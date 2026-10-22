@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codewire_access::EnvironmentId;
@@ -168,6 +169,10 @@ pub(crate) struct SupervisorStore {
     connection: Connection,
     root: PathBuf,
     operation_events: broadcast::Sender<OperationRecord>,
+    // Set once its supervisor stops after a fatal error: nothing more is
+    // written, so no commit persists memory a failure may have left wrong
+    // (#2978). The next supervisor starts from what is here.
+    stopping: AtomicBool,
 }
 
 pub(crate) struct SupervisorOperationReader {
@@ -184,6 +189,23 @@ impl std::fmt::Debug for SupervisorStore {
 }
 
 impl SupervisorStore {
+    /// Refuse every later write: its supervisor is stopping after a fatal
+    /// error (#2978).
+    pub(crate) fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
+    fn writable(&self) -> Result<(), SupervisorStoreError> {
+        if self.stopping() {
+            return Err(SupervisorStoreError::Stopping);
+        }
+        Ok(())
+    }
+
     pub(crate) fn open(
         root: &PrivateRoot,
     ) -> Result<(Self, SupervisorState), SupervisorStoreError> {
@@ -222,6 +244,7 @@ impl SupervisorStore {
             connection,
             root: root.path().to_owned(),
             operation_events: broadcast::channel(OPERATION_EVENT_CAPACITY).0,
+            stopping: AtomicBool::new(false),
         };
         let state = store.load_state()?;
         Ok((Some(store), state))
@@ -245,6 +268,7 @@ impl SupervisorStore {
             connection,
             root: root.path().to_owned(),
             operation_events: broadcast::channel(OPERATION_EVENT_CAPACITY).0,
+            stopping: AtomicBool::new(false),
         };
         store.ensure_metadata(boot_id)?;
         let mut state = store.load_state()?;
@@ -262,6 +286,7 @@ impl SupervisorStore {
         &self,
         state: &SupervisorState,
     ) -> Result<(), SupervisorStoreError> {
+        self.writable()?;
         state
             .validate()
             .map_err(|_| SupervisorStoreError::InvalidState)?;
@@ -279,6 +304,7 @@ impl SupervisorStore {
         kind: OperationKind,
         payload: &serde_json::Value,
     ) -> Result<OperationRecord, SupervisorStoreError> {
+        self.writable()?;
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let record = begin_operation_in_transaction(
@@ -309,6 +335,7 @@ impl SupervisorStore {
         kind: OperationKind,
         payload: &serde_json::Value,
     ) -> Result<(OperationRecord, OperationRecord), SupervisorStoreError> {
+        self.writable()?;
         state
             .validate()
             .map_err(|_| SupervisorStoreError::InvalidState)?;
@@ -350,6 +377,7 @@ impl SupervisorStore {
         result: Option<&serde_json::Value>,
         error_code: Option<&str>,
     ) -> Result<OperationRecord, SupervisorStoreError> {
+        self.writable()?;
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let (record, _) = advance_operation_in_transaction(
@@ -374,6 +402,7 @@ impl SupervisorStore {
         result: Option<&serde_json::Value>,
         error_code: Option<&str>,
     ) -> Result<OperationRecord, SupervisorStoreError> {
+        self.writable()?;
         state
             .validate()
             .map_err(|_| SupervisorStoreError::InvalidState)?;
@@ -484,6 +513,7 @@ impl SupervisorStore {
         operation: &OperationRecord,
         result: &serde_json::Value,
     ) -> Result<OperationRecord, SupervisorStoreError> {
+        self.writable()?;
         if !operation.kind.cw_runtime()
             || operation.phase != OperationPhase::Interrupted
             || !matches!(
@@ -551,6 +581,7 @@ impl SupervisorStore {
     pub(crate) fn clear_host_reboot_workspace_transitions(
         &self,
     ) -> Result<(), SupervisorStoreError> {
+        self.writable()?;
         self.connection.execute(
             "DELETE FROM supervisor_metadata WHERE key = ?1",
             [HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY],

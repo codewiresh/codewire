@@ -677,7 +677,6 @@ impl SupervisorRpc {
         environment_id: Uuid,
     ) -> Result<v1::DaemonAccess, Status> {
         let (access, broker_request) = {
-            let _serial = self.supervisor.serial.lock().await;
             let name = self
                 .supervisor
                 .core()
@@ -687,8 +686,10 @@ impl SupervisorRpc {
                 .find(|environment| environment.id == environment_id)
                 .map(|environment| environment.name.clone())
                 .ok_or_else(|| Status::not_found("local environment was not found"))?;
-            self.supervisor
-                .replay_pending_operations()
+            // It waits for this environment's own operations only (#2978).
+            let _lease = self
+                .supervisor
+                .quiet_lease(&name)
                 .await
                 .map_err(Status::from)?;
             if self.supervisor.environment(&name).map_err(Status::from)?.id != environment_id {

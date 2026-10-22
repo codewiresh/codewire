@@ -28,6 +28,8 @@ pub enum SupervisorStoreError {
     JournalConflict,
     #[error("native supervisor operation was not found")]
     OperationNotFound,
+    #[error("native supervisor is stopping after a failed operation")]
+    Stopping,
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]

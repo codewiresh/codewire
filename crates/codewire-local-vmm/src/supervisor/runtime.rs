@@ -1055,7 +1055,7 @@ impl SupervisorRpc {
             )
         };
         let (operation, endpoint, initial) = {
-            let serial = self.supervisor.serial.lock().await;
+            let serial = self.supervisor.runtime_lease(id).lock_owned().await;
             let existing = self
                 .supervisor
                 .core()
@@ -1192,9 +1192,14 @@ impl SupervisorRpc {
         } else {
             Ok(())
         };
-        // The entire transfer above holds no global core lock. CAS and exact
-        // owner reread below serialize with lifecycle admission and cancellation.
-        let _serial = self.supervisor.serial.lock().await;
+        // The entire transfer above holds no lock. CAS and exact owner reread
+        // below, under the environment's lease, serialize with its lifecycle
+        // and with cancellation.
+        let _lease = self
+            .supervisor
+            .runtime_lease(intent.binding.environment_id)
+            .lock_owned()
+            .await;
         let current = self
             .supervisor
             .core()
@@ -1280,7 +1285,7 @@ impl SupervisorRpc {
                 "cancel requires the original request UUID",
             ));
         }
-        let _serial = self.supervisor.serial.lock().await;
+        let _lease = self.supervisor.runtime_lease(id).lock_owned().await;
         let operation = if request.request_id.is_empty() {
             None
         } else {
@@ -2001,6 +2006,8 @@ mod tests {
                     .code(),
                 tonic::Code::Aborted
             );
+            // Nothing drains or holds the environment.
+            assert!(service.supervisor.runtime_lease(id).try_lock().is_ok());
             let mut core = service.supervisor.core();
             assert_eq!(
                 SupervisorStore::inspect(&core.root).unwrap().1,
@@ -2018,7 +2025,6 @@ mod tests {
             assert!(core.children.is_empty());
             assert!(core.live_runners.is_empty());
             assert!(core.runtime_operations.is_empty());
-            assert!(!service.worker_running.load(Ordering::Acquire));
             assert_eq!(
                 fs::read_dir(core.config.engine_root())
                     .unwrap()

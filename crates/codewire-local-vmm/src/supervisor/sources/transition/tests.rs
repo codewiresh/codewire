@@ -474,7 +474,7 @@ async fn running_source_admission_journals_mixed_delivery_before_stop() {
         let service = test_supervisor_service(core);
         // Hold the worker at its existing admission boundary: this test proves
         // the durable selection, not a synthetic VM restart or platform login.
-        service.worker_running.store(true, Ordering::Release);
+        service.hold_drains.store(true, Ordering::Release);
         let target = SourceSelection::from_request(&request).unwrap();
         let admitted = service
             .admit_source_update(request)
@@ -947,7 +947,7 @@ async fn source_worker_preserves_pending_intent_when_authority_is_unavailable() 
         let operation = begin_at(&core, &transition, 2);
         let core = test_supervisor(core);
         assert!(matches!(
-            core.run_pending_operations(recovering).await,
+            core.drain_pending(recovering).await,
             Err(SupervisorError::CredentialAuthorityUnavailable)
         ));
         let pending = core
@@ -1022,7 +1022,7 @@ async fn failed_source_effect_records_and_logs_its_own_cause_without_secret_valu
         let core = test_supervisor(core);
 
         // No runtime is provisioned, so the target start fails at `effect`.
-        core.run_pending_operations(false).await.unwrap();
+        core.drain_pending(false).await.unwrap();
 
         // The journal row records the failing checkpoint and its cause.
         let failed = core

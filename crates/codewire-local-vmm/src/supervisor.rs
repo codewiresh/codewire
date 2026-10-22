@@ -27,7 +27,8 @@ use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codewire_access::{
@@ -498,7 +499,12 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         runtime_operations: BTreeSet::new(),
         incompatible_runners: BTreeSet::new(),
         download_cache: BTreeMap::new(),
+        content_writers: 0,
+        collection_wanted: false,
+        collecting: false,
         retiring: false,
+        admitted_here: HashMap::new(),
+        selections: 0,
         operation_progress: operation_progress.clone(),
         log: log.map(Arc::new),
         _lock: lock,
@@ -511,17 +517,34 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     supervisor.core().begin_rollback_of_failed_creates()?;
     let service = SupervisorRpc {
         info: supervisor_info(&config),
-        supervisor: Arc::new(supervisor),
+        supervisor,
         operation_reader: Arc::new(Mutex::new(operation_reader)),
         operation_events,
         operation_progress,
-        worker_running: Arc::new(AtomicBool::new(false)),
         host_keys: Arc::new(ssh::HostKeys::new(&config.root)),
         ssh_streams: Arc::default(),
+        #[cfg(test)]
+        hold_drains: Arc::default(),
     };
     let socket = config.supervisor_socket();
     let (listener, socket_identity) = bind_owner_only_listener(&socket)?;
-    service.schedule_operation_worker(true);
+    // One collection before any drain runs recovers what a crash left
+    // behind; later ones run in the collector task (#2978).
+    if service.supervisor.collect_if_idle().await.is_err() {
+        diagnostic_log::record(
+            service.supervisor.log.as_deref(),
+            "content_collection_failed",
+            &[],
+        );
+    }
+    drop(tokio::spawn(
+        Arc::clone(&service.supervisor).run_collector(),
+    ));
+    // Nothing pending was admitted by this process, so every drain recovers.
+    for name in service.supervisor.names_with_pending_work()? {
+        service.spawn_drain(&name);
+    }
+    service.spawn_unheld_runtime_recovery();
     // tmpfiles ages /tmp entries by their timestamps; keep this root's and its
     // engine's sockets current for as long as the supervisor lives (#2735).
     let refreshed = [
@@ -690,16 +713,118 @@ struct SupervisorCore {
     // Set once RetireSupervisor admits a handoff: every later request and
     // pending-operation run is refused while this supervisor exits.
     retiring: bool,
+    // Operations an RPC in this process admitted, each with `selections` at
+    // its admission. Every other pending operation runs as recovering
+    // (#2978).
+    admitted_here: HashMap<Uuid, u64>,
+    // Bumped by every select, one of the current environment included, so a
+    // create admitted before it does not select itself (#2978).
+    selections: u64,
     operation_progress: broadcast::Sender<OperationProgress>,
-    // The image blobs the latest registry pull verified. Content collection
-    // keeps them while no environment references them, so a failed create's
-    // retry resumes its downloads (#2952). Only image blobs, never a
-    // repository bundle; a later pull replaces them, a delete frees them, and
-    // a new supervisor starts without them.
-    download_cache: BTreeMap<Sha256Digest, u64>,
+    // The image blobs each environment name's latest registry pull verified.
+    // Content collection keeps them while no environment references them, so
+    // a failed create's retry resumes its downloads (#2952). Only image blobs,
+    // never a repository bundle; the name's next pull replaces them, a
+    // requested delete of that name frees them, another name's pull frees
+    // them once the name has no environment and no pending create, and a new
+    // supervisor starts without them.
+    download_cache: BTreeMap<String, BTreeMap<Sha256Digest, u64>>,
+    // Content and artifact writers in flight, and whether a collection is
+    // wanted or running (#2978). A collection runs only with no writer in
+    // flight, and a writer waits only while one runs.
+    content_writers: usize,
+    collection_wanted: bool,
+    collecting: bool,
     // The bounded owner-only log its spawner gave this supervisor, if any.
     log: Option<Arc<DiagnosticLog>>,
     _lock: SupervisorLock,
+}
+
+/// What one collection keeps.
+struct CollectionRetained {
+    content: BTreeMap<Sha256Digest, u64>,
+    artifacts: BTreeSet<String>,
+}
+
+/// Remove from the content and runtime-artifact stores what `retained` does
+/// not keep. Only with no writer in flight: it removes temporary ingest files
+/// too.
+fn collect_stores(
+    engine_root: &Path,
+    retained: &CollectionRetained,
+) -> Result<(), SupervisorError> {
+    let engine = PrivateRoot::open(engine_root)?;
+    collect_content(&engine, &retained.content)?;
+    let artifacts =
+        RuntimeArtifactStore::create(&engine).map_err(|_| SupervisorError::ArtifactStore)?;
+    let _collected = artifacts
+        .collect_unreferenced(&retained.artifacts)
+        .map_err(|_| SupervisorError::ArtifactStore)?;
+    Ok(())
+}
+
+fn collect_content(
+    engine: &PrivateRoot,
+    retained: &BTreeMap<Sha256Digest, u64>,
+) -> Result<(), SupervisorError> {
+    let _collected = ContentStore::create(engine)?.collect_unreferenced(retained)?;
+    Ok(())
+}
+
+/// A content or artifact writer in flight (#2978): while one is, no
+/// collection runs, so nothing it wrote and has not yet recorded is taken.
+struct ContentWriter<'a> {
+    supervisor: &'a Supervisor,
+}
+
+impl Drop for ContentWriter<'_> {
+    fn drop(&mut self) {
+        let wanted = {
+            let mut core = self.supervisor.core();
+            core.content_writers -= 1;
+            core.content_writers == 0 && core.collection_wanted
+        };
+        if wanted {
+            self.supervisor.collection.notify_one();
+        }
+    }
+}
+
+#[cfg(test)]
+impl SupervisorCore {
+    /// The content half of a collection, run here and now, as one with no
+    /// writer in flight does.
+    fn collect_content_now(&self) -> Result<(), SupervisorError> {
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        collect_content(&engine, &self.collection_retained()?.content)
+    }
+}
+
+#[cfg(test)]
+impl Supervisor {
+    /// Tests' entry to the drains: every name with pending work, in name
+    /// order, then cw-runtime work no name holds. With `recovering` false the
+    /// pending operations count as admitted here, as an RPC's would.
+    async fn drain_pending(&self, recovering: bool) -> Result<(), SupervisorError> {
+        if !recovering {
+            let pending = self.core().store.pending_operations()?;
+            for operation in &pending {
+                self.admit(operation);
+            }
+        }
+        for name in self.names_with_pending_work()? {
+            self.drain(&name).await?;
+        }
+        let held = self
+            .core()
+            .state
+            .environments
+            .values()
+            .map(|environment| environment.id)
+            .collect::<BTreeSet<_>>();
+        self.recover_runtime_operations(|id| !held.contains(&id))
+            .await
+    }
 }
 
 /// The supervisor (#2978). Lifecycle operations are its async methods: they
@@ -707,41 +832,398 @@ struct SupervisorCore {
 /// held, and read or change [`SupervisorCore`] only in short synchronous
 /// sections.
 struct Supervisor {
+    /// This supervisor's own `Arc`, for work a dropped request must not cut
+    /// short (see [`Self::detached`]).
+    this: std::sync::Weak<Supervisor>,
     config: NativeRuntimeConfig,
     root: Arc<PrivateRoot>,
     log: Option<Arc<DiagnosticLog>>,
     operation_progress: broadcast::Sender<OperationProgress>,
     shutdown: watch::Sender<bool>,
     core: std::sync::Mutex<SupervisorCore>,
-    serial: Mutex<()>,
+    /// One lease per environment name: it orders that name's operations and
+    /// lets other names' run alongside (#2978). Entries are never removed: a
+    /// waiter may already hold a clone, and there are only as many as the
+    /// names this process has seen.
+    leases: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Wakes the collector task when a collection may run.
+    collection: tokio::sync::Notify,
+    /// Wakes content writers waiting for a running collection to end.
+    collection_ended: tokio::sync::Notify,
 }
 
 impl Supervisor {
-    fn new(core: SupervisorCore, shutdown: watch::Sender<bool>) -> Self {
-        Self {
+    fn new(core: SupervisorCore, shutdown: watch::Sender<bool>) -> Arc<Self> {
+        Arc::new_cyclic(|this| Self {
+            this: this.clone(),
             config: core.config.clone(),
             root: Arc::clone(&core.root),
             log: core.log.clone(),
             operation_progress: core.operation_progress.clone(),
             shutdown,
             core: std::sync::Mutex::new(core),
-            serial: Mutex::new(()),
-        }
+            leases: std::sync::Mutex::default(),
+            collection: tokio::sync::Notify::new(),
+            collection_ended: tokio::sync::Notify::new(),
+        })
     }
 
     /// The state lock. A panic while it was held may have left memory ahead
-    /// of the store, so a poisoned lock stops this supervisor; the next one
-    /// starts from the store.
+    /// of the store, so a poisoned lock stops this supervisor, and nothing
+    /// more is written; the next one starts from the store.
     fn core(&self) -> std::sync::MutexGuard<'_, SupervisorCore> {
         self.core.lock().unwrap_or_else(|poisoned| {
+            let core = poisoned.into_inner();
+            core.store.stop();
             let _ = self.shutdown.send(true);
-            poisoned.into_inner()
+            core
         })
+    }
+
+    /// Stop after a fatal error (#2978): no later commit or drain proceeds
+    /// in any environment, and the supervisor shuts down.
+    fn halt(&self) {
+        self.core().store.stop();
+        let _ = self.shutdown.send(true);
+    }
+
+    /// Run `work` in a task of its own and wait for it (#2978): a request
+    /// dropped meanwhile cuts no drain, collection or retirement short, so
+    /// none leaves an admission, a running collection or `retiring` behind.
+    /// A panic in it stops the supervisor.
+    async fn detached<T, F>(&self, work: impl FnOnce(Arc<Self>) -> F) -> Result<T, SupervisorError>
+    where
+        F: Future<Output = Result<T, SupervisorError>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let supervisor = self
+            .this
+            .upgrade()
+            .expect("a supervisor is borrowed only through its Arc");
+        match tokio::spawn(work(supervisor)).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.halt();
+                Err(SupervisorStoreError::Stopping.into())
+            }
+        }
     }
 
     /// A copy of one environment's record as it is now.
     fn environment(&self, name: &str) -> Result<EnvironmentRecord, SupervisorError> {
         self.core().environment(name).cloned()
+    }
+
+    fn leases(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<Mutex<()>>>> {
+        self.leases.lock().unwrap_or_else(|poisoned| {
+            self.halt();
+            poisoned.into_inner()
+        })
+    }
+
+    /// The lease of one environment name.
+    fn lease(&self, name: &str) -> Arc<Mutex<()>> {
+        Arc::clone(self.leases().entry(name.to_owned()).or_default())
+    }
+
+    /// Register a content or artifact writer, waiting only while a
+    /// collection runs (#2978).
+    async fn content_writer(&self) -> ContentWriter<'_> {
+        loop {
+            let ended = self.collection_ended.notified();
+            {
+                let mut core = self.core();
+                if !core.collecting {
+                    core.content_writers += 1;
+                    return ContentWriter { supervisor: self };
+                }
+            }
+            ended.await;
+        }
+    }
+
+    /// Before a stage writes content: remove the environment's own
+    /// unreferenced roots, collect the shared stores unless another writer is
+    /// in flight, then count as a writer until the stage's record commits.
+    async fn begin_staging(&self, name: &str) -> Result<ContentWriter<'_>, SupervisorError> {
+        self.collect_unreferenced_workspace_roots(name).await?;
+        self.collect_if_idle().await?;
+        Ok(self.content_writer().await)
+    }
+
+    /// Remove `name`'s root generations its record no longer references.
+    /// Its caller holds the name's lease; the walk holds no lock.
+    async fn collect_unreferenced_workspace_roots(
+        &self,
+        name: &str,
+    ) -> Result<Vec<String>, SupervisorError> {
+        let environment = self.environment(name)?;
+        let retained = referenced_root_storage_generations(&environment)?;
+        let engine_root = self.config.engine_root();
+        tokio::task::spawn_blocking(move || {
+            let engine = PrivateRoot::open(&engine_root)?;
+            let paths = VmPaths::create(&engine, environment.id)?;
+            cleanup_unreferenced_root_generations(&paths, &retained).map_err(Into::into)
+        })
+        .await
+        .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)?
+    }
+
+    /// Collect now if no writer is in flight, as a stage, a create's cleanup
+    /// and a delete do; otherwise the collector runs it once the writers
+    /// finish. `Ok(false)` when it was left to the collector: a delete then
+    /// reports nothing pending, because nothing failed.
+    async fn collect_if_idle(&self) -> Result<bool, SupervisorError> {
+        let retained = {
+            let mut core = self.core();
+            if core.content_writers > 0 || core.collecting {
+                core.collection_wanted = true;
+                None
+            } else {
+                core.collection_wanted = false;
+                core.collecting = true;
+                Some(core.collection_retained())
+            }
+        };
+        let Some(retained) = retained else {
+            self.collection.notify_one();
+            return Ok(false);
+        };
+        // The walk and its end run in a task of their own, so a caller
+        // dropped meanwhile never leaves `collecting` set.
+        self.detached(|supervisor| async move {
+            let result = match retained {
+                Ok(retained) => supervisor.collect(retained).await,
+                Err(error) => Err(error),
+            };
+            supervisor.end_collection();
+            result.map(|()| true)
+        })
+        .await
+    }
+
+    fn end_collection(&self) {
+        self.core().collecting = false;
+        self.collection_ended.notify_waiters();
+        // One wanted meanwhile runs once the writers allow it.
+        self.collection.notify_one();
+    }
+
+    /// One collection's filesystem walk, with no lock held: it removes what
+    /// `retained` does not keep, temporary ingest files included, which is
+    /// safe because no writer is in flight while it runs.
+    async fn collect(&self, retained: CollectionRetained) -> Result<(), SupervisorError> {
+        let engine_root = self.config.engine_root();
+        tokio::task::spawn_blocking(move || collect_stores(&engine_root, &retained))
+            .await
+            .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)?
+    }
+
+    /// The collector task: it runs a wanted collection once no writer is in
+    /// flight, so a collection never runs inside a request or a drop.
+    async fn run_collector(self: Arc<Self>) {
+        loop {
+            let woken = self.collection.notified();
+            let retained = {
+                let mut core = self.core();
+                if core.collection_wanted && core.content_writers == 0 && !core.collecting {
+                    core.collection_wanted = false;
+                    core.collecting = true;
+                    Some(core.collection_retained())
+                } else {
+                    None
+                }
+            };
+            let Some(retained) = retained else {
+                woken.await;
+                continue;
+            };
+            let result = match retained {
+                Ok(retained) => self.collect(retained).await,
+                Err(error) => Err(error),
+            };
+            self.end_collection();
+            if result.is_err() {
+                // An object the collector does not recognise stays where it
+                // is, for the orphan inventory, as after any failed cleanup.
+                diagnostic_log::record(self.log.as_deref(), "content_collection_failed", &[]);
+            }
+        }
+    }
+
+    /// The lease for cw-runtime work on environment `id`: that of the name
+    /// holding it, or, while none does, one for the id alone. A name never
+    /// contains a NUL, so that key names no environment.
+    fn runtime_lease(&self, id: Uuid) -> Arc<Mutex<()>> {
+        let holder = self
+            .core()
+            .state
+            .environments
+            .values()
+            .find(|environment| environment.id == id)
+            .map(|environment| environment.name.clone());
+        self.lease(&holder.unwrap_or_else(|| format!("\0{id}")))
+    }
+
+    /// The name's pending lifecycle operations, in order. cw-runtime
+    /// operations have no name and never count, so one awaiting an explicit
+    /// observe or cancel cannot block its environment's lifecycle.
+    fn pending_for(&self, name: &str) -> Result<Vec<OperationRecord>, SupervisorError> {
+        let pending = self.core().store.pending_operations()?;
+        Ok(pending
+            .into_iter()
+            .filter(|operation| {
+                !operation.kind.cw_runtime() && operation_name(operation) == Some(name)
+            })
+            .collect())
+    }
+
+    /// Run `name`'s pending operations in order, under its lease.
+    async fn drain(&self, name: &str) -> Result<(), SupervisorError> {
+        let lease = self.lease(name);
+        let _lease = lease.lock().await;
+        self.drain_held(name).await
+    }
+
+    /// As [`Self::drain`], for a caller that already holds `name`'s lease.
+    /// It also recovers the cw-runtime operations of the environment the
+    /// name holds, and checks that name's workspace staging.
+    async fn drain_held(&self, name: &str) -> Result<(), SupervisorError> {
+        self.drainable()?;
+        for operation in self.pending_for(name)? {
+            // Another environment's drain may have stopped the supervisor.
+            self.drainable()?;
+            let operation_id = operation.operation_id;
+            let recovering = !self.core().admitted_here.contains_key(&operation_id);
+            let result = self.run_operation(operation, recovering).await;
+            self.core().admitted_here.remove(&operation_id);
+            result?;
+        }
+        let environment_id = self
+            .core()
+            .state
+            .environments
+            .get(name)
+            .map(|environment| environment.id);
+        if let Some(environment_id) = environment_id {
+            self.recover_runtime_operations(|id| id == environment_id)
+                .await?;
+        }
+        self.core().ensure_no_unowned_workspace_staging(name)
+    }
+
+    /// Whether a drain may run an operation: not while retiring, nor once a
+    /// fatal error stopped the supervisor.
+    fn drainable(&self) -> Result<(), SupervisorError> {
+        let core = self.core();
+        if core.retiring {
+            return Err(SupervisorError::Retiring);
+        }
+        if core.store.stopping() {
+            return Err(SupervisorStoreError::Stopping.into());
+        }
+        Ok(())
+    }
+
+    /// Recover pending cw-runtime operations whose environment `matches`,
+    /// except those an RPC in this process is still running.
+    async fn recover_runtime_operations(
+        &self,
+        matches: impl Fn(Uuid) -> bool,
+    ) -> Result<(), SupervisorError> {
+        let pending = self.core().store.pending_operations()?;
+        for operation in pending {
+            let running = self
+                .core()
+                .runtime_operations
+                .contains(&operation.operation_id);
+            if operation.kind.cw_runtime()
+                && !running
+                && operation.environment_id.is_some_and(&matches)
+            {
+                runtime::recover(self, &operation).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `name`'s lease, once its own pending operations have run here: a
+    /// mutation or a per-environment read waits for its own environment only
+    /// (#2978).
+    async fn quiet_lease(
+        &self,
+        name: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, SupervisorError> {
+        let lease = self.lease(name).lock_owned().await;
+        self.drain_under(lease, name).await
+    }
+
+    /// Run `name`'s pending operations under `lease`, which its caller holds,
+    /// in a task of their own, and hand the lease back: a request dropped
+    /// meanwhile cuts no operation short (#2978).
+    async fn drain_under(
+        &self,
+        lease: tokio::sync::OwnedMutexGuard<()>,
+        name: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, SupervisorError> {
+        let name = name.to_owned();
+        self.detached(|supervisor| async move {
+            supervisor.drain_held(&name).await?;
+            Ok(lease)
+        })
+        .await
+    }
+
+    /// Reconcile `name` only if no operation holds it or waits for it: a
+    /// busy environment's own operation owns its reconciliation, and a read
+    /// never waits for it (#2978).
+    async fn reconcile_if_idle(&self, name: &str) -> Result<(), SupervisorError> {
+        if !self.pending_for(name)?.is_empty() {
+            return Ok(());
+        }
+        let Ok(_lease) = self.lease(name).try_lock_owned() else {
+            return Ok(());
+        };
+        // Under the lease nothing can remove it, but a delete may have run
+        // before, and an operation may have been admitted since the check.
+        if !self.core().state.environments.contains_key(name) || !self.pending_for(name)?.is_empty()
+        {
+            return Ok(());
+        }
+        self.reconcile(name).await
+    }
+
+    /// Record that an RPC in this process admitted `operation`, with the
+    /// selections so far, so its drain runs it as new work rather than as a
+    /// recovery.
+    fn admit(&self, operation: &OperationRecord) {
+        let mut core = self.core();
+        let selections = core.selections;
+        core.admitted_here
+            .insert(operation.operation_id, selections);
+    }
+
+    /// Names with pending lifecycle work, and those holding environments with
+    /// pending cw-runtime work, for drains to start.
+    fn names_with_pending_work(&self) -> Result<BTreeSet<String>, SupervisorError> {
+        let core = self.core();
+        let pending = core.store.pending_operations()?;
+        let mut names = BTreeSet::new();
+        for operation in &pending {
+            if operation.kind.cw_runtime() {
+                if let Some(environment) = core
+                    .state
+                    .environments
+                    .values()
+                    .find(|environment| Some(environment.id) == operation.environment_id)
+                {
+                    names.insert(environment.name.clone());
+                }
+            } else if let Some(name) = operation_name(operation) {
+                names.insert(name.to_owned());
+            }
+        }
+        Ok(names)
     }
 
     /// Applies `change` to the current state and records it with the
@@ -879,6 +1361,7 @@ fn record_staged_workspace_rollback(
 impl Supervisor {
     async fn resolve_workspace_image(
         &self,
+        name: &str,
         reference: &RegistryReference,
         content: &ContentStore,
         pinned: Option<ResolvedImage>,
@@ -892,8 +1375,33 @@ impl Supervisor {
         }
         let resolver = RegistryResolver::new(content)?;
         let resolved = resolver.resolve_anonymous(reference).await;
-        self.core().download_cache = resolver.verified_blobs();
+        self.core()
+            .cache_download(name, resolver.verified_blobs())?;
         Ok(resolved?)
+    }
+}
+
+impl SupervisorCore {
+    /// Cache `name`'s newest pull. Besides it, only names that hold an
+    /// environment or await a create keep theirs: a failed create's layers
+    /// stay for its retry until another name pulls, so the cache never
+    /// outgrows the environments (#2978).
+    fn cache_download(
+        &mut self,
+        name: &str,
+        verified: BTreeMap<Sha256Digest, u64>,
+    ) -> Result<(), SupervisorError> {
+        let pending = self.store.pending_operations()?;
+        let environments = &self.state.environments;
+        self.download_cache.retain(|cached, _| {
+            environments.contains_key(cached)
+                || pending.iter().any(|operation| {
+                    operation.kind == OperationKind::Create
+                        && operation_name(operation) == Some(cached.as_str())
+                })
+        });
+        self.download_cache.insert(name.to_owned(), verified);
+        Ok(())
     }
 }
 
@@ -1528,12 +2036,6 @@ impl Supervisor {
         &self,
         name: &str,
     ) -> Result<Option<WorkspaceGenerationRecord>, SupervisorError> {
-        {
-            let mut core = self.core();
-            core.collect_unreferenced_workspace_roots(name)?;
-            core.collect_unreferenced_content()?;
-            core.collect_unreferenced_runtime_artifacts()?;
-        }
         let (project_json, project_sha256, artifact_generation) = {
             let environment = self.environment(name)?;
             if environment.active_workspace_generation.is_some()
@@ -1574,7 +2076,7 @@ impl Supervisor {
         let content = ContentStore::create(&engine)?;
         let pinned = self.core().matching_synthetic_workspace_image(&reference)?;
         let image = self
-            .resolve_workspace_image(&reference, &content, pinned)
+            .resolve_workspace_image(name, &reference, &content, pinned)
             .await?;
         let resolution = self.core().spawn_skill_snapshot_resolution(
             name,
@@ -1613,12 +2115,6 @@ impl Supervisor {
         else {
             return Err(SupervisorError::InvalidState);
         };
-        {
-            let mut core = self.core();
-            core.collect_unreferenced_workspace_roots(name)?;
-            core.collect_unreferenced_content()?;
-            core.collect_unreferenced_runtime_artifacts()?;
-        }
         let environment = self.environment(name)?;
         let active = environment
             .active_workspace_generation
@@ -1647,7 +2143,7 @@ impl Supervisor {
             let content = ContentStore::create(&engine)?;
             let pinned = self.core().matching_synthetic_workspace_image(&reference)?;
             let image = self
-                .resolve_workspace_image(&reference, &content, pinned)
+                .resolve_workspace_image(name, &reference, &content, pinned)
                 .await?;
             (artifact_generation, image, DEFAULT_OCI_ROOT_DISK_BYTES)
         };
@@ -1722,48 +2218,28 @@ impl SupervisorCore {
         }))
     }
 
-    fn collect_unreferenced_workspace_roots(
-        &self,
-        name: &str,
-    ) -> Result<Vec<String>, SupervisorError> {
-        let environment = self.environment(name)?;
-        let retained = referenced_root_storage_generations(environment)?;
-        let engine = PrivateRoot::open(&self.config.engine_root())?;
-        let paths = VmPaths::create(&engine, environment.id)?;
-        cleanup_unreferenced_root_generations(&paths, &retained).map_err(Into::into)
-    }
-
-    fn collect_unreferenced_content(&mut self) -> Result<(), SupervisorError> {
-        let mut retained = referenced_content_blobs(&self.state)?;
+    /// What a collection keeps, read from memory and the journal only; the
+    /// filesystem walk runs afterwards with no lock held (#2978).
+    fn collection_retained(&self) -> Result<CollectionRetained, SupervisorError> {
+        let mut content = referenced_content_blobs(&self.state)?;
         #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
         if let Some(image) = self.synthetic_workspace_image_pin()? {
-            retain_image_content(&mut retained, &image)?;
+            retain_image_content(&mut content, &image)?;
         }
         for operation in self.store.pending_operations()? {
             if operation.kind != OperationKind::Create {
                 continue;
             }
             let (_, workspace_plan) = create_request_from_operation(&operation)?;
-            retain_workspace_plan_content(&mut retained, &workspace_plan)?;
+            retain_workspace_plan_content(&mut content, &workspace_plan)?;
         }
-        for (digest, size) in &self.download_cache {
-            retained.entry(digest.clone()).or_insert(*size);
+        for (digest, size) in self.download_cache.values().flatten() {
+            content.entry(digest.clone()).or_insert(*size);
         }
-        let engine = PrivateRoot::open(&self.config.engine_root())?;
-        let content = ContentStore::create(&engine)?;
-        let _collected = content.collect_unreferenced(&retained)?;
-        Ok(())
-    }
-
-    fn collect_unreferenced_runtime_artifacts(&mut self) -> Result<(), SupervisorError> {
-        let retained = referenced_artifact_generations(&self.state)?;
-        let engine = PrivateRoot::open(&self.config.engine_root())?;
-        let artifacts =
-            RuntimeArtifactStore::create(&engine).map_err(|_| SupervisorError::ArtifactStore)?;
-        let _collected = artifacts
-            .collect_unreferenced(&retained)
-            .map_err(|_| SupervisorError::ArtifactStore)?;
-        Ok(())
+        Ok(CollectionRetained {
+            content,
+            artifacts: referenced_artifact_generations(&self.state)?,
+        })
     }
 }
 
@@ -1964,8 +2440,10 @@ impl Supervisor {
                         )
                     };
                     // Admission awaits the runtime's artifacts with no lock
-                    // held; the record is inserted only if the name is still
-                    // free when it commits.
+                    // held, as a writer until the record that references them
+                    // commits; the record is inserted only if the name is
+                    // still free then.
+                    let _writer = self.content_writer().await;
                     let admitted = if self.environment(&request.name).is_ok() {
                         None
                     } else {
@@ -2013,20 +2491,29 @@ impl Supervisor {
                             rollback_workspace_generation: None,
                         })
                     };
-                    operation = self.commit_operation(&operation, |next_state| {
-                        if let Some(environment) = next_state.environments.get(&request.name) {
-                            if !recorded(environment)? {
-                                return Err(SupervisorError::AlreadyExists(request.name.clone()));
-                            }
-                            return Ok(());
+                    // Whether it selects itself is decided in the same
+                    // section of the lock as its commit, so no select falls
+                    // between them.
+                    let mut core = self.core();
+                    let selects_itself = create_selects_itself(
+                        core.admitted_here.get(&operation.operation_id).copied(),
+                        core.selections,
+                    );
+                    let mut next_state = core.state.clone();
+                    if let Some(environment) = next_state.environments.get(&request.name) {
+                        if !recorded(environment)? {
+                            return Err(SupervisorError::AlreadyExists(request.name.clone()));
                         }
+                    } else {
                         let environment = admitted.ok_or(SupervisorError::InvalidState)?;
                         next_state
                             .environments
                             .insert(request.name.clone(), environment);
-                        next_state.current = Some(request.name.clone());
-                        Ok(())
-                    })?;
+                        if selects_itself {
+                            next_state.current = Some(request.name.clone());
+                        }
+                    }
+                    operation = core.checkpoint_state_operation(&operation, next_state)?;
                 }
                 LifecycleEffect::BindEnvironmentAccess => {
                     self.bind_environment_access(request, environment_id)
@@ -2060,6 +2547,7 @@ impl Supervisor {
                     operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StageWorkspaceGeneration => {
+                    let _writer = self.begin_staging(&request.name).await?;
                     let generation = self.stage_workspace_generation(&request.name).await?;
                     operation = self.commit_operation(&operation, |next_state| {
                         record_staged_workspace_generation(next_state, &request.name, generation)
@@ -2119,84 +2607,76 @@ impl Supervisor {
         ))
     }
 
-    async fn run_pending_operations(&self, recovering: bool) -> Result<(), SupervisorError> {
-        if self.core().retiring {
-            return Err(SupervisorError::Retiring);
-        }
-        let pending = self.core().store.pending_operations()?;
-        for operation in pending {
-            if operation.kind.cw_runtime() {
-                if !self
-                    .core()
-                    .runtime_operations
-                    .contains(&operation.operation_id)
-                {
-                    runtime::recover(self, &operation).await?;
+    /// Run one pending operation (#2978): its name's drain calls it under
+    /// that name's lease. `recovering` is false only for an operation an RPC in
+    /// this process admitted.
+    async fn run_operation(
+        &self,
+        operation: OperationRecord,
+        recovering: bool,
+    ) -> Result<(), SupervisorError> {
+        let Some(name) = operation
+            .payload
+            .get("name")
+            .and_then(|value| value.as_str())
+        else {
+            self.core()
+                .interrupt_operation(&operation, "invalid_replay_payload")?;
+            return Ok(());
+        };
+        if operation.kind == OperationKind::Create {
+            let (request, workspace_plan) = match create_request_from_operation(&operation) {
+                Ok(prepared) => prepared,
+                Err(_) => {
+                    self.core()
+                        .interrupt_operation(&operation, "invalid_replay_payload")?;
+                    return Ok(());
                 }
-                continue;
-            }
-            let Some(name) = operation
-                .payload
-                .get("name")
-                .and_then(|value| value.as_str())
-            else {
-                self.core()
-                    .interrupt_operation(&operation, "invalid_replay_payload")?;
-                continue;
             };
-            if operation.kind == OperationKind::Create {
-                let (request, workspace_plan) = match create_request_from_operation(&operation) {
-                    Ok(prepared) => prepared,
-                    Err(_) => {
-                        self.core()
-                            .interrupt_operation(&operation, "invalid_replay_payload")?;
-                        continue;
-                    }
-                };
-                let (_, operation) = match self.create(&request, &workspace_plan, &operation).await
-                {
-                    Ok(result) => result,
-                    Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
-                        // The owner-side CLI starts the authority. Preserve the
-                        // latest durable checkpoint for its next worker run.
-                        return Err(SupervisorError::CredentialAuthorityUnavailable);
-                    }
-                    Err(error) => {
-                        let error_code = if recovering {
-                            "create_interrupted"
-                        } else {
-                            create_failure_code(&error)
-                        };
-                        self.core()
-                            .log_operation_failure(&operation, name, &error, error_code);
-                        self.roll_back_failed_create(&operation, name, error_code, recovering)
-                            .await?;
-                        // If failure happened before RecordEnvironment, the
-                        // prepared repository bundles have no durable owner.
-                        // If it happened later, the recorded plan retains
-                        // them. Re-derive reachability in either case.
-                        let _ = self.core().collect_unreferenced_content();
-                        continue;
-                    }
-                };
-                let result = self
-                    .core()
-                    .state
-                    .environments
-                    .get(name)
-                    .map(environment_operation_result)
-                    .ok_or(SupervisorError::InvalidState)?;
-                self.core().complete_operation(&operation, &result)?;
-                continue;
-            }
-            if operation.kind == OperationKind::Start {
-                let (_, operation) = match self.start(name, &operation).await {
-                    Ok(result) => result,
-                    Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
-                        return Err(SupervisorError::CredentialAuthorityUnavailable);
-                    }
-                    Err(error) => {
-                        let error_code = match error {
+            let (_, operation) = match self.create(&request, &workspace_plan, &operation).await {
+                Ok(result) => result,
+                Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
+                    // The owner-side CLI starts the authority. Preserve the
+                    // latest durable checkpoint for its next worker run.
+                    return Err(SupervisorError::CredentialAuthorityUnavailable);
+                }
+                Err(error) => {
+                    let error_code = if recovering {
+                        "create_interrupted"
+                    } else {
+                        create_failure_code(&error)
+                    };
+                    self.core()
+                        .log_operation_failure(&operation, name, &error, error_code);
+                    self.roll_back_failed_create(&operation, name, error_code, recovering)
+                        .await?;
+                    // If failure happened before RecordEnvironment, the
+                    // prepared repository bundles have no durable owner.
+                    // If it happened later, the recorded plan retains
+                    // them. Re-derive reachability in either case.
+                    let _ = self.collect_if_idle().await;
+                    return Ok(());
+                }
+            };
+            let result = self
+                .core()
+                .state
+                .environments
+                .get(name)
+                .map(environment_operation_result)
+                .ok_or(SupervisorError::InvalidState)?;
+            self.core().complete_operation(&operation, &result)?;
+            return Ok(());
+        }
+        if operation.kind == OperationKind::Start {
+            let (_, operation) = match self.start(name, &operation).await {
+                Ok(result) => result,
+                Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
+                    return Err(SupervisorError::CredentialAuthorityUnavailable);
+                }
+                Err(error) => {
+                    let error_code =
+                        match error {
                             SupervisorError::WorkspacePlan(
                                 WorkspacePlanError::DirectShareChanged,
                             ) if !recovering => "start_direct_share_changed".to_owned(),
@@ -2207,214 +2687,200 @@ impl Supervisor {
                                 self.core().recorded_runner_error_code(name),
                             ),
                         };
-                        self.core()
-                            .log_operation_failure(&operation, name, &error, &error_code);
-                        self.core()
-                            .fail_replayed_operation(&operation, name, &error_code)?;
-                        continue;
-                    }
-                };
-                let result = self
-                    .core()
-                    .state
-                    .environments
-                    .get(name)
-                    .map(environment_operation_result)
-                    .ok_or(SupervisorError::InvalidState)?;
-                self.core().complete_operation(&operation, &result)?;
-                continue;
-            }
-            if operation.kind == OperationKind::Stop {
-                let (_, operation) = match self.stop(name, &operation).await {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let error_code = lifecycle_failure_code("stop", &error, None);
-                        self.core()
-                            .log_operation_failure(&operation, name, &error, &error_code);
-                        self.core()
-                            .fail_pending_operation(&operation, &error_code)?;
-                        continue;
-                    }
-                };
-                let result = self
-                    .core()
-                    .state
-                    .environments
-                    .get(name)
-                    .map(environment_operation_result)
-                    .ok_or(SupervisorError::InvalidState)?;
-                self.core().complete_operation(&operation, &result)?;
-                continue;
-            }
-            if operation.kind == OperationKind::Delete {
-                self.run_delete_operation(name, &operation, recovering)
-                    .await?;
-                continue;
-            }
-            if matches!(
-                operation.kind,
-                OperationKind::Restart | OperationKind::GrowDisk
-            ) {
-                let operation = match self.resize(name, &operation).await {
-                    Ok(operation) => operation,
-                    Err(error @ SupervisorError::ReplacementPreflight(_)) => {
-                        self.core().log_operation_failure(
-                            &operation,
-                            name,
-                            &error,
-                            "restart_preflight",
-                        );
-                        self.core()
-                            .fail_pending_operation(&operation, "restart_preflight")?;
-                        continue;
-                    }
-                    Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
-                        return Err(SupervisorError::CredentialAuthorityUnavailable);
-                    }
-                    Err(error) => {
-                        let error_code = if recovering {
-                            "resize_interrupted".to_owned()
-                        } else {
-                            lifecycle_failure_code(
-                                "resize",
-                                &error,
-                                self.core().recorded_runner_error_code(name),
-                            )
-                        };
-                        self.core()
-                            .log_operation_failure(&operation, name, &error, &error_code);
-                        self.core()
-                            .fail_replayed_operation(&operation, name, &error_code)?;
-                        continue;
-                    }
-                };
-                let result = self
-                    .core()
-                    .state
-                    .environments
-                    .get(name)
-                    .map(environment_operation_result)
-                    .ok_or(SupervisorError::InvalidState)?;
-                self.core().complete_operation(&operation, &result)?;
-                continue;
-            }
-            if matches!(
-                operation.kind,
-                OperationKind::UpdateWorkspace | OperationKind::RollbackWorkspace
-            ) {
-                let operation = match self.workspace_transition(name, &operation).await {
-                    Ok(operation) => operation,
-                    Err(error @ SupervisorError::ReplacementPreflight(_)) => {
-                        let current = self
-                            .core()
-                            .store
-                            .operation_by_request(operation.request_id)?
-                            .ok_or(SupervisorError::InvalidState)?;
-                        let error_code = if operation.kind == OperationKind::UpdateWorkspace {
-                            "workspace_update_preflight"
-                        } else {
-                            "workspace_rollback_preflight"
-                        };
-                        self.core()
-                            .log_operation_failure(&operation, name, &error, error_code);
-                        self.abort_workspace_transition_with_stop(
-                            &current, name, error_code, false,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
-                        return Err(SupervisorError::CredentialAuthorityUnavailable);
-                    }
-                    Err(error) => {
-                        let prefix = match operation.kind {
-                            OperationKind::UpdateWorkspace => "workspace_update",
-                            OperationKind::RollbackWorkspace => "workspace_rollback",
-                            _ => return Err(SupervisorError::InvalidState),
-                        };
-                        let error_code = if recovering {
-                            format!("{prefix}_interrupted")
-                        } else {
-                            lifecycle_failure_code(
-                                prefix,
-                                &error,
-                                self.core().recorded_runner_error_code(name),
-                            )
-                        };
-                        self.core()
-                            .log_operation_failure(&operation, name, &error, &error_code);
-                        self.abort_replayed_workspace_transition(&operation, name, &error_code)
-                            .await?;
-                        continue;
-                    }
-                };
-                let result = self
-                    .core()
-                    .state
-                    .environments
-                    .get(name)
-                    .map(environment_operation_result)
-                    .ok_or(SupervisorError::InvalidState)?;
-                self.core().complete_operation(&operation, &result)?;
-                continue;
-            }
-            if operation.kind == OperationKind::UpdateEnvironmentSources {
-                self.execute_source_operation(&operation).await?;
-                continue;
-            }
-            if operation.kind == OperationKind::UpdateHostPorts {
-                // A failed update changes nothing recorded and leaves the
-                // environment as it was.
-                let operation = match self.update_host_ports(name, &operation).await {
-                    Ok(operation) => operation,
-                    Err(error) => {
-                        let error_code = match error {
-                            SupervisorError::HostPortUnavailable => {
-                                "host_port_unavailable".to_owned()
-                            }
-                            _ if recovering => "host_ports_interrupted".to_owned(),
-                            _ => lifecycle_failure_code("host_ports", &error, None),
-                        };
-                        self.core()
-                            .log_operation_failure(&operation, name, &error, &error_code);
-                        self.core()
-                            .fail_pending_operation(&operation, &error_code)?;
-                        continue;
-                    }
-                };
-                let result = self
-                    .core()
-                    .state
-                    .environments
-                    .get(name)
-                    .map(environment_operation_result)
-                    .ok_or(SupervisorError::InvalidState)?;
-                self.core().complete_operation(&operation, &result)?;
-                continue;
-            }
-            if operation.kind == OperationKind::Reconcile {
-                let operation = self.core().apply_reconcile_operation(&operation)?;
-                let result = self
-                    .core()
-                    .state
-                    .environments
-                    .get(name)
-                    .map(environment_operation_result)
-                    .ok_or(SupervisorError::InvalidState)?;
-                self.core().complete_operation(&operation, &result)?;
-                continue;
-            }
-            return Err(SupervisorError::InvalidState);
+                    self.core()
+                        .log_operation_failure(&operation, name, &error, &error_code);
+                    self.core()
+                        .fail_replayed_operation(&operation, name, &error_code)?;
+                    return Ok(());
+                }
+            };
+            let result = self
+                .core()
+                .state
+                .environments
+                .get(name)
+                .map(environment_operation_result)
+                .ok_or(SupervisorError::InvalidState)?;
+            self.core().complete_operation(&operation, &result)?;
+            return Ok(());
         }
-        self.core().ensure_no_unowned_workspace_staging()
-    }
-
-    async fn replay_pending_operations(&self) -> Result<(), SupervisorError> {
-        self.run_pending_operations(true).await
-    }
-
-    async fn execute_pending_operations(&self) -> Result<(), SupervisorError> {
-        self.run_pending_operations(false).await
+        if operation.kind == OperationKind::Stop {
+            let (_, operation) = match self.stop(name, &operation).await {
+                Ok(result) => result,
+                Err(error) => {
+                    let error_code = lifecycle_failure_code("stop", &error, None);
+                    self.core()
+                        .log_operation_failure(&operation, name, &error, &error_code);
+                    self.core()
+                        .fail_pending_operation(&operation, &error_code)?;
+                    return Ok(());
+                }
+            };
+            let result = self
+                .core()
+                .state
+                .environments
+                .get(name)
+                .map(environment_operation_result)
+                .ok_or(SupervisorError::InvalidState)?;
+            self.core().complete_operation(&operation, &result)?;
+            return Ok(());
+        }
+        if operation.kind == OperationKind::Delete {
+            self.run_delete_operation(name, &operation, recovering)
+                .await?;
+            return Ok(());
+        }
+        if matches!(
+            operation.kind,
+            OperationKind::Restart | OperationKind::GrowDisk
+        ) {
+            let operation = match self.resize(name, &operation).await {
+                Ok(operation) => operation,
+                Err(error @ SupervisorError::ReplacementPreflight(_)) => {
+                    self.core().log_operation_failure(
+                        &operation,
+                        name,
+                        &error,
+                        "restart_preflight",
+                    );
+                    self.core()
+                        .fail_pending_operation(&operation, "restart_preflight")?;
+                    return Ok(());
+                }
+                Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
+                    return Err(SupervisorError::CredentialAuthorityUnavailable);
+                }
+                Err(error) => {
+                    let error_code = if recovering {
+                        "resize_interrupted".to_owned()
+                    } else {
+                        lifecycle_failure_code(
+                            "resize",
+                            &error,
+                            self.core().recorded_runner_error_code(name),
+                        )
+                    };
+                    self.core()
+                        .log_operation_failure(&operation, name, &error, &error_code);
+                    self.core()
+                        .fail_replayed_operation(&operation, name, &error_code)?;
+                    return Ok(());
+                }
+            };
+            let result = self
+                .core()
+                .state
+                .environments
+                .get(name)
+                .map(environment_operation_result)
+                .ok_or(SupervisorError::InvalidState)?;
+            self.core().complete_operation(&operation, &result)?;
+            return Ok(());
+        }
+        if matches!(
+            operation.kind,
+            OperationKind::UpdateWorkspace | OperationKind::RollbackWorkspace
+        ) {
+            let operation = match self.workspace_transition(name, &operation).await {
+                Ok(operation) => operation,
+                Err(error @ SupervisorError::ReplacementPreflight(_)) => {
+                    let current = self
+                        .core()
+                        .store
+                        .operation_by_request(operation.request_id)?
+                        .ok_or(SupervisorError::InvalidState)?;
+                    let error_code = if operation.kind == OperationKind::UpdateWorkspace {
+                        "workspace_update_preflight"
+                    } else {
+                        "workspace_rollback_preflight"
+                    };
+                    self.core()
+                        .log_operation_failure(&operation, name, &error, error_code);
+                    self.abort_workspace_transition_with_stop(&current, name, error_code, false)
+                        .await?;
+                    return Ok(());
+                }
+                Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
+                    return Err(SupervisorError::CredentialAuthorityUnavailable);
+                }
+                Err(error) => {
+                    let prefix = match operation.kind {
+                        OperationKind::UpdateWorkspace => "workspace_update",
+                        OperationKind::RollbackWorkspace => "workspace_rollback",
+                        _ => return Err(SupervisorError::InvalidState),
+                    };
+                    let error_code = if recovering {
+                        format!("{prefix}_interrupted")
+                    } else {
+                        lifecycle_failure_code(
+                            prefix,
+                            &error,
+                            self.core().recorded_runner_error_code(name),
+                        )
+                    };
+                    self.core()
+                        .log_operation_failure(&operation, name, &error, &error_code);
+                    self.abort_replayed_workspace_transition(&operation, name, &error_code)
+                        .await?;
+                    return Ok(());
+                }
+            };
+            let result = self
+                .core()
+                .state
+                .environments
+                .get(name)
+                .map(environment_operation_result)
+                .ok_or(SupervisorError::InvalidState)?;
+            self.core().complete_operation(&operation, &result)?;
+            return Ok(());
+        }
+        if operation.kind == OperationKind::UpdateEnvironmentSources {
+            self.execute_source_operation(&operation).await?;
+            return Ok(());
+        }
+        if operation.kind == OperationKind::UpdateHostPorts {
+            // A failed update changes nothing recorded and leaves the
+            // environment as it was.
+            let operation = match self.update_host_ports(name, &operation).await {
+                Ok(operation) => operation,
+                Err(error) => {
+                    let error_code = match error {
+                        SupervisorError::HostPortUnavailable => "host_port_unavailable".to_owned(),
+                        _ if recovering => "host_ports_interrupted".to_owned(),
+                        _ => lifecycle_failure_code("host_ports", &error, None),
+                    };
+                    self.core()
+                        .log_operation_failure(&operation, name, &error, &error_code);
+                    self.core()
+                        .fail_pending_operation(&operation, &error_code)?;
+                    return Ok(());
+                }
+            };
+            let result = self
+                .core()
+                .state
+                .environments
+                .get(name)
+                .map(environment_operation_result)
+                .ok_or(SupervisorError::InvalidState)?;
+            self.core().complete_operation(&operation, &result)?;
+            return Ok(());
+        }
+        if operation.kind == OperationKind::Reconcile {
+            let operation = self.core().apply_reconcile_operation(&operation)?;
+            let result = self
+                .core()
+                .state
+                .environments
+                .get(name)
+                .map(environment_operation_result)
+                .ok_or(SupervisorError::InvalidState)?;
+            self.core().complete_operation(&operation, &result)?;
+            return Ok(());
+        }
+        Err(SupervisorError::InvalidState)
     }
 }
 
@@ -2490,15 +2956,39 @@ impl SupervisorCore {
         Ok(())
     }
 
-    fn ensure_no_unowned_workspace_staging(&self) -> Result<(), SupervisorError> {
-        if self.state.environments.values().any(|environment| {
-            environment.active_workspace_generation.is_some()
-                && environment.staging_workspace_generation.is_some()
-        }) {
+    /// After `name`'s drain, nothing of it stays staged beside an active
+    /// workspace. Only that name: another environment may be mid-update
+    /// (#2978).
+    fn ensure_no_unowned_workspace_staging(&self, name: &str) -> Result<(), SupervisorError> {
+        if self
+            .state
+            .environments
+            .get(name)
+            .is_some_and(|environment| {
+                environment.active_workspace_generation.is_some()
+                    && environment.staging_workspace_generation.is_some()
+            })
+        {
             return Err(SupervisorError::InvalidState);
         }
         Ok(())
     }
+}
+
+/// Whether a create that commits its record selects itself (#2978). A
+/// recovered create, with no admission here, always does, as before; one an
+/// RPC here admitted does only if no select came since, so a `cw select`
+/// during the create stands, even of the VM selected already.
+fn create_selects_itself(selections_at_admission: Option<u64>, selections: u64) -> bool {
+    selections_at_admission.is_none_or(|admitted| admitted == selections)
+}
+
+/// The environment name a lifecycle operation's payload names.
+fn operation_name(operation: &OperationRecord) -> Option<&str> {
+    operation
+        .payload
+        .get("name")
+        .and_then(|value| value.as_str())
 }
 
 impl Supervisor {
@@ -3951,6 +4441,7 @@ impl Supervisor {
                     })?;
                 }
                 LifecycleEffect::StageWorkspaceGeneration => {
+                    let _writer = self.begin_staging(name).await?;
                     let generation = self.stage_workspace_generation(name).await?;
                     operation = self.commit_operation(&operation, |next_state| {
                         record_staged_workspace_generation(next_state, name, generation)
@@ -4496,6 +4987,7 @@ impl Supervisor {
                     if operation.kind == OperationKind::UpdateWorkspace =>
                 {
                     validate_workspace_transition_start(&self.environment(name)?, &parameters)?;
+                    let _writer = self.begin_staging(name).await?;
                     let staged = self.stage_workspace_update(name, &parameters).await?;
                     operation = self.commit_operation(&operation, |next_state| {
                         record_staged_workspace_update(next_state, name, &parameters, staged)
@@ -4792,12 +5284,8 @@ impl Supervisor {
                     let trash_pending =
                         cleanup_trashed_vm(&engine_root, environment_id, operation.operation_id)
                             .is_err();
-                    let content_pending = self.core().collect_unreferenced_content().is_err();
-                    let artifact_pending = self
-                        .core()
-                        .collect_unreferenced_runtime_artifacts()
-                        .is_err();
-                    if trash_pending || content_pending || artifact_pending {
+                    let collection_pending = self.collect_if_idle().await.is_err();
+                    if trash_pending || collection_pending {
                         // Deletion is already durable. Any object that cannot
                         // pass the exact allowlist remains quarantined for
                         // orphan inventory; it is never recursively removed or
@@ -4816,11 +5304,7 @@ impl Supervisor {
         // Re-derive shared-CAS cleanup state after the final checkpoint. This
         // preserves an honest cleanup_pending result if the supervisor died
         // after applying CleanupTrash but before completing the operation.
-        cleanup_pending |= self.core().collect_unreferenced_content().is_err();
-        cleanup_pending |= self
-            .core()
-            .collect_unreferenced_runtime_artifacts()
-            .is_err();
+        cleanup_pending |= self.collect_if_idle().await.is_err();
         if revoke_access {
             cleanup_pending |= self
                 .environment_access_cleanup_pending(environment_id)
@@ -4943,39 +5427,74 @@ struct SupervisorRpc {
     operation_reader: Arc<Mutex<SupervisorOperationReader>>,
     operation_events: broadcast::Sender<OperationRecord>,
     operation_progress: broadcast::Sender<OperationProgress>,
-    worker_running: Arc<AtomicBool>,
     host_keys: Arc<ssh::HostKeys>,
     ssh_streams: Arc<ssh::SshStreams>,
+    /// Tests only: admitted operations wait instead of draining, so a test
+    /// observes them as admitted.
+    #[cfg(test)]
+    hold_drains: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SupervisorRpc {
-    fn schedule_operation_worker(&self, recovering: bool) {
-        if self
-            .worker_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+    /// Start a drain of `name` (#2978). Every admission starts one; a drain
+    /// with nothing pending just exits, so no wakeup is lost and nothing
+    /// tracks whether one runs. An operation error stops the supervisor, as
+    /// it always has, except a recovery waiting for the credential
+    /// authority, which stops only this name's drain until a later request.
+    fn spawn_drain(&self, name: &str) {
+        #[cfg(test)]
+        if self.hold_drains.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
-        let service = self.clone();
-        tokio::spawn(async move {
-            let serial = service.supervisor.serial.lock().await;
-            let result = if recovering {
-                service.supervisor.replay_pending_operations().await
-            } else {
-                service.supervisor.execute_pending_operations().await
-            };
-            let deferred_for_authority = recovering
-                && matches!(
-                    &result,
-                    Err(SupervisorError::CredentialAuthorityUnavailable)
-                );
-            service.worker_running.store(false, Ordering::Release);
-            drop(serial);
-            if result.is_err() && !deferred_for_authority {
-                let _ = service.supervisor.shutdown.send(true);
+        let supervisor = Arc::clone(&self.supervisor);
+        let name = name.to_owned();
+        drop(tokio::spawn(async move {
+            match supervisor.drain(&name).await {
+                Ok(())
+                | Err(SupervisorError::CredentialAuthorityUnavailable)
+                | Err(SupervisorError::Retiring) => {}
+                Err(_) => supervisor.halt(),
             }
-        });
+        }));
+    }
+
+    /// Recover the cw-runtime operations of environments no name holds any
+    /// more; each one held by a name recovers in that name's drain.
+    fn spawn_unheld_runtime_recovery(&self) {
+        let supervisor = Arc::clone(&self.supervisor);
+        drop(tokio::spawn(async move {
+            let held = supervisor
+                .core()
+                .state
+                .environments
+                .values()
+                .map(|environment| environment.id)
+                .collect::<BTreeSet<_>>();
+            if supervisor
+                .recover_runtime_operations(|id| !held.contains(&id))
+                .await
+                .is_err()
+            {
+                supervisor.halt();
+            }
+        }));
+    }
+
+    /// Every request's entry (#2978): refuse while retiring, then start a
+    /// drain, without waiting, for every name with pending work, so a request
+    /// retries a recovery deferred for the credential authority.
+    fn start_drains(&self) -> Result<(), Status> {
+        if self.supervisor.core().retiring {
+            return Err(Status::from(SupervisorError::Retiring));
+        }
+        let names = self
+            .supervisor
+            .names_with_pending_work()
+            .map_err(Status::from)?;
+        for name in names {
+            self.spawn_drain(&name);
+        }
+        Ok(())
     }
 
     async fn operation(&self, operation_id: Uuid) -> Result<OperationRecord, Status> {
@@ -5008,9 +5527,10 @@ impl LocalSupervisorService for SupervisorRpc {
         request.mesh =
             canonicalize_mesh_attachment_proto(request.mesh.as_ref()).map_err(Status::from)?;
         let request_id = validate_create(&request).map_err(Status::from)?;
-        let serial = self.supervisor.serial.lock().await;
-        self.supervisor
-            .replay_pending_operations()
+        self.start_drains()?;
+        let lease = self
+            .supervisor
+            .quiet_lease(&request.name)
             .await
             .map_err(Status::from)?;
         let existing = self
@@ -5048,6 +5568,9 @@ impl LocalSupervisorService for SupervisorRpc {
                 // preparation. Successful preparation journals this SAME ID;
                 // failure abandons it and keeps offline replay unchanged.
                 let environment_id = Uuid::new_v4();
+                // Preparation writes repository bundles that only the
+                // journaled create will reference: a writer until then.
+                let writer = self.supervisor.content_writer().await;
                 let workspace_plan = match self
                     .supervisor
                     .prepare_create_workspace_plan(&request, environment_id)
@@ -5056,22 +5579,24 @@ impl LocalSupervisorService for SupervisorRpc {
                     Ok(workspace_plan) => workspace_plan,
                     Err(error) => {
                         // A multi-repository preparation can admit an earlier
-                        // bundle before a later repository fails. The
-                        // supervisor lock makes it safe to re-derive retained
-                        // content here without racing another lifecycle.
-                        let _ = self.supervisor.core().collect_unreferenced_content();
+                        // bundle before a later repository fails: collect what
+                        // nothing references, once no writer is in flight.
+                        drop(writer);
+                        let _ = self.supervisor.collect_if_idle().await;
                         return Err(Status::from(error));
                     }
                 };
                 let payload =
                     create_operation_payload(&request, &workspace_plan).map_err(Status::from)?;
-                begin_create_operation(
+                let operation = begin_create_operation(
                     &self.supervisor.core().store,
                     request_id,
                     environment_id,
                     &payload,
                 )
-                .map_err(Status::from)?
+                .map_err(Status::from)?;
+                drop(writer);
+                operation
             }
         };
         let payload_matches = create_request_from_operation(&operation)
@@ -5083,9 +5608,12 @@ impl LocalSupervisorService for SupervisorRpc {
             return Err(Status::aborted("local lifecycle request ID collision"));
         }
         let response = operation_proto(&operation)?;
-        drop(serial);
         if !operation.phase.terminal() {
-            self.schedule_operation_worker(false);
+            self.supervisor.admit(&operation);
+        }
+        drop(lease);
+        if !operation.phase.terminal() {
+            self.spawn_drain(&request.name);
         }
         Ok(Response::new(response))
     }
@@ -5094,11 +5622,10 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         _request: Request<v1::ListEnvironmentsRequest>,
     ) -> Result<Response<v1::ListEnvironmentsResponse>, Status> {
-        let _serial = self.supervisor.serial.lock().await;
-        self.supervisor
-            .replay_pending_operations()
-            .await
-            .map_err(Status::from)?;
+        // A read never waits on another environment's operation (#2978). It
+        // lists what is recorded now, so an environment a concurrent delete
+        // removed is simply absent.
+        self.start_drains()?;
         let names = self
             .supervisor
             .core()
@@ -5109,7 +5636,7 @@ impl LocalSupervisorService for SupervisorRpc {
             .collect::<Vec<_>>();
         for name in &names {
             self.supervisor
-                .reconcile(name)
+                .reconcile_if_idle(name)
                 .await
                 .map_err(Status::from)?;
         }
@@ -5129,13 +5656,9 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Environment>, Status> {
         let name = selected_name(request.into_inner())?;
-        let _serial = self.supervisor.serial.lock().await;
+        self.start_drains()?;
         self.supervisor
-            .replay_pending_operations()
-            .await
-            .map_err(Status::from)?;
-        self.supervisor
-            .reconcile(&name)
+            .reconcile_if_idle(&name)
             .await
             .map_err(Status::from)?;
         Ok(Response::new(
@@ -5152,9 +5675,10 @@ impl LocalSupervisorService for SupervisorRpc {
     ) -> Result<Response<v1::Environment>, Status> {
         let (name, _request_id, expected_environment_id) =
             mutation_selection(request.into_inner())?;
-        let _serial = self.supervisor.serial.lock().await;
-        self.supervisor
-            .replay_pending_operations()
+        self.start_drains()?;
+        let _lease = self
+            .supervisor
+            .quiet_lease(&name)
             .await
             .map_err(Status::from)?;
         self.supervisor
@@ -5164,6 +5688,7 @@ impl LocalSupervisorService for SupervisorRpc {
         let environment = self.supervisor.environment(&name).map_err(Status::from)?;
         require_expected_environment(&environment, expected_environment_id)?;
         let mut core = self.supervisor.core();
+        core.selections += 1;
         if core.state.current.as_deref() != Some(name.as_str()) {
             core.state.current = Some(name.clone());
             core.save().map_err(Status::from)?;
@@ -5177,7 +5702,6 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         _request: Request<v1::ListOrphansRequest>,
     ) -> Result<Response<v1::ListOrphansResponse>, Status> {
-        let _serial = self.supervisor.serial.lock().await;
         self.supervisor
             .core()
             .orphan_inventory()
@@ -5190,9 +5714,10 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        let serial = self.supervisor.serial.lock().await;
-        self.supervisor
-            .replay_pending_operations()
+        self.start_drains()?;
+        let lease = self
+            .supervisor
+            .quiet_lease(&name)
             .await
             .map_err(Status::from)?;
         self.supervisor
@@ -5244,9 +5769,12 @@ impl LocalSupervisorService for SupervisorRpc {
                 .map_err(Status::from)?
         };
         let response = operation_proto(&operation)?;
-        drop(serial);
         if !operation.phase.terminal() {
-            self.schedule_operation_worker(false);
+            self.supervisor.admit(&operation);
+        }
+        drop(lease);
+        if !operation.phase.terminal() {
+            self.spawn_drain(&name);
         }
         Ok(Response::new(response))
     }
@@ -5256,9 +5784,10 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        let serial = self.supervisor.serial.lock().await;
-        self.supervisor
-            .replay_pending_operations()
+        self.start_drains()?;
+        let lease = self
+            .supervisor
+            .quiet_lease(&name)
             .await
             .map_err(Status::from)?;
         let environment = self.supervisor.environment(&name).map_err(Status::from)?;
@@ -5278,9 +5807,12 @@ impl LocalSupervisorService for SupervisorRpc {
             .map_err(SupervisorError::from)
             .map_err(Status::from)?;
         let response = operation_proto(&operation)?;
-        drop(serial);
         if !operation.phase.terminal() {
-            self.schedule_operation_worker(false);
+            self.supervisor.admit(&operation);
+        }
+        drop(lease);
+        if !operation.phase.terminal() {
+            self.spawn_drain(&name);
         }
         Ok(Response::new(response))
     }
@@ -5290,9 +5822,10 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        let serial = self.supervisor.serial.lock().await;
-        self.supervisor
-            .replay_pending_operations()
+        self.start_drains()?;
+        let lease = self
+            .supervisor
+            .quiet_lease(&name)
             .await
             .map_err(Status::from)?;
         self.supervisor
@@ -5371,9 +5904,12 @@ impl LocalSupervisorService for SupervisorRpc {
                 .map_err(Status::from)?
         };
         let response = operation_proto(&operation)?;
-        drop(serial);
         if !operation.phase.terminal() {
-            self.schedule_operation_worker(false);
+            self.supervisor.admit(&operation);
+        }
+        drop(lease);
+        if !operation.phase.terminal() {
+            self.spawn_drain(&name);
         }
         Ok(Response::new(response))
     }
@@ -5383,9 +5919,10 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        let serial = self.supervisor.serial.lock().await;
-        self.supervisor
-            .replay_pending_operations()
+        self.start_drains()?;
+        let lease = self
+            .supervisor
+            .quiet_lease(&name)
             .await
             .map_err(Status::from)?;
         self.supervisor
@@ -5475,9 +6012,12 @@ impl LocalSupervisorService for SupervisorRpc {
                 .map_err(Status::from)?
         };
         let response = operation_proto(&operation)?;
-        drop(serial);
         if !operation.phase.terminal() {
-            self.schedule_operation_worker(false);
+            self.supervisor.admit(&operation);
+        }
+        drop(lease);
+        if !operation.phase.terminal() {
+            self.spawn_drain(&name);
         }
         Ok(Response::new(response))
     }
@@ -5490,9 +6030,10 @@ impl LocalSupervisorService for SupervisorRpc {
         let request_id = validate_resize(&request).map_err(Status::from)?;
         let expected_environment_id =
             parse_optional_environment_id(&request.environment_id).map_err(Status::from)?;
-        let serial = self.supervisor.serial.lock().await;
-        self.supervisor
-            .replay_pending_operations()
+        self.start_drains()?;
+        let lease = self
+            .supervisor
+            .quiet_lease(&request.name)
             .await
             .map_err(Status::from)?;
         let environment = self
@@ -5605,9 +6146,12 @@ impl LocalSupervisorService for SupervisorRpc {
                 .map_err(Status::from)?
         };
         let response = operation_proto(&operation)?;
-        drop(serial);
         if !operation.phase.terminal() {
-            self.schedule_operation_worker(false);
+            self.supervisor.admit(&operation);
+        }
+        drop(lease);
+        if !operation.phase.terminal() {
+            self.spawn_drain(&request.name);
         }
         Ok(Response::new(response))
     }
@@ -5628,9 +6172,10 @@ impl LocalSupervisorService for SupervisorRpc {
             .iter()
             .map(|binding| serde_json::json!([binding.host_port, binding.guest_port]))
             .collect::<Vec<_>>();
-        let serial = self.supervisor.serial.lock().await;
-        self.supervisor
-            .replay_pending_operations()
+        self.start_drains()?;
+        let lease = self
+            .supervisor
+            .quiet_lease(&request.name)
             .await
             .map_err(Status::from)?;
         let environment = self
@@ -5696,9 +6241,12 @@ impl LocalSupervisorService for SupervisorRpc {
                 .map_err(Status::from)?
         };
         let response = operation_proto(&operation)?;
-        drop(serial);
         if !operation.phase.terminal() {
-            self.schedule_operation_worker(false);
+            self.supervisor.admit(&operation);
+        }
+        drop(lease);
+        if !operation.phase.terminal() {
+            self.spawn_drain(&request.name);
         }
         Ok(Response::new(response))
     }
@@ -5715,7 +6263,8 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        let serial = self.supervisor.serial.lock().await;
+        self.start_drains()?;
+        let lease = self.supervisor.lease(&name).lock_owned().await;
         // Preserve the selector's stable-identity precondition before replaying
         // any durable work. A replay may remove this environment (including
         // when this request ID names the pending delete itself), but it must
@@ -5745,8 +6294,9 @@ impl LocalSupervisorService for SupervisorRpc {
                 require_expected_environment(&environment, expected_environment_id)?;
             }
         }
-        self.supervisor
-            .replay_pending_operations()
+        let lease = self
+            .supervisor
+            .drain_under(lease, &name)
             .await
             .map_err(Status::from)?;
         let existing = self
@@ -5790,17 +6340,20 @@ impl LocalSupervisorService for SupervisorRpc {
                     )
                     .map_err(SupervisorError::from)
                     .map_err(Status::from)?;
-                // A delete someone asked for frees every downloaded layer no
-                // environment uses, the download cache included; a failed
-                // create's own rollback keeps the cache (#2952).
-                core.download_cache.clear();
+                // A delete someone asked for frees the layers this name's
+                // pulls cached; a failed create's own rollback keeps them
+                // (#2952), and another name's stay (#2978).
+                core.download_cache.remove(&name);
                 operation
             }
         };
         let response = operation_proto(&operation)?;
-        drop(serial);
         if !operation.phase.terminal() {
-            self.schedule_operation_worker(false);
+            self.supervisor.admit(&operation);
+        }
+        drop(lease);
+        if !operation.phase.terminal() {
+            self.spawn_drain(&name);
         }
         Ok(Response::new(response))
     }
@@ -5967,9 +6520,10 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::DaemonAccess>, Status> {
         let name = selected_name(request.into_inner())?;
-        let _serial = self.supervisor.serial.lock().await;
-        self.supervisor
-            .replay_pending_operations()
+        self.start_drains()?;
+        let _lease = self
+            .supervisor
+            .quiet_lease(&name)
             .await
             .map_err(Status::from)?;
         self.supervisor
@@ -5984,10 +6538,11 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::CredentialBrokerRuntime>, Status> {
         let name = selected_name(request.into_inner())?;
+        self.start_drains()?;
         let broker_request = {
-            let _serial = self.supervisor.serial.lock().await;
-            self.supervisor
-                .replay_pending_operations()
+            let _lease = self
+                .supervisor
+                .quiet_lease(&name)
                 .await
                 .map_err(Status::from)?;
             self.supervisor
@@ -6045,9 +6600,10 @@ impl LocalSupervisorService for SupervisorRpc {
                 Status::invalid_argument("managed runtime requires an environment UUID")
             })?;
         let name = selected_name(request)?;
-        let _serial = self.supervisor.serial.lock().await;
-        self.supervisor
-            .replay_pending_operations()
+        self.start_drains()?;
+        let _lease = self
+            .supervisor
+            .quiet_lease(&name)
             .await
             .map_err(Status::from)?;
         self.supervisor
@@ -6124,52 +6680,105 @@ impl LocalSupervisorService for SupervisorRpc {
                 "a local VM supervisor retires only for its own protocol or a newer one",
             ));
         }
-        let serial = self.supervisor.serial.lock().await;
-        self.supervisor
-            .replay_pending_operations()
-            .await
-            .map_err(Status::from)?;
-        if let Some((name, _)) = self
+        // Retire never waits (#2978): every lease, recorded names' and any
+        // other a request or cw-runtime work took, must be free now, and is
+        // held from here, so nothing starts on an environment. With nothing
+        // pending and no VM that may run, `retiring` is set before anything
+        // is awaited; every later lease acquisition and request is refused.
+        let names = self
             .supervisor
             .core()
             .state
             .environments
-            .iter()
-            .find(|(_, environment)| may_run_a_vm(environment))
-        {
-            return Err(Status::from(SupervisorError::RetireRefused(name.clone())));
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in &names {
+            let _ = self.supervisor.lease(name);
         }
-        // A stopped environment's runner holds no VM, but on Linux it outlives
-        // this supervisor, and an older successor (`cw upgrade rollback`)
-        // cannot use a newer runner: end each one this supervisor tracks
-        // before handing over. A newer successor would end it anyway.
-        let idle: Vec<(String, RunnerRecord)> = {
-            let core = self.supervisor.core();
-            core.state
+        let all = self
+            .supervisor
+            .leases()
+            .iter()
+            .map(|(name, lease)| (name.clone(), Arc::clone(lease)))
+            .collect::<Vec<_>>();
+        let mut leases = Vec::with_capacity(all.len());
+        for (name, lease) in all {
+            let Ok(lease) = lease.try_lock_owned() else {
+                // A cw-runtime key is NUL and the environment's ID.
+                return Err(Status::from(SupervisorError::RetireRefused(
+                    name.trim_start_matches('\0').to_owned(),
+                )));
+            };
+            leases.push(lease);
+        }
+        {
+            let mut core = self.supervisor.core();
+            let pending = core
+                .store
+                .pending_operations()
+                .map_err(SupervisorError::from)
+                .map_err(Status::from)?;
+            if let Some(name) = pending
+                .iter()
+                .filter(|operation| !operation.kind.cw_runtime())
+                .find_map(|operation| operation_name(operation))
+            {
+                return Err(Status::from(SupervisorError::RetireRefused(
+                    name.to_owned(),
+                )));
+            }
+            if let Some((name, _)) = core
+                .state
                 .environments
                 .iter()
-                .filter(|(_, environment)| {
-                    environment.state == StoredEnvironmentState::Stopped
-                        && core.live_runners.contains_key(&environment.id)
-                })
-                .filter_map(|(name, environment)| {
-                    environment
-                        .runner
-                        .clone()
-                        .map(|runner| (name.clone(), runner))
-                })
-                .collect()
-        };
-        for (name, runner) in idle {
-            self.supervisor
-                .retire_idle_runner(&name, &runner)
-                .await
-                .map_err(Status::from)?;
+                .find(|(_, environment)| may_run_a_vm(environment))
+            {
+                return Err(Status::from(SupervisorError::RetireRefused(name.clone())));
+            }
+            core.retiring = true;
         }
-        self.supervisor.core().retiring = true;
-        diagnostic_log::record(self.supervisor.log.as_deref(), "supervisor_retiring", &[]);
-        drop(serial);
-        let _ = self.supervisor.shutdown.send(true);
+        // The rest runs in a task of its own: a request dropped meanwhile
+        // still either hands over or keeps serving, and never leaves this
+        // supervisor retiring.
+        self.supervisor
+            .detached(|supervisor| async move {
+                // A stopped environment's runner holds no VM, but on Linux it
+                // outlives this supervisor, and an older successor (`cw
+                // upgrade rollback`) cannot use a newer runner: end each one
+                // this supervisor tracks before handing over. A newer
+                // successor would end it anyway.
+                let idle: Vec<(String, RunnerRecord)> = {
+                    let core = supervisor.core();
+                    core.state
+                        .environments
+                        .iter()
+                        .filter(|(_, environment)| {
+                            environment.state == StoredEnvironmentState::Stopped
+                                && core.live_runners.contains_key(&environment.id)
+                        })
+                        .filter_map(|(name, environment)| {
+                            environment
+                                .runner
+                                .clone()
+                                .map(|runner| (name.clone(), runner))
+                        })
+                        .collect()
+                };
+                for (name, runner) in idle {
+                    if let Err(error) = supervisor.retire_idle_runner(&name, &runner).await {
+                        // Not handed over after all: keep serving.
+                        supervisor.core().retiring = false;
+                        return Err(error);
+                    }
+                }
+                diagnostic_log::record(supervisor.log.as_deref(), "supervisor_retiring", &[]);
+                drop(leases);
+                let _ = supervisor.shutdown.send(true);
+                Ok(())
+            })
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(v1::RetireSupervisorResponse {}))
     }
 }
@@ -8517,7 +9126,9 @@ impl From<SupervisorError> for Status {
             | SupervisorError::WorkloadSecretDeliveryUnavailable => {
                 Status::failed_precondition(error.to_string())
             }
-            SupervisorError::CredentialAuthorityUnavailable | SupervisorError::Retiring => {
+            SupervisorError::CredentialAuthorityUnavailable
+            | SupervisorError::Retiring
+            | SupervisorError::Store(SupervisorStoreError::Stopping) => {
                 Status::unavailable(error.to_string())
             }
             SupervisorError::RetireRefused(_) => Status::failed_precondition(error.to_string()),
@@ -9144,7 +9755,7 @@ mod tests {
         )
     }
 
-    fn test_workspace_generation_with_artifact(
+    pub(super) fn test_workspace_generation_with_artifact(
         project_spec_json: &[u8],
         project_sha256: &str,
         artifact_generation: &str,
@@ -9373,7 +9984,7 @@ mod tests {
         binding
     }
 
-    fn project_environment_with_access() -> EnvironmentRecord {
+    pub(super) fn project_environment_with_access() -> EnvironmentRecord {
         let mut environment = project_environment();
         let mut project: codewire_project::ProjectSpec =
             serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
@@ -9482,7 +10093,7 @@ mod tests {
         }
     }
 
-    fn begin_and_advance_test_operation(
+    pub(super) fn begin_and_advance_test_operation(
         store: &SupervisorStore,
         environment_id: Uuid,
         kind: OperationKind,
@@ -9543,6 +10154,11 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
+            content_writers: 0,
+            collection_wanted: false,
+            collecting: false,
+            admitted_here: HashMap::new(),
+            selections: 0,
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
@@ -9762,7 +10378,7 @@ mod tests {
         assert_eq!(SocketIdentity::capture(&socket).unwrap(), stale);
     }
 
-    pub(super) fn test_supervisor(core: SupervisorCore) -> Supervisor {
+    pub(super) fn test_supervisor(core: SupervisorCore) -> Arc<Supervisor> {
         Supervisor::new(core, watch::channel(false).0)
     }
 
@@ -9774,13 +10390,13 @@ mod tests {
         let host_keys = Arc::new(ssh::HostKeys::new(&core.config.root));
         SupervisorRpc {
             info,
-            supervisor: Arc::new(test_supervisor(core)),
+            supervisor: test_supervisor(core),
             operation_reader: Arc::new(Mutex::new(operation_reader)),
             operation_events,
             operation_progress,
-            worker_running: Arc::new(AtomicBool::new(false)),
             host_keys,
             ssh_streams: Arc::default(),
+            hold_drains: Arc::default(),
         }
     }
 
@@ -9806,7 +10422,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    enum TestRunnerProtocolReply {
+    pub(super) enum TestRunnerProtocolReply {
         Version(u32),
         Failure(tonic::Code),
     }
@@ -9816,6 +10432,15 @@ mod tests {
         reply: TestRunnerProtocolReply,
         useful_calls: Arc<AtomicUsize>,
         shutdown_effect: Option<Arc<std::sync::Mutex<Option<std::process::ChildStdin>>>>,
+        info_gate: Option<RunnerInfoGate>,
+    }
+
+    /// Holds a runner's `get_runner_info` once it is entered, until released,
+    /// as a runner that will not answer holds the operation calling it.
+    #[derive(Clone, Default)]
+    pub(super) struct RunnerInfoGate {
+        pub(super) entered: Arc<tokio::sync::Notify>,
+        pub(super) release: Arc<tokio::sync::Notify>,
     }
 
     impl TestRunnerProtocolService {
@@ -9854,6 +10479,10 @@ mod tests {
             &self,
             _request: Request<v1::GetRunnerInfoRequest>,
         ) -> Result<Response<v1::RunnerInfo>, Status> {
+            if let Some(gate) = &self.info_gate {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
             self.unexpected_use()
         }
 
@@ -9941,12 +10570,27 @@ mod tests {
         tokio::sync::oneshot::Sender<()>,
         tokio::task::JoinHandle<()>,
     ) {
+        spawn_gated_test_runner_server(socket, reply, None)
+    }
+
+    /// A test runner whose `get_runner_info` waits at `info_gate`, if any.
+    pub(super) fn spawn_gated_test_runner_server(
+        socket: &Path,
+        reply: TestRunnerProtocolReply,
+        info_gate: Option<RunnerInfoGate>,
+    ) -> (
+        SocketIdentity,
+        Arc<AtomicUsize>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (incoming, socket_identity) = bind_owner_only(socket).unwrap();
         let useful_calls = Arc::new(AtomicUsize::new(0));
         let service = TestRunnerProtocolService {
             reply,
             useful_calls: Arc::clone(&useful_calls),
             shutdown_effect: None,
+            info_gate,
         };
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
@@ -10072,6 +10716,7 @@ mod tests {
             reply: TestRunnerProtocolReply::Version(7),
             useful_calls: Arc::new(AtomicUsize::new(0)),
             shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
+            info_gate: None,
         };
         let (incoming, identity) = bind_owner_only(&socket).unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -10236,6 +10881,11 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
+            content_writers: 0,
+            collection_wanted: false,
+            collecting: false,
+            admitted_here: HashMap::new(),
+            selections: 0,
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
@@ -10366,7 +11016,7 @@ mod tests {
         );
         let request_id = operation.request_id;
 
-        core.replay_pending_operations().await.unwrap();
+        core.drain_pending(true).await.unwrap();
 
         let operation = core
             .core()
@@ -10470,7 +11120,7 @@ mod tests {
         );
         let request_id = operation.request_id;
 
-        core.replay_pending_operations().await.unwrap();
+        core.drain_pending(true).await.unwrap();
 
         let operation = core
             .core()
@@ -11151,7 +11801,7 @@ mod tests {
                 .unwrap();
         }
 
-        core.replay_pending_operations().await.unwrap();
+        core.drain_pending(true).await.unwrap();
 
         let completed = core
             .core()
@@ -11407,7 +12057,7 @@ mod tests {
         );
 
         let request_id = operation.request_id;
-        core.replay_pending_operations().await.unwrap();
+        core.drain_pending(true).await.unwrap();
         let operation = core
             .core()
             .store
@@ -11505,7 +12155,7 @@ mod tests {
         }
         let request_id = operation.request_id;
 
-        core.replay_pending_operations().await.unwrap();
+        core.drain_pending(true).await.unwrap();
 
         let operation = core
             .core()
@@ -11639,7 +12289,7 @@ mod tests {
             assert_eq!(recovered.state, StoredEnvironmentState::Stopped);
             assert_eq!(recovered.generation, if checkpoint >= 5 { 2 } else { 1 });
             recovered.validate("dev").unwrap();
-            core.ensure_no_unowned_workspace_staging().unwrap();
+            core.ensure_no_unowned_workspace_staging("dev").unwrap();
             assert!(
                 core.store
                     .host_reboot_interrupted_workspace_transitions()
@@ -11725,7 +12375,7 @@ mod tests {
             assert_eq!(recovered.state, StoredEnvironmentState::Stopped);
             assert_eq!(recovered.generation, if checkpoint >= 5 { 2 } else { 1 });
             recovered.validate("dev").unwrap();
-            core.ensure_no_unowned_workspace_staging().unwrap();
+            core.ensure_no_unowned_workspace_staging("dev").unwrap();
             assert!(
                 core.store
                     .host_reboot_interrupted_workspace_transitions()
@@ -12232,7 +12882,7 @@ mod tests {
         let (_parent, core) = test_supervisor_core(environment);
         let credential_root = core.config.credential_authority_root.clone();
         let service = test_supervisor_service(core);
-        service.worker_running.store(true, Ordering::Release);
+        service.hold_drains.store(true, Ordering::Release);
         let request_id = Uuid::new_v4();
 
         let submitted = service
@@ -13890,6 +14540,11 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
+            content_writers: 0,
+            collection_wanted: false,
+            collecting: false,
+            admitted_here: HashMap::new(),
+            selections: 0,
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
@@ -13897,8 +14552,11 @@ mod tests {
         };
         let core = test_supervisor(core);
 
-        // A staged environment stages nothing more; staging still collects.
+        // A staged environment stages nothing more; beginning a stage still
+        // collects.
+        let writer = core.begin_staging("dev").await.unwrap();
         assert_eq!(core.stage_workspace_generation("dev").await.unwrap(), None);
+        drop(writer);
         assert!(paths.generations_dir.join(active_storage).is_dir());
         assert!(!paths.generations_dir.join(stale_storage).exists());
         for digest in retained_content.keys() {
@@ -14794,7 +15452,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            core.replay_pending_operations().await,
+            core.drain_pending(true).await,
             Err(SupervisorError::CredentialAuthorityUnavailable)
         ));
         let pending = core
@@ -14850,7 +15508,7 @@ mod tests {
         );
 
         assert!(matches!(
-            core.replay_pending_operations().await,
+            core.drain_pending(true).await,
             Err(SupervisorError::CredentialAuthorityUnavailable)
         ));
         let pending = core
@@ -14894,7 +15552,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            core.replay_pending_operations().await,
+            core.drain_pending(true).await,
             Err(SupervisorError::CredentialAuthorityUnavailable)
         ));
         let pending = core
@@ -14941,7 +15599,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            core.replay_pending_operations().await,
+            core.drain_pending(true).await,
             Err(SupervisorError::CredentialAuthorityUnavailable)
         ));
         let pending = core
@@ -15064,7 +15722,7 @@ mod tests {
                 )
                 .unwrap();
 
-            core.replay_pending_operations().await.unwrap();
+            core.drain_pending(true).await.unwrap();
 
             let reader = SupervisorOperationReader::open(&core.root).unwrap();
             let deleted = reader
@@ -15216,9 +15874,9 @@ mod tests {
                 .unwrap();
 
             if recovering {
-                core.replay_pending_operations().await.unwrap();
+                core.drain_pending(true).await.unwrap();
             } else {
-                core.execute_pending_operations().await.unwrap();
+                core.drain_pending(false).await.unwrap();
             }
 
             let failed = SupervisorOperationReader::open(&core.root)
@@ -15242,7 +15900,7 @@ mod tests {
             assert!(paths.vm_dir.exists());
             assert!(core.core().store.pending_operations().unwrap().is_empty());
             // Replaying again finds nothing to do.
-            core.replay_pending_operations().await.unwrap();
+            core.drain_pending(true).await.unwrap();
         }
     }
 
@@ -16065,7 +16723,7 @@ mod tests {
             )
             .unwrap();
 
-        core.execute_pending_operations().await.unwrap();
+        core.drain_pending(false).await.unwrap();
 
         let failed = core
             .core()
@@ -16467,6 +17125,13 @@ mod tests {
         );
     }
 
+    fn artifact_is_present(engine: &PrivateRoot, generation: &str) -> bool {
+        engine
+            .path()
+            .join(format!("runtime-artifacts/generations/{generation}.json"))
+            .is_file()
+    }
+
     #[tokio::test]
     async fn generation_publication_serializes_all_generation_collectors() {
         let (_parent, core) = test_supervisor_core(project_environment());
@@ -16474,9 +17139,9 @@ mod tests {
 
         // Model the create/staging transaction after it has published bytes to
         // the three generation stores but before it has durably published the
-        // references. Every RPC mutation and every collector must wait for the
-        // same lifecycle serialization across that entire boundary.
-        let serial = service.supervisor.serial.lock().await;
+        // references: a content writer in flight (#2978). No collection may run
+        // across that boundary.
+        let writer = service.supervisor.content_writer().await;
         let create = &service.supervisor;
         let engine = PrivateRoot::open(&create.config.engine_root()).unwrap();
         let (candidate_artifact, candidate_kernel) =
@@ -16532,29 +17197,37 @@ mod tests {
         )
         .unwrap();
 
-        let (collector_started, collector_reached_lock) = tokio::sync::oneshot::channel();
-        let collector_supervisor = Arc::clone(&service.supervisor);
-        let collector = tokio::spawn(async move {
-            collector_started.send(()).unwrap();
-            let _serial = collector_supervisor.serial.lock().await;
-            let mut core = collector_supervisor.core();
-            let roots = core.collect_unreferenced_workspace_roots("dev").unwrap();
-            core.collect_unreferenced_content().unwrap();
-            core.collect_unreferenced_runtime_artifacts().unwrap();
-            roots
-        });
-        collector_reached_lock.await.unwrap();
+        let collector = tokio::spawn(Arc::clone(&service.supervisor).run_collector());
+        // With the writer in flight a collection is only wanted: nothing is
+        // removed, not even what nothing will reference.
+        assert!(!create.collect_if_idle().await.unwrap());
         tokio::task::yield_now().await;
-        assert!(!collector.is_finished());
+        assert!(blobs.join(stale_content.hex()).is_file());
+        assert!(artifact_is_present(&engine, &stale_artifact));
 
         {
             let mut core = create.core();
             core.state = published_state;
             core.save().unwrap();
         }
-        drop(serial);
+        drop(writer);
 
-        assert_eq!(collector.await.unwrap(), vec![stale_storage]);
+        // The writer's end lets the collector task run the wanted collection.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while blobs.join(stale_content.hex()).exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the wanted collection runs once the writer ends");
+        collector.abort();
+        assert_eq!(
+            create
+                .collect_unreferenced_workspace_roots("dev")
+                .await
+                .unwrap(),
+            vec![stale_storage]
+        );
         assert!(paths.generations_dir.join(candidate_storage).is_dir());
         for digest in retained_content.keys() {
             assert!(blobs.join(digest.hex()).is_file());
@@ -16618,7 +17291,7 @@ mod tests {
             .await
             .unwrap();
 
-        core.collect_unreferenced_content().unwrap();
+        core.collect_content_now().unwrap();
 
         for descriptor in [&image.source, &image.manifest, &image.config] {
             assert!(
@@ -16659,7 +17332,7 @@ mod tests {
 
     #[tokio::test]
     async fn content_collection_retains_bundles_owned_by_pending_creates() {
-        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (_parent, core) = test_supervisor_core(project_environment());
         let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
         let content = ContentStore::create(&engine).unwrap();
         let bundle_bytes = bytes::Bytes::from_static(b"pending repository bundle");
@@ -16736,7 +17409,7 @@ mod tests {
             )
             .unwrap();
 
-        core.collect_unreferenced_content().unwrap();
+        core.collect_content_now().unwrap();
         assert!(
             content
                 .contains_verified(&bundle_digest, bundle_bytes.len() as u64)
@@ -16757,7 +17430,7 @@ mod tests {
                 Some("test_failure"),
             )
             .unwrap();
-        core.collect_unreferenced_content().unwrap();
+        core.collect_content_now().unwrap();
         assert!(
             !content
                 .contains_verified(&bundle_digest, bundle_bytes.len() as u64)
@@ -17112,7 +17785,7 @@ mod tests {
             let unexpected = engine.path().join("content").join(CANARY);
             fs::write(&unexpected, b"synthetic-invalid-content-object").unwrap();
 
-            core.run_pending_operations(recovering).await.unwrap();
+            core.drain_pending(recovering).await.unwrap();
 
             let reader = SupervisorOperationReader::open(&core.root).unwrap();
             let persisted = reader
@@ -17198,7 +17871,7 @@ mod tests {
         assert_eq!(pending[0].kind, OperationKind::Delete);
         assert_eq!(pending[0].environment_id, Some(stranded_id));
 
-        core.run_pending_operations(true).await.unwrap();
+        core.drain_pending(true).await.unwrap();
 
         assert!(matches!(
             core.environment("dev"),
@@ -17282,6 +17955,11 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
+            content_writers: 0,
+            collection_wanted: false,
+            collecting: false,
+            admitted_here: HashMap::new(),
+            selections: 0,
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
@@ -17353,6 +18031,11 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
+            content_writers: 0,
+            collection_wanted: false,
+            collecting: false,
+            admitted_here: HashMap::new(),
+            selections: 0,
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
@@ -17980,10 +18663,13 @@ mod download_cache_tests {
             .admit_bytes(&layer, bytes::Bytes::from_static(bytes))
             .await
             .unwrap();
-        core.core().download_cache = BTreeMap::from([(layer.clone(), bytes.len() as u64)]);
+        core.core().download_cache = BTreeMap::from([(
+            "dev".to_owned(),
+            BTreeMap::from([(layer.clone(), bytes.len() as u64)]),
+        )]);
 
         core.core().begin_rollback_of_failed_creates().unwrap();
-        core.run_pending_operations(true).await.unwrap();
+        core.drain_pending(true).await.unwrap();
         assert!(matches!(
             core.environment("dev"),
             Err(SupervisorError::NotFound(_))
@@ -17997,11 +18683,21 @@ mod download_cache_tests {
     }
 
     #[tokio::test]
-    async fn a_requested_delete_clears_the_download_cache() {
+    async fn a_requested_delete_frees_only_its_own_download_cache() {
         let (_parent, mut core) = test_supervisor_core(project_environment());
         let environment_id = core.environment("dev").unwrap().id;
         let (layer, bytes) = cached_layer();
-        core.download_cache = BTreeMap::from([(layer, bytes.len() as u64)]);
+        // Another name's failed create keeps its retry cache (#2978).
+        core.download_cache = BTreeMap::from([
+            (
+                "dev".to_owned(),
+                BTreeMap::from([(layer.clone(), bytes.len() as u64)]),
+            ),
+            (
+                "other".to_owned(),
+                BTreeMap::from([(layer.clone(), bytes.len() as u64)]),
+            ),
+        ]);
         let service = test_supervisor_service(core);
 
         service
@@ -18012,7 +18708,15 @@ mod download_cache_tests {
             }))
             .await
             .unwrap();
-        assert!(service.supervisor.core().download_cache.is_empty());
+        assert_eq!(
+            service
+                .supervisor
+                .core()
+                .download_cache
+                .keys()
+                .collect::<Vec<_>>(),
+            ["other"]
+        );
     }
 
     #[tokio::test]
@@ -18033,11 +18737,14 @@ mod download_cache_tests {
                 .await
                 .unwrap();
         }
-        core.download_cache = BTreeMap::from([(layer.clone(), layer_bytes.len() as u64)]);
+        core.download_cache = BTreeMap::from([(
+            "dev".to_owned(),
+            BTreeMap::from([(layer.clone(), layer_bytes.len() as u64)]),
+        )]);
 
         // A failed create's retry finds its layer; nothing else unreferenced
         // is kept.
-        core.collect_unreferenced_content().unwrap();
+        core.collect_content_now().unwrap();
         assert!(
             content
                 .contains_verified(&layer, layer_bytes.len() as u64)
@@ -18051,11 +18758,543 @@ mod download_cache_tests {
 
         // A delete clears the cache before it collects.
         core.download_cache.clear();
-        core.collect_unreferenced_content().unwrap();
+        core.collect_content_now().unwrap();
         assert!(
             !content
                 .contains_verified(&layer, layer_bytes.len() as u64)
                 .unwrap()
         );
+    }
+}
+
+/// Operations on one environment never wait on another's (#2978).
+#[cfg(test)]
+mod concurrency_tests {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    use super::tests::{
+        RunnerInfoGate, TestRunnerProtocolReply, attach_named_test_runner_process,
+        begin_and_advance_test_operation, project_environment, project_environment_with_access,
+        spawn_gated_test_runner_server, test_supervisor_core, test_supervisor_service,
+    };
+    use super::*;
+
+    /// Well beyond an idle request, far below any operation's own waits.
+    const PROMPT: Duration = Duration::from_secs(2);
+
+    /// A test's own setup steps, on a loaded host: never the bound of the
+    /// behaviour under test.
+    const SETUP: Duration = Duration::from_secs(60);
+
+    /// A create of `name` journaled up to its runner, with a recorded runner
+    /// whose info call waits at the returned gate: drained, the create is
+    /// stuck in its runner across an await, as one whose runner will not
+    /// answer is.
+    fn stuck_create(
+        core: &mut SupervisorCore,
+        name: &str,
+    ) -> (
+        OperationRecord,
+        RunnerInfoGate,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let mut environment = project_environment_with_access();
+        environment.id = Uuid::new_v4();
+        environment.name = name.to_owned();
+        if let Some(binding) = environment.access_binding.as_mut() {
+            binding.environment_id = access_environment_id(environment.id).unwrap();
+        }
+        // Its workspace generation was staged before its runner.
+        environment.active_workspace_generation =
+            Some(super::tests::test_workspace_generation_with_artifact(
+                environment.project_spec_json.as_deref().unwrap(),
+                environment.project_spec_sha256.as_deref().unwrap(),
+                environment.active_artifact_generation.as_deref().unwrap(),
+                name.as_bytes(),
+            ));
+        let environment_id = environment.id;
+        let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
+            name: name.to_owned(),
+            source_path: "/workspace/source".to_owned(),
+            vcpus: u32::from(environment.vcpus),
+            memory_mib: environment.memory_mib,
+            disk_bytes: environment.disk_bytes,
+            docker_disk_bytes: environment.docker_disk_bytes,
+            request_id: Uuid::new_v4().to_string(),
+            project_spec_json: environment.project_spec_json.clone().unwrap(),
+            project_spec_sha256: environment.project_spec_sha256.clone().unwrap(),
+            implicit_path_mode: "clone".to_owned(),
+            local_mounts: Vec::new(),
+            host_ports: Vec::new(),
+            mesh: None,
+            access_profile_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            access_profile_revision: 7,
+            access_profile_reference: "user/work".to_owned(),
+            platform_source_authority: None,
+        };
+        let payload = create_operation_payload(&request, &environment.workspace_plan).unwrap();
+        core.state.environments.insert(name.to_owned(), environment);
+        core.save().unwrap();
+        let gate = RunnerInfoGate::default();
+        let (socket, _calls, stop_runner, _server) = spawn_gated_test_runner_server(
+            &core.config.runner_socket(environment_id),
+            TestRunnerProtocolReply::Version(7),
+            Some(gate.clone()),
+        );
+        attach_named_test_runner_process(core, name, socket);
+        core.environment_mut(name).unwrap().state = StoredEnvironmentState::Starting;
+        core.save().unwrap();
+        let checkpoint = crate::lifecycle::effects(OperationKind::Create)
+            .iter()
+            .position(|effect| *effect == LifecycleEffect::EnsureRunner)
+            .unwrap();
+        let create = begin_and_advance_test_operation(
+            &core.store,
+            environment_id,
+            OperationKind::Create,
+            &payload,
+            u32::try_from(checkpoint).unwrap(),
+        );
+        (create, gate, stop_runner)
+    }
+
+    /// End a stuck create's runner process, which outlives the test.
+    fn end_runner(service: &SupervisorRpc, name: &str) {
+        let id = service.supervisor.environment(name).unwrap().id;
+        let runner = service.supervisor.core().children.remove(&id);
+        if let Some(mut runner) = runner {
+            let _ = runner.kill();
+            let _ = runner.wait();
+        }
+    }
+
+    /// Stopped environments "dev" and "other".
+    fn two_environments() -> (tempfile::TempDir, SupervisorRpc) {
+        let (parent, mut core) = test_supervisor_core(project_environment());
+        let mut other = project_environment();
+        other.id = Uuid::new_v4();
+        other.name = "other".to_owned();
+        let mut next_state = core.state.clone();
+        next_state.environments.insert("other".to_owned(), other);
+        core.state = next_state;
+        core.save().unwrap();
+        (parent, test_supervisor_service(core))
+    }
+
+    fn selector(service: &SupervisorRpc, name: &str) -> v1::EnvironmentSelector {
+        v1::EnvironmentSelector {
+            name: name.to_owned(),
+            request_id: Uuid::new_v4().to_string(),
+            environment_id: service.supervisor.environment(name).unwrap().id.to_string(),
+        }
+    }
+
+    async fn finished(
+        service: &SupervisorRpc,
+        operation: &v1::Operation,
+        within: Duration,
+    ) -> OperationRecord {
+        let id = Uuid::parse_str(&operation.operation_id).unwrap();
+        timeout(within, async {
+            loop {
+                let operation = service.operation(id).await.unwrap();
+                if operation.phase.terminal() {
+                    return operation;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the operation runs to its end")
+    }
+
+    /// The issue's done-when: a create stuck in its runner holds only its
+    /// own environment. Meanwhile `cw ls`, `cw info` of it and of another,
+    /// `cw select`, daemon access and another environment's stop all answer;
+    /// only a mutation of its own environment waits for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stuck_create_blocks_neither_reads_nor_another_environment() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (create, gate, _stop_runner) = stuck_create(&mut core, "new");
+        let service = test_supervisor_service(core);
+        // As `cw create` admits it here.
+        service.supervisor.admit(&create);
+        service.spawn_drain("new");
+        timeout(SETUP, gate.entered.notified())
+            .await
+            .expect("the create reaches its runner");
+
+        let listed = timeout(
+            PROMPT,
+            service.list_environments(Request::new(v1::ListEnvironmentsRequest::default())),
+        )
+        .await
+        .expect("ls answers")
+        .unwrap()
+        .into_inner();
+        assert_eq!(listed.environments.len(), 2);
+        let new = timeout(
+            PROMPT,
+            service.get_environment(Request::new(selector(&service, "new"))),
+        )
+        .await
+        .expect("info on the stuck environment answers with its recorded state")
+        .unwrap()
+        .into_inner();
+        assert_eq!(new.state, v1::EnvironmentState::Starting as i32);
+        timeout(
+            PROMPT,
+            service.get_environment(Request::new(selector(&service, "dev"))),
+        )
+        .await
+        .expect("info on another environment answers")
+        .unwrap();
+        timeout(
+            PROMPT,
+            service.select_environment(Request::new(selector(&service, "dev"))),
+        )
+        .await
+        .expect("select of another environment answers")
+        .unwrap();
+        // "dev" runs no VM, so its daemon access is refused, but at once.
+        timeout(
+            PROMPT,
+            service.get_daemon_access(Request::new(read_selector("dev"))),
+        )
+        .await
+        .expect("daemon access of another environment answers")
+        .unwrap_err();
+        let dev_id = service.supervisor.environment("dev").unwrap().id;
+        timeout(PROMPT, service.environment_daemon_access(dev_id))
+            .await
+            .expect("public daemon access of another environment answers")
+            .unwrap_err();
+        let stop = timeout(
+            PROMPT,
+            service.stop_environment(Request::new(selector(&service, "dev"))),
+        )
+        .await
+        .expect("another environment's mutation is admitted")
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            finished(&service, &stop, PROMPT).await.phase,
+            OperationPhase::Completed
+        );
+
+        let waiting = tokio::spawn({
+            let service = service.clone();
+            let request = selector(&service, "new");
+            async move { service.stop_environment(Request::new(request)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!waiting.is_finished(), "its own mutation waits for it");
+        assert!(
+            !service
+                .operation(create.operation_id)
+                .await
+                .unwrap()
+                .phase
+                .terminal(),
+            "the create is still stuck"
+        );
+        waiting.abort();
+        end_runner(&service, "new");
+    }
+
+    /// A request dropped while its drain runs an operation, as when its
+    /// client goes away mid-wait, cuts that operation short nowhere: the
+    /// drain finishes it and forgets its admission (#2978).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_dropped_during_its_drain_leaves_the_operation_running() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (create, gate, _stop_runner) = stuck_create(&mut core, "new");
+        let service = test_supervisor_service(core);
+        // Only the request's own drain runs it, as one admitted here.
+        service
+            .hold_drains
+            .store(true, std::sync::atomic::Ordering::Release);
+        service.supervisor.admit(&create);
+        let request = tokio::spawn({
+            let service = service.clone();
+            let request = read_selector("new");
+            async move { service.get_daemon_access(Request::new(request)).await }
+        });
+        timeout(SETUP, gate.entered.notified())
+            .await
+            .expect("the request's drain reaches the create's runner");
+        assert!(
+            !service
+                .operation(create.operation_id)
+                .await
+                .unwrap()
+                .phase
+                .terminal()
+        );
+        request.abort();
+        let _ = request.await;
+        gate.release.notify_one();
+        // Its runner then fails it, but it runs to its end.
+        assert_eq!(
+            finished(&service, &operation_proto(&create).unwrap(), SETUP)
+                .await
+                .phase,
+            OperationPhase::Failed
+        );
+        // Its drain, rollback included, ends and lets go of the name.
+        drop(
+            timeout(SETUP, service.supervisor.lease("new").lock_owned())
+                .await
+                .expect("the drain ends"),
+        );
+        assert!(
+            !service
+                .supervisor
+                .core()
+                .admitted_here
+                .contains_key(&create.operation_id)
+        );
+        end_runner(&service, "new");
+    }
+
+    /// A caller dropped during a collection, as a request's client going
+    /// away drops it, never leaves it running for good: a writer waits only
+    /// until the walk ends (#2978).
+    #[tokio::test]
+    async fn a_collection_its_caller_dropped_still_ends_and_lets_writers_in() {
+        let (_parent, service) = two_environments();
+        let supervisor = &service.supervisor;
+        {
+            let mut collection = std::pin::pin!(supervisor.collect_if_idle());
+            assert!(futures::poll!(collection.as_mut()).is_pending());
+        }
+        assert!(supervisor.core().collecting, "dropped mid-collection");
+        let mut writer = std::pin::pin!(supervisor.content_writer());
+        assert!(
+            futures::poll!(writer.as_mut()).is_pending(),
+            "a writer waits while a collection runs"
+        );
+        let _writer = timeout(PROMPT, writer)
+            .await
+            .expect("the collection ends without its caller");
+        let core = supervisor.core();
+        assert!(!core.collecting);
+        assert_eq!(core.content_writers, 1);
+    }
+
+    /// A retire dropped after it set `retiring` still hands over, or keeps
+    /// serving; it never leaves the supervisor retiring for good (#2978).
+    #[tokio::test]
+    async fn a_retire_its_caller_dropped_still_hands_over() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let socket = SocketIdentity {
+            device: 1,
+            inode: 2,
+            uid: 4,
+            mode: 0o140600,
+        };
+        attach_named_test_runner_process(&mut core, "dev", socket);
+        core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;
+        core.save().unwrap();
+        let service = test_supervisor_service(core);
+        let mut shutdown = service.supervisor.shutdown.subscribe();
+        {
+            let mut retire = std::pin::pin!(service.retire_supervisor(Request::new(
+                v1::RetireSupervisorRequest {
+                    successor_protocol: NATIVE_SUPERVISOR_PROTOCOL_VERSION,
+                }
+            )));
+            // It reaches the idle runner it ends before handing over.
+            assert!(futures::poll!(retire.as_mut()).is_pending());
+            assert!(service.supervisor.core().retiring);
+        }
+        timeout(PROMPT, shutdown.wait_for(|stopping| *stopping))
+            .await
+            .expect("the retirement completes without its caller")
+            .unwrap();
+        assert!(
+            service
+                .supervisor
+                .environment("dev")
+                .unwrap()
+                .runner
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn retire_refuses_at_once_while_an_environment_is_busy() {
+        let (_parent, service) = two_environments();
+        // A recorded environment's, and a create's whose name has no record
+        // yet.
+        for name in ["other", "new"] {
+            let held = service.supervisor.lease(name).lock_owned().await;
+            let refused = timeout(
+                PROMPT,
+                service.retire_supervisor(Request::new(v1::RetireSupervisorRequest {
+                    successor_protocol: NATIVE_SUPERVISOR_PROTOCOL_VERSION,
+                })),
+            )
+            .await
+            .expect("retire never waits")
+            .unwrap_err();
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            assert!(refused.message().contains(name), "{refused:?}");
+            assert!(!service.supervisor.core().retiring);
+            drop(held);
+        }
+        let held = service.supervisor.lease("other").lock_owned().await;
+        timeout(
+            PROMPT,
+            service.list_environments(Request::new(v1::ListEnvironmentsRequest::default())),
+        )
+        .await
+        .expect("ls keeps answering")
+        .unwrap();
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn a_read_skips_an_environment_a_delete_removed() {
+        let (_parent, service) = two_environments();
+        service
+            .supervisor
+            .reconcile_if_idle("removed")
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn workspace_staging_is_checked_for_the_drained_name_only() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let mut other = project_environment();
+        other.id = Uuid::new_v4();
+        other.name = "other".to_owned();
+        let generation = super::tests::test_workspace_generation_with_artifact(
+            other.project_spec_json.as_deref().unwrap(),
+            other.project_spec_sha256.as_deref().unwrap(),
+            "a".repeat(64).as_str(),
+            b"other",
+        );
+        other.active_workspace_generation = Some(generation.clone());
+        other.staging_workspace_generation = Some(generation);
+        core.state.environments.insert("other".to_owned(), other);
+        // "other" is mid-update; "dev"'s drain ending must not trip on it.
+        core.ensure_no_unowned_workspace_staging("dev").unwrap();
+        assert!(core.ensure_no_unowned_workspace_staging("other").is_err());
+    }
+
+    /// `cw select` of the VM selected already, during a create admitted
+    /// here, stands: the create no longer selects itself (#2978).
+    #[tokio::test]
+    async fn a_select_of_the_selected_vm_during_a_create_stands() {
+        let (_parent, service) = two_environments();
+        service
+            .hold_drains
+            .store(true, std::sync::atomic::Ordering::Release);
+        let create = service
+            .supervisor
+            .core()
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(Uuid::new_v4()),
+                OperationKind::Create,
+                &serde_json::json!({ "name": "new" }),
+            )
+            .unwrap();
+        service.supervisor.admit(&create);
+        let selects_itself = || {
+            let core = service.supervisor.core();
+            create_selects_itself(
+                core.admitted_here.get(&create.operation_id).copied(),
+                core.selections,
+            )
+        };
+        assert!(selects_itself());
+        assert_eq!(
+            service.supervisor.core().state.current.as_deref(),
+            Some("dev")
+        );
+        service
+            .select_environment(Request::new(selector(&service, "dev")))
+            .await
+            .unwrap();
+        assert!(!selects_itself());
+    }
+
+    /// After a fatal error, such as a panic under the state lock, nothing
+    /// more is written and no drain runs another operation (#2978).
+    #[tokio::test]
+    async fn a_fatal_error_stops_every_later_commit_and_drain() {
+        let (_parent, service) = two_environments();
+        let supervisor = &service.supervisor;
+        let shutdown = supervisor.shutdown.subscribe();
+        let panicked = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _core = supervisor.core.lock().unwrap();
+                    panic!("a synthetic panic under the state lock");
+                })
+                .join()
+        });
+        assert!(panicked.is_err());
+        assert!(matches!(
+            supervisor.core().save(),
+            Err(SupervisorError::Store(SupervisorStoreError::Stopping))
+        ));
+        assert!(*shutdown.borrow());
+        assert!(matches!(
+            supervisor.drain("dev").await,
+            Err(SupervisorError::Store(SupervisorStoreError::Stopping))
+        ));
+    }
+
+    /// A pull keeps the cached layers of names with an environment or a
+    /// pending create, and its own; another failed create's go (#2978).
+    #[test]
+    fn a_pull_frees_the_layers_of_names_with_no_environment_or_create() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let layer = |seed: &[u8]| {
+            (
+                Sha256Digest::parse(&format!("sha256:{:x}", Sha256::digest(seed))).unwrap(),
+                1,
+            )
+        };
+        core.store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(Uuid::new_v4()),
+                OperationKind::Create,
+                &serde_json::json!({ "name": "creating" }),
+            )
+            .unwrap();
+        core.download_cache = BTreeMap::from([
+            ("dev".to_owned(), BTreeMap::from([layer(b"dev")])),
+            ("creating".to_owned(), BTreeMap::from([layer(b"creating")])),
+            ("failed".to_owned(), BTreeMap::from([layer(b"failed")])),
+        ]);
+        core.cache_download("new", BTreeMap::from([layer(b"new")]))
+            .unwrap();
+        assert_eq!(
+            core.download_cache
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["creating", "dev", "new"]
+        );
+    }
+
+    #[test]
+    fn a_create_selects_itself_unless_a_select_came_since_admission() {
+        // Recovered: no admission here.
+        assert!(create_selects_itself(None, 3));
+        // Admitted here, and no select since.
+        assert!(create_selects_itself(Some(3), 3));
+        // Any select since stands, one of the VM selected already included.
+        assert!(!create_selects_itself(Some(3), 4));
     }
 }

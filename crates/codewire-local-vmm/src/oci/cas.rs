@@ -224,9 +224,10 @@ impl ContentStore {
     /// Collects only published blobs absent from the complete durable
     /// supervisor reachability map, plus abandoned bounded ingest files.
     ///
-    /// The supervisor singleton serializes this with resolution. Every object
-    /// is admitted before the first unlink so an unknown name, type, mode, or
-    /// hardlink leaves the full CAS unchanged for diagnosis.
+    /// The supervisor runs this only with no content writer in flight
+    /// (#2978). Every object is admitted before the first unlink so an unknown
+    /// name, type, mode, or hardlink leaves the full CAS unchanged for
+    /// diagnosis.
     pub(crate) fn collect_unreferenced(
         &self,
         retained: &BTreeMap<Sha256Digest, u64>,

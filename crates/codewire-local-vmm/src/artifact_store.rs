@@ -90,8 +90,8 @@ impl RuntimeArtifactStore {
 
     /// Removes only generation manifests absent from the complete durable
     /// supervisor reachability set, then removes blobs no retained manifest
-    /// references. The supervisor singleton serializes this with admission and
-    /// runner replacement. Every namespace object and every retained blob is
+    /// references. The supervisor runs this only with no artifact writer in
+    /// flight (#2978). Every namespace object and every retained blob is
     /// admitted before the first unlink, so an unsafe object leaves the store
     /// unchanged for diagnosis.
     pub(crate) fn collect_unreferenced(

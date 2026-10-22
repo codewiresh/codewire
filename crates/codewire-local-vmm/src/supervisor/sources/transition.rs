@@ -335,7 +335,8 @@ impl SupervisorRpc {
             .map_err(Status::from)?
             .ok_or_else(|| Status::invalid_argument("environment ID is required"))?;
         SourceSelection::from_request(&request).map_err(Status::from)?;
-        let serial = self.supervisor.serial.lock().await;
+        self.start_drains()?;
+        let mut lease = self.supervisor.lease(&request.name).lock_owned().await;
         let existing = self
             .supervisor
             .core()
@@ -343,6 +344,7 @@ impl SupervisorRpc {
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
             .map_err(Status::from)?;
+        let admitted = existing.is_none();
         let operation = if let Some(operation) = existing {
             let recorded = SourceTransition::from_operation(&operation)
                 .map_err(|_| Status::aborted("local lifecycle request ID collision"))?;
@@ -362,8 +364,9 @@ impl SupervisorRpc {
                     .map_err(Status::from)?,
                 Some(environment_id),
             )?;
-            self.supervisor
-                .replay_pending_operations()
+            lease = self
+                .supervisor
+                .drain_under(lease, &request.name)
                 .await
                 .map_err(Status::from)?;
             let environment = self
@@ -448,9 +451,12 @@ impl SupervisorRpc {
                 .map_err(Status::from)?
         };
         let response = operation_proto(&operation)?;
-        drop(serial);
+        if admitted && !operation.phase.terminal() {
+            self.supervisor.admit(&operation);
+        }
+        drop(lease);
         if !operation.phase.terminal() {
-            self.schedule_operation_worker(false);
+            self.spawn_drain(&request.name);
         }
         Ok(Response::new(response))
     }
