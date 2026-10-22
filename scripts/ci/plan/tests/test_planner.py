@@ -781,6 +781,93 @@ dependencies = ["core"]
             )
 
 
+class RustTestOnlySourceTests(unittest.TestCase):
+    """planner.rust_test_only_sources: the syntactic proof fails closed (#3194)."""
+
+    def sources_of(self, files: dict[str, str]) -> frozenset[str]:
+        with tempfile.TemporaryDirectory(prefix="codewire-test-only-") as temporary:
+            root = Path(temporary)
+            for relative, content in files.items():
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_text(content)
+            return planner.TreeIndex(root).test_only_sources()
+
+    def test_declarations_decide(self) -> None:
+        found = self.sources_of({
+            "crates/a/src/lib.rs": (
+                "mod prod;\n"
+                "#[cfg(test)]\nmod unit_tests;\n"
+                "#[cfg(all(test, target_os = \"linux\"))] mod linux_tests;\n"
+                "#[cfg(not(test))]\nmod not_tests;\n"
+                "#[cfg(any(test, feature = \"x\"))]\nmod any_tests;\n"
+                "#[cfg(test)]\n#[path = \"elsewhere/path_tests.rs\"]\nmod path_tests;\n"
+                "#[path = \"elsewhere/shipped.rs\"]\nmod shipped;\n"
+                "#[cfg(test)]\nmod suite {\n    mod nested;\n}\n"
+                "#[cfg(test)]\nmod twice;\n"
+            ),
+            "crates/a/src/prod.rs": "#[cfg(test)]\nmod tests;\npub mod child;\n",
+            "crates/a/src/prod/tests.rs": "",
+            "crates/a/src/prod/child.rs": "",
+            "crates/a/src/unit_tests.rs": "mod helpers;\n",
+            "crates/a/src/unit_tests/helpers.rs": "",
+            "crates/a/src/linux_tests.rs": "",
+            "crates/a/src/not_tests.rs": "",
+            "crates/a/src/any_tests.rs": "",
+            "crates/a/src/elsewhere/path_tests.rs": "",
+            "crates/a/src/elsewhere/shipped.rs": "",
+            "crates/a/src/suite/nested.rs": "",
+            "crates/a/src/twice.rs": "",
+            "crates/a/src/included.rs": "",
+            "crates/a/src/bin/tool.rs": "#[cfg(test)]\nmod included;\nconst X: &str = include_str!(\"../included.rs\");\n",
+            "crates/a/src/other.rs": "#[cfg(test)]\nmod twice;\n",
+            "crates/codewire-credential-service/src/lib.rs": "#[cfg(test)]\nmod tests;\n",
+            "crates/codewire-credential-service/src/tests.rs": "",
+        })
+        self.assertEqual(sorted(found), [
+            "crates/a/src/elsewhere/path_tests.rs",
+            "crates/a/src/linux_tests.rs",
+            "crates/a/src/prod/tests.rs",
+            "crates/a/src/suite/nested.rs",
+            "crates/a/src/twice.rs",
+            "crates/a/src/unit_tests.rs",
+            "crates/a/src/unit_tests/helpers.rs",
+        ])
+
+    def test_a_production_declaration_beside_a_test_one_keeps_the_file(self) -> None:
+        found = self.sources_of({
+            "crates/a/src/lib.rs": "#[cfg(test)]\nmod shared;\n#[cfg(not(test))]\nmod shared;\n",
+            "crates/a/src/shared.rs": "",
+        })
+        self.assertEqual(found, frozenset())
+
+    def test_shipped_test_binaries_are_the_listed_image_builds(self) -> None:
+        # Every image build in the artifact graph that compiles a package's
+        # unit tests (cargo test without --test/--doc) ships that package's
+        # test modules, so the package must be exempt from the proof.
+        root = PLANNER_PATH.parents[3]
+        patterns = set()
+        for spec in PRODUCTION_GRAPH["artifacts"].values():
+            patterns.update(spec.get("inputs", []))
+            patterns.update(spec.get("explicit_inputs", []))
+        tracked = run(["git", "ls-files"], root).splitlines()
+        sources = [path for path in tracked
+                   if (path.endswith("Dockerfile") or path.endswith(".Dockerfile") or path.endswith(".sh"))
+                   and any(fnmatch.fnmatchcase(path, pattern) or
+                           (pattern.endswith("/**") and path.startswith(pattern[:-3] + "/"))
+                           for pattern in patterns)]
+        shipped = set()
+        for path in sources:
+            text = (root / path).read_text(encoding="utf-8", errors="replace").replace("\\\n", " ")
+            for command in re.findall(r"cargo test[^\n]*", text):
+                words = command.split()
+                if "--test" in words or "--doc" in words or "--no-run" not in words:
+                    continue
+                package = words[words.index("-p") + 1] if "-p" in words else None
+                self.assertIsNotNone(package, f"{path}: a unit-test build without -p")
+                shipped.add(f"crates/{package}")
+        self.assertEqual(sorted(shipped), sorted(planner.TEST_BINARY_PACKAGE_DIRECTORIES))
+
+
 class PlannerFixtureTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="codewire-planner-test-")
@@ -1550,6 +1637,44 @@ class PlannerFixtureTests(unittest.TestCase):
     def test_test_only_change_does_not_change_package_artifact(self) -> None:
         self.repo.change("cli/tests/cli.rs", "#[test] fn smoke() { assert!(true); }\n")
         self.assertEqual(self.states(self.repo.plan()), ("unaffected", "unaffected"))
+
+    def test_rust_test_module_change_leaves_every_artifact_unaffected(self) -> None:
+        """A #[cfg(test)] module compiles into test builds alone (#3194).
+
+        Main c2b844b9a changed only a preview database_tests.rs and rebuilt both
+        support image platforms; a production module change still selects.
+        """
+        self.repo.write("core/src/lib.rs", "pub fn run() { helper::help(); }\nmod helper;\n"
+                        "#[cfg(test)]\nmod database_tests;\n")
+        self.repo.write("core/src/helper.rs", "pub fn help() {}\n")
+        self.repo.write("core/src/database_tests.rs", "#[test] fn reads() {}\n")
+        self.repo.write("crates/codewire-tailnet/src/lib.rs",
+                        "pub fn tailnet() {}\n#[cfg(all(test, target_os = \"linux\"))]\n"
+                        "#[path = \"tailnet/linux_tests.rs\"]\nmod linux_tests;\n")
+        self.repo.write("crates/codewire-tailnet/src/tailnet/linux_tests.rs", "#[test] fn linux() {}\n")
+        self.repo.base = self.repo.commit("test modules")
+
+        self.repo.change("core/src/database_tests.rs", "#[test] fn reads_more() {}\n")
+        self.assertEqual(self.changed_artifacts(self.repo.plan()), {})
+        self.repo.base = run(["git", "rev-parse", "HEAD"], self.repo.root)
+        self.repo.change("crates/codewire-tailnet/src/tailnet/linux_tests.rs", "#[test] fn linux_more() {}\n")
+        self.assertEqual(self.changed_artifacts(self.repo.plan()), {})
+
+        # The production module beside them still selects its artifacts.
+        self.repo.base = run(["git", "rev-parse", "HEAD"], self.repo.root)
+        self.repo.change("core/src/helper.rs", "pub fn help() { let _ = 1; }\n")
+        self.assertEqual(self.states(self.repo.plan()), ("affected", "affected"))
+
+    def test_a_test_module_of_a_shipped_test_binary_stays_an_image_input(self) -> None:
+        # The Kind services image ships codewire-credential-service's lib test
+        # binary, so its test modules are services image inputs.
+        self.repo.write("crates/codewire-credential-service/src/lib.rs",
+                        "pub fn serve() {}\n#[cfg(test)]\nmod tests;\n")
+        self.repo.write("crates/codewire-credential-service/src/tests.rs", "#[test] fn fixture() {}\n")
+        self.repo.base = self.repo.commit("credential service fixture")
+        self.repo.change("crates/codewire-credential-service/src/tests.rs", "#[test] fn fixture_more() {}\n")
+        changed = self.changed_artifacts(self.repo.plan())
+        self.assertEqual(changed.get("services_image"), "affected")
 
     def test_unknown_reachable_path_fails_closed_for_owning_artifact(self) -> None:
         self.repo.change("cli/assets/theme.dat", "new asset\n")

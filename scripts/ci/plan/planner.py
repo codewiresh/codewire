@@ -232,6 +232,211 @@ def validate_exported_tree(root: Path) -> None:
         raise PlannerError(f"candidate tree supplies Cargo configuration: {cargo_configs[0]}")
 
 
+# Rust test modules (#3194). A source file that Rust reaches only through test
+# modules, such as `#[cfg(test)] mod database_tests;`, compiles into test builds
+# alone, so no shipped binary or image depends on it, and artifact fingerprints
+# leave it out. The proof is syntactic and fails closed:
+# - every declaration of the module in its parent (`mod name;` or an inline
+#   `mod name { ... }`) carries `#[cfg(test)]` or `#[cfg(all(test, ...))]`, or
+#   the parent module is itself test-only;
+# - a `#[path]` declaration counts only when it carries the same cfg;
+# - no include macro in the package names the file.
+# Anything else stays an artifact input.
+#
+# A package whose test binary ships in an image is the exception: the Kind
+# services image carries codewire-credential-service's `--lib` test binary
+# (deployments/docker/services.Dockerfile), so its test modules are inputs.
+# test_planner.py keeps this list equal to the image builds that ship one.
+TEST_BINARY_PACKAGE_DIRECTORIES = ("crates/codewire-credential-service",)
+RUST_MOD_DECLARATION_RE = re.compile(
+    r"^[ \t]*((?:#\[[^\]\n]*\][ \t]*)*)(?:pub(?:[ \t]*\([^)\n]*\))?[ \t]+)?"
+    r"mod[ \t]+(?:r#)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*([;{])",
+    re.M,
+)
+RUST_ATTRIBUTE_RE = re.compile(r"#\[[^\]\n]*\]")
+RUST_PATH_ATTRIBUTE_RE = re.compile(r'^#\[path[ \t]*=[ \t]*"([^"\n]+)"[ \t]*\]$')
+RUST_INCLUDE_LITERAL_RE = re.compile(r'include(?:_str|_bytes)?!\s*\([^;]*?"([^"\n]+)"', re.S)
+
+
+def _cfg_requires_test(attribute: str) -> bool:
+    """#[cfg(test)] or #[cfg(all(test, ...))]: compiled only into test builds."""
+    match = re.fullmatch(r"#\[cfg\((.*)\)\]", attribute.strip())
+    if not match:
+        return False
+    expression = match.group(1).strip()
+    if expression == "test":
+        return True
+    inner = re.fullmatch(r"all\((.*)\)", expression)
+    if not inner:
+        return False
+    depth, part, parts = 0, "", []
+    for character in inner.group(1):
+        if character == "," and depth == 0:
+            parts.append(part)
+            part = ""
+            continue
+        depth += character == "("
+        depth -= character == ")"
+        part += character
+    parts.append(part)
+    return any(argument.strip() == "test" for argument in parts)
+
+
+def _declaration_attributes(text: str, match: re.Match[str]) -> list[str]:
+    """The attributes on a declaration: inline, then the lines directly above."""
+    attributes = RUST_ATTRIBUTE_RE.findall(match.group(1))
+    lines = text[: match.start()].split("\n")
+    if lines and lines[-1].strip() == "":
+        lines.pop()
+    while lines:
+        line = lines.pop().strip()
+        # Only a line of attributes alone belongs to this declaration; an
+        # attributed item above it (`#[cfg(test)] mod other;`) ends the run.
+        if re.fullmatch(r"(?:#\[[^\]\n]*\][ \t]*)+", line):
+            attributes.extend(RUST_ATTRIBUTE_RE.findall(line))
+        elif not line.startswith("//"):
+            break
+    return attributes
+
+
+def _declaration_test_only(text: str, name: str) -> bool | None:
+    """Whether every non-#[path] declaration of module `name` here is test-only.
+
+    None when the text declares no such module by name.
+    """
+    found = False
+    for match in RUST_MOD_DECLARATION_RE.finditer(text):
+        if match.group(2) != name:
+            continue
+        attributes = _declaration_attributes(text, match)
+        if any(RUST_PATH_ATTRIBUTE_RE.fullmatch(attribute) for attribute in attributes):
+            continue
+        found = True
+        if not any(_cfg_requires_test(attribute) for attribute in attributes):
+            return False
+    return True if found else None
+
+
+def rust_test_only_sources(index: "TreeIndex") -> frozenset[str]:
+    """Paths of Rust source files that only test builds compile (see above)."""
+    texts: dict[str, str | None] = {}
+
+    def text_of(path: str) -> str | None:
+        if path not in texts:
+            entry = index.entries.get(path)
+            if entry is None or entry.kind != "file":
+                texts[path] = None
+            else:
+                try:
+                    texts[path] = (index.root / path).read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    texts[path] = None
+        return texts[path]
+
+    by_root: dict[str, list[str]] = {}
+    for path, entry in index.entries.items():
+        if entry.kind == "file" and path.endswith(".rs") and "/src/" in path:
+            by_root.setdefault(path[: path.index("/src/") + len("/src")], []).append(path)
+
+    result: set[str] = set()
+    for source_root, sources in by_root.items():
+        if any(source_root == directory + "/src" or source_root.startswith(directory + "/")
+               for directory in TEST_BINARY_PACKAGE_DIRECTORIES):
+            continue
+        package = source_root[: -len("/src")]
+        included: set[str] = set()
+        # #[path] declarations: target file -> whether each declaration is test-only.
+        path_targets: dict[str, list[tuple[bool, str]]] = {}
+        for path, entry in index.entries.items():
+            if entry.kind != "file" or not path.endswith(".rs") or not path.startswith(package + "/"):
+                continue
+            content = text_of(path) or ""
+            for literal in RUST_INCLUDE_LITERAL_RE.findall(content):
+                # include!("x") is relative to the including file; a
+                # concat!(env!("CARGO_MANIFEST_DIR"), "/x") literal to the package.
+                base = package if literal.startswith("/") else posixpath.dirname(path)
+                included.add(posixpath.normpath(posixpath.join(base, literal.lstrip("/"))))
+            for match in RUST_MOD_DECLARATION_RE.finditer(content):
+                attributes = _declaration_attributes(content, match)
+                for attribute in attributes:
+                    target = RUST_PATH_ATTRIBUTE_RE.fullmatch(attribute)
+                    if target:
+                        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), target.group(1)))
+                        path_targets.setdefault(resolved, []).append(
+                            (any(_cfg_requires_test(other) for other in attributes), path))
+
+        def module_file(parts: tuple[str, ...]) -> str | None:
+            if not parts:
+                candidates = [f"{source_root}/lib.rs", f"{source_root}/main.rs"]
+            else:
+                stem = posixpath.join(source_root, *parts)
+                candidates = [stem + ".rs", stem + "/mod.rs"]
+            existing = [candidate for candidate in candidates if text_of(candidate) is not None]
+            return existing[0] if len(existing) == 1 else None
+
+        decided: dict[tuple[str, ...], bool] = {}
+
+        def module_test_only(parts: tuple[str, ...], depth: int = 0) -> bool:
+            if not parts or depth > 64 or parts[0] == "bin":
+                return False
+            if parts in decided:
+                return decided[parts]
+            decided[parts] = False
+            parent = parts[:-1]
+            parent_file = module_file(parent)
+            verdict = False
+            if parent_file is not None:
+                declared = _declaration_test_only(text_of(parent_file) or "", parts[-1])
+                if declared is True:
+                    verdict = True
+                elif declared is False:
+                    verdict = module_test_only(parent, depth + 1)
+            elif len(parts) >= 2 and module_test_only(parent, depth + 1):
+                # The parent is an inline module of a test-only module.
+                verdict = True
+            elif len(parts) >= 2:
+                grandparent_file = module_file(parts[:-2])
+                if grandparent_file is not None:
+                    verdict = _declaration_test_only(text_of(grandparent_file) or "", parts[-1]) is True
+            decided[parts] = verdict
+            return verdict
+
+        def file_test_only(path: str) -> bool:
+            if path in included:
+                return False
+            declarations = path_targets.get(path, [])
+            if declarations and not all(
+                test_cfg or file_test_only_parent(declarer) for test_cfg, declarer in declarations
+            ):
+                return False
+            relative = PurePosixPath(path[len(source_root) + 1:])
+            parts = relative.parent.parts if relative.name == "mod.rs" else (*relative.parent.parts, relative.stem)
+            if relative.parent.parts == () and relative.name in {"lib.rs", "main.rs"}:
+                return False
+            if module_test_only(tuple(parts)):
+                return True
+            if not declarations:
+                return False
+            # Every #[path] declaration is test-only; the file is test-only
+            # unless its parent also declares it by name outside a test cfg.
+            parent_file = module_file(tuple(parts[:-1]))
+            if parent_file is None or module_file(tuple(parts)) != path:
+                return True
+            return _declaration_test_only(text_of(parent_file) or "", parts[-1]) is None
+
+        def file_test_only_parent(declarer: str) -> bool:
+            relative = PurePosixPath(declarer[len(source_root) + 1:])
+            if relative.parent.parts == () and relative.name in {"lib.rs", "main.rs"}:
+                return False
+            parts = relative.parent.parts if relative.name == "mod.rs" else (*relative.parent.parts, relative.stem)
+            return module_test_only(tuple(parts))
+
+        for path in sources:
+            if file_test_only(path):
+                result.add(path)
+    return frozenset(result)
+
+
 @dataclass(frozen=True)
 class IndexedPath:
     path: str
@@ -244,6 +449,7 @@ class TreeIndex:
     def __init__(self, root: Path):
         self.root = root
         self.entries: dict[str, IndexedPath] = {}
+        self._test_only: frozenset[str] | None = None
         for directory, dirs, files in os.walk(root, followlinks=False):
             dirs.sort()
             files.sort()
@@ -269,6 +475,16 @@ class TreeIndex:
             prefix = pattern[:-3].rstrip("/")
             return [entry for path, entry in self.entries.items() if path == prefix or path.startswith(prefix + "/")]
         return [entry for path, entry in self.entries.items() if fnmatch.fnmatchcase(path, pattern)]
+
+    def test_only_sources(self) -> frozenset[str]:
+        if self._test_only is None:
+            self._test_only = rust_test_only_sources(self)
+        return self._test_only
+
+    def artifact_matching(self, pattern: str) -> list[IndexedPath]:
+        """matching, less the Rust test modules no shipped artifact compiles."""
+        excluded = self.test_only_sources()
+        return [entry for entry in self.matching(pattern) if entry.path not in excluded]
 
 
 def isolated_cargo_environment(temp_root: Path, trusted_toolchain: str | None = None) -> dict[str, str]:
@@ -684,8 +900,10 @@ def indexed_file_record(entry: IndexedPath) -> dict[str, Any]:
     return {"path": entry.path, "kind": entry.kind, "mode": entry.mode, "sha256": entry.sha256}
 
 
-def add_pattern_entries(index: TreeIndex, pattern: str, destination: dict[str, dict[str, Any]]) -> None:
-    for entry in index.matching(pattern):
+def add_pattern_entries(
+    index: TreeIndex, pattern: str, destination: dict[str, dict[str, Any]], *, artifact: bool = False
+) -> None:
+    for entry in (index.artifact_matching(pattern) if artifact else index.matching(pattern)):
         destination[entry.path] = indexed_file_record(entry)
 
 
@@ -733,10 +951,9 @@ def file_set_fingerprint(
     tree_index = index or TreeIndex(tree)
     files: dict[str, dict[str, Any]] = {}
     for pattern in patterns:
-        matches = tree_index.matching(pattern)
-        if not matches:
+        if not tree_index.matching(pattern):
             raise PlannerError(f"{artifact_kind} input pattern matched no files: {pattern}")
-        for entry in matches:
+        for entry in tree_index.artifact_matching(pattern):
             if entry.kind != "file":
                 raise PlannerError(f"{artifact_kind} input is not a regular file: {entry.path}")
             files[entry.path] = indexed_file_record(entry)
@@ -772,7 +989,7 @@ def rust_fingerprint(
     for package in closure:
         directory = package["_directory_relative"]
         source_prefix = posixpath.join(directory, "src") if directory else "src"
-        add_pattern_entries(tree_index, source_prefix + "/**", files)
+        add_pattern_entries(tree_index, source_prefix + "/**", files, artifact=True)
         for target in package.get("targets", []):
             kinds = set(target.get("kind") or [])
             if kinds & {"test", "example", "bench"}:
@@ -784,9 +1001,9 @@ def rust_fingerprint(
         if build_rs in tree_index.entries:
             files[build_rs] = indexed_file_record(tree_index.entries[build_rs])
         for pattern in spec.get("package_inputs", {}).get(package["name"], []):
-            add_pattern_entries(tree_index, pattern, files)
+            add_pattern_entries(tree_index, pattern, files, artifact=True)
     for pattern in spec.get("explicit_inputs", []):
-        add_pattern_entries(tree_index, pattern, files)
+        add_pattern_entries(tree_index, pattern, files, artifact=True)
 
     document = {
         "package": spec["package"],
@@ -1062,6 +1279,7 @@ def has_unknown_reachable_path(
     known_non_rust_artifact_inputs: Iterable[str],
     non_artifact_inputs: Iterable[str],
     exact_head_policy_paths: set[str],
+    test_only_paths: frozenset[str] = frozenset(),
 ) -> str | None:
     closure_dirs = before.closure_directories | after.closure_directories
     all_package_dirs = before.all_package_directories | after.all_package_directories
@@ -1091,6 +1309,9 @@ def has_unknown_reachable_path(
     }
     for path in paths:
         if path in exact_head_policy_paths:
+            continue
+        # A Rust test module only test builds compile (rust_test_only_sources).
+        if path in test_only_paths:
             continue
         if any(
             fnmatch.fnmatchcase(path, pattern) for pattern in non_artifact_inputs
@@ -1659,6 +1880,8 @@ def plan(
                                 known_non_rust_artifact_inputs,
                                 non_artifact_inputs,
                                 exact_head_policy_paths,
+                                baseline_index.test_only_sources()
+                                | head_index.test_only_sources(),
                             )
                             if unknown:
                                 result = {

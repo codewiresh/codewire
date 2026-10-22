@@ -2154,6 +2154,71 @@ fi
 grep -qF 'Contracts selected without contracts_proto' \
   <<<"$missing_mode_output"
 
+# Every test the database family runs lives in a source file whose change
+# selects that family (#3194): main commits c2b844b9a and 1f4c5898a changed the
+# preview database matrix, which is ignored without TEST_DATABASE_URL, and it
+# ran nowhere. Each database_lane_* cargo test names its package and either a
+# --lib module filter (resolved to the deepest module file it names) or a
+# --test target.
+database_lane_sources="$(python3 - "$ROOT" <<'PY'
+import os
+import re
+import sys
+
+root = sys.argv[1]
+runner = open(os.path.join(root, "scripts/ci/verify/run-integration-verification.sh")).read()
+bodies = re.findall(r"^database_lane_[a-z_]+\(\) \{\n(.*?)^\}", runner, re.S | re.M)
+if len(bodies) < 4:
+    sys.exit("database lanes not found")
+sources = set()
+for body in bodies:
+    for line in body.replace("\\\n", " ").splitlines():
+        if "cargo test" not in line:
+            continue
+        words = line.split()
+        package = os.path.join("crates", words[words.index("-p") + 1])
+        if "--lib" in words:
+            segments = [s for s in words[words.index("--lib") + 1].strip("'\"").split("::") if s]
+            found = None
+            for depth in range(1, len(segments) + 1):
+                stem = os.path.join(package, "src", *segments[:depth])
+                for candidate in (stem + ".rs", os.path.join(stem, "mod.rs")):
+                    if os.path.exists(os.path.join(root, candidate)):
+                        found = candidate
+            if found is None:
+                sys.exit(f"unresolved database lane module: {line.strip()}")
+            sources.add(found)
+        elif "--test" in words:
+            target = os.path.join(package, "tests", words[words.index("--test") + 1] + ".rs")
+            if not os.path.exists(os.path.join(root, target)):
+                sys.exit(f"unresolved database lane test: {line.strip()}")
+            sources.add(target)
+        else:
+            sys.exit(f"database lane test names neither --lib nor --test: {line.strip()}")
+print("\n".join(sorted(sources)))
+PY
+)"
+[ "$(wc -l <<<"$database_lane_sources")" -ge 40 ] || {
+  echo 'database lane sources: fewer than expected; the runner parse drifted' >&2
+  exit 1
+}
+while IFS= read -r source; do
+  printf '%s\n' "$source" > "$TMP/database-lane-source.paths"
+  for event in push pull_request; do
+    output="$(cd "$ROOT" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+      PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME="$event" GITHUB_REF=refs/heads/main \
+      KIND_E2E_OPT_IN=false "$SELECTOR" "$TMP/database-lane-source.paths")"
+    [[ "$(selection_value "$output")" == *'|database|'* ]] || {
+      echo "database lane source ${source} does not select the database family on ${event}" >&2
+      exit 1
+    }
+  done
+done <<<"$database_lane_sources"
+# The preview matrix, exactly: the orchestration families and database.
+run_paths_case preview_database_tests_select_database push refs/heads/main false \
+  'database policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
+  crates/codewire-orchestration/src/api/preview/authorization/database_tests.rs
+
 integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
 # Database owns the destroy-hint regression. The activity-fencing lane must
 # retain its exact two tests instead of also selecting this ignored worker test.

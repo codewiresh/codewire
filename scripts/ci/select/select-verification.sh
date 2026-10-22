@@ -1547,6 +1547,26 @@ if [ "$event_selected" = false ]; then
         select_token database
         recognized=true
         ;;
+      crates/*/src/*database_tests.rs|\
+      crates/*/src/*/database_tests/*|\
+      crates/codewire-billing/src/billing_teardown.rs|\
+      crates/codewire-orchestration/src/api/cw_runtime/owner.rs|\
+      crates/codewire-orchestration/src/api/environment_daemon/session_mutation/tests.rs|\
+      crates/codewire-orchestration/src/api/environment_resize.rs|\
+      crates/codewire-orchestration/src/api/platform_agents/journal.rs|\
+      crates/codewire-orchestration/src/connect/mesh_authorization.rs|\
+      crates/codewire-orchestration/src/worker/lifecycle.rs|\
+      crates/codewire-orchestration/src/workspace_binding/store.rs|\
+      crates/codewire-orchestration/tests/environment_external_cleanup.rs|\
+      crates/codewire-orchestration/tests/environment_sources.rs)
+        # The database family (run-integration-verification.sh database_lane_*)
+        # runs these files' ignored PostgreSQL tests; no other family does, so a
+        # change to one must select it (#3194). test-select-verification.sh
+        # proves every test the database lanes run has its source path here or
+        # in another rule that selects database.
+        select_token database
+        recognized=true
+        ;;
       tests/contract/README.md)
         recognized=true
         ;;
