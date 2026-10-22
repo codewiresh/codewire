@@ -136,7 +136,7 @@ mod tests {
         command.arg("30");
         let mut child = spawn_copied(&mut command);
         let pid = child.id();
-        let birth = ProcessBirth::observe(pid).unwrap();
+        let birth = exec_birth(pid, &executable, &mut child);
         assert_eq!(birth, ProcessBirth::observe(pid).unwrap());
         std::thread::sleep(Duration::from_millis(20));
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -145,6 +145,26 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_ne!(after.unwrap(), birth);
+    }
+
+    /// The child's birth once it runs `executable`. `spawn` can return as the
+    /// child releases its parent, a moment before the kernel switches it to
+    /// the new image, so a first look could still see this test binary. This
+    /// waits for that state, not for a clock; a child that ends first fails.
+    fn exec_birth(pid: u32, executable: &Path, child: &mut std::process::Child) -> ProcessBirth {
+        let executable = std::fs::canonicalize(executable).unwrap();
+        loop {
+            if let Ok(birth) = ProcessBirth::observe(pid)
+                && birth.executable() == executable
+            {
+                return birth;
+            }
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "the copied executable's child ended before its exec was visible"
+            );
+            std::thread::yield_now();
+        }
     }
 
     /// Spawn an executable this test just copied. A concurrent test's fork

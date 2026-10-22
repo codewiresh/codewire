@@ -756,8 +756,23 @@ class Kernel(unittest.TestCase):
 def kernel_case(name):
     H.subreaper(True)
     if name == "normal":
-        child = subprocess.Popen(["/usr/bin/sleep", "0.5"])
+        # The child ends on its own once its input closes, not on a timer that
+        # admission under load could outlast. It is pinned only once its exec
+        # is visible: Popen can return while the child still runs this
+        # interpreter's image.
+        child = subprocess.Popen(["/usr/bin/cat"], stdin=subprocess.PIPE,
+                                 stdout=subprocess.DEVNULL)
+        image = os.path.realpath("/usr/bin/cat")
+        while True:
+            try:
+                if os.readlink(f"/proc/{child.pid}/exe") == image:
+                    break
+            except FileNotFoundError:
+                pass
+            assert child.poll() is None, "the child ended before its exec was visible"
+            time.sleep(0.001)
         pin = H.Process(child.pid, parent=os.getpid())
+        child.stdin.close()
         child.wait(timeout=5)
         if pin:
             assert pin.dead()
