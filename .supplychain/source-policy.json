@@ -13,5 +13,8 @@
       "owner": "noel",
       "expires": "2026-12-31"
     }
+  ],
+  "lockfiles": [
+    "deployments/docker/*.Cargo.lock"
   ]
 }

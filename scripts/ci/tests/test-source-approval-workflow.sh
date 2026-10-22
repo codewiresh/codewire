@@ -17,7 +17,7 @@ fail() {
 [[ -f "$WORKFLOW" ]] || fail 'source-approval workflow is missing'
 grep -Fq 'runs-on: ci-lite' "$WORKFLOW" ||
   fail 'the supply-chain scan does not use the credential-free validation profile'
-grep -Fq 'EXPECTED_SUPPLYCHAIN: ee0abebcd79661e59b02a22688d929dffa4b9506' \
+grep -Fq 'EXPECTED_SUPPLYCHAIN: cf1984547d9af47807e4f27766baa2cc7f84579d' \
   "$WORKFLOW" || fail 'sealed Supplychain revision changed without review'
 grep -Fq 'Candidate files are scanned as data only' "$WORKFLOW" ||
   fail 'candidate-as-data boundary is undocumented'
