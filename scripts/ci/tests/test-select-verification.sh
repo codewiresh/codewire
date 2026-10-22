@@ -635,9 +635,6 @@ run_paths_case repo_public_address_guard pull_request refs/pull/2203/head false 
 run_paths_case repo_license_with_other_policy pull_request refs/pull/2202/head false \
   'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek security_js' \
   scripts/checks/repo_policy/licensing.py scripts/checks/repo_policy/mesh.py
-run_paths_case repo_policy_fixture pull_request refs/pull/23/head false \
-  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek security_js' \
-  scripts/ci/tests/test-repo-checks-modules.py
 run_paths_case service_ssh_image_verifier pull_request refs/pull/1922/head false \
   'policy security security_js' scripts/ci/tests/test-service-ssh-image-verifier.sh \
   scripts/ci/verify/service-ssh-image-contract.sh scripts/ci/verify/verify-service-ssh-image.sh
@@ -3679,7 +3676,7 @@ for repo_rule in \
     'scripts/ci/release/check-mirror-content.sh --tree' \
     'scripts/ci/verify/check-rust-toolchain.sh' \
     'python3 scripts/checks/repo_checks.py ses-email-isolation' \
-    'python3 scripts/checks/repo_checks.py turnstile-access-projection'; do
+    'python3 scripts/checks/repo_checks.py turnstile-access-projection --self-test'; do
   grep -qxF "  $repo_rule" <(policy_function run_repo_rules) || {
     echo "repository rules do not run $repo_rule" >&2
     exit 1

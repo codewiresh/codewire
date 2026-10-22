@@ -69,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     ses_parser = subparsers.add_parser("ses-email-isolation")
     ses_parser.set_defaults(func=check_ses_sender_isolation)
     turnstile_parser = subparsers.add_parser("turnstile-access-projection")
+    turnstile_parser.add_argument("--self-test", action="store_true")
     turnstile_parser.set_defaults(func=check_turnstile_access_projection)
     design_parser = subparsers.add_parser("design-tokens")
     design_parser.add_argument("--self-test", action="store_true")

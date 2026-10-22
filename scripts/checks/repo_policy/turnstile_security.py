@@ -2,8 +2,19 @@ from .shared import *
 from .kubernetes import documents, resource_name, top_level_field
 
 
-def check_turnstile_access_projection(_: argparse.Namespace) -> int:
-    """Keep the public widget key separate from the IdP-only verifier secret."""
+TURNSTILE_OVERLAYS = (
+    ("deployments/k8s/overlays/dev", "dev"),
+    ("deployments/k8s/overlays/production", "production"),
+    ("deployments/k8s/overlays/local-kind", "local"),
+    ("deployments/k8s/overlays/local-kind-static", "local"),
+)
+
+
+def turnstile_access_projection_failures(render: Callable[[str], str]) -> list[str]:
+    """Keep the public widget key separate from the IdP-only verifier secret.
+
+    RENDER returns the kustomize output for an overlay path.
+    """
 
     site_key = "TURNSTILE_SITE_KEY"
     secret_key = "TURNSTILE_SECRET_KEY"
@@ -11,12 +22,6 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
     public_config = "codewire-dashboard-public-config"
     verifier_secret = "codewire-idp-turnstile"
     dev_site_key = "0x4AAAAAAE2ghrxixpYKpljB"
-    overlays = [
-        ("deployments/k8s/overlays/dev", "dev"),
-        ("deployments/k8s/overlays/production", "production"),
-        ("deployments/k8s/overlays/local-kind", "local"),
-        ("deployments/k8s/overlays/local-kind-static", "local"),
-    ]
     failures: list[str] = []
 
     def fail(message: str) -> None:
@@ -162,9 +167,9 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
         ):
             fail("shared codewire-config source must not contain a Turnstile value")
 
-        for path, mode in overlays:
+        for path, mode in TURNSTILE_OVERLAYS:
             label = f"{path} (rendered)"
-            resources = documents(run(["kustomize", "build", path]).stdout)
+            resources = documents(render(path))
             rendered_dashboard = deployment(resources, "codewire-dashboard", label)
             rendered_idp = deployment(resources, "codewire-idp", label)
             if rendered_dashboard is not None:
@@ -232,15 +237,209 @@ def check_turnstile_access_projection(_: argparse.Namespace) -> int:
         # The managed E2E topology uses the same dashboard deployment but a
         # non-generated public ConfigMap. Keep its synthetic App contract bound.
         path = "tests/e2e/kind"
-        resources = documents(run(["kustomize", "build", path]).stdout)
+        resources = documents(render(path))
         label = f"{path} (rendered)"
         assert_github_public_projection(resources, deployment(resources, "codewire-dashboard", label), label, "local")
     except Exception as error:  # noqa: BLE001 - repository policy boundary
         fail(str(error))
+    return failures
 
+
+# The managed E2E topology is rendered too, for its GitHub App contract only.
+TURNSTILE_RENDERED_TARGETS = (
+    *(path for path, _ in TURNSTILE_OVERLAYS),
+    "tests/e2e/kind",
+)
+
+
+def check_turnstile_access_projection(args: argparse.Namespace) -> int:
+    rendered: dict[str, str] = {}
+
+    def render(path: str) -> str:
+        if path not in rendered:
+            rendered[path] = run(["kustomize", "build", path]).stdout
+        return rendered[path]
+
+    failures = turnstile_access_projection_failures(render)
+    if not failures and getattr(args, "self_test", False):
+        failures = [
+            f"self-test: {failure}"
+            for failure in turnstile_access_projection_self_test(rendered)
+        ]
     if failures:
         for failure in failures:
             print(f"::error::turnstile access projection: {failure}", file=sys.stderr)
         return 1
-    print(f"turnstile access projection: static OK ({len(overlays)} rendered target(s))")
+    suffix = "; negative fixtures rejected" if getattr(args, "self_test", False) else ""
+    print(f"turnstile access projection: static OK ({len(TURNSTILE_OVERLAYS)} rendered target(s)){suffix}")
     return 0
+
+
+def turnstile_access_projection_self_test(rendered: dict[str, str]) -> list[str]:
+    """Each mutation of the passing renders must be rejected with its reason."""
+
+    problems: list[str] = []
+    if sorted(rendered) != sorted(TURNSTILE_RENDERED_TARGETS):
+        return [f"rendered targets are {sorted(rendered)}"]
+
+    def assert_rejected(
+        label: str,
+        overlay: str,
+        old: str,
+        new: str,
+        expected: str,
+        *,
+        deployment_name: str | None = None,
+    ) -> None:
+        fixture = dict(rendered)
+        target = fixture[overlay]
+        if deployment_name is not None:
+            matches = [
+                document for document in documents(target)
+                if top_level_field(document, "kind") == "Deployment"
+                and resource_name(document) == deployment_name
+            ]
+            if len(matches) != 1:
+                problems.append(f"{label}: fixture deployment target is not unique")
+                return
+            target = matches[0]
+        if target.count(old) != 1 or fixture[overlay].count(target) != 1:
+            problems.append(f"{label}: fixture mutation target is not unique")
+            return
+        fixture[overlay] = fixture[overlay].replace(target, target.replace(old, new))
+        if deployment_name is not None:
+            original_others = [
+                document for document in documents(rendered[overlay]) if document != target
+            ]
+            changed_others = [
+                document for document in documents(fixture[overlay])
+                if not (top_level_field(document, "kind") == "Deployment"
+                        and resource_name(document) == deployment_name)
+            ]
+            if changed_others != original_others:
+                problems.append(f"{label}: mutation changed unrelated resources")
+                return
+        failures = turnstile_access_projection_failures(lambda path: fixture[path])
+        if not any(expected in failure for failure in failures):
+            problems.append(
+                f"{label}: expected a rejection containing {expected!r}; got {failures!r}"
+            )
+
+    dev = "deployments/k8s/overlays/dev"
+    production = "deployments/k8s/overlays/production"
+    assert_rejected(
+        "missing-dev-widget-key",
+        dev,
+        "  TURNSTILE_SITE_KEY: 0x4AAAAAAE2ghrxixpYKpljB\n",
+        '  TURNSTILE_SITE_KEY: ""\n',
+        "hostname-bound Dev key",
+    )
+    assert_rejected(
+        "wrong-idp-secret",
+        dev,
+        "              name: codewire-idp-turnstile\n",
+        "              name: codewire-idp-turnstile-wrong\n",
+        "IdP must require only TURNSTILE_SECRET_KEY",
+    )
+    assert_rejected(
+        "optional-idp-secret",
+        dev,
+        "              name: codewire-idp-turnstile\n",
+        "              name: codewire-idp-turnstile\n              optional: true\n",
+        "IdP must require only TURNSTILE_SECRET_KEY",
+    )
+    assert_rejected(
+        "wrong-idp-hostname",
+        dev,
+        "        - name: FRONTEND_URL\n          value: https://codewire-dev.sh\n",
+        "        - name: FRONTEND_URL\n          value: https://wrong.invalid\n",
+        "bind Turnstile verification to https://codewire-dev.sh",
+        deployment_name="codewire-idp",
+    )
+    assert_rejected(
+        "active-production-widget",
+        production,
+        '  TURNSTILE_SITE_KEY: ""\n',
+        "  TURNSTILE_SITE_KEY: 0x4AAAAAAE2ghrxixpYKpljB\n",
+        "must contain an empty value",
+    )
+    assert_rejected(
+        "production-bypass-email",
+        production,
+        '        - name: IDP_PORT\n          value: "8091"\n',
+        "        - name: IDP_TURNSTILE_BYPASS_EMAIL\n"
+        "          value: hello@codewire.sh\n"
+        '        - name: IDP_PORT\n          value: "8091"\n',
+        "production IdP must not receive the Turnstile bypass email",
+    )
+
+    for overlay in TURNSTILE_RENDERED_TARGETS:
+        dashboards = [
+            document for document in documents(rendered[overlay])
+            if top_level_field(document, "kind") == "Deployment"
+            and resource_name(document) == "codewire-dashboard"
+        ]
+        match = re.search(
+            r"^        - name: GITHUB_APP_CLIENT_ID\n"
+            r"          valueFrom:\n"
+            r"            configMapKeyRef:\n"
+            r"              key: GITHUB_APP_CLIENT_ID\n"
+            r"              name: [^\n]+\n"
+            r"              optional: true\n",
+            dashboards[0] if dashboards else "", re.MULTILINE,
+        )
+        if match is None:
+            problems.append(f"{overlay}: missing public GitHub client-ID fixture")
+            continue
+        entry = match.group(0)
+        for label, changed in (
+            ("missing", ""),
+            ("duplicate", entry + entry),
+            ("secret-source", entry.replace("configMapKeyRef", "secretKeyRef")),
+            ("required", entry.replace("optional: true", "optional: false")),
+            ("wrong-key", entry.replace("key: GITHUB_APP_CLIENT_ID", "key: client-secret")),
+            ("wrong-config-map", re.sub(r"name: codewire-dashboard-public-config[^\n]*", "name: codewire-config", entry)),
+        ):
+            assert_rejected(
+                f"{overlay}-github-{label}", overlay, entry, changed,
+                "dashboard must optionally read GITHUB_APP_CLIENT_ID exactly once",
+                deployment_name="codewire-dashboard",
+            )
+        assert_rejected(
+            f"{overlay}-github-private-env", overlay, entry,
+            entry + "        - name: GITHUB_APP_CLIENT_SECRET\n          value: synthetic-forbidden\n",
+            "dashboard must never receive private GitHub App configuration",
+            deployment_name="codewire-dashboard",
+        )
+        assert_rejected(
+            f"{overlay}-github-authorization-secret-dashboard", overlay, entry,
+            entry + '        - name: FORBIDDEN_APP_CONFIG\n          valueFrom:\n'
+            '            secretKeyRef:\n              name: codewire-github-app-authorization\n'
+            '              key: client-secret\n',
+            "dashboard must never receive the GitHub App authorization Secret",
+            deployment_name="codewire-dashboard",
+        )
+        public_configs = [
+            document for document in documents(rendered[overlay])
+            if top_level_field(document, "kind") == "ConfigMap"
+            and (resource_name(document) or "").startswith("codewire-dashboard-public-config")
+        ]
+        id_lines = [
+            line + "\n" for line in (public_configs[0] if public_configs else "").splitlines()
+            if line.startswith("  GITHUB_APP_CLIENT_ID:")
+        ]
+        if not id_lines:
+            problems.append(f"{overlay}: missing public GitHub client-ID ConfigMap entry")
+            continue
+        id_line = id_lines[0]
+        assert_rejected(
+            f"{overlay}-github-private-config", overlay, id_line,
+            id_line + "  GITHUB_APP_CLIENT_SECRET: synthetic-forbidden\n",
+            "public ConfigMap must contain only the three public identifiers",
+        )
+        assert_rejected(
+            f"{overlay}-github-invalid-id", overlay, id_line,
+            '  GITHUB_APP_CLIENT_ID: "https://invalid.example/private?value=x"\n',
+            "GitHub dashboard App identifiers must",
+        )
+    return problems

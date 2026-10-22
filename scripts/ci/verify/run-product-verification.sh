@@ -273,7 +273,7 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py public-address-literals --self-test
   python3 scripts/checks/repo_checks.py go-source-classification
   python3 scripts/checks/repo_checks.py ses-email-isolation
-  python3 scripts/checks/repo_checks.py turnstile-access-projection
+  python3 scripts/checks/repo_checks.py turnstile-access-projection --self-test
 STEPS
   )
 }
@@ -334,7 +334,6 @@ run_ci_script_tests() {
   python3 scripts/dev/test-macos-local-runtime.py
   python3 scripts/dev/test-linux-local-runtime.py
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
-  python3 scripts/ci/tests/test-repo-checks-modules.py
 STEPS
   )
 }
