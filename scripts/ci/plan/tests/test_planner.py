@@ -1032,9 +1032,9 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(capabilities_after["selector_version"], "v3")
         self.assertEqual(
             capabilities_after["selection"],
-            "|valid:v3|ci_script_tests|ci_script_tests_omittable|deploy|"
-            "go_consumer_interop|go_support|policy|policy_shell_omittable|release|"
-            "runtime_confidential|complete|",
+            "|valid:v3|ci_script_tests|ci_script_tests_omittable|confidential_script_tests|"
+            "deploy|go_consumer_interop|go_support|policy|policy_shell_omittable|release|"
+            "complete|",
         )
 
     def test_broad_runtime_crate_contexts_remain_broad(self) -> None:
@@ -1182,7 +1182,7 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertIn(path, DEV_ACCEPTANCE_HARNESS_SPEC["inputs"])
         self.assertNotIn(path, PRODUCTION_GRAPH["non_artifact_inputs"])
         capabilities = select_capabilities([path])
-        self.assertIn("|runtime_dev_smoke|", capabilities["selection"])
+        self.assertIn("|dev_smoke_script_tests|", capabilities["selection"])
 
     def test_each_runtime_positive_is_visible_from_deployed_source(self) -> None:
         cases = (
@@ -1707,7 +1707,7 @@ class PlannerFixtureTests(unittest.TestCase):
             for artifact in document["artifacts"].values()
         ))
         capabilities = select_capabilities(list(CREDENTIAL_ACCEPTANCE_PATHS))
-        self.assertIn("|runtime_dev_smoke|", capabilities["selection"])
+        self.assertIn("|dev_smoke_script_tests|", capabilities["selection"])
         self.assertIn("|policy|", capabilities["selection"])
 
     def test_exact_main_credential_acceptance_and_policy_edits_skip_publication(self) -> None:

@@ -470,7 +470,7 @@ fi
 if [ "$PREFLIGHT_RUNS_KIND" = true ]; then
   environment_args+=(--kind-browser)
 fi
-if selection_has_any contracts web sdk_ts runtime_dev_smoke; then
+if selection_has_any contracts web sdk_ts dev_smoke_script_tests; then
   environment_args+=(--node-modules)
 fi
 if selection_has contracts; then
@@ -515,7 +515,7 @@ queue_policy_parts() {
 
 run_selected_family() {
   local token="$1" family="$2" label="$3" step_environment=()
-  # The same environment as the family's CI step: release provenance checks
+  # The same environment as the family's CI step: the delivery script tests check
   # a source capsule that Python bytecode caches would pollute.
   [ "$family" != release ] || step_environment=(PYTHONDONTWRITEBYTECODE=1)
   if selection_has "$token" && gate_runs "$token"; then
@@ -565,10 +565,10 @@ run_selected_family ios ios "iOS verification"
 run_selected_family sdk_go sdk-go "Go SDK verification"
 run_selected_family sdk_ts sdk-ts "TypeScript SDK verification"
 run_selected_family sdk_python sdk-python "Python SDK verification"
-run_selected_family runtime_confidential runtime-confidential \
+run_selected_family confidential_script_tests confidential-script-tests \
   "confidential runtime tooling verification"
-run_selected_family runtime_dev_smoke runtime-dev-smoke \
-  "Dev smoke tooling verification"
+run_selected_family dev_smoke_script_tests dev-smoke-script-tests \
+  "Dev smoke script tests"
 
 if selection_has database && gate_runs database; then
   run_family database "database verification" env \
@@ -602,7 +602,7 @@ run_selected_family edge_kind edge "edge static verification and selected Kind t
 if [ "$PREFLIGHT_RUNS_KIND" = true ]; then
   run_family kind "Kind e2e verification" scripts/ci/verify/kind-e2e.sh
 fi
-run_selected_family release release "release provenance verification"
+run_selected_family release release "delivery script tests"
 run_selected_family deploy deploy "deploy verification"
 run_selected_family security security "security verification"
 if [ "$PREFLIGHT_RUNS_WORKFLOW_AUDIT" = true ]; then
@@ -731,7 +731,7 @@ step_tokens() {
     services-control|services-runtime) printf 'service_integration\n' ;;
     edge) printf 'edge_kind\n' ;;
     contracts|rust|go-support|web|docs|ios|sdk-go|sdk-ts|sdk-python|\
-    runtime-confidential|runtime-dev-smoke|database|transport|release|deploy|security|kind)
+    confidential-script-tests|dev-smoke-script-tests|database|transport|release|deploy|security|kind)
       printf '%s\n' "${1//-/_}" ;;
     *) return 1 ;;
   esac
@@ -859,7 +859,7 @@ lane_of() {
     rust|transport|rust-curated-locks) printf 'rust\n' ;;
     database|services-control|services-runtime) printf 'integration-%s\n' "$1" ;;
     # One lane owns the shared Bun dependency tree (node_modules).
-    web|sdk-ts|runtime-dev-smoke) printf 'javascript\n' ;;
+    web|sdk-ts|dev-smoke-script-tests) printf 'javascript\n' ;;
     *) printf 'support\n' ;;
   esac
 }

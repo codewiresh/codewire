@@ -117,7 +117,7 @@
       "paths": ["deployments/docker/daemon.Dockerfile"],
       "expected": {
         "classification": "changed",
-        "selection_tokens": ["ci_script_tests", "ci_script_tests_omittable", "deploy", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "release", "runtime_confidential"],
+        "selection_tokens": ["ci_script_tests", "ci_script_tests_omittable", "confidential_script_tests", "deploy", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "release"],
         "required_local_mode": "default"
       }
     },
@@ -129,7 +129,7 @@
       "paths": ["images/base/Dockerfile"],
       "expected": {
         "classification": "changed",
-        "selection_tokens": ["ci_script_tests", "ci_script_tests_omittable", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "release", "runtime_confidential"],
+        "selection_tokens": ["ci_script_tests", "ci_script_tests_omittable", "confidential_script_tests", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "release"],
         "required_local_mode": "default"
       }
     },
@@ -141,7 +141,7 @@
       "paths": ["unexplained/new-surface.txt"],
       "expected": {
         "classification": "unclassified",
-        "selection_tokens": ["ci_script_tests", "ci_script_tests_omittable", "contracts", "contracts_proto", "database", "deploy", "docs", "go_consumer_interop", "go_support", "go_tailnet", "policy", "policy_shell", "policy_shell_omittable", "release", "runtime_confidential", "runtime_dev_smoke", "rust", "rust_curated_locks", "rust_workspace", "sdk_go", "sdk_python", "sdk_ts", "security", "security_dev_smoke_auth", "security_go", "security_idp_kek", "security_js", "service_billing", "service_connectcore", "service_coordinator", "service_idp", "service_integration", "service_nats", "service_orchestration", "service_temporal", "transport", "transport_derp_contract", "transport_pkg_codewire_coordinator", "transport_pkg_codewire_daemon", "transport_pkg_codewire_derp", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_mesh", "transport_pkg_codewire_netstack", "transport_pkg_codewire_tailnet", "transport_pkg_codewire_udp_relay", "transport_pkg_codewire_vmm_guest_probe", "web"],
+        "selection_tokens": ["ci_script_tests", "ci_script_tests_omittable", "confidential_script_tests", "contracts", "contracts_proto", "database", "deploy", "dev_smoke_script_tests", "docs", "go_consumer_interop", "go_support", "go_tailnet", "policy", "policy_shell", "policy_shell_omittable", "release", "rust", "rust_curated_locks", "rust_workspace", "sdk_go", "sdk_python", "sdk_ts", "security", "security_dev_smoke_auth", "security_go", "security_idp_kek", "security_js", "service_billing", "service_connectcore", "service_coordinator", "service_idp", "service_integration", "service_nats", "service_orchestration", "service_temporal", "transport", "transport_derp_contract", "transport_pkg_codewire_coordinator", "transport_pkg_codewire_daemon", "transport_pkg_codewire_derp", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_mesh", "transport_pkg_codewire_netstack", "transport_pkg_codewire_tailnet", "transport_pkg_codewire_udp_relay", "transport_pkg_codewire_vmm_guest_probe", "web"],
         "required_local_mode": "full"
       }
     },

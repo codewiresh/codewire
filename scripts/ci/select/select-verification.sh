@@ -415,7 +415,7 @@ select_all_product() {
       policy policy_shell ci_script_tests rust go_support web docs sdk_go sdk_ts \
       sdk_python database \
       service_integration edge_kind kind_tools release deploy security \
-      runtime_confidential runtime_dev_smoke; do
+      confidential_script_tests dev_smoke_script_tests; do
     select_token "$family"
   done
   # The iOS package is independently hermetic and comparatively expensive.
@@ -796,7 +796,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/verify/run-product-verification.sh)
         # Changes to the capability's routing must execute the capability on
         # the candidate tree, not merely assert that its token is present.
-        select_token runtime_dev_smoke
+        select_token dev_smoke_script_tests
         recognized=true
         ;;
     esac
@@ -1165,7 +1165,7 @@ if [ "$event_selected" = false ]; then
       apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts)
         # Dedicated Dev smoke tooling uses dashboard's pinned browser libraries,
         # but does not change product templates or require rebuilding Kind.
-        select_token runtime_dev_smoke
+        select_token dev_smoke_script_tests
         recognized=true
         ;;
       apps/docs/*)
@@ -1516,7 +1516,7 @@ if [ "$event_selected" = false ]; then
         select_token transport_pkg_codewire_local_vmm
         select_token transport_pkg_codewire_vmm_guest_probe
         if [[ "$path" == scripts/ci/verify/stock-ssh-workload.sh ]]; then
-          select_token runtime_dev_smoke
+          select_token dev_smoke_script_tests
         fi
         recognized=true
         ;;
@@ -1677,7 +1677,7 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/tests/test-resolve-coco-support-lock.sh)
         # This lightweight capability owns confidential image provenance and
         # its fail-closed offline contract fixtures.
-        select_token runtime_confidential
+        select_token confidential_script_tests
         recognized=true
         ;;
       scripts/runtime/dev/provision-dev-smoke-user.sh|\
@@ -1724,7 +1724,7 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/agent-sandbox/drop-crd-conversion.sh|\
       scripts/runtime/tests/test-drop-crd-conversion.sh|\
       scripts/runtime/tests/test-with-dev-smoke-auth.sh)
-        select_token runtime_dev_smoke
+        select_token dev_smoke_script_tests
         case "$path" in
           scripts/runtime/dev/provision-dev-smoke-user.sh|\
           scripts/runtime/dev/with-dev-smoke-auth.sh|\
@@ -2230,7 +2230,7 @@ fi
 # Rust owner. This is the bounded consumer smoke, not a retired Go oracle or a
 # general Go service-driver suite.
 if token_selected release; then
-  select_token runtime_confidential
+  select_token confidential_script_tests
   select_token go_support
   select_token go_consumer_interop
 elif token_selected sdk_go; then

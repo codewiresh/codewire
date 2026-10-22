@@ -19,14 +19,14 @@ ios	yes	The iOS client builds.
 sdk_go	yes	The Go SDK builds and tests.
 sdk_ts	yes	The TypeScript SDK builds and tests.
 sdk_python	yes	The Python SDK builds and tests.
-runtime_confidential	yes	Confidential runtime tooling tests.
-runtime_dev_smoke	yes	Dev smoke tooling tests.
+confidential_script_tests	yes	Confidential runtime script tests; they use fakes and touch no cluster.
+dev_smoke_script_tests	yes	Dev smoke script tests; they use fakes and never touch Dev.
 database	yes	Migrations and database tests against a local Postgres.
 service_integration	yes	Service integration tests against locally started services.
 transport	yes	Transport, daemon and local VM packages.
 edge_kind	yes	Static edge verification; it needs no cluster.
 kind	no	Post-merge CI on metal runs Kind and failures are fixed forward. Owner, 2026-10-21: "Remove the pre-flight gate that says to run a kind cluster. We can't be doing this stuff anymore."
-release	yes	Release provenance and workflow contracts.
+release	yes	Delivery script tests: image publication, signing, release and workflow contracts.
 deploy	yes	Deploy inputs, overlays and delivery workflow contracts.
 security	yes	Selected security scanners.
 workflow_audit	yes	Changed workflow files pass the zizmor audit the supply-chain scan runs (supplychain workflows).

@@ -1192,17 +1192,17 @@ workflow_output="$(push_branch "$linked_workflow" linked-workflow "$workflow_log
 assert_contains linked_workflow "$workflow_output" \
   '  .gitea/workflows/ci.yaml'
 assert_contains linked_workflow "$workflow_output" \
-  'preflight selection: |valid:v3|ci_script_tests|ci_script_tests_omittable|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|rust_curated_locks|security|security_js|complete|'
+  'preflight selection: |valid:v3|ci_script_tests|ci_script_tests_omittable|dev_smoke_script_tests|policy|policy_shell|policy_shell_omittable|rust_curated_locks|security|security_js|complete|'
 assert_contains workflow_tools "$(cat "$workflow_log")" \
   'product rust-curated-locks '
 assert_contains workflow_tools "$(cat "$workflow_log")" \
   'product security '
 assert_contains workflow_tools "$(cat "$workflow_log")" \
-  'product runtime-dev-smoke '
+  'product dev-smoke-script-tests '
 assert_not_contains workflow_tools "$(cat "$workflow_log")" 'integration '
 # Timing-bound JavaScript tests run alone, before policy and the compile gate.
-workflow_order="$(grep -E '^product (runtime-dev-smoke|policy-[a-z0-9-]+|rust-compile) ' "$workflow_log" | cut -d' ' -f2 | tr '\n' ' ')"
-[[ "$workflow_order" == 'runtime-dev-smoke '* ]] \
+workflow_order="$(grep -E '^product (dev-smoke-script-tests|policy-[a-z0-9-]+|rust-compile) ' "$workflow_log" | cut -d' ' -f2 | tr '\n' ' ')"
+[[ "$workflow_order" == 'dev-smoke-script-tests '* ]] \
   || fail "the JavaScript lane overlapped policy or compile: $workflow_order"
 # A changed workflow selects the ShellCheck domain: it is its own policy lane.
 for part in policy-shell policy-repo-rules policy-ci-script-tests; do
@@ -1503,9 +1503,9 @@ confidential_tooling_output="$({
     PREFLIGHT_CHANGED_FILES="$confidential_tooling_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains confidential_tooling "$confidential_tooling_output" \
-  'preflight selection: |valid:v3|ci_script_tests_omittable|policy|policy_shell|policy_shell_omittable|runtime_confidential|security|security_js|complete|'
+  'preflight selection: |valid:v3|ci_script_tests_omittable|confidential_script_tests|policy|policy_shell|policy_shell_omittable|security|security_js|complete|'
 assert_contains confidential_tooling_tools "$(cat "$confidential_tooling_log")" \
-  'product runtime-confidential '
+  'product confidential-script-tests '
 assert_not_contains confidential_tooling_tools \
   "$(cat "$confidential_tooling_log")" 'product release '
 assert_not_contains confidential_tooling_tools \
@@ -1524,13 +1524,13 @@ dev_smoke_tooling_output="$({
     "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains dev_smoke_tooling "$dev_smoke_tooling_output" \
-  'preflight selection: |valid:v3|ci_script_tests_omittable|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|security|security_js|complete|'
+  'preflight selection: |valid:v3|ci_script_tests_omittable|dev_smoke_script_tests|policy|policy_shell|policy_shell_omittable|security|security_js|complete|'
 assert_contains dev_smoke_tooling_tools "$(cat "$dev_smoke_tooling_log")" \
-  'product runtime-dev-smoke '
+  'product dev-smoke-script-tests '
 assert_not_contains dev_smoke_tooling_tools \
   "$(cat "$dev_smoke_tooling_log")" 'integration '
 
-# Release provenance runs with the environment of its CI step.
+# The delivery script tests run with the environment of their CI step.
 release_paths="$TMP/release.paths"
 printf '%s\n' scripts/ci/images/build-push-image.sh > "$release_paths"
 release_log="$TMP/release-tools.log"

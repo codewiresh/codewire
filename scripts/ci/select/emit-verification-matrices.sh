@@ -77,7 +77,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   selected_any contracts go_support web docs sdk_go sdk_ts sdk_python ios \
     && expected[standard]=true
   selected_any \
-    deploy release runtime_confidential runtime_dev_smoke security \
+    deploy release confidential_script_tests dev_smoke_script_tests security \
     policy_shell edge_kind \
     && expected[tooling]=true
   if selected policy && ! selected policy_shell_omittable; then
@@ -120,7 +120,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
       policy|policy_shell|policy_shell_omittable|ci_script_tests|ci_script_tests_omittable|scheduled|\
       contracts|contracts_proto|go_support|go_tailnet|go_consumer_interop|\
       sdk_go|sdk_ts|sdk_python|web|docs|ios|\
-      deploy|release|runtime_confidential|runtime_dev_smoke|\
+      deploy|release|confidential_script_tests|dev_smoke_script_tests|\
       security|security_go|security_js|security_dev_smoke_auth|security_idp_kek|\
       rust|rust_workspace|rust_curated_locks|rust_pkg_*|\
       transport|transport_derp_contract|transport_pkg_*|\

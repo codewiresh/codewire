@@ -612,12 +612,12 @@ PY
   rm -rf -- "$package_work"
 }
 
-run_runtime_confidential() {
+run_confidential_script_tests() {
   scripts/runtime/tests/test-resolve-coco-support-lock.sh
   scripts/runtime/tests/test-confidential-snp-smoke-contract.sh
 }
 
-run_runtime_dev_smoke() {
+run_dev_smoke_script_tests() {
   install_bun_dependencies
   bun test apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts
   bun test apps/dashboard/scripts/dev-ux-ownership.test.ts
@@ -1167,8 +1167,8 @@ case "$FAMILY" in
   sdk-go) run_sdk_go ;;
   sdk-ts) run_sdk_ts ;;
   sdk-python) run_sdk_python ;;
-  runtime-confidential) run_runtime_confidential ;;
-  runtime-dev-smoke) run_runtime_dev_smoke ;;
+  confidential-script-tests) run_confidential_script_tests ;;
+  dev-smoke-script-tests) run_dev_smoke_script_tests ;;
   rust) run_rust ;;
   rust-transport) run_rust_transport ;;
   rust-curated-locks) run_rust_curated_locks ;;
@@ -1180,7 +1180,7 @@ case "$FAMILY" in
   deploy) run_deploy ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-repo-rules|policy-ci-script-tests|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|kind-tools|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-repo-rules|policy-ci-script-tests|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|confidential-script-tests|dev-smoke-script-tests|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|kind-tools|release|deploy|security" >&2
     exit 2
     ;;
 esac
