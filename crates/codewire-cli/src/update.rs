@@ -573,8 +573,11 @@ async fn public_release(
 /// consent passes as `--yes`. Without it the hand-off must not ask again:
 /// its stdin is not a terminal, so every version only lists the VMs and the
 /// repair. A version without the hand-off is asked silently first and
-/// skipped. Never for an explicit --store, which the user's `cw` may not
-/// resolve to. It never fails the update, which has already succeeded.
+/// skipped. A downgrade first hands the state root back while this cw's
+/// supervisor runs no VM: an older cw may refuse its newer protocol, and only
+/// this cw can retire it (#3186). Never for an explicit --store, which the
+/// user's `cw` may not resolve to. It never fails the update, which has
+/// already succeeded.
 async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs, restart: bool) {
     use std::process::{Command, Stdio};
     if !cfg!(any(target_os = "linux", target_os = "macos")) || options.store.store.is_some() {
@@ -582,6 +585,12 @@ async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs
     }
     let Ok(record) = store.verify(sha256) else {
         return;
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let handover = if older_than_this_cw(&record.package_version) {
+        Some(crate::commands::hand_root_to_older_cw().await)
+    } else {
+        None
     };
     let executable = store.version_executable(sha256);
     let supported = Command::new(&executable)
@@ -595,7 +604,14 @@ async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs
         // An older cw, from before #2870: it refuses this cw's local VM
         // supervisor and cannot retire it, so hand the root back now.
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        crate::commands::release_local_vms_for_older_cw(&record.package_version).await;
+        match &handover {
+            Some(handover) => {
+                crate::commands::report_older_cw_handover(&record.package_version, handover);
+            }
+            None => {
+                crate::commands::release_local_vms_for_older_cw(&record.package_version).await;
+            }
+        }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = record;
         return;
@@ -617,8 +633,22 @@ async fn hand_off_local_vms(store: &Store, sha256: &str, options: &SelectionArgs
         }
     }
     if !command.status().is_ok_and(|status| status.success()) {
+        // An older cw that could not take the root over says why; what kept
+        // it is this cw's busy supervisor, never a previous cw's VMs.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(handover) = &handover {
+            crate::commands::report_older_cw_handover(&record.package_version, handover);
+            return;
+        }
         eprintln!("cw: restart local VMs still on the previous cw with `cw upgrade --vms`");
     }
+}
+
+/// Whether release `version` is older than this cw: a downgrade or a
+/// rollback. An unparseable version (a development build) is not.
+fn older_than_this_cw(version: &str) -> bool {
+    codewire_cw_release::release::compare_versions(version, crate::CLI_VERSION)
+        == Some(std::cmp::Ordering::Less)
 }
 
 /// Whether this cw is the version its store selects now. The hand-off acts
@@ -875,9 +905,26 @@ fn print_selection(store: &Store, report: &SelectionReport<'_>, json: bool) -> a
         println!("Running cw processes keep their current version.");
     }
     if let Some(previous) = report.previous {
-        println!("Previous version {previous} is retained; `cw upgrade rollback` selects it.");
+        // The selected cw runs the next command, in its own grammar.
+        println!(
+            "Previous version {previous} is retained; `{}` selects it.",
+            rollback_command(report.package_version)
+        );
     }
     Ok(())
+}
+
+/// The rollback command as cw `version` spells it: a release before the flat
+/// grammar (v0.4.0) has `cw update`. A development build is this grammar's.
+pub(crate) fn rollback_command(version: &str) -> &'static str {
+    if codewire_cw_release::release::valid_release_tag(version)
+        && codewire_cw_release::release::compare_versions(version, "v0.4.0")
+            == Some(std::cmp::Ordering::Less)
+    {
+        "cw update rollback"
+    } else {
+        "cw upgrade rollback"
+    }
 }
 
 /// Read a pinned local release: `cw` plus its schema-2 identity. The digest
@@ -1725,5 +1772,19 @@ mod tests {
         assert!(text.contains(&format!("current:    v0.3.0 ({sha256})")));
         assert!(text.contains("warning:    the entry is a link to /usr/bin/true"));
         assert!(text.contains(&format!("* {sha256} v0.3.0 (self-install)")));
+    }
+
+    #[test]
+    fn a_rollback_hint_is_spelled_in_the_selected_cws_grammar() {
+        // Releases before the flat grammar spell the updater `cw update`.
+        assert_eq!(rollback_command("v0.3.391"), "cw update rollback");
+        assert_eq!(rollback_command("v0.4.0"), "cw upgrade rollback");
+        assert_eq!(rollback_command("v0.4.1"), "cw upgrade rollback");
+        // A development build is this grammar's.
+        assert_eq!(rollback_command("0.1.0"), "cw upgrade rollback");
+        assert_eq!(
+            rollback_command("0.4.1-journey.3186"),
+            "cw upgrade rollback"
+        );
     }
 }

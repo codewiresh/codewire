@@ -2084,18 +2084,47 @@ async fn native_boot_client_here() -> anyhow::Result<NativeSupervisorClient> {
 /// hand the VMs over: this cw stops them, and a rollback while none runs
 /// hands the root over. Never fails the update.
 pub(crate) async fn release_local_vms_for_older_cw(version: &str) {
+    report_older_cw_handover(version, &hand_root_to_older_cw().await);
+}
+
+/// What handing the local VM state root to an older cw found.
+pub(crate) enum OlderCwHandover {
+    /// This cw's supervisor ran no VM and retired, or none served the root.
+    Done,
+    /// These VMs may run on this cw's supervisor, which keeps serving them.
+    Busy(Vec<String>),
+    /// This cw's supervisor could not be asked; it keeps running.
+    Failed(String),
+}
+
+/// Retire this cw's local VM supervisor while it runs no VM, so an older cw
+/// can serve the root. Prints nothing.
+pub(crate) async fn hand_root_to_older_cw() -> OlderCwHandover {
     use codewire_local_vmm::supervisor_upgrade::{OlderCwRelease, release_for_older_cw};
     let Ok(config) = native_runtime_config() else {
-        return;
+        return OlderCwHandover::Done;
     };
-    let hand_over = "to hand them over, select this cw again (`cw upgrade rollback`), stop them (`cw --local stop NAME`), then roll back";
     match release_for_older_cw(&config).await {
-        Ok(OlderCwRelease::Nothing | OlderCwRelease::Released) => {}
-        Ok(OlderCwRelease::Busy(names)) => eprintln!(
+        Ok(OlderCwRelease::Nothing | OlderCwRelease::Released) => OlderCwHandover::Done,
+        Ok(OlderCwRelease::Busy(names)) => OlderCwHandover::Busy(names),
+        Err(error) => OlderCwHandover::Failed(error.to_string()),
+    }
+}
+
+/// Say what keeps the root from cw `version`, and how to hand it over.
+pub(crate) fn report_older_cw_handover(version: &str, handover: &OlderCwHandover) {
+    // The first step runs in cw `version`, in its own grammar.
+    let reselect = crate::update::rollback_command(version);
+    let hand_over = format!(
+        "to hand them over, select this cw again (`{reselect}`), stop them (`cw --local stop NAME`), then roll back"
+    );
+    match handover {
+        OlderCwHandover::Done => {}
+        OlderCwHandover::Busy(names) => eprintln!(
             "cw: local VMs {} run on the local VM supervisor of the cw you rolled back from, which cw {version} cannot use; {hand_over}",
             names.join(", ")
         ),
-        Err(error) => eprintln!(
+        OlderCwHandover::Failed(error) => eprintln!(
             "cw: the local VM supervisor of the cw you rolled back from keeps running ({error}); cw {version} cannot use it; {hand_over}"
         ),
     }

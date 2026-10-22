@@ -290,3 +290,22 @@ fn stable_semver_order_is_numeric_and_rejects_equivocation() {
         );
     }
 }
+
+#[test]
+fn release_versions_compare_by_precedence() {
+    use std::cmp::Ordering;
+    // A rollback from a release, or from a later development build, is older.
+    assert_eq!(compare_versions("v0.3.391", "v0.4.0"), Some(Ordering::Less));
+    assert_eq!(
+        compare_versions("v0.4.0", "v0.4.1-journey.3186"),
+        Some(Ordering::Less)
+    );
+    assert_eq!(compare_versions("v0.4.0", "0.4.0"), Some(Ordering::Equal));
+    assert_eq!(
+        compare_versions("v0.4.1", "v0.4.0"),
+        Some(Ordering::Greater)
+    );
+    // Anything but a release version has no order.
+    assert_eq!(compare_versions("vv0.4.0", "v0.4.0"), None);
+    assert_eq!(compare_versions("v0.4", "v0.4.0"), None);
+}

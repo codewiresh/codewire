@@ -361,6 +361,12 @@ pub fn guard_stable(installed: Option<(&str, &str)>, incoming: &CwPayloadIdentit
     }
 }
 
+/// The precedence of release version `a` against `b`, or None when either is
+/// not a release version.
+pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
+    Some(Semver::parse(a)?.compare(&Semver::parse(b)?))
+}
+
 struct Semver<'a> {
     core: [&'a str; 3],
     prerelease: Option<Vec<&'a str>>,
