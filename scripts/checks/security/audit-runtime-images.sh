@@ -161,10 +161,16 @@ if ! grep -Fq 'cargo metadata --locked --offline --no-deps --format-version 1' \
   echo "runtime image audit: dashboard metadata collection must stay locked, offline, and dependency-free" >&2
   fail=1
 fi
-# The Make expression must be matched literally.
+# Dashboard verification builds the canonical Bake target with --pull --load
+# under the verification tag (scripts/ci/verify/build-dashboard-image.sh, which
+# also chooses the compiler cache), then inspects that image. The Make and
+# shell expressions must be matched literally.
 # shellcheck disable=SC2016
-if ! grep -Fq "docker buildx bake --file docker-bake.hcl --pull --load --set 'dashboard.tags=\$(DASHBOARD_VERIFY_IMAGE)' dashboard" \
-    Makefile; then
+if ! grep -Fxq $'\tscripts/ci/verify/build-dashboard-image.sh "$(DASHBOARD_VERIFY_IMAGE)"' Makefile \
+    || ! grep -Fxq $'\tscripts/ci/verify/dashboard-image.sh "$(DASHBOARD_VERIFY_IMAGE)"' Makefile \
+    || ! grep -Fq 'flags=(--set "dashboard.tags=$tag"' scripts/ci/verify/build-dashboard-image.sh \
+    || ! grep -Fq 'docker buildx bake --file docker-bake.hcl --pull --load "${flags[@]}" dashboard' \
+      scripts/ci/verify/build-dashboard-image.sh; then
   echo "runtime image audit: dashboard verification must load the canonical Bake result before inspection" >&2
   fail=1
 fi
