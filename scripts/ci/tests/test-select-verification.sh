@@ -4736,7 +4736,7 @@ SUPPORT = {
     "Install pinned protoc for Rust builds", "Install pinned protoc for Rust-backed standard checks",
     "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",
     "Install locked dashboard browser-test dependencies", "Set up pinned cross-build tools",
-    "Set up Go 1.26.9", "Set up Go 1.26.9 for security checks", "Set up Go 1.26.9 for DERP interop",
+    "Set up Go 1.26.10", "Set up Go 1.26.10 for security checks", "Set up Go 1.26.10 for DERP interop",
     "Set up pinned Darwin C cross-check tools",
     "Clean workspace cache credentials",
     "Clean compiler cache credentials", "Report and clean Rust cache", "Start integration Postgres",
