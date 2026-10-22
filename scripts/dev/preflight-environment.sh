@@ -157,7 +157,7 @@ check_darwin_cross() {
   fi
   if [ "$(uname -s)" != Linux ]; then
     problem 'the Darwin cross-check selected by local-vmm changes needs a Linux host' \
-      'run merge qualification on the Linux workstation'
+      'run scripts/dev/preflight.sh --all on the Linux workstation'
     return
   fi
   zigbuild_version="$(cargo-zigbuild --version 2>/dev/null || true)"

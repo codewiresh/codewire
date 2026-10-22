@@ -303,8 +303,8 @@ for family, token in [('rust', 'rust_pkg_codewire_alpha'),
 
 print(f'Rust/transport composition trace: {cases} cases passed')
 
-# Exercise the actual local receipt owner through the actual shared core too.
-# Only terminal checks are synthetic; selection, preflight and receipt logic
+# Exercise the actual local runner (preflight.sh --all) through the actual
+# shared core too. Only terminal checks are synthetic; selection and preflight
 # are copied byte-for-byte. This isolated repository has no external remote or secrets.
 # Policy core is two parts, the repository rules and the CI-script tests;
 # together they hold every shared policy helper.
@@ -329,21 +329,15 @@ for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh',
         destination.chmod(0o755)
     else:
         shutil.copy(tool, destination)
-for helper in ('scripts/dev/preflight.sh', 'scripts/ci/select/select-verification.sh',
-               'scripts/ci/select/merge-gate.py', 'scripts/ci/select/merge-gate.tsv',
-               'scripts/ci/receipts/local-prepush-receipt.py'):
+for helper in ('scripts/dev/preflight.sh', 'scripts/ci/select/select-verification.sh'):
     destination = fixture / helper
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(source_root / helper, destination)
 # The environment precheck is a terminal check here; its own fixture lives in
-# test-pre-push-worktree.sh. Merge state lives in ignored .tmp/, as in the repo.
+# test-pre-push-worktree.sh. Family logs live in ignored .tmp/, as in the repo.
 environment_check = fixture / 'scripts/dev/preflight-environment.sh'
 environment_check.write_text('#!/usr/bin/env bash\nexit 0\n')
 environment_check.chmod(0o755)
-# The merge pass key reads the toolchain identity; never reach a real rustup.
-rustc = binary / 'rustc'
-rustc.write_text('#!/usr/bin/env bash\nprintf "rustc 0.0.0 (composition fixture)\\n"\n')
-rustc.chmod(0o755)
 (fixture / '.gitignore').write_text('.tmp/\n')
 git_env = dict(environment, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
 
@@ -371,21 +365,17 @@ with (fixture / 'scripts/ci/tests/test-darwin-cross-check.sh').open('a') as stre
     stream.write('# composition fixture change\n')
 git('add', '.')
 git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'synthetic selected local VM fixture')
-receipt_owner = fixture / 'scripts/ci/receipts/local-prepush-receipt.py'
 preflight = fixture / 'scripts/dev/preflight.sh'
-receipt_cases = [dict(COMPOSITION_FAIL_TOOL=name) for name in
+failure_cases = [dict(COMPOSITION_FAIL_TOOL=name) for name in
                  ('test-darwin-cross-check.sh', *image_guards)]
-receipt_cases += [dict(COMPOSITION_FAIL_ARGS=json.dumps(darwin_check))]
-for injected in receipt_cases:
+failure_cases += [dict(COMPOSITION_FAIL_ARGS=json.dumps(darwin_check))]
+for injected in failure_cases:
     trace.write_text('')
-    # An injected failure lives in the environment, outside the exact-tree
-    # pass key, so each case starts without earlier passes.
     shutil.rmtree(fixture / '.tmp', ignore_errors=True)
-    result = subprocess.run([str(preflight), '--for-merge', '--emit-receipt'], cwd=fixture,
+    result = subprocess.run([str(preflight), '--all'], cwd=fixture,
                             env=dict(git_env, **injected), capture_output=True, text=True)
     assert result.returncode != 0, result.stdout
-    assert 'preflight merge mode: default' in result.stdout, result.stdout
-    assert 'receipt=emitted' not in result.stdout and 'receipt_path=' not in result.stdout
+    assert 'preflight all-families mode: default' in result.stdout, result.stdout
     assert 'preflight: OK' not in result.stdout
     assert "FAILED" in result.stderr, result.stderr
     records = [json.loads(line) for line in trace.read_text().splitlines()]
@@ -396,11 +386,7 @@ for injected in receipt_cases:
         assert any(r['tool'] == injected['COMPOSITION_FAIL_TOOL'] for r in records), (records, result.stderr[-3000:])
     else:
         assert any(r['args'] == json.loads(injected['COMPOSITION_FAIL_ARGS']) for r in records), (records, result.stderr[-3000:])
-    missing = subprocess.run([str(receipt_owner), 'verify', '--accept-scope', 'merge'], cwd=fixture,
-                             env=git_env, capture_output=True, text=True)
-    assert missing.returncode != 0 and 'missing' in missing.stdout, missing.stdout
-    assert not list((fixture / '.git/codewire-receipts').rglob('*.json'))
-print(f'Actual selected policy/workload failures without a receipt: {len(receipt_cases)} cases passed')
+print(f'Actual selected policy/workload failures fail preflight --all: {len(failure_cases)} cases passed')
 
 # Exercise the actual shared build_one function with a Cargo sentinel for all
 # four target/independent-tree pairs. This proves the exact default guest probe

@@ -254,7 +254,7 @@ if [ "${#full_reasons[@]}" -gt 0 ]; then
   for reason in "${full_reasons[@]}"; do
     log "  ${reason}"
   done
-  log 'push it for CI (CODEWIRE_PREFLIGHT_MODE=ci git push), or name suites with SUITES=... to observe part of it'
+  log 'push it and let pull-request CI run it, or name suites with SUITES=... to observe part of it'
   exit 3
 fi
 if [ "${#selected[@]}" -eq 0 ]; then

@@ -8,7 +8,6 @@ WORKFLOWS=(
   "$ROOT/.gitea/workflows/ci.yaml"
   "$ROOT/.gitea/workflows/cli-release.yaml"
   "$ROOT/.gitea/workflows/cw-release-dry-run.yaml"
-  "$ROOT/.gitea/workflows/merge-check.yaml"
 )
 
 test -x "$ASSERTION"

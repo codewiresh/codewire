@@ -978,7 +978,7 @@ class SelectorContractTests(unittest.TestCase):
                 classification, tokens, mode = self.select([candidate])
                 self.assertEqual(classification, "changed")
                 self.assertTrue({"edge_kind", "kind", "policy"}.issubset(tokens))
-                # Kind is never a local merge mode (merge-gate.tsv).
+                # Kind is never a local mode.
                 self.assertEqual(mode, "default")
 
     def test_unknown_future_python_path_still_fails_closed(self) -> None:

@@ -41,7 +41,6 @@ readonly -a PINNED_WORKFLOWS=(
   '.gitea/workflows/ci.yaml:11'
   '.gitea/workflows/cli-release.yaml:2'
   '.gitea/workflows/deploy-dev.yaml:1'
-  '.gitea/workflows/merge-check.yaml:1'
   '.gitea/workflows/support-images.yaml:1'
 )
 readonly -a SHIPPED_RUST_DOCKERFILES=(

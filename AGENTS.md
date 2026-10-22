@@ -143,8 +143,8 @@ Program mutation except read-only diagnosis and control repair.
 For long-running work, use one staged proof loop: confirm canonical control and
 risk; get an independent design/security read before broad implementation;
 build the smallest coherent slice; run focused checks and review the diff before
-committing a credible candidate. Then push it, and complete the merge rule's
-checks once for the exact tree before merge, reusing valid evidence. Each PR
+committing a credible candidate. Then push it, and merge once its required
+statuses are green on the exact head. Each PR
 states one bounded
 outcome, its dependencies, affected contracts, and acceptance; keep generated
 contracts and their consumers atomic. Update Program control at admissions and
@@ -210,33 +210,36 @@ Each pull request merges alone. Never bundle pull requests into a train or an
 integration branch: one failure then hides in several changes. A pull request
 that merges cleanly merges without a rebase, even when it is behind `main`;
 rebase only on a conflict (owner, 2026-10-21: "if pr doesnt need rebase dont
-force rebase"). `main` CI verifies the landed tree after merge, and a failure
-is fixed forward. Merge on:
+force rebase"). Pull-request CI is the merge gate (#3119 step 2). A pull
+request merges on:
 
-- the focused checks the change needs. `scripts/dev/preflight.sh --for-merge`
-  runs, in parallel and with the same scripts as CI on the shared compiler
-  cache, the selected families that `scripts/ci/select/merge-gate.tsv` marks
-  required before merge. That table is the one place that says what the gate
-  needs; changing it is a one-line reviewed edit. Use the preflight when a
-  change crosses crates or contracts; the changed crates' tests and lints are
-  enough when it does not;
+- its required statuses, green on its exact head: `CI / Required verification
+  (pull_request)` and `Supply-chain scan / Supply-chain scan
+  (pull_request_target)`. Branch protection enforces both
+  (infra's `forgejo-codewire-branch-protection.json`). Local evidence never
+  replaces them; CI-only fixes merge on them too;
 - its product journey where "Done means observed working" places it.
 
-A merge check on a CI worker is the same evidence as a local `--for-merge`
-run. Label the pull request `merge-check`. A metal guest then runs
-`scripts/dev/preflight.sh --for-merge --emit-receipt` on the pull request's
-exact head merged with current `main`, with no credentials and no remote cache
-writes, and runs it again on every push. A separate job issues the receipt.
-It runs no pull-request code, so pull-request code cannot forge the receipt.
-A change to the merge check's own machinery gets no receipt and qualifies
-locally. Merge on it only when
-`scripts/ci/receipts/ci-merge-check.py verify --pr N` passes, which binds the
-receipt to the current head and `main`. A local run stays valid. The product
-journey is unchanged (owner, 2026-10-20, cited on #3013).
+The one exception is the advisory and expiry break-glass (#3119 P3 (a)): on an
+advisory or expiry day, one infra pull request lifts the `Supply-chain scan`
+context for the one reviewed exception pull request, and a second restores it
+straight after. Exception-only pull requests never read their own exceptions,
+and the advisory and expiry checks stay blocking.
 
-Kind is never part of the merge gate (merge-gate.tsv marks it no): post-merge
-CI on metal runs it, and a failure there is fixed forward. A CLI-only change
-merges on its unit tests, lints and host journey with a built `cw` (owner,
+Forgejo checks the head, not the merged tree. When `main` moves after the
+statuses passed, a clean merge stands; `main` CI verifies the landed tree, and
+a failure there is fixed forward (#3119 P1).
+
+Pull-request CI runs every family the change's paths select, as `main` does,
+except Kind. Label the pull request `ci-full` to add Kind when a hosted-only
+claim needs it. Local checks are the development loop:
+`scripts/dev/preflight.sh --all` runs the same families locally, in parallel
+and on the shared compiler cache, when that is faster than waiting; it records
+nothing and qualifies nothing.
+
+Kind is never part of the merge gate: Kind on the schedule, on release
+candidates and on `ci-full` runs it, and a failure is fixed forward. A
+CLI-only change still needs its host journey with a built `cw` (owner,
 2026-10-20, cited on #2940).
 
 Prefer the faster build or CI option. State a binary-size or cost trade-off in
@@ -251,15 +254,8 @@ tag never points at a commit without them. When a protected build fails for an
 infrastructure reason, rerun it for that commit before the commit can become a
 release (owner, 2026-10-15, cited on #2892).
 
-When `main` moves after a check passed, the result still holds for a clean
-merge. When a conflict forces a rebase, merge qualification carries every
-family's pass forward whose inputs the main delta does not touch, by the
-selector's own file-to-family map, and reruns only what overlaps.
-
-Hosted CI confirms after merge; it is not a merge gate. The exception is a
-hosted-only claim (such as scheduling, credentials, permissions, cache, or
-timing) that lacks equivalent accepted exact local/read-only evidence. Never
-cancel a `main` run by hand, and fix forward when one fails. `main` CI and
+`main` CI confirms the landed tree after merge. Never cancel a `main` run by
+hand, and fix forward when one fails. `main` CI and
 release publication always finish; a newer `main` push cancels the superseded
 support-image and release dry-run runs itself.
 Dev runs only commits whose main CI passed: Deploy Dev signs and dispatches a
@@ -269,10 +265,6 @@ push cancels an older one, queued or building, once two newer deliveries are
 building or once its own `main` CI can no longer verify it, but never one
 that has started publishing, so a cancelled run never signs or dispatches
 (owner, 2026-10-21, cited on infra#1594; #2892).
-Pull-request CI runs every family the change's paths select, as `main` does,
-except Kind. Label the pull request `ci-full` to add Kind when a hosted-only
-claim needs it.
-
 Temporary rule (owner decision, 2026-10-20): a push to `main` runs no Kind and
 no release dry run. Both still run on a dispatched release candidate, on a pull
 request labelled `ci-full`, and every four hours on a schedule against the
@@ -293,23 +285,16 @@ idle.
 
 Local and hosted policy checks share one checked-in core. Never maintain a
 separate local subset; preserve capability-selected expensive checks. A failing
-guard must fail qualification and prevent successful receipt emission.
+guard must fail its run.
 
-Do not run the same exact-tree qualification twice. Reuse a valid receipt or an
-already-running owner. If an obviously narrow path selects the full product or
+Do not run the same exact-tree verification twice. Reuse a green run of the same
+head or an already-running owner. If an obviously narrow path selects the full product or
 Kind suite only because classification is missing, repair the classifier and
 its fixtures; do not use an expensive unrelated suite as the classifier. An
 unknown result blocks the affected mutation, not unrelated work.
 
-For a clean, current, single-feature-branch update whose checks already ran,
-`CODEWIRE_PREFLIGHT_MODE=ci git push ...` skips the local push check and leaves
-the rest to hosted CI. Reuse accepted local evidence; do not rebuild
-integration, Kind, or product images locally solely to create or refresh a push
-receipt. This mode is unavailable for `main`, tags, deletions, multi-ref
-pushes, Tier 3 effects, or work whose acceptance depends on local-only hardware.
-It is not a waiver of the merge rule, and CI never substitutes for the local
-product journey. The frontend iteration checkpoint still requires an explicit
-landing instruction.
+CI never substitutes for the local product journey. The frontend iteration
+checkpoint still requires an explicit landing instruction.
 
 Bind a hosted run once and use a transition watcher; never spend turns polling
 unchanged CI. Inspect component logs after failure before proposing a mechanism.
@@ -332,8 +317,7 @@ Record actual commands, exit status and required test counts. Distinguish full
 runs, composed component proof, pending checks and unchanged inherited results.
 Reuse evidence only while its relevant source, dependencies/features, fixtures,
 toolchain, topology, selector and entrypoint inputs still match. Missing,
-interrupted or stale proof is not success; emitting a receipt is not running a
-check.
+interrupted or stale proof is not success.
 
 Use only checked-in verification topology. Never add an ad-hoc proxy, relay,
 tunnel, port-forward, route, hosts entry, firewall rule, or fixture rewrite to

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The fast pre-push check: only what the changed files need, in minutes on a
-# warm worktree. Merge qualification (preflight.sh --for-merge) runs the
-# selected families; Kind and everything else run in post-merge CI.
+# warm worktree. Pull-request CI runs the selected families, and
+# scripts/dev/preflight.sh --all runs them locally on request.
 #
 #   scripts/dev/preflight-push.sh <changed-paths-file> <base-commit> <ran-output>
 #
@@ -70,7 +70,7 @@ while IFS= read -r path; do
     proto/*) proto_changed=true ;;
     apps/dashboard/* | packages/*) dashboard_changed=true ;;
   esac
-  # Deleted files need no lint; the merge qualification checks the rest.
+  # Deleted files need no lint; pull-request CI checks the rest.
   [ -f "$path" ] || continue
   case "$path" in
     *.sh | .githooks/*) shell_files+=("$path") ;;

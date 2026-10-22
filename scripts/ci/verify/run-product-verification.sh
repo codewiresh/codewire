@@ -295,7 +295,6 @@ run_ci_script_tests() {
   scripts/ci/tests/test-shellcheck-policy-domain.sh
   scripts/ci/tests/test-require-verification-results.sh
   scripts/ci/tests/test-verify-tested-tree-receipt.sh
-  python3 -I -B scripts/ci/tests/test-ci-merge-check.py
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
   scripts/ci/tests/test-cargo-target-runner-failures.sh
   scripts/ci/tests/test-darwin-cross-check.sh

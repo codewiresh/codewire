@@ -673,8 +673,6 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/prod-readonly-smoke.yaml|\
       .gitea/workflows/runtime-dev-commodity-smoke.yaml|\
       .gitea/workflows/merge-check.yaml|\
-      scripts/ci/receipts/ci-merge-check.py|\
-      scripts/ci/tests/test-ci-merge-check.py|\
       .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
       scripts/dev/dashboard-watch.py|\
       scripts/dev/macos-cli.py|scripts/dev/test-macos-cli.py|\
@@ -684,8 +682,6 @@ if [ "$event_selected" = false ]; then
       scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\
       scripts/dev/linux-local-runtime.py|scripts/dev/test-linux-local-runtime.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
-      scripts/ci/select/merge-gate.tsv|scripts/ci/select/merge-gate.py|\
-      scripts/ci/tests/test-merge-gate.py|\
       scripts/dev/pre-push.sh|scripts/dev/preflight-push.sh|\
       scripts/dev/preflight-environment.sh|\
       scripts/ci/select/emit-verification-matrices.sh|\
@@ -694,7 +690,6 @@ if [ "$event_selected" = false ]; then
       scripts/ci/select/last-scheduled-run.py|\
       scripts/ci/tests/test-last-scheduled-run.py|\
       scripts/ci/tests/test-ci-done-measures.py|\
-      scripts/ci/receipts/local-prepush-receipt.py|\
       scripts/ci/receipts/emit-verification-receipt.py|\
       scripts/ci/receipts/verify-tested-tree-receipt.sh|\
       scripts/ci/receipts/verify-release-tag-receipt.sh|\
@@ -712,7 +707,6 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-emit-verification-matrices.sh|\
       scripts/ci/tests/test-verify-tested-tree-receipt.sh|\
       scripts/ci/tests/test-verify-release-tag-receipt.sh|\
-      scripts/ci/tests/test-local-prepush-receipt.sh|\
       scripts/ci/tests/test-pre-push-worktree.sh|\
       scripts/ci/tests/test-push-check-shellcheck.sh|\
       scripts/ci/tests/test-go-source-ownership.sh|\
@@ -2265,9 +2259,8 @@ else
   unset 'selected[kind_tools]'
 fi
 
-# The local mode describes what merge qualification needs for this change.
-# Kind is never a local mode: scripts/ci/select/merge-gate.tsv keeps it out of
-# the merge gate (owner, 2026-10-21).
+# The local mode says how far scripts/dev/preflight.sh must escalate to run
+# this change's families. Kind is never a local mode (owner, 2026-10-21).
 required_local_mode=default
 if [ "$classification" = unclassified ] \
   || [ "$classification" = release ] \

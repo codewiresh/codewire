@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # CPU limits that keep a Linux workstation usable while agents run the
-# Codewire dev loop: merge checks, image builds and Kind on the same cores as
+# Codewire dev loop: preflight runs, image builds and Kind on the same cores as
 # the owner's desktop. Needs systemd with cgroup v2 and passwordless sudo.
 #
 #   workstation-cpu.sh status      load, each limit and the CPU each group uses
@@ -16,7 +16,7 @@
 set -euo pipefail
 
 readonly SLICE=cwvmtest.slice
-# Merge checks and local-VM runs started with `run`. The ceiling is the one
+# Preflight runs and local-VM runs started with `run`. The ceiling is the one
 # limit on how much CPU they take together (12 of 16 cores); any number of jobs
 # may share it, and the desktop weight still wins when the cores are contended.
 readonly SLICE_WEIGHT=200 SLICE_CEILING=1200%
@@ -175,7 +175,7 @@ status() {
   local user="$cg/user.slice/user-$uid.slice"
   local -a paths=() names=() labels=() before=()
   add() { paths+=("$1"); names+=("$2"); labels+=("$3"); }
-  add "$cg/$SLICE" "$SLICE" "merge checks and local-VM runs"
+  add "$cg/$SLICE" "$SLICE" "preflight and local-VM runs"
   add "$cg/system.slice" system.slice "Docker, Kind and system services"
   add "$cg/user.slice" user.slice "everything users run"
   add "$user/user@$uid.service" "user@$uid.service" "user services and terminals"

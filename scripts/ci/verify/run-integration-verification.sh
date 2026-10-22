@@ -16,7 +16,7 @@ select_local_rust_cache "$ROOT" || true
 CARGO_CI_TARGET_DIR="${CODEWIRE_CARGO_CI_TARGET_DIR:-$CARGO_TARGET_DIR}"
 CARGO_CI_DIR="$CARGO_CI_TARGET_DIR/ci"
 # Names below are per process: merge qualification runs several of these
-# side by side under one run ID (scripts/dev/preflight.sh --for-merge).
+# side by side under one run ID (scripts/dev/preflight.sh --all).
 RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-product-integration-${GITHUB_RUN_ID:-local}-$$}"
 DATABASE_URL_EXPLICIT=false
 DATABASE_URL_RUST_EXPLICIT=false

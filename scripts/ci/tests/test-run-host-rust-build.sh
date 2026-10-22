@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly RUNNER="$ROOT/scripts/ci/verify/run-host-rust-build.sh"
 
 # Each case chooses every compiler-cache setting itself. A caller's own
-# selection, such as the sccache environment a CI merge-check job exports,
+# selection, such as the sccache environment a CI job exports,
 # must not reach the runner under test.
 for name in "${!SCCACHE_@}" "${!CODEWIRE_SCCACHE_@}" RUSTC_WRAPPER \
     AWS_SHARED_CREDENTIALS_FILE AWS_PROFILE; do

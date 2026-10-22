@@ -1083,7 +1083,7 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
             ("unmapped crate", {"FAKE_SELECTION": "rust|rust_pkg_codewire_future_crate"}, "no retained suite is mapped"),
             ("unclassified", {"FAKE_CLASSIFICATION": "unclassified", "FAKE_SELECTION": "web"}, "cannot classify"),
             ("manifest only", {"FAKE_SELECTION": "deploy|policy"}, "no narrower suite"),
-            # Kind is no local mode any more (merge-gate.tsv); the local
+            # Kind is no local mode any more; the local
             # selection carries the kind token of a Kind-relevant path.
             ("Kind harness or ingress", {"FAKE_SELECTION": "kind|policy|policy_shell"}, "no narrower suite"),
         ):

@@ -495,7 +495,6 @@ run_paths_case ci_self pull_request refs/pull/2/head false \
   scripts/ci/select/select-verification.sh \
   scripts/ci/select/emit-verification-matrices.sh \
   scripts/ci/select/require-verification-results.sh \
-  scripts/ci/receipts/local-prepush-receipt.py \
   scripts/ci/receipts/emit-verification-receipt.py \
   scripts/ci/receipts/verify-tested-tree-receipt.sh \
   scripts/ci/receipts/verify-release-tag-receipt.sh \
@@ -503,29 +502,30 @@ run_paths_case ci_self pull_request refs/pull/2/head false \
   scripts/ci/tests/test-emit-verification-matrices.sh \
   scripts/ci/tests/test-verify-tested-tree-receipt.sh \
   scripts/ci/tests/test-verify-release-tag-receipt.sh \
-  scripts/ci/tests/test-local-prepush-receipt.sh \
   scripts/ci/tests/test-source-approval-workflow.sh
-# The CI-worker merge check (#3055) is CI policy: its workflow, binding tool
-# and tests, and the host Rust build fixture it made hermetic, select Policy
-# alone. Unmapped they were unclassified and qualified
-# in full, as an unmapped neighbouring workflow still is.
-run_paths_case ci_worker_merge_check pull_request refs/pull/3055/head false \
+# The host Rust build fixture selects Policy alone; an unmapped workflow is
+# unclassified and qualifies in full.
+run_paths_case host_rust_build_fixture pull_request refs/pull/3055/head false \
   'policy security security_js' \
-  .gitea/workflows/merge-check.yaml \
-  scripts/ci/receipts/ci-merge-check.py \
-  scripts/ci/tests/test-ci-merge-check.py \
   scripts/ci/tests/test-run-host-rust-build.sh
-printf '%s\n' .gitea/workflows/merge-check-neighbour.yaml > "$TMP/merge-check-neighbour.paths"
-merge_check_neighbour="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+printf '%s\n' .gitea/workflows/unmapped-neighbour.yaml > "$TMP/unmapped-workflow.paths"
+unmapped_workflow="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/3055/head \
-  KIND_E2E_OPT_IN=false "$SELECTOR" "$TMP/merge-check-neighbour.paths" 2>/dev/null)"
-assert_contract_field merge_check_neighbour "$merge_check_neighbour" classification unclassified
-assert_contract_field merge_check_neighbour "$merge_check_neighbour" required_local_mode full
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$TMP/unmapped-workflow.paths" 2>/dev/null)"
+assert_contract_field unmapped_workflow "$unmapped_workflow" classification unclassified
+assert_contract_field unmapped_workflow "$unmapped_workflow" required_local_mode full
+# Deleting the retired local merge gate (#3119 step 2.3) is classified, so its
+# removal does not select every family.
+run_paths_case retired_local_gate pull_request refs/pull/3119/head false \
+  'policy security security_js' \
+  .gitea/workflows/merge-check.yaml scripts/ci/plan/verified-base.py \
+  scripts/ci/receipts/ci-merge-check.py scripts/ci/receipts/local-prepush-receipt.py \
+  scripts/ci/select/merge-gate.py scripts/ci/select/merge-gate.tsv \
+  scripts/ci/tests/test-ci-merge-check.py scripts/ci/tests/test-local-prepush-receipt.sh \
+  scripts/ci/tests/test-merge-gate.py
 run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   'policy dev_smoke_script_tests rust_curated_locks security security_js' \
   .githooks/pre-push scripts/dev/preflight.sh \
-  scripts/ci/receipts/local-prepush-receipt.py \
-  scripts/ci/tests/test-local-prepush-receipt.sh \
   scripts/ci/verify/integration-postgres.sh \
   scripts/ci/verify/resolve-cargo-target-dir.sh \
   scripts/ci/verify/run-product-verification.sh \
@@ -2839,21 +2839,20 @@ if grep -qE '/actions/runs/[^ ]*/cancel' "$WORKFLOW"; then
   exit 1
 fi
 
-# Closing or merging a pull request cancels its CI and merge check in flight:
-# both workflows take the closed event into the same concurrency group, and
-# the run it starts takes no runner (#2892). Old behaviour: a merged pull
-# request's run kept its metal guests until it finished.
-python3 - "$WORKFLOW" "$ROOT/.gitea/workflows/merge-check.yaml" <<'PY'
+# Closing or merging a pull request cancels its CI in flight: the workflow
+# takes the closed event into the same concurrency group, and the run it
+# starts takes no runner (#2892). Old behaviour: a merged pull request's run
+# kept its metal guests until it finished.
+python3 - "$WORKFLOW" <<'PY'
 import sys
 import yaml
 
-ci_path, merge_check_path = sys.argv[1:]
-for path in (ci_path, merge_check_path):
-    workflow = yaml.safe_load(open(path, encoding="utf-8"))
-    # PyYAML reads the bare key `on` as True.
-    trigger = (workflow.get("on") or workflow.get(True))["pull_request"]
-    if "closed" not in trigger["types"]:
-        raise SystemExit(f"{path}: a closed pull request does not cancel its run")
+ci_path = sys.argv[1]
+workflow = yaml.safe_load(open(ci_path, encoding="utf-8"))
+# PyYAML reads the bare key `on` as True.
+trigger = (workflow.get("on") or workflow.get(True))["pull_request"]
+if "closed" not in trigger["types"]:
+    raise SystemExit(f"{ci_path}: a closed pull request does not cancel its run")
 ci = yaml.safe_load(open(ci_path, encoding="utf-8"))
 if not ci["concurrency"]["cancel-in-progress"].startswith("${{ github.event_name == 'pull_request'"):
     raise SystemExit("ci.yaml: pull request runs no longer cancel their predecessor")
@@ -2869,14 +2868,21 @@ for job_id, job in jobs.items():
         raise SystemExit(f"ci.yaml: {job_id} could run for a closed pull request")
     if "always()" in str(job.get("if", "")) and "needs.verification-selection.result == 'success'" not in job["if"]:
         raise SystemExit(f"ci.yaml: {job_id} runs always() without a successful selection")
-merge_check = yaml.safe_load(open(merge_check_path, encoding="utf-8"))
-condition = merge_check["jobs"]["merge-check"]["if"]
-if "github.event.action != 'closed'" not in condition:
-    raise SystemExit("merge-check.yaml: a closed, labelled pull request would start a merge check")
-if merge_check["concurrency"] != {"group": "merge-check-${{ github.event.pull_request.number }}",
-                                  "cancel-in-progress": True}:
-    raise SystemExit("merge-check.yaml: the closed event no longer cancels the merge check in flight")
 PY
+# The local merge check and its workflow are gone (#3119 step 2.3): pull-request
+# CI is the merge gate.
+for retired in .gitea/workflows/merge-check.yaml scripts/ci/receipts/local-prepush-receipt.py \
+    scripts/ci/receipts/ci-merge-check.py scripts/ci/select/merge-gate.tsv \
+    scripts/ci/select/merge-gate.py scripts/ci/plan/verified-base.py; do
+  [ ! -e "$ROOT/$retired" ] || {
+    echo "the retired local merge gate remains: $retired" >&2
+    exit 1
+  }
+done
+if rg -n -- '--for-merge|--emit-receipt|CODEWIRE_PREFLIGHT_MODE' "$ROOT/scripts/dev" "$ROOT/.githooks"; then
+  echo 'the local merge gate or its receipts remain' >&2
+  exit 1
+fi
 
 control_block="$TMP/services-control.yaml"
 runtime_block="$TMP/services-runtime.yaml"
@@ -4462,7 +4468,6 @@ bash -n \
   "$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh" \
   "$ROOT/scripts/ci/tests/test-verify-tested-tree-receipt.sh" \
   "$ROOT/scripts/ci/tests/test-verify-release-tag-receipt.sh" \
-  "$ROOT/scripts/ci/tests/test-local-prepush-receipt.sh" \
   "$ROOT/scripts/ci/verify/run-product-verification.sh" \
   "$ROOT/scripts/ci/verify/integration-postgres.sh" \
   "$ROOT/scripts/ci/verify/run-integration-verification.sh" \
@@ -4472,10 +4477,6 @@ bash -n \
   "$ROOT/scripts/dev/preflight.sh" \
   "$ROOT/.githooks/pre-push"
 
-"$ROOT/scripts/ci/tests/test-local-prepush-receipt.sh"
-# What the merge gate requires: merge-gate.tsv, preflight honouring it, and
-# the verified-base override (owner, 2026-10-21).
-python3 -B "$ROOT/scripts/ci/tests/test-merge-gate.py"
 "$ROOT/scripts/ci/tests/test-pre-push-worktree.sh"
 "$ROOT/scripts/ci/tests/test-push-check-shellcheck.sh"
 "$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh"
