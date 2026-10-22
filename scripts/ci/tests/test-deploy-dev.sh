@@ -148,12 +148,10 @@ cancel_step="$(awk '
 cancel_step_line="$(grep -n -m1 'name: Cancel the older deliveries this push supersedes' <<<"$selection_job" | cut -d: -f1)"
 [[ "$toolchain_line" -lt "$cancel_step_line" && "$cancel_step_line" -lt "$classifier_line" ]] ||
   fail "the cancellation step does not run before planning"
-# Apart from fail-fast jobs cancelling their own run, the only run
-# cancellation anywhere is that script's.
-# shellcheck disable=SC2016 # Match the literal workflow expression.
+# The only run cancellation anywhere is that script's: no job cancels its own
+# run (#3119 A17).
 cancel_users="$(grep -rE '/actions/runs/[^ ]*/cancel' "$ROOT/.gitea/workflows" "$ROOT/scripts" |
-  grep -vF '/actions/runs/${GITHUB_RUN_ID}/cancel' | grep -v '/tests/' | cut -d: -f1 |
-  sed "s|^$ROOT/||" | sort -u)"
+  grep -v '/tests/' | cut -d: -f1 | sed "s|^$ROOT/||" | sort -u)"
 [[ "$cancel_users" == 'scripts/ci/deploy/cancel-superseded-deliveries.py' ]] ||
   fail "a run is cancelled outside cancel-superseded-deliveries.py: $cancel_users"
 

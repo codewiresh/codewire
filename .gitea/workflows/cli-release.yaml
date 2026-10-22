@@ -193,35 +193,6 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
-      - name: Cancel the run after this failure
-        # Fail fast: the delivery needs every target, so a failed build
-        # cancels the run instead of leaving the other targets building
-        # (#2995). Best effort; the job has already failed and this step
-        # never changes that result.
-        if: ${{ failure() }}
-        env:
-          GITEA_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
-            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
-            exit 0
-          fi
-          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
-          # The cancel revokes this ephemeral runner's registration in the
-          # same transaction, severing log upload: lines echoed after the
-          # POST below never reach the job log (infra#1229). The runner
-          # ships buffered rows once a second; hold the cancel briefly so
-          # this evidence stays durable.
-          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
-          umask 077
-          auth="$(mktemp)"
-          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
-          unset GITEA_TOKEN
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
-          rm -f "$auth"
-          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   build-helper-darwin:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
@@ -287,35 +258,6 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
-      - name: Cancel the run after this failure
-        # Fail fast: the delivery needs every target, so a failed build
-        # cancels the run instead of leaving the other targets building
-        # (#2995). Best effort; the job has already failed and this step
-        # never changes that result.
-        if: ${{ failure() }}
-        env:
-          GITEA_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
-            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
-            exit 0
-          fi
-          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
-          # The cancel revokes this ephemeral runner's registration in the
-          # same transaction, severing log upload: lines echoed after the
-          # POST below never reach the job log (infra#1229). The runner
-          # ships buffered rows once a second; hold the cancel briefly so
-          # this evidence stays durable.
-          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
-          umask 077
-          auth="$(mktemp)"
-          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
-          unset GITEA_TOKEN
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
-          rm -f "$auth"
-          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   sign-helper:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
@@ -412,35 +354,6 @@ jobs:
           path: vz-runner-signed/codewire-vz-runner
           if-no-files-found: error
           retention-days: 1
-      - name: Cancel the run after this failure
-        # Fail fast: the delivery needs every target, so a failed build
-        # cancels the run instead of leaving the other targets building
-        # (#2995). Best effort; the job has already failed and this step
-        # never changes that result.
-        if: needs.build-helper-darwin.outputs.unsigned_sha256 != '' && failure()
-        env:
-          GITEA_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
-            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
-            exit 0
-          fi
-          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
-          # The cancel revokes this ephemeral runner's registration in the
-          # same transaction, severing log upload: lines echoed after the
-          # POST below never reach the job log (infra#1229). The runner
-          # ships buffered rows once a second; hold the cancel briefly so
-          # this evidence stays durable.
-          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
-          umask 077
-          auth="$(mktemp)"
-          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
-          unset GITEA_TOKEN
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
-          rm -f "$auth"
-          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   pack-runtime:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
@@ -642,35 +555,6 @@ jobs:
           path: .release-source/dist/cw-release/
           if-no-files-found: error
           retention-days: 1
-      - name: Cancel the run after this failure
-        # Fail fast: the delivery needs every target, so a failed build
-        # cancels the run instead of leaving the other targets building
-        # (#2995). Best effort; the job has already failed and this step
-        # never changes that result.
-        if: ${{ failure() }}
-        env:
-          GITEA_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
-            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
-            exit 0
-          fi
-          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
-          # The cancel revokes this ephemeral runner's registration in the
-          # same transaction, severing log upload: lines echoed after the
-          # POST below never reach the job log (infra#1229). The runner
-          # ships buffered rows once a second; hold the cancel briefly so
-          # this evidence stays durable.
-          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
-          umask 077
-          auth="$(mktemp)"
-          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
-          unset GITEA_TOKEN
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
-          rm -f "$auth"
-          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   sign-darwin:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
@@ -744,35 +628,6 @@ jobs:
           path: dist-darwin-signed/
           if-no-files-found: error
           retention-days: 1
-      - name: Cancel the run after this failure
-        # Fail fast: the delivery needs every target, so a failed build
-        # cancels the run instead of leaving the other targets building
-        # (#2995). Best effort; the job has already failed and this step
-        # never changes that result.
-        if: ${{ failure() }}
-        env:
-          GITEA_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
-            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
-            exit 0
-          fi
-          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
-          # The cancel revokes this ephemeral runner's registration in the
-          # same transaction, severing log upload: lines echoed after the
-          # POST below never reach the job log (infra#1229). The runner
-          # ships buffered rows once a second; hold the cancel briefly so
-          # this evidence stays durable.
-          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
-          umask 077
-          auth="$(mktemp)"
-          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
-          unset GITEA_TOKEN
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
-          rm -f "$auth"
-          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   build-linux-musl:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
@@ -847,35 +702,6 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
-      - name: Cancel the run after this failure
-        # Fail fast: the delivery needs every target, so a failed build
-        # cancels the run instead of leaving the other targets building
-        # (#2995). Best effort; the job has already failed and this step
-        # never changes that result.
-        if: ${{ failure() }}
-        env:
-          GITEA_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
-            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
-            exit 0
-          fi
-          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
-          # The cancel revokes this ephemeral runner's registration in the
-          # same transaction, severing log upload: lines echoed after the
-          # POST below never reach the job log (infra#1229). The runner
-          # ships buffered rows once a second; hold the cancel briefly so
-          # this evidence stays durable.
-          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
-          umask 077
-          auth="$(mktemp)"
-          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
-          unset GITEA_TOKEN
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
-          rm -f "$auth"
-          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   build-linux-gnu:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
@@ -950,35 +776,6 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
-      - name: Cancel the run after this failure
-        # Fail fast: the delivery needs every target, so a failed build
-        # cancels the run instead of leaving the other targets building
-        # (#2995). Best effort; the job has already failed and this step
-        # never changes that result.
-        if: ${{ failure() }}
-        env:
-          GITEA_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
-            echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
-            exit 0
-          fi
-          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
-          # The cancel revokes this ephemeral runner's registration in the
-          # same transaction, severing log upload: lines echoed after the
-          # POST below never reach the job log (infra#1229). The runner
-          # ships buffered rows once a second; hold the cancel briefly so
-          # this evidence stays durable.
-          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
-          umask 077
-          auth="$(mktemp)"
-          printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
-          unset GITEA_TOKEN
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            --max-time 20 --config "$auth" --request POST \
-            "${GITHUB_SERVER_URL:?}/api/v1/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel")" || true
-          rm -f "$auth"
-          echo "fail-fast: requested cancellation of run ${GITHUB_RUN_ID} (HTTP ${status:-000})"
 
   build-release:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
