@@ -335,7 +335,11 @@ async fn after_contention(
 async fn single_connection_roundtrip_is_stateless_until_confirmation_and_replay_fenced()
 -> Result<()> {
     let f = Fixture::create(1).await?;
-    let result = tokio::time::timeout(Duration::from_secs(12), async {
+    // No wall-clock budget (#2315): under load these steps can outlast any
+    // fixed one. A handler that waited on itself for the one connection
+    // would be refused when the pool's acquire timeout ends, which fails
+    // the test.
+    let result = async {
         for _ in 0..12 { f.begin().await?; }
         let (continuation, nonce) = f.begin().await?;
         anyhow::ensure!(f.counts().await? == (0, 0));
@@ -359,7 +363,7 @@ async fn single_connection_roundtrip_is_stateless_until_confirmation_and_replay_
         rejected(authorize_inner(&f.context(), &account_headers(), Approval { challenge: continuation, csrf: confirmation_token(SECRET, "preview-session", &decoded.challenge.id) }).await, StatusCode::BAD_REQUEST)?;
         anyhow::ensure!(f.counts().await? == (1, 1));
         Ok(())
-    }).await.context("one-connection preview protocol self-starved").and_then(|result| result);
+    }.await;
     result.and(f.cleanup().await)
 }
 
