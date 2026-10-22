@@ -89,37 +89,14 @@ assert_output "$edge_output" edge_kind false
 kind_output="$(emit '|valid:v3|kind|complete|' fallback false false)"
 assert_output "$kind_output" edge_kind true
 
-# A hosted pull request's quick selection dispatches only what it names: the
-# policy core, ShellCheck in tooling, compiling every Rust target, and Kind
-# when opted in. Artifact facts that would dispatch the CW release assets
-# or the desktop package dispatch nothing.
-quick_output="$(emit \
+# The retired quick pull-request marker (#3119 step 2.1) is an unknown token:
+# a selection that still carries it dispatches every group rather than less.
+retired_quick_output="$(emit \
   '|valid:v3|policy|policy_shell_omittable|pr_quick|rust_compile|complete|' \
   fallback true true)"
-assert_output "$quick_output" policy true
-assert_output "$quick_output" rust_compile true
-for group in standard tooling rust_shards rust_transport database services_control \
-    services_runtime edge_kind cw_release_assets; do
-  assert_output "$quick_output" "$group" false
-done
-quick_shell_output="$(emit \
-  '|valid:v3|policy|policy_shell|policy_shell_omittable|pr_quick|complete|' \
-  fallback true true)"
-assert_output "$quick_shell_output" policy true
-assert_output "$quick_shell_output" tooling true
-for group in standard rust_compile rust_shards rust_transport database services_control \
-    services_runtime edge_kind cw_release_assets; do
-  assert_output "$quick_shell_output" "$group" false
-done
-quick_kind_output="$(emit \
-  '|valid:v3|edge_kind|kind|policy|policy_shell_omittable|pr_quick|rust_compile|complete|' \
-  fallback false false)"
-for group in policy tooling rust_compile edge_kind; do
-  assert_output "$quick_kind_output" "$group" true
-done
-for group in standard rust_shards rust_transport database services_control \
-    services_runtime cw_release_assets; do
-  assert_output "$quick_kind_output" "$group" false
+for group in policy standard tooling rust_compile rust_shards rust_transport database \
+    services_control services_runtime cw_release_assets; do
+  assert_output "$retired_quick_output" "$group" true
 done
 # A scheduled run (owner decision 2026-10-20) dispatches the Kind shards
 # alone when it selected Kind, and nothing when it did not, whatever the
@@ -133,7 +110,7 @@ for group in policy standard tooling rust_compile rust_shards rust_transport dat
   assert_output "$scheduled_nothing_output" "$group" false
 done
 assert_output "$scheduled_nothing_output" edge_kind false
-# The same artifact facts without pr_quick or scheduled keep dispatching their groups.
+# The same artifact facts without scheduled keep dispatching their groups.
 full_artifact_output="$(emit '|valid:v3|policy|policy_shell_omittable|complete|' fallback true true)"
 for group in policy rust_compile rust_transport cw_release_assets; do
   assert_output "$full_artifact_output" "$group" true

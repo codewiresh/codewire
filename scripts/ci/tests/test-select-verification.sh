@@ -25,9 +25,6 @@ cleanup() {
   rm -rf "$TMP"
 }
 trap cleanup EXIT
-# Only hosted pull-request CI sets the quick scope; every fixture below that
-# needs it names it explicitly.
-unset VERIFICATION_PR_SCOPE
 # The path-rule cases classify against a Cargo workspace without crate edges,
 # so each pins its path rules alone and no case changes when a manifest
 # gains a dependency. The crate-graph cases run real Cargo on a fixture
@@ -3613,7 +3610,7 @@ grep -qF 'run: scripts/ci/receipts/emit-verification-receipt.py' "$required_bloc
 # shellcheck disable=SC2016 # Match the literal Actions expression.
 grep -A12 -F 'name: Emit exact-head verification receipt' "$required_block" \
   | grep -qF 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' || {
-  echo 'the receipt step cannot see whether its run was a quick selection' >&2
+  echo 'the receipt step cannot validate its run selection' >&2
   exit 1
 }
 for receipt_input in CODEWIRE_PR_NUMBER CODEWIRE_BASE_COMMIT \
@@ -4414,10 +4411,9 @@ done
 [[ "$(superseded_case push refs/heads/main not-a-commit)" == failed ]] || {
   echo 'a malformed canonical main did not fail closed' >&2; exit 1; }
 
-# Hosted pull-request scope (owner decision 2026-10-14). Hosted pull-request
-# CI sets VERIFICATION_PR_SCOPE=quick and runs only the quick families unless
-# the pull request carries ci-full. Pushes, dispatches and local merge
-# qualification keep the complete selection.
+# Pull-request scope (#3119 step 2.1, owner decision 2026-10-21): a pull
+# request runs every family its paths select, as a push to main does, except
+# Kind, which only the ci-full label adds.
 scope_event() {
   # NAME TITLE LABEL... -> a pull_request event payload as Forgejo sends it
   local name="$1" title="$2" labels='' label
@@ -4431,13 +4427,12 @@ scope_event() {
 }
 
 scope_select() {
-  # EVENT SCOPE EVENT_PATH PATHS_FILE (SCOPE or EVENT_PATH may be empty)
-  local event="$1" scope="$2" event_path="$3" paths="$4" ref=refs/pull/7/head
+  # EVENT EVENT_PATH PATHS_FILE (EVENT_PATH may be empty)
+  local event="$1" event_path="$2" paths="$3" ref=refs/pull/7/head
   local -a inputs=()
   if [ "$event" = push ]; then ref=refs/heads/main; fi
   if [ -n "$event_path" ]; then inputs+=("GITHUB_EVENT_PATH=$event_path"); fi
-  if [ -n "$scope" ]; then inputs+=("VERIFICATION_PR_SCOPE=$scope"); fi
-  env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u VERIFICATION_PR_SCOPE -u KIND_E2E_OPT_IN \
+  env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u KIND_E2E_OPT_IN \
     "${inputs[@]}" GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" \
     "${SCOPE_SELECTOR:-$SELECTOR}" "$paths" </dev/null
 }
@@ -4448,18 +4443,18 @@ kind_label="$(scope_event kind_label 'feat: change' kind-e2e)"
 kind_marker="$(scope_event kind_marker 'feat: change [kind-e2e]')"
 lookalike="$(scope_event lookalike 'feat: ci-full is not a label' ci ci/r2-cache-canary ci-fuller)"
 
-# NAME|QUICK TOKENS (policy_shell_omittable, ci_script_tests_omittable implied)|PATHS (space separated)
-while IFS='|' read -r name quick_expected paths_list; do
+# NAME|PATHS (space separated)
+while IFS='|' read -r name paths_list; do
   paths="$TMP/scope-${name}.paths"
   tr ' ' '\n' <<<"$paths_list" > "$paths"
-  # A push to main as it selects with Kind (the switch true); ci-full and
-  # kind-e2e compare against it.
-  push_output="$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" scope_select push '' '' "$paths")"
-  pr_full_output="$(scope_select pull_request '' "$no_labels" "$paths")"
+  # A push to main as it selects with Kind (the switch true); ci-full
+  # compares against it.
+  push_output="$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" scope_select push '' "$paths")"
+  pr_output="$(scope_select pull_request "$no_labels" "$paths")"
 
   # The checked-in switch keeps that selection on a push to main, less kind
   # while it defers Kind, and nothing else.
-  main_output="$(scope_select push '' '' "$paths")"
+  main_output="$(scope_select push '' "$paths")"
   main_tokens="$(selection_tokens "$(selection_value "$push_output")")"
   if [ -z "$MAIN_PUSH_KIND" ]; then
     main_tokens="$(grep -vx kind <<<"$main_tokens" || true)"
@@ -4468,112 +4463,95 @@ while IFS='|' read -r name quick_expected paths_list; do
     echo "${name}: the switch changed a push to main beyond Kind" >&2
     exit 1
   }
-  # A push to main is unchanged: the workflow sets the quick scope on every
-  # event, and a push ignores it.
-  [ "$(scope_select push quick '' "$paths")" = "$main_output" ] || {
-    echo "${name}: the quick scope changed a push to main" >&2
-    exit 1
-  }
-  # Local merge qualification (no scope) keeps today's pull-request selection:
-  # what main selects, without Kind unless opted in.
+  # A pull request without a label selects what main does, without Kind.
   push_tokens="$(selection_tokens "$(selection_value "$push_output")" | grep -Evx 'edge_kind|kind' || true)"
-  [ "$(selection_tokens "$(selection_value "$pr_full_output")")" = "$push_tokens" ] || {
-    echo "${name}: local merge qualification no longer selects main's families" >&2
+  [ "$(selection_tokens "$(selection_value "$pr_output")")" = "$push_tokens" ] || {
+    echo "${name}: a pull request no longer selects main's families" >&2
     exit 1
   }
-  # A pull request without a label gets only the quick families.
-  quick_output="$(scope_select pull_request quick "$no_labels" "$paths")"
-  assert_tokens "${name}_quick" "$quick_expected pr_quick" "$quick_output"
-  assert_contract_field "${name}_quick" "$quick_output" required_local_mode \
-    "$(sed -n 's/^required_local_mode=//p' <<<"$pr_full_output")"
-  # Labels that only resemble ci-full, and ci-full in the title, stay quick.
-  [ "$(scope_select pull_request quick "$lookalike" "$paths")" = "$quick_output" ] || {
-    echo "${name}: a lookalike label or title escalated a quick pull request" >&2
+  if grep -Fq '|pr_quick|' <<<"$pr_output"; then
+    echo "${name}: a pull request still carries the retired quick marker" >&2
+    exit 1
+  fi
+  # Labels that only resemble ci-full, and ci-full in the title, add nothing.
+  [ "$(scope_select pull_request "$lookalike" "$paths")" = "$pr_output" ] || {
+    echo "${name}: a lookalike label or title changed a pull request's selection" >&2
     exit 1
   }
   # ci-full gets exactly what a push to main selects with Kind, even while
   # the switch defers Kind on the push.
-  [ "$(scope_select pull_request quick "$ci_full" "$paths")" = "$push_output" ] || {
+  [ "$(scope_select pull_request "$ci_full" "$paths")" = "$push_output" ] || {
     echo "${name}: ci-full does not select what a push to main does" >&2
-    scope_select pull_request quick "$ci_full" "$paths" >&2
+    scope_select pull_request "$ci_full" "$paths" >&2
     exit 1
   }
   # Kind runs only on the schedule and ci-full (owner, 2026-10-21): the
-  # retired kind-e2e label and title marker add nothing, quick or complete.
+  # retired kind-e2e label and title marker add nothing.
   for kind_event in "$kind_label" "$kind_marker"; do
-    [ "$(scope_select pull_request quick "$kind_event" "$paths")" = "$quick_output" ] || {
+    [ "$(scope_select pull_request "$kind_event" "$paths")" = "$pr_output" ] || {
       echo "${name}: the retired kind-e2e opt-in still selects Kind" >&2
-      exit 1
-    }
-    [ "$(scope_select pull_request '' "$kind_event" "$paths")" = "$pr_full_output" ] || {
-      echo "${name}: the retired kind-e2e opt-in still selects Kind without the quick scope" >&2
       exit 1
     }
   done
 done <<'CASES'
-docs|policy|docs/dev/AGENT-WORKFLOW.md
-rust_cli|policy rust_compile|crates/codewire-cli/src/main.rs
-broker_database|policy rust_compile|crates/codewire-credential-broker/src/provider_enrollment.rs
-transport|policy rust_compile|crates/codewire-daemon/src/lib.rs
-dashboard_kind|policy rust_compile|crates/codewire-dashboard-web/src/lib.rs
-browser_spec|policy|apps/dashboard/e2e/sandbox-lifecycle.spec.ts
-release_shell|policy policy_shell ci_script_tests|scripts/ci/release/package-cw-release.sh
-selector_policy|policy policy_shell ci_script_tests rust_compile|scripts/ci/select/select-verification.sh .gitea/workflows/ci.yaml
-mixed|policy policy_shell ci_script_tests rust_compile|docs/dev/CI-ARCHITECTURE.md crates/codewire-cli/src/main.rs scripts/ci/release/package-cw-release.sh
+docs|docs/dev/AGENT-WORKFLOW.md
+rust_cli|crates/codewire-cli/src/main.rs
+broker_database|crates/codewire-credential-broker/src/provider_enrollment.rs
+transport|crates/codewire-daemon/src/lib.rs
+dashboard_kind|crates/codewire-dashboard-web/src/lib.rs
+browser_spec|apps/dashboard/e2e/sandbox-lifecycle.spec.ts
+release_shell|scripts/ci/release/package-cw-release.sh
+selector_policy|scripts/ci/select/select-verification.sh .gitea/workflows/ci.yaml
+mixed|docs/dev/CI-ARCHITECTURE.md crates/codewire-cli/src/main.rs scripts/ci/release/package-cw-release.sh
 CASES
 
-# The Kind cases above must really exercise Kind.
+# The Kind cases above must really exercise Kind, and the Rust cases their
+# crate tests on a pull request.
 for kind_case in dashboard_kind browser_spec; do
-  kind_case_output="$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" scope_select push '' '' "$TMP/scope-${kind_case}.paths")"
+  kind_case_output="$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" scope_select push '' "$TMP/scope-${kind_case}.paths")"
   grep -Fq '|kind|' <<<"$kind_case_output" || {
     echo "${kind_case}: fixture no longer selects Kind on main" >&2
     exit 1
   }
 done
+for rust_case in rust_cli broker_database transport mixed; do
+  grep -Eq '\|(rust|transport)\|' <<<"$(selection_value \
+      "$(scope_select pull_request "$no_labels" "$TMP/scope-${rust_case}.paths")")" || {
+    echo "${rust_case}: a pull request does not run its Rust tests" >&2
+    exit 1
+  }
+done
 
-# An unchanged pull request stays quick.
+# An unchanged pull request runs policy alone.
 : > "$TMP/scope-empty.paths"
-assert_tokens scope_unchanged 'policy pr_quick' \
-  "$(scope_select pull_request quick "$no_labels" "$TMP/scope-empty.paths")"
+assert_tokens scope_unchanged 'policy' \
+  "$(scope_select pull_request "$no_labels" "$TMP/scope-empty.paths")"
 
-# An unclassified path fails closed: the selector cannot tell what it affects,
-# so a quick pull request keeps today's complete pull-request selection (no
-# pr_quick, Kind still opt-in) and its run can vouch for main as before.
+# An unclassified path fails closed: a pull request selects all product
+# verification, Kind still only with ci-full.
 printf 'unclassified-scope-fixture.bin\n' > "$TMP/scope-unclassified.paths"
-unclassified_quick="$(scope_select pull_request quick "$no_labels" "$TMP/scope-unclassified.paths" 2>/dev/null)"
-[ "$unclassified_quick" = "$(scope_select pull_request '' "$no_labels" "$TMP/scope-unclassified.paths" 2>/dev/null)" ] || {
-  echo 'an unclassified path on a quick pull request did not keep the complete selection' >&2
-  exit 1
-}
-assert_contract_field scope_unclassified "$unclassified_quick" classification unclassified
-assert_contract_field scope_unclassified "$unclassified_quick" required_local_mode full
-if grep -Fq '|pr_quick|' <<<"$unclassified_quick" || grep -Fq '|kind|' <<<"$unclassified_quick"; then
-  echo 'an unclassified quick pull request was reduced or ran Kind without opt-in' >&2
+unclassified_pr="$(scope_select pull_request "$no_labels" "$TMP/scope-unclassified.paths" 2>/dev/null)"
+assert_contract_field scope_unclassified "$unclassified_pr" classification unclassified
+assert_contract_field scope_unclassified "$unclassified_pr" required_local_mode full
+if grep -Fq '|kind|' <<<"$unclassified_pr"; then
+  echo 'an unclassified pull request ran Kind without ci-full' >&2
   exit 1
 fi
-[ "$(scope_select pull_request quick "$ci_full" "$TMP/scope-unclassified.paths" 2>/dev/null)" \
-  = "$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" scope_select push '' '' "$TMP/scope-unclassified.paths" 2>/dev/null)" ] || {
+[ "$(scope_select pull_request "$ci_full" "$TMP/scope-unclassified.paths" 2>/dev/null)" \
+  = "$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" scope_select push '' "$TMP/scope-unclassified.paths" 2>/dev/null)" ] || {
   echo 'ci-full on an unclassified pull request differs from main' >&2
   exit 1
 }
 
-# A malformed scope emits no machine-readable selection.
-if scope_select pull_request partial "$no_labels" "$TMP/scope-docs.paths" \
-    >"$TMP/scope-invalid.out" 2>"$TMP/scope-invalid.err"; then
-  echo 'selector accepted an unsupported pull-request scope' >&2
-  exit 1
-fi
-[ ! -s "$TMP/scope-invalid.out" ] && grep -Fq "unsupported pull-request scope 'partial'" "$TMP/scope-invalid.err"
-
-# Required verification passes a quick pull request with only its quick groups,
-# even when every artifact fact says affected, and still fails it when one of
-# them does not run.
-quick_dispatch_and_require() {
+# Required verification passes a pull request with exactly its dispatched
+# groups, even when every artifact fact says affected, and fails it when one
+# of them does not run.
+pr_dispatch_and_require() {
   local selection="$1" missing="${2:-}" output="$TMP/scope-dispatch.out" group value job
   local -a results=()
   : > "$output"
   VERIFICATION_SELECTION="$selection" VERIFICATION_TESTED_TREE_RECEIPT=fallback \
-    CW_PACKAGE_SELECTED=true DESKTOP_PACKAGE_SELECTED=true \
+    CW_PACKAGE_SELECTED=true DESKTOP_PACKAGE_SELECTED=true WORKSPACE_IMAGE_SELECTED=true \
     GITHUB_OUTPUT="$output" "$ROOT/scripts/ci/select/emit-verification-matrices.sh"
   local -a jobs
   while IFS='=' read -r group value; do
@@ -4596,27 +4574,27 @@ quick_dispatch_and_require() {
     "$ROOT/scripts/ci/select/require-verification-results.sh" >/dev/null 2>&1
 }
 for scope_case in rust_cli dashboard_kind release_shell selector_policy mixed; do
-  quick_selection="$(selection_value "$(scope_select pull_request quick "$no_labels" "$TMP/scope-${scope_case}.paths")")"
-  quick_dispatch_and_require "$quick_selection" || {
-    echo "${scope_case}: Required verification rejected a green quick pull request" >&2
+  pr_selection="$(selection_value "$(scope_select pull_request "$no_labels" "$TMP/scope-${scope_case}.paths")")"
+  pr_dispatch_and_require "$pr_selection" || {
+    echo "${scope_case}: Required verification rejected a green pull request" >&2
     exit 1
   }
-  if grep -Fq '|rust_compile|' <<<"$quick_selection" \
-      && quick_dispatch_and_require "$quick_selection" RUST_COMPILE; then
-    echo "${scope_case}: Required verification accepted a quick run without its Rust compile" >&2
+  if grep -Fq '|rust|' <<<"$pr_selection" \
+      && pr_dispatch_and_require "$pr_selection" RUST_PACKAGES; then
+    echo "${scope_case}: Required verification accepted a pull request without its crate tests" >&2
     exit 1
   fi
 done
 # Policy always runs on main, so the release-tag receipt finds a green
 # capability group in every main run.
 for scope_case in docs rust_cli broker_database transport release_shell selector_policy; do
-  main_selection="$(selection_value "$(scope_select push '' '' "$TMP/scope-${scope_case}.paths")")"
+  main_selection="$(selection_value "$(scope_select push '' "$TMP/scope-${scope_case}.paths")")"
   grep -Fq '|policy|' <<<"$main_selection" || {
     echo "${scope_case}: a main push selects no policy group" >&2
     exit 1
   }
 done
-# The quick run carries no receipt for main to reuse; the complete one does.
+# A pull request's run carries the receipt main may reuse.
 receipt_env=(GITHUB_EVENT_NAME=pull_request GITHUB_REPOSITORY=codewire/codewire
   GITHUB_RUN_ID=501 GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb CODEWIRE_PR_NUMBER=7
   CODEWIRE_BASE_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -4626,19 +4604,37 @@ receipt_for() {
   env -i PATH="$PATH" "${receipt_env[@]}" VERIFICATION_SELECTION="$1" \
     python3 -I -B "$ROOT/scripts/ci/receipts/emit-verification-receipt.py"
 }
-if receipt_for "$(selection_value "$(scope_select pull_request quick "$no_labels" "$TMP/scope-rust_cli.paths")")" \
-    | grep -Fq 'CODEWIRE_CI_VERIFICATION_RECEIPT='; then
-  echo 'a quick pull-request run emitted a receipt main could reuse' >&2
-  exit 1
-fi
-receipt_for "$(selection_value "$(scope_select pull_request quick "$ci_full" "$TMP/scope-rust_cli.paths")")" \
+receipt_for "$(selection_value "$(scope_select pull_request "$no_labels" "$TMP/scope-rust_cli.paths")")" \
   | grep -Fq 'CODEWIRE_CI_VERIFICATION_RECEIPT=' || {
-  echo 'a ci-full pull-request run did not emit its receipt' >&2
+  echo 'a pull-request run did not emit its receipt' >&2
   exit 1
 }
 
-# The workflow sets the scope for the selector, re-runs on label changes, and
-# local merge qualification strips the scope.
+# Branch protection requires two status contexts on main (#3119 step 2.2;
+# infra's forgejo-codewire-branch-protection.json pins the same names).
+# Forgejo names a status "<workflow> / <job> (<event>)", so renaming either
+# workflow or job, or dropping its trigger, would block every merge.
+python3 - "$WORKFLOW" "$ROOT/.gitea/workflows/source-approval.yml" <<'PY'
+import sys
+import yaml
+
+REQUIRED = {
+    "CI / Required verification (pull_request)",
+    "Supply-chain scan / Supply-chain scan (pull_request_target)",
+}
+contexts = set()
+for path in sys.argv[1:]:
+    workflow = yaml.safe_load(open(path, encoding="utf-8"))
+    triggers = workflow.get("on", workflow.get(True))
+    for job in workflow["jobs"].values():
+        for event in triggers:
+            contexts.add(f"{workflow['name']} / {job.get('name', '')} ({event})")
+missing = REQUIRED - contexts
+if missing:
+    raise SystemExit(f"required status contexts no workflow produces: {sorted(missing)}")
+PY
+
+# The workflow re-runs on label changes and no longer reduces a pull request.
 python3 - "$WORKFLOW" <<'PY'
 import sys
 import yaml
@@ -4651,33 +4647,30 @@ if types != wanted:
     raise SystemExit(f"pull_request types {sorted(types)} != {sorted(wanted)}")
 steps = workflow["jobs"]["verification-selection"]["steps"]
 select = [step for step in steps if step.get("id") == "select"]
-if len(select) != 1 or select[0].get("env", {}).get("VERIFICATION_PR_SCOPE") != "quick":
-    raise SystemExit("the selection step does not request the quick pull-request scope")
+if len(select) != 1 or "VERIFICATION_PR_SCOPE" in select[0].get("env", {}):
+    raise SystemExit("the selection step still sets the retired pull-request scope")
 PY
-grep -qF 'env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u VERIFICATION_PR_SCOPE \' "$ROOT/scripts/dev/preflight.sh" || {
-  echo 'preflight can inherit the hosted quick scope' >&2
+if rg -n 'VERIFICATION_PR_SCOPE|pr_quick' "$ROOT/scripts/ci/select" "$ROOT/scripts/dev/preflight.sh" \
+    "$ROOT/scripts/ci/receipts" "$WORKFLOW"; then
+  echo 'the retired quick pull-request scope remains' >&2
   exit 1
-}
-grep -qF 'environment.pop("VERIFICATION_PR_SCOPE", None)' "$ROOT/scripts/ci/receipts/local-prepush-receipt.py" || {
-  echo 'the local receipt can inherit the hosted quick scope' >&2
-  exit 1
-}
+fi
 
 # A dispatched heavy job always has work, and selected work is always
 # dispatched: the emitter's decisions are evaluated against the workflow's own
 # step conditions, for realistic selections and for every token alone, with
-# policy, Kind, Edge or the quick marker, under every artifact fact.
+# policy, Kind or Edge, under every artifact fact.
 job_work_selections="$TMP/job-work-selections.txt"
 : > "$job_work_selections"
 for scope_case in docs rust_cli broker_database transport dashboard_kind browser_spec \
     release_shell selector_policy mixed; do
   for scope_event_name in push pull_request; do
     if [ "$scope_event_name" = push ]; then
-      scope_output="$(scope_select push '' '' "$TMP/scope-${scope_case}.paths")"
+      scope_output="$(scope_select push '' "$TMP/scope-${scope_case}.paths")"
       selection_value "$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" \
-        scope_select push '' '' "$TMP/scope-${scope_case}.paths")" >> "$job_work_selections"
+        scope_select push '' "$TMP/scope-${scope_case}.paths")" >> "$job_work_selections"
     else
-      scope_output="$(scope_select pull_request quick "$no_labels" "$TMP/scope-${scope_case}.paths")"
+      scope_output="$(scope_select pull_request "$no_labels" "$TMP/scope-${scope_case}.paths")"
     fi
     selection_value "$scope_output" >> "$job_work_selections"
   done
@@ -4963,25 +4956,25 @@ EVENTS = {
 
 realistic = [line.strip() for line in open(realistic_path) if line.strip()]
 universe = sorted({token for selection in realistic for token in selection.strip("|").split("|")}
-                  - {"valid:v3", "complete"} | {"ios", "pr_quick", "rust_compile", "rust_pkg_codewire_desktop",
+                  - {"valid:v3", "complete"} | {"ios", "rust_pkg_codewire_desktop",
                                                 "transport_derp_contract", "contracts_proto", "go_tailnet",
                                                 "security_go", "go_consumer_interop"})
 synthetic = set()
 for token in universe:
-    for extra in ((), ("policy", "policy_shell_omittable"), ("kind",), ("edge_kind",), ("pr_quick",)):
+    for extra in ((), ("policy", "policy_shell_omittable"), ("kind",), ("edge_kind",)):
         synthetic.add("|valid:v3|" + "|".join(sorted({token, *extra})) + "|complete|")
 synthetic.add("|valid:v3|complete|")
 checked = 0
 for selection in sorted(set(realistic) | synthetic):
-    # A quick or scheduled selection dispatches no artifact group.
-    quick = "|pr_quick|" in selection or "|scheduled|" in selection
+    # A scheduled selection dispatches no artifact group.
+    scheduled_only = "|scheduled|" in selection
     for event, cw, desktop, kind_workspace in itertools.product(
             ("push to main", "pull request"),
             ("true", "false"), ("true", "false"), ("source", "pinned")):
         expected = dispatch(selection, cw, desktop)
-        # A quick selection deliberately ignores artifact facts; its steps
+        # A scheduled selection deliberately ignores artifact facts; its steps
         # see what dispatch saw.
-        facts = ("false", "false") if quick else (cw, desktop)
+        facts = ("false", "false") if scheduled_only else (cw, desktop)
         context = {
             **EVENTS[event],
             "needs.verification-selection.result": "success",
@@ -5063,9 +5056,5 @@ grep -qF "selected_any ${compile_tokens}" "$ROOT/scripts/ci/select/emit-verifica
 }
 grep -qF "selection_has_any ${compile_tokens}; then" "$ROOT/scripts/dev/preflight.sh" || {
   echo 'preflight fast compile drifted from the CI rust-compile selection' >&2
-  exit 1
-}
-grep -qF "for token in ${compile_tokens}; do" "$SELECTOR" || {
-  echo 'the quick pull-request compile drifted from the CI rust-compile selection' >&2
   exit 1
 }

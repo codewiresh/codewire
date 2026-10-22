@@ -21,6 +21,9 @@ class ReceiptError(RuntimeError):
     pass
 
 
+SELECTION_RE = re.compile(r"^\|valid:v3\|(?:[a-z0-9_]+\|)*complete\|$")
+
+
 def require(env: Mapping[str, str], key: str, pattern: re.Pattern[str] | None = None) -> str:
     value = env.get(key, "")
     if not value or (pattern and not pattern.fullmatch(value)):
@@ -51,6 +54,7 @@ def build_receipt(env: Mapping[str, str]) -> dict[str, object]:
     head_tree = require(env, "CODEWIRE_HEAD_TREE", HEX40_RE)
     if head_commit != require(env, "GITHUB_SHA", HEX40_RE):
         raise ReceiptError("receipt head does not equal the workflow head")
+    require(env, "VERIFICATION_SELECTION", SELECTION_RE)
 
     return {
         "schema": RECEIPT_SCHEMA,
@@ -71,14 +75,6 @@ def build_receipt(env: Mapping[str, str]) -> dict[str, object]:
     }
 
 
-def receipt_withheld(env: Mapping[str, str]) -> bool:
-    """A quick pull-request run verified less than main would, so main reruns it."""
-    selection = env.get("VERIFICATION_SELECTION", "")
-    if not (selection.startswith("|valid:v3|") and selection.endswith("|complete|")):
-        raise ReceiptError("receipt input VERIFICATION_SELECTION is invalid")
-    return "|pr_quick|" in selection
-
-
 def encode_receipt(receipt: dict[str, object]) -> str:
     raw = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
     return base64.b64encode(raw).decode("ascii")
@@ -86,12 +82,6 @@ def encode_receipt(receipt: dict[str, object]) -> str:
 
 def main() -> int:
     try:
-        if receipt_withheld(os.environ):
-            print(
-                "verification receipt: withheld; this quick pull-request run "
-                "is not main's verification, so main runs its own"
-            )
-            return 0
         receipt = build_receipt(os.environ)
     except ReceiptError as exc:
         print(f"verification receipt: {exc}", file=sys.stderr)

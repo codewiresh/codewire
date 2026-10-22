@@ -57,13 +57,10 @@ declare -A expected=(
 if [ "$superseded" = true ]; then
   echo 'superseded main commit: no capability group is dispatched' >&2
 elif [ "$tested_tree_receipt" = fallback ]; then
-  # A hosted pull request's quick selection (pr_quick) runs only the quick
-  # families it names. Artifact facts dispatch nothing there: the CW release
-  # assets and desktop package run on main, or on a pull request labelled
-  # ci-full. A scheduled run (scheduled) checks Kind alone,
-  # which the pushes to main may defer; they ran the artifact groups.
+  # A scheduled run (scheduled) checks Kind alone, which the pushes to main may
+  # defer; they ran the artifact groups.
   artifact_groups=true
-  if selected pr_quick || selected scheduled; then
+  if selected scheduled; then
     artifact_groups=false
   fi
   # Each group is expected exactly when one of its job's verification steps
@@ -87,9 +84,9 @@ elif [ "$tested_tree_receipt" = fallback ]; then
     expected[tooling]=true
   fi
   # Compiling every Rust target: the fast-compile token set and the desktop
-  # package, or a quick selection's rust_compile.
+  # package.
   if selected_any rust rust_curated_locks transport transport_derp_contract \
-      || [ "$desktop_package" = true ] || selected rust_compile; then
+      || [ "$desktop_package" = true ]; then
     expected[rust_compile]=true
   fi
   # The packages and feature-graph shards run only selected Rust or transport.
@@ -120,8 +117,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   for token in "${selection_tokens[@]}"; do
     case "$token" in
       ''|valid:v3|complete|\
-      policy|policy_shell|policy_shell_omittable|ci_script_tests|ci_script_tests_omittable|\
-      pr_quick|scheduled|rust_compile|\
+      policy|policy_shell|policy_shell_omittable|ci_script_tests|ci_script_tests_omittable|scheduled|\
       contracts|contracts_proto|go_support|go_tailnet|go_consumer_interop|\
       sdk_go|sdk_ts|sdk_python|web|docs|ios|\
       deploy|release|runtime_confidential|runtime_dev_smoke|\

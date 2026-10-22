@@ -32,6 +32,7 @@ def environment() -> dict[str, str]:
         "CODEWIRE_BASE_COMMIT": BASE,
         "CODEWIRE_HEAD_COMMIT": HEAD,
         "CODEWIRE_HEAD_TREE": TREE,
+        "VERIFICATION_SELECTION": "|valid:v3|policy|policy_shell_omittable|complete|",
     }
 
 
@@ -60,24 +61,17 @@ class ReceiptEmitterTests(unittest.TestCase):
         with self.assertRaisesRegex(emitter.ReceiptError, "GITHUB_RUN_ATTEMPT"):
             emitter.build_receipt(env)
 
-    def test_quick_pull_request_selection_withholds_the_receipt(self) -> None:
-        env = environment()
-        env["VERIFICATION_SELECTION"] = (
-            "|valid:v3|policy|policy_shell_omittable|pr_quick|rust_compile|complete|"
-        )
-        self.assertTrue(emitter.receipt_withheld(env))
-
-    def test_complete_selection_keeps_the_receipt(self) -> None:
+    def test_a_pull_request_selection_keeps_the_receipt(self) -> None:
         env = environment()
         env["VERIFICATION_SELECTION"] = "|valid:v3|policy|rust|rust_pkg_codewire_cli|complete|"
-        self.assertFalse(emitter.receipt_withheld(env))
+        self.assertEqual(emitter.build_receipt(env)["event"], "pull_request")
 
     def test_missing_or_malformed_selection_is_fatal(self) -> None:
         for selection in ("", "|valid:v3|policy|", "policy|complete|"):
             env = environment()
             env["VERIFICATION_SELECTION"] = selection
             with self.assertRaisesRegex(emitter.ReceiptError, "VERIFICATION_SELECTION"):
-                emitter.receipt_withheld(env)
+                emitter.build_receipt(env)
 
     def test_workflow_head_must_match_receipt_head(self) -> None:
         env = environment()

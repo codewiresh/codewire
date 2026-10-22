@@ -269,10 +269,9 @@ push cancels an older one, queued or building, once two newer deliveries are
 building or once its own `main` CI can no longer verify it, but never one
 that has started publishing, so a cancelled run never signs or dispatches
 (owner, 2026-10-21, cited on infra#1594; #2892).
-Pull-request CI runs only the quick checks (selection, policy, compiling every
-Rust target); `main` runs the full verification after merge. Label the pull
-request `ci-full` to run that full verification, Kind included, on the pull
-request when such a hosted-only claim needs it.
+Pull-request CI runs every family the change's paths select, as `main` does,
+except Kind. Label the pull request `ci-full` to add Kind when a hosted-only
+claim needs it.
 
 Temporary rule (owner decision, 2026-10-20): a push to `main` runs no Kind and
 no release dry run. Both still run on a dispatched release candidate, on a pull

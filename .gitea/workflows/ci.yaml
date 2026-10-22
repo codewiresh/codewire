@@ -68,10 +68,8 @@ env:
 # A canonical squash whose tree exactly matches a fully green PR head emits
 # empty matrices. Receipt-control changes always take the full path, and every
 # rejected receipt falls back to the ordinary selected suite.
-# A pull request runs only the quick families (policy, ShellCheck and
-# compiling every Rust target, plus Kind when opted in) unless it carries the
-# ci-full label, which runs what a push to main would, with Kind. A quick run
-# emits no receipt, so main verifies that change in full after merge.
+# A pull request runs every family its paths select, as a push to main does,
+# except Kind, which it runs only with the ci-full label (#3119 step 2.1).
 # Temporarily (owner decision 2026-10-20) a push to main runs no Kind while
 # scripts/ci/select/main-push-switch.sh says so. Kind still runs on a
 # dispatched release candidate, on a ci-full pull request, and on the
@@ -165,10 +163,6 @@ jobs:
           PUSH_AFTER_SHA: ${{ github.sha }}
           SCHEDULE_BASELINE_SHA: ${{ steps.schedule-baseline.outputs.schedule_baseline }}
           VERIFICATION_REQUEST: ${{ github.event.inputs.verification }}
-          # Hosted pull-request CI selects the quick families unless the pull
-          # request carries ci-full. Pushes and dispatches ignore it, and local
-          # merge qualification leaves it unset.
-          VERIFICATION_PR_SCOPE: quick
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           # A push to main reads whether its previous main run verified that
           # commit (plan-main-push.py); no other event receives the token here.

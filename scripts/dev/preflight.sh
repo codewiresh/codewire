@@ -337,11 +337,10 @@ else
   printf '  (no changed paths)\n'
 fi
 
-# Local qualification always takes the complete selection, Kind included,
-# never hosted CI's quick pull-request scope; merge-gate.tsv then decides
-# which selected families run before merge.
+# Local qualification always takes the complete selection, Kind included;
+# merge-gate.tsv then decides which selected families run before merge.
 selector_output="$(
-  env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u VERIFICATION_PR_SCOPE \
+  env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
     GITHUB_EVENT_NAME=pull_request KIND_E2E_OPT_IN=true \
     "$SELECTOR" "$PREFLIGHT_CHANGED_PATHS"
 )"
@@ -765,7 +764,7 @@ delta_selection() {
     output=all
   else
     output="$(
-      env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u VERIFICATION_PR_SCOPE \
+      env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
         GITHUB_EVENT_NAME=pull_request KIND_E2E_OPT_IN=true \
         "$SELECTOR" "$paths" 2>/dev/null
     )" || output=''

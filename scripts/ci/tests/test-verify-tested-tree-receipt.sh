@@ -64,16 +64,6 @@ emitter_head="$(git -C "$repo" rev-parse HEAD)"
 emitter_tree="$(git -C "$repo" rev-parse 'HEAD^{tree}')"
 emitter_merge="$(printf 'emitter squash\n' | git -C "$repo" commit-tree "$emitter_tree" -p "$base_sha")"
 
-# A quick pull-request run's Required verification log: the real emitter's
-# output for a quick selection, which carries no receipt.
-withheld_log="$(env -i PATH="$PATH" GITHUB_EVENT_NAME=pull_request \
-  VERIFICATION_SELECTION='|valid:v3|policy|policy_shell_omittable|pr_quick|rust_compile|complete|' \
-  python3 -I -B "$ROOT/scripts/ci/receipts/emit-verification-receipt.py")"
-[[ "$withheld_log" == 'verification receipt: withheld;'* ]] || {
-  echo 'quick pull-request run did not withhold its receipt' >&2
-  exit 1
-}
-
 git init -q --bare "$remote"
 git -C "$remote" config maintenance.autoDetach false
 git -C "$remote" config gc.autoDetach false
@@ -197,9 +187,6 @@ case "$url" in
       missing_receipt)
         body='required verification completed without a receipt'
         ;;
-      quick_withheld)
-        body="2026-01-01T00:00:00Z ${FIXTURE_WITHHELD_LOG}"
-        ;;
       duplicate_receipt)
         body="CODEWIRE_CI_VERIFICATION_RECEIPT=${FIXTURE_RECEIPT_B64}
 CODEWIRE_CI_VERIFICATION_RECEIPT=${FIXTURE_RECEIPT_B64}"
@@ -253,7 +240,6 @@ run_case() {
       FIXTURE_BASE_SHA="$base_sha" \
       FIXTURE_PR_NUMBER="$pr" \
       FIXTURE_RECEIPT_B64="$receipt_b64" \
-      FIXTURE_WITHHELD_LOG="$withheld_log" \
       GITEA_TOKEN=fixture-token \
       GITHUB_EVENT_NAME=push \
       GITHUB_REF=refs/heads/main \
@@ -301,13 +287,6 @@ run_case missing_required fallback "$good_merge" 42 "$tested_head" missing_requi
 run_case required_failed fallback "$good_merge" 42 "$tested_head" required_failed
 run_case required_skipped fallback "$good_merge" 42 "$tested_head" required_skipped
 run_case missing_receipt fallback "$good_merge" 42 "$tested_head" missing_receipt
-# A green quick pull-request run never lets main skip its own verification.
-run_case quick_run_withheld fallback "$good_merge" 42 "$tested_head" quick_withheld
-grep -Fq 'full main verification required (verification-receipt-count-invalid)' \
-  "$TMP/quick_run_withheld.log" || {
-  echo 'quick pull-request run fell back for the wrong reason' >&2
-  exit 1
-}
 run_case duplicate_receipt fallback "$good_merge" 42 "$tested_head" duplicate_receipt
 run_case receipt_mismatch fallback "$good_merge" 42 "$tested_head" receipt_mismatch
 run_case control_self_certification fallback "$control_merge" 43 "$control_head" success

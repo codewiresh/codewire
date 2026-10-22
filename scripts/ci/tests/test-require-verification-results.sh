@@ -87,10 +87,10 @@ env "${green_results[@]}" \
   VERIFICATION_TESTED_TREE_RUN=501 \
   "$CHECK" >/dev/null
 
-# A hosted quick pull request passes with only its quick groups: the policy
-# core, ShellCheck in tooling and compiling every Rust target. Every other
-# group is unselected and must stay skipped.
-quick_results=(
+# A run passes with only its dispatched groups, here the policy core,
+# ShellCheck in tooling and compiling every Rust target. Every other group is
+# unselected and must stay skipped.
+partial_results=(
   "${unselected_results[@]}"
   VERIFICATION_POLICY_EXPECTED=true
   VERIFICATION_POLICY_RESULT=success
@@ -99,21 +99,21 @@ quick_results=(
   VERIFICATION_RUST_COMPILE_EXPECTED=true
   VERIFICATION_RUST_COMPILE_RESULT=success
 )
-quick_selection='|valid:v3|policy|policy_shell|policy_shell_omittable|pr_quick|rust_compile|complete|'
-env "${green_results[@]}" "${quick_results[@]}" \
-  VERIFICATION_SELECTION="$quick_selection" \
+partial_selection='|valid:v3|policy|policy_shell|policy_shell_omittable|rust|complete|'
+env "${green_results[@]}" "${partial_results[@]}" \
+  VERIFICATION_SELECTION="$partial_selection" \
   "$CHECK" >/dev/null
 
-expect_failure quick_compile_skipped \
+expect_failure partial_compile_skipped \
   'rust-compile selected capability group concluded skipped' \
-  "${quick_results[@]}" \
-  VERIFICATION_SELECTION="$quick_selection" \
+  "${partial_results[@]}" \
+  VERIFICATION_SELECTION="$partial_selection" \
   VERIFICATION_RUST_COMPILE_RESULT=skipped
 
-expect_failure quick_rust_tests_ran \
+expect_failure partial_rust_tests_ran \
   'rust-transport unselected capability group concluded success' \
-  "${quick_results[@]}" \
-  VERIFICATION_SELECTION="$quick_selection" \
+  "${partial_results[@]}" \
+  VERIFICATION_SELECTION="$partial_selection" \
   VERIFICATION_RUST_TRANSPORT_RESULT=success
 
 # Curated locks alone run Rust / transport verification without the shards.
