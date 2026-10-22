@@ -271,9 +271,11 @@ regorus = { git = "https://github.com/microsoft/regorus", rev = "898643129e3652e
 # Embedded web browser
 wry = "0.54"
 
+# The cw CLI release assets and the release tools. Thin LTO with the default
+# codegen units builds faster than fat LTO with one unit, for a bigger cw
+# (owner, 2026-10-22: "use thin lto"; 2026-10-15: "bigger cw is FINE").
 [profile.release]
-lto = true
-codegen-units = 1
+lto = "thin"
 strip = true
 
 # The one profile every image builds, for Kind, Dev and Production alike:
