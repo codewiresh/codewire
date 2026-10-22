@@ -289,7 +289,12 @@ async fn challenge_target(
         &challenge.host,
     )
     .await
-    .map_err(|_| invalid())?
+    // A database failure is transient: answer 503 so the browser may retry,
+    // not 400, which tells it the challenge itself is bad (#2315).
+    .map_err(|error| match error {
+        super::PreviewHostError::Internal => unavailable(),
+        super::PreviewHostError::Invalid | super::PreviewHostError::NotFound => invalid(),
+    })?
     .ok_or_else(invalid)?;
     let target = super::resolve_preview_target(state.pool, &matched).await?;
     if matched.org_id != challenge.organization_id
@@ -759,6 +764,39 @@ mod tests {
         }
         assert!(!product.contains("gradient"));
         assert!(!fixture.contains("gradient"));
+    }
+
+    // A database failure while resolving a challenge's host is transient, so the
+    // callback answers 503 and the browser may retry. A 400 would tell it to
+    // reopen the preview, as if the challenge itself were invalid (#2315).
+    #[tokio::test]
+    async fn challenge_target_reports_a_database_failure_as_unavailable() {
+        // Nothing listens on port 1: every query fails to acquire a connection.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://synthetic:synthetic@127.0.0.1:1/synthetic")
+            .unwrap();
+        let context = PreviewContext {
+            pool: &pool,
+            preview_base_domain: "preview.test",
+            frontend_url: "https://dashboard.test",
+            session_secret: "synthetic-key",
+            confidential_storage_flags: crate::confidential_storage::FeatureFlags {
+                enabled: false,
+                admin_only: true,
+            },
+            org_slugs: zero_ttl_org_slugs(),
+        };
+        let challenge = Challenge {
+            id: "00000000-0000-4000-8000-000000000001".to_string(),
+            organization_id: "org-synthetic".to_string(),
+            environment_id: "env-synthetic".to_string(),
+            port_id: "port-synthetic".to_string(),
+            host: "web-abcde-acme.preview.test".to_string(),
+            return_path: "/".to_string(),
+        };
+        let response = challenge_target(&context, &challenge).await.unwrap_err();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
