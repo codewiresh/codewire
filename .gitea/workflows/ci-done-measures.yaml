@@ -1,0 +1,82 @@
+# zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this read-only measurement has no secret, OIDC or write-capable integration.
+name: CI done measures
+
+# Dispatch only. Computes the CI Program's "Done when" measures (#3144) over one
+# bounded window of this repository's retained Actions records: pull-request,
+# main CI and merge-to-Dev speed, the main CI first-attempt pass rate and the
+# Dev smoke pass rate. It only reads, with the job's own token, and reads merge
+# ancestry from its own full checkout. scripts/ci/measure/README.md describes
+# the collector. The Lite pool stops a task after 20 minutes: if a window does
+# not fit, dispatch shorter windows one after another.
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: Window start, UTC, e.g. 2026-10-31T00:00:00Z
+        required: true
+        type: string
+      until:
+        description: Window end, UTC, after since and at most 31 days later
+        required: true
+        type: string
+
+jobs:
+  measure:
+    # zizmor: ignore[excessive-permissions] This job has no OIDC or secret; its job token only reads this repository's Actions records.
+    name: Measure CI done
+    runs-on: ci-lite
+    timeout-minutes: 20
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          # Merge-to-Dev reads ancestry between merges and deployed sources.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Collect the window
+        env:
+          SINCE: ${{ inputs.since }}
+          UNTIL: ${{ inputs.until }}
+          # Read only by the collector, which never prints it.
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/ci-done-measures"
+          mkdir -p "$output"
+          python3 -I -B scripts/ci/measure/ci-done-measures collect \
+            --since "$SINCE" --until "$UNTIL" --git-dir "$GITHUB_WORKSPACE/.git" \
+            > "$output/rows.jsonl"
+          echo "rows: $(wc -l < "$output/rows.jsonl")"
+
+      - name: Summarize the measures
+        env:
+          SINCE: ${{ inputs.since }}
+          UNTIL: ${{ inputs.until }}
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/ci-done-measures"
+          python3 -I -B scripts/ci/measure/ci-done-measures summary \
+            < "$output/rows.jsonl" > "$output/summary.json"
+          echo "window: $SINCE to $UNTIL"
+          python3 -I -B -m json.tool --sort-keys "$output/summary.json"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              printf '## CI done measures (#3144), %s to %s\n\n```json\n' "$SINCE" "$UNTIL"
+              python3 -I -B -m json.tool --sort-keys "$output/summary.json"
+              printf '```\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # The rows in the log too, so `fj actions runs logs` can read them
+          # without the artifact API's token. They hold run IDs, commits,
+          # statuses and timings, never a credential or a payload.
+          echo "::group::rows.jsonl"
+          cat "$output/rows.jsonl"
+          echo "::endgroup::"
+
+      - name: Upload rows and summary
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: ci-done-measures-${{ github.run_id }}
+          path: ${{ runner.temp }}/ci-done-measures/
+          if-no-files-found: error
+          retention-days: 30

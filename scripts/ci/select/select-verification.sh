@@ -649,6 +649,7 @@ if [ "$event_selected" = false ]; then
     case "$path" in
       .gitea/workflows/ci.yaml|.gitea/workflows/manual-diagnostics.yaml|\
       .gitea/workflows/ci-start-latency.yaml|\
+      .gitea/workflows/ci-done-measures.yaml|\
       .gitea/workflows/rust-latest-canary.yaml|\
       .gitea/workflows/rust-cache-refresh.yaml|\
       .gitea/workflows/connect-apikey-smoke.yaml|\
@@ -677,6 +678,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/select/main-push-switch.sh|\
       scripts/ci/select/last-scheduled-run.py|\
       scripts/ci/tests/test-last-scheduled-run.py|\
+      scripts/ci/tests/test-ci-done-measures.py|\
       scripts/ci/receipts/local-prepush-receipt.py|\
       scripts/ci/receipts/emit-verification-receipt.py|\
       scripts/ci/receipts/verify-tested-tree-receipt.sh|\

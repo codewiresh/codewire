@@ -1,0 +1,617 @@
+#!/usr/bin/env python3
+"""Read-only measures for the CI Program's "Done when" (#3144) over one window.
+
+`collect` reads this repository's retained Actions records and prints one JSONL
+row per measured item:
+- each pull-request head pushed in the window;
+- each main-push `ci.yaml` run;
+- each Dev deployment smoke receipt;
+- each merge to main and the first passing Dev smoke receipt that delivers it.
+`summary` reduces the rows to the measures exactly as #3144 defines them, with
+each threshold and whether it holds.
+
+Requests are GET-only against fixed allowlisted Forgejo paths. Event payloads
+are read only for labels, the dispatch inputs and the pull-request number. No
+token, response body or payload is printed, and every failure is a fixed
+message. Merge ancestry is read from a local Git checkout (`--git-dir`), which
+the caller fetches first.
+
+The definitions (#3144, "Done when"):
+- Speed, ordinary pull requests (no `ci-full` label): from the push that set
+  the head to the last required check finishing, queue time included. p50 must
+  be at most 5 min and p95 at most 10 min. `ci-full` heads are reported apart
+  and not counted.
+- Speed, main CI: a main-push `ci.yaml` run from creation to stop. p50 must be
+  at most 10 min.
+- Speed, merge to Dev: from the push to main to the first passing Dev smoke
+  receipt whose deployed source contains that merge. p50 must be at most
+  15 min.
+- Green, main CI: at least 95% of main CI runs pass on the first attempt. Only
+  runs that verified count. Skipped and superseded runs are excluded from both
+  numerator and denominator and reported apart, and a pass after a rerun is not
+  a first-attempt pass.
+- Green, Dev smoke: at least 95% of deploy-owned smoke results pass (#3132).
+"""
+
+import argparse
+import json
+import math
+import os
+import re
+import ssl
+import stat
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+API = "https://git.example.invalid/api/v1"
+REPOSITORY = "codewire/codewire"
+MAX_WINDOW = timedelta(days=31)
+# Receipts and reruns that finish after the window still count for what the
+# window started.
+SETTLE = timedelta(hours=24)
+RUN_PAGE_LIMIT = 50
+MAX_RUN_PAGES = 400
+JOB_PAGE_LIMIT = 100
+MAX_JSON_BYTES = 16 * 1024 * 1024
+MAX_STEPS = 200
+TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,255}$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+WORKFLOW_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}\.ya?ml$")
+REPO = r"(?:codewire/codewire)"
+EVENTS = r"(?:push|pull_request|pull_request_target|workflow_dispatch)"
+PATHS = {
+    "runs": re.compile(
+        rf"^/repos/{REPO}/actions/runs\?event={EVENTS}"
+        rf"&page=[1-9][0-9]{{0,2}}&limit={RUN_PAGE_LIMIT}$"),
+    "jobs": re.compile(
+        rf"^/repos/{REPO}/actions/runs/[1-9][0-9]{{0,11}}/jobs\?page=1&limit={JOB_PAGE_LIMIT}$"),
+    "job": re.compile(rf"^/repos/{REPO}/actions/jobs/[1-9][0-9]{{0,11}}$"),
+}
+MAIN_WORKFLOW = "ci.yaml"
+RECEIPT_WORKFLOW = "dev-deployment-smoke-receipt.yaml"
+CI_FULL_LABEL = "ci-full"
+# The required statuses #3119 step 2 turns on (G9): workflow file and job name.
+DEFAULT_REQUIRED = ("ci.yaml:Required verification", "source-approval.yml:Supply-chain scan")
+TERMINAL = {"success", "failure", "cancelled", "skipped"}
+FINISHED = {"success", "failure", "skipped"}
+# Pull-request events that push a head; a labeled run never sets one.
+PUSH_ACTIONS = {"opened", "synchronize", "synchronized", "reopened"}
+THRESHOLDS = {
+    "pr_ordinary_p50_s": 300, "pr_ordinary_p95_s": 600,
+    "main_ci_p50_s": 600, "merge_to_dev_p50_s": 900,
+    "main_ci_first_attempt_rate": 0.95, "dev_smoke_pass_rate": 0.95,
+}
+
+
+class CollectorFailure(RuntimeError):
+    """A value-blind collector failure."""
+
+
+def parse_time(value: Any) -> datetime | None:
+    """Forgejo times; its zero time and empty values mean "not set"."""
+    if value in (None, "") or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise CollectorFailure("Forgejo returned a malformed timestamp") from error
+    if parsed.tzinfo is None:
+        raise CollectorFailure("Forgejo returned a timestamp without a zone")
+    if parsed.year < 2000:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def parse_window(value: str, name: str) -> datetime:
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", value):
+        raise CollectorFailure(f"{name} must be a UTC time like 2026-10-31T00:00:00Z")
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as error:
+        raise CollectorFailure(f"{name} is not a valid UTC time") from error
+
+
+def iso(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat().replace("+00:00", "Z")
+
+
+def seconds(start: datetime | None, end: datetime | None) -> float | None:
+    # A negative interval is unknown, never zero.
+    if start is None or end is None or end < start:
+        return None
+    return round((end - start).total_seconds(), 3)
+
+
+def positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def read_token(token_file: str | None, environ: dict[str, str]) -> str:
+    if token_file is not None:
+        try:
+            info = os.lstat(token_file)
+        except OSError as error:
+            raise CollectorFailure("token file is unreadable") from error
+        if not stat.S_ISREG(info.st_mode):
+            raise CollectorFailure("token file must be a regular file, not a link")
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise CollectorFailure("token file must be owned by the caller with mode 0600")
+        if info.st_size > 4096:
+            raise CollectorFailure("token file exceeds the bounded size")
+        try:
+            value = Path(token_file).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError) as error:
+            raise CollectorFailure("token file is unreadable") from error
+    elif environ.get("CI") == "true":
+        value = (environ.get("GITEA_TOKEN") or environ.get("FORGEJO_TOKEN") or "").strip()
+    else:
+        raise CollectorFailure("pass --token-file, or run in a Forgejo job with its job token")
+    if not TOKEN_RE.fullmatch(value):
+        raise CollectorFailure("token has an invalid shape")
+    return value
+
+
+def http_transport(token: str) -> Callable[[str, str], tuple[int, bytes]]:
+    context = ssl.create_default_context()
+
+    def transport(kind: str, path: str) -> tuple[int, bytes]:
+        request = urllib.request.Request(
+            f"{API}{path}",
+            headers={"Accept": "application/json", "Authorization": f"token {token}",
+                     "User-Agent": "codewire-ci-done-measures/1"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, context=context, timeout=30) as response:
+                payload = response.read(MAX_JSON_BYTES + 1)
+                if len(payload) > MAX_JSON_BYTES:
+                    raise CollectorFailure("Forgejo response exceeded the bounded size")
+                return response.status, payload
+        except urllib.error.HTTPError as error:
+            error.close()
+            return error.code, b""
+        except (OSError, urllib.error.URLError) as error:
+            raise CollectorFailure(f"Forgejo {kind} transport failed") from error
+
+    return transport
+
+
+class Forgejo:
+    """GET-only client bound to the allowlisted read paths."""
+
+    def __init__(self, transport: Callable[[str, str], tuple[int, bytes]]) -> None:
+        self.transport = transport
+        self.requests = 0
+
+    def get_json(self, kind: str, path: str) -> Any:
+        if PATHS[kind].fullmatch(path) is None:
+            raise CollectorFailure(f"refusing Forgejo {kind} path outside the read allowlist")
+        self.requests += 1
+        code, payload = self.transport(kind, path)
+        if code != 200:
+            raise CollectorFailure(f"Forgejo {kind} read returned HTTP {code}")
+        try:
+            return json.loads(payload)
+        except (TypeError, ValueError) as error:
+            raise CollectorFailure(f"Forgejo {kind} returned malformed JSON") from error
+
+
+def list_runs(forgejo: Forgejo, event: str, since: datetime, until: datetime) -> list[dict]:
+    """Runs of one event created in [since, until), newest pages first."""
+    runs: dict[int, dict] = {}
+    for page in range(1, MAX_RUN_PAGES + 1):
+        document = forgejo.get_json(
+            "runs", f"/repos/{REPOSITORY}/actions/runs?event={event}&page={page}&limit={RUN_PAGE_LIMIT}")
+        items = document.get("workflow_runs") if isinstance(document, dict) else None
+        if not isinstance(items, list) or len(items) > RUN_PAGE_LIMIT:
+            raise CollectorFailure("run list response had an invalid shape")
+        oldest = None
+        for run in items:
+            if not isinstance(run, dict) or not positive_int(run.get("id")):
+                raise CollectorFailure("run list item had an invalid shape")
+            created = parse_time(run.get("created"))
+            if created is None:
+                raise CollectorFailure("run list item had no creation time")
+            oldest = created if oldest is None else min(oldest, created)
+            # The filter is server-side; keep only what it promised. A
+            # pull_request_target run reports the webhook event pull_request and
+            # its trigger_event, so either may carry the requested event.
+            if event not in {run.get("event"), run.get("trigger_event")} or not since <= created < until:
+                continue
+            runs[run["id"]] = run
+        if len(items) < RUN_PAGE_LIMIT or (oldest is not None and oldest < since):
+            return sorted(runs.values(), key=lambda run: run["id"])
+    raise CollectorFailure("run list exceeded the bounded pagination limit")
+
+
+def payload_of(run: dict) -> dict:
+    """The run's event payload as an object; never echoed."""
+    raw = run.get("event_payload")
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def run_jobs(forgejo: Forgejo, run_id: int) -> list[dict]:
+    document = forgejo.get_json(
+        "jobs", f"/repos/{REPOSITORY}/actions/runs/{run_id}/jobs?page=1&limit={JOB_PAGE_LIMIT}")
+    if isinstance(document, dict) and isinstance(document.get("jobs"), list):
+        document = document["jobs"]
+    if not isinstance(document, list) or len(document) >= JOB_PAGE_LIMIT:
+        raise CollectorFailure("run job list had an invalid or unbounded shape")
+    for job in document:
+        if (not isinstance(job, dict) or not positive_int(job.get("id"))
+                or job.get("run_id", run_id) != run_id):
+            raise CollectorFailure("run job item had an invalid identity")
+    return document
+
+
+def job_stopped(forgejo: Forgejo, job_id: int) -> datetime | None:
+    """When the job's latest attempt stopped: its last step's stop time."""
+    document = forgejo.get_json("job", f"/repos/{REPOSITORY}/actions/jobs/{job_id}")
+    if not isinstance(document, dict) or document.get("id") != job_id:
+        raise CollectorFailure("job response had an invalid identity")
+    stopped = parse_time(document.get("stopped"))
+    steps = document.get("steps") or []
+    if not isinstance(steps, list) or len(steps) > MAX_STEPS:
+        raise CollectorFailure("job steps had an invalid shape")
+    times = [parse_time(step.get("stopped")) for step in steps if isinstance(step, dict)]
+    times = [time for time in times if time is not None]
+    candidates = ([stopped] if stopped is not None else []) + times
+    return max(candidates) if candidates else None
+
+
+def pull_number(run: dict, payload: dict) -> int | None:
+    pull = payload.get("pull_request")
+    if isinstance(pull, dict) and positive_int(pull.get("number")):
+        return pull["number"]
+    if positive_int(payload.get("number")):
+        return payload["number"]
+    match = re.fullmatch(r"(?:#|refs/pull/)([1-9][0-9]{0,8})(?:/head)?", str(run.get("prettyref") or ""))
+    return int(match.group(1)) if match else None
+
+
+def payload_labels(payload: dict) -> set[str]:
+    pull = payload.get("pull_request")
+    labels = pull.get("labels") if isinstance(pull, dict) else None
+    names = {label.get("name") for label in labels or [] if isinstance(label, dict)}
+    return {name for name in names if isinstance(name, str)}
+
+
+def parse_required(values: list[str]) -> list[tuple[str, str]]:
+    required = []
+    for value in values:
+        workflow, separator, job = value.partition(":")
+        if not separator or not WORKFLOW_RE.fullmatch(workflow) or not job or len(job) > 200:
+            raise CollectorFailure("a required check must be WORKFLOW_FILE:JOB_NAME")
+        required.append((workflow, job))
+    if not required:
+        raise CollectorFailure("at least one required check is needed")
+    return required
+
+
+def pull_request_rows(forgejo: Forgejo, since: datetime, until: datetime,
+                      required: list[tuple[str, str]]) -> list[dict]:
+    runs = {}
+    # Earlier runs find the true push of a head first seen in the window.
+    for event in ("pull_request", "pull_request_target"):
+        for run in list_runs(forgejo, event, since - SETTLE, until + SETTLE):
+            runs[run["id"]] = run
+    heads: dict[tuple[int, str], list[dict]] = {}
+    for run in runs.values():
+        sha = run.get("commit_sha")
+        payload = payload_of(run)
+        number = pull_number(run, payload)
+        if not isinstance(sha, str) or not SHA_RE.fullmatch(sha) or number is None:
+            continue
+        heads.setdefault((number, sha), []).append({"run": run, "payload": payload})
+    rows = []
+    for (number, sha), members in sorted(heads.items()):
+        # Only the runs a push started measure that push; ci.yaml also runs on
+        # labeled, unlabeled and closed events, which never set a head.
+        pushes = [member for member in members if member["payload"].get("action") in PUSH_ACTIONS]
+        if not pushes:
+            continue
+        pushed = min(parse_time(member["run"]["created"]) for member in pushes)
+        # A head belongs to the window its push fell in.
+        if not since <= pushed < until:
+            continue
+        # A ci-full run is one the label was on when the push started it.
+        ci_full = any(CI_FULL_LABEL in payload_labels(member["payload"]) for member in pushes)
+        checks = {}
+        for workflow, job_name in required:
+            # The latest run of the workflow for this head decides its status.
+            candidates = [member["run"] for member in pushes if member["run"].get("workflow_id") == workflow]
+            if not candidates:
+                checks[f"{workflow}:{job_name}"] = {"status": "missing", "stopped": None}
+                continue
+            run = max(candidates, key=lambda run: (parse_time(run["created"]), run["id"]))
+            job = next((job for job in run_jobs(forgejo, run["id"]) if job.get("name") == job_name), None)
+            if job is None:
+                checks[f"{workflow}:{job_name}"] = {"status": "missing", "stopped": None}
+                continue
+            status = job.get("status")
+            stopped = job_stopped(forgejo, job["id"]) if status in TERMINAL else None
+            if stopped is None and status == "skipped":
+                # A skipped job has no steps; it resolved when its run stopped.
+                stopped = parse_time(run.get("stopped"))
+            checks[f"{workflow}:{job_name}"] = {
+                "status": status if isinstance(status, str) else "unknown",
+                "stopped": iso(stopped), "attempt": job.get("attempt"), "run_id": run["id"]}
+        statuses = {check["status"] for check in checks.values()}
+        if statuses <= FINISHED and all(check["stopped"] for check in checks.values()):
+            outcome = "finished"
+            finished = max(parse_time(check["stopped"]) for check in checks.values())
+        elif "cancelled" in statuses:
+            outcome = "superseded"
+            finished = None
+        else:
+            outcome = "unfinished"
+            finished = None
+        rows.append({
+            "schema_version": 1, "kind": "pull_request_head", "pull_request": number, "head_sha": sha,
+            "ci_full": ci_full, "pushed_at": iso(pushed), "finished_at": iso(finished),
+            "seconds": seconds(pushed, finished), "outcome": outcome,
+            "passed": outcome == "finished" and "failure" not in statuses, "checks": checks,
+        })
+    return rows
+
+
+def main_ci_rows(forgejo: Forgejo, since: datetime, until: datetime) -> list[dict]:
+    rows = []
+    for run in list_runs(forgejo, "push", since, until):
+        if run.get("workflow_id") != MAIN_WORKFLOW or run.get("prettyref") not in {"main", "refs/heads/main"}:
+            continue
+        status = run.get("status")
+        created, stopped = parse_time(run.get("created")), parse_time(run.get("stopped"))
+        if status == "skipped":
+            category = "skipped"
+        elif status == "cancelled":
+            category = "superseded"
+        elif status in {"success", "failure"}:
+            category = "verified"
+        else:
+            category = "unfinished"
+        first_attempt_pass = None
+        if category == "verified":
+            jobs = run_jobs(forgejo, run["id"])
+            rerun = any(positive_int(job.get("attempt")) and job["attempt"] > 1 for job in jobs)
+            first_attempt_pass = status == "success" and not rerun
+        rows.append({
+            "schema_version": 1, "kind": "main_ci", "run_id": run["id"], "sha": run.get("commit_sha"),
+            "created_at": iso(created), "stopped_at": iso(stopped), "status": status,
+            "category": category, "seconds": seconds(created, stopped) if category == "verified" else None,
+            "first_attempt_pass": first_attempt_pass,
+        })
+    return rows
+
+
+def receipt_rows(forgejo: Forgejo, since: datetime, until: datetime) -> list[dict]:
+    rows = []
+    for run in list_runs(forgejo, "workflow_dispatch", since, until + SETTLE):
+        if run.get("workflow_id") != RECEIPT_WORKFLOW:
+            continue
+        inputs = payload_of(run).get("inputs")
+        inputs = inputs if isinstance(inputs, dict) else {}
+        source = inputs.get("source_sha")
+        smoke = inputs.get("smoke_status")
+        status = run.get("status")
+        rows.append({
+            "schema_version": 1, "kind": "dev_smoke_receipt", "run_id": run["id"],
+            "created_at": iso(parse_time(run.get("created"))),
+            "stopped_at": iso(parse_time(run.get("stopped"))), "status": status,
+            "source_sha": source if isinstance(source, str) and SHA_RE.fullmatch(source) else None,
+            "smoke_status": smoke if smoke in {"success", "failure"} else None,
+            # A receipt counts for the window it was created in; later ones
+            # only settle deliveries of merges inside the window.
+            "in_window": since <= parse_time(run.get("created")) < until,
+        })
+    return rows
+
+
+def is_ancestor(git_dir: str, ancestor: str, descendant: str) -> bool | None:
+    result = subprocess.run(
+        ["git", f"--git-dir={git_dir}", "merge-base", "--is-ancestor", ancestor, descendant],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=60, check=False)
+    if result.returncode in (0, 1):
+        return result.returncode == 0
+    return None
+
+
+def delivery_rows(main_rows: list[dict], receipts: list[dict], git_dir: str) -> list[dict]:
+    passing = sorted(
+        (receipt for receipt in receipts
+         if receipt["smoke_status"] == "success" and receipt["status"] == "success"
+         and receipt["source_sha"] and receipt["stopped_at"]),
+        key=lambda receipt: receipt["stopped_at"])
+    rows = []
+    for merge in main_rows:
+        sha = merge["sha"]
+        if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
+            continue
+        merged = parse_time(merge["created_at"])
+        delivered, unknown = None, False
+        for receipt in passing:
+            if parse_time(receipt["stopped_at"]) < merged:
+                continue
+            contains = is_ancestor(git_dir, sha, receipt["source_sha"])
+            if contains is None:
+                unknown = True
+                continue
+            if contains:
+                delivered = receipt
+                break
+        rows.append({
+            "schema_version": 1, "kind": "merge_to_dev", "sha": sha, "merged_at": iso(merged),
+            "receipt_run_id": delivered["run_id"] if delivered else None,
+            "delivered_at": delivered["stopped_at"] if delivered else None,
+            "seconds": seconds(merged, parse_time(delivered["stopped_at"])) if delivered else None,
+            "outcome": "delivered" if delivered else ("unknown" if unknown else "undelivered"),
+        })
+    return rows
+
+
+def collect(arguments, environ, transport_factory=None) -> list[dict]:
+    since, until = parse_window(arguments.since, "since"), parse_window(arguments.until, "until")
+    if not since < until or until - since > MAX_WINDOW:
+        raise CollectorFailure("the window must end after it starts and span at most 31 days")
+    required = parse_required(arguments.required_check or list(DEFAULT_REQUIRED))
+    git_dir = arguments.git_dir
+    if not git_dir or not Path(git_dir).is_dir():
+        raise CollectorFailure("--git-dir must name a fetched Git directory")
+    factory = transport_factory or http_transport
+    forgejo = Forgejo(factory(read_token(arguments.token_file, environ)))
+    rows = pull_request_rows(forgejo, since, until, required)
+    main_rows = main_ci_rows(forgejo, since, until)
+    receipts = receipt_rows(forgejo, since, until)
+    rows += main_rows + receipts + delivery_rows(main_rows, receipts, git_dir)
+    rows.append({"schema_version": 1, "kind": "window", "since": iso(since), "until": iso(until),
+                 "required_checks": [f"{workflow}:{job}" for workflow, job in required],
+                 "requests": forgejo.requests})
+    return rows
+
+
+def percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(fraction * len(ordered)) - 1)]
+
+
+def at_most(value: float | None, limit: float) -> bool | None:
+    return None if value is None else value <= limit
+
+
+def rate(passed: int, total: int) -> float | None:
+    return None if total == 0 else round(passed / total, 4)
+
+
+def summarize(rows: list[dict]) -> dict:
+    by_kind: dict[str, list[dict]] = {}
+    for row in rows:
+        by_kind.setdefault(row.get("kind"), []).append(row)
+    window = (by_kind.get("window") or [{}])[0]
+    heads = by_kind.get("pull_request_head", [])
+
+    def head_speed(ci_full: bool) -> dict:
+        members = [row for row in heads if row["ci_full"] is ci_full]
+        values = [row["seconds"] for row in members if row["outcome"] == "finished" and row["seconds"] is not None]
+        p50, p95 = percentile(values, 0.5), percentile(values, 0.95)
+        entry = {"n": len(values), "p50_s": p50, "p95_s": p95,
+                 "superseded": sum(row["outcome"] == "superseded" for row in members),
+                 "unfinished": sum(row["outcome"] == "unfinished" for row in members)}
+        if not ci_full:
+            entry["holds"] = (None if p50 is None else
+                              at_most(p50, THRESHOLDS["pr_ordinary_p50_s"]) and at_most(p95, THRESHOLDS["pr_ordinary_p95_s"]))
+            entry["thresholds"] = {"p50_s": THRESHOLDS["pr_ordinary_p50_s"], "p95_s": THRESHOLDS["pr_ordinary_p95_s"]}
+        return entry
+
+    main = by_kind.get("main_ci", [])
+    verified = [row for row in main if row["category"] == "verified"]
+    main_seconds = [row["seconds"] for row in verified if row["seconds"] is not None]
+    main_p50 = percentile(main_seconds, 0.5)
+    first = sum(row["first_attempt_pass"] is True for row in verified)
+    first_rate = rate(first, len(verified))
+
+    deliveries = by_kind.get("merge_to_dev", [])
+    delivered = [row["seconds"] for row in deliveries if row["outcome"] == "delivered" and row["seconds"] is not None]
+    dev_p50 = percentile(delivered, 0.5)
+
+    receipts = [row for row in by_kind.get("dev_smoke_receipt", []) if row["in_window"]]
+    results = [row["smoke_status"] or ("success" if row["status"] == "success" else
+                                      "failure" if row["status"] == "failure" else None)
+               for row in receipts]
+    smoke_passed = sum(result == "success" for result in results)
+    smoke_total = sum(result in {"success", "failure"} for result in results)
+    smoke_rate = rate(smoke_passed, smoke_total)
+
+    return {
+        "schema_version": 1, "program": "#3144", "since": window.get("since"), "until": window.get("until"),
+        "required_checks": window.get("required_checks"),
+        "speed": {
+            "pull_requests_ordinary": head_speed(False),
+            "pull_requests_ci_full": head_speed(True),
+            "main_ci": {"n": len(main_seconds), "p50_s": main_p50, "threshold_p50_s": THRESHOLDS["main_ci_p50_s"],
+                        "holds": at_most(main_p50, THRESHOLDS["main_ci_p50_s"])},
+            "merge_to_dev": {"n": len(delivered), "p50_s": dev_p50, "threshold_p50_s": THRESHOLDS["merge_to_dev_p50_s"],
+                             "holds": at_most(dev_p50, THRESHOLDS["merge_to_dev_p50_s"]),
+                             "undelivered": sum(row["outcome"] == "undelivered" for row in deliveries),
+                             "ancestry_unknown": sum(row["outcome"] == "unknown" for row in deliveries)},
+        },
+        "green": {
+            "main_ci_first_attempt": {
+                "verified": len(verified), "first_attempt_passes": first, "rate": first_rate,
+                "threshold": THRESHOLDS["main_ci_first_attempt_rate"],
+                "holds": None if first_rate is None else first_rate >= THRESHOLDS["main_ci_first_attempt_rate"],
+                "excluded_skipped": sum(row["category"] == "skipped" for row in main),
+                "excluded_superseded": sum(row["category"] == "superseded" for row in main),
+                "unfinished": sum(row["category"] == "unfinished" for row in main)},
+            "dev_smoke": {
+                "results": smoke_total, "passes": smoke_passed, "rate": smoke_rate,
+                "threshold": THRESHOLDS["dev_smoke_pass_rate"],
+                "holds": None if smoke_rate is None else smoke_rate >= THRESHOLDS["dev_smoke_pass_rate"],
+                "unknown": len(results) - smoke_total},
+        },
+    }
+
+
+def read_jsonl(stream, limit: int = 200000) -> list[Any]:
+    records = []
+    for number, line in enumerate(stream, 1):
+        if number > limit or len(line) > MAX_JSON_BYTES:
+            raise CollectorFailure("input exceeds the bounded size")
+        if line.strip():
+            try:
+                records.append(json.loads(line))
+            except ValueError as error:
+                raise CollectorFailure("input has a malformed record") from error
+    return records
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(prog="ci-done-measures", description=__doc__.splitlines()[0])
+    commands = root.add_subparsers(dest="command", required=True)
+    collect_command = commands.add_parser("collect", help="read the window's runs into rows")
+    collect_command.add_argument("--since", required=True, help="UTC start, e.g. 2026-10-31T00:00:00Z")
+    collect_command.add_argument("--until", required=True, help="UTC end, at most 31 days later")
+    collect_command.add_argument("--git-dir", required=True, help="a fetched Git directory for merge ancestry")
+    collect_command.add_argument("--token-file", help="mode-0600 file holding a read token")
+    collect_command.add_argument("--required-check", action="append",
+                                 help="WORKFLOW_FILE:JOB_NAME; repeat. Defaults to the #3119 required statuses")
+    commands.add_parser("summary", help="collected rows on stdin to the #3144 measures")
+    return root
+
+
+def main(argv: list[str] | None = None, environ: dict[str, str] | None = None,
+         transport_factory=None) -> int:
+    arguments = parser().parse_args(argv)
+    try:
+        if arguments.command == "collect":
+            output = collect(arguments, dict(os.environ) if environ is None else environ, transport_factory)
+        else:
+            output = [summarize(read_jsonl(sys.stdin))]
+        for record in output:
+            print(json.dumps(record, separators=(",", ":"), sort_keys=True))
+        return 0
+    except CollectorFailure as error:
+        print(f"ci-done-measures: ERROR {error}", file=sys.stderr)
+        return 1
+    except Exception:
+        print("ci-done-measures: ERROR unexpected failure", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

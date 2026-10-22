@@ -789,6 +789,11 @@ run_paths_case ci_start_latency pull_request refs/pull/3030/head false \
   scripts/ci/measure/README.md \
   scripts/ci/measure/forgejo-ci-start-latency \
   scripts/ci/measure/forgejo-ci-start-latency.sha256
+run_paths_case ci_done_measures pull_request refs/pull/3144/head false \
+  'policy security security_js' \
+  .gitea/workflows/ci-done-measures.yaml \
+  scripts/ci/measure/ci-done-measures \
+  scripts/ci/tests/test-ci-done-measures.py
 run_paths_case retired_prod_readonly_smoke pull_request refs/pull/3021/head false \
   'policy security security_js' \
   .gitea/workflows/prod-readonly-smoke.yaml \
@@ -3531,6 +3536,19 @@ grep -qF '    runs-on: ci-lite' "$START_LATENCY_WORKFLOW"
 grep -qF 'run: sha256sum --check --strict forgejo-ci-start-latency.sha256' \
   "$START_LATENCY_WORKFLOW"
 grep -qF 'echo "::group::rows.jsonl"' "$START_LATENCY_WORKFLOW"
+
+# The #3144 done measures are dispatch-only and read with their own job token
+# on the Lite pool, from a full checkout for merge ancestry.
+DONE_MEASURES_WORKFLOW="$ROOT/.gitea/workflows/ci-done-measures.yaml"
+grep -qF '  workflow_dispatch:' "$DONE_MEASURES_WORKFLOW"
+if grep -Eq '^  (push|pull_request|pull_request_target|schedule|workflow_run):' \
+    "$DONE_MEASURES_WORKFLOW" \
+  || grep -Eq '^permissions:|enable-openid-connect|secrets\.' "$DONE_MEASURES_WORKFLOW"; then
+  echo 'done measures must stay dispatch-only and credential-free' >&2
+  exit 1
+fi
+grep -qF '    runs-on: ci-lite' "$DONE_MEASURES_WORKFLOW"
+grep -qF 'scripts/ci/measure/ci-done-measures collect' "$DONE_MEASURES_WORKFLOW"
 
 required_block="$TMP/required-verification.yaml"
 awk '

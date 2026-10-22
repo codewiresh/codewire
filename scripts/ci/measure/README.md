@@ -30,3 +30,32 @@ path shim at the top, is byte for byte the source.
 checks it before collecting, and `scripts/ci/tests/test-select-verification.sh`
 checks it in policy. To update the copy, take the new source commit, make the
 same two-line change, and update this table and the checksum file together.
+
+## CI done measures (#3144)
+
+`ci-done-measures` computes the CI Program's "Done when" measures (#3144) over
+one window of this repository's retained Actions records. It is not vendored;
+its tests are `scripts/ci/tests/test-ci-done-measures.py`. Like the start-latency
+collector, it is read-only: GET requests to fixed API paths, and it prints no
+token or event payload. The dispatch-only `CI done measures` workflow
+(`.gitea/workflows/ci-done-measures.yaml`) runs it with the job's own token
+against the job's full checkout. It posts the summary to the step summary and
+the log, and uploads the rows and the summary.
+
+For the measurement week, dispatch it with `since=2026-10-31T00:00:00Z` and
+`until=2026-11-07T00:00:00Z`. A window may be dispatched earlier to see
+progress.
+
+| Measure (#3144) | How it is read | Must hold |
+|---|---|---|
+| Ordinary PR speed | Per PR head pushed in the window, without `ci-full` on the push: from the push's first run to the last required check finishing (default `ci.yaml:Required verification` and `source-approval.yml:Supply-chain scan`). Only push-started runs count; labeled, unlabeled and closed runs never set a head. Superseded and unfinished heads are counted apart. | p50 ≤ 5 min, p95 ≤ 10 min |
+| `ci-full` PR speed | The same, for heads whose push carried `ci-full` | reported, not counted |
+| Main CI speed | Each main-push `ci.yaml` run that verified, from creation to stop | p50 ≤ 10 min |
+| Merge to Dev | From each push to main to the first passing Dev smoke receipt whose deployed source contains it | p50 ≤ 15 min |
+| Main CI first attempt | Verified main-push `ci.yaml` runs that passed with every job on its first attempt. Skipped and superseded (cancelled) runs are excluded and counted apart. | ≥ 95% |
+| Dev smoke | Deploy-owned smoke results of the Dev deployment smoke receipts created in the window | ≥ 95% |
+
+Receipts and checks that finish up to 24 hours after the window still settle
+what the window started; receipts created after it are not counted as smoke
+results. Percentiles are nearest-rank. A measure with no samples reports
+`holds: null`, not a pass.
