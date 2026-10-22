@@ -310,10 +310,18 @@ for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-gnu; do
   grep -Fq "id=cw-release-target-$triple,target=/cargo-target,sharing=locked" "$DOCKERFILE" ||
     fail "$triple has no target cache of its own"
 done
-# One cw compile at a time on the builder: both build stages take the same
-# locked slot, at the cw compile's own Cargo job bound.
-[ "$(grep -c -- '--mount=type=cache,id=cw-release-compile-slot,target=/tmp/cw-release-compile-slot,sharing=locked' "$DOCKERFILE")" -eq 2 ] ||
-  fail "the two cw compiles do not share one locked slot"
+# The two cw compiles run side by side: every builder cache belongs to one
+# target, so no locked mount makes one compile wait for the other. Each runs
+# at the cw compile's own Cargo job bound.
+ids="$(grep -o -- '--mount=type=cache,id=[^,]*' "$DOCKERFILE" | sed 's/.*id=//')"
+[ "$(printf '%s\n' "$ids" | wc -l)" -eq 6 ] || fail "the two build stages do not keep exactly three caches each"
+for id in $ids; do
+  case "$id" in
+    *-x86_64-unknown-linux-musl | *-aarch64-unknown-linux-gnu) ;;
+    *) fail "builder cache $id is not one target's own" ;;
+  esac
+done
+[ -z "$(printf '%s\n' "$ids" | sort | uniq -d)" ] || fail "the two cw compiles share a builder cache"
 grep -Fq 'CARGO_BUILD_JOBS          = CW_RELEASE_CARGO_BUILD_JOBS' "$HCL" || fail "the cw compile does not take its own Cargo job bound"
 grep -q 'type=cache' "$DOCKERFILE" || fail "the release build keeps no builder cache"
 if grep -Eq 'cache-(to|from)|sccache' "$HCL" "$DOCKERFILE"; then

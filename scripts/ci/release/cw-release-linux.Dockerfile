@@ -61,7 +61,6 @@ RUN --mount=type=bind,from=workflow-scripts,target=/workflow/scripts \
     --mount=type=cache,id=cw-release-cargo-registry-x86_64-unknown-linux-musl,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=cw-release-cargo-git-x86_64-unknown-linux-musl,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=cw-release-target-x86_64-unknown-linux-musl,target=/cargo-target,sharing=locked \
-    --mount=type=cache,id=cw-release-compile-slot,target=/tmp/cw-release-compile-slot,sharing=locked \
     /workflow/scripts/ci/release/cw-release-linux-build.sh
 
 FROM cw-release-source AS cw-release-build-aarch64-unknown-linux-gnu
@@ -79,13 +78,13 @@ RUN --mount=type=bind,from=workflow-scripts,target=/workflow/scripts \
     --mount=type=cache,id=cw-release-cargo-registry-aarch64-unknown-linux-gnu,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=cw-release-cargo-git-aarch64-unknown-linux-gnu,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=cw-release-target-aarch64-unknown-linux-gnu,target=/cargo-target,sharing=locked \
-    --mount=type=cache,id=cw-release-compile-slot,target=/tmp/cw-release-compile-slot,sharing=locked \
     /workflow/scripts/ci/release/cw-release-linux-build.sh
 
-# Each target has its own locked Cargo registry, git and target caches. The
-# shared locked compile slot runs one cw compile on the builder at a time: two
-# side by side (up to 14 GiB each at 8 Cargo jobs) and an image build would
-# not fit the builder's 24 GiB guest.
+# Each target has its own locked Cargo registry, git and target caches, and the
+# two stages share no cache, so the two cw compiles run side by side. At 8 Cargo
+# jobs they peaked at 13.3 GiB (aarch64 gnu) and 6.6 GiB (x86_64 musl) in dry
+# run 18323; with one image step beside them that fits the builder's 29 GiB
+# guest (owner, 2026-10-22, infra#1594).
 
 # The export targets: the executable, its SHA-256 line and the admission line
 # package-cw-release.sh printed for it, nothing else.

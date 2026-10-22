@@ -26,8 +26,8 @@ readonly PROTOC_SHA256='6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53
 # Both workflows reuse the per-target Cargo target directory the main builds
 # keep on the builder (owner, 2026-10-21, on infra#1617: "Approve, warm cache").
 readonly CW_RELEASE_TARGET_CACHE_DEFAULT='warm'
-# Cargo jobs for one cw compile on the builder. Its 8-14 GiB peak was measured
-# at 8 jobs (CPX42); the Dockerfile runs one cw compile at a time.
+# Cargo jobs for one cw compile on the builder. At 8 jobs the two compiles
+# peaked at 13.3 and 6.6 GiB and about 10 busy cores each (dry run 18323).
 readonly CW_RELEASE_CARGO_JOBS_DEFAULT=8
 
 die() {
