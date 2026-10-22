@@ -87,17 +87,32 @@ class LaneLockTest(unittest.TestCase):
         self.assertEqual(probe.returncode, 0, probe.stderr)
 
 
+# A listener that opens and closes descriptors without pause, as a service does
+# while it starts up.
+BUSY_SERVER = """
+import os, socket, sys
+listener = socket.socket()
+listener.bind(("127.0.0.1", int(sys.argv[1])))
+listener.listen()
+while True:
+    for fd in [os.open(os.devnull, os.O_RDONLY) for _ in range(50)]:
+        os.close(fd)
+"""
+
+
 class OwnerTest(unittest.TestCase):
-    def serve(self, token):
+    def serve(self, token, busy=False):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         environment = {key: value for key, value in os.environ.items() if key != "CODEWIRE_INTEGRATION_RUN_ID"}
         if token:
             environment["CODEWIRE_INTEGRATION_RUN_ID"] = token
+        command = ([sys.executable, "-c", BUSY_SERVER, str(port)] if busy
+                   else [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"])
         server = subprocess.Popen(
-            [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
-            env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=tempfile.gettempdir())
+            command, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cwd=tempfile.gettempdir())
         self.addCleanup(lambda: (server.kill(), server.wait()))
 
         def listening():
@@ -116,6 +131,17 @@ class OwnerTest(unittest.TestCase):
         refused = self.owner(port, "b" * 32)
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn(f"port {port} is served by", refused.stderr)
+        self.assertIn("not this run's orchestration", refused.stderr)
+
+    def test_a_busy_service_is_still_this_runs(self):
+        # #3217: a descriptor closed mid-scan made the whole process unreadable,
+        # so a starting service was refused as another run's (most checks failed).
+        port = self.serve("a" * 32, busy=True)
+        for _ in range(20):
+            result = self.owner(port, "a" * 32)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        refused = self.owner(port, "b" * 32)
+        self.assertNotEqual(refused.returncode, 0)
         self.assertIn("not this run's orchestration", refused.stderr)
 
     def test_a_service_without_any_token_is_refused(self):

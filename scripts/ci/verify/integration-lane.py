@@ -71,12 +71,21 @@ def socket_owners(inodes):
         if not entry.name.isdigit():
             continue
         try:
-            links = {os.readlink(fd) for fd in (entry / "fd").iterdir()}
+            fds = list((entry / "fd").iterdir())
         except OSError:
             unreadable = True
             continue
-        if links & wanted:
-            owners.add(int(entry.name))
+        for fd in fds:
+            # A busy service closes descriptors between the listing and this
+            # read. Skip that one descriptor, never the whole process, or a
+            # service that is starting up reads as someone else's (#3217).
+            try:
+                link = os.readlink(fd)
+            except OSError:
+                continue
+            if link in wanted:
+                owners.add(int(entry.name))
+                break
     return owners, unreadable
 
 
