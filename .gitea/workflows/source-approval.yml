@@ -49,7 +49,7 @@ jobs:
           } >> "$FORGEJO_OUTPUT"
 
       - name: Check out protected policy base
-        uses: https://git.example.invalid/noel/actions-checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: noel/actions-checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ steps.selection.outputs.base_sha }}
           path: .source-approval-base
@@ -60,7 +60,7 @@ jobs:
           clean: true
 
       - name: Check out exact candidate source as data
-        uses: https://git.example.invalid/noel/actions-checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: noel/actions-checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ steps.selection.outputs.head_sha }}
           path: candidate
@@ -72,7 +72,7 @@ jobs:
 
       - name: Check out candidate history as data for the content scan
         if: forgejo.event_name == 'pull_request_target'
-        uses: https://git.example.invalid/noel/actions-checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: noel/actions-checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ steps.selection.outputs.head_sha }}
           path: .content-scan

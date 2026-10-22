@@ -24,15 +24,15 @@ INTEGRATED = ROOT / "scripts/ci/verify/kind/suites/integrated.sh"
 SELECTOR = ROOT / "scripts/ci/select/select-verification.sh"
 
 CHECKOUT = (
-    "https://git.example.invalid/noel/actions-checkout@"
+    "noel/actions-checkout@"
     "34e114876b0b11c390a56381ad16ebd13914f8d5"
 )
 UPLOAD = (
-    "https://git.example.invalid/noel/actions-upload-artifact@"
+    "noel/actions-upload-artifact@"
     "c6a3b2bd78b3985e4b2f15397fec357f0fd808de"
 )
 DOWNLOAD = (
-    "https://git.example.invalid/noel/actions-download-artifact@"
+    "noel/actions-download-artifact@"
     "ad191675b41f6a5b46da9a048cb6893812da158b"
 )
 PRODUCERS = {

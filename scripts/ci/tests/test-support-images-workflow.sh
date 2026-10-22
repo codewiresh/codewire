@@ -47,7 +47,7 @@ if grep -q '^    paths:' "$WORKFLOW"; then
 fi
 grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
   fail 'support selection does not receive canonical history for ancestry validation'
-grep -Fq 'https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
+grep -Fq 'noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
   <<<"$selection_job" || fail 'support selection checkout action is not pinned'
 grep -Fq 'name: Verify sealed Rust toolchain' \
   <<<"$selection_job" ||
@@ -706,7 +706,7 @@ contract_mutations=(
   'needs. input::/          WORKSPACE_DIGEST: /a\          SOURCE_SHA: ${{ needs.support-selection.outputs.head_sha }}'
   'needs. digest::s/WORKSPACE_DIGEST: ${{ steps.build.outputs.workspace_digest }}/WORKSPACE_DIGEST: ${{ needs.support-selection.outputs.baseline_sha }}/'
   'artifact contract::s|            scripts/ci/verify/workspace-agent-contract.sh|            "$RUNNER_TEMP/artifact/workspace-agent-contract.sh"|'
-  "artifact step::$amd64_range{/      - name: Run the workspace contract on the exact image/i\\      - uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+  "artifact step::$amd64_range{/      - name: Run the workspace contract on the exact image/i\\      - uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
 }"
   'tagged image::s|"registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST"|"registry.example.invalid/codewire/workspace:$GITHUB_SHA"|'
   'public mirror source::s|run-workspace-contract-on-image.sh \\$|run-workspace-contract-on-image.sh --source ghcr \\|'

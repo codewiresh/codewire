@@ -3256,7 +3256,7 @@ fi
 
 standard_block="$TMP/standard.yaml"
 bun_setup_condition="$(grep -A1 -F \
-  'uses: https://git.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
+  'uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
   "$standard_block")"
 if grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" \
     <<<"$bun_setup_condition"; then
@@ -3312,7 +3312,7 @@ done
 
 tooling_block="$TMP/tooling.yaml"
 tooling_bun_setup="$(grep -A3 -F \
-  'uses: https://git.example.invalid/noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
+  'uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
   "$tooling_block" || true)"
 if ! grep -qF "tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|dev_smoke_script_tests|')" \
     <<<"$tooling_bun_setup" ||
@@ -3320,7 +3320,7 @@ if ! grep -qF "tested_tree_receipt != 'accepted' && contains(needs.verification-
   echo 'tooling: Dev smoke must provision pinned Bun in its own selected job' >&2
   exit 1
 fi
-tooling_bun_line="$(grep -n -m1 'uses: https://git.example.invalid/noel/setup-bun@' "$tooling_block" | cut -d: -f1)"
+tooling_bun_line="$(grep -n -m1 'uses: noel/setup-bun@' "$tooling_block" | cut -d: -f1)"
 tooling_dev_smoke_line="$(grep -n -m1 'name: Run Dev smoke script tests' "$tooling_block" | cut -d: -f1)"
 if [ "$tooling_bun_line" -ge "$tooling_dev_smoke_line" ]; then
   echo 'tooling: pinned Bun setup must precede Dev smoke execution' >&2

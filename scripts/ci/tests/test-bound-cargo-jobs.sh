@@ -67,7 +67,7 @@ for name in sized:
     step = steps[index]
     assert step["run"] == "scripts/ci/setup/bound-cargo-jobs.sh", name
     checkout = next(i for i, s in enumerate(steps)
-                    if str(s.get("uses", "")).startswith("https://git.example.invalid/noel/actions-checkout@"))
+                    if str(s.get("uses", "")).startswith("noel/actions-checkout@"))
     assert checkout < index, name
     assert step.get("if") == steps[checkout].get("if"), name
     # Only the checkout and the warm cache selection come before it.

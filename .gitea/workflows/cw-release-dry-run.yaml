@@ -162,7 +162,7 @@ jobs:
     outputs:
       superseded: ${{ steps.canonical.outputs.superseded }}
     steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -208,7 +208,7 @@ jobs:
       present: ${{ steps.build.outputs.present }}
       linux_sha256: ${{ steps.build.outputs.linux_sha256 }}
     steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -288,7 +288,7 @@ jobs:
 
       - name: Hand the Linux side to the macOS build
         if: steps.superseded.outputs.superseded == 'false' && steps.build.outputs.present == 'true'
-        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
         with:
           name: cw-dry-run-runtime-linux-${{ github.run_id }}
           path: .local-runtime/runtime-linux.tar
@@ -311,7 +311,7 @@ jobs:
       superseded: ${{ steps.superseded.outputs.superseded }}
       unsigned_sha256: ${{ steps.build.outputs.unsigned_sha256 }}
     steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -340,7 +340,7 @@ jobs:
 
       - name: Hand the unsigned helper to signing
         if: steps.superseded.outputs.superseded == 'false' && steps.build.outputs.unsigned_sha256 != ''
-        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
         with:
           name: cw-dry-run-vz-runner-unsigned-${{ github.run_id }}
           path: .vz-runner-unsigned/codewire-vz-runner
@@ -360,11 +360,11 @@ jobs:
     runs-on: ci-protected
     timeout-minutes: 20
     steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Receive the unsigned helper
         if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
-        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-dry-run-vz-runner-unsigned-${{ github.run_id }}
           path: vz-runner-unsigned
@@ -418,7 +418,7 @@ jobs:
       # The one local runtime document every cw embeds (#2733).
       document_sha256: ${{ steps.runtime.outputs.document_sha256 }}
     steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -433,7 +433,7 @@ jobs:
 
       - name: Receive the local runtime's Linux side
         if: steps.superseded.outputs.superseded == 'false' && needs.build-runtime-linux.outputs.present == 'true'
-        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-dry-run-runtime-linux-${{ github.run_id }}
           path: .local-runtime-linux
@@ -477,7 +477,7 @@ jobs:
 
       - name: Hand the local runtime to the cw builds
         if: steps.superseded.outputs.superseded == 'false' && steps.runtime.outputs.present == 'true'
-        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
         with:
           name: cw-dry-run-runtime-${{ github.run_id }}
           path: .local-runtime/
@@ -496,7 +496,7 @@ jobs:
       superseded: ${{ steps.superseded.outputs.superseded }}
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
     steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -522,7 +522,7 @@ jobs:
 
       - name: Receive the local runtime
         if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
-        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-dry-run-runtime-${{ github.run_id }}
           path: .local-runtime
@@ -550,7 +550,7 @@ jobs:
 
       - name: Hand the macOS pair to the assembly
         if: steps.superseded.outputs.superseded == 'false'
-        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
         with:
           name: cw-dry-run-darwin-${{ github.run_id }}
           path: dist/cw-release/
@@ -572,10 +572,10 @@ jobs:
     outputs:
       darwin_sums_sha256: ${{ steps.sign.outputs.darwin_sums_sha256 }}
     steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Receive the macOS pair
-        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-dry-run-darwin-${{ github.run_id }}
           path: dist-darwin
@@ -616,7 +616,7 @@ jobs:
             "$(sha256sum dist-darwin-signed/SHA256SUMS | cut -c1-64)" >> "$GITHUB_OUTPUT"
 
       - name: Hand the stand-in-signed macOS pair to the assembly
-        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
         with:
           name: cw-dry-run-darwin-signed-${{ github.run_id }}
           path: dist-darwin-signed/
@@ -646,7 +646,7 @@ jobs:
       superseded: ${{ steps.superseded.outputs.superseded }}
       cw_sha256: ${{ steps.build.outputs.cw_sha256 }}
     steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -661,7 +661,7 @@ jobs:
 
       - name: Receive the local runtime
         if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
-        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-dry-run-runtime-${{ github.run_id }}
           path: .local-runtime
@@ -683,7 +683,7 @@ jobs:
 
       - name: Hand the cw to the assembly
         if: steps.superseded.outputs.superseded == 'false'
-        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
         with:
           name: cw-dry-run-x86_64-unknown-linux-musl-${{ github.run_id }}
           path: .cw-linux/
@@ -714,7 +714,7 @@ jobs:
       superseded: ${{ steps.superseded.outputs.superseded }}
       cw_sha256: ${{ steps.build.outputs.cw_sha256 }}
     steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -729,7 +729,7 @@ jobs:
 
       - name: Receive the local runtime
         if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
-        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-dry-run-runtime-${{ github.run_id }}
           path: .local-runtime
@@ -751,7 +751,7 @@ jobs:
 
       - name: Hand the cw to the assembly
         if: steps.superseded.outputs.superseded == 'false'
-        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
         with:
           name: cw-dry-run-aarch64-unknown-linux-gnu-${{ github.run_id }}
           path: .cw-linux/
@@ -769,7 +769,7 @@ jobs:
     runs-on: ci-protected
     timeout-minutes: 30
     steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
 
@@ -788,21 +788,21 @@ jobs:
 
       - name: Receive the stand-in-signed macOS pair
         if: steps.superseded.outputs.superseded == 'false'
-        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-dry-run-darwin-signed-${{ github.run_id }}
           path: dist-darwin
 
       - name: Receive the Linux x86_64 cw
         if: steps.superseded.outputs.superseded == 'false'
-        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-dry-run-x86_64-unknown-linux-musl-${{ github.run_id }}
           path: dist-linux
 
       - name: Receive the Linux arm64 cw
         if: steps.superseded.outputs.superseded == 'false'
-        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-dry-run-aarch64-unknown-linux-gnu-${{ github.run_id }}
           path: dist-linux

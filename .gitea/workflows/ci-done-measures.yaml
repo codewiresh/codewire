@@ -27,7 +27,7 @@ jobs:
     runs-on: ci-lite
     timeout-minutes: 20
     steps:
-      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           # Merge-to-Dev reads ancestry between merges and deployed sources.
           fetch-depth: 0
@@ -74,7 +74,7 @@ jobs:
           echo "::endgroup::"
 
       - name: Upload rows and summary
-        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
         with:
           name: ci-done-measures-${{ github.run_id }}
           path: ${{ runner.temp }}/ci-done-measures/

@@ -198,7 +198,7 @@ contract_mutations=(
   'needs. revision::s/"$release_source_sha" \\$/"${{ needs.release-selection.outputs.source_sha }}" \\/'
   'contract outside the release source::s|            .release-source/scripts/ci/verify/workspace-agent-contract.sh|            scripts/ci/verify/workspace-agent-contract.sh|'
   'artifact contract::s|            .release-source/scripts/ci/verify/workspace-agent-contract.sh|            "$RUNNER_TEMP/artifact/workspace-agent-contract.sh"|'
-  "artifact step::$amd64_range{/      - name: Run the workspace contract on the exact image/i\\      - uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+  "artifact step::$amd64_range{/      - name: Run the workspace contract on the exact image/i\\      - uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
 }"
   'tagged image::s|"registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST"|"registry.example.invalid/codewire/workspace:$release_source_sha"|'
   'public mirror source::s|run-workspace-contract-on-image.sh \\$|run-workspace-contract-on-image.sh --source ghcr \\|'

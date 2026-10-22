@@ -417,7 +417,7 @@ def check(text, ci_text):
          "helper signing does not follow the helper build on a protected runner with its OIDC exchange")
     need(all(HELPER_IF in step or HELPER_IF.removesuffix("\n") + " && failure()\n" in step
              for name, step in steps(helper_signing)
-             if name != "https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+             if name != "noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
              or "path: .release-source" in step),
          "helper signing acts without an unsigned helper to sign")
     need("name: cw-release-vz-runner-unsigned-${{ github.run_id }}" in helper_signing
@@ -605,8 +605,8 @@ def check(text, ci_text):
     need(not re.search(r"ghp_|github_pat_|ssh-key|SSH_PRIVATE_KEY|secrets\.(GH|GITHUB)_", text),
          "a PAT or SSH deploy key appears")
     for action in ("actions-upload-artifact@", "actions-download-artifact@"):
-        refs = set(re.findall(r"https://git\.example\.invalid/noel/" + action + r"[0-9a-f]{40}", text))
-        need(len(refs) == 1 and refs <= set(re.findall(r"https://git\.example\.invalid/noel/" + action + r"[0-9a-f]{40}",
+        refs = set(re.findall(r"(?<![\w./-])noel/" + action + r"[0-9a-f]{40}", text))
+        need(len(refs) == 1 and refs <= set(re.findall(r"(?<![\w./-])noel/" + action + r"[0-9a-f]{40}",
                                                        ci_text)), f"{action} is not the pinned mirrored action")
     errors.extend(run_cancel_errors(text, "cli-release.yaml"))
     return errors

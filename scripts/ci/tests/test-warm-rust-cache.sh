@@ -98,7 +98,7 @@ for name, job in jobs.items():
     wired.add(name)
     index = names.index("Select the warm Rust cache")
     checkout = steps[index - 1]
-    assert str(checkout.get("uses", "")).startswith("https://git.example.invalid/noel/actions-checkout@"), name
+    assert str(checkout.get("uses", "")).startswith("noel/actions-checkout@"), name
     assert steps[index]["if"] == checkout["if"], name
     assert steps[index]["run"] == "scripts/ci/setup/select-warm-rust-cache.sh", name
     # The report is the job's last step.
