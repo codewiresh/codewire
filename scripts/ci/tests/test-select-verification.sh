@@ -88,19 +88,40 @@ declare -F ci_script_test_input >/dev/null || {
   echo 'the selector has no CI-script test rule' >&2
   exit 1
 }
+# The same for the Kind tool tests that run with Edge (#3119 R8);
+# kind_tools_cases pins its edges.
+eval "$(awk '
+  $0 == "kind_tool_test_input() {" { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT/scripts/ci/select/select-verification.sh")"
+declare -F kind_tool_test_input >/dev/null || {
+  echo 'the selector has no Kind tool test rule' >&2
+  exit 1
+}
 
-# A path case selects the CI-script tests when one of its paths is their input.
+# A path case selects the CI-script tests when one of its paths is their
+# input, and the Kind tool tests when it selects Edge and one of its paths is
+# theirs.
 with_ci_script_tests() {
   local expected="$1" path
   shift
-  [[ " $expected " == *' policy '* && " $expected " != *' ci_script_tests '* ]] \
-    || { printf '%s\n' "$expected"; return; }
-  for path in "$@"; do
-    if ci_script_test_input "$path"; then
-      printf '%s ci_script_tests\n' "$expected"
-      return
-    fi
-  done
+  if [[ " $expected " == *' policy '* && " $expected " != *' ci_script_tests '* ]]; then
+    for path in "$@"; do
+      if ci_script_test_input "$path"; then
+        expected="$expected ci_script_tests"
+        break
+      fi
+    done
+  fi
+  if [[ " $expected " == *' edge_kind '* && " $expected " != *' kind_tools '* ]]; then
+    for path in "$@"; do
+      if kind_tool_test_input "$path"; then
+        expected="$expected kind_tools"
+        break
+      fi
+    done
+  fi
   printf '%s\n' "$expected"
 }
 
@@ -113,6 +134,10 @@ assert_tokens() {
   if [[ " $expected " == *' policy '* ]] \
       && [[ " $expected " != *' ci_script_tests_omittable '* ]]; then
     expected="$expected ci_script_tests_omittable"
+  fi
+  if [[ " $expected " == *' edge_kind '* ]] \
+      && [[ " $expected " != *' kind_tools_omittable '* ]]; then
+    expected="$expected kind_tools_omittable"
   fi
   if [ "$(wc -l <<<"$output")" -ne 4 ] \
       || [ "$(sed -n '1p' <<<"$output")" != 'selector_version=v3' ] \
@@ -1699,7 +1724,7 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
 run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
-all_product='ci_script_tests contracts contracts_proto database deploy docs edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product='ci_script_tests kind_tools contracts contracts_proto database deploy docs edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 # A pull request without the Kind opt-in never selects Kind.
 all_product_pr='ci_script_tests contracts contracts_proto database deploy docs go_consumer_interop go_support go_tailnet policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
@@ -1828,6 +1853,49 @@ for product_path in \
     scripts/runtime/dev/smoke-dev-candidate.sh \
     Cargo.lock; do
   ci_script_tests_case omit "$product_path"
+done
+
+# The Kind tool tests (#3119 R8) run with Edge static verification only when
+# a Kind tool or a product file they read changes. On a push to main, Edge
+# runs for Kind-relevant paths; a pull request without ci-full selects neither.
+kind_tools_case() {
+  local want="$1" path="$2" paths="$TMP/kind-tools.paths" selection
+  printf '%s\n' "$path" > "$paths"
+  selection="$(selection_value "$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+    PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
+    "$SELECTOR" "$paths")")"
+  [[ "$selection" == *'|edge_kind|'* && "$selection" == *'|kind_tools_omittable|'* ]] || {
+    echo "kind_tools: $path does not run Edge with an authoritative Kind tool choice: $selection" >&2
+    exit 1
+  }
+  if [ "$want" = run ] && [[ "$selection" != *'|kind_tools|'* ]]; then
+    echo "kind_tools: $path does not run the Kind tool tests" >&2
+    exit 1
+  fi
+  if [ "$want" = omit ] && [[ "$selection" == *'|kind_tools|'* ]]; then
+    echo "kind_tools: $path runs the Kind tool tests" >&2
+    exit 1
+  fi
+  selection="$(selection_value "$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+    PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME=pull_request \
+    GITHUB_REF=refs/pull/3119/head KIND_E2E_OPT_IN=false "$SELECTOR" "$paths")")"
+  if [[ "$selection" == *'|kind_tools'* ]]; then
+    echo "kind_tools: a pull request without Edge kept a Kind tool token for $path" >&2
+    exit 1
+  fi
+}
+for kind_tool_path in \
+    scripts/ci/verify/kind-e2e.sh \
+    tests/e2e/kind/kind-config.yaml \
+    apps/dashboard/e2e/auth.setup.ts; do
+  kind_tools_case run "$kind_tool_path"
+done
+for edge_only_path in \
+    crates/codewire-dashboard-web/src/lib.rs \
+    crates/codewire-dashboard-web/templates/admin-accounts.html \
+    Caddyfile \
+    proto/codewire/v1/environment.proto; do
+  kind_tools_case omit "$edge_only_path"
 done
 run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product_pr" \
   scripts/checks/contracts/mesh-final-surface-policy.json \
@@ -1959,7 +2027,7 @@ assert_tokens dispatch_release \
 # verification) or all; a push to main may defer Kind to it.
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=edge_kind "$SELECTOR")"
-assert_tokens dispatch_edge_kind 'edge_kind kind' "$dispatch_output"
+assert_tokens dispatch_edge_kind 'edge_kind kind kind_tools' "$dispatch_output"
 
 grep -qF "contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|')" \
   "$WORKFLOW"
@@ -2510,12 +2578,12 @@ switch_push() { # SELECTOR PATH... -> output; stderr in $TMP/switch.stderr
     "$selector" "$TMP/switch.paths" 2>"$TMP/switch.stderr"
 }
 output="$(switch_push "$SELECTOR_KIND_OFF" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)"
-assert_tokens main_push_switch_off 'edge_kind policy web' "$output"
+assert_tokens main_push_switch_off 'edge_kind kind_tools policy web' "$output"
 assert_contract_field main_push_switch_off "$output" required_local_mode default
 [ "$(grep -Fxc "$deferred_line" "$TMP/switch.stderr")" = 1 ] || {
   echo 'a main push that deferred Kind did not say so in one line' >&2; exit 1; }
 output="$(switch_push "$SELECTOR_KIND_ON" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)"
-assert_tokens main_push_switch_on 'edge_kind kind policy web' "$output"
+assert_tokens main_push_switch_on 'edge_kind kind kind_tools policy web' "$output"
 assert_contract_field main_push_switch_on "$output" required_local_mode default
 ! grep -Fq 'Kind deferred' "$TMP/switch.stderr" || {
   echo 'a main push that runs Kind said it deferred Kind' >&2; exit 1; }
@@ -2525,7 +2593,7 @@ assert_tokens main_push_switch_off_docs policy \
 ! grep -Fq 'Kind deferred' "$TMP/switch.stderr" || {
   echo 'a main push without Kind said it deferred Kind' >&2; exit 1; }
 # The checked-in tree behaves as its own switch says.
-assert_tokens main_push_switch_checked_in "edge_kind ${MAIN_PUSH_KIND} policy web" \
+assert_tokens main_push_switch_checked_in "edge_kind ${MAIN_PUSH_KIND} kind_tools policy web" \
   "$(switch_push "$SELECTOR" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)"
 # Pull requests (ci-full, kind-e2e) and dispatches read no switch.
 for switch_selector in "$SELECTOR_KIND_ON" "$SELECTOR_KIND_OFF"; do
@@ -2536,7 +2604,7 @@ for switch_selector in "$SELECTOR_KIND_ON" "$SELECTOR_KIND_OFF"; do
       GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/7/head KIND_E2E_OPT_IN=true \
       "$SELECTOR" "$TMP/switch.paths" 2>/dev/null)" ] || {
     echo 'the main-push switch changed a pull request' >&2; exit 1; }
-  assert_tokens "dispatch_edge_kind_${switch_selector##*/switch-}" 'edge_kind kind' \
+  assert_tokens "dispatch_edge_kind_${switch_selector##*/switch-}" 'edge_kind kind kind_tools' \
     "$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch VERIFICATION_REQUEST=edge_kind \
       "$switch_selector")"
 done
@@ -3443,8 +3511,9 @@ if grep -qF 'run-product-verification.sh edge' "$edge_kind_block"; then
 fi
 grep -qF 'scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"' "$edge_kind_block"
 edge_fixture_runner="$TMP/edge-fixture-runner.sh"
+# The Kind tool tests own these fixtures; Edge runs them when selected (R8).
 awk '
-  /^run_edge\(\) \{/ { capture = 1 }
+  /^run_kind_tools\(\) \{/ { capture = 1 }
   capture { print }
   capture && $0 == "}" { exit }
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$edge_fixture_runner"
@@ -3452,7 +3521,7 @@ for edge_fixture_command in \
     '  scripts/ci/tests/test-kind-e2e-suites.sh' \
     '  run_kind_cw_runtime_probe_fixture'; do
   [ "$(grep -cFx "$edge_fixture_command" "$edge_fixture_runner")" -eq 1 ] || {
-    echo "shared edge route must invoke the owning fixture once: $edge_fixture_command" >&2
+    echo "the Kind tool tests must invoke the owning fixture once: $edge_fixture_command" >&2
     exit 1
   }
 done
@@ -3845,6 +3914,38 @@ for selection_and_parts in \
     exit 1
   }
 done
+# Edge runs the Kind tool tests only when the selection names them, or when
+# an older trusted selector cannot say (#3119 R8).
+edge_family_fixture() {
+  SELECTION="$1" bash -c '
+    set -euo pipefail
+    selected() { [[ "$SELECTION" == *"|$1|"* ]]; }
+    run_edge() { echo edge; }
+    run_kind_tools() { echo kind-tools; }
+    eval "$1"
+    eval "$2"
+    run_edge_family
+  ' edge-family-fixture "$(policy_function kind_tools_selected)" \
+    "$(policy_function run_edge_family)"
+}
+[ "$(edge_family_fixture '|valid:v3|edge_kind|complete|')" = $'edge\nkind-tools' ] || {
+  echo 'Edge from an older trusted selector skipped the Kind tool tests' >&2
+  exit 1
+}
+[ "$(edge_family_fixture '|valid:v3|edge_kind|kind_tools|kind_tools_omittable|complete|')" \
+    = $'edge\nkind-tools' ] || {
+  echo 'Edge skipped the selected Kind tool tests' >&2
+  exit 1
+}
+[ "$(edge_family_fixture '|valid:v3|edge_kind|kind_tools_omittable|complete|')" \
+    = $'edge\nKind tool tests: not selected; no Kind tool or input they read changed' ] || {
+  echo 'Edge ran Kind tool tests the selection omitted' >&2
+  exit 1
+}
+grep -qxF '  edge) run_edge_family ;;' "$product_runner" || {
+  echo 'the edge family does not decide on the Kind tool tests' >&2
+  exit 1
+}
 grep -qF '"$PRODUCT_RUNNER" policy-parts' "$ROOT/scripts/dev/preflight.sh" || {
   echo 'local merge qualification does not take policy parts from the product runner' >&2
   exit 1
@@ -4513,7 +4614,7 @@ while IFS='|' read -r name paths_list; do
     exit 1
   }
   # A pull request without a label selects what main does, without Kind.
-  push_tokens="$(selection_tokens "$(selection_value "$push_output")" | grep -Evx 'edge_kind|kind' || true)"
+  push_tokens="$(selection_tokens "$(selection_value "$push_output")" | grep -Evx 'edge_kind|kind|kind_tools|kind_tools_omittable' || true)"
   [ "$(selection_tokens "$(selection_value "$pr_output")")" = "$push_tokens" ] || {
     echo "${name}: a pull request no longer selects main's families" >&2
     exit 1
@@ -4759,7 +4860,7 @@ WORK = {
     "tooling": {
         "Run Shell policy", "Run Confidential runtime tooling",
         "Run Dev smoke tooling", "Run Release provenance", "Run Deploy", "Run Security",
-        "Run Edge static verification",
+        "Run Edge static verification and selected Kind tool tests",
     },
     "rust-compile": {"Compile every Rust target"},
     "rust-packages": {"Run the Rust packages shard"},

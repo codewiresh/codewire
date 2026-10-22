@@ -244,6 +244,30 @@ ci_script_test_input() {
   return 1
 }
 
+# The Kind tool tests run with Edge static verification only when one of
+# their inputs changes (#3119 R8): the CI and developer scripts, and every
+# product file one of them reads from the tree rather than from a fixture.
+# A Kind tool test that starts reading another product file adds it here.
+kind_tool_test_input() {
+  case "$1" in
+    scripts/ci/*|scripts/dev/*|.gitea/*|.githooks/*|\
+    Makefile|Cargo.toml|docker-bake.hcl|deployments/docker/kind-dev-binary.Dockerfile|\
+    deployments/k8s/*|tests/e2e/kind/*|tests/fixtures/orchestration/*|\
+    apps/dashboard/e2e/*|\
+    crates/codewire-client/examples/*|\
+    crates/codewire-orchestration/src/bin/*|\
+    crates/codewire-orchestration/src/sandbox/template/workspace.rs|\
+    crates/codewire-orchestration/src/worker/credential_relay/epoch.rs|\
+    crates/codewire-credential-service/src/runtime/kind/*|\
+    crates/codewire-daemon/src/config.rs|\
+    crates/codewire-daemon-proto/src/lib.rs|\
+    crates/codewire-workspace-image/src/pin.rs)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 select_services() {
   select_token service_integration
   select_token service_idp
@@ -390,7 +414,7 @@ select_all_product() {
   for family in \
       policy policy_shell ci_script_tests rust go_support web docs sdk_go sdk_ts \
       sdk_python database \
-      service_integration edge_kind release deploy security \
+      service_integration edge_kind kind_tools release deploy security \
       runtime_confidential runtime_dev_smoke; do
     select_token "$family"
   done
@@ -424,6 +448,7 @@ select_dispatch_request() {
       ;;
     edge_kind)
       select_token edge_kind
+      select_token kind_tools
       select_token kind
       ;;
     rust)
@@ -557,6 +582,9 @@ if [ "$event_selected" = false ]; then
     # from the tree. Deleted inputs stay selected by their path.
     if ci_script_test_input "$path"; then
       select_token ci_script_tests
+    fi
+    if kind_tool_test_input "$path"; then
+      select_token kind_tools
     fi
 
     # The JavaScript supply-chain audit is grep-only. Run it for any path it
@@ -2225,6 +2253,16 @@ fi
 # main-push-switch.sh defers it (below).
 if [ "$event" = pull_request ] && [ "$pr_kind_opt_in" != true ]; then
   unset 'selected[kind]' 'selected[edge_kind]'
+fi
+
+# kind_tools picks the Edge selections that also run the Kind tool tests, so
+# it means nothing without edge_kind. kind_tools_omittable says the omission is
+# authoritative; a selection from an older trusted selector lacks it and still
+# runs them.
+if token_selected edge_kind; then
+  select_token kind_tools_omittable
+else
+  unset 'selected[kind_tools]'
 fi
 
 # The local mode describes what merge qualification needs for this change.

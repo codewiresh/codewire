@@ -124,7 +124,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
       security|security_go|security_js|security_dev_smoke_auth|security_idp_kek|\
       rust|rust_workspace|rust_curated_locks|rust_pkg_*|\
       transport|transport_derp_contract|transport_pkg_*|\
-      database|edge_kind|kind|\
+      database|edge_kind|kind|kind_tools|kind_tools_omittable|\
       service_integration|service_idp|service_coordinator|\
       service_billing|service_connectcore|service_orchestration|service_nats|\
       service_temporal)

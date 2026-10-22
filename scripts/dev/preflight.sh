@@ -598,7 +598,7 @@ if selection_has service_integration && gate_runs service_integration; then
 fi
 
 run_selected_family transport transport "Rust transport verification"
-run_selected_family edge_kind edge "edge static verification"
+run_selected_family edge_kind edge "edge static verification and selected Kind tool tests"
 if [ "$PREFLIGHT_RUNS_KIND" = true ]; then
   run_family kind "Kind e2e verification" scripts/ci/verify/kind-e2e.sh
 fi

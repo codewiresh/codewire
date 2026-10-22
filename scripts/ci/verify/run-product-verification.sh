@@ -870,6 +870,28 @@ run_edge() {
     fi
   done
   python3 scripts/checks/repo_checks.py connect-edge-routing --self-test
+  )
+}
+
+# The Kind tool tests run with Edge static verification when the trusted
+# selection asks for them (#3119 R8). A selection from an older trusted
+# selector has no kind_tools_omittable and keeps them.
+kind_tools_selected() {
+  selected kind_tools || ! selected kind_tools_omittable
+}
+
+run_edge_family() {
+  run_edge
+  if kind_tools_selected; then
+    run_kind_tools
+  else
+    echo 'Kind tool tests: not selected; no Kind tool or input they read changed'
+  fi
+}
+
+run_kind_tools() {
+  (
+  isolate_kind_fixture_environment
   scripts/ci/tests/test-kind-e2e-cleanup.sh
   scripts/ci/tests/test-kind-e2e-suites.sh
   run_kind_cw_runtime_probe_fixture
@@ -1152,12 +1174,13 @@ case "$FAMILY" in
   rust-curated-locks) run_rust_curated_locks ;;
   rust-compile) run_rust_compile ;;
   transport) run_transport ;;
-  edge) run_edge ;;
+  edge) run_edge_family ;;
+  kind-tools) run_kind_tools ;;
   release) run_release ;;
   deploy) run_deploy ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-repo-rules|policy-ci-script-tests|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-repo-rules|policy-ci-script-tests|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|kind-tools|release|deploy|security" >&2
     exit 2
     ;;
 esac

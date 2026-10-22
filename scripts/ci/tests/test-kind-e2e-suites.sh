@@ -2833,7 +2833,7 @@ tooling_block="$(awk '
   selected { print }
 ' "$ROOT/.gitea/workflows/ci.yaml")"
 grep -Fq "contains(needs.verification-selection.outputs.selection, '|edge_kind|') }}" \
-  <<<"$(grep -A1 -F 'name: Run Edge static verification' <<<"$tooling_block")" ||
+  <<<"$(grep -A1 -F 'name: Run Edge static verification and selected Kind tool tests' <<<"$tooling_block")" ||
   fail 'Edge static verification does not run in tooling for an edge selection'
 if grep -Fq 'run-product-verification.sh edge' <<<"$edge_kind_block"; then
   fail 'Edge static verification moved back into a Kind shard'

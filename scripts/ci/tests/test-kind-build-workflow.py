@@ -466,11 +466,11 @@ class WorkflowContractTests(unittest.TestCase):
         # so an edge-only selection starts no Kind leg. The locked browser
         # host dependencies belong only to the dashboard leg.
         self.assertNotIn(
-            "Run Edge static verification", [step.get("name") for step in edge["steps"]],
+            "Run Edge static verification and selected Kind tool tests", [step.get("name") for step in edge["steps"]],
         )
         self.assertIn(
             "contains(needs.verification-selection.outputs.selection, '|edge_kind|')",
-            named_step(self.jobs["tooling"], "Run Edge static verification")["if"],
+            named_step(self.jobs["tooling"], "Run Edge static verification and selected Kind tool tests")["if"],
         )
         for step_name in ("Install locked dashboard browser-test dependencies",):
             self.assertIn(

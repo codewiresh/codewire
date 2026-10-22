@@ -684,9 +684,12 @@ jobs:
         run: scripts/ci/verify/run-product-verification.sh security
 
       # Static edge checks need no cluster, so they run here rather than in a
-      # Kind shard, and an edge-only selection starts no Kind leg.
-      - name: Run Edge static verification
+      # Kind shard, and an edge-only selection starts no Kind leg. The Kind
+      # tool tests follow only when the selection names them (#3119 R8).
+      - name: Run Edge static verification and selected Kind tool tests
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|edge_kind|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-product-verification.sh edge
 
   rust-compile:

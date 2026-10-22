@@ -177,7 +177,7 @@
       "paths": ["apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts"],
       "expected": {
         "classification": "changed",
-        "selection_tokens": ["ci_script_tests_omittable", "edge_kind", "kind", "policy", "policy_shell_omittable", "web"],
+        "selection_tokens": ["ci_script_tests_omittable", "edge_kind", "kind", "kind_tools", "kind_tools_omittable", "policy", "policy_shell_omittable", "web"],
         "required_local_mode": "default"
       }
     }
