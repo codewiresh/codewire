@@ -805,9 +805,11 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      scripts/ci/verify/run-integration-verification.sh|scripts/ci/verify/integration-lane.py)
-        # This file owns database execution and every service's integration
-        # harness. Its changes must qualify both executable families.
+      scripts/ci/verify/run-integration-verification.sh|scripts/ci/verify/integration-lane.py|\
+      scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh)
+        # These files own database execution and every service's integration
+        # harness, including the PostgreSQL both run against (#3198). Their
+        # changes must qualify both executable families.
         select_token policy
         select_token database
         select_services

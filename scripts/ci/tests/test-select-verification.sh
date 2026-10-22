@@ -523,16 +523,16 @@ run_paths_case retired_local_gate pull_request refs/pull/3119/head false \
   scripts/ci/select/merge-gate.py scripts/ci/select/merge-gate.tsv \
   scripts/ci/tests/test-ci-merge-check.py scripts/ci/tests/test-local-prepush-receipt.sh \
   scripts/ci/tests/test-merge-gate.py
+# The integration PostgreSQL helper and its test are not tooling alone: the
+# harness guard below proves they select database and every service (#3198).
 run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   'policy dev_smoke_script_tests rust_curated_locks security security_js' \
   .githooks/pre-push scripts/dev/preflight.sh \
-  scripts/ci/verify/integration-postgres.sh \
   scripts/ci/verify/resolve-cargo-target-dir.sh \
   scripts/ci/verify/run-product-verification.sh \
   scripts/ci/tests/test-retired-local-sdk-contract.sh \
   scripts/checks/security/audit-rust-only-runtime.sh \
   scripts/ci/verify/rust-stack-rehearsal.sh \
-  scripts/ci/tests/test-integration-postgres.sh \
   scripts/ci/tests/test-go-source-ownership.sh \
   scripts/ci/tests/test-resolve-cargo-target-dir.sh \
   scripts/ci/tests/test-cargo-target-runner-failures.sh \
@@ -2218,6 +2218,47 @@ done <<<"$database_lane_sources"
 run_paths_case preview_database_tests_select_database push refs/heads/main false \
   'database policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/src/api/preview/authorization/database_tests.rs
+
+# The integration runner's PostgreSQL harness, the helpers it sources that
+# start PostgreSQL, and their tests qualify every family that runs against
+# that PostgreSQL: database and all services (#3198). The helper list comes
+# from the runner, so a new PostgreSQL helper needs this rule too.
+integration_harness_sources="$(python3 - "$ROOT" <<'PY'
+import os
+import re
+import sys
+
+root = sys.argv[1]
+runner_path = "scripts/ci/verify/run-integration-verification.sh"
+runner = open(os.path.join(root, runner_path)).read()
+sources = {runner_path}
+for helper in re.findall(r'^\s*(?:source|\.)\s+"\$ROOT/([^"]+)"', runner, re.M):
+    text = open(os.path.join(root, helper)).read()
+    if re.search(r"postgres:[0-9]", text):
+        sources.add(helper)
+        test = os.path.join("scripts/ci/tests", "test-" + os.path.basename(helper))
+        if os.path.exists(os.path.join(root, test)):
+            sources.add(test)
+if "scripts/ci/verify/integration-postgres.sh" not in sources:
+    sys.exit("the runner no longer sources its PostgreSQL helper")
+print("\n".join(sorted(sources)))
+PY
+)"
+while IFS= read -r source; do
+  printf '%s\n' "$source" > "$TMP/integration-harness.paths"
+  for event in push pull_request; do
+    output="$(cd "$ROOT" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+      PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME="$event" GITHUB_REF=refs/heads/main \
+      KIND_E2E_OPT_IN=false "$SELECTOR" "$TMP/integration-harness.paths")"
+    for token in database service_integration service_idp service_billing service_orchestration \
+        service_coordinator service_temporal service_nats service_connectcore; do
+      [[ "$(selection_value "$output")" == *"|${token}|"* ]] || {
+        echo "integration harness ${source} does not select ${token} on ${event}" >&2
+        exit 1
+      }
+    done
+  done
+done <<<"$integration_harness_sources"
 
 integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
 # Database owns the destroy-hint regression. The activity-fencing lane must
