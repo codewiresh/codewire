@@ -66,6 +66,8 @@ case "$result" in
     [[ "$error_mode" != any ]] || exit 100
     exit 0 ;;
   hang)
+    # Only a call under the fixture's bounded acquisition may hang.
+    [[ "$PPID" == "${FAKE_TIMEOUT_PID:-}" ]] || exit 93
     child_pid=''
     terminate() {
       if [[ -n "$child_pid" ]]; then
@@ -80,6 +82,12 @@ case "$result" in
     child_pid=$!
     printf '%s\n' "$$" >"$FAKE_APT_ARGV.$count.apt-pid"
     printf '%s\n' "$child_pid" >"$FAKE_APT_ARGV.$count.child-pid"
+    # This call is now counted and recorded, and it handles TERM. Only now
+    # expire the real GNU timeout's deadline: SIGALRM is its own expiry
+    # signal, so it sends TERM to this process and its group and returns 124.
+    # A deadline running from the fork could fire on a loaded runner before a
+    # slowly starting fake had recorded the call (#3221).
+    kill -ALRM "$PPID"
     wait "$child_pid"
     exit 96 ;;
   ''|*[!0-9]*) exit 97 ;;
@@ -126,10 +134,12 @@ count="$(<"$FAKE_TIMEOUT_STATE")"
 count="$((count + 1))"
 printf '%s\n' "$count" >"$FAKE_TIMEOUT_STATE"
 printf '%s\0' "$@" >"$FAKE_TIMEOUT_ARGV.$count"
-shift 3
-# Validate the production bound above, then shorten only the fixture deadline.
-# The real GNU timeout still delivers TERM and owns its ordinary process group.
-exec /usr/bin/timeout --signal=TERM --kill-after=3s 1s "$@"
+# Run the real GNU timeout with the production bound validated above. It
+# delivers TERM, owns its ordinary process group and returns 124 on expiry. A
+# hung fake APT expires it with SIGALRM only once it has recorded its call, so
+# no deadline races the fake's start. exec keeps this PID for that signal.
+export FAKE_TIMEOUT_PID="$$"
+exec /usr/bin/timeout "$@"
 SH
 chmod 0755 "$TEST_TMP/bin/timeout"
 
