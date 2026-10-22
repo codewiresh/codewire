@@ -67,6 +67,19 @@ out="$(run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2 WARM_CACHE_
   fail 'an oversized Cargo home was kept'
 [[ ! -e "$work/cache/v1/cargo-home/registry.blob" ]] || fail 'the Cargo home was not wiped'
 
+# The default caps start a job at most 80% into the 110 GB image, whose
+# filesystem holds 105149384 KiB (measured on the metal guests, 2026-10-22),
+# so the job's own build has room: 70 GB of targets and 12 GB of Cargo home.
+default_cap() {
+  sed -n "s/^readonly $1=\"\${[A-Z_]*:-\([0-9]*\)}\"\$/\1/p" "$SELECT"
+}
+target_default="$(default_cap target_cap_kib)"
+cargo_home_default="$(default_cap cargo_home_cap_kib)"
+[[ "$target_default" == 68359375 && "$cargo_home_default" == 11718750 ]] ||
+  fail "default caps are ${target_default:-unset} and ${cargo_home_default:-unset} KiB, not 70 GB and 12 GB"
+(( (target_default + cargo_home_default) * 100 <= 105149384 * 80 )) ||
+  fail 'the default caps leave a job less than 20% of the cache image'
+
 # The finish step marks what the job built and reports sizes.
 echo started-before > "$work/cache/v1/ci-cache/host-debug/older"
 date -u -d '1 minute ago' +%s > "$work/cache/v1/.job-started"
@@ -77,6 +90,22 @@ report="$(env -i PATH="$PATH" WARM_CACHE_ROOT="$work/cache" GITHUB_WORKSPACE="$w
 grep -qF '[warm-rust-cache] size host-debug' <<<"$report" || fail 'the finish step did not report sizes'
 [[ "$(find "$work/cache/v1/ci-cache/host-debug/.last-used" -mmin -1)" ]] || fail 'a built directory was not marked used'
 [[ -z "$(find "$work/cache/v1/ci-cache/desktop-release/.last-used" -mmin -1)" ]] || fail 'an untouched directory was marked used'
+grep -qE '^\[warm-rust-cache\] filesystem [0-9]+ KiB used of [0-9]+$' <<<"$report" || fail 'the finish step did not report the cache disk'
+
+# Over 85% full after a job, the finish step warns on the run page; at or
+# under 85% it stays quiet. A fake df reports the cache disk's usage.
+mkdir -p "$work/bin"
+finish_at() {
+  printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/loop1 1000 %s 0 0%% /ci-cache"\n' "$1" > "$work/bin/df"
+  chmod +x "$work/bin/df"
+  env -i PATH="$work/bin:$PATH" WARM_CACHE_ROOT="$work/cache" GITHUB_WORKSPACE="$work/workspace" "$FINISH"
+}
+report="$(finish_at 880)"
+grep -qxF '::warning::the warm Rust cache disk is 88% full after this job; the next job may run out of space' <<<"$report" ||
+  fail "a cache disk 88% full did not warn: $report"
+report="$(finish_at 850)"
+! grep -qF '::warning::' <<<"$report" || fail 'a cache disk 85% full warned'
+rm -f "$work/bin/df"
 
 # The workflow wires exactly the families that build a shared profile target,
 # each right after its checkout and under the same condition, and never a job

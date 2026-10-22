@@ -25,7 +25,15 @@ for dir in "$cache"/ci-cache/*/ "$cache/cargo-home/"; do
   [[ -d "$dir" ]] || continue
   printf '[warm-rust-cache] size %s %s KiB\n' "$(basename "$dir")" "$(du -sk "$dir" 2>/dev/null | awk '{print $1}')"
 done
-printf '[warm-rust-cache] filesystem %s\n' "$(df -Pk "$root" 2>/dev/null | awk 'END {print $3 " KiB used of " $2}')"
+used='' size=''
+read -r used size < <(df -Pk "$root" 2>/dev/null | awk 'END {print $3, $2}')
+printf '[warm-rust-cache] filesystem %s KiB used of %s\n' "${used:-?}" "${size:-?}"
+# Over 85% after a job, the next job may run out of space in the cache: the
+# only in-guest signal, shown on the run page (infra#1534).
+if [[ "$used" =~ ^[0-9]+$ && "$size" =~ ^[1-9][0-9]*$ ]] && (( used * 100 > size * 85 )); then
+  printf '::warning::the warm Rust cache disk is %s%% full after this job; the next job may run out of space\n' \
+    "$(( used * 100 / size ))"
+fi
 if [[ -r /sys/fs/cgroup/memory.peak ]]; then
   printf '[warm-rust-cache] job memory.peak %s bytes\n' "$(cat /sys/fs/cgroup/memory.peak)"
 fi

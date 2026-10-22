@@ -16,7 +16,7 @@
 # Bounds, applied before linking:
 # - a new ISO week, or a new CODEWIRE_WARM_CACHE_EPOCH (a repository variable
 #   an operator raises to force a clean build), wipes the whole cache;
-# - the target directories stay under 90 GB, removing whole profile
+# - the target directories stay under 70 GB, removing whole profile
 #   directories, least recently used first;
 # - the Cargo home stays under 12 GB, wiped whole when it is over.
 # CI never runs `cargo login`, so no registry credential is ever written to the
@@ -25,9 +25,11 @@ set -euo pipefail
 
 readonly root="${WARM_CACHE_ROOT:-/ci-cache}"
 readonly cache="$root/v1"
-# Caps in KiB: 90 GB of target directories and 12 GB of Cargo home, inside the
-# 110 GB image. Tests override them.
-readonly target_cap_kib="${WARM_CACHE_TARGET_CAP_KIB:-87890625}"
+# Caps in KiB: 70 GB of target directories and 12 GB of Cargo home, inside the
+# 110 GB image (107.7 GB usable). Together they start a job at 76%, leaving the
+# job's own build room; at 90 GB a job could start at 95% and run out (infra#1534).
+# Tests override them.
+readonly target_cap_kib="${WARM_CACHE_TARGET_CAP_KIB:-68359375}"
 readonly cargo_home_cap_kib="${WARM_CACHE_CARGO_HOME_CAP_KIB:-11718750}"
 # Artifacts that ship or are published build from a clean target.
 readonly shipping_jobs=' cw-release-assets '
