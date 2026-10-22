@@ -75,9 +75,14 @@ expected_allows="fs.read=$CW_RELEASE_CONTEXT fs.read=$CW_RELEASE_RUNTIME fs.writ
     "$CW_RELEASE_TAG_OBJECT_SHA" "$CW_RELEASE_TARGET_CACHE" "${CODEWIRE_CARGO_BUILD_JOBS:-}" "${CW_RELEASE_CARGO_BUILD_JOBS:-}"
   printf 'zig=%s %s zigbuild=%s\n' "$ZIG_VERSION" "$ZIG_X86_64_LINUX_SHA256" "$CARGO_ZIGBUILD_VERSION"
 } >"${FAKE_BAKE_RECORD:?}"
+# Buildx asks for write access to the nearest existing parent of a missing
+# local destination, which the allow above does not cover (cli-release 18343):
+# the destination must already be an empty private directory.
+[[ -d "$dest" && ! -L "$dest" && -z "$(ls -A "$dest")" ]] ||
+  { echo "the local export destination is not an existing empty directory: $dest" >&2; exit 1; }
+[[ "$(stat -c %a "$dest")" == 700 ]] || { echo "the local export destination is not private: $dest" >&2; exit 1; }
 triple="${target#cw-release-}"
 name="cw-${CW_RELEASE_VERSION}-$triple"
-mkdir -p "$dest"
 printf 'synthetic %s executable\n' "$triple" >"$dest/$name"
 chmod 0755 "$dest/$name"
 digest="$(sha256sum "$dest/$name" | cut -c1-64)"
@@ -225,6 +230,22 @@ run_client "$work/out-oidc-mutant" \
 client_under_test=''
 grep -Fxq 'oidc_request=tokenurl' "$work/bake-record" || fail "the test cannot see OIDC credentials reach the build"
 
+# Mutation: without creating the export destination first, buildx would ask for
+# write access to its parent, and the fake refuses that bake.
+# shellcheck disable=SC2016 # the literal line to change
+sed 's|^  mkdir -m 0700 "\$work/export" |  mkdir -m 0700 |' "$CLIENT" >"$fake_root/scripts/ci/release/build-cw-linux.sh"
+# shellcheck disable=SC2016 # the literal text to look for
+if grep -q 'mkdir -m 0700 "\$work/export"' "$fake_root/scripts/ci/release/build-cw-linux.sh"; then
+  fail "the export-directory mutation did not apply"
+fi
+client_under_test="$fake_root/scripts/ci/release/build-cw-linux.sh"
+if run_client "$work/out-export-mutant" >"$work/export-mutant.log" 2>&1; then
+  fail "a bake to a missing export destination was accepted"
+fi
+client_under_test=''
+grep -q 'the local export destination is not an existing empty directory' "$work/export-mutant.log" ||
+  fail "the export-directory mutant failed for another reason"
+
 # Inside the build: every source file is touched before packaging, so a warm
 # target directory never keeps another commit's workspace crates; .git is left
 # alone; the export is the executable and its two records for this version.
@@ -302,4 +323,4 @@ fi
 grep -Fq "$(sed -n "s/^readonly PROTOC_SHA256='\(.*\)'$/\1/p" "$CLIENT")" "$ROOT/deployments/docker/rust-base.Dockerfile" ||
   fail "the in-job protoc pin differs from rust-base.Dockerfile's"
 
-echo "build-cw-linux: OK (valid export, runtime, 8 refused exports, wrong source, wrong target, recovery flag, in-job recovery without tokens, OIDC-drop and mtime mutants, in-build export, static)"
+echo "build-cw-linux: OK (valid export, runtime, 8 refused exports, wrong source, wrong target, recovery flag, in-job recovery without tokens, OIDC-drop, export-directory and mtime mutants, in-build export, static)"

@@ -130,7 +130,11 @@ build_remote() {
   else
     mkdir -m 0700 "$runtime"
   fi
-  mkdir -m 0700 "$work/docker-config" "$work/trusted-buildkit-tls"
+  # Buildx asks for write access to the nearest existing parent of a missing
+  # local export destination, which --allow=fs.write=<destination> does not
+  # cover; it refused cli-release 18343 that way, intermittently. An existing
+  # destination is exactly the path the allow names.
+  mkdir -m 0700 "$work/export" "$work/docker-config" "$work/trusted-buildkit-tls"
   builder="codewire-cw-release-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$$"
   trusted_buildkit_attach "$builder" "$work/docker-config" "$work/trusted-buildkit-tls"
   drop_oidc
