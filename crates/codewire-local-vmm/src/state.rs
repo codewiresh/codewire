@@ -989,6 +989,7 @@ mod tests {
                     uid: crate::host::path::current_uid(),
                     mode: 0o100500,
                     links: 1,
+                    pin: Default::default(),
                 },
                 executable_sha256: "a".repeat(64),
             },
@@ -1000,6 +1001,7 @@ mod tests {
                     uid: crate::host::path::current_uid(),
                     mode: 0o100600,
                     links: 1,
+                    pin: Default::default(),
                 },
                 filesystem_uuid: Uuid::new_v4(),
             },
@@ -1155,6 +1157,7 @@ mod tests {
             inode: 4,
             uid: crate::host::path::current_uid(),
             mode: 0o140600,
+            pin: Default::default(),
         };
         state.api_socket = Some(socket.clone());
         assert!(matches!(

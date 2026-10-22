@@ -10326,34 +10326,48 @@ mod tests {
         // Once no owner holds the lock, the new supervisor replaces it. Until
         // a child another test thread forked has execed, it may still hold
         // the released lock, so a supervisor that meets it is started again.
+        // Each attempt waits on the supervisor's own state, serving the
+        // replaced endpoint or exiting, not on a clock: under load, startup
+        // and such a child's exec can each take seconds (#3207).
         drop(held);
-        let mut supervisor = tokio::spawn(serve_supervisor(config.clone()));
-        let replaced = tokio::time::timeout(Duration::from_secs(5), async {
+        let (replaced, mut supervisor) = tokio::time::timeout(HANG_GUARD, async {
             loop {
-                if supervisor.is_finished() {
-                    let finished = (&mut supervisor).await.unwrap();
-                    assert!(
-                        matches!(finished, Err(SupervisorError::AlreadyRunning)),
-                        "{finished:?}"
-                    );
-                    supervisor = tokio::spawn(serve_supervisor(config.clone()));
+                let mut supervisor = tokio::spawn(serve_supervisor(config.clone()));
+                let served = loop {
+                    if supervisor.is_finished() {
+                        break None;
+                    }
+                    if let Ok(identity) = SocketIdentity::capture(&socket)
+                        && identity != stale
+                        && NativeSupervisorClient::connect(&socket).await.is_ok()
+                    {
+                        break Some(identity);
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                };
+                if let Some(identity) = served {
+                    break (identity, supervisor);
                 }
-                if let Ok(identity) = SocketIdentity::capture(&socket)
-                    && identity != stale
-                    && NativeSupervisorClient::connect(&socket).await.is_ok()
-                {
-                    break identity;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                let finished = (&mut supervisor).await.unwrap();
+                assert!(
+                    matches!(finished, Err(SupervisorError::AlreadyRunning)),
+                    "{finished:?}"
+                );
+                // A supervisor that lost the lock never touches the endpoint.
+                assert_eq!(SocketIdentity::capture(&socket).unwrap(), stale);
             }
         })
         .await
-        .expect("the lock holder replaced the refused endpoint");
+        .expect("hang guard: the lock holder never replaced the refused endpoint");
         assert_ne!(replaced, stale);
         assert!(!supervisor.is_finished());
         supervisor.abort();
         assert!((&mut supervisor).await.unwrap_err().is_cancelled());
     }
+
+    /// A bound on a wait whose progress is observed state, so a failure means
+    /// a hang rather than a slow host.
+    const HANG_GUARD: Duration = Duration::from_secs(120);
 
     #[tokio::test]
     async fn client_leaves_a_refused_endpoint_whose_lock_is_held() {
@@ -12590,6 +12604,7 @@ mod tests {
                     uid: 4,
                     mode: 0o100500,
                     links: 1,
+                    pin: Default::default(),
                 },
                 executable_sha256: "f".repeat(64),
             },
@@ -12598,6 +12613,7 @@ mod tests {
                 inode: 2,
                 uid: 4,
                 mode: 0o140600,
+                pin: Default::default(),
             },
             artifact_generation: runner.clone(),
             error_code: None,
@@ -15006,6 +15022,7 @@ mod tests {
                     uid: crate::host::path::current_uid(),
                     mode: 0o100755,
                     links: 1,
+                    pin: Default::default(),
                 },
                 executable_sha256: "f".repeat(64),
             },
@@ -15014,6 +15031,7 @@ mod tests {
                 inode,
                 uid: crate::host::path::current_uid(),
                 mode: 0o140600,
+                pin: Default::default(),
             },
             artifact_generation: "b".repeat(64),
             error_code: None,
@@ -16784,6 +16802,7 @@ mod tests {
                     uid: unsafe { libc::getuid() },
                     mode: 0o100500,
                     links: 1,
+                    pin: Default::default(),
                 },
                 executable_sha256: "d".repeat(64),
             },
@@ -16792,6 +16811,7 @@ mod tests {
                 device: 1,
                 inode: 2,
                 mode: 0o140600,
+                pin: Default::default(),
             },
             artifact_generation: environment.active_artifact_generation.clone().unwrap(),
             cw_runtime_catalog_generation: Some("a".repeat(64)),
@@ -17696,6 +17716,7 @@ mod tests {
                     uid: 4,
                     mode: 0o100500,
                     links: 1,
+                    pin: Default::default(),
                 },
                 executable_sha256: "f".repeat(64),
             },
@@ -17704,6 +17725,7 @@ mod tests {
                 inode: 2,
                 uid: 4,
                 mode: 0o140600,
+                pin: Default::default(),
             },
             artifact_generation: "b".repeat(64),
             error_code: Some("guest_start_failed".to_owned()),
@@ -18091,6 +18113,7 @@ mod tests {
                     uid: 1000,
                     mode: 0o100500,
                     links: 1,
+                    pin: Default::default(),
                 },
                 executable_sha256: "f".repeat(64),
             },
@@ -18099,6 +18122,7 @@ mod tests {
                 inode: 2,
                 uid: 1000,
                 mode: 0o140600,
+                pin: Default::default(),
             },
             artifact_generation: generation.clone(),
             error_code: None,
@@ -18241,6 +18265,7 @@ mod runner_exit_tests {
                     uid: 4,
                     mode: 0o100500,
                     links: 1,
+                    pin: Default::default(),
                 },
                 executable_sha256: "f".repeat(64),
             },
@@ -18249,6 +18274,7 @@ mod runner_exit_tests {
                 inode: 2,
                 uid: 4,
                 mode: 0o140600,
+                pin: Default::default(),
             },
             artifact_generation,
             error_code: None,
@@ -18503,6 +18529,7 @@ mod retire_tests {
                     uid: 4,
                     mode: 0o100500,
                     links: 1,
+                    pin: Default::default(),
                 },
                 executable_sha256: "f".repeat(64),
             },
@@ -18511,6 +18538,7 @@ mod retire_tests {
                 inode: 2,
                 uid: 4,
                 mode: 0o140600,
+                pin: Default::default(),
             },
             artifact_generation: "a".repeat(64),
             error_code: Some(RUNNER_EXIT_ERROR_CODE.to_owned()),
@@ -18549,6 +18577,7 @@ mod retire_tests {
             inode: 2,
             uid: 4,
             mode: 0o140600,
+            pin: Default::default(),
         };
         let (environment_id, process) = attach_named_test_runner_process(&mut core, "dev", socket);
         core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;
@@ -19095,6 +19124,7 @@ mod concurrency_tests {
             inode: 2,
             uid: 4,
             mode: 0o140600,
+            pin: Default::default(),
         };
         attach_named_test_runner_process(&mut core, "dev", socket);
         core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;

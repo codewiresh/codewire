@@ -29,6 +29,7 @@ impl FileIdentity {
             uid: metadata.uid(),
             mode: metadata.mode(),
             links: metadata.nlink(),
+            pin: Default::default(),
         }
     }
 }
@@ -742,6 +743,7 @@ fn socket_identity(
         inode: metadata.st_ino,
         uid: metadata.st_uid,
         mode,
+        pin: Default::default(),
     })
 }
 

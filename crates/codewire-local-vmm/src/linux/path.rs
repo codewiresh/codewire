@@ -17,6 +17,7 @@ const RESOLVE_PRIVATE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_XDEV);
 
 impl FileIdentity {
+    /// The identity these attributes describe, holding nothing.
     pub fn from_metadata(metadata: &Metadata) -> Self {
         Self {
             device: metadata.dev(),
@@ -25,7 +26,22 @@ impl FileIdentity {
             uid: metadata.uid(),
             mode: metadata.mode(),
             links: metadata.nlink(),
+            pin: Default::default(),
         }
+    }
+
+    /// The identity of the open `file`, holding its inode while the identity
+    /// (or a clone) lives: a file created at the same path afterwards has
+    /// another inode number on every local filesystem (#3214).
+    fn of_open_file(file: &File, metadata: &Metadata, path: &Path) -> Result<Self, PathError> {
+        let held = file.try_clone().map_err(|source| PathError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+        Ok(Self {
+            pin: crate::supervisor_metadata::legacy::InodePin::holding(held.into()),
+            ..Self::from_metadata(metadata)
+        })
     }
 }
 
@@ -238,7 +254,7 @@ impl PrivateRoot {
             return Err(PathError::UnsafeFile(self.path.join(relative)));
         }
         Ok(ConfinedFile {
-            identity: FileIdentity::from_metadata(&metadata),
+            identity: FileIdentity::of_open_file(&file, &metadata, &self.path.join(relative))?,
             file,
         })
     }
@@ -278,7 +294,7 @@ impl PrivateRoot {
             return Err(PathError::UnsafeFile(self.path.join(relative)));
         }
         Ok(ConfinedFile {
-            identity: FileIdentity::from_metadata(&metadata),
+            identity: FileIdentity::of_open_file(&file, &metadata, &self.path.join(relative))?,
             file,
         })
     }
@@ -501,14 +517,56 @@ impl PrivateRoot {
 }
 
 impl SocketIdentity {
+    /// Capture the private socket at `path`, holding its inode (#3207).
     pub fn capture(path: &Path) -> Result<Self, PathError> {
         Self::capture_with_permissions(path, &[0o600])
     }
 
+    /// Capture the socket at `path` with one of `exact_permissions`, holding
+    /// its inode: an `O_PATH` descriptor names the inode the checks admit, and
+    /// the path must still name that inode once the descriptor is held. While
+    /// the identity (or a clone) lives, a socket bound at the path afterwards
+    /// has another inode number on every local filesystem, so comparing with
+    /// it detects replacement even where numbers are reused (ext4, overlay).
     pub(crate) fn capture_with_permissions(
         path: &Path,
         exact_permissions: &[u32],
     ) -> Result<Self, PathError> {
+        // A symlink opens as itself under O_NOFOLLOW; the socket type check
+        // on the held inode refuses it.
+        let descriptor = rustix::fs::open(
+            path,
+            OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|source| PathError::Io {
+            path: path.to_owned(),
+            source: source.into(),
+        })?;
+        let held = rustix::fs::fstat(&descriptor).map_err(|source| PathError::Io {
+            path: path.to_owned(),
+            source: source.into(),
+        })?;
+        if rustix::fs::FileType::from_raw_mode(held.st_mode) != rustix::fs::FileType::Socket
+            || held.st_uid != current_uid()
+            || held.st_nlink != 1
+            || !exact_permissions.contains(&(held.st_mode & 0o777))
+        {
+            return Err(PathError::UnsafeSocket(path.to_owned()));
+        }
+        let named = Self::observe(path, exact_permissions)?;
+        if named.device != held.st_dev || named.inode != held.st_ino {
+            // The path was replaced between the open and the check.
+            return Err(PathError::UnsafeSocket(path.to_owned()));
+        }
+        Ok(Self {
+            pin: crate::supervisor_metadata::legacy::InodePin::holding(descriptor),
+            ..named
+        })
+    }
+
+    /// The socket the path names now, without holding it.
+    fn observe(path: &Path, exact_permissions: &[u32]) -> Result<Self, PathError> {
         let metadata = fs::symlink_metadata(path).map_err(|source| PathError::Io {
             path: path.to_owned(),
             source,
@@ -525,11 +583,16 @@ impl SocketIdentity {
             inode: metadata.ino(),
             uid: metadata.uid(),
             mode: metadata.mode(),
+            pin: Default::default(),
         })
     }
 
+    /// Whether `path` still names this socket. It opens nothing, so running
+    /// out of descriptors cannot read as a replacement. The comparison is
+    /// exact on every local filesystem when this identity is pinned (a
+    /// capture); one read back from a stored record compares numbers only.
     pub fn revalidate(&self, path: &Path) -> Result<(), PathError> {
-        if &Self::capture(path)? != self {
+        if &Self::observe(path, &[0o600])? != self {
             return Err(PathError::SocketIdentityChanged(path.to_owned()));
         }
         Ok(())

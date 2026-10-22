@@ -5620,6 +5620,7 @@ mod tests {
                     uid: current_uid(),
                     mode: 0o100600,
                     links: 1,
+                    pin: Default::default(),
                 },
                 filesystem_uuid: Uuid::new_v4(),
             },

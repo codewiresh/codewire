@@ -461,6 +461,30 @@ mod client_tests {
         );
     }
 
+    /// The original's last reference is gone before the replacement binds,
+    /// so a filesystem such as ext4 hands the replacement the original's
+    /// inode number (#3207). The connector's pinned identity keeps that
+    /// inode allocated, so the replacement still reads as replaced.
+    #[tokio::test]
+    async fn captured_connector_rejects_a_replacement_after_the_original_is_gone() {
+        let (parent, socket, original_listener) = private_socket();
+        let connector = owner_only_connector(&socket).unwrap();
+        let original = SocketIdentity::capture(&socket).unwrap();
+        drop(original_listener);
+        fs::remove_file(&socket).unwrap();
+        let replacement_listener = UnixListener::bind(&socket).unwrap();
+        let replacement = host_path::set_socket_private(&socket).unwrap();
+        assert_ne!(replacement, original);
+        let error = connector
+            .oneshot("http://codewire-local-control".parse().unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(original.revalidate(&socket).is_err());
+        replacement.revalidate(&socket).unwrap();
+        drop((replacement_listener, parent));
+    }
+
     #[tokio::test]
     async fn captured_connector_rejects_and_preserves_replacement() {
         let (parent, socket, original_listener) = private_socket();

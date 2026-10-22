@@ -20,6 +20,9 @@ use crate::supervisor_config::{NATIVE_SUPERVISOR_PROTOCOL_VERSION, NativeRuntime
 enum WatchReply {
     Updates(Vec<Result<v1::Operation, Status>>),
     Failure(tonic::Code),
+    /// Fails with the code only once the test releases it, so the test can
+    /// change the endpoint while the client is still inside this watch.
+    FailureWhenReleased(tonic::Code, Arc<tokio::sync::Notify>),
 }
 
 #[derive(Clone)]
@@ -98,9 +101,14 @@ impl LocalSupervisorService for ProtocolPeer {
         request: Request<v1::WatchOperationRequest>,
     ) -> Result<Response<Self::WatchOperationStream>, Status> {
         self.record(format!("watch:{}", request.into_inner().operation_id));
-        match self.replies.lock().unwrap().pop_front().unwrap() {
+        let reply = self.replies.lock().unwrap().pop_front().unwrap();
+        match reply {
             WatchReply::Updates(updates) => Ok(Response::new(tokio_stream::iter(updates))),
             WatchReply::Failure(code) => Err(Status::new(code, "untrusted stream details")),
+            WatchReply::FailureWhenReleased(code, release) => {
+                release.notified().await;
+                Err(Status::new(code, "untrusted stream details"))
+            }
         }
     }
 
@@ -245,6 +253,26 @@ impl TestServer {
         replies: Vec<WatchReply>,
         environment_present: bool,
     ) -> Self {
+        Self::start_listening(info, replies, environment_present, false).0
+    }
+
+    /// A server whose listener the test can close while the connections it
+    /// accepted keep serving: aborting the returned accept task drops the
+    /// listener, so its socket inode is free once the path is unlinked.
+    fn start_with_closable_listener(
+        info: impl FnOnce(&NativeRuntimeConfig) -> Result<v1::SupervisorInfo, tonic::Code>,
+        replies: Vec<WatchReply>,
+    ) -> (Self, tokio::task::JoinHandle<()>) {
+        let (server, accept) = Self::start_listening(info, replies, true, true);
+        (server, accept.unwrap())
+    }
+
+    fn start_listening(
+        info: impl FnOnce(&NativeRuntimeConfig) -> Result<v1::SupervisorInfo, tonic::Code>,
+        replies: Vec<WatchReply>,
+        environment_present: bool,
+        closable: bool,
+    ) -> (Self, Option<tokio::task::JoinHandle<()>>) {
         // Keep Unix paths short and canonical on both hosts. This creates only
         // an owned fixture; production input is never silently canonicalized.
         let parent = tempfile::Builder::new()
@@ -275,24 +303,55 @@ impl TestServer {
             environment_present,
         };
         let (shutdown, receiver) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(LocalSupervisorServiceServer::new(peer))
-                .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
-                    let _ = receiver.await;
-                })
-                .await
-                .unwrap();
-        });
-        Self {
-            _parent: parent,
-            config,
-            socket,
-            identity,
-            calls,
-            shutdown: Some(shutdown),
-            task,
-        }
+        let mut accept = None;
+        let task = if closable {
+            let (accepted, incoming) = tokio::sync::mpsc::unbounded_channel();
+            accept = Some(tokio::spawn(async move {
+                loop {
+                    let connection = listener.accept().await.map(|(stream, _)| stream);
+                    if accepted.send(connection).is_err() {
+                        break;
+                    }
+                }
+            }));
+            let incoming = futures::stream::unfold(incoming, |mut incoming| async move {
+                incoming
+                    .recv()
+                    .await
+                    .map(|connection| (connection, incoming))
+            });
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(LocalSupervisorServiceServer::new(peer))
+                    .serve_with_incoming_shutdown(incoming, async {
+                        let _ = receiver.await;
+                    })
+                    .await
+                    .unwrap();
+            })
+        } else {
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(LocalSupervisorServiceServer::new(peer))
+                    .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
+                        let _ = receiver.await;
+                    })
+                    .await
+                    .unwrap();
+            })
+        };
+        (
+            Self {
+                _parent: parent,
+                config,
+                socket,
+                identity,
+                calls,
+                shutdown: Some(shutdown),
+                task,
+            },
+            accept,
+        )
     }
 
     fn calls(&self) -> Vec<String> {
@@ -738,9 +797,17 @@ async fn linux_watch_reconnect_is_bounded_to_three_attempts() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_without_replay() {
-    let mut server = TestServer::start(
+    // The original server holds the client's first watch until the endpoint
+    // is replaced, so the client's reconnect can only meet the replacement.
+    // Without that order the client's reconnect raced the test's shutdown of
+    // the original: under load it reached the original again (#3207).
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (mut server, accept) = TestServer::start_with_closable_listener(
         valid_info,
-        vec![WatchReply::Failure(tonic::Code::Unavailable)],
+        vec![WatchReply::FailureWhenReleased(
+            tonic::Code::Unavailable,
+            release.clone(),
+        )],
     );
     let mut client = bounded(NativeSupervisorClient::connect_admitted(
         &server.socket,
@@ -753,19 +820,25 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
     let initial = operation(v1::OperationPhase::Intent);
     let expected_id = initial.operation_id.clone();
     let follower = tokio::spawn(async move { client.follow_operation(initial, &mut |_| {}).await });
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while original_calls.lock().unwrap().len() < 2 {
-        assert!(tokio::time::Instant::now() < deadline);
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    server.shutdown.take().unwrap().send(()).unwrap();
-    bounded(&mut server.task).await.unwrap();
+    bounded(async {
+        while original_calls.lock().unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+
+    // Stop the original listener, so its socket inode is free once the path
+    // is unlinked (a filesystem such as ext4 hands that number to the next
+    // socket, #3207), while the original still serves the held watch. Then
+    // replace the endpoint.
+    accept.abort();
+    assert!(bounded(accept).await.unwrap_err().is_cancelled());
     host_path::PrivateRoot::open(&server.config.socket_dir())
         .unwrap()
         .remove_private_socket(Path::new("supervisor.sock"))
         .unwrap();
     let listener = UnixListener::bind(&server.socket).unwrap();
-    server.identity = host_path::set_socket_private(&server.socket).unwrap();
+    let replacement_identity = host_path::set_socket_private(&server.socket).unwrap();
     let replacement_calls = Arc::new(Mutex::new(Vec::new()));
     let peer = ProtocolPeer {
         info: valid_info(&server.config),
@@ -773,8 +846,8 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
         replies: Arc::new(Mutex::new(VecDeque::new())),
         environment_present: true,
     };
-    let (shutdown, receiver) = oneshot::channel();
-    server.task = tokio::spawn(async move {
+    let (replacement_shutdown, receiver) = oneshot::channel();
+    let replacement_task = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(LocalSupervisorServiceServer::new(peer))
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
@@ -783,7 +856,8 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
             .await
             .unwrap();
     });
-    server.shutdown = Some(shutdown);
+
+    release.notify_one();
     let error = bounded(follower).await.unwrap().unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unavailable);
     assert!(error.message().contains(&expected_id));
@@ -792,6 +866,14 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
         ["info", &format!("watch:{expected_id}")]
     );
     assert!(replacement_calls.lock().unwrap().is_empty());
+
+    // The original finishes once its listener is gone and the held watch
+    // has ended, so it may no longer wait for a shutdown.
+    let _ = server.shutdown.take().unwrap().send(());
+    bounded(&mut server.task).await.unwrap();
+    server.task = replacement_task;
+    server.shutdown = Some(replacement_shutdown);
+    server.identity = replacement_identity;
     server.identity.revalidate(&server.socket).unwrap();
     server.finish().await;
 }

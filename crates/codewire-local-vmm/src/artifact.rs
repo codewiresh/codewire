@@ -231,6 +231,7 @@ impl AdmittedArtifact {
                 uid: 0,
                 mode: 0o100600,
                 links: 1,
+                pin: Default::default(),
             },
             size: 1,
             sha256: "a".repeat(64),
