@@ -56,7 +56,7 @@ integration_postgres_configure
 [ "$INTEGRATION_POSTGRES_SOURCE" = managed ]
 [ "$DATABASE_URL" = "postgres://codewire:codewire@127.0.0.1:45678/codewire?sslmode=disable" ]
 [ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:45678/codewire" ]
-grep -q '^run .*127.0.0.1::5432 postgres:17-alpine$' "$FAKE_DOCKER_LOG"
+grep -q '^run .*127.0.0.1::5432 postgres:17-alpine -c max_locks_per_transaction=1024$' "$FAKE_DOCKER_LOG"
 grep -q '127.0.0.1:45678/codewire?sslmode=disable.*SELECT 1' "$FAKE_PSQL_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER$" "$FAKE_DOCKER_LOG"
@@ -70,7 +70,7 @@ integration_postgres_lanes_available
 integration_postgres_start_lane credential-broker
 [ "$INTEGRATION_POSTGRES_LANE_URL" = "postgres://codewire:codewire@127.0.0.1:45678/codewire?sslmode=disable" ]
 [ "$INTEGRATION_POSTGRES_LANE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:45678/codewire" ]
-grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-credential-broker .*127.0.0.1::5432 postgres:17-alpine$" "$FAKE_DOCKER_LOG"
+grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-credential-broker .*127.0.0.1::5432 postgres:17-alpine -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER$" "$FAKE_DOCKER_LOG"
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER-lane-credential-broker$" "$FAKE_DOCKER_LOG"
@@ -92,7 +92,7 @@ INTEGRATION_DOCKER_NETWORK=codewire-fixture-net
 integration_postgres_lanes_available
 integration_postgres_start_lane orchestration
 [ "$INTEGRATION_POSTGRES_LANE_URL_RUST" = "postgres://codewire:codewire@codewire-integration-postgres-orchestration:5432/codewire" ]
-grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration --pids-limit 2048 --network codewire-fixture-net --network-alias codewire-integration-postgres-orchestration .* postgres:17-alpine$" "$FAKE_DOCKER_LOG"
+grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration --pids-limit 2048 --network codewire-fixture-net --network-alias codewire-integration-postgres-orchestration .* postgres:17-alpine -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration$" "$FAKE_DOCKER_LOG"
 unset INTEGRATION_DOCKER_NETWORK
@@ -108,7 +108,7 @@ integration_postgres_configure
 [ "$INTEGRATION_POSTGRES_CONTAINER" = "codewire-product-postgres-fixture-$$-$$" ]
 [ "$DATABASE_URL" = "postgres://codewire:codewire@$INTEGRATION_POSTGRES_CONTAINER:5432/codewire?sslmode=disable" ]
 [ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@$INTEGRATION_POSTGRES_CONTAINER:5432/codewire" ]
-grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER --pids-limit 2048 --network codewire-fixture-net --network-alias $INTEGRATION_POSTGRES_CONTAINER .* postgres:17-alpine$" "$FAKE_DOCKER_LOG"
+grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER --pids-limit 2048 --network codewire-fixture-net --network-alias $INTEGRATION_POSTGRES_CONTAINER .* postgres:17-alpine -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
 if grep -q -- '127.0.0.1:' "$FAKE_DOCKER_LOG"; then
   echo 'a job-network PostgreSQL published a loopback port' >&2
   exit 1
@@ -159,7 +159,7 @@ integration_postgres_configure
 [ "$INTEGRATION_POSTGRES_SOURCE" = managed ]
 [ "$DATABASE_URL" = "postgres://codewire:codewire@127.0.0.1:55432/codewire?sslmode=disable" ]
 [ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:55432/codewire" ]
-grep -q '^run .*127.0.0.1:55432:5432 postgres:17-alpine$' "$FAKE_DOCKER_LOG"
+grep -q '^run .*127.0.0.1:55432:5432 postgres:17-alpine -c max_locks_per_transaction=1024$' "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 
 for invalid_port in invalid 1023 65536; do
@@ -543,6 +543,23 @@ assert f'{root} pid=' in (lock_dir / 'ports-62000.lock.holder').read_text()
 
 print(f'Database batching: {len(suites) + 10} trace/failure cases; '
       f'all {len(suites)} suite contracts and {sum(suite["count"] for suite in suites)} required tests preserved')
+PYTHON
+
+# Every integration PostgreSQL gets the same server settings (#3198): the ones
+# this file starts above, and ci.yaml's "Start integration Postgres" steps.
+[ "${INTEGRATION_POSTGRES_SERVER_ARGS[*]}" = '-c max_locks_per_transaction=1024' ]
+python3 - "$ROOT/.gitea/workflows/ci.yaml" "${INTEGRATION_POSTGRES_SERVER_ARGS[*]}" <<'PYTHON'
+import re
+import sys
+
+workflow, server_args = open(sys.argv[1], encoding="utf-8").read(), sys.argv[2]
+steps = re.findall(r"- name: Start integration Postgres\n(.*?)(?=\n      - name: )", workflow, re.S)
+assert len(steps) >= 3, f"expected the database and two service Postgres steps, found {len(steps)}"
+for step in steps:
+    run = step.replace("\\\n", " ")
+    command = re.search(r"docker run -d [^\n]*", run)
+    assert command, "a Postgres step has no docker run"
+    assert " ".join(command.group(0).split()).endswith(f"postgres:17-alpine {server_args}"), command.group(0)
 PYTHON
 
 printf '[test-integration-postgres] hermetic selection, prerequisite, scope, and cleanup cases passed\n'

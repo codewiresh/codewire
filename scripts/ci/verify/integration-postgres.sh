@@ -4,6 +4,16 @@
 # This file is sourced by run-integration-verification.sh and its focused test.
 # shellcheck disable=SC2034 # State is consumed by the sourcing script.
 
+# Server settings for every integration PostgreSQL this file starts, and for the
+# one ci.yaml's "Start integration Postgres" steps start (test-integration-
+# postgres.sh keeps them equal). Each migration test applies the baseline
+# migration in one transaction, holding about 900 locks until it commits, and
+# the database lanes run those tests side by side. The default lock table (64
+# locks per transaction for 100 connections) runs out at a few concurrent
+# migrations with "out of shared memory" (#3198); 1024 fits every concurrent
+# test the lanes can open within max_connections.
+INTEGRATION_POSTGRES_SERVER_ARGS=(-c max_locks_per_transaction=1024)
+
 integration_postgres_init() {
   # Each run names its containers for its own process: the concurrent lanes of
   # one merge qualification share a run ID, and on CI also a Docker daemon.
@@ -65,7 +75,7 @@ integration_postgres_configure() {
       --network "$INTEGRATION_DOCKER_NETWORK" \
       --network-alias "$INTEGRATION_POSTGRES_CONTAINER" \
       -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire \
-      "$image" >/dev/null
+      "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
     INTEGRATION_POSTGRES_MANAGED=true
     DATABASE_URL="postgres://codewire:codewire@${INTEGRATION_POSTGRES_CONTAINER}:5432/codewire?sslmode=disable"
     DATABASE_URL_RUST="postgres://codewire:codewire@${INTEGRATION_POSTGRES_CONTAINER}:5432/codewire"
@@ -99,7 +109,7 @@ integration_postgres_configure() {
     -e POSTGRES_USER=codewire \
     -e POSTGRES_PASSWORD=codewire \
     -e POSTGRES_DB=codewire \
-    -p "$publish" "$image" >/dev/null
+    -p "$publish" "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
   INTEGRATION_POSTGRES_MANAGED=true
 
   port="$(docker port "$INTEGRATION_POSTGRES_CONTAINER" 5432/tcp | sed 's/.*://')"
@@ -155,7 +165,7 @@ integration_postgres_start_lane() {
   if [ "${INTEGRATION_POSTGRES_SOURCE:-}" = managed ]; then
     docker run -d --rm --name "$name" \
       -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire \
-      -p 127.0.0.1::5432 "$image" >/dev/null
+      -p 127.0.0.1::5432 "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
     host=127.0.0.1
     port="$(docker port "$name" 5432/tcp | sed 's/.*://')"
     if ! [[ "$port" =~ ^[0-9]+$ ]]; then
@@ -167,7 +177,7 @@ integration_postgres_start_lane() {
     docker run -d --rm --name "$name" --pids-limit 2048 \
       --network "$INTEGRATION_DOCKER_NETWORK" --network-alias "$host" \
       -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire \
-      "$image" >/dev/null
+      "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
     port=5432
   fi
   INTEGRATION_POSTGRES_LANE_URL="postgres://codewire:codewire@${host}:${port}/codewire?sslmode=disable"

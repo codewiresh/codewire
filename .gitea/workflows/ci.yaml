@@ -1110,10 +1110,13 @@ jobs:
             exit 1
           fi
           postgres_host="codewire-integration-postgres"
+          # The lock table fits the side-by-side migration tests (#3198); the
+          # setting matches scripts/ci/verify/integration-postgres.sh.
           docker run -d --name "$container" --pids-limit 2048 \
             --network "${networks[0]}" --network-alias "$postgres_host" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
-            -e POSTGRES_DB=codewire postgres:17-alpine
+            -e POSTGRES_DB=codewire postgres:17-alpine \
+            -c max_locks_per_transaction=1024
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
 
@@ -1243,10 +1246,13 @@ jobs:
             exit 1
           fi
           postgres_host="codewire-integration-postgres"
+          # The lock table fits the side-by-side migration tests (#3198); the
+          # setting matches scripts/ci/verify/integration-postgres.sh.
           docker run -d --name "$container" --pids-limit 2048 \
             --network "${networks[0]}" --network-alias "$postgres_host" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
-            -e POSTGRES_DB=codewire postgres:17-alpine
+            -e POSTGRES_DB=codewire postgres:17-alpine \
+            -c max_locks_per_transaction=1024
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
 
@@ -1378,10 +1384,13 @@ jobs:
             exit 1
           fi
           postgres_host="codewire-integration-postgres"
+          # The lock table fits the side-by-side migration tests (#3198); the
+          # setting matches scripts/ci/verify/integration-postgres.sh.
           docker run -d --name "$container" --pids-limit 2048 \
             --network "${networks[0]}" --network-alias "$postgres_host" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
-            -e POSTGRES_DB=codewire postgres:17-alpine
+            -e POSTGRES_DB=codewire postgres:17-alpine \
+            -c max_locks_per_transaction=1024
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
 
