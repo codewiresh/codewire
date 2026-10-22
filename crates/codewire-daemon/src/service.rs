@@ -1710,17 +1710,28 @@ mod tests {
         assert!(current.borrow().is_empty());
     }
 
-    async fn wait_attach_fixture_ready(temp: &tempfile::TempDir) {
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while !std::fs::read_to_string(temp.path().join("home/attach-ready"))
-                .as_deref()
-                .is_ok_and(|value| value == "ready")
-            {
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("quiet PTY fixture is ready with echo disabled");
+    /// Wait until the fixture shell has disabled echo and said so. Its start
+    /// under load is not what these tests measure, so this waits on that
+    /// state rather than a clock; a shell that ends first fails.
+    async fn wait_attach_fixture_ready(
+        temp: &tempfile::TempDir,
+        engine: &SessionEngine,
+        session_id: &str,
+    ) {
+        while !std::fs::read_to_string(temp.path().join("home/attach-ready"))
+            .as_deref()
+            .is_ok_and(|value| value == "ready")
+        {
+            assert_attach_fixture_live(engine, session_id).await;
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn assert_attach_fixture_live(engine: &SessionEngine, session_id: &str) {
+        assert!(
+            is_attached_session_live(engine.get(session_id).await.unwrap().state),
+            "the fixture shell ended before writing its evidence"
+        );
     }
 
     /// A browser terminal types each key as its own small frame. While the
@@ -1756,7 +1767,7 @@ mod tests {
             })
             .await
             .unwrap();
-        wait_attach_fixture_ready(&temp).await;
+        wait_attach_fixture_ready(&temp, &engine, &session.session_id).await;
         let (input, incoming) = mpsc::channel(8);
         let (output, _unread) = mpsc::channel(32);
         let owner = tokio::spawn(run_attach_session(
@@ -1905,9 +1916,9 @@ mod tests {
             height: 24,
             ..Default::default()
         }).await.unwrap();
-        wait_attach_fixture_ready(&temp).await;
+        wait_attach_fixture_ready(&temp, &engine, &session.session_id).await;
         // Prepare the full production-sized transcript deterministically. This
-        // is disk setup, not the separately asserted 3s control/1s detach gate.
+        // is disk setup, not part of what the controls below prove.
         tokio::time::timeout(
             Duration::from_secs(30),
             engine.append_test_output(&session.session_id, &vec![0; output_bytes as usize]),
@@ -1935,48 +1946,57 @@ mod tests {
             },
             output,
         ));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while capacity.capacity() != 0 {
-                sleep(Duration::from_millis(10)).await;
+        // The replay fills every response slot, and nothing reads them.
+        while capacity.capacity() != 0 {
+            assert!(
+                !owner.is_finished(),
+                "the attachment ended before it filled its response slots"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+        // Nothing reads a response frame until the end, so an attachment
+        // that waited for its reader, or for a lock behind it, would never
+        // apply these controls; applying them at all proves it did not. The
+        // proof is the controls' effects, not a clock: under load the shell
+        // can take any time to run, and that is not what this measures
+        // (#2442). A control that fails, or outlives the attachment's own
+        // control deadline, ends the attachment, which fails here.
+        for payload in [
+            v1::session_attach_message::Payload::Resize(v1::ResizeRequest {
+                width: 132,
+                height: 43,
+            }),
+            v1::session_attach_message::Payload::Input(v1::SessionInput {
+                data: b"fair-input\n".to_vec(),
+            }),
+        ] {
+            input
+                .send(Ok(v1::SessionAttachMessage {
+                    payload: Some(payload),
+                }))
+                .await
+                .unwrap();
+        }
+        // The shell reads the input line and then reports its terminal size,
+        // so its evidence shows both reached it, in that order.
+        let size = loop {
+            if let Ok(size) = std::fs::read_to_string(temp.path().join("home/attach-size"))
+                && size.ends_with('\n')
+            {
+                break size;
             }
-        })
-        .await
-        .expect("all 32 response slots are saturated");
-        input
-            .send(Ok(v1::SessionAttachMessage {
-                payload: Some(v1::session_attach_message::Payload::Resize(
-                    v1::ResizeRequest {
-                        width: 132,
-                        height: 43,
-                    },
-                )),
-            }))
-            .await
-            .unwrap();
-        input
-            .send(Ok(v1::SessionAttachMessage {
-                payload: Some(v1::session_attach_message::Payload::Input(
-                    v1::SessionInput {
-                        data: b"fair-input\n".to_vec(),
-                    },
-                )),
-            }))
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let input = std::fs::read_to_string(temp.path().join("home/attach-input"));
-                let size = std::fs::read_to_string(temp.path().join("home/attach-size"));
-                if input.as_deref().is_ok_and(|input| input == "fair-input")
-                    && size.as_deref().is_ok_and(|size| size.trim() == "43 132")
-                {
-                    break;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("resize and input complete without reading response frames");
+            assert!(
+                !owner.is_finished(),
+                "the attachment ended before its controls reached the shell"
+            );
+            assert_attach_fixture_live(&engine, &session.session_id).await;
+            sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(size.trim(), "43 132");
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("home/attach-input")).unwrap(),
+            "fair-input"
+        );
         assert_eq!(capacity.capacity(), 0);
         input
             .send(Ok(v1::SessionAttachMessage {
@@ -1988,14 +2008,12 @@ mod tests {
             }))
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(1), owner)
-            .await
-            .expect("detach does not wait for the saturated reader")
-            .unwrap();
-        assert_eq!(
-            engine.get(&session.session_id).await.unwrap().state,
-            v1::SessionLifecycleState::Running as i32
-        );
+        // Still unread, so the attachment ends without waiting for its reader.
+        owner.await.unwrap();
+        assert_eq!(capacity.capacity(), 0);
+        let record = engine.get(&session.session_id).await.unwrap();
+        assert_eq!(record.state, v1::SessionLifecycleState::Running as i32);
+        assert_eq!(record.status_message, "session resized to 132x43");
         let first = unread.recv().await.unwrap().unwrap().payload.unwrap();
         let replay_start = if expect_gap {
             let v1::session_attach_message::Payload::HistoryGap(gap) = first else {
@@ -2037,7 +2055,7 @@ mod tests {
             height: 24,
             ..Default::default()
         }).await.unwrap();
-        wait_attach_fixture_ready(&temp).await;
+        wait_attach_fixture_ready(&temp, &engine, &session.session_id).await;
         tokio::time::timeout(
             Duration::from_secs(30),
             engine.append_test_output(&session.session_id, &vec![0; 262144]),
@@ -2234,7 +2252,7 @@ mod tests {
             height: 24,
             ..Default::default()
         }).await.unwrap();
-        wait_attach_fixture_ready(&temp).await;
+        wait_attach_fixture_ready(&temp, &engine, &session.session_id).await;
         let (input, incoming) = mpsc::channel(8);
         let (output, mut replies) = mpsc::channel(32);
         let owner = tokio::spawn(run_attach_session(
