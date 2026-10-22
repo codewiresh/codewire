@@ -654,6 +654,8 @@ run_paths_case repo_license_inventory pull_request refs/pull/2201/head false \
   'policy security security_js' scripts/checks/repo_policy/licensing.py
 run_paths_case repo_public_address_guard pull_request refs/pull/2203/head false \
   'policy security security_js' scripts/checks/repo_policy/public_addresses.py
+run_paths_case repo_private_host_guard pull_request refs/pull/3189/head false \
+  'policy security security_js' scripts/checks/repo_policy/private_hosts.py
 run_paths_case repo_license_with_other_policy pull_request refs/pull/2202/head false \
   'contracts contracts_proto deploy go_consumer_interop go_support policy release confidential_script_tests security security_idp_kek security_js' \
   scripts/checks/repo_policy/licensing.py scripts/checks/repo_policy/mesh.py

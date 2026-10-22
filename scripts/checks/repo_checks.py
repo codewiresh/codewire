@@ -17,6 +17,7 @@ from repo_policy.orchestration_security import check_orchestration_authz
 from repo_policy.permanent_raw import check_permanent_raw_surface
 from repo_policy.production import check_production_source_ownership
 from repo_policy.public_addresses import check_public_address_literals
+from repo_policy.private_hosts import check_private_host_literals
 from repo_policy.proto import check_proto_package_boundaries
 from repo_policy.workspace_identity import check_identity_free_workspace
 from repo_policy.webpki_roots_floor import check_webpki_roots_floor
@@ -87,6 +88,9 @@ def main(argv: list[str] | None = None) -> int:
     public_address_parser = subparsers.add_parser("public-address-literals")
     public_address_parser.add_argument("--self-test", action="store_true")
     public_address_parser.set_defaults(func=check_public_address_literals)
+    private_host_parser = subparsers.add_parser("private-host-literals")
+    private_host_parser.add_argument("--self-test", action="store_true")
+    private_host_parser.set_defaults(func=check_private_host_literals)
 
     args = parser.parse_args(argv)
     return args.func(args)

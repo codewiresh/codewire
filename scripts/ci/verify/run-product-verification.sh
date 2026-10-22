@@ -271,6 +271,7 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
   python3 scripts/checks/repo_checks.py public-address-literals --self-test
+  python3 scripts/checks/repo_checks.py private-host-literals --self-test
   python3 scripts/checks/repo_checks.py go-source-classification
   python3 scripts/checks/repo_checks.py ses-email-isolation
   python3 scripts/checks/repo_checks.py turnstile-access-projection --self-test

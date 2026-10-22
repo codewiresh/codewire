@@ -55,16 +55,27 @@ names the variable. It never falls back to a built-in site.
 
 ## Local runs
 
-Scripts read the same names outside CI. Put them in `~/.config/codewire/env`
-(or an untracked `.envrc`; see `.envrc.example`). Outside CI, set
-`GITHUB_SERVER_URL` to the Forgejo base URL for anything that builds Forgejo
-URLs: a release tag push's receipt check (without it the push falls back to
-full local verification), the CI measures, and the local VM journeys that
-clone a Forgejo-hosted source. Kind's sealed CI inputs need
-`CODEWIRE_IMAGE_REGISTRY`; a local Kind loop that builds its own images does
-not.
+Scripts read the same names outside CI. A workstation sets these two in
+`~/.config/codewire/env` (or an untracked `.envrc`; see `.envrc.example`):
+
+```sh
+export CODEWIRE_IMAGE_REGISTRY=registry.example.com
+export GITHUB_SERVER_URL=https://forgejo.example.com
+```
+
+- `GITHUB_SERVER_URL` is the Forgejo base URL. A release tag push's receipt
+  check needs it (without it the push falls back to full local verification),
+  and so do the CI measures and the local VM journeys that clone a
+  Forgejo-hosted source.
+- `CODEWIRE_IMAGE_REGISTRY` is needed by the Dev and confidential smokes and
+  Kind's sealed CI inputs. A local Kind loop that builds its own images does
+  not need it.
 
 ## Tests
 
 Tests use the reserved names `git.example.invalid`, `registry.example.invalid`
 and other `*.example.invalid` endpoints, so they pass anywhere.
+`python3 scripts/checks/repo_checks.py private-host-literals` (policy core)
+refuses the live forge and registry host names and literal R2 account
+endpoints everywhere except the Dev and Production deployment paths that move
+to the deploy repository.
