@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# CI names these in Actions variables and the job context; the scripts
+# require them.
+export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
 readonly COPY_IMAGE="$ROOT/scripts/ci/images/copy-image-to-ghcr.sh"
 
 fail() {

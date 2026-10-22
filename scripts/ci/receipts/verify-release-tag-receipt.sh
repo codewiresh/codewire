@@ -40,6 +40,14 @@ remote="${PREFLIGHT_PUSH_REMOTE_NAME:-}"
 [[ "$tag_object" =~ ^[0-9a-f]{40}$ ]] || fallback 'invalid-tag-object-sha'
 [ -n "$remote" ] || fallback 'push-remote-unavailable'
 
+# The canonical forge is GITHUB_SERVER_URL, set in every Forgejo job; a local
+# tag push sets it to the same Forgejo base URL.
+server_url="${GITHUB_SERVER_URL:-}"
+server_url="${server_url%/}"
+[[ "$server_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] \
+  || fallback 'GITHUB_SERVER_URL-unset-or-invalid'
+forge_host="${server_url#https://}"
+
 for required_tool in git jq fj; do
   command -v "$required_tool" >/dev/null 2>&1 \
     || fallback "${required_tool}-unavailable"
@@ -48,7 +56,7 @@ done
 remote_url="$(git remote get-url "$remote" 2>/dev/null)" \
   || fallback 'push-remote-unavailable'
 case "$remote_url" in
-  git@git.example.invalid:codewire/codewire.git|ssh://git@git.example.invalid/codewire/codewire.git|https://git.example.invalid/codewire/codewire.git)
+  "git@$forge_host:codewire/codewire.git"|"ssh://git@$forge_host/codewire/codewire.git"|"https://$forge_host/codewire/codewire.git")
     ;;
   *) fallback 'push-remote-not-canonical-gitea' ;;
 esac
@@ -282,7 +290,7 @@ while read -r candidate; do
 done < <(successful_runs "$dry_runs_json" cw-release-dry-run.yaml)
 [ -n "$dry_run_id" ] || fallback 'exact-commit-dry-run-not-verified'
 
-deploy_repo=(-r codewire/deploy -H git.example.invalid)
+deploy_repo=(-r codewire/deploy -H "$forge_host")
 deploy_runs="$tmp/deploy-runs.json"
 fj actions runs list "${deploy_repo[@]}" --workflow promote-dev.yaml \
   --status success -L 30 --output json >"$deploy_runs" 2>/dev/null \

@@ -134,6 +134,8 @@ export CODEWIRE_RELEASE_TAG_CURL="$fake_curl"
 export FAKE_CURL_ARGV_LOG="$fixture/curl-argv.log"
 export FAKE_EXPECTED_TOKEN="$token_canary"
 export GITEA_TOKEN="$token_canary"
+# Forgejo's server URL is its ROOT_URL, which ends with a slash.
+export GITHUB_SERVER_URL=https://git.example.invalid/
 
 git -C "$fixture" init -q
 git -C "$fixture" config user.name 'Release Guard Test'
@@ -268,6 +270,14 @@ expect_failure wrong-server \
   workflow_dispatch refs/heads/main main v0.3.359 \
   https://github.com codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
+missing_server_output="$(cd "$fixture" && env -u GITHUB_SERVER_URL "$VERIFY" \
+  workflow_dispatch refs/heads/main main v0.3.359 \
+  https://git.example.invalid codewire/codewire \
+  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" 2>&1)" && {
+  printf 'release tag guard test failed: missing GITHUB_SERVER_URL unexpectedly passed\n' >&2
+  exit 1
+}
+grep -Fq 'GITHUB_SERVER_URL' <<<"$missing_server_output"
 expect_failure wrong-repository \
   workflow_dispatch refs/heads/main main v0.3.359 \
   https://git.example.invalid codewire/other \
@@ -613,7 +623,7 @@ grep -Fq -- '--provenance="$provenance"' "$image_builder"
 grep -Fq -- '--metadata-file "$build_metadata"' "$image_builder"
 grep -Fq '"$credential_fetcher" "$registry_username_file" "$registry_password_file"' \
   "$image_builder"
-grep -Fq "readonly REGISTRY_HOST='registry.example.invalid'" \
+grep -Fq 'readonly REGISTRY_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"' \
   "$image_builder"
 if grep -Fq 'GITEA_REGISTRY_TOKEN' "$image_builder"; then
   echo 'image builder still accepts a direct registry token' >&2

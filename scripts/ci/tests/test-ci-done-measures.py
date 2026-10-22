@@ -359,6 +359,14 @@ class MeasuresTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("pass --token-file", stderr.getvalue())
 
+    def test_forgejo_api_comes_from_the_job_server_url(self):
+        self.assertEqual(measures.api_base({"GITHUB_SERVER_URL": "https://git.example.invalid/"}),
+                         "https://git.example.invalid/api/v1")
+        for environ in ({}, {"GITHUB_SERVER_URL": "http://git.example.invalid"},
+                        {"GITHUB_SERVER_URL": "https://git.example.invalid/path"}):
+            with self.subTest(environ), self.assertRaisesRegex(measures.CollectorFailure, "GITHUB_SERVER_URL"):
+                measures.api_base(environ)
+
     def test_window_is_bounded(self):
         stdout, stderr = io.StringIO(), io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):

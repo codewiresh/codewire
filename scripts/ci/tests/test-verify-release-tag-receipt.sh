@@ -258,6 +258,7 @@ run_case() {
     PREFLIGHT_RELEASE_TAG_REF="refs/tags/$tag" \
     PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$tag_object" \
     PREFLIGHT_PUSH_REMOTE_NAME=origin \
+    GITHUB_SERVER_URL="${CASE_SERVER_URL-https://git.example.invalid/}" \
     "$CHECK" 2>&1)" || fail "$name checker returned failure"
   case_output="$output"
   if grep -Fq 'tea must not be used' <<<"$output"; then
@@ -275,6 +276,9 @@ run_case() {
 run_case accepted success v1.2.3 accepted signed-tag-at-exact-green-deployed-main
 run_case bad_signature bad_signature v1.2.3 fallback release-tag-signature-invalid
 run_case wrong_remote wrong_remote v1.2.3 fallback push-remote-not-canonical-gitea
+CASE_SERVER_URL='' run_case no_server_url success v1.2.3 fallback GITHUB_SERVER_URL-unset-or-invalid
+CASE_SERVER_URL='https://other.example.invalid' \
+  run_case other_server success v1.2.3 fallback push-remote-not-canonical-gitea
 run_case api_unavailable api_unavailable v1.2.3 fallback exact-main-runs-unavailable
 run_case failed_ci failed_ci v1.2.3 fallback exact-main-ci-not-successful
 run_case failed_required failed_required v1.2.3 fallback required-verification-not-successful

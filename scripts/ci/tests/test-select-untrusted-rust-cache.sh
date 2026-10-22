@@ -65,6 +65,7 @@ run_selector() {
     GITHUB_EVENT_NAME="${SELECT_EVENT:-pull_request}" \
     GITHUB_REF="${SELECT_REF:-refs/pull/1748/head}" \
     CODEWIRE_SCCACHE_REQUEST="$request" \
+    CODEWIRE_R2_CACHE_ENDPOINT="${SELECT_ENDPOINT-https://r2-cache.example.invalid}" \
     OPENBAO_SCCACHE_FETCHER="$fetcher" \
     "$SELECTOR" "$credentials"
 }
@@ -81,6 +82,7 @@ grep -Fxq 'SCCACHE_IGNORE_SERVER_IO_ERROR=1' "$r2_env" || fail 'cache failure is
 # A pull request reads main's caches read-only and writes nothing remote.
 grep -Fxq 'SCCACHE_BUCKET=example-ci-cache-protected' "$r2_env" || fail 'R2 bucket is not exact'
 grep -Fxq 'SCCACHE_S3_KEY_PREFIX=protected/codewire/v1' "$r2_env" || fail 'main prefix is not exact'
+grep -Fxq 'SCCACHE_ENDPOINT=https://r2-cache.example.invalid' "$r2_env" || fail 'R2 endpoint is not the configured one'
 grep -Fxq 'SCCACHE_S3_RW_MODE=READ_ONLY' "$r2_env" || fail 'a pull request may write the main cache'
 grep -Fxq 'CODEWIRE_R2_CACHE_TRUST=protected-read' "$r2_env" || fail 'pull-request trust is not protected-read'
 [[ "$(tail -n 1 "$work/fetch.trust")" == protected-read ]] || fail 'fetcher was not asked for the protected-read token'
@@ -133,6 +135,23 @@ if grep -q '^SCCACHE_BUCKET=' "$local_env"; then
   fail 'local fallback retained a remote bucket'
 fi
 [[ ! -e "$local_credentials" ]] || fail 'local fallback retained a credential file'
+
+# Without a configured cache endpoint, auto mode asks for no credential and
+# names the missing variable; a malformed endpoint is refused.
+: >"$work/fetch.trust"
+unconfigured_env="$work/unconfigured.env"
+SELECT_ENDPOINT='' run_selector auto "$work/bin/fetch-success" "$unconfigured_env" \
+  "$work/runner/unconfigured.aws" >"$work/unconfigured.out"
+grep -Fxq 'CODEWIRE_SCCACHE_MODE=local' "$unconfigured_env" || fail 'unconfigured R2 did not fall back locally'
+grep -Fxq '::warning::CODEWIRE_R2_CACHE_ENDPOINT is unset; continuing with the job-local cache' \
+  "$work/unconfigured.out" || fail 'unconfigured R2 did not name its variable'
+[[ ! -s "$work/fetch.trust" && ! -e "$work/runner/unconfigured.aws" ]] ||
+  fail 'unconfigured R2 still fetched a credential'
+if SELECT_ENDPOINT='http://r2-cache.example.invalid/bucket' run_selector auto "$work/bin/fetch-success" \
+    "$work/malformed.env" "$work/runner/malformed.aws" >"$work/malformed.out" 2>&1; then
+  fail 'a malformed R2 endpoint was accepted'
+fi
+grep -Fq 'CODEWIRE_R2_CACHE_ENDPOINT' "$work/malformed.out" || fail 'malformed R2 endpoint was not named'
 
 # An R2 server that cannot start falls back to the local disk cache, with no
 # remote variable or credential left for later steps.

@@ -24,9 +24,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly BUNDLE_INPUT="$1"
 readonly PUBLIC_KEY_INPUT="$2"
-readonly HARBOR_HOST='registry.example.invalid'
-readonly COSIGN_IMAGE='registry.example.invalid/oci-approved/sigstore/cosign/cosign@sha256:6ca1127dc1e9ff19f3f2bfa214936813a86fbbf52919652eda49d393c888ad3c'
-readonly ref_pattern='^registry\.example\.invalid/codewire/(dashboard|derp|daemon|services|mesh)@sha256:[0-9a-f]{64}$'
+readonly HARBOR_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
+readonly COSIGN_IMAGE="$HARBOR_HOST/oci-approved/sigstore/cosign/cosign@sha256:6ca1127dc1e9ff19f3f2bfa214936813a86fbbf52919652eda49d393c888ad3c"
+readonly ref_pattern="^${HARBOR_HOST//./\\.}/codewire/(dashboard|derp|daemon|services|mesh)@sha256:[0-9a-f]{64}\$"
 
 for input in "$BUNDLE_INPUT" "$PUBLIC_KEY_INPUT"; do
   [[ -f "$input" && -r "$input" && ! -L "$input" ]] || {

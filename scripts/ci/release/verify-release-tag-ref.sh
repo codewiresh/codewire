@@ -66,12 +66,15 @@ case "$event" in
     ;;
 esac
 
-# The canonical Forgejo instance has one public name and may have an internal
-# one (CODEWIRE_FORGEJO_INTERNAL_URL) that runners register against. Nothing else is
-# trusted.
+# The canonical Forgejo instance has one public name (GITHUB_SERVER_URL, set
+# in every Forgejo job) and may have an internal one
+# (CODEWIRE_FORGEJO_INTERNAL_URL) that runners register against. Nothing else
+# is trusted.
+canonical_url="${GITHUB_SERVER_URL:?set to the Forgejo base URL}"
+canonical_url="${canonical_url%/}"
 internal_url="${CODEWIRE_FORGEJO_INTERNAL_URL:-}"
 internal_url="${internal_url%/}"
-if [[ "$server_url" != https://git.example.invalid &&
+if [[ "$server_url" != "$canonical_url" &&
       ( -z "$internal_url" || "$server_url" != "$internal_url" ) ]]; then
   fail "server must be canonical Forgejo, got '$server_url'"
 fi

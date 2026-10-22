@@ -15,7 +15,7 @@
 # container, and the contract never runs on the host.
 #
 # Usage: run-workspace-contract-on-image.sh [--source ghcr] IMAGE_REF REVISION CONTRACT
-#   IMAGE_REF  registry.example.invalid/codewire/workspace@sha256:<64 hex>
+#   IMAGE_REF  $CODEWIRE_IMAGE_REGISTRY/codewire/workspace@sha256:<64 hex>
 #   REVISION   the full commit the image's revision label must name
 #   CONTRACT   the workspace-agent-contract.sh streamed into the image
 # On success it writes workspace_digest=<digest> to $GITHUB_OUTPUT, or prints
@@ -27,7 +27,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
-readonly HARBOR_HOST='registry.example.invalid'
+readonly HARBOR_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
 readonly GHCR_REPOSITORY='ghcr.io/codewiresh/workspace'
 readonly PULL_ATTEMPTS=3 PULL_TIMEOUT=600s
 readonly CONTRACT_TIMEOUT=600s
@@ -39,7 +39,7 @@ fail() {
 }
 
 usage() {
-  echo 'usage: run-workspace-contract-on-image.sh [--source ghcr] registry.example.invalid/codewire/workspace@sha256:DIGEST REVISION CONTRACT' >&2
+  echo "usage: run-workspace-contract-on-image.sh [--source ghcr] $HARBOR_HOST/codewire/workspace@sha256:DIGEST REVISION CONTRACT" >&2
   exit 2
 }
 
@@ -51,7 +51,7 @@ if [[ "${1:-}" == --source ]]; then
 fi
 [[ $# -eq 3 ]] || usage
 readonly image_ref="$1" revision="$2" contract="$3"
-[[ "$image_ref" =~ ^registry\.example\.invalid/codewire/workspace@(sha256:[0-9a-f]{64})$ ]] ||
+[[ "$image_ref" =~ ^"$HARBOR_HOST"/codewire/workspace@(sha256:[0-9a-f]{64})$ ]] ||
   fail "the image must be one exact Harbor workspace digest, not: $image_ref"
 readonly digest="${BASH_REMATCH[1]}"
 [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || fail "the expected revision is not a full commit: $revision"

@@ -6,7 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"
 CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-dev}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
-REGISTRY_HOST="${REGISTRY_HOST:-registry.example.invalid}"
+# The image registry CODEWIRE_IMAGE_REGISTRY names; --registry-host overrides it.
+REGISTRY_HOST="${CODEWIRE_IMAGE_REGISTRY:-}"
 CONFIGMAP_NAME="${CONFIGMAP_NAME:-}"
 DEFAULT_SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
 EXPECTED_TAILNET_PATH_TRANSPORT="${EXPECTED_TAILNET_PATH_TRANSPORT:-direct_udp}"
@@ -70,7 +71,7 @@ Options:
   --image IMAGE             Candidate image to build/push/deploy; repeatable
   --current-dev             Run the existing commodity smoke against current dev
   --tag TAG                 Candidate tag (default: dev-smoke-<branch>-<sha>)
-  --registry-host HOST      Registry host (default: registry.example.invalid)
+  --registry-host HOST      Registry host (default: $CODEWIRE_IMAGE_REGISTRY)
   --sandbox-namespace NAME  Sandbox namespace for the candidate smoke
   --no-temp-sandbox-namespace
                             Use the current dev sandbox namespace instead
@@ -559,6 +560,9 @@ validate_args() {
   fi
   if [[ "$CURRENT_DEV" != "1" && "${#REQUESTED_IMAGES[@]}" == "0" ]]; then
     die "choose --current-dev or at least one --image"
+  fi
+  if [[ "$CURRENT_DEV" != "1" && -z "$REGISTRY_HOST" ]]; then
+    die "CODEWIRE_IMAGE_REGISTRY: set to the image registry host, or pass --registry-host"
   fi
   if [[ "$PREFLIGHT_ONLY" == "1" && "$CURRENT_DEV" != "1" ]]; then
     die "--preflight-only requires --current-dev"

@@ -422,7 +422,7 @@ class PublisherTest(unittest.TestCase):
                 github_env = sandbox / "github-env"
                 env = {"PATH": os.environ["PATH"], "HOME": str(sandbox), "LC_ALL": "C",
                        "RUNNER_TEMP": str(runner), "RELEASE_TAG": fx.VERSION, "GITHUB_ENV": str(github_env),
-                       "CW_RELEASE_R2_ROUTE_ADMITTED": "true",
+                       "CW_RELEASE_R2_ROUTE_ADMITTED": "true", "CODEWIRE_R2_RELEASES_ENDPOINT": fx.R2_ENDPOINT,
                        "SYNTHETIC_ACCESS": ACCESS_KEY, "SYNTHETIC_SECRET": SECRET_KEY,
                        "CW_TEST_TESTS": str(fx.ROOT / "scripts/ci/tests"),
                        "CW_TEST_RELEASE": str(fx.ROOT / "scripts/ci/release"),
@@ -597,6 +597,17 @@ class PublisherTest(unittest.TestCase):
                 r2.object_path(key)
         with self.assertRaises(r2.PublishError):
             r2.HttpsTransport().request("GET", "example.com", "/", {})
+
+    def test_release_endpoint_is_configured_and_bounded(self):
+        self.assertEqual(r2.s3_host({r2.ENDPOINT_VARIABLE: fx.R2_ENDPOINT}), fx.R2_HOST)
+        self.assertEqual(r2.s3_host({r2.ENDPOINT_VARIABLE: fx.R2_ENDPOINT + "/"}), fx.R2_HOST)
+        with self.assertRaisesRegex(r2.PublishError, r2.ENDPOINT_VARIABLE):
+            r2.s3_host({})
+        for endpoint in ("http://r2.example.invalid", "https://r2.example.invalid:8443",
+                         "https://r2.example.invalid/bucket", "https://user@r2.example.invalid",
+                         "r2.example.invalid"):
+            with self.subTest(endpoint), self.assertRaisesRegex(r2.PublishError, r2.ENDPOINT_VARIABLE):
+                r2.s3_host({r2.ENDPOINT_VARIABLE: endpoint})
 
     def test_cli_refuses_before_any_request_without_private_credentials(self):
         loose = self.credential_file("cli-loose",

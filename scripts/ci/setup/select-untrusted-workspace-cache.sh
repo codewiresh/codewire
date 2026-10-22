@@ -19,6 +19,12 @@ trust=protected-read
 : "${RUNNER_TEMP:?Forgejo runner temporary directory is required}"
 
 bucket=example-ci-cache-protected prefix=protected/codewire/v1
+# The S3 endpoint of the CI cache buckets. Unset, auto modes use local caches.
+endpoint="${CODEWIRE_R2_CACHE_ENDPOINT:-}"
+[[ -z "$endpoint" || "$endpoint" =~ ^https://[A-Za-z0-9.-]+/?$ ]] || {
+  echo 'CODEWIRE_R2_CACHE_ENDPOINT must be an https origin with no path' >&2
+  exit 2
+}
 
 for request in "$rust_request" "$layer_request"; do
   case "$request" in
@@ -67,7 +73,9 @@ if [[ "$rust_request" != disabled ]] \
   echo '::warning::Pinned host sccache is unavailable; compiling without a compiler cache'
 fi
 if [[ ( "$rust_request" == auto && "$rust_mode" != disabled ) || "$layer_request" == auto ]]; then
-  if CODEWIRE_R2_CACHE_TRUST="$trust" "$fetcher" "$credentials_file"; then
+  if [[ -z "$endpoint" ]]; then
+    echo '::warning::CODEWIRE_R2_CACHE_ENDPOINT is unset; auto modes fall back to local'
+  elif CODEWIRE_R2_CACHE_TRUST="$trust" "$fetcher" "$credentials_file"; then
     # Validate the fetcher's output before exporting any job configuration.
     [[ -f "$credentials_file" && ! -L "$credentials_file" && -s "$credentials_file" \
         && -r "$credentials_file" && "$(stat -c %a -- "$credentials_file")" == 600 ]] || {
@@ -79,7 +87,7 @@ if [[ ( "$rust_request" == auto && "$rust_mode" != disabled ) || "$layer_request
     emit_env CODEWIRE_SCCACHE_CREDENTIALS_FILE "$credentials_file"
     emit_env CODEWIRE_R2_CACHE_TRUST "$trust"
     emit_env SCCACHE_BUCKET "$bucket"
-    emit_env SCCACHE_ENDPOINT https://00000000000000000000000000000000.r2.cloudflarestorage.com
+    emit_env SCCACHE_ENDPOINT "$endpoint"
     emit_env CODEWIRE_SCCACHE_PREFIX "$prefix"
   else
     if [[ -f "$credentials_file" && ! -L "$credentials_file" ]]; then

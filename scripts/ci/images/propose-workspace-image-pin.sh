@@ -29,7 +29,7 @@ die() {
   echo 'usage: propose-workspace-image-pin.sh HARBOR_WORKSPACE_DIGEST_REF' >&2
   exit 2
 }
-[[ "$1" =~ ^registry\.example\.invalid/codewire/workspace@(sha256:[0-9a-f]{64})$ ]] ||
+[[ "$1" =~ ^"${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"/codewire/workspace@(sha256:[0-9a-f]{64})$ ]] ||
   die 'the published image is not an exact Harbor workspace digest reference'
 readonly digest="${BASH_REMATCH[1]}"
 : "${GITHUB_SHA:?}" "${GITHUB_REPOSITORY:?}" "${GITHUB_SERVER_URL:?}"

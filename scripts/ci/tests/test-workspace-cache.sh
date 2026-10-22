@@ -13,6 +13,9 @@ mkdir "$work/bin"
 export CW_IMAGE_FIXTURES="$PRIMARY_ROOT/scripts/ci/tests/cw_image_fixtures.py"
 python3 -B "$CW_IMAGE_FIXTURES" source "$work/source" >"$work/source-identity.json"
 ROOT="$work/source"
+# CI names these in Actions variables and the job context; the scripts
+# require them.
+export CODEWIRE_R2_CACHE_ENDPOINT=https://r2-cache.example.invalid
 source_tree="$(jq -er .source_tree "$work/source-identity.json")"
 umask 077
 printf '%s\n' '[default]' 'aws_access_key_id = synthetic-workspace-key' \
@@ -100,7 +103,7 @@ export FAKE_TEE_BIN="$work/bin/tee" FAKE_TEE_CALLS="$work/tee-calls" FAKE_TEE_FI
 export FAKE_PIN='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 export CODEWIRE_SCCACHE_CREDENTIALS_FILE="$credential_work/r2.aws"
 export SCCACHE_BUCKET=example-ci-cache-untrusted
-export SCCACHE_ENDPOINT=https://00000000000000000000000000000000.r2.cloudflarestorage.com
+export SCCACHE_ENDPOINT=https://r2-cache.example.invalid
 export CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/v1
 export PATH="$work/bin:$PATH"
 # A non-executable fixture must fail, never fall through to a real Docker client.
@@ -360,6 +363,13 @@ for failure in mode scope symlink permissions; do
   ) >/dev/null 2>&1; then echo "accepted $failure configuration" >&2; exit 1; fi
 done
 chmod 0600 "$credential_work/r2.aws"
+# The R2 modes name their endpoint only through CODEWIRE_R2_CACHE_ENDPOINT.
+if (
+  source "$ROOT/scripts/ci/images/workspace-cache.sh"
+  CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 CODEWIRE_R2_CACHE_ENDPOINT=
+  workspace_cache_validate
+) >"$work/endpoint-rejection.out" 2>&1; then exit 1; fi
+grep -q 'CODEWIRE_R2_CACHE_ENDPOINT' "$work/endpoint-rejection.out"
 cp "$credential_work/r2.aws" "$ROOT/in-context.aws"
 chmod 0600 "$ROOT/in-context.aws"
 if (

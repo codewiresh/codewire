@@ -31,10 +31,10 @@ readonly OPENBAO_ROLE='codewire-source-dev-publisher'
 readonly OPENBAO_AUDIENCE='openbao-codewire-source-dev-publisher'
 readonly OPENBAO_KEY='openbao://codewire-runtime'
 readonly GHCR_HOST='ghcr.io'
-readonly HARBOR_HOST='registry.example.invalid'
+readonly HARBOR_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
 readonly PROVENANCE_SOURCE_URL="$PIPELINE_SOURCE_URL"
 readonly PROVENANCE_BUILDER_ID="$PIPELINE_BUILDER_ID"
-readonly COSIGN_IMAGE='registry.example.invalid/oci-approved/sigstore/cosign/cosign@sha256:6ca1127dc1e9ff19f3f2bfa214936813a86fbbf52919652eda49d393c888ad3c'
+readonly COSIGN_IMAGE="$HARBOR_HOST/oci-approved/sigstore/cosign/cosign@sha256:6ca1127dc1e9ff19f3f2bfa214936813a86fbbf52919652eda49d393c888ad3c"
 readonly SIGNING_CONFIG_SOURCE="$ROOT/scripts/ci/images/cosign-private-signing-config.json"
 readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
 

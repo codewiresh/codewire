@@ -3,6 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# CI names these in Actions variables and the job context; the scripts
+# require them.
+export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
+export GITHUB_SERVER_URL=https://git.example.invalid
+export CODEWIRE_R2_CACHE_ENDPOINT=https://r2-cache.example.invalid
 
 fail() {
   printf '[test-build-push-runtime-images] ERROR: %s\n' "$*" >&2
@@ -320,7 +325,7 @@ if run_group services "$work/untrusted-bucket-output" "$docker_log" "$build_log"
     CODEWIRE_SCCACHE_MODE=r2 \
     CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
     SCCACHE_BUCKET=example-ci-cache-untrusted \
-    SCCACHE_ENDPOINT=https://00000000000000000000000000000000.r2.cloudflarestorage.com \
+    SCCACHE_ENDPOINT=https://r2-cache.example.invalid \
     >"$work/untrusted-bucket.stdout" 2>"$work/untrusted-bucket.stderr"; then
   fail "protected runtime wrapper accepted the untrusted R2 cache bucket"
 fi
@@ -337,7 +342,7 @@ for group in services daemon; do
     CODEWIRE_SCCACHE_MODE=r2 \
     CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
     SCCACHE_BUCKET=example-ci-cache-protected \
-    SCCACHE_ENDPOINT=https://00000000000000000000000000000000.r2.cloudflarestorage.com
+    SCCACHE_ENDPOINT=https://r2-cache.example.invalid
   [[ "$(cut -d'|' -f4 "$protected_r2_build_log" | sort -u)" = r2 ]] ||
     fail "protected-prefix R2 mode did not reach every $group product build"
 done

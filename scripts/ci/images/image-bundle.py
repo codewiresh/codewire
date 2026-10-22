@@ -19,23 +19,24 @@ SOURCE_REPOSITORY = "codewire/codewire"
 FAMILIES = ("dashboard", "derp", "daemon", "services", "mesh")
 PUBLICATION_FAMILIES = FAMILIES + ("base", "workspace", "confidential-probe")
 ENVIRONMENTS = ("dev", "prod")
-IMAGE_REPOSITORIES = {
-    family: f"registry.example.invalid/codewire/{family}"
-    for family in FAMILIES
-}
-PUBLICATION_IMAGE_REPOSITORIES = {
-    family: f"registry.example.invalid/codewire/{family}"
-    for family in PUBLICATION_FAMILIES
-}
-PUBLICATION_REPOSITORY_PREFIX = (
-    "registry.example.invalid/codewire"
-)
 SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 class BundleError(ValueError):
     """The aggregate candidate set is not one complete source-owned bundle."""
+
+
+def _repository_prefix() -> str:
+    """The Harbor codewire project on the host CI names in CODEWIRE_IMAGE_REGISTRY."""
+    host = os.environ.get("CODEWIRE_IMAGE_REGISTRY", "")
+    if not host:
+        raise BundleError("CODEWIRE_IMAGE_REGISTRY must name the image registry host")
+    return f"{host}/codewire"
+
+
+def _repository(family: str) -> str:
+    return f"{_repository_prefix()}/{family}"
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -108,7 +109,7 @@ def validate_bundle(value: Any) -> dict[str, Any]:
         where = f"images[{index}]"
         image = _exact_keys(image_value, {"family", "source", "ref"}, where)
         family = image["family"]
-        if not isinstance(family, str) or family not in IMAGE_REPOSITORIES:
+        if not isinstance(family, str) or family not in FAMILIES:
             raise BundleError(f"{where}.family is unknown: {family!r}")
         if family in seen:
             raise BundleError(f"duplicate image family: {family}")
@@ -120,9 +121,10 @@ def validate_bundle(value: Any) -> dict[str, Any]:
             )
 
         ref = image["ref"]
-        prefix = f"{IMAGE_REPOSITORIES[family]}@"
+        repository = _repository(family)
+        prefix = f"{repository}@"
         if not isinstance(ref, str) or not ref.startswith(prefix):
-            raise BundleError(f"{where}.ref must use {IMAGE_REPOSITORIES[family]}")
+            raise BundleError(f"{where}.ref must use {repository}")
         if DIGEST.fullmatch(ref[len(prefix) :]) is None:
             raise BundleError(
                 f"{where}.ref must be an immutable lowercase sha256 digest reference"
@@ -208,11 +210,11 @@ def _write_bundle(path: Path, value: dict[str, Any]) -> None:
 def _candidate_from_metadata(
     family: str, source_sha: str, registry: str, metadata_path: Path
 ) -> tuple[str, str, str]:
-    if family not in PUBLICATION_IMAGE_REPOSITORIES:
+    if family not in PUBLICATION_FAMILIES:
         raise BundleError(f"unknown image family: {family}")
     if not SOURCE_SHA.fullmatch(source_sha) or source_sha == "0" * 40:
         raise BundleError("candidate source SHA must be an exact Git object ID")
-    if registry != PUBLICATION_REPOSITORY_PREFIX:
+    if registry != _repository_prefix():
         raise BundleError("candidate repository prefix must be exactly the Harbor codewire project")
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -223,7 +225,7 @@ def _candidate_from_metadata(
     digest = metadata.get("containerimage.digest")
     if not isinstance(digest, str) or DIGEST.fullmatch(digest) is None:
         raise BundleError("Buildx metadata is missing an immutable image digest")
-    return family, source_sha, f"{PUBLICATION_IMAGE_REPOSITORIES[family]}@{digest}"
+    return family, source_sha, f"{_repository(family)}@{digest}"
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -14,7 +14,6 @@ case "${CODEWIRE_R2_CACHE_TRUST:-untrusted}" in
   *) readonly WORKSPACE_CACHE_TRUST=untrusted WORKSPACE_CACHE_SCOPE=untrusted ;;
 esac
 readonly WORKSPACE_CACHE_BUCKET="example-ci-cache-$WORKSPACE_CACHE_SCOPE"
-readonly WORKSPACE_CACHE_ENDPOINT='https://00000000000000000000000000000000.r2.cloudflarestorage.com'
 readonly WORKSPACE_CACHE_PREFIX="$WORKSPACE_CACHE_SCOPE/codewire/buildkit/v1/"
 readonly WORKSPACE_SCCACHE_PREFIX="$WORKSPACE_CACHE_SCOPE/codewire/v1"
 readonly WORKSPACE_DAEMON_CREDENTIALS='/run/codewire-cache/aws-credentials'
@@ -54,8 +53,12 @@ workspace_cache_validate() {
     case "$credentials_file" in
       "$source_root"/*) echo 'workspace cache credential must remain outside the build context' >&2; return 2 ;;
     esac
+    # CI names the cache endpoint in the CODEWIRE_R2_CACHE_ENDPOINT Actions variable.
+    [[ -n "${CODEWIRE_R2_CACHE_ENDPOINT:-}" ]] || {
+      echo 'CODEWIRE_R2_CACHE_ENDPOINT: set to the CI cache R2 endpoint URL' >&2; return 2;
+    }
     [[ "${SCCACHE_BUCKET:-}" == "$WORKSPACE_CACHE_BUCKET" \
-        && "${SCCACHE_ENDPOINT:-}" == "$WORKSPACE_CACHE_ENDPOINT" \
+        && "${SCCACHE_ENDPOINT:-}" == "$CODEWIRE_R2_CACHE_ENDPOINT" \
         && "${CODEWIRE_SCCACHE_PREFIX:-}" == "$WORKSPACE_SCCACHE_PREFIX" ]] || {
       echo "workspace cache requires the reviewed $WORKSPACE_CACHE_TRUST R2 configuration" >&2; return 2;
     }
@@ -173,7 +176,7 @@ workspace_cache_layer_args() {
       --no-cache-filter workspace-floating-go)
   fi
   if [[ "$layer_cache_mode" == r2 ]]; then
-    common="type=s3,bucket=$WORKSPACE_CACHE_BUCKET,region=auto,endpoint_url=$WORKSPACE_CACHE_ENDPOINT,use_path_style=true,prefix=$WORKSPACE_CACHE_PREFIX"
+    common="type=s3,bucket=$WORKSPACE_CACHE_BUCKET,region=auto,endpoint_url=$CODEWIRE_R2_CACHE_ENDPOINT,use_path_style=true,prefix=$WORKSPACE_CACHE_PREFIX"
     name="$architecture/$target/tree-$source_tree"
     layer_args+=(--cache-from "$common,name=$name")
     if [[ "$WORKSPACE_CACHE_TRUST" == protected-read ]]; then
@@ -210,7 +213,7 @@ workspace_cache_compiler_args() {
   if [[ "$sccache_mode" == r2 ]]; then
     compiler_args+=(--secret "id=aws_shared_credentials,src=$credentials_file"
       --build-arg "SCCACHE_BUCKET=$WORKSPACE_CACHE_BUCKET"
-      --build-arg "SCCACHE_ENDPOINT=$WORKSPACE_CACHE_ENDPOINT"
+      --build-arg "SCCACHE_ENDPOINT=$CODEWIRE_R2_CACHE_ENDPOINT"
       --build-arg "CODEWIRE_SCCACHE_PREFIX=$WORKSPACE_SCCACHE_PREFIX")
   fi
 }

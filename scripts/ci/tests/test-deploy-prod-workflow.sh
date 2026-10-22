@@ -68,7 +68,7 @@ fi
 [[ "$(grep -Fc '            "$SOURCE_SHA" "$RELEASE_TAG"' "$WORKFLOW")" -eq 14 ]] ||
   fail "every production image must receive source-SHA and stable SemVer aliases in Harbor and GHCR"
 for family in base workspace; do
-  grep -Fq "            registry.example.invalid/codewire/$family" "$WORKFLOW" ||
+  grep -Fq "            \"\$CODEWIRE_IMAGE_REGISTRY/codewire/$family\"" "$WORKFLOW" ||
     fail "production omits the $family support image from Harbor"
   grep -Fq "            ghcr.io/codewiresh/$family" "$WORKFLOW" ||
     fail "production omits the $family support image from the GHCR mirror"
@@ -165,7 +165,7 @@ expected = {
     "run": "set -euo pipefail\n"
            'release_source_sha="$(git -C .release-source rev-parse HEAD)"\n'
            "scripts/ci/images/run-workspace-contract-on-image.sh \\\n"
-           '  "registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST" "$release_source_sha" \\\n'
+           '  "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST" "$release_source_sha" \\\n'
            "  .release-source/scripts/ci/verify/workspace-agent-contract.sh\n",
 }
 if steps[contract[0]] != expected:
@@ -200,7 +200,7 @@ contract_mutations=(
   'artifact contract::s|            .release-source/scripts/ci/verify/workspace-agent-contract.sh|            "$RUNNER_TEMP/artifact/workspace-agent-contract.sh"|'
   "artifact step::$amd64_range{/      - name: Run the workspace contract on the exact image/i\\      - uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
 }"
-  'tagged image::s|"registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST"|"registry.example.invalid/codewire/workspace:$release_source_sha"|'
+  'tagged image::s|"$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST"|"$CODEWIRE_IMAGE_REGISTRY/codewire/workspace:$release_source_sha"|'
   'public mirror source::s|run-workspace-contract-on-image.sh \\$|run-workspace-contract-on-image.sh --source ghcr \\|'
 )
 for mutation in "${contract_mutations[@]}"; do
@@ -346,6 +346,7 @@ chmod +x "$stub_tree/fetcher" "$stub_tree/bin/docker"
 state_case() {
   : >"$stub_tree/output"
   if env PATH="$stub_tree/bin:$PATH" STUB_PUBLISHED="$1" OPENBAO_HARBOR_CREDENTIAL_FETCHER="$stub_tree/fetcher" \
+      CODEWIRE_IMAGE_REGISTRY=registry.example.invalid \
       GITHUB_OUTPUT="$stub_tree/output" RUNNER_TEMP="$stub_tree" \
       "$ROOT/scripts/ci/images/release-support-pair-state.sh" "$(printf '%040d' 7)" >"$stub_tree/out" 2>&1; then
     cat "$stub_tree/output"

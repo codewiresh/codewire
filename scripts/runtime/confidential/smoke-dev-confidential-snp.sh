@@ -181,6 +181,7 @@ require_cmd base64
 require_cmd sha256sum
 if [[ "$RUN_COCO_PRODUCT" == "1" ]]; then
   require_cmd skopeo
+  [[ -n "${CODEWIRE_IMAGE_REGISTRY:-}" ]] || die "CODEWIRE_IMAGE_REGISTRY: set to the image registry host"
 fi
 
 if [[ -z "${KUBECONFIG:-}" && -f "$HOME/src/infra/kubeconfig-oidc.yaml" ]]; then
@@ -339,7 +340,7 @@ resolve_active_release() {
   image="$(jq -r '.data.SANDBOX_DAEMON_IMAGE // empty' "$EVIDENCE_DIR/active-runtime-config.json")"
   # Deploy owns the Dev registry overlay. Require its canonical private Harbor
   # authority here; accepting the source-template or public mirror hides drift.
-  [[ "$image" =~ ^registry\.example\.invalid/codewire/daemon@sha256:[0-9a-f]{64}$ ]] || \
+  [[ "$image" =~ ^"$CODEWIRE_IMAGE_REGISTRY"/codewire/daemon@sha256:[0-9a-f]{64}$ ]] || \
     die "active dev ConfigMap has no digest-pinned private daemon image"
 
   while IFS= read -r line; do

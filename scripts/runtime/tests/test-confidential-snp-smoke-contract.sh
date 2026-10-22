@@ -105,11 +105,8 @@ rg -F 'phase == "confidential-snp"' "$SMOKE" >/dev/null
 rg -F 'if [[ "$RUN_COCO_PRODUCT" != "1" ]]; then' "$SMOKE" >/dev/null
 rg -F 'log "skipping product release image resolution"' "$SMOKE" >/dev/null
 rg -F 'if [[ "$RUN_COCO_PRODUCT" == "1" ]]; then' "$SMOKE" >/dev/null
-rg -F 'registry\.example\.invalid/codewire/daemon@sha256:' "$SMOKE" >/dev/null
-if rg -F 'git\.example\.invalid/codewire/daemon@sha256:' "$SMOKE" "$RESOLVER"; then
-  printf 'confidential smoke accepts the retired Gitea daemon authority\n' >&2
-  exit 1
-fi
+rg -F '[[ "$image" =~ ^"$CODEWIRE_IMAGE_REGISTRY"/codewire/daemon@sha256:[0-9a-f]{64}$ ]]' "$SMOKE" >/dev/null
+rg -F '[[ "$DAEMON_IMAGE" =~ ^"$registry"/codewire/daemon@sha256:[0-9a-f]{64}$ ]]' "$RESOLVER" >/dev/null
 rg -F 'restore the commodity source profile' "$SMOKE" >/dev/null
 rg -F -- '--admin-oidc "${smoke_args[@]}"' "$SMOKE" >/dev/null
 rg -F 'CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' "$SMOKE" >/dev/null

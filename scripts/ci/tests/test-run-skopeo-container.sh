@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# CI names these in Actions variables and the job context; the scripts
+# require them.
+export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
 readonly RUNNER="$ROOT/scripts/ci/images/run-skopeo-container.sh"
 readonly IMAGE='registry.example.invalid/oci-approved/skopeo/stable@sha256:8b23fe434af822adf71bc7c8674a8dfab379771aa1400fb81ff655a5cecfca87'
 

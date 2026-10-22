@@ -57,7 +57,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-API = "https://git.example.invalid/api/v1"
 REPOSITORY = "codewire/codewire"
 MAX_WINDOW = timedelta(days=31)
 # Receipts and reruns that finish after the window still count for what the
@@ -181,12 +180,23 @@ def read_token(token_file: str | None, environ: dict[str, str]) -> str:
     return value
 
 
-def http_transport(token: str) -> Callable[[str, str], tuple[int, bytes]]:
+SERVER_URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(?::[0-9]+)?/?$")
+
+
+def api_base(environ: dict[str, str]) -> str:
+    """The Forgejo API root, from GITHUB_SERVER_URL (set in every Forgejo job)."""
+    server_url = environ.get("GITHUB_SERVER_URL", "")
+    if not SERVER_URL_RE.fullmatch(server_url):
+        raise CollectorFailure("GITHUB_SERVER_URL must be the Forgejo base URL, for example https://forgejo.example.com")
+    return server_url.rstrip("/") + "/api/v1"
+
+
+def http_transport(token: str, api: str) -> Callable[[str, str], tuple[int, bytes]]:
     context = ssl.create_default_context()
 
     def transport(kind: str, path: str) -> tuple[int, bytes]:
         request = urllib.request.Request(
-            f"{API}{path}",
+            f"{api}{path}",
             headers={"Accept": "application/json", "Authorization": f"token {token}",
                      "User-Agent": "codewire-ci-done-measures/1"},
             method="GET",
@@ -540,7 +550,7 @@ def collect(arguments, environ, transport_factory=None) -> list[dict]:
     git_dir = arguments.git_dir
     if not git_dir or not Path(git_dir).is_dir():
         raise CollectorFailure("--git-dir must name a fetched Git directory")
-    factory = transport_factory or http_transport
+    factory = transport_factory or (lambda token: http_transport(token, api_base(environ)))
     forgejo = Forgejo(factory(read_token(arguments.token_file, environ)))
     rows = pull_request_rows(forgejo, since, until, required)
     main_rows = main_ci_rows(forgejo, since, until)

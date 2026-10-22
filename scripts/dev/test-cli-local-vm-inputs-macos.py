@@ -8,7 +8,7 @@ Run on an Apple silicon Mac against a built cw and a runtime directory from
 
 It creates a local VM from a project file declaring the inputs the Linux
 native smoke proves (scripts/ci/verify/smoke-native-local-environment.sh):
-two repositories at pinned commits (git.example.invalid and GitHub), a copy mount, a
+two repositories at pinned commits (Forgejo and GitHub), a copy mount, a
 direct read-only and a direct read-write share (each holding a symlink to a
 directory outside it), and repository, direct-share and user skills. It then
 proves, on this Mac:
@@ -31,7 +31,8 @@ proves, on this Mac:
 
 The VM, its private root, HOME and throwaway keychain are those of
 test-cli-local-vm-macos.py. Needs network egress for the image pull, the
-repositories and the guest's git.
+repositories and the guest's git. GITHUB_SERVER_URL names the Forgejo instance
+whose public supply-chain scanner repository it clones.
 """
 import argparse
 import importlib.util
@@ -57,14 +58,23 @@ cli_host = journey_module.cli_host
 NAME = journey_module.NAME
 IMAGE = journey_module.IMAGE
 COPY_NAME = "copy-proof"
-# The Linux native smoke's pinned repositories and commits.
-GITEA = ("https://git.example.invalid/supplychain.git", "bcbae548ab2f4f0e407068aa8717cec341084d7a")
+# The Linux native smoke's pinned repositories and commits. The Forgejo one is
+# the public supply-chain scanner repository on the forge GITHUB_SERVER_URL names.
+GITEA_COMMIT = "bcbae548ab2f4f0e407068aa8717cec341084d7a"
 GITHUB = ("https://github.com/noeljackson/method.git", "93f68ba4abc9f6e222481265b9b759e71d332575")
 
 
+def gitea_source():
+    server = os.environ.get("GITHUB_SERVER_URL", "").rstrip("/")
+    if not server:
+        raise SystemExit("GITHUB_SERVER_URL: set to the Forgejo base URL")
+    return f"{server}/supplychain.git"
+
+
 class InputsJourney(journey_module.LocalVmJourney):
-    def __init__(self, cw, runtime):
+    def __init__(self, cw, runtime, gitea):
         super().__init__(cw, runtime)
+        self.gitea = (gitea, GITEA_COMMIT)
         root = self.root
         self.workspace = root / "w"
         self.copy_source = root / "m"
@@ -101,8 +111,8 @@ class InputsJourney(journey_module.LocalVmJourney):
         (self.workspace / "codewire.yaml").write_text(f"""version: 1
 image: {IMAGE}
 repositories:
-  - source: {GITEA[0]}
-    revision: {GITEA[1]}
+  - source: {self.gitea[0]}
+    revision: {self.gitea[1]}
     destination: /workspace/gitea
   - source: {GITHUB[0]}
     revision: {GITHUB[1]}
@@ -159,7 +169,7 @@ skills:
         self.guest("for n in 1 2 3; do apk add --quiet --no-cache git && exit 0; sleep 3; done; exit 1", timeout=300)
         heads = self.guest("git -c safe.directory='*' -C /workspace/gitea rev-parse HEAD; "
                            "git -c safe.directory='*' -C /workspace/github rev-parse HEAD").stdout.split()
-        assert heads == [GITEA[1], GITHUB[1]], heads
+        assert heads == [self.gitea[1], GITHUB[1]], heads
         self.check("repositories at their pinned commits")
 
         # Host changes after creation: live in the shares, not in the copy or the skills.
@@ -276,8 +286,9 @@ def main():
     parser.add_argument("--cw", required=True)
     parser.add_argument("--runtime", required=True, help="a runtime directory packed for this cw")
     args = parser.parse_args()
+    gitea = gitea_source()
     cli_host.arm_owned_session()
-    journey = InputsJourney(args.cw, args.runtime)
+    journey = InputsJourney(args.cw, args.runtime, gitea)
     try:
         journey.run()
     finally:

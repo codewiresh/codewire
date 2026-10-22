@@ -14,7 +14,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
-readonly REGISTRY_HOST='registry.example.invalid'
+readonly REGISTRY_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
 readonly REPOSITORY_PREFIX="$REGISTRY_HOST/codewire"
 
 fail() {

@@ -29,6 +29,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly BUILDER="$ROOT/scripts/ci/images/build-push-image.sh"
+readonly REGISTRY_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
 readonly ARM64_CLIENT_FETCHER="$ROOT/scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh"
 readonly ARM64_BUILDKIT_HOST="${ARM64_BUILDKIT_HOST:-arm64-builder.example.invalid}"
 readonly ARM64_BUILDKIT_ENDPOINT="tcp://$ARM64_BUILDKIT_HOST:1234"
@@ -152,7 +153,7 @@ else
   base_digest="$(build base "$base_dockerfile" "$base_context")"
 fi
 workspace_digest="$(build workspace "$workspace_dockerfile" "$workspace_context" \
-  "CODEWIRE_BASE_IMAGE_REF=registry.example.invalid/codewire/base@$base_digest")"
+  "CODEWIRE_BASE_IMAGE_REF=$REGISTRY_HOST/codewire/base@$base_digest")"
 printf 'base_digest=%s\nworkspace_digest=%s\n' "$base_digest" "$workspace_digest" >>"$output"
 printf 'Built and verified the %s support pair in %s minutes: base %s, workspace %s\n' \
   "$PLATFORM" "$(((SECONDS - started) / 60))" "$base_digest" "$workspace_digest"

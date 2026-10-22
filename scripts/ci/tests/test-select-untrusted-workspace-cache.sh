@@ -39,6 +39,7 @@ select_cache() {
     GITHUB_REPOSITORY=codewire/codewire \
     FETCH_CALLS="$work/fetch-calls" OPENBAO_SCCACHE_FETCHER="$work/fetch" \
     CODEWIRE_SCCACHE_REQUEST="$rust" CODEWIRE_BUILDKIT_CACHE_REQUEST="$layer" \
+    CODEWIRE_R2_CACHE_ENDPOINT="${TEST_ENDPOINT-https://r2-cache.example.invalid}" \
     "$selector" "$file"
 }
 for rust in disabled local auto; do
@@ -64,6 +65,7 @@ for rust in disabled local auto; do
 done
 # Pull requests read main's caches read-only; canonical main reads and writes them.
 grep -Fxq SCCACHE_BUCKET=example-ci-cache-protected "$work/env"
+grep -Fxq SCCACHE_ENDPOINT=https://r2-cache.example.invalid "$work/env"
 grep -Fxq CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 "$work/env"
 grep -Fxq CODEWIRE_R2_CACHE_TRUST=protected-read "$work/env"
 grep -Fxq SCCACHE_S3_RW_MODE=READ_ONLY "$work/env"
@@ -84,6 +86,18 @@ grep -Fxq CODEWIRE_SCCACHE_MODE=local "$work/env"
 grep -Fxq CODEWIRE_BUILDKIT_CACHE_MODE=local "$work/env"
 [[ ! -e "$credential_work/runner/fallback.aws" && "$(wc -l <"$work/fetch-calls")" == 1 ]]
 ! grep -q '^SCCACHE_BUCKET=' "$work/env" || exit 1
+: >"$work/env"; : >"$work/fetch-calls"
+# Without a configured cache endpoint, auto modes fetch nothing and name the
+# variable; a malformed endpoint is refused.
+TEST_ENDPOINT='' select_cache auto auto "$credential_work/runner/unconfigured.aws" >"$work/output"
+grep -Fxq CODEWIRE_SCCACHE_MODE=local "$work/env"
+grep -Fxq CODEWIRE_BUILDKIT_CACHE_MODE=local "$work/env"
+grep -Fq CODEWIRE_R2_CACHE_ENDPOINT "$work/output"
+[[ ! -s "$work/fetch-calls" && ! -e "$credential_work/runner/unconfigured.aws" ]]
+: >"$work/env"
+if TEST_ENDPOINT=https://r2-cache.example.invalid/bucket \
+    select_cache auto auto "$credential_work/runner/malformed.aws" >/dev/null 2>&1; then exit 1; fi
+[[ ! -s "$work/fetch-calls" ]]
 : >"$work/env"; : >"$work/fetch-calls"
 if select_cache disabled invalid "$credential_work/runner/invalid.aws" >/dev/null 2>&1; then exit 1; fi
 [[ ! -s "$work/env" && ! -s "$work/fetch-calls" ]]

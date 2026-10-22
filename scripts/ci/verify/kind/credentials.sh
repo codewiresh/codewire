@@ -11,7 +11,7 @@ kind_credential_support_images() {
   local registry sealed_status=0
   validate_sealed_kind_images >&2 || sealed_status=$?
   case "$sealed_status" in
-    0) registry=registry.example.invalid/oci-approved/jetstack ;;
+    0) registry="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}/oci-approved/jetstack" ;;
     1) registry=quay.io/jetstack ;;
     *) return "$sealed_status" ;;
   esac

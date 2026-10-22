@@ -22,6 +22,8 @@ env:
   CODEWIRE_FORGEJO_INTERNAL_URL: ${{ vars.CODEWIRE_FORGEJO_INTERNAL_URL }}
   CONFIDENTIAL_SNP_NODE: ${{ vars.CONFIDENTIAL_SNP_NODE }}
   ARM64_BUILDKIT_HOST: ${{ vars.ARM64_BUILDKIT_HOST }}
+  CODEWIRE_IMAGE_REGISTRY: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}
+  CODEWIRE_R2_CACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
 
 jobs:
   support-selection:
@@ -152,7 +154,7 @@ jobs:
           SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
           CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
           SCCACHE_BUCKET: example-ci-cache-protected
-          SCCACHE_ENDPOINT: https://00000000000000000000000000000000.r2.cloudflarestorage.com
+          SCCACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
           CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1
           CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected.aws
         run: scripts/ci/images/build-support-platform.sh linux/amd64
@@ -172,7 +174,7 @@ jobs:
           WORKSPACE_DIGEST: ${{ steps.build.outputs.workspace_digest }}
         run: |
           scripts/ci/images/run-workspace-contract-on-image.sh \
-            "registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST" "$GITHUB_SHA" \
+            "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST" "$GITHUB_SHA" \
             scripts/ci/verify/workspace-agent-contract.sh
 
   build-support-arm64:
@@ -209,7 +211,7 @@ jobs:
           SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
           CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
           SCCACHE_BUCKET: example-ci-cache-protected
-          SCCACHE_ENDPOINT: https://00000000000000000000000000000000.r2.cloudflarestorage.com
+          SCCACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
           CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1
           CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected.aws
         run: scripts/ci/images/build-support-platform.sh linux/arm64
@@ -307,7 +309,7 @@ jobs:
           [[ "${{ steps.confidential_probe.outputs.source_sha }}" == "$GITHUB_SHA" ]]
           scripts/ci/images/publish-image-to-harbor.sh \
             "${{ steps.confidential_probe.outputs.candidate_ref }}" \
-            registry.example.invalid/codewire/confidential-probe \
+            "$CODEWIRE_IMAGE_REGISTRY/codewire/confidential-probe" \
             "$GITHUB_SHA"
 
       - name: Mirror confidential bootstrap probe to GHCR without gating delivery

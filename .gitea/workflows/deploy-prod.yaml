@@ -25,6 +25,7 @@ env:
   CODEWIRE_FORGEJO_INTERNAL_URL: ${{ vars.CODEWIRE_FORGEJO_INTERNAL_URL }}
   CONFIDENTIAL_SNP_NODE: ${{ vars.CONFIDENTIAL_SNP_NODE }}
   ARM64_BUILDKIT_HOST: ${{ vars.ARM64_BUILDKIT_HOST }}
+  CODEWIRE_IMAGE_REGISTRY: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}
   OPENBAO_ROLE: codewire-source-prod-publisher
   OPENBAO_AUDIENCE: openbao-codewire-source-prod-publisher
   OPENBAO_GHCR_ROLE: codewire-source-prod-publisher
@@ -298,7 +299,7 @@ jobs:
           set -euo pipefail
           release_source_sha="$(git -C .release-source rev-parse HEAD)"
           scripts/ci/images/run-workspace-contract-on-image.sh \
-            "registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST" "$release_source_sha" \
+            "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST" "$release_source_sha" \
             .release-source/scripts/ci/verify/workspace-agent-contract.sh
 
   build-support-arm64:
@@ -382,11 +383,11 @@ jobs:
           [[ "${{ steps.workspace.outputs.source_sha }}" == "$SOURCE_SHA" ]]
           scripts/ci/images/publish-image-to-harbor.sh \
             "${{ steps.base.outputs.candidate_ref }}" \
-            registry.example.invalid/codewire/base \
+            "$CODEWIRE_IMAGE_REGISTRY/codewire/base" \
             "$SOURCE_SHA" "$RELEASE_TAG"
           scripts/ci/images/publish-image-to-harbor.sh \
             "${{ steps.workspace.outputs.candidate_ref }}" \
-            registry.example.invalid/codewire/workspace \
+            "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace" \
             "$SOURCE_SHA" "$RELEASE_TAG"
 
       # Harbor serves every consumer; the public GHCR copy never gates release.
@@ -452,23 +453,23 @@ jobs:
             "$bundle" scripts/ci/trust/codewire-runtime-signing.pub
           scripts/ci/images/publish-image-to-harbor.sh \
             "${{ needs.build-dashboard-image.outputs.candidate_ref }}" \
-            registry.example.invalid/codewire/dashboard \
+            "$CODEWIRE_IMAGE_REGISTRY/codewire/dashboard" \
             "$SOURCE_SHA" "$RELEASE_TAG"
           scripts/ci/images/publish-image-to-harbor.sh \
             "${{ needs.build-derp.outputs.candidate_ref }}" \
-            registry.example.invalid/codewire/derp \
+            "$CODEWIRE_IMAGE_REGISTRY/codewire/derp" \
             "$SOURCE_SHA" "$RELEASE_TAG"
           scripts/ci/images/publish-image-to-harbor.sh \
             "${{ needs.build-daemon-image.outputs.candidate_ref }}" \
-            registry.example.invalid/codewire/daemon \
+            "$CODEWIRE_IMAGE_REGISTRY/codewire/daemon" \
             "$SOURCE_SHA" "$RELEASE_TAG"
           scripts/ci/images/publish-image-to-harbor.sh \
             "${{ needs.build-services-image.outputs.candidate_ref }}" \
-            registry.example.invalid/codewire/services \
+            "$CODEWIRE_IMAGE_REGISTRY/codewire/services" \
             "$SOURCE_SHA" "$RELEASE_TAG"
           scripts/ci/images/publish-image-to-harbor.sh \
             "${{ needs.build-mesh-image.outputs.candidate_ref }}" \
-            registry.example.invalid/codewire/mesh \
+            "$CODEWIRE_IMAGE_REGISTRY/codewire/mesh" \
             "$SOURCE_SHA" "$RELEASE_TAG"
 
       - name: Mirror the runtime release to GHCR without gating release

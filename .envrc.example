@@ -9,9 +9,6 @@
 # OpenBao that serves signing keys and publisher credentials.
 # export CODEWIRE_OPENBAO_ADDR=https://openbao.example.invalid
 
-# Registry the Dev smoke and the Production render read images from.
-# export REGISTRY_HOST=registry.example.invalid
-
 # Origins `make kind-watch` and the Kind e2e profile use for the dashboard and API.
 # export KIND_PUBLIC_ORIGIN=http://localhost:4174
 # export KIND_BROWSER_API_ORIGIN=http://localhost:8090
@@ -20,6 +17,15 @@
 # no setting selects.
 # export CODEWIRE_SCCACHE_MODE=local
 # export CODEWIRE_BUILDKIT_CACHE_MODE=local
+
+# Site configuration. These have no default; a script that needs one stops
+# and names it (docs/dev/CI-CONFIGURATION.md).
+# Image registry host the image, Kind, Dev smoke and Production scripts use.
+# export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
+# S3 endpoint of the CI compiler and layer cache buckets.
+# export CODEWIRE_R2_CACHE_ENDPOINT=https://r2-cache.example.invalid
+# Forgejo base URL for scripts that call its API outside CI.
+# export GITHUB_SERVER_URL=https://git.example.invalid
 
 # Hosted cluster bindings for the Dev and Production operator scripts. These
 # have no default: the source tree carries no live cluster value (#1383).

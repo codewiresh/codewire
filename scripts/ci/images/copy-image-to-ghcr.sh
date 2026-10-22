@@ -14,8 +14,8 @@ target_repository="$2"
 shift 2
 tags=("$@")
 
-readonly source_pattern='^registry\.example\.invalid/codewire/(dashboard|derp|daemon|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
-if [[ ! "$source_ref" =~ $source_pattern ]]; then
+readonly HARBOR_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
+if [[ ! "$source_ref" =~ ^"$HARBOR_HOST"/codewire/(dashboard|derp|daemon|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$ ]]; then
   echo "Source must be an exact supported Harbor digest reference" >&2
   exit 1
 fi
@@ -25,9 +25,9 @@ expected_digest="sha256:${BASH_REMATCH[2]}"
 if [ "$target_repository" = "ghcr.io/codewiresh/$image_name" ]; then
   target_label=GHCR
   target_host=ghcr.io
-elif [ "$target_repository" = "registry.example.invalid/codewire/$image_name" ]; then
+elif [ "$target_repository" = "$HARBOR_HOST/codewire/$image_name" ]; then
   target_label=Harbor
-  target_host=registry.example.invalid
+  target_host="$HARBOR_HOST"
 else
   echo "Target repository must be the Harbor or GHCR repository of the supported source image family" >&2
   exit 1
@@ -157,7 +157,6 @@ registry_login() {
   done
 }
 
-readonly HARBOR_HOST='registry.example.invalid'
 [[ -n "$HARBOR_PUBLISH_USERNAME" && "$HARBOR_PUBLISH_USERNAME" != *$'\n'* ]] || {
   echo 'Harbor username is malformed' >&2
   exit 1

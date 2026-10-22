@@ -28,6 +28,10 @@ REVISION = "a" * 40
 TREE = "b" * 64
 ACCESS_KEY = "SYNTHETICACCESSKEY0123456789ABCD"
 SECRET_KEY = "SYNTHETIC-SECRET-ACCESS-KEY-NEVER-LOGGED-0123456789abcdef"
+# Every test process names the synthetic release bucket endpoint, never a real one.
+R2_HOST = "r2-releases.example.invalid"
+R2_ENDPOINT = f"https://{R2_HOST}"
+os.environ["CODEWIRE_R2_RELEASES_ENDPOINT"] = R2_ENDPOINT
 
 
 def scratch(prefix):
@@ -368,7 +372,7 @@ class FakeR2:
             if key in self.public_missing or key not in self.objects:
                 return r2.Response(404, {}, b"")
             return r2.Response(200, {}, self.objects[key][0])
-        assert host == r2.S3_HOST and path.startswith(f"/{r2.BUCKET}/")
+        assert host == R2_HOST and path.startswith(f"/{r2.BUCKET}/")
         assert headers["authorization"].startswith(f"AWS4-HMAC-SHA256 Credential={ACCESS_KEY}/")
         assert headers["x-amz-content-sha256"] == digest(body or b"")
         key = urllib.parse.unquote(path[len(r2.BUCKET) + 2:])

@@ -22,7 +22,8 @@ elif ! command -v "$curl_bin" >/dev/null 2>&1; then
   fail "curl is required for deploy workflow dispatch"
 fi
 
-readonly dispatch_url='https://git.example.invalid/api/v1/repos/codewire/deploy/actions/workflows/promote-dev.yaml/dispatches'
+readonly server_url="${GITHUB_SERVER_URL:?set to the Forgejo base URL}"
+readonly dispatch_url="${server_url%/}/api/v1/repos/codewire/deploy/actions/workflows/promote-dev.yaml/dispatches"
 umask 077
 work="$(mktemp -d)"
 auth_header="$work/auth-header"

@@ -27,8 +27,8 @@ build_runtime_set="${CODEWIRE_BUILD_RUNTIME_SET:-0}"
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 # Harbor is the only registry: publication targets the codewire/ project and
 # every digest-pinned approved third-party input lives in its oci-approved/
-# project.
-readonly REGISTRY_HOST='registry.example.invalid'
+# project. CI names its host in the CODEWIRE_IMAGE_REGISTRY Actions variable.
+readonly REGISTRY_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
 readonly REGISTRY_REPOSITORY_PREFIX="${REGISTRY_HOST}/codewire"
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 # Docker keys credentials by registry hostname. The single Harbor publisher
@@ -37,7 +37,7 @@ readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5
 # BuildKit runs the SBOM scanner on the build node, so it is pinned by its
 # multi-platform index (docker/buildkit-syft-scanner 1.12.0, promoted by
 # infra#1383): the native arm64 support build runs its arm64 variant.
-readonly SBOM_GENERATOR_IMAGE='registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9'
+readonly SBOM_GENERATOR_IMAGE="$REGISTRY_HOST/oci-approved/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9"
 # The workspace image carries the same static cw as the runtime images, built
 # with the runtime profile (no LTO, parallel codegen): the single-codegen-unit
 # fat-LTO release profile spent about 25 minutes per architecture in one serial
@@ -136,7 +136,7 @@ if [ -n "$base_image_ref" ]; then
     echo "An exact base image may only be supplied to the workspace build" >&2
     exit 1
   fi
-  if [[ ! "$base_image_ref" =~ ^(registry\.example\.invalid/codewire/base|ghcr\.io/codewiresh/base)@sha256:[0-9a-f]{64}$ ]]; then
+  if [[ ! "$base_image_ref" =~ ^("$REGISTRY_REPOSITORY_PREFIX"/base|ghcr\.io/codewiresh/base)@sha256:[0-9a-f]{64}$ ]]; then
     echo "Workspace base image must be an exact supported digest reference" >&2
     exit 1
   fi
@@ -744,6 +744,11 @@ label_args=(
 build_args=()
 if [ -n "$base_image_ref" ]; then
   build_args+=("--build-arg" "BASE_IMAGE_REF=$base_image_ref")
+fi
+# A Dockerfile that pulls an approved input from the registry declares the
+# host as a build argument instead of naming it.
+if grep -Eqs '^ARG CODEWIRE_IMAGE_REGISTRY$' "$dockerfile"; then
+  build_args+=("--build-arg" "CODEWIRE_IMAGE_REGISTRY=$REGISTRY_HOST")
 fi
 platform_args=()
 if [ -n "$image_platform" ]; then

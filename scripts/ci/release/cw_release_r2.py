@@ -46,9 +46,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cw_release as release  # noqa: E402
 
-ACCOUNT_ID = "00000000000000000000000000000000"
 BUCKET = "codewire-releases"
-S3_HOST = f"{ACCOUNT_ID}.r2.cloudflarestorage.com"
+# The release bucket's S3 API origin, for example https://<account>.r2.cloudflarestorage.com.
+ENDPOINT_VARIABLE = "CODEWIRE_R2_RELEASES_ENDPOINT"
 REGION = "auto"
 PUBLIC_HOST = "releases.codewire.sh"
 # The public origin's edge rejects Python's default User-Agent with 403, which
@@ -132,6 +132,17 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def s3_host(environ=None):
+    """The release bucket's S3 API host, from CODEWIRE_R2_RELEASES_ENDPOINT."""
+    endpoint = (os.environ if environ is None else environ).get(ENDPOINT_VARIABLE, "")
+    require(endpoint, f"{ENDPOINT_VARIABLE} is required: the release bucket's https S3 endpoint URL")
+    parts = urllib.parse.urlsplit(endpoint)
+    require(parts.scheme == "https" and parts.hostname and parts.netloc == parts.hostname
+            and parts.path in ("", "/") and not parts.query and not parts.fragment,
+            f"{ENDPOINT_VARIABLE} must be an https origin with no port, path or credentials")
+    return parts.hostname
+
+
 class HttpsTransport:
     """HTTPS only, no proxies, no redirects, bounded responses."""
 
@@ -139,7 +150,7 @@ class HttpsTransport:
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
     def request(self, method, host, path, headers, body=None, limit=MAX_OBJECT):
-        require(host in (S3_HOST, PUBLIC_HOST), "request host is not admitted")
+        require(host == PUBLIC_HOST or host == s3_host(), "request host is not admitted")
         request = urllib.request.Request(f"https://{host}{path}", data=body, method=method, headers=headers)
         try:
             with self.opener.open(request, timeout=TIMEOUT) as response:
@@ -190,13 +201,14 @@ class S3:
     def __init__(self, transport, credentials, clock=None):
         self.transport = transport
         self.credentials = credentials
+        self.host = s3_host()
         self.clock = clock or (lambda: datetime.datetime.now(datetime.timezone.utc))
 
     def _send(self, method, key, body=b"", headers=None, limit=MAX_OBJECT):
         path = object_path(key)
         payload = hashlib.sha256(body).hexdigest()
-        signed = sigv4_headers(self.credentials, method, S3_HOST, path, headers or {}, payload, self.clock())
-        return self.transport.request(method, S3_HOST, path, signed, body if method == "PUT" else None, limit)
+        signed = sigv4_headers(self.credentials, method, self.host, path, headers or {}, payload, self.clock())
+        return self.transport.request(method, self.host, path, signed, body if method == "PUT" else None, limit)
 
     def get(self, key, limit=MAX_OBJECT):
         return self._send("GET", key, limit=limit)

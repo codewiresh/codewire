@@ -48,7 +48,8 @@ env:
   CODEWIRE_FORGEJO_INTERNAL_URL: ${{ vars.CODEWIRE_FORGEJO_INTERNAL_URL }}
   CONFIDENTIAL_SNP_NODE: ${{ vars.CONFIDENTIAL_SNP_NODE }}
   ARM64_BUILDKIT_HOST: ${{ vars.ARM64_BUILDKIT_HOST }}
-  REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}
+  CODEWIRE_IMAGE_REGISTRY: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}
+  CODEWIRE_R2_CACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
   KUSTOMIZE_VERSION: v5.4.3
   HELM_VERSION: v3.16.4
   CADDY_VERSION: 2.10.2
@@ -1692,11 +1693,11 @@ jobs:
       CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
       CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV: ubuntu24-cft145
-      KIND_INGRESS_CONTROLLER_IMAGE: registry.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180
-      KIND_INGRESS_CERTGEN_IMAGE: registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053
-      KIND_AGENT_SANDBOX_IMAGE: registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:fb3b81ff40a5ef07a455f1e81f2af3a9b0884ed801238e018008184520044595
-      KIND_WORKSPACE_IMAGE: registry.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510
-      KIND_DIND_IMAGE: registry.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e
+      KIND_INGRESS_CONTROLLER_IMAGE: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180
+      KIND_INGRESS_CERTGEN_IMAGE: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053
+      KIND_AGENT_SANDBOX_IMAGE: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}/oci-approved/codewire/agent-sandbox-controller@sha256:fb3b81ff40a5ef07a455f1e81f2af3a9b0884ed801238e018008184520044595
+      KIND_WORKSPACE_IMAGE: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510
+      KIND_DIND_IMAGE: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci
       CODEWIRE_KIND_PRODUCT_IMAGE_MODE: prebuilt-ci
       CODEWIRE_KIND_PRODUCT_MANIFEST_SHA256: ${{ needs.kind-product.outputs.manifest_sha256 }}

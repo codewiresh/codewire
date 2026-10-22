@@ -10,6 +10,8 @@ The --render-only mode writes the production Codewire, DERP, and Mesh manifests
 for the exact Gitea-built image tag without configuring kubeconfig or touching
 the cluster. Direct production mutation is retired; signed release tags are
 promoted atomically through the deploy repository and reconciled by Flux.
+
+CODEWIRE_IMAGE_REGISTRY names the image registry host the manifests pull from.
 EOF
 }
 
@@ -36,7 +38,7 @@ case "${1:-}" in
     ;;
 esac
 
-: "${REGISTRY_HOST:?REGISTRY_HOST is required}"
+readonly REGISTRY_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
 
 deploy_tag_slug() {
   local value="$1"

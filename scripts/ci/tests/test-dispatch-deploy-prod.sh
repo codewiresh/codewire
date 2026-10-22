@@ -54,6 +54,7 @@ MOCK
 chmod +x "$work/bin/curl"
 
 export ACTIONS_ID_TOKEN_REQUEST_URL='https://git.example.invalid/api/actions/oidc?job=synthetic'
+export GITHUB_SERVER_URL='https://git.example.invalid'
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN="$TEST_REQUEST_TOKEN"
 export CURL_BIN="$work/bin/curl"
 export MOCK_CAPTURE_DIR="$work/capture"
@@ -102,5 +103,13 @@ for invalid_tag in \
   fi
   [[ ! -e "$marker" ]] || fail "malformed source tag reached curl: $invalid_tag"
 done
+
+if env -u GITHUB_SERVER_URL CURL_BIN="$work/curl-never" "$DISPATCH" "$SOURCE_TAG" \
+    >"$work/no-server.out" 2>&1; then
+  fail 'dispatch without GITHUB_SERVER_URL was accepted'
+fi
+grep -Fq 'GITHUB_SERVER_URL' "$work/no-server.out" ||
+  fail 'missing GITHUB_SERVER_URL was not named'
+[[ ! -e "$marker" ]] || fail 'dispatch without GITHUB_SERVER_URL reached curl'
 
 printf '[test-dispatch-deploy-prod] OIDC stable-tag workflow dispatch contract passed\n'

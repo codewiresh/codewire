@@ -19,9 +19,8 @@ source "$ROOT/scripts/ci/images/pipeline-identity.sh"
 source "$ROOT/scripts/ci/setup/trusted-buildkit.sh"
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 readonly PROVENANCE_BUILDER_ID="$PIPELINE_BUILDER_ID"
-readonly PUBLISH_REGISTRY_HOST='registry.example.invalid'
+readonly PUBLISH_REGISTRY_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
 readonly PROTECTED_SCCACHE_BUCKET='example-ci-cache-protected'
-readonly PROTECTED_SCCACHE_ENDPOINT='https://00000000000000000000000000000000.r2.cloudflarestorage.com'
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
@@ -58,7 +57,7 @@ case "${CODEWIRE_SCCACHE_MODE:-local}" in
         ;;
     esac
     if [ "${SCCACHE_BUCKET:-}" != "$PROTECTED_SCCACHE_BUCKET" ] \
-        || [ "${SCCACHE_ENDPOINT:-}" != "$PROTECTED_SCCACHE_ENDPOINT" ]; then
+        || [ "${SCCACHE_ENDPOINT:-}" != "${CODEWIRE_R2_CACHE_ENDPOINT:?set to the CI cache R2 endpoint URL}" ]; then
       echo 'Protected runtime builds may use only the protected R2 compiler-cache bucket' >&2
       exit 2
     fi
@@ -265,7 +264,7 @@ build_one() {
   run_protected_build "$image_name" "$dockerfile" "$output" "$build_runtime_set"
 
   candidate_ref="$(sed -n 's/^candidate_ref=//p' "$output")"
-  if [[ ! "$candidate_ref" =~ ^registry\.example\.invalid/codewire/${image_name}@sha256:[0-9a-f]{64}$ ]]; then
+  if [[ ! "$candidate_ref" =~ ^"$PUBLISH_REGISTRY_HOST/codewire/$image_name"@sha256:[0-9a-f]{64}$ ]]; then
     echo "Runtime build returned an invalid $image_name candidate reference" >&2
     exit 1
   fi

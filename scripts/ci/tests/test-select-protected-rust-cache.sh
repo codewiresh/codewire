@@ -225,7 +225,9 @@ done
   fail 'Deploy Dev is reachable from an event other than a canonical-main push'
 [[ "$(grep -c '^on:$' "$DEPLOY_WORKFLOW")" -eq 1 ]] ||
   fail 'Deploy Dev declares more than one trigger block'
-[[ "$(sed -n '/^on:$/,/^jobs:$/p' "$DEPLOY_WORKFLOW" | grep -Ec '^[a-z-]+:')" -eq 3 ]] ||
+# Between them sit only the concurrency block and the site configuration env.
+[[ "$(sed -n '/^on:$/,/^jobs:$/p' "$DEPLOY_WORKFLOW" | grep -Eo '^[a-z-]+:' | tr '\n' ' ')" == \
+    'on: concurrency: env: jobs: ' ]] ||
   fail 'Deploy Dev declares an unexpected key between its trigger and its jobs'
 
 # ci.yaml cache selection reads and, on main, writes the same one CI cache
@@ -259,7 +261,7 @@ chmod 0600 "$work/kind.aws"
 if env CODEWIRE_DOCKER_BIN=/bin/false \
     CODEWIRE_SCCACHE_MODE=r2 \
     SCCACHE_BUCKET=example-ci-cache-untrusted \
-    SCCACHE_ENDPOINT=https://00000000000000000000000000000000.r2.cloudflarestorage.com \
+    SCCACHE_ENDPOINT=https://r2-cache.example.invalid \
     CODEWIRE_SCCACHE_PREFIX=other/codewire/v1 \
     CODEWIRE_SCCACHE_CREDENTIALS_FILE="$work/kind.aws" \
     "$ROOT/scripts/ci/images/build-kind-images.sh" >"$work/kind.out" 2>&1; then

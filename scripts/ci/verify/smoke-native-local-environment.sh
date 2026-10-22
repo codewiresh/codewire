@@ -178,13 +178,15 @@ isolated standalone Codewire Mesh/DERP pair, and creates disposable mixed
 repository/copy-mount and implicit filesystem-copy fixtures. Initial create
 permits direct registry and Git egress; every later command receives dead proxy
 endpoints. It proves digest-pinned OCI workspace execution, exact
-credential-free git.example.invalid/GitHub preparation, independent copy preparation,
+credential-free Forgejo/GitHub preparation, independent copy preparation,
 create/info, loopback-only host-port publication, bounded daemon diagnostics and
 repair, stock Codex 0.160.0 over the synthetic credential bridge, bare run and
 shell, PTY behavior, saved output and nonzero status,
 cached-runtime restart after the installed artifact lock advances, offline
 disk/CPU/memory resize, supervisor crash recovery, Mesh attachment and typed
 transport-loss recovery, and journaled exact deletion cleanup.
+GITHUB_SERVER_URL names the Forgejo instance whose public supply-chain
+scanner repository the smoke clones at its pinned commit.
 
 With --managed-credential-broker, it instead runs the focused protected-store
 product proof. That mode requires a specially featured cw binary named exactly
@@ -402,6 +404,12 @@ if (( MANAGED_AGENT_UPDATE_RUNTIME_SEEN + MANAGED_AGENT_UPDATE_IMAGE_SEEN + MANA
      -n "$MANAGED_AGENT_CW_IMAGE_RECEIPT" ]] || { usage; exit 2; }
   MANAGED_AGENT_UPDATE=1
 fi
+
+# The Forgejo-hosted repository fixture is the public supply-chain scanner
+# repository on the forge GITHUB_SERVER_URL names, pinned to GITEA_COMMIT.
+[[ -n "${GITHUB_SERVER_URL:-}" ]] || die 'GITHUB_SERVER_URL: set to the Forgejo base URL'
+GITEA_SOURCE="${GITHUB_SERVER_URL%/}/supplychain.git"
+readonly GITEA_SOURCE
 
 for tool in awk base64 cat chmod cp dirname e2fsck find findmnt git id jq ln mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
   require_cmd "$tool"
@@ -752,7 +760,7 @@ cat >"$WORKSPACE/codewire.yaml" <<EOF
 version: 1
 image: $WORKSPACE_IMAGE
 repositories:
-  - source: https://git.example.invalid/supplychain.git
+  - source: $GITEA_SOURCE
     revision: $GITEA_COMMIT
     destination: /workspace/gitea
   - source: https://github.com/noeljackson/method.git
@@ -3772,15 +3780,15 @@ rg -qF 'copy-mount-executable-ok' "$LAST_STDOUT" ||
 rg -qF "guest-github-head=$GITHUB_COMMIT" "$LAST_STDOUT" ||
   die 'GitHub workspace does not identify the pinned commit'
 rg -qF "guest-gitea-head=$GITEA_COMMIT" "$LAST_STDOUT" ||
-  die 'git.example.invalid workspace does not identify the pinned commit'
+  die 'Forgejo workspace does not identify the pinned commit'
 rg -qF "guest-github-readme-sha=$GITHUB_README_SHA256" "$LAST_STDOUT" ||
   die 'GitHub workspace content drifted from the pinned commit'
 rg -qF "guest-gitea-readme-sha=$GITEA_README_SHA256" "$LAST_STDOUT" ||
-  die 'git.example.invalid workspace content drifted from the pinned commit'
+  die 'Forgejo workspace content drifted from the pinned commit'
 rg -qF 'guest-github-origin=https://github.com/noeljackson/method.git' "$LAST_STDOUT" ||
   die 'GitHub workspace origin metadata is not the sanitized public source'
-rg -qF 'guest-gitea-origin=https://git.example.invalid/supplychain.git' "$LAST_STDOUT" ||
-  die 'git.example.invalid workspace origin metadata is not the sanitized public source'
+rg -qF "guest-gitea-origin=$GITEA_SOURCE" "$LAST_STDOUT" ||
+  die 'Forgejo workspace origin metadata is not the sanitized public source'
 if rg -qF 'host-secret' "$LAST_STDOUT" || rg -qF 'credential.helper' "$LAST_STDOUT" ||
    rg -qF "$WORKSPACE" "$LAST_STDOUT" || rg -qF "$MOUNT_SOURCE" "$LAST_STDOUT"; then
   die 'host Git credential or source-path metadata entered the guest clone'
@@ -4005,7 +4013,7 @@ rg -qF 'guest-copy-mount-write' "$LAST_STDOUT" ||
 rg -qF "$GITHUB_COMMIT" "$LAST_STDOUT" ||
   die 'GitHub workspace did not survive cached-runtime restart'
 rg -qF "$GITEA_COMMIT" "$LAST_STDOUT" ||
-  die 'git.example.invalid workspace did not survive cached-runtime restart'
+  die 'Forgejo workspace did not survive cached-runtime restart'
 rg -qF "$EXPECTED_MACHINE_ID" "$LAST_STDOUT" ||
   die 'environment-specific machine identity did not survive restart'
 [[ "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||

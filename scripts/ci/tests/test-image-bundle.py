@@ -4,11 +4,15 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
+# CI names the registry host in the CODEWIRE_IMAGE_REGISTRY Actions variable.
+os.environ["CODEWIRE_IMAGE_REGISTRY"] = "registry.example.invalid"
 ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location(
     "image_bundle", ROOT / "scripts" / "ci" / "images" / "image-bundle.py"
@@ -217,6 +221,11 @@ class ImageBundleTests(unittest.TestCase):
                 image_bundle._candidate_from_metadata(
                     "daemon", SOURCE_SHA, "unapproved.example/oci", metadata
                 )
+
+    def test_unconfigured_registry_is_rejected(self) -> None:
+        with mock.patch.dict(os.environ, {"CODEWIRE_IMAGE_REGISTRY": ""}):
+            with self.assertRaisesRegex(image_bundle.BundleError, "CODEWIRE_IMAGE_REGISTRY"):
+                image_bundle.validate_bundle(image_bundle._create_bundle(SOURCE_SHA, candidates(), None))
 
     def test_candidate_for_other_registry_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

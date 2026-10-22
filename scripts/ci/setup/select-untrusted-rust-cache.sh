@@ -19,12 +19,18 @@ trust=protected-read
 [[ "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" != 'push|refs/heads/main' ]] || trust=main
 readonly trust
 readonly bucket='example-ci-cache-protected'
-readonly endpoint='https://00000000000000000000000000000000.r2.cloudflarestorage.com'
+# The S3 endpoint of the CI cache buckets. Unset, auto mode uses the job-local
+# cache only.
+readonly endpoint="${CODEWIRE_R2_CACHE_ENDPOINT:-}"
 readonly prefix='protected/codewire/v1'
 
 : "${GITHUB_ENV:?Forgejo job environment file is required}"
 : "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"
 : "${RUNNER_TEMP:?Forgejo runner temporary directory is required}"
+[[ -z "$endpoint" || "$endpoint" =~ ^https://[A-Za-z0-9.-]+/?$ ]] || {
+  echo 'CODEWIRE_R2_CACHE_ENDPOINT must be an https origin with no path' >&2
+  exit 2
+}
 
 case "$credentials_file" in
   "$RUNNER_TEMP"/*) ;;
@@ -152,6 +158,10 @@ case "$request" in
       if select_local_or_disabled; then
         printf 'CODEWIRE_CI_CACHE state=explicit backend=local\n'
       fi
+    elif [[ -z "$endpoint" ]]; then
+      echo '::warning::CODEWIRE_R2_CACHE_ENDPOINT is unset; continuing with the job-local cache'
+      printf 'CODEWIRE_CI_CACHE state=cache-unconfigured fallback=local\n'
+      select_local_or_disabled || true
     elif CODEWIRE_R2_CACHE_TRUST="$trust" "$fetcher" "$credentials_file"; then
       if sccache_starts r2; then
         select_sccache r2

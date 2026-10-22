@@ -1,7 +1,9 @@
 fullnameOverride: codewire-mesh
 
 image:
-  repository: registry.example.invalid/codewire/mesh
+  # A source placeholder: codewire/deploy sets the configured registry's
+  # repository and the release's immutable digest.
+  repository: git.example.com/codewire/mesh
   tag: latest
   digest: ""
 

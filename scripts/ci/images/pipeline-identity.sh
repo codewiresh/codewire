@@ -12,8 +12,10 @@
 # fetches. Changing it invalidates verification of every image built under the
 # old value, so change it only in a release that rebuilds the whole set.
 readonly PIPELINE_BUILDER_ID='https://codewire.sh/ci/builders/protected-delivery/v1'
-# The repository URL provenance must name as its source.
-readonly PIPELINE_SOURCE_URL='https://git.example.invalid/codewire/codewire.git'
+# The repository URL provenance must name as its source: codewire/codewire on
+# the forge that runs the pipeline, whose URL Forgejo sets in every job.
+: "${GITHUB_SERVER_URL:?set to the Forgejo base URL}"
+readonly PIPELINE_SOURCE_URL="${GITHUB_SERVER_URL%/}/codewire/codewire.git"
 # OpenBao serving the Transit signing key and publisher credentials. Every
 # CI and smoke script reads the same CODEWIRE_OPENBAO_ADDR; set it (workflow
 # env or repository variable) to point this tooling at another OpenBao.

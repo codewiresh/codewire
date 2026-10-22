@@ -26,6 +26,7 @@ SYNTHETIC_DEV_PIN = {
     "CODEWIRE_DEV_KUBE_SERVER": "https://192.0.2.30:6443",
     "CODEWIRE_DEV_KUBE_TLS_SERVER_NAME": "api.example-dev-cluster.example.invalid",
     "CODEWIRE_DEV_KUBE_CA_SHA256": hashlib.sha256(CERTIFICATE).hexdigest(),
+    "CODEWIRE_IMAGE_REGISTRY": "registry.example.invalid",
 }
 SPEC = importlib.util.spec_from_file_location("checkout_fixture", ROOT / "scripts/runtime/dev/hosted-checkout-fixture.py")
 FIXTURE = importlib.util.module_from_spec(SPEC)
@@ -420,6 +421,14 @@ class FixtureTests(unittest.TestCase):
                 with self.assertRaises(FIXTURE.Failure) as caught:
                     FIXTURE.start(self.args)
                 self.assertEqual(str(caught.exception), "Dev cluster pin is not configured")
+        self.assertEqual(self.kube.calls, [])
+        self.assertFalse(self.args.state_dir.exists())
+
+    def test_unset_image_registry_refuses_before_any_cluster_read(self):
+        with patch.object(FIXTURE, "IMAGE_REGISTRY", ""):
+            with self.assertRaises(FIXTURE.Failure) as caught:
+                FIXTURE.start(self.args)
+            self.assertEqual(str(caught.exception), "CODEWIRE_IMAGE_REGISTRY is not configured")
         self.assertEqual(self.kube.calls, [])
         self.assertFalse(self.args.state_dir.exists())
 

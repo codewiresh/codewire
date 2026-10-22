@@ -18,18 +18,20 @@ keeps its tests, its placement join and its runbook:
 | Source path | `tools/forgejo/commands/forgejo-ci-start-latency` |
 | Source commit | `63fa55f481d494a0bee8081c3702bd8ce20fa2e2` |
 | Source sha256 | `ea24bae8ed934205da6ebcdb923b5a09dc71deb69cf559b05402107488e9ed9f` |
-| Vendored sha256 | `2bf6c18846317e670c875be1e0a304f4ae7a3dd668e6ffa75de3d12997856048` |
+| Vendored sha256 | `a3c7d3a771afb995e051fcaa52ed486ad4a452567b02f1582566e707ccea9985` |
 
-The copy differs from the source in two lines: `REPOSITORIES` and the `REPO`
-path pattern allow only `codewire/codewire`. The source also allows the
-infrastructure repository, whose name stays out of this tree; a Codewire job
-token cannot read it in any case. Everything else, including the entrypoint
-path shim at the top, is byte for byte the source.
+The copy differs from the source in two ways. `REPOSITORIES` and the `REPO`
+path pattern allow only `codewire/codewire`; the source also allows the
+infrastructure repository, whose name stays out of this tree, and a Codewire
+job token cannot read it in any case. And the API root comes from
+`GITHUB_SERVER_URL`, which Forgejo sets in every job (`api_base`), instead of a
+fixed host. Everything else, including the entrypoint path shim at the top, is
+byte for byte the source.
 
 `forgejo-ci-start-latency.sha256` records the vendored sha256. The workflow
 checks it before collecting, and `scripts/ci/tests/test-select-verification.sh`
 checks it in policy. To update the copy, take the new source commit, make the
-same two-line change, and update this table and the checksum file together.
+same changes, and update this table and the checksum file together.
 
 ## CI done measures (#3144)
 

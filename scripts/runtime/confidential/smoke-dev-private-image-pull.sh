@@ -8,6 +8,7 @@ KUBE_CONTEXT="${KUBE_CONTEXT:-${CODEWIRE_DEV_CLUSTER:?set CODEWIRE_DEV_CLUSTER t
 SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-dev}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
 NODE="${CONFIDENTIAL_SNP_NODE:?set CONFIDENTIAL_SNP_NODE to the Dev confidential node}"
+IMAGE_REGISTRY="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
 WAIT_SECONDS="${PRIVATE_PULL_WAIT_SECONDS:-360}"
 KEEP_PROBE="${PRIVATE_PULL_KEEP_PROBE:-0}"
 ENCRYPTED_EMPTYDIR="${PRIVATE_PULL_ENCRYPTED_EMPTYDIR:-0}"
@@ -188,7 +189,7 @@ registry_auth_uri="$(jq -er '.data.SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI' "$
 coco_enabled="$(jq -er '.data.SANDBOX_KATA_COCO_INIT_DATA_ENABLED' "$configmap_json")"
 test_resource_uri="$(jq -er '.data.SANDBOX_KATA_COCO_TEST_RESOURCE_URI' "$configmap_json")"
 
-[[ "$daemon_image" =~ ^registry\.example\.invalid/codewire/daemon@sha256:[a-f0-9]{64}$ ]] || \
+[[ "$daemon_image" =~ ^"$IMAGE_REGISTRY"/codewire/daemon@sha256:[a-f0-9]{64}$ ]] || \
   die "promoted daemon image is not an exact Harbor digest"
 [[ "$dind_image" =~ ^docker\.io/library/docker:[0-9]+\.[0-9]+\.[0-9]+-dind@sha256:[a-f0-9]{64}$ ]] || \
   die "active dind image is not an exact official Docker digest"
@@ -343,14 +344,14 @@ if [[ "$IMAGE_ROLE" == "product" ]]; then
     '          memory: 4Gi')"
 fi
 
-registry_egress_yaml=$'    - toFQDNs:\n        - matchName: registry.example.invalid\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
-dns_rules_yaml=$'          rules:\n            dns:\n              - matchName: registry.example.invalid\n              - matchName: codewire-trustee-kbs.codewire-trustee.svc.cluster.local\n'
+registry_egress_yaml=$'    - toFQDNs:\n        - matchName: '"$IMAGE_REGISTRY"$'\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
+dns_rules_yaml=$'          rules:\n            dns:\n              - matchName: '"$IMAGE_REGISTRY"$'\n              - matchName: codewire-trustee-kbs.codewire-trustee.svc.cluster.local\n'
 if [[ "$public_registry_egress" == "1" ]]; then
   dns_rules_yaml=""
   registry_egress_yaml=$'    - toCIDRSet:\n        - cidr: 0.0.0.0/0\n          except:\n            - 10.0.0.0/8\n            - 100.64.0.0/10\n            - 127.0.0.0/8\n            - 169.254.0.0/16\n            - 172.16.0.0/12\n            - 192.168.0.0/16\n        - cidr: ::/0\n          except:\n            - fc00::/7\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
 fi
 if [[ "$IMAGE_ROLE" == "product" ]]; then
-  registry_egress_yaml+=$'    - toFQDNs:\n        - matchName: registry.example.invalid\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
+  registry_egress_yaml+=$'    - toFQDNs:\n        - matchName: '"$IMAGE_REGISTRY"$'\n      toPorts:\n        - ports:\n            - port: "443"\n              protocol: TCP\n'
 fi
 
 policy_source="$ROOT/crates/codewire-orchestration/src/sandbox/template/encoding.rs"

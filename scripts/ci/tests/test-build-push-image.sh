@@ -3,6 +3,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# CI names these in Actions variables and the job context; the scripts
+# require them.
+export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
+export GITHUB_SERVER_URL=https://git.example.invalid
 if [[ "${PYTHONDONTWRITEBYTECODE:-}" != 1 ]]; then
   # CI's release step sets this. Without it, a local Python can write
   # __pycache__ into the CW source capsule, which the producer then refuses.
@@ -404,7 +408,8 @@ for name in (
     'apps/dashboard/Dockerfile', 'deployments/docker/services.Dockerfile',
     'deployments/docker/services.Dockerfile.dockerignore',
     'deployments/docker/mesh.Dockerfile', 'deployments/docker/derp.Dockerfile',
-    'docker-compose.yml', 'scripts/ci/images/build-kind-images.sh',
+    'docker-compose.yml', 'images/confidential-probe/Dockerfile',
+    'scripts/ci/images/build-kind-images.sh',
     'scripts/ci/images/build-push-image.sh', 'scripts/ci/images/build-push-runtime-images.sh',
     'scripts/ci/images/image-bundle.py',
     'scripts/ci/images/compute-image-tags.sh',
@@ -1751,6 +1756,13 @@ for variant in base-mirror workspace-mirror base-empty-mirror probe-mirror; do
   esac >"$work/$variant.out" 2>&1
   [[ "$(build_invocation_count)" == 1 ]] || fail "$variant was not built exactly once"
   build_call="$(grep -E ' buildx (bake|build) ' "$FAKE_DOCKER_CALLS")"
+  # Only a Dockerfile that declares the registry argument receives it.
+  if [[ "$variant" == probe-mirror ]]; then
+    grep -qF -- '--build-arg CODEWIRE_IMAGE_REGISTRY=registry.example.invalid ' <<<"$build_call" ||
+      fail 'the probe build did not receive its registry host'
+  elif grep -qF 'CODEWIRE_IMAGE_REGISTRY=' <<<"$build_call"; then
+    fail "$variant received a registry build argument its Dockerfile does not declare"
+  fi
   case "$variant" in
     base-mirror|workspace-mirror)
       [[ "$(grep -oF -- "$apt_mirror_secret" <<<"$build_call" | wc -l)" == 1 ]] ||

@@ -156,20 +156,23 @@ fi
 if [ -z "${KIND_AGENT_SANDBOX_IMAGE+x}" ]; then
   KIND_AGENT_SANDBOX_IMAGE=''
 fi
+# The five sealed Kind inputs are the approved digests in the image registry
+# that CODEWIRE_IMAGE_REGISTRY names. Only the sealed (CI) path needs it;
+# validate_sealed_kind_images refuses sealed inputs while it is unset.
 if [ -z "${APPROVED_KIND_INGRESS_CONTROLLER_IMAGE+x}" ]; then
-  APPROVED_KIND_INGRESS_CONTROLLER_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
+  APPROVED_KIND_INGRESS_CONTROLLER_IMAGE="${CODEWIRE_IMAGE_REGISTRY:+$CODEWIRE_IMAGE_REGISTRY/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180}"
 fi
 if [ -z "${APPROVED_KIND_INGRESS_CERTGEN_IMAGE+x}" ]; then
-  APPROVED_KIND_INGRESS_CERTGEN_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
+  APPROVED_KIND_INGRESS_CERTGEN_IMAGE="${CODEWIRE_IMAGE_REGISTRY:+$CODEWIRE_IMAGE_REGISTRY/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053}"
 fi
 if [ -z "${APPROVED_KIND_AGENT_SANDBOX_IMAGE+x}" ]; then
-  APPROVED_KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:fb3b81ff40a5ef07a455f1e81f2af3a9b0884ed801238e018008184520044595'
+  APPROVED_KIND_AGENT_SANDBOX_IMAGE="${CODEWIRE_IMAGE_REGISTRY:+$CODEWIRE_IMAGE_REGISTRY/oci-approved/codewire/agent-sandbox-controller@sha256:fb3b81ff40a5ef07a455f1e81f2af3a9b0884ed801238e018008184520044595}"
 fi
 if [ -z "${APPROVED_KIND_WORKSPACE_IMAGE+x}" ]; then
-  APPROVED_KIND_WORKSPACE_IMAGE='registry.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
+  APPROVED_KIND_WORKSPACE_IMAGE="${CODEWIRE_IMAGE_REGISTRY:+$CODEWIRE_IMAGE_REGISTRY/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510}"
 fi
 if [ -z "${APPROVED_KIND_DIND_IMAGE+x}" ]; then
-  APPROVED_KIND_DIND_IMAGE='registry.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e'
+  APPROVED_KIND_DIND_IMAGE="${CODEWIRE_IMAGE_REGISTRY:+$CODEWIRE_IMAGE_REGISTRY/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e}"
 fi
 if [ -z "${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE+x}" ]; then
   KIND_INGRESS_CONTROLLER_LOCAL_IMAGE='localhost/codewire-ci/ingress-nginx-controller:verified-5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
@@ -1473,6 +1476,14 @@ validate_sealed_kind_images() {
       && [ "$KIND_WORKSPACE_IMAGE" = "$DEFAULT_KIND_WORKSPACE_IMAGE" ] \
       && [ "$KIND_DIND_IMAGE" = "$DEFAULT_KIND_DIND_IMAGE" ]; then
     return 1
+  fi
+  if [ -z "$APPROVED_KIND_INGRESS_CONTROLLER_IMAGE" ] \
+      || [ -z "$APPROVED_KIND_INGRESS_CERTGEN_IMAGE" ] \
+      || [ -z "$APPROVED_KIND_AGENT_SANDBOX_IMAGE" ] \
+      || [ -z "$APPROVED_KIND_WORKSPACE_IMAGE" ] \
+      || [ -z "$APPROVED_KIND_DIND_IMAGE" ]; then
+    echo "::error::CODEWIRE_IMAGE_REGISTRY: set to the image registry host; sealed Kind inputs are its approved digests"
+    return 2
   fi
   if [ "$KIND_INGRESS_CONTROLLER_IMAGE" != "$APPROVED_KIND_INGRESS_CONTROLLER_IMAGE" ] \
       || [ "$KIND_INGRESS_CERTGEN_IMAGE" != "$APPROVED_KIND_INGRESS_CERTGEN_IMAGE" ] \
@@ -4501,6 +4512,7 @@ deploy_agent_sandbox_and_smoke() {
 
 assert_sandbox_supply_chain() {
   local service_account pods templates events workspace_image dind_image configured_dind_image
+  local registry registry_alternative
 
   log "verifying sandbox service-account and runtime-image provenance"
   service_account="$(kubectl -n "$SANDBOX_NS" get serviceaccount/codewire-sandbox -o json)"
@@ -4512,6 +4524,13 @@ assert_sandbox_supply_chain() {
 
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   dind_image="$(kind_dind_runtime_image)"
+  # The approved inputs come from the configured image registry; an unset one
+  # contributes no approved-path alternative.
+  registry="${CODEWIRE_IMAGE_REGISTRY:-}"
+  registry_alternative=''
+  if [ -n "$registry" ]; then
+    registry_alternative="|${registry//./\\.}/oci-approved/(codewire/workspace|docker/dind)"
+  fi
   configured_dind_image="$(kubectl -n "$NS" get configmap/codewire-config \
     -o jsonpath='{.data.SANDBOX_DIND_IMAGE}')"
   if [ "$configured_dind_image" != "$dind_image" ]; then
@@ -4519,18 +4538,18 @@ assert_sandbox_supply_chain() {
     return 1
   fi
   pods="$(kubectl get pods -A -o json)"
-  if ! jq -e --arg workspace "$workspace_image" --arg dind "$dind_image" '
+  if ! jq -e --arg workspace "$workspace_image" --arg dind "$dind_image" --arg registry "$registry" '
     def workspace_image:
       startswith("ghcr.io/codewiresh/workspace:") or
       startswith("ghcr.io/codewiresh/workspace@") or
-      startswith("registry.example.invalid/oci-approved/codewire/workspace@") or
+      ($registry != "" and startswith($registry + "/oci-approved/codewire/workspace@")) or
       startswith("localhost/codewire-ci/workspace:");
     def dind_image:
       startswith("ghcr.io/codewiresh/" + "dind") or
       startswith("docker:" + "dind") or
       startswith("docker.io/library/docker:") or
       startswith("docker.io/library/docker@") or
-      startswith("registry.example.invalid/oci-approved/docker/dind@") or
+      ($registry != "" and startswith($registry + "/oci-approved/docker/dind@")) or
       startswith("localhost/codewire-ci/docker-dind:");
     [
       .items[]
@@ -4544,7 +4563,7 @@ assert_sandbox_supply_chain() {
         end)
   ' <<<"$pods" >/dev/null; then
     echo "::error::Kind pod spec contains an unaccepted workspace or DinD image reference"
-    jq -r '
+    jq -r --arg registry "$registry" '
       .items[]
       | ((.spec.initContainers // []) + (.spec.containers // []))[]
       | .image
@@ -4552,8 +4571,8 @@ assert_sandbox_supply_chain() {
                startswith("ghcr.io/codewiresh/" + "dind") or
                startswith("docker:" + "dind") or
                startswith("docker.io/library/docker") or
-               startswith("registry.example.invalid/oci-approved/codewire/workspace@") or
-               startswith("registry.example.invalid/oci-approved/docker/dind@") or
+               ($registry != "" and startswith($registry + "/oci-approved/codewire/workspace@")) or
+               ($registry != "" and startswith($registry + "/oci-approved/docker/dind@")) or
                startswith("localhost/codewire-ci/workspace:") or
                startswith("localhost/codewire-ci/docker-dind:"))
     ' <<<"$pods" | LC_ALL=C sort -u >&2
@@ -4561,27 +4580,27 @@ assert_sandbox_supply_chain() {
   fi
 
   templates="$(kubectl get sandboxtemplates -A -o json)"
-  if ! jq -e --arg workspace "$workspace_image" --arg dind "$dind_image" '
+  if ! jq -e --arg workspace "$workspace_image" --arg dind "$dind_image" --arg registry "$registry" '
     [.. | strings
       | select(startswith("ghcr.io/codewiresh/workspace") or
                startswith("ghcr.io/codewiresh/" + "dind") or
                startswith("docker:" + "dind") or
                startswith("docker.io/library/docker") or
-               startswith("registry.example.invalid/oci-approved/codewire/workspace@") or
-               startswith("registry.example.invalid/oci-approved/docker/dind@") or
+               ($registry != "" and startswith($registry + "/oci-approved/codewire/workspace@")) or
+               ($registry != "" and startswith($registry + "/oci-approved/docker/dind@")) or
                startswith("localhost/codewire-ci/workspace:") or
                startswith("localhost/codewire-ci/docker-dind:"))] as $images
     | ($images | index($workspace) != null)
       and ($images | all(. == $workspace or . == $dind))
   ' <<<"$templates" >/dev/null; then
     echo "::error::rendered SandboxTemplate contains an unaccepted workspace or DinD image reference"
-    jq -r '[.. | strings
+    jq -r --arg registry "$registry" '[.. | strings
       | select(startswith("ghcr.io/codewiresh/workspace") or
                startswith("ghcr.io/codewiresh/" + "dind") or
                startswith("docker:" + "dind") or
                startswith("docker.io/library/docker") or
-               startswith("registry.example.invalid/oci-approved/codewire/workspace@") or
-               startswith("registry.example.invalid/oci-approved/docker/dind@") or
+               ($registry != "" and startswith($registry + "/oci-approved/codewire/workspace@")) or
+               ($registry != "" and startswith($registry + "/oci-approved/docker/dind@")) or
                startswith("localhost/codewire-ci/workspace:") or
                startswith("localhost/codewire-ci/docker-dind:"))] | unique[]' \
       <<<"$templates" >&2
@@ -4589,22 +4608,22 @@ assert_sandbox_supply_chain() {
   fi
 
   events="$(kubectl get events -A -o json)"
-  if ! jq -e '
+  if ! jq -e --arg registry_alternative "$registry_alternative" '
     [
       .items[] as $event
       | select(
           (["ErrImagePull", "Failed", "FailedToRetrieveImagePullSecret", "ImagePullBackOff"]
             | index($event.reason)) != null and
           (($event.message // "")
-            | test("(ghcr\\.io/codewiresh/(workspace|din[d])|docker:din[d]|docker\\.io/library/docker|registry\\.example\\.invalid/oci-approved/(codewire/workspace|docker/dind)|localhost/codewire-ci/(workspace|docker-dind))"))
+            | test("(ghcr\\.io/codewiresh/(workspace|din[d])|docker:din[d]|docker\\.io/library/docker|localhost/codewire-ci/(workspace|docker-dind))" + $registry_alternative))
         )
       | $event
     ] | length == 0
   ' <<<"$events" >/dev/null; then
     echo "::error::Kind recorded a workspace or DinD image-provenance failure"
-    jq -r '.items[]
+    jq -r --arg registry_alternative "$registry_alternative" '.items[]
       | select((.message // "")
-          | test("(ghcr\\.io/codewiresh/(workspace|din[d])|docker:din[d]|docker\\.io/library/docker|registry\\.example\\.invalid/oci-approved/(codewire/workspace|docker/dind)|localhost/codewire-ci/(workspace|docker-dind))"))
+          | test("(ghcr\\.io/codewiresh/(workspace|din[d])|docker:din[d]|docker\\.io/library/docker|localhost/codewire-ci/(workspace|docker-dind))" + $registry_alternative))
       | "\(.metadata.namespace // "default")/\(.involvedObject.name): \(.reason)"' \
       <<<"$events" >&2
     return 1

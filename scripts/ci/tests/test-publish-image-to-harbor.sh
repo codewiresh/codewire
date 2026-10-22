@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# CI names these in Actions variables and the job context; the scripts
+# require them.
+export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
 readonly PUBLISH="$ROOT/scripts/ci/images/publish-image-to-harbor.sh"
 
 fail() {
@@ -51,7 +54,7 @@ case "$1" in
     credential="$(cat)"
     [[ "$credential" == synthetic-harbor-pull-password \
       || "$credential" == synthetic-harbor-publisher-password ]]
-    [[ "${!#}" == registry.example.invalid ]]
+    [[ "${!#}" == "${CODEWIRE_IMAGE_REGISTRY:?}" ]]
     ;;
   inspect)
     [[ "${SKOPEO_AUTH_VOLUME:?}" == fake-volume ]]
@@ -69,7 +72,7 @@ case "$1" in
     destination="${!#}"
     source="${*: -2:1}"
     [[ "$*" == *--src-no-creds* && "$source" == docker://ghcr.io/codewiresh/* ]]
-    [[ "$destination" == docker://registry.example.invalid/codewire/*:keep-sha256-* ]]
+    [[ "$destination" == docker://"${CODEWIRE_IMAGE_REGISTRY:?}"/codewire/*:keep-sha256-* ]]
     touch "${FAKE_PRESENT_DIR:?}/${source##*@}"
     ;;
   *) exit 64 ;;
@@ -146,17 +149,23 @@ grep -qxF "$harbor/workspace@$digest $harbor/workspace keep-${digest/:/-}" "$FAK
 [[ "$(grep -c '^inspect ' "$FAKE_SKOPEO_LOG")" -eq 2 ]] || fail 'keep publication did not verify both digests'
 
 # Compiled-in defaults already in Harbor are only kept; the public mirror is
-# never contacted.
+# never contacted. The product source names the registry its defaults pin, so
+# these cases publish on that host.
+source_registry="$(grep -ohE '"[a-z0-9.-]+(:[0-9]+)?/codewire/daemon@sha256:[0-9a-f]{64}"' \
+  "$ROOT/crates/codewire-server-core/src/runtime_images.rs" | head -n 1)"
+source_registry="${source_registry#\"}"
+source_registry="${source_registry%%/*}"
+[[ -n "$source_registry" ]] || fail 'source does not pin a Harbor daemon default'
 mapfile -t pinned < <(
   {
     python3 "$ROOT/scripts/ci/images/workspace-image-pin.py" show harbor-image
-    grep -ohE 'registry\.example\.invalid/codewire/daemon@sha256:[0-9a-f]{64}' \
+    grep -ohE "${source_registry//./\\.}/codewire/daemon@sha256:[0-9a-f]{64}" \
       "$ROOT/crates/codewire-server-core/src/runtime_images.rs"
   } | sort -u
 )
 [[ "${#pinned[@]}" -ge 2 ]] || fail 'source does not pin Harbor workspace and daemon defaults'
 reset_logs
-"$PUBLISH" --pinned-defaults >"$work/pinned.out" 2>&1 ||
+CODEWIRE_IMAGE_REGISTRY="$source_registry" "$PUBLISH" --pinned-defaults >"$work/pinned.out" 2>&1 ||
   { cat "$work/pinned.out" >&2; fail 'pinned defaults publication failed'; }
 if grep -q '^copy ' "$FAKE_SKOPEO_LOG"; then
   fail 'a pinned default already in Harbor was imported again'
@@ -171,7 +180,8 @@ done
 # mirror without credentials, then kept and verified.
 reset_logs
 workspace_default="$(printf '%s\n' "${pinned[@]}" | grep '/workspace@')"
-FAKE_ABSENT="${workspace_default##*@}" "$PUBLISH" --pinned-defaults >"$work/import.out" 2>&1 ||
+FAKE_ABSENT="${workspace_default##*@}" CODEWIRE_IMAGE_REGISTRY="$source_registry" \
+  "$PUBLISH" --pinned-defaults >"$work/import.out" 2>&1 ||
   { cat "$work/import.out" >&2; fail 'pinned default import failed'; }
 [[ "$(grep -c '^copy ' "$FAKE_SKOPEO_LOG")" -eq 1 ]] ||
   fail 'a missing pinned default was not imported exactly once'
@@ -180,7 +190,8 @@ grep -qF "docker://ghcr.io/codewiresh/workspace@${workspace_default##*@}" "$FAKE
 grep -qF 'Imported pinned default into Harbor' "$work/import.out" ||
   fail 'the pinned default import was not reported'
 reset_logs
-FAKE_ABSENT="${workspace_default##*@}" "$PUBLISH" --pinned-defaults >"$work/import-again.out" 2>&1 ||
+FAKE_ABSENT="${workspace_default##*@}" CODEWIRE_IMAGE_REGISTRY="$source_registry" \
+  "$PUBLISH" --pinned-defaults >"$work/import-again.out" 2>&1 ||
   fail 'repeated pinned default publication failed'
 if grep -q '^copy ' "$FAKE_SKOPEO_LOG"; then
   fail 'an imported pinned default was imported again'
@@ -215,5 +226,13 @@ fi
 if grep -q '^inspect ' "$FAKE_SKOPEO_LOG"; then
   fail 'verification continued after a failed Harbor tag confirmation'
 fi
+
+# Without its configured registry host, publication refuses and names it.
+if env -u CODEWIRE_IMAGE_REGISTRY "$PUBLISH" --keep "$harbor/workspace@$digest" \
+    >"$work/unconfigured.out" 2>&1; then
+  fail 'publication ran without a configured registry host'
+fi
+grep -qF 'CODEWIRE_IMAGE_REGISTRY' "$work/unconfigured.out" ||
+  fail 'the unconfigured registry failure does not name CODEWIRE_IMAGE_REGISTRY'
 
 echo '[test-publish-image-to-harbor] Harbor publication contract passed'

@@ -97,7 +97,7 @@ grep -Fq "if: \${{ needs.support-selection.outputs.build_confidential_probe_imag
 grep -qF 'scripts/ci/images/build-push-image.sh base images/base/Dockerfile images/base' \
   "$WORKFLOW" || fail 'base is not built by the canonical Gitea helper'
 # shellcheck disable=SC2016
-grep -qF '"CODEWIRE_BASE_IMAGE_REF=registry.example.invalid/codewire/base@$base_digest"' \
+grep -qF '"CODEWIRE_BASE_IMAGE_REF=$REGISTRY_HOST/codewire/base@$base_digest"' \
   "$PLATFORM_BUILDER" || fail 'a platform workspace does not consume that platform'"'"'s exact base'
 grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .' \
   "$WORKFLOW" || fail 'workspace is not built by the canonical Gitea helper'
@@ -340,7 +340,9 @@ fi
 [[ "$(tail -n 1 "$WORKSPACE_DOCKERFILE")" == 'USER codewire' ]] ||
   fail 'workspace image does not restore the unprivileged runtime user after installing cw'
 
-grep -qF 'FROM registry.example.invalid/oci-approved/e2e-test-images/busybox@sha256:caec39cad3b12c26600baf6e67ba811ac15d28a9288d0ccdfffb4b318992c3bb' \
+grep -qx 'ARG CODEWIRE_IMAGE_REGISTRY' "$CONFIDENTIAL_PROBE_DOCKERFILE" ||
+  fail 'confidential probe does not take the registry host as a build argument'
+grep -qF 'FROM ${CODEWIRE_IMAGE_REGISTRY}/oci-approved/e2e-test-images/busybox@sha256:caec39cad3b12c26600baf6e67ba811ac15d28a9288d0ccdfffb4b318992c3bb' \
   "$CONFIDENTIAL_PROBE_DOCKERFILE" || fail 'confidential probe does not use the approved exact Harbor base'
 [[ "$(grep -c '^FROM ' "$CONFIDENTIAL_PROBE_DOCKERFILE")" -eq 1 ]] ||
   fail 'confidential probe must have exactly one approved base'
@@ -354,7 +356,7 @@ grep -Fq 'https://github.com/virtee/snpguest/releases/download/v0.10.0/snpguest'
 [[ "$(tail -n 1 "$CONFIDENTIAL_PROBE_DOCKERFILE")" == 'USER 65532:65532' ]] ||
   fail 'confidential probe does not restore its unprivileged runtime user'
 
-if grep -Eq '(registry\.example\.invalid/codewire|ghcr\.io/codewiresh)/(base|workspace):(latest|main)' \
+if grep -Eq '(\$CODEWIRE_IMAGE_REGISTRY/codewire|ghcr\.io/codewiresh)/(base|workspace):(latest|main)' \
     "$WORKFLOW"; then
   fail 'support-image publication contains a moving image tag'
 fi
@@ -468,7 +470,7 @@ for job_name in publish_job probe_job; do
     fail "$job_name lets a required Harbor step continue on error"
   fi
 done
-grep -Fq 'registry.example.invalid/codewire/confidential-probe' <<<"$probe_job" ||
+grep -Fq '"$CODEWIRE_IMAGE_REGISTRY/codewire/confidential-probe"' <<<"$probe_job" ||
   fail 'confidential probe is not published to its Harbor repository'
 
 # The published workspace image is proposed as the new pin by the
@@ -658,7 +660,7 @@ expected = {
     "id": "contract",
     "env": {"WORKSPACE_DIGEST": "${{ steps.build.outputs.workspace_digest }}"},
     "run": "scripts/ci/images/run-workspace-contract-on-image.sh \\\n"
-           '  "registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST" "$GITHUB_SHA" \\\n'
+           '  "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST" "$GITHUB_SHA" \\\n'
            "  scripts/ci/verify/workspace-agent-contract.sh\n",
 }
 if steps[contract[0]] != expected:
@@ -708,7 +710,7 @@ contract_mutations=(
   'artifact contract::s|            scripts/ci/verify/workspace-agent-contract.sh|            "$RUNNER_TEMP/artifact/workspace-agent-contract.sh"|'
   "artifact step::$amd64_range{/      - name: Run the workspace contract on the exact image/i\\      - uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
 }"
-  'tagged image::s|"registry.example.invalid/codewire/workspace@$WORKSPACE_DIGEST"|"registry.example.invalid/codewire/workspace:$GITHUB_SHA"|'
+  'tagged image::s|"$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST"|"$CODEWIRE_IMAGE_REGISTRY/codewire/workspace:$GITHUB_SHA"|'
   'public mirror source::s|run-workspace-contract-on-image.sh \\$|run-workspace-contract-on-image.sh --source ghcr \\|'
 )
 for mutation in "${contract_mutations[@]}"; do
@@ -789,7 +791,7 @@ platform_case() {
   shift 2
   : >"$platform_tree/calls"; : >"$platform_tree/output"; : >"$platform_tree/fetches"; : >"$platform_tree/docker"
   : >"$platform_tree/trusted-fetches"; : >"$platform_tree/calls.jobs"
-  if env "$@" PATH="$platform_tree/bin:$PATH" RUNNER_TEMP="$platform_tree/runner" \
+  if env CODEWIRE_IMAGE_REGISTRY=registry.example.invalid "$@" PATH="$platform_tree/bin:$PATH" RUNNER_TEMP="$platform_tree/runner" \
       STUB_CALLS="$platform_tree/calls" STUB_FETCHES="$platform_tree/fetches" STUB_DOCKER="$platform_tree/docker" \
       STUB_TRUSTED_FETCHES="$platform_tree/trusted-fetches" \
       GITHUB_OUTPUT="$platform_tree/output" GITHUB_RUN_ID=77 GITHUB_RUN_ATTEMPT=1 \
@@ -920,6 +922,9 @@ grep -qF 'owner-invoked recovery path' "$platform_tree/out" || fail 'the in-job 
   fail 'a platform build that reported no digest was accepted'
 [[ "$(platform_case 0 linux/amd64)" == failed* && "$(platform_case '' linux/amd64)" == failed* ]] ||
   fail 'a platform build without a valid budget was accepted'
+[[ "$(platform_case 110 linux/amd64 CODEWIRE_IMAGE_REGISTRY=)" == failed* && ! -s "$platform_tree/calls" ]] &&
+  grep -Fq 'CODEWIRE_IMAGE_REGISTRY' "$platform_tree/out" ||
+  fail 'a platform build without the registry host did not stop naming CODEWIRE_IMAGE_REGISTRY'
 [[ "$(platform_case 110 linux/riscv64)" == failed* && ! -s "$platform_tree/calls" ]] ||
   fail 'an unsupported platform was built'
 grep -qF -- '--kill-after=60s "${remaining}s"' "$PLATFORM_BUILDER" ||

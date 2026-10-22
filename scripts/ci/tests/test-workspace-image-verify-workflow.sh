@@ -513,7 +513,8 @@ run_mock_verifier() {
     GITHUB_JOB=workspace-fixture GITHUB_RUN_ID=2047 GITHUB_RUN_ATTEMPT=1 RUNNER_TEMP="$work/runner-temp" \
     CODEWIRE_SCCACHE_CREDENTIALS_FILE="${MOCK_CREDENTIALS:-}" \
     SCCACHE_BUCKET=example-ci-cache-untrusted \
-    SCCACHE_ENDPOINT=https://00000000000000000000000000000000.r2.cloudflarestorage.com \
+    SCCACHE_ENDPOINT=https://r2-cache.example.invalid \
+    CODEWIRE_R2_CACHE_ENDPOINT=https://r2-cache.example.invalid \
     CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/v1 \
     CODEWIRE_APT_SNAPSHOT_MIRROR="${MOCK_APT_MIRROR:-}" \
     FAKE_DOCKER_LOG="$work/docker.log" \

@@ -33,11 +33,13 @@ WARM_POOLS="$ROOT/scripts/ci/verify/kind/suites/warm-pools.sh"
 mkdir -p "$ROOT/.tmp"
 FIXTURE="$(mktemp -d "$ROOT/.tmp/kind-e2e-suites.XXXXXX")"
 CALLS="$FIXTURE/calls"
-readonly SEALED_CONTROLLER_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
-readonly SEALED_CERTGEN_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
-readonly SEALED_AGENT_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:fb3b81ff40a5ef07a455f1e81f2af3a9b0884ed801238e018008184520044595'
-readonly SEALED_WORKSPACE_IMAGE='registry.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
-readonly SEALED_DIND_IMAGE='registry.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e'
+# Sealed inputs are the approved digests in the configured image registry.
+export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
+readonly SEALED_CONTROLLER_IMAGE="$CODEWIRE_IMAGE_REGISTRY/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180"
+readonly SEALED_CERTGEN_IMAGE="$CODEWIRE_IMAGE_REGISTRY/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053"
+readonly SEALED_AGENT_IMAGE="$CODEWIRE_IMAGE_REGISTRY/oci-approved/codewire/agent-sandbox-controller@sha256:fb3b81ff40a5ef07a455f1e81f2af3a9b0884ed801238e018008184520044595"
+readonly SEALED_WORKSPACE_IMAGE="$CODEWIRE_IMAGE_REGISTRY/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510"
+readonly SEALED_DIND_IMAGE="$CODEWIRE_IMAGE_REGISTRY/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e"
 
 cleanup_fixture() {
   rm -rf "$FIXTURE"
@@ -2139,7 +2141,7 @@ sealed_credential_images="$(env \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; kind_credential_support_images' _ "$COMMON")" ||
   fail 'sealed credential inventory failed'
-[[ "$sealed_credential_images" == "${public_credential_images//quay.io\/jetstack/registry.example.invalid\/oci-approved\/jetstack}" ]] ||
+[[ "$sealed_credential_images" == "${public_credential_images//quay.io\/jetstack/$CODEWIRE_IMAGE_REGISTRY\/oci-approved\/jetstack}" ]] ||
   fail 'sealed credential inventory did not select exactly the approved Harbor references'
 missing_credential_index=0
 while IFS='|' read -r missing_credential_source missing_credential_alias; do
@@ -2187,7 +2189,7 @@ done <<<"$sealed_credential_images"
 # even if every image inspection would succeed. No cached image permits a
 # partial or substituted platform tuple to select an image delivery mode.
 for credential_operation in prepare_kind_credential_support_images load_kind_credential_support_images; do
-  for invalid_agent in '' 'registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; do
+  for invalid_agent in '' "$CODEWIRE_IMAGE_REGISTRY/oci-approved/codewire/agent-sandbox-controller@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; do
     : >"$CALLS"
     env \
       KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
@@ -2429,7 +2431,7 @@ PY
     fail 'sealed ingress render does not contain the local certgen twice'
   [ "$(grep -Fc 'imagePullPolicy: Never' "$rendered")" -eq 3 ] ||
     fail 'sealed ingress render does not prohibit registry pulls'
-  if grep -Fq 'registry.example.invalid/oci-approved/ingress-nginx/' "$rendered"; then
+  if grep -Fq "$CODEWIRE_IMAGE_REGISTRY/oci-approved/ingress-nginx/" "$rendered"; then
     fail 'sealed ingress render retained a private registry reference'
   fi
   if grep -Fq 'registry.k8s.io/ingress-nginx/' "$rendered"; then
@@ -2439,7 +2441,7 @@ PY
     fail 'sealed agent-sandbox render does not contain the local controller once'
   [ "$(grep -Fc 'imagePullPolicy: Never' "$agent_rendered")" -eq 1 ] ||
     fail 'sealed agent-sandbox render does not prohibit registry pulls'
-  if grep -Fq 'registry.example.invalid/oci-approved/codewire/' "$agent_rendered"; then
+  if grep -Fq "$CODEWIRE_IMAGE_REGISTRY/oci-approved/codewire/" "$agent_rendered"; then
     fail 'sealed agent-sandbox render retained a private registry reference'
   fi
   if grep -Fq 'ghcr.io/noeljackson/agent-sandbox-controller' "$agent_rendered"; then
@@ -2698,6 +2700,20 @@ env \
   if assert_sandbox_supply_chain >/dev/null 2>&1; then
     fail 'sealed runtime ignored a DinD pull failure'
   fi
+  events_json="$(jq -cn --arg image "$CODEWIRE_IMAGE_REGISTRY/oci-approved/docker/dind@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    '{items:[{reason:"ErrImagePull",message:("failed to pull " + $image),metadata:{namespace:"dev-sandboxes"},involvedObject:{name:"workspace"}}]}')"
+  if assert_sandbox_supply_chain >/dev/null 2>&1; then
+    fail 'sealed runtime ignored a pull failure of the configured registry DinD'
+  fi
+  events_json='{"items":[]}'
+
+  pods_json="$(jq -cn \
+    --arg workspace "$KIND_WORKSPACE_LOCAL_IMAGE" \
+    --arg approved "$CODEWIRE_IMAGE_REGISTRY/oci-approved/codewire/workspace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    '{items:[{spec:{containers:[{image:$workspace},{image:$approved}]}}]}')"
+  if assert_sandbox_supply_chain >/dev/null 2>&1; then
+    fail 'sealed runtime accepted a substituted workspace from the configured registry'
+  fi
 BASH
 
 # A partial or substituted sealed-image tuple must fail before any nested
@@ -2727,7 +2743,7 @@ grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
 expect_failure substituted-agent-image env \
   KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
   KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
-  KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:b00759b0efbf2c654078d30573d3830841d8cbe7896655704bc8268948d72177' \
+  KIND_AGENT_SANDBOX_IMAGE="$CODEWIRE_IMAGE_REGISTRY/oci-approved/codewire/agent-sandbox-controller@sha256:b00759b0efbf2c654078d30573d3830841d8cbe7896655704bc8268948d72177" \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
@@ -2739,7 +2755,7 @@ expect_failure substituted-workspace-image env \
   KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
   KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
   KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
-  KIND_WORKSPACE_IMAGE='registry.example.invalid/oci-approved/codewire/workspace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  KIND_WORKSPACE_IMAGE="$CODEWIRE_IMAGE_REGISTRY/oci-approved/codewire/workspace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
 grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
@@ -2751,11 +2767,22 @@ expect_failure substituted-dind-image env \
   KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
   KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
-  KIND_DIND_IMAGE='registry.example.invalid/oci-approved/docker/dind@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  KIND_DIND_IMAGE="$CODEWIRE_IMAGE_REGISTRY/oci-approved/docker/dind@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
 grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
   "$FIXTURE/substituted-dind-image.out" ||
   fail 'DinD digest substitution did not explain its rejection'
+
+expect_failure sealed-images-without-registry env -u CODEWIRE_IMAGE_REGISTRY \
+  KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
+  KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
+  KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
+  KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
+  KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
+  bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
+grep -Fq 'CODEWIRE_IMAGE_REGISTRY: set to the image registry host' \
+  "$FIXTURE/sealed-images-without-registry.out" ||
+  fail 'sealed inputs without a configured registry did not name CODEWIRE_IMAGE_REGISTRY'
 
 grep -Fq "docker:image inspect $SEALED_CONTROLLER_IMAGE" "$CALLS" ||
   fail 'sealed controller was not proven in the runner-preloaded Docker store'
@@ -2778,15 +2805,20 @@ grep -Fq "docker:image inspect $SEALED_DIND_IMAGE" "$CALLS" ||
 grep -Fq "docker:image tag $SEALED_DIND_IMAGE localhost/codewire-ci/docker-dind:verified-66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e" "$CALLS" ||
   fail 'sealed DinD was not assigned its disposable Kind reference'
 
-grep -Fq "KIND_INGRESS_CONTROLLER_IMAGE: $SEALED_CONTROLLER_IMAGE" \
+# Forgejo CI names the approved digests in the registry its Actions variable
+# configures.
+ci_sealed_image() {
+  printf '%s%s' '${{ vars.CODEWIRE_IMAGE_REGISTRY }}' "${1#"$CODEWIRE_IMAGE_REGISTRY"}"
+}
+grep -Fq "KIND_INGRESS_CONTROLLER_IMAGE: $(ci_sealed_image "$SEALED_CONTROLLER_IMAGE")" \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved ingress controller'
-grep -Fq "KIND_INGRESS_CERTGEN_IMAGE: $SEALED_CERTGEN_IMAGE" \
+grep -Fq "KIND_INGRESS_CERTGEN_IMAGE: $(ci_sealed_image "$SEALED_CERTGEN_IMAGE")" \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved ingress cert generator'
-grep -Fq "KIND_AGENT_SANDBOX_IMAGE: $SEALED_AGENT_IMAGE" \
+grep -Fq "KIND_AGENT_SANDBOX_IMAGE: $(ci_sealed_image "$SEALED_AGENT_IMAGE")" \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved agent-sandbox controller'
-grep -Fq "KIND_WORKSPACE_IMAGE: $SEALED_WORKSPACE_IMAGE" \
+grep -Fq "KIND_WORKSPACE_IMAGE: $(ci_sealed_image "$SEALED_WORKSPACE_IMAGE")" \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the Forgejo-proven workspace image'
-grep -Fq "KIND_DIND_IMAGE: $SEALED_DIND_IMAGE" \
+grep -Fq "KIND_DIND_IMAGE: $(ci_sealed_image "$SEALED_DIND_IMAGE")" \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved Docker DinD image'
 
 # The CI gate shards the retained suites across four matrix legs, each with its

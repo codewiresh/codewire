@@ -68,6 +68,8 @@ MOCK
 chmod +x "$work/bin/curl"
 
 export ACTIONS_ID_TOKEN_REQUEST_URL='https://git.example.invalid/api/actions/oidc?job=synthetic'
+# Forgejo's server URL is its ROOT_URL, which ends with a slash.
+export GITHUB_SERVER_URL='https://git.example.invalid/'
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN="$TEST_REQUEST_TOKEN"
 export CURL_BIN="$work/bin/curl"
 export MOCK_CAPTURE_DIR="$work/capture"
@@ -132,5 +134,13 @@ if CURL_BIN="$work/curl-never" "$RESOLVER" "$work/invalid-head.json" invalid \
   fail 'invalid exact-head binding was accepted'
 fi
 [[ ! -e "$marker" ]] || fail 'invalid exact-head binding reached curl'
+
+if env -u GITHUB_SERVER_URL CURL_BIN="$work/curl-never" "$RESOLVER" \
+    "$work/no-server.json" "$HEAD_SHA" >"$work/no-server.out" 2>&1; then
+  fail 'resolver without GITHUB_SERVER_URL was accepted'
+fi
+grep -Fq 'GITHUB_SERVER_URL' "$work/no-server.out" ||
+  fail 'missing GITHUB_SERVER_URL was not named'
+[[ ! -e "$marker" ]] || fail 'resolver without GITHUB_SERVER_URL reached curl'
 
 printf '[test-resolve-deployed-source] OIDC candidate and isolation cases passed\n'

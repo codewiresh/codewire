@@ -175,8 +175,9 @@ current_daemon_tag() {
 
   image="$(kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get configmap "$configmap" -o json |
     jq -r '.data.SANDBOX_DAEMON_IMAGE // empty')"
-  [[ "$image" == registry.example.invalid/codewire/daemon:* ]] || \
-    die "dev SANDBOX_DAEMON_IMAGE=$image, expected registry.example.invalid/codewire/daemon:<tag>"
+  [[ -n "${CODEWIRE_IMAGE_REGISTRY:-}" ]] || die "CODEWIRE_IMAGE_REGISTRY: set to the image registry host"
+  [[ "$image" == "$CODEWIRE_IMAGE_REGISTRY"/codewire/daemon:* ]] || \
+    die "dev SANDBOX_DAEMON_IMAGE=$image, expected $CODEWIRE_IMAGE_REGISTRY/codewire/daemon:<tag>"
   printf '%s\n' "${image##*:}"
 }
 

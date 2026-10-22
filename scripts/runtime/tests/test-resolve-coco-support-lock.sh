@@ -5,7 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RESOLVER="$ROOT/scripts/runtime/confidential/resolve-coco-support-lock.sh"
 LOCK="$ROOT/deployments/k8s/runtime-profiles/confidential/coco-support-images.lock.json"
 SOURCE_SHA="c0a265c6eb6cea7353a632b92e7c5819f0629583"
-DAEMON_IMAGE="registry.example.invalid/codewire/daemon@sha256:b606b5e4b119c4117b9163943702ff3fcea56d1c0e2f85a6ad3bf2ffa3dfc1c1"
+export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
+DAEMON_IMAGE="$CODEWIRE_IMAGE_REGISTRY/codewire/daemon@sha256:b606b5e4b119c4117b9163943702ff3fcea56d1c0e2f85a6ad3bf2ffa3dfc1c1"
 mkdir -p "$ROOT/.tmp"
 TMPDIR_TEST="$(mktemp -d "$ROOT/.tmp/codewire-coco-support-lock.XXXXXX")"
 trap 'rm -rf "$TMPDIR_TEST"' EXIT
@@ -60,5 +61,12 @@ expect_failure "resolved dind digest mismatch" run_resolver "$TMPDIR_TEST/wrong-
 
 expect_failure "daemon revision mismatch" env MOCK_DAEMON_REVISION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa PATH="$TMPDIR_TEST/bin:$PATH" "$RESOLVER" --lock "$LOCK" --daemon-image "$DAEMON_IMAGE" --source-sha "$SOURCE_SHA"
 expect_failure "workspace revision mismatch" env MOCK_WORKSPACE_REVISION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa PATH="$TMPDIR_TEST/bin:$PATH" "$RESOLVER" --lock "$LOCK" --daemon-image "$DAEMON_IMAGE" --source-sha "$SOURCE_SHA"
+
+expect_failure "daemon image from another registry" env CODEWIRE_IMAGE_REGISTRY=other.example.invalid PATH="$TMPDIR_TEST/bin:$PATH" "$RESOLVER" --lock "$LOCK" --daemon-image "$DAEMON_IMAGE" --source-sha "$SOURCE_SHA"
+if missing_registry="$(env -u CODEWIRE_IMAGE_REGISTRY PATH="$TMPDIR_TEST/bin:$PATH" "$RESOLVER" --lock "$LOCK" --daemon-image "$DAEMON_IMAGE" --source-sha "$SOURCE_SHA" 2>&1)"; then
+  printf 'expected failure: missing image registry\n' >&2
+  exit 1
+fi
+grep -Fq 'CODEWIRE_IMAGE_REGISTRY: set to the image registry host' <<<"$missing_registry"
 
 printf 'CoCo support lock resolver tests passed\n'

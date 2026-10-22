@@ -144,7 +144,7 @@ for claim in '.actor = "mallory"' '.workflow_ref = "codewire/codewire/.gitea/wor
 done
 
 # The document must contain exactly the two well-formed fields.
-for extra in '{"accountId":"00000000000000000000000000000000"}' '{"endpoint":"https://example.invalid"}'; do
+for extra in '{"accountId":"synthetic-r2-account"}' '{"endpoint":"https://example.invalid"}'; do
   if FAKE_EXTRA_FIELDS="$extra" fetch "$work/output/extra" env >"$work/extra.out" 2>&1; then
     fail "credential document with $extra was accepted"
   fi

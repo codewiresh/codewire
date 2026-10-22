@@ -8,6 +8,13 @@ TMP="$(mktemp -d "$ROOT/.tmp/test-private-image-pull.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 chmod 700 "$TMP"
 
+export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
+if env -u CODEWIRE_IMAGE_REGISTRY "$SCRIPT" --help >"$TMP/registry.out" 2>"$TMP/registry.err"; then
+  printf '%s\n' 'private image pull smoke ran without a configured image registry' >&2
+  exit 1
+fi
+grep -Fq 'CODEWIRE_IMAGE_REGISTRY: set to the image registry host' "$TMP/registry.err"
+
 for command in jq yq base64 gzip; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'missing test command: %s\n' "$command" >&2

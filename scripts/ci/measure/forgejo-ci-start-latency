@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 ROOT = Path(__file__).absolute().parent.parent
-API = "https://git.example.invalid/api/v1"
+SERVER_URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(?::[0-9]+)?/?$")
 REPOSITORIES = ("codewire/codewire",)
 MAX_WINDOW = timedelta(days=31)
 RUN_PAGE_LIMIT = 50
@@ -161,12 +161,20 @@ def read_bounded(response: Any, limit: int) -> bytes:
     return payload
 
 
-def http_transport(token: str) -> Callable[[str, str], tuple[int, bytes]]:
+def api_base(environ: dict[str, str]) -> str:
+    """The Forgejo API root, from GITHUB_SERVER_URL (set in every Forgejo job)."""
+    server_url = environ.get("GITHUB_SERVER_URL", "")
+    if not SERVER_URL_RE.fullmatch(server_url):
+        raise CollectorFailure("GITHUB_SERVER_URL must be the Forgejo base URL, for example https://forgejo.example.com")
+    return server_url.rstrip("/") + "/api/v1"
+
+
+def http_transport(token: str, api: str) -> Callable[[str, str], tuple[int, bytes]]:
     context = ssl.create_default_context()
 
     def transport(kind: str, path: str) -> tuple[int, bytes]:
         request = urllib.request.Request(
-            f"{API}{path}",
+            f"{api}{path}",
             headers={
                 "Accept": "application/json" if kind in {"runs", "jobs", "job"} else "*/*",
                 "Authorization": f"token {token}",
@@ -589,7 +597,8 @@ def collect(arguments, environ, transport_factory=None) -> list[dict]:
         raise CollectorFailure("window must be ordered, zoned and at most 31 days")
     placements = load_placements(arguments.placements) if arguments.placements else {}
     dispatcher = load_dispatcher() if placements else None
-    factory = http_transport if transport_factory is None else transport_factory
+    factory = (lambda token: http_transport(token, api_base(environ))) if transport_factory is None \
+        else transport_factory
     forgejo = Forgejo(factory(read_token(arguments.token_file, environ)))
     rows = []
     for run in main_push_runs(forgejo, arguments.repo, since, until):

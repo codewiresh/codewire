@@ -4,7 +4,8 @@
 set -euo pipefail
 
 readonly CANDIDATE_SCHEMA='codewire.ci-deployed-source-candidate/v1'
-readonly RELEASE_URL='https://git.example.invalid/api/v1/repos/codewire/deploy/contents/environments/dev/release.json?ref=main'
+readonly SERVER_URL="${GITHUB_SERVER_URL:?set to the Forgejo base URL}"
+readonly RELEASE_URL="${SERVER_URL%/}/api/v1/repos/codewire/deploy/contents/environments/dev/release.json?ref=main"
 
 [[ $# -eq 2 ]] || {
   echo 'Usage: resolve-deployed-source.sh OUTPUT_JSON EXPECTED_HEAD_SHA' >&2

@@ -15,6 +15,7 @@ Usage:
 Validates the committed confidential-runtime support-image lock and derives the
 public daemon/workspace references for the exact active Flux source SHA. This
 is release evidence, not a mechanism for selecting mutable image tags.
+CODEWIRE_IMAGE_REGISTRY names the image registry the daemon image comes from.
 USAGE
 }
 
@@ -55,7 +56,9 @@ command -v skopeo >/dev/null 2>&1 || die "missing required command: skopeo"
   die "--source-sha must be one exact non-zero lowercase object ID"
 # The active input comes from Deploy's Harbor registry overlay. GHCR below is
 # only an independently readable digest/revision oracle for that same image.
-[[ "$DAEMON_IMAGE" =~ ^registry\.example\.invalid/codewire/daemon@sha256:[0-9a-f]{64}$ ]] || \
+registry="${CODEWIRE_IMAGE_REGISTRY:-}"
+[[ -n "$registry" ]] || die "CODEWIRE_IMAGE_REGISTRY: set to the image registry host"
+[[ "$DAEMON_IMAGE" =~ ^"$registry"/codewire/daemon@sha256:[0-9a-f]{64}$ ]] || \
   die "--daemon-image must be the digest-pinned canonical Dev daemon reference"
 
 jq -e '

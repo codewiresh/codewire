@@ -1762,12 +1762,15 @@ kind_credential_relay_token_lead sandbox-x codewire-orchestration-a
         self.assertEqual(source.count(expected), 1)
         self.assertNotIn("-p codewire-cli --bin cw", source)
 
-    def shell(self, body):
+    def shell(self, body, registry="registry.example.invalid"):
+        env = {"PATH": "/usr/bin:/bin", "ROOT": str(ROOT)}
+        if registry is not None:
+            env["CODEWIRE_IMAGE_REGISTRY"] = registry
         result = subprocess.run(
             ["/bin/bash", "-c", 'set -euo pipefail\nsource "$1"\n'
              'validate_sealed_kind_images() { return 1; }\n' + body,
              "kind-credential-fixture", str(HELPERS)],
-            env={"PATH": "/usr/bin:/bin", "ROOT": str(ROOT)},
+            env=env,
             capture_output=True, text=True, timeout=10,
         )
         return result
@@ -1806,6 +1809,15 @@ kind_credential_support_images
                     f"localhost/codewire-ci/cert-manager-{name}:verified-{digest}"
                     for name, digest in CREDENTIAL_IMAGES
                 ])
+
+    def test_sealed_support_images_require_the_configured_registry(self):
+        result = self.shell('''
+validate_sealed_kind_images() { return 0; }
+kind_credential_support_images
+''', registry=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("CODEWIRE_IMAGE_REGISTRY: set to the image registry host", result.stderr)
 
     def test_sealed_prepare_and_load_use_only_preloaded_harbor_references(self):
         result = self.shell('''

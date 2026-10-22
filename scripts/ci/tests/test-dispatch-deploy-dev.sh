@@ -51,6 +51,8 @@ MOCK
 chmod +x "$work/bin/curl"
 
 export ACTIONS_ID_TOKEN_REQUEST_URL='https://git.example.invalid/api/actions/oidc?job=synthetic'
+# Forgejo's server URL is its ROOT_URL, which ends with a slash.
+export GITHUB_SERVER_URL='https://git.example.invalid/'
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN="$TEST_REQUEST_TOKEN"
 export CURL_BIN="$work/bin/curl"
 export MOCK_CAPTURE_DIR="$work/capture"
@@ -93,5 +95,13 @@ if CURL_BIN="$work/curl-never" "$DISPATCH" uppercase-sha \
   fail 'malformed source SHA was accepted'
 fi
 [[ ! -e "$marker" ]] || fail 'malformed source reached curl'
+
+if env -u GITHUB_SERVER_URL CURL_BIN="$work/curl-never" "$DISPATCH" "$SOURCE_SHA" \
+    >"$work/no-server.out" 2>&1; then
+  fail 'dispatch without GITHUB_SERVER_URL was accepted'
+fi
+grep -Fq 'GITHUB_SERVER_URL' "$work/no-server.out" ||
+  fail 'missing GITHUB_SERVER_URL was not named'
+[[ ! -e "$marker" ]] || fail 'dispatch without GITHUB_SERVER_URL reached curl'
 
 printf '[test-dispatch-deploy-dev] OIDC SHA-only workflow dispatch contract passed\n'

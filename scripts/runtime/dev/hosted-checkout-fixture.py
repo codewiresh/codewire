@@ -56,7 +56,15 @@ OBSERVATION_FAILURE_CODES = {
     "invalid fixture ready metadata": "ready-metadata",
     "invalid public key": "ready-metadata",
 }
-IMAGE = re.compile(r"(?:ghcr\.io/codewiresh/workspace|registry\.example\.invalid/codewire/workspace)@sha256:[0-9a-f]{64}")
+# The workspace image is the public GHCR one or the same image in the image
+# registry CODEWIRE_IMAGE_REGISTRY names (~/.config/codewire/env); an unset or
+# malformed registry refuses every mode.
+IMAGE_REGISTRY = os.environ.get("CODEWIRE_IMAGE_REGISTRY", "")
+REGISTRY_HOST = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?(?::[0-9]{1,5})?")
+IMAGE = re.compile(r"(?:ghcr\.io/codewiresh/workspace"
+                   + ("|" + re.escape(IMAGE_REGISTRY) + r"/codewire/workspace"
+                      if REGISTRY_HOST.fullmatch(IMAGE_REGISTRY) else "")
+                   + r")@sha256:[0-9a-f]{64}")
 # Public route/trust binding of the Dev cluster from the owning Infra
 # clusters/kubernetes-access.json. The operator environment supplies it
 # (~/.config/codewire/env, #1383); an unset or malformed pin refuses every
@@ -180,6 +188,7 @@ def require_dev_pin():
     require(DNS_NAME.fullmatch(DEV_CONTEXT) and DNS_NAME.fullmatch(DEV_TLS)
             and re.fullmatch(r"https://[0-9A-Za-z.:\[\]-]+:[0-9]{1,5}", DEV_SERVER)
             and re.fullmatch(r"[0-9a-f]{64}", DEV_CA_SHA256), "Dev cluster pin is not configured")
+    require(REGISTRY_HOST.fullmatch(IMAGE_REGISTRY), "CODEWIRE_IMAGE_REGISTRY is not configured")
 
 
 def preflight(args, directory):

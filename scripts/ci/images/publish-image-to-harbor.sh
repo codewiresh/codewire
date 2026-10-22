@@ -7,8 +7,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
-readonly source_pattern='^registry\.example\.invalid/codewire/(dashboard|derp|daemon|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
-readonly HARBOR_HOST='registry.example.invalid'
+readonly HARBOR_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
+readonly HARBOR_HOST_PATTERN="${HARBOR_HOST//./\\.}"
+readonly source_pattern="^$HARBOR_HOST_PATTERN/codewire/(dashboard|derp|daemon|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})\$"
 readonly HARBOR_PROJECT="$HARBOR_HOST/codewire"
 readonly PUBLIC_MIRROR='ghcr.io/codewiresh'
 
@@ -118,7 +119,7 @@ case "${1:-}" in
     mapfile -t keep_refs < <(
       {
         python3 "$ROOT/scripts/ci/images/workspace-image-pin.py" show harbor-image
-        grep -ohE 'registry\.example\.invalid/codewire/daemon@sha256:[0-9a-f]{64}' \
+        grep -ohE "$HARBOR_HOST_PATTERN/codewire/daemon@sha256:[0-9a-f]{64}" \
           "$ROOT/crates/codewire-server-core/src/runtime_images.rs"
       } | sort -u
     )
