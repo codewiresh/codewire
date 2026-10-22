@@ -6,6 +6,7 @@ from __future__ import annotations
 from repo_policy.shared import ROOT, argparse
 from repo_policy.design_tokens import check_design_tokens
 from repo_policy.edge_routing import check_connect_edge_routing
+from repo_policy.hosted_overlay_contract import check_hosted_overlay_contract
 from repo_policy.idp_security import check_idp_signing_kek_isolation
 from repo_policy.ses_security import check_ses_sender_isolation
 from repo_policy.turnstile_security import check_turnstile_access_projection
@@ -72,6 +73,9 @@ def main(argv: list[str] | None = None) -> int:
     turnstile_parser = subparsers.add_parser("turnstile-access-projection")
     turnstile_parser.add_argument("--self-test", action="store_true")
     turnstile_parser.set_defaults(func=check_turnstile_access_projection)
+    hosted_overlay_parser = subparsers.add_parser("hosted-overlay-contract")
+    hosted_overlay_parser.add_argument("--self-test", action="store_true")
+    hosted_overlay_parser.set_defaults(func=check_hosted_overlay_contract)
     design_parser = subparsers.add_parser("design-tokens")
     design_parser.add_argument("--self-test", action="store_true")
     design_parser.add_argument("--root", default=str(ROOT))

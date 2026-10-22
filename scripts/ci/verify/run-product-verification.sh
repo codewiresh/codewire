@@ -275,6 +275,7 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py go-source-classification
   python3 scripts/checks/repo_checks.py ses-email-isolation
   python3 scripts/checks/repo_checks.py turnstile-access-projection --self-test
+  python3 scripts/checks/repo_checks.py hosted-overlay-contract --self-test
 STEPS
   )
 }
@@ -1028,7 +1029,6 @@ run_deploy() {
   done
 
   install_helm
-  scripts/ci/tests/test-deploy-prod-render.sh
   scripts/ci/tests/test-deploy-mesh-ingress-protocol.sh
   local default_mesh_render
   default_mesh_render="$(helm template test apps/cli/charts/codewire-mesh \

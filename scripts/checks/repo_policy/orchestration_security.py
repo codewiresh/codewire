@@ -197,6 +197,7 @@ WARM_POOL_ENVIRONMENT = (
     "CODEWIRE_DOCKER_DATA_ROOT", "CODEWIRE_DOCKER_DATA_SIZE", "CODEWIRE_DOCKER_MOUNT_MODE",
 )
 WARM_POOL_AUDIENCES = ("codewire.internal.workspace-binding.v1", "codewire.internal.credential-workspace.v1")
+CREDENTIAL_SELF_TEST_TARGETS = ("deployments/k8s/overlays/local-kind", "deployments/k8s/overlays/dev")
 WARM_POOL_KIND_TARGETS = ("deployments/k8s/overlays/local-kind", "deployments/k8s/overlays/local-kind-static", "tests/e2e/kind")
 # Images without a registry digest a pool template may still run: only the
 # Kind e2e overlay's side-loaded daemon image (C4). Every other target admits
@@ -1002,17 +1003,21 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
         credential_resources = documents(run(["kustomize", "build", "deployments/k8s/credential-service"]).stdout)
         assert_credential_service(credential_resources, credential_target, "credential-service (rendered)", failures)
         manifests: list[str] = []
+        renders: dict[str, list[str]] = {}
         for target in targets:
-            rendered = run(["kustomize", "build", target["path"]]).stdout
-            manifests.extend(documents(rendered))
-            failures.extend(verify_resources(documents(rendered), target, f"{target['path']} (rendered)"))
+            renders[target["path"]] = documents(run(["kustomize", "build", target["path"]]).stdout)
+            manifests.extend(renders[target["path"]])
+            failures.extend(verify_resources(renders[target["path"]], target, f"{target['path']} (rendered)"))
         failures.extend(check_warm_member_bridge(args.self_test, manifests))
         if args.self_test:
             self_test()
             credential_service_self_test(credential_resources, credential_target)
-            dev_target = targets[1]
-            dev_resources = documents(run(["kustomize", "build", dev_target["path"]]).stdout)
-            credential_service_self_test(dev_resources, dev_target)
+            # The rendered credential edge is proved on the retained local
+            # Kind overlay. The hosted Dev row stays until codewire#3189
+            # removes the hosted overlays; codewire/deploy guards it after.
+            for path in CREDENTIAL_SELF_TEST_TARGETS:
+                target = next(target for target in targets if target["path"] == path)
+                credential_service_self_test(renders[path], target)
     except Exception as error:  # noqa: BLE001 - repo check script
         failures.append(str(error))
 

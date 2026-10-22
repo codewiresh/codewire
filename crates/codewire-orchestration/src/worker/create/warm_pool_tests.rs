@@ -12,7 +12,7 @@ use serde_json::Value;
 const SANDBOX_NAMESPACE: &str = "dev-sandboxes";
 const SYNTHETIC_WORKSPACE_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
-/// The Dev commodity configuration (`deployments/k8s/overlays/dev`) with
+/// A Dev-shaped commodity configuration (the hosted Dev overlay's values) with
 /// synthetic digests.
 fn dev_cfg() -> SandboxWorkerCfg {
     SandboxWorkerCfg {

@@ -10,11 +10,21 @@ def check_ses_sender_isolation(_: argparse.Namespace) -> int:
         "AWS_EC2_METADATA_DISABLED": "true",
         "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "true",
     }
+    workloads = ("codewire-idp", "codewire-billing")
+    # (render target, SES active, the sender workloads it must contain). The
+    # source directories own the SES projection itself, and base owns the
+    # shared codewire-config every service imports, so the active rules hold
+    # in this repository without the hosted overlays.
     overlays = [
-        ("deployments/k8s/overlays/dev", True),
-        ("deployments/k8s/overlays/production", True),
-        ("deployments/k8s/overlays/local-kind", False),
-        ("deployments/k8s/overlays/local-kind-static", False),
+        ("deployments/k8s/base", True, ()),
+        ("deployments/k8s/idp", True, ("codewire-idp",)),
+        ("deployments/k8s/billing", True, ("codewire-billing",)),
+        # Hosted copies; codewire/deploy's hosted guards own their renders and
+        # codewire#3189 removes these two rows with the overlays.
+        ("deployments/k8s/overlays/dev", True, workloads),
+        ("deployments/k8s/overlays/production", True, workloads),
+        ("deployments/k8s/overlays/local-kind", False, workloads),
+        ("deployments/k8s/overlays/local-kind-static", False, workloads),
     ]
     failures: list[str] = []
 
@@ -101,35 +111,25 @@ def check_ses_sender_isolation(_: argparse.Namespace) -> int:
             )
 
     try:
-        for path, active in overlays:
+        for path, active, expected in overlays:
             label = f"{path} (rendered)"
             resources = documents(run(["kustomize", "build", path]).stdout)
-            idp = find_deployment(resources, "codewire-idp", label)
-            billing = find_deployment(resources, "codewire-billing", label)
-            if idp is None or billing is None:
+            senders = {name: find_deployment(resources, name, label) for name in expected}
+            if None in senders.values():
                 continue
 
-            assert_generation(idp, label, "codewire-idp")
-            assert_generation(billing, label, "codewire-billing")
+            for name, document in senders.items():
+                assert_generation(document, label, name)
             if active:
-                assert_hardening(idp, label, "codewire-idp")
-                assert_hardening(billing, label, "codewire-billing")
-                assert_sender_secret(
-                    idp,
-                    label,
-                    "codewire-idp",
-                    "codewire-idp-ses",
-                    "codewire-billing-ses",
-                )
-                assert_sender_secret(
-                    billing,
-                    label,
-                    "codewire-billing",
-                    "codewire-billing-ses",
-                    "codewire-idp-ses",
-                )
-                assert_legacy_resend_projection(idp, label, "codewire-idp")
-                assert_legacy_resend_projection(billing, label, "codewire-billing")
+                for name, document in senders.items():
+                    secret, other = (
+                        ("codewire-idp-ses", "codewire-billing-ses")
+                        if name == "codewire-idp"
+                        else ("codewire-billing-ses", "codewire-idp-ses")
+                    )
+                    assert_hardening(document, label, name)
+                    assert_sender_secret(document, label, name, secret, other)
+                    assert_legacy_resend_projection(document, label, name)
                 for resource in resources:
                     if top_level_field(resource, "kind") != "ConfigMap":
                         continue
@@ -138,7 +138,7 @@ def check_ses_sender_isolation(_: argparse.Namespace) -> int:
                             fail(f"{label}: ConfigMap {resource_name(resource)} leaks {name}")
             else:
                 for secret in ["codewire-idp-ses", "codewire-billing-ses"]:
-                    if secret in idp or secret in billing:
+                    if any(secret in document for document in senders.values()):
                         fail(f"{label}: local Kind must not require live SES Secret {secret}")
                 config_maps = [
                     resource

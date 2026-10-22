@@ -795,6 +795,11 @@ async fn upstream_status_must_match_session_and_replayed_output() {
 
 #[test]
 fn declared_orchestration_origins_match_dashboard_without_overriding_kind() {
+    // The hosted Dev and Production origins are deployment configuration:
+    // codewire/deploy's hosted guard "orchestration-origin" binds each
+    // overlay's FRONTEND_URL to its dashboard's public origin. This repository
+    // owns the reusable base and the Kind origins.
+    //
     // The two local process defaults must use the same origin spelling, too;
     // hostname aliases are not equivalent under browser Origin checks.
     let main = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"));
@@ -805,7 +810,8 @@ fn declared_orchestration_origins_match_dashboard_without_overriding_kind() {
     assert!(main.contains(".unwrap_or_else(|_| \"http://127.0.0.1:5173\".into())"));
     assert!(dashboard_config.contains(".unwrap_or_else(|_| \"http://127.0.0.1:5173\".to_owned())"));
     fn yaml(text: &str) -> serde_yaml::Value {
-        serde_yaml::from_str(text).unwrap()
+        // The first document: a Kind dashboard manifest also holds its Service.
+        serde_yaml::from_str(text.split("\n---\n").next().unwrap()).unwrap()
     }
     fn env(document: &serde_yaml::Value, name: &str) -> String {
         document["spec"]["template"]["spec"]["containers"][0]["env"]
@@ -818,64 +824,54 @@ fn declared_orchestration_origins_match_dashboard_without_overriding_kind() {
             .unwrap()
             .into()
     }
-    for (origin, patch, dashboard, kustomization) in [
-        (
-            ORIGIN,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../deployments/k8s/overlays/dev/orchestration-origin-patch.yaml"
-            )),
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../deployments/k8s/overlays/dev/dashboard-deployment.yaml"
-            )),
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../deployments/k8s/overlays/dev/kustomization.yaml"
-            )),
-        ),
-        (
-            "https://codewire.sh",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../deployments/k8s/overlays/production/orchestration-origin-patch.yaml"
-            )),
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../deployments/k8s/dashboard/deployment.yaml"
-            )),
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../deployments/k8s/overlays/production/kustomization.yaml"
-            )),
-        ),
-    ] {
-        assert_eq!(env(&yaml(patch), "FRONTEND_URL"), origin);
-        assert_eq!(env(&yaml(dashboard), "CODEWIRE_PUBLIC_ORIGIN"), origin);
-        assert!(
-            yaml(kustomization)["patches"]
-                .as_sequence()
-                .unwrap()
-                .iter()
-                .any(
-                    |entry| entry["path"].as_str() == Some("orchestration-origin-patch.yaml")
-                        && entry["target"]["name"].as_str() == Some("codewire-orchestration")
-                )
-        );
-    }
+    // The reusable base leaves the origin unset, so each placement sets its own.
     let base = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../deployments/k8s/orchestration/deployment.yaml"
     ));
     assert!(!base.contains("FRONTEND_URL"));
-    let local = yaml(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../deployments/k8s/overlays/local-kind/configmap-patch.yaml"
-    )));
-    assert_eq!(
-        local["data"]["FRONTEND_URL"].as_str(),
-        Some("http://127.0.0.1:8080")
-    );
+    // Kind takes the origin from its shared configuration, equal to its
+    // dashboard's, and never registers a hosted origin patch over it.
+    for (config, dashboard, kustomization) in [
+        (
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deployments/k8s/overlays/local-kind/configmap-patch.yaml"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deployments/k8s/overlays/local-kind/dashboard.yaml"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deployments/k8s/overlays/local-kind/kustomization.yaml"
+            )),
+        ),
+        (
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deployments/k8s/overlays/local-kind-static/configmap-patch.yaml"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deployments/k8s/overlays/local-kind-static/dashboard.yaml"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deployments/k8s/overlays/local-kind-static/kustomization.yaml"
+            )),
+        ),
+    ] {
+        assert_eq!(
+            yaml(config)["data"]["FRONTEND_URL"].as_str(),
+            Some("http://127.0.0.1:8080")
+        );
+        assert_eq!(
+            env(&yaml(dashboard), "CODEWIRE_PUBLIC_ORIGIN"),
+            "http://127.0.0.1:8080"
+        );
+        assert!(!kustomization.contains("orchestration-origin-patch.yaml"));
+    }
     let managed = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../tests/e2e/kind/support.yaml"

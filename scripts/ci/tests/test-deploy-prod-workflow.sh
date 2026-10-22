@@ -283,6 +283,14 @@ grep -Fq 'fetch-forgejo-deploy-prod-token.sh' \
 if grep -Eq 'promote-image-bundle|promotion-receipt|gitea-(upload|download)-artifact|CODEWIRE_DEPLOY_PROMOTION_USERNAME|observe-production:|deploy-prod-observer\.sh|setup-kubeconfig|kubectl|helm' "$WORKFLOW"; then
   fail "source production workflow retains desired-state writes, receipts, or cluster observation"
 fi
+# Production renders only in codewire/deploy promote-prod, which the dispatch
+# starts with the signed tag alone; the source tree keeps no production render.
+[[ ! -e "$ROOT/scripts/ci/deploy/deploy-prod.sh" ]] ||
+  fail "the retired source production render is back"
+if grep -Eq 'scripts/ci/deploy/deploy-prod\.sh|--render-only|kustomize' \
+  "$WORKFLOW" "$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh"; then
+  fail "the production path renders manifests in the source repository"
+fi
 
 # The join script never builds: a built pair is joined from both exact
 # platform digests, a reused pair must already exist.

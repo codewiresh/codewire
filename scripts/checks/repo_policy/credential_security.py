@@ -165,7 +165,8 @@ def credential_service_self_test(resources: list[str], target: dict[str, str]) -
          "    - podSelector:\n        matchLabels:\n          app.kubernetes.io/component: dashboard\n          app.kubernetes.io/name: codewire",
          "    - podSelector: {}", "same-namespace dashboard"),
     ]
-    if target["subject_namespace"] == "dev":
+    # Kind and Dev admit the public edge from the ingress-nginx controller.
+    if target["subject_namespace"] in {"default", "codewire-e2e", "dev"}:
         mutations.extend([
             ("NetworkPolicy", "codewire-credential-service",
              "kubernetes.io/metadata.name: ingress-nginx",
@@ -176,6 +177,9 @@ def credential_service_self_test(resources: list[str], target: dict[str, str]) -
             ("NetworkPolicy", "codewire-credential-service",
              "app.kubernetes.io/name: ingress-nginx",
              "app.kubernetes.io/name: rke2-ingress-nginx", "credential ingress"),
+        ])
+    if target["subject_namespace"] == "dev":
+        mutations.extend([
             ("NetworkPolicy", "codewire-credential-service",
              "app.kubernetes.io/component: controller",
              "app.kubernetes.io/component: default-backend", "credential ingress"),

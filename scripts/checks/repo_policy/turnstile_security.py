@@ -372,6 +372,38 @@ def turnstile_access_projection_self_test(rendered: dict[str, str]) -> list[str]
         '        - name: IDP_PORT\n          value: "8091"\n',
         "production IdP must not receive the Turnstile bypass email",
     )
+    # The retained Kind overlays prove the inactive widget, inactive verifier
+    # and bound bypass rules on their own; the Dev and Production mutations
+    # above leave with the hosted rows (codewire#3189).
+    for overlay in (path for path, mode in TURNSTILE_OVERLAYS if mode == "local"):
+        assert_rejected(
+            f"{overlay}-active-widget",
+            overlay,
+            '  TURNSTILE_SITE_KEY: ""\n',
+            "  TURNSTILE_SITE_KEY: 0x4AAAAAAE2ghrxixpYKpljB\n",
+            "must contain an empty value",
+        )
+        assert_rejected(
+            f"{overlay}-verifier-secret",
+            overlay,
+            '        - name: IDP_PORT\n          value: "8091"\n',
+            "        - name: TURNSTILE_SECRET_KEY\n"
+            "          valueFrom:\n"
+            "            secretKeyRef:\n"
+            "              key: TURNSTILE_SECRET_KEY\n"
+            "              name: codewire-idp-turnstile\n"
+            '        - name: IDP_PORT\n          value: "8091"\n',
+            "inactive IdP must not receive the Turnstile verifier Secret",
+            deployment_name="codewire-idp",
+        )
+        assert_rejected(
+            f"{overlay}-bypass-email",
+            overlay,
+            "          value: codewire-e2e@example.test\n",
+            "          value: hello@codewire.sh\n",
+            "IdP must bind the Turnstile bypass to codewire-e2e@example.test",
+            deployment_name="codewire-idp",
+        )
 
     for overlay in TURNSTILE_RENDERED_TARGETS:
         dashboards = [

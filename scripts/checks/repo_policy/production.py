@@ -44,6 +44,10 @@ def load_production_source_files(root: Path) -> dict[str, Any]:
         "scripts/ci/promotion-receipt.py",
         "scripts/ci/test-promote-image-bundle.sh",
         "scripts/ci/test-promotion-receipt.py",
+        # The legacy source render. Production renders only in codewire/deploy
+        # promote-prod, which dispatch-deploy-prod.sh starts.
+        "scripts/ci/deploy/deploy-prod.sh",
+        "scripts/ci/tests/test-deploy-prod-render.sh",
     ]
     production_files: dict[str, str] = {}
     for directory in [
@@ -58,7 +62,6 @@ def load_production_source_files(root: Path) -> dict[str, Any]:
         "kustomization": read("deployments/k8s/overlays/production/kustomization.yaml"),
         "daemon_patch": read("deployments/k8s/overlays/production/config-images.yaml"),
         "mesh_release": read("deployments/k8s/flux/production/mesh-helmrelease.yaml"),
-        "deploy_script": read("scripts/ci/deploy/deploy-prod.sh"),
         "ci_workflow": read(".gitea/workflows/ci.yaml"),
         "production_workflow": read(".gitea/workflows/deploy-prod.yaml"),
         "production_dispatch": read("scripts/ci/deploy/dispatch-deploy-prod.sh"),
@@ -135,18 +138,6 @@ def validate_production_source(files: dict[str, Any]) -> str:
     if len(digests) != 5:
         raise RuntimeError(f"expected five immutable source digests, found {len(digests)}")
 
-    if "scripts/ci/deploy/deploy-prod.sh --render-only" not in files["deploy_script"]:
-        raise RuntimeError("credential-free production render mode is missing")
-    if (
-        re.search(
-            r"--preflight-only|setup-kubeconfig|ci-deployer-rbac|CODEWIRE_(?:TOKEN_PATH|K8S_SERVER)|TEMPORAL_PREFLIGHT",
-            files["deploy_script"],
-        )
-        or re.search(r"\bkubectl\s+(?:apply|delete|get|run|wait|logs|describe|rollout)\b", files["deploy_script"])
-        or re.search(r"\bhelm\s+(?:upgrade|uninstall)\b", files["deploy_script"])
-    ):
-        raise RuntimeError("direct production mutation or cluster credential path remains in deploy-prod.sh")
-
     for required in [
         "publish-runtime-images:",
         "image-bundle.py create",
@@ -210,8 +201,14 @@ def production_source_self_test(files: dict[str, Any]) -> None:
     expect_rejected("retired image setter", fixture, "retired Flux image setter marker")
 
     fixture = dict(files)
-    fixture["deploy_script"] = files["deploy_script"] + "\nkubectl apply -k .\n"
-    expect_rejected("direct production mutation", fixture, "direct production mutation")
+    fixture["production_workflow"] = (
+        files["production_workflow"] + "\n        run: scripts/ci/deploy/deploy-prod.sh v0.0.0\n"
+    )
+    expect_rejected(
+        "retired direct deploy script",
+        fixture,
+        "production workflow reintroduced the retired direct deploy script",
+    )
 
     fixture = dict(files)
     fixture["retired_control_paths_present"] = ["scripts/ci/retired-observer.sh"]
