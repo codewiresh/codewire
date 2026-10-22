@@ -209,6 +209,8 @@ chmod +x "$mock_bin/curl"
 
 run_case() {
   local name="$1" expected="$2" merge_sha="$3" pr="$4" head="$5" mode="$6"
+  # The newest main commit main CI verified (main-ci-verdict.py base).
+  local verified_base="${7-$base_sha}"
   local output="$TMP/${name}.output" log="$TMP/${name}.log"
   local receipt_base="$base_sha" receipt_json receipt_b64
   if [ "$mode" = receipt_mismatch ]; then receipt_base="$unrelated_parent"; fi
@@ -241,6 +243,7 @@ run_case() {
       FIXTURE_PR_NUMBER="$pr" \
       FIXTURE_RECEIPT_B64="$receipt_b64" \
       GITEA_TOKEN=fixture-token \
+      PUSH_VERIFIED_BASE="$verified_base" \
       GITHUB_EVENT_NAME=push \
       GITHUB_REF=refs/heads/main \
       GITHUB_SHA="$merge_sha" \
@@ -291,6 +294,17 @@ run_case duplicate_receipt fallback "$good_merge" 42 "$tested_head" duplicate_re
 run_case receipt_mismatch fallback "$good_merge" 42 "$tested_head" receipt_mismatch
 run_case control_self_certification fallback "$control_merge" 43 "$control_head" success
 run_case emitter_self_certification fallback "$emitter_merge" 44 "$emitter_head" success
+# A receipt covers only its pull request's change: when main CI did not verify
+# the commit it merged onto (a superseded or failed run, or no base found), the
+# push verifies everything since the verified base instead (#3176).
+run_case parent_superseded fallback "$good_merge" 42 "$tested_head" success "$unrelated_parent"
+run_case no_verified_base fallback "$good_merge" 42 "$tested_head" success ''
+for name in parent_superseded no_verified_base; do
+  grep -Fq 'full main verification required (parent-not-verified)' "$TMP/${name}.log" || {
+    echo "${name}: an unverified parent did not refuse the receipt" >&2
+    exit 1
+  }
+done
 grep -Fq 'full main verification required (receipt-control-change)' \
   "$TMP/emitter_self_certification.log" || {
   echo 'a receipt emitter change was not treated as receipt control' >&2

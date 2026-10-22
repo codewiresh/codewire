@@ -110,6 +110,13 @@ expect_failure partial_compile_skipped \
   VERIFICATION_SELECTION="$partial_selection" \
   VERIFICATION_RUST_COMPILE_RESULT=skipped
 
+# The run for main's tip verifies a superseded chain's cumulative change
+# (#3176): a family its selection expects never passes skipped.
+expect_failure tip_expected_family_skipped \
+  'rust-transport selected capability group concluded skipped' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|transport|complete|' \
+  VERIFICATION_RUST_TRANSPORT_RESULT=skipped
+
 expect_failure partial_rust_tests_ran \
   'rust-transport unselected capability group concluded success' \
   "${partial_results[@]}" \

@@ -185,7 +185,30 @@ jobs:
             capability_selector='.trusted-ci-policy/scripts/ci/select/select-verification.sh'
           fi
           [ -f "$capability_selector" ]
-          GITHUB_OUTPUT="$capability_output" "$capability_selector"
+          # A push to main verifies everything since the newest main commit
+          # whose own run verified it: a superseded run verified nothing
+          # (#3176). Without such a commit, or when it cannot be read, the
+          # push selects all product verification.
+          selector_before="$PUSH_BEFORE_SHA"
+          push_base_unverified=false
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+            base_output="$(mktemp)"
+            verified_base=''
+            if python3 -I -B scripts/ci/plan/main-ci-verdict.py base \
+                --head "$GITHUB_SHA" --before "$PUSH_BEFORE_SHA" --output "$base_output"; then
+              verified_base="$(sed -n 's/^push_verified_base=//p' "$base_output")"
+            fi
+            rm -f "$base_output"
+            if [[ "$verified_base" =~ ^[0-9a-f]{40}$ ]]; then
+              selector_before="$verified_base"
+            else
+              verified_base=''
+              push_base_unverified=true
+            fi
+            printf 'push_verified_base=%s\n' "$verified_base" >> "$workflow_output"
+          fi
+          PUSH_BEFORE_SHA="$selector_before" PUSH_BASE_UNVERIFIED="$push_base_unverified" \
+            GITHUB_OUTPUT="$capability_output" "$capability_selector"
           grep -Fxq 'selector_version=v3' "$capability_output"
           cat "$capability_output" >> "$workflow_output"
           export GITHUB_OUTPUT="$workflow_output"
@@ -230,6 +253,9 @@ jobs:
         id: receipt
         env:
           GITEA_TOKEN: ${{ github.token }}
+          # A receipt covers only its pull request's change, so it stands for
+          # a push only when main CI verified the commit it merged onto.
+          PUSH_VERIFIED_BASE: ${{ steps.select.outputs.push_verified_base }}
         run: |
           set -euo pipefail
           receipt_checker='scripts/ci/receipts/verify-tested-tree-receipt.sh'
@@ -241,7 +267,8 @@ jobs:
       # Main runs queue one at a time and Forgejo keeps every queued run. A
       # main push that starts after main moved on runs this selection, records
       # which commit superseded it, and dispatches no capability group: the
-      # newer commit's run, queued behind it, verifies the cumulative change.
+      # newer commit's run, queued behind it, verifies the cumulative change,
+      # because a push selects from the newest commit main CI verified (#3176).
       # The run for main's tip always verifies everything selected, and a run
       # that has started its groups is never stopped.
       - name: Skip a superseded main commit

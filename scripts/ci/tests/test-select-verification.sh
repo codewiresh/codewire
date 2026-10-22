@@ -2368,6 +2368,49 @@ output="$(cd "$repo" && env -u GITHUB_OUTPUT \
   GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
   PUSH_BEFORE_SHA="$base" PUSH_AFTER_SHA="$head" "$SELECTOR")"
 assert_tokens discovered_push policy "$output"
+
+# A superseded main run verifies nothing (#3176). The push that superseded it
+# compares with the newest commit main CI verified (main-ci-verdict.py base),
+# which ci.yaml passes as PUSH_BEFORE_SHA, so the cumulative change selects
+# what each commit would have; the push's own docs change alone selects only
+# policy. Without a verified commit the push selects all product verification.
+git -C "$repo" switch -q -c superseded-chain
+mkdir -p "$repo/crates/codewire-cli/src"
+printf 'pub fn superseded() {}\n' > "$repo/crates/codewire-cli/src/lib.rs"
+git -C "$repo" add crates/codewire-cli/src/lib.rs
+git -C "$repo" -c commit.gpgsign=false commit -q -m 'superseded rust change'
+superseded="$(git -C "$repo" rev-parse HEAD)"
+printf 'tip docs\n' >> "$repo/docs/range.md"
+git -C "$repo" add docs/range.md
+git -C "$repo" -c commit.gpgsign=false commit -q -m 'tip docs'
+chain_tip="$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" switch -q main
+chain_push() { # BEFORE [UNVERIFIED] -> selector output
+  (cd "$repo" && env -u GITHUB_OUTPUT \
+    GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
+    PUSH_BEFORE_SHA="$1" PUSH_AFTER_SHA="$chain_tip" \
+    PUSH_BASE_UNVERIFIED="${2:-false}" "$SELECTOR" 2>"$TMP/chain.stderr")
+}
+assert_tokens chain_tip_alone policy "$(chain_push "$superseded")"
+output="$(chain_push "$head")"
+assert_tokens chain_from_verified_base 'policy rust rust_pkg_codewire_cli' "$output"
+output="$(chain_push "$superseded" true)"
+assert_contract_field chain_unverified "$output" classification unclassified
+for token in policy rust rust_workspace transport database service_integration \
+    web docs release deploy security edge_kind; do
+  [[ "$(selection_value "$output")" == *"|${token}|"* ]] || {
+    echo "chain_unverified: a push without a verified base did not select ${token}" >&2
+    exit 1
+  }
+done
+grep -Fxq 'main push: no verified main commit to compare with; selecting all product verification' \
+  "$TMP/chain.stderr"
+# Only a push to main reads it; a value other than false selects everything.
+output="$(chain_push "$superseded" yes)"
+assert_contract_field chain_unverified_any_value "$output" classification unclassified
+output="$(cd "$repo" && env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/other \
+  PUSH_BEFORE_SHA="$superseded" PUSH_AFTER_SHA="$chain_tip" PUSH_BASE_UNVERIFIED=true "$SELECTOR")"
+assert_tokens chain_other_branch policy "$output"
 missing_stdout="$TMP/zero-push.stdout"
 missing_stderr="$TMP/zero-push.stderr"
 if (cd "$repo" && env -u GITHUB_OUTPUT \
@@ -2953,6 +2996,12 @@ grep -qF "main_push_planner='.trusted-ci-policy/scripts/ci/plan/plan-main-push.p
   "$selection_block"
 grep -qF 'if [ "$GITHUB_EVENT_NAME" = push ] && [ -f "$main_push_planner" ]' "$selection_block"
 grep -qF -- '--before "$PUSH_BEFORE_SHA"' "$selection_block"
+# A push to main selects from the newest verified main commit, or everything,
+# and a receipt stands only on that commit (#3176).
+grep -qF 'python3 -I -B scripts/ci/plan/main-ci-verdict.py base' "$selection_block"
+grep -qF 'PUSH_BEFORE_SHA="$selector_before" PUSH_BASE_UNVERIFIED="$push_base_unverified"' "$selection_block"
+grep -qF "printf 'push_verified_base=%s\\n' \"\$verified_base\" >> \"\$workflow_output\"" "$selection_block"
+grep -qF 'PUSH_VERIFIED_BASE: ${{ steps.select.outputs.push_verified_base }}' "$selection_block"
 grep -A4 -F 'python3 scripts/ci/plan/apply-verification-plan.py' "$selection_block" \
   | grep -qF -- '--unclassified'
 grep -qF "GITEA_TOKEN: \${{ github.event_name == 'push' && github.token || '' }}" "$selection_block"

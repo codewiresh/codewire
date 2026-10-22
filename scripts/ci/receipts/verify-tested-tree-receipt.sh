@@ -70,6 +70,11 @@ case "${#commit_line[@]}" in
     ;;
 esac
 
+# A receipt covers only its pull request's change. Its parent must be the
+# newest main commit main CI verified (main-ci-verdict.py base); otherwise
+# commits between them went unverified and the push verifies them (#3176).
+[ "${PUSH_VERIFIED_BASE:-}" = "$parent_sha" ] || fallback 'parent-not-verified'
+
 changed_paths="$tmp/changed-paths"
 git diff --name-only "$parent_sha" "$canonical_sha" > "$changed_paths" \
   || fallback 'canonical-diff-unavailable'

@@ -334,5 +334,141 @@ class CommandTests(unittest.TestCase):
                     verdicts.ForgejoAPI.from_environ({**good, key: value})
 
 
+class HistoryForgejo(fx.FakeForgejo):
+    """A main history: each commit's own ci.yaml push run, by head SHA."""
+
+    def __init__(self, commits: dict[str, tuple[int, str]]):
+        runs, jobs, logs = {}, {}, {}
+        for sha, (run_id, outcome) in commits.items():
+            required = "failure" if outcome == "failed" else "success"
+            runs[sha] = [fx.run(sha, run_id=run_id, status=required)]
+            jobs[run_id] = fx.ci_jobs(run_id, required=required)
+            if outcome == "verified":
+                log = fx.log_lines(fx.marker(sha, tree_of(sha), run_id=run_id))
+            else:
+                log = fx.log_lines(
+                    f"main CI verdict: not verified; superseded by {HEAD}, whose run verifies this commit's changes")
+            logs[fx.required_job_id(run_id)] = log
+        super().__init__({}, jobs, logs)
+        self.by_sha = runs
+
+    def get_json(self, path: str):
+        if path.startswith("/actions/runs?head_sha="):
+            self.paths.append(path)
+            sha = path.split("head_sha=", 1)[1].split("&", 1)[0]
+            runs = self.by_sha.get(sha, [])
+            return {"total_count": len(runs), "workflow_runs": runs}
+        return super().get_json(path)
+
+
+def tree_of(sha: str) -> str:
+    return "f" + sha[1:]
+
+
+# main, oldest first: A verified, then B superseded, C red and D superseded;
+# HEAD is the push whose run superseded B and D.
+A, B, C, D, HEAD = ("a" * 40, "b" * 40, "c" * 40, "d" * 40, "e" * 40)
+PARENTS = {HEAD: D, D: C, C: B, B: A, A: None}
+
+
+def base_of(forgejo, before=D, head=HEAD, limit=verdicts.MAX_BASE_WALK, parents=PARENTS):
+    return verdicts.verified_base(
+        forgejo, head, before, first_parent=parents.__getitem__, tree_of=tree_of,
+        is_ancestor=lambda ancestor, descendant: True, limit=limit,
+    )
+
+
+class VerifiedBaseTests(unittest.TestCase):
+    """A push verifies everything since the newest commit main CI verified (#3176)."""
+
+    def chain(self) -> HistoryForgejo:
+        return HistoryForgejo({A: (10, "verified"), B: (11, "superseded"),
+                               C: (12, "failed"), D: (13, "superseded")})
+
+    def test_a_superseded_chain_is_verified_from_its_last_verified_commit(self) -> None:
+        base = base_of(self.chain())
+        self.assertEqual(base.sha, A)
+        self.assertEqual(base.verdict.run_id, 10)
+        self.assertEqual([(sha, result.state) for sha, result in base.unverified],
+                         [(D, verdicts.SUPERSEDED), (C, verdicts.FAILED), (B, verdicts.SUPERSEDED)])
+
+    def test_a_verified_predecessor_is_the_base(self) -> None:
+        forgejo = HistoryForgejo({D: (13, "verified")})
+        self.assertEqual(base_of(forgejo).sha, D)
+
+    def test_no_verified_commit_names_no_base(self) -> None:
+        forgejo = HistoryForgejo({A: (10, "superseded"), B: (11, "superseded"),
+                                  C: (12, "failed"), D: (13, "superseded")})
+        with self.assertRaisesRegex(verdicts.Unproven, "no-verified-ancestor"):
+            base_of(forgejo)
+        with self.assertRaisesRegex(verdicts.Unproven, "no-verified-ancestor-within-2-commits"):
+            base_of(self.chain(), limit=2)
+
+    def test_an_unreadable_verdict_names_no_base(self) -> None:
+        forgejo = self.chain()
+        forgejo.logs[fx.required_job_id(12)] = verdicts.Unproven("verdict-log-unavailable")
+        forgejo.jobs[12] = fx.ci_jobs(12)  # green, so the walk reads its log
+        with self.assertRaisesRegex(verdicts.Unproven, "verdict-log-unavailable"):
+            base_of(forgejo)
+
+    def test_an_unusable_push_baseline_names_no_base(self) -> None:
+        for before in ("", "0" * 40, HEAD, "not-a-commit"):
+            with self.subTest(before=before):
+                with self.assertRaisesRegex(verdicts.Unproven, "push-baseline-unavailable"):
+                    base_of(self.chain(), before=before)
+        with self.assertRaisesRegex(verdicts.Unproven, "push-baseline-unavailable"):
+            verdicts.verified_base(self.chain(), HEAD, D, first_parent=PARENTS.__getitem__,
+                                   tree_of=tree_of, is_ancestor=lambda *_: False)
+
+    def test_the_git_helpers_read_real_history(self) -> None:
+        import subprocess
+        with tempfile.TemporaryDirectory() as temporary:
+            def git(*args: str) -> str:
+                return subprocess.run(["git", "-C", temporary, *args], check=True, capture_output=True,
+                                      text=True, stdin=subprocess.DEVNULL).stdout.strip()
+            git("init", "-q")
+            for message in ("root", "child"):
+                git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                    "commit", "-q", "--allow-empty", "-m", message)
+            root, child = git("rev-parse", "HEAD^"), git("rev-parse", "HEAD")
+            previous = os.getcwd()
+            os.chdir(temporary)
+            try:
+                self.assertEqual(verdicts.git_first_parent(child), root)
+                self.assertIsNone(verdicts.git_first_parent(root))
+                self.assertEqual(verdicts.git_tree(child), git("rev-parse", "HEAD^{tree}"))
+                self.assertTrue(verdicts.git_is_ancestor(root, child))
+                self.assertFalse(verdicts.git_is_ancestor(child, root))
+                with self.assertRaisesRegex(verdicts.Unproven, "git-history-unavailable"):
+                    verdicts.git_first_parent("9" * 40)
+            finally:
+                os.chdir(previous)
+
+    def run_base(self, forgejo, factory=None) -> tuple[int, str, str]:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "out"
+            args = verdicts.parse_args(["base", "--head", HEAD, "--before", D, "--output", str(output)])
+            with mock.patch.object(verdicts, "git_first_parent", PARENTS.__getitem__), \
+                    mock.patch.object(verdicts, "git_tree", tree_of), \
+                    mock.patch.object(verdicts, "git_is_ancestor", lambda *_: True), \
+                    contextlib.redirect_stdout(io.StringIO()) as log:
+                status = verdicts.command_base(args, api_factory=factory or (lambda _: forgejo))
+            return status, output.read_text(), log.getvalue()
+
+    def test_the_command_names_the_base_or_none(self) -> None:
+        status, outputs, log = self.run_base(self.chain())
+        self.assertEqual(status, 0)
+        self.assertEqual(outputs, f"push_verified_base={A}\npush_verified_base_reason=verified\n")
+        self.assertIn(f"main push base: {A} verified by ci.yaml run 10; selecting from {A}..{HEAD}", log)
+        self.assertIn(f"main push base: {D} is not verified", log)
+
+        def unavailable(_):
+            raise verdicts.Unproven("gitea-token-unavailable")
+        status, outputs, log = self.run_base(None, factory=unavailable)
+        self.assertEqual(status, 0)
+        self.assertEqual(outputs, "push_verified_base=\npush_verified_base_reason=gitea-token-unavailable\n")
+        self.assertIn("selecting all product verification", log)
+
+
 if __name__ == "__main__":
     unittest.main()

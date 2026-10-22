@@ -2239,6 +2239,17 @@ elif token_selected database || token_selected service_integration; then
   required_local_mode=integration
 fi
 
+# A push to main compares with the newest main commit main CI verified, which
+# ci.yaml passes as PUSH_BEFORE_SHA (main-ci-verdict.py base). When there is
+# none, or it cannot be read, PUSH_BASE_UNVERIFIED=true: nothing bounds what
+# went unverified, so the push selects all product verification (#3176).
+if [ "$event" = push ] && [ "${GITHUB_REF:-}" = refs/heads/main ] \
+    && [ "${PUSH_BASE_UNVERIFIED:-false}" != false ]; then
+  echo 'main push: no verified main commit to compare with; selecting all product verification' >&2
+  select_all_product
+  classification=unclassified
+fi
+
 # Temporary (owner decision 2026-10-20): while main-push-switch.sh says so, a
 # push to main defers Kind to the scheduled or dispatched Kind run. Edge
 # static verification (edge_kind) stays. The local mode above keeps Kind.

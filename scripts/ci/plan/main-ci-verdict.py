@@ -9,13 +9,21 @@ a superseded run dispatches no capability group, so it verified nothing.
 
 One predicate decides, for every consumer: plan-main-push.py (is the previous
 main commit a planning baseline?), Deploy Dev's publish job (may it sign and
-dispatch this commit?) and CI's final job (may it start that publish job?).
+dispatch this commit?), CI's final job (may it start that publish job?) and a
+push's capability selection (base: which commit does it verify from?).
 A pull-request, dispatched or scheduled run of the same commit never counts.
 The run's own overall status does not decide: its final delivery job runs
 after Required verification and may still be running when the verdict is read.
 
   main-ci-verdict.py emit                      (Required verification, push to main)
   main-ci-verdict.py check --sha SHA --tree TREE [--github-output]
+  main-ci-verdict.py base --head SHA --before SHA --output FILE
+
+base walks the first-parent history from the push's previous main commit to
+the newest commit main CI verified. A superseded run verified nothing, so the
+push that superseded it verifies everything since that commit (#3176). When
+no such commit is found within MAX_BASE_WALK commits, or anything cannot be
+read, it names no base and the push selects all product verification.
 """
 
 from __future__ import annotations
@@ -47,6 +55,10 @@ MAIN_REF = "refs/heads/main"
 REQUIRED_JOB = "Required verification"
 API_LIMIT = 100
 MAX_LOG_BYTES = 32 * 1024 * 1024
+ZERO_SHA = "0" * 40
+# How far back a push looks for a verified main commit before it selects
+# everything.
+MAX_BASE_WALK = 50
 
 VERIFIED = "verified"
 PENDING = "pending"
@@ -342,6 +354,89 @@ def verdict(api: ForgejoAPI, sha: str, tree: str) -> Verdict:
     return Verdict(VERIFIED, "verified", run_id, basis)
 
 
+def git_output(*args: str) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", *args], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            check=False, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Unproven("git-history-unavailable") from exc
+    if completed.returncode != 0:
+        raise Unproven("git-history-unavailable")
+    return completed.stdout.strip()
+
+
+def git_first_parent(sha: str) -> str | None:
+    """The commit's first parent, or None for a root commit."""
+    fields = git_output("rev-list", "--parents", "-n", "1", sha).split()
+    if not fields or fields[0] != sha or not all(HEX40_RE.fullmatch(field) for field in fields):
+        raise Unproven("git-history-unavailable")
+    return fields[1] if len(fields) > 1 else None
+
+
+def git_tree(sha: str) -> str:
+    tree = git_output("rev-parse", "--verify", f"{sha}^{{tree}}")
+    if not HEX40_RE.fullmatch(tree):
+        raise Unproven("git-history-unavailable")
+    return tree
+
+
+def git_is_ancestor(ancestor: str, head: str) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, head],
+            stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Unproven("git-history-unavailable") from exc
+    return completed.returncode == 0
+
+
+@dataclass(frozen=True)
+class Base:
+    sha: str
+    verdict: Verdict
+    unverified: tuple[tuple[str, Verdict], ...]
+
+
+def verified_base(
+    api: ForgejoAPI,
+    head: str,
+    before: str,
+    *,
+    first_parent=None,
+    tree_of=None,
+    is_ancestor=None,
+    limit: int = MAX_BASE_WALK,
+) -> Base:
+    """The newest first-parent ancestor of head, from before, that main CI verified.
+
+    Raises Unproven when there is none within limit commits or when anything
+    cannot be read; the push then selects everything.
+    """
+    first_parent = first_parent or git_first_parent
+    tree_of = tree_of or git_tree
+    is_ancestor = is_ancestor or git_is_ancestor
+    if not HEX40_RE.fullmatch(head):
+        raise Unproven("invalid-commit")
+    if not HEX40_RE.fullmatch(before) or before in (ZERO_SHA, head):
+        raise Unproven("push-baseline-unavailable")
+    if not is_ancestor(before, head):
+        raise Unproven("push-baseline-unavailable")
+    candidate: str | None = before
+    unverified: list[tuple[str, Verdict]] = []
+    for _ in range(limit):
+        if candidate is None:
+            raise Unproven("no-verified-ancestor")
+        result = verdict(api, candidate, tree_of(candidate))
+        if result.verified:
+            return Base(candidate, result, tuple(unverified))
+        unverified.append((candidate, result))
+        candidate = first_parent(candidate)
+    raise Unproven(f"no-verified-ancestor-within-{limit}-commits")
+
+
 def require(env: Mapping[str, str], key: str, pattern: re.Pattern[str] | None = None) -> str:
     value = env.get(key, "")
     if not value or (pattern and not pattern.fullmatch(value)):
@@ -458,6 +553,23 @@ def command_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_base(args: argparse.Namespace, api_factory=ForgejoAPI.from_environ) -> int:
+    """Name the commit a push to main verifies from, or none: select everything."""
+    try:
+        base = verified_base(api_factory(os.environ), args.head, args.before)
+    except Unproven as exc:
+        print(f"main push base: no verified main commit ({exc}); "
+              "selecting all product verification")
+        write_outputs(args.output, {"push_verified_base": "", "push_verified_base_reason": str(exc)})
+        return 0
+    for sha, result in base.unverified:
+        print(f"main push base: {sha} is not verified: {result.describe(sha)}")
+    print(f"main push base: {base.sha} verified by ci.yaml run {base.verdict.run_id}; "
+          f"selecting from {base.sha}..{args.head}")
+    write_outputs(args.output, {"push_verified_base": base.sha, "push_verified_base_reason": "verified"})
+    return 0
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -467,6 +579,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     check.add_argument("--tree", required=True)
     check.add_argument("--github-output", action="store_true")
     check.set_defaults(handler=command_check)
+    base = commands.add_parser("base")
+    base.add_argument("--head", required=True)
+    base.add_argument("--before", required=True)
+    base.add_argument("--output", required=True, help="file that receives key=value outputs")
+    base.set_defaults(handler=command_base)
     return parser.parse_args(argv)
 
 
