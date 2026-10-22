@@ -2746,13 +2746,24 @@ mod tests {
     /// few HTTP/2 DATA frames rather than one per keystroke, which the
     /// connection's flood guard would count against it (#2822). Stdin never
     /// passes a resize or EOF, and no message exceeds the coalescing limit.
+    ///
+    /// The backlog the pump coalesces must be queued before the process reads.
+    /// The test waits for that state, not a clock (#3167): see `QUEUED`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn russh_handler_coalesces_backlogged_keystrokes_in_order() {
         const KEYS: u32 = 1200;
+        // The keystrokes before the first resize that are queued for the
+        // pump, or taken by it, before the gate opens. The pump takes some
+        // before it waits on the gate and the rest in one message after, so
+        // one of the two carries at least half.
+        const QUEUED: u32 = 99;
+        let config = workspace_ssh_server_config();
+        // Every one of them fits in the channel's queue, so the gateway
+        // reaches the probe below without waiting for the pump.
+        assert!(config.channel_buffer_size > QUEUED as usize);
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let runner = Arc::new(RecordingRunner::gated(gate.clone()));
-        let (addr, server_task) =
-            spawn_test_gateway_with_config(runner.clone(), workspace_ssh_server_config(), 1).await;
+        let (addr, server_task) = spawn_test_gateway_with_config(runner.clone(), config, 1).await;
         let client = authenticated_client(addr).await;
         let channel = client.channel_open_session().await.unwrap();
         channel
@@ -2768,6 +2779,14 @@ mod tests {
                 .await
                 .expect("keystroke accepted")
                 .unwrap();
+            if index + 1 == QUEUED {
+                // The client sends in order, and the gateway handles each
+                // message in order: it confirms this channel only after it
+                // has queued every keystroke before it for the pump. Under
+                // load that can take any time; opening the gate earlier let
+                // the pump drain the queue as it filled (#3167).
+                drop(client.channel_open_session().await.unwrap());
+            }
             if index % 100 == 99 {
                 let width = 80 + index;
                 expected.push(SshSessionInput::Resize {
@@ -2804,7 +2823,7 @@ mod tests {
             .max()
             .unwrap();
         assert!(
-            (50..=MAX_COALESCED_STDIN).contains(&longest),
+            (QUEUED.div_ceil(2) as usize..=MAX_COALESCED_STDIN).contains(&longest),
             "queued keystrokes were not coalesced: the longest input was {longest} bytes"
         );
         assert!(inputs.len() < expected.len());
