@@ -117,6 +117,87 @@ jobs:
             --patterns "$trusted/public-content-patterns.txt" --message-file "$text" \
             "$BASE_SHA" "$HEAD_SHA"
 
+      - name: Verify the mounted advisory bundle
+        id: advisories
+        shell: bash
+        env:
+          # infra#1630: every ci-lite pod mounts the hourly supplychain
+          # advisory bundle read-only here. A bundle that is absent, altered
+          # or more than 24 hours old fails the scan closed. Codewire takes
+          # only its IOC and OSM data; OSV stays live against api.osv.dev.
+          ADVISORIES: /opt/supplychain/advisories
+          MAX_AGE_SECONDS: "86400"
+        run: |
+          set -euo pipefail
+          data_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/supplychain-data.XXXXXX")"
+          python3 -I - "$ADVISORIES" "$MAX_AGE_SECONDS" "$data_dir" <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import sys
+
+          root, max_age, data_dir = Path(sys.argv[1]), int(sys.argv[2]), Path(sys.argv[3])
+
+
+          def refuse(reason):
+              print("advisory bundle refused: " + reason, file=sys.stderr)
+              sys.exit(65)
+
+
+          manifest_path = root / "manifest.json"
+          if not manifest_path.is_file() or manifest_path.is_symlink():
+              refuse("no manifest.json at " + str(root) + "; the bundle is not mounted")
+          raw = manifest_path.read_bytes()
+          try:
+              manifest = json.loads(raw)
+              built = datetime.datetime.fromisoformat(manifest["built_at"].replace("Z", "+00:00"))
+              listed = {item["path"]: item for item in manifest["files"]}
+          except (ValueError, KeyError, TypeError, AttributeError):
+              refuse("manifest.json is malformed")
+          if manifest.get("schema") != 1 or built.tzinfo is None:
+              refuse("manifest.json has an unknown schema or time")
+          age = int((datetime.datetime.now(datetime.timezone.utc) - built).total_seconds())
+          if not -300 <= age <= max_age:
+              refuse(f"the bundle built at {manifest['built_at']} is {age} s old; the limit is {max_age} s")
+          present = sorted(path.relative_to(root).as_posix() for path in root.rglob("*")
+                           if not path.is_dir() or path.is_symlink())
+          if present != sorted([*listed, "manifest.json"]):
+              refuse("the bundle's files differ from its manifest")
+          required = {f"osv-scanner/{name}/all.zip" for name in ("crates.io", "Go", "npm", "PyPI")}
+          required |= {"data/iocs/manifest.json", "data/osm-cache.json"}
+          if not required <= set(listed):
+              refuse("the bundle lacks a required database or data file")
+          for name, item in sorted(listed.items()):
+              path = root / name
+              digest = hashlib.sha256()
+              with open(path, "rb") as stream:
+                  for block in iter(lambda: stream.read(1 << 20), b""):
+                      digest.update(block)
+              if digest.hexdigest() != item.get("sha256") or path.stat().st_size != item.get("bytes"):
+                  refuse(name + " differs from the manifest")
+          # supplychain writes its registry caches beside the data, so it gets
+          # a private writable copy of the verified IOC and OSM files.
+          # copytree also copies the bundle's read-only mode onto data_dir itself.
+          shutil.copytree(root / "data", data_dir, dirs_exist_ok=True)
+          for path in [data_dir, *data_dir.rglob("*")]:
+              path.chmod(0o700 if path.is_dir() else 0o600)
+          receipt = {
+              "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+              "built_at": manifest["built_at"],
+              "age_seconds": age,
+              "osv_last_modified": {name: value.get("last_modified") for name, value in sorted(manifest.get("osv", {}).items())},
+          }
+          print("advisory bundle receipt: " + json.dumps(receipt, sort_keys=True))
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as stream:
+                  stream.write("### Advisory bundle\n\n```json\n" + json.dumps(receipt, indent=2, sort_keys=True) + "\n```\n")
+          PY
+          echo "data_dir=$data_dir" >> "$FORGEJO_OUTPUT"
+
       - name: Run the sealed supply-chain scan
         shell: bash
         working-directory: candidate
@@ -125,6 +206,7 @@ jobs:
           EVENT_NAME: ${{ forgejo.event_name }}
           EXPECTED_SUPPLYCHAIN: cf1984547d9af47807e4f27766baa2cc7f84579d
           HEAD_SHA: ${{ steps.selection.outputs.head_sha }}
+          SUPPLYCHAIN_DATA_DIR: ${{ steps.advisories.outputs.data_dir }}
         run: |
           set -euo pipefail
           export GIT_CONFIG_NOSYSTEM=1

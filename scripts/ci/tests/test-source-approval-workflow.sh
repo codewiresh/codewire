@@ -25,6 +25,62 @@ if grep -Fq -- '--osv-offline' "$WORKFLOW"; then
   fail 'workflow requests an incomplete ecosystem-specific offline database'
 fi
 
+# infra#1630: the scan takes the IOC and OSM data from the mounted
+# advisory bundle, verified against its manifest and at most 24 hours old,
+# and keeps OSV live.
+grep -Fq 'ADVISORIES: /opt/supplychain/advisories' "$WORKFLOW" ||
+  fail 'the scan does not verify the mounted advisory bundle'
+grep -Fq 'MAX_AGE_SECONDS: "86400"' "$WORKFLOW" ||
+  fail 'the advisory bundle has no 24-hour fail-closed age'
+# shellcheck disable=SC2016 # Match the workflow expression literally.
+grep -Fq 'SUPPLYCHAIN_DATA_DIR: ${{ steps.advisories.outputs.data_dir }}' "$WORKFLOW" ||
+  fail 'the scan does not read the verified IOC and OSM data'
+if grep -Fq 'OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY' "$WORKFLOW"; then
+  fail 'Codewire keeps OSV live; the scan must not read the bundle databases'
+fi
+verifier="$FIXTURE/advisory-verifier.py"
+awk '/^          python3 -I - "\$ADVISORIES"/ { capture = 1; next }
+     capture && /^          PY$/ { exit }
+     capture { sub(/^          /, ""); print }' "$WORKFLOW" >"$verifier"
+python3 -I - "$verifier" "$FIXTURE/advisories" <<'PY' ||
+import datetime, hashlib, json, subprocess, sys
+from pathlib import Path
+
+verifier, root = Path(sys.argv[1]).read_text(), Path(sys.argv[2])
+
+
+def bundle(age):
+    for path in sorted(root.rglob("*"), reverse=True):
+        path.unlink() if path.is_file() else path.rmdir()
+    files = {f"osv-scanner/{name}/all.zip": name.encode() for name in ("crates.io", "Go", "npm", "PyPI")}
+    files.update({"data/iocs/manifest.json": b"{}", "data/osm-cache.json": b'{"entries": [1]}'})
+    for name, data in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_bytes(data)
+    built = datetime.datetime.now(datetime.timezone.utc) - age
+    (root / "manifest.json").write_text(json.dumps({"schema": 1, "built_at": built.isoformat(), "files": [
+        {"path": name, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)} for name, data in files.items()]}))
+
+
+def verify():
+    data = root.parent / "data"
+    data.mkdir(exist_ok=True)
+    return subprocess.run([sys.executable, "-I", "-", str(root), "86400", str(data)], input=verifier,
+                          capture_output=True, text=True, timeout=60), data
+
+
+bundle(datetime.timedelta(minutes=5))
+result, data = verify()
+assert result.returncode == 0, result.stderr
+assert "advisory bundle receipt" in result.stdout and (data / "osm-cache.json").is_file()
+bundle(datetime.timedelta(hours=25))
+assert verify()[0].returncode == 65, "a stale bundle passed"
+bundle(datetime.timedelta(minutes=5))
+(root / "data/osm-cache.json").write_bytes(b"tampered")
+assert verify()[0].returncode == 65, "an altered bundle passed"
+PY
+  fail 'the advisory bundle check does not pass a fresh bundle and refuse a stale or altered one'
+
 for input in \
   '.supplychain/source-policy.json' \
   '.gitleaks.toml' \
