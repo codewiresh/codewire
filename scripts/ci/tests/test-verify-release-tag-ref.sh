@@ -134,8 +134,10 @@ export CODEWIRE_RELEASE_TAG_CURL="$fake_curl"
 export FAKE_CURL_ARGV_LOG="$fixture/curl-argv.log"
 export FAKE_EXPECTED_TOKEN="$token_canary"
 export GITEA_TOKEN="$token_canary"
-# Forgejo's server URL is its ROOT_URL, which ends with a slash.
+# Forgejo's server URL is its ROOT_URL, which ends with a slash. The canonical
+# server comes from CODEWIRE_SOURCE_URL, never from the job's own server URL.
 export GITHUB_SERVER_URL=https://git.example.invalid/
+export CODEWIRE_SOURCE_URL=https://git.example.invalid/codewire/codewire.git
 
 git -C "$fixture" init -q
 git -C "$fixture" config user.name 'Release Guard Test'
@@ -270,14 +272,24 @@ expect_failure wrong-server \
   workflow_dispatch refs/heads/main main v0.3.359 \
   https://github.com codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
-missing_server_output="$(cd "$fixture" && env -u GITHUB_SERVER_URL "$VERIFY" \
+missing_source_output="$(cd "$fixture" && env -u CODEWIRE_SOURCE_URL "$VERIFY" \
   workflow_dispatch refs/heads/main main v0.3.359 \
   https://git.example.invalid codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" 2>&1)" && {
-  printf 'release tag guard test failed: missing GITHUB_SERVER_URL unexpectedly passed\n' >&2
+  printf 'release tag guard test failed: missing CODEWIRE_SOURCE_URL unexpectedly passed\n' >&2
   exit 1
 }
-grep -Fq 'GITHUB_SERVER_URL' <<<"$missing_server_output"
+grep -Fq 'CODEWIRE_SOURCE_URL' <<<"$missing_source_output"
+# A job's own server URL is not trusted by itself: an internal-looking server
+# that is neither the canonical origin nor the configured internal URL fails.
+GITHUB_SERVER_URL=https://forgejo-internal.tail.example.invalid/ expect_failure job-server-only \
+  workflow_dispatch refs/heads/main main v0.3.359 \
+  https://forgejo-internal.tail.example.invalid codewire/codewire \
+  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
+CODEWIRE_SOURCE_URL=https://git.example.invalid/codewire/other.git expect_failure foreign-source-url \
+  workflow_dispatch refs/heads/main main v0.3.359 \
+  https://git.example.invalid codewire/codewire \
+  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
 expect_failure wrong-repository \
   workflow_dispatch refs/heads/main main v0.3.359 \
   https://git.example.invalid codewire/other \

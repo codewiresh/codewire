@@ -12,10 +12,19 @@
 # fetches. Changing it invalidates verification of every image built under the
 # old value, so change it only in a release that rebuilds the whole set.
 readonly PIPELINE_BUILDER_ID='https://codewire.sh/ci/builders/protected-delivery/v1'
-# The repository URL provenance must name as its source: codewire/codewire on
-# the forge that runs the pipeline, whose URL Forgejo sets in every job.
-: "${GITHUB_SERVER_URL:?set to the Forgejo base URL}"
-readonly PIPELINE_SOURCE_URL="${GITHUB_SERVER_URL%/}/codewire/codewire.git"
+# The repository URL provenance must name as its source: the canonical public
+# clone URL, from the CODEWIRE_SOURCE_URL Actions variable. Never the job's
+# GITHUB_SERVER_URL: a runner may reach Forgejo through an internal name, and
+# that name must not reach published provenance (deploy verifies this value).
+readonly PIPELINE_SOURCE_URL="${CODEWIRE_SOURCE_URL:?set to the canonical source repository clone URL, for example https://forgejo.example.com/codewire/codewire.git}"
+if [[ ! "$PIPELINE_SOURCE_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]]; then
+  echo 'CODEWIRE_SOURCE_URL must be an https clone URL ending in .git' >&2
+  exit 2
+fi
+if [[ -n "${CODEWIRE_FORGEJO_INTERNAL_URL:-}" && "$PIPELINE_SOURCE_URL" == "${CODEWIRE_FORGEJO_INTERNAL_URL%/}/"* ]]; then
+  echo 'CODEWIRE_SOURCE_URL names the internal Forgejo URL; provenance must name the canonical public one' >&2
+  exit 2
+fi
 # OpenBao serving the Transit signing key and publisher credentials. Every
 # CI and smoke script reads the same CODEWIRE_OPENBAO_ADDR; set it (workflow
 # env or repository variable) to point this tooling at another OpenBao.

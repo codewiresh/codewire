@@ -26,9 +26,11 @@ images come from, is in the [configuration reference](../CONFIGURATION.md).
   `actions-download-artifact`, `setup-bun` and `setup-node`. The exact commits
   are the `uses:` lines in `.gitea/workflows/`.
 
-- **Forge URL.** Forgejo gives every job its own base URL as
-  `${{ github.server_url }}` and the `GITHUB_SERVER_URL` environment variable.
-  Scripts build API, clone and OIDC URLs from it, so there is nothing to set.
+- **Forge URL.** Forgejo gives every job the base URL its runner reaches it
+  by, as `${{ github.server_url }}` and the `GITHUB_SERVER_URL` environment
+  variable. Scripts call the API through it. A runner may use an internal
+  name, so nothing that is published (image provenance, release checks) takes
+  the forge from it: those use `CODEWIRE_SOURCE_URL` below.
 
 ## Repository Actions variables
 
@@ -38,6 +40,7 @@ secrets; credentials come from OpenBao.
 
 | Variable | Value | Used by |
 |---|---|---|
+| `CODEWIRE_SOURCE_URL` | Canonical public clone URL of this repository, for example `https://forgejo.example.com/codewire/codewire.git` | image provenance (`vcs.source`), which deployment verifies; the release tag's canonical-server check. Never an internal URL |
 | `CODEWIRE_IMAGE_REGISTRY` | Image registry host, with no scheme, for example `registry.example.com` | image build, publish, sign and verify scripts; Kind's approved images; Production publication |
 | `CODEWIRE_R2_CACHE_ENDPOINT` | `https://` S3 endpoint of the CI compiler and layer cache buckets | sccache and workspace layer cache selection |
 | `CODEWIRE_R2_RELEASES_ENDPOINT` | `https://` S3 endpoint of the `cw` release bucket | `cw` release publication (`cli-release.yaml`) |
@@ -70,6 +73,8 @@ export GITHUB_SERVER_URL=https://forgejo.example.com
 - `CODEWIRE_IMAGE_REGISTRY` is needed by the Dev and confidential smokes and
   Kind's sealed CI inputs. A local Kind loop that builds its own images does
   not need it.
+- `CODEWIRE_SOURCE_URL` is read only by the protected image builds and the
+  release tag check, which run in CI.
 
 ## Tests
 

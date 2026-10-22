@@ -26,6 +26,7 @@ env:
   CONFIDENTIAL_SNP_NODE: ${{ vars.CONFIDENTIAL_SNP_NODE }}
   ARM64_BUILDKIT_HOST: ${{ vars.ARM64_BUILDKIT_HOST }}
   CODEWIRE_IMAGE_REGISTRY: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}
+  CODEWIRE_SOURCE_URL: ${{ vars.CODEWIRE_SOURCE_URL }}
   OPENBAO_ROLE: codewire-source-prod-publisher
   OPENBAO_AUDIENCE: openbao-codewire-source-prod-publisher
   OPENBAO_GHCR_ROLE: codewire-source-prod-publisher

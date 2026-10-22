@@ -66,12 +66,14 @@ case "$event" in
     ;;
 esac
 
-# The canonical Forgejo instance has one public name (GITHUB_SERVER_URL, set
-# in every Forgejo job) and may have an internal one
-# (CODEWIRE_FORGEJO_INTERNAL_URL) that runners register against. Nothing else
-# is trusted.
-canonical_url="${GITHUB_SERVER_URL:?set to the Forgejo base URL}"
-canonical_url="${canonical_url%/}"
+# The canonical Forgejo instance is the origin of the canonical source URL
+# (CODEWIRE_SOURCE_URL) and may also have an internal name
+# (CODEWIRE_FORGEJO_INTERNAL_URL) that runners register against. A job's own
+# GITHUB_SERVER_URL is trusted only as one of those. Nothing else is trusted.
+source_url="${CODEWIRE_SOURCE_URL:?set to the canonical source repository clone URL}"
+[[ "$source_url" =~ ^(https://[A-Za-z0-9.-]+(:[0-9]+)?)/codewire/codewire\.git$ ]] ||
+  fail "CODEWIRE_SOURCE_URL must be the canonical https clone URL of codewire/codewire"
+canonical_url="${BASH_REMATCH[1]}"
 internal_url="${CODEWIRE_FORGEJO_INTERNAL_URL:-}"
 internal_url="${internal_url%/}"
 if [[ "$server_url" != "$canonical_url" &&

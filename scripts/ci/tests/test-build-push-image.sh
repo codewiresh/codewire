@@ -6,7 +6,11 @@ readonly ROOT
 # CI names these in Actions variables and the job context; the scripts
 # require them.
 export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
-export GITHUB_SERVER_URL=https://git.example.invalid
+# The job reaches Forgejo through an internal name; provenance must still name
+# the canonical public clone URL from CODEWIRE_SOURCE_URL.
+export GITHUB_SERVER_URL=https://forgejo-internal.tail.example.invalid/
+export CODEWIRE_FORGEJO_INTERNAL_URL=https://forgejo-internal.tail.example.invalid
+export CODEWIRE_SOURCE_URL=https://git.example.invalid/codewire/codewire.git
 if [[ "${PYTHONDONTWRITEBYTECODE:-}" != 1 ]]; then
   # CI's release step sets this. Without it, a local Python can write
   # __pycache__ into the CW source capsule, which the producer then refuses.
@@ -971,6 +975,8 @@ grep -qF -- '--driver-opt provenance-add-gha=false' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication may leak the Forgejo event payload into public provenance'
 grep -qF -- 'GIT_REMOTE=https://git.example.invalid/codewire/codewire.git' \
   "$FAKE_DOCKER_CALLS" || fail 'protected provenance does not build from the canonical source remote'
+! grep -qF 'tail.example.invalid' "$FAKE_DOCKER_CALLS" ||
+  fail 'the job'"'"'s internal Forgejo URL reached the image build or its provenance'
 grep -qF -- 'Provenance.SLSA' \
   "$FAKE_DOCKER_CALLS" || fail 'protected publication did not verify its emitted SLSA predicate'
 { grep -qF -- '--sbom=generator=registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9' \
@@ -1155,6 +1161,24 @@ awk -F '\t' \
   fail 'release alias rebuilt an existing source image'
 [[ "$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS")" -eq $((create_calls_before + 1)) ]] ||
   fail 'release alias was not created exactly once'
+
+# Provenance names only the configured canonical source: without it, or with
+# the internal Forgejo URL, the build stops before it touches Docker.
+build_calls_before="$(build_invocation_count)"
+for bad_source in '' 'https://forgejo-internal.tail.example.invalid/codewire/codewire.git' \
+    'http://git.example.invalid/codewire/codewire.git'; do
+  if (
+    cd "$source_fixture"
+    CODEWIRE_SOURCE_URL="$bad_source" \
+      "$BUILDER" services deployments/docker/services.Dockerfile .
+  ) >"$work/source-url-refused.out" 2>&1; then
+    fail "an image build accepted CODEWIRE_SOURCE_URL='$bad_source'"
+  fi
+  grep -qF 'CODEWIRE_SOURCE_URL' "$work/source-url-refused.out" ||
+    fail "a refused CODEWIRE_SOURCE_URL='$bad_source' did not name the variable"
+done
+[[ "$(build_invocation_count)" -eq "$build_calls_before" ]] ||
+  fail 'a refused provenance source reached a build'
 
 build_calls_before="$(build_invocation_count)"
 if (

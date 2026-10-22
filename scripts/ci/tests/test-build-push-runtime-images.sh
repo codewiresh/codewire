@@ -6,7 +6,8 @@ readonly ROOT
 # CI names these in Actions variables and the job context; the scripts
 # require them.
 export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
-export GITHUB_SERVER_URL=https://git.example.invalid
+export GITHUB_SERVER_URL=https://forgejo-internal.tail.example.invalid/
+export CODEWIRE_SOURCE_URL=https://git.example.invalid/codewire/codewire.git
 export CODEWIRE_R2_CACHE_ENDPOINT=https://r2-cache.example.invalid
 
 fail() {

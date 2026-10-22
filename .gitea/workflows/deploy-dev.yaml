@@ -24,6 +24,7 @@ concurrency:
 # Site configuration from repository Actions variables (docs/dev/CI-CONFIGURATION.md).
 env:
   CODEWIRE_IMAGE_REGISTRY: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}
+  CODEWIRE_SOURCE_URL: ${{ vars.CODEWIRE_SOURCE_URL }}
   CODEWIRE_R2_CACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
 
 jobs:

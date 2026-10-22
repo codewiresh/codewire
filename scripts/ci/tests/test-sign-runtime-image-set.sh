@@ -7,7 +7,8 @@ readonly ROOT
 # CI names these in Actions variables and the job context; the scripts
 # require them.
 export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
-export GITHUB_SERVER_URL=https://git.example.invalid
+export GITHUB_SERVER_URL=https://forgejo-internal.tail.example.invalid/
+export CODEWIRE_SOURCE_URL=https://git.example.invalid/codewire/codewire.git
 readonly SIGNER="$ROOT/scripts/ci/images/sign-runtime-image-set.sh"
 readonly COSIGN_IMAGE='registry.example.invalid/oci-approved/sigstore/cosign/cosign@sha256:6ca1127dc1e9ff19f3f2bfa214936813a86fbbf52919652eda49d393c888ad3c'
 
