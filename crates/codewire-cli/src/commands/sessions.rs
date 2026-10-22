@@ -485,6 +485,18 @@ async fn resolve_environment_session_target(
     }
 }
 
+/// A saved managed-message location is also its placement authority. Resolve
+/// it only in that placement so an unrelated local supervisor or cloud lookup
+/// cannot intercept a wait before the indexed environment is reached.
+pub(crate) fn globals_for_message_placement(
+    globals: &Globals,
+    placement: EnvironmentPlacement,
+) -> Globals {
+    let mut located = globals.clone();
+    located.placement = Some(placement);
+    located
+}
+
 async fn resolve_unplaced_session_target(
     globals: &Globals,
     environment: Option<&str>,

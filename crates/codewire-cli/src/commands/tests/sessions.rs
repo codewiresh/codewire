@@ -36,6 +36,24 @@ fn attach_navigation_recognizes_every_session_action() {
 }
 
 #[test]
+fn saved_message_location_selects_its_own_placement() {
+    let globals = Globals {
+        server: Some("https://codewire.test".to_owned()),
+        member: Some("trusted-host".to_owned()),
+        placement: None,
+    };
+    let cloud = globals_for_message_placement(&globals, EnvironmentPlacement::Platform);
+    assert_eq!(cloud.server, globals.server);
+    assert_eq!(cloud.member, globals.member);
+    assert_eq!(cloud.placement, Some(EnvironmentPlacement::Platform));
+
+    let local = globals_for_message_placement(&cloud, EnvironmentPlacement::Local);
+    assert_eq!(local.server, globals.server);
+    assert_eq!(local.member, globals.member);
+    assert_eq!(local.placement, Some(EnvironmentPlacement::Local));
+}
+
+#[test]
 fn attachment_reconnect_budget_is_bounded_and_resets_on_output_progress() {
     let mut budget = AttachmentReconnectBudget::default();
     assert_eq!(budget.retry_delay(0).unwrap(), ATTACH_RECONNECT_BASE_DELAY);

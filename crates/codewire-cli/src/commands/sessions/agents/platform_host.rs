@@ -1101,8 +1101,9 @@ pub(super) async fn wait(
     let Some(location) = read_optional::<MessageLocation>(&location_path(message)?)? else {
         return Ok(false);
     };
+    let located = globals_for_message_placement(globals, EnvironmentPlacement::Platform);
     let target =
-        resolve_environment_session_target(globals, Some(&location.environment_id)).await?;
+        resolve_environment_session_target(&located, Some(&location.environment_id)).await?;
     let (org, env, client) = platform(&target)?;
     anyhow::ensure!(
         org == location.org_id && env == location.environment_id,

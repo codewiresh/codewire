@@ -854,8 +854,9 @@ pub(super) async fn wait(
     }
     canonical_uuid(&location.environment_id)?;
     canonical_uuid(&location.driver_id)?;
+    let located = globals_for_message_placement(globals, EnvironmentPlacement::Local);
     let target =
-        resolve_environment_session_target(globals, Some(&location.environment_id)).await?;
+        resolve_environment_session_target(&located, Some(&location.environment_id)).await?;
     let guest = Guest::admit_retained(target, location.executable).await?;
     if guest.id != location.environment_id {
         anyhow::bail!("the managed message environment was replaced");
