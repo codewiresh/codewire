@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The #3144 Done-when measures from synthetic Forgejo records and a real Git history."""
 
+import base64
 import importlib.machinery
 import importlib.util
 import io
@@ -37,6 +38,17 @@ def at(minutes: float) -> str:
     return f"2026-{10 if day == 0 else 11}-{31 if day == 0 else day:02d}T{hours:02d}:{rest // 60:02d}:{rest % 60:02d}Z"
 
 
+def verdict_marker(run_id, commit):
+    """The marker main-ci-verdict.py emits for a verified main run."""
+    document = {
+        "schema": "codewire.main-ci-verdict/v1", "repository": "codewire/codewire", "event": "push",
+        "workflow_path": "ci.yaml@refs/heads/main",
+        "run": {"id": run_id, "attempt": 1, "job": "Required verification"},
+        "source": {"commit": commit, "tree": sha("e")}, "basis": "verification",
+    }
+    return "CODEWIRE_MAIN_CI_VERDICT=" + base64.b64encode(json.dumps(document).encode()).decode()
+
+
 class Fake:
     """Serves allowlisted paths from in-memory runs, jobs and job details."""
 
@@ -44,6 +56,7 @@ class Fake:
         self.runs = {"push": [], "pull_request": [], "pull_request_target": [], "workflow_dispatch": []}
         self.jobs = {}
         self.details = {}
+        self.logs = {}
         self.next_job = 1000
         self.paths = []
 
@@ -59,9 +72,10 @@ class Fake:
         })
         self.jobs[run_id] = []
 
-    def job(self, run_id, name, status, stopped=None, attempt=1):
+    def job(self, run_id, name, status, stopped=None, attempt=1, log=""):
         self.next_job += 1
         job_id = self.next_job
+        self.logs[job_id] = log
         self.jobs[run_id].append({"id": job_id, "run_id": run_id, "name": name, "status": status,
                                   "attempt": attempt})
         steps = [] if stopped is None else [{"number": 0, "stopped": at(stopped - 1)},
@@ -82,6 +96,8 @@ class Fake:
             if kind == "jobs":
                 run_id = int(path.split("/runs/")[1].split("/")[0])
                 return 200, json.dumps({"jobs": self.jobs[run_id]}).encode()
+            if kind == "log":
+                return 200, self.logs[int(path.split("/jobs/")[1].split("/")[0])].encode()
             job_id = int(path.rsplit("/", 1)[1])
             return 200, json.dumps(self.details[job_id]).encode()
 
@@ -213,11 +229,27 @@ class MeasuresTest(unittest.TestCase):
         ordinary = self.summary(self.rows())["speed"]["pull_requests_ordinary"]
         self.assertEqual((ordinary["p95_s"], ordinary["holds"]), (660.0, False))
 
-    def main_run(self, run_id, commit, created, stopped, status, attempts=(1,)):
+    def main_run(self, run_id, commit, created, stopped, status, attempts=(1,), verdict="verified"):
+        """A main push run whose Required verification prints its verdict.
+
+        verdict: "verified" (the marker for this run and commit), "superseded",
+        "none" (no verdict line) or "other-run" (a marker naming another run).
+        """
         self.fake.run("push", run_id, "ci.yaml", commit, created, stopped, status)
         for index, attempt in enumerate(attempts):
             self.fake.job(run_id, f"job {index}", "success" if status != "skipped" else "skipped",
                           stopped, attempt=attempt)
+        if status == "skipped":
+            return
+        log = {
+            "verified": verdict_marker(run_id, commit),
+            "other-run": verdict_marker(run_id + 1000, commit),
+            "superseded": (f"main CI verdict: not verified; superseded by {sha('f')}, "
+                           "whose run verifies this commit's changes"),
+            "none": "required verification: every selected capability group succeeded",
+        }[verdict]
+        self.fake.job(run_id, "Required verification", "failure" if status == "failure" else "success",
+                      stopped, attempt=attempts[-1], log=f"2026-10-31T00:00:00.0000000Z {log}\n")
 
     def test_main_first_attempt_excludes_skipped_and_superseded_and_rejects_rerun_passes(self):
         commits = self.repo.commits
@@ -230,11 +262,42 @@ class MeasuresTest(unittest.TestCase):
         self.fake.run("push", 6, "support-images.yaml", commits["D"], 60, 90, "failure")
         summary = self.summary(self.rows())
         green = summary["green"]["main_ci_first_attempt"]
-        self.assertEqual((green["verified"], green["first_attempt_passes"], green["rate"], green["holds"]),
-                         (3, 1, 0.3333, False))
+        self.assertEqual((green["runs"], green["verified"], green["failed"], green["first_attempt_passes"],
+                          green["rate"], green["holds"]), (3, 2, 1, 1, 0.3333, False))
         self.assertEqual((green["excluded_skipped"], green["excluded_superseded"]), (1, 1))
         main = summary["speed"]["main_ci"]
         self.assertEqual((main["n"], main["p50_s"], main["holds"]), (3, 540.0, True))
+
+    def test_a_main_run_verified_only_by_its_own_verdict(self):
+        """A superseded run dispatched nothing, so it never counts (#3176).
+
+        Runs 18429, 18464, 18473 and 18485 ended "success" with every family
+        skipped; counted as verified, they pulled main CI's p50 down.
+        """
+        commits = self.repo.commits
+        self.main_run(1, commits["A"], 0, 12, "success")
+        for run_id, minutes in ((2, 7), (3, 8), (4, 20)):
+            self.main_run(run_id, commits["B"], 20 * run_id, 20 * run_id + minutes, "success",
+                          verdict="superseded")
+        self.main_run(5, commits["C"], 100, 110, "success", verdict="none")
+        self.main_run(6, commits["D"], 120, 121, "success", verdict="other-run")
+        rows = self.rows()
+        main_rows = {row["run_id"]: row for row in rows if row["kind"] == "main_ci"}
+        self.assertEqual({run_id: row["category"] for run_id, row in main_rows.items()},
+                         {1: "verified", 2: "superseded", 3: "superseded", 4: "superseded",
+                          5: "unverified", 6: "unverified"})
+        self.assertEqual([main_rows[run_id]["seconds"] for run_id in (2, 3, 4, 5, 6)], [None] * 5)
+        summary = self.summary(rows)
+        main = summary["speed"]["main_ci"]
+        self.assertEqual((main["n"], main["p50_s"]), (1, 720.0))
+        green = summary["green"]["main_ci_first_attempt"]
+        self.assertEqual((green["runs"], green["verified"], green["first_attempt_passes"], green["rate"],
+                          green["excluded_superseded"], green["excluded_unverified"]),
+                         (1, 1, 1, 1.0, 3, 2))
+        # Every log read is the Required verification job's, through the allowlist.
+        logs = [path for path in self.fake.paths if path.endswith("/logs")]
+        self.assertEqual(len(logs), 6)
+        self.assertTrue(all(measures.PATHS["log"].fullmatch(path) for path in logs))
 
     def receipt(self, run_id, source, created, stopped, smoke):
         self.fake.run("workflow_dispatch", run_id, "dev-deployment-smoke-receipt.yaml", sha("9"), created,

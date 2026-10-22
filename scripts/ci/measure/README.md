@@ -50,10 +50,20 @@ progress.
 |---|---|---|
 | Ordinary PR speed | Per PR head pushed in the window, without `ci-full` on the push: from the push's first run to the last required check finishing (default `ci.yaml:Required verification` and `source-approval.yml:Supply-chain scan`). Only push-started runs count; labeled, unlabeled and closed runs never set a head. Superseded and unfinished heads are counted apart. | p50 ≤ 5 min, p95 ≤ 10 min |
 | `ci-full` PR speed | The same, for heads whose push carried `ci-full` | reported, not counted |
-| Main CI speed | Each main-push `ci.yaml` run that verified, from creation to stop | p50 ≤ 10 min |
+| Main CI speed | Each main-push `ci.yaml` run that ran its verification (verified or failed), from creation to stop | p50 ≤ 10 min |
 | Merge to Dev | From each push to main to the first passing Dev smoke receipt whose deployed source contains it | p50 ≤ 15 min |
-| Main CI first attempt | Verified main-push `ci.yaml` runs that passed with every job on its first attempt. Skipped and superseded (cancelled) runs are excluded and counted apart. | ≥ 95% |
+| Main CI first attempt | Of the main-push `ci.yaml` runs that ran their verification, those verified with every job on its first attempt. Skipped, superseded and unverified runs are excluded and counted apart. | ≥ 95% |
 | Dev smoke | Deploy-owned smoke results of the Dev deployment smoke receipts created in the window | ≥ 95% |
+
+A main run's category comes from its own verdict: the marker its Required
+verification job prints, which `scripts/ci/plan/main-ci-verdict.py` also reads
+(#3176).
+- **verified:** the marker names exactly this run and commit.
+- **superseded:** the run was cancelled, or its Required verification says a
+  newer commit's run verifies its change. It dispatched nothing, so it has no
+  seconds.
+- **failed:** Required verification did not pass.
+- **unverified:** the job printed no verdict, or a marker for another run.
 
 Receipts and checks that finish up to 24 hours after the window still settle
 what the window started; receipts created after it are not counted as smoke

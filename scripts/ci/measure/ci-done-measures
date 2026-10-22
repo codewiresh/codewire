@@ -30,10 +30,19 @@ The definitions (#3144, "Done when"):
   runs that verified count. Skipped and superseded runs are excluded from both
   numerator and denominator and reported apart, and a pass after a rerun is not
   a first-attempt pass.
+
+A main run's category comes from its own verdict, the marker its Required
+verification job prints and main-ci-verdict.py reads (#3176): "verified" when
+the marker names this run and commit, "superseded" when the job says a newer
+commit's run verifies its change (it dispatched nothing, so it has no
+seconds), "failed" when Required verification did not pass, and "unverified"
+when it printed neither. Main CI speed and green count verified and failed
+runs; the rest are reported apart.
 - Green, Dev smoke: at least 95% of deploy-owned smoke results pass (#3132).
 """
 
 import argparse
+import importlib.util
 import json
 import math
 import os
@@ -71,6 +80,7 @@ PATHS = {
     "jobs": re.compile(
         rf"^/repos/{REPO}/actions/runs/[1-9][0-9]{{0,11}}/jobs\?page=1&limit={JOB_PAGE_LIMIT}$"),
     "job": re.compile(rf"^/repos/{REPO}/actions/jobs/[1-9][0-9]{{0,11}}$"),
+    "log": re.compile(rf"^/repos/{REPO}/actions/jobs/[1-9][0-9]{{0,11}}/logs$"),
 }
 MAIN_WORKFLOW = "ci.yaml"
 RECEIPT_WORKFLOW = "dev-deployment-smoke-receipt.yaml"
@@ -90,6 +100,21 @@ THRESHOLDS = {
 
 class CollectorFailure(RuntimeError):
     """A value-blind collector failure."""
+
+
+def load_verdicts():
+    """main-ci-verdict.py, whose marker decides whether a main run verified."""
+    path = Path(__file__).resolve().parents[1] / "plan" / "main-ci-verdict.py"
+    spec = importlib.util.spec_from_file_location("codewire_ci_done_measures_verdict", path)
+    if spec is None or spec.loader is None:
+        raise CollectorFailure("main CI verdict module is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+VERDICTS = load_verdicts()
 
 
 def parse_time(value: Any) -> datetime | None:
@@ -199,6 +224,16 @@ class Forgejo:
             return json.loads(payload)
         except (TypeError, ValueError) as error:
             raise CollectorFailure(f"Forgejo {kind} returned malformed JSON") from error
+
+    def get_text(self, kind: str, path: str) -> str:
+        """A job log, matched against fixed patterns and never printed."""
+        if PATHS[kind].fullmatch(path) is None:
+            raise CollectorFailure(f"refusing Forgejo {kind} path outside the read allowlist")
+        self.requests += 1
+        code, payload = self.transport(kind, path)
+        if code != 200:
+            raise CollectorFailure(f"Forgejo {kind} read returned HTTP {code}")
+        return payload.decode("utf-8", errors="replace")
 
 
 def list_runs(forgejo: Forgejo, event: str, since: datetime, until: datetime) -> list[dict]:
@@ -368,6 +403,40 @@ def pull_request_rows(forgejo: Forgejo, since: datetime, until: datetime,
     return rows
 
 
+# Main runs that ran verification: speed and green count these.
+MAIN_COUNTED = {"verified", "failed"}
+
+
+def main_verdict(forgejo: Forgejo, run: dict, jobs: list[dict]) -> str:
+    """verified, superseded, failed or unverified, from the run's own verdict.
+
+    The same predicate main-ci-verdict.py applies (#3176): only the Required
+    verification job's marker for exactly this run and commit means verified.
+    """
+    required = [job for job in jobs if job.get("name") == VERDICTS.REQUIRED_JOB]
+    if len(required) != 1:
+        return "unverified"
+    if required[0].get("status") != "success":
+        return "failed"
+    log = forgejo.get_text("log", f"/repos/{REPOSITORY}/actions/jobs/{required[0]['id']}/logs")
+    markers = VERDICTS.MARKER_RE.findall(log)
+    if not markers:
+        return "superseded" if VERDICTS.SUPERSEDED_RE.search(log) else "unverified"
+    if len(markers) != 1:
+        return "unverified"
+    try:
+        document = VERDICTS.decode_marker(markers[0])
+    except VERDICTS.Unproven:
+        return "unverified"
+    if (isinstance(document, dict) and document.get("schema") == VERDICTS.SCHEMA
+            and document.get("event") == "push"
+            and isinstance(document.get("run"), dict) and document["run"].get("id") == run["id"]
+            and isinstance(document.get("source"), dict)
+            and document["source"].get("commit") == run.get("commit_sha")):
+        return "verified"
+    return "unverified"
+
+
 def main_ci_rows(forgejo: Forgejo, since: datetime, until: datetime) -> list[dict]:
     rows = []
     for run in list_runs(forgejo, "push", since, until):
@@ -375,23 +444,23 @@ def main_ci_rows(forgejo: Forgejo, since: datetime, until: datetime) -> list[dic
             continue
         status = run.get("status")
         created, stopped = parse_time(run.get("created")), parse_time(run.get("stopped"))
+        first_attempt_pass = None
         if status == "skipped":
             category = "skipped"
         elif status == "cancelled":
             category = "superseded"
         elif status in {"success", "failure"}:
-            category = "verified"
+            jobs = run_jobs(forgejo, run["id"])
+            category = main_verdict(forgejo, run, jobs)
+            if category in MAIN_COUNTED:
+                rerun = any(positive_int(job.get("attempt")) and job["attempt"] > 1 for job in jobs)
+                first_attempt_pass = category == "verified" and not rerun
         else:
             category = "unfinished"
-        first_attempt_pass = None
-        if category == "verified":
-            jobs = run_jobs(forgejo, run["id"])
-            rerun = any(positive_int(job.get("attempt")) and job["attempt"] > 1 for job in jobs)
-            first_attempt_pass = status == "success" and not rerun
         rows.append({
             "schema_version": 1, "kind": "main_ci", "run_id": run["id"], "sha": run.get("commit_sha"),
             "created_at": iso(created), "stopped_at": iso(stopped), "status": status,
-            "category": category, "seconds": seconds(created, stopped) if category == "verified" else None,
+            "category": category, "seconds": seconds(created, stopped) if category in MAIN_COUNTED else None,
             "first_attempt_pass": first_attempt_pass,
         })
     return rows
@@ -519,11 +588,11 @@ def summarize(rows: list[dict]) -> dict:
         return entry
 
     main = by_kind.get("main_ci", [])
-    verified = [row for row in main if row["category"] == "verified"]
-    main_seconds = [row["seconds"] for row in verified if row["seconds"] is not None]
+    counted = [row for row in main if row["category"] in MAIN_COUNTED]
+    main_seconds = [row["seconds"] for row in counted if row["seconds"] is not None]
     main_p50 = percentile(main_seconds, 0.5)
-    first = sum(row["first_attempt_pass"] is True for row in verified)
-    first_rate = rate(first, len(verified))
+    first = sum(row["first_attempt_pass"] is True for row in counted)
+    first_rate = rate(first, len(counted))
 
     deliveries = by_kind.get("merge_to_dev", [])
     delivered = [row["seconds"] for row in deliveries if row["outcome"] == "delivered" and row["seconds"] is not None]
@@ -552,11 +621,15 @@ def summarize(rows: list[dict]) -> dict:
         },
         "green": {
             "main_ci_first_attempt": {
-                "verified": len(verified), "first_attempt_passes": first, "rate": first_rate,
+                "runs": len(counted),
+                "verified": sum(row["category"] == "verified" for row in main),
+                "failed": sum(row["category"] == "failed" for row in main),
+                "first_attempt_passes": first, "rate": first_rate,
                 "threshold": THRESHOLDS["main_ci_first_attempt_rate"],
                 "holds": None if first_rate is None else first_rate >= THRESHOLDS["main_ci_first_attempt_rate"],
                 "excluded_skipped": sum(row["category"] == "skipped" for row in main),
                 "excluded_superseded": sum(row["category"] == "superseded" for row in main),
+                "excluded_unverified": sum(row["category"] == "unverified" for row in main),
                 "unfinished": sum(row["category"] == "unfinished" for row in main)},
             "dev_smoke": {
                 "results": smoke_total, "passes": smoke_passed, "rate": smoke_rate,
