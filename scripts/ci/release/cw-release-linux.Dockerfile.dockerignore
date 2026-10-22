@@ -1,0 +1,5 @@
+# BuildKit per-Dockerfile ignore for the Linux cw release build (#3119). Its
+# context is a fresh clone of exactly the selected commit, and
+# package-cw-release.sh binds the source with git (`git ls-files --cached
+# --others`, `git rev-parse HEAD`). This file admits everything, .git
+# included, and overrides the source's own .dockerignore.

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Execute fetch-openbao-trusted-buildkit-client.sh against a fake curl: only
-# the Dev, support and production publisher roles read the trusted builder's
-# client tuple, it lands only in an empty private directory as three mode-0600
+# the Dev, support and production publisher roles and the two protected-main
+# release builds read the trusted builder's client tuple, it lands only in an
+# empty private directory as three mode-0600
 # PEM files, nothing secret is printed or passed as an argument, and every
 # failure says what failed.
 set -euo pipefail
@@ -39,7 +40,9 @@ done
 case "$url" in
   https://git.example.invalid/*audience=openbao-codewire-source-dev-publisher | \
     https://git.example.invalid/*audience=openbao-codewire-source-support-publisher | \
-    https://git.example.invalid/*audience=openbao-codewire-source-prod-publisher)
+    https://git.example.invalid/*audience=openbao-codewire-source-prod-publisher | \
+    https://git.example.invalid/*audience=openbao-codewire-source-cli-release-build | \
+    https://git.example.invalid/*audience=openbao-codewire-source-release-dry-run-build)
     jq -n --arg value synthetic-forgejo-jwt '{value:$value}' >"$output" ;;
   https://openbao.example.invalid/v1/auth/forgejo-jwt/login)
     jq -n '{auth:{client_token:"synthetic-openbao-token"}}' >"$output" ;;
@@ -116,11 +119,23 @@ OPENBAO_ROLE=codewire-source-prod-publisher OPENBAO_AUDIENCE=openbao-codewire-so
   "$FETCHER" "$prod_tls" >"$work/prod.out" 2>&1 || { cat "$work/prod.out" >&2; fail 'the production publisher could not read the client tuple'; }
 [[ "$(cd "$prod_tls" && find . -type f | sort | tr '\n' ' ')" == './ca.crt ./client.crt ./client.key ' ]] ||
   fail 'the production publisher did not receive exactly the client tuple'
+# So do the two protected-main release builds (#3119).
+for role in codewire-source-cli-release-build codewire-source-release-dry-run-build; do
+  release_tls="$(private_dir "$role")"
+  OPENBAO_ROLE="$role" OPENBAO_AUDIENCE="openbao-$role" \
+    "$FETCHER" "$release_tls" >"$work/$role.out" 2>&1 || { cat "$work/$role.out" >&2; fail "$role could not read the client tuple"; }
+  [[ "$(cd "$release_tls" && find . -type f | sort | tr '\n' ' ')" == './ca.crt ./client.crt ./client.key ' ]] ||
+    fail "$role did not receive exactly the client tuple"
+done
 calls_before="$(wc -l <"$FAKE_CURL_CALLS")"
 refuse other-role 'only the Dev, support and production publisher roles' "$(private_dir other-role)" \
   OPENBAO_ROLE=codewire-source-ci-cache OPENBAO_AUDIENCE=openbao-codewire-source-ci-cache
 refuse mixed-role 'only the Dev, support and production publisher roles' "$(private_dir mixed-role)" \
   OPENBAO_ROLE=codewire-source-prod-publisher OPENBAO_AUDIENCE=openbao-codewire-source-support-publisher
+refuse release-signing-role 'only the Dev, support and production publisher roles' "$(private_dir release-signing)" \
+  OPENBAO_ROLE=codewire-source-cli-release-signing OPENBAO_AUDIENCE=openbao-codewire-source-cli-release-signing
+refuse mixed-release-role 'only the Dev, support and production publisher roles' "$(private_dir mixed-release)" \
+  OPENBAO_ROLE=codewire-source-cli-release-build OPENBAO_AUDIENCE=openbao-codewire-source-release-dry-run-build
 shared="$work/shared"; mkdir -m 0755 "$shared"
 refuse shared-directory 'empty private directory' "$shared"
 used="$(private_dir used)"; : >"$used/leftover"

@@ -561,12 +561,17 @@ class CwRuntimeBuilderTest(unittest.TestCase):
 
     def test_the_cross_tools_are_the_release_delivery_s(self):
         builder = sources.load_pins()["cw_runtime_builder"]
+        # Release delivery's Linux builds read these very pins (#3119), on
+        # the trusted builder and in the job alike; no workflow repeats them.
+        client = (ROOT / "scripts/ci/release/build-cw-linux.sh").read_text()
+        self.assertIn('pins = json.load(open(sys.argv[1]))["cw_runtime_builder"]', client)
+        self.assertIn('print(pins["zig"]["version"], pins["zig"]["sha256"], pins["cargo_zigbuild"])', client)
+        self.assertIn('"$ROOT/scripts/ci/release/local-runtime-sources.json"', client)
         for name in ("cli-release.yaml", "cw-release-dry-run.yaml"):
             workflow = (ROOT / ".gitea/workflows" / name).read_text()
             with self.subTest(workflow=name):
-                self.assertIn(f"  ZIG_VERSION: {builder['zig']['version']}\n", workflow)
-                self.assertIn(f"  ZIG_X86_64_LINUX_SHA256: {builder['zig']['sha256']}\n", workflow)
-                self.assertIn(f"  CARGO_ZIGBUILD_VERSION: {builder['cargo_zigbuild']}\n", workflow)
+                self.assertNotIn("ZIG_VERSION", workflow)
+                self.assertNotIn("CARGO_ZIGBUILD_VERSION", workflow)
         self.assertEqual(builder["zig"]["url"], f"https://ziglang.org/download/{builder['zig']['version']}/"
                                                 f"zig-x86_64-linux-{builder['zig']['version']}.tar.xz")
         script = (ROOT / "scripts/ci/release/build-runtime-cw.sh").read_text()

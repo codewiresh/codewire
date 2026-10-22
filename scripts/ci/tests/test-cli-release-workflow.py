@@ -29,8 +29,40 @@ CI = ROOT / ".gitea/workflows/ci.yaml"
 # macos-arm64 runner; the Linux pair is built beside the four-target assembly.
 DARWIN_TARGETS = "aarch64-apple-darwin x86_64-apple-darwin"
 LINUX_TARGETS = "x86_64-unknown-linux-musl aarch64-unknown-linux-gnu"
-# Each Linux cw builds in its own job, beside the macOS pair.
+# Each Linux cw builds in its own job, beside the macOS pair, compiled on the
+# trusted BuildKit builder (#3119): the job's one capability is the OIDC login
+# for the builder's client certificate, under the workflow's own build role,
+# and the owner's in-job recovery is off unless the repository variable names
+# the run's commit.
 LINUX_BUILDS = (("build-linux-musl", "x86_64-unknown-linux-musl"), ("build-linux-gnu", "aarch64-unknown-linux-gnu"))
+RELEASE_BUILD_ROLE = "codewire-source-cli-release-build"
+DRY_RUN_BUILD_ROLE = "codewire-source-release-dry-run-build"
+IN_JOB_RECOVERY = "      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}\n"
+
+
+def builder_login(role):
+    """The exact OIDC grant and env of a Linux cw build job."""
+    return (f"    enable-openid-connect: true\n    timeout-minutes: 60\n    env:\n"
+            f"      OPENBAO_ROLE: {role}\n      OPENBAO_AUDIENCE: openbao-{role}\n")
+
+
+def linux_build_errors(block, job, target, role, source, version):
+    """A Linux cw build job: the builder login, the recovery switch, exactly its target."""
+    errors = []
+    if builder_login(role) not in block or block.count("OPENBAO_ROLE:") != 1:
+        errors.append(f"{job} does not log in to the trusted builder as exactly {role}")
+    if IN_JOB_RECOVERY not in block:
+        errors.append(f"{job} does not keep the in-job build for the owner's recovery only")
+    if f'run: scripts/ci/release/build-cw-linux.sh {source} "{version}" {target} .cw-linux\n' not in block:
+        errors.append(f"{job} does not build exactly the {target} cw")
+    for capability in CAPABILITIES + MACOS_SIGNING:
+        if capability != "enable-openid-connect" and capability in block:
+            errors.append(f"{job} holds capability {capability}")
+    # build-cw-linux.sh drops the ID-token request credentials after the one
+    # login; no step may hand them on.
+    if "ACTIONS_ID_TOKEN_REQUEST" in block or "ACTIONS_RUNTIME_TOKEN" in block:
+        errors.append(f"{job} hands on the job's OIDC request or runtime credentials")
+    return errors
 GPG = ("CW_RELEASE_GPG_PRIVATE_KEY", "CW_RELEASE_GPG_PASSPHRASE", "CW_RELEASE_GPG_KEY_ID")
 CAPABILITIES = ("enable-openid-connect", "secrets.", "fetch-openbao-", "sign-cw-release", "cw_release_r2",
                 "mint-github-app-token", "publish-cw-release", "GH_MIRROR_TOKEN_FILE")
@@ -62,6 +94,9 @@ def runner_targets_sealed(text):
             continue
         for targets in re.findall(r"CW_RELEASE_TARGETS='([^']*)'", block):
             unsealed += [target for target in targets.split() if target not in sealed_targets()]
+        # The owner's in-job recovery builds a Linux cw on the runner itself.
+        unsealed += [target for target in re.findall(r"scripts/ci/release/build-cw-linux\.sh \S+ \S+ (\S+) ", block)
+                     if target not in sealed_targets()]
         unsealed += re.findall(r"cargo [^\n]*--target[ =](\S+)", block)
         if re.search(r"\brustup\b", block):
             unsealed.append(f"{name}: rustup")
@@ -450,16 +485,15 @@ def check(text, ci_text):
         block = blocks.get(job, "")
         need("    needs: [release-selection, pack-runtime]\n    runs-on: ci-protected\n" in block,
              f"{job} does not build on a protected runner as soon as the runtime is packed")
-        need(f"CW_RELEASE_BUILD_CMD='cargo zigbuild' CW_RELEASE_TARGETS='{target}'" in block,
-             f"{job} does not build exactly the {target} cw")
+        errors.extend(linux_build_errors(block, job, target, RELEASE_BUILD_ROLE, ".release-source", "$RELEASE_TAG"))
         need("      cw_sha256: ${{ steps.build.outputs.cw_sha256 }}\n" in block
              and f"name: cw-release-{target}-${{{{ github.run_id }}}}" in block,
              f"{job} does not hand over and bind its cw")
-        for capability in CAPABILITIES + MACOS_SIGNING:
-            need(capability not in block, f"{job} holds capability {capability}")
     # Every release cw is compiled exactly once, in its own build job.
     built = [target for block in blocks.values()
              for targets in re.findall(r"CW_RELEASE_TARGETS='([^']*)'", block) for target in targets.split()]
+    built += [target for block in blocks.values()
+              for target in re.findall(r"scripts/ci/release/build-cw-linux\.sh \S+ \S+ (\S+) ", block)]
     need(sorted(built) == sorted(DARWIN_TARGETS.split() + LINUX_TARGETS.split()),
          f"the release targets are not each built exactly once: {sorted(built)}")
     for capability in CAPABILITIES + MACOS_SIGNING:
@@ -713,8 +747,6 @@ MUTATIONS = {
     "unbounded protoc download": lambda t: t.replace(
         "          scripts/ci/release/fetch-pinned.sh \"https://github.com/protocolbuffers",
         "          curl -fsSL -o /tmp/protoc.zip \"https://github.com/protocolbuffers", 1),
-    "unbounded zig download": lambda t: t.replace(
-        'scripts/ci/release/fetch-pinned.sh "$zig_url"', 'curl -fsSLo zig.tar.xz "$zig_url" #', 1),
     "global OIDC": lambda t: t.replace("\n\nenv:\n", "\n\nenable-openid-connect: true\n\nenv:\n", 1),
     "OIDC in build": lambda t: t.replace("    runs-on: ci-protected\n    timeout-minutes: 30\n",
                                          "    runs-on: ci-protected\n    enable-openid-connect: true\n"
@@ -725,9 +757,22 @@ MUTATIONS = {
     "OIDC in runtime pack": lambda t: t.replace("    runs-on: macos-arm64\n    timeout-minutes: 45\n",
                                                 "    runs-on: macos-arm64\n    enable-openid-connect: true\n"
                                                 "    timeout-minutes: 45\n", 1),
-    "OIDC in a Linux cw build": lambda t: t.replace(
-        "    needs: [release-selection, pack-runtime]\n    runs-on: ci-protected\n",
-        "    needs: [release-selection, pack-runtime]\n    runs-on: ci-protected\n    enable-openid-connect: true\n", 1),
+    "Linux cw build under the signing role": lambda t: t.replace(
+        f"      OPENBAO_ROLE: {RELEASE_BUILD_ROLE}\n", "      OPENBAO_ROLE: codewire-source-cli-release-signing\n", 1),
+    "Linux cw build with a second role": lambda t: t.replace(
+        f"      OPENBAO_ROLE: {RELEASE_BUILD_ROLE}\n",
+        f"      OPENBAO_ROLE: {RELEASE_BUILD_ROLE}\n      OPENBAO_ROLE_R2: codewire-source-cli-releases-r2\n", 1),
+    "Linux cw built in the job by default": lambda t: t.replace(IN_JOB_RECOVERY, "      CODEWIRE_IN_JOB_BUILD: '1'\n", 1),
+    "Linux cw build hands on the OIDC request token": lambda t: t.replace(
+        "          CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}\n"
+        "        run: scripts/ci/release/build-cw-linux.sh",
+        "          CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}\n"
+        "          BUILD_OIDC: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}\n"
+        "        run: scripts/ci/release/build-cw-linux.sh", 1),
+    "Linux cw build reads the signing key": lambda t: t.replace(
+        'run: scripts/ci/release/build-cw-linux.sh .release-source "$RELEASE_TAG" x86_64-unknown-linux-musl .cw-linux\n',
+        'run: scripts/ci/setup/fetch-openbao-release-signing-key.sh && scripts/ci/release/build-cw-linux.sh '
+        '.release-source "$RELEASE_TAG" x86_64-unknown-linux-musl .cw-linux\n', 1),
     "macOS pair waits for the Linux cws": lambda t: t.replace(
         "    needs: [release-selection, pack-runtime]\n    runs-on: macos-arm64\n",
         "    needs: [release-selection, pack-runtime, build-linux-musl]\n    runs-on: macos-arm64\n", 1),
@@ -735,8 +780,7 @@ MUTATIONS = {
         "    needs: [release-selection, pack-runtime]\n    runs-on: ci-protected\n",
         "    needs: [release-selection, pack-runtime, build-darwin]\n    runs-on: ci-protected\n", 1),
     "Linux cw built twice": lambda t: t.replace(
-        "CW_RELEASE_TARGETS='aarch64-unknown-linux-gnu'",
-        "CW_RELEASE_TARGETS='aarch64-unknown-linux-gnu x86_64-unknown-linux-musl'", 1),
+        '"$RELEASE_TAG" aarch64-unknown-linux-gnu .cw-linux', '"$RELEASE_TAG" x86_64-unknown-linux-musl .cw-linux', 1),
     "packaging compiles the Linux pair": lambda t: t.replace(
         "CW_RELEASE_TARGETS=none CW_RELEASE_IMPORT_DIR=dist-darwin",
         f"CW_RELEASE_BUILD_CMD='cargo zigbuild' CW_RELEASE_TARGETS='{LINUX_TARGETS}' CW_RELEASE_IMPORT_DIR=dist-darwin",
@@ -918,8 +962,8 @@ MUTATIONS = {
     "unbound records": lambda t: t.replace('= "$RECORDS_SHA256" ]', "] || true", 1),
     "records on a retained retry": lambda t: t.replace('if [ "$CW_RELEASE_R2_STATE" = retained ]; then',
                                                        "if false; then", 1),
-    "unsealed Linux target": lambda t: t.replace("CW_RELEASE_TARGETS='x86_64-unknown-linux-musl'",
-                                                 "CW_RELEASE_TARGETS='riscv64gc-unknown-linux-gnu'", 1),
+    "unsealed Linux target": lambda t: t.replace('"$RELEASE_TAG" x86_64-unknown-linux-musl .cw-linux',
+                                                 '"$RELEASE_TAG" riscv64gc-unknown-linux-gnu .cw-linux', 1),
     "rustup on the runner": lambda t: t.replace(
         "          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}\n"
         "        run: |\n          set -euo pipefail\n",
@@ -1111,8 +1155,9 @@ def check_dry_run(text, release):
              and 'echo "CW_RELEASE_LOCAL_RUNTIME_DIR=$PWD/.local-runtime" >> "$GITHUB_ENV"' in verify,
              f"dry-run job {job} may embed a runtime other than the packed one")
     for job, target in LINUX_BUILDS:
-        need(f"CW_RELEASE_BUILD_CMD='cargo zigbuild' CW_RELEASE_TARGETS='{target}'" in blocks.get(job, "")
-             and f"name: cw-dry-run-{target}-${{{{ github.run_id }}}}" in blocks.get(job, "")
+        errors.extend(linux_build_errors(blocks.get(job, ""), f"dry-run job {job}", target, DRY_RUN_BUILD_ROLE,
+                                         ".", "$DRY_RUN_VERSION"))
+        need(f"name: cw-dry-run-{target}-${{{{ github.run_id }}}}" in blocks.get(job, "")
              and f"name: cw-dry-run-{target}-${{{{ github.run_id }}}}" in assemble,
              f"dry-run job {job} does not build and hand over exactly the {target} cw")
     need("    needs: [protected-main, superseded]\n    if: needs.superseded.outputs.superseded == 'false'\n"
@@ -1210,8 +1255,15 @@ def check_dry_run(text, release):
          and 'cp -R "$work/macos/runtime/." .local-runtime/' in mac_build
          and "          name: cw-dry-run-runtime-${{ github.run_id }}\n          path: .local-runtime/\n" in pack,
          "the dry run does not check the delivery embeds exactly the runtime it built")
+    # No job holds a credential but the two Linux builds' login for the
+    # trusted builder's client certificate (#3119).
+    # The push paths name the builder's scripts, which hold no capability.
+    without_builder_login = re.sub(r"^      - '[^'\n]*'\n", "", text.replace(builder_login(DRY_RUN_BUILD_ROLE), "", 2),
+                                   flags=re.M)
     for capability in CAPABILITIES:
-        need(capability not in text, f"dry run holds capability {capability}")
+        need(capability not in without_builder_login, f"dry run holds capability {capability}")
+    need(text.count("OPENBAO_ROLE:") == 2 and text.count(builder_login(DRY_RUN_BUILD_ROLE)) == 2,
+         "the dry run holds an OIDC role other than the Linux builds' builder login")
     need("    runs-on: macos-arm64\n" in darwin and "    runs-on: macos-arm64\n" in pack,
          "the dry-run macOS build is not on the protected Mac runner")
     need(f"CW_RELEASE_TARGETS='{DARWIN_TARGETS}'" in darwin, "the dry-run macOS build is not the Mac pair")
@@ -1399,6 +1451,13 @@ DRY_RUN_MUTATIONS = {
         t, "build-darwin", "    if: needs.pack-runtime.outputs.superseded == 'false'\n", ""),
     "Linux cw ignores the pack's decision": lambda t: in_job(
         t, "build-linux-gnu", "    if: needs.pack-runtime.outputs.superseded == 'false'\n", ""),
+    "dry-run Linux cw under the cli-release role": lambda t: in_job(
+        t, "build-linux-gnu", f"      OPENBAO_ROLE: {DRY_RUN_BUILD_ROLE}\n", f"      OPENBAO_ROLE: {RELEASE_BUILD_ROLE}\n"),
+    "dry-run Linux cw built in the job by default": lambda t: in_job(
+        t, "build-linux-musl", IN_JOB_RECOVERY, "      CODEWIRE_IN_JOB_BUILD: '1'\n"),
+    "dry-run assembly logs in to the builder": lambda t: in_job(
+        t, "assemble", "    runs-on: ci-protected\n",
+        "    runs-on: ci-protected\n" + builder_login(DRY_RUN_BUILD_ROLE).replace("    timeout-minutes: 60\n", "")),
     "Linux cw does not decide again": lambda t: in_job(t, "build-linux-musl", "        id: superseded\n",
                                                        "        id: decided\n"),
     "Linux cw built for a superseded commit": lambda t: in_job(

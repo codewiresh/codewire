@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Exchange the current Forgejo job OIDC token for one of the three protected
 # publisher OpenBao roles (deploy-dev.yaml's Dev publisher, support-images.yaml's
-# support publisher, deploy-prod.yaml's production publisher) and write the
+# support publisher, deploy-prod.yaml's production publisher) or the two
+# protected-main release builds (cli-release.yaml's and the release dry run's
+# Linux cw builds, #3119) and write the
 # trusted BuildKit builder's mutual-TLS client tuple (infra
 # runbooks/ci-buildkit-trusted.md, infra#1534) into a private directory:
 # ca.crt, client.crt and client.key, each mode 0600. Nothing is printed. The
@@ -30,13 +32,16 @@ readonly output_dir="$1"
 readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly CREDENTIAL_PATH='platform/data/ci/codewire/trusted-buildkit-client'
 readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
-# Only the three protected-main publishers may read the builder's client
-# tuple; OpenBao enforces the same set (forgejo-codewire-trusted-buildkit-client).
+# Only the three protected-main publishers and the two protected-main release
+# builds may read the builder's client tuple; OpenBao enforces the same set
+# (forgejo-codewire-trusted-buildkit-client).
 case "$OPENBAO_ROLE|$OPENBAO_AUDIENCE" in
   'codewire-source-dev-publisher|openbao-codewire-source-dev-publisher' | \
     'codewire-source-support-publisher|openbao-codewire-source-support-publisher' | \
-    'codewire-source-prod-publisher|openbao-codewire-source-prod-publisher') ;;
-  *) fail 'only the Dev, support and production publisher roles read the trusted BuildKit client certificate' ;;
+    'codewire-source-prod-publisher|openbao-codewire-source-prod-publisher' | \
+    'codewire-source-cli-release-build|openbao-codewire-source-cli-release-build' | \
+    'codewire-source-release-dry-run-build|openbao-codewire-source-release-dry-run-build') ;;
+  *) fail 'only the Dev, support and production publisher roles and the two release builds read the trusted BuildKit client certificate' ;;
 esac
 [[ "$output_dir" == /* && -d "$output_dir" && ! -L "$output_dir" \
   && "$(stat -c '%u %a' -- "$output_dir")" == "$(id -u) 700" \

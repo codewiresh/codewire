@@ -2020,6 +2020,9 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/public-content-patterns.txt|\
       scripts/ci/tests/test-check-mirror-content.sh|\
       scripts/ci/release/package-cw-release.sh|scripts/ci/release/publish-cw-release.sh|\
+      scripts/ci/release/build-cw-linux.sh|scripts/ci/release/cw-release-linux-build.sh|\
+      scripts/ci/release/cw-release-linux.Dockerfile|scripts/ci/release/cw-release-linux.Dockerfile.dockerignore|\
+      scripts/ci/release/cw-release-linux.hcl|scripts/ci/tests/test-build-cw-linux.sh|\
       scripts/ci/release/cw_release.py|scripts/ci/release/cw_release_r2.py|\
       scripts/ci/release/sign-cw-release.sh|scripts/ci/release/sign-macos-cw.sh|\
       scripts/ci/release/sign-macos-helper.sh|scripts/ci/release/macos-signing.sh|\

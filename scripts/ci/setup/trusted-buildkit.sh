@@ -3,7 +3,8 @@
 # infra#1534): one persistent builder in the system cluster with its own
 # layer cache, which builds what Codewire ships. Only protected jobs reach it,
 # over mutual TLS, with the client certificate that only the three publisher
-# roles read from OpenBao. When it cannot be reached the build fails: it never
+# roles and the two release builds (#3119) read from OpenBao. When it cannot be
+# reached the build fails: it never
 # falls back to building in the job on its own. The owner's explicit recovery,
 # CODEWIRE_IN_JOB_BUILD=1, is the one way to build in the job instead.
 #

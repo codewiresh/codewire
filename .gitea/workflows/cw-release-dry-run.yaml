@@ -8,7 +8,8 @@ name: cw four-target dry run
 # pair through the release's macOS signing job with an rcodesign stand-in in
 # place of Apple signing and notarization, and the four imported into the
 # unsigned four-target delivery, which is verified. Nothing is signed or
-# published, and no job holds a credential.
+# published, and no job holds a credential but the two Linux cw builds' login
+# for the trusted BuildKit builder's client certificate (#3119).
 #
 # Temporarily (owner decision 2026-10-20) a push to main builds nothing while
 # scripts/ci/select/main-push-switch.sh says so. A dispatch on a release
@@ -33,7 +34,10 @@ on:
     # links (test-cli-release-workflow.py derives them from the workspace
     # manifests and fails when they change) and the files outside them its
     # build reads, the runtime recipes, and the release scripts and
-    # workflows. A server, dashboard or SDK change starts none.
+    # workflows, and what the Linux cws' build on the trusted BuildKit
+    # builder reads outside them (#3119): the rust-base toolchain, the
+    # builder's attach and its client certificate's fetch. A server,
+    # dashboard or SDK change starts none.
     # dry-run-superseded.sh reads this list; keep it one entry per line.
     paths:
       - 'Cargo.lock'
@@ -73,6 +77,12 @@ on:
       - 'apps/cli/GPG_PUBLIC_KEY.asc'
       - 'images/cw-runtime/**'
       - 'scripts/ci/release/**'
+      - 'deployments/docker/rust-base.Dockerfile'
+      - 'scripts/ci/images/run-rust-build.sh'
+      - 'scripts/ci/setup/trusted-buildkit.sh'
+      - 'scripts/ci/setup/fetch-openbao-trusted-buildkit-client.sh'
+      - 'scripts/ci/setup/curl-transport-retry.sh'
+      - 'scripts/ci/setup/assert-ci-runner-image.sh'
       - 'scripts/ci/tests/fixtures/rcodesign-stand-in.sh'
       - 'scripts/ci/select/**'
       - 'scripts/ci/verify/build-local-vmm-initramfs.sh'
@@ -113,9 +123,6 @@ env:
   CODEWIRE_FORGEJO_INTERNAL_URL: ${{ vars.CODEWIRE_FORGEJO_INTERNAL_URL }}
   CONFIDENTIAL_SNP_NODE: ${{ vars.CONFIDENTIAL_SNP_NODE }}
   ARM64_BUILDKIT_HOST: ${{ vars.ARM64_BUILDKIT_HOST }}
-  ZIG_VERSION: 0.15.2
-  ZIG_X86_64_LINUX_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
-  CARGO_ZIGBUILD_VERSION: 0.23.0
   # The release's exact rcodesign pin (cli-release.yaml).
   RCODESIGN_VERSION: 0.29.0
   RCODESIGN_X86_64_LINUX_SHA256: dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002
@@ -764,12 +771,22 @@ jobs:
   build-linux-musl:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # One Linux cw from the packed runtime, beside the macOS pair and the
-    # other Linux cw, as a release builds it.
+    # other Linux cw, as a release builds it: on the trusted BuildKit builder
+    # (#3119). OIDC is on for one login, the builder's client certificate;
+    # build-cw-linux.sh drops the ID-token request credentials once it is
+    # done and before anything compiles.
     name: Build the Linux x86_64 cw
     needs: [protected-main, pack-runtime]
     if: needs.pack-runtime.outputs.superseded == 'false'
     runs-on: ci-protected
+    enable-openid-connect: true
     timeout-minutes: 60
+    env:
+      OPENBAO_ROLE: codewire-source-release-dry-run-build
+      OPENBAO_AUDIENCE: openbao-codewire-source-release-dry-run-build
+      # The owner's recovery (trusted-buildkit.sh): build in the job when the
+      # repository variable CODEWIRE_IN_JOB_BUILD_SHA names this run's commit.
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
     outputs:
       superseded: ${{ steps.superseded.outputs.superseded }}
       cw_sha256: ${{ steps.build.outputs.cw_sha256 }}
@@ -786,32 +803,6 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
         run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
-
-      - name: Verify sealed Rust toolchain and release targets
-        if: steps.superseded.outputs.superseded == 'false'
-        run: scripts/ci/setup/assert-ci-runner-image.sh
-
-      - name: Install protoc (pinned)
-        if: steps.superseded.outputs.superseded == 'false'
-        run: |
-          set -euo pipefail
-          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
-            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
-          mkdir -p "$HOME/.proto-tools/protoc"
-          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
-          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
-          "$HOME/.proto-tools/protoc/bin/protoc" --version
-
-      - name: Set up cross-build tools
-        if: steps.superseded.outputs.superseded == 'false'
-        run: |
-          set -euo pipefail
-          zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          scripts/ci/release/fetch-pinned.sh "$zig_url" "$ZIG_X86_64_LINUX_SHA256" zig.tar.xz
-          tar -xf zig.tar.xz
-          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
-
-          cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
 
       - name: Receive the local runtime
         if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
@@ -833,14 +824,7 @@ jobs:
       - name: Build the cw
         id: build
         if: steps.superseded.outputs.superseded == 'false'
-        run: |
-          set -euo pipefail
-          CW_RELEASE_BUILD_CMD='cargo zigbuild' CW_RELEASE_TARGETS='x86_64-unknown-linux-musl' \
-            scripts/ci/release/package-cw-release.sh "$DRY_RUN_VERSION"
-          mkdir -m 0700 .cw-linux
-          cp "dist/cw-release/cw-$DRY_RUN_VERSION-x86_64-unknown-linux-musl" .cw-linux/
-          printf 'cw_sha256=%s\n' \
-            "$(sha256sum ".cw-linux/cw-$DRY_RUN_VERSION-x86_64-unknown-linux-musl" | cut -c1-64)" >> "$GITHUB_OUTPUT"
+        run: scripts/ci/release/build-cw-linux.sh . "$DRY_RUN_VERSION" x86_64-unknown-linux-musl .cw-linux
 
       - name: Hand the cw to the assembly
         if: steps.superseded.outputs.superseded == 'false'
@@ -884,12 +868,22 @@ jobs:
   build-linux-gnu:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # One Linux cw from the packed runtime, beside the macOS pair and the
-    # other Linux cw, as a release builds it.
+    # other Linux cw, as a release builds it: on the trusted BuildKit builder
+    # (#3119). OIDC is on for one login, the builder's client certificate;
+    # build-cw-linux.sh drops the ID-token request credentials once it is
+    # done and before anything compiles.
     name: Build the Linux arm64 cw
     needs: [protected-main, pack-runtime]
     if: needs.pack-runtime.outputs.superseded == 'false'
     runs-on: ci-protected
+    enable-openid-connect: true
     timeout-minutes: 60
+    env:
+      OPENBAO_ROLE: codewire-source-release-dry-run-build
+      OPENBAO_AUDIENCE: openbao-codewire-source-release-dry-run-build
+      # The owner's recovery (trusted-buildkit.sh): build in the job when the
+      # repository variable CODEWIRE_IN_JOB_BUILD_SHA names this run's commit.
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
     outputs:
       superseded: ${{ steps.superseded.outputs.superseded }}
       cw_sha256: ${{ steps.build.outputs.cw_sha256 }}
@@ -906,32 +900,6 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
         run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
-
-      - name: Verify sealed Rust toolchain and release targets
-        if: steps.superseded.outputs.superseded == 'false'
-        run: scripts/ci/setup/assert-ci-runner-image.sh
-
-      - name: Install protoc (pinned)
-        if: steps.superseded.outputs.superseded == 'false'
-        run: |
-          set -euo pipefail
-          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
-            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
-          mkdir -p "$HOME/.proto-tools/protoc"
-          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
-          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
-          "$HOME/.proto-tools/protoc/bin/protoc" --version
-
-      - name: Set up cross-build tools
-        if: steps.superseded.outputs.superseded == 'false'
-        run: |
-          set -euo pipefail
-          zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          scripts/ci/release/fetch-pinned.sh "$zig_url" "$ZIG_X86_64_LINUX_SHA256" zig.tar.xz
-          tar -xf zig.tar.xz
-          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
-
-          cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
 
       - name: Receive the local runtime
         if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
@@ -953,14 +921,7 @@ jobs:
       - name: Build the cw
         id: build
         if: steps.superseded.outputs.superseded == 'false'
-        run: |
-          set -euo pipefail
-          CW_RELEASE_BUILD_CMD='cargo zigbuild' CW_RELEASE_TARGETS='aarch64-unknown-linux-gnu' \
-            scripts/ci/release/package-cw-release.sh "$DRY_RUN_VERSION"
-          mkdir -m 0700 .cw-linux
-          cp "dist/cw-release/cw-$DRY_RUN_VERSION-aarch64-unknown-linux-gnu" .cw-linux/
-          printf 'cw_sha256=%s\n' \
-            "$(sha256sum ".cw-linux/cw-$DRY_RUN_VERSION-aarch64-unknown-linux-gnu" | cut -c1-64)" >> "$GITHUB_OUTPUT"
+        run: scripts/ci/release/build-cw-linux.sh . "$DRY_RUN_VERSION" aarch64-unknown-linux-gnu .cw-linux
 
       - name: Hand the cw to the assembly
         if: steps.superseded.outputs.superseded == 'false'

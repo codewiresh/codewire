@@ -157,11 +157,14 @@ else:
     environment['PATH'] = saved_path
 
     # These fixture pins must move atomically with the existing workflow pins.
-    for workflow in ('.gitea/workflows/ci.yaml', '.gitea/workflows/cli-release.yaml',
-                     '.gitea/workflows/cw-release-dry-run.yaml'):
+    # The release Linux builds take theirs from local-runtime-sources.json
+    # (build-cw-linux.sh, #3119), so their workflows carry none.
+    for workflow in ('.gitea/workflows/ci.yaml',):
         content = (source / workflow).read_text()
         assert content.count('  ZIG_VERSION: 0.15.2\n') == 1, workflow
         assert content.count('  CARGO_ZIGBUILD_VERSION: 0.23.0\n') == 1, workflow
+    for workflow in ('.gitea/workflows/cli-release.yaml', '.gitea/workflows/cw-release-dry-run.yaml'):
+        assert 'ZIG_VERSION' not in (source / workflow).read_text(), workflow
     ci = (source / '.gitea/workflows/ci.yaml').read_text()
     transport = ci.split('\n  rust-transport:\n', 1)[1].split('\n  database:\n', 1)[0]
     assert 'CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home' in transport
