@@ -1160,7 +1160,8 @@ impl Supervisor {
 
     /// Run `name`'s pending operations under `lease`, which its caller holds,
     /// in a task of their own, and hand the lease back: a request dropped
-    /// meanwhile cuts no operation short (#2978).
+    /// meanwhile cuts no operation short (#2978). A fatal error stops the
+    /// supervisor here too, not only in the request's answer (#3143).
     async fn drain_under(
         &self,
         lease: tokio::sync::OwnedMutexGuard<()>,
@@ -1168,7 +1169,12 @@ impl Supervisor {
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, SupervisorError> {
         let name = name.to_owned();
         self.detached(|supervisor| async move {
-            supervisor.drain_held(&name).await?;
+            if let Err(error) = supervisor.drain_held(&name).await {
+                if fatal_drain_error(&error) {
+                    supervisor.halt();
+                }
+                return Err(error);
+            }
             Ok(lease)
         })
         .await
@@ -1197,10 +1203,7 @@ impl Supervisor {
     /// selections so far, so its drain runs it as new work rather than as a
     /// recovery.
     fn admit(&self, operation: &OperationRecord) {
-        let mut core = self.core();
-        let selections = core.selections;
-        core.admitted_here
-            .insert(operation.operation_id, selections);
+        self.core().admit(operation);
     }
 
     /// Names with pending lifecycle work, and those holding environments with
@@ -1382,6 +1385,13 @@ impl Supervisor {
 }
 
 impl SupervisorCore {
+    /// As [`Supervisor::admit`], within a section of the lock its caller
+    /// already holds.
+    fn admit(&mut self, operation: &OperationRecord) {
+        self.admitted_here
+            .insert(operation.operation_id, self.selections);
+    }
+
     /// Cache `name`'s newest pull. Besides it, only names that hold an
     /// environment or await a create keep theirs: a failed create's layers
     /// stay for its retry until another name pulls, so the cache never
@@ -2975,6 +2985,19 @@ impl SupervisorCore {
     }
 }
 
+/// Whether a drain's error stops the supervisor, as an operation error always
+/// has (#3143). A recovery waiting for the credential authority stops only its
+/// name's drain until a later request retries it, and a retiring or stopping
+/// supervisor is already ending.
+fn fatal_drain_error(error: &SupervisorError) -> bool {
+    !matches!(
+        error,
+        SupervisorError::CredentialAuthorityUnavailable
+            | SupervisorError::Retiring
+            | SupervisorError::Store(SupervisorStoreError::Stopping)
+    )
+}
+
 /// Whether a create that commits its record selects itself (#2978). A
 /// recovered create, with no admission here, always does, as before; one an
 /// RPC here admitted does only if no select came since, so a `cw select`
@@ -3693,6 +3716,18 @@ impl SupervisorCore {
         runner_error_code: Option<&str>,
     ) -> Result<(), SupervisorError> {
         let environment = self.environment(name)?;
+        // An operation of its own that boots the environment owns its state
+        // until it ends: the runner it has just started reports `stopped`
+        // until the VM boots, which must not read as stopped meanwhile
+        // (#3143). The operation's end, or its failure, records the outcome.
+        let state = if environment.state == StoredEnvironmentState::Starting
+            && state == StoredEnvironmentState::Stopped
+            && self.store.has_pending_lifecycle_operation(environment.id)?
+        {
+            StoredEnvironmentState::Starting
+        } else {
+            state
+        };
         if environment.state == state
             && environment.generation == generation
             && (!clear_runner || environment.runner.is_none())
@@ -5449,11 +5484,10 @@ impl SupervisorRpc {
         let supervisor = Arc::clone(&self.supervisor);
         let name = name.to_owned();
         drop(tokio::spawn(async move {
-            match supervisor.drain(&name).await {
-                Ok(())
-                | Err(SupervisorError::CredentialAuthorityUnavailable)
-                | Err(SupervisorError::Retiring) => {}
-                Err(_) => supervisor.halt(),
+            if let Err(error) = supervisor.drain(&name).await
+                && fatal_drain_error(&error)
+            {
+                supervisor.halt();
             }
         }));
     }
@@ -5540,14 +5574,14 @@ impl LocalSupervisorService for SupervisorRpc {
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
             .map_err(Status::from)?;
-        let operation = match existing {
+        let (operation, admitted) = match existing {
             Some(operation) => {
                 let (recorded, _) =
                     create_request_from_operation(&operation).map_err(Status::from)?;
                 if recorded != request {
                     return Err(Status::aborted("local lifecycle request ID collision"));
                 }
-                operation
+                (operation, false)
             }
             None => {
                 // A new create for a taken name fails here, before anything
@@ -5588,15 +5622,25 @@ impl LocalSupervisorService for SupervisorRpc {
                 };
                 let payload =
                     create_operation_payload(&request, &workspace_plan).map_err(Status::from)?;
-                let operation = begin_create_operation(
-                    &self.supervisor.core().store,
-                    request_id,
-                    environment_id,
-                    &payload,
-                )
-                .map_err(Status::from)?;
+                // One section of the lock journals and admits it (#3143): no
+                // select falls between them, and a retire either sees this
+                // create pending or is seen here. Any other admission is of a
+                // recorded name, whose lease a retire holds.
+                let operation = {
+                    let mut core = self.supervisor.core();
+                    if core.retiring {
+                        return Err(Status::from(SupervisorError::Retiring));
+                    }
+                    let operation =
+                        begin_create_operation(&core.store, request_id, environment_id, &payload)
+                            .map_err(Status::from)?;
+                    if !operation.phase.terminal() {
+                        core.admit(&operation);
+                    }
+                    operation
+                };
                 drop(writer);
-                operation
+                (operation, true)
             }
         };
         let payload_matches = create_request_from_operation(&operation)
@@ -5608,7 +5652,7 @@ impl LocalSupervisorService for SupervisorRpc {
             return Err(Status::aborted("local lifecycle request ID collision"));
         }
         let response = operation_proto(&operation)?;
-        if !operation.phase.terminal() {
+        if !admitted && !operation.phase.terminal() {
             self.supervisor.admit(&operation);
         }
         drop(lease);
@@ -19315,6 +19359,148 @@ mod concurrency_tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             ["creating", "dev", "new"]
+        );
+    }
+
+    /// While an operation of its own boots the environment, a reconcile
+    /// that finds its fresh runner `stopped` keeps it `starting`; with no
+    /// such operation the runner's state stands (#3143).
+    #[test]
+    fn a_booting_environment_reads_as_starting_until_its_operation_ends() {
+        let mut environment = project_environment();
+        environment.state = StoredEnvironmentState::Starting;
+        let generation = environment.generation;
+        let environment_id = environment.id;
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let start = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::Start,
+                &serde_json::json!({ "name": "dev" }),
+            )
+            .unwrap();
+        core.record_reconcile_observation(
+            "dev",
+            StoredEnvironmentState::Stopped,
+            generation,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            core.environment("dev").unwrap().state,
+            StoredEnvironmentState::Starting
+        );
+        core.fail_operation(&start, "start_failed").unwrap();
+        core.record_reconcile_observation(
+            "dev",
+            StoredEnvironmentState::Stopped,
+            generation,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            core.environment("dev").unwrap().state,
+            StoredEnvironmentState::Stopped
+        );
+    }
+
+    /// A fatal error in a drain a request waits on stops the supervisor, as
+    /// one in a spawned drain does (#3143).
+    #[tokio::test]
+    async fn a_fatal_error_in_a_request_drain_stops_the_supervisor() {
+        let (_parent, service) = two_environments();
+        let shutdown = service.supervisor.shutdown.subscribe();
+        {
+            // "other" mid-update with no operation of its own: its drain
+            // ends on the staging check, a fatal error.
+            let mut core = service.supervisor.core();
+            let other = core.state.environments.get_mut("other").unwrap();
+            let generation = super::tests::test_workspace_generation_with_artifact(
+                other.project_spec_json.as_deref().unwrap(),
+                other.project_spec_sha256.as_deref().unwrap(),
+                "a".repeat(64).as_str(),
+                b"other",
+            );
+            other.active_workspace_generation = Some(generation.clone());
+            other.staging_workspace_generation = Some(generation);
+        }
+        service
+            .select_environment(Request::new(selector(&service, "other")))
+            .await
+            .unwrap_err();
+        assert!(service.supervisor.core().store.stopping());
+        assert!(*shutdown.borrow());
+    }
+
+    /// A create that passed every earlier check, but reaches its journal
+    /// write after a retire began, is refused with nothing journaled
+    /// (#3143).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_create_reaching_its_journal_after_a_retire_began_is_refused() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let service = test_supervisor_service(core);
+        service
+            .hold_drains
+            .store(true, std::sync::atomic::Ordering::Release);
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("README.md"), b"new").unwrap();
+        let environment = project_environment();
+        let request_id = Uuid::new_v4();
+        let request = v1::CreateEnvironmentRequest {
+            implicit_vm_only: Vec::new(),
+            name: "new".to_owned(),
+            source_path: source.path().to_str().unwrap().to_owned(),
+            vcpus: u32::from(environment.vcpus),
+            memory_mib: environment.memory_mib,
+            disk_bytes: environment.disk_bytes,
+            docker_disk_bytes: 0,
+            request_id: request_id.to_string(),
+            project_spec_json: environment.project_spec_json.unwrap(),
+            project_spec_sha256: environment.project_spec_sha256.unwrap(),
+            implicit_path_mode: "copy".to_owned(),
+            local_mounts: Vec::new(),
+            host_ports: Vec::new(),
+            mesh: None,
+            access_profile_id: String::new(),
+            access_profile_revision: 0,
+            access_profile_reference: String::new(),
+            platform_source_authority: None,
+        };
+        // A running collection holds the create at its content writer, past
+        // the request's entry check and its drain.
+        service.supervisor.core().collecting = true;
+        let create = tokio::spawn({
+            let service = service.clone();
+            async move { service.create_environment(Request::new(request)).await }
+        });
+        timeout(SETUP, async {
+            while service.supervisor.lease("new").try_lock().is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the create takes its name's lease");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        service.supervisor.core().retiring = true;
+        service.supervisor.end_collection();
+        let refused = timeout(SETUP, create)
+            .await
+            .expect("the create answers")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::Unavailable, "{refused:?}");
+        assert!(
+            service
+                .supervisor
+                .core()
+                .store
+                .operation_by_request(request_id)
+                .unwrap()
+                .is_none()
         );
     }
 
