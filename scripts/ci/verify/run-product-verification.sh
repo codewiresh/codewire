@@ -205,38 +205,85 @@ isolate_kind_fixture_environment() {
   unset CLUSTER KEEP_KIND_CLUSTER KUBECONFIG KUBE_CONTEXT RUN_DIR CARGO_CI_DIR
 }
 
-# CI runs the two parts side by side, as local merge qualification does. Part
-# one streams; part two's output follows it. Either failure fails policy core,
-# and both parts always finish and report.
+# CI runs the parts side by side, as local merge qualification does. The first
+# part streams; the others' output follows it. Any failure fails policy core,
+# and every part always finishes and reports.
 run_policy_core() {
-  local two_log pid_one pid_two status_one=0 status_two=0
-  two_log="$(mktemp)"
-  run_policy_core_two >"$two_log" 2>&1 &
-  pid_two=$!
-  run_policy_core_one &
-  pid_one=$!
-  wait "$pid_one" || status_one=$?
-  wait "$pid_two" || status_two=$?
-  printf '=== policy-core-2 (ran beside policy-core-1) ===\n'
-  cat "$two_log"
-  rm -f "$two_log"
-  if [ "$status_one" -ne 0 ] || [ "$status_two" -ne 0 ]; then
-    printf 'policy core failed: policy-core-1 exited %s, policy-core-2 exited %s\n' \
-      "$status_one" "$status_two" >&2
+  local part index first='' log status=0 failed=''
+  local -a parts=() logs=() pids=()
+  while IFS= read -r part; do
+    [ "$part" = policy-shell ] || parts+=("$part")
+  done < <(policy_parts)
+  for part in "${parts[@]}"; do
+    if [ -z "$first" ]; then
+      first="$part"
+      run_policy_part "$part" &
+      logs+=('')
+    else
+      log="$(mktemp)"
+      run_policy_part "$part" >"$log" 2>&1 &
+      logs+=("$log")
+    fi
+    pids+=("$!")
+  done
+  for index in "${!parts[@]}"; do
+    status=0
+    wait "${pids[$index]}" || status=$?
+    if [ -n "${logs[$index]}" ]; then
+      printf '=== %s (ran beside %s) ===\n' "${parts[$index]}" "$first"
+      cat "${logs[$index]}"
+      rm -f "${logs[$index]}"
+    fi
+    [ "$status" -eq 0 ] || failed="${failed} ${parts[$index]} exited ${status};"
+  done
+  if [ -n "$failed" ]; then
+    printf 'policy core failed:%s\n' "$failed" >&2
     return 1
   fi
 }
 
-# Policy core runs as two independent parts so local merge qualification and
-# CI can run them side by side; the policy family runs them in order. Every
-# step belongs to exactly one part and keeps no state outside its own
-# scratch directory.
-run_policy_core_one() {
+# Repository rules run on every pull request and every push to main: the
+# private-content tree scan, every repo_checks rule and the guards that read
+# product source (#3119 A6). Every step is independent and keeps no state
+# outside its own scratch directory; run_side_by_side runs them side by side.
+run_repo_rules() {
   (
   isolate_kind_fixture_environment
-  # Every step is independent; run_side_by_side runs them side by side.
   run_side_by_side <<'STEPS'
   run_verification_shell_syntax
+  scripts/ci/tests/test-go-source-ownership.sh
+  scripts/ci/verify/check-rust-toolchain.sh
+  scripts/ci/tests/test-rust-owned-fixtures.sh
+  python3 -B scripts/ci/tests/test-runtime-profile.py
+  scripts/ci/tests/test-admin-proto-boundary.sh
+  scripts/ci/tests/test-openbao-only-secret-authority.sh
+  python3 scripts/checks/repo_checks.py license-map
+  python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
+  python3 scripts/checks/repo_checks.py design-tokens --self-test
+  python3 scripts/checks/repo_checks.py identity-free-workspace --self-test
+  python3 scripts/checks/repo_checks.py workspace-image-pin --self-test
+  python3 scripts/checks/repo_checks.py workspace-image-pin
+  python3 scripts/checks/repo_checks.py webpki-roots-floor --self-test
+  python3 scripts/checks/repo_checks.py webpki-roots-floor
+  scripts/ci/release/check-mirror-content.sh --tree
+  python3 scripts/checks/repo_checks.py mcp-settings --self-test
+  python3 scripts/checks/repo_checks.py epoch-material-cache-owner --self-test
+  python3 scripts/checks/repo_checks.py rust-validation-source
+  python3 scripts/checks/repo_checks.py retired-reference-source
+  python3 scripts/checks/repo_checks.py public-address-literals --self-test
+  python3 scripts/checks/repo_checks.py go-source-classification
+  python3 scripts/checks/repo_checks.py ses-email-isolation
+  python3 scripts/checks/repo_checks.py turnstile-access-projection
+STEPS
+  )
+}
+
+# The self-tests of the CI, developer and workflow scripts. They run when those
+# scripts change: the selector's ci_script_tests (#3119 A6).
+run_ci_script_tests() {
+  (
+  isolate_kind_fixture_environment
+  run_side_by_side <<'STEPS'
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-run-side-by-side.sh
   scripts/ci/tests/test-warm-rust-cache.sh
@@ -245,8 +292,6 @@ run_policy_core_one() {
   python3 -B scripts/ci/tests/test-last-scheduled-run.py
   scripts/ci/tests/test-service-ssh-image-verifier.sh
   scripts/ci/tests/test-shellcheck-policy-domain.sh
-  scripts/ci/tests/test-go-source-ownership.sh
-  scripts/ci/tests/test-rust-owned-fixtures.sh
   scripts/ci/tests/test-require-verification-results.sh
   scripts/ci/tests/test-verify-tested-tree-receipt.sh
   python3 -I -B scripts/ci/tests/test-ci-merge-check.py
@@ -255,9 +300,7 @@ run_policy_core_one() {
   scripts/ci/tests/test-darwin-cross-check.sh
   scripts/ci/tests/test-package-codewire-desktop.sh
   scripts/ci/tests/test-rust-toolchain.sh
-  python3 -B scripts/ci/tests/test-runtime-profile.py
   scripts/ci/tests/test-cargo-cache-capacity.sh
-  scripts/ci/tests/test-admin-proto-boundary.sh
   scripts/ci/tests/test-ci-tool-downloads.sh
   python3 -B scripts/ci/tests/test-linux-vmm-kernel.py
   scripts/ci/tests/test-build-local-image.sh
@@ -270,7 +313,6 @@ run_policy_core_one() {
   python3 -I -B scripts/ci/tests/test-cw-image-consumer.py
   scripts/ci/tests/test-build-kind-smokes.sh
   python3 -B scripts/ci/tests/test-kind-build-artifacts.py
-  scripts/ci/tests/test-openbao-only-secret-authority.sh
   scripts/ci/tests/test-preflight-openbao-native-secrets.sh
   scripts/ci/tests/test-sync-local-secrets.sh
   scripts/ci/tests/test-kind-runtime-images.sh
@@ -290,30 +332,6 @@ run_policy_core_one() {
   python3 scripts/dev/test-macos-git-tool.py
   python3 scripts/dev/test-macos-local-runtime.py
   python3 scripts/dev/test-linux-local-runtime.py
-  python3 scripts/checks/repo_checks.py license-map
-  python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
-  python3 scripts/checks/repo_checks.py design-tokens --self-test
-  python3 scripts/checks/repo_checks.py identity-free-workspace --self-test
-  python3 scripts/checks/repo_checks.py workspace-image-pin --self-test
-  python3 scripts/checks/repo_checks.py workspace-image-pin
-  python3 scripts/checks/repo_checks.py webpki-roots-floor --self-test
-  python3 scripts/checks/repo_checks.py webpki-roots-floor
-  scripts/ci/release/check-mirror-content.sh --tree
-  python3 scripts/checks/repo_checks.py mcp-settings --self-test
-  python3 scripts/checks/repo_checks.py epoch-material-cache-owner --self-test
-  python3 scripts/checks/repo_checks.py rust-validation-source
-  python3 scripts/checks/repo_checks.py retired-reference-source
-  python3 scripts/checks/repo_checks.py public-address-literals --self-test
-  python3 scripts/checks/repo_checks.py go-source-classification
-STEPS
-  )
-}
-
-# The two longest steps, beside part one.
-run_policy_core_two() {
-  (
-  isolate_kind_fixture_environment
-  run_side_by_side <<'STEPS'
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
   python3 scripts/ci/tests/test-repo-checks-modules.py
 STEPS
@@ -326,18 +344,22 @@ STEPS
 policy_parts() {
   # A legacy trusted selector does not know when omission is authoritative, so
   # it must retain the historical full ShellCheck behavior. Only a trusted
-  # selector that emits policy_shell_omittable may omit the shell domain.
+  # selector that emits policy_shell_omittable may omit the shell domain. The
+  # CI-script tests follow the same rule with ci_script_tests_omittable.
   if selected policy_shell || ! selected policy_shell_omittable; then
     printf 'policy-shell\n'
   fi
-  printf 'policy-core-1\npolicy-core-2\n'
+  printf 'policy-repo-rules\n'
+  if selected ci_script_tests || ! selected ci_script_tests_omittable; then
+    printf 'policy-ci-script-tests\n'
+  fi
 }
 
 run_policy_part() {
   case "$1" in
     policy-shell) run_shell_policy ;;
-    policy-core-1) run_policy_core_one ;;
-    policy-core-2) run_policy_core_two ;;
+    policy-repo-rules) run_repo_rules ;;
+    policy-ci-script-tests) run_ci_script_tests ;;
     *) return 2 ;;
   esac
 }
@@ -1109,7 +1131,7 @@ esac
 case "$FAMILY" in
   policy) run_policy ;;
   policy-core) run_policy_core ;;
-  policy-core-1|policy-core-2) run_policy_part "$FAMILY" ;;
+  policy-repo-rules|policy-ci-script-tests) run_policy_part "$FAMILY" ;;
   policy-parts) policy_parts ;;
   policy-shell) run_shell_policy ;;
   contracts) run_contracts ;;
@@ -1134,7 +1156,7 @@ case "$FAMILY" in
   deploy) run_deploy ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-core-1|policy-core-2|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-repo-rules|policy-ci-script-tests|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|release|deploy|security" >&2
     exit 2
     ;;
 esac

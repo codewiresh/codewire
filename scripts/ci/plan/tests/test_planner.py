@@ -1032,8 +1032,9 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(capabilities_after["selector_version"], "v3")
         self.assertEqual(
             capabilities_after["selection"],
-            "|valid:v3|deploy|go_consumer_interop|go_support|policy|"
-            "policy_shell_omittable|release|runtime_confidential|complete|",
+            "|valid:v3|ci_script_tests|ci_script_tests_omittable|deploy|"
+            "go_consumer_interop|go_support|policy|policy_shell_omittable|release|"
+            "runtime_confidential|complete|",
         )
 
     def test_broad_runtime_crate_contexts_remain_broad(self) -> None:

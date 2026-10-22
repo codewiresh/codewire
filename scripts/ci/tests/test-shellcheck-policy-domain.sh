@@ -25,9 +25,11 @@ for policy_function in policy_parts run_policy_part run_policy; do
 done > "$policy_dispatch"
 grep -Fq 'selected policy_shell || ! selected policy_shell_omittable' \
   "$policy_dispatch" || fail 'policy runner omits the legacy-safe routing guard'
+grep -Fq 'selected ci_script_tests || ! selected ci_script_tests_omittable' \
+  "$policy_dispatch" || fail 'policy runner omits the legacy-safe CI-script test guard'
 grep -Fq 'policy-core) run_policy_core' "$RUNNER" \
   || fail 'hosted policy core has no independent entrypoint'
-grep -Fq 'policy-core-1|policy-core-2) run_policy_part "$FAMILY"' "$RUNNER" \
+grep -Fq 'policy-repo-rules|policy-ci-script-tests) run_policy_part "$FAMILY"' "$RUNNER" \
   || fail 'policy core parts have no independent entrypoints'
 grep -Fq 'policy-parts) policy_parts' "$RUNNER" \
   || fail 'the policy part list has no entrypoint'
@@ -43,13 +45,13 @@ run_dispatch_fixture() {
       printf "shell\n"
       if [ "$POLICY_FIXTURE_FAILURE" = shell ]; then return 41; fi
     }
-    run_policy_core_one() {
-      printf "core-1\n"
-      if [ "$POLICY_FIXTURE_FAILURE" = core ]; then return 42; fi
+    run_repo_rules() {
+      printf "rules\n"
+      if [ "$POLICY_FIXTURE_FAILURE" = rules ]; then return 42; fi
     }
-    run_policy_core_two() {
-      printf "core-2\n"
-      if [ "$POLICY_FIXTURE_FAILURE" = core-2 ]; then return 43; fi
+    run_ci_script_tests() {
+      printf "ci-tests\n"
+      if [ "$POLICY_FIXTURE_FAILURE" = ci-tests ]; then return 43; fi
     }
     source "$1"
     run_policy
@@ -57,16 +59,24 @@ run_dispatch_fixture() {
 }
 
 legacy_output="$(run_dispatch_fixture '|valid:v3|policy|complete|')"
-[[ "$legacy_output" == $'shell\ncore-1\ncore-2' ]] \
-  || fail 'legacy trusted selection skipped ShellCheck'
+[[ "$legacy_output" == $'shell\nrules\nci-tests' ]] \
+  || fail 'legacy trusted selection skipped ShellCheck or the CI-script tests'
 selected_output="$(run_dispatch_fixture \
   '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|')"
-[[ "$selected_output" == $'shell\ncore-1\ncore-2' ]] \
+[[ "$selected_output" == $'shell\nrules\nci-tests' ]] \
   || fail 'selected shell policy did not execute ShellCheck'
 omitted_output="$(run_dispatch_fixture \
   '|valid:v3|policy|policy_shell_omittable|complete|')"
-[[ "$omitted_output" == $'core-1\ncore-2' ]] \
+[[ "$omitted_output" == $'rules\nci-tests' ]] \
   || fail 'authoritative shell-policy omission still executed ShellCheck'
+ci_omitted_output="$(run_dispatch_fixture \
+  '|valid:v3|ci_script_tests_omittable|policy|policy_shell_omittable|complete|')"
+[[ "$ci_omitted_output" == rules ]] \
+  || fail 'authoritative CI-script test omission still executed the CI-script tests'
+ci_selected_output="$(run_dispatch_fixture \
+  '|valid:v3|ci_script_tests|ci_script_tests_omittable|policy|policy_shell_omittable|complete|')"
+[[ "$ci_selected_output" == $'rules\nci-tests' ]] \
+  || fail 'selected CI-script tests did not execute'
 
 # Exercise the actual shared dispatcher in a fresh shell so a failure cannot
 # be hidden by an outer conditional or followed by another policy phase.
@@ -81,32 +91,32 @@ fi
 [[ "$shell_failure_output" == shell ]] \
   || fail 'shared policy ran core after a shell failure'
 if core_failure_output="$(run_dispatch_fixture \
-  '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|' core)"; then
-  fail 'shared policy accepted a failing core phase'
+  '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|' rules)"; then
+  fail 'shared policy accepted failing repository rules'
 else
   core_failure_status=$?
 fi
 [[ "$core_failure_status" -eq 42 ]] \
-  || fail 'shared policy changed the core failure status'
-[[ "$core_failure_output" == $'shell\ncore-1' ]] \
-  || fail 'shared policy repeated a phase or ran on after the core failure'
+  || fail 'shared policy changed the repository rules failure status'
+[[ "$core_failure_output" == $'shell\nrules' ]] \
+  || fail 'shared policy repeated a phase or ran on after the repository rules failed'
 if second_core_failure_output="$(run_dispatch_fixture \
-  '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|' core-2)"; then
-  fail 'shared policy accepted a failing second core part'
+  '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|' ci-tests)"; then
+  fail 'shared policy accepted failing CI-script tests'
 else
   second_core_failure_status=$?
 fi
 [[ "$second_core_failure_status" -eq 43 \
-    && "$second_core_failure_output" == $'shell\ncore-1\ncore-2' ]] \
-  || fail 'shared policy did not preserve the second core part failure'
+    && "$second_core_failure_output" == $'shell\nrules\nci-tests' ]] \
+  || fail 'shared policy did not preserve the CI-script test failure'
 if omitted_failure_output="$(run_dispatch_fixture \
-  '|valid:v3|policy|policy_shell_omittable|complete|' core)"; then
-  fail 'shell-omitted policy accepted a failing core phase'
+  '|valid:v3|ci_script_tests_omittable|policy|policy_shell_omittable|complete|' rules)"; then
+  fail 'shell-omitted policy accepted failing repository rules'
 else
   omitted_failure_status=$?
 fi
-[[ "$omitted_failure_status" -eq 42 && "$omitted_failure_output" == core-1 ]] \
-  || fail 'shell-omitted policy did not preserve the core failure'
+[[ "$omitted_failure_status" -eq 42 && "$omitted_failure_output" == rules ]] \
+  || fail 'shell-omitted policy did not preserve the repository rules failure'
 
 # A pull request names its base, so ShellCheck covers only its changed
 # scripts; without a base every script is checked. Run the runner's own

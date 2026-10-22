@@ -462,6 +462,8 @@ jobs:
 
       - name: Run Policy
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|policy|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-product-verification.sh policy-core
 
   standard:

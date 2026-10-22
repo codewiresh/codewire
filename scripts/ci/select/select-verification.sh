@@ -19,8 +19,8 @@ Set VERIFICATION_REQUEST for product workflow_dispatch to a family token or
 all.
 
 VERIFICATION_PR_SCOPE=quick (hosted pull-request CI only) reduces a classified
-pull request to the quick families: policy, its shell domain, and compiling
-every Rust target, plus Kind when opted in. The ci-full label keeps the
+pull request to the quick families: policy, its shell domain and CI-script
+tests, and compiling every Rust target, plus Kind when opted in. The ci-full label keeps the
 selection a push to main would make for the same paths, Kind included.
 Unset or full keeps the complete pull-request selection that local merge
 qualification runs.
@@ -218,6 +218,36 @@ js_audit_scans() {
   return 1
 }
 
+# The CI-script tests (policy-ci-script-tests) run for their own scripts,
+# workflows and hooks, and for every product file one of them reads from the
+# tree rather than from a fixture (#3119 A6). A CI-script test that starts
+# reading another product file adds it here.
+ci_script_test_input() {
+  case "$1" in
+    scripts/ci/*|scripts/dev/*|scripts/checks/*|.gitea/*|.githooks/*|\
+    scripts/runtime/dev/preflight-openbao-native-secrets.sh|\
+    Makefile|package.json|rust-toolchain.toml|.dockerignore|docker-bake.hcl|.gitleaks.toml|\
+    images/*|deployments/docker/*.Dockerfile|apps/dashboard/Dockerfile|\
+    proto/buf.gen.*.yaml|proto/README.md|docs/dev/PROTO-STYLE.md|\
+    libs/gen-go/codewire/internal/v1/internalv1connect/coordinate.connect.go|\
+    tests/contract/go.mod|tests/contract/billing/*|\
+    crates/codewire-workspace-image/src/pin.rs|\
+    crates/codewire-orchestration/src/sandbox/template/mod.rs|\
+    crates/codewire-cw-release/src/local_runtime.rs|\
+    crates/codewire-local-vmm/src/artifact.rs|crates/codewire-local-vmm/src/cw_runtime.rs|\
+    crates/codewire-local-vmm/src/darwin/mod.rs|crates/codewire-local-vmm/src/runtime_install.rs|\
+    crates/codewire-local-vmm/src/supervisor_config.rs|\
+    crates/codewire-local-vmm/src/darwin/path/*.py|\
+    crates/codewire-local-vmm/macos-vz-runner/*|\
+    crates/codewire-vmm-guest-probe/src/cw_runtime.rs|\
+    crates/codewire-vmm-guest-probe/src/cw_runtime_live.rs|\
+    crates/codewire-vmm-guest-probe/src/newc.rs)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 select_services() {
   select_token service_integration
   select_token service_idp
@@ -362,7 +392,8 @@ PY
 select_all_product() {
   local include_ios="${1:-false}" family
   for family in \
-      policy policy_shell rust go_support web docs sdk_go sdk_ts sdk_python database \
+      policy policy_shell ci_script_tests rust go_support web docs sdk_go sdk_ts \
+      sdk_python database \
       service_integration edge_kind release deploy security \
       runtime_confidential runtime_dev_smoke; do
     select_token "$family"
@@ -425,6 +456,7 @@ select_dispatch_request() {
     policy)
       select_token policy
       select_token policy_shell
+      select_token ci_script_tests
       ;;
     web|docs|sdk_go|sdk_ts|sdk_python|database|release|deploy|ios)
       select_token "$request"
@@ -531,6 +563,14 @@ if [ "$event_selected" = false ]; then
         select_token policy_shell
         ;;
     esac
+
+    # The CI-script tests are their own policy part, which the trusted
+    # selector owns as it owns the shell domain (#3119 A6). They run when a
+    # script, workflow or hook changes, or a product file one of them reads
+    # from the tree. Deleted inputs stay selected by their path.
+    if ci_script_test_input "$path"; then
+      select_token ci_script_tests
+    fi
 
     # The JavaScript supply-chain audit is grep-only. Run it for any path it
     # scans, in addition to that path's own classification.
@@ -2182,8 +2222,10 @@ fi
 # This marker means absence of policy_shell is an authoritative decision from
 # a selector that knows the shell-policy domain. Older trusted selectors omit
 # it, so candidate runners must keep executing ShellCheck for legacy output.
+# ci_script_tests_omittable says the same of the CI-script tests.
 if token_selected policy; then
   select_token policy_shell_omittable
+  select_token ci_script_tests_omittable
 fi
 
 # Kind takes over an hour. A pull request runs it only with the ci-full
@@ -2246,16 +2288,16 @@ fi
 
 # Hosted pull-request CI runs only the quick families by default: every pull
 # request already ran its complete selection in local merge qualification, and
-# a push to main runs it again after merge. Policy, its shell domain and
-# compiling every Rust target stay; Kind stays when opted in. pr_quick marks
-# the reduced selection so dispatch ignores artifact facts and the run emits no
-# exact-tree receipt main could reuse. The ci-full label keeps the complete
+# a push to main runs it again after merge. Policy with its shell domain and
+# CI-script tests, and compiling every Rust target, stay; Kind stays when opted
+# in. pr_quick marks the reduced selection so dispatch ignores artifact facts
+# and the run emits no exact-tree receipt main could reuse. The ci-full label keeps the complete
 # selection. An unclassified path keeps it too: the selector cannot tell what
 # such a change affects, so it fails closed as it does everywhere else.
 if [ "$event" = pull_request ] && [ "$pr_scope" = quick ] \
     && [ "$pr_ci_full" != true ] && [ "$classification" != unclassified ]; then
   declare -A quick=([policy]=1 [policy_shell]=1 [policy_shell_omittable]=1
-    [edge_kind]=1 [kind]=1)
+    [ci_script_tests]=1 [ci_script_tests_omittable]=1 [edge_kind]=1 [kind]=1)
   # The fast-compile token set: the selections that run the rust-compile job
   # on main (see emit-verification-matrices.sh).
   for token in rust rust_curated_locks transport transport_derp_contract; do

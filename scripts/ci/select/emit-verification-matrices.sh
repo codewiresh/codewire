@@ -120,7 +120,8 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   for token in "${selection_tokens[@]}"; do
     case "$token" in
       ''|valid:v3|complete|\
-      policy|policy_shell|policy_shell_omittable|pr_quick|scheduled|rust_compile|\
+      policy|policy_shell|policy_shell_omittable|ci_script_tests|ci_script_tests_omittable|\
+      pr_quick|scheduled|rust_compile|\
       contracts|contracts_proto|go_support|go_tailnet|go_consumer_interop|\
       sdk_go|sdk_ts|sdk_python|web|docs|ios|\
       deploy|release|runtime_confidential|runtime_dev_smoke|\

@@ -241,24 +241,28 @@ if [ "$1" = policy-parts ]; then
     printf 'policy-shell\n'
   fi
   [ "${PREFLIGHT_TEST_POLICY_PARTS:-}" != none ] || exit 0
-  printf 'policy-core-1\npolicy-core-2\n'
+  printf 'policy-repo-rules\n'
+  if [[ "$VERIFICATION_SELECTION" == *'|ci_script_tests|'* \
+      || "$VERIFICATION_SELECTION" != *'|ci_script_tests_omittable|'* ]]; then
+    printf 'policy-ci-script-tests\n'
+  fi
   exit 0
 fi
 printf 'product %s %s\n' "$1" "${VERIFICATION_SELECTION:?}" \
   >> "${PREFLIGHT_TEST_TOOL_LOG:?}"
-# The policy family, and its first core part in merge qualification, carry
+# The policy family, and its repository rules in merge qualification, carry
 # the policy body.
 policy_body=false
-case "$1" in policy|policy-core-1) policy_body=true ;; esac
+case "$1" in policy|policy-repo-rules) policy_body=true ;; esac
 if [ "$policy_body" = true ] && [ "${PREFLIGHT_TEST_POLICY_FAIL:-0}" = 1 ]; then
   echo 'synthetic shared policy failure' >&2
   exit 42
 fi
-if [ "$1" = policy-core-2 ] && [ "${PREFLIGHT_TEST_POLICY_TWO_FAIL:-0}" = 1 ]; then
+if [ "$1" = policy-ci-script-tests ] && [ "${PREFLIGHT_TEST_POLICY_TWO_FAIL:-0}" = 1 ]; then
   # Fail only once the first part's pass is recorded, so the rerun's reuse of
   # it does not depend on timing.
   for _ in $(seq 1 600); do
-    ! grep -qsx 'family=policy-core-1' .tmp/preflight/passed/* || break
+    ! grep -qsx 'family=policy-repo-rules' .tmp/preflight/passed/* || break
     sleep 0.1
   done
   echo 'synthetic second policy part failure' >&2
@@ -650,10 +654,11 @@ fi
 assert_contains policy_failure "$policy_failure_output" \
   'synthetic shared policy failure'
 assert_contains policy_failure "$policy_failure_output" \
-  'preflight: policy verification (core-1) FAILED'
+  'preflight: policy verification (repo-rules) FAILED'
 assert_not_contains policy_failure "$policy_failure_output" 'receipt_path='
-assert_contains policy_failure_tools "$(cat "$policy_failure_log")" 'product policy-core-1 '
-if grep '^product ' "$policy_failure_log" | grep -qv '^product policy-core-[12] '; then
+assert_contains policy_failure_tools "$(cat "$policy_failure_log")" 'product policy-repo-rules '
+if grep '^product ' "$policy_failure_log" \
+    | grep -Eqv '^product policy-(repo-rules|ci-script-tests) '; then
   fail 'a failing policy part ran another family'
 fi
 assert_not_contains policy_failure_tools "$(cat "$policy_failure_log")" 'integration '
@@ -682,10 +687,11 @@ if drift_output="$({
 fi
 assert_contains fixture_drift "$drift_output" 'fixture checksum mismatch'
 assert_contains fixture_drift "$drift_output" \
-  'preflight: policy verification (core-1) FAILED'
+  'preflight: policy verification (repo-rules) FAILED'
 assert_not_contains fixture_drift "$drift_output" 'receipt_path='
-assert_contains fixture_drift_tools "$(cat "$drift_log")" 'product policy-core-1 '
-if grep '^product ' "$drift_log" | grep -qv '^product policy-core-[12] '; then
+assert_contains fixture_drift_tools "$(cat "$drift_log")" 'product policy-repo-rules '
+if grep '^product ' "$drift_log" \
+    | grep -Eqv '^product policy-(repo-rules|ci-script-tests) '; then
   fail 'fixture drift ran another family'
 fi
 assert_not_contains fixture_drift "$drift_output" \
@@ -700,13 +706,13 @@ assert_contains fixture_drift_receipt "$drift_receipt_output" 'missing'
 
 # The failing runs above stop the other policy part, which may or may not
 # have finished and recorded its pass first. Start this case from no recorded
-# passes so both parts run here exactly once.
+# passes so its part runs here exactly once.
 rm -rf "$repo/.tmp/preflight/passed"
 normal_log="$TMP/normal-tools.log"
 normal_output="$(push_branch "$repo" normal-docs "$normal_log")"
 assert_contains normal "$normal_output" '  docs/normal.md'
 assert_contains normal "$normal_output" \
-  'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
+  'preflight selection: |valid:v3|ci_script_tests_omittable|policy|policy_shell_omittable|complete|'
 assert_contains normal "$normal_output" 'preflight merge mode: default'
 # Family output goes to its own log, not the merged console.
 assert_not_contains normal "$normal_output" \
@@ -714,15 +720,16 @@ assert_not_contains normal "$normal_output" \
 assert_contains normal "$normal_output" \
   'pre-push: exact-tree local merge receipt accepted'
 assert_contains normal_tools "$(cat "$normal_log")" 'rust_owned_fixtures'
-# A docs change needs no ShellCheck domain: exactly the two core parts run.
+# A docs change needs neither the ShellCheck domain nor the CI-script tests:
+# only the repository rules run (#3119 A6).
 assert_policy_parts_only normal_tools "$(grep -v '^environment' "$normal_log")" \
-  policy-core-1 policy-core-2
-assert_contains normal "$normal_output" 'preflight lane policy-core-1: policy-core-1'
-assert_contains normal "$normal_output" 'preflight lane policy-core-2: policy-core-2'
+  policy-repo-rules
+assert_contains normal "$normal_output" 'preflight lane policy-repo-rules: policy-repo-rules'
+assert_not_contains normal "$normal_output" 'preflight lane policy-ci-script-tests'
 # Each family keeps its own log.
 normal_family_log="$(sed -n 's/^preflight family logs: //p' <<<"$normal_output")"
-[ -f "$normal_family_log/policy-core-2.log" ] || fail 'the second policy part kept no log'
-assert_contains normal_family_log "$(cat "$normal_family_log/policy-core-1.log")" \
+[ ! -e "$normal_family_log/policy-ci-script-tests.log" ] || fail 'an unselected policy part kept a log'
+assert_contains normal_family_log "$(cat "$normal_family_log/policy-repo-rules.log")" \
   'dashboard image network probe contract: OK'
 # The same exact tree reuses its passes and still records an honest receipt.
 normal_rerun="$({
@@ -731,13 +738,11 @@ normal_rerun="$({
     scripts/dev/preflight.sh --for-merge --emit-receipt
 } 2>&1)"
 assert_contains normal_rerun "$normal_rerun" \
-  '==> policy verification (core-1): reused the exact-tree pass'
-assert_contains normal_rerun "$normal_rerun" \
-  '==> policy verification (core-2): reused the exact-tree pass'
-assert_contains normal_rerun "$normal_rerun" '(ran: none; reused: policy-core-1 policy-core-2)'
-[ "$(grep -c '^product policy-core-1 ' "$normal_log")" -eq 1 ] ||
+  '==> policy verification (repo-rules): reused the exact-tree pass'
+assert_contains normal_rerun "$normal_rerun" '(ran: none; reused: policy-repo-rules)'
+[ "$(grep -c '^product policy-repo-rules ' "$normal_log")" -eq 1 ] ||
   fail 'an exact-tree rerun repeated a passed family'
-grep -Fxq 'reused=policy-core-1,policy-core-2' <<<"$(
+grep -Fxq 'reused=policy-repo-rules' <<<"$(
   cd "$repo" && scripts/ci/receipts/local-prepush-receipt.py verify --accept-scope merge
 )" || fail 'the rerun receipt does not record its reuse'
 # A different toolchain never matches.
@@ -747,7 +752,7 @@ normal_toolchain="$({
     scripts/dev/preflight.sh --for-merge --emit-receipt
 } 2>&1)"
 assert_not_contains normal_toolchain "$normal_toolchain" 'reused the exact-tree pass'
-[ "$(grep -c '^product policy-core-1 ' "$normal_log")" -eq 2 ] ||
+[ "$(grep -c '^product policy-repo-rules ' "$normal_log")" -eq 2 ] ||
   fail 'another toolchain reused a pass'
 # A tampered pass is not evidence.
 for marker in "$repo"/.tmp/preflight/passed/*; do
@@ -760,7 +765,7 @@ normal_tampered="$({
     scripts/dev/preflight.sh --for-merge --emit-receipt
 } 2>&1)"
 assert_not_contains normal_tampered "$normal_tampered" 'reused the exact-tree pass'
-[ "$(grep -c '^product policy-core-1 ' "$normal_log")" -eq 3 ] ||
+[ "$(grep -c '^product policy-repo-rules ' "$normal_log")" -eq 3 ] ||
   fail 'a tampered pass was reused'
 # A canonical base that moved without changing this tree's change set keeps
 # the same selection, so the passes still apply; only contracts, which reads
@@ -778,7 +783,7 @@ normal_base="$({
     scripts/dev/preflight.sh --for-merge --emit-receipt
 } 2>&1)"
 git -C "$repo" update-ref refs/remotes/origin/main "$original_base"
-assert_contains normal_base "$normal_base" '==> policy verification (core-1): reused the exact-tree pass'
+assert_contains normal_base "$normal_base" '==> policy verification (repo-rules): reused the exact-tree pass'
 git -C "$repo" switch -q main
 
 git -C "$repo" switch -q -c ci-owned main
@@ -972,16 +977,18 @@ linked_docs_log="$TMP/linked-docs-tools.log"
 linked_docs_output="$(push_branch "$linked_docs" linked-docs "$linked_docs_log")"
 assert_contains linked_docs "$linked_docs_output" '  docs/linked.md'
 assert_contains linked_docs "$linked_docs_output" \
-  'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
+  'preflight selection: |valid:v3|ci_script_tests_omittable|policy|policy_shell_omittable|complete|'
 assert_policy_parts_only linked_docs_tools "$(grep -v '^environment' "$linked_docs_log")" \
-  policy-core-1 policy-core-2
+  policy-repo-rules
 
-# Each policy part is its own family: a failure in the second part leaves no
-# receipt, and the rerun reuses the first part's pass and repeats only the
-# part that failed.
+# Each policy part is its own family: a failure in the CI-script tests leaves
+# no receipt, and the rerun reuses the repository rules' pass and repeats only
+# the part that failed. A docs page one of those tests reads selects both
+# parts and nothing else.
 linked_parts="$TMP/linked-parts"
 git -C "$repo" worktree add -q -b linked-parts "$linked_parts" main
-printf 'linked policy parts\n' > "$linked_parts/docs/parts.md"
+mkdir -p "$linked_parts/docs/dev"
+printf 'linked policy parts\n' > "$linked_parts/docs/dev/PROTO-STYLE.md"
 commit_all "$linked_parts" 'docs: linked policy parts fixture'
 parts_log="$TMP/parts-tools.log"
 if parts_failure_output="$({
@@ -994,9 +1001,9 @@ if parts_failure_output="$({
 fi
 assert_contains parts_failure "$parts_failure_output" 'synthetic second policy part failure'
 assert_contains parts_failure "$parts_failure_output" \
-  'preflight: policy verification (core-2) FAILED'
+  'preflight: policy verification (ci-script-tests) FAILED'
 assert_contains parts_failure "$parts_failure_output" \
-  '==> policy verification (core-1): passed'
+  '==> policy verification (repo-rules): passed'
 assert_not_contains parts_failure "$parts_failure_output" 'receipt_path='
 if parts_failure_receipt="$({
   cd "$linked_parts"
@@ -1007,11 +1014,11 @@ fi
 assert_contains parts_failure_receipt "$parts_failure_receipt" 'missing'
 parts_output="$(push_branch "$linked_parts" linked-parts "$parts_log")"
 assert_contains linked_parts "$parts_output" \
-  '==> policy verification (core-1): reused the exact-tree pass'
-assert_contains linked_parts "$parts_output" '(ran: policy-core-2; reused: policy-core-1)'
-[ "$(grep -c '^product policy-core-1 ' "$parts_log")" -eq 1 ] ||
+  '==> policy verification (repo-rules): reused the exact-tree pass'
+assert_contains linked_parts "$parts_output" '(ran: policy-ci-script-tests; reused: policy-repo-rules)'
+[ "$(grep -c '^product policy-repo-rules ' "$parts_log")" -eq 1 ] ||
   fail 'the rerun repeated the policy part that had passed'
-[ "$(grep -c '^product policy-core-2 ' "$parts_log")" -eq 2 ] ||
+[ "$(grep -c '^product policy-ci-script-tests ' "$parts_log")" -eq 2 ] ||
   fail 'the rerun did not repeat the policy part that had failed'
 # The product runner owns the part list; an empty list qualifies nothing.
 git -C "$linked_parts" commit -q --allow-empty -m 'test: empty policy part list fixture'
@@ -1124,8 +1131,8 @@ assert_contains source_policy_failure "$source_failure_output" \
 assert_contains source_policy_failure "$source_failure_output" \
   'synthetic shared policy failure'
 assert_contains source_policy_failure "$source_failure_output" \
-  'preflight: policy verification (core-1) FAILED'
-assert_contains source_policy_failure_tools "$(cat "$source_failure_log")" 'product policy-core-1 '
+  'preflight: policy verification (repo-rules) FAILED'
+assert_contains source_policy_failure_tools "$(cat "$source_failure_log")" 'product policy-repo-rules '
 assert_not_contains source_policy_failure "$source_failure_output" 'receipt_path='
 if source_failure_receipt_output="$({
   cd "$linked_source"
@@ -1165,7 +1172,7 @@ source_output="$(push_branch "$linked_source" linked-source "$source_log")"
 assert_contains linked_source "$source_output" \
   '  crates/codewire-cli/src/worktree_fixture.rs'
 assert_contains linked_source "$source_output" \
-  'preflight selection: |valid:v3|policy|policy_shell_omittable|rust|rust_pkg_codewire_cli|complete|'
+  'preflight selection: |valid:v3|ci_script_tests_omittable|policy|policy_shell_omittable|rust|rust_pkg_codewire_cli|complete|'
 assert_contains linked_source "$source_output" \
   '==> every Rust target compiles: reused the exact-tree pass'
 assert_contains linked_source "$source_output" '==> Rust verification: passed'
@@ -1185,7 +1192,7 @@ workflow_output="$(push_branch "$linked_workflow" linked-workflow "$workflow_log
 assert_contains linked_workflow "$workflow_output" \
   '  .gitea/workflows/ci.yaml'
 assert_contains linked_workflow "$workflow_output" \
-  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|rust_curated_locks|security|security_js|complete|'
+  'preflight selection: |valid:v3|ci_script_tests|ci_script_tests_omittable|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|rust_curated_locks|security|security_js|complete|'
 assert_contains workflow_tools "$(cat "$workflow_log")" \
   'product rust-curated-locks '
 assert_contains workflow_tools "$(cat "$workflow_log")" \
@@ -1198,7 +1205,7 @@ workflow_order="$(grep -E '^product (runtime-dev-smoke|policy-[a-z0-9-]+|rust-co
 [[ "$workflow_order" == 'runtime-dev-smoke '* ]] \
   || fail "the JavaScript lane overlapped policy or compile: $workflow_order"
 # A changed workflow selects the ShellCheck domain: it is its own policy lane.
-for part in policy-shell policy-core-1 policy-core-2; do
+for part in policy-shell policy-repo-rules policy-ci-script-tests; do
   [ "$(grep -c "^product ${part} " "$workflow_log")" -eq 1 ] ||
     fail "workflow change did not run policy part ${part} exactly once"
 done
@@ -1207,7 +1214,7 @@ grep -Fq 'reused=' <<<"$(
   cd "$linked_workflow" && scripts/ci/receipts/local-prepush-receipt.py verify --accept-scope merge
 )" || fail 'workflow merge receipt is missing'
 workflow_receipt="$(cd "$linked_workflow" && scripts/ci/receipts/local-prepush-receipt.py verify --accept-scope merge)"
-for part in policy-shell policy-core-1 policy-core-2; do
+for part in policy-shell policy-repo-rules policy-ci-script-tests; do
   grep -Eq "^(ran|reused)=(.*,)?${part}(,|\$)" <<<"$workflow_receipt" ||
     fail "workflow merge receipt does not record policy part ${part}"
 done
@@ -1267,7 +1274,7 @@ proto_rerun="$({
 } 2>&1)"
 git -C "$repo" update-ref refs/remotes/origin/main "$proto_original_base"
 assert_contains linked_proto_base "$proto_rerun" '==> contract verification: started'
-assert_contains linked_proto_base "$proto_rerun" '==> policy verification (core-1): reused the exact-tree pass'
+assert_contains linked_proto_base "$proto_rerun" '==> policy verification (repo-rules): reused the exact-tree pass'
 [ "$(grep -c '^product contracts ' "$proto_log")" -eq 2 ] ||
   fail 'a moved base reused the contracts pass'
 
@@ -1301,7 +1308,7 @@ main_moves() {
   git -C "$carry" rebase -q "$main_commit"
 }
 go_runs() { grep -c '^product go-support ' "$carry_log" || true; }
-policy_runs() { grep -c '^product policy-core-1 ' "$carry_log" || true; }
+policy_runs() { grep -c '^product policy-repo-rules ' "$carry_log" || true; }
 carry_output="$(carry_merge)"
 assert_contains carry_first "$carry_output" '==> Go support verification: passed'
 [ "$(go_runs)" -eq 1 ] || fail 'the first carry fixture run did not run Go support'
@@ -1367,7 +1374,7 @@ empty_preflight="$({
 assert_contains empty "$empty_preflight" '  (no changed paths)'
 assert_contains empty "$empty_preflight" 'preflight classification: unchanged'
 assert_contains empty "$empty_preflight" \
-  'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
+  'preflight selection: |valid:v3|ci_script_tests_omittable|policy|policy_shell_omittable|complete|'
 empty_lines="$(wc -l < "$empty_log")"
 empty_output="$({ cd "$repo" && "$dispatcher"; } 2>&1)"
 assert_contains empty_hook "$empty_output" \
@@ -1412,7 +1419,7 @@ diagnostic_output="$({
 } 2>&1)"
 assert_contains diagnostic "$diagnostic_output" '  docs/diagnostic.md'
 assert_contains diagnostic "$diagnostic_output" \
-  'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
+  'preflight selection: |valid:v3|ci_script_tests_omittable|policy|policy_shell_omittable|complete|'
 assert_policy_only diagnostic_tools "$(grep -v '^environment' "$diagnostic_log")"
 for scope in push merge; do
   if diagnostic_scope_output="$({
@@ -1479,7 +1486,7 @@ sdk_runner_output="$({
     PREFLIGHT_CHANGED_FILES="$sdk_runner_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains sdk_runner "$sdk_runner_output" \
-  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|sdk_python|security|security_js|complete|'
+  'preflight selection: |valid:v3|ci_script_tests_omittable|policy|policy_shell|policy_shell_omittable|sdk_python|security|security_js|complete|'
 assert_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'product sdk-python '
 assert_not_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'integration '
 assert_no_kind sdk_runner_tools "$(cat "$sdk_runner_log")"
@@ -1496,7 +1503,7 @@ confidential_tooling_output="$({
     PREFLIGHT_CHANGED_FILES="$confidential_tooling_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains confidential_tooling "$confidential_tooling_output" \
-  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_confidential|security|security_js|complete|'
+  'preflight selection: |valid:v3|ci_script_tests_omittable|policy|policy_shell|policy_shell_omittable|runtime_confidential|security|security_js|complete|'
 assert_contains confidential_tooling_tools "$(cat "$confidential_tooling_log")" \
   'product runtime-confidential '
 assert_not_contains confidential_tooling_tools \
@@ -1517,7 +1524,7 @@ dev_smoke_tooling_output="$({
     "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains dev_smoke_tooling "$dev_smoke_tooling_output" \
-  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|security|security_js|complete|'
+  'preflight selection: |valid:v3|ci_script_tests_omittable|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|security|security_js|complete|'
 assert_contains dev_smoke_tooling_tools "$(cat "$dev_smoke_tooling_log")" \
   'product runtime-dev-smoke '
 assert_not_contains dev_smoke_tooling_tools \
@@ -1546,7 +1553,7 @@ sdk_tooling_output="$({
     PREFLIGHT_CHANGED_FILES="$sdk_tooling_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains sdk_tooling "$sdk_tooling_output" \
-  'preflight selection: |valid:v3|go_consumer_interop|go_support|policy|policy_shell_omittable|sdk_go|security|security_js|complete|'
+  'preflight selection: |valid:v3|ci_script_tests|ci_script_tests_omittable|go_consumer_interop|go_support|policy|policy_shell_omittable|sdk_go|security|security_js|complete|'
 assert_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'product sdk-go '
 assert_not_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'integration '
 assert_no_kind sdk_tooling_tools "$(cat "$sdk_tooling_log")"

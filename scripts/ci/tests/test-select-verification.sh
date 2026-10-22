@@ -80,11 +80,42 @@ expected_tokens() {
   tr ' ' '\n' <<<"$1" | sed '/^$/d' | LC_ALL=C sort
 }
 
+# The selector's own CI-script test rule. The path cases below expect
+# ci_script_tests wherever it holds; ci_script_tests_cases pins its edges.
+eval "$(awk '
+  $0 == "ci_script_test_input() {" { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT/scripts/ci/select/select-verification.sh")"
+declare -F ci_script_test_input >/dev/null || {
+  echo 'the selector has no CI-script test rule' >&2
+  exit 1
+}
+
+# A path case selects the CI-script tests when one of its paths is their input.
+with_ci_script_tests() {
+  local expected="$1" path
+  shift
+  [[ " $expected " == *' policy '* && " $expected " != *' ci_script_tests '* ]] \
+    || { printf '%s\n' "$expected"; return; }
+  for path in "$@"; do
+    if ci_script_test_input "$path"; then
+      printf '%s ci_script_tests\n' "$expected"
+      return
+    fi
+  done
+  printf '%s\n' "$expected"
+}
+
 assert_tokens() {
   local name="$1" expected="$2" output="$3" actual want selection
   if [[ " $expected " == *' policy '* ]] \
       && [[ " $expected " != *' policy_shell_omittable '* ]]; then
     expected="$expected policy_shell_omittable"
+  fi
+  if [[ " $expected " == *' policy '* ]] \
+      && [[ " $expected " != *' ci_script_tests_omittable '* ]]; then
+    expected="$expected ci_script_tests_omittable"
   fi
   if [ "$(wc -l <<<"$output")" -ne 4 ] \
       || [ "$(sed -n '1p' <<<"$output")" != 'selector_version=v3' ] \
@@ -130,6 +161,7 @@ run_paths_case() {
       break
     fi
   done
+  expected="$(with_ci_script_tests "$expected" "$@")"
   printf '%s\n' "$@" > "$paths"
   # SELECTOR_CASE_ROOT runs the selector where the case's paths exist.
   output="$(cd "${SELECTOR_CASE_ROOT:-$PWD}" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
@@ -142,6 +174,7 @@ run_present_paths_case() {
   local name="$1" event="$2" ref="$3" opt_in="$4" expected="$5"
   shift 5
   local fixture_root="$TMP/${name}.repo" paths="$TMP/${name}.paths" output path
+  expected="$(with_ci_script_tests "$expected" "$@")"
   mkdir -p "$fixture_root"
   for path in "$@"; do
     mkdir -p "$fixture_root/$(dirname "$path")"
@@ -1667,9 +1700,9 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
 run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
-all_product='contracts contracts_proto database deploy docs edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product='ci_script_tests contracts contracts_proto database deploy docs edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 # A pull request without the Kind opt-in never selects Kind.
-all_product_pr='contracts contracts_proto database deploy docs go_consumer_interop go_support go_tailnet policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product_pr='ci_script_tests contracts contracts_proto database deploy docs go_consumer_interop go_support go_tailnet policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy security security_js" scripts/dev/dashboard-watch.py
 run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head false \
@@ -1741,6 +1774,62 @@ run_present_paths_case kind_runtime_fixture_unknown pull_request refs/pull/1801/
   "$all_product_pr" scripts/ci/tests/test-kind-cw-runtime-future.py
 run_paths_case unknown pull_request refs/pull/18/head false "$all_product_pr" \
   unexplained/new-surface.txt
+
+# The CI-script tests (#3119 A6) run for their own scripts, workflows and
+# hooks and for the product files they read from the tree. Any other path
+# leaves only the always-on repository rules, and an unclassified one fails
+# closed. Every policy selection says the omission is authoritative.
+ci_script_tests_case() {
+  local want="$1" path="$2" paths="$TMP/ci-script-tests.paths" selection
+  printf '%s\n' "$path" > "$paths"
+  selection="$(selection_value "$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+    PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME=pull_request \
+    GITHUB_REF=refs/pull/3119/head KIND_E2E_OPT_IN=false "$SELECTOR" "$paths")")"
+  [[ "$selection" == *'|policy|'* && "$selection" == *'|ci_script_tests_omittable|'* ]] || {
+    echo "ci_script_tests_${path}: policy does not mark CI-script tests omittable: $selection" >&2
+    exit 1
+  }
+  if [ "$want" = run ] && [[ "$selection" != *'|ci_script_tests|'* ]]; then
+    echo "ci_script_tests: $path does not run the CI-script tests" >&2
+    exit 1
+  fi
+  if [ "$want" = omit ] && [[ "$selection" == *'|ci_script_tests|'* ]]; then
+    echo "ci_script_tests: $path runs the CI-script tests" >&2
+    exit 1
+  fi
+}
+for ci_script_path in \
+    scripts/ci/select/emit-verification-matrices.sh \
+    scripts/ci/tests/test-select-verification.sh \
+    scripts/dev/preflight.sh \
+    scripts/dev/test-macos-local-runtime.py \
+    scripts/checks/repo_checks.py \
+    .gitea/workflows/ci.yaml \
+    .gitea/workflows/source-approval.yml \
+    .githooks/pre-push \
+    scripts/runtime/dev/preflight-openbao-native-secrets.sh \
+    crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py \
+    Makefile \
+    .gitleaks.toml \
+    images/workspace/Dockerfile \
+    deployments/docker/daemon.Dockerfile \
+    crates/codewire-local-vmm/src/artifact.rs \
+    crates/codewire-cw-release/src/local_runtime.rs \
+    crates/codewire-workspace-image/src/pin.rs \
+    unexplained/new-surface.txt; do
+  ci_script_tests_case run "$ci_script_path"
+done
+for product_path in \
+    docs/dev/AGENT-WORKFLOW.md \
+    crates/codewire-cli/src/main.rs \
+    crates/codewire-local-vmm/src/lib.rs \
+    crates/codewire-cw-release/src/lib.rs \
+    crates/codewire-dashboard-web/templates/admin-accounts.html \
+    deployments/k8s/overlays/dev/kustomization.yaml \
+    scripts/runtime/dev/smoke-dev-candidate.sh \
+    Cargo.lock; do
+  ci_script_tests_case omit "$product_path"
+done
 run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product_pr" \
   scripts/checks/contracts/mesh-final-surface-policy.json \
   unexplained/new-surface.txt
@@ -1857,8 +1946,9 @@ dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
 assert_tokens dispatch_docs 'docs' "$dispatch_output"
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=policy "$SELECTOR")"
-assert_tokens dispatch_policy 'policy policy_shell' "$dispatch_output"
+assert_tokens dispatch_policy 'ci_script_tests policy policy_shell' "$dispatch_output"
 grep -Fq '|policy_shell_omittable|' <<<"$dispatch_output"
+grep -Fq '|ci_script_tests_omittable|' <<<"$dispatch_output"
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=all "$SELECTOR")"
 assert_tokens dispatch_all "${all_product} ios" "$dispatch_output"
@@ -2476,6 +2566,12 @@ policy_block="$TMP/policy.yaml"
 tooling_block="$TMP/tooling.yaml"
 grep -Fq 'run-product-verification.sh policy-core' "$policy_block" || {
   echo 'policy job does not own only the fast policy core' >&2
+  exit 1
+}
+# shellcheck disable=SC2016 # Match the workflow's literal expression.
+grep -Fq 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' \
+    "$policy_block" || {
+  echo 'policy core does not see the trusted selection, so it cannot omit CI-script tests' >&2
   exit 1
 }
 grep -Fq 'run-product-verification.sh policy-shell' "$tooling_block" || {
@@ -3528,9 +3624,11 @@ if grep -Eq 'run_policy_local|scripts/checks/repo_checks.py|test-rust-owned-fixt
   echo 'local preflight still owns a private policy checklist' >&2
   exit 1
 fi
-# Policy core is two parts that local merge qualification runs side by side.
-# Together they are the shared core: every step is in exactly one part, the
-# aggregate runs exactly the two parts, and the policy family runs exactly the
+# Policy core is two parts that local merge qualification runs side by side:
+# the repository rules, which run on every change, and the CI-script tests,
+# which run when the trusted selection asks for them (#3119 A6). Together they
+# are the shared core: every step is in exactly one part, the aggregate runs
+# the core parts the runner lists, and the policy family runs exactly the
 # parts the runner lists for the selection.
 shared_policy_core="$TMP/shared-policy-core.sh"
 product_runner="$ROOT/scripts/ci/verify/run-product-verification.sh"
@@ -3541,66 +3639,117 @@ policy_function() {
     capture && /^}$/ { exit }
   ' "$product_runner"
 }
-{ policy_function run_policy_core_one; policy_function run_policy_core_two; } > "$shared_policy_core"
+{ policy_function run_repo_rules; policy_function run_ci_script_tests; } > "$shared_policy_core"
 policy_steps() {
   grep -E '^  (scripts/|crates/|python3 )' | LC_ALL=C sort
 }
-[ -z "$(policy_function run_policy_core_one | policy_steps | uniq -d)" ] \
-  && [ -z "$(policy_function run_policy_core_two | policy_steps | uniq -d)" ] \
-  && [ -z "$(comm -12 <(policy_function run_policy_core_one | policy_steps) \
-      <(policy_function run_policy_core_two | policy_steps))" ] || {
+[ -z "$(policy_function run_repo_rules | policy_steps | uniq -d)" ] \
+  && [ -z "$(policy_function run_ci_script_tests | policy_steps | uniq -d)" ] \
+  && [ -z "$(comm -12 <(policy_function run_repo_rules | policy_steps) \
+      <(policy_function run_ci_script_tests | policy_steps))" ] || {
   echo 'a policy core step is repeated or belongs to both parts' >&2
   exit 1
 }
-[ -n "$(policy_function run_policy_core_one | policy_steps)" ] \
-  && [ -n "$(policy_function run_policy_core_two | policy_steps)" ] || {
+[ -n "$(policy_function run_repo_rules | policy_steps)" ] \
+  && [ -n "$(policy_function run_ci_script_tests | policy_steps)" ] || {
   echo 'a policy core part has no steps' >&2
   exit 1
 }
-[ "$(policy_function run_policy_core | grep -Eo 'run_policy_core_(one|two)' | LC_ALL=C sort | paste -sd' ')" \
-    = 'run_policy_core_one run_policy_core_two' ] || {
-  echo 'policy core is not exactly its two parts' >&2
+# The always-on part owns the private-content tree scan and every repository
+# rule, the two secret-isolation rules included (#3119 M5).
+for repo_rule in \
+    'scripts/ci/release/check-mirror-content.sh --tree' \
+    'scripts/ci/verify/check-rust-toolchain.sh' \
+    'python3 scripts/checks/repo_checks.py ses-email-isolation' \
+    'python3 scripts/checks/repo_checks.py turnstile-access-projection'; do
+  grep -qxF "  $repo_rule" <(policy_function run_repo_rules) || {
+    echo "repository rules do not run $repo_rule" >&2
+    exit 1
+  }
+done
+if policy_function run_ci_script_tests | grep -qF 'scripts/checks/repo_checks.py '; then
+  echo 'a repository rule runs only with the CI-script tests' >&2
+  exit 1
+fi
+[ "$(policy_function run_policy_part | grep -E '^    policy-')" = "$(printf '    %s\n' \
+    'policy-shell) run_shell_policy ;;' \
+    'policy-repo-rules) run_repo_rules ;;' \
+    'policy-ci-script-tests) run_ci_script_tests ;;')" ] || {
+  echo 'policy parts are not exactly ShellCheck, repository rules and CI-script tests' >&2
   exit 1
 }
-# CI's policy core runs both parts side by side and fails when either fails,
-# including a failure in the middle of a part. Part one here passes only if
-# part two starts while it runs, so a serial aggregate fails this fixture.
+grep -qxF '    [ "$part" = policy-shell ] || parts+=("$part")' <(policy_function run_policy_core) \
+  && grep -qxF '  done < <(policy_parts)' <(policy_function run_policy_core) || {
+  echo 'policy core does not run the listed parts other than ShellCheck' >&2
+  exit 1
+}
+# CI's policy core runs its parts side by side and fails when either fails,
+# including a failure in the middle of a part. The repository rules here pass
+# only if the CI-script tests start while they run, so a serial aggregate fails
+# this fixture. ShellCheck is its own job and never runs in policy core.
 policy_core_fixture() {
-  local dir="$1" one="$2" two="$3"
+  local dir="$1" parts="$2" one="$3" two="$4"
   bash -c '
     set -euo pipefail
-    dir="$1" one_mode="$3" two_mode="$4"
+    dir="$1" listed="$3" one_mode="$4" two_mode="$5"
     eval "$2"
-    run_policy_core_one() { (
-      for _ in $(seq 1 100); do
-        [ -e "$dir/two-started" ] && break
-        sleep 0.05
-      done
-      [ -e "$dir/two-started" ]
-      [ "$one_mode" = pass ] || false
-      echo one-finished
-    ) }
-    run_policy_core_two() { (
-      touch "$dir/two-started"
-      [ "$two_mode" = pass ] || false
-      echo two-finished
-    ) }
+    policy_parts() { tr " " "\n" <<<"$listed"; }
+    run_policy_part() {
+      case "$1" in
+        policy-shell) echo shell-ran-in-core ;;
+        policy-repo-rules) (
+          if [[ " $listed " == *" policy-ci-script-tests "* ]]; then
+            for _ in $(seq 1 100); do
+              [ -e "$dir/two-started" ] && break
+              sleep 0.05
+            done
+            [ -e "$dir/two-started" ]
+          fi
+          [ "$one_mode" = pass ] || false
+          echo one-finished
+        ) ;;
+        policy-ci-script-tests) (
+          touch "$dir/two-started"
+          [ "$two_mode" = pass ] || false
+          echo two-finished
+        ) ;;
+      esac
+    }
     run_policy_core
-  ' policy-core-fixture "$dir" "$(policy_function run_policy_core)" "$one" "$two"
+  ' policy-core-fixture "$dir" "$(policy_function run_policy_core)" "$parts" "$one" "$two"
 }
-for policy_core_case in pass:pass:0 fail:pass:1 pass:fail:1 fail:fail:1; do
-  IFS=: read -r policy_one policy_two policy_expected <<<"$policy_core_case"
+for policy_core_case in \
+    'policy-shell policy-repo-rules policy-ci-script-tests:pass:pass:0' \
+    'policy-repo-rules policy-ci-script-tests:fail:pass:1' \
+    'policy-repo-rules policy-ci-script-tests:pass:fail:1' \
+    'policy-repo-rules policy-ci-script-tests:fail:fail:1' \
+    'policy-shell policy-repo-rules:pass:pass:0' \
+    'policy-repo-rules:fail:pass:1'; do
+  IFS=: read -r policy_listed policy_one policy_two policy_expected <<<"$policy_core_case"
   policy_core_dir="$(mktemp -d "$TMP/policy-core.XXXXXX")"
   policy_core_status=0
-  policy_core_output="$(policy_core_fixture "$policy_core_dir" "$policy_one" "$policy_two" 2>&1)" \
-    || policy_core_status=$?
+  policy_core_output="$(policy_core_fixture "$policy_core_dir" "$policy_listed" \
+    "$policy_one" "$policy_two" 2>&1)" || policy_core_status=$?
+  if grep -qx shell-ran-in-core <<<"$policy_core_output"; then
+    echo 'policy core ran ShellCheck, which is its own job' >&2
+    exit 1
+  fi
+  if [[ " $policy_listed " != *' policy-ci-script-tests '* ]] \
+      && grep -qx two-finished <<<"$policy_core_output"; then
+    echo 'policy core ran CI-script tests the selection did not list' >&2
+    exit 1
+  fi
   if [ "$policy_expected" = 0 ]; then
     [ "$policy_core_status" -eq 0 ] \
-      && grep -qx one-finished <<<"$policy_core_output" \
-      && grep -qx two-finished <<<"$policy_core_output" || {
+      && grep -qx one-finished <<<"$policy_core_output" || {
       echo "policy core did not run its parts side by side: $policy_core_output" >&2
       exit 1
     }
+    if [[ " $policy_listed " == *' policy-ci-script-tests '* ]] \
+        && ! grep -qx two-finished <<<"$policy_core_output"; then
+      echo "policy core skipped its listed CI-script tests: $policy_core_output" >&2
+      exit 1
+    fi
   else
     [ "$policy_core_status" -ne 0 ] || {
       echo "policy core passed with part one $policy_one and part two $policy_two" >&2
@@ -3621,10 +3770,14 @@ grep -qxF '  for part in $(policy_parts); do' <(policy_function run_policy) \
   echo 'the policy family does not run the listed policy parts' >&2
   exit 1
 }
+# A selector that predates a part's omission marker keeps that part.
 for selection_and_parts in \
-    '|valid:v3|policy|policy_shell_omittable|complete|=policy-core-1 policy-core-2' \
-    '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|=policy-shell policy-core-1 policy-core-2' \
-    '|valid:v3|policy|complete|=policy-shell policy-core-1 policy-core-2'; do
+    '|valid:v3|policy|policy_shell_omittable|complete|=policy-repo-rules policy-ci-script-tests' \
+    '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|=policy-shell policy-repo-rules policy-ci-script-tests' \
+    '|valid:v3|policy|complete|=policy-shell policy-repo-rules policy-ci-script-tests' \
+    '|valid:v3|ci_script_tests_omittable|policy|policy_shell_omittable|complete|=policy-repo-rules' \
+    '|valid:v3|ci_script_tests|ci_script_tests_omittable|policy|policy_shell_omittable|complete|=policy-repo-rules policy-ci-script-tests' \
+    '|valid:v3|ci_script_tests_omittable|policy|policy_shell|policy_shell_omittable|complete|=policy-shell policy-repo-rules'; do
   listed_parts="$(VERIFICATION_SELECTION="${selection_and_parts%%=*}" "$product_runner" policy-parts | paste -sd' ')"
   [ "$listed_parts" = "${selection_and_parts#*=}" ] || {
     echo "policy parts for ${selection_and_parts%%=*} are: ${listed_parts}" >&2
@@ -4280,7 +4433,7 @@ kind_label="$(scope_event kind_label 'feat: change' kind-e2e)"
 kind_marker="$(scope_event kind_marker 'feat: change [kind-e2e]')"
 lookalike="$(scope_event lookalike 'feat: ci-full is not a label' ci ci/r2-cache-canary ci-fuller)"
 
-# NAME|QUICK TOKENS (policy_shell_omittable implied)|PATHS (space separated)
+# NAME|QUICK TOKENS (policy_shell_omittable, ci_script_tests_omittable implied)|PATHS (space separated)
 while IFS='|' read -r name quick_expected paths_list; do
   paths="$TMP/scope-${name}.paths"
   tr ' ' '\n' <<<"$paths_list" > "$paths"
@@ -4349,9 +4502,9 @@ broker_database|policy rust_compile|crates/codewire-credential-broker/src/provid
 transport|policy rust_compile|crates/codewire-daemon/src/lib.rs
 dashboard_kind|policy rust_compile|crates/codewire-dashboard-web/src/lib.rs
 browser_spec|policy|apps/dashboard/e2e/sandbox-lifecycle.spec.ts
-release_shell|policy policy_shell|scripts/ci/release/package-cw-release.sh
-selector_policy|policy policy_shell rust_compile|scripts/ci/select/select-verification.sh .gitea/workflows/ci.yaml
-mixed|policy policy_shell rust_compile|docs/dev/CI-ARCHITECTURE.md crates/codewire-cli/src/main.rs scripts/ci/release/package-cw-release.sh
+release_shell|policy policy_shell ci_script_tests|scripts/ci/release/package-cw-release.sh
+selector_policy|policy policy_shell ci_script_tests rust_compile|scripts/ci/select/select-verification.sh .gitea/workflows/ci.yaml
+mixed|policy policy_shell ci_script_tests rust_compile|docs/dev/CI-ARCHITECTURE.md crates/codewire-cli/src/main.rs scripts/ci/release/package-cw-release.sh
 CASES
 
 # The Kind cases above must really exercise Kind.

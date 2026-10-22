@@ -306,9 +306,10 @@ print(f'Rust/transport composition trace: {cases} cases passed')
 # Exercise the actual local receipt owner through the actual shared core too.
 # Only terminal checks are synthetic; selection, preflight and receipt logic
 # are copied byte-for-byte. This isolated repository has no external remote or secrets.
-# Policy core is two parts; together they hold every shared policy helper.
+# Policy core is two parts, the repository rules and the CI-script tests;
+# together they hold every shared policy helper.
 policy_body = '\n'.join(production.split(part + '() {', 1)[1].split('\n}\n', 1)[0]
-                        for part in ('run_policy_core_one', 'run_policy_core_two'))
+                        for part in ('run_repo_rules', 'run_ci_script_tests'))
 policy_helpers = re.findall(r'^  (?:python3 (?:(?:-I|-B) )*)?((?:scripts|crates)/[\w/.-]+)', policy_body, re.M)
 image_guards = ('test-cw-image-context.py', 'test-cw-runtime-source.py',
                 'test-cw-image-source.py', 'test-cw-image-consumer.py')
@@ -360,10 +361,14 @@ git('remote', 'add', 'origin', str(fixture))
 git('add', '.')
 git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'synthetic base')
 git('update-ref', 'refs/remotes/origin/main', 'HEAD')
-# A shared local VM packet fixture selects the local-vmm and guest-probe shard.
+# A shared local VM packet fixture selects the local-vmm and guest-probe shard,
+# and a change to a CI-script test selects the CI-script tests (#3119 A6), so
+# the injected policy failures below run.
 parent = fixture / 'testdata/local-vm-network/composition-fixture.json'
 parent.parent.mkdir(parents=True)
 parent.write_text('{}\n')
+with (fixture / 'scripts/ci/tests/test-darwin-cross-check.sh').open('a') as stream:
+    stream.write('# composition fixture change\n')
 git('add', '.')
 git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'synthetic selected local VM fixture')
 receipt_owner = fixture / 'scripts/ci/receipts/local-prepush-receipt.py'
