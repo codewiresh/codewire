@@ -47,7 +47,8 @@ variable "CODEWIRE_CARGO_BUILD_JOBS" {
 }
 
 variable "CW_RELEASE_CARGO_BUILD_JOBS" {
-  # The cw compile's own bound; its 8-14 GiB peak was measured at 8 jobs.
+  # The cw compile's own bound, 16 from build-cw-linux.sh; at 8 jobs both
+  # compiles together peaked at 8.47 GiB (dry run 18591).
   default = ""
 }
 

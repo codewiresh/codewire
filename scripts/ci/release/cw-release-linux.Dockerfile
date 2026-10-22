@@ -82,9 +82,9 @@ RUN --mount=type=bind,from=workflow-scripts,target=/workflow/scripts \
 
 # Each target has its own locked Cargo registry, git and target caches, and the
 # two stages share no cache, so the two cw compiles run side by side. At 8 Cargo
-# jobs they peaked at 13.3 GiB (aarch64 gnu) and 6.6 GiB (x86_64 musl) in dry
-# run 18323; with one image step beside them that fits the builder's 29 GiB
-# guest (owner, 2026-10-22, infra#1594).
+# jobs with thin LTO they peaked at 8.47 GiB together in dry run 18591; at the
+# 16 build-cw-linux.sh now passes, and with one image step beside them, they
+# fit the builder's 29 GiB guest (owner, 2026-10-22, infra#1594; #3144).
 
 # The export targets: the executable, its SHA-256 line and the admission line
 # package-cw-release.sh printed for it, nothing else.
