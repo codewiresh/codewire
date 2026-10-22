@@ -38,7 +38,21 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// (#2702). Only against a server that said it answers keepalives.
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(25);
 
-pub(super) struct NativePlatformCredentialConnector;
+pub(super) struct NativePlatformCredentialConnector {
+    /// The longest a connection to the platform may take to open. `None`
+    /// leaves only the caller's deadline. The authority's own tests use
+    /// `None`: they decide whose login this is and what it reaches, and a
+    /// starved test host must not turn that into a transport failure (#3123).
+    connect_timeout: Option<Duration>,
+}
+
+impl Default for NativePlatformCredentialConnector {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Some(SEND_TIMEOUT),
+        }
+    }
+}
 
 impl PlatformCredentialConnector for NativePlatformCredentialConnector {
     fn connect(
@@ -48,12 +62,13 @@ impl PlatformCredentialConnector for NativePlatformCredentialConnector {
         input: PlatformCredentialInput,
         deadline: Instant,
     ) -> BoxFuture<'static, Result<PlatformCredentialOutput, Status>> {
+        let connect_timeout = self.connect_timeout;
         Box::pin(async move {
             tokio::time::timeout_at(deadline, async move {
                 live(deadline)?;
                 binding.validate()?;
                 let open = opening(&binding, ready)?;
-                let client = authenticated_client(&binding, deadline).await?;
+                let client = authenticated_client(&binding, deadline, connect_timeout).await?;
                 live(deadline)?;
                 let admitted = client
                     .delegate_credentials(open)
@@ -72,12 +87,13 @@ impl PlatformCredentialConnector for NativePlatformCredentialConnector {
         binding: PlatformCredentialBinding,
         deadline: Instant,
     ) -> BoxFuture<'static, Result<bool, Status>> {
+        let connect_timeout = self.connect_timeout;
         Box::pin(async move {
             tokio::time::timeout_at(deadline, async move {
                 live(deadline)?;
                 binding.validate()?;
                 // As the selection's creator, exactly as a delegation opens.
-                let client = authenticated_client(&binding, deadline).await?;
+                let client = authenticated_client(&binding, deadline, connect_timeout).await?;
                 live(deadline)?;
                 account_github_connected(&client).await
             })
@@ -179,6 +195,7 @@ fn opening(
 async fn authenticated_client(
     binding: &PlatformCredentialBinding,
     deadline: Instant,
+    connect_timeout: Option<Duration>,
 ) -> Result<CodewireClient, Status> {
     live(deadline)?;
     validate_directory(&binding.config_directory)?;
@@ -192,7 +209,7 @@ async fn authenticated_client(
     let path = config::oauth_credentials_path(&binding.config_directory);
     validate_file(&path)?;
     live(deadline)?;
-    let http = confined_http(&binding.server_url)?;
+    let http = confined_http(&binding.server_url, connect_timeout)?;
     let oauth = OAuthClient::for_server_url_with_http(&binding.server_url, http.clone())
         .map_err(client_error)?;
     // This is the existing normal saved OAuth reader and atomic refresh writer.
@@ -224,11 +241,17 @@ async fn authenticated_client(
     .map_err(client_error)
 }
 
-fn confined_http(server: &str) -> Result<reqwest::Client, Status> {
+fn confined_http(
+    server: &str,
+    connect_timeout: Option<Duration>,
+) -> Result<reqwest::Client, Status> {
     let builder = reqwest::Client::builder()
         .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(SEND_TIMEOUT);
+        .redirect(reqwest::redirect::Policy::none());
+    let builder = match connect_timeout {
+        Some(timeout) => builder.connect_timeout(timeout),
+        None => builder,
+    };
     let builder = if url::Url::parse(server).map_err(|_| denied())?.scheme() == "http" {
         builder.http2_prior_knowledge()
     } else {

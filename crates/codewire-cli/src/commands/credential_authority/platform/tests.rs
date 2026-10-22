@@ -24,6 +24,25 @@ fn no_deadline() -> Instant {
     Instant::now() + Duration::from_secs(24 * 60 * 60)
 }
 
+/// The authority as production builds it, but with no connect timeout of
+/// its own: these tests check whose login is used and what it reaches, so a
+/// starved host must not turn a slow connection into a refusal (#3123).
+fn connector() -> NativePlatformCredentialConnector {
+    NativePlatformCredentialConnector {
+        connect_timeout: None,
+    }
+}
+
+/// What the mock server saw, to read beside a refusal or a failure: a
+/// request that never reached it failed in transport, which the authority
+/// reports as a refusal too (#3123).
+async fn reached(server: &MockServer) -> String {
+    match server.received_requests().await.unwrap().len() {
+        0 => "the mock server received no request, so this failed in transport".into(),
+        received => format!("the mock server received {received} requests"),
+    }
+}
+
 fn binding(directory: &Path, server: &str) -> PlatformCredentialBinding {
     PlatformCredentialBinding {
         config_directory: directory.to_owned(),
@@ -148,7 +167,7 @@ async fn explicit_saved_oauth_rejects_missing_malformed_api_key_and_origin_misma
             }
             _ => unreachable!(),
         }
-        let error = authenticated_client(&selected, no_deadline())
+        let error = authenticated_client(&selected, no_deadline(), None)
             .await
             .err()
             .expect(attack);
@@ -172,13 +191,18 @@ async fn explicit_saved_oauth_binds_user_and_ignores_changed_default_organizatio
     )
     .await;
     let selected = binding(directory.path(), &server.uri());
-    let error = authenticated_client(&selected, no_deadline())
+    let error = authenticated_client(&selected, no_deadline(), None)
         .await
         .err()
         .unwrap();
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "{error:?}: {}",
+        reached(&server).await
+    );
     assert_eq!(error.code(), tonic::Code::PermissionDenied);
     assert_eq!(opening(&selected, ready()).unwrap().org_id, "pinned-org");
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -197,9 +221,10 @@ async fn saved_refresh_is_once_and_userinfo_and_returned_client_share_original_b
         .await;
     userinfo(&server, "synthetic-refreshed", "synthetic-owner").await;
     let selected = binding(directory.path(), &server.uri());
-    let client = authenticated_client(&selected, no_deadline())
-        .await
-        .unwrap();
+    let client = match authenticated_client(&selected, no_deadline(), None).await {
+        Ok(client) => client,
+        Err(error) => panic!("{error:?}: {}", reached(&server).await),
+    };
     // Simulate a subsequent login replacing the normal saved pair. The admitted
     // client must retain the original UserInfo bearer, not load this new login.
     saved(
@@ -230,7 +255,7 @@ async fn saved_auth_original_deadline_and_noncanonical_or_nonprivate_paths_fail_
     );
     let selected = binding(directory.path(), "https://synthetic.invalid");
     assert_eq!(
-        authenticated_client(&selected, Instant::now())
+        authenticated_client(&selected, Instant::now(), None)
             .await
             .err()
             .unwrap()
@@ -583,10 +608,13 @@ async fn github_connection_state_is_read_as_the_creator_from_metadata_only() {
             .expect(1)
             .mount(&server)
             .await;
-        let connected = NativePlatformCredentialConnector
+        let connected = match connector()
             .github_connected(binding(directory.path(), &server.uri()), no_deadline())
             .await
-            .unwrap();
+        {
+            Ok(connected) => connected,
+            Err(error) => panic!("{error:?}: {}", reached(&server).await),
+        };
         assert_eq!(connected, expected, "{credentials:?}");
     }
 
@@ -595,12 +623,17 @@ async fn github_connection_state_is_read_as_the_creator_from_metadata_only() {
     let directory = tempfile::tempdir().unwrap();
     saved(directory.path(), &server.uri(), "synthetic-access", true);
     userinfo(&server, "synthetic-access", "another-owner").await;
-    let error = NativePlatformCredentialConnector
+    let error = connector()
         .github_connected(binding(directory.path(), &server.uri()), no_deadline())
         .await
         .unwrap_err();
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "{error:?}: {}",
+        reached(&server).await
+    );
     assert_eq!(error.code(), tonic::Code::PermissionDenied);
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 
     // A saved API key, or a login saved for another server, is refused before
     // any request, as when a delegation opens.
@@ -624,7 +657,7 @@ async fn github_connection_state_is_read_as_the_creator_from_metadata_only() {
             )
             .unwrap(),
         }
-        let error = NativePlatformCredentialConnector
+        let error = connector()
             .github_connected(binding(directory.path(), &server.uri()), no_deadline())
             .await
             .unwrap_err();

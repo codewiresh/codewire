@@ -98,7 +98,7 @@ pub(crate) async fn run_local_credential_authority(
         spawner.clone(),
         spawner,
         signer.clone(),
-        Arc::new(platform::NativePlatformCredentialConnector),
+        Arc::new(platform::NativePlatformCredentialConnector::default()),
     )
     .await;
     // Always drain an initialized owner, including authority-server failure.
