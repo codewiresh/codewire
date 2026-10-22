@@ -3,10 +3,9 @@
 
 /// Content digest of the published workspace image.
 pub const DIGEST: &str = "sha256:351bed9404bc79390c06a02d67a4e348f0cb2cd3d29a3555a9cef1505717b655";
-/// The image at the Harbor repository every deployment pulls.
-pub const HARBOR_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:351bed9404bc79390c06a02d67a4e348f0cb2cd3d29a3555a9cef1505717b655";
-/// The same digest at the public GHCR mirror, pulled anonymously by local
-/// environments.
+/// The image at the public GHCR mirror, pulled anonymously by local
+/// environments. A deployment pulls the same digest from its configured
+/// repository.
 pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:351bed9404bc79390c06a02d67a4e348f0cb2cd3d29a3555a9cef1505717b655";
 /// Platforms the published image index serves.
 pub const PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64"];

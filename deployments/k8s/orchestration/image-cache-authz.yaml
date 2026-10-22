@@ -94,7 +94,10 @@ subjects:
 # runtime nodes, with the dedicated tokenless identity; no host namespaces or
 # privilege; one container running only BusyBox sleep from the pinned DinD
 # image; no init containers; and at most six image volumes, each a
-# digest-pinned image from Harbor or Docker Official Images, mounted read-only.
+# digest-pinned image from a registry CODEWIRE_APPROVED_IMAGE_REGISTRIES
+# approves, mounted read-only. The policy reads that value from the
+# codewire-image-registries ConfigMap (image-registries.yaml), the one
+# orchestration reads it from, so both approve the same registries.
 # The Rust renderer (crates/codewire-orchestration/src/sandbox/image_cache.rs)
 # has a test that this file pins its commands, images, selector and resources.
 apiVersion: admissionregistration.k8s.io/v1
@@ -106,6 +109,9 @@ metadata:
     app.kubernetes.io/component: orchestration
 spec:
   failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
   matchConstraints:
     matchPolicy: Equivalent
     resourceRules:
@@ -117,6 +123,12 @@ spec:
     - name: orchestration-service-account
       expression: request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')
   variables:
+    # The approved registry prefixes, each ending in '/'. A malformed entry,
+    # which orchestration refuses at startup, approves nothing here.
+    - name: registries
+      expression: >-
+        has(params.data) && 'CODEWIRE_APPROVED_IMAGE_REGISTRIES' in params.data ?
+        params.data['CODEWIRE_APPROVED_IMAGE_REGISTRIES'].split(',').filter(r, r.matches('^[a-z0-9]+([.-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*/$')) : []
     - name: pod
       expression: object.spec.template.spec
     - name: containers
@@ -158,10 +170,11 @@ spec:
         size(variables.volumes) <= 6 &&
         variables.volumes.all(v, v.name.matches('^image-[0-9]$') &&
         has(v.image) && has(v.image.reference) &&
-        v.image.reference.matches('^(registry[.]example[.]invalid|docker[.]io/library)/[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$') &&
+        variables.registries.exists(r, v.image.reference.startsWith(r) &&
+        v.image.reference.substring(size(r)).matches('^[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$')) &&
         has(v.image.pullPolicy) && v.image.pullPolicy == 'IfNotPresent') &&
         !has(variables.pod.resourceClaims)
-      message: the image cache may mount only up to six image volumes of digest-pinned images from registry.example.invalid or docker.io/library, with no other volume sources
+      message: the image cache may mount only up to six image volumes of digest-pinned images from the registries CODEWIRE_APPROVED_IMAGE_REGISTRIES approves, with no other volume sources
     - expression: >-
         (!has(object.spec.template.spec.initContainers) || size(object.spec.template.spec.initContainers) == 0) &&
         size(variables.containers) == 1 &&
@@ -243,5 +256,12 @@ metadata:
 spec:
   policyName: codewire-orchestration-image-cache
   validationActions: [Deny]
+  # The ConfigMap orchestration reads CODEWIRE_APPROVED_IMAGE_REGISTRIES
+  # from. Kustomize writes the orchestration namespace
+  # (kustomizeconfig.yaml); a missing ConfigMap denies.
+  paramRef:
+    name: codewire-image-registries
+    namespace: prod
+    parameterNotFoundAction: Deny
   # No mutable namespace selector: orchestration can update namespace labels.
   # The exact namespace Role bounds the grant; admission follows the identity.

@@ -1,0 +1,8 @@
+# The image cache admission binding reads its parameter ConfigMap from the
+# namespace orchestration runs in: the namespace transformer writes it.
+namespace:
+  - group: admissionregistration.k8s.io
+    version: v1
+    kind: ValidatingAdmissionPolicyBinding
+    path: spec/paramRef/namespace
+    create: false

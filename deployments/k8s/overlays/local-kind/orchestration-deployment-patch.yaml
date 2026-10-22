@@ -44,6 +44,12 @@
           fieldPath: spec.serviceAccountName
     - name: TEMPORAL_HOST_PORT
       value: temporal-frontend.temporal-system.svc.cluster.local:7233
+    # The image cache admission policy reads the same ConfigMap.
+    - name: CODEWIRE_APPROVED_IMAGE_REGISTRIES
+      valueFrom:
+        configMapKeyRef:
+          name: codewire-image-registries
+          key: CODEWIRE_APPROVED_IMAGE_REGISTRIES
     - name: OTEL_EXPORTER_OTLP_ENDPOINT
       value: ""
     # Mount the Connect conformance probe (connect-rpc/03 D8)

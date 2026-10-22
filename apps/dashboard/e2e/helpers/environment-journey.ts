@@ -24,7 +24,7 @@ if (
   );
 }
 export const presetName = "ssr-environment-preset";
-// Current published immutable Codewire workspace image in Harbor.
+// Current published immutable Codewire workspace image, the product default.
 // This browser proof must never turn a floating registry tag into a test input.
 export const workspaceImage = defaultWorkspaceImage;
 // Sealed Kind runs side-load the Forgejo-proven workspace under a disposable

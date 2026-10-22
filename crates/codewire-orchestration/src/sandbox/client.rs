@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use codewire_server_core::runtime_images::SUPPORT_IMAGE_REPOSITORIES;
 use crc32fast::Hasher as Crc32Hasher;
 use k8s_openapi::api::core::v1::{
     ContainerStatus, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, ResourceRequirements,
@@ -835,8 +834,8 @@ enum DaemonImageKept {
     /// rendered containers, so its daemon image changes only with a new
     /// measured rendering, never with a patch to an existing Sandbox.
     ConfidentialRuntime,
-    /// The daemon image comes from a repository no release rendered the
-    /// support image from ([`SUPPORT_IMAGE_REPOSITORIES`]).
+    /// The daemon image comes from another repository than the configured
+    /// support image's.
     UnlistedRepository,
 }
 
@@ -905,11 +904,12 @@ fn daemon_named_entry<'a>(
 /// workspace by one route: the `codewire-bin` image volume, or the
 /// `codewire-daemon-init` copy that commodity Sandboxes from before the image
 /// volume (e374b1f11), runc and Kind use. Either is re-pinned from an image in
-/// [`SUPPORT_IMAGE_REPOSITORIES`] to a digest-pinned support image, except on
-/// a confidential runtime. A Dev candidate smoke that swaps
-/// `SANDBOX_DAEMON_IMAGE` (`scripts/runtime/dev/smoke-dev-candidate.sh`)
-/// therefore re-pins Sandboxes started while it runs, and their next Start
-/// after the restore re-pins them back. A malformed or ambiguous daemon
+/// the configured support image's repository (`SANDBOX_DAEMON_IMAGE`) to that
+/// digest-pinned support image, except on a confidential runtime. A Dev
+/// candidate smoke that swaps `SANDBOX_DAEMON_IMAGE` within that repository
+/// (`scripts/runtime/dev/smoke-dev-candidate.sh`) therefore re-pins Sandboxes
+/// started while it runs, and their next Start after the restore re-pins them
+/// back. A malformed or ambiguous daemon
 /// source fails closed: no Pod can be built from it, and nothing here can
 /// tell which entry the daemon uses.
 fn plan_daemon_image<'a>(
@@ -965,7 +965,7 @@ fn plan_daemon_image<'a>(
         DaemonImagePlan::Kept(DaemonImageKept::ConfidentialRuntime)
     } else if !super::warm_pool::digest_pinned(support_image) {
         DaemonImagePlan::Kept(DaemonImageKept::UnpinnedSupportImage)
-    } else if !SUPPORT_IMAGE_REPOSITORIES.contains(&image_repository(entry.from)) {
+    } else if image_repository(entry.from) != image_repository(support_image) {
         DaemonImagePlan::Kept(DaemonImageKept::UnlistedRepository)
     } else {
         DaemonImagePlan::Repin(entry)
@@ -5703,7 +5703,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    const SUPPORT_IMAGE: &str = crate::sandbox::template::DEFAULT_DAEMON_IMAGE;
+    const SUPPORT_IMAGE: &str = crate::sandbox::template::TEST_SUPPORT_IMAGE;
     const MODE_CLAIM_PATH: &str = "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxclaims/sandbox-env-test";
     const MODE_SANDBOX_PATH: &str =
         "/apis/agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxes/workspace-env-test";

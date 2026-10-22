@@ -20,7 +20,7 @@ mod enabled {
     use std::time::Duration;
 
     use anyhow::Context as _;
-    use codewire_orchestration::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE;
+    use codewire_orchestration::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE;
     use codewire_orchestration::sandbox::client::SandboxClient;
     use codewire_orchestration::sandbox::host_keys::RecordedHostKeys;
     use codewire_orchestration::temporal::{
@@ -237,7 +237,7 @@ mod enabled {
             let orchestration_url = std::env::var("SMOKE_ORCHESTRATION_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8084".to_string());
             let workspace_image = std::env::var("SMOKE_WORKSPACE_IMAGE")
-                .unwrap_or_else(|_| CANONICAL_WORKSPACE_RUNTIME_IMAGE.to_string());
+                .unwrap_or_else(|_| PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE.to_string());
             let pool = PgPool::connect(&database_url).await?;
             let connection = Connection::connect(
                 ConnectionOptions::new(url::Url::parse(&temporal_address)?).build(),
@@ -346,6 +346,15 @@ mod enabled {
                 .env("SESSION_SECRET", "kind-e2e-not-a-real-secret")
                 .env("SANDBOX_NAMESPACE", SANDBOX_NAMESPACE)
                 .env("SANDBOX_DAEMON_IMAGE", "codewire-daemon:e2e")
+                // The overlay's runtime images (tests/e2e/kind).
+                .env(
+                    "CODEWIRE_WORKSPACE_IMAGE_REPOSITORY",
+                    "ghcr.io/codewiresh/workspace",
+                )
+                .env(
+                    "CODEWIRE_APPROVED_IMAGE_REGISTRIES",
+                    "ghcr.io/codewiresh/,docker.io/library/",
+                )
                 .env("SANDBOX_RUNTIME_PROFILE", "runc")
                 .env("SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME", "true")
                 .env("SANDBOX_WORKSPACE_STORAGE_CLASS", "example-volumes")

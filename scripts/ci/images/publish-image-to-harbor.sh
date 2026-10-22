@@ -112,19 +112,15 @@ case "${1:-}" in
   --pinned-defaults)
     [ "$#" -eq 1 ] || usage
     mode=keep
-    # Sandboxes and their daemons default to Harbor digests compiled into the
-    # product. Keep each one in Harbor before any deployment references it.
-    # The workspace default is the published pin; the daemon default is
-    # written in the runtime image defaults module.
+    # Sandboxes default to the published workspace pin. Keep it in Harbor
+    # before any deployment references it. The daemon has no compiled-in
+    # default: each deployment names its support image (SANDBOX_DAEMON_IMAGE,
+    # docs/CONFIGURATION.md), which its own release publishes.
     mapfile -t keep_refs < <(
-      {
-        python3 "$ROOT/scripts/ci/images/workspace-image-pin.py" show harbor-image
-        grep -ohE "$HARBOR_HOST_PATTERN/codewire/daemon@sha256:[0-9a-f]{64}" \
-          "$ROOT/crates/codewire-server-core/src/runtime_images.rs"
-      } | sort -u
+      python3 "$ROOT/scripts/ci/images/workspace-image-pin.py" show harbor-image
     )
-    [ "${#keep_refs[@]}" -ge 2 ] || {
-      echo 'Pinned Harbor workspace and daemon defaults were not found in source' >&2
+    [ "${#keep_refs[@]}" -eq 1 ] || {
+      echo 'The pinned Harbor workspace default was not found in source' >&2
       exit 1
     }
     for keep_ref in "${keep_refs[@]}"; do

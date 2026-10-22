@@ -1534,10 +1534,12 @@ pub(crate) struct EnvironmentCreateFormView {
 pub(crate) const MAX_CREATE_REPOSITORIES: usize = 108;
 
 impl EnvironmentCreateFormView {
-    /// The product's default workspace image, rendered as the image field's
-    /// placeholder so the browser reset control needs no copy of it.
+    /// The product's default workspace image at its public mirror, rendered
+    /// as the image field's placeholder so the browser reset control needs no
+    /// copy of it. Orchestration resolves it to the same digest at the
+    /// deployment's configured repository.
     pub(crate) fn default_image(&self) -> &'static str {
-        codewire_server_core::runtime_images::DEFAULT_WORKSPACE_IMAGE
+        codewire_server_core::runtime_images::PUBLIC_WORKSPACE_IMAGE
     }
 
     pub(crate) fn repository_limit(&self) -> usize {

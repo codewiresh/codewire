@@ -284,9 +284,9 @@ jobs:
           # follows delivery and never gates it.
           scripts/ci/images/publish-image-to-harbor.sh \
             --runtime-bundle "$bundle"
-          # Sandboxes and their daemons default to digests compiled into the
-          # product; keep each one in Harbor before Dev references it. A
-          # default Harbor lacks is imported once from the public mirror.
+          # Sandboxes default to the published workspace pin; keep it in
+          # Harbor before Dev references it. A pin Harbor lacks is imported
+          # once from the public mirror.
           scripts/ci/images/publish-image-to-harbor.sh --pinned-defaults
 
       # A verified commit delivers even after main moved on, as long as it

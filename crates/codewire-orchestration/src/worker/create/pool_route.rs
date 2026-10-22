@@ -22,7 +22,7 @@ use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 use serde_json::Value;
 
 use super::{SandboxWorkerCfg, render_configured_warm_pool};
-use crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE;
+use crate::sandbox::canonical_workspace_runtime_image;
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::template::{TemplateOpts, render_sandbox_template};
 use crate::sandbox::warm_pool::{
@@ -106,7 +106,7 @@ pub(crate) fn pool_candidate(
     if env.isolation_tier != "standard" {
         return Err(ColdReason::Tier);
     }
-    if image_ref.trim() != CANONICAL_WORKSPACE_RUNTIME_IMAGE {
+    if image_ref.trim() != canonical_workspace_runtime_image() {
         return Err(ColdReason::Image);
     }
     if !opts.identity_free() {

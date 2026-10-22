@@ -409,18 +409,18 @@ fn generate_short_id() -> String {
 
 // ── Preset helpers (environment_db.go) ──────────────────────────────────
 
-/// Mirrors `normalizeImageRef`.
+/// Mirrors `normalizeImageRef`. The short workspace names, the public
+/// mirror's and the configured workspace repository, and every canonical
+/// digest at either, resolve to the configured workspace image.
 pub(crate) fn normalize_image_ref(image_ref: &str) -> String {
     let image_ref = image_ref.trim();
     if matches!(
         image_ref,
-        "workspace"
-            | "codewiresh/workspace"
-            | "ghcr.io/codewiresh/workspace"
-            | "registry.example.invalid/codewire/workspace"
-    ) || crate::sandbox::is_canonical_workspace_runtime_image(image_ref)
+        "workspace" | "codewiresh/workspace" | "ghcr.io/codewiresh/workspace"
+    ) || image_ref == crate::sandbox::runtime_images::configured().workspace_repository()
+        || crate::sandbox::is_canonical_workspace_runtime_image(image_ref)
     {
-        crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE.to_string()
+        crate::sandbox::canonical_workspace_runtime_image().to_string()
     } else {
         image_ref.to_string()
     }
@@ -1982,13 +1982,13 @@ credentials: {profile: user/work}
     #[test]
     fn canonical_and_explicit_image_references_are_stable() {
         assert_eq!(
-            normalize_image_ref(crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE),
-            crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE
+            normalize_image_ref(crate::sandbox::canonical_workspace_runtime_image()),
+            crate::sandbox::canonical_workspace_runtime_image()
         );
         assert_eq!(normalize_image_ref("python:3.12"), "python:3.12");
         // The public mirror of the same digest, earlier published digests that
         // older clients and stored presets still send, and the short workspace
-        // names all resolve to the Harbor reference deployments pull.
+        // names all resolve to the configured repository's reference.
         use codewire_server_core::runtime_images::workspace_image as pin;
         let previous: Vec<String> = pin::PREVIOUS_DIGESTS
             .iter()
@@ -2005,11 +2005,11 @@ credentials: {profile: user/work}
         {
             assert_eq!(
                 normalize_image_ref(legacy),
-                crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE
+                crate::sandbox::canonical_workspace_runtime_image()
             );
         }
         assert!(
-            crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE
+            crate::sandbox::canonical_workspace_runtime_image()
                 .starts_with("registry.example.invalid/codewire/workspace@sha256:")
         );
         assert!(crate::sandbox::is_canonical_workspace_runtime_image(

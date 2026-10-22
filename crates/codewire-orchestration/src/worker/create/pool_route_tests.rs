@@ -66,8 +66,8 @@ fn candidate(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> Result<WarmPoolObj
     pool_candidate(
         cfg,
         env,
-        CANONICAL_WORKSPACE_RUNTIME_IMAGE,
-        &opts(cfg, env, CANONICAL_WORKSPACE_RUNTIME_IMAGE),
+        canonical_workspace_runtime_image(),
+        &opts(cfg, env, canonical_workspace_runtime_image()),
         NAMESPACE,
     )
 }
@@ -103,8 +103,8 @@ fn only_an_exact_canonical_standard_binding_shape_is_a_pool_candidate() {
         pool_candidate(
             &cfg,
             &confidential,
-            CANONICAL_WORKSPACE_RUNTIME_IMAGE,
-            &opts(&cfg, &small, CANONICAL_WORKSPACE_RUNTIME_IMAGE),
+            canonical_workspace_runtime_image(),
+            &opts(&cfg, &small, canonical_workspace_runtime_image()),
             NAMESPACE
         ),
         Err(ColdReason::Tier)
@@ -126,13 +126,13 @@ fn only_an_exact_canonical_standard_binding_shape_is_a_pool_candidate() {
     assert_eq!(candidate(&unbindable, &small), Err(ColdReason::Identity));
     // An own rendering that differs from the pool's (here another storage
     // class for this environment's rendering) is never pooled.
-    let mut other_class = opts(&cfg, &small, CANONICAL_WORKSPACE_RUNTIME_IMAGE);
+    let mut other_class = opts(&cfg, &small, canonical_workspace_runtime_image());
     other_class.workspace_storage_class = "local-path".into();
     assert_eq!(
         pool_candidate(
             &cfg,
             &small,
-            CANONICAL_WORKSPACE_RUNTIME_IMAGE,
+            canonical_workspace_runtime_image(),
             &other_class,
             NAMESPACE
         ),
@@ -350,7 +350,7 @@ fn api_with(
 #[tokio::test]
 async fn routing_reads_nothing_without_configuration_and_claims_only_a_current_pool() {
     let env = environment(1000, 4096, 10);
-    let canonical = CANONICAL_WORKSPACE_RUNTIME_IMAGE;
+    let canonical = canonical_workspace_runtime_image();
 
     // Inert: no shape configured is decided before any Kubernetes read.
     let cfg = dev_cfg("");
@@ -439,7 +439,7 @@ fn a_pool_claim_carries_only_the_pool_reference_and_identity_labels() {
     let env = environment(1000, 4096, 10);
     let objects = candidate(&cfg, &env).unwrap();
     let mut claim = crate::worker::create::environment_claim_opts(
-        CANONICAL_WORKSPACE_RUNTIME_IMAGE,
+        canonical_workspace_runtime_image(),
         "workspace",
         &env,
         7,
@@ -476,7 +476,7 @@ fn a_pool_claim_carries_only_the_pool_reference_and_identity_labels() {
 #[tokio::test]
 async fn routing_needs_a_capable_controller_and_current_members() {
     let env = environment(1000, 4096, 10);
-    let canonical = CANONICAL_WORKSPACE_RUNTIME_IMAGE;
+    let canonical = canonical_workspace_runtime_image();
     let cfg = dev_cfg(SHAPES);
     let objects = candidate(&cfg, &env).unwrap();
     let decide = |client: SandboxClient| {

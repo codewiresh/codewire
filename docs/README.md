@@ -8,6 +8,8 @@ directory holds the architecture reference and developer documentation.
 - [ARCHITECTURE.md](ARCHITECTURE.md): platform, placements, daemon, access,
   credentials.
 - [GLOSSARY.md](GLOSSARY.md): canonical terms.
+- [CONFIGURATION.md](CONFIGURATION.md): the registries and hosts a deployment
+  configures, and which values are required.
 - [dev/SANDBOX-DAEMON.md](dev/SANDBOX-DAEMON.md): the in-environment daemon,
   its SSH server, tailnet peer and credential bridge.
 - [dev/DERP-STUN.md](dev/DERP-STUN.md): how `cw` reaches an environment

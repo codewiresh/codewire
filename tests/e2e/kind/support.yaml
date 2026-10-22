@@ -51,6 +51,9 @@ data:
   SANDBOX_CODEX_LOGIN_CHECK_PERIOD_SECONDS: "30"
   SANDBOX_INGRESS_NAMESPACE: ingress-nginx
   SANDBOX_INGRESS_POD_NAME: ingress-nginx
+  # Kind pulls (or `make kind-runtime-images` preloads) the workspace image
+  # from its public mirror (docs/CONFIGURATION.md).
+  CODEWIRE_WORKSPACE_IMAGE_REPOSITORY: ghcr.io/codewiresh/workspace
 ---
 # The non-promotable credential fixture owns this public synthetic App slug.
 # No App client material is present in the browser or in this ConfigMap.

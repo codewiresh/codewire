@@ -1483,7 +1483,7 @@ source "$RUNTIME_ACCEPTANCE"
 
 # The retained managed-agent journey runs on the product's pinned workspace
 # image (#2694): a node without it fails, naming make kind-runtime-images.
-pinned_workspace="$(sed -n 's/^pub const HARBOR_IMAGE: &str = "\(.*\)";$/\1/p' \
+pinned_workspace="$(sed -n 's/^pub const PUBLIC_IMAGE: &str = "\(.*\)";$/\1/p' \
   "$ROOT/crates/codewire-workspace-image/src/pin.rs")"
 pinned_output="$(
   kind() { printf 'fixture-control-plane\n'; }

@@ -49,8 +49,13 @@ IMAGE_CACHE_IDLE_IMAGE = (
     "docker.io/library/docker:29.7.1-dind@sha256:"
     "e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c"
 )
-IMAGE_CACHE_IMAGE_PATTERN = (
-    "^(registry[.]example[.]invalid|docker[.]io/library)/[a-z0-9]+([._/-][a-z0-9]+)*"
+# The image cache admits images only from the registries
+# CODEWIRE_APPROVED_IMAGE_REGISTRIES approves, read from the ConfigMap
+# orchestration reads it from (docs/CONFIGURATION.md).
+IMAGE_CACHE_REGISTRIES_CONFIGMAP = "codewire-image-registries"
+IMAGE_CACHE_REGISTRY_PATTERN = "^[a-z0-9]+([.-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*/$"
+IMAGE_CACHE_NAME_PATTERN = (
+    "^[a-z0-9]+([._/-][a-z0-9]+)*"
     "(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$"
 )
 
@@ -134,7 +139,11 @@ def assert_image_cache(resources: list[str], target: dict[str, str], label: str,
             "variables.pod.hostUsers == false",
             "size(variables.volumes) <= 6",
             "has(v.image) && has(v.image.reference)",
-            f"v.image.reference.matches('{IMAGE_CACHE_IMAGE_PATTERN}')",
+            "paramKind: apiVersion: v1 kind: ConfigMap",
+            "params.data['CODEWIRE_APPROVED_IMAGE_REGISTRIES'].split(',')"
+            f".filter(r, r.matches('{IMAGE_CACHE_REGISTRY_PATTERN}'))",
+            "variables.registries.exists(r, v.image.reference.startsWith(r) && "
+            f"v.image.reference.substring(size(r)).matches('{IMAGE_CACHE_NAME_PATTERN}'))",
             "v.image.pullPolicy == 'IfNotPresent'",
             "(!has(c.securityContext.privileged) || !c.securityContext.privileged)",
             "!c.securityContext.allowPrivilegeEscalation",
@@ -163,9 +172,16 @@ def assert_image_cache(resources: list[str], target: dict[str, str], label: str,
         if metadata_field(policy, "namespace") is not None:
             output.append(f"{label}: {IMAGE_CACHE_ROLE} must remain cluster-scoped")
     if policy_binding:
-        expected = compact(f"spec: policyName: {IMAGE_CACHE_ROLE} validationActions: - Deny")
+        expected = compact(
+            f"spec: paramRef: name: {IMAGE_CACHE_REGISTRIES_CONFIGMAP} "
+            f"namespace: {target['subject_namespace']} parameterNotFoundAction: Deny "
+            f"policyName: {IMAGE_CACHE_ROLE} validationActions: - Deny"
+        )
         if metadata_field(policy_binding, "namespace") is not None or compact(top_level_block(policy_binding, "spec")) != expected:
-            output.append(f"{label}: {IMAGE_CACHE_ROLE} must deny by identity without mutable namespace selectors")
+            output.append(
+                f"{label}: {IMAGE_CACHE_ROLE} must deny by identity without mutable namespace selectors, "
+                f"reading {IMAGE_CACHE_REGISTRIES_CONFIGMAP} in orchestration's namespace"
+            )
 
 
 WARM_POOL_POLICY = "codewire-orchestration-warm-pool"

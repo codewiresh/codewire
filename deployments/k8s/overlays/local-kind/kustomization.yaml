@@ -46,6 +46,18 @@ patches:
     target:
       kind: ConfigMap
       name: codewire-config
+  # The registries the image cache may hold images from: the public
+  # workspace mirror and Docker Official Images (docs/CONFIGURATION.md).
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: codewire-image-registries
+      data:
+        CODEWIRE_APPROVED_IMAGE_REGISTRIES: ghcr.io/codewiresh/,docker.io/library/
+    target:
+      kind: ConfigMap
+      name: codewire-image-registries
   - path: derp-deployment-patch.yaml
     target:
       kind: Deployment

@@ -974,6 +974,7 @@ mod tests {
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
                 daemon_auth_token: "commodity-template-daemon-token".into(),
                 disk_gib: 40,
+                support_image: TEST_SUPPORT_IMAGE.into(),
                 ..Default::default()
             },
         );
@@ -1034,7 +1035,7 @@ mod tests {
                 .unwrap()
                 .contains(&json!({
                     "name": "codewire-bin",
-                    "image": { "reference": DEFAULT_DAEMON_IMAGE, "pullPolicy": "IfNotPresent" },
+                    "image": { "reference": TEST_SUPPORT_IMAGE, "pullPolicy": "IfNotPresent" },
                 }))
         );
         let workspace_container = &containers[0];

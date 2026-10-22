@@ -148,24 +148,12 @@ grep -qxF "$harbor/workspace@$digest $harbor/workspace keep-${digest/:/-}" "$FAK
   fail 'keep publication did not use the exact-digest keep tag'
 [[ "$(grep -c '^inspect ' "$FAKE_SKOPEO_LOG")" -eq 2 ]] || fail 'keep publication did not verify both digests'
 
-# Compiled-in defaults already in Harbor are only kept; the public mirror is
-# never contacted. The product source names the registry its defaults pin, so
-# these cases publish on that host.
-source_registry="$(grep -ohE '"[a-z0-9.-]+(:[0-9]+)?/codewire/daemon@sha256:[0-9a-f]{64}"' \
-  "$ROOT/crates/codewire-server-core/src/runtime_images.rs" | head -n 1)"
-source_registry="${source_registry#\"}"
-source_registry="${source_registry%%/*}"
-[[ -n "$source_registry" ]] || fail 'source does not pin a Harbor daemon default'
-mapfile -t pinned < <(
-  {
-    python3 "$ROOT/scripts/ci/images/workspace-image-pin.py" show harbor-image
-    grep -ohE "${source_registry//./\\.}/codewire/daemon@sha256:[0-9a-f]{64}" \
-      "$ROOT/crates/codewire-server-core/src/runtime_images.rs"
-  } | sort -u
-)
-[[ "${#pinned[@]}" -ge 2 ]] || fail 'source does not pin Harbor workspace and daemon defaults'
+# The published workspace pin, already in Harbor, is only kept; the public
+# mirror is never contacted. The daemon has no compiled-in default.
+mapfile -t pinned < <(python3 "$ROOT/scripts/ci/images/workspace-image-pin.py" show harbor-image)
+[[ "${#pinned[@]}" -eq 1 ]] || fail 'source does not pin the Harbor workspace default'
 reset_logs
-CODEWIRE_IMAGE_REGISTRY="$source_registry" "$PUBLISH" --pinned-defaults >"$work/pinned.out" 2>&1 ||
+"$PUBLISH" --pinned-defaults >"$work/pinned.out" 2>&1 ||
   { cat "$work/pinned.out" >&2; fail 'pinned defaults publication failed'; }
 if grep -q '^copy ' "$FAKE_SKOPEO_LOG"; then
   fail 'a pinned default already in Harbor was imported again'
@@ -180,8 +168,7 @@ done
 # mirror without credentials, then kept and verified.
 reset_logs
 workspace_default="$(printf '%s\n' "${pinned[@]}" | grep '/workspace@')"
-FAKE_ABSENT="${workspace_default##*@}" CODEWIRE_IMAGE_REGISTRY="$source_registry" \
-  "$PUBLISH" --pinned-defaults >"$work/import.out" 2>&1 ||
+FAKE_ABSENT="${workspace_default##*@}" "$PUBLISH" --pinned-defaults >"$work/import.out" 2>&1 ||
   { cat "$work/import.out" >&2; fail 'pinned default import failed'; }
 [[ "$(grep -c '^copy ' "$FAKE_SKOPEO_LOG")" -eq 1 ]] ||
   fail 'a missing pinned default was not imported exactly once'
@@ -190,8 +177,7 @@ grep -qF "docker://ghcr.io/codewiresh/workspace@${workspace_default##*@}" "$FAKE
 grep -qF 'Imported pinned default into Harbor' "$work/import.out" ||
   fail 'the pinned default import was not reported'
 reset_logs
-FAKE_ABSENT="${workspace_default##*@}" CODEWIRE_IMAGE_REGISTRY="$source_registry" \
-  "$PUBLISH" --pinned-defaults >"$work/import-again.out" 2>&1 ||
+FAKE_ABSENT="${workspace_default##*@}" "$PUBLISH" --pinned-defaults >"$work/import-again.out" 2>&1 ||
   fail 'repeated pinned default publication failed'
 if grep -q '^copy ' "$FAKE_SKOPEO_LOG"; then
   fail 'an imported pinned default was imported again'

@@ -424,7 +424,7 @@ mod tests {
             sandbox_namespace: "dev-sandboxes".into(),
             ..Default::default()
         };
-        cfg.daemon_image = codewire_server_core::runtime_images::DEFAULT_DAEMON_IMAGE.into();
+        cfg.daemon_image = crate::sandbox::template::TEST_SUPPORT_IMAGE.into();
         cfg
     }
 

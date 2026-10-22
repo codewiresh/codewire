@@ -2148,7 +2148,7 @@ pub(super) fn default_create_form(token: String, expanded: bool) -> EnvironmentC
         expanded,
         name: String::new(),
         preset_id: String::new(),
-        image: codewire_server_core::runtime_images::DEFAULT_WORKSPACE_IMAGE.to_owned(),
+        image: codewire_server_core::runtime_images::PUBLIC_WORKSPACE_IMAGE.to_owned(),
         repositories: vec![EnvironmentRepositoryFormRow {
             index: 100,
             url: String::new(),

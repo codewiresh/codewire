@@ -41,7 +41,7 @@ cp "$ROOT/scripts/dev/kind/dev-loop.sh" "$SCRIPT"
 cp "$ROOT/scripts/dev/kind/profile.sh" "$TREE/scripts/dev/kind/profile.sh"
 : >"$TREE/scripts/dev/dashboard-watch.py"
 mkdir -p "$TREE/crates/codewire-workspace-image/src"
-printf 'pub const HARBOR_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:%064d";\n' 0 \
+printf 'pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:%064d";\n' 0 \
   >"$TREE/crates/codewire-workspace-image/src/pin.rs"
 printf 'pub const DEFAULT_DIND_IMAGE: &str = "docker.io/library/docker:29.7.1-dind@sha256:%064d";\n' 1 \
   >"$TREE/crates/codewire-orchestration/src/sandbox/template/mod.rs"

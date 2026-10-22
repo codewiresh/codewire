@@ -290,10 +290,23 @@ async fn bind_listeners(
     })
 }
 
+/// The deployment names the images every workspace runs; there are no
+/// defaults (docs/CONFIGURATION.md).
+fn require_runtime_images() -> anyhow::Result<()> {
+    use codewire_orchestration::sandbox::runtime_images;
+    runtime_images::init().map_err(anyhow::Error::msg)?;
+    if std::env::var(runtime_images::DAEMON_IMAGE_ENV).is_ok_and(|image| !image.trim().is_empty()) {
+        Ok(())
+    } else {
+        anyhow::bail!(runtime_images::missing(runtime_images::DAEMON_IMAGE_ENV))
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = ServiceConfig::from_env("orchestration")?;
     codewire_server_core::obs::init(&cfg)?;
+    require_runtime_images()?;
     let workspace_binding_bind_addr = workspace_binding_bind_addr(
         cfg.bind_addr,
         std::env::var(ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV)

@@ -22,8 +22,8 @@ readonly WS_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 readonly DIND_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 readonly WS_DIGEST_UPPER=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 readonly OTHER_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-readonly WS_REF="registry.example.invalid/codewire/workspace@${WS_DIGEST}"
-readonly WS_SOURCE="ghcr.io/codewiresh/workspace@${WS_DIGEST}"
+readonly WS_REF="ghcr.io/codewiresh/workspace@${WS_DIGEST}"
+readonly WS_SOURCE="$WS_REF"
 readonly DIND_REF="docker.io/library/docker:29.7.1-dind@${DIND_DIGEST}"
 readonly DIND_SOURCE="docker.io/library/docker@${DIND_DIGEST}"
 
@@ -38,7 +38,7 @@ cp "$ROOT/scripts/dev/kind/dev-loop.sh" "$SCRIPT"
 cp "$ROOT/scripts/dev/kind/profile.sh" "$TREE/scripts/dev/kind/profile.sh"
 
 write_constants() {
-  printf 'pub const HARBOR_IMAGE: &str = "%s";\n' "$1" >"$WORKSPACE_CONSTANTS"
+  printf 'pub const PUBLIC_IMAGE: &str = "%s";\n' "$1" >"$WORKSPACE_CONSTANTS"
   printf 'pub const DEFAULT_DIND_IMAGE: &str = "%s";\n' "$2" >"$DIND_CONSTANTS"
 }
 
@@ -125,7 +125,7 @@ call_count() {
 }
 
 # The real product constants resolve, and each source pins the same digest.
-real_workspace="$(sed -n 's/^pub const HARBOR_IMAGE: &str = "\(.*\)";$/\1/p' \
+real_workspace="$(sed -n 's/^pub const PUBLIC_IMAGE: &str = "\(.*\)";$/\1/p' \
   "$ROOT/crates/codewire-workspace-image/src/pin.rs")"
 real_dind="$(sed -n 's/^pub const DEFAULT_DIND_IMAGE: &str = "\(.*\)";$/\1/p' \
   "$ROOT/crates/codewire-orchestration/src/sandbox/template/mod.rs")"
@@ -149,19 +149,18 @@ FAKE_CLUSTERS=codewire-ux-2099 expect_failure absent_cluster \
   'cluster codewire-e2e-ci does not exist' run_loader
 [ ! -s "$CALLS" ] || fail "a load without the cluster touched a node"
 
-# Fresh nodes pull each source by digest; only the workspace needs a second
-# name, because containerd already records the DinD reference by its digest.
+# Fresh nodes pull each source by digest. Neither needs a second name: the
+# workspace is rendered at its public source, and containerd already records
+# the DinD reference by its digest.
 run_loader >/dev/null 2>&1 || fail "fresh load failed"
 for node in kind-control-plane kind-worker; do
   [ "$(node_digest "$node" "$WS_REF")" = "$WS_DIGEST" ] || fail "$node lacks $WS_REF"
   [ "$(node_digest "$node" "$DIND_SOURCE")" = "$DIND_DIGEST" ] || fail "$node lacks $DIND_SOURCE"
   [ "$(call_count "exec $node crictl pull $WS_SOURCE")" = 1 ] || fail "$node workspace pull count"
   [ "$(call_count "exec $node crictl pull $DIND_SOURCE")" = 1 ] || fail "$node DinD pull count"
-  [ "$(call_count "exec $node ctr -n k8s.io images tag $WS_SOURCE $WS_REF")" = 1 ] \
-    || fail "$node workspace was not named as the product renders it"
 done
-! grep -Eq 'crictl pull .*:29\.7\.1-dind|images tag .*docker' "$CALLS" \
-  || fail "DinD was pulled by tag or renamed"
+! grep -Eq 'crictl pull .*:29\.7\.1-dind| images tag ' "$CALLS" \
+  || fail "DinD was pulled by tag, or an image was renamed"
 [ "$(grep -c ' crictl pull ' "$CALLS")" = 4 ] || fail "fresh load pulled more than needed"
 
 # A second run finds every image at its digest and changes nothing.
@@ -203,10 +202,10 @@ malformed_case dind_tag_only 'DEFAULT_DIND_IMAGE is not a reference the dind row
   "$WS_REF" 'docker.io/library/docker:29.7.1-dind'
 malformed_case dind_other_repository 'DEFAULT_DIND_IMAGE is not a reference the dind row accepts' \
   "$WS_REF" "docker.io/library/docker:dind@${DIND_DIGEST}"
-malformed_case workspace_other_registry 'HARBOR_IMAGE is not a reference the workspace row accepts' \
-  "ghcr.io/codewiresh/workspace@${WS_DIGEST}" "$DIND_REF"
-malformed_case workspace_uppercase_digest 'HARBOR_IMAGE is not a reference the workspace row accepts' \
-  "registry.example.invalid/codewire/workspace@sha256:${WS_DIGEST_UPPER}" "$DIND_REF"
+malformed_case workspace_other_registry 'PUBLIC_IMAGE is not a reference the workspace row accepts' \
+  "registry.example.invalid/codewire/workspace@${WS_DIGEST}" "$DIND_REF"
+malformed_case workspace_uppercase_digest 'PUBLIC_IMAGE is not a reference the workspace row accepts' \
+  "ghcr.io/codewiresh/workspace@sha256:${WS_DIGEST_UPPER}" "$DIND_REF"
 
 reset_nodes
 write_constants "$WS_REF" "$DIND_REF"
@@ -221,10 +220,10 @@ write_constants "$WS_REF" "$DIND_REF"
 cp "$SCRIPT" "$FIXTURE/dev-loop.sh"
 sed -i "s#ghcr.io/codewiresh/\\\\1@\\\\2#ghcr.io/codewiresh/\\\\1@${OTHER_DIGEST}#" "$SCRIPT"
 ! cmp -s "$SCRIPT" "$FIXTURE/dev-loop.sh" || fail "could not rewrite the workspace row"
-expect_failure other_digest_source 'does not pin HARBOR_IMAGE' run_loader --dry-run
+expect_failure other_digest_source 'does not pin PUBLIC_IMAGE' run_loader --dry-run
 cp "$FIXTURE/dev-loop.sh" "$SCRIPT"
 sed -i 's#ghcr.io/codewiresh/\\1@\\2#ghcr.io/codewiresh/\\1:latest#' "$SCRIPT"
 ! cmp -s "$SCRIPT" "$FIXTURE/dev-loop.sh" || fail "could not rewrite the workspace row"
-expect_failure tagged_source 'does not pin HARBOR_IMAGE' run_loader --dry-run
+expect_failure tagged_source 'does not pin PUBLIC_IMAGE' run_loader --dry-run
 
 printf '[test-kind-runtime-images] table, digest identity, idempotence and fail-closed loads passed\n'

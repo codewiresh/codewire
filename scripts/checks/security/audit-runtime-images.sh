@@ -36,8 +36,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 
 # The workspace digest is the published pin (crates/codewire-workspace-image).
-# Deployments take its Harbor reference from the runtime image defaults module;
-# the CLI's local default is the same digest at the public GHCR mirror.
+# Orchestration appends it to the repository a deployment configures
+# (CODEWIRE_WORKSPACE_IMAGE_REPOSITORY); the CLI's and the dashboard's default
+# is the same digest at the public GHCR mirror.
 readonly runtime_defaults='crates/codewire-server-core/src/runtime_images.rs'
 if ! python3 scripts/ci/images/workspace-image-pin.py show >/dev/null; then
   echo "runtime image audit: the published workspace pin is not well formed" >&2
@@ -76,8 +77,9 @@ readonly -a runtime_reference_paths=(
   ':!scripts/checks/security/audit-runtime-images.sh'
 )
 
-if moving_workspace="$(git grep -nF -e 'ghcr.io/codewiresh/workspace:latest' \
-    -e 'registry.example.invalid/codewire/workspace:latest' -- \
+# A deployment's own workspace repository is configuration, and orchestration
+# refuses one with a tag (docs/CONFIGURATION.md).
+if moving_workspace="$(git grep -nF -e 'ghcr.io/codewiresh/workspace:latest' -- \
     "${runtime_reference_paths[@]}" || true)" \
   && [[ -n "$moving_workspace" ]]; then
   echo "runtime image audit: moving canonical workspace references are forbidden" >&2
@@ -100,8 +102,9 @@ if retired_dind="$(git grep -nF 'ghcr.io/codewiresh/dind' -- \
 fi
 
 for assertion in \
-  "crates/codewire-orchestration/src/sandbox/mod.rs:codewire_server_core::runtime_images::DEFAULT_WORKSPACE_IMAGE" \
-  "$runtime_defaults:pub const DEFAULT_WORKSPACE_IMAGE: &str = codewire_workspace_image::HARBOR_IMAGE;" \
+  "crates/codewire-orchestration/src/sandbox/mod.rs:runtime_images::configured().workspace_image()" \
+  "crates/codewire-orchestration/src/sandbox/runtime_images.rs:workspace_image::image_at(workspace_repository)" \
+  "$runtime_defaults:pub const PUBLIC_WORKSPACE_IMAGE: &str = codewire_workspace_image::PUBLIC_IMAGE;" \
   "crates/codewire-cli/src/commands/collaboration.rs:codewire_workspace_image::PUBLIC_IMAGE" \
   "crates/codewire-orchestration/src/sandbox/template/mod.rs:$dind_image"; do
   path="${assertion%%:*}"

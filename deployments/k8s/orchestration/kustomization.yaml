@@ -10,8 +10,12 @@ resources:
   - certificate.yaml
   - internal-roots-authz.yaml
   - image-cache-authz.yaml
+  - image-registries.yaml
   - warm-pool-authz.yaml
   - workspace-binding-network-policy.yaml
+
+configurations:
+  - kustomizeconfig.yaml
 
 transformers:
   # These run after the package namespace transformer. Parent overlays repeat

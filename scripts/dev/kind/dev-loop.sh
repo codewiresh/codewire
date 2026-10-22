@@ -118,11 +118,11 @@ ensure_review_origin() {
 #
 # The public source serves the same digest without a credential; \N is the
 # Nth group of the accepted reference, whose last group is its digest.
-# - workspace: a Harbor digest Dev pulls with its registry credential; the
-#   public GHCR mirror publishes the same digests.
+# - workspace: the published digest at its public GHCR mirror, the repository
+#   Kind configures (CODEWIRE_WORKSPACE_IMAGE_REPOSITORY, docs/CONFIGURATION.md).
 # - dind: Docker Hub's official image, pulled by its index digest alone.
 RUNTIME_IMAGES=(
-  'workspace crates/codewire-workspace-image/src/pin.rs HARBOR_IMAGE ^registry\.example\.invalid/codewire/([a-z0-9-]+)@(sha256:[0-9a-f]{64})$ ghcr.io/codewiresh/\1@\2'
+  'workspace crates/codewire-workspace-image/src/pin.rs PUBLIC_IMAGE ^ghcr\.io/codewiresh/([a-z0-9-]+)@(sha256:[0-9a-f]{64})$ ghcr.io/codewiresh/\1@\2'
   'dind crates/codewire-orchestration/src/sandbox/template/mod.rs DEFAULT_DIND_IMAGE ^docker\.io/library/docker:[0-9]+\.[0-9]+\.[0-9]+-dind@(sha256:[0-9a-f]{64})$ docker.io/library/docker@\1'
 )
 

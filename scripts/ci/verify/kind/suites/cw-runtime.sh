@@ -215,9 +215,9 @@ cw_runtime_add_managed_credentials() {
 # then refuses it (#2694), so the journey runs on the pinned image instead.
 retained_managed_workspace_image() {
   local reference node images
-  reference="$(sed -n 's/^pub const HARBOR_IMAGE: &str = "\(.*\)";$/\1/p' \
+  reference="$(sed -n 's/^pub const PUBLIC_IMAGE: &str = "\(.*\)";$/\1/p' \
     "$ROOT/crates/codewire-workspace-image/src/pin.rs")"
-  if ! [[ "$reference" =~ ^registry\.example\.invalid/codewire/workspace@sha256:[0-9a-f]{64}$ ]]; then
+  if ! [[ "$reference" =~ ^ghcr\.io/codewiresh/workspace@sha256:[0-9a-f]{64}$ ]]; then
     echo '::error::crates/codewire-workspace-image/src/pin.rs names no pinned workspace image' >&2
     return 1
   fi

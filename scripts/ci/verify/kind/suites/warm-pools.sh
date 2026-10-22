@@ -126,7 +126,7 @@ warm_pool_rpc() {
 }
 
 warm_pool_canonical_image() {
-  sed -n 's/^pub const HARBOR_IMAGE: &str = "\(.*\)";$/\1/p' \
+  sed -n 's/^pub const PUBLIC_IMAGE: &str = "\(.*\)";$/\1/p' \
     "$ROOT/crates/codewire-workspace-image/src/pin.rs"
 }
 

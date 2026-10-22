@@ -92,7 +92,7 @@ fn environment_with_selection(shape: WorkspaceShape) -> EnvironmentRow {
 fn environment_opts(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> TemplateOpts {
     environment_template_opts(
         cfg,
-        CANONICAL_WORKSPACE_RUNTIME_IMAGE,
+        canonical_workspace_runtime_image(),
         "workspace",
         env,
         7,
@@ -161,7 +161,7 @@ fn environment_opts_are_the_shape_opts_plus_identity() {
         };
         let shape_opts = shape_template_opts(
             &cfg,
-            CANONICAL_WORKSPACE_RUNTIME_IMAGE,
+            canonical_workspace_runtime_image(),
             &standard_runtime_profile_spec(&cfg),
             shape,
         );
@@ -177,7 +177,7 @@ fn environment_opts_are_the_shape_opts_plus_identity() {
 fn pool_opts_use_the_canonical_image_and_carry_no_identity() {
     let cfg = dev_cfg();
     let opts = warm_pool_template_opts(&cfg, shapes()[0]).unwrap();
-    assert_eq!(opts.image, CANONICAL_WORKSPACE_RUNTIME_IMAGE);
+    assert_eq!(opts.image, canonical_workspace_runtime_image());
     assert!(opts.identity_free());
     assert!(opts.name.is_empty() && opts.environment_id.is_empty());
     assert!(opts.organization_id.is_empty() && opts.operation_generation == 0);

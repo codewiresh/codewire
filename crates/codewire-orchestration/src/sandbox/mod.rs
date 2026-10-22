@@ -7,6 +7,7 @@ pub mod client;
 pub mod exec;
 pub mod host_keys;
 pub mod image_cache;
+pub mod runtime_images;
 pub mod sidecar;
 pub mod template;
 pub mod warm_pool;
@@ -29,19 +30,22 @@ pub const LABEL_TYPE: &str = "codewire.sh/type";
 
 const DELETION_PROTECTION_FINALIZER: &str = "codewire.sh/deletion-protection";
 
-/// Mirrors `sandbox.CanonicalWorkspaceRuntimeImage`.
-pub const CANONICAL_WORKSPACE_RUNTIME_IMAGE: &str =
-    codewire_server_core::runtime_images::DEFAULT_WORKSPACE_IMAGE;
+/// The published workspace digest at this deployment's configured repository
+/// ([`runtime_images`]): the image a Sandbox runs when it chooses none.
+pub fn canonical_workspace_runtime_image() -> &'static str {
+    runtime_images::configured().workspace_image()
+}
 
-/// The canonical workspace digest at its public GHCR mirror, which cw sends.
-/// It and the earlier published digests older clients or stored presets still
-/// send all resolve to [`CANONICAL_WORKSPACE_RUNTIME_IMAGE`].
+/// The canonical workspace digest at its public GHCR mirror, which cw and
+/// the dashboard send. It and the earlier published digests older clients or
+/// stored presets still send all resolve to
+/// [`canonical_workspace_runtime_image`].
 pub const PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE: &str =
     codewire_server_core::runtime_images::PUBLIC_WORKSPACE_IMAGE;
 
 /// Mirrors `sandbox.IsCanonicalWorkspaceRuntimeImage`.
 pub fn is_canonical_workspace_runtime_image(image_ref: &str) -> bool {
-    codewire_server_core::runtime_images::is_canonical_workspace_image(image_ref)
+    runtime_images::configured().is_canonical_workspace(image_ref)
 }
 
 /// Mirrors `sandbox.EnvironmentTemplateName`: base + "-" + envID,

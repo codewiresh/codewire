@@ -1220,6 +1220,9 @@ start_orchestration_process() {
     CODEWIRE_API_URL="http://127.0.0.1:${ORCHESTRATION_PORT}" \
     DATABASE_URL="$DATABASE_URL_RUST" SESSION_SECRET="$SESSION_SECRET" \
     CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER=true \
+    CODEWIRE_WORKSPACE_IMAGE_REPOSITORY=registry.example.invalid/codewire/workspace \
+    CODEWIRE_APPROVED_IMAGE_REGISTRIES=registry.example.invalid/,docker.io/library/ \
+    SANDBOX_DAEMON_IMAGE=registry.example.invalid/codewire/daemon@sha256:adaba1f8e5ca50ed7aaeaf1b15d0588e441cadd1830e508a83108f798f66e029 \
     ORCHESTRATION_PORT="$ORCHESTRATION_PORT" \
     TEMPORAL_HOST_PORT="$TEMPORAL_HOST_PORT" WORKER_CONSUMERS= WORKER_LOOPS= \
     "${daemon_endpoint_environment[@]}" \

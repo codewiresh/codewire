@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::CANONICAL_WORKSPACE_RUNTIME_IMAGE;
+use super::canonical_workspace_runtime_image;
 use super::template::DEFAULT_DIND_IMAGE;
 
 /// The one DaemonSet orchestration may manage (the admission policy binds
@@ -79,12 +79,13 @@ pub const IMAGE_CACHE_IDLE_IMAGE: &str = DEFAULT_DIND_IMAGE;
 /// A Pod never rewrites a DaemonSet rendered by a newer renderer. A test
 /// fails until a render change bumps it.
 pub const IMAGE_CACHE_RENDER_VERSION: u32 = 2;
-/// Registries the admission policy accepts. Kept in the same order and
-/// spelling as `deployments/k8s/orchestration/image-cache-authz.yaml`.
-pub const APPROVED_IMAGE_REGISTRIES: [&str; 2] = ["registry.example.invalid/", "docker.io/library/"];
-/// The admission policy's image expression, which [`is_approved_image`]
-/// implements. A test binds this text to the policy file.
-pub const APPROVED_IMAGE_PATTERN: &str = "^(registry[.]example[.]invalid|docker[.]io/library)/[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$";
+/// What follows an approved registry prefix
+/// ([`super::runtime_images::APPROVED_IMAGE_REGISTRIES_ENV`]): a repository
+/// path, an optional tag and a mandatory digest. The admission policy matches
+/// the rest of a reference after a prefix it approves against this text, and
+/// [`is_approved_image`] implements it. A test binds both to the policy file.
+pub const APPROVED_IMAGE_NAME_PATTERN: &str =
+    "^[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$";
 
 const MAX_SETS: usize = 2;
 /// Workspace, daemon and DinD per set.
@@ -202,7 +203,11 @@ impl DesiredSet {
         };
         let mut images = Vec::new();
         let mut skipped = 0;
-        for image in [CANONICAL_WORKSPACE_RUNTIME_IMAGE, daemon_image.trim(), dind] {
+        for image in [
+            canonical_workspace_runtime_image(),
+            daemon_image.trim(),
+            dind,
+        ] {
             if !is_approved_image(image) {
                 skipped += 1;
             } else if !images.iter().any(|held| held == image) {
@@ -274,15 +279,26 @@ pub fn merge(state: &mut CacheState, desired: &DesiredSet) -> MergeOutcome {
     MergeOutcome::Added
 }
 
-/// `registry.example.invalid/…` or `docker.io/library/…`, with an optional tag and a
-/// mandatory `@sha256:` digest ([`APPROVED_IMAGE_PATTERN`]).
+/// An image from a registry this deployment approves, with an optional tag
+/// and a mandatory `@sha256:` digest ([`APPROVED_IMAGE_NAME_PATTERN`]).
 pub fn is_approved_image(image: &str) -> bool {
-    let Some(rest) = APPROVED_IMAGE_REGISTRIES
-        .iter()
-        .find_map(|registry| image.strip_prefix(registry))
-    else {
-        return false;
-    };
+    approved_by(
+        super::runtime_images::configured().approved_registries(),
+        image,
+    )
+}
+
+/// Whether any of `registries` prefixes `image` and the rest is an approved
+/// name, as the admission policy's `exists` evaluates it.
+fn approved_by(registries: &[String], image: &str) -> bool {
+    registries.iter().any(|registry| {
+        image
+            .strip_prefix(registry.as_str())
+            .is_some_and(approved_name)
+    })
+}
+
+fn approved_name(rest: &str) -> bool {
     let Some((name, digest)) = rest.split_once("@sha256:") else {
         return false;
     };
@@ -641,10 +657,11 @@ mod tests {
             1,
             "d1f20498b4b3d5d2dd156333b012a6dd89ee6cbab09a7e00c1ff435db341cf8e",
         ),
-        // One idle DinD container; cached images as image volumes.
+        // One idle DinD container; cached images as image volumes. Hashed
+        // again when the fixture images moved to registry.example.invalid.
         (
             2,
-            "c46cf29f1834914680fef859418962896543769e8dda195062667229146aee8f",
+            "24964f5c4e40dcb0442b5ae3ea94479d6ad0086e3e59f487e0034e88f175e401",
         ),
     ];
 
@@ -742,12 +759,12 @@ mod tests {
 
     #[test]
     fn desired_set_is_workspace_daemon_and_dind() {
-        let daemon = codewire_server_core::runtime_images::DEFAULT_DAEMON_IMAGE;
+        let daemon = crate::sandbox::template::TEST_SUPPORT_IMAGE;
         let set = DesiredSet::from_rendered(daemon, "");
         assert_eq!(
             set.images,
             [
-                CANONICAL_WORKSPACE_RUNTIME_IMAGE,
+                canonical_workspace_runtime_image(),
                 daemon,
                 DEFAULT_DIND_IMAGE
             ]
@@ -763,14 +780,14 @@ mod tests {
             "codewire-daemon:e2e",
             "localhost/codewire-ci/docker-dind:verified-66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e",
         );
-        assert_eq!(set.images, [CANONICAL_WORKSPACE_RUNTIME_IMAGE]);
+        assert_eq!(set.images, [canonical_workspace_runtime_image()]);
         assert_eq!(set.skipped, 2);
     }
 
     #[test]
     fn approved_images_match_the_admission_expression() {
         for image in [
-            CANONICAL_WORKSPACE_RUNTIME_IMAGE,
+            canonical_workspace_runtime_image(),
             DEFAULT_DIND_IMAGE,
             GATEWAY_A,
             "docker.io/library/busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -793,6 +810,16 @@ mod tests {
         ] {
             assert!(!is_approved_image(image), "{image}");
         }
+        // Like the policy's `exists`, any approved prefix may admit an image,
+        // not only the first that matches it.
+        let nested = [
+            "registry.example.invalid/".to_owned(),
+            "registry.example.invalid/team/".to_owned(),
+        ];
+        let image = "registry.example.invalid/team/x@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c";
+        assert!(approved_by(&nested, image));
+        assert!(approved_by(&[nested[1].clone(), nested[0].clone()], image));
+        assert!(!approved_by(&[], image));
     }
 
     #[test]
@@ -1062,6 +1089,64 @@ mod tests {
         );
     }
 
+    /// The policy approves exactly what [`is_approved_image`] does: it reads
+    /// `CODEWIRE_APPROVED_IMAGE_REGISTRIES` from the ConfigMap orchestration
+    /// reads it from, keeps the entries [`APPROVED_REGISTRY_PATTERN`]
+    /// accepts, and matches the rest of a reference after any of them against
+    /// [`APPROVED_IMAGE_NAME_PATTERN`].
+    #[test]
+    fn admission_policy_reads_the_registries_orchestration_reads() {
+        use crate::sandbox::runtime_images::{
+            APPROVED_IMAGE_REGISTRIES_ENV, APPROVED_REGISTRY_PATTERN,
+        };
+        let read = |path: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../deployments/k8s/orchestration/{path}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .expect(path)
+        };
+        let config_map = "codewire-image-registries";
+        let policy = read("image-cache-authz.yaml");
+        for fragment in [
+            "paramKind:\n    apiVersion: v1\n    kind: ConfigMap\n".to_owned(),
+            format!(
+                "paramRef:\n    name: {config_map}\n    namespace: prod\n    parameterNotFoundAction: Deny\n"
+            ),
+            format!(
+                "has(params.data) && '{APPROVED_IMAGE_REGISTRIES_ENV}' in params.data ?\n        \
+                 params.data['{APPROVED_IMAGE_REGISTRIES_ENV}'].split(',')\
+                 .filter(r, r.matches('{APPROVED_REGISTRY_PATTERN}')) : []"
+            ),
+            "variables.registries.exists(r, v.image.reference.startsWith(r) &&\n        \
+             v.image.reference.substring(size(r))"
+                .to_owned(),
+            format!(
+                "v.image.reference.substring(size(r)).matches('{APPROVED_IMAGE_NAME_PATTERN}')"
+            ),
+        ] {
+            assert!(policy.contains(&fragment), "policy does not pin {fragment}");
+        }
+        let registries = read("image-registries.yaml");
+        assert!(registries.contains(&format!(
+            "kind: ConfigMap\nmetadata:\n  name: {config_map}\n"
+        )));
+        assert!(registries.contains(&format!("\n  {APPROVED_IMAGE_REGISTRIES_ENV}: \"\"\n")));
+        let deployment = read("deployment.yaml");
+        assert!(deployment.contains(&format!(
+            "- name: {APPROVED_IMAGE_REGISTRIES_ENV}\n              valueFrom:\n                \
+             configMapKeyRef:\n                  name: {config_map}\n                  \
+             key: {APPROVED_IMAGE_REGISTRIES_ENV}\n"
+        )));
+        // The pattern is the one valid_registry_prefix implements.
+        for prefix in crate::sandbox::runtime_images::RuntimeImages::example().approved_registries()
+        {
+            assert!(crate::sandbox::runtime_images::valid_registry_prefix(
+                prefix
+            ));
+        }
+    }
+
     #[test]
     fn admission_policy_pins_the_rendered_shape() {
         let policy = std::fs::read_to_string(concat!(
@@ -1079,7 +1164,6 @@ mod tests {
             .collect();
         for fragment in [
             cel_list(&idle_command()),
-            format!("v.image.reference.matches('{APPROVED_IMAGE_PATTERN}')"),
             format!("c.image == '{IMAGE_CACHE_IDLE_IMAGE}'"),
             format!("size(variables.volumes) <= {MAX_CACHED_IMAGES}"),
             format!("m.mountPath == '{IMAGE_VOLUME_ROOT}/' + m.name"),

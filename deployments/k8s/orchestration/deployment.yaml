@@ -109,6 +109,12 @@ spec:
             # Required (the service errors at startup without it).
             - name: TEMPORAL_HOST_PORT
               value: "temporal-frontend.temporal-system.svc.cluster.local:7233"
+            # The image cache admission policy reads the same ConfigMap.
+            - name: CODEWIRE_APPROVED_IMAGE_REGISTRIES
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-image-registries
+                  key: CODEWIRE_APPROVED_IMAGE_REGISTRIES
           resources:
             requests:
               cpu: 100m

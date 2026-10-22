@@ -42,7 +42,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 PIN = "crates/codewire-workspace-image/src/pin.rs"
-HARBOR_REPOSITORY = "registry.example.invalid/codewire/workspace"
 PUBLIC_REPOSITORY = "ghcr.io/codewiresh/workspace"
 INPUT_PATHS = ("images/base", "images/workspace")
 # Agent name -> the npm package the workspace image installs it from.
@@ -174,10 +173,9 @@ def render(pin: dict) -> str:
         "\n"
         "/// Content digest of the published workspace image.\n"
         f'pub const DIGEST: &str = "{digest}";\n'
-        "/// The image at the Harbor repository every deployment pulls.\n"
-        f'pub const HARBOR_IMAGE: &str = "{HARBOR_REPOSITORY}@{digest}";\n'
-        "/// The same digest at the public GHCR mirror, pulled anonymously by local\n"
-        "/// environments.\n"
+        "/// The image at the public GHCR mirror, pulled anonymously by local\n"
+        "/// environments. A deployment pulls the same digest from its configured\n"
+        "/// repository.\n"
         f'pub const PUBLIC_IMAGE: &str = "{PUBLIC_REPOSITORY}@{digest}";\n'
         "/// Platforms the published image index serves.\n"
         f"pub const PLATFORMS: &[&str] = &[{platforms}];\n"
@@ -244,7 +242,6 @@ def parse(text: str) -> dict:
         "agents": agents,
         "previous_digests": previous,
     })
-    require(one("HARBOR_IMAGE") == f"{HARBOR_REPOSITORY}@{pin['digest']}", "pin Harbor image is not the digest")
     require(one("PUBLIC_IMAGE") == f"{PUBLIC_REPOSITORY}@{pin['digest']}", "pin public image is not the digest")
     require(render(pin) == text, "pin is not in the generator's exact form; regenerate it with `render`")
     return pin
@@ -261,10 +258,18 @@ def read_pin(root: Path, commit: str | None) -> dict:
     return parse(text)
 
 
+def harbor_repository() -> str:
+    """The workspace repository on the registry CI names in CODEWIRE_IMAGE_REGISTRY."""
+    host = os.environ.get("CODEWIRE_IMAGE_REGISTRY", "")
+    require(bool(host), "CODEWIRE_IMAGE_REGISTRY must name the image registry host")
+    return f"{host}/codewire/workspace"
+
+
 def field(pin: dict, name: str):
+    if name == "harbor-image":
+        return f"{harbor_repository()}@{pin['digest']}"
     return {
         "digest": pin["digest"],
-        "harbor-image": f"{HARBOR_REPOSITORY}@{pin['digest']}",
         "public-image": f"{PUBLIC_REPOSITORY}@{pin['digest']}",
         "platforms": pin["platforms"],
         "source-sha": pin["source_sha"],
@@ -307,7 +312,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "show":
             pin = read_pin(root, args.commit)
-            value = field(pin, args.field) if args.field else {name: field(pin, name) for name in FIELDS}
+            # The Harbor reference needs CI's registry; the whole pin shows
+            # it only when CODEWIRE_IMAGE_REGISTRY names one.
+            shown = [name for name in FIELDS
+                     if name != "harbor-image" or os.environ.get("CODEWIRE_IMAGE_REGISTRY")]
+            value = field(pin, args.field) if args.field else {name: field(pin, name) for name in shown}
             print(value if isinstance(value, str) else json.dumps(value, sort_keys=True))
         elif args.command == "inputs-sha256":
             print(inputs_sha256(root, args.commit))

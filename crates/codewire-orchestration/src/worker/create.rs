@@ -31,7 +31,7 @@ use crate::sandbox::template::{
 };
 use crate::sandbox::warm_pool::{WarmPoolObjects, WorkspaceShape, render_warm_pool};
 use crate::sandbox::{
-    CANONICAL_WORKSPACE_RUNTIME_IMAGE, ClaimOpts, claim_name, environment_template_name,
+    ClaimOpts, canonical_workspace_runtime_image, claim_name, environment_template_name,
     is_canonical_workspace_runtime_image, shadow_warm_pool_name,
 };
 use crate::start_metrics::{self, StartPath, StartProfile, StartStage};
@@ -178,7 +178,7 @@ impl SandboxWorkerCfg {
     /// The support image this worker renders, which every resume and Pod
     /// replacement re-pins a Sandbox's daemon to.
     pub fn support_image(&self) -> &str {
-        crate::sandbox::template::effective_support_image(&self.daemon_image)
+        &self.daemon_image
     }
 
     /// Review L2: a commodity workspace binds through the binding Service in
@@ -346,10 +346,7 @@ impl SandboxWorkerCfg {
             session_secret: getenv("SESSION_SECRET", ""),
             sandbox_namespace,
             credential_runtime,
-            daemon_image: getenv(
-                "SANDBOX_DAEMON_IMAGE",
-                codewire_server_core::runtime_images::DEFAULT_DAEMON_IMAGE,
-            ),
+            daemon_image: getenv(crate::sandbox::runtime_images::DAEMON_IMAGE_ENV, ""),
             dind_image: getenv("SANDBOX_DIND_IMAGE", ""),
             runtime_profile: std::env::var("SANDBOX_RUNTIME_PROFILE").unwrap_or_default(),
             docker_mode: getenv("SANDBOX_DOCKER_MODE", "profile-default"),
@@ -654,7 +651,12 @@ pub fn warm_pool_template_opts(
     );
     validate_managed_runtime_profile(&runtime_spec, cfg.allow_diagnostic_runtime)
         .map_err(|error| anyhow::anyhow!("warm pool runtime profile: {error}"))?;
-    let opts = shape_template_opts(cfg, CANONICAL_WORKSPACE_RUNTIME_IMAGE, &runtime_spec, shape);
+    let opts = shape_template_opts(
+        cfg,
+        canonical_workspace_runtime_image(),
+        &runtime_spec,
+        shape,
+    );
     anyhow::ensure!(
         opts.identity_free(),
         "warm pools require identity-free workspaces (POD_NAMESPACE and a coordinator)"

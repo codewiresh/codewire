@@ -5,6 +5,9 @@ registry and storage location comes from configuration. A site that runs
 Codewire's CI on its own Forgejo sets the values below once; nothing in the
 tree changes.
 
+What a deployment itself configures, such as the registries its runtime
+images come from, is in the [configuration reference](../CONFIGURATION.md).
+
 ## Forgejo server
 
 - **Action resolution.** Workflows refer to actions by short references such

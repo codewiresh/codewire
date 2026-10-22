@@ -1,0 +1,14 @@
+# CODEWIRE_APPROVED_IMAGE_REGISTRIES: comma-separated registry prefixes, each
+# ending in '/', that the runtime-node image cache may hold images from
+# (docs/CONFIGURATION.md). Orchestration reads it into its environment and the
+# image cache admission policy reads it as its parameter, so both approve the
+# same registries. The name carries no hash suffix, so the policy binding can
+# name it. Every overlay sets the value: the empty base value refuses
+# orchestration's start and approves no registry.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codewire-image-registries
+  namespace: prod
+data:
+  CODEWIRE_APPROVED_IMAGE_REGISTRIES: ""
