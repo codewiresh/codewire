@@ -1,0 +1,400 @@
+# Sandbox Daemon
+
+This document describes the in-sandbox control plane of Codewire workspaces:
+the environment daemon, which also serves the workspace's SSH, tailnet and
+credential bridge. There is no per-environment gateway workload.
+
+Source files:
+
+- `crates/codewire-daemon/` — the daemon
+- `crates/codewire-workspace-access/` — the SSH, SFTP, SCP and tailnet server
+  the daemon runs
+- `crates/codewire-cli/src/hosted_access.rs`, `hosted_binding.rs` — binding
+  and access startup in `cw __hosted-daemon`
+- `crates/codewire-daemon-proto/` — shared constants and the daemon,
+  bridge and broker protos
+- `libs/daemon-proto/proto/daemon/v1/daemon.proto`
+- `proto/codewire/internal/v1/workspace_binding.proto`
+
+## Components
+
+### Orchestration's internal listeners
+
+Orchestration serves two cluster-internal TLS listeners, both with the
+cert-manager leaf of its internal authority:
+
+- **8087, workspace binding**, for
+  `codewire-orchestration-workspace-binding.<namespace>.svc.cluster.local`.
+  It serves only `WorkspaceBindingService` (BindWorkspace, RefreshAccess,
+  RecordHostKey, AllocatePeerRelay) to workspace Pods in the sandbox
+  namespace, under its own connection, request and database limits.
+- **8088, internal Connect**, for
+  `codewire-orchestration.<namespace>.svc.cluster.local`. It serves only
+  `MeshAuthorizationService`, to Mesh.
+
+There is no plaintext listener.
+
+- Inside a cluster, orchestration refuses to start without that leaf, and
+  refuses to serve unless `codewire-orchestration-internal-roots` in the
+  sandbox namespace verifies it for both names. Its only sandbox-namespace
+  read is that ConfigMap (Role `codewire-orchestration-internal-roots`).
+- Outside a cluster (`scripts/dev/dev-stack.sh`, integration verification) it
+  serves no internal API.
+- Workspace daemons mount those roots and verify 8087 with them; Mesh
+  verifies 8088 with `meshAuthorization.tlsRootsConfigMap`.
+
+Each cluster's site issues the authority and publishes the public roots
+before it deploys a release that requires them.
+
+### Environment daemon
+
+The self-contained `cw` binary provides the environment daemon through the
+private `cw __hosted-daemon` entrypoint. The support image contains that
+binary at `/usr/local/bin/cw`, and the workspace container runs it as
+`/codewire/bin/cw`. Commodity workspaces mount the support image's
+`usr/local/bin` there as a read-only OCI image volume, so they start without an
+init container. Confidential, `runc` and Kind workspaces keep a
+`codewire-daemon-init` init container that copies only `cw` into a
+`/codewire/bin` emptyDir: confidential guests pull images inside the guest,
+where image volumes do not apply. There is no standalone daemon binary,
+executable-name alias, or public daemon command.
+
+Every Start or resume re-pins an existing Sandbox's daemon to orchestration's
+current support image, in the same Sandbox patch that sets it running, so a
+stopped Sandbox restarts on the current daemon. The re-pin rewrites only the
+`codewire-bin` image volume's reference, or the `codewire-daemon-init` image of
+a Sandbox that copies its daemon, and only from an image in the configured
+support image's repository (`SANDBOX_DAEMON_IMAGE`,
+[configuration reference](../CONFIGURATION.md)) to that digest-pinned image. A running Pod keeps its image until it is next started or replaced:
+`cw daemon repair`, a restart-mode resize and the replacement of a
+terminal Pod re-pin the running Sandbox the same way before they delete its
+Pod, and an unbound Pod that fails its binding check is deleted after a
+best-effort re-pin. Confidential Sandboxes are never re-pinned: their
+measured, attested Pod policy admits exactly the containers they were
+rendered with.
+
+The daemon performs operations that must use the workspace container's process
+namespace, filesystem view, UID/GID, and environment:
+
+- run non-interactive commands and interactive PTY sessions
+- forward stdin, stdout, stderr, resize, exit, and error messages
+- provide file operations: list, stat, read, write, mkdir, remove, rename,
+  setstat, and readlink
+- own durable session lifecycle, attach/detach, output cursors, health, and
+  capability/version diagnostics
+- build process environment from session input plus
+  `/home/codewire/.codewire/environment.json`
+- default workspace paths to `/workspace` and `/home/codewire`
+
+The daemon RPC listener is `0.0.0.0:7777` inside the workspace Pod. Kubernetes
+exposes it only through the environment-local `cw-daemon-<env>` ClusterIP
+Service, and NetworkPolicy admits only the Codewire orchestration workload in
+the server namespace to it. Every daemon RPC requires the bound Pod's daemon
+credential in the `x-codewire-daemon-token` metadata header.
+
+The daemon does not own user identity, organization membership or environment
+authorization; those belong to the Codewire API.
+
+### Workspace access
+
+Once bound, the daemon also serves the workspace's access paths from the
+same process:
+
+- **SSH** on TCP 2222 in the Pod, with SFTP and SCP served internally over
+  the daemon's file RPCs. Only orchestration reaches it: its SSH proxy for
+  `cw ssh` and the setup health check. Its Ed25519 host key is generated per
+  binding generation, never leaves the VM, and only its public line is
+  recorded with orchestration, write-once, through `RecordHostKey`. Clients
+  pin that recorded key.
+- **Tailnet** on UDP 31000: the daemon joins the coordinator as the
+  environment's node with the coordinate capability from its binding, and
+  serves the same SSH server over tailnet. The world reaches 31000 through
+  the environment's direct-UDP LoadBalancer `cw-tailnet-udp-<env>`, and
+  clients fall back to the shared UDP relay (allocated through
+  `AllocatePeerRelay`) and then DERP.
+- **Credential bridge**: the credential relay in orchestration dials the
+  daemon over the daemon Service and relays the bridge to the broker.
+
+`/codewire/run/daemon/access-ready` appears once the daemon is bound, SSH
+listens and the host key is recorded. `RefreshAccess` renews the access
+material before it expires. Nothing listens on 2222, 7777 or 31000 before
+binding.
+
+## Startup Sequence
+
+1. Kubernetes starts the workspace Pod from the `SandboxClaim` (or adopts a
+   warm-pool member).
+2. On commodity, the kubelet mounts `/codewire/bin` read-only from the
+   support image and no init container runs. Elsewhere, the
+   `codewire-daemon-init` init container copies `/usr/local/bin/cw` from the
+   support image to `/codewire/bin/cw` and prepares `/codewire/run/processes`.
+   A hosted daemon with launch projection creates its owner-private (0700)
+   `/codewire/run/processes` itself when it is missing. The daemon also
+   prepares Codex's home, `~/.codex` on the persistent home volume, before it
+   listens, and once listening keeps Codex's own ChatGPT login there while
+   the broker delivers one (see
+   [Secrets and credentials](SECRETS-AND-CREDENTIALS.md#codex-home-in-hosted-sandboxes)).
+3. A managed image runs `cw __hosted-daemon` as its primary supervised process.
+   A custom image runs the same private entrypoint as a supervised side process
+   beside the image command and restarts it while that workload remains alive.
+4. The daemon writes `/codewire/run/daemon/ready` and long-polls
+   `BindWorkspace` on 8087. Orchestration creates the environment's access
+   objects (the daemon Service, the direct-UDP LoadBalancer and the workspace
+   NetworkPolicy) and records the binding as soon as the chain is bind-ready.
+5. Bound, the daemon listens on 7777, starts SSH on 2222, records its host
+   key, writes `access-ready`, and joins the tailnet.
+6. Create and start wait for the Claim to be Ready and for access: setup's
+   health check completes a pinned SSH handshake with the recorded host key.
+
+What bounds a daemon that never comes up is the tier's workspace ready
+timeout: 10 minutes for commodity and 30 minutes for confidential, whose guest
+initializes encrypted storage before the daemon listens. The workspace's
+Docker startup probe uses the same budget.
+
+## Daemon API Surface
+
+The support image ships the self-contained Rust `cw` binary. Its private
+hosted-daemon mode serves only the typed gRPC daemon service on 7777; it has
+no HTTP router, unauthenticated health route, or shell-based diagnostic
+endpoint.
+
+| Surface | Source | Purpose | Status |
+|---|---|---|---|
+| typed daemon service | `libs/daemon-proto/proto/daemon/v1/daemon.proto` | typed daemon RPC contract | the only path |
+
+The typed service exposes:
+
+- `GetCapabilities` and `GetHealth` for version negotiation, readiness, and
+  actionable `unsupported`, `starting`, `unhealthy`, and `upgrade_required`
+  states
+- durable session launch/list/get/stop/restart, attach/detach, input, resize,
+  events, and lossless output reads by byte offset
+- `ExecSession`: bidirectional stream for non-PTY commands
+- `PtySession`: bidirectional stream for interactive shells
+- `List`, `Stat`, `OpenFile`, `Read`, `Write`, `Mkdir`, `Remove`, `Rename`,
+  `SetStat`, and `Readlink`
+
+Orchestration (its exec, file and health paths and the credential relay) and
+the daemon's own access server use `daemon.proto` through authenticated
+tonic/gRPC: orchestration over the workspace daemon Service with the bound
+Pod's daemon credential, the access server over the daemon's in-process
+transport. Treat `daemon.proto` as the compatibility contract.
+
+The legacy WebSocket session path (`/session`) and legacy HTTP file API
+(`/files/*`) are retired. The old Go daemon command, Go daemon package, and Go
+helper module have been deleted. Do not reintroduce the legacy frame protocol;
+new work must target the typed daemon service.
+## Command Semantics
+
+For both exec and PTY sessions:
+
+- empty command defaults to the workspace shell
+- empty working directory defaults to the workspace user home
+- command process env starts from the workspace container env
+- persisted env from `/home/codewire/.codewire/environment.json` is merged in
+- session-provided env wins over persisted env
+- PTY sessions set `TERM` from the request
+- `HOME`, `USER`, and `SHELL` are filled with sane defaults when missing
+- stdout/stderr are drained before `Wait` to avoid losing buffered output
+## File Semantics
+
+Daemon file operations are intentionally workspace-scoped. Paths are cleaned and
+resolved against:
+
+- `/workspace`
+- `/home/codewire`
+
+Relative paths resolve under `/workspace`. Attempts to operate outside those
+roots fail before the filesystem operation. The typed gRPC service applies
+this rule to every file operation. This path
+boundary is defense in depth for the workspace control channel. It is not a
+substitute for the runtime boundary: a user command still runs as the workspace
+user inside the sandbox and can do whatever that user can do in the workspace
+container.
+## Runtime Profiles and Docker
+
+Docker support is a runtime-profile capability, not a Kubernetes RuntimeClass
+by itself.
+
+| Profile | Default Docker mode | Shape |
+|---|---|---|
+| `runc` | `none` | no Docker socket |
+| local kind override | `local-dind-direct` | workspace talks directly to a pod-local `docker:dind` socket |
+| `commodity` | `guest-dind` | workspace talks to guest-local `docker:dind` inside the Kata/Cloud Hypervisor boundary |
+| `confidential` | `guest-dind` | same pod shape as commodity, with future TEE gates |
+
+For commodity and future confidential profiles, the intended Docker path is:
+
+```text
+docker CLI in workspace
+  -> DOCKER_HOST=unix:///var/run/docker/docker.sock
+  -> docker:dind running inside the same Kata/CoCo pod
+```
+
+The workspace container must not mount `/var/run/docker.sock`,
+`/run/docker.sock`, or the Kubernetes node's containerd socket. The
+`/var/run/docker/docker.sock` path is the pod-local dind socket inside the
+runtime boundary, not the Kubernetes node's socket.
+
+The `dind` data root must stay inside the runtime boundary and must not use the
+Kubernetes node's Docker/containerd sockets. Commodity currently creates an
+ext4 image at `/workspace/.codewire/docker-data.ext4`, mounts it at
+`/var/lib/docker`, and uses dockerd `vfs`, because the current Kata guest
+rejects `overlay2` for this path. The commodity smoke checks for the ext4
+over-mount specifically, not just any mountpoint.
+
+Confidential QEMU-SNP is different: the confidential guest has ext4 support
+but no loop devices, so `mount -o loop` fails even when the target directory exists. For
+confidential, the renderer starts dockerd with `--data-root
+/workspace/.codewire/docker-root`, `--storage-driver vfs`, and
+`CODEWIRE_DOCKER_MOUNT_MODE=none`. The focused diagnostic is:
+
+```bash
+KUBECONFIG=/path/to/the-dev-cluster-kubeconfig.yaml \
+  scripts/runtime/dev/smoke-dev-dind-storage.sh \
+    --runtime-class confidential \
+    --node <confidential-node> \
+    --data-root /workspace/.codewire/docker-root \
+    --mount-mode none \
+    --run-docker
+```
+
+## Security Invariants
+
+- External clients never connect to the daemon directly. The daemon Service
+  is ClusterIP-only and NetworkPolicy admits only orchestration to 7777 and
+  2222; only the world reaches UDP 31000, through the LoadBalancer.
+- App-preview traffic is separate from daemon traffic: public preview requests
+  terminate at ingress/orchestration, then the orchestration preview proxy
+  connects to the workspace Pod on the registered TCP app port. Preview ports
+  may be any port except 2222.
+- Typed daemon RPCs require the bound Pod's daemon credential via
+  `x-codewire-daemon-token`.
+- The API owns user authentication, organization membership, and environment
+  authorization; orchestration's SSH proxy and the coordinator admit access.
+- The workspace container must not receive Kubernetes node credentials, host
+  Docker sockets, host containerd sockets, or privileged host mounts.
+- In CoCo profiles, privileged Docker-in-Docker is acceptable only when the pod
+  is actually using the Kata/CoCo runtime class and the Docker daemon is inside
+  the guest VM boundary.
+
+The daemon's SSH server uses no SSH client auth: admission happens before
+traffic reaches it, in orchestration's SSH proxy or the tailnet coordinator.
+Never expose 2222 outside that path.
+
+The SSH server offers russh's default key exchanges, `mlkem768x25519-sha256`
+first, so OpenSSH negotiates a post-quantum exchange. Its larger key-exchange
+packets need a path that carries full-size tunnel packets.
+
+Tailnet interop has two packet-level invariants: packets must carry checksums
+a Go/Tailscale peer accepts, and the tunnel MTU must leave room for WireGuard,
+relay, UDP, IP and pod network overhead across nodes.
+
+## Claim-time workspace binding
+
+Hosted commodity workspaces bind at claim time:
+
+- **Identity-free Pod.** The workspace container carries no daemon token,
+  environment ID, operation generation, projection digest, managed-client
+  selection or derived client variables, and the template no environment
+  label or Codex ConfigMap. It carries a
+  Pod-bound projected token (`codewire.internal.workspace-binding.v1`, 600 s,
+  `/var/run/secrets/codewire/workspace-binding`; the volume asks for 0440, and
+  because the Pod sets `fsGroup` kubelet writes it 0640 with group 1000),
+  `CODEWIRE_WORKSPACE_BINDING_URL` and its own UID (`CODEWIRE_POD_UID`, from
+  the downward API). A golden fixture and the `identity-free-workspace`
+  policy guard enforce this.
+- **Bind, then listen.** The daemon writes `/codewire/run/daemon/ready`,
+  which the readiness probe tests (with the Docker check in DinD modes), and
+  long-polls `WorkspaceBindingService.BindWorkspace` on orchestration's
+  dedicated listener (TCP 8087). After a valid response for its own Pod UID
+  it writes its credential to `/codewire/run/daemon/credential` (0400),
+  which the fixed-purpose hosted exec reads, prepares Codex's `~/.codex` for
+  the bound clients, and only then listens on 7777, serves SSH on 2222 and
+  joins the tailnet (see "Workspace access" above).
+- **Record before release.** As soon as the chain is bind-ready, while
+  create and start still wait for Claim Ready, orchestration
+  verifies the Claim → Sandbox → Pod UID chain, images and the workspace PVC
+  UID and records Pod UID → environment. Bind-ready means:
+  - identity labels converged;
+  - the Sandbox status reporting its current generation;
+  - the Pod `Running` with every container started from a resolved image.
+
+  Docker in DinD may still be starting, and Claim Ready still gates
+  MarkRunning and setup. Create, start, a Pod replaced while running, resize,
+  daemon repair and setup recovery all bind this way. Stop and destroy release the binding
+  only after the Pod is gone. The `workspace_bind` stage measures it.
+- **Rotating the session secret** changes every daemon credential. Bound
+  daemons never re-bind, so it requires restarting the workspace Pods.
+- **No environment-token mode.** The daemon serves SSH and the tailnet only
+  once bound, so an environment-token commodity workspace could never become
+  access-ready. `SANDBOX_WORKSPACE_IDENTITY_MODE` accepts only `binding`, and
+  a worker configured otherwise refuses to start. A legacy environment's
+  suspended template and Sandbox are replaced with the identity-free rendering
+  on its next start.
+
+Exposure statement:
+
+> A workspace Pod receives a Pod-bound projected token with the audience
+> `codewire.internal.workspace-binding.v1`, in the `workspace` container
+> only. The daemon uses it to fetch its binding, then keeps the daemon
+> credential in memory and in an owner-only file under `/codewire/run`.
+>
+> The workload runs as the daemon's uid and can reach VM root through
+> privileged DinD, so it can read both the binding token and the daemon
+> credential, just as it can read today's environment-variable token. Both
+> are scoped to this environment and this Pod. They grant the Pod's own
+> binding response and the private daemon RPC boundary of the same Pod. They
+> grant no provider credential, no other Pod's binding and no Kubernetes API
+> access: the API server rejects the custom audience, and
+> `automountServiceAccountToken` is false. The bind response also carries the
+> Pod's coordinate capability, which admits only this environment's tailnet
+> node.
+
+Warm-pool members are identity-free and bind at adoption the same way. The
+zero-replica `SandboxWarmPool` referenced by a cold claim remains only because
+the Agent Sandbox CRD requires that indirection for cold creation.
+
+## Troubleshooting
+
+If shell, exec, or file operations fail:
+
+1. Run `cw daemon status ENV`; it reports daemon state, protocol version,
+   capabilities, pod identity, and diagnostics without exposing the daemon
+   credential.
+2. Check the workspace Pod exists with `workspace` (and `dind`) containers
+   and that `/codewire/run/daemon/access-ready` exists in it.
+3. Run `cw daemon logs ENV`; a bound daemon logs its binding, its SSH
+   listener and its tailnet join. An unbound one logs its binding attempts.
+4. If the daemon is unhealthy or unavailable, run `cw daemon repair ENV`.
+   Repair replaces only the workspace Pod, binds the replacement, and
+   preserves the environment, Sandbox, claim, PVCs, and identity.
+5. For OpenSSH hangs over tailnet, compare `CW_SSH_TRANSPORT=websocket` and
+   `CW_SSH_TRANSPORT=tailnet` and inspect `CW_DEBUG_TAILNET=1` path-probe
+   output; then check packet checksums, tunnel MTU/MSS, forced-DERP behavior,
+   and whether the relay path was tested cross-node.
+
+If Docker fails in a Kata-backed sandbox:
+
+1. Confirm the pod has `runtimeClassName: commodity` or `confidential`.
+2. Confirm the workspace pod has `workspace` and `dind` containers.
+3. Confirm the workspace has `DOCKER_HOST=unix:///var/run/docker/docker.sock`.
+4. Confirm no host Docker/containerd socket is mounted into the workspace.
+
+## Validation Checklist
+
+For a `commodity` sandbox, expected evidence is:
+
+- workspace pod `runtimeClassName` is `commodity`
+- workspace pod containers are `workspace` and `dind`
+- the workspace has no environment token: it binds through 8087
+- workspace env has `DOCKER_HOST=unix:///var/run/docker/docker.sock`
+- workspace does not have `/var/run/docker.sock` or `/run/docker.sock`
+- workspace daemon Service is ClusterIP-only on TCP `7777`
+- `cw ssh`, `scp`, `sftp` and tailnet SSH reach the workspace with the
+  recorded host key
+- `docker version` works from the workspace
+- `docker compose` can run a simple service
+
+Do not flip `commodity` to a default runtime from pod readiness alone.
+Docker/compose and no-host-socket evidence are part of the gate.
