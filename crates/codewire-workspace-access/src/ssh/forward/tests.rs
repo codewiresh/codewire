@@ -445,10 +445,12 @@ async fn refused_forwards_get_an_open_failure_naming_the_reason() {
     assert_eq!(open_failure_code(open(&client, "127.0.0.1", 80).await), 2);
     assert_eq!(recording.targets.lock().unwrap().len(), 1);
 
-    // Nothing listening, through the real dialer.
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Nothing listening, through the real dialer. The port stays bound but
+    // never listens for the whole test: a connection to it is refused every
+    // time, and no other test can take the port meanwhile (#3267).
+    let closed = tokio::net::TcpSocket::new_v4().unwrap();
+    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let closed_port = closed.local_addr().unwrap().port();
-    drop(closed);
     let (addr, _gateway) = gateway(dialing(Arc::new(WorkloadLoopbackDialer))).await;
     let client = connect(addr).await;
     assert_eq!(
@@ -469,6 +471,7 @@ async fn refused_forwards_get_an_open_failure_naming_the_reason() {
         )),
         "{error}"
     );
+    drop(closed);
 
     // A server without a dialer refuses every forward.
     let (addr, _gateway) = gateway(|| None).await;

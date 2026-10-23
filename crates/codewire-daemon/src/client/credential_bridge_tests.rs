@@ -56,7 +56,11 @@ fn ssh_guest_validation_preserves_exact_request_and_rejects_bounds_not_deadlines
     // #2763: a deadline outside the host's window (an expired one, or one a
     // guest clock ahead of the host's put past the maximum) is the request's
     // own failure. The handler refuses it; receipt must not end the epoch.
-    for deadline_unix_ms in [1, future_deadline() + 27_000] {
+    // The skewed deadline sits an hour past the window, so it stays outside
+    // it however long a loaded runner takes to reach the check; one just past
+    // the maximum became valid again after a two-second stall (#3251 run 19543).
+    let skewed_ahead = future_deadline() + 3_600_000;
+    for deadline_unix_ms in [1, skewed_ahead] {
         let mut skewed = sign_request();
         skewed.deadline_unix_ms = deadline_unix_ms;
         assert!(ssh::validate_request(&skewed).is_err());
