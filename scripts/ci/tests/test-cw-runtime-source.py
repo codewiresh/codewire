@@ -110,6 +110,14 @@ class Source(unittest.TestCase):
 
     def test_normal_python_imports_preserve_sealed_source_and_caller_flag(self):
         environment = {key: value for key, value in os.environ.items() if key != "PYTHONDONTWRITEBYTECODE"}
+        # Normal imports write bytecode, here into a prefix tree that mirrors
+        # each source's path, never into the checkout (#3071). The prefix
+        # shows what was compiled: the host driver, never the sealed source.
+        prefix = self.base / "pycache"
+        environment["PYTHONPYCACHEPREFIX"] = str(prefix)
+
+        def cached(directory):
+            return list((prefix / directory.resolve().relative_to("/")).rglob("*.pyc"))
         with self.prepare() as capsule:
             selected = capsule.path / "source"
             script = selected / "scripts/ci/images/finalize-cw-runtime-source.py"
@@ -140,6 +148,8 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
                                     env=environment, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             self.assertEqual(result.stdout, b"normal-default-cli-and-library-source-unchanged/flag-restored\n")
+            self.assertTrue(cached(ROOT / "scripts/ci/images"), "the host driver's import wrote no bytecode")
+            self.assertEqual(cached(capsule.path), [])
             capsule.revalidate()
 
     def test_edited_worktree_and_stage_zero_index_are_not_head_relabels(self):

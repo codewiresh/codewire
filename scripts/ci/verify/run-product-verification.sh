@@ -2,6 +2,10 @@
 # Focused automatic product-verification families. Toolchain setup belongs to
 # the owning workflow job; this script is also callable for local diagnosis.
 set -euo pipefail
+# No step writes Python bytecode into the source tree, where a __pycache__
+# would reach the next image context, which refuses it (#3071). A test of
+# default bytecode behaviour clears this for its own child.
+export PYTHONDONTWRITEBYTECODE=1
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 FAMILY="${1:-}"
@@ -299,6 +303,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-verify-tested-tree-receipt.sh
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
   scripts/ci/tests/test-cargo-target-runner-failures.sh
+  scripts/ci/tests/test-runner-no-bytecode.sh
   scripts/ci/tests/test-darwin-cross-check.sh
   scripts/ci/tests/test-package-codewire-desktop.sh
   scripts/ci/tests/test-rust-toolchain.sh

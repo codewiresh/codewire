@@ -414,16 +414,13 @@ queue_policy_parts() {
 }
 
 run_selected_family() {
-  local token="$1" family="$2" label="$3" step_environment=()
-  # The same environment as the family's CI step: the delivery script tests check
-  # a source capsule that Python bytecode caches would pollute.
-  [ "$family" != release ] || step_environment=(PYTHONDONTWRITEBYTECODE=1)
+  local token="$1" family="$2" label="$3"
   if selection_has "$token"; then
     if [ "$family" = policy ] && [ "$PREFLIGHT_SCOPE" = all ]; then
       queue_policy_parts "$label"
       return
     fi
-    run_family "$family" "$label" env "${step_environment[@]}" \
+    run_family "$family" "$label" env \
       VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
       VERIFICATION_PR_BASE_SHA="$PREFLIGHT_EFFECTIVE_BASE_SHA" \
       "$PRODUCT_RUNNER" "$family"

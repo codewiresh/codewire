@@ -733,6 +733,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
+      scripts/ci/tests/test-runner-no-bytecode.sh|\
       scripts/ci/tests/test-local-rust-cache.sh|\
       scripts/ci/tests/test-run-host-rust-build.sh|\
       scripts/ci/tests/test-run-side-by-side.sh|\
