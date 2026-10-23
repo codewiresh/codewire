@@ -2601,6 +2601,8 @@ async fn run_ingress_forwarder(
         monitors.spawn(async move {
             // Process wait descriptors only become readable. Darwin's kqueue
             // descriptor also cannot be registered for writability.
+            // RUSTSEC-2026-0386: an owned `OwnedFd` is outside `AsyncFd::new`'s unsound case; `register` migration is #3249.
+            #[allow(deprecated)]
             let descriptor = AsyncFd::with_interest(descriptor, tokio::io::Interest::READABLE)
                 .map_err(|_| RunnerError::IngressControl)?;
             let _ready = descriptor

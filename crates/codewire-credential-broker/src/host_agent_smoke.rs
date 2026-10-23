@@ -607,7 +607,10 @@ fn private_pipe(fd: impl std::os::fd::AsFd) -> Result<AsyncFd<std::fs::File>, Ho
     let flags = rustix::fs::fcntl_getfl(&file).map_err(|_| HostAgentSmokeError::Control)?;
     rustix::fs::fcntl_setfl(&file, flags | rustix::fs::OFlags::NONBLOCK)
         .map_err(|_| HostAgentSmokeError::Control)?;
-    AsyncFd::new(file).map_err(|_| HostAgentSmokeError::Control)
+    // RUSTSEC-2026-0386: an owned `File` is outside `AsyncFd::new`'s unsound case; `register` migration is #3249.
+    #[allow(deprecated)]
+    let registered = AsyncFd::new(file);
+    registered.map_err(|_| HostAgentSmokeError::Control)
 }
 
 async fn write_ready(

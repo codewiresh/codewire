@@ -116,7 +116,10 @@ impl StartupProjectionIngress {
                         let peer = channel.peer_cred()?;
                         if peer.uid() != expected_uid || peer.pid().and_then(|pid| u32::try_from(pid).ok()) != Some(expected_pid) { continue; }
                         let pid = Pid::from_raw(i32::try_from(expected_pid).map_err(|_| denied())?).ok_or_else(denied)?;
-                        let life = AsyncFd::new(pidfd_open(pid, PidfdFlags::NONBLOCK).map_err(io::Error::from)?)?;
+                        let pidfd = pidfd_open(pid, PidfdFlags::NONBLOCK).map_err(io::Error::from)?;
+                        // RUSTSEC-2026-0386: an owned `OwnedFd` is outside `AsyncFd::new`'s unsound case; `register` migration is #3249.
+                        #[allow(deprecated)]
+                        let life = AsyncFd::new(pidfd)?;
                         let mut phase = [0];
                         tokio::select! {
                             biased;

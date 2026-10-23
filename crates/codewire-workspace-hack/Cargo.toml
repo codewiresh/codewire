@@ -128,7 +128,7 @@ subtle = { version = "2.6.1", features = ["const-generics"] }
 sync_wrapper = { version = "1.0.2", default-features = false, features = ["futures"] }
 thiserror = { version = "2.0.18" }
 time = { version = "0.3.47", features = ["serde-well-known"] }
-tokio = { version = "1.52.3", features = ["full", "test-util"] }
+tokio = { version = "1.54.1", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 tokio-stream = { version = "0.1.18", features = ["fs", "net"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }
@@ -262,7 +262,7 @@ syn-f595c2ba2a3f28df = { package = "syn", version = "2.0.117", features = ["extr
 sync_wrapper = { version = "1.0.2", default-features = false, features = ["futures"] }
 thiserror = { version = "2.0.18" }
 time = { version = "0.3.47", features = ["serde-well-known"] }
-tokio = { version = "1.52.3", features = ["full", "test-util"] }
+tokio = { version = "1.54.1", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 tokio-stream = { version = "0.1.18", features = ["fs", "net"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }

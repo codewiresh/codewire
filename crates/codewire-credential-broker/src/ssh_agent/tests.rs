@@ -45,6 +45,8 @@ impl PhaseEvidence {
         for process in &self.processes {
             // A pidfd refers to this exact process even if its numeric PID is
             // subsequently reused. Readiness is the kernel's exit signal.
+            // RUSTSEC-2026-0386: an owned `OwnedFd` is outside `AsyncFd::new`'s unsound case; `register` migration is #3249.
+            #[allow(deprecated)]
             let descriptor =
                 tokio::io::unix::AsyncFd::new(process.descriptor.try_clone().unwrap()).unwrap();
             drop(

@@ -107,7 +107,10 @@ pub(crate) fn observe_process(pid: i32) -> AsyncFd<OwnedFd> {
     let pid = Pid::from_raw(pid).expect("exact synthetic process PID");
     let descriptor = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
         .expect("pin exact synthetic process before completion or cancellation");
-    AsyncFd::new(descriptor).expect("register synthetic process exit observation")
+    // RUSTSEC-2026-0386: an owned `OwnedFd` is outside `AsyncFd::new`'s unsound case; `register` migration is #3249.
+    #[allow(deprecated)]
+    let registered = AsyncFd::new(descriptor);
+    registered.expect("register synthetic process exit observation")
 }
 
 pub(crate) async fn wait_for_exit(

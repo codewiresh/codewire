@@ -1121,6 +1121,8 @@ fn transferred_stream(descriptor: OwnedFd) -> io::Result<TransferredStream> {
     {
         return Err(io::Error::last_os_error());
     }
+    // RUSTSEC-2026-0386: an owned `OwnedFd` is outside `AsyncFd::new`'s unsound case; `register` migration is #3249.
+    #[allow(deprecated)]
     let descriptor = AsyncFd::new(descriptor)?;
     Ok(TransferredStream {
         descriptor: Some(descriptor),

@@ -857,9 +857,12 @@ pub async fn run_network_agent() -> Result<()> {
             .context("derive guest network session key"),
         "workspace-net-seed-failed",
     )?;
+    let tun_descriptor = open_and_configure_tun()?;
+    // RUSTSEC-2026-0386: an owned `OwnedFd` is outside `AsyncFd::new`'s unsound case; `register` migration is #3249.
+    #[allow(deprecated)]
+    let registered = AsyncFd::new(tun_descriptor);
     let tun = Arc::new(network_agent_startup(
-        AsyncFd::new(open_and_configure_tun()?)
-            .context("register guest TUN with the async runtime"),
+        registered.context("register guest TUN with the async runtime"),
         "workspace-net-async-failed",
     )?);
     let listener = network_agent_startup(
