@@ -138,6 +138,31 @@ one of your local SSH keys or generate a new one, and sets it in the profile.
 Every VM that uses the profile then gets the key. There is no question
 without a local profile, and scripts, `--yes` and JSON output never see it.
 
+## Direct mounts
+
+A direct mount (`mounts:` with `mode: direct`) shares a host directory live
+through virtiofsd. Admission binds the directory's device, inode, mount,
+owner and filesystem. Every start reopens the path without following a
+symlink and refuses a directory that was moved, removed or replaced while the
+VM was stopped. A moved directory can be moved back. A removed one cannot
+come back, even recreated at the same path, so create the environment again.
+
+A filesystem can give a removed directory's inode number to the next one
+created, and ext4 does, so a directory recreated at the same path can match
+all of those. The supervisor therefore also records the directory's file
+handle, which carries the inode's generation, and a start refuses a directory
+whose handle differs. While a VM starts or runs, its shares are held open, so
+their inode numbers cannot be reused.
+
+Overlay (including overlay over ext4) gives no file handle. There a start
+compares the device and inode alone, and a directory removed and created
+again at the same path while the VM is stopped can be shared as if it were the
+original. Copying a lower-layer directory up, as any write in it does, keeps
+its identity and is not refused.
+
+A share admitted before this check gets its handle recorded at the first
+supervisor start after the upgrade, if it still matches then.
+
 ## After a cw upgrade
 
 `cw upgrade` stops your local VMs only when you choose their restart. The previous cw's local VM supervisor

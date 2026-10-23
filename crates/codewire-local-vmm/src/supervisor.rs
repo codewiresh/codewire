@@ -108,8 +108,9 @@ use crate::workspace::{
 };
 use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationRecord};
 use crate::workspace_plan::{
-    RepositoryCredentialAccess, WorkspaceInput, WorkspacePlan, WorkspacePlanError,
-    prepare_direct_input, prepare_repository_plan, validate_local_mount_destination,
+    CheckedDirectShares, DirectShareDiscriminators, RepositoryCredentialAccess, WorkspaceInput,
+    WorkspacePlan, WorkspacePlanError, prepare_direct_input, prepare_repository_plan,
+    validate_local_mount_destination,
 };
 use codewire_project::valid_vm_only_patterns;
 
@@ -514,6 +515,9 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     core.recover_host_reboot_workspace_transitions()?;
     let supervisor = Supervisor::new(core, shutdown_tx);
     supervisor.reconcile_exposing_runners_for_startup().await?;
+    supervisor
+        .record_direct_share_discriminators_for_startup()
+        .await?;
     supervisor.core().begin_rollback_of_failed_creates()?;
     let service = SupervisorRpc {
         info: supervisor_info(&config),
@@ -1926,7 +1930,7 @@ impl Supervisor {
         &self,
         request: &v1::CreateEnvironmentRequest,
         environment_id: Uuid,
-    ) -> Result<WorkspacePlan, SupervisorError> {
+    ) -> Result<(WorkspacePlan, DirectShareDiscriminators), SupervisorError> {
         // Repository preparation runs the runtime's git before preflight
         // admits the VM inputs. Without an admissible runtime, git-backed
         // preparation reports the reinstall guidance and preflight the rest.
@@ -1954,8 +1958,9 @@ impl Supervisor {
             .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
             let plan = WorkspacePlan::local(&source)?;
             validate_request_workspace_plan(request, &project, &plan)?;
-            return Ok(plan);
+            return Ok((plan, DirectShareDiscriminators::default()));
         }
+        let mut discriminators = DirectShareDiscriminators::default();
         let mut inputs = if project.repositories.is_empty() {
             Vec::new()
         } else {
@@ -2014,6 +2019,7 @@ impl Supervisor {
                                 mount.vm_only.clone(),
                                 &forbidden_roots,
                             )
+                            .map(|(input, discriminator)| (input, Some(discriminator)))
                             .map_err(SupervisorError::from);
                         }
                         let source = inspect_workspace_skipping(
@@ -2026,17 +2032,24 @@ impl Supervisor {
                         if source.source_path.as_os_str().as_bytes() != mount.source_path {
                             return Err(SupervisorError::from(WorkspaceError::SourceChanged));
                         }
-                        Ok(WorkspaceInput::local(&source, &mount.destination))
+                        Ok((WorkspaceInput::local(&source, &mount.destination), None))
                     })
                     .collect::<Result<Vec<_>, _>>()
             })
             .await
             .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
-            inputs.extend(local_inputs);
+            for (input, discriminator) in local_inputs {
+                if let (Some(identity_sha256), Some(discriminator)) =
+                    (input.direct_identity_sha256(), discriminator)
+                {
+                    discriminators.insert(identity_sha256, discriminator);
+                }
+                inputs.push(input);
+            }
         }
         let plan = WorkspacePlan::from_inputs(inputs)?;
         validate_request_workspace_plan(request, &project, &plan)?;
-        Ok(plan)
+        Ok((plan, discriminators))
     }
 
     /// The workspace generation a first boot stages, or `None` when one is
@@ -2254,30 +2267,61 @@ impl SupervisorCore {
 }
 
 impl Supervisor {
+    /// Admit `plan`'s direct shares again under the discriminators recorded
+    /// for `environment_id`, and record any that change (#3209). The result
+    /// holds every share open; see [`WorkspacePlan::check_direct_shares`].
+    /// A store failure fails it as `SupervisorError::Store`, after the
+    /// shares were checked as if nothing were recorded, so it never stands
+    /// for a changed share and never quarantines a runner (see
+    /// [`revalidation_requires_quarantine`]).
     async fn revalidate_workspace_plan_for_boot(
         &self,
+        environment_id: Uuid,
         plan: &WorkspacePlan,
-    ) -> Result<(), SupervisorError> {
+    ) -> Result<CheckedDirectShares, SupervisorError> {
         let plan = plan.clone();
         let forbidden_roots = self.config.direct_share_forbidden_roots()?;
-        tokio::task::spawn_blocking(move || {
-            revalidate_direct_shares_for_boot(&plan, &forbidden_roots)
+        let (recorded, read_failure) = match self
+            .core()
+            .store
+            .direct_share_discriminators(environment_id)
+        {
+            Ok(recorded) => (recorded, None),
+            Err(error) => (DirectShareDiscriminators::default(), Some(error)),
+        };
+        let check_recorded = recorded.clone();
+        let checked = tokio::task::spawn_blocking(move || {
+            revalidate_direct_shares_for_boot(&plan, &forbidden_roots, &check_recorded)
         })
         .await
         .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
-        Ok(())
+        if let Some(error) = read_failure {
+            return Err(error.into());
+        }
+        if checked.discriminators != recorded {
+            self.core()
+                .store
+                .record_direct_share_discriminators(environment_id, &checked.discriminators)?;
+        }
+        Ok(checked)
     }
 
     async fn revalidate_environment_workspace_plan_for_boot(
         &self,
         name: &str,
-    ) -> Result<(), SupervisorError> {
+    ) -> Result<CheckedDirectShares, SupervisorError> {
         let environment = self.environment(name)?;
         let plan = environment.workspace_plan.clone();
         let exposes_direct_shares =
             environment.runner.is_some() && environment_may_expose_direct_shares(&environment);
-        let validation = self.revalidate_workspace_plan_for_boot(&plan).await;
-        if exposes_direct_shares && validation.is_err() {
+        let validation = self
+            .revalidate_workspace_plan_for_boot(environment.id, &plan)
+            .await;
+        if exposes_direct_shares
+            && validation
+                .as_ref()
+                .is_err_and(revalidation_requires_quarantine)
+        {
             // A replay can resume after StartVm. Reconciliation terminates an
             // exact live runner before an invalid or unresolved current
             // exclusion boundary is returned to the lifecycle worker.
@@ -2325,6 +2369,52 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Record a discriminator for each direct share that has none yet and
+    /// still matches its recorded identity (#3209). A database written
+    /// before #3209 records none, so this records them at the first start
+    /// after the upgrade, and a share replaced from then on is refused at
+    /// its next boot even where inode numbers are reused. Nothing is
+    /// refused here: a share that does not match is left for its boot.
+    async fn record_direct_share_discriminators_for_startup(&self) -> Result<(), SupervisorError> {
+        let environments = self
+            .core()
+            .state
+            .environments
+            .values()
+            .filter(|environment| {
+                environment
+                    .workspace_plan
+                    .inputs
+                    .iter()
+                    .any(|input| matches!(input, WorkspaceInput::Direct { .. }))
+            })
+            .map(|environment| (environment.id, environment.workspace_plan.clone()))
+            .collect::<Vec<_>>();
+        if environments.is_empty() {
+            return Ok(());
+        }
+        let forbidden_roots = self.config.direct_share_forbidden_roots()?;
+        for (environment_id, plan) in environments {
+            let recorded = self
+                .core()
+                .store
+                .direct_share_discriminators(environment_id)?;
+            let sweep_recorded = recorded.clone();
+            let sweep_roots = forbidden_roots.clone();
+            let swept = tokio::task::spawn_blocking(move || {
+                plan.sweep_direct_share_discriminators(&sweep_roots, &sweep_recorded)
+            })
+            .await
+            .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)?;
+            if swept != recorded {
+                self.core()
+                    .store
+                    .record_direct_share_discriminators(environment_id, &swept)?;
+            }
+        }
+        Ok(())
+    }
+
     async fn reconcile_exposing_runners_for_startup(&self) -> Result<(), SupervisorError> {
         let names = self
             .core()
@@ -2356,7 +2446,7 @@ impl Supervisor {
                 .revalidate_environment_workspace_plan_for_boot(&name)
                 .await
             {
-                Ok(()) => valid_names.push(name),
+                Ok(_) => valid_names.push(name),
                 Err(SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged)) => {
                     if let Err(error) = self.reconcile(&name).await {
                         first_error.get_or_insert(error);
@@ -2396,9 +2486,11 @@ impl Supervisor {
             return Err(SupervisorError::InvalidState);
         }
         let validation = self
-            .revalidate_workspace_plan_for_boot(workspace_plan)
+            .revalidate_workspace_plan_for_boot(environment_id, workspace_plan)
             .await;
-        if validation.is_err()
+        if validation
+            .as_ref()
+            .is_err_and(revalidation_requires_quarantine)
             && self
                 .core()
                 .state
@@ -3479,7 +3571,7 @@ impl Supervisor {
         let environment_id = self.environment(name)?.id;
         self.core().incompatible_runners.remove(&environment_id);
         let environment = self.environment(name)?;
-        let Some(record) = environment.runner.clone() else {
+        let Some(mut record) = environment.runner.clone() else {
             if environment.state == StoredEnvironmentState::Running {
                 self.core().mark_runner_dead(name)?;
             }
@@ -3491,8 +3583,9 @@ impl Supervisor {
             None
         } else {
             Some(
-                self.revalidate_workspace_plan_for_boot(&workspace_plan)
-                    .await,
+                self.revalidate_workspace_plan_for_boot(environment_id, &workspace_plan)
+                    .await
+                    .map(drop),
             )
         };
         let expected_socket = self.config.runner_socket(environment_id);
@@ -3551,6 +3644,16 @@ impl Supervisor {
             self.core().mark_runner_dead(name)?;
             return Ok(());
         }
+        self.pin_recovered_runner_socket(name, &mut record);
+        // A runner that exited while its socket was being pinned may have
+        // freed that inode first: act on nothing pinned after its exit.
+        let live = self.core().live_runners.get(&environment_id).cloned();
+        if let Some(live) = live
+            && live.is_exited()?
+        {
+            self.core().mark_runner_dead(name)?;
+            return Ok(());
+        }
         // A stopped environment's runner from another cw (an older supervisor
         // started it, and on Linux it outlives that supervisor) holds no VM:
         // end it and clear its record, so the next start runs this cw's
@@ -3578,6 +3681,9 @@ impl Supervisor {
                 self.quarantine_recorded_runner(name, socket_trusted)
                     .await?;
                 return Ok(());
+            }
+            Some(Err(error)) if !revalidation_requires_quarantine(&error) => {
+                return Err(error);
             }
             Some(Err(error)) => {
                 // If the current exclusion boundary cannot be resolved at all,
@@ -4163,7 +4269,12 @@ impl Supervisor {
         generation: u64,
         operation_id: Uuid,
     ) -> Result<(), SupervisorError> {
-        self.revalidate_environment_workspace_plan_for_boot(name)
+        // Every checked share stays open until the runner's StartVm returns
+        // (`while_holding_direct_shares`): the runner reopens each by path
+        // and compares (device, inode), which is exact only while the
+        // admitted inode cannot be freed (#3209).
+        let checked_direct_shares = self
+            .revalidate_environment_workspace_plan_for_boot(name)
             .await?;
         let environment = self.environment(name)?;
         let staging = environment.staging_workspace_generation.is_some();
@@ -4288,18 +4399,21 @@ impl Supervisor {
         // Broker startup must proceed while the runner waits for install and
         // startup. Its owner-only runner seam does not take either lifecycle
         // mutex; the immutable selection is admitted before either future.
-        let (start, broker) = tokio::join!(client.start(start_request), async {
-            if let Some(events) = broker_events {
-                bootstrap::wait_for_broker_bootstrap(
-                    events,
-                    environment.id,
-                    generation,
-                    &expected_artifact_generation,
-                )
-                .await?;
-            }
-            ensure_credential_broker(broker_request).await
-        },);
+        let (start, broker) = while_holding_direct_shares(checked_direct_shares, async {
+            tokio::join!(client.start(start_request), async {
+                if let Some(events) = broker_events {
+                    bootstrap::wait_for_broker_bootstrap(
+                        events,
+                        environment.id,
+                        generation,
+                        &expected_artifact_generation,
+                    )
+                    .await?;
+                }
+                ensure_credential_broker(broker_request).await
+            },)
+        })
+        .await;
         let start = match broker {
             Ok(_) => start,
             Err(error) => {
@@ -4604,6 +4718,45 @@ impl Supervisor {
             environment.state = StoredEnvironmentState::Stopped;
             Ok(())
         })
+    }
+
+    /// Pin the socket of a runner record read back from the store, which
+    /// holds no pin, while its runner is verified alive and so still holds
+    /// the socket (#3209). Only the socket the record names is pinned, at
+    /// this root's runner path or the pre-#2735 one. Every later removal
+    /// after a kill (`terminate_recorded_runner`, `quarantine_recorded_runner`,
+    /// `retire_idle_runner`) compares with the record, and against a pinned
+    /// one that is exact even where inode numbers are reused. A runner this
+    /// supervisor started was pinned when its socket was captured. Darwin
+    /// never adopts a runner that outlived its supervisor, and pins nothing.
+    fn pin_recovered_runner_socket(&self, name: &str, record: &mut RunnerRecord) {
+        if !cfg!(target_os = "linux") || record.socket.pin.is_pinned() {
+            return;
+        }
+        let Ok(environment_id) = self.environment(name).map(|environment| environment.id) else {
+            return;
+        };
+        let pinned = [
+            self.config.runner_socket(environment_id),
+            self.config.legacy_runner_socket(environment_id),
+        ]
+        .iter()
+        .find_map(|socket| {
+            SocketIdentity::capture(socket)
+                .ok()
+                .filter(|captured| captured == &record.socket)
+        });
+        let Some(pinned) = pinned else {
+            return;
+        };
+        if let Ok(environment) = self.core().environment_mut(name)
+            && let Some(runner) = environment.runner.as_mut()
+            && runner.process == record.process
+            && runner.socket == pinned
+        {
+            runner.socket = pinned.clone();
+        }
+        record.socket = pinned;
     }
 
     /// Terminate the exact process and remove the exact socket recorded for a
@@ -5605,12 +5758,12 @@ impl LocalSupervisorService for SupervisorRpc {
                 // Preparation writes repository bundles that only the
                 // journaled create will reference: a writer until then.
                 let writer = self.supervisor.content_writer().await;
-                let workspace_plan = match self
+                let (workspace_plan, discriminators) = match self
                     .supervisor
                     .prepare_create_workspace_plan(&request, environment_id)
                     .await
                 {
-                    Ok(workspace_plan) => workspace_plan,
+                    Ok(prepared) => prepared,
                     Err(error) => {
                         // A multi-repository preparation can admit an earlier
                         // bundle before a later repository fails: collect what
@@ -5631,9 +5784,14 @@ impl LocalSupervisorService for SupervisorRpc {
                     if core.retiring {
                         return Err(Status::from(SupervisorError::Retiring));
                     }
-                    let operation =
-                        begin_create_operation(&core.store, request_id, environment_id, &payload)
-                            .map_err(Status::from)?;
+                    let operation = begin_create_operation(
+                        &core.store,
+                        request_id,
+                        environment_id,
+                        &payload,
+                        &discriminators,
+                    )
+                    .map_err(Status::from)?;
                     if !operation.phase.terminal() {
                         core.admit(&operation);
                     }
@@ -7382,18 +7540,35 @@ fn direct_share_attachments_to_proto(
         .collect())
 }
 
+/// Run the runner's StartVm while `held` keeps every checked direct share
+/// open, and release them only once it has returned (#3209). Taking the
+/// shares by value ties the hold to the start it protects.
+async fn while_holding_direct_shares<T>(
+    held: CheckedDirectShares,
+    start: impl std::future::Future<Output = T>,
+) -> T {
+    let started = start.await;
+    drop(held);
+    started
+}
+
+/// Whether a failed direct-share revalidation must end an exposing runner.
+/// Reading or recording discriminators (#3209) can fail in the store, which
+/// says nothing about the shares: the operation fails, the runner stays.
+fn revalidation_requires_quarantine(error: &SupervisorError) -> bool {
+    !matches!(error, SupervisorError::Store(_))
+}
+
 fn revalidate_direct_shares_for_boot(
     plan: &WorkspacePlan,
     forbidden_roots: &[PathBuf],
-) -> Result<(), WorkspacePlanError> {
+    recorded: &DirectShareDiscriminators,
+) -> Result<CheckedDirectShares, WorkspacePlanError> {
     // A persisted plan may have been admitted under an older supervisor
     // configuration. Recheck the current private roots before any boot-side
     // effects; the runner separately reopens the exact identity at launch.
     plan.validate()?;
-    for input in &plan.inputs {
-        drop(input.direct_source(forbidden_roots)?);
-    }
-    Ok(())
+    plan.check_direct_shares(forbidden_roots, recorded)
 }
 
 fn environment_may_expose_direct_shares(environment: &EnvironmentRecord) -> bool {
@@ -7755,11 +7930,15 @@ fn parse_request_id(value: &str) -> Result<Uuid, SupervisorError> {
     Ok(id)
 }
 
+/// Journal a create, or return the one already journaled for its request.
+/// A new create records its direct shares' admission discriminators in the
+/// same transaction; a replay keeps what the first one recorded.
 fn begin_create_operation(
     store: &SupervisorStore,
     request_id: Uuid,
     environment_id: Uuid,
     payload: &serde_json::Value,
+    discriminators: &DirectShareDiscriminators,
 ) -> Result<OperationRecord, SupervisorError> {
     if request_id.is_nil() || environment_id.is_nil() {
         return Err(SupervisorError::InvalidRequest);
@@ -7774,12 +7953,7 @@ fn begin_create_operation(
         }
         Some(_) => Err(SupervisorStoreError::RequestCollision.into()),
         None => store
-            .begin_operation(
-                request_id,
-                Some(environment_id),
-                OperationKind::Create,
-                payload,
-            )
+            .begin_create_operation(request_id, environment_id, payload, discriminators)
             .map_err(Into::into),
     }
 }
@@ -9639,6 +9813,7 @@ mod tests {
 
     use super::*;
     use crate::artifact::{ArtifactArchitecture, ArtifactLock, ArtifactSpec};
+    use crate::direct_share::DirectShareDiscriminator;
     use crate::oci::{OciArchitecture, ResolvedDescriptor, ResolvedImage, Sha256Digest};
     use crate::uds::bind_owner_only;
     use codewire_access::builtin_provider_catalog;
@@ -13639,7 +13814,7 @@ mod tests {
         validate_create(&request).unwrap();
         let (_parent, core) = test_supervisor_core(project_environment());
         let core = test_supervisor(core);
-        let plan = core
+        let (plan, _) = core
             .prepare_create_workspace_plan(&request, Uuid::new_v4())
             .await
             .unwrap();
@@ -13704,7 +13879,7 @@ mod tests {
         validate_create(&request).unwrap();
         let (_parent, core) = test_supervisor_core(project_environment());
         let core = test_supervisor(core);
-        let plan = core
+        let (plan, discriminators) = core
             .prepare_create_workspace_plan(&request, Uuid::new_v4())
             .await
             .unwrap();
@@ -13720,6 +13895,13 @@ mod tests {
             } if source_path == source.as_os_str().as_bytes()
                 && destination == "/workspace/fixtures"
         ));
+        // The admission's discriminator travels with the plan, to be
+        // recorded in the create's own transaction (#3209).
+        assert!(
+            discriminators
+                .get(&plan.inputs[0].direct_identity_sha256().unwrap())
+                .is_some()
+        );
         plan.validate_for_project(&project).unwrap();
         let guest = plan.direct_share_plan().unwrap().unwrap();
         assert_eq!(guest.mounts()[0].tag(), "cw-direct-00");
@@ -13814,7 +13996,7 @@ mod tests {
         validate_create(&request).unwrap();
         let (_parent, core) = test_supervisor_core(project_environment());
         let core = test_supervisor(core);
-        let plan = core
+        let (plan, _) = core
             .prepare_create_workspace_plan(&request, Uuid::new_v4())
             .await
             .unwrap();
@@ -14197,6 +14379,257 @@ mod tests {
         assert!(core.core().live_runners.is_empty());
     }
 
+    /// A share directory and the inode number it was admitted with.
+    #[cfg(target_os = "linux")]
+    fn direct_share_inode(plan: &WorkspacePlan) -> u64 {
+        match &plan.inputs[0] {
+            WorkspaceInput::Direct { identity, .. } => identity.inode(),
+            _ => unreachable!("a direct plan"),
+        }
+    }
+
+    /// After the share at `source` was recreated, whether `reused` its inode
+    /// number, a start refuses it, except where the filesystem has no file
+    /// handle (overlay) and the number was reused: the documented limit.
+    #[cfg(target_os = "linux")]
+    async fn assert_start_refuses_a_recreated_share(
+        core: &Arc<Supervisor>,
+        recorded: &DirectShareDiscriminator,
+        reused: bool,
+    ) {
+        if reused && recorded == &DirectShareDiscriminator::Unsupported {
+            core.revalidate_environment_workspace_plan_for_boot("dev")
+                .await
+                .expect("without a handle a reused inode number is accepted");
+            return;
+        }
+        assert!(matches!(
+            core.ensure_vm_started("dev", 2, Uuid::new_v4()).await,
+            Err(SupervisorError::WorkspacePlan(
+                WorkspacePlanError::DirectShareChanged
+            ))
+        ));
+    }
+
+    /// #3209, end to end in the supervisor: the create records the share's
+    /// discriminator in its own transaction; while the VM is stopped nothing
+    /// holds the directory, so `rm -rf` and `mkdir` at its path can give the
+    /// new one the same inode number (TMPDIR on ext4 does); the next start
+    /// refuses it all the same.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_start_refuses_a_direct_share_recreated_while_stopped() {
+        let parent = tempfile::tempdir().unwrap();
+        let source = fs::canonicalize(parent.path()).unwrap().join("share");
+        fs::create_dir(&source).unwrap();
+        let (input, discriminator) =
+            prepare_direct_input(&source, "/workspace/fixtures", true, Vec::new(), &[]).unwrap();
+        let mut discriminators = DirectShareDiscriminators::default();
+        discriminators.insert(
+            input.direct_identity_sha256().unwrap(),
+            discriminator.clone(),
+        );
+        let mut environment = project_environment();
+        environment.workspace_plan = WorkspacePlan::from_inputs(vec![input]).unwrap();
+        let environment_id = environment.id;
+        let inode = direct_share_inode(&environment.workspace_plan);
+        let (_parent, core) = test_supervisor_core(environment);
+        begin_create_operation(
+            &core.store,
+            Uuid::new_v4(),
+            environment_id,
+            &serde_json::json!({"name": "dev"}),
+            &discriminators,
+        )
+        .unwrap();
+        let core = test_supervisor(core);
+
+        let reused = crate::direct_share::recreate_directory_reusing_inode(&source, inode);
+
+        assert_start_refuses_a_recreated_share(&core, &discriminator, reused).await;
+        assert!(core.environment("dev").unwrap().runner.is_none());
+    }
+
+    /// #3209 upgrade: a database written before discriminators has none. The
+    /// first supervisor start records one for each share that still matches,
+    /// so a share recreated after the upgrade is refused at its next start,
+    /// and a later start never records the replacement.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn startup_records_discriminators_for_shares_admitted_before_them() {
+        let parent = tempfile::tempdir().unwrap();
+        let source = fs::canonicalize(parent.path()).unwrap().join("share");
+        fs::create_dir(&source).unwrap();
+        let mut environment = project_environment();
+        environment.workspace_plan = direct_workspace_plan(&source);
+        let environment_id = environment.id;
+        let identity_sha256 = environment.workspace_plan.inputs[0]
+            .direct_identity_sha256()
+            .unwrap();
+        let inode = direct_share_inode(&environment.workspace_plan);
+        let (_parent, core) = test_supervisor_core(environment);
+        assert!(
+            core.store
+                .direct_share_discriminators(environment_id)
+                .unwrap()
+                .is_empty()
+        );
+        let core = test_supervisor(core);
+
+        core.record_direct_share_discriminators_for_startup()
+            .await
+            .unwrap();
+        let recorded = core
+            .core()
+            .store
+            .direct_share_discriminators(environment_id)
+            .unwrap();
+        let discriminator = recorded
+            .get(&identity_sha256)
+            .cloned()
+            .expect("the sweep records the matching share");
+
+        let reused = crate::direct_share::recreate_directory_reusing_inode(&source, inode);
+        core.record_direct_share_discriminators_for_startup()
+            .await
+            .unwrap();
+        assert_eq!(
+            core.core()
+                .store
+                .direct_share_discriminators(environment_id)
+                .unwrap(),
+            recorded
+        );
+        assert_start_refuses_a_recreated_share(&core, &discriminator, reused).await;
+    }
+
+    /// #3209 handoff: the checked shares go into the runner's StartVm and
+    /// stay held until it returns, so a directory recreated at a share's
+    /// path meanwhile cannot take its inode number (TMPDIR on ext4 would
+    /// otherwise reuse it) and the runner's (device, inode) reopen refuses it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn checked_shares_stay_held_until_the_runner_start_returns() {
+        let parent = tempfile::tempdir().unwrap();
+        let source = fs::canonicalize(parent.path()).unwrap().join("share");
+        fs::create_dir(&source).unwrap();
+        let plan = direct_workspace_plan(&source);
+        let inode = direct_share_inode(&plan);
+        let checked = plan
+            .check_direct_shares(&[], &DirectShareDiscriminators::default())
+            .unwrap();
+
+        let reused = while_holding_direct_shares(checked, async {
+            crate::direct_share::recreate_directory_reusing_inode(&source, inode)
+        })
+        .await;
+
+        assert!(!reused);
+        assert!(matches!(
+            plan.inputs[0].direct_source(&[]),
+            Err(WorkspacePlanError::DirectShareChanged)
+        ));
+    }
+
+    /// #3209: reading or recording discriminators can fail in the store,
+    /// which says nothing about the shares. The reconcile fails, and the
+    /// live runner exposing them is not ended.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_store_failure_recording_discriminators_never_quarantines_a_runner() {
+        let source = tempfile::tempdir().unwrap();
+        let source = fs::canonicalize(source.path()).unwrap();
+        let mut environment = project_environment();
+        environment.workspace_plan = direct_workspace_plan(&source);
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let socket = core
+            .config
+            .runner_socket(core.environment("dev").unwrap().id);
+        let (socket_identity, _useful_calls, shutdown_tx, server) =
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(2));
+        let (environment_id, _process_identity) =
+            attach_test_runner_process(&mut core, socket_identity);
+        // Nothing recorded yet, so the check must record, and the store is
+        // halted as at shutdown.
+        core.store.stop();
+        let core = test_supervisor(core);
+
+        let reconciled = core.reconcile_runner("dev", false).await;
+
+        assert!(matches!(reconciled, Err(SupervisorError::Store(_))));
+        assert!(core.environment("dev").unwrap().runner.is_some());
+        assert!(
+            core.core()
+                .children
+                .get_mut(&environment_id)
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        let mut child = core.core().children.remove(&environment_id).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    /// #3209 runner sockets: a record read back from the store holds no pin.
+    /// Reconcile pins the socket while the verified runner lives, and only
+    /// the socket the record names, so a removal after the kill compares
+    /// with a held inode.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn reconcile_pins_a_recovered_runner_socket_while_its_runner_lives() {
+        for replace_socket in [false, true] {
+            let (_parent, mut core) = test_supervisor_core(project_environment());
+            let socket = core
+                .config
+                .runner_socket(core.environment("dev").unwrap().id);
+            let (socket_identity, _useful_calls, shutdown_tx, server) =
+                spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(2));
+            let recorded = socket_identity.clone();
+            let (environment_id, _process_identity) =
+                attach_test_runner_process(&mut core, socket_identity);
+            let mut detached_child = core.children.remove(&environment_id).unwrap();
+            core.live_runners.remove(&environment_id).unwrap();
+            let runner = core
+                .environment_mut("dev")
+                .unwrap()
+                .runner
+                .as_mut()
+                .unwrap();
+            runner.socket =
+                serde_json::from_value(serde_json::to_value(&runner.socket).unwrap()).unwrap();
+            assert!(!runner.socket.pin.is_pinned());
+            let _replacement = replace_socket.then(|| {
+                remove_bound_socket(&socket, &recorded).unwrap();
+                bind_owner_only(&socket).unwrap()
+            });
+            let core = test_supervisor(core);
+
+            let _ = core.reconcile_runner("dev", false).await;
+
+            let environment = core.environment("dev").unwrap();
+            if replace_socket {
+                assert!(
+                    environment
+                        .runner
+                        .as_ref()
+                        .is_none_or(|runner| !runner.socket.pin.is_pinned())
+                );
+            } else {
+                let runner = environment.runner.as_ref().unwrap();
+                assert!(runner.socket.pin.is_pinned());
+                assert_eq!(runner.socket, recorded);
+            }
+            detached_child.kill().unwrap();
+            detached_child.wait().unwrap();
+            shutdown_tx.send(()).unwrap();
+            server.await.unwrap();
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn ensure_vm_started_revalidates_a_direct_share_as_defense_in_depth() {
@@ -14481,24 +14914,39 @@ mod tests {
         let request_id = Uuid::new_v4();
         let payload = serde_json::json!({"name": "dev"});
         let environment_id = Uuid::new_v4();
+        let mut admitted = DirectShareDiscriminators::default();
+        admitted.insert("a".repeat(64), DirectShareDiscriminator::Unsupported);
+        let mut replayed = DirectShareDiscriminators::default();
+        replayed.insert("b".repeat(64), DirectShareDiscriminator::Unsupported);
 
-        let first = begin_create_operation(&store, request_id, environment_id, &payload).unwrap();
-        let retried = begin_create_operation(&store, request_id, environment_id, &payload).unwrap();
+        let first = begin_create_operation(&store, request_id, environment_id, &payload, &admitted)
+            .unwrap();
+        let retried =
+            begin_create_operation(&store, request_id, environment_id, &payload, &replayed)
+                .unwrap();
 
         assert_eq!(retried, first);
         assert_eq!(first.environment_id, Some(environment_id));
+        // The create's own transaction recorded its admission discriminators,
+        // and a replay keeps them (#3209).
+        assert_eq!(
+            store.direct_share_discriminators(environment_id).unwrap(),
+            admitted
+        );
         for (changed_id, changed_payload) in [
             (Uuid::new_v4(), payload.clone()),
             (environment_id, serde_json::json!({"name": "other"})),
         ] {
             assert!(matches!(
-                begin_create_operation(&store, request_id, changed_id, &changed_payload),
+                begin_create_operation(&store, request_id, changed_id, &changed_payload, &admitted),
                 Err(SupervisorError::Store(
                     SupervisorStoreError::RequestCollision
                 ))
             ));
         }
-        assert!(begin_create_operation(&store, request_id, Uuid::nil(), &payload).is_err());
+        assert!(
+            begin_create_operation(&store, request_id, Uuid::nil(), &payload, &admitted).is_err()
+        );
     }
 
     #[test]

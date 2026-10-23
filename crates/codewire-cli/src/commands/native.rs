@@ -706,7 +706,9 @@ pub(crate) async fn create_native_environment(
             environment
         }
         Err(status) => {
-            let stage = progress.fail();
+            let stage = progress.fail_with_code(
+                codewire_local_vmm::supervisor_client::operation_error_code(&status),
+            );
             // The supervisor's reason already says whether the failed
             // environment was kept.
             return Err(lifecycle::lifecycle_failure(
@@ -1291,7 +1293,12 @@ async fn run_native_start(
                 progress.complete();
                 Ok(environment)
             }
-            Err(status) => Err((progress.fail(), native_status(status))),
+            Err(status) => Err((
+                progress.fail_with_code(
+                    codewire_local_vmm::supervisor_client::operation_error_code(&status),
+                ),
+                native_status(status),
+            )),
         },
     )
 }

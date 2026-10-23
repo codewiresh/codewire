@@ -29,9 +29,13 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use crate::direct_share::{AdmittedDirectShare, admit_direct_share, reopen_direct_share};
+use crate::direct_share::{
+    AdmittedDirectShare, DirectShareDiscriminator, admit_direct_share, reopen_direct_share,
+};
 use crate::host::path::{PrivateRoot, current_uid};
 use crate::oci::{ContentStore, Sha256Digest};
+pub(crate) use crate::supervisor_metadata::direct_share::DirectShareDiscriminators;
+use crate::supervisor_metadata::direct_share::direct_share_identity_sha256;
 #[cfg(test)]
 use crate::supervisor_metadata::workspace_plan::{
     WORKSPACE_PLAN_SCHEMA_VERSION, validate_retained_repository_source,
@@ -118,23 +122,109 @@ impl WorkspaceInput {
             .map(Some)
             .map_err(|_| WorkspacePlanError::DirectShareChanged)
     }
+
+    /// The digest its recorded discriminator is kept under, for a direct
+    /// share.
+    pub(crate) fn direct_identity_sha256(&self) -> Option<String> {
+        match self {
+            Self::Direct {
+                source_path,
+                identity,
+                ..
+            } => Some(direct_share_identity_sha256(source_path, identity)),
+            Self::Local { .. } | Self::Repository { .. } => None,
+        }
+    }
 }
 
+/// A plan's direct shares admitted again, held open, and the discriminators
+/// to record for them.
+#[derive(Debug, Default)]
+pub(crate) struct CheckedDirectShares {
+    pub(crate) shares: Vec<AdmittedDirectShare>,
+    pub(crate) discriminators: DirectShareDiscriminators,
+}
+
+impl WorkspacePlan {
+    /// Admit every direct share again and apply its recorded discriminator
+    /// (#3209). Any share that changed, or whose recorded file handle cannot
+    /// be read back equal, refuses the whole plan. The result holds every
+    /// share open: until it drops, nothing created at a share's path can
+    /// take the admitted inode's number, so later reopens (the runner's
+    /// among them) compare exactly.
+    pub(crate) fn check_direct_shares(
+        &self,
+        forbidden_roots: &[PathBuf],
+        recorded: &DirectShareDiscriminators,
+    ) -> Result<CheckedDirectShares, WorkspacePlanError> {
+        let mut checked = CheckedDirectShares::default();
+        for input in &self.inputs {
+            let (Some(admitted), Some(identity_sha256)) = (
+                input.direct_source(forbidden_roots)?,
+                input.direct_identity_sha256(),
+            ) else {
+                continue;
+            };
+            let discriminator = DirectShareDiscriminator::admit(
+                recorded.get(&identity_sha256),
+                admitted.discriminator(),
+            )
+            .ok_or(WorkspacePlanError::DirectShareChanged)?;
+            checked
+                .discriminators
+                .insert(identity_sha256, discriminator);
+            checked.shares.push(admitted);
+        }
+        Ok(checked)
+    }
+
+    /// The discriminators to record at supervisor startup: one for each
+    /// share that still matches its recorded identity and has no handle
+    /// recorded yet. Nothing is refused here; a share that does not match is
+    /// left as it was, for its next boot to refuse.
+    pub(crate) fn sweep_direct_share_discriminators(
+        &self,
+        forbidden_roots: &[PathBuf],
+        recorded: &DirectShareDiscriminators,
+    ) -> DirectShareDiscriminators {
+        let mut swept = DirectShareDiscriminators::default();
+        for input in &self.inputs {
+            let Some(identity_sha256) = input.direct_identity_sha256() else {
+                continue;
+            };
+            let recorded = recorded.get(&identity_sha256);
+            let discriminator = match recorded {
+                Some(handle @ DirectShareDiscriminator::Handle { .. }) => Some(handle.clone()),
+                _ => match input.direct_source(forbidden_roots) {
+                    Ok(Some(admitted)) => {
+                        DirectShareDiscriminator::admit(recorded, admitted.discriminator())
+                    }
+                    Ok(None) | Err(_) => recorded.cloned(),
+                },
+            };
+            if let Some(discriminator) = discriminator {
+                swept.insert(identity_sha256, discriminator);
+            }
+        }
+        swept
+    }
+}
+
+/// A direct share admitted for a new plan, with the discriminator read from
+/// the same held descriptor, recorded in the create's own transaction.
 pub(crate) fn prepare_direct_input(
     requested_source: &Path,
     destination: &str,
     read_only: bool,
     vm_only: Vec<String>,
     forbidden_roots: &[PathBuf],
-) -> Result<WorkspaceInput, WorkspacePlanError> {
+) -> Result<(WorkspaceInput, DirectShareDiscriminator), WorkspacePlanError> {
     validate_local_mount_destination(destination)?;
     let admitted = admit_direct_share(requested_source, forbidden_roots)
         .map_err(|_| WorkspacePlanError::DirectShareInvalid)?;
-    Ok(WorkspaceInput::direct(
-        &admitted,
-        destination,
-        read_only,
-        vm_only,
+    Ok((
+        WorkspaceInput::direct(&admitted, destination, read_only, vm_only),
+        admitted.discriminator().clone(),
     ))
 }
 
@@ -1038,6 +1128,152 @@ mod tests {
             plan.validate_for_project(&mismatched),
             Err(WorkspacePlanError::InvalidPlan)
         ));
+    }
+
+    fn direct_plan(source: &Path) -> (WorkspacePlan, DirectShareDiscriminator, String) {
+        let (input, discriminator) =
+            prepare_direct_input(source, "/workspace/share", false, Vec::new(), &[]).unwrap();
+        let identity_sha256 = input.direct_identity_sha256().unwrap();
+        (
+            WorkspacePlan::from_inputs(vec![input]).unwrap(),
+            discriminator,
+            identity_sha256,
+        )
+    }
+
+    fn other_handle(discriminator: &DirectShareDiscriminator) -> DirectShareDiscriminator {
+        DirectShareDiscriminator::Handle {
+            handle_type: 1,
+            handle: match discriminator {
+                DirectShareDiscriminator::Handle { handle, .. } if handle == "00" => "01",
+                _ => "00",
+            }
+            .to_owned(),
+        }
+    }
+
+    /// The three recorded states (#3209), on whatever filesystem TMPDIR is.
+    #[test]
+    fn a_boot_check_applies_each_recorded_discriminator_state() {
+        let source = tempfile::tempdir().unwrap();
+        let source = fs::canonicalize(source.path()).unwrap();
+        let (plan, admitted, identity_sha256) = direct_plan(&source);
+        let recorded_as = |discriminator: DirectShareDiscriminator| {
+            let mut recorded = DirectShareDiscriminators::default();
+            recorded.insert(identity_sha256.clone(), discriminator);
+            recorded
+        };
+        let admitted_alone = recorded_as(admitted.clone());
+
+        // Absent: accepted once, recording what the share reads now.
+        let checked = plan
+            .check_direct_shares(&[], &DirectShareDiscriminators::default())
+            .unwrap();
+        assert_eq!(checked.shares.len(), 1);
+        assert_eq!(checked.discriminators, admitted_alone);
+        // A digest that names no plan entry counts as absent and is dropped.
+        let mut stale = recorded_as(admitted.clone());
+        stale.insert("f".repeat(64), other_handle(&admitted));
+        let mut moved = DirectShareDiscriminators::default();
+        moved.insert("f".repeat(64), other_handle(&admitted));
+        for recorded in [stale, moved] {
+            assert_eq!(
+                plan.check_direct_shares(&[], &recorded)
+                    .unwrap()
+                    .discriminators,
+                admitted_alone
+            );
+        }
+        // Unsupported: the identity decides, and a handle is recorded once
+        // one can be read.
+        assert_eq!(
+            plan.check_direct_shares(&[], &recorded_as(DirectShareDiscriminator::Unsupported))
+                .unwrap()
+                .discriminators,
+            admitted_alone
+        );
+        // A handle: the same one is accepted; another one, or none read now,
+        // as on overlay, refuses the plan.
+        assert_eq!(
+            plan.check_direct_shares(&[], &admitted_alone)
+                .unwrap()
+                .discriminators,
+            admitted_alone
+        );
+        assert!(matches!(
+            plan.check_direct_shares(&[], &recorded_as(other_handle(&admitted))),
+            Err(WorkspacePlanError::DirectShareChanged)
+        ));
+    }
+
+    /// The startup sweep records only shares that still match their
+    /// identity, never replaces a recorded handle, and refuses nothing.
+    #[test]
+    fn the_startup_sweep_records_matching_shares_and_keeps_recorded_handles() {
+        let parent = tempfile::tempdir().unwrap();
+        let parent = fs::canonicalize(parent.path()).unwrap();
+        let source = parent.join("share");
+        fs::create_dir(&source).unwrap();
+        let (plan, admitted, identity_sha256) = direct_plan(&source);
+        let recorded_as = |discriminator: DirectShareDiscriminator| {
+            let mut recorded = DirectShareDiscriminators::default();
+            recorded.insert(identity_sha256.clone(), discriminator);
+            recorded
+        };
+
+        // Written before #3209: the matching share is recorded now.
+        assert_eq!(
+            plan.sweep_direct_share_discriminators(&[], &DirectShareDiscriminators::default()),
+            recorded_as(admitted.clone())
+        );
+        let handle = recorded_as(other_handle(&admitted));
+        assert_eq!(plan.sweep_direct_share_discriminators(&[], &handle), handle);
+
+        // A share replaced before the sweep is not recorded, and one
+        // recorded without a handle keeps that record.
+        fs::rename(&source, parent.join("parked")).unwrap();
+        fs::create_dir(&source).unwrap();
+        assert!(
+            plan.sweep_direct_share_discriminators(&[], &DirectShareDiscriminators::default())
+                .is_empty()
+        );
+        let unsupported = recorded_as(DirectShareDiscriminator::Unsupported);
+        assert_eq!(
+            plan.sweep_direct_share_discriminators(&[], &unsupported),
+            unsupported
+        );
+    }
+
+    /// #3209 handoff: a replacement injected after the supervisor's check
+    /// and before the runner prepares is refused by the runner's own reopen,
+    /// because the checked shares hold every admitted inode until StartVm
+    /// returns. TMPDIR on ext4 makes the replacement try to reuse it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replacement_between_the_boot_check_and_the_runner_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        let source = fs::canonicalize(parent.path()).unwrap().join("share");
+        fs::create_dir(&source).unwrap();
+        let (plan, admitted, identity_sha256) = direct_plan(&source);
+        let mut recorded = DirectShareDiscriminators::default();
+        recorded.insert(identity_sha256, admitted);
+        let WorkspaceInput::Direct { identity, .. } = &plan.inputs[0] else {
+            unreachable!("a direct plan");
+        };
+        let runner_request = crate::direct_share::DirectShareRequest::new(
+            source.clone(),
+            identity.clone(),
+            plan.direct_share_plan().unwrap().unwrap().mounts()[0].clone(),
+        )
+        .unwrap();
+
+        let checked = plan.check_direct_shares(&[], &recorded).unwrap();
+        assert!(!crate::direct_share::recreate_directory_reusing_inode(
+            &source,
+            identity.inode()
+        ));
+        assert!(runner_request.reopen(&[]).is_err());
+        drop(checked);
     }
 
     #[test]

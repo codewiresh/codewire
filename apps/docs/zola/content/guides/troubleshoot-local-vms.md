@@ -49,8 +49,11 @@ variant. Pass `--image` with one.
 **`create_guest_docker_tooling_missing`**. The image has no Docker tooling.
 Create with `--no-docker`.
 
-**`start_direct_share_changed`** (macOS). A directly mounted folder was moved,
-removed or replaced while the VM was stopped. Put it back and start again.
+**`start_direct_share_changed`**, at "Checking mounted folders". A directly
+mounted folder was moved, removed or replaced while the VM was stopped. Move
+it back and start again. A removed folder cannot come back, even recreated at
+the same path: remove the environment with `cw rm --local NAME` and create it
+again.
 
 ## Stops and leftovers
 

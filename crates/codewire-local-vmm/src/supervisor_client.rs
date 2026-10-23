@@ -647,6 +647,11 @@ pub(crate) fn operation_terminal(operation: &v1::Operation) -> Result<bool, Stat
     }
 }
 
+/// Where a failed operation's [`Status`] keeps its error code, for
+/// [`operation_error_code`]. The status is made in this process from the
+/// terminal operation; nothing reads it from the wire.
+const OPERATION_ERROR_CODE_METADATA: &str = "codewire-operation-error-code";
+
 pub(crate) fn operation_outcome(operation: v1::Operation) -> Result<v1::Operation, Status> {
     match v1::OperationPhase::try_from(operation.phase) {
         Ok(v1::OperationPhase::Completed) => Ok(operation),
@@ -656,16 +661,32 @@ pub(crate) fn operation_outcome(operation: v1::Operation) -> Result<v1::Operatio
             } else {
                 operation.error_code.as_str()
             };
-            Err(Status::failed_precondition(format!(
+            let mut status = Status::failed_precondition(format!(
                 "local lifecycle operation {} failed: {error_code}{}",
                 operation.operation_id,
                 operation_error_hint(error_code)
-            )))
+            ));
+            if let Ok(value) = error_code.parse() {
+                status
+                    .metadata_mut()
+                    .insert(OPERATION_ERROR_CODE_METADATA, value);
+            }
+            Err(status)
         }
         _ => Err(Status::internal(
             "local lifecycle operation is not terminal",
         )),
     }
+}
+
+/// The error code of a failed lifecycle operation, when `status` reports one,
+/// so a caller can name what failed (#3209).
+pub fn operation_error_code(status: &Status) -> Option<&str> {
+    status
+        .metadata()
+        .get(OPERATION_ERROR_CODE_METADATA)?
+        .to_str()
+        .ok()
 }
 
 /// A plain-language reason for an operation error code, where the code alone

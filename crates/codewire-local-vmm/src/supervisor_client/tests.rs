@@ -893,3 +893,20 @@ fn direct_share_change_failures_name_the_moved_source() {
     }
     assert_eq!(operation_error_hint("start_failed"), "");
 }
+
+#[test]
+fn a_failed_operation_status_carries_its_error_code() {
+    let mut failed = operation(v1::OperationPhase::Failed);
+    failed.error_code = "start_direct_share_changed".to_owned();
+    let status = operation_outcome(failed).unwrap_err();
+    assert_eq!(
+        operation_error_code(&status),
+        Some("start_direct_share_changed")
+    );
+    let unknown = operation_outcome(operation(v1::OperationPhase::Interrupted)).unwrap_err();
+    assert_eq!(operation_error_code(&unknown), Some("unknown"));
+    assert_eq!(
+        operation_error_code(&Status::unavailable("watch failed")),
+        None
+    );
+}

@@ -89,6 +89,21 @@ impl NativeProgress {
     }
 
     /// Ends the open stage with a failure line and returns its label, or
+    /// `None` when no stage was open. A failure whose `error_code` names a
+    /// check with its own stage ([`failed_check_stage`]) fails that stage
+    /// instead of the one that was showing.
+    pub(crate) fn fail_with_code(&self, error_code: Option<&str>) -> Option<&'static str> {
+        if let Some((key, label)) = error_code.and_then(failed_check_stage)
+            && let (Ok(mut current), Ok(mut line)) = (self.current.lock(), self.line.lock())
+            && current.is_some()
+        {
+            let _ = line.begin(label);
+            *current = Some((key, label));
+        }
+        self.fail()
+    }
+
+    /// Ends the open stage with a failure line and returns its label, or
     /// `None` when no stage was open.
     pub(crate) fn fail(&self) -> Option<&'static str> {
         let (Ok(mut current), Ok(mut line)) = (self.current.lock(), self.line.lock()) else {
@@ -205,6 +220,16 @@ fn stage_of(operation: &v1::Operation) -> Option<(&'static str, &'static str)> {
     })
 }
 
+/// The stage a failure belongs to when its error code names the check that
+/// refused it. Every start, and a replayed create, first checks each direct
+/// mount's host folder (#3209); that runs before any stage the supervisor
+/// publishes, so without this its refusal would name the stage showing.
+fn failed_check_stage(error_code: &str) -> Option<(&'static str, &'static str)> {
+    error_code
+        .ends_with("direct_share_changed")
+        .then_some(("mounts", "Checking mounted folders"))
+}
+
 /// What the guest is doing while it boots, for the live line.
 fn guest_detail(operation: &v1::Operation) -> Option<&'static str> {
     use v1::GuestBootStage as Guest;
@@ -313,5 +338,37 @@ mod tests {
         assert_eq!(guest_detail(&boot), Some("running setup"));
         boot.runner_stage = v1::RunnerStage::DaemonReady as i32;
         assert_eq!(guest_detail(&boot), Some("daemon ready"));
+    }
+
+    /// #3209: a refused mounted folder names its own check, not the stage
+    /// that was showing when the supervisor refused it; other failures keep
+    /// the open stage, and no open stage stays none.
+    #[test]
+    fn a_refused_mounted_folder_fails_its_own_stage() {
+        let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Machine);
+        let access = operation(
+            v1::OperationStage::RequireEnvironmentAccess,
+            v1::RunnerStage::Unspecified,
+        );
+        for (code, expected) in [
+            (
+                Some("start_direct_share_changed"),
+                Some("Checking mounted folders"),
+            ),
+            (
+                Some("create_direct_share_changed"),
+                Some("Checking mounted folders"),
+            ),
+            (Some("start_failed"), Some("Checking credential access")),
+            (None, Some("Checking credential access")),
+        ] {
+            let progress = NativeProgress::new(&caps);
+            progress.observe(&access);
+            assert_eq!(progress.fail_with_code(code), expected, "{code:?}");
+        }
+        assert_eq!(
+            NativeProgress::new(&caps).fail_with_code(Some("start_direct_share_changed")),
+            None
+        );
     }
 }

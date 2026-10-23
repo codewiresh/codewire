@@ -32,6 +32,9 @@ use crate::mesh_ingress::MeshAttachment;
 use crate::supervisor::RunnerRecord;
 use crate::supervisor::{EnvironmentRecord, StoredEnvironmentState, SupervisorState};
 use crate::supervisor_metadata::CwRuntimeBinding;
+use crate::supervisor_metadata::direct_share::{
+    DIRECT_SHARE_DISCRIMINATORS_KEY_PREFIX, DirectShareDiscriminators,
+};
 use crate::supervisor_store_codec::{parse_uuid, require_persistent_wal};
 use crate::workspace_generation::WorkspaceGenerationRecord;
 #[cfg(test)]
@@ -317,6 +320,55 @@ impl SupervisorStore {
         transaction.commit()?;
         let _ = self.operation_events.send(record.clone());
         Ok(record)
+    }
+
+    /// Begins a create and, in the same transaction, records the
+    /// discriminators its direct shares were admitted with (#3209), so no
+    /// journaled create exists without them.
+    pub(crate) fn begin_create_operation(
+        &self,
+        request_id: Uuid,
+        environment_id: Uuid,
+        payload: &serde_json::Value,
+        discriminators: &DirectShareDiscriminators,
+    ) -> Result<OperationRecord, SupervisorStoreError> {
+        self.writable()?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let record = begin_operation_in_transaction(
+            &transaction,
+            request_id,
+            Some(environment_id),
+            OperationKind::Create,
+            payload,
+        )?;
+        write_direct_share_discriminators(&transaction, environment_id, discriminators)?;
+        transaction.commit()?;
+        let _ = self.operation_events.send(record.clone());
+        Ok(record)
+    }
+
+    /// The discriminators recorded for an environment's direct shares. A row
+    /// that is absent or malformed reads as nothing recorded.
+    pub(crate) fn direct_share_discriminators(
+        &self,
+        environment_id: Uuid,
+    ) -> Result<DirectShareDiscriminators, SupervisorStoreError> {
+        Ok(metadata_value(
+            &self.connection,
+            &direct_share_discriminators_key(environment_id),
+        )?
+        .map(|value| DirectShareDiscriminators::decode(&value))
+        .unwrap_or_default())
+    }
+
+    pub(crate) fn record_direct_share_discriminators(
+        &self,
+        environment_id: Uuid,
+        discriminators: &DirectShareDiscriminators,
+    ) -> Result<(), SupervisorStoreError> {
+        self.writable()?;
+        write_direct_share_discriminators(&self.connection, environment_id, discriminators)
     }
 
     /// Fails `failed_operation_id`, writes `state` and, in the same
@@ -1383,6 +1435,23 @@ fn write_state(
          WHERE NOT EXISTS (SELECT 1 FROM desired_environments wanted WHERE wanted.id = environments.id)",
         [],
     )?;
+    // Discriminators outlive their environment only while its create is
+    // still journaled; a create records them before the environment exists.
+    transaction.execute(
+        "DELETE FROM supervisor_metadata
+         WHERE key GLOB ?1
+           AND substr(key, ?2) NOT IN (SELECT id FROM desired_environments)
+           AND substr(key, ?2) NOT IN (
+             SELECT environment_id FROM operations
+             WHERE kind = 'create'
+               AND phase IN ('intent', 'effect_applied')
+               AND environment_id IS NOT NULL
+           )",
+        params![
+            format!("{DIRECT_SHARE_DISCRIMINATORS_KEY_PREFIX}*"),
+            DIRECT_SHARE_DISCRIMINATORS_KEY_PREFIX.len() + 1,
+        ],
+    )?;
     if let Some(current) = &state.current {
         let id = state
             .environments
@@ -1452,6 +1521,32 @@ fn encode_workspace_generation(
         .map(WorkspaceGenerationRecord::encode_canonical)
         .transpose()
         .map_err(|_| SupervisorStoreError::InvalidState)
+}
+
+fn direct_share_discriminators_key(environment_id: Uuid) -> String {
+    format!("{DIRECT_SHARE_DISCRIMINATORS_KEY_PREFIX}{environment_id}")
+}
+
+/// Record an environment's discriminators in one `supervisor_metadata` row,
+/// or remove the row when there are none. Since schema 12 the table is read
+/// by key and keeps rows it does not know, so an older supervisor of this
+/// schema ignores the row and leaves it in place.
+fn write_direct_share_discriminators(
+    connection: &Connection,
+    environment_id: Uuid,
+    discriminators: &DirectShareDiscriminators,
+) -> Result<(), SupervisorStoreError> {
+    let key = direct_share_discriminators_key(environment_id);
+    if discriminators.is_empty() {
+        connection.execute("DELETE FROM supervisor_metadata WHERE key = ?1", [key])?;
+    } else {
+        connection.execute(
+            "INSERT INTO supervisor_metadata(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, discriminators.encode()],
+        )?;
+    }
+    Ok(())
 }
 
 fn metadata_value(
@@ -3212,6 +3307,124 @@ mod tests {
             loaded.environments["dev"].docker_disk_bytes,
             crate::state::MINIMUM_DOCKER_DISK_BYTES
         );
+    }
+
+    /// #3209: an environment's discriminators stay while it or its
+    /// journaled create exists and go with it; a malformed row reads as
+    /// nothing recorded, and recording nothing removes the row.
+    #[test]
+    fn direct_share_discriminators_follow_their_environment_or_journaled_create() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let environment = environment(StoredEnvironmentState::Stopped, None);
+        let environment_id = environment.id;
+        let pending_create = Uuid::new_v4();
+        let abandoned = Uuid::new_v4();
+        let mut recorded = DirectShareDiscriminators::default();
+        recorded.insert(
+            "a".repeat(64),
+            crate::direct_share::DirectShareDiscriminator::Unsupported,
+        );
+        store
+            .begin_create_operation(
+                Uuid::new_v4(),
+                pending_create,
+                &serde_json::json!({"name": "next"}),
+                &recorded,
+            )
+            .unwrap();
+        for id in [environment_id, abandoned] {
+            store
+                .record_direct_share_discriminators(id, &recorded)
+                .unwrap();
+        }
+
+        store.replace_state(&state(environment.clone())).unwrap();
+        for id in [environment_id, pending_create] {
+            assert_eq!(store.direct_share_discriminators(id).unwrap(), recorded);
+        }
+        assert_eq!(
+            metadata_value(
+                &store.connection,
+                &direct_share_discriminators_key(abandoned)
+            )
+            .unwrap(),
+            None
+        );
+
+        let mut removed = state(environment);
+        removed.environments.clear();
+        removed.current = None;
+        store.replace_state(&removed).unwrap();
+        assert!(
+            store
+                .direct_share_discriminators(environment_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.direct_share_discriminators(pending_create).unwrap(),
+            recorded
+        );
+
+        let key = direct_share_discriminators_key(pending_create);
+        store
+            .connection
+            .execute(
+                "UPDATE supervisor_metadata SET value = 'not json' WHERE key = ?1",
+                [&key],
+            )
+            .unwrap();
+        assert!(
+            store
+                .direct_share_discriminators(pending_create)
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .record_direct_share_discriminators(
+                pending_create,
+                &DirectShareDiscriminators::default(),
+            )
+            .unwrap();
+        assert_eq!(metadata_value(&store.connection, &key).unwrap(), None);
+    }
+
+    /// #3209 rollback: the row is a plain keyed `supervisor_metadata` row of
+    /// schema 12. Opening and validating the database, loading its state and
+    /// rewriting it for the same environment never read the row and keep it
+    /// byte for byte, as a v0.3.391 supervisor, which reads that table by
+    /// key, does.
+    #[test]
+    fn a_schema_12_database_with_discriminators_opens_and_keeps_the_row() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let expected = state(environment(StoredEnvironmentState::Stopped, None));
+        let environment_id = expected.environments["dev"].id;
+        store.replace_state(&expected).unwrap();
+        let mut recorded = DirectShareDiscriminators::default();
+        recorded.insert(
+            "b".repeat(64),
+            crate::direct_share::DirectShareDiscriminator::Handle {
+                handle_type: 1,
+                handle: "2a000000efbeadde".to_owned(),
+            },
+        );
+        store
+            .record_direct_share_discriminators(environment_id, &recorded)
+            .unwrap();
+        let key = direct_share_discriminators_key(environment_id);
+        let row = metadata_value(&store.connection, &key).unwrap();
+        drop(store);
+
+        let (reopened, loaded) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        assert_eq!(
+            schema_version(&reopened.connection),
+            DATABASE_SCHEMA_VERSION
+        );
+        assert_eq!(loaded, expected);
+        reopened.replace_state(&loaded).unwrap();
+        assert_eq!(metadata_value(&reopened.connection, &key).unwrap(), row);
     }
 
     #[test]

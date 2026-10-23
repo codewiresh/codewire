@@ -24,14 +24,20 @@ use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, StatxFlags, openat2, statx
 
 use crate::host::path::current_uid;
 use crate::supervisor_metadata::direct_share::allowed_filesystem;
-pub(crate) use crate::supervisor_metadata::direct_share::{DirectShareError, DirectShareIdentity};
+pub(crate) use crate::supervisor_metadata::direct_share::{
+    DirectShareDiscriminator, DirectShareError, DirectShareIdentity,
+};
 
 const MAXIMUM_HOST_PATH_BYTES: usize = 4096;
 
+/// An admitted directory, held open. While it lives the directory's inode
+/// stays allocated, so a directory created at its path has another inode
+/// number and any (device, inode) comparison against it is exact.
 #[derive(Debug)]
 pub(crate) struct AdmittedDirectShare {
     path: PathBuf,
     identity: DirectShareIdentity,
+    discriminator: DirectShareDiscriminator,
     descriptor: OwnedFd,
 }
 
@@ -42,6 +48,11 @@ impl AdmittedDirectShare {
 
     pub(crate) fn identity(&self) -> &DirectShareIdentity {
         &self.identity
+    }
+
+    /// The discriminator read from the held descriptor at admission.
+    pub(crate) fn discriminator(&self) -> &DirectShareDiscriminator {
+        &self.discriminator
     }
 
     pub(crate) fn descriptor(&self) -> &OwnedFd {
@@ -119,9 +130,11 @@ pub(crate) fn admit_direct_share(
     }
     identity.validate()?;
     reject_mount_alias_or_submounts(&canonical, identity.mount_id())?;
+    let discriminator = capture_discriminator(&descriptor)?;
     Ok(AdmittedDirectShare {
         path: canonical,
         identity,
+        discriminator,
         descriptor,
     })
 }
@@ -196,6 +209,68 @@ fn capture_identity(descriptor: &OwnedFd) -> Result<DirectShareIdentity, DirectS
         metadata.stx_uid,
         filesystem.f_type as i64,
     ))
+}
+
+/// The held directory's file handle (`name_to_handle_at` with
+/// `AT_EMPTY_PATH`), which embeds its inode generation. It needs no
+/// privilege and survives a reboot. A filesystem without handles
+/// (`EOPNOTSUPP`, as overlay answers) or a kernel without the call
+/// (`ENOSYS`) reads as unsupported and keeps the identity comparison; any
+/// other failure fails admission rather than weakening the record.
+#[cfg(target_os = "linux")]
+fn capture_discriminator(
+    descriptor: &OwnedFd,
+) -> Result<DirectShareDiscriminator, DirectShareError> {
+    use crate::supervisor_metadata::direct_share::MAXIMUM_FILE_HANDLE_BYTES;
+
+    #[repr(C)]
+    struct FileHandle {
+        handle_bytes: libc::c_uint,
+        handle_type: libc::c_int,
+        f_handle: [u8; MAXIMUM_FILE_HANDLE_BYTES],
+    }
+
+    let mut handle = FileHandle {
+        handle_bytes: MAXIMUM_FILE_HANDLE_BYTES as libc::c_uint,
+        handle_type: 0,
+        f_handle: [0; MAXIMUM_FILE_HANDLE_BYTES],
+    };
+    let mut mount_id: libc::c_int = 0;
+    // SAFETY: the descriptor is live, the path is an empty C string used
+    // with AT_EMPTY_PATH, and `handle` is a `struct file_handle` header
+    // followed by MAX_HANDLE_SZ bytes, the size `handle_bytes` announces.
+    let result = unsafe {
+        libc::name_to_handle_at(
+            descriptor.as_raw_fd(),
+            c"".as_ptr(),
+            (&raw mut handle).cast::<libc::file_handle>(),
+            &raw mut mount_id,
+            libc::AT_EMPTY_PATH,
+        )
+    };
+    if result != 0 {
+        let error = rustix::io::Errno::from_io_error(&std::io::Error::last_os_error())
+            .unwrap_or(rustix::io::Errno::IO);
+        return if error == rustix::io::Errno::OPNOTSUPP || error == rustix::io::Errno::NOSYS {
+            Ok(DirectShareDiscriminator::Unsupported)
+        } else {
+            Err(DirectShareError::Inspect(error))
+        };
+    }
+    usize::try_from(handle.handle_bytes)
+        .ok()
+        .and_then(|length| handle.f_handle.get(..length))
+        .and_then(|bytes| DirectShareDiscriminator::handle(handle.handle_type, bytes))
+        .ok_or(DirectShareError::Inspect(rustix::io::Errno::OVERFLOW))
+}
+
+/// Darwin has no file handles; APFS allocates file IDs from a per-volume
+/// counter, so its identity comparison stands alone.
+#[cfg(target_os = "macos")]
+fn capture_discriminator(
+    _descriptor: &OwnedFd,
+) -> Result<DirectShareDiscriminator, DirectShareError> {
+    Ok(DirectShareDiscriminator::Unsupported)
 }
 
 /// Open the directory itself. `O_NOFOLLOW_ANY` refuses a symlink in any
@@ -615,10 +690,32 @@ fn darwin_mounts() -> Result<Vec<(PathBuf, u64)>, DirectShareError> {
     Err(DirectShareError::InvalidMountTable)
 }
 
+/// Remove the directory at `path` and create it again until it takes
+/// `inode`'s number, as ext4 and overlay over it do, for a bounded number of
+/// tries. Whether it did is the result; tmpfs and btrfs never do.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn recreate_directory_reusing_inode(path: &Path, inode: u64) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    for _ in 0..64 {
+        fs::remove_dir(path).unwrap();
+        fs::create_dir(path).unwrap();
+        if fs::symlink_metadata(path).unwrap().ino() == inode {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::supervisor_metadata::direct_share::{
+        DirectShareDiscriminators, direct_share_identity_sha256,
+    };
     use std::os::unix::fs::symlink;
+
+    #[cfg(target_os = "linux")]
+    const OVERLAYFS_MAGIC: i64 = 0x794c_7630;
 
     #[test]
     fn owned_local_directory_is_bound_and_reopened() {
@@ -667,6 +764,195 @@ mod tests {
             admit_direct_share(&canonical, std::slice::from_ref(&canonical)),
             Err(DirectShareError::ForbiddenSource(_))
         ));
+    }
+
+    #[test]
+    fn a_recorded_handle_must_read_back_equal_and_an_unsupported_one_keeps_the_identity() {
+        let handle = |byte: u8| DirectShareDiscriminator::Handle {
+            handle_type: 1,
+            handle: format!("{byte:02x}"),
+        };
+        let unsupported = DirectShareDiscriminator::Unsupported;
+        let admit = DirectShareDiscriminator::admit;
+        // Nothing recorded: accepted once, recording what was read.
+        assert_eq!(admit(None, &handle(1)), Some(handle(1)));
+        assert_eq!(admit(None, &unsupported), Some(unsupported.clone()));
+        // Recorded without a handle: the identity alone decided, and a
+        // handle is recorded once one can be read.
+        assert_eq!(
+            admit(Some(&unsupported), &unsupported),
+            Some(unsupported.clone())
+        );
+        assert_eq!(admit(Some(&unsupported), &handle(1)), Some(handle(1)));
+        // Recorded with a handle: only that handle, read again, is accepted.
+        assert_eq!(admit(Some(&handle(1)), &handle(1)), Some(handle(1)));
+        assert_eq!(admit(Some(&handle(1)), &handle(2)), None);
+        assert_eq!(admit(Some(&handle(1)), &unsupported), None);
+    }
+
+    #[test]
+    fn discriminator_rows_round_trip_and_bind_the_whole_plan_entry() {
+        let identity = DirectShareIdentity::from_captured_parts(8, 1, 42, 7, 1000, 0xef53);
+        let digest = direct_share_identity_sha256(b"/work/project", &identity);
+        let mut recorded = DirectShareDiscriminators::default();
+        recorded.insert(
+            digest.clone(),
+            DirectShareDiscriminator::Handle {
+                handle_type: 1,
+                handle: "2a000000efbeadde".to_owned(),
+            },
+        );
+        recorded.insert("0".repeat(64), DirectShareDiscriminator::Unsupported);
+        assert_eq!(
+            DirectShareDiscriminators::decode(&recorded.encode()),
+            recorded
+        );
+
+        // Another path or any other identity field names another entry.
+        assert_ne!(
+            direct_share_identity_sha256(b"/work/other", &identity),
+            digest
+        );
+        for changed in [
+            DirectShareIdentity::from_captured_parts(9, 1, 42, 7, 1000, 0xef53),
+            DirectShareIdentity::from_captured_parts(8, 2, 42, 7, 1000, 0xef53),
+            DirectShareIdentity::from_captured_parts(8, 1, 43, 7, 1000, 0xef53),
+            DirectShareIdentity::from_captured_parts(8, 1, 42, 8, 1000, 0xef53),
+            DirectShareIdentity::from_captured_parts(8, 1, 42, 7, 1001, 0xef53),
+            DirectShareIdentity::from_captured_parts(8, 1, 42, 7, 1000, 0x9123_683e),
+        ] {
+            assert_ne!(
+                direct_share_identity_sha256(b"/work/project", &changed),
+                digest
+            );
+        }
+
+        // A malformed row reads as nothing recorded, as before #3209.
+        for malformed in [
+            "",
+            "{}",
+            "[{\"identity_sha256\":\"00\",\"discriminator\":\"unsupported\"}]",
+            &format!(
+                "[{{\"identity_sha256\":\"{}\",\"discriminator\":{{\"handle\":{{\"handle_type\":1,\"handle\":\"XYZ\"}}}}}}]",
+                "0".repeat(64)
+            ),
+            &format!(
+                "[{{\"identity_sha256\":\"{}\",\"discriminator\":\"unsupported\",\"extra\":1}}]",
+                "0".repeat(64)
+            ),
+        ] {
+            assert!(DirectShareDiscriminators::decode(malformed).is_empty());
+        }
+    }
+
+    /// The filesystem decides whether a share has a handle: overlay has
+    /// none, and every other admitted Linux filesystem does.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_share_records_its_file_handle_except_on_overlay() {
+        let source = tempfile::tempdir().unwrap();
+        let canonical = fs::canonicalize(source.path()).unwrap();
+        let admitted = admit_direct_share(&canonical, &[]).unwrap();
+        let overlay = admitted.identity().filesystem_magic() == OVERLAYFS_MAGIC;
+        assert_eq!(
+            matches!(
+                admitted.discriminator(),
+                DirectShareDiscriminator::Unsupported
+            ),
+            overlay
+        );
+        // The same directory reads back the same discriminator.
+        let reopened = reopen_direct_share(&canonical, admitted.identity(), &[]).unwrap();
+        assert_eq!(reopened.discriminator(), admitted.discriminator());
+    }
+
+    /// #3209: on a filesystem that reuses inode numbers, a directory removed
+    /// while nothing holds it and created again at its path passes the
+    /// identity comparison; its file handle tells it apart. TMPDIR on ext4
+    /// exercises the reuse; elsewhere the test stops once none happens.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_recreated_with_the_same_inode_number_has_another_handle() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = fs::canonicalize(parent.path()).unwrap().join("share");
+        fs::create_dir(&path).unwrap();
+        let admitted = admit_direct_share(&path, &[]).unwrap();
+        let identity = admitted.identity().clone();
+        let recorded = admitted.discriminator().clone();
+        // A stopped VM holds nothing.
+        drop(admitted);
+        if !recreate_directory_reusing_inode(&path, identity.inode()) {
+            eprintln!("TMPDIR's filesystem did not reuse the inode number; nothing to tell apart");
+            return;
+        }
+
+        let replacement = reopen_direct_share(&path, &identity, &[])
+            .expect("a reused inode number passes the identity comparison");
+        let admitted_again =
+            DirectShareDiscriminator::admit(Some(&recorded), replacement.discriminator());
+        if recorded == DirectShareDiscriminator::Unsupported {
+            // Overlay over ext4: no handle, the documented limit.
+            assert_eq!(identity.filesystem_magic(), OVERLAYFS_MAGIC);
+            assert!(admitted_again.is_some());
+        } else {
+            assert_ne!(replacement.discriminator(), &recorded);
+            assert_eq!(admitted_again, None);
+        }
+    }
+
+    /// #3209 overlay fallback: overlay gives no file handle, so a share there
+    /// records none and keeps the identity comparison, and copying the
+    /// directory up between boots, as any write in it does, keeps that
+    /// identity. Run it against a directory only an overlay's lower layer
+    /// holds, owned by the test's user.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs CODEWIRE_TEST_OVERLAY_SHARE, a directory present only in an overlay's lower layer"]
+    fn a_share_copied_up_on_overlay_between_boots_is_not_refused() {
+        let path = PathBuf::from(
+            std::env::var_os("CODEWIRE_TEST_OVERLAY_SHARE")
+                .expect("CODEWIRE_TEST_OVERLAY_SHARE names the lower-layer directory"),
+        );
+        let admitted = admit_direct_share(&path, &[]).unwrap();
+        assert_eq!(admitted.identity().filesystem_magic(), OVERLAYFS_MAGIC);
+        assert_eq!(
+            admitted.discriminator(),
+            &DirectShareDiscriminator::Unsupported
+        );
+        let identity = admitted.identity().clone();
+        let recorded = admitted.discriminator().clone();
+        drop(admitted);
+
+        fs::write(path.join("copied-up"), b"").unwrap();
+
+        let reopened = reopen_direct_share(&path, &identity, &[]).unwrap();
+        assert_eq!(
+            DirectShareDiscriminator::admit(Some(&recorded), reopened.discriminator()),
+            Some(DirectShareDiscriminator::Unsupported)
+        );
+    }
+
+    /// While a share is held, as the supervisor holds its checked shares
+    /// until the runner's StartVm returns, a directory created at its path
+    /// cannot take its inode number, so the runner's (device, inode) reopen
+    /// refuses it even on ext4.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_held_share_keeps_its_inode_number_from_a_recreated_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = fs::canonicalize(parent.path()).unwrap().join("share");
+        fs::create_dir(&path).unwrap();
+        let held = admit_direct_share(&path, &[]).unwrap();
+
+        assert!(!recreate_directory_reusing_inode(
+            &path,
+            held.identity().inode()
+        ));
+        assert!(matches!(
+            reopen_direct_share(&path, held.identity(), &[]),
+            Err(DirectShareError::SourceChanged(_))
+        ));
+        drop(held);
     }
 
     #[cfg(target_os = "linux")]
