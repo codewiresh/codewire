@@ -48,15 +48,23 @@ server_url="${server_url%/}"
   || fallback 'GITHUB_SERVER_URL-unset-or-invalid'
 forge_host="${server_url#https://}"
 
-for required_tool in git jq fj; do
+for required_tool in git jq curl; do
   command -v "$required_tool" >/dev/null 2>&1 \
     || fallback "${required_tool}-unavailable"
 done
 
+# Forgejo evidence is read from its REST API with GITEA_TOKEN: a job's own
+# token in CI; locally, the token scripts/release/release loads. The token
+# leaves the environment at once and reaches curl only through a pipe: never
+# argv, a file or output.
+[ -n "${GITEA_TOKEN:-}" ] || fallback 'forgejo-token-unavailable'
+forgejo_token="$GITEA_TOKEN"
+unset GITEA_TOKEN
+
 remote_url="$(git remote get-url "$remote" 2>/dev/null)" \
   || fallback 'push-remote-unavailable'
 case "$remote_url" in
-  "git@$forge_host:codewire/codewire.git"|"ssh://git@$forge_host/codewire/codewire.git"|"https://$forge_host/codewire/codewire.git")
+  "git@$forge_host:codewire/codewire.git"|"ssh://git@$forge_host/codewire/codewire.git"|"https://$forge_host/codewire/codewire.git"|"https://$forge_host/codewire/codewire")
     ;;
   *) fallback 'push-remote-not-canonical-gitea' ;;
 esac
@@ -90,9 +98,46 @@ if [ "$tag_commit" != "$main_sha" ]; then
     || fallback 'release-tag-not-on-canonical-main'
 fi
 
-# Forgejo evidence comes from the supported fj CLI. Main CI must be the
-# tagged commit's latest push run of ci.yaml on main, with a green Required
-# verification job, and it must have verified: a run that started after main
+# api_get REPO PATH FILE: one Forgejo API read into FILE; anything but HTTP
+# 200 fails. --disable comes first so no curlrc can trace, redirect or
+# otherwise reuse the token, and the header arrives on curl's stdin from the
+# printf builtin.
+api_get() {
+  local status
+  status="$(printf 'header = "Authorization: token %s"\n' "$forgejo_token" |
+    curl --disable --config - --silent --show-error \
+    --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 \
+    --output "$3" --write-out '%{http_code}' \
+    "$server_url/api/v1/repos/$1$2" 2>/dev/null)" || return 1
+  [ "$status" = 200 ]
+}
+
+# The run fields the checks below read, in one shape for a listed run and a
+# viewed one: Forgejo's commit_sha, workflow_id and prettyref.
+readonly run_fields='{id, head_sha: .commit_sha, workflow: .workflow_id, status, event, ref: .prettyref}'
+
+# list_runs REPO QUERY FILE: the runs QUERY selects, newest first.
+list_runs() {
+  api_get "$1" "/actions/runs?$2&page=1&limit=50" "$3.raw" || return 1
+  jq "{schema_version: 1, runs: [.workflow_runs[] | $run_fields]}" "$3.raw" >"$3" 2>/dev/null
+}
+
+# view_run REPO RUN FILE: the run and its jobs, read once into FILE.
+view_run() {
+  local repo="$1" run="$2" file="$3"
+  [ -s "$file" ] && return 0
+  api_get "$repo" "/actions/runs/$run" "$file.run" || return 1
+  # Forgejo lists every job of a run at once, unpaginated.
+  api_get "$repo" "/actions/runs/$run/jobs" "$file.jobs" || return 1
+  jq -n --slurpfile run "$file.run" --slurpfile jobs "$file.jobs" "
+      {schema_version: 1,
+       run: (\$run[0] | $run_fields),
+       jobs: (\$jobs[0] | sort_by(.id) | map({id, run_id, name, status, attempt}))}
+    " >"$file" 2>/dev/null
+}
+
+# Main CI must be the tagged commit's latest push run of ci.yaml on main,
+# with a green Required verification job, and it must have verified: a run that started after main
 # moved on is superseded, dispatches no capability group and still reports
 # green. A scheduled run that a push to main registered is listed with event
 # push too; its selection log says classification=scheduled, and it is never
@@ -102,30 +147,24 @@ fi
 # dry run, from a push, a dispatch or a schedule. Dev evidence is read from
 # the deploy-owned promotion itself: a green promote-dev run whose release
 # commit job and acceptance job both checked out this exact source.
+readonly source_repo=codewire/codewire deploy_repo=codewire/deploy
 runs_json="$tmp/runs.json"
-fj actions runs list -R "$remote" --head "$tag_commit" --workflow ci.yaml \
-  -L 50 --output json >"$runs_json" 2>/dev/null \
+list_runs "$source_repo" "head_sha=$tag_commit&workflow_id=ci.yaml" "$runs_json" \
   || fallback 'exact-main-runs-unavailable'
 jq -e '.schema_version == 1 and (.runs | type == "array")' \
   "$runs_json" >/dev/null 2>&1 || fallback 'exact-main-runs-ambiguous'
 
-# view_run RUN FILE: the run and its jobs, read once into FILE.
-view_run() {
-  local run="$1" file="$2"
-  [ -s "$file" ] && return 0
-  fj actions runs view "$run" -R "$remote" --output json >"$file" 2>/dev/null
-}
-
-# job_log RUN VIEW NAME FILE: the whole log of the run's one job called NAME,
-# carriage returns removed. Read into a file before matching: a pipeline
-# ending in grep -q can stop reading early and fail the writer under pipefail.
+# job_log REPO VIEW NAME FILE: the whole log of the viewed run's one job
+# called NAME, at the attempt whose status the view shows, carriage returns
+# removed. Read into a file before matching: a pipeline ending in grep -q can
+# stop reading early and fail the writer under pipefail.
 job_log() {
-  local run="$1" view="$2" name="$3" file="$4" job
-  job="$(jq -r --arg name "$name" '
-      [.jobs[] | select(.name == $name)] | select(length == 1) | .[0].id
-    ' "$view")"
-  [[ "$job" =~ ^[1-9][0-9]*$ ]] || return 1
-  fj actions runs logs "$run" -R "$remote" --job "$job" >"$file.raw" 2>/dev/null || return 1
+  local repo="$1" view="$2" name="$3" file="$4" job attempt
+  read -r job attempt < <(jq -r --arg name "$name" '
+      [.jobs[] | select(.name == $name)] | select(length == 1) | .[0] | "\(.id) \(.attempt)"
+    ' "$view") || return 1
+  [[ "$job" =~ ^[1-9][0-9]*$ && "$attempt" =~ ^[1-9][0-9]*$ ]] || return 1
+  api_get "$repo" "/actions/jobs/$job/logs?attempt=$attempt" "$file.raw" || return 1
   tr -d '\r' <"$file.raw" >"$file"
 }
 
@@ -136,9 +175,9 @@ selection_log=''
 while read -r candidate; do
   [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
   candidate_view="$tmp/ci-view-$candidate.json"
-  view_run "$candidate" "$candidate_view" || fallback 'exact-main-jobs-unavailable'
+  view_run "$source_repo" "$candidate" "$candidate_view" || fallback 'exact-main-jobs-unavailable'
   candidate_log="$tmp/ci-selection-$candidate.log"
-  job_log "$candidate" "$candidate_view" 'Verification selection' "$candidate_log" \
+  job_log "$source_repo" "$candidate_view" 'Verification selection' "$candidate_log" \
     || fallback 'exact-main-selection-unavailable'
   if grep -Eq '^[0-9T:.-]+Z classification=scheduled$' "$candidate_log"; then
     continue
@@ -205,7 +244,7 @@ if ! jq -e '
     | length > 0
   ' "$run_view" >/dev/null 2>&1; then
   required_log="$tmp/required.log"
-  if ! { job_log "$run_id" "$run_view" 'Required verification' "$required_log" \
+  if ! { job_log "$source_repo" "$run_view" 'Required verification' "$required_log" \
       && grep -Eq '^[0-9T:.-]+Z required verification: exact tested tree from PR #[1-9][0-9]* run [1-9][0-9]* accepted$' \
         "$required_log"; }; then
     fallback 'exact-main-ci-verified-nothing'
@@ -237,7 +276,7 @@ successful_runs() {
 while read -r candidate; do
   [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
   candidate_view="$tmp/ci-view-$candidate.json"
-  view_run "$candidate" "$candidate_view" || continue
+  view_run "$source_repo" "$candidate" "$candidate_view" || continue
   jq -e --arg head "$tag_commit" --argjson id "$candidate" '
       .schema_version == 1
       and .run.id == $id
@@ -258,15 +297,14 @@ done < <(successful_runs "$runs_json" ci.yaml)
 # commit whose assembly job verified the unsigned four-target delivery. A
 # superseded or deferred run skips that verification and does not count.
 dry_runs_json="$tmp/dry-runs.json"
-fj actions runs list -R "$remote" --head "$tag_commit" --workflow cw-release-dry-run.yaml \
-  -L 50 --output json >"$dry_runs_json" 2>/dev/null \
+list_runs "$source_repo" "head_sha=$tag_commit&workflow_id=cw-release-dry-run.yaml" "$dry_runs_json" \
   || fallback 'exact-commit-dry-runs-unavailable'
 jq -e '.schema_version == 1 and (.runs | type == "array")' \
   "$dry_runs_json" >/dev/null 2>&1 || fallback 'exact-commit-dry-runs-unavailable'
 while read -r candidate; do
   [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
   candidate_view="$tmp/dry-view-$candidate.json"
-  view_run "$candidate" "$candidate_view" || continue
+  view_run "$source_repo" "$candidate" "$candidate_view" || continue
   jq -e --arg head "$tag_commit" --argjson id "$candidate" '
       .schema_version == 1
       and .run.id == $id
@@ -277,7 +315,7 @@ while read -r candidate; do
         | length == 1 and .[0].status == "success")
     ' "$candidate_view" >/dev/null 2>&1 || continue
   assemble_log="$tmp/dry-assemble-$candidate.log"
-  job_log "$candidate" "$candidate_view" 'Assemble and verify the unsigned four-target delivery' \
+  job_log "$source_repo" "$candidate_view" 'Assemble and verify the unsigned four-target delivery' \
     "$assemble_log" || continue
   grep -Eq '^[0-9T:.-]+Z cw-release: verified targets=4 version=v[0-9.]+ runtime_equal=true signed=false$' \
     "$assemble_log" || continue
@@ -290,10 +328,8 @@ while read -r candidate; do
 done < <(successful_runs "$dry_runs_json" cw-release-dry-run.yaml)
 [ -n "$dry_run_id" ] || fallback 'exact-commit-dry-run-not-verified'
 
-deploy_repo=(-r codewire/deploy -H "$forge_host")
 deploy_runs="$tmp/deploy-runs.json"
-fj actions runs list "${deploy_repo[@]}" --workflow promote-dev.yaml \
-  --status success -L 30 --output json >"$deploy_runs" 2>/dev/null \
+list_runs "$deploy_repo" 'workflow_id=promote-dev.yaml&status=success' "$deploy_runs" \
   || fallback 'dev-acceptance-runs-unavailable'
 jq -e '.schema_version == 1 and (.runs | type == "array")' \
   "$deploy_runs" >/dev/null 2>&1 || fallback 'dev-acceptance-runs-ambiguous'
@@ -304,8 +340,7 @@ checkout_line="^[0-9T:.-]+Z Checked out exact Codewire source ${tag_commit}\$"
 while read -r candidate; do
   [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
   view="$tmp/deploy-view-$candidate.json"
-  fj actions runs view "$candidate" "${deploy_repo[@]}" --output json \
-    >"$view" 2>/dev/null || continue
+  view_run "$deploy_repo" "$candidate" "$view" || continue
   jq -e --argjson id "$candidate" '
       .schema_version == 1
       and .run.id == $id
@@ -317,18 +352,11 @@ while read -r candidate; do
       and ([.jobs[] | select(.name == "Commit one complete dev release")] | length == 1)
       and ([.jobs[] | select(.name == "Run exact-source Dev acceptance smokes")] | length == 1)
     ' "$view" >/dev/null 2>&1 || continue
-  commit_job="$(jq -r '.jobs[] | select(.name == "Commit one complete dev release") | .id' "$view")"
-  acceptance_job="$(jq -r '.jobs[] | select(.name == "Run exact-source Dev acceptance smokes") | .id' "$view")"
-  [[ "$commit_job" =~ ^[1-9][0-9]*$ && "$acceptance_job" =~ ^[1-9][0-9]*$ ]] || continue
-  # Read each whole log into a file before matching. A pipeline ending in
-  # grep -q can stop reading early and fail the writer under pipefail.
-  job_log="$tmp/deploy-$candidate-job.log"
   job_text="$tmp/deploy-$candidate-job.txt"
   proven=true
-  for job in "$commit_job" "$acceptance_job"; do
-    if ! fj actions runs logs "$candidate" "${deploy_repo[@]}" --job "$job" \
-        >"$job_log" 2>/dev/null \
-      || ! tr -d '\r' <"$job_log" >"$job_text" \
+  for job in 'Commit one complete dev release' 'Run exact-source Dev acceptance smokes'; do
+    rm -f "$job_text" "$job_text.raw"
+    if ! job_log "$deploy_repo" "$view" "$job" "$job_text" \
       || ! grep -Eq "$checkout_line" "$job_text"; then
       proven=false
       break

@@ -49,6 +49,9 @@ case "$*" in
   'remote get-url origin')
     if [ "$FIXTURE_MODE" = wrong_remote ]; then
       printf 'https://github.com/codewiresh/codewire.git\n'
+    elif [ "$FIXTURE_MODE" = checkout_remote ]; then
+      # actions/checkout names origin without .git.
+      printf 'https://git.example.invalid/codewire/codewire\n'
     else
       printf 'https://git.example.invalid/codewire/codewire.git\n'
     fi
@@ -71,11 +74,13 @@ case "$*" in
 esac
 EOF
 
-cat >"$mock_bin/fj" <<'EOF'
+# fixture-forge answers each read with the fixture's runs, jobs and logs:
+# list, view (a run and its jobs) and logs (one job's).
+cat >"$mock_bin/fixture-forge" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [ "${FIXTURE_MODE:?}" != api_unavailable ] || exit 1
-[ "$1 $2" = 'actions runs' ] || { echo "unexpected fj command: $*" >&2; exit 2; }
+[ "$1 $2" = 'actions runs' ] || { echo "unexpected forge read: $*" >&2; exit 2; }
 verb="$3"; shift 3
 repo=codewire; target=''; job=''; output=text; workflow=''
 while [ "$#" -gt 0 ]; do
@@ -230,18 +235,109 @@ case "$repo:$verb:$target" in
     # line; an early-exiting matcher must not turn that into a failure.
     awk 'BEGIN { for (i = 0; i < 100000; i++) print "2026-09-27T16:51:43.0000000Z filler line that keeps the job log larger than a pipe buffer\r" }'
     ;;
-  *) echo "unexpected fj request: $repo $verb $target" >&2; exit 2 ;;
+  *) echo "unexpected forge request: $repo $verb $target" >&2; exit 2 ;;
 esac
 EOF
 
-# The receipt must not depend on the legacy tea CLI.
-cat >"$mock_bin/tea" <<'EOF'
+# The Forgejo REST API over fixture-forge: Forgejo's field names for a run
+# (commit_sha, workflow_id, prettyref), a run's jobs as one array, and a job's
+# log by job ID. It requires the token in a private curl config and records
+# every argument list, so a leaked token is caught.
+cat >"$mock_bin/curl" <<'EOF'
 #!/usr/bin/env bash
-echo "tea must not be used" >&2
-exit 99
+set -euo pipefail
+printf '%s\n' "$*" >>"$FIXTURE_CURL_ARGV_LOG"
+config='' output='' url=''
+# --disable must come first, or a curlrc could reuse the token.
+[ "${1:-}" = --disable ] || exit 95
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --config) config="$2"; shift 2 ;;
+    --output) output="$2"; shift 2 ;;
+    --proto|--connect-timeout|--max-time|--write-out) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+# The token arrives on stdin, never in a file.
+[ "$config" = - ] || exit 94
+grep -Fqx "header = \"Authorization: token ${FIXTURE_TOKEN:?}\"" || exit 99
+[[ "$url" =~ ^https://git\.example\.invalid/api/v1/repos/codewire/(codewire|deploy)/actions/(.*)$ ]] \
+  || { echo "unexpected API URL: $url" >&2; exit 98; }
+repo="${BASH_REMATCH[1]}" path="${BASH_REMATCH[2]}"
+target=(-R origin)
+[ "$repo" = codewire ] || target=(-r codewire/deploy -H git.example.invalid)
+raw_run='{id, commit_sha: .head_sha, workflow_id: .workflow, status, event, prettyref: .ref}'
+answer() { # forge reads, then the jq filter that makes Forgejo's response
+  local filter="$1" document
+  shift
+  if ! document="$(fixture-forge actions runs "$@" "${target[@]}")"; then
+    printf 500
+    return
+  fi
+  jq "$filter" <<<"$document" >"$output"
+  served
+}
+# served: the status for this endpoint. A server error is refused even when
+# its body looks like evidence; FIXTURE_ERROR_ENDPOINT names the endpoint.
+served() {
+  if [ "$FIXTURE_MODE" = server_error_valid_body ] && [ "${FIXTURE_ERROR_ENDPOINT:-runs}" = "$endpoint" ]; then
+    printf 500
+  else
+    printf 200
+  fi
+}
+case "$path" in
+  runs\?*)
+    endpoint=runs
+    query="${path#runs?}" workflow='' status=''
+    IFS='&' read -r -a pairs <<<"$query"
+    for pair in "${pairs[@]}"; do
+      case "$pair" in
+        workflow_id=*) workflow="${pair#workflow_id=}" ;;
+        status=*) status="${pair#status=}" ;;
+        head_sha=*) [ "${pair#head_sha=}" = "$FIXTURE_TAG_COMMIT" ] || exit 97 ;;
+        page=1|limit=50) ;;
+        *) echo "unexpected query: $pair" >&2; exit 97 ;;
+      esac
+    done
+    args=(list --workflow "$workflow" --output json)
+    [ -z "$status" ] || args+=(--status "$status")
+    answer "{total_count, workflow_runs: [.runs[] | $raw_run]}" "${args[@]}"
+    ;;
+  runs/[0-9]*/jobs) endpoint=jobs run="${path#runs/}"; answer '.jobs' view "${run%/jobs}" --output json ;;
+  runs/[0-9]*) endpoint=run; answer ".run | $raw_run" view "${path#runs/}" --output json ;;
+  jobs/[0-9]*/logs\?attempt=1)
+    # Every fixture job is on its first attempt, which the view shows.
+    endpoint=log
+    job="${path#jobs/}" job="${job%/logs?attempt=1}"
+    case "$job" in
+      9022) run=902 ;;
+      70[0-9]) run=701 ;;
+      71[0-9]) run=711 ;;
+      72[0-9]) run=721 ;;
+      81[0-9]) run=801 ;;
+      *) exit 96 ;;
+    esac
+    if fixture-forge actions runs logs "$run" --job "$job" "${target[@]}" >"$output"; then
+      served
+    else
+      printf 404
+    fi
+    ;;
+  *) echo "unexpected API path: $path" >&2; exit 98 ;;
+esac
 EOF
 
-chmod +x "$mock_bin/git" "$mock_bin/fj" "$mock_bin/tea"
+# The receipt reads Forgejo only through its REST API: never the legacy tea
+# CLI, and never fj, which CI runners do not have.
+for retired in tea fj; do
+  printf '#!/usr/bin/env bash\necho "%s must not be used" >&2\nexit 99\n' "$retired" >"$mock_bin/$retired"
+done
+
+chmod +x "$mock_bin/git" "$mock_bin/fixture-forge" "$mock_bin/curl" "$mock_bin/tea" "$mock_bin/fj"
+token_canary='forgejo-receipt-token-canary-3c9e'
+curl_argv_log="$TMP/curl-argv.log"
 
 # run_case NAME MODE TAG EXPECTED_RECEIPT EXPECTED_REASON
 run_case() {
@@ -259,11 +355,18 @@ run_case() {
     PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$tag_object" \
     PREFLIGHT_PUSH_REMOTE_NAME=origin \
     GITHUB_SERVER_URL="${CASE_SERVER_URL-https://git.example.invalid/}" \
+    GITEA_TOKEN="${CASE_TOKEN-$token_canary}" \
+    FIXTURE_TOKEN="$token_canary" \
+    FIXTURE_CURL_ARGV_LOG="$curl_argv_log" \
     "$CHECK" 2>&1)" || fail "$name checker returned failure"
   case_output="$output"
-  if grep -Fq 'tea must not be used' <<<"$output"; then
+  if grep -Eq '(tea|fj) must not be used' <<<"$output"; then
     printf '%s\n' "$output" >&2
-    fail "$name invoked the legacy tea CLI"
+    fail "$name invoked a retired forge CLI"
+  fi
+  if grep -Fq "$token_canary" <<<"$output" \
+      || { [ -e "$curl_argv_log" ] && grep -Fq "$token_canary" "$curl_argv_log"; }; then
+    fail "$name leaked the Forgejo token into output or arguments"
   fi
   if ! grep -Fxq "release_tag_receipt=$expected" <<<"$output" \
       || ! grep -Fxq "release_tag_reason=$reason" <<<"$output"; then
@@ -276,6 +379,15 @@ run_case() {
 run_case accepted success v1.2.3 accepted signed-tag-at-exact-green-deployed-main
 run_case bad_signature bad_signature v1.2.3 fallback release-tag-signature-invalid
 run_case wrong_remote wrong_remote v1.2.3 fallback push-remote-not-canonical-gitea
+run_case checkout_remote checkout_remote v1.2.3 accepted signed-tag-at-exact-green-deployed-main
+CASE_TOKEN='' run_case no_token success v1.2.3 fallback forgejo-token-unavailable
+run_case server_error_valid_body server_error_valid_body v1.2.3 fallback exact-main-runs-unavailable
+FIXTURE_ERROR_ENDPOINT='run' run_case run_server_error server_error_valid_body v1.2.3 \
+  fallback exact-main-jobs-unavailable
+FIXTURE_ERROR_ENDPOINT='jobs' run_case jobs_server_error server_error_valid_body v1.2.3 \
+  fallback exact-main-jobs-unavailable
+FIXTURE_ERROR_ENDPOINT='log' run_case log_server_error server_error_valid_body v1.2.3 \
+  fallback exact-main-selection-unavailable
 CASE_SERVER_URL='' run_case no_server_url success v1.2.3 fallback GITHUB_SERVER_URL-unset-or-invalid
 CASE_SERVER_URL='https://other.example.invalid' \
   run_case other_server success v1.2.3 fallback push-remote-not-canonical-gitea

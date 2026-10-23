@@ -77,6 +77,11 @@ export CODEWIRE_FORGEJO_FIXTURE_REPOSITORY=example/supplychain
   the pinned commit the journeys check out. Mirror the public supply-chain
   scanner repository, `https://github.com/noeljackson/supplychain`, to get it.
   The Linux native smoke and the macOS local VM inputs journey need it.
+- A release tag push's receipt check reads its evidence from Forgejo's REST
+  API with `GITEA_TOKEN`, a token that can read both repositories' Actions
+  runs: a job's own token in CI. Locally, the release command loads it, through
+  pipes only. Never set it by hand, put it in a file, or paste it. Without it, a
+  tag push falls back to full local verification.
 - `CODEWIRE_IMAGE_REGISTRY` is needed by the Dev and confidential smokes and
   Kind's sealed CI inputs. A local Kind loop that builds its own images does
   not need it.
