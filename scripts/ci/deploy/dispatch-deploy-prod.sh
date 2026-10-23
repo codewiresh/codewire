@@ -94,22 +94,30 @@ printf '[dispatch-deploy-prod] accepted signed source tag %s as deploy run %s / 
 # accepted the release; cli-release publishes a CLI only after that (#2892).
 # A few minutes of a protected runner buy that guarantee. A failed lookup or
 # token renewal is retried until the deadline; only promote-prod's own verdict
-# ends the wait. If promote-prod finishes after the deadline, or is re-run
+# ends the wait. A refused token is renewed in the same poll, so a wait that
+# ends on a token that cannot be renewed names the renewal. If promote-prod finishes after the deadline, or is re-run
 # after this run failed, rerun deploy-prod: promote-prod accepts an existing
 # deploy tag for the same release, and this run then goes green.
 readonly run_url="$deploy_api/runs/$run_id"
+# renew: a fresh token, or the failure named and the renewal retried at the
+# next poll.
+renew() {
+  if authorize; then
+    authorized_at=$SECONDS
+    return 0
+  fi
+  problem='the deploy token could not be renewed'
+  printf '[dispatch-deploy-prod] %s; retrying\n' "$problem" >&2
+  authorized_at=$((SECONDS - renew_seconds))
+  return 1
+}
 deadline=$((SECONDS + wait_seconds))
 state='unknown'
 problem=''
 while ((SECONDS < deadline)); do
   sleep "$poll_seconds"
   if ((SECONDS - authorized_at >= renew_seconds)); then
-    if ! authorize; then
-      problem='the deploy token could not be renewed'
-      printf '[dispatch-deploy-prod] %s; retrying\n' "$problem" >&2
-      continue
-    fi
-    authorized_at=$SECONDS
+    renew || continue
   fi
   if ! status="$(
     "$curl_bin" --silent --show-error \
@@ -123,8 +131,8 @@ while ((SECONDS < deadline)); do
     problem="the deploy run lookup failed (HTTP ${status:-none})"
     printf '[dispatch-deploy-prod] deploy run %s lookup failed (HTTP %s); retrying\n' \
       "$run_id" "${status:-none}" >&2
-    # A refused token is renewed at the next poll.
-    [[ "${status:-}" != 401 ]] || authorized_at=$((SECONDS - renew_seconds))
+    # A refused token is renewed now; the next poll presents the new one.
+    [[ "${status:-}" != 401 ]] || renew || true
     continue
   fi
   problem=''

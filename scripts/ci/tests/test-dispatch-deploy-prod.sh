@@ -44,8 +44,10 @@ case "$url" in
     printf '%s\n' "$url" >"$MOCK_CAPTURE_DIR/oidc-url"
     printf 'fetch\n' >>"$MOCK_CAPTURE_DIR/token-fetches"
     fetches="$(wc -l <"$MOCK_CAPTURE_DIR/token-fetches")"
-    # MOCK_FAILED_FETCHES: these fetches (1-based) are refused.
+    # MOCK_FAILED_FETCHES: these fetches (1-based) are refused;
+    # MOCK_FAILED_FETCHES_FROM: this fetch and every later one is.
     [[ ",${MOCK_FAILED_FETCHES:-}," != *",$fetches,"* ]] || exit 94
+    [[ -z "${MOCK_FAILED_FETCHES_FROM:-}" || "$fetches" -lt "$MOCK_FAILED_FETCHES_FROM" ]] || exit 94
     if [[ "$fetches" -eq 1 ]]; then jwt="${MOCK_JWT:?}"; else jwt="${MOCK_JWT%%.*}.renewed-$fetches.${MOCK_JWT##*.}"; fi
     printf '%s' "$jwt" >"$MOCK_CAPTURE_DIR/latest-jwt"
     jq -n --arg value "$jwt" '{value:$value}' >"$output"
@@ -109,8 +111,11 @@ grep -Fq 'the deploy token could not be renewed; retrying' "$work/renew.out" ||
   fail 'a failed token renewal was not reported'
 [[ "$(wc -l <"$work/capture/token-fetches")" -eq 3 ]] ||
   fail 'a refused token was not renewed until a renewal succeeded'
+# A token that is refused and can never be renewed is named however the
+# deadline falls: the refusal's renewal runs in the same poll, so it is always
+# the wait's last event.
 reset_wait
-if DEPLOY_PROD_WAIT_SECONDS=2 DEPLOY_PROD_POLL_SECONDS=1 MOCK_RUN_STATES=http-401 MOCK_FAILED_FETCHES=2,3,4 \
+if DEPLOY_PROD_WAIT_SECONDS=2 DEPLOY_PROD_POLL_SECONDS=1 MOCK_RUN_STATES=http-401 MOCK_FAILED_FETCHES_FROM=2 \
     "$DISPATCH" "$SOURCE_TAG" >"$work/renew-never.out" 2>&1; then
   fail 'a wait whose token could never be renewed was accepted'
 fi
