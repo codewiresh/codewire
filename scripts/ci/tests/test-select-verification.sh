@@ -4542,9 +4542,9 @@ bash -n \
 "$ROOT/scripts/ci/tests/test-push-check-shellcheck.sh"
 "$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh"
 
-# Main CI runs queue one at a time and Forgejo keeps every queued run. A main
-# push that starts after main moved on runs selection, says which commit
-# superseded it, and dispatches nothing; main's tip runs everything selected.
+# Main CI runs start at once, one group per commit. A main push whose
+# selection starts after main moved on says which commit superseded it, and
+# dispatches nothing; main's tip runs everything selected.
 # Execute the checked-in step against a stub remote.
 selection_block="$(awk '
   $0 == "  verification-selection:" { capture = 1 }

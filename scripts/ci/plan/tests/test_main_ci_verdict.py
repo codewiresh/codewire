@@ -340,11 +340,13 @@ class HistoryForgejo(fx.FakeForgejo):
     def __init__(self, commits: dict[str, tuple[int, str]]):
         runs, jobs, logs = {}, {}, {}
         for sha, (run_id, outcome) in commits.items():
-            required = "failure" if outcome == "failed" else "success"
+            required = {"failed": "failure", "running": "running"}.get(outcome, "success")
             runs[sha] = [fx.run(sha, run_id=run_id, status=required)]
             jobs[run_id] = fx.ci_jobs(run_id, required=required)
             if outcome == "verified":
                 log = fx.log_lines(fx.marker(sha, tree_of(sha), run_id=run_id))
+            elif outcome == "running":
+                continue
             else:
                 log = fx.log_lines(
                     f"main CI verdict: not verified; superseded by {HEAD}, whose run verifies this commit's changes")
@@ -391,6 +393,17 @@ class VerifiedBaseTests(unittest.TestCase):
         self.assertEqual(base.verdict.run_id, 10)
         self.assertEqual([(sha, result.state) for sha, result in base.unverified],
                          [(D, verdicts.SUPERSEDED), (C, verdicts.FAILED), (B, verdicts.SUPERSEDED)])
+
+    def test_a_parent_still_verifying_is_covered_by_the_push(self) -> None:
+        # Main runs start at once, one group per commit: a push can select
+        # while its parent's run is still verifying. It never trusts that run;
+        # it verifies from the newest commit whose own run finished verified.
+        forgejo = HistoryForgejo({A: (10, "verified"), B: (11, "verified"),
+                                  C: (12, "running"), D: (13, "running")})
+        base = base_of(forgejo)
+        self.assertEqual(base.sha, B)
+        self.assertEqual([(sha, result.state) for sha, result in base.unverified],
+                         [(D, verdicts.PENDING), (C, verdicts.PENDING)])
 
     def test_a_verified_predecessor_is_the_base(self) -> None:
         forgejo = HistoryForgejo({D: (13, "verified")})

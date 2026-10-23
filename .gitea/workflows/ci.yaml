@@ -34,12 +34,16 @@ on:
     - cron: '15 */4 * * *'
 
 # A newer push to a pull request supersedes its older run. Runs on main
-# are the post-merge confirmation, so each one finishes; later main runs
-# queue behind it instead of cancelling it. Scheduled and dispatched runs
-# have their own groups, so they never cancel or wait for a push to main; a
-# newer scheduled run cancels an older one.
+# are the post-merge confirmation, so each one finishes, and each main commit
+# has its own group: a push to main starts at once beside a main run still
+# verifying, and only a rerun of the same commit waits. A main run never
+# trusts another that has not finished: a push verifies from the newest main
+# commit whose own run verified it (#3176), and Dev delivery is forward-only
+# whatever order verdicts land in (#2892). Scheduled and dispatched runs have
+# their own groups, so they never cancel or wait for a push to main; a newer
+# scheduled run cancels an older one.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'schedule' && '-schedule' || github.event_name == 'workflow_dispatch' && '-dispatch' || '' }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'schedule' && '-schedule' || github.event_name == 'workflow_dispatch' && '-dispatch' || github.event_name == 'push' && '-push-' || '' }}${{ github.event_name == 'push' && github.sha || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'schedule' }}
 
 env:
@@ -269,11 +273,11 @@ jobs:
           fi
           "$receipt_checker"
 
-      # Main runs queue one at a time and Forgejo keeps every queued run. A
-      # main push that starts after main moved on runs this selection, records
-      # which commit superseded it, and dispatches no capability group: the
-      # newer commit's run, queued behind it, verifies the cumulative change,
-      # because a push selects from the newest commit main CI verified (#3176).
+      # Main runs start at once, each in its own group. A main push whose
+      # selection starts after main moved on records which commit superseded
+      # it and dispatches no capability group: the newer commit's run verifies
+      # the cumulative change, because a push selects from the newest commit
+      # main CI verified (#3176), walking past any run that is still pending.
       # The run for main's tip always verifies everything selected, and a run
       # that has started its groups is never stopped.
       - name: Skip a superseded main commit

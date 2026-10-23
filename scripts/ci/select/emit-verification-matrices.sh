@@ -6,7 +6,7 @@ tested_tree_receipt="${VERIFICATION_TESTED_TREE_RECEIPT:-}"
 cw_package_selected="${CW_PACKAGE_SELECTED:-}"
 desktop_package_selected="${DESKTOP_PACKAGE_SELECTED:-}"
 # A main push that main has moved past dispatches nothing: the newer commit's
-# run, queued behind it, verifies the cumulative change.
+# run verifies the cumulative change from the newest commit main CI verified.
 superseded="${VERIFICATION_SUPERSEDED:-false}"
 
 fail() {

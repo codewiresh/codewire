@@ -881,9 +881,11 @@ class MainPushDeferralContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
 
-    def context(self, event: str) -> dict[str, str]:
+    SHA = "1" * 40
+
+    def context(self, event: str, sha: str = SHA) -> dict[str, str]:
         return {"github.event_name": event, "github.ref": self.EVENTS[event],
-                "github.workflow": self.workflow["name"]}
+                "github.workflow": self.workflow["name"], "github.sha": sha}
 
     def test_kind_is_scheduled_every_four_hours(self) -> None:
         triggers = self.workflow.get("on", self.workflow.get(True))
@@ -899,8 +901,8 @@ class MainPushDeferralContractTests(unittest.TestCase):
             for event in self.EVENTS
         }
         self.assertEqual(rendered, {
-            # Main runs finish and queue one behind another.
-            "push": ("ci-CI-refs/heads/main", False),
+            # Each main commit's run finishes in a group of its own.
+            "push": (f"ci-CI-refs/heads/main-push-{self.SHA}", False),
             # A newer pull-request push supersedes its older run.
             "pull_request": ("ci-CI-refs/pull/7/head", True),
             # A newer schedule supersedes an older scheduled run only.
@@ -912,6 +914,24 @@ class MainPushDeferralContractTests(unittest.TestCase):
         # group, so a long Kind run never holds a push to main behind it.
         on_main = [rendered[event][0] for event in ("push", "schedule", "workflow_dispatch")]
         self.assertEqual(len(set(on_main)), 3, on_main)
+
+    def test_main_runs_of_different_commits_never_wait_for_each_other(self) -> None:
+        concurrency = self.workflow["concurrency"]
+        newer = "2" * 40
+        older_group = actions_value(concurrency["group"], self.context("push"))
+        newer_group = actions_value(concurrency["group"], self.context("push", newer))
+        # A newer main commit starts beside the older run instead of queueing
+        # behind it; neither cancels the other.
+        self.assertNotEqual(older_group, newer_group)
+        self.assertTrue(newer_group.endswith(newer), newer_group)
+        self.assertIs(actions_value(concurrency["cancel-in-progress"], self.context("push", newer)), False)
+        # Only a rerun of the same commit shares its group.
+        self.assertEqual(older_group, actions_value(concurrency["group"], self.context("push")))
+        # The commit never reaches the other events' groups: a pull request's
+        # newer push still supersedes its older run.
+        for event in ("pull_request", "schedule", "workflow_dispatch"):
+            self.assertEqual(actions_value(concurrency["group"], self.context(event)),
+                             actions_value(concurrency["group"], self.context(event, newer)), event)
 
     def test_scheduled_kind_takes_the_shared_heavy_pool(self) -> None:
         runners_set = {"vars.CODEWIRE_CI_RUNNER_TRUSTED_KIND": "trusted-kind-label",
