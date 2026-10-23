@@ -571,7 +571,8 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Dispatch Signed Tag to Deploy
     runs-on: ci-protected
-    timeout-minutes: 15
+    # The dispatch waits up to 30 minutes for promote-prod's verdict.
+    timeout-minutes: 40
     needs:
       - release-selection
       - publish-runtime-images

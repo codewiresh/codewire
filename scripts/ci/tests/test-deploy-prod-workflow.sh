@@ -267,12 +267,20 @@ grep -Fq 'run: scripts/ci/deploy/dispatch-deploy-prod.sh "$RELEASE_TAG"' <<<"$di
   fail "production dispatch sends more than the signed source tag"
 grep -Fq '    runs-on: ci-protected' <<<"$dispatch_job" ||
   fail "production dispatch does not use the protected CI tier"
-grep -Fq '    timeout-minutes: 15' <<<"$dispatch_job" ||
-  fail "production dispatch can outlive the validation runner deadline"
-if grep -Fq 'wait-for-deploy-run.sh' \
-  "$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh"; then
-  fail "production dispatch holds a source runner while the downstream run needs capacity"
-fi
+# The dispatch waits for promote-prod's verdict, so a green release run means
+# Production accepted the release (#2892). It holds one protected runner while
+# promote-prod runs on the same pool: deploy-prod's concurrency group allows
+# one such wait at a time, and the pool runs several protected jobs at once.
+grep -Fq '    timeout-minutes: 40' <<<"$dispatch_job" ||
+  fail "production dispatch has no deadline beyond its 30-minute wait"
+grep -Fxq '  group: deploy-prod-release' "$WORKFLOW" ||
+  fail "production dispatches can wait on deploy runs side by side"
+grep -A1 -Fx '  group: deploy-prod-release' "$WORKFLOW" | grep -Fxq '  cancel-in-progress: false' ||
+  fail "a new release can cancel a dispatch while promote-prod runs"
+# shellcheck disable=SC2016
+grep -Fq 'readonly wait_seconds="${DEPLOY_PROD_WAIT_SECONDS:-1800}"' \
+  "$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh" ||
+  fail "production dispatch does not wait for promote-prod's verdict"
 if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' "$WORKFLOW"; then
   fail "production dispatch retains the static deploy token"
 fi
