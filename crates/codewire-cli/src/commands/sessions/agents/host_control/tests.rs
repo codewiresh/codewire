@@ -1054,7 +1054,11 @@ fn stop_interrupt_waits_briefly_for_a_starting_run_to_report_its_id() {
             "run_id": null, "deliver": true}})
     );
     let waited = started.elapsed();
-    assert!(waited >= STOP_INTERRUPT_RUN_WAIT && waited < Duration::from_secs(5));
+    // The wait ends at its own deadline. The upper bound only rejects a
+    // deadline far longer than STOP_INTERRUPT_RUN_WAIT; it leaves room for the
+    // record write after the deadline, which ran past 5 s while a loaded CI
+    // host stalled I/O (#3231).
+    assert!(waited >= STOP_INTERRUPT_RUN_WAIT && waited < Duration::from_secs(30));
     let recorded = load_message(&f.dir(&driver), &id).unwrap();
     assert_eq!(recorded.state, MessageState::Requested);
     assert_eq!(recorded.expected_turn_id, None);

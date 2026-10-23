@@ -454,13 +454,41 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn the_first_ctrl_c_ends_an_interruptible_wait() {
+        // SIGINT reaches the whole test process, so this runs alone in a
+        // child of this binary, where no other test's SIGINT listener can see
+        // it (#3231).
+        const ISOLATED: &str = "CODEWIRE_TEST_SIGINT_ISOLATED";
+        const NAME: &str =
+            "commands::lifecycle_output::tests::the_first_ctrl_c_ends_an_interruptible_wait";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env(ISOLATED, "1")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("test result: ok. 1 passed"),
+                "isolated SIGINT test failed: {}\n{stdout}{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // Without an interrupt the work's own result comes back. These run
+        // before any SIGINT, so none is still in flight when they do.
+        assert_eq!(unless_interrupted(false, async { 7 }).await, Some(7));
+        assert_eq!(unless_interrupted(true, async { 8 }).await, Some(8));
         // A listener of our own keeps every SIGINT below from reaching the
         // default handler, whatever the order of registration.
         let _listener =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
         let wait = tokio::spawn(unless_interrupted(true, std::future::pending::<()>()));
         let pid = std::process::id().to_string();
-        let interrupted = tokio::time::timeout(Duration::from_secs(10), async {
+        // The wait ends once the spawned wait has registered and taken a
+        // SIGINT; the bound only turns a hang into a failure.
+        let interrupted = tokio::time::timeout(Duration::from_secs(120), async {
             loop {
                 std::process::Command::new("kill")
                     .args(["-INT", &pid])
@@ -476,8 +504,6 @@ mod tests {
         .await
         .expect("Ctrl-C ended the wait");
         assert_eq!(interrupted, None);
-        assert_eq!(unless_interrupted(false, async { 7 }).await, Some(7));
-        assert_eq!(unless_interrupted(true, async { 8 }).await, Some(8));
     }
 
     #[test]

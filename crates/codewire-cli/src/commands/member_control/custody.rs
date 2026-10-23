@@ -281,6 +281,10 @@ mod kernel_tests {
         let socket = temp.path().join("owner.sock");
         // Use a bounded native ELF for this kernel-only witness. A debug
         // libtest image can exceed the unchanged production executable cap.
+        // The owner writes one byte once its socket is bound and private. That
+        // byte, or EOF if the owner exits, ends the wait; the guard only turns
+        // a hang into a failure. A 3 s polling guess failed while a loaded CI
+        // host stalled I/O (#3231).
         let mut owner = SocketOwner(
             std::process::Command::new("/usr/bin/python3")
                 .args([
@@ -289,31 +293,32 @@ mod kernel_tests {
                     "-c",
                     "import os, socket, sys; os.umask(0o077); s = socket.socket(socket.AF_UNIX); \
                      s.bind(sys.argv[1]); s.listen(1); os.chmod(sys.argv[1], 0o600); \
-                     c, _ = s.accept(); c.recv(1)",
+                     sys.stdout.write('r'); sys.stdout.flush(); c, _ = s.accept(); c.recv(1)",
                 ])
                 .arg(&socket)
                 .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
                 .spawn()
                 .unwrap(),
         );
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
-            assert!(owner.0.try_wait().unwrap().is_none(), "socket owner exited");
-            if std::fs::symlink_metadata(&socket)
-                .is_ok_and(|meta| meta.file_type().is_socket() && meta.mode() & 0o7777 == 0o600)
-            {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "socket owner not ready"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        let mut ready = owner.0.stdout.take().unwrap();
+        let byte = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            tokio::task::spawn_blocking(move || {
+                let mut byte = [0; 1];
+                std::io::Read::read(&mut ready, &mut byte).map(|read| (read, byte))
+            }),
+        )
+        .await
+        .expect("socket owner hung before it was ready")
+        .unwrap()
+        .unwrap();
+        assert_eq!(byte, (1, *b"r"), "socket owner exited before it was ready");
+        let meta = std::fs::symlink_metadata(&socket).unwrap();
+        assert!(meta.file_type().is_socket() && meta.mode() & 0o7777 == 0o600);
         let stream = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(120),
             tokio::net::UnixStream::connect(&socket),
         )
         .await

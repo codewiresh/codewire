@@ -1210,6 +1210,33 @@ mod tests {
     use super::*;
     use crate::{Cli, Command};
 
+    /// Bounds a readiness wait in these tests. Readiness itself ends the wait
+    /// and a server that ended fails it at once, so this only turns a hang
+    /// into a failure. The 3 s guesses it replaces failed while a loaded CI
+    /// host stalled I/O (#3231).
+    const READINESS_HANG_GUARD: Duration = Duration::from_secs(120);
+
+    /// Connects once the in-process synthetic authority listens.
+    async fn connect_ready_authority<T>(
+        config: &codewire_local_credentials::AuthorityRuntimeConfig,
+        server: &tokio::task::JoinHandle<T>,
+    ) -> LocalCredentialClient {
+        tokio::time::timeout(READINESS_HANG_GUARD, async {
+            loop {
+                if let Ok(client) = LocalCredentialClient::connect(config).await {
+                    break client;
+                }
+                assert!(
+                    !server.is_finished(),
+                    "synthetic authority ended before it listened"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("synthetic authority ready")
+    }
+
     #[test]
     fn codex_connect_help_explains_device_authorization_for_both_placements() {
         for placement in ["--local", "--cloud"] {
@@ -1392,16 +1419,7 @@ mod tests {
                 builtin_provider_catalog(),
             ),
         );
-        let mut client = tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if let Ok(client) = LocalCredentialClient::connect(&config).await {
-                    break client;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("synthetic authority ready");
+        let mut client = connect_ready_authority(&config, &server).await;
         let generate = |name: &str| super::super::CredentialGenerateArgs {
             provider: "ssh".to_owned(),
             name: name.to_owned(),
@@ -1447,16 +1465,7 @@ mod tests {
                 builtin_provider_catalog(),
             ),
         );
-        let mut client = tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if let Ok(client) = LocalCredentialClient::connect(&config).await {
-                    break client;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("synthetic authority ready");
+        let mut client = connect_ready_authority(&config, &server).await;
         for (provider, slot) in [
             ("openai", CapabilitySlot::codex()),
             ("github", CapabilitySlot::github()),
@@ -1550,7 +1559,7 @@ mod tests {
         }
         assert_eq!(client.list_credentials().await.unwrap().len(), 2);
         client.shutdown().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(3), server)
+        tokio::time::timeout(READINESS_HANG_GUARD, server)
             .await
             .unwrap()
             .unwrap()

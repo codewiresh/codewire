@@ -541,6 +541,16 @@ async fn connect_host(
 pub(crate) async fn host_control_client(
     environment: &HostEnvironment,
 ) -> anyhow::Result<codewire_daemon::client::HostControlClient> {
+    host_control_client_within(environment, REQUEST_TIMEOUT).await
+}
+
+/// `host_control_client` with its own per-request timeout. Tests of the
+/// protocol, not of its latency, use a long one on a loaded host (#3231).
+#[cfg(target_os = "linux")]
+pub(crate) async fn host_control_client_within(
+    environment: &HostEnvironment,
+    request_timeout: Duration,
+) -> anyhow::Result<codewire_daemon::client::HostControlClient> {
     if environment.state != "running" {
         anyhow::bail!("host control requires an already running host environment");
     }
@@ -548,7 +558,7 @@ pub(crate) async fn host_control_client(
     if current.id != environment.id || current.state != "running" {
         anyhow::bail!("host control environment identity changed");
     }
-    let (channel, token) = connect_host_channel(&current, REQUEST_TIMEOUT).await?;
+    let (channel, token) = connect_host_channel(&current, request_timeout).await?;
     let client =
         codewire_daemon::client::HostControlClient::from_channel(channel, token, current.id)?;
     client.require_ready().await?;

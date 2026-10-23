@@ -13,7 +13,12 @@ use super::*;
 const ROLE: &str = "CODEWIRE_TEST_SSH_PARENT_ROLE";
 const FIXTURE: &str =
     "commands::credential_repository::ssh::process_tests::ssh_parent_lifetime_fixture";
-const LIMIT: Duration = Duration::from_secs(5);
+// Every wait here ends on its event: a fixture's announcement, SSH's
+// connection and banner, its socket EOF, its reap, the executor's exit.
+// A fixture that exits fails the wait at once, and SSH must die by SIGKILL.
+// This bound only turns a hang into a failure; 5 s guesses failed while a
+// loaded CI host stalled I/O under the debug test binary's re-execs (#3231).
+const HANG_GUARD: Duration = Duration::from_secs(120);
 
 fn fixture_command(role: &str, runtime: &Path, port: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
@@ -34,8 +39,8 @@ fn fixture_command(role: &str, runtime: &Path, port: &str) -> Command {
 
 fn announce(runtime: &Path, role: u8) -> UnixStream {
     let mut stream = UnixStream::connect(runtime.join("control")).unwrap();
-    stream.set_read_timeout(Some(LIMIT)).unwrap();
-    stream.set_write_timeout(Some(LIMIT)).unwrap();
+    stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+    stream.set_write_timeout(Some(HANG_GUARD)).unwrap();
     stream.write_all(&[role]).unwrap();
     stream.write_all(&std::process::id().to_be_bytes()).unwrap();
     stream
@@ -67,7 +72,7 @@ fn ssh_parent_lifetime_fixture() {
             assert!(ssh_pid > 1 && ssh_pid != git.id() as i32);
             git.kill().unwrap();
             assert_eq!(git.wait().unwrap().signal(), Some(libc::SIGKILL));
-            let deadline = Instant::now() + LIMIT;
+            let deadline = Instant::now() + HANG_GUARD;
             loop {
                 let mut status = 0;
                 // SAFETY: waitpid does not signal a PID. The exact helper is
@@ -114,6 +119,20 @@ fn ssh_parent_lifetime_fixture() {
 }
 
 struct OwnedExecutor(Child);
+
+/// Whether the executor has exited, without reaping it: its unreaped PID keeps
+/// the process group that `OwnedExecutor`'s drop signals reserved.
+fn executor_exited(executor: &OwnedExecutor) -> bool {
+    let pid = rustix::process::Pid::from_raw(executor.0.id() as i32).unwrap();
+    rustix::process::waitid(
+        rustix::process::WaitId::Pid(pid),
+        rustix::process::WaitIdOptions::EXITED
+            | rustix::process::WaitIdOptions::NOHANG
+            | rustix::process::WaitIdOptions::NOWAIT,
+    )
+    .unwrap()
+    .is_some()
+}
 
 impl Drop for OwnedExecutor {
     fn drop(&mut self) {
@@ -163,13 +182,13 @@ fn stock_ssh_is_killed_and_reaped_when_its_git_parent_exits() {
         });
     }
     let executor = OwnedExecutor(command.spawn().unwrap());
-    let deadline = Instant::now() + LIMIT;
+    let deadline = Instant::now() + HANG_GUARD;
     let mut channels = std::collections::BTreeMap::new();
     while channels.len() < 3 {
         match control.accept() {
             Ok((mut stream, _)) => {
-                stream.set_read_timeout(Some(LIMIT)).unwrap();
-                stream.set_write_timeout(Some(LIMIT)).unwrap();
+                stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+                stream.set_write_timeout(Some(HANG_GUARD)).unwrap();
                 let mut message = [0; 5];
                 stream.read_exact(&mut message).unwrap();
                 assert!(matches!(message[0], b'E' | b'G' | b'H'));
@@ -180,7 +199,11 @@ fn stock_ssh_is_killed_and_reaped_when_its_git_parent_exits() {
                 );
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(Instant::now() < deadline, "fixture startup timed out");
+                assert!(
+                    !executor_exited(&executor),
+                    "a fixture exited during startup"
+                );
+                assert!(Instant::now() < deadline, "fixture startup hung");
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!("fixture control failed: {error}"),
@@ -190,13 +213,20 @@ fn stock_ssh_is_killed_and_reaped_when_its_git_parent_exits() {
         match server.accept() {
             Ok((stream, _)) => break stream,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(Instant::now() < deadline, "stock SSH did not connect");
+                assert!(
+                    !executor_exited(&executor),
+                    "a fixture exited before SSH connected"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "stock SSH hung before it connected"
+                );
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!("fixture connection failed: {error}"),
         }
     };
-    connection.set_read_timeout(Some(LIMIT)).unwrap();
+    connection.set_read_timeout(Some(HANG_GUARD)).unwrap();
     let mut banner = [0; 4];
     connection.read_exact(&mut banner).unwrap();
     assert_eq!(&banner, b"SSH-");

@@ -393,7 +393,13 @@ mod tests {
             )
             .await
         });
-        let client = host_control_client(&environment).await.unwrap();
+        // The production 5 s request timeout ran out on a loaded CI host
+        // while the daemon launched the owner (#3231). This proves the
+        // protocol, not its latency; the bound only turns a hang into a
+        // failure.
+        let client = host_control_client_within(&environment, Duration::from_secs(120))
+            .await
+            .unwrap();
         let grant = uuid::Uuid::new_v4().to_string();
         let response = client
             .put_grant(v1::HostControlPutGrantRequest {
