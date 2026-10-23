@@ -81,11 +81,11 @@ ARG BUILDARCH
 ARG TARGETARCH
 # The same checksum-verified Go archive workspace-foundation installs. Go
 # installs a cross-compiled binary below bin/<goos>_<goarch>.
-ARG GO_VERSION=1.26.10
+ARG GO_VERSION=1.27.3
 RUN set -euo pipefail; \
     case "$BUILDARCH" in \
-      amd64) go_sha=ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5 ;; \
-      arm64) go_sha=3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797 ;; \
+      amd64) go_sha=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 ;; \
+      arm64) go_sha=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 ;; \
       *) echo "unsupported build architecture: $BUILDARCH" >&2; exit 1 ;; \
     esac; \
     case "$TARGETARCH" in \
@@ -177,7 +177,7 @@ SHELL ["/bin/bash", "-c"]
 USER root
 ARG TARGETARCH
 ARG NODE_VERSION=22.23.2
-ARG GO_VERSION=1.26.10
+ARG GO_VERSION=1.27.3
 
 # Node and Go are direct, checksum-verified upstream archives on both supported
 # architectures. Unknown architectures fail closed.
@@ -186,11 +186,11 @@ RUN set -euo pipefail; \
       amd64) \
         node_arch=x64; \
         node_sha=b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a; \
-        go_sha=ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5 ;; \
+        go_sha=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 ;; \
       arm64) \
         node_arch=arm64; \
         node_sha=013b59cfd2819703a6f4a14ab891fc46fc2a4e3f5bcd92de3fb4929b43e35b30; \
-        go_sha=3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797 ;; \
+        go_sha=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 ;; \
       *) echo "unsupported workspace image architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     curl --proto '=https' --tlsv1.2 -fsSL \
