@@ -1000,12 +1000,9 @@ run_deploy() {
   for overlay in \
       deployments/k8s/base deployments/k8s/coordinator deployments/k8s/idp \
       deployments/k8s/orchestration deployments/k8s/credential-service \
-      deployments/k8s/derp deployments/k8s/flux/mesh-dev \
-      deployments/k8s/flux/production deployments/k8s/flux/temporal-dev \
-      deployments/k8s/flux/temporal-production \
+      deployments/k8s/derp \
       deployments/k8s/overlays/local-kind \
       deployments/k8s/overlays/local-kind-static \
-      deployments/k8s/overlays/dev deployments/k8s/overlays/production \
       tests/e2e/kind; do
     kustomize build "$overlay" >/dev/null
   done
@@ -1013,7 +1010,6 @@ run_deploy() {
   local dashboard_manifest dashboard_source
   for dashboard_source in \
       deployments/k8s/dashboard/deployment.yaml \
-      deployments/k8s/overlays/dev/dashboard-deployment.yaml \
       deployments/k8s/overlays/local-kind/dashboard.yaml \
       deployments/k8s/overlays/local-kind-static/dashboard.yaml; do
     dashboard_manifest="$(<"$dashboard_source")"

@@ -11,33 +11,16 @@ RESOLVER="$ROOT/scripts/runtime/confidential/resolve-coco-support-lock.sh"
 PROBE_POLICY_GENERATOR="$ROOT/scripts/runtime/confidential/generate-confidential-probe-initdata.sh"
 GENPOLICY_RUNTIME_CONTRACT="$ROOT/deployments/k8s/runtime-profiles/policy/genpolicy-runtime-contract.json"
 WRAPPER="$ROOT/scripts/runtime/confidential/with-dev-confidential-coco-config.sh"
-PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile.yaml"
-COMMODITY_PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile-commodity.yaml"
-CONFIDENTIAL_PROFILE="$ROOT/deployments/k8s/overlays/dev/config-runtime-profile-confidential-snp.yaml"
 SMOKE_DIR="$ROOT/deployments/k8s/runtime-profiles/confidential-smoke"
 RUNTIME_PROFILE_DIR="$ROOT/deployments/k8s/runtime-profiles/base"
 ORCHESTRATION_DEPLOYMENT="$ROOT/deployments/k8s/orchestration/deployment.yaml"
 
-if cmp -s "$PROFILE" "$COMMODITY_PROFILE"; then
-  active_profile=commodity
-elif cmp -s "$PROFILE" "$CONFIDENTIAL_PROFILE"; then
-  active_profile=confidential
-else
-  printf 'active runtime profile is not an approved source template\n' >&2
-  exit 1
-fi
-
-if cmp -s "$SMOKE_DIR/kustomization.yaml" "$SMOKE_DIR/kustomization.baseline.yaml"; then
-  active_smoke=commodity
-elif cmp -s "$SMOKE_DIR/kustomization.yaml" "$SMOKE_DIR/kustomization.confidential-snp.yaml"; then
-  active_smoke=confidential
-else
+# The active Dev runtime profile and its templates live in codewire/deploy
+# hosted/; its README owns the two-repository activation, and its hosted guards
+# check the profile. This repository keeps the smoke Kustomization templates.
+if ! cmp -s "$SMOKE_DIR/kustomization.yaml" "$SMOKE_DIR/kustomization.baseline.yaml" &&
+  ! cmp -s "$SMOKE_DIR/kustomization.yaml" "$SMOKE_DIR/kustomization.confidential-snp.yaml"; then
   printf 'active confidential smoke Kustomization is not an approved source template\n' >&2
-  exit 1
-fi
-
-if [[ "$active_profile" != "$active_smoke" ]]; then
-  printf 'runtime profile and confidential smoke activation must transition together\n' >&2
   exit 1
 fi
 
@@ -107,7 +90,7 @@ rg -F 'log "skipping product release image resolution"' "$SMOKE" >/dev/null
 rg -F 'if [[ "$RUN_COCO_PRODUCT" == "1" ]]; then' "$SMOKE" >/dev/null
 rg -F '[[ "$image" =~ ^"$CODEWIRE_IMAGE_REGISTRY"/codewire/daemon@sha256:[0-9a-f]{64}$ ]]' "$SMOKE" >/dev/null
 rg -F '[[ "$DAEMON_IMAGE" =~ ^"$registry"/codewire/daemon@sha256:[0-9a-f]{64}$ ]]' "$RESOLVER" >/dev/null
-rg -F 'restore the commodity source profile' "$SMOKE" >/dev/null
+rg -F 'restore the commodity Dev profile in codewire/deploy' "$SMOKE" >/dev/null
 rg -F -- '--admin-oidc "${smoke_args[@]}"' "$SMOKE" >/dev/null
 rg -F 'CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' "$SMOKE" >/dev/null
 rg -F 'EXPECTED_CODEWIRE_DEV_SERVER_URL="$EXPECTED_CODEWIRE_DEV_SERVER_URL"' "$SMOKE" >/dev/null
@@ -242,38 +225,13 @@ if jq -n '{
   exit 1
 fi
 
-rg -F 'SANDBOX_RUNTIME_PROFILE: commodity' "$COMMODITY_PROFILE" >/dev/null
-rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "false"' "$COMMODITY_PROFILE" >/dev/null
-rg -F 'SANDBOX_RUNTIME_PROFILE: commodity' "$CONFIDENTIAL_PROFILE" >/dev/null
 if rg -F 'SANDBOX_RUNTIME_CLASS' \
   "$ROOT/deployments/k8s/base/config.env" \
-  "$COMMODITY_PROFILE" \
-  "$CONFIDENTIAL_PROFILE" \
   "$ROOT/deployments/k8s/overlays/local-kind/configmap-patch.yaml" \
-  "$ROOT/deployments/k8s/overlays/local-kind-static/configmap-patch.yaml" \
-  "$ROOT/deployments/k8s/overlays/production/kustomization.yaml" >/dev/null; then
+  "$ROOT/deployments/k8s/overlays/local-kind-static/configmap-patch.yaml" >/dev/null; then
   printf 'active deployment config still exposes the removed runtime-class selector\n' >&2
   exit 1
 fi
-rg -F 'SANDBOX_DOCKER_MODE: profile-default' "$CONFIDENTIAL_PROFILE" >/dev/null
-rg -F 'SANDBOX_CONFIDENTIAL_STORAGE_ENABLED: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
-rg -F 'SANDBOX_CONFIDENTIAL_ADMIN_ONLY: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
-rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
-# Dev commodity workspaces use LINSTOR linstor-local (Program #2238, A1-6).
-# The inactive confidential activation still pins ordinary Longhorn for
-# commodity workspaces and must not be activated until confidential storage is
-# re-homed onto LINSTOR.
-rg -Fx '  SANDBOX_WORKSPACE_STORAGE_CLASS: linstor-local' "$COMMODITY_PROFILE" >/dev/null
-rg -Fx '  SANDBOX_WORKSPACE_STORAGE_CLASS: longhorn' "$CONFIDENTIAL_PROFILE" >/dev/null
-# Prod commodity workspaces use LINSTOR linstor-local (Program #2238, A3); the
-# renderer default example-volumes cannot attach on the Prod runtime node.
-rg -Fx '        SANDBOX_WORKSPACE_STORAGE_CLASS: linstor-local' \
-  "$ROOT/deployments/k8s/overlays/production/kustomization.yaml" >/dev/null
-rg -F 'SANDBOX_KATA_COCO_KBS_URL: https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080' \
-  "$CONFIDENTIAL_PROFILE" >/dev/null
-rg -F 'SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI: kbs:///default/containers/auth' \
-  "$CONFIDENTIAL_PROFILE" >/dev/null
-rg -F 'SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI: ""' "$COMMODITY_PROFILE" >/dev/null
 rg -F 'COCO_IMAGE_REGISTRY_AUTH_URI="${COCO_IMAGE_REGISTRY_AUTH_URI:-kbs:///default/containers/auth}"' \
   "$SMOKE" >/dev/null
 rg -F 'SANDBOX_NAMESPACE="$SANDBOX_NAMESPACE"' "$SMOKE" >/dev/null
@@ -285,7 +243,7 @@ rg -F 'EXPECTED_KATA_COCO_IMAGE_REGISTRY_AUTH_URI="$COCO_IMAGE_REGISTRY_AUTH_URI
 rg -F 'COCO_KBS_URL="${COCO_KBS_URL:-https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080}"' \
   "$SMOKE" >/dev/null
 if rg -F 'http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080' \
-  "$SMOKE" "$CONFIDENTIAL_PROFILE"; then
+  "$SMOKE"; then
   printf 'confidential KBS contract must require TLS\n' >&2
   exit 1
 fi
@@ -600,7 +558,6 @@ command -v kustomize >/dev/null 2>&1 || {
   exit 1
 }
 kustomize build "$SMOKE_DIR" >/dev/null
-kustomize build "$ROOT/deployments/k8s/overlays/dev" >/dev/null
 
 activation_dir="$(mktemp -d)"
 trap 'rm -rf "$activation_dir"' EXIT

@@ -6,15 +6,13 @@ def check_idp_signing_kek_isolation(args: argparse.Namespace) -> int:
     volume = "idp-signing-keks"
     kek_dir = "/var/run/secrets/codewire/idp-signing-keks"
     default_active_id = "v1"
-    dev_active_id = "v2"
     env_names = ["IDP_SIGNING_KEK_DIR", "IDP_SIGNING_ACTIVE_KEK_ID"]
     workload_markers = [secret, volume, kek_dir, *env_names]
     pod_workload_kinds = {"Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"}
     synthetic_kek = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    # codewire/deploy's hosted guards check the hosted Dev and Production renders.
     overlays = [
         {"path": "deployments/k8s/idp", "local": False, "active_id": default_active_id},
-        {"path": "deployments/k8s/overlays/dev", "local": False, "active_id": dev_active_id},
-        {"path": "deployments/k8s/overlays/production", "local": False, "active_id": default_active_id},
         {"path": "deployments/k8s/overlays/local-kind", "local": True, "active_id": default_active_id},
         {"path": "deployments/k8s/overlays/local-kind-static", "local": True, "active_id": default_active_id},
     ]

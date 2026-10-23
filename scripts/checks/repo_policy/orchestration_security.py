@@ -197,7 +197,7 @@ WARM_POOL_ENVIRONMENT = (
     "CODEWIRE_DOCKER_DATA_ROOT", "CODEWIRE_DOCKER_DATA_SIZE", "CODEWIRE_DOCKER_MOUNT_MODE",
 )
 WARM_POOL_AUDIENCES = ("codewire.internal.workspace-binding.v1", "codewire.internal.credential-workspace.v1")
-CREDENTIAL_SELF_TEST_TARGETS = ("deployments/k8s/overlays/local-kind", "deployments/k8s/overlays/dev")
+CREDENTIAL_SELF_TEST_TARGETS = ("deployments/k8s/overlays/local-kind",)
 WARM_POOL_KIND_TARGETS = ("deployments/k8s/overlays/local-kind", "deployments/k8s/overlays/local-kind-static", "tests/e2e/kind")
 # Images without a registry digest a pool template may still run: only the
 # Kind e2e overlay's side-loaded daemon image (C4). Every other target admits
@@ -670,8 +670,6 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
     token_request_name = "codewire-orchestration-tokenrequest"
     targets = [
         {"path": "deployments/k8s/orchestration", "role_namespace": "prod-sandboxes", "subject_namespace": "prod"},
-        {"path": "deployments/k8s/overlays/dev", "role_namespace": "dev-sandboxes", "subject_namespace": "dev"},
-        {"path": "deployments/k8s/overlays/production", "role_namespace": "prod-sandboxes", "subject_namespace": "prod"},
         {"path": "deployments/k8s/overlays/local-kind", "role_namespace": "dev-sandboxes", "subject_namespace": "default"},
         {"path": "deployments/k8s/overlays/local-kind-static", "role_namespace": "dev-sandboxes", "subject_namespace": "default"},
         {"path": "tests/e2e/kind", "role_namespace": "dev-sandboxes", "subject_namespace": "codewire-e2e"},
@@ -1013,8 +1011,7 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             self_test()
             credential_service_self_test(credential_resources, credential_target)
             # The rendered credential edge is proved on the retained local
-            # Kind overlay. The hosted Dev row stays until codewire#3189
-            # removes the hosted overlays; codewire/deploy guards it after.
+            # Kind overlay; codewire/deploy guards the hosted renders.
             for path in CREDENTIAL_SELF_TEST_TARGETS:
                 target = next(target for target in targets if target["path"] == path)
                 credential_service_self_test(renders[path], target)

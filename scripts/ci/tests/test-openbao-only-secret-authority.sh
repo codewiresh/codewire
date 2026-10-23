@@ -201,42 +201,31 @@ grep -Fq 'CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER: "true"' \
 grep -Fq 'CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER: "true"' \
   tests/e2e/kind/support.yaml
 if rg -n 'CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER' \
-  deployments/k8s/base deployments/k8s/overlays/dev deployments/k8s/overlays/production \
+  deployments/k8s/base deployments/k8s/orchestration \
   deployments/docker/services.Dockerfile; then
   printf 'Kind-only tenant-secret provider leaked into a promotable surface\n' >&2
   exit 1
 fi
 
-# Decide from the rendered workload rather than source fragments. Dev uses a
-# Pod-bound TokenRequest identity with two exact audiences per OpenBao client;
-# Production binds its reconciled tenant Transit authority the same way.
+# Decide from the rendered workload rather than source fragments. The source
+# directories and both Kind topologies are rendered here; codewire/deploy's
+# hosted guards check the hosted Dev and Production OpenBao identities.
 render_root="$(mktemp -d)"
 trap 'rm -rf -- "$render_root"' EXIT
-kubectl kustomize deployments/k8s/overlays/dev >"$render_root/dev.yaml"
+kubectl kustomize deployments/k8s/orchestration >"$render_root/source-orchestration.yaml"
+kubectl kustomize deployments/k8s/credential-service >"$render_root/source-credential.yaml"
 kubectl kustomize deployments/k8s/overlays/local-kind >"$render_root/local-kind.yaml"
 kubectl kustomize deployments/k8s/overlays/local-kind-static >"$render_root/local-kind-static.yaml"
-kubectl kustomize deployments/k8s/overlays/production >"$render_root/production.yaml"
-yq ea -o=json -I=0 \
-  'select(.kind == "ConfigMap" and (.metadata.name | test("^codewire-config-"))) | .data' \
-  "$render_root/dev.yaml" >"$render_root/dev-config.json"
 yq ea -o=json -I=0 \
   'select(.kind == "Deployment" and .metadata.name == "codewire-orchestration")' \
-  "$render_root/dev.yaml" >"$render_root/dev-orchestration.json"
+  "$render_root/source-orchestration.yaml" >"$render_root/source-orchestration.json"
+yq ea -o=json -I=0 \
+  'select(.kind == "NetworkPolicy" and .metadata.name == "codewire-credential-service")' \
+  "$render_root/source-credential.yaml" >"$render_root/source-credential-network-policy.json"
 for topology in local-kind local-kind-static; do
   yq ea -o=json -I=0 \
     'select(.kind == "Deployment" and .metadata.name == "codewire-orchestration")' \
     "$render_root/$topology.yaml" >"$render_root/$topology-orchestration.json"
-done
-yq ea -o=json -I=0 \
-  'select(.kind == "Role" and .metadata.name == "codewire-orchestration-tokenrequest")' \
-  "$render_root/dev.yaml" >"$render_root/dev-tokenrequest-role.json"
-yq ea -o=json -I=0 \
-  'select(.kind == "RoleBinding" and .metadata.name == "codewire-orchestration-tokenrequest")' \
-  "$render_root/dev.yaml" >"$render_root/dev-tokenrequest-binding.json"
-yq ea -o=json -I=0 \
-  'select(.kind == "Deployment" and .metadata.name == "codewire-orchestration")' \
-  "$render_root/production.yaml" >"$render_root/production-orchestration.json"
-for topology in dev local-kind local-kind-static production; do
   yq ea -o=json -I=0 \
     'select(.kind == "NetworkPolicy" and .metadata.name == "codewire-credential-service")' \
     "$render_root/$topology.yaml" >"$render_root/$topology-credential-network-policy.json"
@@ -249,46 +238,6 @@ yq ea -o=json -I=0 \
   'select(.kind == "ConfigMap" and .metadata.name == "codewire-credential-service-config") | .data' \
   tests/e2e/kind/credential-fixture-config.yaml \
   >"$render_root/kind-credential-config.json"
-yq ea -o=json -I=0 \
-  'select(.kind == "ConfigMap" and (.metadata.name | test("^codewire-config-"))) | .data' \
-  "$render_root/production.yaml" >"$render_root/production-config.json"
-
-# The source names every hosted OpenBao identity with a placeholder. The
-# private deploy release supplies the live values and its render tests own
-# them (#1383); a placeholder that survives a hosted render fails there.
-jq -e '
-  .BAO_ADDR == "https://openbao.example.invalid" and
-  .OPENBAO_KUBERNETES_API_AUDIENCE == "https://192.0.2.10:6443" and
-  .TENANT_SECRET_BAO_AUTH_MOUNT == "example-cluster-k8s" and
-  .TENANT_SECRET_BAO_ROLE == "codewire-tenant-example-cluster" and
-  .TENANT_SECRET_BAO_AUDIENCE == "openbao-codewire-tenant-example-cluster" and
-  .CONFIDENTIAL_STORAGE_BAO_AUDIENCE == "openbao-codewire-confidential-storage-example-cluster" and
-  .TENANT_SECRET_BAO_TRANSIT_MOUNT == "codewire-tenant-example" and
-  .TENANT_SECRET_BAO_TRANSIT_KEY == "example-transit-key" and
-  .TENANT_SECRET_BAO_EXPECTED_CLUSTER_ID == "00000000-0000-0000-0000-000000000000"
-' "$render_root/dev-config.json" >/dev/null
-
-jq -e '
-  def named($items; $name): [$items[] | select(.name == $name)];
-  .spec.template.spec as $pod |
-  $pod.securityContext == {
-    "fsGroup": 65532,
-    "fsGroupChangePolicy": "OnRootMismatch",
-    "runAsGroup": 65532,
-    "runAsNonRoot": true,
-    "runAsUser": 65532
-  } and
-  $pod.serviceAccountName == "codewire-orchestration" and
-  $pod.automountServiceAccountToken != false and
-  named($pod.containers[0].env; "POD_NAMESPACE")[0].valueFrom.fieldRef.fieldPath == "metadata.namespace" and
-  named($pod.containers[0].env; "POD_NAME")[0].valueFrom.fieldRef.fieldPath == "metadata.name" and
-  named($pod.containers[0].env; "POD_UID")[0].valueFrom.fieldRef.fieldPath == "metadata.uid" and
-  named($pod.containers[0].env; "POD_SERVICE_ACCOUNT_NAME")[0].valueFrom.fieldRef.fieldPath == "spec.serviceAccountName" and
-  named($pod.containers[0].volumeMounts; "tenant-secret-openbao-token") == [] and
-  named($pod.containers[0].volumeMounts; "confidential-storage-openbao-token") == [] and
-  named($pod.volumes; "tenant-secret-openbao-token") == [] and
-  named($pod.volumes; "confidential-storage-openbao-token") == []
-' "$render_root/dev-orchestration.json" >/dev/null
 
 for topology in local-kind local-kind-static; do
   jq -e '
@@ -303,67 +252,8 @@ for topology in local-kind local-kind-static; do
   ' "$render_root/$topology-orchestration.json" >/dev/null
 done
 
-jq -e '
-  .metadata.namespace == "dev" and
-  .rules == [{
-    "apiGroups": [""],
-    "resourceNames": ["codewire-orchestration"],
-    "resources": ["serviceaccounts/token"],
-    "verbs": ["create"]
-  }]
-' "$render_root/dev-tokenrequest-role.json" >/dev/null
-
-jq -e '
-  .metadata.namespace == "dev" and
-  .roleRef == {
-    "apiGroup": "rbac.authorization.k8s.io",
-    "kind": "Role",
-    "name": "codewire-orchestration-tokenrequest"
-  } and
-  .subjects == [{
-    "kind": "ServiceAccount",
-    "name": "codewire-orchestration",
-    "namespace": "dev"
-  }]
-' "$render_root/dev-tokenrequest-binding.json" >/dev/null
-
-# The public mutation edge admits only the actual Dev ingress controller.
-# Keep the same-namespace dashboard and private managed-gateway legs exact;
-# tenant/DERP ingress namespaces and adjacent ports are not peers.
-jq -e '
-  .metadata.namespace == "dev" and
-  .spec.ingress == [
-    {
-      "from": [
-        {
-          "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}},
-          "podSelector": {"matchLabels": {
-            "app.kubernetes.io/component": "controller",
-            "app.kubernetes.io/instance": "ingress-nginx",
-            "app.kubernetes.io/name": "ingress-nginx"
-          }}
-        },
-        {"podSelector": {"matchLabels": {
-          "app.kubernetes.io/component": "dashboard",
-          "app.kubernetes.io/name": "codewire"
-        }}}
-      ],
-      "ports": [{"port": 8086, "protocol": "TCP"}]
-    },
-    {
-      "from": [{
-        "podSelector": {"matchLabels": {
-          "app.kubernetes.io/component": "orchestration",
-          "app.kubernetes.io/name": "codewire"
-        }}
-      }],
-      "ports": [{"port": 9443, "protocol": "TCP"}]
-    }
-  ]
-' "$render_root/dev-credential-network-policy.json" >/dev/null
-
-# Dev's concrete edge must not broaden the reusable Production contract or
-# either checked-in Kind ingress topology.
+# The reusable source edge admits only the RKE2 ingress controller and the
+# same-namespace dashboard; neither Kind ingress topology broadens it.
 jq -e '
   .spec.ingress[0] == {
     "from": [
@@ -378,7 +268,7 @@ jq -e '
     ],
     "ports": [{"port": 8086, "protocol": "TCP"}]
   }
-' "$render_root/production-credential-network-policy.json" >/dev/null
+' "$render_root/source-credential-network-policy.json" >/dev/null
 for topology in local-kind local-kind-static; do
   jq -e '
     .spec.ingress[0].from[0] == {
@@ -389,31 +279,15 @@ for topology in local-kind local-kind-static; do
   ' "$render_root/$topology-credential-network-policy.json" >/dev/null
 done
 
-# Production binds the tenant-secret client to its reconciled OpenBao Transit
-# authority through the same placeholders, which its release supplies;
-# confidential storage stays unconfigured until reconciled.
-jq -e '
-  .BAO_ADDR == "https://openbao.example.invalid" and
-  .OPENBAO_KUBERNETES_API_AUDIENCE == "https://192.0.2.20:6443" and
-  .TENANT_SECRET_BAO_AUTH_MOUNT == "example-cluster-k8s" and
-  .TENANT_SECRET_BAO_ROLE == "codewire-tenant-example-cluster" and
-  .TENANT_SECRET_BAO_AUDIENCE == "openbao-codewire-tenant-example-cluster" and
-  .TENANT_SECRET_BAO_TRANSIT_MOUNT == "codewire-tenant-example" and
-  .TENANT_SECRET_BAO_TRANSIT_KEY == "example-transit-key" and
-  .TENANT_SECRET_BAO_EXPECTED_CLUSTER_ID == "00000000-0000-0000-0000-000000000000" and
-  .CONFIDENTIAL_STORAGE_BAO_ADDR == "" and
-  .CONFIDENTIAL_STORAGE_BAO_ROLE == "" and
-  .CONFIDENTIAL_STORAGE_BAO_AUDIENCE == "" and
-  .CONFIDENTIAL_STORAGE_BAO_EXPECTED_CLUSTER_ID == ""
-' "$render_root/production-config.json" >/dev/null
-
+# Orchestration obtains its OpenBao login tokens from the TokenRequest API for
+# its own Pod-bound ServiceAccount; the source mounts no OpenBao token file.
 jq -e '
   [
     .spec.template.spec.volumes[]?.name,
     .spec.template.spec.containers[].volumeMounts[]?.name
   ] |
   all(. != "tenant-secret-openbao-token" and . != "confidential-storage-openbao-token")
-' "$render_root/production-orchestration.json" >/dev/null
+' "$render_root/source-orchestration.json" >/dev/null
 
 # Credential records and application projections intentionally use two
 # separately authorized Transit mounts. Both consume the same explicit

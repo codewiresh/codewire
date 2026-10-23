@@ -13,16 +13,12 @@ def check_ses_sender_isolation(_: argparse.Namespace) -> int:
     workloads = ("codewire-idp", "codewire-billing")
     # (render target, SES active, the sender workloads it must contain). The
     # source directories own the SES projection itself, and base owns the
-    # shared codewire-config every service imports, so the active rules hold
-    # in this repository without the hosted overlays.
+    # shared codewire-config every service imports. codewire/deploy's hosted
+    # guards check the hosted Dev and Production renders.
     overlays = [
         ("deployments/k8s/base", True, ()),
         ("deployments/k8s/idp", True, ("codewire-idp",)),
         ("deployments/k8s/billing", True, ("codewire-billing",)),
-        # Hosted copies; codewire/deploy's hosted guards own their renders and
-        # codewire#3189 removes these two rows with the overlays.
-        ("deployments/k8s/overlays/dev", True, workloads),
-        ("deployments/k8s/overlays/production", True, workloads),
         ("deployments/k8s/overlays/local-kind", False, workloads),
         ("deployments/k8s/overlays/local-kind-static", False, workloads),
     ]

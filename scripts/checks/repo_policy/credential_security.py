@@ -100,16 +100,9 @@ def assert_credential_service(
     ):
         failures.append(f"{label}: broker certificate must bind exact DNS and its dedicated Issuer")
     local = namespace in {"default", "codewire-e2e"}
-    dev = namespace == "dev"
-    ingress_namespace = "ingress-nginx" if local or dev else "kube-system"
-    ingress_app = "ingress-nginx" if local or dev else "rke2-ingress-nginx"
+    ingress_namespace = "ingress-nginx" if local else "kube-system"
+    ingress_app = "ingress-nginx" if local else "rke2-ingress-nginx"
     ingress_labels = f"app.kubernetes.io/name: {ingress_app} "
-    if dev:
-        ingress_labels = (
-            "app.kubernetes.io/component: controller "
-            "app.kubernetes.io/instance: ingress-nginx "
-            f"{ingress_labels}"
-        )
     if policy and compact(top_level_block(policy, "spec")) != (
         "spec: ingress: - from: - namespaceSelector: matchLabels: "
         f"kubernetes.io/metadata.name: {ingress_namespace} podSelector: matchLabels: "
@@ -165,8 +158,8 @@ def credential_service_self_test(resources: list[str], target: dict[str, str]) -
          "    - podSelector:\n        matchLabels:\n          app.kubernetes.io/component: dashboard\n          app.kubernetes.io/name: codewire",
          "    - podSelector: {}", "same-namespace dashboard"),
     ]
-    # Kind and Dev admit the public edge from the ingress-nginx controller.
-    if target["subject_namespace"] in {"default", "codewire-e2e", "dev"}:
+    # Kind admits the public edge from the ingress-nginx controller.
+    if target["subject_namespace"] in {"default", "codewire-e2e"}:
         mutations.extend([
             ("NetworkPolicy", "codewire-credential-service",
              "kubernetes.io/metadata.name: ingress-nginx",
@@ -177,15 +170,6 @@ def credential_service_self_test(resources: list[str], target: dict[str, str]) -
             ("NetworkPolicy", "codewire-credential-service",
              "app.kubernetes.io/name: ingress-nginx",
              "app.kubernetes.io/name: rke2-ingress-nginx", "credential ingress"),
-        ])
-    if target["subject_namespace"] == "dev":
-        mutations.extend([
-            ("NetworkPolicy", "codewire-credential-service",
-             "app.kubernetes.io/component: controller",
-             "app.kubernetes.io/component: default-backend", "credential ingress"),
-            ("NetworkPolicy", "codewire-credential-service",
-             "app.kubernetes.io/instance: ingress-nginx",
-             "app.kubernetes.io/instance: other", "credential ingress"),
         ])
     for kind, name, before, after, wanted in mutations:
         changed = []

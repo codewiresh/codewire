@@ -77,11 +77,12 @@ Options:
   --evidence-dir DIR       Store evidence in DIR instead of repo .tmp
   -h, --help               Show this help
 
-Before running, merge a reviewed Codewire source activation that copies both
-the confidential runtime profile and the confidential-smoke Kustomization
-template into their active paths. Wait for the normal source promotion and
-Flux reconciliation. Restore commodity through a second reviewed source commit
-after evidence collection; never use kubectl to patch the ConfigMap or Jobs.
+Activation spans two repositories and transitions together. The Dev runtime
+profile lives in codewire/deploy hosted/, whose README owns the procedure; the
+confidential-smoke Kustomization template stays in Codewire. Merge both
+reviewed activations, wait for the normal promotion and Flux reconciliation,
+and restore commodity in both after evidence collection; never use kubectl to
+patch the ConfigMap or Jobs.
 USAGE
 }
 
@@ -622,7 +623,7 @@ main() {
     exit 77
   fi
   log "confidential SNP smoke passed"
-  log "restore the commodity source profile and baseline smoke Kustomization through a reviewed source commit"
+  log "restore the commodity Dev profile in codewire/deploy and the baseline smoke Kustomization through reviewed commits"
 }
 
 main "$@"

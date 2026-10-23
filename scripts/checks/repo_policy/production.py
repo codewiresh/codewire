@@ -3,10 +3,10 @@ from .shared import *
 def check_production_source_ownership(args: argparse.Namespace) -> int:
     try:
         files = load_production_source_files(Path(args.root).resolve())
-        tag = validate_production_source(files)
+        validate_production_source(files)
         if args.self_test:
             production_source_self_test(files)
-        print(f"production source ownership: OK ({tag})")
+        print("production source ownership: OK")
         return 0
     except Exception as error:  # noqa: BLE001 - repo check script
         print(f"production source ownership: {error}", file=sys.stderr)
@@ -17,13 +17,6 @@ def collect_files(root: Path, directory: Path, files: dict[str, str]) -> None:
     for path in sorted(directory.rglob("*")):
         if path.is_file() and path.stat().st_size > 0:
             files[path.relative_to(root).as_posix()] = path.read_text(encoding="utf-8")
-
-
-def one_match(text: str, pattern: str, label: str) -> re.Match[str]:
-    matches = list(re.finditer(pattern, text, re.MULTILINE))
-    if len(matches) != 1:
-        raise RuntimeError(f"{label}: expected exactly one immutable source pin, found {len(matches)}")
-    return matches[0]
 
 
 def load_production_source_files(root: Path) -> dict[str, Any]:
@@ -48,20 +41,17 @@ def load_production_source_files(root: Path) -> dict[str, Any]:
         # promote-prod, which dispatch-deploy-prod.sh starts.
         "scripts/ci/deploy/deploy-prod.sh",
         "scripts/ci/tests/test-deploy-prod-render.sh",
+        # The hosted Dev and Production overlays and Flux trees, with their
+        # image pins. codewire/deploy hosted/ owns them and its release record
+        # owns the digests (#3189).
+        "deployments/k8s/overlays/dev",
+        "deployments/k8s/overlays/production",
+        "deployments/k8s/flux",
     ]
     production_files: dict[str, str] = {}
-    for directory in [
-        "deployments/k8s/overlays/production",
-        "deployments/k8s/flux/production",
-        "deployments/k8s/flux/temporal-production",
-        "deployments/k8s/mesh-production",
-    ]:
-        collect_files(root, root / directory, production_files)
+    collect_files(root, root / "deployments/k8s/mesh-production", production_files)
 
     return {
-        "kustomization": read("deployments/k8s/overlays/production/kustomization.yaml"),
-        "daemon_patch": read("deployments/k8s/overlays/production/config-images.yaml"),
-        "mesh_release": read("deployments/k8s/flux/production/mesh-helmrelease.yaml"),
         "ci_workflow": read(".gitea/workflows/ci.yaml"),
         "production_workflow": read(".gitea/workflows/deploy-prod.yaml"),
         "production_dispatch": read("scripts/ci/deploy/dispatch-deploy-prod.sh"),
@@ -76,7 +66,7 @@ def load_production_source_files(root: Path) -> dict[str, Any]:
     }
 
 
-def validate_production_source(files: dict[str, Any]) -> str:
+def validate_production_source(files: dict[str, Any]) -> None:
     if files["retired_temporal_preflight_present"]:
         raise RuntimeError("retired manual production Temporal preflight workflow remains")
     if files["retired_control_paths_present"]:
@@ -90,53 +80,6 @@ def validate_production_source(files: dict[str, Any]) -> str:
     for path, text in files["production_files"].items():
         if "$imagepolicy" in text:
             raise RuntimeError(f"retired Flux image setter marker remains in {path}")
-
-    if not re.search(r"^\s*- path: config-images\.yaml\s*$", files["kustomization"], re.MULTILINE):
-        raise RuntimeError("production Kustomization must apply config-images.yaml")
-
-    tags: dict[str, str] = {}
-    digests: dict[str, str] = {}
-    # The production overlay names its image registry host; this source check
-    # binds the repository path, tag and digest, never one registry host.
-    registry = r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d+)?"
-    for name in ["services", "derp", "dashboard"]:
-        pin = one_match(
-            files["kustomization"],
-            rf"^\s*- name: git\.example\.com/codewire/{name}\s*\n"
-            rf"\s+newName: {registry}/codewire/{name}\s*\n"
-            r"\s+newTag: (v\d+\.\d+\.\d+)\s*\n"
-            r"\s+digest: (sha256:[0-9a-f]{64})\s*$",
-            f"{name} image",
-        )
-        tags[name] = pin.group(1)
-        digests[name] = pin.group(2)
-
-    daemon = one_match(
-        files["daemon_patch"],
-        rf"^\s*SANDBOX_DAEMON_IMAGE:\s*{registry}/codewire/daemon:(v\d+\.\d+\.\d+)@(sha256:[0-9a-f]{{64}})\s*$",
-        "daemon image",
-    )
-    tags["daemon"] = daemon.group(1)
-    digests["daemon"] = daemon.group(2)
-
-    mesh = one_match(
-        files["mesh_release"],
-        rf"^\s*image:\s*\n\s+repository:\s*{registry}/codewire/mesh\s*\n"
-        r"\s+tag:\s*(v\d+\.\d+\.\d+)\s*\n"
-        r"\s+digest:\s*(sha256:[0-9a-f]{64})\s*$",
-        "mesh image",
-    )
-    tags["mesh"] = mesh.group(1)
-    digests["mesh"] = mesh.group(2)
-
-    unique_tags = set(tags.values())
-    if len(unique_tags) != 1:
-        raise RuntimeError(
-            "mixed credential-free source tags: "
-            + ", ".join(f"{name}={tag}" for name, tag in tags.items())
-        )
-    if len(digests) != 5:
-        raise RuntimeError(f"expected five immutable source digests, found {len(digests)}")
 
     for required in [
         "publish-runtime-images:",
@@ -175,8 +118,6 @@ def validate_production_source(files: dict[str, Any]) -> str:
     if "CODEWIRE_DEPLOY_PROMOTION_TOKEN" in files["production_dispatch"]:
         raise RuntimeError("production dispatch retained the static deploy token")
 
-    return next(iter(unique_tags))
-
 
 def production_source_self_test(files: dict[str, Any]) -> None:
     def expect_rejected(label: str, fixture: dict[str, Any], expected: str) -> None:
@@ -187,14 +128,6 @@ def production_source_self_test(files: dict[str, Any]) -> None:
                 return
             raise
         raise RuntimeError(f"self-test accepted {label}")
-
-    fixture = dict(files)
-    fixture["daemon_patch"] = re.sub(
-        r"daemon:v\d+\.\d+\.\d+@",
-        "daemon:v999.999.999@",
-        files["daemon_patch"],
-    )
-    expect_rejected("mixed image tags", fixture, "mixed credential-free source tags")
 
     fixture = dict(files)
     fixture["production_files"] = {**files["production_files"], "fixture.yaml": '# {"$imagepolicy": "flux-system:retired"}'}

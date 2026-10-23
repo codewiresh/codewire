@@ -2145,16 +2145,6 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      deployments/k8s/overlays/production/kustomization.yaml|\
-      deployments/k8s/overlays/production/config-images.yaml|\
-      deployments/k8s/flux/production/mesh-helmrelease.yaml)
-        select_token deploy
-        select_token release
-        recognized=true
-        ;;
-    esac
-
-    case "$path" in
       scripts/checks/security/audit-js-supply-chain.sh)
         select_token security
         select_token security_js

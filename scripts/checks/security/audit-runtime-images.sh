@@ -199,19 +199,8 @@ if ! jq -e --arg runtime "$dashboard_runtime" '
   fail=1
 fi
 
-if ! grep -Eq 'newTag: main-[0-9a-f]{7,40}-[0-9]+' deployments/k8s/overlays/dev/kustomization.yaml; then
-  echo "runtime image audit: dev dashboard source is not an immutable source tag" >&2
-  fail=1
-fi
-if ! awk '
-  /name: git\.example\.com\/codewire\/dashboard/ { dashboard = 1; next }
-  dashboard && /digest: sha256:[0-9a-f]{64}/ { found = 1; exit }
-  dashboard && /name: / { exit }
-  END { exit found ? 0 : 1 }
-' deployments/k8s/overlays/production/kustomization.yaml; then
-  echo "runtime image audit: production dashboard render input lacks an exact digest" >&2
-  fail=1
-fi
+# The hosted Dev and Production image pins live in codewire/deploy, whose
+# release record owns the exact digests.
 
 if [[ "$fail" -ne 0 ]]; then
   exit 1

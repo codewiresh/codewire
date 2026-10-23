@@ -8,9 +8,6 @@ readonly RUNTIME_BUILDER="$ROOT/scripts/ci/images/build-push-runtime-images.sh"
 readonly RUNTIME_SIGNER="$ROOT/scripts/ci/images/sign-runtime-image-set.sh"
 readonly RUNTIME_PUBLIC_KEY="$ROOT/scripts/ci/trust/codewire-runtime-signing.pub"
 readonly LEGACY_GITHUB_GATEWAY_WORKFLOW="$ROOT/.github/workflows/build-gateway-image.yml"
-readonly DEV_KUSTOMIZATION="$ROOT/deployments/k8s/overlays/dev/kustomization.yaml"
-readonly DEV_CONFIG_IMAGES="$ROOT/deployments/k8s/overlays/dev/config-images.yaml"
-readonly DEV_MESH_RELEASE="$ROOT/deployments/k8s/flux/mesh-dev/helmrelease.yaml"
 readonly DEV_MESH_VALUES="$ROOT/deployments/k8s/mesh-dev/values.yaml"
 readonly MESH_CHART="$ROOT/apps/cli/charts/codewire-mesh"
 
@@ -556,17 +553,9 @@ if grep -Eq 'candidate_ref|image_digest|deploy_commit|promotion-receipt' \
   "$ROOT/scripts/ci/deploy/dispatch-deploy-dev.sh"; then
   fail "source-to-deploy dispatch carries deployment state beyond the source SHA"
 fi
-# shellcheck disable=SC2016
-if grep -Fq '$imagepolicy' \
-  "$DEV_KUSTOMIZATION" "$DEV_CONFIG_IMAGES" "$DEV_MESH_RELEASE"; then
-  fail "retired dev image-automation setter marker remains in source manifests"
-fi
-grep -Fq 'name: git.example.com/codewire/dashboard' "$DEV_KUSTOMIZATION" ||
-  fail "dev workload render input was removed with its setter marker"
-grep -Fq 'SANDBOX_DAEMON_IMAGE:' "$DEV_CONFIG_IMAGES" ||
-  fail "dev daemon render input was removed with its setter marker"
-grep -Fq 'name: codewire-mesh' "$DEV_MESH_RELEASE" ||
-  fail "dev Mesh render input was removed with its setter marker"
+# The hosted Dev overlay, its image pins and the Mesh HelmRelease live in
+# codewire/deploy hosted/; its hosted guards check them. The source Mesh values
+# below remain a render input.
 
 assert_mesh_database_input() {
   local label="$1"
@@ -579,9 +568,7 @@ assert_mesh_database_input() {
     fail "$label does not select the CNPG URI key"
 }
 
-mesh_release_database="$(sed -n '/^    database:$/,/^    mesh:$/p' "$DEV_MESH_RELEASE")"
 mesh_values_database="$(sed -n '/^database:$/,/^mesh:$/p' "$DEV_MESH_VALUES")"
-assert_mesh_database_input "dev Mesh HelmRelease" "$mesh_release_database"
 assert_mesh_database_input "dev Mesh values" "$mesh_values_database"
 
 assert_mesh_authorization_input() {
@@ -597,9 +584,7 @@ assert_mesh_authorization_input() {
     fail "$label does not select the scoped HMAC key"
 }
 
-mesh_release_authorization="$(sed -n '/^    meshAuthorization:$/,/^    mesh:$/p' "$DEV_MESH_RELEASE")"
 mesh_values_authorization="$(sed -n '/^meshAuthorization:$/,/^mesh:$/p' "$DEV_MESH_VALUES")"
-assert_mesh_authorization_input "dev Mesh HelmRelease" "$mesh_release_authorization"
 assert_mesh_authorization_input "dev Mesh values" "$mesh_values_authorization"
 
 assert_mesh_transport_input() {
@@ -610,8 +595,6 @@ assert_mesh_transport_input() {
     fail "$label must advertise the separate Dev DERP relay, not the Mesh API"
 }
 
-assert_mesh_transport_input "dev Mesh HelmRelease" \
-  "$(sed -n '/^    mesh:$/,/^    ingress:$/p' "$DEV_MESH_RELEASE")"
 assert_mesh_transport_input "dev Mesh values" \
   "$(sed -n '/^mesh:$/,/^ingress:$/p' "$DEV_MESH_VALUES")"
 

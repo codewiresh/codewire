@@ -351,9 +351,6 @@ class FixtureRepository:
                     "kind": "file-set",
                     "inputs": [
                         "deployments/k8s/orchestration/deployment.yaml",
-                        "deployments/k8s/overlays/dev/config-runtime-profile.yaml",
-                        "deployments/k8s/overlays/dev/config-runtime-profile-commodity.yaml",
-                        "deployments/k8s/overlays/dev/config-runtime-profile-confidential-snp.yaml",
                         "deployments/k8s/runtime-profiles/confidential/**",
                         "deployments/k8s/runtime-profiles/confidential-smoke/**",
                         "scripts/runtime/confidential/**",
@@ -375,15 +372,6 @@ class FixtureRepository:
             "deployments/k8s/orchestration/deployment.yaml",
             "apiVersion: apps/v1\nkind: Deployment\n",
         )
-        for profile in (
-            "config-runtime-profile.yaml",
-            "config-runtime-profile-commodity.yaml",
-            "config-runtime-profile-confidential-snp.yaml",
-        ):
-            self.write(
-                f"deployments/k8s/overlays/dev/{profile}",
-                "apiVersion: v1\nkind: ConfigMap\n",
-            )
         self.write(
             "deployments/k8s/runtime-profiles/confidential/coco-support-images.lock.json",
             "{}\n",

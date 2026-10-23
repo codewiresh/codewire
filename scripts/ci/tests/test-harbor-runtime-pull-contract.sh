@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Keep live CodeWire Flux inputs and the Dev sandbox smoke on the infra-owned
-# Harbor pull Secret, and on no other registry credential.
+# Keep the source workloads the hosted overlays render, the Mesh values and the
+# Dev sandbox smoke on the infra-owned Harbor pull Secret, and on no other
+# registry credential. codewire/deploy's hosted guards check the hosted renders.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -43,21 +44,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for environment in dev production; do
-  output="$render_dir/$environment.yaml"
-  kubectl kustomize "$ROOT/deployments/k8s/overlays/$environment" >"$output"
-  require_harbor_only "$output" "$environment render"
+for source in billing coordinator credential-service dashboard derp idp orchestration udp-relay; do
+  output="$render_dir/$source.yaml"
+  kubectl kustomize "$ROOT/deployments/k8s/$source" >"$output"
+  require_harbor_only "$output" "$source render"
   if grep -Eq 'gitea-registry|GITEA_REGISTRY_TOKEN' "$output"; then
-    fail "$environment render retains legacy Gitea credential ownership"
+    fail "$source render retains legacy Gitea credential ownership"
   fi
 done
 
-for mesh in \
-  "$ROOT/deployments/k8s/flux/mesh-dev/helmrelease.yaml" \
-  "$ROOT/deployments/k8s/flux/production/mesh-helmrelease.yaml" \
-  "$ROOT/deployments/k8s/mesh-dev/values.yaml"; do
-  require_harbor_only "$mesh" "${mesh#"$ROOT"/}"
-done
+require_harbor_only "$ROOT/deployments/k8s/mesh-dev/values.yaml" deployments/k8s/mesh-dev/values.yaml
 
 smoke="$ROOT/scripts/runtime/dev/smoke-dev-candidate.sh"
 grep -Fq "wait --for=create secret/$PULL_SECRET" "$smoke" ||

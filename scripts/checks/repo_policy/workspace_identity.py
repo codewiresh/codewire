@@ -576,7 +576,7 @@ def check_identity_free_workspace(args: argparse.Namespace) -> int:
             if extra_roots_setting_violations(kind):
                 raise RuntimeError("the Kind overlay's coordinator extra roots were rejected")
             for name, manifests in {
-                "Dev overlay setting": {**kind, "deployments/k8s/overlays/dev/config.yaml": f"{EXTRA_ROOTS_SETTING}: \"true\""},
+                "local overlay setting": {**kind, "deployments/k8s/overlays/local-kind/configmap-patch.yaml": f"{EXTRA_ROOTS_SETTING}: \"true\""},
                 "base setting": {**kind, "deployments/k8s/orchestration/deployment.yaml": f"- name: {EXTRA_ROOTS_SETTING}"},
                 "Kind without the setting": {EXTRA_ROOTS_SETTING_OWNER: ""},
             }.items():

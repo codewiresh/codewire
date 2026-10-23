@@ -126,7 +126,7 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
         assert_mesh_coordinator_transport_shape(file, fail)
         assert_environment_session_transport_shape(file, fail)
     assert_native_grpc_opt_in_sites(fail)
-    assert_rendered_dev_ingress_identities(fail)
+    assert_rendered_grpc_service(fail)
 
     for service in pending.keys():
         for file, data in per_file.items():
@@ -1841,79 +1841,19 @@ def isolated_grpc_service_self_test() -> None:
             raise RuntimeError(f"isolated gRPC Service accepted {listener}: {failures!r}")
 
 
-def ingress_identity(document: str | None, label: str, fail: Callable[[str], None]) -> dict[str, str] | None:
-    if document is None:
-        return None
-    rule_host = re.search(r"^\s*-\s+host:\s+(\S+)\s*$", document, re.MULTILINE)
-    tls = re.search(
-        r"^\s*tls:\s*\n\s*-\s+hosts:\s*\n\s*-\s+(\S+)\s*\n\s+secretName:\s+(\S+)\s*$",
-        document,
-        re.MULTILINE,
-    )
-    if not rule_host or not tls:
-        fail(f"{label}: unable to read Ingress rule host and TLS identity")
-        return None
-    return {"ruleHost": rule_host.group(1), "tlsHost": tls.group(1), "tlsSecret": tls.group(2)}
+def assert_rendered_grpc_service(fail: Callable[[str], None]) -> None:
+    """The isolated native-gRPC Service, as the orchestration source renders it.
 
-
-def assert_rendered_dev_ingress_identities(fail: Callable[[str], None]) -> None:
-    label = "deployments/k8s/overlays/dev (rendered)"
-    result = run(["kustomize", "build", "deployments/k8s/overlays/dev"], check=False)
+    codewire/deploy's hosted guards check the hosted Dev and Production
+    Ingress identities.
+    """
+    label = "deployments/k8s/orchestration (rendered)"
+    result = run(["kustomize", "build", "deployments/k8s/orchestration"], check=False)
     if result.returncode != 0:
         fail(f"{label}: kustomize build failed: {result.stderr.strip() or result.stdout.strip()}")
         return
-    coordinator_connect = ingress_document_by_name(result.stdout, "codewire-coordinator-connect", label, fail)
-    environment_session = ingress_document_by_name(
-        result.stdout, "codewire-environment-session-grpc", label, fail
-    )
-    environment_session_upstream = service_document_by_name(
-        result.stdout, "codewire-orchestration-grpc", label, fail
-    )
-    general_connect = ingress_document_by_name(result.stdout, "codewire-connect", label, fail)
-    dashboard = ingress_document_by_name(result.stdout, "codewire-dashboard", label, fail)
-    if dashboard is not None:
-        assert_github_browser_callback_ingress(dashboard, label, "codewire-dashboard", "name: http", fail)
-    assert_coordinator_ingress_shape(coordinator_connect, f"{label} codewire-coordinator-connect", fail)
-    assert_environment_session_ingress_shape(
-        environment_session,
-        f"{label} codewire-environment-session-grpc",
-        fail,
-    )
-    assert_credential_delegation_ingress_shape(
-        environment_session,
-        f"{label} codewire-environment-session-grpc",
-        fail,
-    )
     assert_environment_session_grpc_service_shape(
-        environment_session_upstream,
+        service_document_by_name(result.stdout, "codewire-orchestration-grpc", label, fail),
         f"{label} codewire-orchestration-grpc",
         fail,
     )
-
-    coordinator_connect_identity = ingress_identity(
-        coordinator_connect, f"{label} codewire-coordinator-connect", fail
-    )
-    environment_session_identity = ingress_identity(
-        environment_session, f"{label} codewire-environment-session-grpc", fail
-    )
-    general_connect_identity = ingress_identity(general_connect, f"{label} codewire-connect", fail)
-    if (
-        not coordinator_connect_identity
-        or not environment_session_identity
-        or not general_connect_identity
-    ):
-        return
-
-    expected = {
-        "ruleHost": "codewire-dev.sh",
-        "tlsHost": "codewire-dev.sh",
-        "tlsSecret": "codewire-dev-tls",
-    }
-    for name, identity in [
-        ("codewire-coordinator-connect", coordinator_connect_identity),
-        ("codewire-environment-session-grpc", environment_session_identity),
-        ("codewire-connect", general_connect_identity),
-    ]:
-        for field, value in expected.items():
-            if identity[field] != value:
-                fail(f"{label}: {name} {field} must be {value}, got {identity[field]}")

@@ -834,9 +834,6 @@ run_paths_case dev_deploy_oidc pull_request refs/pull/3011/head false \
   'deploy go_consumer_interop go_support policy release confidential_script_tests security security_js' \
   scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh \
   scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh
-run_paths_case production_source_ownership pull_request refs/pull/31/head false \
-  'deploy go_consumer_interop go_support policy release confidential_script_tests security security_idp_kek security_js' \
-  deployments/k8s/overlays/production/config-images.yaml
 run_paths_case idp_kek_boundary pull_request refs/pull/32/head false \
   'deploy policy security security_idp_kek security_js' \
   deployments/k8s/idp/deployment.yaml
@@ -1851,7 +1848,7 @@ for product_path in \
     crates/codewire-local-vmm/src/lib.rs \
     crates/codewire-cw-release/src/lib.rs \
     crates/codewire-dashboard-web/templates/admin-accounts.html \
-    deployments/k8s/overlays/dev/kustomization.yaml \
+    deployments/k8s/coordinator/deployment.yaml \
     scripts/runtime/dev/smoke-dev-candidate.sh \
     Cargo.lock; do
   ci_script_tests_case omit "$product_path"

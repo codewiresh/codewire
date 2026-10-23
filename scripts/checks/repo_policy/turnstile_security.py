@@ -2,11 +2,11 @@ from .shared import *
 from .kubernetes import documents, resource_name, top_level_field
 
 
+# The retained Kind overlays. codewire/deploy's hosted guards check the hosted
+# Dev widget key, verifier Secret and bypass binding.
 TURNSTILE_OVERLAYS = (
-    ("deployments/k8s/overlays/dev", "dev"),
-    ("deployments/k8s/overlays/production", "production"),
-    ("deployments/k8s/overlays/local-kind", "local"),
-    ("deployments/k8s/overlays/local-kind-static", "local"),
+    "deployments/k8s/overlays/local-kind",
+    "deployments/k8s/overlays/local-kind-static",
 )
 
 
@@ -21,7 +21,6 @@ def turnstile_access_projection_failures(render: Callable[[str], str]) -> list[s
     bypass_email = "IDP_TURNSTILE_BYPASS_EMAIL"
     public_config = "codewire-dashboard-public-config"
     verifier_secret = "codewire-idp-turnstile"
-    dev_site_key = "0x4AAAAAAE2ghrxixpYKpljB"
     failures: list[str] = []
 
     def fail(message: str) -> None:
@@ -70,7 +69,7 @@ def turnstile_access_projection_failures(render: Callable[[str], str]) -> list[s
         if secret_key in entry:
             fail(f"{label}: dashboard must never receive {secret_key}")
 
-    def assert_github_public_projection(resources: list[str], document: str | None, label: str, mode: str) -> None:
+    def assert_github_public_projection(resources: list[str], document: str | None, label: str) -> None:
         # Browser authorization needs public identifiers, never the App secret or
         # the credential-service's secret-bearing authorization configuration.
         if document is not None:
@@ -104,11 +103,8 @@ def turnstile_access_projection_failures(render: Callable[[str], str]) -> list[s
             values = dict(entries)
             client_id = values.get("GITHUB_APP_CLIENT_ID", "")
             slug = values.get("GITHUB_APP_SLUG", "")
-            if mode == "local":
-                if client_id != "Iv1.kindsynthetic" or slug != "codewire-synthetic":
-                    fail(f"{label}: GitHub dashboard App identifiers must use fixed synthetic Kind values")
-            elif not re.fullmatch(r'(?:"[A-Za-z0-9.]{0,100}"|[A-Za-z0-9.]{1,100})', client_id) or not re.fullmatch(r'(?:"[A-Za-z0-9-]{0,100}"|[A-Za-z0-9-]{1,100})', slug):
-                fail(f"{label}: GitHub dashboard App identifiers must be empty or bounded public metadata")
+            if client_id != "Iv1.kindsynthetic" or slug != "codewire-synthetic":
+                fail(f"{label}: GitHub dashboard App identifiers must use fixed synthetic Kind values")
         for resource in resources:
             if top_level_field(resource, "kind") == "Deployment" and resource_name(resource) != "codewire-dashboard":
                 if re.search(r"^        - name: GITHUB_APP_(?:SLUG|CLIENT_ID)\s*$", resource, re.MULTILINE) or public_config in resource:
@@ -117,46 +113,19 @@ def turnstile_access_projection_failures(render: Callable[[str], str]) -> list[s
                 if re.search(r"^  GITHUB_APP_(?:SLUG|CLIENT_ID):", resource, re.MULTILINE):
                     fail(f"{label}: shared codewire-config must not contain GitHub dashboard App identifiers")
 
-    def assert_idp_projection(document: str, label: str, mode: str) -> None:
+    def assert_idp_projection(document: str, label: str) -> None:
         if site_key in document or public_config in document:
             fail(f"{label}: IdP must never receive the public Turnstile projection")
-        secret_entry = env_entry(document, secret_key)
-        frontend_entry = env_entry(document, "FRONTEND_URL")
         bypass_entry = env_entry(document, bypass_email)
-        expected_bypass = {
-            "dev": "hello@codewire.sh",
-            "local": "codewire-e2e@example.test",
-        }.get(mode)
-        if expected_bypass is None:
-            if bypass_entry is not None or bypass_email in document:
-                fail(f"{label}: production IdP must not receive the Turnstile bypass email")
-        elif bypass_entry is None or not re.search(
+        expected_bypass = "codewire-e2e@example.test"
+        if bypass_entry is None or not re.search(
             rf"^          value: {re.escape(expected_bypass)}[ \t]*\n?\Z",
             bypass_entry,
             re.MULTILINE,
         ):
             fail(f"{label}: IdP must bind the Turnstile bypass to {expected_bypass}")
-
-        if mode != "dev":
-            if secret_entry is not None or secret_key in document or verifier_secret in document:
-                fail(f"{label}: inactive IdP must not receive the Turnstile verifier Secret")
-            return
-        expected_secret = (
-            r"^          valueFrom:[ \t]*\n"
-            r"            secretKeyRef:[ \t]*\n"
-            r"              key: TURNSTILE_SECRET_KEY[ \t]*\n"
-            r"              name: codewire-idp-turnstile[ \t]*\n?\Z"
-        )
-        if secret_entry is None or not re.search(expected_secret, secret_entry, re.MULTILINE):
-            fail(f"{label}: IdP must require only {secret_key} from {verifier_secret}")
-        if document.count(secret_key) != 2 or document.count(verifier_secret) != 1:
-            fail(f"{label}: IdP must contain exactly one bounded Turnstile verifier projection")
-        if frontend_entry is None or not re.search(
-            r"^          value: https://codewire-dev\.sh[ \t]*\n?\Z",
-            frontend_entry,
-            re.MULTILINE,
-        ):
-            fail(f"{label}: IdP must bind Turnstile verification to https://codewire-dev.sh")
+        if env_entry(document, secret_key) is not None or secret_key in document or verifier_secret in document:
+            fail(f"{label}: inactive IdP must not receive the Turnstile verifier Secret")
 
     try:
         config_source = read_text("deployments/k8s/base/config.env")
@@ -167,16 +136,16 @@ def turnstile_access_projection_failures(render: Callable[[str], str]) -> list[s
         ):
             fail("shared codewire-config source must not contain a Turnstile value")
 
-        for path, mode in TURNSTILE_OVERLAYS:
+        for path in TURNSTILE_OVERLAYS:
             label = f"{path} (rendered)"
             resources = documents(render(path))
             rendered_dashboard = deployment(resources, "codewire-dashboard", label)
             rendered_idp = deployment(resources, "codewire-idp", label)
             if rendered_dashboard is not None:
                 assert_public_key_projection(rendered_dashboard, label)
-            assert_github_public_projection(resources, rendered_dashboard, label, mode)
+            assert_github_public_projection(resources, rendered_dashboard, label)
             if rendered_idp is not None:
-                assert_idp_projection(rendered_idp, label, mode)
+                assert_idp_projection(rendered_idp, label)
 
             config_maps = [
                 resource
@@ -188,14 +157,8 @@ def turnstile_access_projection_failures(render: Callable[[str], str]) -> list[s
                 fail(f"{label}: expected one generated {public_config} ConfigMap, found {len(config_maps)}")
             else:
                 config_map = config_maps[0]
-                expected_value = dev_site_key if mode == "dev" else '""'
-                if not re.search(
-                    rf"^  TURNSTILE_SITE_KEY: {re.escape(expected_value)}$",
-                    config_map,
-                    re.MULTILINE,
-                ):
-                    state = "the hostname-bound Dev key" if mode == "dev" else "an empty value"
-                    fail(f"{label}: generated {public_config} must contain {state}")
+                if not re.search(r'^  TURNSTILE_SITE_KEY: ""$', config_map, re.MULTILINE):
+                    fail(f"{label}: generated {public_config} must contain an empty value")
                 if re.search(r"^  TURNSTILE_SECRET_KEY:", config_map, re.MULTILINE):
                     fail(f"{label}: generated {public_config} must never contain {secret_key}")
 
@@ -239,7 +202,7 @@ def turnstile_access_projection_failures(render: Callable[[str], str]) -> list[s
         path = "tests/e2e/kind"
         resources = documents(render(path))
         label = f"{path} (rendered)"
-        assert_github_public_projection(resources, deployment(resources, "codewire-dashboard", label), label, "local")
+        assert_github_public_projection(resources, deployment(resources, "codewire-dashboard", label), label)
     except Exception as error:  # noqa: BLE001 - repository policy boundary
         fail(str(error))
     return failures
@@ -247,7 +210,7 @@ def turnstile_access_projection_failures(render: Callable[[str], str]) -> list[s
 
 # The managed E2E topology is rendered too, for its GitHub App contract only.
 TURNSTILE_RENDERED_TARGETS = (
-    *(path for path, _ in TURNSTILE_OVERLAYS),
+    *TURNSTILE_OVERLAYS,
     "tests/e2e/kind",
 )
 
@@ -325,57 +288,9 @@ def turnstile_access_projection_self_test(rendered: dict[str, str]) -> list[str]
                 f"{label}: expected a rejection containing {expected!r}; got {failures!r}"
             )
 
-    dev = "deployments/k8s/overlays/dev"
-    production = "deployments/k8s/overlays/production"
-    assert_rejected(
-        "missing-dev-widget-key",
-        dev,
-        "  TURNSTILE_SITE_KEY: 0x4AAAAAAE2ghrxixpYKpljB\n",
-        '  TURNSTILE_SITE_KEY: ""\n',
-        "hostname-bound Dev key",
-    )
-    assert_rejected(
-        "wrong-idp-secret",
-        dev,
-        "              name: codewire-idp-turnstile\n",
-        "              name: codewire-idp-turnstile-wrong\n",
-        "IdP must require only TURNSTILE_SECRET_KEY",
-    )
-    assert_rejected(
-        "optional-idp-secret",
-        dev,
-        "              name: codewire-idp-turnstile\n",
-        "              name: codewire-idp-turnstile\n              optional: true\n",
-        "IdP must require only TURNSTILE_SECRET_KEY",
-    )
-    assert_rejected(
-        "wrong-idp-hostname",
-        dev,
-        "        - name: FRONTEND_URL\n          value: https://codewire-dev.sh\n",
-        "        - name: FRONTEND_URL\n          value: https://wrong.invalid\n",
-        "bind Turnstile verification to https://codewire-dev.sh",
-        deployment_name="codewire-idp",
-    )
-    assert_rejected(
-        "active-production-widget",
-        production,
-        '  TURNSTILE_SITE_KEY: ""\n',
-        "  TURNSTILE_SITE_KEY: 0x4AAAAAAE2ghrxixpYKpljB\n",
-        "must contain an empty value",
-    )
-    assert_rejected(
-        "production-bypass-email",
-        production,
-        '        - name: IDP_PORT\n          value: "8091"\n',
-        "        - name: IDP_TURNSTILE_BYPASS_EMAIL\n"
-        "          value: hello@codewire.sh\n"
-        '        - name: IDP_PORT\n          value: "8091"\n',
-        "production IdP must not receive the Turnstile bypass email",
-    )
     # The retained Kind overlays prove the inactive widget, inactive verifier
-    # and bound bypass rules on their own; the Dev and Production mutations
-    # above leave with the hosted rows (codewire#3189).
-    for overlay in (path for path, mode in TURNSTILE_OVERLAYS if mode == "local"):
+    # and bound bypass rules.
+    for overlay in TURNSTILE_OVERLAYS:
         assert_rejected(
             f"{overlay}-active-widget",
             overlay,

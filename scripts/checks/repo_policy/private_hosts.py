@@ -5,10 +5,9 @@ Workflows and scripts take the forge from Forgejo's job context
 endpoints from repository Actions variables (docs/dev/CI-CONFIGURATION.md).
 Action references are short (`noel/<action>@<sha>`) and resolve through
 Forgejo's `DEFAULT_ACTIONS_URL`. Tests use `git.example.invalid`,
-`registry.example.invalid` and other `*.example.invalid` names.
-
-Only the Dev and Production deployment paths below still carry live values;
-they move to the private deploy repository. No other file is excepted.
+`registry.example.invalid` and other `*.example.invalid` names. No file is
+excepted; the hosted Dev and Production values live in the private deploy
+repository.
 """
 
 from __future__ import annotations
@@ -24,16 +23,7 @@ PRIVATE_HOST = re.compile(r"(?<![\w.-])(?:git|registry)" + _DOT + "noel" + _DOT 
 # A literal Cloudflare R2 account endpoint; configuration supplies it.
 R2_ACCOUNT_ENDPOINT = re.compile(r"(?<![0-9A-Fa-f])[0-9a-f]{32}" + _DOT + r"r2" + _DOT + "cloudflarestorage")
 
-MOVING_PATHS = (
-    "deployments/k8s/overlays/dev/",
-    "deployments/k8s/overlays/production/",
-    "deployments/k8s/flux/",
-)
-
-
 def private_host_findings(rel: str, text: str) -> list[str]:
-    if rel.startswith(MOVING_PATHS):
-        return []
     findings: list[str] = []
     for label, pattern in (("private host", PRIVATE_HOST), ("R2 account endpoint", R2_ACCOUNT_ENDPOINT)):
         for match in pattern.finditer(text):
@@ -80,9 +70,6 @@ def private_host_self_test() -> None:
         findings = private_host_findings("scripts/fixture.sh", text)
         if findings:
             raise RuntimeError(f"self-test rejected {label}: {findings}")
-    for path in MOVING_PATHS:
-        if private_host_findings(path + "kustomization.yaml", f"newName: {registry}/codewire/services"):
-            raise RuntimeError(f"self-test refused the moving path {path}")
     for path in ("deployments/k8s/overlays/local-kind/x.yaml", "crates/x/src/lib.rs", ".gitea/workflows/x.yaml"):
         if not private_host_findings(path, f"https://{forge}"):
             raise RuntimeError(f"self-test excepted {path}")
