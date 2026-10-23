@@ -114,6 +114,25 @@ jobs:
             "$remote_object_sha" \
             "$remote_peeled_sha" \
             "$canonical_main_sha"
+          # Release selection composes proofs (#2892):
+          # - the tag's own signature, by the release tagger's account:
+          #   verify-release-tag-ref.sh, above;
+          # - the workspace image the release ships: the pin check;
+          # - main CI, Kind and the dry run of the exact commit: the receipt's
+          #   source evidence;
+          # - Dev acceptance: promote-prod, which dispatch-deploy-prod.sh waits
+          #   for and cli-release requires.
+          python3 scripts/ci/images/workspace-image-pin.py check --release --commit "$source_sha"
+          receipt="$(PREFLIGHT_RELEASE_TAG_REF="refs/tags/${selected_tag}" \
+            PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$remote_object_sha" \
+            PREFLIGHT_PUSH_REMOTE_NAME=origin \
+            scripts/ci/receipts/verify-release-tag-receipt.sh --source-evidence)"
+          printf '%s\n' "$receipt"
+          grep -Fxq 'release_tag_receipt=accepted' <<<"$receipt"
+          grep -Fxq 'release_tag_scope=source-evidence' <<<"$receipt"
+          # One version for web and CLI: a CLI ships only after Production
+          # accepted the same release.
+          scripts/ci/release/require-production-accepted.sh "$selected_tag" "$remote_object_sha" "$source_sha"
           printf 'release_tag=%s\n' "$selected_tag" >> "$GITHUB_OUTPUT"
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
           printf 'tag_object_sha=%s\n' "$remote_object_sha" >> "$GITHUB_OUTPUT"

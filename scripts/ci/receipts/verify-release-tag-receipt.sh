@@ -5,7 +5,25 @@
 # dry run of the exact commit, which a push to main may defer to a dispatch or
 # the schedule. Every uncertainty returns a fallback receipt so pre-push can
 # run its full gate.
+#
+# The full receipt (no argument) is what a release tag push needs: the source
+# evidence, the tag's signature in the pusher's keyring, and Dev acceptance.
+# --source-evidence proves the source evidence alone: main CI on the exact
+# commit, not superseded, verifying something, and Kind and the dry run of that
+# commit. Release selection composes it with the proofs it has elsewhere
+# (#2892): verify-release-tag-ref.sh proves the signature, and promote-prod
+# proves Dev acceptance.
 set -euo pipefail
+
+scope=full
+case "$*" in
+  '') ;;
+  --source-evidence) scope=source-evidence ;;
+  *)
+    printf 'usage: verify-release-tag-receipt.sh [--source-evidence]\n' >&2
+    exit 2
+    ;;
+esac
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -18,15 +36,19 @@ dry_run_id=''
 dev_run_id=''
 
 emit_outputs() {
-  printf 'release_tag_receipt=%s\nrelease_tag_reason=%s\nrelease_tag_run=%s\n' \
-    "$receipt" "$reason" "$run_id"
+  printf 'release_tag_receipt=%s\nrelease_tag_scope=%s\nrelease_tag_reason=%s\nrelease_tag_run=%s\n' \
+    "$receipt" "$scope" "$reason" "$run_id"
   printf 'release_tag_kind_run=%s\nrelease_tag_dry_run=%s\nrelease_tag_dev_acceptance_run=%s\n' \
     "$kind_run_id" "$dry_run_id" "$dev_run_id"
 }
 
 fallback() {
   reason="$1"
-  printf 'release-tag receipt: full local verification required (%s)\n' "$reason" >&2
+  if [ "$scope" = full ]; then
+    printf 'release-tag receipt: full local verification required (%s)\n' "$reason" >&2
+  else
+    printf 'release-tag source evidence: not proven (%s)\n' "$reason" >&2
+  fi
   emit_outputs
   exit 0
 }
@@ -74,8 +96,10 @@ resolved_object="$(git rev-parse --verify "$tag_ref" 2>/dev/null)" \
 [ "$resolved_object" = "$tag_object" ] || fallback 'release-tag-object-mismatch'
 [ "$(git cat-file -t "$tag_object" 2>/dev/null)" = tag ] \
   || fallback 'release-tag-not-annotated'
-git verify-tag "$tag_object" >/dev/null 2>&1 \
-  || fallback 'release-tag-signature-invalid'
+if [ "$scope" = full ]; then
+  git verify-tag "$tag_object" >/dev/null 2>&1 \
+    || fallback 'release-tag-signature-invalid'
+fi
 tag_commit="$(git rev-parse --verify "${tag_object}^{commit}" 2>/dev/null)" \
   || fallback 'release-tag-commit-unavailable'
 
@@ -327,6 +351,20 @@ while read -r candidate; do
   break
 done < <(successful_runs "$dry_runs_json" cw-release-dry-run.yaml)
 [ -n "$dry_run_id" ] || fallback 'exact-commit-dry-run-not-verified'
+
+# The source evidence is complete here.
+if [ "$scope" = source-evidence ]; then
+  receipt='accepted'
+  if [ "$tag_commit" = "$main_sha" ]; then
+    reason='tag-at-exact-green-main-source-evidence'
+  else
+    reason='tag-on-main-at-exact-green-commit-source-evidence'
+  fi
+  printf 'release-tag source evidence: %s peels to %s on canonical main %s (CI run %s; Kind run %s; dry run %s)\n' \
+    "$tag_ref" "$tag_commit" "$main_sha" "$run_id" "$kind_run_id" "$dry_run_id"
+  emit_outputs
+  exit 0
+fi
 
 deploy_runs="$tmp/deploy-runs.json"
 list_runs "$deploy_repo" 'workflow_id=promote-dev.yaml&status=success' "$deploy_runs" \

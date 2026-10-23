@@ -203,7 +203,7 @@ verified_output="$(run_verify \
   workflow_dispatch refs/heads/main main v0.3.359 \
   https://git.example.invalid/ codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" 2>&1)"
-grep -Fq "release tag verified: tag=v0.3.359 commit=$source_sha forgejo_signer=release-guard" \
+grep -Fq "release tag verified: tag=v0.3.359 object=$tag_object_sha commit=$source_sha forgejo_signer=release-guard" \
   <<<"$verified_output"
 
 # Runners register against the same instance's internal Tailnet name.
@@ -504,6 +504,49 @@ PY
 }
 assert_confirmed_checkouts "$deploy_workflow" 9
 assert_confirmed_checkouts "$cli_workflow" 9
+# Release selection composes its proofs in order (#2892): the tag's own
+# signature, the workspace image pin, then the receipt's source evidence,
+# whose accepted answer and scope are both required; cli-release then waits
+# for Production to accept the same release.
+assert_composed_selection() {
+  python3 -I - "$1" "$2" <<'PY'
+import sys
+
+text = open(sys.argv[1]).read()
+start = text.index("      - name: Select exact canonical release source\n")
+step = text[start:text.index("\n\n", start)]
+order = [
+    "scripts/ci/release/verify-release-tag-ref.sh \\\n",
+    'python3 scripts/ci/images/workspace-image-pin.py check --release --commit "$source_sha"\n',
+    'PREFLIGHT_RELEASE_TAG_REF="refs/tags/${selected_tag}" \\\n',
+    'PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$remote_object_sha" \\\n',
+    "scripts/ci/receipts/verify-release-tag-receipt.sh --source-evidence)\"\n",
+    "grep -Fxq 'release_tag_receipt=accepted' <<<\"$receipt\"\n",
+    "grep -Fxq 'release_tag_scope=source-evidence' <<<\"$receipt\"\n",
+]
+if sys.argv[2] == "cli":
+    order.append('scripts/ci/release/require-production-accepted.sh "$selected_tag" "$remote_object_sha" "$source_sha"\n')
+order.append("printf 'release_tag=%s\\n' \"$selected_tag\" >> \"$GITHUB_OUTPUT\"\n")
+position = 0
+for line in order:
+    found = step.find(line, position)
+    if found < 0:
+        sys.exit(f"release selection lacks, or misorders: {line.strip()}")
+    position = found + len(line)
+if "GITEA_TOKEN: ${{ github.token }}" not in step:
+    sys.exit("release selection does not give the receipt the job token")
+PY
+}
+assert_composed_selection "$deploy_workflow" deploy
+assert_composed_selection "$cli_workflow" cli
+for mutation in 's/--source-evidence)"/)"/' "/release_tag_scope=source-evidence/d" \
+    '/workspace-image-pin.py check --release/d' '/require-production-accepted.sh/d'; do
+  sed "$mutation" "$cli_workflow" >"$fixture/composed-cli-release.yaml"
+  if assert_composed_selection "$fixture/composed-cli-release.yaml" cli 2>/dev/null; then
+    printf 'release workflow fixture accepted selection without: %s\n' "$mutation" >&2
+    exit 1
+  fi
+done
 unconfirmed_workflow="$fixture/unconfirmed-deploy-prod.yaml"
 python3 -I - "$deploy_workflow" "$unconfirmed_workflow" <<'PY'
 import sys

@@ -157,5 +157,5 @@ reported_signature="$(jq -r '.verification.signature // ""' "$tag_record")"
 [[ "$reported_signature" == "$tag_signature" ]] ||
   fail "Forgejo's verification of release tag '$tag' is not of the tag's own signature"
 
-printf 'release tag verified: tag=%s commit=%s forgejo_signer=%s\n' \
-  "$tag" "$source_sha" "$signer"
+printf 'release tag verified: tag=%s object=%s commit=%s forgejo_signer=%s\n' \
+  "$tag" "$remote_object_sha" "$source_sha" "$signer"

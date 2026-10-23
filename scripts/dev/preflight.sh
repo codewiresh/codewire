@@ -261,7 +261,10 @@ release_tag_reason=checker-failed
 release_tag_run='
   fi
   printf '%s\n' "$receipt_output"
-  if grep -Fxq 'release_tag_receipt=accepted' <<<"$receipt_output"; then
+  # A tag push needs the full receipt; source evidence alone proves neither
+  # the signature nor Dev acceptance.
+  if grep -Fxq 'release_tag_receipt=accepted' <<<"$receipt_output" &&
+      grep -Fxq 'release_tag_scope=full' <<<"$receipt_output"; then
     printf 'preflight: exact-main CI receipt accepted; signed release tag verified\n'
     printf 'preflight: OK\n'
     exit 0

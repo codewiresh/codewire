@@ -73,7 +73,8 @@ printf 'import os, sys\nopen(os.environ["PREFLIGHT_TEST_TOOL_LOG"], "a").write("
   > "$repo/scripts/ci/images/workspace-image-pin.py"
 stub scripts/ci/release/verify-release-support-pair.sh ''
 stub scripts/ci/receipts/verify-release-tag-receipt.sh \
-  'printf "release_tag_receipt=accepted\nrelease_tag_reason=fixture\nrelease_tag_run=1\n"'
+  'printf "release_tag_receipt=accepted\nrelease_tag_scope=%s\nrelease_tag_reason=fixture\nrelease_tag_run=1\n" \
+  "${PREFLIGHT_TEST_RECEIPT_SCOPE:-full}"'
 cat > "$TMP/bin/tool-stub" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -134,6 +135,14 @@ git -C "$repo" tag v9.9.9
 output="$(push refs/tags/v9.9.9)" || fail "a release tag push failed: $output"
 assert_contains tag_push "$(cat "$log")" 'verify-release-tag-receipt.sh'
 grep -q '^cargo ' "$log" && fail 'a release tag push ran the push check'
+# Source evidence alone is not a tag push's receipt: it proves neither the
+# signature nor Dev acceptance (#2892).
+git -C "$repo" tag v9.9.8
+if output="$(PREFLIGHT_RECEIPT_ONLY=true PREFLIGHT_TEST_RECEIPT_SCOPE=source-evidence \
+    push refs/tags/v9.9.8)"; then
+  fail 'a release tag push was accepted on source evidence alone'
+fi
+assert_contains source_evidence_only "$output" 'exact-main release receipt is unavailable'
 # The retired merge qualification flags are gone.
 for retired in --for-merge --emit-receipt; do
   if (cd "$repo" && scripts/dev/preflight.sh "$retired" >/dev/null 2>&1); then

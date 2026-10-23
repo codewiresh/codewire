@@ -358,7 +358,7 @@ run_case() {
     GITEA_TOKEN="${CASE_TOKEN-$token_canary}" \
     FIXTURE_TOKEN="$token_canary" \
     FIXTURE_CURL_ARGV_LOG="$curl_argv_log" \
-    "$CHECK" 2>&1)" || fail "$name checker returned failure"
+    "$CHECK" ${CASE_ARGS:+"$CASE_ARGS"} 2>&1)" || fail "$name checker returned failure"
   case_output="$output"
   if grep -Eq '(tea|fj) must not be used' <<<"$output"; then
     printf '%s\n' "$output" >&2
@@ -435,6 +435,45 @@ run_case dry_runs_unavailable dry_runs_unavailable v1.2.3 fallback exact-commit-
 # A scheduled run, which Forgejo lists with event push, is never taken for
 # the push run: a failed push run stays failed behind a green schedule.
 run_case scheduled_masks_failed_push scheduled_masks_failed_push v1.2.3 fallback exact-main-ci-not-successful
+
+# The full receipt reports its scope.
+run_case full_scope success v1.2.3 accepted signed-tag-at-exact-green-deployed-main
+grep -Fxq release_tag_scope=full <<<"$case_output" || fail 'the full receipt did not report its scope'
+
+# --source-evidence proves main CI, Kind and the dry run of the exact commit,
+# and nothing else: release selection composes it with the signature that
+# verify-release-tag-ref.sh proves and the Dev acceptance promote-prod proves
+# (#2892). It never reads the private deploy runs, and the keyring and Dev
+# evidence the full receipt requires do not change its answer.
+source_case() { # NAME MODE TAG EXPECTED REASON
+  : >"$curl_argv_log"
+  CASE_ARGS=--source-evidence run_case "$@"
+  grep -Fxq release_tag_scope=source-evidence <<<"$case_output" \
+    || fail "$1 did not report the source-evidence scope"
+  grep -Fq '/repos/codewire/deploy/' "$curl_argv_log" && fail "$1 read the deploy runs"
+  grep -Fxq release_tag_dev_acceptance_run= <<<"$case_output" \
+    || fail "$1 reported a Dev acceptance run"
+}
+source_case source_at_main success v1.2.3 accepted tag-at-exact-green-main-source-evidence
+source_case source_ancestor success v1.2.2 accepted tag-on-main-at-exact-green-commit-source-evidence
+source_case source_without_keyring bad_signature v1.2.3 accepted tag-at-exact-green-main-source-evidence
+source_case source_without_dev failed_dev v1.2.3 accepted tag-at-exact-green-main-source-evidence
+source_case source_failed_ci failed_ci v1.2.3 fallback exact-main-ci-not-successful
+source_case source_superseded superseded v1.2.2 fallback exact-main-ci-superseded
+source_case source_no_kind no_kind_run v1.2.3 fallback exact-commit-kind-not-verified
+source_case source_no_dry_run no_dry_run v1.2.3 fallback exact-commit-dry-run-not-verified
+source_case source_not_on_main success v1.2.4 fallback release-tag-not-on-canonical-main
+grep -Fq 'release-tag source evidence: not proven' <<<"$case_output" \
+  || fail 'a refused source-evidence check did not say so'
+# The full receipt still refuses what only the source evidence leaves out.
+run_case full_without_keyring bad_signature v1.2.3 fallback release-tag-signature-invalid
+run_case full_without_dev failed_dev v1.2.3 fallback exact-source-dev-acceptance-not-successful
+# Any other argument is a usage error.
+for argument in --source --full source-evidence; do
+  if (cd "$repo" && "$CHECK" "$argument" >/dev/null 2>&1); then
+    fail "the receipt accepted the argument $argument"
+  fi
+done
 
 if grep -qF "tags: ['v*']" "$ROOT/.gitea/workflows/ci.yaml"; then
   fail 'generic CI still runs redundantly for release tags'
