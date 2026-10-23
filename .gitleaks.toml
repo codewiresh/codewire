@@ -13,6 +13,17 @@ regexTarget = "match"
 regexes = ['''crypto_secretbox''']
 
 [[allowlists]]
+description = "The Tailscale wire-format golden records fixed public test keys derived from labelled seeds"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)tests/fixtures/tailnet/tailscale_golden\.json$''']
+regexTarget = "match"
+regexes = [
+  '''(nodekey|discokey):[0-9a-f]{64}''',
+  '''(node_key|remote_key)_hex": "[0-9a-f]{64}"''',
+]
+
+[[allowlists]]
 description = "Codewire terminal rejection tests use fixed 32-byte hex signing fixtures"
 targetRules = ["generic-api-key"]
 condition = "AND"
