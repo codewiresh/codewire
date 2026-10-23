@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
+# shellcheck source=scripts/ci/tests/fixtures/ci-runners.sh
+source "$ROOT/scripts/ci/tests/fixtures/ci-runners.sh"
 MIRROR="$ROOT/scripts/ci/release/mirror-git-tags.sh"
 MIRROR_CANONICAL="$ROOT/scripts/ci/release/mirror-canonical-release-tag.sh"
 MIRROR_WORKFLOW="$ROOT/.gitea/workflows/mirror-github.yaml"
@@ -180,7 +182,7 @@ grep -F 'canonical tag is not annotated' "$TMP/lightweight.out"
 grep -Fq 'enable-openid-connect: true' "$MIRROR_WORKFLOW"
 grep -Fq 'OPENBAO_GITHUB_ROLE: codewire-source-github-mirror' "$MIRROR_WORKFLOW"
 grep -Fq 'OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-github-mirror' "$MIRROR_WORKFLOW"
-grep -Fq '    runs-on: ci-protected' "$MIRROR_WORKFLOW"
+grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" "$MIRROR_WORKFLOW"
 grep -Fq 'run: scripts/ci/release/mirror-github.sh "${GITHUB_REF:?}"' "$MIRROR_WORKFLOW"
 if grep -Eq "tags:|workflow_dispatch:" "$MIRROR_WORKFLOW"; then
   echo 'mirror workflow has a trigger outside its protected-main OpenBao role' >&2

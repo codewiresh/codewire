@@ -46,9 +46,14 @@ BUILDER = re.compile(
     r"verify-workspace-image\.sh|build-push-image\.sh (base|workspace) "
     r"|build-support-platform\.sh linux/"
 )
-HEAVY = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}"
-# Metal guests carry the ci-heavy pool label, so the same cache policy admits them.
-METAL_MAIN = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}"
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]).resolve().parents[1] / "scripts/ci/tests"))
+import ci_runner_fixtures as runners  # noqa: E402
+
+# The in-cluster runner pools that reach the apt snapshot cache: Kind and the
+# sized metal Heavy guests carry the heavy pool's policy, and the trusted
+# light runner is the protected pool.
+CACHE_RUNNERS = {runners.KIND, runners.HEAVY, runners.TRUSTED_LIGHT}
 # Jobs that call an image builder without the cache: the arm64 support legs
 # build on the remote ci-arm64-builder node outside the cluster, and the
 # support join only assembles the two platform digests. A release's own pair
@@ -80,9 +85,8 @@ for path in sorted(pathlib.Path(sys.argv[1]).glob("*.y*ml")):
         if NAME in (job.get("env") or {}):
             if job["env"][NAME] != MIRROR:
                 raise SystemExit(f"{key}: unexpected apt snapshot cache value")
-            # ci-protected-metal slots are ci-protected pool pods (same cache policy).
-            if job.get("runs-on") not in ("ci-heavy", "ci-protected", "ci-protected-metal", HEAVY, METAL_MAIN):
-                raise SystemExit(f"{key}: apt snapshot cache set outside ci-heavy/ci-protected")
+            if job.get("runs-on") not in CACHE_RUNNERS:
+                raise SystemExit(f"{key}: apt snapshot cache set outside the heavy and protected pools")
             configured.add(key)
             file_jobs += 1
     if text.count(NAME) != file_jobs or text.count("apt-snapshot-cache.") != file_jobs:
@@ -513,6 +517,7 @@ run_mock_verifier() {
     GITHUB_JOB=workspace-fixture GITHUB_RUN_ID=2047 GITHUB_RUN_ATTEMPT=1 RUNNER_TEMP="$work/runner-temp" \
     CODEWIRE_SCCACHE_CREDENTIALS_FILE="${MOCK_CREDENTIALS:-}" \
     SCCACHE_BUCKET=example-ci-cache-untrusted \
+    CODEWIRE_CI_SCCACHE_BUCKET_UNTRUSTED=example-ci-cache-untrusted \
     SCCACHE_ENDPOINT=https://r2-cache.example.invalid \
     CODEWIRE_R2_CACHE_ENDPOINT=https://r2-cache.example.invalid \
     CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/v1 \

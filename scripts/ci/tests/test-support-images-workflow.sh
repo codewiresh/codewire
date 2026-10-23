@@ -4,6 +4,8 @@ unset CODEWIRE_OPENBAO_ADDR ARM64_BUILDKIT_HOST  # the tests exercise the script
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# shellcheck source=scripts/ci/tests/fixtures/ci-runners.sh
+source "$ROOT/scripts/ci/tests/fixtures/ci-runners.sh"
 readonly WORKFLOW="$ROOT/.gitea/workflows/support-images.yaml"
 readonly LEGACY_GITHUB_WORKFLOW="$ROOT/.github/workflows/build-workspace-image.yml"
 readonly WORKSPACE_DOCKERFILE="$ROOT/images/workspace/Dockerfile"
@@ -37,7 +39,7 @@ if grep -Fq 'CODEWIRE_GHCR_PUBLISH_ENABLED' "$WORKFLOW"; then
   fail 'support GHCR publication retains its rollout flag'
 fi
 selection_job="$(sed -n '/^  support-selection:/,/^  build-support-amd64:/p' "$WORKFLOW")"
-grep -Fq '    runs-on: ci-protected' <<<"$selection_job" ||
+grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$selection_job" ||
   fail 'support selection does not receive the pinned Skopeo capability'
 if grep -Fq 'enable-openid-connect: true' <<<"$selection_job"; then
   fail 'support selection can request publisher OIDC'
@@ -106,9 +108,9 @@ grep -qF 'scripts/ci/images/build-push-image.sh confidential-probe images/confid
 publish_job="$(sed -n '/^  publish-support-images:/,/^  publish-confidential-probe:/p' "$WORKFLOW")"
 probe_job="$(sed -n '/^  publish-confidential-probe:/,/^  propose-workspace-image-pin:/p' "$WORKFLOW")"
 pin_job="$(sed -n '/^  propose-workspace-image-pin:/,$p' "$WORKFLOW")"
-grep -Fq '    runs-on: ci-protected' <<<"$publish_job" ||
+grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$publish_job" ||
   fail 'support-pair publisher does not use the protected CI tier'
-grep -Fq '    runs-on: ci-protected' <<<"$probe_job" ||
+grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$probe_job" ||
   fail 'confidential-probe publisher does not use the protected CI tier'
 grep -Fq '    enable-openid-connect: true' <<<"$publish_job" ||
   fail 'support-pair publisher lacks job-scoped OIDC'
@@ -493,7 +495,7 @@ pin_job_violation() {
     { echo 'the pin proposal does not wait for the support publication'; return; }
   grep -Fq "if: \${{ needs.publish-support-images.outputs.workspace_mirrored == 'true' }}" <<<"$job" ||
     { echo 'the pin proposal can name an image the public mirror lacks'; return; }
-  grep -Fq '    runs-on: ci-protected' <<<"$job" ||
+  grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$job" ||
     { echo 'the pin proposal leaves the protected tier'; return; }
   grep -Fq '    enable-openid-connect: true' <<<"$job" ||
     { echo 'the pin proposal lacks job-scoped OIDC for the bot token'; return; }
@@ -533,7 +535,7 @@ pin_mutations=(
   'another document::s|fetch-openbao-workspace-pin-bot-token.sh|fetch-openbao-ghcr-credentials.sh|'
   'a second document::/fetch-openbao-workspace-pin-bot-token.sh/a\          scripts/ci/setup/fetch-openbao-harbor-credentials.sh "$bot_work/harbor"'
   'token outlives the step::/trap /d'
-  'unprotected tier::s|runs-on: ci-protected|runs-on: ci|'
+  'unprotected tier::s|vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT|vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT|'
   'no mirror gate::/workspace_mirrored == .true./d'
   'no publication wait::/needs: \[publish-support-images\]/d'
 )
@@ -600,8 +602,8 @@ superseded_case() {
 [[ "$(superseded_case not-a-commit)" == failed ]] ||
   fail 'a malformed canonical main did not fail closed'
 
-if grep -q 'ci-protected-metal' "$WORKFLOW"; then
-  fail 'support images still select a metal protected slot'
+if grep -Eq '^ *runs-on: [^$]' "$WORKFLOW"; then
+  fail 'support images name a literal runner label instead of its repository variable'
 fi
 
 # Each platform of the pair builds in its own protected job with its own time
@@ -612,8 +614,8 @@ for platform in amd64 arm64; do
     # amd64 compiles cw on the trusted BuildKit builder; arm64 drives the
     # remote arm64 node. The amd64 workspace digest leaves its job only
     # through the contract.
-    amd64) timeout_minutes=120 budget=110 next_job=build-support-arm64 runs_on=ci-protected digest_step=contract ;;
-    arm64) timeout_minutes=120 budget=110 next_job=publish-support-images runs_on=ci-protected digest_step=build ;;
+    amd64) timeout_minutes=120 budget=110 next_job=build-support-arm64 runs_on="$RUNS_ON_TRUSTED_LIGHT" digest_step=contract ;;
+    arm64) timeout_minutes=120 budget=110 next_job=publish-support-images runs_on="$RUNS_ON_TRUSTED_LIGHT" digest_step=build ;;
   esac
   platform_job="$(sed -n "/^  build-support-$platform:/,/^  $next_job:/p" "$WORKFLOW")"
   for expected in "    runs-on: $runs_on" '    enable-openid-connect: true' \

@@ -18,7 +18,8 @@ readonly fetcher="${OPENBAO_SCCACHE_FETCHER:-$ROOT/scripts/ci/setup/fetch-openba
 trust=protected-read
 [[ "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" != 'push|refs/heads/main' ]] || trust=main
 readonly trust
-readonly bucket='example-ci-cache-protected'
+# The protected cache bucket, from site configuration with no default.
+readonly bucket="${CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED:-}"
 # The S3 endpoint of the CI cache buckets. Unset, auto mode uses the job-local
 # cache only.
 readonly endpoint="${CODEWIRE_R2_CACHE_ENDPOINT:-}"
@@ -29,6 +30,11 @@ readonly prefix='protected/codewire/v1'
 : "${RUNNER_TEMP:?Forgejo runner temporary directory is required}"
 [[ -z "$endpoint" || "$endpoint" =~ ^https://[A-Za-z0-9.-]+/?$ ]] || {
   echo 'CODEWIRE_R2_CACHE_ENDPOINT must be an https origin with no path' >&2
+  exit 2
+}
+# A configured cache endpoint needs its bucket; never guess one.
+[[ -z "$endpoint" || "$bucket" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || {
+  echo 'CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED: set to the protected CI compiler-cache bucket (docs/dev/CI-CONFIGURATION.md)' >&2
   exit 2
 }
 

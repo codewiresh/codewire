@@ -22,7 +22,7 @@ jobs:
   mirror:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Mirror main and signed tags to GitHub
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     timeout-minutes: 15
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

@@ -236,7 +236,7 @@ class CacheTest(unittest.TestCase):
 
     def test_a_record_may_carry_the_provenance_of_its_run(self):
         provenance = {"source_sha": "f" * 40, "version": "v0.3.390", "run_id": "14001",
-                      "build_runner": "mac-runner-20261015-101500", "sign_runner": "ci-protected-3",
+                      "build_runner": "mac-runner-20261015-101500", "sign_runner": "trusted-runner-3",
                       "notary_submission_id": "0b7e5f2a-1c3d-4e5f-8a9b-0c1d2e3f4a5b"}
         record = parts.record("git-macos", self.recipe, self.built, provenance)
         self.assertEqual(json.loads(record)["provenance"], provenance)

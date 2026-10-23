@@ -16,7 +16,6 @@ resources:
   - idp-signing-keks.yaml
   - postgres.yaml
   - dashboard.yaml
-  - storage-class.yaml
 
 # Keep the static Kind renderer on the same synthetic browser App contract as
 # the managed fixture; the secret-bearing configuration remains test-only.

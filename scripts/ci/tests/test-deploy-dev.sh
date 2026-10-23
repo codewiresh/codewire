@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# shellcheck source=scripts/ci/tests/fixtures/ci-runners.sh
+source "$ROOT/scripts/ci/tests/fixtures/ci-runners.sh"
 readonly WORKFLOW="$ROOT/.gitea/workflows/deploy-dev.yaml"
 readonly RUNTIME_BUILDER="$ROOT/scripts/ci/images/build-push-runtime-images.sh"
 readonly RUNTIME_SIGNER="$ROOT/scripts/ci/images/sign-runtime-image-set.sh"
@@ -46,7 +48,7 @@ if grep -Eq 'CODEWIRE_(GHCR_PUBLISH|DEPLOY_SHA_DISPATCH)_ENABLED' "$WORKFLOW"; t
 fi
 
 selection_job="$(sed -n '/^  deploy-selection:/,/^  build-service-images:/p' "$WORKFLOW")"
-grep -Fq '    runs-on: ci-lite' <<<"$selection_job" ||
+grep -Fq "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" <<<"$selection_job" ||
   fail "deploy selection does not use the non-privileged CI tier"
 grep -Fq '    enable-openid-connect: true' <<<"$selection_job" ||
   fail "deploy selection cannot request its read-only baseline identity"
@@ -54,7 +56,7 @@ if grep -Eq 'OPENBAO_(ROLE|AUDIENCE)|secrets\.' <<<"$selection_job"; then
   fail "deploy selection receives a publisher or static credential"
 fi
 grep -Fq '    timeout-minutes: 15' <<<"$selection_job" ||
-  fail "deploy selection lacks a bounded ci-lite deadline"
+  fail "deploy selection lacks a bounded light-runner deadline"
 grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
   fail "deploy selection does not receive the complete cumulative history"
 grep -Fq 'name: Verify sealed Rust toolchain' \
@@ -163,13 +165,13 @@ daemon_job="$(sed -n '/^  build-daemon-image:/,/^  publish-runtime-images:/p' "$
 # builder; nothing selects a metal slot. Only the owner's per-commit recovery
 # variable builds them in the job.
 for half in "$service_job" "$daemon_job"; do
-  grep -Fxq '    runs-on: ci-protected' <<<"$half" ||
+  grep -Fxq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$half" ||
     fail "a runtime image build left the ordinary protected pool"
   grep -Fxq "      CODEWIRE_IN_JOB_BUILD: \${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}" <<<"$half" ||
     fail "a runtime image build lacks the owner's exact-commit recovery switch"
 done
-if grep -q 'ci-protected-metal' "$WORKFLOW"; then
-  fail "Dev delivery still selects a metal protected slot"
+if grep -Eq '^ *runs-on: [^$]' "$WORKFLOW"; then
+  fail "Dev delivery names a literal runner label instead of its repository variable"
 fi
 publish_job="$(sed -n '/^  publish-runtime-images:/,$p' "$WORKFLOW")"
 [[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq 4 ]] ||
@@ -182,7 +184,7 @@ grep -Fxq '    timeout-minutes: 45' <<<"$publish_job" ||
 assert_build_half() {
   local half="$1" job="$2" step="$3"
   shift 3
-  grep -Fq '    runs-on: ci-protected' <<<"$job" ||
+  grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$job" ||
     fail "$half half does not build and push on the protected CI tier"
   grep -Fq '    enable-openid-connect: true' <<<"$job" ||
     fail "$half half cannot mint just-in-time identities"
@@ -204,7 +206,8 @@ assert_build_half() {
     fail "$half half does not select the shared protected compiler cache with a local fallback"
   [[ "$(grep -Fc 'CODEWIRE_SCCACHE_MODE:' <<<"$job")" -eq 1 ]] ||
     fail "$half half fixes its compiler-cache mode outside the fail-open selector"
-  grep -Fq '          SCCACHE_BUCKET: example-ci-cache-protected' <<<"$job" ||
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  grep -Fq '          SCCACHE_BUCKET: ${{ vars.CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED }}' <<<"$job" ||
     fail "$half half does not use the dedicated protected cache bucket"
   grep -Fq '          CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1' <<<"$job" ||
     fail "$half half does not stay below the protected cache prefix"
@@ -235,7 +238,7 @@ assert_build_half() {
   grep -Fq 'shred -u -- "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"' <<<"$job" ||
     fail "$half half does not remove its cache credential"
   if grep -Fq 'scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh' <<<"$job" \
-      || grep -Fq 'example-ci-cache-untrusted' <<<"$job"; then
+      || grep -Fq 'CODEWIRE_CI_SCCACHE_BUCKET_UNTRUSTED' <<<"$job"; then
     fail "$half half consumes the untrusted cache"
   fi
   grep -Fq "          CODEWIRE_RUNTIME_CARRY_FORWARD: '0'" <<<"$job" ||

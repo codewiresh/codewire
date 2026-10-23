@@ -22,11 +22,20 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ci_runner_fixtures as runners  # noqa: E402
+
+# The exact runs-on values: runner labels are repository Actions variables.
+TRUSTED_LIGHT = runners.TRUSTED_LIGHT
+UNTRUSTED_LIGHT = runners.UNTRUSTED_LIGHT
+MACOS = runners.MACOS
+HEAVY = runners.HEAVY
 WORKFLOW = ROOT / ".gitea/workflows/cli-release.yaml"
 DRY_RUN = ROOT / ".gitea/workflows/cw-release-dry-run.yaml"
 CI = ROOT / ".gitea/workflows/ci.yaml"
 # The macOS pair links Apple frameworks and is built natively on the protected
-# macos-arm64 runner; the Linux pair is built beside the four-target assembly.
+# macOS runner; the Linux pair is built beside the four-target assembly.
 DARWIN_TARGETS = "aarch64-apple-darwin x86_64-apple-darwin"
 LINUX_TARGETS = "x86_64-unknown-linux-musl aarch64-unknown-linux-gnu"
 # Each Linux cw builds in its own job, beside the macOS pair, compiled on the
@@ -90,7 +99,7 @@ def runner_targets_sealed(text):
     """Every Rust target built on a pool runner is one its sealed toolchain ships."""
     unsealed = []
     for name, block in jobs(text).items():
-        if "    runs-on: macos-arm64\n" in block:
+        if "    runs-on: " + MACOS + "\n" in block:
             continue
         for targets in re.findall(r"CW_RELEASE_TARGETS='([^']*)'", block):
             unsealed += [target for target in targets.split() if target not in sealed_targets()]
@@ -309,7 +318,7 @@ def check(text, ci_text):
     # The local VM runtime every release cw embeds (#2539, #2733): built from the release
     # source's own scripts, slow parts included on a cache miss, by jobs with
     # no capability; only the publishing job records the parts it built.
-    need("    needs: [release-selection]\n    runs-on: ci-protected\n" in runtime,
+    need("    needs: [release-selection]\n    runs-on: " + TRUSTED_LIGHT + "\n" in runtime,
          "the runtime's Linux side does not follow release selection on a protected runner")
     # Both kernels, guest roots and cw runtimes fit; a wedged build cannot hold
     # a release near the protected pool's 330-minute limit (#2733).
@@ -355,8 +364,8 @@ def check(text, ci_text):
          "the runtime pack does not bind the runtime document every cw embeds")
     # That document is the one output the four cw builds wait for: the macOS
     # pair and each Linux cw build at the same time from exactly it.
-    need("    needs: [release-selection, pack-runtime]\n    runs-on: macos-arm64\n" in darwin
-         and "    runs-on: macos-arm64\n" in pack,
+    need("    needs: [release-selection, pack-runtime]\n    runs-on: " + MACOS + "\n" in darwin
+         and "    runs-on: " + MACOS + "\n" in pack,
          "the macOS pair does not build on the Mac as soon as the runtime is packed")
     for job, block, digest in (("build-darwin", darwin, "shasum -a 256"),
                                *((job, blocks.get(job, ""), "sha256sum") for job, _ in LINUX_BUILDS)):
@@ -368,7 +377,7 @@ def check(text, ci_text):
              f"{job} may embed a runtime other than the one pack-runtime packed")
     for job, target in LINUX_BUILDS:
         block = blocks.get(job, "")
-        need("    needs: [release-selection, pack-runtime]\n    runs-on: ci-protected\n" in block,
+        need("    needs: [release-selection, pack-runtime]\n    runs-on: " + TRUSTED_LIGHT + "\n" in block,
              f"{job} does not build on a protected runner as soon as the runtime is packed")
         errors.extend(linux_build_errors(block, job, target, RELEASE_BUILD_ROLE, ".release-source", "$RELEASE_TAG"))
         need("      cw_sha256: ${{ steps.build.outputs.cw_sha256 }}\n" in block
@@ -387,7 +396,7 @@ def check(text, ci_text):
          and [step for step, body in steps(package) if "local_runtime_parts.py publish" in body]
          == ["Record the runtime parts this release built"],
          "runtime part records are written outside the publishing step")
-    need("    runs-on: macos-arm64\n" in darwin, "the macOS build does not run on the protected Mac runner")
+    need("    runs-on: " + MACOS + "\n" in darwin, "the macOS build does not run on the protected Mac runner")
     for capability in CAPABILITIES + MACOS_SIGNING:
         need(capability not in darwin, f"macOS build job holds capability {capability}")
     need(f"CW_RELEASE_TARGETS='{DARWIN_TARGETS}'" in darwin, "the macOS build does not build exactly the Mac pair")
@@ -398,7 +407,7 @@ def check(text, ci_text):
     # capability, Developer ID-signed by a job that holds only the Apple keys,
     # and packed by the macOS build only as the exact signed bytes, with the
     # recipe and provenance of this run; or taken from the parts cache.
-    need("    needs: [release-selection]\n    runs-on: macos-arm64\n" in helper_build
+    need("    needs: [release-selection]\n    runs-on: " + MACOS + "\n" in helper_build
          and not re.search(r"^    if:", helper_build, re.M),
          "the helper build does not follow release selection on the protected Mac runner")
     for capability in CAPABILITIES + MACOS_SIGNING:
@@ -412,7 +421,7 @@ def check(text, ci_text):
          and "          include-hidden-files: true\n" in dict(steps(helper_build)).get(
              "Hand the unsigned helper to signing", ""),
          "the helper build does not hand over and bind the unsigned helper")
-    need("    needs: [release-selection, build-helper-darwin]\n    runs-on: ci-protected\n"
+    need("    needs: [release-selection, build-helper-darwin]\n    runs-on: " + TRUSTED_LIGHT + "\n"
          "    enable-openid-connect: true\n" in helper_signing and not re.search(r"^    if:", helper_signing, re.M),
          "helper signing does not follow the helper build on a protected runner with its OIDC exchange")
     need(all(HELPER_IF in step or HELPER_IF.removesuffix("\n") + " && failure()\n" in step
@@ -446,7 +455,7 @@ def check(text, ci_text):
 
     # Developer ID signing and notarization (#2064): after the macOS build,
     # before any identity binds the bytes, holding only the Apple keys.
-    need("    needs: [release-selection, build-darwin]\n    runs-on: ci-protected\n"
+    need("    needs: [release-selection, build-darwin]\n    runs-on: " + TRUSTED_LIGHT + "\n"
          "    enable-openid-connect: true\n" in macos_signing and not re.search(r"^    if:", macos_signing, re.M),
          "macOS signing does not follow the macOS build on a protected runner with its OIDC exchange")
     for job, block, step, signer in (
@@ -632,14 +641,14 @@ MUTATIONS = {
         "          scripts/ci/release/fetch-pinned.sh \"https://github.com/protocolbuffers",
         "          curl -fsSL -o /tmp/protoc.zip \"https://github.com/protocolbuffers", 1),
     "global OIDC": lambda t: t.replace("\n\nenv:\n", "\n\nenable-openid-connect: true\n\nenv:\n", 1),
-    "OIDC in build": lambda t: t.replace("    runs-on: ci-protected\n    timeout-minutes: 30\n",
-                                         "    runs-on: ci-protected\n    enable-openid-connect: true\n"
+    "OIDC in build": lambda t: t.replace("    runs-on: " + TRUSTED_LIGHT + "\n    timeout-minutes: 30\n",
+                                         "    runs-on: " + TRUSTED_LIGHT + "\n    enable-openid-connect: true\n"
                                          "    timeout-minutes: 30\n", 1),
-    "OIDC in macOS build": lambda t: t.replace("    runs-on: macos-arm64\n    timeout-minutes: 60\n",
-                                               "    runs-on: macos-arm64\n    enable-openid-connect: true\n"
+    "OIDC in macOS build": lambda t: t.replace("    runs-on: " + MACOS + "\n    timeout-minutes: 60\n",
+                                               "    runs-on: " + MACOS + "\n    enable-openid-connect: true\n"
                                                "    timeout-minutes: 60\n", 1),
-    "OIDC in runtime pack": lambda t: t.replace("    runs-on: macos-arm64\n    timeout-minutes: 45\n",
-                                                "    runs-on: macos-arm64\n    enable-openid-connect: true\n"
+    "OIDC in runtime pack": lambda t: t.replace("    runs-on: " + MACOS + "\n    timeout-minutes: 45\n",
+                                                "    runs-on: " + MACOS + "\n    enable-openid-connect: true\n"
                                                 "    timeout-minutes: 45\n", 1),
     "Linux cw build under the signing role": lambda t: t.replace(
         f"      OPENBAO_ROLE: {RELEASE_BUILD_ROLE}\n", "      OPENBAO_ROLE: codewire-source-cli-release-signing\n", 1),
@@ -658,11 +667,11 @@ MUTATIONS = {
         'run: scripts/ci/setup/fetch-openbao-release-signing-key.sh && scripts/ci/release/build-cw-linux.sh '
         '.release-source "$RELEASE_TAG" x86_64-unknown-linux-musl .cw-linux\n', 1),
     "macOS pair waits for the Linux cws": lambda t: t.replace(
-        "    needs: [release-selection, pack-runtime]\n    runs-on: macos-arm64\n",
-        "    needs: [release-selection, pack-runtime, build-linux-musl]\n    runs-on: macos-arm64\n", 1),
+        "    needs: [release-selection, pack-runtime]\n    runs-on: " + MACOS + "\n",
+        "    needs: [release-selection, pack-runtime, build-linux-musl]\n    runs-on: " + MACOS + "\n", 1),
     "Linux cw waits for the macOS pair": lambda t: t.replace(
-        "    needs: [release-selection, pack-runtime]\n    runs-on: ci-protected\n",
-        "    needs: [release-selection, pack-runtime, build-darwin]\n    runs-on: ci-protected\n", 1),
+        "    needs: [release-selection, pack-runtime]\n    runs-on: " + TRUSTED_LIGHT + "\n",
+        "    needs: [release-selection, pack-runtime, build-darwin]\n    runs-on: " + TRUSTED_LIGHT + "\n", 1),
     "Linux cw built twice": lambda t: t.replace(
         '"$RELEASE_TAG" aarch64-unknown-linux-gnu .cw-linux', '"$RELEASE_TAG" x86_64-unknown-linux-musl .cw-linux', 1),
     "packaging compiles the Linux pair": lambda t: t.replace(
@@ -691,7 +700,7 @@ MUTATIONS = {
         "          name: cw-release-runtime-${{ github.run_id }}\n          path: .local-runtime/local-runtime.json\n", 1),
     "hidden runtime skipped": lambda t: t.replace(
         "          path: .local-runtime/\n          include-hidden-files: true\n", "          path: .local-runtime/\n", 1),
-    "macOS build on a pool runner": lambda t: t.replace("    runs-on: macos-arm64\n", "    runs-on: ci-protected\n", 1),
+    "macOS build on a pool runner": lambda t: t.replace("    runs-on: " + MACOS + "\n", "    runs-on: " + TRUSTED_LIGHT + "\n", 1),
     "unbound macOS pair": lambda t: t.replace(
         '[ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$DARWIN_SUMS_SHA256" ]', 'true', 1),
     "build without the signed pair": lambda t: t.replace(
@@ -755,8 +764,8 @@ MUTATIONS = {
         "            .release-source/crates/codewire-local-vmm/macos-vz-runner/developer-entitlements.plist",
         "            crates/codewire-local-vmm/macos-vz-runner/developer-entitlements.plist", 1),
     "OIDC in helper build": lambda t: t.replace(
-        "    needs: [release-selection]\n    runs-on: macos-arm64\n",
-        "    needs: [release-selection]\n    runs-on: macos-arm64\n    enable-openid-connect: true\n", 1),
+        "    needs: [release-selection]\n    runs-on: " + MACOS + "\n",
+        "    needs: [release-selection]\n    runs-on: " + MACOS + "\n    enable-openid-connect: true\n", 1),
     "Apple keys in the helper build": lambda t: t.replace(
         '          scripts/ci/release/build-local-runtime.sh helper --output "$work"\n',
         '          scripts/ci/release/build-local-runtime.sh helper --output "$work"\n'
@@ -811,8 +820,8 @@ MUTATIONS = {
     "signing without build": lambda t: t.replace("    needs: [release-selection, pack-runtime, build-release]",
                                                  "    needs: [release-selection, pack-runtime]", 1),
     "OIDC in runtime build": lambda t: t.replace(
-        "    needs: [release-selection]\n    runs-on: ci-protected\n",
-        "    needs: [release-selection]\n    runs-on: ci-protected\n    enable-openid-connect: true\n", 1),
+        "    needs: [release-selection]\n    runs-on: " + TRUSTED_LIGHT + "\n",
+        "    needs: [release-selection]\n    runs-on: " + TRUSTED_LIGHT + "\n    enable-openid-connect: true\n", 1),
     "release skips uncached parts": lambda t: t.replace(
         'TMPDIR="$work/tmp" LOCAL_RUNTIME_JOB_CONTAINER',
         'TMPDIR="$work/tmp" LOCAL_RUNTIME_NO_BUILD=1 LOCAL_RUNTIME_JOB_CONTAINER', 1),
@@ -1014,7 +1023,7 @@ def check_dry_run(text, release):
     darwin, assemble = blocks.get("build-darwin", ""), blocks.get("assemble", "")
     pack = blocks.get("pack-runtime", "")
     helper_build, helper_sign = blocks.get("build-helper-darwin", ""), blocks.get("sign-helper", "")
-    need("    runs-on: ci-lite\n" in guard and "actions-checkout" not in guard
+    need("    runs-on: " + UNTRUSTED_LIGHT + "\n" in guard and "actions-checkout" not in guard
          and "[ \"$GITHUB_REF\" = 'refs/heads/main' ]" in guard
          and "[ \"$GITHUB_REF_NAME\" = 'main' ]" in guard and not re.search(r"^\s+if:", guard, re.M),
          "the dry run does not refuse every ref but main before the protected builders")
@@ -1022,8 +1031,8 @@ def check_dry_run(text, release):
          in pack, "the runtime pack does not wait for the main-only guard, the runtime's Linux side and the helper")
     # As in a release, the packed runtime is the one output the macOS pair
     # and each Linux cw wait for; they then build at the same time.
-    for job, runner in (("build-darwin", "macos-arm64"), ("build-linux-musl", "ci-protected"),
-                        ("build-linux-gnu", "ci-protected")):
+    for job, runner in (("build-darwin", MACOS), ("build-linux-musl", TRUSTED_LIGHT),
+                        ("build-linux-gnu", TRUSTED_LIGHT)):
         need("    needs: [protected-main, pack-runtime]\n    if: needs.pack-runtime.outputs.superseded == 'false'\n"
              f"    runs-on: {runner}\n" in blocks.get(job, ""),
              f"dry-run job {job} does not build as soon as the runtime is packed")
@@ -1039,9 +1048,9 @@ def check_dry_run(text, release):
              and f"name: cw-dry-run-{target}-${{{{ github.run_id }}}}" in assemble,
              f"dry-run job {job} does not build and hand over exactly the {target} cw")
     need("    needs: [protected-main, superseded]\n    if: needs.superseded.outputs.superseded == 'false'\n"
-         "    runs-on: macos-arm64\n" in helper_build,
+         "    runs-on: " + MACOS + "\n" in helper_build,
          "the helper build does not wait for the main-only guard on the protected Mac runner")
-    need("    needs: [protected-main, superseded]\n" in runtime and "    runs-on: ci-protected\n" in runtime,
+    need("    needs: [protected-main, superseded]\n" in runtime and "    runs-on: " + TRUSTED_LIGHT + "\n" in runtime,
          "the runtime's Linux side does not wait for the main-only guard on a protected runner")
     # Forgejo keeps every queued run. Only the newest queued commit needs the
     # protected builders and the Mac; the checked-in rule says when an older
@@ -1078,7 +1087,7 @@ def check_dry_run(text, release):
          " && needs.build-linux-gnu.outputs.superseded == 'false'\n" in assemble,
          "the dry-run assembly runs after a Linux cw build found the commit superseded")
     errors.extend(dry_run_path_errors(text))
-    need("    needs: [protected-main]\n    runs-on: ci-lite\n" in superseded
+    need("    needs: [protected-main]\n    runs-on: " + UNTRUSTED_LIGHT + "\n" in superseded
          and not re.search(r"^    if:", superseded, re.M)
          and "      superseded: ${{ steps.canonical.outputs.superseded }}\n" in superseded
          and "          BEFORE: ${{ github.event.before }}\n" in superseded
@@ -1142,11 +1151,11 @@ def check_dry_run(text, release):
         need(capability not in without_builder_login, f"dry run holds capability {capability}")
     need(text.count("OPENBAO_ROLE:") == 2 and text.count(builder_login(DRY_RUN_BUILD_ROLE)) == 2,
          "the dry run holds an OIDC role other than the Linux builds' builder login")
-    need("    runs-on: macos-arm64\n" in darwin and "    runs-on: macos-arm64\n" in pack,
+    need("    runs-on: " + MACOS + "\n" in darwin and "    runs-on: " + MACOS + "\n" in pack,
          "the dry-run macOS build is not on the protected Mac runner")
     need(f"CW_RELEASE_TARGETS='{DARWIN_TARGETS}'" in darwin, "the dry-run macOS build is not the Mac pair")
     need("    needs: [protected-main, pack-runtime, sign-darwin, build-linux-musl, build-linux-gnu]\n" in assemble
-         and "    runs-on: ci-protected\n" in assemble,
+         and "    runs-on: " + TRUSTED_LIGHT + "\n" in assemble,
          "the dry-run assembly does not follow the macOS signing job and both Linux cws on a protected runner")
     linux_received = dict(steps(assemble)).get("Verify the received Linux cws are the built cws", "")
     need("          MUSL_SHA256: ${{ needs.build-linux-musl.outputs.cw_sha256 }}\n" in linux_received
@@ -1165,7 +1174,7 @@ def check_dry_run(text, release):
          and "unsigned_sha256" in helper_build,
          "the dry run does not build and hand over the helper as a release does")
     need("    needs: [protected-main, build-helper-darwin]\n"
-         "    if: needs.build-helper-darwin.outputs.superseded == 'false'\n    runs-on: ci-protected\n" in helper_sign
+         "    if: needs.build-helper-darwin.outputs.superseded == 'false'\n    runs-on: " + TRUSTED_LIGHT + "\n" in helper_sign
          and "enable-openid-connect" not in helper_sign,
          "the dry-run helper signing does not follow the helper build on a protected runner without OIDC")
     need("UNSIGNED_SHA256: ${{ needs.build-helper-darwin.outputs.unsigned_sha256 }}" in helper_sign
@@ -1185,7 +1194,7 @@ def check_dry_run(text, release):
     pins = [re.findall(r"^  (RCODESIGN_[A-Z0-9_]+: \S+)$", part, re.M) for part in (release_header, header)]
     need(len(pins[0]) == 2 and pins[0] == pins[1], "the dry run does not pin the release's rcodesign")
     need("    needs: [protected-main, build-darwin]\n    if: needs.build-darwin.outputs.superseded == 'false'\n"
-         "    runs-on: ci-protected\n" in sign,
+         "    runs-on: " + TRUSTED_LIGHT + "\n" in sign,
          "the dry-run macOS signing does not follow the macOS build on a protected runner")
     need(dict(steps(sign)).get("Install rcodesign (pinned)")
          == dict(steps(release_jobs.get("sign-darwin", ""))).get("Install rcodesign (pinned)", "")
@@ -1262,20 +1271,20 @@ DRY_RUN_MUTATIONS = {
     "deferral without the schedule baseline": lambda t: t.replace(
         "          SCHEDULE_BASELINE_SHA: ${{ steps.schedule-baseline.outputs.schedule_baseline }}\n", "", 1),
     "job token beyond the schedule baseline": lambda t: in_job(
-        t, "assemble", "    runs-on: ci-protected\n",
-        "    runs-on: ci-protected\n    env:\n      GITEA_TOKEN: ${{ github.token }}\n"),
+        t, "assemble", "    runs-on: " + TRUSTED_LIGHT + "\n",
+        "    runs-on: " + TRUSTED_LIGHT + "\n    env:\n      GITEA_TOKEN: ${{ github.token }}\n"),
     "pull requests": lambda t: t.replace("on:\n  push:", "on:\n  pull_request:\n  push:", 1),
-    "secret": lambda t: t.replace("    runs-on: ci-protected\n", "    runs-on: ci-protected\n    env:\n"
+    "secret": lambda t: t.replace("    runs-on: " + TRUSTED_LIGHT + "\n", "    runs-on: " + TRUSTED_LIGHT + "\n    env:\n"
                                   "      KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}\n", 1),
-    "pool Mac": lambda t: t.replace("    runs-on: macos-arm64\n", "    runs-on: ci-heavy\n", 1),
+    "pool Mac": lambda t: t.replace("    runs-on: " + MACOS + "\n", "    runs-on: " + HEAVY + "\n", 1),
     "signer in the dry-run assembly": lambda t: t.replace(
         "          CW_RELEASE_TARGETS=none CW_RELEASE_IMPORT_DIR=dist-darwin \\\n",
         "          CW_RELEASE_TARGETS=none CW_RELEASE_IMPORT_DIR=dist-darwin \\\n"
         "            CW_SIGN=scripts/ci/release/sign-macos-cw.sh \\\n", 1),
     "no verification": lambda t: t.replace("runtime_equal=true signed=false", "runtime_equal=true", 1),
     "no main guard": lambda t: t.replace("          [ \"$GITHUB_REF\" = 'refs/heads/main' ]\n", "", 1),
-    "guard skipped": lambda t: t.replace("    name: Refuse anything but protected main\n    runs-on: ci-lite\n",
-                                         "    name: Refuse anything but protected main\n    runs-on: ci-lite\n"
+    "guard skipped": lambda t: t.replace("    name: Refuse anything but protected main\n    runs-on: " + UNTRUSTED_LIGHT + "\n",
+                                         "    name: Refuse anything but protected main\n    runs-on: " + UNTRUSTED_LIGHT + "\n"
                                          "    if: github.event_name == 'push'\n", 1),
     "Mac build without the guard": lambda t: t.replace(
         "    needs: [protected-main, superseded, build-runtime-linux, build-helper-darwin, sign-helper]\n",
@@ -1296,8 +1305,8 @@ DRY_RUN_MUTATIONS = {
     "helper hides its decision": lambda t: in_job(
         t, "build-helper-darwin", "      superseded: ${{ steps.superseded.outputs.superseded }}\n", ""),
     "helper signing ignores the helper's decision": lambda t: t.replace(
-        "    if: needs.build-helper-darwin.outputs.superseded == 'false'\n    runs-on: ci-protected\n",
-        "    runs-on: ci-protected\n", 1),
+        "    if: needs.build-helper-darwin.outputs.superseded == 'false'\n    runs-on: " + TRUSTED_LIGHT + "\n",
+        "    runs-on: " + TRUSTED_LIGHT + "\n", 1),
     "Mac ignores the helper's decision": lambda t: in_job(
         t, "pack-runtime", " && needs.build-helper-darwin.outputs.superseded == 'false'", ""),
     "dry run packs its stand-in-signed helper": lambda t: t.replace(
@@ -1308,8 +1317,8 @@ DRY_RUN_MUTATIONS = {
         'scripts/ci/release/sign-macos-helper.sh "$stand_in/bin/rcodesign" "$stand_in/keys"',
         'scripts/ci/release/sign-macos-helper.sh .rcodesign/rcodesign "$stand_in/keys"', 1),
     "dry-run helper signing with OIDC": lambda t: t.replace(
-        "    if: needs.build-helper-darwin.outputs.superseded == 'false'\n    runs-on: ci-protected\n",
-        "    if: needs.build-helper-darwin.outputs.superseded == 'false'\n    runs-on: ci-protected\n"
+        "    if: needs.build-helper-darwin.outputs.superseded == 'false'\n    runs-on: " + TRUSTED_LIGHT + "\n",
+        "    if: needs.build-helper-darwin.outputs.superseded == 'false'\n    runs-on: " + TRUSTED_LIGHT + "\n"
         "    enable-openid-connect: true\n", 1),
     "unbound dry-run unsigned helper": lambda t: t.replace(
         '[ "$(sha256sum vz-runner-unsigned/codewire-vz-runner | cut -c1-64)" = "$UNSIGNED_SHA256" ]', "true", 1),
@@ -1335,8 +1344,8 @@ DRY_RUN_MUTATIONS = {
     "dry-run Linux cw built in the job by default": lambda t: in_job(
         t, "build-linux-musl", IN_JOB_RECOVERY, "      CODEWIRE_IN_JOB_BUILD: '1'\n"),
     "dry-run assembly logs in to the builder": lambda t: in_job(
-        t, "assemble", "    runs-on: ci-protected\n",
-        "    runs-on: ci-protected\n" + builder_login(DRY_RUN_BUILD_ROLE).replace("    timeout-minutes: 60\n", "")),
+        t, "assemble", "    runs-on: " + TRUSTED_LIGHT + "\n",
+        "    runs-on: " + TRUSTED_LIGHT + "\n" + builder_login(DRY_RUN_BUILD_ROLE).replace("    timeout-minutes: 60\n", "")),
     "Linux cw does not decide again": lambda t: in_job(t, "build-linux-musl", "        id: superseded\n",
                                                        "        id: decided\n"),
     "Linux cw built for a superseded commit": lambda t: in_job(
@@ -1392,8 +1401,8 @@ DRY_RUN_MUTATIONS = {
     "every crate starts a dry run": lambda t: re.sub(
         r"(      - 'crates/[^']+'\n)+", "      - 'crates/**'\n", t, count=1),
     "runtime builds a superseded commit": lambda t: t.replace(
-        "    if: needs.superseded.outputs.superseded == 'false'\n    runs-on: ci-protected\n",
-        "    runs-on: ci-protected\n", 1),
+        "    if: needs.superseded.outputs.superseded == 'false'\n    runs-on: " + TRUSTED_LIGHT + "\n",
+        "    runs-on: " + TRUSTED_LIGHT + "\n", 1),
     "supersession before the guard": lambda t: t.replace(
         "    name: Skip a superseded commit\n    needs: [protected-main]\n",
         "    name: Skip a superseded commit\n", 1),
@@ -1431,10 +1440,10 @@ DRY_RUN_MUTATIONS = {
     "dry-run signing with OIDC": lambda t: t.replace(
         "    name: Sign the macOS pair with the rcodesign stand-in (never signs)\n"
         "    needs: [protected-main, build-darwin]\n    if: needs.build-darwin.outputs.superseded == 'false'\n"
-        "    runs-on: ci-protected\n",
+        "    runs-on: " + TRUSTED_LIGHT + "\n",
         "    name: Sign the macOS pair with the rcodesign stand-in (never signs)\n"
         "    needs: [protected-main, build-darwin]\n    if: needs.build-darwin.outputs.superseded == 'false'\n"
-        "    runs-on: ci-protected\n    enable-openid-connect: true\n", 1),
+        "    runs-on: " + TRUSTED_LIGHT + "\n    enable-openid-connect: true\n", 1),
     "dry run reads the Apple keys": lambda t: t.replace(
         '          scripts/ci/tests/fixtures/rcodesign-stand-in.sh --install "$stand_in"\n',
         '          scripts/ci/tests/fixtures/rcodesign-stand-in.sh --install "$stand_in"\n'

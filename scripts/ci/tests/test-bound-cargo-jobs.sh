@@ -55,7 +55,8 @@ import sys
 import yaml
 
 jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
-sized = {name for name, job in jobs.items() if "cpu10-ram17g" in str(job.get("runs-on", ""))}
+# The sized Heavy runners are the CODEWIRE_CI_RUNNER_*_HEAVY variables.
+sized = {name for name, job in jobs.items() if "_HEAVY ||" in str(job.get("runs-on", ""))}
 assert len(sized) == 11, sorted(sized)
 for name in sized:
     job = jobs[name]

@@ -16,6 +16,8 @@ ROOT="$work/source"
 # CI names these in Actions variables and the job context; the scripts
 # require them.
 export CODEWIRE_R2_CACHE_ENDPOINT=https://r2-cache.example.invalid
+export CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED=example-ci-cache-protected
+export CODEWIRE_CI_SCCACHE_BUCKET_UNTRUSTED=example-ci-cache-untrusted
 source_tree="$(jq -er .source_tree "$work/source-identity.json")"
 umask 077
 printf '%s\n' '[default]' 'aws_access_key_id = synthetic-workspace-key' \
@@ -370,6 +372,23 @@ if (
   workspace_cache_validate
 ) >"$work/endpoint-rejection.out" 2>&1; then exit 1; fi
 grep -q 'CODEWIRE_R2_CACHE_ENDPOINT' "$work/endpoint-rejection.out"
+# Each scope's bucket is site configuration with no default: unset, the R2
+# modes stop and name the variable.
+if (
+  unset CODEWIRE_CI_SCCACHE_BUCKET_UNTRUSTED
+  source "$ROOT/scripts/ci/images/workspace-cache.sh"
+  CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2
+  workspace_cache_validate
+) >"$work/bucket-rejection.out" 2>&1; then exit 1; fi
+grep -q 'CODEWIRE_CI_SCCACHE_BUCKET_UNTRUSTED' "$work/bucket-rejection.out"
+if (
+  unset CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED
+  CODEWIRE_R2_CACHE_TRUST=main
+  source "$ROOT/scripts/ci/images/workspace-cache.sh"
+  CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2
+  workspace_cache_validate
+) >"$work/bucket-rejection.out" 2>&1; then exit 1; fi
+grep -q 'CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED' "$work/bucket-rejection.out"
 cp "$credential_work/r2.aws" "$ROOT/in-context.aws"
 chmod 0600 "$ROOT/in-context.aws"
 if (

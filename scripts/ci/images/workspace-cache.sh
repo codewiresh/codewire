@@ -13,7 +13,14 @@ case "${CODEWIRE_R2_CACHE_TRUST:-untrusted}" in
   main|protected-read) readonly WORKSPACE_CACHE_TRUST="$CODEWIRE_R2_CACHE_TRUST" WORKSPACE_CACHE_SCOPE=protected ;;
   *) readonly WORKSPACE_CACHE_TRUST=untrusted WORKSPACE_CACHE_SCOPE=untrusted ;;
 esac
-readonly WORKSPACE_CACHE_BUCKET="example-ci-cache-$WORKSPACE_CACHE_SCOPE"
+# Each scope's bucket is site configuration with no default
+# (docs/dev/CI-CONFIGURATION.md); the r2 modes refuse to run without it.
+if [[ "$WORKSPACE_CACHE_SCOPE" == protected ]]; then
+  readonly WORKSPACE_CACHE_BUCKET_VARIABLE=CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED
+else
+  readonly WORKSPACE_CACHE_BUCKET_VARIABLE=CODEWIRE_CI_SCCACHE_BUCKET_UNTRUSTED
+fi
+readonly WORKSPACE_CACHE_BUCKET="${!WORKSPACE_CACHE_BUCKET_VARIABLE:-}"
 readonly WORKSPACE_CACHE_PREFIX="$WORKSPACE_CACHE_SCOPE/codewire/buildkit/v1/"
 readonly WORKSPACE_SCCACHE_PREFIX="$WORKSPACE_CACHE_SCOPE/codewire/v1"
 readonly WORKSPACE_DAEMON_CREDENTIALS='/run/codewire-cache/aws-credentials'
@@ -56,6 +63,10 @@ workspace_cache_validate() {
     # CI names the cache endpoint in the CODEWIRE_R2_CACHE_ENDPOINT Actions variable.
     [[ -n "${CODEWIRE_R2_CACHE_ENDPOINT:-}" ]] || {
       echo 'CODEWIRE_R2_CACHE_ENDPOINT: set to the CI cache R2 endpoint URL' >&2; return 2;
+    }
+    [[ -n "$WORKSPACE_CACHE_BUCKET" ]] || {
+      echo "$WORKSPACE_CACHE_BUCKET_VARIABLE: set to the $WORKSPACE_CACHE_SCOPE CI cache bucket (docs/dev/CI-CONFIGURATION.md)" >&2
+      return 2
     }
     [[ "${SCCACHE_BUCKET:-}" == "$WORKSPACE_CACHE_BUCKET" \
         && "${SCCACHE_ENDPOINT:-}" == "$CODEWIRE_R2_CACHE_ENDPOINT" \

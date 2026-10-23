@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -22,6 +23,9 @@ COMMON = ROOT / "scripts/ci/verify/kind/common.sh"
 CREDENTIALS = ROOT / "scripts/ci/verify/kind/credentials.sh"
 INTEGRATED = ROOT / "scripts/ci/verify/kind/suites/integrated.sh"
 SELECTOR = ROOT / "scripts/ci/select/select-verification.sh"
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / "scripts/ci/tests"))
+import ci_runner_fixtures as runners  # noqa: E402
 
 CHECKOUT = (
     "noel/actions-checkout@"
@@ -155,8 +159,7 @@ class WorkflowContractTests(unittest.TestCase):
             with self.subTest(job=job_name):
                 job = self.jobs[job_name]
                 # A main push's Heavy jobs take the runners reserved for main.
-                self.assertEqual(job["runs-on"], "${{ github.event_name == 'push' && "
-                                 "github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}")
+                self.assertEqual(job["runs-on"], runners.KIND)
                 cache = named_step(job, "Select existing compiler cache")
                 clean = named_step(job, "Clean compiler cache credentials")
                 self.assertEqual(clean["if"], "${{ always() }}")
@@ -839,10 +842,15 @@ coordinator_ingress_smoke() {
 
 def actions_value(template: str, context: dict[str, str]):
     """TEMPLATE as Actions renders it, for the forms the concurrency block and
-    runner labels use: github context values, quoted strings, ==, && and ||.
-    A value that is one whole expression keeps its type."""
+    runner labels use: github and vars context values, quoted strings, ==, &&
+    and ||. An unset variable is the empty string, as in Forgejo. A value that
+    is one whole expression keeps its type."""
     def evaluate(expression: str):
-        python = re.sub(r"github\.[a-z_]+", lambda match: repr(context[match.group(0)]), expression)
+        python = re.sub(r"github\.[a-z_]+|vars\.[A-Z0-9_]+",
+                        lambda match: repr(context.get(match.group(0), "")
+                                           if match.group(0).startswith("vars.")
+                                           else context[match.group(0)]),
+                        expression)
         python = python.replace("&&", " and ").replace("||", " or ")
         if not re.fullmatch(r"(?:\s|'[^']*'|==|!=|and|or|\(|\))*", python):
             raise AssertionError(f"unsupported expression {expression!r}")
@@ -906,11 +914,38 @@ class MainPushDeferralContractTests(unittest.TestCase):
         self.assertEqual(len(set(on_main)), 3, on_main)
 
     def test_scheduled_kind_takes_the_shared_heavy_pool(self) -> None:
+        runners_set = {"vars.CODEWIRE_CI_RUNNER_TRUSTED_KIND": "trusted-kind-label",
+                       "vars.CODEWIRE_CI_RUNNER_UNTRUSTED_KIND": "untrusted-kind-label"}
         for job_id in ("kind-workspace", "kind-product", "kind-daemon", "kind-smokes", "edge-kind"):
             with self.subTest(job=job_id):
                 runs_on = self.workflow["jobs"][job_id]["runs-on"]
-                self.assertEqual(actions_value(runs_on, self.context("schedule")), "ci-heavy")
-                self.assertEqual(actions_value(runs_on, self.context("push")), "ci-heavy-main")
+                self.assertEqual(actions_value(runs_on, self.context("schedule") | runners_set),
+                                 "untrusted-kind-label")
+                self.assertEqual(actions_value(runs_on, self.context("push") | runners_set),
+                                 "trusted-kind-label")
+
+    def test_a_missing_runner_variable_never_selects_another_runner(self) -> None:
+        """Unset, a runner variable leaves the job on a label no runner has,
+        named for the variable; a main push never falls through to the
+        untrusted runner, nor a pull request to the trusted one."""
+        trusted, untrusted = "vars.CODEWIRE_CI_RUNNER_TRUSTED_KIND", "vars.CODEWIRE_CI_RUNNER_UNTRUSTED_KIND"
+        runs_on = self.workflow["jobs"]["edge-kind"]["runs-on"]
+        cases = {
+            ("push", trusted): "unset-CODEWIRE_CI_RUNNER_TRUSTED_KIND",
+            ("schedule", untrusted): "unset-CODEWIRE_CI_RUNNER_UNTRUSTED_KIND",
+            ("pull_request", untrusted): "unset-CODEWIRE_CI_RUNNER_UNTRUSTED_KIND",
+        }
+        for (event, missing), expected in cases.items():
+            with self.subTest(event=event, missing=missing):
+                context = self.context(event) | {trusted: "trusted-kind-label",
+                                                 untrusted: "untrusted-kind-label"}
+                del context[missing]
+                self.assertEqual(actions_value(runs_on, context), expected)
+        heavy = self.workflow["jobs"]["rust-compile"]["runs-on"]
+        self.assertEqual(heavy, runners.HEAVY)
+        self.assertEqual(actions_value(heavy, self.context("push") | {
+            "vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY": "untrusted-heavy-label"}),
+            "unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY")
 
     def test_only_a_scheduled_run_reads_its_baseline(self) -> None:
         steps = self.workflow["jobs"]["verification-selection"]["steps"]

@@ -26,12 +26,13 @@ env:
   CODEWIRE_IMAGE_REGISTRY: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}
   CODEWIRE_SOURCE_URL: ${{ vars.CODEWIRE_SOURCE_URL }}
   CODEWIRE_R2_CACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
+  CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED: ${{ vars.CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED }}
 
 jobs:
   deploy-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this trusted planner receives only the read-only Deploy baseline integration.
     name: Deploy selection
-    runs-on: ci-lite
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 15
     outputs:
@@ -111,7 +112,7 @@ jobs:
   build-service-images:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
     name: Build and push the service runtime images
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 110
     needs: [deploy-selection]
@@ -150,7 +151,7 @@ jobs:
         id: build
         env:
           CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
-          SCCACHE_BUCKET: example-ci-cache-protected
+          SCCACHE_BUCKET: ${{ vars.CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED }}
           SCCACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
           CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1
           CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected.aws
@@ -176,7 +177,7 @@ jobs:
   build-daemon-image:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
     name: Build and push the daemon runtime image
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 110
     needs: [deploy-selection]
@@ -209,7 +210,7 @@ jobs:
         id: build
         env:
           CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
-          SCCACHE_BUCKET: example-ci-cache-protected
+          SCCACHE_BUCKET: ${{ vars.CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED }}
           SCCACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
           CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1
           CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected.aws
@@ -232,7 +233,7 @@ jobs:
   publish-runtime-images:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
     name: Publish the exact runtime image set
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 45
     needs: [deploy-selection, build-service-images, build-daemon-image]

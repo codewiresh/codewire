@@ -192,12 +192,12 @@ done
 
 # A main push writes the one protected cache, which only main-only builders on
 # fresh metal VMs may write (infra#1544). A job that fetches cache credentials
-# therefore runs main pushes on the metal-only sized Heavy label, or forces its
-# job-local caches on a main push: an unsized ci-heavy-main job can land on a
-# PR-shared cloud pod.
+# therefore runs main pushes on the trusted Heavy runner variable (the metal-only
+# sized label), or forces its job-local caches on a main push: a job on the
+# trusted Kind runner (an unsized label) can land on a PR-shared cloud pod.
 readonly main_push="github.event_name == 'push' && github.ref == 'refs/heads/main'"
 # Only the main-push branch of the expression matters here; pull requests read.
-readonly sized_runs_on="    runs-on: \${{ $main_push && 'ci-main-large' || "
+readonly sized_runs_on="    runs-on: \${{ $main_push && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || "
 check_main_cache_runners() {
   local workflow="$1" job block step checked=0
   while IFS= read -r job; do
@@ -223,9 +223,10 @@ check_main_cache_runners() {
   [[ "$checked" -gt 0 ]]
 }
 check_main_cache_runners "$WORKFLOW" || fail 'a main cache job may run on a PR-shared Heavy pod'
-# Fixtures: one sized cache job moved to the unsized main label, and one
+# Fixtures: one sized cache job moved to the unsized main runner, and one
 # unsized job that no longer forces local caches on a main push.
-sed '0,/ci-main-large/s//ci-heavy-main/' "$WORKFLOW" >"$work/unsized-ci.yaml"
+sed '0,/&& (vars\.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY /s//\&\& (vars.CODEWIRE_CI_RUNNER_TRUSTED_KIND /' \
+  "$WORKFLOW" >"$work/unsized-ci.yaml"
 if check_main_cache_runners "$work/unsized-ci.yaml" 2>"$work/unsized.err"; then
   fail 'an unsized main cache job was accepted'
 fi

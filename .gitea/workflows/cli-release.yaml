@@ -52,7 +52,7 @@ jobs:
   release-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Verify canonical CLI release tag
-    runs-on: ci-lite
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     outputs:
       release_tag: ${{ steps.select.outputs.release_tag }}
       source_sha: ${{ steps.select.outputs.source_sha }}
@@ -130,7 +130,7 @@ jobs:
     # OIDC, signing, mirror or R2 write capability exists in this job.
     name: Build the local runtime's Linux side
     needs: [release-selection]
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     # Both kernels (about 20 min, side by side, when not cached), then each
     # target's guest root and cw runtime beside the other's (about 25 min):
     # bounded well below the pool's limit, so a wedged build cannot hold a
@@ -212,7 +212,7 @@ jobs:
     # only: no OIDC, signing, mirror or R2 capability exists in this job.
     name: Build the VZ helper for signing
     needs: [release-selection]
-    runs-on: macos-arm64
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_MACOS || 'unset-CODEWIRE_CI_RUNNER_MACOS' }}
     timeout-minutes: 30
     outputs:
       present: ${{ steps.build.outputs.present }}
@@ -275,7 +275,7 @@ jobs:
     # no OpenPGP, mirror or R2 capability.
     name: Sign and notarize the VZ helper
     needs: [release-selection, build-helper-darwin]
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 45
     outputs:
@@ -372,7 +372,7 @@ jobs:
     # OIDC, signing, mirror or R2 capability exists in this job.
     name: Pack the local runtime
     needs: [release-selection, build-runtime-linux, build-helper-darwin, sign-helper]
-    runs-on: macos-arm64
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_MACOS || 'unset-CODEWIRE_CI_RUNNER_MACOS' }}
     timeout-minutes: 45
     outputs:
       present: ${{ steps.runtime.outputs.present }}
@@ -486,13 +486,13 @@ jobs:
     # The macOS cw links Apple frameworks (Security, SystemConfiguration), so
     # it is built natively on the protected mac-runner runner: one ephemeral
     # registration per job, as the unprivileged ci account (infra
-    # runbooks/macos-arm64-runner.md). Both targets
+    # macOS runner runbook). Both targets
     # build in one Cargo invocation, side by side, beside the two Linux cws.
     # Compilation only: no OIDC, signing, mirror or R2 capability exists in
     # this job.
     name: Build the macOS cw natively
     needs: [release-selection, pack-runtime]
-    runs-on: macos-arm64
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_MACOS || 'unset-CODEWIRE_CI_RUNNER_MACOS' }}
     timeout-minutes: 60
     outputs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
@@ -571,7 +571,7 @@ jobs:
     # compiles nothing and holds no OpenPGP, mirror or R2 capability.
     name: Sign and notarize the macOS cw pair
     needs: [release-selection, build-darwin]
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     outputs:
       darwin_sums_sha256: ${{ steps.sign.outputs.darwin_sums_sha256 }}
@@ -648,7 +648,7 @@ jobs:
     # recovery compiles under an environment without the job's tokens.
     name: Build the Linux x86_64 cw
     needs: [release-selection, pack-runtime]
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 60
     env:
@@ -722,7 +722,7 @@ jobs:
     # recovery compiles under an environment without the job's tokens.
     name: Build the Linux arm64 cw
     needs: [release-selection, pack-runtime]
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 60
     env:
@@ -792,7 +792,7 @@ jobs:
     # this job.
     name: Build four-target cw release delivery
     needs: [release-selection, pack-runtime, sign-darwin, build-linux-musl, build-linux-gnu]
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     timeout-minutes: 30
     outputs:
       delivery_sha256: ${{ steps.prepare.outputs.delivery_sha256 }}
@@ -944,7 +944,7 @@ jobs:
     # Signing, mirror and R2 capabilities exist only after a successful build.
     name: Sign and publish cw release
     needs: [release-selection, pack-runtime, build-release]
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

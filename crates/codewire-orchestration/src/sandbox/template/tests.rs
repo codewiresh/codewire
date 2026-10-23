@@ -2303,19 +2303,40 @@ mod tests {
     }
 
     #[test]
-    fn workspace_storage_class_defaults_and_overrides() {
+    fn workspace_storage_class_is_required_except_for_confidential() {
+        for missing in ["", "  "] {
+            for profile in ["", RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_RUNC] {
+                let error = required_workspace_storage_class(profile, missing).unwrap_err();
+                assert!(error.contains(WORKSPACE_STORAGE_CLASS_ENV), "{error}");
+                assert!(error.contains("docs/CONFIGURATION.md"), "{error}");
+            }
+            assert_eq!(
+                required_workspace_storage_class(RUNTIME_PROFILE_CONFIDENTIAL, missing).unwrap(),
+                ""
+            );
+        }
+        assert!(required_workspace_storage_class(RUNTIME_PROFILE_COMMODITY, "two words").is_err());
+        assert_eq!(
+            required_workspace_storage_class(RUNTIME_PROFILE_COMMODITY, " example-class ").unwrap(),
+            "example-class"
+        );
+    }
+
+    #[test]
+    fn workspace_storage_class_is_the_configured_class() {
         let rendered = render_sandbox_template(
             "codewire-runtime",
             &TemplateOpts {
-                name: "tmpl-storage-default".into(),
+                name: "tmpl-storage-configured".into(),
                 daemon_auth_token: "test-daemon-token".into(),
                 disk_gib: 20,
+                workspace_storage_class: "example-workspace-class".into(),
                 ..Default::default()
             },
         );
         assert_eq!(
             rendered["spec"]["volumeClaimTemplates"][0]["spec"]["storageClassName"].as_str(),
-            Some(DEFAULT_WORKSPACE_STORAGE_CLASS)
+            Some("example-workspace-class")
         );
         assert!(
             rendered["spec"]["volumeClaimTemplates"][0]["spec"]["volumeMode"].is_null(),

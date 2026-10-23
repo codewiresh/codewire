@@ -4,13 +4,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SELECTOR="$ROOT/scripts/ci/select/select-verification.sh"
 WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
-# A main push's Heavy jobs take the runners reserved for main; every other run
-# uses the shared Heavy pool (infra forgejo-runners dispatcher).
-# shellcheck disable=SC2016 # The workflow expression is literal text.
-HEAVY_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-heavy-main'"'"' || '"'"'ci-heavy'"'"' }}'
-# Every ordinary Heavy group runs on the metal guests' sized labels
-# (infra#1534), main's label on a main push; cloud takes only overflow.
-METAL_MAIN_RUNS_ON='${{ github.event_name == '"'"'push'"'"' && github.ref == '"'"'refs/heads/main'"'"' && '"'"'ci-main-large'"'"' || '"'"'ci-heavy-cpu10-ram17g'"'"' }}'
+# The exact runs-on values: runner labels are repository Actions variables.
+# shellcheck source=scripts/ci/tests/fixtures/ci-runners.sh
+source "$ROOT/scripts/ci/tests/fixtures/ci-runners.sh"
+# A main push's Heavy jobs take the trusted runners; every other run takes the
+# untrusted ones. Kind still runs on its own unsized pool until it runs in a
+# metal guest; every ordinary Heavy group runs on the sized metal pool.
+HEAVY_RUNS_ON="$RUNS_ON_KIND"
+METAL_MAIN_RUNS_ON="$RUNS_ON_HEAVY"
 # Each one bounds cargo by its runner's memory at job start (bound-cargo-jobs.sh).
 METAL_CARGO_BOUND='        run: scripts/ci/setup/bound-cargo-jobs.sh'
 CLI_RELEASE_WORKFLOW="$ROOT/.gitea/workflows/cli-release.yaml"
@@ -542,6 +543,10 @@ run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   scripts/ci/tests/test-cargo-cache-capacity.sh \
   scripts/ci/tests/fixtures/cargo-cache-df.sh \
   scripts/ci/tests/test-select-verification.sh
+# The shared runs-on fixtures feed only CI-script tests.
+run_paths_case ci_runner_fixtures pull_request refs/pull/3189/head false \
+  'policy security security_js' \
+  scripts/ci/tests/fixtures/ci-runners.sh scripts/ci/tests/ci_runner_fixtures.py
 run_paths_case retired_cache_surface pull_request refs/pull/200/head false \
   "$policy security security_js" \
   .gitea/workflows/rust-cache-refresh.yaml \
@@ -2797,12 +2802,12 @@ grep -Fq 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selec
   exit 1
 }
 grep -Fq 'run-product-verification.sh policy-shell' "$tooling_block" || {
-  echo 'ci-heavy tooling job does not own selected ShellCheck' >&2
+  echo 'heavy tooling job does not own selected ShellCheck' >&2
   exit 1
 }
 grep -Fq "contains(needs.verification-selection.outputs.selection, '|policy_shell|')" \
   "$tooling_block" || {
-  echo 'ci-heavy ShellCheck lacks trusted policy_shell dispatch' >&2
+  echo 'heavy ShellCheck lacks trusted policy_shell dispatch' >&2
   exit 1
 }
 
@@ -3101,7 +3106,7 @@ awk '
   capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  verification-selection:" { exit }
   capture { print }
 ' "$WORKFLOW" > "$selection_block"
-grep -qF '    runs-on: ci-lite' "$selection_block" || {
+grep -qxF "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$selection_block" || {
   echo 'verification selection does not use the live non-privileged validation profile' >&2
   exit 1
 }
@@ -3121,17 +3126,13 @@ fi
   echo 'Codewire CI requires Edge / Kind and four parallel Kind producers, each selecting the main-first cloud Heavy label until Kind runs in a metal guest' >&2
   exit 1
 }
-if grep -Eq '^ *runs-on: ci-heavy(-main)?$' "$WORKFLOW"; then
-  echo 'a Codewire CI Heavy job fixes one label: main would wait behind pull requests, or pull requests would take main-only runners' >&2
+if grep -Eq '^ *runs-on: [^$]' "$WORKFLOW"; then
+  echo 'a Codewire CI job names a literal runner label instead of its repository Actions variable (docs/dev/CI-CONFIGURATION.md)' >&2
   exit 1
 fi
 # Selection, aggregation and the final Dev delivery trigger (#2892).
-[[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 3 ]] || {
-  echo 'Codewire CI has not assigned selection, aggregation and the Dev delivery trigger to ci-lite' >&2
-  exit 1
-}
-[[ "$(grep -Fc '    runs-on: ci-light' "$WORKFLOW")" -eq 0 ]] || {
-  echo 'Codewire CI still uses the retired ci-light label' >&2
+[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$WORKFLOW")" -eq 3 ]] || {
+  echo 'Codewire CI has not assigned selection, aggregation and the Dev delivery trigger to the untrusted light runner' >&2
   exit 1
 }
 for output in selector_version classification selection required_local_mode \
@@ -3762,7 +3763,7 @@ if grep -Eq '^  (push|pull_request|pull_request_target|schedule|workflow_run):' 
   echo 'start-latency measurement must stay dispatch-only and credential-free' >&2
   exit 1
 fi
-grep -qF '    runs-on: ci-lite' "$START_LATENCY_WORKFLOW"
+grep -qxF "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$START_LATENCY_WORKFLOW"
 grep -qF 'run: sha256sum --check --strict forgejo-ci-start-latency.sha256' \
   "$START_LATENCY_WORKFLOW"
 grep -qF 'echo "::group::rows.jsonl"' "$START_LATENCY_WORKFLOW"
@@ -3777,7 +3778,7 @@ if grep -Eq '^  (push|pull_request|pull_request_target|schedule|workflow_run):' 
   echo 'done measures must stay dispatch-only and credential-free' >&2
   exit 1
 fi
-grep -qF '    runs-on: ci-lite' "$DONE_MEASURES_WORKFLOW"
+grep -qxF "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$DONE_MEASURES_WORKFLOW"
 grep -qF 'scripts/ci/measure/ci-done-measures collect' "$DONE_MEASURES_WORKFLOW"
 
 required_block="$TMP/required-verification.yaml"
@@ -3798,7 +3799,7 @@ if rg -ni 'migration[ _-](static|integration)' "$WORKFLOW"; then
 fi
 grep -qF '  required-verification:' "$WORKFLOW"
 grep -qF '    name: Required verification' "$WORKFLOW"
-grep -qF '    runs-on: ci-lite' "$required_block" || {
+grep -qxF "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$required_block" || {
   echo 'required coordination consumes the heavy compatibility pool' >&2
   exit 1
 }

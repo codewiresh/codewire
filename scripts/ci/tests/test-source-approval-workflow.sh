@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# shellcheck source=scripts/ci/tests/fixtures/ci-runners.sh
+source "$ROOT/scripts/ci/tests/fixtures/ci-runners.sh"
 readonly WORKFLOW="$ROOT/.gitea/workflows/source-approval.yml"
 readonly GITLEAKS_CONFIG="$ROOT/.gitleaks.toml"
 
@@ -15,7 +17,7 @@ fail() {
 }
 
 [[ -f "$WORKFLOW" ]] || fail 'source-approval workflow is missing'
-grep -Fq 'runs-on: ci-lite' "$WORKFLOW" ||
+grep -Fq "runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$WORKFLOW" ||
   fail 'the supply-chain scan does not use the credential-free validation profile'
 grep -Fq 'EXPECTED_SUPPLYCHAIN: cf1984547d9af47807e4f27766baa2cc7f84579d' \
   "$WORKFLOW" || fail 'sealed Supplychain revision changed without review'

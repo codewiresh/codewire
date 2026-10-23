@@ -34,8 +34,8 @@ pub use runtime_policy::{
     DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, DOCKER_MODE_NONE,
     DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_CONFIDENTIAL,
     RUNTIME_CLASS_RUNC, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL,
-    RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC, RuntimeProfileSpec, runtime_profile_spec,
-    validate_managed_runtime_profile,
+    RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC, RuntimeProfileSpec,
+    required_workspace_storage_class, runtime_profile_spec, validate_managed_runtime_profile,
 };
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
@@ -91,7 +91,9 @@ pub const KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY: &str =
     "io.katacontainers.config.hypervisor.kernel_params";
 pub const DEFAULT_KATA_COCO_TEST_RESOURCE_PATH: &str =
     "/run/confidential-containers/cdh/kbs/codewire/runtime-test-resource";
-pub const DEFAULT_WORKSPACE_STORAGE_CLASS: &str = "example-volumes";
+/// The StorageClass commodity workspace volumes use. It has no default; see
+/// [`required_workspace_storage_class`].
+pub const WORKSPACE_STORAGE_CLASS_ENV: &str = "SANDBOX_WORKSPACE_STORAGE_CLASS";
 pub const CONFIDENTIAL_WORKSPACE_STORAGE_CLASS: &str = "longhorn-confidential";
 pub const KATA_CONFIDENTIAL_VOLUME_ANNOTATION: &str = "io.katacontainers.volume.confidential";
 pub const KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH: &str = "/dev/codewire-workspace";

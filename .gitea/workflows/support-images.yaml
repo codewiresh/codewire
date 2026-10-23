@@ -25,12 +25,13 @@ env:
   CODEWIRE_IMAGE_REGISTRY: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}
   CODEWIRE_SOURCE_URL: ${{ vars.CODEWIRE_SOURCE_URL }}
   CODEWIRE_R2_CACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
+  CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED: ${{ vars.CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED }}
 
 jobs:
   support-selection:
     # zizmor: ignore[excessive-permissions] This credential-free selection uses protected Docker only for the preloaded, pinned Skopeo runtime.
     name: Support image selection
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     outputs:
       superseded: ${{ steps.canonical.outputs.superseded }}
       build_support_images: ${{ steps.select.outputs.build_support_images }}
@@ -117,7 +118,7 @@ jobs:
   build-support-amd64:
     # zizmor: ignore[excessive-permissions] This exact protected job receives the scoped publisher identity for its platform of the pair.
     name: Build exact support pair (linux/amd64)
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 120
     needs: [support-selection]
@@ -154,7 +155,7 @@ jobs:
         env:
           SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
           CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
-          SCCACHE_BUCKET: example-ci-cache-protected
+          SCCACHE_BUCKET: ${{ vars.CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED }}
           SCCACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
           CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1
           CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected.aws
@@ -181,7 +182,7 @@ jobs:
   build-support-arm64:
     # zizmor: ignore[excessive-permissions] This exact protected job receives the scoped publisher identity for its platform of the pair.
     name: Build exact support pair (linux/arm64)
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     # The job's OIDC also reads the arm64 node's client certificate.
     enable-openid-connect: true
     timeout-minutes: 120
@@ -211,7 +212,7 @@ jobs:
         env:
           SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
           CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
-          SCCACHE_BUCKET: example-ci-cache-protected
+          SCCACHE_BUCKET: ${{ vars.CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED }}
           SCCACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
           CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1
           CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected.aws
@@ -230,7 +231,7 @@ jobs:
     # provenance and an SBOM each) before it tags or reports a candidate, and
     # publication consumes only those same-job candidates.
     name: Join and publish exact support pair
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [build-support-amd64, build-support-arm64]
@@ -283,7 +284,7 @@ jobs:
   publish-confidential-probe:
     # zizmor: ignore[excessive-permissions] This independent protected job receives the same scoped publisher identity only for the probe.
     name: Build and publish exact confidential probe
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     needs: [support-selection]
     if: ${{ needs.support-selection.outputs.build_confidential_probe_image == 'true' && needs.support-selection.outputs.superseded == 'false' }}
@@ -329,7 +330,7 @@ jobs:
     # like a person's. The bot cannot merge. The checkout keeps no job token,
     # so git sends only the bot's credential (runbooks/workspace-image-pin.md).
     name: Propose the published workspace image pin
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     needs: [publish-support-images]
     if: ${{ needs.publish-support-images.outputs.workspace_mirrored == 'true' }}

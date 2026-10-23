@@ -43,6 +43,7 @@ secrets; credentials come from OpenBao.
 | `CODEWIRE_SOURCE_URL` | Canonical public clone URL of this repository, for example `https://forgejo.example.com/codewire/codewire.git` | image provenance (`vcs.source`), which deployment verifies; the release tag's canonical-server check. Never an internal URL |
 | `CODEWIRE_IMAGE_REGISTRY` | Image registry host, with no scheme, for example `registry.example.com` | image build, publish, sign and verify scripts; Kind's approved images; Production publication |
 | `CODEWIRE_R2_CACHE_ENDPOINT` | `https://` S3 endpoint of the CI compiler and layer cache buckets | sccache and workspace layer cache selection |
+| `CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED` | The one CI compiler and layer cache bucket. Main pushes read and write it; pull requests read it with a read-only token | the cache selectors and the protected image builds. With the endpoint set and this unset, they stop |
 | `CODEWIRE_R2_RELEASES_ENDPOINT` | `https://` S3 endpoint of the `cw` release bucket | `cw` release publication (`cli-release.yaml`) |
 | `CODEWIRE_OPENBAO_ADDR` | OpenBao base URL | every OpenBao credential fetch |
 | `CODEWIRE_RELEASE_TAGGER` | Login of the Forgejo account whose registered GPG key signs release tags, exactly as Forgejo spells it | the release tag check in `deploy-prod.yaml` and `cli-release.yaml`: a tag counts only when Forgejo verifies it against a key on this account. Unset, every release is refused |
@@ -57,6 +58,27 @@ secrets; credentials come from OpenBao.
 A script that needs one of these and does not get it stops with an error that
 names the variable. It never falls back to a built-in site.
 
+### Runner labels
+
+Every job's `runs-on` names a repository variable, never a label. Each
+variable holds the label of the runner pool for one role. Jobs that differ
+between a main push and every other run select the trusted variable on a main
+push and the untrusted one otherwise.
+
+| Variable | Role | Jobs |
+|---|---|---|
+| `CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT` | Credential-free light work | selection, aggregation, the Dev delivery trigger, source approval, measures |
+| `CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY` | Sized heavy verification, for every run except a main push | `ci.yaml` build and test groups |
+| `CODEWIRE_CI_RUNNER_TRUSTED_HEAVY` | Sized heavy verification on a main push; the only heavy runner that may write the protected cache | the same groups on a main push |
+| `CODEWIRE_CI_RUNNER_UNTRUSTED_KIND` | The Kind producers and Edge / Kind, for every run except a main push | `ci.yaml` Kind jobs |
+| `CODEWIRE_CI_RUNNER_TRUSTED_KIND` | The same Kind jobs on a main push | `ci.yaml` Kind jobs on a main push |
+| `CODEWIRE_CI_RUNNER_TRUSTED_LIGHT` | Protected publication, signing and release jobs, which hold OIDC roles and build on the trusted BuildKit builder | Dev and Production delivery, support images, release, mirror |
+| `CODEWIRE_CI_RUNNER_MACOS` | Native macOS builds | the macOS `cw`, the VZ helper and the runtime pack |
+
+A missing variable never selects another runner. The job waits on a label
+named `unset-<variable>` that no runner advertises, so the queue shows which
+variable to set. A main push never falls through to an untrusted runner.
+
 ## Local runs
 
 Scripts read the same names outside CI. A workstation sets these in
@@ -66,7 +88,12 @@ Scripts read the same names outside CI. A workstation sets these in
 export CODEWIRE_IMAGE_REGISTRY=registry.example.com
 export GITHUB_SERVER_URL=https://forgejo.example.com
 export CODEWIRE_FORGEJO_FIXTURE_REPOSITORY=example/supplychain
+export CODEWIRE_CI_SCCACHE_BUCKET_UNTRUSTED=example-ci-cache-untrusted
 ```
+
+- `CODEWIRE_CI_SCCACHE_BUCKET_UNTRUSTED` is the disposable cache bucket a
+  local workspace build uses in `r2` mode without main or pull-request trust.
+  CI never selects it, so it is not an Actions variable.
 
 - `GITHUB_SERVER_URL` is the Forgejo base URL. A release tag push's receipt
   check needs it (without it the push falls back to full local verification),

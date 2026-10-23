@@ -139,10 +139,10 @@ jobs:
   protected-main:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     # Both builders are protected. Refuse any ref but main on a lite runner,
-    # before any job reaches mac-runner or ci-protected; a dispatch from a
+    # before any job reaches the macOS or trusted runner; a dispatch from a
     # feature branch must not run its code there.
     name: Refuse anything but protected main
-    runs-on: ci-lite
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     steps:
       - name: Refuse anything but protected main
         run: |
@@ -159,7 +159,7 @@ jobs:
     # Mac (behind a release, say) gives the runner up in seconds.
     name: Skip a superseded commit
     needs: [protected-main]
-    runs-on: ci-lite
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     outputs:
       superseded: ${{ steps.canonical.outputs.superseded }}
     steps:
@@ -195,7 +195,7 @@ jobs:
     name: Build or check the local runtime's Linux side
     needs: [protected-main, superseded]
     if: needs.superseded.outputs.superseded == 'false'
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     # A wedged step must not hold this workflow's one-at-a-time queue until
     # the runner's 330-minute limit (run 13161 waited 5.5 h on a git fetch).
     # Each job's limit is about three times its recent successful runs:
@@ -306,7 +306,7 @@ jobs:
     name: Build the VZ helper for signing
     needs: [protected-main, superseded]
     if: needs.superseded.outputs.superseded == 'false'
-    runs-on: macos-arm64
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_MACOS || 'unset-CODEWIRE_CI_RUNNER_MACOS' }}
     timeout-minutes: 30
     outputs:
       superseded: ${{ steps.superseded.outputs.superseded }}
@@ -358,7 +358,7 @@ jobs:
     name: Sign the VZ helper with the rcodesign stand-in (never signs)
     needs: [protected-main, build-helper-darwin]
     if: needs.build-helper-darwin.outputs.superseded == 'false'
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     timeout-minutes: 20
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -411,7 +411,7 @@ jobs:
     name: Pack the local runtime from cached parts
     needs: [protected-main, superseded, build-runtime-linux, build-helper-darwin, sign-helper]
     if: needs.superseded.outputs.superseded == 'false' && needs.build-runtime-linux.outputs.superseded == 'false' && needs.build-helper-darwin.outputs.superseded == 'false'
-    runs-on: macos-arm64
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_MACOS || 'unset-CODEWIRE_CI_RUNNER_MACOS' }}
     timeout-minutes: 30
     outputs:
       superseded: ${{ steps.superseded.outputs.superseded }}
@@ -491,7 +491,7 @@ jobs:
     name: Build the macOS cw natively
     needs: [protected-main, pack-runtime]
     if: needs.pack-runtime.outputs.superseded == 'false'
-    runs-on: macos-arm64
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_MACOS || 'unset-CODEWIRE_CI_RUNNER_MACOS' }}
     timeout-minutes: 60
     outputs:
       superseded: ${{ steps.superseded.outputs.superseded }}
@@ -568,7 +568,7 @@ jobs:
     name: Sign the macOS pair with the rcodesign stand-in (never signs)
     needs: [protected-main, build-darwin]
     if: needs.build-darwin.outputs.superseded == 'false'
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     timeout-minutes: 20
     outputs:
       darwin_sums_sha256: ${{ steps.sign.outputs.darwin_sums_sha256 }}
@@ -634,7 +634,7 @@ jobs:
     name: Build the Linux x86_64 cw
     needs: [protected-main, pack-runtime]
     if: needs.pack-runtime.outputs.superseded == 'false'
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 60
     env:
@@ -702,7 +702,7 @@ jobs:
     name: Build the Linux arm64 cw
     needs: [protected-main, pack-runtime]
     if: needs.pack-runtime.outputs.superseded == 'false'
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 60
     env:
@@ -767,7 +767,7 @@ jobs:
     name: Assemble and verify the unsigned four-target delivery
     needs: [protected-main, pack-runtime, sign-darwin, build-linux-musl, build-linux-gnu]
     if: needs.build-linux-musl.outputs.superseded == 'false' && needs.build-linux-gnu.outputs.superseded == 'false'
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     timeout-minutes: 30
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

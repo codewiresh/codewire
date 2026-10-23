@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=scripts/ci/tests/fixtures/ci-runners.sh
+source "$ROOT/scripts/ci/tests/fixtures/ci-runners.sh"
 
 # This isolated fixture owns the helpers started by its original nested tests.
 # The existing kernel owner supplies Linux subreaper admission and initial ECHILD.
@@ -568,7 +570,7 @@ if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' "$deploy_workflow"; then
   echo 'production dispatch retains the static deploy credential' >&2
   exit 1
 fi
-grep -Fq '    runs-on: ci-protected' \
+grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" \
   <(sed -n '/^  dispatch-deploy-prod:/,$p' "$deploy_workflow")
 if grep -Eq 'CODEWIRE_DEPLOY_PROMOTION_USERNAME|promote-image-bundle|promote \.release-source|promotion-receipt|observe-production:|deploy-prod-observer\.sh|gitea-(upload|download)-artifact|kubectl|helm' \
   "$deploy_workflow"; then

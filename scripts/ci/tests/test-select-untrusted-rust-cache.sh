@@ -66,6 +66,7 @@ run_selector() {
     GITHUB_REF="${SELECT_REF:-refs/pull/1748/head}" \
     CODEWIRE_SCCACHE_REQUEST="$request" \
     CODEWIRE_R2_CACHE_ENDPOINT="${SELECT_ENDPOINT-https://r2-cache.example.invalid}" \
+    CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED="${SELECT_BUCKET-example-ci-cache-protected}" \
     OPENBAO_SCCACHE_FETCHER="$fetcher" \
     "$SELECTOR" "$credentials"
 }
@@ -152,6 +153,16 @@ if SELECT_ENDPOINT='http://r2-cache.example.invalid/bucket' run_selector auto "$
   fail 'a malformed R2 endpoint was accepted'
 fi
 grep -Fq 'CODEWIRE_R2_CACHE_ENDPOINT' "$work/malformed.out" || fail 'malformed R2 endpoint was not named'
+# A configured endpoint without its bucket stops before any credential, and
+# names the variable: the selector never guesses a bucket.
+: >"$work/fetch.trust"
+if SELECT_BUCKET='' run_selector auto "$work/bin/fetch-success" \
+    "$work/no-bucket.env" "$work/runner/no-bucket.aws" >"$work/no-bucket.out" 2>&1; then
+  fail 'a configured endpoint without its bucket was accepted'
+fi
+grep -Fq 'CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED' "$work/no-bucket.out" || fail 'the missing bucket was not named'
+[[ ! -s "$work/fetch.trust" && ! -e "$work/runner/no-bucket.aws" && ! -s "$work/no-bucket.env" ]] ||
+  fail 'a selector without its bucket fetched a credential or wrote job configuration'
 
 # An R2 server that cannot start falls back to the local disk cache, with no
 # remote variable or credential left for later steps.

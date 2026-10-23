@@ -9,6 +9,8 @@ export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
 export GITHUB_SERVER_URL=https://forgejo-internal.tail.example.invalid/
 export CODEWIRE_SOURCE_URL=https://git.example.invalid/codewire/codewire.git
 export CODEWIRE_R2_CACHE_ENDPOINT=https://r2-cache.example.invalid
+export CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED=example-ci-cache-protected
+export CODEWIRE_CI_SCCACHE_BUCKET_UNTRUSTED=example-ci-cache-untrusted
 
 fail() {
   printf '[test-build-push-runtime-images] ERROR: %s\n' "$*" >&2
@@ -334,6 +336,21 @@ grep -Fq 'Protected runtime builds may use only the protected R2 compiler-cache 
   "$work/untrusted-bucket.stderr" || fail "untrusted-bucket rejection was not attributable"
 [[ ! -s "$work/untrusted-bucket-output" ]] ||
   fail "untrusted-bucket rejection emitted runtime image outputs"
+# The protected bucket is site configuration with no default: unset, an r2
+# build stops and names the variable.
+if run_group services "$work/no-bucket-output" "$docker_log" "$build_log" 45 \
+    CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED= \
+    CODEWIRE_SCCACHE_MODE=r2 \
+    CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
+    SCCACHE_BUCKET=example-ci-cache-protected \
+    SCCACHE_ENDPOINT=https://r2-cache.example.invalid \
+    >"$work/no-bucket.stdout" 2>"$work/no-bucket.stderr"; then
+  fail "protected runtime wrapper ran without the protected bucket variable"
+fi
+grep -Fq 'CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED' "$work/no-bucket.stderr" ||
+  fail "the missing protected bucket variable was not named"
+[[ ! -s "$work/no-bucket-output" ]] ||
+  fail "a build without the protected bucket variable emitted runtime image outputs"
 
 for group in services daemon; do
   protected_r2_output="$work/protected-r2-$group-output"

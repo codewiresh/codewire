@@ -51,6 +51,7 @@ env:
   CODEWIRE_IMAGE_REGISTRY: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}
   CODEWIRE_SOURCE_URL: ${{ vars.CODEWIRE_SOURCE_URL }}
   CODEWIRE_R2_CACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
+  CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED: ${{ vars.CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED }}
   KUSTOMIZE_VERSION: v5.4.3
   HELM_VERSION: v3.16.4
   CADDY_VERSION: 2.10.2
@@ -77,14 +78,17 @@ env:
 # dispatched release candidate, on a ci-full pull request, and on the
 # four-hourly schedule, which runs Kind alone.
 # Forgejo hands jobs to runners first in, first out. A main push's Heavy jobs
-# select ci-heavy-main, which three Heavy runners take exclusively and the
-# others also take, so main never waits behind queued pull requests; every
-# other run, a scheduled one included, selects ci-heavy.
+# select the trusted runner variables (CODEWIRE_CI_RUNNER_TRUSTED_HEAVY and
+# _KIND), whose runners serve main first, so main never waits behind queued
+# pull requests; every other run, a scheduled one included, selects the
+# untrusted ones. Runner labels are repository Actions variables
+# (docs/dev/CI-CONFIGURATION.md); an unset one leaves the job queued on an
+# `unset-<variable>` label that no runner advertises.
 jobs:
   verification-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job receives no write-capable integration.
     name: Verification selection
-    runs-on: ci-lite
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     # A closed pull request verifies nothing; every other job needs this one.
     if: ${{ github.event.action != 'closed' }}
     outputs:
@@ -356,7 +360,7 @@ jobs:
   cw-release-assets:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: CW release-assets verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
@@ -457,11 +461,11 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     # Baseline repository contracts are non-Docker checks over sealed tools.
     # They admit owner-private checkouts and temp roots, which only the heavy
-    # pool's job-private /data and /tmp provide; ci-lite's emptyDir roots are
+    # pool's job-private /data and /tmp provide; the light runner's emptyDir roots are
     # world-writable. The measured full ShellCheck phase joins the existing
     # heavy tooling group only when trusted selection requests it.
     name: Policy verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.policy_expected == 'true' }}
@@ -492,7 +496,7 @@ jobs:
   standard:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Standard verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
@@ -620,9 +624,9 @@ jobs:
     # Give repository tooling and delivery-contract checks an independent
     # general-heavy slot so an all-selected policy change does not serialize
     # them behind language and SDK verification. These checks still need the
-    # dependency egress and compute budget intentionally absent from ci-lite.
+    # dependency egress and compute budget intentionally absent from the light runner.
     name: Tooling / delivery contract verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.tooling_expected == 'true' }}
@@ -697,7 +701,7 @@ jobs:
   rust-compile:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Compile every Rust target
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
@@ -768,7 +772,7 @@ jobs:
   rust-packages:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Rust / transport packages
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
@@ -854,7 +858,7 @@ jobs:
   rust-features:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Rust / transport feature graphs
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
@@ -928,7 +932,7 @@ jobs:
   rust-transport:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Rust / transport verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 55
     needs: [verification-selection]
@@ -1044,7 +1048,7 @@ jobs:
   database:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Database verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
@@ -1160,7 +1164,7 @@ jobs:
   services-control:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Service control-plane verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
@@ -1298,7 +1302,7 @@ jobs:
   services-runtime:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Service runtime-plane verification
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-main-large' || 'ci-heavy-cpu10-ram17g' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
@@ -1439,7 +1443,7 @@ jobs:
   kind-workspace:
     # zizmor: ignore[excessive-permissions] Existing untrusted cache identity only; no publication.
     name: Kind workspace build
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_KIND || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_KIND') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_KIND || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_KIND') }}
     enable-openid-connect: true
     # Sized for a fully cold build, as measured in run 13275 (e45c39c40):
     # workspace-image verification took 51 minutes with no layer cache, and
@@ -1498,7 +1502,7 @@ jobs:
   kind-product:
     # zizmor: ignore[excessive-permissions] Existing untrusted cache identity only; non-promotable images.
     name: Kind product image build
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_KIND || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_KIND') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_KIND || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_KIND') }}
     enable-openid-connect: true
     timeout-minutes: 35
     needs: [verification-selection]
@@ -1546,7 +1550,7 @@ jobs:
     # The daemon image carries the static CW from the sealed producer. It builds
     # on its own worker, beside the three service images.
     name: Kind daemon image build
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_KIND || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_KIND') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_KIND || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_KIND') }}
     enable-openid-connect: true
     timeout-minutes: 35
     needs: [verification-selection]
@@ -1592,7 +1596,7 @@ jobs:
   kind-smokes:
     # zizmor: ignore[excessive-permissions] Existing untrusted cache identity only; synthetic test binaries.
     name: Kind smoke binary build
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_KIND || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_KIND') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_KIND || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_KIND') }}
     enable-openid-connect: true
     timeout-minutes: 35
     needs: [verification-selection]
@@ -1653,7 +1657,7 @@ jobs:
   edge-kind:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Edge / Kind verification (${{ matrix.shard.slug }})
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_KIND || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_KIND') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_KIND || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_KIND') }}
     # Builds run on independent producers; every shard leg imports the exact
     # same outputs, brings up its own disposable cluster, and runs only its
     # mapped retained suites, so the gate's wall time is its longest shard
@@ -1853,7 +1857,7 @@ jobs:
   required-verification:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this aggregator receives no write-capable integration.
     name: Required verification
-    runs-on: ci-lite
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     if: ${{ always() && github.event.action != 'closed' }}
     needs:
       - verification-selection
@@ -1941,7 +1945,7 @@ jobs:
   deliver-to-dev:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token reads runs and reruns one Deploy Dev job.
     name: Start Dev delivery of the verified commit
-    runs-on: ci-lite
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     timeout-minutes: 15
     needs: [verification-selection, required-verification]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.required-verification.result == 'success' && needs.verification-selection.outputs.superseded == 'false' }}

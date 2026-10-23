@@ -24,6 +24,8 @@
 # export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
 # S3 endpoint of the CI compiler and layer cache buckets.
 # export CODEWIRE_R2_CACHE_ENDPOINT=https://r2-cache.example.invalid
+# Disposable cache bucket a local r2-mode workspace build uses.
+# export CODEWIRE_CI_SCCACHE_BUCKET_UNTRUSTED=example-ci-cache-untrusted
 # Forgejo base URL for scripts that call its API outside CI.
 # export GITHUB_SERVER_URL=https://git.example.invalid
 # owner/name of the public repository on that Forgejo the local VM journeys

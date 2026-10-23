@@ -7,6 +7,8 @@ unset CODEWIRE_OPENBAO_ADDR ARM64_BUILDKIT_HOST  # the tests exercise the script
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# shellcheck source=scripts/ci/tests/fixtures/ci-runners.sh
+source "$ROOT/scripts/ci/tests/fixtures/ci-runners.sh"
 readonly SELECTOR="$ROOT/scripts/ci/setup/select-protected-rust-cache.sh"
 readonly FETCHER_NAME='fetch-openbao-sccache-r2-protected-credentials.sh'
 readonly DEPLOY_WORKFLOW="$ROOT/.gitea/workflows/deploy-dev.yaml"
@@ -159,7 +161,7 @@ rm -f -- "$work/runner/existing.aws"
 readonly -a protected_markers=(
   'select-protected-rust-cache\.sh'
   "${FETCHER_NAME//./\\.}"
-  'example-ci-cache-protected(?!-workspace)'
+  'SCCACHE_BUCKET: \$\{\{ vars\.CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED'
   'protected/codewire/(?!workspace/)'
   'sccache-r2/protected(?!-workspace)'
 )
@@ -183,11 +185,12 @@ for job_header in '  build-support-amd64:' '  build-support-arm64:'; do
   [[ -n "$support_job" ]] || fail "Support images lacks its build job${job_header%:}"
   grep -Fq 'select-protected-rust-cache.sh' <<<"$support_job" ||
     fail "support build job${job_header%:} does not select the protected compiler cache"
-  grep -Exq '    runs-on: ci-protected(-metal)?' <<<"$support_job" ||
+  grep -Fxq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$support_job" ||
     fail 'protected compiler cache is reachable outside the protected runner tier'
   grep -Fxq '      OPENBAO_ROLE: codewire-source-support-publisher' <<<"$support_job" ||
     fail 'support cache job is not the support publisher identity'
-  grep -Fxq '          SCCACHE_BUCKET: example-ci-cache-protected' <<<"$support_job" ||
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  grep -Fxq '          SCCACHE_BUCKET: ${{ vars.CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED }}' <<<"$support_job" ||
     fail "support build job${job_header%:} does not name the protected bucket"
   grep -Fq 'shred -u' <<<"$support_job" || fail "support build job${job_header%:} does not remove the credential"
 done
@@ -212,8 +215,7 @@ for job_header in "${protected_cache_jobs[@]}"; do
   [[ -n "$build_job" ]] || fail "Deploy Dev lacks the protected build job${job_header%:}"
   grep -Fq 'select-protected-rust-cache.sh' <<<"$build_job" ||
     fail "Deploy Dev build job${job_header%:} does not select the protected compiler cache"
-  # ci-protected-metal is the protected tier's metal capability.
-  grep -Exq '    runs-on: ci-protected(-metal)?' <<<"$build_job" ||
+  grep -Fxq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$build_job" ||
     fail 'protected compiler cache is reachable outside the protected runner tier'
   grep -Fxq '      OPENBAO_ROLE: codewire-source-dev-publisher' <<<"$build_job" ||
     fail 'protected compiler cache job is not the Dev publisher identity'
@@ -247,7 +249,7 @@ done
 for protected in \
     scripts/ci/setup/select-protected-rust-cache.sh \
     "scripts/ci/setup/$FETCHER_NAME"; do
-  for marker in example-ci-cache-untrusted untrusted/codewire sccache-r2/untrusted \
+  for marker in CODEWIRE_CI_SCCACHE_BUCKET_UNTRUSTED untrusted/codewire sccache-r2/untrusted \
       codewire-source-ci-sccache-r2; do
     if grep -Fq -- "$marker" "$ROOT/$protected"; then
       fail "$protected references the untrusted compiler cache ($marker)"

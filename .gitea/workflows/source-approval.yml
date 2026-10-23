@@ -16,7 +16,7 @@ on:
 jobs:
   source-approval: # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the disposable runner and network policy enforce no write.
     name: Supply-chain scan
-    runs-on: ci-lite
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     timeout-minutes: 15
     steps:
       - name: Select exact source and trusted policy base
@@ -121,7 +121,7 @@ jobs:
         id: advisories
         shell: bash
         env:
-          # infra#1630: every ci-lite pod mounts the hourly supplychain
+          # infra#1630: every untrusted light runner pod mounts the hourly supplychain
           # advisory bundle read-only here. A bundle that is absent, altered
           # or more than 24 hours old fails the scan closed. Codewire takes
           # only its IOC and OSM data; OSV stays live against api.osv.dev.

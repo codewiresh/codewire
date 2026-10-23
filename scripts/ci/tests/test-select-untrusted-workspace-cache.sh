@@ -40,6 +40,7 @@ select_cache() {
     FETCH_CALLS="$work/fetch-calls" OPENBAO_SCCACHE_FETCHER="$work/fetch" \
     CODEWIRE_SCCACHE_REQUEST="$rust" CODEWIRE_BUILDKIT_CACHE_REQUEST="$layer" \
     CODEWIRE_R2_CACHE_ENDPOINT="${TEST_ENDPOINT-https://r2-cache.example.invalid}" \
+    CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED="${TEST_BUCKET-example-ci-cache-protected}" \
     "$selector" "$file"
 }
 for rust in disabled local auto; do
@@ -98,6 +99,14 @@ grep -Fq CODEWIRE_R2_CACHE_ENDPOINT "$work/output"
 if TEST_ENDPOINT=https://r2-cache.example.invalid/bucket \
     select_cache auto auto "$credential_work/runner/malformed.aws" >/dev/null 2>&1; then exit 1; fi
 [[ ! -s "$work/fetch-calls" ]]
+# A configured endpoint without its bucket stops before any credential and
+# names the variable: the selector never guesses a bucket.
+: >"$work/env"
+if TEST_BUCKET='' select_cache auto auto "$credential_work/runner/no-bucket.aws" >"$work/output" 2>&1; then
+  exit 1
+fi
+grep -Fq CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED "$work/output"
+[[ ! -s "$work/fetch-calls" && ! -s "$work/env" && ! -e "$credential_work/runner/no-bucket.aws" ]]
 : >"$work/env"; : >"$work/fetch-calls"
 if select_cache disabled invalid "$credential_work/runner/invalid.aws" >/dev/null 2>&1; then exit 1; fi
 [[ ! -s "$work/env" && ! -s "$work/fetch-calls" ]]

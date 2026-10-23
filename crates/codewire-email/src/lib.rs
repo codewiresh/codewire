@@ -44,12 +44,10 @@ pub const RESEND_API_KEY_ENV: &str = "RESEND_API_KEY";
 
 /// Environment variable holding the From header for the legacy Resend sender:
 /// one mailbox, optionally with a display name (`Codewire <hello@example.com>`).
-/// Its domain must be verified in the Resend account. Unset or empty selects
-/// [`DEFAULT_RESEND_FROM`].
+/// Its domain must be verified in the Resend account. It has no default: when
+/// [`RESEND_API_KEY_ENV`] enables Resend, an unset or empty value refuses
+/// startup (docs/CONFIGURATION.md).
 pub const RESEND_FROM_ENV: &str = "CODEWIRE_RESEND_FROM";
-
-/// The legacy Resend sender used when [`RESEND_FROM_ENV`] is unset.
-pub const DEFAULT_RESEND_FROM: &str = "Codewire <ops@example.invalid>";
 
 const SESSION_TOKEN_ENV: &str = "AWS_SESSION_TOKEN";
 const DISABLE_IMDS_ENV: &str = "AWS_EC2_METADATA_DISABLED";
@@ -677,12 +675,16 @@ fn ensure_resend_success(status: reqwest::StatusCode) -> Result<()> {
     }
 }
 
-/// Returns the Resend From header: the configured value, or the default when
-/// unset or empty. It is one plain mailbox, or a display name followed by one
-/// mailbox in angle brackets.
+/// Returns the configured Resend From header. It is one plain mailbox, or a
+/// display name followed by one mailbox in angle brackets. There is no
+/// built-in sender: unset or empty is a configuration error.
 fn resend_sender(value: Option<&str>) -> Result<String> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(DEFAULT_RESEND_FROM.to_owned());
+        bail!(
+            "{RESEND_FROM_ENV} is required when {RESEND_API_KEY_ENV} is set; \
+             set it to a sender whose domain is verified in the Resend account \
+             (see docs/CONFIGURATION.md)"
+        );
     };
     let invalid = || {
         anyhow::anyhow!(
@@ -744,7 +746,7 @@ mod tests {
     #[test]
     fn inactive_ses_marker_leaves_the_legacy_provider_available() {
         assert_eq!(
-            EmailConfig::parse(None, Some("hello@codewire.sh"), Some("eu-west-1")).unwrap(),
+            EmailConfig::parse(None, Some("hello@example.invalid"), Some("eu-west-1")).unwrap(),
             None
         );
         assert!(
@@ -756,7 +758,8 @@ mod tests {
 
     #[test]
     fn enabled_sender_requires_an_explicit_region() {
-        let error = EmailConfig::parse(Some("true"), Some("hello@codewire.sh"), None).unwrap_err();
+        let error =
+            EmailConfig::parse(Some("true"), Some("hello@example.invalid"), None).unwrap_err();
         assert!(error.to_string().contains(REGION_ENV));
     }
 
@@ -765,12 +768,12 @@ mod tests {
         assert_eq!(
             EmailConfig::parse(
                 Some("true"),
-                Some("hello@codewire-dev.sh"),
+                Some("hello@example.invalid"),
                 Some("eu-west-1"),
             )
             .unwrap(),
             Some(EmailConfig {
-                from: "hello@codewire-dev.sh".to_owned(),
+                from: "hello@example.invalid".to_owned(),
                 region: "eu-west-1".to_owned(),
             })
         );
@@ -781,13 +784,18 @@ mod tests {
         assert!(
             EmailConfig::parse(
                 Some("true"),
-                Some("Codewire <hello@codewire.sh>"),
+                Some("Codewire <hello@example.invalid>"),
                 Some("eu-west-1"),
             )
             .is_err()
         );
         assert!(
-            EmailConfig::parse(Some("true"), Some("hello@codewire.sh"), Some("eu-west_1")).is_err()
+            EmailConfig::parse(
+                Some("true"),
+                Some("hello@example.invalid"),
+                Some("eu-west_1")
+            )
+            .is_err()
         );
     }
 
@@ -861,7 +869,7 @@ mod tests {
     #[test]
     fn ses_payload_uses_the_send_email_v2_shape() {
         let payload = ses_email_payload(
-            "hello@codewire-dev.sh",
+            "hello@example.invalid",
             "owner@example.com",
             "Review your Codewire request",
             "<p>review</p>",
@@ -869,7 +877,7 @@ mod tests {
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
 
-        assert_eq!(value["FromEmailAddress"], "hello@codewire-dev.sh");
+        assert_eq!(value["FromEmailAddress"], "hello@example.invalid");
         assert_eq!(
             value["Destination"]["ToAddresses"],
             serde_json::json!(["owner@example.com"])
@@ -890,7 +898,7 @@ mod tests {
         let request = resend_email_request(
             &client,
             "re_test_credential",
-            DEFAULT_RESEND_FROM,
+            "Codewire <hello@example.invalid>",
             "owner@example.com",
             "Review your Codewire request",
             "<p>review</p>",
@@ -904,16 +912,22 @@ mod tests {
         assert_eq!(authorization, "Bearer re_test_credential");
         let body = request.body().unwrap().as_bytes().unwrap();
         let value: serde_json::Value = serde_json::from_slice(body).unwrap();
-        assert_eq!(value["from"], DEFAULT_RESEND_FROM);
+        assert_eq!(value["from"], "Codewire <hello@example.invalid>");
         assert_eq!(value["to"], serde_json::json!(["owner@example.com"]));
         assert_eq!(value["subject"], "Review your Codewire request");
         assert_eq!(value["html"], "<p>review</p>");
     }
 
     #[test]
-    fn legacy_resend_sender_defaults_and_accepts_one_configured_mailbox() {
-        assert_eq!(resend_sender(None).unwrap(), DEFAULT_RESEND_FROM);
-        assert_eq!(resend_sender(Some(" ")).unwrap(), DEFAULT_RESEND_FROM);
+    fn legacy_resend_sender_is_required_and_accepts_one_configured_mailbox() {
+        for missing in [None, Some(""), Some(" ")] {
+            let error = resend_sender(missing).unwrap_err().to_string();
+            assert!(error.contains(RESEND_FROM_ENV), "{missing:?}: {error}");
+            assert!(
+                error.contains("docs/CONFIGURATION.md"),
+                "{missing:?}: {error}"
+            );
+        }
         assert_eq!(
             resend_sender(Some("Example <mail@example.com>")).unwrap(),
             "Example <mail@example.com>"

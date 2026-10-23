@@ -24,7 +24,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] This job has no OIDC or secret; its job token only reads this repository's Actions records.
     name: Collect main-push start latency
     # The pool the main-push planner uses for its Actions API reads.
-    runs-on: ci-lite
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     timeout-minutes: 20
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

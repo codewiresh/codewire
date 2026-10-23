@@ -1,8 +1,8 @@
 //! Pure sandbox runtime-profile and resource policy.
 
 use super::{
-    CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, DEFAULT_DIND_IMAGE, DEFAULT_WORKSPACE_STORAGE_CLASS,
-    TemplateOpts,
+    CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, DEFAULT_DIND_IMAGE, TemplateOpts,
+    WORKSPACE_STORAGE_CLASS_ENV,
 };
 
 pub const RUNTIME_CLASS_RUNC: &str = "runc";
@@ -148,12 +148,29 @@ pub(super) fn workspace_storage_class(opts: &TemplateOpts) -> &str {
     if opts.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL {
         return CONFIDENTIAL_WORKSPACE_STORAGE_CLASS;
     }
-    let storage_class = opts.workspace_storage_class.trim();
-    if storage_class.is_empty() {
-        DEFAULT_WORKSPACE_STORAGE_CLASS
-    } else {
-        storage_class
+    opts.workspace_storage_class.trim()
+}
+
+/// Validates the configured commodity workspace StorageClass at startup. There
+/// is no built-in class: every profile except confidential, which always uses
+/// [`CONFIDENTIAL_WORKSPACE_STORAGE_CLASS`], must name one.
+pub fn required_workspace_storage_class(profile: &str, value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        if profile.trim() == RUNTIME_PROFILE_CONFIDENTIAL {
+            return Ok(String::new());
+        }
+        return Err(format!(
+            "{WORKSPACE_STORAGE_CLASS_ENV} must name the StorageClass for workspace volumes; \
+             it has no default (see docs/CONFIGURATION.md)"
+        ));
     }
+    if value.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "{WORKSPACE_STORAGE_CLASS_ENV} must be one StorageClass name"
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 pub(super) fn docker_data_size_gib(disk_gib: i64) -> i64 {

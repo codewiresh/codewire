@@ -18,11 +18,17 @@ trust=protected-read
 : "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"
 : "${RUNNER_TEMP:?Forgejo runner temporary directory is required}"
 
-bucket=example-ci-cache-protected prefix=protected/codewire/v1
+# The protected cache bucket, from site configuration with no default.
+bucket="${CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED:-}" prefix=protected/codewire/v1
 # The S3 endpoint of the CI cache buckets. Unset, auto modes use local caches.
 endpoint="${CODEWIRE_R2_CACHE_ENDPOINT:-}"
 [[ -z "$endpoint" || "$endpoint" =~ ^https://[A-Za-z0-9.-]+/?$ ]] || {
   echo 'CODEWIRE_R2_CACHE_ENDPOINT must be an https origin with no path' >&2
+  exit 2
+}
+# A configured cache endpoint needs its bucket; never guess one.
+[[ -z "$endpoint" || "$bucket" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || {
+  echo 'CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED: set to the protected CI compiler-cache bucket (docs/dev/CI-CONFIGURATION.md)' >&2
   exit 2
 }
 

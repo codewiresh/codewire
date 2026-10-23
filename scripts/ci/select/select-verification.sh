@@ -728,6 +728,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-kind-runtime-images.sh|\
       scripts/ci/tests/test-kind-watch-github-app.sh|\
       scripts/ci/tests/fixtures/cargo-cache-df.sh|\
+      scripts/ci/tests/fixtures/ci-runners.sh|scripts/ci/tests/ci_runner_fixtures.py|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
       scripts/ci/tests/test-integration-lane.py|\
       scripts/ci/verify/resolve-cargo-target-dir.sh|\

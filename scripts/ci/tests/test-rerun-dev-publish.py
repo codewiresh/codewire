@@ -25,6 +25,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts/ci/plan/tests"))
 import verdict_fixtures as fx  # noqa: E402
+sys.path.insert(0, str(ROOT / "scripts/ci/tests"))
+import ci_runner_fixtures as runners  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location(
     "codewire_ci_rerun_dev_publish", ROOT / "scripts/ci/deploy/rerun-dev-publish.py"
@@ -277,7 +279,7 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual(users, {"deliver-to-dev"})
         job = self.jobs["deliver-to-dev"]
         self.assertEqual(job["needs"], ["verification-selection", "required-verification"])
-        self.assertEqual(job["runs-on"], "ci-lite")
+        self.assertEqual(job["runs-on"], runners.UNTRUSTED_LIGHT)
         self.assertLessEqual(job["timeout-minutes"], 15)
         self.assertNotIn("enable-openid-connect", job)
         steps = [step for step in job["steps"] if "run" in step]

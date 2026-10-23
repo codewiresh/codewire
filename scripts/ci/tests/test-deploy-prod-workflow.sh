@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
+# shellcheck source=scripts/ci/tests/fixtures/ci-runners.sh
+source "$ROOT/scripts/ci/tests/fixtures/ci-runners.sh"
 readonly WORKFLOW="$ROOT/.gitea/workflows/deploy-prod.yaml"
 
 fail() {
@@ -122,7 +124,7 @@ for platform in amd64 arm64; do
     arm64) next_job=publish-support-release-images ;;
   esac
   platform_job="$(sed -n "/^  build-support-$platform:/,/^  $next_job:/p" "$WORKFLOW")"
-  for expected in '    runs-on: ci-protected' '    timeout-minutes: 120' \
+  for expected in "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" '    timeout-minutes: 120' \
       '    needs: [release-selection, support-pair-selection]' \
       "    if: \${{ needs.support-pair-selection.outputs.build == 'true' }}" \
       '          CODEWIRE_SOURCE_DIR: .release-source' \
@@ -265,7 +267,7 @@ grep -Fq "    if: \${{ always() && needs.release-selection.result == 'success' &
 # shellcheck disable=SC2016
 grep -Fq 'run: scripts/ci/deploy/dispatch-deploy-prod.sh "$RELEASE_TAG"' <<<"$dispatch_job" ||
   fail "production dispatch sends more than the signed source tag"
-grep -Fq '    runs-on: ci-protected' <<<"$dispatch_job" ||
+grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$dispatch_job" ||
   fail "production dispatch does not use the protected CI tier"
 # The dispatch waits for promote-prod's verdict, so a green release run means
 # Production accepted the release (#2892). It holds one protected runner while
@@ -408,6 +410,6 @@ expected = "${{ (inputs.in_job_build == true || inputs.in_job_build == 'true') &
 jobs = document["jobs"]
 assert jobs["build-support-amd64"]["env"]["CODEWIRE_IN_JOB_BUILD"] == expected
 assert [name for name, job in jobs.items() if "CODEWIRE_IN_JOB_BUILD" in (job.get("env") or {})] == ["build-support-amd64"]
-assert all(job.get("runs-on") != "ci-protected-metal" for job in jobs.values())
+assert all(str(job.get("runs-on", "")).startswith("${{ vars.CODEWIRE_CI_RUNNER_") for job in jobs.values())
 PY
 printf '[test-deploy-prod-workflow] signed-tag publication and dispatch contract passed\n'

@@ -342,16 +342,23 @@ impl SandboxWorkerCfg {
                 )
             })
         };
+        let runtime_profile = std::env::var("SANDBOX_RUNTIME_PROFILE").unwrap_or_default();
+        let workspace_storage_class = crate::sandbox::template::required_workspace_storage_class(
+            &runtime_profile,
+            &std::env::var(crate::sandbox::template::WORKSPACE_STORAGE_CLASS_ENV)
+                .unwrap_or_default(),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         Self {
             session_secret: getenv("SESSION_SECRET", ""),
             sandbox_namespace,
             credential_runtime,
             daemon_image: getenv(crate::sandbox::runtime_images::DAEMON_IMAGE_ENV, ""),
             dind_image: getenv("SANDBOX_DIND_IMAGE", ""),
-            runtime_profile: std::env::var("SANDBOX_RUNTIME_PROFILE").unwrap_or_default(),
+            runtime_profile,
             docker_mode: getenv("SANDBOX_DOCKER_MODE", "profile-default"),
             allow_diagnostic_runtime: getenv("SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME", "false") == "true",
-            workspace_storage_class: getenv("SANDBOX_WORKSPACE_STORAGE_CLASS", ""),
+            workspace_storage_class,
             network_policy_management: getenv("SANDBOX_NETWORK_POLICY_MANAGEMENT", "Managed"),
             dind_enabled: getenv("SANDBOX_DIND_ENABLED", "false") == "true",
             kata_agent_policy_enabled: getenv("SANDBOX_KATA_AGENT_POLICY_ENABLED", "false")

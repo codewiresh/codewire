@@ -375,7 +375,7 @@ mod enabled {
                 )
                 .env("SANDBOX_RUNTIME_PROFILE", "runc")
                 .env("SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME", "true")
-                .env("SANDBOX_WORKSPACE_STORAGE_CLASS", "example-volumes")
+                .env("SANDBOX_WORKSPACE_STORAGE_CLASS", "standard")
                 .env("SANDBOX_NETWORK_POLICY_MANAGEMENT", "Managed")
                 .env("SANDBOX_DIND_ENABLED", "false")
                 .env("SIDECAR_READY_TIMEOUT_SECS", "120")

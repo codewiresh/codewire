@@ -37,7 +37,7 @@ jobs:
   release-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Verify canonical release tag
-    runs-on: ci-lite
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     outputs:
       release_tag: ${{ steps.select.outputs.release_tag }}
       source_sha: ${{ steps.select.outputs.source_sha }}
@@ -108,7 +108,7 @@ jobs:
   build-daemon-image:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Alias Existing Daemon Image
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     needs: [release-selection]
     outputs:
       source_sha: ${{ steps.build.outputs.source_sha }}
@@ -140,7 +140,7 @@ jobs:
   build-derp:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Alias Existing DERP Relay Image
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     needs: [release-selection]
     outputs:
       source_sha: ${{ steps.build.outputs.source_sha }}
@@ -172,7 +172,7 @@ jobs:
   build-services-image:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Alias Existing Rust Services Image
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     needs: [release-selection]
     outputs:
       source_sha: ${{ steps.build.outputs.source_sha }}
@@ -204,7 +204,7 @@ jobs:
   build-mesh-image:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Alias Existing Hosted Mesh Image
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     needs: [release-selection]
     outputs:
       source_sha: ${{ steps.build.outputs.source_sha }}
@@ -236,7 +236,7 @@ jobs:
   build-dashboard-image:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Alias Existing Dashboard Image
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     needs: [release-selection]
     outputs:
       source_sha: ${{ steps.build.outputs.source_sha }}
@@ -273,7 +273,7 @@ jobs:
   support-pair-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Select the release support pair
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     timeout-minutes: 15
     needs: [release-selection]
     outputs:
@@ -292,7 +292,7 @@ jobs:
   build-support-amd64:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Build the release support pair (linux/amd64)
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     timeout-minutes: 120
     needs: [release-selection, support-pair-selection]
     if: ${{ needs.support-pair-selection.outputs.build == 'true' }}
@@ -351,7 +351,7 @@ jobs:
   build-support-arm64:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Build the release support pair (linux/arm64)
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     timeout-minutes: 120
     needs: [release-selection, support-pair-selection]
     if: ${{ needs.support-pair-selection.outputs.build == 'true' }}
@@ -392,7 +392,7 @@ jobs:
     # protected provenance and an SBOM each) before it tags or reports a
     # candidate. A reused pair must already exist; this job never builds.
     name: Join and Publish Exact Support Release Images
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     timeout-minutes: 30
     needs: [release-selection, support-pair-selection, build-support-amd64, build-support-arm64]
     if: ${{ always() && needs.release-selection.result == 'success' && needs.support-pair-selection.result == 'success' && (needs.support-pair-selection.outputs.build == 'false' || (needs.build-support-amd64.result == 'success' && needs.build-support-arm64.result == 'success')) }}
@@ -470,7 +470,7 @@ jobs:
   publish-runtime-images:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Validate and Publish Exact Runtime Bundle
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     needs:
       - release-selection
       - build-daemon-image
@@ -570,7 +570,7 @@ jobs:
   dispatch-deploy-prod:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Dispatch Signed Tag to Deploy
-    runs-on: ci-protected
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     # The dispatch waits up to 30 minutes for promote-prod's verdict.
     timeout-minutes: 40
     needs:

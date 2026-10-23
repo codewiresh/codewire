@@ -98,7 +98,12 @@ case "$sccache_mode" in
     esac
     # Every publishing lane writes the one CI cache that only main-only
     # builders write (infra#1544).
-    if [ "$SCCACHE_BUCKET" != example-ci-cache-protected ]; then
+    protected_bucket="${CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED:-}"
+    if [ -z "$protected_bucket" ]; then
+      echo "CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED: set to the protected CI compiler-cache bucket (docs/dev/CI-CONFIGURATION.md)" >&2
+      exit 2
+    fi
+    if [ "$SCCACHE_BUCKET" != "$protected_bucket" ]; then
       echo 'Published images may use only the protected sccache bucket' >&2
       exit 2
     fi

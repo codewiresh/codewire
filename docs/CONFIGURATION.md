@@ -54,3 +54,30 @@ CODEWIRE_APPROVED_IMAGE_REGISTRIES=ghcr.io/codewiresh/,docker.io/library/
 The process-level harnesses (`scripts/dev/dev-stack.sh` and the integration and
 rehearsal runners) use `registry.example.invalid`, a reserved name that never
 resolves.
+
+## Transactional email
+
+The IdP and billing send verification, access and receipt email. SES is
+selected only by its workload-specific `CODEWIRE_SES_ENABLED=true` marker,
+delivered with the SES credential projection. Without that marker, a
+`RESEND_API_KEY` in the workload's environment selects the Resend sender.
+With neither, the workload starts with email delivery disabled.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `CODEWIRE_SES_FROM` | Required when SES is enabled | The SES sender: one plain mailbox, verified as an SES identity. | `hello@example.com` |
+| `CODEWIRE_SES_REGION` | Required when SES is enabled | The AWS region of that SES identity. | `eu-west-1` |
+| `CODEWIRE_RESEND_FROM` | Required when `RESEND_API_KEY` is set and SES is not enabled | The Resend `From` header: one mailbox, optionally with a display name. Its domain must be verified in the Resend account. There is no default: unset or empty, the IdP and billing refuse to start. | `Example <hello@example.com>` |
+
+The Kind overlays provide neither credential, so local email delivery stays
+disabled and needs no sender.
+
+## Workspace storage
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `SANDBOX_WORKSPACE_STORAGE_CLASS` | Required by orchestration, except under the `confidential` runtime profile | The StorageClass of every `commodity` workspace volume. There is no default: empty, orchestration refuses to start. A disk resize expands the volume only when this class allows volume expansion. The `confidential` profile always uses `longhorn-confidential`. | `standard` |
+
+Base `config.env` leaves it empty, so every overlay sets it. The Kind
+overlays (`deployments/k8s/overlays/local-kind*` and `tests/e2e/kind`) use
+Kind's built-in `standard` class.

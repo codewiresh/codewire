@@ -11,6 +11,7 @@ export CODEWIRE_IMAGE_REGISTRY=registry.example.invalid
 export GITHUB_SERVER_URL=https://forgejo-internal.tail.example.invalid/
 export CODEWIRE_FORGEJO_INTERNAL_URL=https://forgejo-internal.tail.example.invalid
 export CODEWIRE_SOURCE_URL=https://git.example.invalid/codewire/codewire.git
+export CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED=example-ci-cache-protected
 if [[ "${PYTHONDONTWRITEBYTECODE:-}" != 1 ]]; then
   # CI's release step sets this. Without it, a local Python can write
   # __pycache__ into the CW source capsule, which the producer then refuses.
@@ -1697,7 +1698,7 @@ for mode in r2 auto invalid; do
 done
 [[ "$(wc -l <"$FAKE_FETCH_CALLS")" == "$fetch_calls_before" ]] || fail 'layer mode rejection reached protected credentials'
 if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
-    SCCACHE_BUCKET=codewire-ci SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+    SCCACHE_BUCKET=example-ci-cache SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
     CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/v1 \
     "$BUILDER" workspace images/workspace/Dockerfile . >"$work/compiler-rejection.out" 2>&1; then
   fail 'published workspace accepted an untrusted compiler prefix'
@@ -1715,6 +1716,17 @@ for image in 'workspace images/workspace/Dockerfile' 'services deployments/docke
   grep -Fq 'Published images may use only the protected sccache bucket' "$work/lane-rejection.out" ||
     fail "published image ${image%% *} rejection was not attributable"
 done
+# The protected bucket is site configuration with no default: unset, an r2
+# build stops and names the variable.
+if CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED='' CODEWIRE_SCCACHE_MODE=r2 \
+    CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
+    SCCACHE_BUCKET=example-ci-cache-protected SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+    CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
+    "$BUILDER" workspace images/workspace/Dockerfile . >"$work/no-bucket.out" 2>&1; then
+  fail 'a published image built without the protected bucket variable'
+fi
+grep -Fq 'CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED' "$work/no-bucket.out" ||
+  fail 'the missing protected bucket variable was not named'
 
 # Exercise old release sources and explicit cold mode through the real argument
 # construction. Only the synthetic registry manifests are removed between runs.

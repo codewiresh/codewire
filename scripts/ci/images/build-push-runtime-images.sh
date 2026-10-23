@@ -20,7 +20,6 @@ source "$ROOT/scripts/ci/setup/trusted-buildkit.sh"
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 readonly PROVENANCE_BUILDER_ID="$PIPELINE_BUILDER_ID"
 readonly PUBLISH_REGISTRY_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
-readonly PROTECTED_SCCACHE_BUCKET='example-ci-cache-protected'
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
@@ -56,7 +55,11 @@ case "${CODEWIRE_SCCACHE_MODE:-local}" in
         exit 2
         ;;
     esac
-    if [ "${SCCACHE_BUCKET:-}" != "$PROTECTED_SCCACHE_BUCKET" ] \
+    if [ -z "${CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED:-}" ]; then
+      echo 'CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED: set to the protected CI compiler-cache bucket (docs/dev/CI-CONFIGURATION.md)' >&2
+      exit 2
+    fi
+    if [ "${SCCACHE_BUCKET:-}" != "$CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED" ] \
         || [ "${SCCACHE_ENDPOINT:-}" != "${CODEWIRE_R2_CACHE_ENDPOINT:?set to the CI cache R2 endpoint URL}" ]; then
       echo 'Protected runtime builds may use only the protected R2 compiler-cache bucket' >&2
       exit 2

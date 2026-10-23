@@ -16,7 +16,6 @@ resources:
   - idp-signing-keks.yaml
   - postgres.yaml
   - dashboard.yaml
-  - storage-class.yaml
 
 # The non-promotable Kind credential fixture provides this fixed synthetic App
 # itself. Production and Dev continue to receive only their deployment-owned
