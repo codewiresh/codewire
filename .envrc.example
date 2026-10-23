@@ -26,6 +26,9 @@
 # export CODEWIRE_R2_CACHE_ENDPOINT=https://r2-cache.example.invalid
 # Forgejo base URL for scripts that call its API outside CI.
 # export GITHUB_SERVER_URL=https://git.example.invalid
+# owner/name of the public repository on that Forgejo the local VM journeys
+# clone at a pinned commit: a mirror of github.com/noeljackson/supplychain.
+# export CODEWIRE_FORGEJO_FIXTURE_REPOSITORY=example/supplychain
 
 # Hosted cluster bindings for the Dev and Production operator scripts. These
 # have no default: the source tree carries no live cluster value (#1383).

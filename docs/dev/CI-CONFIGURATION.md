@@ -58,18 +58,24 @@ names the variable. It never falls back to a built-in site.
 
 ## Local runs
 
-Scripts read the same names outside CI. A workstation sets these two in
+Scripts read the same names outside CI. A workstation sets these in
 `~/.config/codewire/env` (or an untracked `.envrc`; see `.envrc.example`):
 
 ```sh
 export CODEWIRE_IMAGE_REGISTRY=registry.example.com
 export GITHUB_SERVER_URL=https://forgejo.example.com
+export CODEWIRE_FORGEJO_FIXTURE_REPOSITORY=example/supplychain
 ```
 
 - `GITHUB_SERVER_URL` is the Forgejo base URL. A release tag push's receipt
   check needs it (without it the push falls back to full local verification),
   and so do the CI measures and the local VM journeys that clone a
   Forgejo-hosted source.
+- `CODEWIRE_FORGEJO_FIXTURE_REPOSITORY` is the `owner/name` of that
+  Forgejo-hosted source: a public repository on the same instance that holds
+  the pinned commit the journeys check out. Mirror the public supply-chain
+  scanner repository, `https://github.com/noeljackson/supplychain`, to get it.
+  The Linux native smoke and the macOS local VM inputs journey need it.
 - `CODEWIRE_IMAGE_REGISTRY` is needed by the Dev and confidential smokes and
   Kind's sealed CI inputs. A local Kind loop that builds its own images does
   not need it.

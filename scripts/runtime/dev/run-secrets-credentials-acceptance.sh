@@ -355,6 +355,7 @@ start_fixed_child() {
       start_isolated_child \
         XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
         GITHUB_SERVER_URL="${GITHUB_SERVER_URL:-}" \
+        CODEWIRE_FORGEJO_FIXTURE_REPOSITORY="${CODEWIRE_FORGEJO_FIXTURE_REPOSITORY:-}" \
         "$ROOT/scripts/ci/verify/smoke-native-local-environment.sh" \
         --cw-bin "$ACCEPTANCE_SYNTHETIC_CW_BIN" \
         --mesh-bin "$ACCEPTANCE_NATIVE_MESH_BIN" \

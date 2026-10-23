@@ -2,8 +2,9 @@
 # Request the Dev-only source-to-Deploy Authorized Integration JWT and write it
 # directly to one new private file. The integration audience is an identifier,
 # not a credential; keeping it here gives both consumers one exact contract.
-# Its paired declaration is infra's
-# clusters/system-cluster/access/forgejo-codewire-source-deploy-authorized-integration.json.
+# Its paired declaration is the system cluster's
+# access/forgejo-codewire-source-deploy-authorized-integration.json in the
+# infrastructure repository.
 set -euo pipefail
 
 fail() {

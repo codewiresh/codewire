@@ -185,8 +185,10 @@ shell, PTY behavior, saved output and nonzero status,
 cached-runtime restart after the installed artifact lock advances, offline
 disk/CPU/memory resize, supervisor crash recovery, Mesh attachment and typed
 transport-loss recovery, and journaled exact deletion cleanup.
-GITHUB_SERVER_URL names the Forgejo instance whose public supply-chain
-scanner repository the smoke clones at its pinned commit.
+GITHUB_SERVER_URL names the Forgejo instance, and
+CODEWIRE_FORGEJO_FIXTURE_REPOSITORY (owner/name) the public repository on it
+that the smoke clones at its pinned commit: a mirror of the public supply-chain
+scanner repository, https://github.com/noeljackson/supplychain.
 
 With --managed-credential-broker, it instead runs the focused protected-store
 product proof. That mode requires a specially featured cw binary named exactly
@@ -405,10 +407,13 @@ if (( MANAGED_AGENT_UPDATE_RUNTIME_SEEN + MANAGED_AGENT_UPDATE_IMAGE_SEEN + MANA
   MANAGED_AGENT_UPDATE=1
 fi
 
-# The Forgejo-hosted repository fixture is the public supply-chain scanner
-# repository on the forge GITHUB_SERVER_URL names, pinned to GITEA_COMMIT.
+# The Forgejo-hosted repository fixture is CODEWIRE_FORGEJO_FIXTURE_REPOSITORY on
+# the forge GITHUB_SERVER_URL names, pinned to GITEA_COMMIT.
 [[ -n "${GITHUB_SERVER_URL:-}" ]] || die 'GITHUB_SERVER_URL: set to the Forgejo base URL'
-GITEA_SOURCE="${GITHUB_SERVER_URL%/}/supplychain.git"
+[[ "${CODEWIRE_FORGEJO_FIXTURE_REPOSITORY:-}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ &&
+   "$CODEWIRE_FORGEJO_FIXTURE_REPOSITORY" != *.git ]] ||
+  die 'CODEWIRE_FORGEJO_FIXTURE_REPOSITORY: set to owner/name of the public Forgejo repository holding GITEA_COMMIT'
+GITEA_SOURCE="${GITHUB_SERVER_URL%/}/${CODEWIRE_FORGEJO_FIXTURE_REPOSITORY}.git"
 readonly GITEA_SOURCE
 
 for tool in awk base64 cat chmod cp dirname e2fsck find findmnt git id jq ln mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do

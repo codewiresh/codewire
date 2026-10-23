@@ -92,11 +92,13 @@ class CollectorFailure(RuntimeError):
     """A value-blind collector failure."""
 
 
-def load_dispatcher():
-    spec = importlib.util.spec_from_file_location(
-        "forgejo_start_latency_dispatcher",
-        ROOT / "clusters/system-cluster/infrastructure/forgejo-runners/dispatcher.py",
-    )
+def load_dispatcher(environ: dict[str, str]):
+    # Only the infrastructure repository has the runner dispatcher the placement
+    # join needs; FORGEJO_RUNNER_DISPATCHER names that checkout's dispatcher.py.
+    path = environ.get("FORGEJO_RUNNER_DISPATCHER", "")
+    if not path:
+        raise CollectorFailure("FORGEJO_RUNNER_DISPATCHER must name the runner dispatcher.py")
+    spec = importlib.util.spec_from_file_location("forgejo_start_latency_dispatcher", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -596,7 +598,7 @@ def collect(arguments, environ, transport_factory=None) -> list[dict]:
     if since is None or until is None or not since < until or until - since > MAX_WINDOW:
         raise CollectorFailure("window must be ordered, zoned and at most 31 days")
     placements = load_placements(arguments.placements) if arguments.placements else {}
-    dispatcher = load_dispatcher() if placements else None
+    dispatcher = load_dispatcher(environ) if placements else None
     factory = (lambda token: http_transport(token, api_base(environ))) if transport_factory is None \
         else transport_factory
     forgejo = Forgejo(factory(read_token(arguments.token_file, environ)))

@@ -31,8 +31,10 @@ proves, on this Mac:
 
 The VM, its private root, HOME and throwaway keychain are those of
 test-cli-local-vm-macos.py. Needs network egress for the image pull, the
-repositories and the guest's git. GITHUB_SERVER_URL names the Forgejo instance
-whose public supply-chain scanner repository it clones.
+repositories and the guest's git. GITHUB_SERVER_URL names the Forgejo instance,
+and CODEWIRE_FORGEJO_FIXTURE_REPOSITORY (owner/name) the public repository on it
+that it clones: a mirror of the public supply-chain scanner repository,
+https://github.com/noeljackson/supplychain.
 """
 import argparse
 import importlib.util
@@ -59,7 +61,7 @@ NAME = journey_module.NAME
 IMAGE = journey_module.IMAGE
 COPY_NAME = "copy-proof"
 # The Linux native smoke's pinned repositories and commits. The Forgejo one is
-# the public supply-chain scanner repository on the forge GITHUB_SERVER_URL names.
+# CODEWIRE_FORGEJO_FIXTURE_REPOSITORY on the forge GITHUB_SERVER_URL names.
 GITEA_COMMIT = "bcbae548ab2f4f0e407068aa8717cec341084d7a"
 GITHUB = ("https://github.com/noeljackson/method.git", "93f68ba4abc9f6e222481265b9b759e71d332575")
 
@@ -68,7 +70,11 @@ def gitea_source():
     server = os.environ.get("GITHUB_SERVER_URL", "").rstrip("/")
     if not server:
         raise SystemExit("GITHUB_SERVER_URL: set to the Forgejo base URL")
-    return f"{server}/supplychain.git"
+    repository = os.environ.get("CODEWIRE_FORGEJO_FIXTURE_REPOSITORY", "")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repository) or repository.endswith(".git"):
+        raise SystemExit("CODEWIRE_FORGEJO_FIXTURE_REPOSITORY: set to owner/name of the public "
+                         "Forgejo repository holding GITEA_COMMIT")
+    return f"{server}/{repository}.git"
 
 
 class InputsJourney(journey_module.LocalVmJourney):

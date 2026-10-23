@@ -4410,7 +4410,7 @@ repositories:
   - source: https://github.com/noeljackson/method.git
     revision: 93f68ba4abc9f6e222481265b9b759e71d332575
     destination: /workspace/github
-  - source: https://git.example.invalid/supplychain.git
+  - source: https://git.example.invalid/example/supplychain.git
     revision: bcbae548ab2f4f0e407068aa8717cec341084d7a
     destination: /workspace/gitea
 working_directory: /workspace/github
@@ -4424,7 +4424,7 @@ working_directory: /workspace/github
         assert_eq!(
             resolve_native_workspace(temp.path(), &mut project, None, None, true).unwrap(),
             NativeWorkspace {
-                description: "clone https://github.com/noeljackson/method.git at /workspace/github, clone https://git.example.invalid/supplychain.git at /workspace/gitea".to_owned(),
+                description: "clone https://github.com/noeljackson/method.git at /workspace/github, clone https://git.example.invalid/example/supplychain.git at /workspace/gitea".to_owned(),
                 ..NativeWorkspace::default()
             }
         );

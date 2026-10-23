@@ -18,15 +18,21 @@ keeps its tests, its placement join and its runbook:
 | Source path | `tools/forgejo/commands/forgejo-ci-start-latency` |
 | Source commit | `63fa55f481d494a0bee8081c3702bd8ce20fa2e2` |
 | Source sha256 | `ea24bae8ed934205da6ebcdb923b5a09dc71deb69cf559b05402107488e9ed9f` |
-| Vendored sha256 | `a3c7d3a771afb995e051fcaa52ed486ad4a452567b02f1582566e707ccea9985` |
+| Vendored sha256 | `4261e5e44027a728831d09db02d2b48b10814ea2fa16d9605c65e7409b40d56b` |
 
-The copy differs from the source in two ways. `REPOSITORIES` and the `REPO`
-path pattern allow only `codewire/codewire`; the source also allows the
-infrastructure repository, whose name stays out of this tree, and a Codewire
-job token cannot read it in any case. And the API root comes from
-`GITHUB_SERVER_URL`, which Forgejo sets in every job (`api_base`), instead of a
-fixed host. Everything else, including the entrypoint path shim at the top, is
-byte for byte the source.
+The copy differs from the source in three ways:
+- `REPOSITORIES` and the `REPO` path pattern allow only `codewire/codewire`.
+  The source also allows the infrastructure repository, whose name stays out of
+  this tree, and a Codewire job token cannot read it in any case.
+- The API root comes from `GITHUB_SERVER_URL`, which Forgejo sets in every job
+  (`api_base`), instead of a fixed host.
+- `collect --placements` loads the runner dispatcher from the file
+  `FORGEJO_RUNNER_DISPATCHER` names, in an infrastructure checkout, instead of
+  from a cluster path in the source repository. The workflow joins no
+  placements, so it never needs the variable.
+
+Everything else, including the entrypoint path shim at the top, is byte for
+byte the source.
 
 `forgejo-ci-start-latency.sha256` records the vendored sha256. The workflow
 checks it before collecting, and `scripts/ci/tests/test-select-verification.sh`
