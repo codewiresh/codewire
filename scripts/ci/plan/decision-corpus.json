@@ -69,7 +69,7 @@
       "paths": ["Cargo.toml"],
       "expected": {
         "classification": "changed",
-        "selection_tokens": ["ci_script_tests_omittable", "policy", "policy_shell_omittable", "rust", "rust_curated_locks", "rust_workspace", "transport", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_vmm_guest_probe"],
+        "selection_tokens": ["ci_script_tests", "ci_script_tests_omittable", "policy", "policy_shell_omittable", "rust", "rust_curated_locks", "rust_workspace", "transport", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_vmm_guest_probe"],
         "required_local_mode": "default"
       }
     },

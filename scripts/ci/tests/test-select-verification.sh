@@ -278,6 +278,7 @@ git -C "$graph_repo" init -q
 run_graph_case() {
   local name="$1" expected="$2" cargo_path="$3" output stderr="$TMP/$1.stderr"
   shift 3
+  expected="$(with_ci_script_tests "$expected" "$@")"
   printf '%s\n' "$@" > "$TMP/${name}.paths"
   output="$(cd "$graph_repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
     PATH="${cargo_path:+$cargo_path:}$PATH" GITHUB_EVENT_NAME=pull_request \
@@ -1800,9 +1801,11 @@ run_paths_case unknown pull_request refs/pull/18/head false "$all_product_pr" \
   unexplained/new-surface.txt
 
 # The CI-script tests (#3119 A6) run for their own scripts, workflows and
-# hooks and for the product files they read from the tree. Any other path
-# leaves only the always-on repository rules, and an unclassified one fails
-# closed. Every policy selection says the omission is authoritative.
+# hooks and for the product files they read from the tree, the workspace
+# manifests among them: the live-graph cases above read the crate graph from
+# those (#3225), never from Cargo.lock. Any other path leaves only the
+# always-on repository rules, and an unclassified one fails closed. Every
+# policy selection says the omission is authoritative.
 ci_script_tests_case() {
   local want="$1" path="$2" paths="$TMP/ci-script-tests.paths" selection
   printf '%s\n' "$path" > "$paths"
@@ -1840,6 +1843,9 @@ for ci_script_path in \
     crates/codewire-local-vmm/src/artifact.rs \
     crates/codewire-cw-release/src/local_runtime.rs \
     crates/codewire-workspace-image/src/pin.rs \
+    Cargo.toml \
+    crates/codewire-cli-bin/Cargo.toml \
+    crates/codewire-platform-credentials/Cargo.toml \
     unexplained/new-surface.txt; do
   ci_script_tests_case run "$ci_script_path"
 done

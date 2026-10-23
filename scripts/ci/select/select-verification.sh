@@ -217,10 +217,13 @@ js_audit_scans() {
 # The CI-script tests (policy-ci-script-tests) run for their own scripts,
 # workflows and hooks, and for every product file one of them reads from the
 # tree rather than from a fixture (#3119 A6). A CI-script test that starts
-# reading another product file adds it here.
+# reading another product file adds it here. The selector suite's live-graph
+# cases read this repository's crate graph from the workspace manifests, so a
+# manifest change runs them (#3225).
 ci_script_test_input() {
   case "$1" in
     scripts/ci/*|scripts/dev/*|scripts/checks/*|.gitea/*|.githooks/*|\
+    Cargo.toml|crates/*/Cargo.toml|\
     scripts/runtime/dev/preflight-openbao-native-secrets.sh|\
     Makefile|package.json|rust-toolchain.toml|.dockerignore|docker-bake.hcl|.gitleaks.toml|\
     images/*|deployments/docker/*.Dockerfile|apps/dashboard/Dockerfile|\
