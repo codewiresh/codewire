@@ -10,6 +10,9 @@
     "@moonshot-ai/kimi-code": "2.1.1",
     "@openai/codex": "0.160.0"
   },
+  "overrides": {
+    "undici": "8.12.2"
+  },
   "allowScripts": {
     "@anthropic-ai/claude-code@2.1.288": true,
     "@github/keytar": false,
