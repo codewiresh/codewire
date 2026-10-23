@@ -31,7 +31,7 @@ assert_output() {
 docs_output="$(emit '|valid:v3|policy|policy_shell_omittable|complete|' fallback false false)"
 assert_output "$docs_output" policy true
 for group in standard tooling rust_compile rust_shards rust_transport database \
-    services_control services_runtime edge_kind cw_release_assets; do
+    services_control services_runtime edge_kind; do
   assert_output "$docs_output" "$group" false
 done
 
@@ -45,7 +45,7 @@ assert_output "$legacy_policy_output" tooling true
 
 receipt_output="$(emit '|valid:v3|policy|rust|kind|complete|' accepted true true)"
 for group in policy standard tooling rust_compile rust_shards rust_transport database \
-    services_control services_runtime edge_kind cw_release_assets; do
+    services_control services_runtime edge_kind; do
   assert_output "$receipt_output" "$group" false
 done
 
@@ -53,7 +53,7 @@ selected_output="$(emit \
   '|valid:v3|policy|contracts|security|rust|database|service_idp|service_nats|kind|web|complete|' \
   fallback true false)"
 for group in policy standard tooling rust_compile rust_shards rust_transport database \
-    services_control services_runtime edge_kind cw_release_assets; do
+    services_control services_runtime edge_kind; do
   assert_output "$selected_output" "$group" true
 done
 
@@ -61,6 +61,19 @@ desktop_output="$(emit '|valid:v3|complete|' fallback false true)"
 assert_output "$desktop_output" rust_transport true
 assert_output "$desktop_output" rust_compile true
 assert_output "$desktop_output" rust_shards false
+
+# A cw package change compiles every Rust target, which compile-checks the
+# macOS cw for both Mac targets (#3119 A13). No other group starts for it.
+cw_output="$(emit '|valid:v3|complete|' fallback true false)"
+assert_output "$cw_output" rust_compile true
+for group in policy standard tooling rust_shards rust_transport database \
+    services_control services_runtime edge_kind; do
+  assert_output "$cw_output" "$group" false
+done
+if grep -q '^cw_release_assets_expected=' <<<"$cw_output"; then
+  echo 'the retired CW release-assets group is still dispatched' >&2
+  exit 1
+fi
 
 # Every fast-compile selection compiles. Each other Rust job is expected only
 # when its own steps have work: the shards for rust or transport, Rust /
@@ -95,7 +108,7 @@ retired_quick_output="$(emit \
   '|valid:v3|policy|policy_shell_omittable|pr_quick|rust_compile|complete|' \
   fallback true true)"
 for group in policy standard tooling rust_compile rust_shards rust_transport database \
-    services_control services_runtime cw_release_assets; do
+    services_control services_runtime; do
   assert_output "$retired_quick_output" "$group" true
 done
 # A scheduled run (owner decision 2026-10-20) dispatches the Kind shards
@@ -105,14 +118,14 @@ scheduled_kind_output="$(emit '|valid:v3|kind|scheduled|complete|' fallback true
 assert_output "$scheduled_kind_output" edge_kind true
 scheduled_nothing_output="$(emit '|valid:v3|scheduled|complete|' fallback true true)"
 for group in policy standard tooling rust_compile rust_shards rust_transport database \
-    services_control services_runtime cw_release_assets; do
+    services_control services_runtime; do
   assert_output "$scheduled_kind_output" "$group" false
   assert_output "$scheduled_nothing_output" "$group" false
 done
 assert_output "$scheduled_nothing_output" edge_kind false
 # The same artifact facts without scheduled keep dispatching their groups.
 full_artifact_output="$(emit '|valid:v3|policy|policy_shell_omittable|complete|' fallback true true)"
-for group in policy rust_compile rust_transport cw_release_assets; do
+for group in policy rust_compile rust_transport; do
   assert_output "$full_artifact_output" "$group" true
 done
 
@@ -123,7 +136,7 @@ assert_output "$web_output" standard true
 ios_output="$(emit '|valid:v3|ios|complete|' fallback false false)"
 assert_output "$ios_output" standard true
 for group in policy tooling rust_compile rust_shards rust_transport database \
-    services_control services_runtime edge_kind cw_release_assets; do
+    services_control services_runtime edge_kind; do
   assert_output "$ios_output" "$group" false
 done
 
@@ -132,7 +145,7 @@ done
 docs_output="$(emit '|valid:v3|docs|complete|' fallback false false)"
 assert_output "$docs_output" standard true
 for group in policy tooling rust_compile rust_shards rust_transport database \
-    services_control services_runtime edge_kind cw_release_assets; do
+    services_control services_runtime edge_kind; do
   assert_output "$docs_output" "$group" false
 done
 
@@ -154,7 +167,7 @@ assert_output "$orchestration_temporal_output" services_runtime true
 
 unknown_output="$(emit '|valid:v3|future_capability|complete|' fallback false false)"
 for group in policy standard tooling rust_compile rust_shards rust_transport database \
-    services_control services_runtime edge_kind cw_release_assets; do
+    services_control services_runtime edge_kind; do
   assert_output "$unknown_output" "$group" true
 done
 
@@ -171,7 +184,7 @@ fi
 # A superseded main commit dispatches nothing, whatever it selected; the same
 # selection on main's tip (or with the input unset) dispatches as before.
 all_groups=(policy standard tooling rust_compile rust_shards rust_transport database
-  services_control services_runtime edge_kind cw_release_assets)
+  services_control services_runtime edge_kind)
 everything='|valid:v3|future_capability|complete|'
 superseded_emit() {
   local superseded="$1" output="$TMP/superseded-output"

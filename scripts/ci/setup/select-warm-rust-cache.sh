@@ -10,8 +10,9 @@
 # (target/ci-rust-cargo-home: the registry index, downloaded crates and git
 # checkouts) into the cache, so the job starts from the last build on its
 # guest. Main and pull requests share it (owner, 2026-10-21: the cache risk
-# is accepted). Anywhere else (another event, a cloud runner, a job that ships
-# an artifact) it changes nothing and the job builds in its own workspace.
+# is accepted). Anywhere else (another event, a cloud runner) it changes
+# nothing and the job builds in its own workspace. CI ships no artifact: the
+# release and delivery workflows build those, never from this cache.
 #
 # Bounds, applied before linking:
 # - a new ISO week, or a new CODEWIRE_WARM_CACHE_EPOCH (a repository variable
@@ -31,11 +32,8 @@ readonly cache="$root/v1"
 # Tests override them.
 readonly target_cap_kib="${WARM_CACHE_TARGET_CAP_KIB:-68359375}"
 readonly cargo_home_cap_kib="${WARM_CACHE_CARGO_HOME_CAP_KIB:-11718750}"
-# Artifacts that ship or are published build from a clean target.
-readonly shipping_jobs=' cw-release-assets '
 
 : "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"
-: "${GITHUB_JOB:?Forgejo job id is required}"
 
 skip() {
   printf '[warm-rust-cache] not used: %s\n' "$*"
@@ -46,7 +44,6 @@ case "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" in
   'push|refs/heads/main' | pull_request\|*) ;;
   *) skip 'not a push to main or a pull request' ;;
 esac
-[[ "$shipping_jobs" != *" $GITHUB_JOB "* ]] || skip "$GITHUB_JOB ships an artifact and builds clean"
 if [[ -z "${WARM_CACHE_ROOT:-}" ]]; then
   [[ "$(stat -f -c %T "$root" 2>/dev/null)" == ext2/ext3 ]] || skip 'no warm cache is mounted on this runner'
 fi

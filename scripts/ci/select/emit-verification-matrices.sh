@@ -51,7 +51,6 @@ declare -A expected=(
   [services_control]=false
   [services_runtime]=false
   [edge_kind]=false
-  [cw_release_assets]=false
 )
 
 if [ "$superseded" = true ]; then
@@ -83,10 +82,12 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   if selected policy && ! selected policy_shell_omittable; then
     expected[tooling]=true
   fi
-  # Compiling every Rust target: the fast-compile token set and the desktop
-  # package.
+  # Compiling every Rust target: the fast-compile token set, the desktop
+  # package, and the cw package, whose macOS build it compile-checks for both
+  # Mac targets (#3119 A13).
   if selected_any rust rust_curated_locks transport transport_derp_contract \
-      || [ "$desktop_package" = true ]; then
+      || [ "$desktop_package" = true ] \
+      || { [ "$artifact_groups" = true ] && [ "$cw_package_selected" = true ]; }; then
     expected[rust_compile]=true
   fi
   # The packages and feature-graph shards run only selected Rust or transport.
@@ -105,9 +106,6 @@ elif [ "$tested_tree_receipt" = fallback ]; then
     && expected[services_runtime]=true
   # The Kind shards. Edge static verification (edge_kind) runs in tooling.
   selected kind && expected[edge_kind]=true
-  if [ "$artifact_groups" = true ] && [ "$cw_package_selected" = true ]; then
-    expected[cw_release_assets]=true
-  fi
 
   # A future trusted selector token must never silently create no work merely
   # because this dispatch registry has not learned it yet. Unknown tokens take
@@ -144,7 +142,7 @@ fi
 
 for group in \
     policy standard tooling rust_compile rust_shards rust_transport database \
-    services_control services_runtime edge_kind cw_release_assets; do
+    services_control services_runtime edge_kind; do
   value="${expected[$group]}"
   printf '%s_expected=%s\n' "$group" "$value"
 done >> "${GITHUB_OUTPUT:-/dev/stdout}"

@@ -28,8 +28,6 @@ green_results=(
   VERIFICATION_SERVICES_RUNTIME_RESULT=success
   VERIFICATION_EDGE_KIND_EXPECTED=true
   VERIFICATION_EDGE_KIND_RESULT=success
-  VERIFICATION_CW_RELEASE_ASSETS_EXPECTED=true
-  VERIFICATION_CW_RELEASE_ASSETS_RESULT=success
 )
 
 unselected_results=(
@@ -54,8 +52,6 @@ unselected_results=(
   VERIFICATION_SERVICES_RUNTIME_RESULT=skipped
   VERIFICATION_EDGE_KIND_EXPECTED=false
   VERIFICATION_EDGE_KIND_RESULT=skipped
-  VERIFICATION_CW_RELEASE_ASSETS_EXPECTED=false
-  VERIFICATION_CW_RELEASE_ASSETS_RESULT=skipped
 )
 
 expect_failure() {
@@ -192,11 +188,6 @@ expect_failure services_runtime_skip \
 expect_failure edge_kind_missing 'edge-kind selected capability group concluded missing' \
   VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
   VERIFICATION_EDGE_KIND_RESULT=
-
-expect_failure cw_release_assets_failure \
-  'cw-release-assets selected capability group concluded failure' \
-  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
-  VERIFICATION_CW_RELEASE_ASSETS_RESULT=failure
 
 expect_failure malformed_selection 'verification selection is invalid or incomplete' \
   VERIFICATION_SELECTION='|valid:v3|policy|'

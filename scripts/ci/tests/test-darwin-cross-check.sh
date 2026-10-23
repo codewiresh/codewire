@@ -175,14 +175,20 @@ else:
     export = 'echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"'
     assert install in setup and export in setup and setup.index(install) < setup.index(export)
     assert '"${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -' in setup
-    # The release-assets job runs the --cli check, which needs the installed
-    # cargo-zigbuild on PATH; that job keeps cargo's default home.
-    assets = ci.split('\n  cw-release-assets:\n', 1)[1].split('\n  policy:\n', 1)[0]
-    setup = assets.split('      - name: Set up pinned cross-build tools\n', 1)[1].split('      - name:', 1)[0]
-    export = 'echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"'
+    # Compile every Rust target runs the --cli check when the cw package
+    # changes (#3119 A13), with the installed cargo-zigbuild on PATH from the
+    # job's own Cargo home.
+    assert '\n  cw-release-assets:\n' not in ci
+    compile_job = ci.split('\n  rust-compile:\n', 1)[1].split('\n  rust-packages:\n', 1)[0]
+    assert 'CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home' in compile_job
+    cw_selected = "needs.verification-selection.outputs.cw_package_selected == 'true'"
+    setup = compile_job.split('      - name: Set up pinned Darwin C cross-check tools\n', 1)[1].split('      - name:', 1)[0]
+    assert "tested_tree_receipt != 'accepted'" in setup and cw_selected in setup
     assert install in setup and export in setup and setup.index(install) < setup.index(export)
-    assert 'CARGO_HOME:' not in assets.split('    steps:\n', 1)[0]
-    check = assets.split('      - name: Compile the macOS cw for both Mac targets\n', 1)[1].split('      - name:', 1)[0]
+    assert '"${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -' in setup
+    check = compile_job.split('      - name: Compile the macOS cw for both Mac targets\n', 1)[1].split('      - name:', 1)[0]
+    assert "tested_tree_receipt != 'accepted'" in check and cw_selected in check
     assert 'run: scripts/ci/verify/check-darwin-cross.sh --cli' in check
+    assert compile_job.index('Set up pinned Darwin C cross-check tools') < compile_job.index('Compile the macOS cw for both Mac targets')
     print(f'Darwin cross-check wrapper: {cases} cases passed; old bare check rejected')
 PY

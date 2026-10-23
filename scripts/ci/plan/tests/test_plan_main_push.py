@@ -38,7 +38,7 @@ SPEC.loader.exec_module(main_push)
 MAIN_PUSH = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}
 EVERYTHING = ("true", "true", "true")
 NOTHING = ("false", "false", "false")
-HEAVY_ARTIFACT_GROUPS = ("cw_release_assets", "rust_compile", "rust_transport")
+HEAVY_ARTIFACT_GROUPS = ("rust_compile", "rust_transport")
 
 
 def tree_of(repository: Path, sha: str) -> str:

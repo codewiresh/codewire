@@ -65,9 +65,6 @@ require_group_result services-runtime \
 require_group_result edge-kind \
   "${VERIFICATION_EDGE_KIND_EXPECTED:-missing}" \
   "${VERIFICATION_EDGE_KIND_RESULT:-missing}"
-require_group_result cw-release-assets \
-  "${VERIFICATION_CW_RELEASE_ASSETS_EXPECTED:-missing}" \
-  "${VERIFICATION_CW_RELEASE_ASSETS_RESULT:-missing}"
 
 case "$tested_tree_receipt" in
   fallback)

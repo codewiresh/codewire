@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The metal guest's warm Rust cache: used only by a main push or a pull request
-# on a guest that mounts it, never by a job that ships, wiped weekly or on an operator epoch,
+# on a guest that mounts it, wiped weekly or on an operator epoch,
 # kept under its caps by whole least recently used profile directories.
 set -euo pipefail
 
@@ -24,11 +24,9 @@ run() {
     GITHUB_JOB="$job" GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" "$@" "$SELECT"
 }
 
-# Other refs, other events and shipping jobs never touch the cache.
+# Other refs and other events never touch the cache.
 out="$(run rust-compile push refs/heads/feature)"; grep -qF 'not a push to main or a pull request' <<<"$out" || fail 'another ref used the cache'
 out="$(run rust-compile schedule refs/heads/main)"; grep -qF 'not a push to main or a pull request' <<<"$out" || fail 'a scheduled run used the cache'
-out="$(run cw-release-assets push refs/heads/main)"; grep -qF 'ships an artifact' <<<"$out" || fail 'cw-release-assets used the cache on main'
-out="$(run cw-release-assets pull_request refs/pull/1/head)"; grep -qF 'ships an artifact' <<<"$out" || fail 'cw-release-assets used the cache on a pull request'
 [[ ! -e "$work/cache/v1" && ! -L "$work/workspace/target/ci-cache" ]] || fail 'a skipped job changed the cache'
 
 # A main push links its target and Cargo home into the cache.
@@ -135,7 +133,6 @@ for name, job in jobs.items():
     assert report["name"] == "Report the warm Rust cache", name
     assert report["if"] == checkout["if"].replace("${{ ", "${{ always() && ", 1), name
 assert wired == expected, sorted(wired ^ expected)
-assert "cw-release-assets" not in wired
 WIRING
 
-printf '[test-warm-rust-cache] main and pull requests only, shipping excluded, weekly and epoch wipes, LRU and Cargo home caps: OK\n'
+printf '[test-warm-rust-cache] main and pull requests only, weekly and epoch wipes, LRU and Cargo home caps: OK\n'

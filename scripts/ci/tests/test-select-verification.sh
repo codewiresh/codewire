@@ -1754,8 +1754,8 @@ run_present_paths_case macos_formatter_with_runtime_source pull_request refs/pul
   scripts/dev/macos-ext4-tool.py crates/codewire-local-vmm/src/lib.rs
 run_present_paths_case macos_formatter_unknown pull_request refs/pull/2064/head false \
   "$all_product_pr" scripts/dev/macos-ext4-tool-future.py
-# The --cli mode compile-checks the macOS cw in the release-assets job, so the
-# script also selects the release group (as the SDK-less check it replaced).
+# The --cli mode compile-checks the macOS cw in Compile every Rust target when
+# the cw package changes (#3119 A13); the script still selects the release group.
 run_present_paths_case darwin_cross_check pull_request refs/pull/20655/head false \
   'go_consumer_interop go_support policy policy_shell release confidential_script_tests security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/check-darwin-cross.sh
@@ -2777,7 +2777,6 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     exit 1
   fi
 done <<'EOF'
-cw-release-assets|CW release-assets verification|metal-main|cw_release_assets
 policy|Policy verification|metal-main|policy
 standard|Standard verification|metal-main|standard
 tooling|Tooling / delivery contract verification|metal-main|tooling
@@ -2835,7 +2834,7 @@ grep -qxF '      rust_shards_expected: ${{ steps.dispatch.outputs.rust_shards_ex
   exit 1
 }
 for expectation_name in policy standard tooling rust_compile rust_transport database \
-    services_control services_runtime edge_kind cw_release_assets; do
+    services_control services_runtime edge_kind; do
   grep -qF "${expectation_name}_expected: \${{ steps.dispatch.outputs.${expectation_name}_expected }}" \
     "$selection_block"
   if grep -qF "${expectation_name}_matrix:" "$selection_block"; then
@@ -2851,7 +2850,7 @@ done
 # gate shards its suites across four parallel per-cluster legs; each shard's
 # 45-minute ceiling holds the longest leg (setup plus dashboard browser) far
 # below the 90-minute heavy budget.
-for job_id in cw-release-assets standard tooling rust-compile rust-packages rust-features database services-control services-runtime; do
+for job_id in standard tooling rust-compile rust-packages rust-features database services-control services-runtime; do
   block="$TMP/${job_id}.yaml"
   if [ ! -s "$block" ]; then
     awk -v wanted="$job_id" '
@@ -3116,11 +3115,11 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 11 ]] || {
-  echo 'Codewire CI requires its eleven ordinary heavy groups (policy included) on the metal labels' >&2
+[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 10 ]] || {
+  echo 'Codewire CI requires its ten ordinary heavy groups (policy included) on the metal labels' >&2
   exit 1
 }
-[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 11 ]] || {
+[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 10 ]] || {
   echo 'each metal group must bound its cargo jobs to its guest memory' >&2
   exit 1
 }
@@ -3233,8 +3232,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 19 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, the CW release-assets job, eleven groups, four Kind producers, aggregate and the Dev delivery trigger" >&2
+if [ "$top_level_jobs" != 18 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, eleven groups, four Kind producers, aggregate and the Dev delivery trigger" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
@@ -3245,62 +3244,10 @@ for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
   fi
 done
 
-cw_block="$TMP/cw-release-assets.yaml"
-awk '
-  $0 == "  cw-release-assets:" { capture = 1 }
-  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  cw-release-assets:" { exit }
-  capture { print }
-' "$WORKFLOW" > "$cw_block"
-grep -qF '  cw-release-assets:' "$cw_block"
-grep -qF '    name: CW release-assets verification' "$cw_block"
-grep -qxF "    runs-on: ${METAL_MAIN_RUNS_ON}" "$cw_block"
-grep -qF 'name: CW release assets not selected' "$cw_block"
-grep -qF "needs.verification-selection.outputs.cw_package_selected != 'true'" \
-  "$cw_block"
-grep -qF "needs.verification-selection.outputs.cw_package_selected == 'true'" \
-  "$cw_block"
-# Pull requests package the Linux pair and compile the macOS pair without the
-# SDK; the protected Mac runner links it after merge (cw-release-dry-run.yaml).
-grep -qF "CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu'" \
-  "$cw_block"
-grep -qF 'run: scripts/ci/verify/check-darwin-cross.sh --cli' "$cw_block"
-if grep -qF 'apple-darwin' <(grep -F 'CW_RELEASE_TARGETS=' "$cw_block"); then
-  echo 'PR CW release-assets verification links the macOS cw without its SDK' >&2
-  exit 1
-fi
-grep -qF 'scripts/ci/release/package-cw-release.sh v0.0.0-ci' "$cw_block"
-# The Linux pair builds side by side in one Cargo invocation with the build
-# environment package-cw-release.sh uses, so packaging finds both fresh. A
-# change to that environment must update the CI build too.
-grep -qF -- '--target x86_64-unknown-linux-musl --target aarch64-unknown-linux-gnu' "$cw_block"
-for cw_build_env in 'env -u CODEWIRE_LOCAL_RUNTIME' 'CODEWIRE_VERSION=' \
-    'CODEWIRE_SOURCE_REVISION=' 'CODEWIRE_SOURCE_TREE_SHA256='; do
-  grep -qF -- "$cw_build_env" "$cw_block" \
-    && grep -qF -- "$cw_build_env" "$ROOT/scripts/ci/release/package-cw-release.sh" || {
-    echo "CI's Linux pair build and package-cw-release.sh differ in $cw_build_env" >&2
-    exit 1
-  }
-done
-[ "$(grep -c '^    CODEWIRE_[A-Z0-9_]*=' "$ROOT/scripts/ci/release/package-cw-release.sh")" -eq 3 ] || {
-  echo 'package-cw-release.sh builds with a different environment; update the CI Linux pair build' >&2
-  exit 1
-}
-jq -e '
-  .artifacts.cw_cli_release_assets.release_targets == [
-    "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin"
-  ]
-' "$ROOT/scripts/ci/plan/artifact-graph.json" >/dev/null
-if grep -Eiq 'publish|contents: write|secrets\.' "$cw_block"; then
-  echo 'PR CW release-assets verification crosses a publication boundary' >&2
-  exit 1
-fi
-cw_selected_steps="$(grep -Ec '^      - (name:|uses:)' "$cw_block")"
-cw_guarded_steps="$(grep -Ec '^        if:' "$cw_block")"
-if [ "$cw_selected_steps" != "$cw_guarded_steps" ]; then
-  echo 'every CW verification step must be guarded by receipt/package selection' >&2
+# CI packages no cw release asset: the release workflows build and package
+# every target (#3119 A13).
+if grep -qE '^  cw-release-assets:$|package-cw-release\.sh' "$WORKFLOW"; then
+  echo 'product CI still packages cw release assets' >&2
   exit 1
 fi
 
@@ -3808,13 +3755,13 @@ grep -qxF "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$required_block" || {
 # shellcheck disable=SC2016 # Match the literal Actions expression.
 grep -qF '    if: ${{ always() }}' "$WORKFLOW"
 grep -qF 'scripts/ci/select/require-verification-results.sh' "$required_block"
-for group in cw-release-assets standard rust-compile rust-packages rust-features rust-transport database services-control services-runtime edge-kind; do
+for group in standard rust-compile rust-packages rust-features rust-transport database services-control services-runtime edge-kind; do
   grep -qF "      - ${group}" "$required_block" || {
     echo "required CI does not wait on ${group}" >&2
     exit 1
   }
 done
-for result in VERIFICATION_CW_RELEASE_ASSETS_RESULT VERIFICATION_STANDARD_RESULT \
+for result in VERIFICATION_STANDARD_RESULT \
     VERIFICATION_RUST_COMPILE_RESULT VERIFICATION_RUST_PACKAGES_RESULT \
     VERIFICATION_RUST_FEATURES_RESULT VERIFICATION_RUST_TRANSPORT_RESULT \
     VERIFICATION_DATABASE_RESULT \
@@ -3829,8 +3776,7 @@ for expected in VERIFICATION_POLICY_EXPECTED VERIFICATION_STANDARD_EXPECTED \
     VERIFICATION_TOOLING_EXPECTED VERIFICATION_RUST_COMPILE_EXPECTED \
     VERIFICATION_RUST_SHARDS_EXPECTED VERIFICATION_RUST_TRANSPORT_EXPECTED \
     VERIFICATION_DATABASE_EXPECTED VERIFICATION_SERVICES_CONTROL_EXPECTED \
-    VERIFICATION_SERVICES_RUNTIME_EXPECTED VERIFICATION_EDGE_KIND_EXPECTED \
-    VERIFICATION_CW_RELEASE_ASSETS_EXPECTED; do
+    VERIFICATION_SERVICES_RUNTIME_EXPECTED VERIFICATION_EDGE_KIND_EXPECTED; do
   grep -qF "${expected}:" "$required_block" || {
     echo "required CI omits ${expected}" >&2
     exit 1
@@ -4966,7 +4912,6 @@ jobs = workflow["jobs"]
 # a named support step (setup, guard or cleanup), so a new step is classified
 # before this fixture accepts it.
 WORK = {
-    "cw-release-assets": {"Compile the macOS cw for both Mac targets", "Package Linux dry-run assets"},
     "policy": {"Run Policy"},
     "standard": {
         "Run Contracts", "Run Go support", "Run Web", "Run Docs", "Run SDK Go",
@@ -4978,7 +4923,7 @@ WORK = {
         "Run Dev smoke script tests", "Run delivery script tests", "Run Deploy", "Run Security",
         "Run Edge static verification and selected Kind tool tests",
     },
-    "rust-compile": {"Compile every Rust target"},
+    "rust-compile": {"Compile every Rust target", "Compile the macOS cw for both Mac targets"},
     "rust-packages": {"Run the Rust packages shard"},
     "rust-features": {"Run the Rust features shard"},
     "rust-transport": {
@@ -4996,7 +4941,6 @@ WORK = {
 }
 SUPPORT = {
     "Reuse exact PR-head content verification",
-    "CW release assets not selected",
     "Service control-plane integration not selected", "Service runtime-plane integration not selected",
     "Resolve service control-plane scope",
     "Resolve service runtime-plane scope",
@@ -5006,10 +4950,10 @@ SUPPORT = {
     "Verify Kind runner tools", "Select best-effort shared Rust cache", "Select existing compiler cache",
     "Select the warm Rust cache", "Report the warm Rust cache", "Bound cargo jobs by memory",
     "Declare a metal Kata guest",
-    "Select independent workspace caches", "Install pinned protobuf compiler",
+    "Select independent workspace caches",
     "Install pinned protoc for Rust builds", "Install pinned protoc for Rust-backed standard checks",
     "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",
-    "Install locked dashboard browser-test dependencies", "Set up pinned cross-build tools",
+    "Install locked dashboard browser-test dependencies",
     "Set up Go 1.26.10", "Set up Go 1.26.10 for security checks", "Set up Go 1.26.10 for DERP interop",
     "Set up pinned Darwin C cross-check tools",
     "Clean workspace cache credentials",
@@ -5198,14 +5142,14 @@ for job_id, work in WORK.items():
     unclassified = names - work - SUPPORT
     if unclassified:
         raise SystemExit(f"{job_id}: classify these steps as work or support: {sorted(unclassified)}")
-# Jobs whose work steps carry their own selection conditions must also not
-# leave selected work undispatched. The others (Kind builders, the compile)
-# run unconditionally once their job is dispatched.
+# A work step that carries its own selection condition must also never be
+# left undispatched: when it would run, its job starts. Unconditional work
+# (Kind builders, the compile) runs whenever its job is dispatched.
 SELECTION_GATED = {
-    job_id for job_id, work in WORK.items()
-    if all(re.search(r"outputs\.selection|_selected|steps\.",
-                     str(step.get("if", "")))
-           for step in jobs[job_id]["steps"] if step.get("name") in work)
+    job_id: {step["name"] for step in jobs[job_id]["steps"]
+             if step.get("name") in work
+             and re.search(r"outputs\.selection|_selected|steps\.", str(step.get("if", "")))}
+    for job_id, work in WORK.items()
 }
 capability_jobs = {job_id for job_id, job in jobs.items()
                    if re.search(r"outputs\.[a-z_]+_expected == 'true'", job.get("if", ""))}
@@ -5265,10 +5209,11 @@ for selection in sorted(set(realistic) | synthetic):
                 raise SystemExit(
                     f"{job_id} would start with no work for {selection} "
                     f"(cw={cw} desktop={desktop}): legs={work}")
-            if not dispatched and any(work) and job_id in SELECTION_GATED:
+            gated = [sorted(set(leg) & SELECTION_GATED[job_id]) for leg in work]
+            if not dispatched and any(gated):
                 raise SystemExit(
                     f"{job_id} has selected work but is not dispatched for {selection} "
-                    f"(cw={cw} desktop={desktop}): {work}")
+                    f"(cw={cw} desktop={desktop}): {gated}")
         checked += 1
 
 # A scheduled run dispatches the Kind builds and shards alone, whatever the
