@@ -28,6 +28,12 @@ EDGELESS_CARGO = """#!/usr/bin/env bash
 [ "${1:-}" = metadata ] || { echo "edgeless cargo stub: unexpected cargo $*" >&2; exit 2; }
 printf '{"packages":[]}\\n'
 """
+EDGELESS_METADATA = '{"packages":[]}\n'
+# The stub lives under the checkout's .tmp, as the selector suite's stubs do. A
+# system temporary directory may not allow executing files: PATH then skips the
+# stub, the real cargo answers, and the corpus would read this repository's
+# live crate graph (#3225).
+STUB_ROOT = ROOT / ".tmp"
 
 
 def load_corpus() -> dict[str, object]:
@@ -85,16 +91,57 @@ def validate_case(case: object, case_ids: set[str]) -> dict[str, object]:
     return case
 
 
+def stub_directory() -> tempfile.TemporaryDirectory[str]:
+    STUB_ROOT.mkdir(exist_ok=True)
+    return tempfile.TemporaryDirectory(prefix="codewire-decision-corpus-", dir=STUB_ROOT)
+
+
+def edgeless_cargo_environment(directory: Path) -> dict[str, str]:
+    cargo = directory / "bin" / "cargo"
+    cargo.parent.mkdir()
+    cargo.write_text(EDGELESS_CARGO, encoding="utf-8")
+    cargo.chmod(0o755)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{cargo.parent}{os.pathsep}{environment.get('PATH', '')}"
+    return environment
+
+
+def require_edgeless_cargo(environment: dict[str, str], directory: Path) -> None:
+    """Fail closed unless the cargo the selector runs from PATH is the stub.
+
+    A real cargo reached instead fails at once: the manifest is absent, and
+    nothing resolves, downloads or installs.
+    """
+    probe_environment = dict(environment, RUSTUP_AUTO_INSTALL="0", CARGO_NET_OFFLINE="true")
+    try:
+        probe = subprocess.run(
+            [
+                "cargo", "metadata", "--offline", "--no-deps", "--format-version", "1",
+                "--manifest-path", str(directory / "absent" / "Cargo.toml"),
+            ],
+            cwd=directory,
+            env=probe_environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        answered = probe.returncode == 0 and probe.stdout == EDGELESS_METADATA
+    except OSError:
+        answered = False
+    if not answered:
+        raise AssertionError(
+            f"the cargo on the selector's PATH is not the edgeless cargo stub in {directory}; "
+            "its directory must allow executing files, or the corpus reads the live crate graph"
+        )
+
+
 def selector_result(case: dict[str, object]) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="codewire-decision-corpus-") as temporary_directory:
+    with stub_directory() as temporary_directory:
         changed_paths = Path(temporary_directory) / "changed-paths"
         changed_paths.write_text("\n".join(case["paths"]) + "\n", encoding="utf-8")
-        cargo = Path(temporary_directory) / "bin" / "cargo"
-        cargo.parent.mkdir()
-        cargo.write_text(EDGELESS_CARGO, encoding="utf-8")
-        cargo.chmod(0o755)
-        environment = os.environ.copy()
-        environment["PATH"] = f"{cargo.parent}{os.pathsep}{environment.get('PATH', '')}"
+        environment = edgeless_cargo_environment(Path(temporary_directory))
+        require_edgeless_cargo(environment, Path(temporary_directory))
         environment.pop("GITHUB_OUTPUT", None)
         environment.pop("GITHUB_EVENT_PATH", None)
         environment["GITHUB_EVENT_NAME"] = str(case["event"])
@@ -167,6 +214,19 @@ class DecisionCorpusTests(unittest.TestCase):
             case = validate_case(raw_case, case_ids)
             with self.subTest(case=case["id"]):
                 self.assertEqual(selector_result(case), expected_result(case))
+
+
+class EdgelessCargoTests(unittest.TestCase):
+    def test_a_stub_that_cannot_run_fails_closed(self) -> None:
+        # A stub without execute permission is skipped by a PATH search exactly
+        # as one in a directory mounted noexec is.
+        with stub_directory() as temporary_directory:
+            directory = Path(temporary_directory)
+            environment = edgeless_cargo_environment(directory)
+            require_edgeless_cargo(environment, directory)
+            (directory / "bin" / "cargo").chmod(0o644)
+            with self.assertRaisesRegex(AssertionError, "not the edgeless cargo stub"):
+                require_edgeless_cargo(environment, directory)
 
 
 if __name__ == "__main__":

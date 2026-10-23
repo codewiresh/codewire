@@ -105,6 +105,9 @@ required local mode. It deliberately does not select artifact jobs, describe
 runtime facts, validate receipts, or authorize a reduction in verification.
 Its crate cases classify against a workspace without crate edges, so they
 record path rules alone; the selector fixture suite proves the crate graph.
+The edgeless Cargo stub lives under the checkout's `.tmp`, and each case first
+proves that the `cargo` on the selector's `PATH` is that stub. A stub that
+cannot run fails the check, so the corpus never reads the live crate graph.
 
 Run its standard-library-only check directly with:
 
