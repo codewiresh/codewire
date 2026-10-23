@@ -11,6 +11,12 @@
 # superseded, signs and dispatches nothing; promote-dev's forward-only check
 # is the second guard. Writes deliver=true or deliver=false to GITHUB_OUTPUT;
 # an unreadable Dev source fails closed.
+#
+# One exception: a Dev source that is not in main's history at all (a history
+# rewrite stranded it) cannot be descended from, so a verified commit signs and
+# dispatches with a loud warning, and promote-dev's forward-only check, with
+# its owner-only re-anchor inputs, decides whether Dev moves (codewire-4f,
+# 2026-10-21).
 set -euo pipefail
 
 fail() {
@@ -35,8 +41,16 @@ readonly candidate="$work/deployed-source.json"
 dev_sha="$(jq -er 'select(.retrieval.valid == true) | .source.sha' "$candidate" 2>/dev/null)" ||
   fail "cannot read the source Dev runs; ${purpose} nothing"
 [[ "$dev_sha" =~ ^[0-9a-f]{40}$ ]] || fail "Dev's source is not an exact commit; ${purpose} nothing"
-git cat-file -e "${dev_sha}^{commit}" 2>/dev/null ||
-  fail "Dev's source ${dev_sha} is not in main's history; ${purpose} nothing"
+
+# Main's full history is present: a Dev source missing from it is not on main.
+main_sha="$(git ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" { print $1 }')" || true
+[[ "$main_sha" =~ ^[0-9a-f]{40}$ ]] || fail "cannot read main's head; ${purpose} nothing"
+git cat-file -e "${main_sha}^{commit}" 2>/dev/null ||
+  fail "main's head ${main_sha} is not in this checkout; ${purpose} nothing"
+[ "$(git rev-parse --is-shallow-repository)" = false ] ||
+  fail "this checkout is shallow, so main's history is incomplete; ${purpose} nothing"
+dev_present=true
+git cat-file -e "${dev_sha}^{commit}" 2>/dev/null || dev_present=false
 
 # Exit status 1 means "not an ancestor"; anything else is an error.
 is_ancestor() {
@@ -49,9 +63,13 @@ is_ancestor() {
 if [[ "$dev_sha" == "$sha" ]]; then
   echo 'deliver=false' >>"$GITHUB_OUTPUT"
   printf 'descent check before %s: Dev already runs %s; %s nothing\n' "$purpose" "$sha" "$purpose"
-elif is_ancestor "$dev_sha" "$sha"; then
+elif [ "$dev_present" = true ] && is_ancestor "$dev_sha" "$sha"; then
   echo 'deliver=true' >>"$GITHUB_OUTPUT"
   printf "descent check before %s: %s descends from Dev's source %s\n" "$purpose" "$sha" "$dev_sha"
+elif [ "$dev_present" = false ] || ! is_ancestor "$dev_sha" "$main_sha"; then
+  echo 'deliver=true' >>"$GITHUB_OUTPUT"
+  printf "::warning::descent check before %s: Dev's source %s is not in main's history (a history rewrite stranded it); %s %s anyway, and promote-dev's forward-only check decides whether Dev moves\n" \
+    "$purpose" "$dev_sha" "$purpose" "$sha"
 else
   echo 'deliver=false' >>"$GITHUB_OUTPUT"
   printf "descent check before %s: Dev runs %s, which %s does not move forward; %s nothing, Dev never moves backwards\n" \

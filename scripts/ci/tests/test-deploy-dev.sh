@@ -396,6 +396,14 @@ done
 sha_a="$(git -C "$descent_root/repo" rev-parse HEAD~2)"
 sha_b="$(git -C "$descent_root/repo" rev-parse HEAD~1)"
 sha_c="$(git -C "$descent_root/repo" rev-parse HEAD)"
+# main is C, on an origin the check reads with ls-remote. A stranded commit
+# (what a history rewrite leaves Dev on) shares no history with main.
+git init -q --bare "$descent_root/origin.git"
+git -C "$descent_root/repo" remote add origin "$descent_root/origin.git"
+git -C "$descent_root/repo" push -q origin HEAD:refs/heads/main
+stranded="$(printf 'stranded by a history rewrite\n' |
+  git -C "$descent_root/repo" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false \
+    commit-tree "$(git -C "$descent_root/repo" rev-parse 'HEAD^{tree}')")"
 descent_case() {
   local purpose="$1" dev="$2" output log
   output="$(mktemp)"
@@ -422,9 +430,21 @@ for purpose in signing dispatching; do
     fail "an unreadable Dev source did not fail closed before $purpose"
   [[ "$(descent_case "$purpose" not-a-commit)" == failed* ]] ||
     fail "a malformed Dev source did not fail closed before $purpose"
-  [[ "$(descent_case "$purpose" 4444444444444444444444444444444444444444)" == failed* ]] ||
-    fail "a Dev source outside main's history did not fail closed before $purpose"
+  # A Dev source off main's history (stranded, or missing from main's full
+  # history) cannot be descended from: the verified commit goes on, loudly,
+  # and promote-dev's forward-only check decides. Old behaviour: nothing ever
+  # signed again after a history rewrite.
+  for off_history in "$stranded" 4444444444444444444444444444444444444444; do
+    result="$(descent_case "$purpose" "$off_history")"
+    [[ "$result" == "deliver=true|::warning::descent check before $purpose: Dev's source $off_history is not in main's history (a history rewrite stranded it); $purpose $sha_b anyway, and promote-dev's forward-only check decides whether Dev moves" ]] ||
+      fail "a Dev source off main's history blocked delivery before $purpose: $result"
+  done
 done
+# An unreadable main fails closed.
+git -C "$descent_root/repo" remote set-url origin "$descent_root/missing.git"
+[[ "$(descent_case signing "$stranded")" == failed* ]] ||
+  fail "an unreadable main did not fail closed"
+git -C "$descent_root/repo" remote set-url origin "$descent_root/origin.git"
 if (cd "$descent_root/repo" && FAKE_DEV_SHA="$sha_a" GITHUB_SHA="$sha_b" GITHUB_OUTPUT=/dev/null \
     "$descent_root/bin/scripts/ci/deploy/require-dev-descent.sh" publishing) >/dev/null 2>&1; then
   fail "the descent check accepted an unknown purpose"
