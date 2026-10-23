@@ -27,6 +27,7 @@ env:
   ARM64_BUILDKIT_HOST: ${{ vars.ARM64_BUILDKIT_HOST }}
   CODEWIRE_IMAGE_REGISTRY: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}
   CODEWIRE_SOURCE_URL: ${{ vars.CODEWIRE_SOURCE_URL }}
+  CODEWIRE_RELEASE_TAGGER: ${{ vars.CODEWIRE_RELEASE_TAGGER }}
   OPENBAO_ROLE: codewire-source-prod-publisher
   OPENBAO_AUDIENCE: openbao-codewire-source-prod-publisher
   OPENBAO_GHCR_ROLE: codewire-source-prod-publisher
@@ -40,6 +41,7 @@ jobs:
     outputs:
       release_tag: ${{ steps.select.outputs.release_tag }}
       source_sha: ${{ steps.select.outputs.source_sha }}
+      tag_object_sha: ${{ steps.select.outputs.tag_object_sha }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -101,6 +103,7 @@ jobs:
             "$canonical_main_sha"
           printf 'release_tag=%s\n' "$selected_tag" >> "$GITHUB_OUTPUT"
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          printf 'tag_object_sha=%s\n' "$remote_object_sha" >> "$GITHUB_OUTPUT"
 
   build-daemon-image:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
@@ -117,6 +120,13 @@ jobs:
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
+
+      - name: Confirm selected release checkout
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Reuse and alias daemon image
         id: build
@@ -143,6 +153,13 @@ jobs:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
 
+      - name: Confirm selected release checkout
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
+
       - name: Reuse and alias DERP image
         id: build
         env:
@@ -167,6 +184,13 @@ jobs:
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
+
+      - name: Confirm selected release checkout
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Reuse and alias services image
         id: build
@@ -193,6 +217,13 @@ jobs:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
 
+      - name: Confirm selected release checkout
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
+
       - name: Reuse and alias hosted Mesh image
         id: build
         env:
@@ -217,6 +248,13 @@ jobs:
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
+
+      - name: Confirm selected release checkout
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Reuse and alias dashboard image
         id: build
@@ -278,6 +316,13 @@ jobs:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
 
+      - name: Confirm selected release checkout
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
+
       - name: Build the linux/amd64 base and workspace by digest
         id: build
         env:
@@ -321,6 +366,13 @@ jobs:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
 
+      - name: Confirm selected release checkout
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
+
       # The production publisher reads the arm64 node's client certificate.
       - name: Build the linux/arm64 base and workspace by digest
         id: build
@@ -351,6 +403,13 @@ jobs:
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
+
+      - name: Confirm selected release checkout
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Join and verify the base index, or reuse the published one
         id: base
@@ -429,6 +488,13 @@ jobs:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
           fetch-depth: 0
+
+      - name: Confirm selected release checkout
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Validate and publish the production bundle to Harbor
         env:

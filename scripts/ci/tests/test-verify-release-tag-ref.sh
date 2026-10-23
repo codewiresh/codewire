@@ -111,13 +111,24 @@ grep -Fqx "header = \"Authorization: token ${FAKE_EXPECTED_TOKEN}\"" "$config" |
 object="${BASH_REMATCH[2]}"
 name="$(git cat-file tag "$object" | awk '$1 == "tag" { print $2; exit }')"
 commit="$(git cat-file tag "$object" | awk '$1 == "object" { print $2; exit }')"
+signature="$(git cat-file tag "$object" | awk '
+    /^-----BEGIN PGP SIGNATURE-----$/ { block = ""; inside = 1 }
+    inside { block = block $0 "\n" }
+    /^-----END PGP SIGNATURE-----$/ { inside = 0; last = block }
+    END { printf "%s", last }')"
+if [[ "${FAKE_TAG_API_MODE:-}" == commit-signature || -z "$signature" ]]; then
+  signature=$'-----BEGIN PGP SIGNATURE-----\n\ncommit-signature\n-----END PGP SIGNATURE-----'
+fi
 record() {
   jq -cn --arg tag "$name" --arg sha "$1" --arg commit "$commit" --argjson verified "$2" \
+    --arg signer "${FAKE_TAG_SIGNER-release-guard}" --arg signature "$signature" \
     '{tag: $tag, sha: $sha, object: {type: "commit", sha: $commit},
-      verification: {verified: $verified, reason: "", signer: {username: "release-guard"}}}'
+      verification: {verified: $verified, reason: "", signature: $signature,
+        signer: {name: $signer, email: "release-guard@example.invalid", username: ""}}}'
 }
 case "${FAKE_TAG_API_MODE:-verified}" in
-  verified) record "$object" true >"$output"; printf 200 ;;
+  verified|commit-signature) record "$object" true >"$output"; printf 200 ;;
+  no-signer) record "$object" true | jq -c 'del(.verification.signer)' >"$output"; printf 200 ;;
   unverified) record "$object" false >"$output"; printf 200 ;;
   sha-mismatch) record "$(printf '0%.0s' {1..40})" true >"$output"; printf 200 ;;
   malformed) printf 'not json' >"$output"; printf 200 ;;
@@ -134,6 +145,7 @@ export CODEWIRE_RELEASE_TAG_CURL="$fake_curl"
 export FAKE_CURL_ARGV_LOG="$fixture/curl-argv.log"
 export FAKE_EXPECTED_TOKEN="$token_canary"
 export GITEA_TOKEN="$token_canary"
+export CODEWIRE_RELEASE_TAGGER=release-guard
 # Forgejo's server URL is its ROOT_URL, which ends with a slash. The canonical
 # server comes from CODEWIRE_SOURCE_URL, never from the job's own server URL.
 export GITHUB_SERVER_URL=https://git.example.invalid/
@@ -143,25 +155,32 @@ git -C "$fixture" init -q
 git -C "$fixture" config user.name 'Release Guard Test'
 git -C "$fixture" config user.email release-guard@example.invalid
 git -C "$fixture" config commit.gpgsign false
-# Signature trust comes from Forgejo; the fixture tags stay unsigned so host
-# signing defaults cannot change them.
+# Signature trust comes from Forgejo. The fixture's release tags carry a
+# signature block in the tag object, the way git stores a signed tag, without
+# a key; host signing defaults stay off so they cannot change them.
 git -C "$fixture" config tag.gpgSign false
+signed_tag() { # NAME: an annotated tag at HEAD whose object carries a signature block
+  printf '%s\n-----BEGIN PGP SIGNATURE-----\n\nsynthetic %s signature\n-----END PGP SIGNATURE-----\n' \
+    "$1" "$1" | git -C "$fixture" tag -a -F - --cleanup=verbatim "$1"
+}
 git -C "$fixture" commit -q --allow-empty -m base
 git -C "$fixture" branch -M main
 git -C "$fixture" commit -q --allow-empty -m release
 source_sha="$(git -C "$fixture" rev-parse HEAD)"
 canonical_main_sha="$source_sha"
-git -C "$fixture" tag -a v0.3.359 -m v0.3.359
+signed_tag v0.3.359
 tag_object_sha="$(git -C "$fixture" rev-parse v0.3.359)"
 
 git -C "$fixture" switch -q -c unmerged HEAD~1
 git -C "$fixture" commit -q --allow-empty -m unmerged
 unmerged_sha="$(git -C "$fixture" rev-parse HEAD)"
-git -C "$fixture" tag -a v0.3.360 -m v0.3.360
+signed_tag v0.3.360
 unmerged_tag_object="$(git -C "$fixture" rev-parse v0.3.360)"
 git -C "$fixture" switch -q main
 
-git -C "$fixture" tag -a v0.3.362 -m v0.3.362
+signed_tag v0.3.362
+git -C "$fixture" tag -a v0.3.361 -m v0.3.361
+unsigned_tag_object="$(git -C "$fixture" rev-parse v0.3.361)"
 embedded_name_tag_object="$(git -C "$fixture" rev-parse v0.3.362)"
 git -C "$fixture" update-ref refs/tags/v0.3.363 "$embedded_name_tag_object"
 
@@ -179,16 +198,11 @@ expect_failure() {
 }
 
 verified_output="$(run_verify \
-  push refs/tags/v0.3.359 v0.3.359 '' \
-  https://git.example.invalid codewire/codewire \
+  workflow_dispatch refs/heads/main main v0.3.359 \
+  https://git.example.invalid/ codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" 2>&1)"
 grep -Fq "release tag verified: tag=v0.3.359 commit=$source_sha forgejo_signer=release-guard" \
   <<<"$verified_output"
-
-run_verify \
-  workflow_dispatch refs/heads/main main v0.3.359 \
-  https://git.example.invalid/ codewire/codewire \
-  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" >/dev/null
 
 # Runners register against the same instance's internal Tailnet name.
 CODEWIRE_FORGEJO_INTERNAL_URL=https://forgejo.example.invalid run_verify \
@@ -197,7 +211,7 @@ CODEWIRE_FORGEJO_INTERNAL_URL=https://forgejo.example.invalid run_verify \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" >/dev/null
 
 # Forgejo's verdict is required; every other response fails closed.
-for mode in unverified sha-mismatch malformed not-found server-error transport; do
+for mode in unverified no-signer commit-signature sha-mismatch malformed not-found server-error transport; do
   if FAKE_TAG_API_MODE="$mode" run_verify \
       workflow_dispatch refs/heads/main main v0.3.359 \
       https://git.example.invalid codewire/codewire \
@@ -206,6 +220,39 @@ for mode in unverified sha-mismatch malformed not-found server-error transport; 
     exit 1
   fi
 done
+# Only the release tagger's account counts: a verified key on any other
+# account, a differently spelled login, or an unset or malformed tagger
+# variable fails closed (owner, 2026-10-23, #2892).
+for signer in other-maintainer Release-Guard release-guard-2 ''; do
+  if FAKE_TAG_SIGNER="$signer" run_verify \
+      workflow_dispatch refs/heads/main main v0.3.359 \
+      https://git.example.invalid codewire/codewire \
+      "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" >/dev/null 2>&1; then
+    printf "release tag guard test failed: a tag signed by '%s' was accepted\n" "$signer" >&2
+    exit 1
+  fi
+done
+signer_output="$(FAKE_TAG_SIGNER=other-maintainer run_verify \
+  workflow_dispatch refs/heads/main main v0.3.359 \
+  https://git.example.invalid codewire/codewire \
+  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" 2>&1)" && exit 1
+grep -Fq "is signed by 'other-maintainer', not the release tagger 'release-guard'" <<<"$signer_output"
+for tagger in '' 'release guard' '-release-guard' 'release-guard;id'; do
+  if CODEWIRE_RELEASE_TAGGER="$tagger" run_verify \
+      workflow_dispatch refs/heads/main main v0.3.359 \
+      https://git.example.invalid codewire/codewire \
+      "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" >/dev/null 2>&1; then
+    printf "release tag guard test failed: release tagger '%s' was accepted\n" "$tagger" >&2
+    exit 1
+  fi
+done
+if (unset CODEWIRE_RELEASE_TAGGER; run_verify \
+    workflow_dispatch refs/heads/main main v0.3.359 \
+    https://git.example.invalid codewire/codewire \
+    "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha") >/dev/null 2>&1; then
+  echo 'release tag guard test failed: verification ran without a release tagger' >&2
+  exit 1
+fi
 if (unset GITEA_TOKEN; run_verify \
     workflow_dispatch refs/heads/main main v0.3.359 \
     https://git.example.invalid codewire/codewire \
@@ -248,16 +295,18 @@ expect_failure non-semver-recovery-tag \
   workflow_dispatch refs/heads/main main v0.3.359-rc1 \
   https://git.example.invalid codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
-expect_failure recovery-input-on-push \
+# A tag push runs the tagged commit's workflow code, so it never selects a
+# release, with or without a tag input.
+expect_failure tag-push \
+  push refs/tags/v0.3.359 v0.3.359 '' \
+  https://git.example.invalid codewire/codewire \
+  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
+expect_failure tag-push-with-tag \
   push refs/tags/v0.3.359 v0.3.359 v0.3.359 \
   https://git.example.invalid codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
 expect_failure branch-push \
-  push refs/heads/main main '' \
-  https://git.example.invalid codewire/codewire \
-  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
-expect_failure mismatched-push-ref-name \
-  push refs/tags/v0.3.359 v0.3.358 '' \
+  push refs/heads/main main v0.3.359 \
   https://git.example.invalid codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
 expect_failure unconfigured-internal-server \
@@ -322,10 +371,51 @@ expect_failure unsupported-event \
   pull_request refs/pull/1/head main v0.3.359 \
   https://git.example.invalid codewire/codewire \
   "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
+# An annotated tag without a signature of its own is refused even though
+# Forgejo reports its commit's verified signature.
+expect_failure unsigned-tag-commit-verification \
+  workflow_dispatch refs/heads/main main v0.3.361 \
+  https://git.example.invalid codewire/codewire \
+  "$source_sha" "$unsigned_tag_object" "$source_sha" "$canonical_main_sha"
+unsigned_output="$(run_verify \
+  workflow_dispatch refs/heads/main main v0.3.361 \
+  https://git.example.invalid codewire/codewire \
+  "$source_sha" "$unsigned_tag_object" "$source_sha" "$canonical_main_sha" 2>&1)" && exit 1
+grep -Fq "release tag 'v0.3.361' carries no OpenPGP signature of its own" <<<"$unsigned_output"
 expect_failure mismatched-signed-tag-name \
   workflow_dispatch refs/heads/main main v0.3.363 \
   https://git.example.invalid codewire/codewire \
   "$source_sha" "$embedded_name_tag_object" "$source_sha" "$canonical_main_sha"
+
+CONFIRM="$ROOT/scripts/ci/release/confirm-release-checkout.sh"
+confirm() {
+  RELEASE_TAG="$1" SOURCE_SHA="$2" TAG_OBJECT_SHA="$3" "$CONFIRM" "$fixture"
+}
+expect_unconfirmed() {
+  local name="$1" expected="$2"
+  shift 2
+  local output
+  if output="$(confirm "$@" 2>&1)"; then
+    printf 'release checkout test failed: %s was confirmed\n' "$name" >&2
+    exit 1
+  fi
+  grep -Fq "$expected" <<<"$output" || {
+    printf 'release checkout test failed: %s: %s\n' "$name" "$output" >&2
+    exit 1
+  }
+}
+git -C "$fixture" switch -q --detach v0.3.359
+confirm v0.3.359 "$source_sha" "$tag_object_sha" |
+  grep -Fqx "release checkout confirmed: tag=v0.3.359 object=$tag_object_sha commit=$source_sha"
+expect_unconfirmed other-source 'not the selected source' v0.3.359 "$unmerged_sha" "$tag_object_sha"
+expect_unconfirmed moved-tag "is now object $tag_object_sha" v0.3.359 "$source_sha" "$embedded_name_tag_object"
+expect_unconfirmed missing-tag 'has no tag v0.3.399' v0.3.399 "$source_sha" "$tag_object_sha"
+git -C "$fixture" tag v0.3.364
+expect_unconfirmed lightweight-tag 'not an annotated tag object' v0.3.364 "$source_sha" "$source_sha"
+expect_unconfirmed non-semver-tag 'is not exact semver' v0.3.359-rc1 "$source_sha" "$tag_object_sha"
+expect_unconfirmed empty-source 'selected source is not a commit ID' v0.3.359 '' "$tag_object_sha"
+expect_unconfirmed empty-object 'selected tag object is not an object ID' v0.3.359 "$source_sha" ''
+git -C "$fixture" switch -q main
 
 mapfile -t recovery_tags < <(
   "$COMPUTE_TAGS" registry.example.invalid/codewire services "$source_sha" v0.3.359 \
@@ -369,6 +459,66 @@ sign_script="$ROOT/scripts/ci/release/sign-cw-release.sh"
 
 grep -Fq '  workflow_dispatch:' "$deploy_workflow"
 grep -Fq '  release-selection:' "$deploy_workflow"
+# Each release workflow names the release tagger, records the selected tag
+# object, and confirms every later tag checkout against the selection before
+# its next step.
+assert_confirmed_checkouts() {
+  local workflow="$1" expected="$2"
+  grep -Fq '  CODEWIRE_RELEASE_TAGGER: ${{ vars.CODEWIRE_RELEASE_TAGGER }}' "$workflow" || return 1
+  grep -Fq "          printf 'tag_object_sha=%s\\n' \"\$remote_object_sha\" >> \"\$GITHUB_OUTPUT\"" "$workflow" || return 1
+  grep -Fq '      tag_object_sha: ${{ steps.select.outputs.tag_object_sha }}' "$workflow" || return 1
+  python3 -I - "$workflow" "$expected" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1]).read()
+expected = int(sys.argv[2])
+checkout = re.compile(
+    r"      - uses: noel/actions-checkout@[0-9a-f]{40}\n"
+    r"(?:        if: (?P<if>[^\n]+)\n)?"
+    r"        with:\n"
+    r"          ref: refs/tags/\$\{\{ needs\.release-selection\.outputs\.release_tag \}\}\n"
+    r"          path: \.release-source\n"
+    r"(?:          fetch-depth: 0\n)?\n")
+confirm = (
+    "      - name: Confirm selected release checkout\n"
+    "{condition}"
+    "        env:\n"
+    "          RELEASE_TAG: ${{{{ needs.release-selection.outputs.release_tag }}}}\n"
+    "          SOURCE_SHA: ${{{{ needs.release-selection.outputs.source_sha }}}}\n"
+    "          TAG_OBJECT_SHA: ${{{{ needs.release-selection.outputs.tag_object_sha }}}}\n"
+    "        run: scripts/ci/release/confirm-release-checkout.sh .release-source\n")
+found = list(checkout.finditer(text))
+if len(found) != expected:
+    sys.exit(f"{len(found)} later tag checkouts, expected {expected}")
+for match in found:
+    condition = f"        if: {match['if']}\n" if match["if"] else ""
+    if not text.startswith(confirm.format(condition=condition), match.end()):
+        line = text.count("\n", 0, match.start()) + 1
+        sys.exit(f"tag checkout at line {line} is not confirmed before its next step")
+if text.count("ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}") != expected:
+    sys.exit("a later tag checkout has an unexpected shape")
+PY
+}
+assert_confirmed_checkouts "$deploy_workflow" 9
+assert_confirmed_checkouts "$cli_workflow" 9
+unconfirmed_workflow="$fixture/unconfirmed-deploy-prod.yaml"
+python3 -I - "$deploy_workflow" "$unconfirmed_workflow" <<'PY'
+import sys
+
+text = open(sys.argv[1]).read()
+step = text.index("      - name: Confirm selected release checkout\n")
+end = text.index("\n\n", step) + 2
+open(sys.argv[2], "w").write(text[:step] + text[end:])
+PY
+if assert_confirmed_checkouts "$unconfirmed_workflow" 9 2>/dev/null; then
+  echo 'release workflow fixture accepted a tag checkout without confirmation' >&2
+  exit 1
+fi
+grep -Fqx '  group: cli-release' "$cli_workflow" || {
+  echo 'CLI release has no single concurrency group' >&2
+  exit 1
+}
 for workflow in "$deploy_workflow" "$cli_workflow"; do
   sed -n '/- name: Select exact canonical release source/,/scripts\/ci\/release\/verify-release-tag-ref\.sh/p' \
     "$workflow" | grep -Fq '          GITEA_TOKEN: ${{ github.token }}' || {

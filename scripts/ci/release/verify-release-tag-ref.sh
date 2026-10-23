@@ -30,8 +30,10 @@ remote_object_sha="$8"
 remote_peeled_sha="$9"
 canonical_main_sha="${10}"
 # A release tag is trusted when Forgejo verifies its signature against a GPG
-# key registered on the tagger's Forgejo account. Only the synthetic test
-# harness may substitute the HTTP client.
+# key registered on the release tagger's Forgejo account, named by
+# CODEWIRE_RELEASE_TAGGER. The account is pinned, never a key list, so keys
+# rotate on the account (owner, 2026-09-25 and 2026-10-23, #2892). Only the
+# synthetic test harness may substitute the HTTP client.
 curl_bin="${CODEWIRE_RELEASE_TAG_CURL:-curl}"
 if [[ "$curl_bin" != curl ]]; then
   [[ "${CODEWIRE_RELEASE_TAG_TEST_MODE:-0}" == 1 ]] ||
@@ -39,18 +41,12 @@ if [[ "$curl_bin" != curl ]]; then
 fi
 [[ -n "${GITEA_TOKEN:-}" ]] ||
   fail "Forgejo API token is required to read the release tag verification"
+release_tagger="${CODEWIRE_RELEASE_TAGGER:-}"
+[[ "$release_tagger" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] ||
+  fail "CODEWIRE_RELEASE_TAGGER must name the release tagger's Forgejo account"
 
+# Release workflows run only main's code; a tag push never selects a release.
 case "$event" in
-  push)
-    [[ -z "$recovery_tag" ]] ||
-      fail "tag-push selection must not include a recovery tag"
-    if [[ ! "$workflow_ref" =~ ^refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-      fail "push ref must be an exact semver tag, got '$workflow_ref'"
-    fi
-    tag="${BASH_REMATCH[1]}"
-    [[ "$workflow_ref_name" == "$tag" ]] ||
-      fail "ref name '$workflow_ref_name' does not match tag '$tag'"
-    ;;
   workflow_dispatch)
     [[ "$workflow_ref" == "refs/heads/main" ]] ||
       fail "recovery dispatch must run from refs/heads/main, got '$workflow_ref'"
@@ -134,13 +130,32 @@ if ! verified_record="$(jq -er \
       select(type == "object"
         and .tag == $tag and .sha == $object
         and .object.type == "commit" and .object.sha == $commit)
-      | [(.verification.verified == true), (.verification.signer.username // "")]
+      | [(.verification.verified == true), (.verification.signer.name // "")]
       | @tsv' "$tag_record" 2>/dev/null)"; then
   fail "Forgejo release tag record for '$tag' does not match the canonical tag"
 fi
+# Forgejo names the account that owns the verifying key in signer.name, its
+# login; it never fills signer.username for a tag (services/convert).
 IFS=$'\t' read -r verified signer <<<"$verified_record"
 [[ "$verified" == true ]] ||
   fail "release tag '$tag' is not signed by a GPG key verified by Forgejo"
+[[ "$signer" == "$release_tagger" ]] ||
+  fail "release tag '$tag' is signed by '${signer:-unknown}', not the release tagger '$release_tagger'"
+# For a tag without a signature of its own, Forgejo reports the tagged
+# commit's verification instead (services/convert ToAnnotatedTag), so a
+# verified record alone does not prove the tag was signed. The tag object
+# must carry an OpenPGP signature, and Forgejo's verdict must be about exactly
+# that signature: Forgejo keeps its last block, BEGIN through END lines.
+tag_signature="$(git cat-file tag "$tag_ref" | awk '
+    /^-----BEGIN PGP SIGNATURE-----$/ { block = ""; inside = 1 }
+    inside { block = block $0 "\n" }
+    /^-----END PGP SIGNATURE-----$/ { inside = 0; last = block }
+    END { printf "%s", last }')"
+[[ -n "$tag_signature" ]] ||
+  fail "release tag '$tag' carries no OpenPGP signature of its own"
+reported_signature="$(jq -r '.verification.signature // ""' "$tag_record")"
+[[ "$reported_signature" == "$tag_signature" ]] ||
+  fail "Forgejo's verification of release tag '$tag' is not of the tag's own signature"
 
 printf 'release tag verified: tag=%s commit=%s forgejo_signer=%s\n' \
-  "$tag" "$source_sha" "${signer:-unknown}"
+  "$tag" "$source_sha" "$signer"

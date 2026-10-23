@@ -20,6 +20,10 @@ on:
         default: none
         options: [none, stable]
 
+concurrency:
+  group: cli-release
+  cancel-in-progress: false
+
 env:
   CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
   EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE: ${{ vars.EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE }}
@@ -28,6 +32,7 @@ env:
   ARM64_BUILDKIT_HOST: ${{ vars.ARM64_BUILDKIT_HOST }}
   CODEWIRE_R2_RELEASES_ENDPOINT: ${{ vars.CODEWIRE_R2_RELEASES_ENDPOINT }}
   CODEWIRE_SOURCE_URL: ${{ vars.CODEWIRE_SOURCE_URL }}
+  CODEWIRE_RELEASE_TAGGER: ${{ vars.CODEWIRE_RELEASE_TAGGER }}
   # Signs and notarizes the macOS pair and the VZ helper on Linux (#2064, #1905).
   RCODESIGN_VERSION: 0.29.0
   RCODESIGN_X86_64_LINUX_SHA256: dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002
@@ -145,10 +150,10 @@ jobs:
 
       - name: Confirm selected release checkout
         env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Verify sealed Rust toolchain and release targets
         run: scripts/ci/setup/assert-ci-runner-image.sh
@@ -225,10 +230,10 @@ jobs:
 
       - name: Confirm selected release checkout
         env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Build the helper unless its recipe is signed
         id: build
@@ -289,10 +294,10 @@ jobs:
       - name: Confirm selected release checkout
         if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
         env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Receive the unsigned helper
         if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
@@ -385,10 +390,10 @@ jobs:
 
       - name: Confirm selected release checkout
         env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Receive the local runtime's Linux side
         if: needs.build-runtime-linux.outputs.present == 'true'
@@ -502,10 +507,10 @@ jobs:
 
       - name: Confirm selected release checkout
         env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Install protoc (pinned)
         run: |
@@ -665,10 +670,10 @@ jobs:
 
       - name: Confirm selected release checkout
         env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Receive the local runtime
         if: needs.pack-runtime.outputs.present == 'true'
@@ -739,10 +744,10 @@ jobs:
 
       - name: Confirm selected release checkout
         env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Receive the local runtime
         if: needs.pack-runtime.outputs.present == 'true'
@@ -803,10 +808,10 @@ jobs:
 
       - name: Confirm selected release checkout
         env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Verify sealed Rust toolchain and release targets
         run: scripts/ci/setup/assert-ci-runner-image.sh
@@ -951,10 +956,10 @@ jobs:
 
       - name: Confirm selected release checkout
         env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
       - name: Receive the unsigned delivery
         uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b

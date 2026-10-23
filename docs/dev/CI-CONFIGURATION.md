@@ -45,6 +45,7 @@ secrets; credentials come from OpenBao.
 | `CODEWIRE_R2_CACHE_ENDPOINT` | `https://` S3 endpoint of the CI compiler and layer cache buckets | sccache and workspace layer cache selection |
 | `CODEWIRE_R2_RELEASES_ENDPOINT` | `https://` S3 endpoint of the `cw` release bucket | `cw` release publication (`cli-release.yaml`) |
 | `CODEWIRE_OPENBAO_ADDR` | OpenBao base URL | every OpenBao credential fetch |
+| `CODEWIRE_RELEASE_TAGGER` | Login of the Forgejo account whose registered GPG key signs release tags, exactly as Forgejo spells it | the release tag check in `deploy-prod.yaml` and `cli-release.yaml`: a tag counts only when Forgejo verifies it against a key on this account. Unset, every release is refused |
 | `CODEWIRE_FORGEJO_INTERNAL_URL` | Internal Forgejo URL that runners register against, if it differs from the public one | release tag and receipt checks |
 | `ARM64_BUILDKIT_HOST` | Host of the native arm64 BuildKit builder | arm64 image builds |
 | `CONFIDENTIAL_SNP_NODE` | Dev node that runs confidential (SNP) Sandboxes | confidential smoke |

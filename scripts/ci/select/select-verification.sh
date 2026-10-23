@@ -2117,6 +2117,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/*observe*.sh|scripts/ci/*observe*.py|\
       scripts/ci/*observer*.tsv|\
       scripts/ci/release/verify-cw-release-signing-key.sh|scripts/ci/release/verify-release-tag-ref.sh|\
+      scripts/ci/release/confirm-release-checkout.sh|\
       scripts/ci/release/verify-release-support-pair.sh|scripts/ci/tests/test-verify-release-support-pair.sh|\
       apps/cli/GPG_PUBLIC_KEY.asc|\
       apps/cli/README.md|apps/cli/install.sh|scripts/dev/test-cw-release-update.py|\
