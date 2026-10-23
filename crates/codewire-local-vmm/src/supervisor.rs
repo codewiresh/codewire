@@ -9820,6 +9820,12 @@ mod tests {
     use codewire_local_credentials::{LocalCredentialClient, serve_local_credential_authority};
     use codewire_protected_store::EphemeralProtectedStore;
 
+    /// Bounds a wait for a started supervisor's listener after its startup
+    /// reconciliation. The socket appearing, or the supervisor exiting, ends
+    /// the wait; the bound only turns a hang into a failure. 2 s failed on a
+    /// slow CI slot that stalled I/O (#3239).
+    const LISTENER_HANG_GUARD: Duration = Duration::from_secs(120);
+
     fn project_intent(vcpus: u32, memory_mib: u32, disk_gib: u64) -> (Vec<u8>, String) {
         let spec = codewire_project::ProjectSpec {
             image: "registry.example/codewire/workspace:latest".to_owned(),
@@ -15638,7 +15644,7 @@ mod tests {
                 result = &mut supervisor => {
                     panic!("supervisor exited before listening: {result:?}");
                 }
-                identity = tokio::time::timeout(Duration::from_secs(2), async {
+                identity = tokio::time::timeout(LISTENER_HANG_GUARD, async {
                     loop {
                         if let Ok(identity) = SocketIdentity::capture(&supervisor_socket) {
                             break identity;
@@ -15731,7 +15737,7 @@ mod tests {
             result = &mut supervisor => {
                 panic!("supervisor exited before listening: {result:?}");
             }
-            identity = tokio::time::timeout(Duration::from_secs(2), async {
+            identity = tokio::time::timeout(LISTENER_HANG_GUARD, async {
                 loop {
                     if let Ok(identity) = SocketIdentity::capture(&supervisor_socket) {
                         break identity;
@@ -15921,7 +15927,7 @@ mod tests {
             result = &mut supervisor => {
                 panic!("supervisor exited before listening: {result:?}");
             }
-            identity = tokio::time::timeout(Duration::from_secs(2), async {
+            identity = tokio::time::timeout(LISTENER_HANG_GUARD, async {
                 loop {
                     if let Ok(identity) = SocketIdentity::capture(&supervisor_socket) {
                         break identity;

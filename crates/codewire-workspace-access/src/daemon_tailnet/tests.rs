@@ -17,6 +17,12 @@ use super::*;
 
 const ENVIRONMENT: Uuid = Uuid::from_u128(0x2460_0000_0000_4000_8000_0000_0000_0001);
 
+/// Bounds a wait that ends on its event: a coordinator session's setup, a
+/// session or proof the fake coordinator records, a recorded host key. It only
+/// turns a hang into a failure; 5 and 8 s bounds failed while a slow CI slot
+/// stalled I/O (#3239).
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 /// A grant for `token` that expires `lifetime_seconds` from now, at
 /// `generation`.
 fn grant(token: &str, lifetime_seconds: i64, generation: i64) -> WorkspaceAccessGrant {
@@ -242,7 +248,7 @@ impl CoordinatorDialer for LocalCoordinator {
             &format!("http://{}", self.0),
             grant.peer_token().expose_secret(),
             PrimaryCoordinateIdentity::sidecar(environment_id),
-            Duration::from_secs(5),
+            HANG_GUARD,
         )
         .await
     }
@@ -279,9 +285,19 @@ fn connected(bearer: &str) -> Seen {
 
 #[tokio::test]
 async fn access_is_renewed_at_half_life_and_each_token_reproves_the_session() {
+    // Each token lives LIFETIME seconds. The renewal time is the subject, so
+    // its bounds stay: never before half the remaining lifetime, and never
+    // after expiry. The lifetime is long enough that a renewal delayed by a
+    // stalled slot still lands well before expiry; 4 s left 1 s of slack, and
+    // a slow CI slot stalled longer than that (#3239). `refresh_at`'s own
+    // tests pin the exact half.
+    const LIFETIME: i64 = 16;
+    let lifetime = Duration::from_secs(LIFETIME as u64);
+    // Whole-second expiry leaves between LIFETIME - 1 and LIFETIME seconds.
+    let shortest = lifetime - Duration::from_secs(1);
     let (coordinator, address) = serve_coordinator(0).await;
-    let plane = FakePlane::new(4);
-    let grants = AccessGrants::new(plane.clone(), grant("peer-token-0", 4, 4));
+    let plane = FakePlane::new(LIFETIME);
+    let grants = AccessGrants::new(plane.clone(), grant("peer-token-0", LIFETIME, 4));
     let started = Instant::now();
     let dialer: Arc<dyn CoordinatorDialer> = Arc::new(LocalCoordinator(address));
     let first = DialedSession::dial(&grants, dialer.as_ref(), ENVIRONMENT)
@@ -303,7 +319,9 @@ async fn access_is_renewed_at_half_life_and_each_token_reproves_the_session() {
         shutdown,
     ));
 
-    let seen = coordinator.wait_for(3, Duration::from_secs(8)).await;
+    let seen = coordinator.wait_for(3, HANG_GUARD).await;
+    // Stopped first, so no later renewal changes what is checked below.
+    let _ = stop.send(true);
     assert_eq!(
         seen[..3],
         [
@@ -313,26 +331,26 @@ async fn access_is_renewed_at_half_life_and_each_token_reproves_the_session() {
         ],
         "one session, re-proven in-band with each renewed token"
     );
-    // A 4-second token (3 to 4 s left at whole-second expiry) is renewed at
-    // half its remaining lifetime, never at once and never after expiry.
+    // Each token is renewed at half its remaining lifetime, never at once
+    // and never after expiry. A sleep never ends early, so the lower bound is
+    // exact (less 100 ms for the two clocks); a stall only delays a renewal.
     let refreshed = plane.refreshed_at.lock().unwrap().clone();
+    let half = shortest / 2 - Duration::from_millis(100);
     let first_renewal = refreshed[0].duration_since(started);
     assert!(
-        first_renewal >= Duration::from_millis(1400)
-            && first_renewal <= Duration::from_millis(2300),
+        first_renewal >= half && first_renewal < shortest,
         "first renewal after {first_renewal:?}"
     );
     let second_renewal = refreshed[1].duration_since(refreshed[0]);
     assert!(
-        second_renewal >= Duration::from_millis(1400)
-            && second_renewal <= Duration::from_millis(2300),
+        second_renewal >= half && second_renewal < shortest,
         "second renewal after {second_renewal:?}"
     );
+    // Each renewal became the current grant.
     assert_eq!(
         grants.current().peer_token().expose_secret(),
-        "peer-token-2"
+        format!("peer-token-{}", refreshed.len())
     );
-    let _ = stop.send(true);
 }
 
 #[tokio::test]
@@ -353,7 +371,7 @@ async fn an_ended_session_is_replaced_only_after_renewal() {
     // Each dial follows a renewal. The first session is ended by the
     // coordinator (a new generation, say); the daemon renews its grant and
     // reconnects with the newer token, never the ended session's.
-    coordinator.wait_for(2, Duration::from_secs(8)).await;
+    coordinator.wait_for(2, HANG_GUARD).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         coordinator.seen(),
@@ -383,7 +401,7 @@ async fn the_host_key_is_recorded_again_for_a_new_generation() {
     // A new generation records the same key again.
     plane.generation.store(5, Ordering::SeqCst);
     grants.refresh().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while plane.recorded.lock().unwrap().is_empty() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

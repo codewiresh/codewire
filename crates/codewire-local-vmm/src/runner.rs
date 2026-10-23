@@ -5519,6 +5519,13 @@ mod tests {
     use super::*;
     use crate::host_port::tests::{free_loopback_port, once_released};
 
+    /// Bounds a wait for a fixture child's exit, which ends the wait. The
+    /// bound only turns a hang into a failure; SIGNAL_STOP_TIMEOUT (2 s)
+    /// failed around a /bin/sh child on a slow CI slot that stalled I/O
+    /// (#3239).
+    #[cfg(target_os = "linux")]
+    const CHILD_EXIT_HANG_GUARD: Duration = Duration::from_secs(120);
+
     /// #2638: a network role starts with at least 1024 open files, or its
     /// hard limit, even from a process that has the macOS default of 256.
     #[test]
@@ -6981,7 +6988,8 @@ mod tests {
         start_task.abort();
         assert!(start_task.await.unwrap_err().is_cancelled());
 
-        tokio::time::timeout(SIGNAL_STOP_TIMEOUT, async {
+        // The aborted startup's drop sent SIGKILL; its exit ends the wait.
+        tokio::time::timeout(CHILD_EXIT_HANG_GUARD, async {
             loop {
                 match LiveProcess::recover(&identity) {
                     Ok(process) if !process.is_exited().unwrap() => {
@@ -7144,9 +7152,9 @@ mod tests {
         );
 
         let mut child = command.spawn().unwrap();
-        let status = tokio::time::timeout(SIGNAL_STOP_TIMEOUT, child.wait())
+        let status = tokio::time::timeout(CHILD_EXIT_HANG_GUARD, child.wait())
             .await
-            .expect("confined fixture exceeded its deadline")
+            .expect("confined fixture hung")
             .unwrap();
         assert!(status.success());
     }
@@ -7325,9 +7333,9 @@ exit 0"#,
             .unwrap()
             .spawn()
             .unwrap();
-        let status = tokio::time::timeout(SIGNAL_STOP_TIMEOUT, child.wait())
+        let status = tokio::time::timeout(CHILD_EXIT_HANG_GUARD, child.wait())
             .await
-            .expect("descriptor sentinel child exceeded its bound")
+            .expect("descriptor sentinel child hung")
             .unwrap();
         assert!(status.success());
     }

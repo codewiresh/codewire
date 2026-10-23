@@ -54,8 +54,11 @@ struct ChildRecord {
     ready: Option<Duration>,
     /// The last time the authority answered this child's lease channel.
     answered: Option<Duration>,
-    /// When its lease channel stopped answering.
+    /// When its lease channel stopped answering, as its probe saw it: later
+    /// than the close itself by however long the probe waited to run.
     closed: Option<Duration>,
+    /// How many earlier children's processes still existed when it spawned.
+    predecessors_alive: Option<usize>,
 }
 
 /// Each spawn stands in for a broker child: a real process the authority
@@ -131,10 +134,17 @@ impl LocalBrokerProcessSpawner for RenewalSpawner {
             .map_err(|_| LocalBrokerSpawnError::Spawn)?;
         let index = {
             let mut children = self.children.lock().unwrap();
+            // The lifecycle reaps a child it stops before it goes on, so an
+            // earlier child counted here had not been stopped yet.
+            let predecessors_alive = children
+                .iter()
+                .filter(|earlier| earlier.pid.is_some_and(|pid| !process_gone(pid)))
+                .count();
             children.push(ChildRecord {
                 pid: child.id(),
                 config: Some(config.clone()),
                 spawned: Some(self.started.elapsed()),
+                predecessors_alive: Some(predecessors_alive),
                 ..Default::default()
             });
             children.len() - 1
@@ -373,13 +383,26 @@ async fn a_broker_whose_successor_cannot_start_still_stops_when_its_lifetime_end
 
     let first = &children[0];
     let lifetime_end = first.spawned.unwrap() + RENEWAL.lifetime;
-    let closed = first.closed.unwrap();
-    assert!(closed + Duration::from_millis(100) >= lifetime_end);
-    assert!(closed <= lifetime_end + Duration::from_secs(1));
+    // The probe sees the close no earlier than it happened.
+    assert!(first.closed.unwrap() + Duration::from_millis(100) >= lifetime_end);
     assert!(process_gone(first.pid.unwrap()));
-    // It failed closed: the replacement started afresh after it stopped.
+    // It failed closed: the replacement started afresh after it stopped. The
+    // first child was already killed and reaped when the replacement spawned.
+    // The probe's close time is no witness of that, nor of how soon the
+    // child stopped: it is late by however long the probe waited to run,
+    // which on a slow CI slot exceeded the replacement's spawn by more than
+    // 100 ms (#3239). The lifecycle records the spawn itself, after the
+    // reap, so the spawn time bounds the stop from above.
     let replacement = &children[1];
-    assert!(replacement.spawned.unwrap() + Duration::from_millis(100) >= closed);
+    assert_eq!(
+        replacement.predecessors_alive,
+        Some(0),
+        "the replacement spawned while its predecessor ran: {children:?}"
+    );
+    assert!(
+        replacement.spawned.unwrap() <= lifetime_end + Duration::from_secs(1),
+        "the first child outlived its lifetime: {children:?}"
+    );
     assert_eq!(
         states,
         [

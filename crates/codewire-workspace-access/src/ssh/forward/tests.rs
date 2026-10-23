@@ -16,7 +16,10 @@ use super::super::{
 };
 use super::*;
 
-const BOUND: Duration = Duration::from_secs(10);
+// Every wait bounded by this ends on its event: an accept, an EOF, a close,
+// a child's exit or a count reaching zero. The bound only turns a hang into a
+// failure; 10 s failed while a slow CI slot stalled I/O (#3239).
+const HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// Process sessions are not under test.
 struct NoSessions;
@@ -109,7 +112,7 @@ async fn open(
     port: u16,
 ) -> Result<Channel<client::Msg>, russh::Error> {
     timeout(
-        BOUND,
+        HANG_GUARD,
         client.channel_open_direct_tcpip(host, port.into(), "127.0.0.1", 40000),
     )
     .await
@@ -145,7 +148,7 @@ async fn echo_server() -> SocketAddr {
 /// The channel's data until its EOF.
 async fn read_to_eof(read: &mut russh::ChannelReadHalf) -> Vec<u8> {
     let mut received = Vec::new();
-    timeout(BOUND, async {
+    timeout(HANG_GUARD, async {
         loop {
             match read.wait().await {
                 Some(ChannelMsg::Data { data }) => received.extend_from_slice(&data),
@@ -163,7 +166,7 @@ async fn read_to_eof(read: &mut russh::ChannelReadHalf) -> Vec<u8> {
 /// Wait until the server closes the channel. (A russh client that closes
 /// first drops the server's reply, so this is only for a server's close.)
 async fn closed_by_server(read: &mut russh::ChannelReadHalf) {
-    timeout(BOUND, async {
+    timeout(HANG_GUARD, async {
         loop {
             match read.wait().await {
                 Some(ChannelMsg::Close) | None => return,
@@ -176,7 +179,7 @@ async fn closed_by_server(read: &mut russh::ChannelReadHalf) {
 }
 
 async fn eventually(what: &str, done: impl Fn() -> bool) {
-    timeout(BOUND, async {
+    timeout(HANG_GUARD, async {
         while !done() {
             sleep(Duration::from_millis(10)).await;
         }
@@ -518,7 +521,7 @@ async fn forwards_never_leave_the_workloads_network_namespace() {
     );
     // The same listener through loopback is the workload's own.
     let channel = open(&client, "127.0.0.1", port).await.unwrap();
-    timeout(BOUND, listener.accept())
+    timeout(HANG_GUARD, listener.accept())
         .await
         .expect("the loopback forward connected")
         .unwrap();
@@ -584,7 +587,7 @@ async fn the_client_closing_ends_the_forward() {
     write.data_bytes(b"request".to_vec()).await.unwrap();
     write.eof().await.unwrap();
     let mut request = Vec::new();
-    timeout(BOUND, accepted.read_to_end(&mut request))
+    timeout(HANG_GUARD, accepted.read_to_end(&mut request))
         .await
         .unwrap()
         .unwrap();
@@ -604,7 +607,7 @@ async fn the_client_closing_ends_the_forward() {
     let (mut accepted, _) = target.accept().await.unwrap();
     channel.close().await.unwrap();
     let mut rest = Vec::new();
-    timeout(BOUND, accepted.read_to_end(&mut rest))
+    timeout(HANG_GUARD, accepted.read_to_end(&mut rest))
         .await
         .expect("the target saw the forward end")
         .unwrap();
@@ -686,7 +689,7 @@ async fn the_connection_ending_ends_its_forwards() {
         .await
         .unwrap();
     let mut rest = Vec::new();
-    timeout(BOUND, accepted.read_to_end(&mut rest))
+    timeout(HANG_GUARD, accepted.read_to_end(&mut rest))
         .await
         .expect("the target saw the forward end")
         .unwrap();
@@ -713,7 +716,7 @@ async fn forwards_beyond_the_connection_limit_are_refused_until_one_ends() {
         4
     );
     first.close().await.unwrap();
-    timeout(BOUND, async {
+    timeout(HANG_GUARD, async {
         loop {
             if open(&client, "127.0.0.1", echo.port()).await.is_ok() {
                 return;
@@ -808,7 +811,7 @@ async fn openssh_stdio_forward(
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(input).await.unwrap();
     drop(stdin);
-    timeout(BOUND, child.wait_with_output())
+    timeout(HANG_GUARD, child.wait_with_output())
         .await
         .expect("OpenSSH finished")
         .unwrap()
@@ -867,7 +870,7 @@ async fn socks5_connect(proxy: SocketAddr, host: &str, port: u16) -> Option<toki
     stream.write_all(&request).await.unwrap();
     // VER REP RSV ATYP (IPv4) ADDR PORT.
     let mut reply = [0u8; 10];
-    match timeout(BOUND, stream.read_exact(&mut reply))
+    match timeout(HANG_GUARD, stream.read_exact(&mut reply))
         .await
         .expect("the SOCKS5 CONNECT was answered")
     {
@@ -899,7 +902,7 @@ async fn openssh_dynamic_forward_refuses_platform_listeners_and_reaches_user_por
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn OpenSSH");
-    timeout(BOUND, async {
+    timeout(HANG_GUARD, async {
         while tokio::net::TcpStream::connect(socks).await.is_err() {
             sleep(Duration::from_millis(50)).await;
         }
@@ -914,7 +917,7 @@ async fn openssh_dynamic_forward_refuses_platform_listeners_and_reaches_user_por
     user.write_all(b"through socks").await.unwrap();
     user.shutdown().await.unwrap();
     let mut echoed = Vec::new();
-    timeout(BOUND, user.read_to_end(&mut echoed))
+    timeout(HANG_GUARD, user.read_to_end(&mut echoed))
         .await
         .expect("the echo ended")
         .unwrap();
@@ -935,7 +938,7 @@ async fn openssh_dynamic_forward_refuses_platform_listeners_and_reaches_user_por
 
     let mut ssh = ssh;
     ssh.start_kill().unwrap();
-    let output = timeout(BOUND, ssh.wait_with_output())
+    let output = timeout(HANG_GUARD, ssh.wait_with_output())
         .await
         .expect("OpenSSH ended")
         .unwrap();
