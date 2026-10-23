@@ -16,8 +16,8 @@ read.
 | Placement | Create | Terminal sessions | Managed agents |
 | --- | --- | --- | --- |
 | Trusted Linux host | `--local --type host` | Owner daemon and private Unix socket | Codex, Claude and noel |
-| Native Linux sandbox | `--local --type sandbox` | Native supervisor and guest daemon | Codex/Claude implementation; VM qualification pending |
-| Platform sandbox | `--cloud --type sandbox` | Authenticated platform API | Qualification pending |
+| Native Linux sandbox | `--local --type sandbox` | Native supervisor and guest daemon | Codex and Claude, with a selected credential profile |
+| Platform sandbox | `--cloud --type sandbox` | Authenticated platform API | Codex and Claude, with a selected credential profile |
 | macOS trusted host | `--local --type host` | Owner daemon and private Unix socket | Codex and Claude |
 | macOS local sandbox | `--local --type sandbox` on Apple Silicon | Shared supervisor, VZ helper and arm64 guest daemon | Same host route as a native Linux sandbox; needs a local credential profile, see [MACOS-CLI.md](MACOS-CLI.md) |
 

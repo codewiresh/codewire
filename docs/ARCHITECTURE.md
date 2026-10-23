@@ -1,32 +1,21 @@
-# Codewire Architecture
+# Hosted platform architecture
 
-Status: current overview. For component detail use the linked docs; for
-proposals use the maintainers' private design repository.
+Status: current. This page describes how the hosted platform is put together
+on Kubernetes. [SPEC.md](../SPEC.md) is the specification of the whole
+product: its model, every placement, the contracts, access paths and security
+model. For component detail use the linked docs; for proposals use the
+maintainers' private design repository.
 
-## 1. What Codewire is
+## 1. Scope
 
-Codewire gives developers and AI coding agents an isolated development
-machine: a Linux environment with persistent storage, durable terminal and
-agent sessions, Docker, and access over SSH, a browser terminal, file
-transfer and preview URLs.
-
-An environment runs in one of three placements, all driven by the same `cw`
-CLI and the same in-environment daemon:
-
-| Placement | Where it runs | Isolation |
-| --- | --- | --- |
-| Hosted sandbox | the Codewire platform on Kubernetes | one VM per environment (Kata Containers) |
-| Local VM | the user's Linux or Apple Silicon machine | Cloud Hypervisor on KVM; Virtualization.framework on macOS |
-| Trusted host | the user's machine, as their user | process ownership only, no containment |
-
-### Why a VM per environment
-
-Agents run untrusted code: whatever they generate, whatever dependency they
-pull. Containers share the host kernel, so one kernel exploit reaches every
-environment on the node. Codewire runs each environment in its own
-hardware-virtualized VM with its own kernel; the hypervisor boundary is the
-security boundary. The cost is more work in networking, storage and
-orchestration, which the rest of this document describes.
+A Codewire environment runs in one of three placements, all driven by the
+same `cw` CLI and the same in-environment daemon: a hosted sandbox on the
+platform, a local VM on the user's machine, or a trusted host session
+([SPEC.md, Product model](../SPEC.md#2-product-model)). Each environment runs
+in its own hardware-virtualized VM with its own kernel, because agents run
+untrusted code and a shared kernel would make one exploit reach every
+environment on the node. The cost is more work in networking, storage and
+orchestration, which this document describes for the hosted platform.
 
 ## 2. Platform overview
 
@@ -200,68 +189,27 @@ orchestration forwards to an application port inside the sandbox. See
 [dev/DERP-STUN.md](dev/DERP-STUN.md) and
 [dev/SANDBOX-PREVIEWS.md](dev/SANDBOX-PREVIEWS.md).
 
-## 5. Secrets and credentials
+## 5. Secrets and credentials in a hosted sandbox
 
-Application secrets and provider credentials are separate concepts
-([dev/SECRETS-AND-CREDENTIALS.md](dev/SECRETS-AND-CREDENTIALS.md)).
-
-- **Application secrets** (for example `DATABASE_URL`) are named values a
-  user selects for an environment; they reach the workload's processes as an
-  environment projection under their original names. They are visible to
-  those processes.
-- **Provider credentials** (OpenAI/Codex, Anthropic, GitHub, SSH identities)
-  stay outside the sandbox. A credential profile selects identities; the
-  sandbox receives endpoints, placeholders and a bounded capability, and the
-  broker performs the typed operation (HTTP proxy, signer, repository
-  executor).
+Application secrets and provider credentials are separate concepts; the
+product model, the direct delivery exceptions and the authority reuse limits
+are in [SPEC.md](../SPEC.md#8-security-model), the contract in
+[dev/SECRETS-AND-CREDENTIALS.md](dev/SECRETS-AND-CREDENTIALS.md). In a hosted
+sandbox the path is:
 
 ```text
-local VM:  child -> local relay -> guest edge -> host broker -> provider
-hosted:    child -> local relay -> daemon bridge -> orchestration relay -> credential service -> provider
+child -> daemon loopback ingress -> daemon bridge -> orchestration relay -> credential service -> provider
 ```
 
-The relay legs hold no provider material. The only direct deliveries are the
-creator's own Codex and Claude Code sign-in tokens, written as those tools'
-own login files so their account features work; refresh tokens, API keys and
-organization credentials are never delivered.
+The relay legs hold no provider material: the credential relay in
+orchestration dials the daemon over the daemon Service and relays the bridge
+to the broker in the credential service, which injects the credential and
+redacts it from responses.
 
-Saved-state vocabulary: a **skill snapshot** is immutable reusable skill
-content (implemented). **Workspace storage** is the live filesystem;
-surviving a stop is not a snapshot. Workspace snapshots, environment
-snapshots and **VM checkpoints** (saved running-VM state) are reserved names
-and not implemented. An **environment projection** launches a process;
-snapshots restore saved state; checkpoints resume execution.
+## 6. Other placements and contracts
 
-## 6. Local placements
-
-`cw create --local` runs the environment on the user's machine
-([dev/LINUX-LOCAL-VMS.md](dev/LINUX-LOCAL-VMS.md),
-[dev/MACOS-CLI.md](dev/MACOS-CLI.md)):
-
-- **Linux**: Cloud Hypervisor on KVM with the Codewire guest kernel and guest
-  root that the release pins; `cw setup --local` installs them by digest. A
-  native supervisor owns VM lifecycle, state (an owner-only SQLite database)
-  and host ports; the guest runs the same workspace image and daemon as the
-  platform.
-- **macOS (Apple Silicon)**: the same artifacts under Virtualization.framework
-  through a signed helper; the packet worker and egress broker run as host
-  processes under Seatbelt.
-- **Trusted host** (`--type host`): sessions run as the user's own account
-  with their tools; Codewire owns process cleanup only.
-
-The project folder is mounted live by default (`--path-mode mount`);
-`copy` (a one-time copy of the folder as it is), `clone` (a one-time clone of
-the committed Git state) and `empty` are the alternatives. Dependency and
-build folders listed in `workspace.vm_only` live on the VM disk. Local
-environments join Codewire Mesh only when a network is selected; the host
-owns Mesh identity, and the VM sees only admitted streams for its declared
-ports.
-
-## 7. Clients and contracts
-
-The control-plane contract is protobuf under `proto/`, served as Connect-RPC
-and generated into `packages/codewire-proto-ts`, `libs/gen-go`,
-`libs/gen-python` and the SDKs in `libs/sdk-*`
-([dev/PROTO-STYLE.md](dev/PROTO-STYLE.md)). The daemon, bridge and broker
-protocol is gRPC under `libs/daemon-proto` and `crates/codewire-daemon-proto`.
-Authentication flavors are in [dev/AUTH-POLICY.md](dev/AUTH-POLICY.md).
+Local VMs, trusted hosts and the client contracts are specified in
+[SPEC.md](../SPEC.md) (sections 5 and 6), with the detail in
+[dev/LINUX-LOCAL-VMS.md](dev/LINUX-LOCAL-VMS.md),
+[dev/MACOS-CLI.md](dev/MACOS-CLI.md) and
+[dev/PROTO-STYLE.md](dev/PROTO-STYLE.md).

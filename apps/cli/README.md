@@ -42,8 +42,8 @@ Choose a placement:
 | Platform sandbox | `cw create --name dev --image workspace` | A platform environment, after `cw login` |
 
 Local host creation requires no platform account. It uses the tools and
-provider configuration available to your host user. Host execution is
-currently qualified on Linux; Mac host support follows its cleanup adapter.
+provider configuration available to your host user. Linux and macOS are the
+admitted hosts.
 
 Create a local sandbox with the workspace image:
 
@@ -152,10 +152,10 @@ Active steering currently supports Codex. Claude accepts queued follow-ups
 and native interruption. Use `cw send` for terminal sessions; managed agents
 receive tasks through `cw msg` and `cw steer`.
 
-Managed Codex/Claude commands also target a native Linux sandbox created with
-`--local --type sandbox`. Platform sandboxes already support ordinary terminal
-sessions; their managed-agent integration remains a separate delivery step.
-Sandbox provider credentials stay with the selected external credential profile.
+Managed Codex/Claude commands work the same in a local VM created with
+`--local --type sandbox` and in a platform sandbox. In both, the agent needs
+a selected credential profile with a provider for it, and the provider
+material stays outside the environment.
 
 ## Updating cw without restarting
 
@@ -241,7 +241,8 @@ cw network nodes
 `cw mesh up`, `cw mesh status`, and `cw mesh down` manage an optional local
 Mesh service installation.
 
-Remote member execution is planned.
-Its execution grants and `--member` routing remain unimplemented.
+`cw member` pins an enrolled trusted Linux host, and `cw --member NAME`
+routes session commands to it; see
+[docs/dev/CLI-ORCHESTRATION.md](../../docs/dev/CLI-ORCHESTRATION.md).
 
 See [docs/quickstart.md](docs/quickstart.md) for the concise user flow.

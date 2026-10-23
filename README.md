@@ -118,7 +118,10 @@ docs/            architecture, glossary and developer docs
 ## Documentation
 
 - [User guide](https://codewire.sh/docs)
-- [Architecture](docs/ARCHITECTURE.md) and [glossary](docs/GLOSSARY.md)
+- [Specification](SPEC.md): what Codewire is and how it behaves, for
+  engineers and self-hosters
+- [Hosted platform architecture](docs/ARCHITECTURE.md) and
+  [glossary](docs/GLOSSARY.md)
 - [Local VMs on Linux](docs/dev/LINUX-LOCAL-VMS.md) and [on macOS](docs/dev/MACOS-CLI.md)
 - [Sessions and agent orchestration](docs/dev/CLI-ORCHESTRATION.md)
 - [Sandbox daemon](docs/dev/SANDBOX-DAEMON.md), [networking](docs/dev/DERP-STUN.md),

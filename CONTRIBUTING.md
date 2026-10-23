@@ -2,7 +2,10 @@
 
 Codewire is not accepting issues or pull requests yet. This guide describes
 how the project is built and tested, and the terms that will apply once
-contributions open (see [License](#license)).
+contributions open (see [License](#license)). The
+[code of conduct](CODE_OF_CONDUCT.md) applies to every project space.
+[SPEC.md](SPEC.md) describes the system; [docs/README.md](docs/README.md)
+maps the rest of the documentation.
 
 ## Build, test, run
 
