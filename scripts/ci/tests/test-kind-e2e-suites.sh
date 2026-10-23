@@ -831,6 +831,17 @@ for temporal_smoke in temporal-smoke temporal-fencing-smoke; do
   [ "$invocations" -ge 1 ] && [ "$addressed" -eq "$invocations" ] ||
     fail "${temporal_smoke} can fall back to another cluster's Temporal (${addressed}/${invocations} addressed)"
 done
+# The fencing smoke runs orchestration code on the host, which refuses to run
+# without the deployment's runtime images: it gets the deployed values.
+fencing_smoke_source="$(workspace_smoke_definition temporal_fencing_smoke)"
+for runtime_image in CODEWIRE_WORKSPACE_IMAGE_REPOSITORY CODEWIRE_APPROVED_IMAGE_REGISTRIES SANDBOX_DAEMON_IMAGE; do
+  grep -Fq "${runtime_image}=\"\$" <<<"$fencing_smoke_source" ||
+    fail "the fencing smoke does not pass the deployed ${runtime_image}"
+done
+for deployed in 'configmap/codewire-config' 'configmap/codewire-image-registries' 'deploy/codewire-orchestration'; do
+  grep -Fq "get ${deployed}" <<<"$fencing_smoke_source" ||
+    fail "the fencing smoke does not read its runtime images from ${deployed}"
+done
 for hardcoded_loopback in '127.0.0.1:7233' '127.0.0.1:8084' '127.0.0.1:18092' '127.0.0.1:8090' 'localhost:10443'; do
   if grep -Fq "$hardcoded_loopback" <<<"$common_client_source"; then
     fail "Kind harness still hardcodes client address ${hardcoded_loopback}"

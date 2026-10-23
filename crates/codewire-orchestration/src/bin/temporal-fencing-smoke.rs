@@ -23,6 +23,7 @@ mod enabled {
     use codewire_orchestration::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE;
     use codewire_orchestration::sandbox::client::SandboxClient;
     use codewire_orchestration::sandbox::host_keys::RecordedHostKeys;
+    use codewire_orchestration::sandbox::runtime_images::{self, RuntimeImages};
     use codewire_orchestration::temporal::{
         EnvironmentCommand, EnvironmentWorkflow, EnvironmentWorkflowRun,
         OrganizationDeletionWorkflow, TemporalTrigger, environment_workflow_id,
@@ -221,6 +222,8 @@ mod enabled {
         temporal_address: String,
         orchestration_url: String,
         workspace_image: String,
+        runtime_images: &'static RuntimeImages,
+        daemon_image: String,
         pool: PgPool,
         temporal: Client,
         sandbox: SandboxClient,
@@ -238,6 +241,18 @@ mod enabled {
                 .unwrap_or_else(|_| "http://127.0.0.1:8084".to_string());
             let workspace_image = std::env::var("SMOKE_WORKSPACE_IMAGE")
                 .unwrap_or_else(|_| PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE.to_string());
+            // This process runs orchestration code too (it names the
+            // template its worker creates), so it needs the deployment's
+            // runtime images exactly as orchestration does: the Kind harness
+            // passes the deployed values (docs/CONFIGURATION.md), and a
+            // missing one fails here as it fails orchestration's start.
+            let runtime_images = runtime_images::init().map_err(anyhow::Error::msg)?;
+            let daemon_image = std::env::var(runtime_images::DAEMON_IMAGE_ENV)
+                .ok()
+                .filter(|image| !image.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(runtime_images::missing(runtime_images::DAEMON_IMAGE_ENV))
+                })?;
             let pool = PgPool::connect(&database_url).await?;
             let connection = Connection::connect(
                 ConnectionOptions::new(url::Url::parse(&temporal_address)?).build(),
@@ -259,6 +274,8 @@ mod enabled {
                 temporal_address,
                 orchestration_url,
                 workspace_image,
+                runtime_images,
+                daemon_image,
                 pool,
                 temporal,
                 sandbox: SandboxClient::new(kube, SANDBOX_NAMESPACE),
@@ -345,15 +362,16 @@ mod enabled {
                 .env("ENVIRONMENT", "local")
                 .env("SESSION_SECRET", "kind-e2e-not-a-real-secret")
                 .env("SANDBOX_NAMESPACE", SANDBOX_NAMESPACE)
-                .env("SANDBOX_DAEMON_IMAGE", "codewire-daemon:e2e")
-                // The overlay's runtime images (tests/e2e/kind).
+                // The deployed orchestration's runtime images, as this
+                // process was given them.
+                .env(runtime_images::DAEMON_IMAGE_ENV, &self.daemon_image)
                 .env(
-                    "CODEWIRE_WORKSPACE_IMAGE_REPOSITORY",
-                    "ghcr.io/codewiresh/workspace",
+                    runtime_images::WORKSPACE_IMAGE_REPOSITORY_ENV,
+                    self.runtime_images.workspace_repository(),
                 )
                 .env(
-                    "CODEWIRE_APPROVED_IMAGE_REGISTRIES",
-                    "ghcr.io/codewiresh/,docker.io/library/",
+                    runtime_images::APPROVED_IMAGE_REGISTRIES_ENV,
+                    self.runtime_images.approved_registries().join(","),
                 )
                 .env("SANDBOX_RUNTIME_PROFILE", "runc")
                 .env("SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME", "true")

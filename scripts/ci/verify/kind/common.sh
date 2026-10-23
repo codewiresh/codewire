@@ -4490,10 +4490,28 @@ SQL
 }
 
 temporal_fencing_smoke() {
-  local workspace_image
+  local workspace_image workspace_repository approved_registries daemon_image
   workspace_image="$(kind_workspace_runtime_image)" || return $?
+  # The smoke and its workers run orchestration code on this host, which
+  # refuses to run without the deployment's runtime images
+  # (docs/CONFIGURATION.md): give them the values the deployed orchestration
+  # has, from the resources the Kind overlay applied.
+  workspace_repository="$(kubectl -n "$NS" get configmap/codewire-config \
+    -o jsonpath='{.data.CODEWIRE_WORKSPACE_IMAGE_REPOSITORY}')" || return $?
+  approved_registries="$(kubectl -n "$NS" get configmap/codewire-image-registries \
+    -o jsonpath='{.data.CODEWIRE_APPROVED_IMAGE_REGISTRIES}')" || return $?
+  daemon_image="$(kubectl -n "$NS" get deploy/codewire-orchestration \
+    -o jsonpath='{.spec.template.spec.containers[?(@.name=="orchestration")].env[?(@.name=="SANDBOX_DAEMON_IMAGE")].value}')" \
+    || return $?
+  if [ -z "$workspace_repository" ] || [ -z "$approved_registries" ] || [ -z "$daemon_image" ]; then
+    echo "::error::the deployed orchestration has no runtime image configuration for the fencing smoke"
+    return 1
+  fi
   log "running final Temporal activity-fencing smoke"
-  DATABASE_URL="$KIND_DATABASE_URL" \
+  CODEWIRE_WORKSPACE_IMAGE_REPOSITORY="$workspace_repository" \
+    CODEWIRE_APPROVED_IMAGE_REGISTRIES="$approved_registries" \
+    SANDBOX_DAEMON_IMAGE="$daemon_image" \
+    DATABASE_URL="$KIND_DATABASE_URL" \
     TEMPORAL_ADDRESS="$KIND_TEMPORAL_FRONTEND_URL" \
     SMOKE_ORCHESTRATION_URL="$KIND_ORCHESTRATION_HTTP_URL" \
     SMOKE_WORKSPACE_IMAGE="$workspace_image" \
