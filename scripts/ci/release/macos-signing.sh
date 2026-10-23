@@ -9,6 +9,10 @@
 readonly macos_team_id='PXQZM3GLP5'
 # Apple usually answers within minutes; a release waits at most this long.
 readonly macos_notary_wait_seconds=1800
+# A failed upload, or a connection lost while Apple processes a submission, is
+# retried this many times this far apart. rcodesign itself retries neither.
+readonly macos_notary_attempts=4
+readonly macos_notary_retry_seconds=30
 
 # Check the signer and its keys, refuse every other release capability, and
 # make the private work directory $work, shredded on exit.
@@ -67,17 +71,82 @@ macos_check_signature() {
 
 # Have Apple notarize ZIP: Apple notarizes a zip, not a bare executable, and
 # records each executable's code directory hash, which Gatekeeper looks up for
-# a quarantined download. Sets notary_submission_id from the log; acceptance
-# is rcodesign's exit status, so a log without the id only warns.
+# a quarantined download. Sets notary_submission_id from the log.
+#
+# Apple's verdict decides the run; a lost connection does not. rcodesign 0.29.0
+# polls without retrying a transport error, so one dropped response used to read
+# as a rejection. A verdict other than Accepted fails at once. An upload that
+# created no submission is retried. A submission whose answer was lost is waited
+# on again, by its id, within the same overall limit, and `notary-wait` reports
+# the verdict only as its last `poll state` line.
 macos_notarize() {
-  local zip="$1" status=0
+  local zip="$1" attempt status started reason verdict remaining
   run_rcodesign encode-app-store-connect-api-key --config-file /dev/null --output-path "$work/notary-key.json" \
     "$(<"$keys/notary-issuer-id")" "$(<"$keys/notary-key-id")" "$keys/notary-key.p8" >/dev/null 2>&1 ||
     die 'the notary API key does not encode'
-  run_rcodesign notary-submit --config-file /dev/null --api-key-file "$work/notary-key.json" --wait \
-    --max-wait-seconds "$macos_notary_wait_seconds" "$zip" 2>&1 | tee "$work/notary.log" || status=$?
-  [ "$status" = 0 ] || die 'Apple did not accept the notarization'
-  notary_submission_id="$(sed -n 's/.*created submission ID: \([0-9a-f-]\{36\}\).*/\1/p' "$work/notary.log" | head -1)"
+  started=$SECONDS
+  notary_submission_id=''
+  for ((attempt = 1; attempt <= macos_notary_attempts; attempt++)); do
+    status=0
+    run_rcodesign notary-submit --config-file /dev/null --api-key-file "$work/notary-key.json" --wait \
+      --max-wait-seconds "$macos_notary_wait_seconds" "$zip" 2>&1 | tee "$work/notary.log" || status=$?
+    notary_submission_id="$(macos_notary_submission_id "$work/notary.log")"
+    if [ "$status" = 0 ]; then
+      macos_notary_accepted
+      return
+    fi
+    macos_notary_refuse_verdict "$work/notary.log"
+    grep -q 'reached time limit waiting for notarization' "$work/notary.log" &&
+      die "Apple did not finish notarization submission ${notary_submission_id:-(no id)} within ${macos_notary_wait_seconds}s"
+    [ -z "$notary_submission_id" ] || break
+    reason="$(macos_notary_reason "$work/notary.log")"
+    [ "$attempt" -lt "$macos_notary_attempts" ] ||
+      die "the notary upload failed $macos_notary_attempts times and created no submission: $reason"
+    printf '::warning::%s: the notary upload failed and created no submission (attempt %s of %s): %s\n' \
+      "$signer" "$attempt" "$macos_notary_attempts" "$reason"
+    sleep "$macos_notary_retry_seconds"
+  done
+
+  # The submission exists; only its answer was lost.
+  for ((attempt = 1; attempt <= macos_notary_attempts; attempt++)); do
+    reason="$(macos_notary_reason "$work/notary.log")"
+    printf '::warning::%s: lost contact with Apple while it processed submission %s (attempt %s of %s): %s\n' \
+      "$signer" "$notary_submission_id" "$attempt" "$macos_notary_attempts" "$reason"
+    sleep "$macos_notary_retry_seconds"
+    remaining=$((macos_notary_wait_seconds - (SECONDS - started)))
+    [ "$remaining" -gt 0 ] || break
+    status=0
+    run_rcodesign notary-wait --config-file /dev/null --api-key-file "$work/notary-key.json" \
+      --max-wait-seconds "$remaining" "$notary_submission_id" 2>&1 | tee "$work/notary.log" || status=$?
+    [ "$status" = 0 ] || continue
+    verdict="$(sed -n 's/.*poll state after [0-9]*s: \([A-Za-z]*\).*/\1/p' "$work/notary.log" | tail -1)"
+    case "$verdict" in
+      Accepted) macos_notary_accepted; return ;;
+      '') die "notary-wait for submission $notary_submission_id ended without a verdict" ;;
+      *) die "Apple did not accept the notarization: submission $notary_submission_id is $verdict" ;;
+    esac
+  done
+  die "lost contact with Apple's notary service: submission $notary_submission_id has no verdict after $((SECONDS - started))s; Apple may still accept it, so check that submission before rerunning"
+}
+
+macos_notary_submission_id() {
+  sed -n 's/.*created submission ID: \([0-9a-f-]\{36\}\).*/\1/p' "$1" | head -1
+}
+
+# The last error line of a notary log, for a warning or a final failure.
+macos_notary_reason() {
+  grep -iE 'error|failed|HTTP' "$1" | tail -1 | cut -c1-300 || true
+}
+
+# rcodesign's verdict errors (`notary-submit --wait`): a rejection, an invalid
+# package or an incomplete status is Apple's answer, never retried.
+macos_notary_refuse_verdict() {
+  local verdict
+  verdict="$(grep -E 'notarization rejected:|notarization package is invalid|notarization is incomplete' "$1" | tail -1 || true)"
+  [ -z "$verdict" ] || die "Apple did not accept the notarization${notary_submission_id:+ (submission $notary_submission_id)}: ${verdict##*: }"
+}
+
+macos_notary_accepted() {
   if [ -n "$notary_submission_id" ]; then
     printf '%s: notary submission %s accepted\n' "$signer" "$notary_submission_id"
   else

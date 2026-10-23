@@ -13,8 +13,13 @@
 # appends a marker to every executable it "signs", after the identifier and
 # entitlements it was given. A file in DIR/state makes it misbehave: `drop`
 # (omit that exact signature-info line), `extra-entitlement` (report one more
-# entitlement than it was given), `verify-fails`, `reject` (the notarization)
-# or `no-submission-id` (a notarization log without the id).
+# entitlement than it was given), `verify-fails`, `reject` (the notarization),
+# `no-submission-id` (a notarization log without the id), `upload-fails` (the
+# next N uploads fail before a submission exists; N is the file's content),
+# `lost-poll` (the submission exists, then its poll loses the connection),
+# `wait-limit` (Apple takes longer than the wait limit), `wait-lost` (the next
+# N `notary-wait` polls lose the connection) or `wait-verdict` (the verdict
+# `notary-wait` reports; Accepted when absent). Messages are rcodesign 0.29.0's.
 set -euo pipefail
 
 if [ "${1:-}" = --install ]; then
@@ -105,9 +110,40 @@ INFO
     [ "$1" = --api-key-file ] && [ -f "$2" ] && [ "$3" = --wait ] && [ "$4" = --max-wait-seconds ] || exit 93
     python3 -I -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); print(" ".join(sorted(z.namelist())))
 for name in z.namelist(): assert b"developer-id-signature" in z.read(name), name' "$6" >"$state/zip" || exit 94
+    if [ -s "$state/upload-fails" ] && [ "$(cat "$state/upload-fails")" -gt 0 ]; then
+      echo $(( $(cat "$state/upload-fails") - 1 )) >"$state/upload-fails"
+      echo 'Error: HTTP error: error sending request for url (https://appstoreconnect.apple.com/notary/v2/submissions)' >&2
+      exit 1
+    fi
     [ -e "$state/no-submission-id" ] ||
       echo 'created submission ID: 0b7e5f2a-1c3d-4e5f-8a9b-0c1d2e3f4a5b' >&2
-    [ ! -e "$state/reject" ] || { echo 'notary status: Invalid' >&2; exit 1; }
+    if [ -e "$state/lost-poll" ]; then
+      echo 'poll state after 3s: InProgress' >&2
+      echo 'Error: HTTP error: error sending request for url (https://appstoreconnect.apple.com/notary/v2/submissions/0b7e5f2a-1c3d-4e5f-8a9b-0c1d2e3f4a5b)' >&2
+      exit 1
+    fi
+    if [ -e "$state/wait-limit" ]; then
+      echo "reached wait limit after ${5}s" >&2
+      echo 'Error: reached time limit waiting for notarization to complete' >&2
+      exit 1
+    fi
+    [ ! -e "$state/reject" ] || {
+      echo 'poll state after 3s: Invalid' >&2
+      echo 'Error: notarization package is invalid' >&2
+      exit 1
+    }
+    ;;
+  notary-wait)
+    [ "$1" = --api-key-file ] && [ -f "$2" ] && [ "$3" = --max-wait-seconds ] && [ "$4" -gt 0 ] &&
+      [ "$5" = 0b7e5f2a-1c3d-4e5f-8a9b-0c1d2e3f4a5b ] || exit 97
+    if [ -s "$state/wait-lost" ] && [ "$(cat "$state/wait-lost")" -gt 0 ]; then
+      echo $(( $(cat "$state/wait-lost") - 1 )) >"$state/wait-lost"
+      echo "Error: HTTP error: error sending request for url (https://appstoreconnect.apple.com/notary/v2/submissions/$5)" >&2
+      exit 1
+    fi
+    echo "waiting up to ${4}s for package upload $5 to finish processing" >&2
+    echo "poll state after 3s: $(cat "$state/wait-verdict" 2>/dev/null || echo Accepted)" >&2
+    echo 'Notary API Server has finished processing the uploaded asset' >&2
     ;;
   *) exit 95 ;;
 esac

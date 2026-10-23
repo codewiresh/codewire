@@ -122,7 +122,8 @@ rm "$STAND/state/verify-fails"
 # A notarization Apple does not accept fails before anything is handed over.
 touch "$STAND/state/reject"
 refused notary-rejected sign "$work/refused"
-grep -q 'Apple did not accept the notarization' "$work/notary-rejected.out" || fail 'rejection was not reported'
+grep -q 'Apple did not accept the notarization (submission 0b7e5f2a-1c3d-4e5f-8a9b-0c1d2e3f4a5b): notarization package is invalid' \
+  "$work/notary-rejected.out" || fail 'rejection was not reported with its reason'
 rm "$STAND/state/reject"
 
 # Release OpenPGP, mirror and R2 capabilities never reach macOS signing.
