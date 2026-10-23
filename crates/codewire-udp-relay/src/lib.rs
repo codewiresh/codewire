@@ -132,6 +132,11 @@ pub struct RelayRuntime {
 impl RelayRuntime {
     pub async fn bind(config: &Config) -> anyhow::Result<Self> {
         let server = SocketServer::bind(config.disco_private()?, config.socket_options()).await?;
+        if config.allocator_token.is_none() {
+            tracing::warn!(
+                "udp-relay: {ALLOCATOR_TOKEN_ENV} is not set; the allocator accepts unauthenticated requests"
+            );
+        }
         let state = AppState::new(server.handle(), config.allocator_token.clone());
         Ok(Self { server, state })
     }
@@ -311,9 +316,22 @@ fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
         return Err(ApiError::Unauthorized);
     };
     match value.strip_prefix("Bearer ") {
-        Some(candidate) if candidate.as_bytes() == token.as_bytes() => Ok(()),
+        Some(candidate) if token_matches(candidate.as_bytes(), token.as_bytes()) => Ok(()),
         _ => Err(ApiError::Unauthorized),
     }
+}
+
+/// Compares a presented token in time that does not depend on where it first
+/// differs from the configured one. Only the length can be learned.
+fn token_matches(candidate: &[u8], token: &[u8]) -> bool {
+    if candidate.len() != token.len() {
+        return false;
+    }
+    let diff = candidate
+        .iter()
+        .zip(token)
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+    std::hint::black_box(diff) == 0
 }
 
 fn duration_nanos(duration: Duration) -> u64 {
@@ -450,6 +468,33 @@ mod tests {
         let second_body: AllocationResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(second_body.endpoint.vni, body.endpoint.vni);
         assert_eq!(second_body.endpoint.lamport_id, body.endpoint.lamport_id);
+    }
+
+    #[tokio::test]
+    async fn allocation_rejects_near_miss_tokens() {
+        let app = test_router(Some("secret-token".into())).await;
+        for auth in [
+            "Bearer secret-tokem",
+            "Bearer secret-toke",
+            "Bearer secret-token2",
+            "Bearer ",
+            "secret-token",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(allocation_request(Some(auth)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{auth:?}");
+        }
+    }
+
+    #[test]
+    fn token_matches_only_identical_tokens() {
+        assert!(token_matches(b"secret-token", b"secret-token"));
+        assert!(!token_matches(b"secret-tokem", b"secret-token"));
+        assert!(!token_matches(b"secret-toke", b"secret-token"));
+        assert!(!token_matches(b"", b"secret-token"));
     }
 
     async fn test_router(token: Option<String>) -> Router {

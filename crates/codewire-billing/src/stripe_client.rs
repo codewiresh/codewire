@@ -76,6 +76,12 @@ impl StripeHandle {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_webhook_secret(mut self, secret: &str) -> Self {
+        self.webhook_secret = secret.to_owned();
+        self
+    }
+
     pub fn webhook_secret(&self) -> &str {
         &self.webhook_secret
     }

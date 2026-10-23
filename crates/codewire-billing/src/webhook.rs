@@ -3,6 +3,8 @@
 //! Wire behavior (this third-party webhook uses its established
 //! `{"error": "..."}` shape rather than the product error envelope):
 //! - billing disabled → 404 `{"error":"billing is not enabled"}`
+//! - no signing secret configured → 401
+//!   `{"error":"webhook signing is not configured"}`
 //! - bad signature → 400 `{"error":"invalid signature"}`
 //! - handler failure → 500 `{"error":"webhook processing failed"}`
 //! - success → 200 `{"status":"ok"}`
@@ -43,6 +45,18 @@ pub async fn stripe_webhook(
 ) -> Response {
     if !state.stripe.is_configured() {
         return err_response(StatusCode::NOT_FOUND, "billing is not enabled");
+    }
+
+    // HMAC accepts an empty key, so with no signing secret any caller could
+    // sign its own event. Refuse every delivery until the secret is set.
+    if state.stripe.webhook_secret().is_empty() {
+        tracing::error!(
+            "billing: Stripe webhook rejected because STRIPE_WEBHOOK_SECRET is not set"
+        );
+        return err_response(
+            StatusCode::UNAUTHORIZED,
+            "webhook signing is not configured",
+        );
     }
 
     if body.len() > MAX_BODY {
@@ -933,6 +947,67 @@ fn format_go_date(ts: i64, style: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkout_sessions::FrontendOrigin;
+    use crate::stripe_client::StripeHandle;
+
+    // The event shape async-stripe's own tests construct; Codewire does not
+    // handle this type, so an accepted delivery goes on to the idempotency
+    // record.
+    const EVENT: &str = r#"{"id":"evt_forged","object":"event","api_version":"2017-05-25","created":1492774577,"livemode":false,"pending_webhooks":1,"data":{"object":{"object":"bank_account","country":"us","currency":"usd","id":"ba_test","last4":"6789","status":"verified"}},"type":"account.external_account.created"}"#;
+
+    fn state(stripe: StripeHandle) -> BillingState {
+        BillingState {
+            // Never connected: every case below answers before any query.
+            pool: PgPool::connect_lazy("postgres://codewire@127.0.0.1:1/codewire").unwrap(),
+            stripe,
+            email: EmailClient::disabled(),
+            frontend_origin: FrontendOrigin::parse("https://app.codewire.test").unwrap(),
+        }
+    }
+
+    async fn deliver(stripe: StripeHandle, signed_with: &str) -> (StatusCode, serde_json::Value) {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Stripe-Signature",
+            Webhook::generate_test_header(EVENT, signed_with, None)
+                .parse()
+                .unwrap(),
+        );
+        let response = stripe_webhook(
+            State(state(stripe)),
+            headers,
+            axum::body::Bytes::from_static(EVENT.as_bytes()),
+        )
+        .await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), MAX_BODY)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[test]
+    fn stripe_accepts_a_signature_made_with_an_empty_key() {
+        // Why the guard exists: the library does not refuse an empty secret.
+        let header = Webhook::generate_test_header(EVENT, "", None);
+        assert!(Webhook::construct_event(EVENT, &header, "").is_ok());
+    }
+
+    #[tokio::test]
+    async fn webhooks_are_refused_while_the_signing_secret_is_empty() {
+        // The attack: with no secret configured, sign with the empty key.
+        let (status, body) = deliver(StripeHandle::for_test("http://127.0.0.1:1"), "").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "webhook signing is not configured");
+    }
+
+    #[tokio::test]
+    async fn a_configured_secret_rejects_an_empty_key_signature() {
+        let stripe = StripeHandle::for_test("http://127.0.0.1:1").with_webhook_secret("whsec_test");
+        let (status, body) = deliver(stripe, "").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid signature");
+    }
 
     #[test]
     fn go_date_formats_match() {
