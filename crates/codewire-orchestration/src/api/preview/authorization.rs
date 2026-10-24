@@ -306,6 +306,78 @@ async fn challenge_target(
     Ok((matched, target))
 }
 
+/// The proxy's access decision for an authenticated preview request, for a
+/// preview grant and a Bearer credential alike.
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
+pub(super) async fn authorize_proxy_user(
+    state: &PreviewContext<'_>,
+    method: &Method,
+    headers: &HeaderMap,
+    user: &AuthUser,
+    matched: &PreviewHostMatch,
+    target: &PreviewTarget,
+) -> Result<(), Response> {
+    let forbidden =
+        |message: &'static str| super::preview_forbidden(state, method, headers, message);
+    // API keys are capabilities for exactly one organization. Enforce
+    // that boundary before creator/member shortcuts can grant access to
+    // an environment owned by the same user in another organization.
+    if !user.permits_organization(&matched.org_id) {
+        return Err(forbidden(
+            "forbidden: API key belongs to another organization",
+        ));
+    }
+
+    if let Err(error) = crate::confidential_storage::require_interactive_access(
+        state.confidential_storage_flags,
+        user,
+        &target.isolation_tier,
+    ) {
+        return Err(match error {
+            codewire_server_core::AppError::Coded { status, .. } => preview_error(
+                status,
+                if status == StatusCode::SERVICE_UNAVAILABLE {
+                    "confidential persistent storage is disabled"
+                } else {
+                    "global administrator user credential required"
+                },
+            ),
+            _ => forbidden("forbidden"),
+        });
+    }
+
+    if target.access == "org_members" {
+        if super::require_environment_access(
+            state.pool,
+            user,
+            &target.env_id,
+            &matched.org_id,
+            "viewer",
+            "forbidden: no access to this environment",
+        )
+        .await
+        .is_err()
+        {
+            return Err(forbidden("forbidden: no access to this environment"));
+        }
+    } else if target.access == "creator" {
+        if user.user_id != target.created_by {
+            return Err(forbidden(
+                "forbidden: only the creator can access this preview",
+            ));
+        }
+        // The creator must still be a member, as check_access requires. The
+        // proxy decides every request, so a grant or Bearer credential issued
+        // before the removal stops working with it (#3254).
+        match codewire_server_core::org::user_org_role(state.pool, user, &matched.org_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(forbidden("forbidden: no access to this environment")),
+            Err(_) => return Err(unavailable()),
+        }
+    }
+    Ok(())
+}
+
 #[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(super) async fn check_access(
     state: &PreviewContext<'_>,

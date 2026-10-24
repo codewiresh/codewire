@@ -402,7 +402,7 @@ database_lane_orchestration() {
     cargo test --locked -p codewire-orchestration --lib \
       api::preview::authorization::database_tests:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "preview browser authorization matrix" "$logfile" 8
+  assert_passed_count "preview browser authorization matrix" "$logfile" 9
 
   logfile="$RUN_DIR/public-access-profiles.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

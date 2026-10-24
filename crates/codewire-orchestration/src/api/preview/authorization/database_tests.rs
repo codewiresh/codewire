@@ -165,6 +165,34 @@ impl Fixture {
         response_cookie(&response, GRANT_COOKIE)
     }
 
+    /// The proxy's own steps for a GET that carries the grant cookie `token`:
+    /// its grant lookup, then its access decision.
+    async fn proxied_with_grant(&self, token: &str) -> Result<StatusCode> {
+        let (matched, target) = self.target().await?;
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, format!("{GRANT_COOKIE}={token}").parse()?);
+        let user = accepted(grant_user(&self.context(), &headers, HOST, &matched, &target).await)?;
+        let Some(user) = user else {
+            return Ok(StatusCode::UNAUTHORIZED);
+        };
+        self.proxied_as(&user, &headers).await
+    }
+
+    /// The proxy's access decision for a request authenticated as `user`.
+    async fn proxied_as(&self, user: &AuthUser, headers: &HeaderMap) -> Result<StatusCode> {
+        let (matched, target) = self.target().await?;
+        let decision = authorize_proxy_user(
+            &self.context(),
+            &Method::GET,
+            headers,
+            user,
+            &matched,
+            &target,
+        )
+        .await;
+        Ok(decision.map_or_else(|response| response.status(), |()| StatusCode::OK))
+    }
+
     async fn granted(&self, token: &str) -> Result<bool> {
         let (matched, target) = self.target().await?;
         let mut headers = HeaderMap::new();
@@ -728,5 +756,55 @@ async fn removed_creator_loses_creator_and_member_preview_access() -> Result<()>
         anyhow::ensure!(f.granted(&token).await?);
         Ok(())
     }.await;
+    result.and(f.cleanup().await)
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL"]
+async fn removed_creator_proxy_requests_are_refused_for_old_grants_and_bearers() -> Result<()> {
+    // The proxy decides every request itself: a grant issued before the
+    // creator's removal, and an organization-free Bearer credential such as
+    // an OIDC access token, stop opening the creator port once the creator
+    // is no longer a member (#3254).
+    let f = Fixture::create(2).await?;
+    let result = async {
+        let (continuation, nonce) = f.begin().await?;
+        let code = f.approve(&continuation).await?;
+        let token = f.finish(&code, &nonce).await?;
+        let bearer = |user_id: &str| AuthUser {
+            user_id: user_id.to_string(),
+            org_id: None,
+            is_admin: false,
+            via_api_key: false,
+        };
+        let no_cookie = HeaderMap::new();
+        anyhow::ensure!(f.proxied_with_grant(&token).await? == StatusCode::OK);
+        anyhow::ensure!(f.proxied_as(&bearer("preview-user"), &no_cookie).await? == StatusCode::OK);
+        anyhow::ensure!(
+            f.proxied_as(&bearer("other-user"), &no_cookie).await? == StatusCode::FORBIDDEN,
+            "a member who did not create the environment opened its creator port"
+        );
+
+        sqlx::query("DELETE FROM org_members WHERE id = 'preview-member'")
+            .execute(&f.pool)
+            .await?;
+        anyhow::ensure!(
+            f.proxied_with_grant(&token).await? == StatusCode::FORBIDDEN,
+            "a grant issued before the removal still opened the creator port"
+        );
+        anyhow::ensure!(
+            f.proxied_as(&bearer("preview-user"), &no_cookie).await? == StatusCode::FORBIDDEN,
+            "a removed creator's Bearer credential still opened the creator port"
+        );
+
+        // Re-added as a member, the creator reaches the port again.
+        sqlx::query("INSERT INTO org_members(id,org_id,user_id,role) VALUES('preview-member','preview-org','preview-user','viewer')")
+            .execute(&f.pool)
+            .await?;
+        anyhow::ensure!(f.proxied_with_grant(&token).await? == StatusCode::OK);
+        anyhow::ensure!(f.proxied_as(&bearer("preview-user"), &no_cookie).await? == StatusCode::OK);
+        Ok(())
+    }
+    .await;
     result.and(f.cleanup().await)
 }

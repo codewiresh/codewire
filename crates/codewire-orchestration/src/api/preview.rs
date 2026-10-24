@@ -14,7 +14,6 @@ use super::ApiState;
 use super::environments::require_environment_access;
 use super::prepare::plain_error;
 use super::terminal::authenticate_socket_request;
-use crate::confidential_storage::require_interactive_access;
 
 const PREVIEW_SERVICE_HEADER: &str = "x-codewire-service";
 const PREVIEW_SERVICE_NAME: &str = "codewire-orchestration";
@@ -201,62 +200,17 @@ pub async fn preview_proxy_middleware(
             Err(response) => return response,
         };
 
-        // API keys are capabilities for exactly one organization. Enforce
-        // that boundary before creator/member shortcuts can grant access to
-        // an environment owned by the same user in another organization.
-        if !user.permits_organization(&host_match.org_id) {
-            return preview_forbidden(
-                &state,
-                &method,
-                &headers,
-                "forbidden: API key belongs to another organization",
-            );
-        }
-
-        if let Err(error) = require_interactive_access(
-            state.confidential_storage_flags,
+        if let Err(response) = authorization::authorize_proxy_user(
+            &authorization::PreviewContext::from(&state),
+            &method,
+            &headers,
             &user,
-            &target.isolation_tier,
-        ) {
-            return match error {
-                codewire_server_core::AppError::Coded { status, .. } => preview_error(
-                    status,
-                    if status == StatusCode::SERVICE_UNAVAILABLE {
-                        "confidential persistent storage is disabled"
-                    } else {
-                        "global administrator user credential required"
-                    },
-                ),
-                _ => preview_forbidden(&state, &method, &headers, "forbidden"),
-            };
-        }
-
-        if target.access == "org_members" {
-            if require_environment_access(
-                &state.pool,
-                &user,
-                &target.env_id,
-                &host_match.org_id,
-                "viewer",
-                "forbidden: no access to this environment",
-            )
-            .await
-            .is_err()
-            {
-                return preview_forbidden(
-                    &state,
-                    &method,
-                    &headers,
-                    "forbidden: no access to this environment",
-                );
-            }
-        } else if target.access == "creator" && user.user_id != target.created_by {
-            return preview_forbidden(
-                &state,
-                &method,
-                &headers,
-                "forbidden: only the creator can access this preview",
-            );
+            &host_match,
+            &target,
+        )
+        .await
+        {
+            return response;
         }
     }
 
@@ -625,7 +579,7 @@ fn preview_error(status: StatusCode, message: &'static str) -> Response {
 }
 
 fn preview_forbidden(
-    state: &ApiState,
+    context: &authorization::PreviewContext<'_>,
     method: &axum::http::Method,
     headers: &HeaderMap,
     message: &'static str,
@@ -634,7 +588,7 @@ fn preview_forbidden(
         && headers.get("sec-fetch-mode").and_then(|v| v.to_str().ok()) == Some("navigate")
         && headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("document")
     {
-        authorization::denied_page(&authorization::PreviewContext::from(state))
+        authorization::denied_page(context)
     } else {
         preview_error(StatusCode::FORBIDDEN, message)
     }
