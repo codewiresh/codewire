@@ -11,6 +11,14 @@ use tower::ServiceExt;
 
 const ORIGIN: &str = "https://app.codewire.test";
 
+/// Bounds a wait that ends on its event: a lock wait PostgreSQL reports, the
+/// database clock passing an expiry, a request's answer. It only turns a hang
+/// into a failure; 2 and 3 s windows failed on loaded runners (#3311).
+const HANG: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The session routes' own server statement ceiling (`bounded_transaction`).
+const ROUTE_STATEMENT_CEILING: std::time::Duration = std::time::Duration::from_secs(4);
+
 async fn pool() -> Option<PgPool> {
     let Ok(url) = std::env::var("DATABASE_URL") else {
         eprintln!("DATABASE_URL unset — skipping session inventory DB proof");
@@ -535,7 +543,7 @@ async fn authority_and_target_scope_are_closed_and_revocation_is_acknowledged() 
 }
 
 async fn wait_blocked(pool: &PgPool, worker_pid: i32, owner_pid: i32) {
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    tokio::time::timeout(HANG, async {
         loop {
             let blocked: bool = sqlx::query_scalar("SELECT $2 = ANY(pg_blocking_pids($1))")
                 .bind(worker_pid)
@@ -609,10 +617,7 @@ async fn actor_is_revalidated_after_lock_wait_not_from_stale_request_identity() 
                 .unwrap();
         }
         lock.commit().await.unwrap();
-        let response = tokio::time::timeout(std::time::Duration::from_secs(3), task)
-            .await
-            .unwrap()
-            .unwrap();
+        let response = tokio::time::timeout(HANG, task).await.unwrap().unwrap();
         assert_eq!(response.0, 401);
         assert_eq!(count(&pool, "inventory_race_target").await, 1);
         worker.close().await;
@@ -627,7 +632,9 @@ async fn reciprocal_session_revocation_has_no_deadlock_and_only_one_winner() {
     session(&pool, owner, "inventory_reciprocal_a", "reciprocal-a", true).await;
     session(&pool, owner, "inventory_reciprocal_b", "reciprocal-b", true).await;
     let app = app(pool.clone());
-    let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    // A deadlock would end one revocation with an error, not a 200 or 401;
+    // the bound only turns a hang into a failure.
+    let (a, b) = tokio::time::timeout(HANG, async {
         tokio::join!(
             revoke(&app, owner, "reciprocal-a", "inventory_reciprocal_b"),
             revoke(&app, owner, "reciprocal-b", "inventory_reciprocal_a")
@@ -644,6 +651,12 @@ async fn reciprocal_session_revocation_has_no_deadlock_and_only_one_winner() {
     );
 }
 
+/// How long the actor stays valid once the request is parked at the owner
+/// lock. It must outlast only the few statements between that gate and the
+/// row-lock wait; the barrier then holds the request about this long, inside
+/// the route's 4 s server statement ceiling.
+const ACTOR_LIFETIME_AT_GATE: &str = "1 second";
+
 #[tokio::test]
 async fn unchanged_actor_or_target_lock_wait_cannot_extend_expired_authority() {
     let Some(pool) = pool().await else { return };
@@ -659,13 +672,6 @@ async fn unchanged_actor_or_target_lock_wait_cannot_extend_expired_authority() {
             true,
         )
         .await;
-        sqlx::query(
-            "UPDATE sessions SET expires_at=clock_timestamp()+interval '1 second' WHERE id=$1",
-        )
-        .bind("inventory_expiry_actor")
-        .execute(&pool)
-        .await
-        .unwrap();
         let worker = PgPoolOptions::new()
             .max_connections(1)
             .connect(&std::env::var("DATABASE_URL").unwrap())
@@ -675,11 +681,39 @@ async fn unchanged_actor_or_target_lock_wait_cannot_extend_expired_authority() {
             .fetch_one(&worker)
             .await
             .unwrap();
+        // Park the request at the owner lock, its first lock, so the actor's
+        // short lifetime starts only once the fixture setup is behind it.
+        let mut gate = pool.begin().await.unwrap();
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *gate)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+            .bind(owner)
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+        let app = app(worker.clone());
+        let mut task = tokio::spawn(async move {
+            revoke(&app, owner, "expiry-token", "inventory_expiry_target").await
+        });
+        wait_blocked_while_pending(&pool, worker_pid, gate_pid, &mut task).await;
         let mut lock = pool.begin().await.unwrap();
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *lock)
             .await
             .unwrap();
+        // The request's transaction began while the actor was valid for hours.
+        // It reads both session rows only after the owner lock, so after this
+        // commit they are unchanged for every statement that waits on them.
+        sqlx::query(&format!(
+            "UPDATE sessions SET expires_at=clock_timestamp()+interval '{ACTOR_LIFETIME_AT_GATE}' \
+             WHERE id=$1"
+        ))
+        .bind("inventory_expiry_actor")
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query("SELECT id FROM sessions WHERE id=$1 FOR UPDATE")
             .bind(if target_lock {
                 "inventory_expiry_target"
@@ -689,13 +723,10 @@ async fn unchanged_actor_or_target_lock_wait_cannot_extend_expired_authority() {
             .execute(&mut *lock)
             .await
             .unwrap();
-        let app = app(worker.clone());
-        let task = tokio::spawn(async move {
-            revoke(&app, owner, "expiry-token", "inventory_expiry_target").await
-        });
-        wait_blocked(&pool, worker_pid, blocker_pid).await;
+        gate.commit().await.unwrap();
+        wait_blocked_while_pending(&pool, worker_pid, blocker_pid, &mut task).await;
         // Release an unchanged row only after PostgreSQL's clock proves expiry.
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(HANG, async {
             loop {
                 let expired: bool = sqlx::query_scalar(
                     "SELECT expires_at <= clock_timestamp() FROM sessions WHERE id=$1",
@@ -713,13 +744,27 @@ async fn unchanged_actor_or_target_lock_wait_cannot_extend_expired_authority() {
         .await
         .unwrap();
         lock.commit().await.unwrap();
-        let response = tokio::time::timeout(std::time::Duration::from_secs(2), task)
-            .await
-            .unwrap()
-            .unwrap();
+        let response = tokio::time::timeout(HANG, task).await.unwrap().unwrap();
         assert_eq!(response.0, 401);
         assert_eq!(count(&pool, "inventory_expiry_target").await, 1);
         worker.close().await;
+    }
+}
+
+/// Waits until `worker_pid` waits on a lock `holder_pid` holds. A request that
+/// answers first never reached that wait, and fails the test with its answer.
+async fn wait_blocked_while_pending(
+    pool: &PgPool,
+    worker_pid: i32,
+    holder_pid: i32,
+    task: &mut tokio::task::JoinHandle<(u16, Value, HeaderMap)>,
+) {
+    tokio::select! {
+        biased;
+        answered = &mut *task => {
+            panic!("the request answered before its lock wait: {:?}", answered.map(|r| (r.0, r.1)));
+        }
+        () = wait_blocked(pool, worker_pid, holder_pid) => {}
     }
 }
 
@@ -761,13 +806,21 @@ async fn server_lock_timeout_releases_abandoned_authority_and_does_not_claim_suc
         .await
         .unwrap();
     let app = app(worker.clone());
+    let started = std::time::Instant::now();
     let response = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        HANG,
         revoke(&app, owner, "timeout-token", "inventory_timeout_target"),
     )
     .await
     .unwrap();
     assert_eq!(response.0, 503);
+    // Only the stricter 500 ms setting can end the wait before the route's own
+    // ceiling: under that ceiling the statement alone would last at least 4 s.
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < ROUTE_STATEMENT_CEILING,
+        "the route replaced the stricter statement timeout: answered after {elapsed:?}"
+    );
     assert_eq!(count(&pool, "inventory_timeout_target").await, 1);
     // While the original target remains locked, a different connection can lock
     // the owner: canceled/failed work must not retain its transaction authority.
