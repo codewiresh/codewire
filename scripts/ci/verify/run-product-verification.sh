@@ -291,6 +291,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-run-side-by-side.sh
   scripts/ci/tests/test-warm-rust-cache.sh
+  scripts/ci/tests/test-install-cargo-nextest.sh
   scripts/ci/tests/test-bound-cargo-jobs.sh
   scripts/ci/tests/test-select-verification.sh
   python3 -B scripts/ci/tests/test-last-scheduled-run.py

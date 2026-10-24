@@ -1,0 +1,26 @@
+# cargo-nextest configuration (infra#1632: compile once, run tests from an
+# archive). It keeps `cargo test`'s semantics:
+# - ignored tests stay ignored unless a run asks for them (`--run-ignored`),
+#   which is how the #[ignore] convention keeps the database, service and
+#   fixture tests out of a default run;
+# - no retries, so a flaky test fails as it does under cargo test;
+# - no timeout kills a test; a slow one is reported.
+# Feature sets are chosen when the archive is built: CI tests the default
+# features, and each explicit feature lane (for example the credential broker
+# with --no-default-features --features platform) gets its own archive.
+# `--all-features` turns on smoke-only features such as
+# local-broker-synthetic-smoke, which change cw itself, so no archive uses it.
+
+[profile.default]
+retries = 0
+slow-timeout = { period = "60s" }
+
+# CI runs every test and reports each one, so one failure never hides the rest.
+[profile.ci]
+retries = 0
+fail-fast = false
+slow-timeout = { period = "60s" }
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+path = "junit.xml"

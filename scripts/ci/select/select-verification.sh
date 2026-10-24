@@ -717,10 +717,14 @@ if [ "$event_selected" = false ]; then
 
     # CI policy changes validate only the workflow/selector contract. Product
     # files in the same PR still add their own families below.
+    # .config/nextest.toml is read only by the dispatch-only test-archive
+    # measurement (infra#1632) until a CI job runs tests from the archive;
+    # that change must make it select the Rust families it runs.
     case "$path" in
       .gitea/workflows/ci.yaml|.gitea/workflows/manual-diagnostics.yaml|\
       .gitea/workflows/ci-start-latency.yaml|\
       .gitea/workflows/ci-done-measures.yaml|\
+      .gitea/workflows/test-archive-measure.yaml|\
       .gitea/workflows/rust-latest-canary.yaml|\
       .gitea/workflows/rust-cache-refresh.yaml|\
       .gitea/workflows/connect-apikey-smoke.yaml|\
@@ -730,6 +734,7 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/runtime-dev-commodity-smoke.yaml|\
       .gitea/workflows/merge-check.yaml|\
       .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
+      .config/nextest.toml|\
       scripts/dev/dashboard-watch.py|\
       scripts/dev/macos-cli.py|scripts/dev/test-macos-cli.py|\
       scripts/dev/macos-command-owner.py|\
@@ -794,6 +799,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-darwin-cross-check.sh|\
       scripts/ci/tests/test-ci-runner-image-contract.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
+      scripts/ci/tests/test-install-cargo-nextest.sh|\
       scripts/ci/tests/test-service-ssh-image-verifier.sh|\
       scripts/ci/verify/run-product-verification.sh|\
       scripts/ci/tests/test-retired-local-sdk-contract.sh|\

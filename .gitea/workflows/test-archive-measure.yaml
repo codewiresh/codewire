@@ -1,0 +1,64 @@
+# zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this measurement has no secret, OIDC or write-capable integration.
+name: Test archive measurement
+
+# Dispatch only: measurement 3 of the compile-once design (infra#1632). On one
+# heavy metal guest it builds the workspace test archive (cargo nextest
+# archive, default features) and runs it from a fresh directory with
+# cargo-nextest and no Rust toolchain, as a test runner will, repeating each
+# run to show the flake rate. The full and line-tables variants compare the
+# archive with full and line-tables-only debug info (owner, 2026-10-24: pick
+# the smaller if the flake rate is equal). Nothing else reads its results; CI
+# keeps compiling and testing in each job until the archive measures green.
+on:
+  workflow_dispatch:
+    inputs:
+      variants:
+        description: Archive variants, space-separated (full, line-tables)
+        required: false
+        default: full line-tables
+      runs:
+        description: Runs per variant, 1 to 9
+        required: false
+        default: '3'
+
+jobs:
+  measure:
+    # zizmor: ignore[excessive-permissions] This job has no OIDC or secret and builds and runs repository code only.
+    name: Measure the test archive
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY' }}
+    timeout-minutes: 90
+    env:
+      CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/test-archive
+    steps:
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Bound cargo jobs by memory
+        run: scripts/ci/setup/bound-cargo-jobs.sh
+
+      - name: Verify sealed Rust toolchain
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Verify Rust cache capacity
+        run: scripts/ci/setup/assert-cargo-cache-capacity.sh "$CARGO_HOME"
+
+      - name: Install pinned protoc for Rust builds
+        run: |
+          set -euo pipefail
+          scripts/ci/release/fetch-pinned.sh \
+            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 "$RUNNER_TEMP/protoc.zip"
+          rm -rf "$HOME/.proto-tools/protoc"
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q "$RUNNER_TEMP/protoc.zip" -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Install pinned cargo-nextest
+        run: scripts/ci/setup/install-cargo-nextest.sh "$RUNNER_TEMP/nextest"
+
+      - name: Build and run the test archive
+        env:
+          VARIANTS: ${{ github.event.inputs.variants }}
+          RUNS: ${{ github.event.inputs.runs }}
+        run: scripts/ci/measure/test-archive.sh "$RUNNER_TEMP/nextest" "$RUNNER_TEMP/test-archive" "$VARIANTS" "$RUNS"
