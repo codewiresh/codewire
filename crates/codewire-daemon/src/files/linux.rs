@@ -21,6 +21,48 @@ use super::{
 };
 use crate::config::Config;
 
+/// This thread's filesystem identity, switched to the workload user until
+/// dropped. `setfsuid` and `setfsgid` report the previous value and never an
+/// error, so each switch is read back and refused if it did not take effect.
+pub(super) struct FilesystemIdentity {
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+}
+
+impl FilesystemIdentity {
+    pub(super) fn switch(uid: u32, gid: u32) -> Result<Self> {
+        // SAFETY: setfsgid and setfsuid take scalar IDs and change only this
+        // thread's filesystem credentials; `u32::MAX` (-1) queries them.
+        let previous = unsafe {
+            Self {
+                gid: libc::setfsgid(gid) as libc::gid_t,
+                uid: libc::setfsuid(uid) as libc::uid_t,
+            }
+        };
+        let (current_uid, current_gid) =
+            unsafe { (libc::setfsuid(u32::MAX), libc::setfsgid(u32::MAX)) };
+        if current_uid as u32 != uid || current_gid as u32 != gid {
+            drop(previous);
+            return Err(FileError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "file operations could not act as the workload user",
+            )));
+        }
+        Ok(previous)
+    }
+}
+
+impl Drop for FilesystemIdentity {
+    fn drop(&mut self) {
+        // SAFETY: as in `switch`; restore the user first, then the group, so
+        // the thread never holds root's group with the workload's user.
+        unsafe {
+            libc::setfsuid(self.uid);
+            libc::setfsgid(self.gid);
+        }
+    }
+}
+
 const RESOLVE_WORKSPACE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_XDEV);

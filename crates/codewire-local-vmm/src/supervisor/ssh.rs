@@ -10,11 +10,17 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use codewire_workspace_access::daemon::DaemonSessionClient;
+use codewire_daemon_proto::platform_listeners;
+use codewire_workspace_access::daemon::{DaemonForwardDialer, DaemonSessionClient};
 use codewire_workspace_access::daemon_access::{
     HostKeyStore, daemon_ssh_server_config, public_key_line,
 };
-use codewire_workspace_access::ssh::{DaemonBackedSshRunner, WorkspaceSshHandler};
+use codewire_workspace_access::scp::DaemonScpRunner;
+use codewire_workspace_access::sftp::DaemonSftpRunner;
+use codewire_workspace_access::ssh::{
+    DaemonBackedSshRunner, ForwardDialError, ForwardDialer, ForwardIo, ForwardTarget,
+    WorkspaceSshHandler,
+};
 use futures::{Stream, StreamExt as _};
 use ssh_key::PrivateKey;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -41,9 +47,9 @@ const QUEUED_FRAMES: usize = 8;
 /// How long a disconnect has to reach the client once the VM stops.
 const DISCONNECT_FLUSH: std::time::Duration = std::time::Duration::from_secs(2);
 /// Exec requests run `<shell> -c <command>`, as sshd runs them through the
-/// login shell. The daemon does not report the workspace's own shell, so
-/// command lines run through `/bin/sh`.
-const EXEC_SHELL: &str = "/bin/sh";
+/// login shell: the workspace's own shell, or `/bin/sh` from a daemon older
+/// than its report.
+const FALLBACK_EXEC_SHELL: &str = "/bin/sh";
 
 pub(super) type SshFrames =
     Pin<Box<dyn Stream<Item = Result<v1::SshStreamFrame, Status>> + Send + 'static>>;
@@ -169,6 +175,58 @@ pub(super) async fn daemon_client(access: v1::DaemonAccess) -> Result<DaemonSess
     Ok(DaemonSessionClient::from_channel(channel, credential))
 }
 
+/// What the environment's daemon offers the SSH server.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct DaemonFeatures {
+    exec_shell: String,
+    /// SFTP and SCP only where file operations act as the workload user, so
+    /// a transfer never leaves root-owned files in the workspace.
+    file_transfer: bool,
+    /// Port forwarding only where the daemon connects inside the workload's
+    /// network namespace; a dial from here would reach the host.
+    forwarding: bool,
+}
+
+impl DaemonFeatures {
+    pub(super) async fn read(daemon: &DaemonSessionClient) -> Self {
+        daemon
+            .capabilities()
+            .await
+            .map(Self::from_capabilities)
+            .unwrap_or_else(|_| Self::from_capabilities(Default::default()))
+    }
+
+    fn from_capabilities(
+        response: codewire_daemon_proto::daemon::v1::GetCapabilitiesResponse,
+    ) -> Self {
+        Self {
+            exec_shell: Some(response.default_shell)
+                .filter(|shell| shell.starts_with('/'))
+                .unwrap_or_else(|| FALLBACK_EXEC_SHELL.to_owned()),
+            file_transfer: response.capabilities.iter().any(|capability| {
+                capability == codewire_daemon_proto::DAEMON_CAPABILITY_WORKLOAD_FILES
+            }),
+            forwarding: response.capabilities.iter().any(|capability| {
+                capability == codewire_daemon_proto::DAEMON_CAPABILITY_FORWARD_TCP
+            }),
+        }
+    }
+}
+
+/// Refuses every forward from a VM whose runtime predates `ForwardTcp`.
+struct OlderRuntime;
+
+#[async_trait::async_trait]
+impl ForwardDialer for OlderRuntime {
+    async fn dial(&self, _target: &ForwardTarget) -> Result<Box<dyn ForwardIo>, ForwardDialError> {
+        Err(ForwardDialError::Prohibited(
+            "this local VM's runtime predates port forwarding; a local VM created with \
+             this cw has it"
+                .into(),
+        ))
+    }
+}
+
 /// Whether `operation` stops or replaces the environment's VM, which ends the
 /// environment's SSH streams.
 fn replaces_vm(operation: &OperationRecord, environment_id: Uuid) -> bool {
@@ -187,11 +245,12 @@ fn replaces_vm(operation: &OperationRecord, environment_id: Uuid) -> bool {
 
 /// Serve SSH over `inbound` and the returned frames until the client or the
 /// server ends the connection, or an operation stops or replaces the VM. SFTP
-/// and SCP are refused until the daemon writes files as the workload user;
-/// port forwarding needs a dialer into the workload's network namespace
-/// (#3025, after #3045's forwarding).
+/// and SCP are offered only by a daemon whose file operations act as the
+/// workload user, and port forwarding only by one that connects inside the
+/// workload's network namespace.
 pub(super) fn serve(
     daemon: DaemonSessionClient,
+    features: DaemonFeatures,
     host_key: PrivateKey,
     mut inbound: impl Stream<Item = Result<v1::SshStreamFrame, Status>> + Send + Unpin + 'static,
     mut operations: broadcast::Receiver<OperationRecord>,
@@ -202,8 +261,24 @@ pub(super) fn serve(
     let (server_side, client_side) = tokio::io::duplex(PIPE_BYTES);
     let (mut from_server, mut to_server) = tokio::io::split(client_side);
     let config = Arc::new(daemon_ssh_server_config(host_key));
-    let handler = WorkspaceSshHandler::new(Arc::new(DaemonBackedSshRunner::new(daemon)))
-        .with_exec_shell(EXEC_SHELL);
+    let runner = Arc::new(DaemonBackedSshRunner::new(daemon.clone()));
+    let dialer: Arc<dyn ForwardDialer> = if features.forwarding {
+        Arc::new(DaemonForwardDialer::new(daemon.clone()))
+    } else {
+        Arc::new(OlderRuntime)
+    };
+    let handler = if features.file_transfer {
+        WorkspaceSshHandler::with_file_protocols(
+            runner,
+            Some(Arc::new(DaemonSftpRunner::new(daemon.clone()))),
+            Some(Arc::new(DaemonScpRunner::new(daemon))),
+        )
+    } else {
+        WorkspaceSshHandler::new(runner)
+    }
+    .with_exec_shell(features.exec_shell)
+    // The guest daemon serves its API on vsock, so no workload port is its.
+    .with_port_forwarding(dialer, Arc::new(platform_listeners(None)));
     tokio::spawn(async move {
         let _permit = permit;
         let (handle_tx, mut handle_rx) = tokio::sync::oneshot::channel();
@@ -373,8 +448,10 @@ mod tests {
     ) -> Connected {
         let expected = host_key.public_key().clone();
         let (inbound_tx, inbound_rx) = mpsc::channel(8);
+        let features = DaemonFeatures::read(&daemon).await;
         let mut frames = serve(
             daemon,
+            features,
             host_key,
             ReceiverStream::new(inbound_rx),
             operations,
@@ -495,10 +572,56 @@ mod tests {
         let (stdout, exit) = exec(&connected.client, "printf '%s' \"$((6 * 7))\" | tr 4 x").await;
         assert_eq!((stdout.as_slice(), exit), (&b"x2"[..], Some(0)));
 
-        // No SFTP until the daemon writes as the workload user.
+        // This daemon's file operations act as the workload user, so SFTP is
+        // offered.
         let mut sftp = connected.client.channel_open_session().await.unwrap();
         sftp.request_subsystem(true, "sftp").await.unwrap();
-        assert!(matches!(sftp.wait().await, Some(ChannelMsg::Failure)));
+        assert!(matches!(sftp.wait().await, Some(ChannelMsg::Success)));
+
+        // A forward reaches a loopback service through the daemon, which
+        // makes the connection; both directions half-close as TCP does.
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_port = echo.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = echo.accept().await.unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            stream.write_all(&received).await.unwrap();
+        });
+        let mut forward = connected
+            .client
+            .channel_open_direct_tcpip("127.0.0.1", echo_port.into(), "127.0.0.1", 40_000)
+            .await
+            .expect("the forward opens");
+        forward.data(&b"through the daemon"[..]).await.unwrap();
+        forward.eof().await.unwrap();
+        let mut echoed = Vec::new();
+        timeout(Duration::from_secs(20), async {
+            while let Some(message) = forward.wait().await {
+                match message {
+                    ChannelMsg::Data { data } => echoed.extend_from_slice(&data),
+                    ChannelMsg::Eof | ChannelMsg::Close => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the forward finishes");
+        assert_eq!(echoed, b"through the daemon");
+        // A platform listener, such as the credential bridge, is refused.
+        let bridge = connected
+            .client
+            .channel_open_direct_tcpip(
+                "127.0.0.1",
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT.into(),
+                "127.0.0.1",
+                40_001,
+            )
+            .await;
+        assert!(
+            matches!(bridge, Err(russh::Error::ChannelOpenFailure(_))),
+            "the credential bridge port is refused"
+        );
 
         // Another operation on the VM, such as a host-port change, leaves the
         // stream open; a stop ends it and frees its place.
@@ -528,6 +651,55 @@ mod tests {
         })
         .await
         .expect("the stream's place is freed");
+    }
+
+    #[tokio::test]
+    async fn an_older_runtime_refuses_forwards_with_a_reason() {
+        let target = ForwardTarget::local("localhost", 8080, &platform_listeners(None)).unwrap();
+        let Err(ForwardDialError::Prohibited(reason)) = OlderRuntime.dial(&target).await else {
+            panic!("an older runtime refuses");
+        };
+        assert!(reason.contains("predates port forwarding"), "{reason}");
+    }
+
+    #[test]
+    fn an_older_daemon_offers_no_file_transfer_or_forwarding_and_runs_lines_through_sh() {
+        use codewire_daemon_proto::daemon::v1::GetCapabilitiesResponse;
+        assert_eq!(
+            DaemonFeatures::from_capabilities(GetCapabilitiesResponse {
+                capabilities: vec!["files.v1".into(), "exec.v1".into()],
+                ..Default::default()
+            }),
+            DaemonFeatures {
+                exec_shell: "/bin/sh".into(),
+                file_transfer: false,
+                forwarding: false,
+            }
+        );
+        assert_eq!(
+            DaemonFeatures::from_capabilities(GetCapabilitiesResponse {
+                capabilities: vec![
+                    codewire_daemon_proto::DAEMON_CAPABILITY_WORKLOAD_FILES.into(),
+                    codewire_daemon_proto::DAEMON_CAPABILITY_FORWARD_TCP.into(),
+                ],
+                default_shell: "/usr/bin/zsh".into(),
+                ..Default::default()
+            }),
+            DaemonFeatures {
+                exec_shell: "/usr/bin/zsh".into(),
+                file_transfer: true,
+                forwarding: true,
+            }
+        );
+        // Only an absolute shell is used.
+        assert_eq!(
+            DaemonFeatures::from_capabilities(GetCapabilitiesResponse {
+                default_shell: "zsh".into(),
+                ..Default::default()
+            })
+            .exec_shell,
+            "/bin/sh"
+        );
     }
 
     #[test]

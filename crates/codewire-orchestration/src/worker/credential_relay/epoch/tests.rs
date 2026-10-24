@@ -59,6 +59,7 @@ macro_rules! daemon_service {
         impl DaemonService for SyntheticDaemon {
             type ExecSessionStream = ReceiverStream<Result<daemon_v1::ExecMessage, Status>>;
             type PtySessionStream = ReceiverStream<Result<daemon_v1::PtyMessage, Status>>;
+            type ForwardTcpStream = ReceiverStream<Result<daemon_v1::ForwardTcpMessage, Status>>;
             type AttachSessionStream = ReceiverStream<Result<daemon_v1::SessionAttachMessage, Status>>;
             type CredentialBridgeStream = ReceiverStream<Result<v1::CredentialBridgeGuestMessage, Status>>;
             async fn credential_bridge(&self, request: Request<Streaming<v1::CredentialBridgeHostMessage>>) -> Result<Response<Self::CredentialBridgeStream>, Status> {
@@ -93,6 +94,7 @@ daemon_service! {
     attach_session(Streaming<daemon_v1::SessionAttachMessage>) -> Self::AttachSessionStream,
     exec_session(Streaming<daemon_v1::ExecMessage>) -> Self::ExecSessionStream,
     pty_session(Streaming<daemon_v1::PtyMessage>) -> Self::PtySessionStream,
+    forward_tcp(Streaming<daemon_v1::ForwardTcpMessage>) -> Self::ForwardTcpStream,
     list(daemon_v1::ListRequest) -> daemon_v1::ListResponse,
     stat(daemon_v1::StatRequest) -> daemon_v1::StatResponse,
     open_file(daemon_v1::OpenFileRequest) -> daemon_v1::OperationStatus,

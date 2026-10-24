@@ -5,10 +5,13 @@ use std::time::Duration;
 use codewire_daemon::client::{SessionClient, SessionClientError};
 use codewire_daemon::service::DaemonRuntimeState;
 use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::{CREDENTIAL_BRIDGE_LOOPBACK_PORT, WORKSPACE_SSH_PORT};
 use codewire_daemon_proto::{
     DAEMON_CAPABILITIES, DAEMON_CAPABILITY_ATTACH, DAEMON_CAPABILITY_EXEC,
     DAEMON_CAPABILITY_SESSIONS, DAEMON_PROTOCOL_VERSION,
 };
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_stream::iter;
 use tokio_stream::wrappers::ReceiverStream;
@@ -1642,4 +1645,172 @@ async fn assert_persisted_output(
     assert_eq!(next_offset, expected_end_offset);
     assert_eq!(stdout, expected_stdout);
     assert_eq!(stderr, expected_stderr);
+}
+
+// ForwardTcp (#3025): a loopback target, both half-closes, and the targets
+// the daemon refuses before any dial.
+
+type ForwardPayload = v1::forward_tcp_message::Payload;
+
+fn forward_message(payload: ForwardPayload) -> v1::ForwardTcpMessage {
+    v1::ForwardTcpMessage {
+        payload: Some(payload),
+    }
+}
+
+fn forward_open(address: &str, port: u32) -> v1::ForwardTcpMessage {
+    forward_message(ForwardPayload::Open(v1::ForwardTcpOpen {
+        address: address.into(),
+        port,
+    }))
+}
+
+async fn forward(
+    client: &mut HarnessClient,
+    first: v1::ForwardTcpMessage,
+) -> (
+    mpsc::Sender<v1::ForwardTcpMessage>,
+    Result<tonic::Streaming<v1::ForwardTcpMessage>, tonic::Status>,
+) {
+    let (input, requests) = mpsc::channel(4);
+    input.send(first).await.unwrap();
+    let response = client
+        .forward_tcp(ReceiverStream::new(requests))
+        .await
+        .map(tonic::Response::into_inner);
+    (input, response)
+}
+
+/// The client's end shuts down writing to the target, which answers only
+/// then; the target's end of stream comes back as `end`, and the RPC ends.
+#[tokio::test]
+async fn a_forward_reaches_a_loopback_listener_and_half_closes_both_ways() {
+    let harness = DaemonHarness::spawn().await;
+    let mut client = harness.client().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let target = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).await.unwrap();
+        stream.write_all(b"pong:").await.unwrap();
+        stream.write_all(&received).await.unwrap();
+        stream.shutdown().await.unwrap();
+        received
+    });
+
+    let (input, response) = forward(&mut client, forward_open("127.0.0.1", port.into())).await;
+    let mut output = response.expect("the forward opens");
+    let first = output.message().await.unwrap().and_then(|m| m.payload);
+    assert_eq!(
+        first,
+        Some(ForwardPayload::Opened(())),
+        "opened comes first"
+    );
+    input
+        .send(forward_message(ForwardPayload::Data(b"ping".to_vec())))
+        .await
+        .unwrap();
+    input
+        .send(forward_message(ForwardPayload::End(())))
+        .await
+        .unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut received = Vec::new();
+        loop {
+            match output.message().await.unwrap().and_then(|m| m.payload) {
+                Some(ForwardPayload::Data(bytes)) => received.extend(bytes),
+                Some(ForwardPayload::End(())) => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(output.message().await.unwrap(), None, "the RPC ends");
+        received
+    })
+    .await
+    .expect("the forward finishes");
+    assert_eq!(received, b"pong:ping");
+    assert_eq!(target.await.unwrap(), b"ping");
+    drop(input);
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_forward_refuses_every_target_but_loopback_before_dialing() {
+    let harness = DaemonHarness::spawn().await;
+    let mut client = harness.client().await;
+    for (address, port, code) in [
+        ("10.0.0.1", 80, tonic::Code::PermissionDenied),
+        ("169.254.169.254", 80, tonic::Code::PermissionDenied),
+        ("::ffff:127.0.0.1", 80, tonic::Code::PermissionDenied),
+        ("localhost", 80, tonic::Code::InvalidArgument),
+        ("127.0.0.1", 0, tonic::Code::InvalidArgument),
+        ("127.0.0.1", 70_000, tonic::Code::InvalidArgument),
+        (
+            "127.0.0.1",
+            u32::from(CREDENTIAL_BRIDGE_LOOPBACK_PORT),
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            "127.0.0.1",
+            u32::from(WORKSPACE_SSH_PORT),
+            tonic::Code::PermissionDenied,
+        ),
+    ] {
+        let (_input, response) = forward(&mut client, forward_open(address, port)).await;
+        let status = response.expect_err(address);
+        assert_eq!(status.code(), code, "{address}:{port}: {status:?}");
+    }
+    let (_input, response) = forward(
+        &mut client,
+        forward_message(ForwardPayload::Data(b"x".to_vec())),
+    )
+    .await;
+    assert_eq!(
+        response.unwrap_err().code(),
+        tonic::Code::InvalidArgument,
+        "open comes first"
+    );
+    harness.shutdown().await;
+}
+
+/// A daemon serving on TCP, as in a hosted Sandbox, refuses a forward to its
+/// own port: forwarding never reaches the daemon's API.
+#[tokio::test]
+async fn a_hosted_daemon_refuses_a_forward_to_its_own_port() {
+    let harness = DaemonHarness::spawn_hosted_tcp().await;
+    let mut client = harness.client().await;
+    let endpoint = harness.endpoint();
+    let port: u32 = endpoint
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.parse().ok())
+        .expect("the harness serves on a TCP port");
+    let (_input, response) = forward(&mut client, forward_open("127.0.0.1", port)).await;
+    let status = response.expect_err("its own port is refused");
+    assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
+    assert!(
+        status.message().contains("the workspace daemon"),
+        "{status:?}"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_forward_to_a_closed_port_is_unavailable() {
+    let harness = DaemonHarness::spawn().await;
+    let mut client = harness.client().await;
+    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let (_input, response) = forward(&mut client, forward_open("127.0.0.1", port.into())).await;
+    let status = response.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+    assert!(
+        status
+            .message()
+            .contains("nothing in the environment accepted")
+    );
+    harness.shutdown().await;
 }

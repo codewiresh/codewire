@@ -730,6 +730,7 @@ pub async fn run_daemon() -> Result<()> {
                 uid: plan.identity.uid,
                 gid: plan.identity.gid,
                 additional_gids: plan.identity.additional_gids.clone(),
+                network_namespace: PathBuf::from(NETWORK_NAMESPACE_PATH),
             },
         ),
         host: None,

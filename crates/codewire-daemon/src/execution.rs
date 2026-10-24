@@ -93,6 +93,9 @@ pub struct RuncExecution {
     pub uid: u32,
     pub gid: u32,
     pub additional_gids: Vec<u32>,
+    /// The pinned network namespace the workload container joins, which
+    /// `ForwardTcp` connects inside (#3025).
+    pub network_namespace: PathBuf,
 }
 
 impl ProcessExecution {
@@ -574,6 +577,7 @@ mod tests {
             uid: 1000,
             gid: 1000,
             additional_gids: vec![27],
+            network_namespace: "/run/codewire/netns/workspace".into(),
         });
         let secret = "CW_TEST_SECRET=not-on-helper-command";
         let daemon_auth = format!("{DAEMON_AUTH_TOKEN_ENV}=must-not-enter-child");
@@ -667,6 +671,7 @@ mod tests {
             uid: 0,
             gid: 0,
             additional_gids: Vec::new(),
+            network_namespace: "/run/codewire/netns/workspace".into(),
         });
         let error =
             PreparedProcess::prepare(&execution, &["/bin/sh".into()], "/", &[], false, 0, 0)

@@ -3084,6 +3084,7 @@ mod tests {
                 .collect(),
             state: daemon_v1::DaemonState::Ready as i32,
             message: sentinel.to_owned(),
+            default_shell: sentinel.to_owned(),
         };
         let health = daemon_v1::GetHealthResponse {
             state: daemon_v1::DaemonState::Ready as i32,

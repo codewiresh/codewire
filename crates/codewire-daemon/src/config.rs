@@ -106,6 +106,15 @@ pub enum CredentialBridgeTransport {
 }
 
 impl Config {
+    /// The TCP port this daemon serves its API on, when it serves on TCP (a
+    /// hosted Sandbox's workload namespace); none on vsock (a local VM).
+    pub fn tcp_port(&self) -> Option<u16> {
+        self.listen_addr
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|address| address.port())
+    }
+
     pub fn validate_host(&self) -> Result<(), ConfigError> {
         let Some(host) = &self.host else {
             return Ok(());
@@ -696,6 +705,17 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn the_daemon_names_its_own_tcp_port_only_when_it_serves_on_tcp() {
+        let mut config = fixture();
+        assert_eq!(config.tcp_port(), Some(7777));
+        config.listen_addr = "0.0.0.0:7777".into();
+        assert_eq!(config.tcp_port(), Some(7777));
+        // A local VM's daemon serves on vsock.
+        config.listen_addr = "vsock:any:5000".into();
+        assert_eq!(config.tcp_port(), None);
+    }
+
     #[test]
     fn host_configuration_requires_dedicated_state_and_excludes_guest_authority() {
         let temp = tempfile::tempdir().unwrap();

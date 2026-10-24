@@ -46,6 +46,7 @@ pub struct DaemonServiceImpl {
     /// A bound daemon's exposed application ports; `None` where the daemon
     /// serves no tailnet (environment-token mode, local placements).
     app_ports: Option<AppPortsSender>,
+    workload_sockets: crate::forward::WorkloadSockets,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -90,6 +91,7 @@ impl DaemonServiceImpl {
             config,
             runtime_state,
             app_ports: None,
+            workload_sockets: crate::forward::WorkloadSockets::default(),
         }
     }
 
@@ -135,6 +137,7 @@ impl DaemonServiceImpl {
 impl DaemonService for DaemonServiceImpl {
     type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
     type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
+    type ForwardTcpStream = ReceiverStream<Result<v1::ForwardTcpMessage, Status>>;
     type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;
     type CredentialBridgeStream = codewire_credential_bridge::CredentialBridgeOutput;
 
@@ -376,6 +379,27 @@ impl DaemonService for DaemonServiceImpl {
         )))
     }
 
+    async fn forward_tcp(
+        &self,
+        request: Request<Streaming<v1::ForwardTcpMessage>>,
+    ) -> Result<Response<Self::ForwardTcpStream>, Status> {
+        self.authorize(&request)?;
+        self.require_guest()?;
+        let mut inbound = request.into_inner();
+        let open = match inbound
+            .message()
+            .await
+            .map_err(|err| Status::invalid_argument(format!("read forward open message: {err}")))?
+            .and_then(|msg| msg.payload)
+        {
+            Some(v1::forward_tcp_message::Payload::Open(open)) => open,
+            _ => return Err(Status::invalid_argument("forward open message is required")),
+        };
+        let target = crate::forward::admit(&open, self.config.tcp_port())?;
+        let stream = self.workload_sockets.connect(&self.config, target).await?;
+        Ok(Response::new(crate::forward::serve(stream, inbound)))
+    }
+
     async fn pty_session(
         &self,
         request: Request<Streaming<v1::PtyMessage>>,
@@ -407,7 +431,8 @@ impl DaemonService for DaemonServiceImpl {
     ) -> Result<Response<v1::ListResponse>, Status> {
         self.authorize(&request)?;
         self.require_guest()?;
-        let entries = files::list(&self.config, &request.into_inner().path)
+        let path = request.into_inner().path;
+        let entries = files::as_workload_user(&self.config, || files::list(&self.config, &path))
             .map_err(status_from_file_error)?;
         Ok(Response::new(v1::ListResponse { entries }))
     }
@@ -419,8 +444,10 @@ impl DaemonService for DaemonServiceImpl {
         self.authorize(&request)?;
         self.require_guest()?;
         let request = request.into_inner();
-        let entry = files::stat(&self.config, &request.path, request.follow)
-            .map_err(status_from_file_error)?;
+        let entry = files::as_workload_user(&self.config, || {
+            files::stat(&self.config, &request.path, request.follow)
+        })
+        .map_err(status_from_file_error)?;
         Ok(Response::new(v1::StatResponse { entry: Some(entry) }))
     }
 
@@ -431,12 +458,14 @@ impl DaemonService for DaemonServiceImpl {
         self.authorize(&request)?;
         self.require_guest()?;
         let request = request.into_inner();
-        files::open_file(
-            &self.config,
-            &request.path,
-            request.options.as_ref(),
-            request.perm,
-        )
+        files::as_workload_user(&self.config, || {
+            files::open_file(
+                &self.config,
+                &request.path,
+                request.options.as_ref(),
+                request.perm,
+            )
+        })
         .map_err(status_from_file_error)?;
         Ok(Response::new(ok_status()))
     }
@@ -448,8 +477,10 @@ impl DaemonService for DaemonServiceImpl {
         self.authorize(&request)?;
         self.require_guest()?;
         let request = request.into_inner();
-        let data = files::read(&self.config, &request.path, request.offset, request.length)
-            .map_err(status_from_file_error)?;
+        let data = files::as_workload_user(&self.config, || {
+            files::read(&self.config, &request.path, request.offset, request.length)
+        })
+        .map_err(status_from_file_error)?;
         Ok(Response::new(v1::ReadResponse { data }))
     }
 
@@ -460,9 +491,10 @@ impl DaemonService for DaemonServiceImpl {
         self.authorize(&request)?;
         self.require_guest()?;
         let request = request.into_inner();
-        let bytes_written =
+        let bytes_written = files::as_workload_user(&self.config, || {
             files::write(&self.config, &request.path, request.offset, &request.data)
-                .map_err(status_from_file_error)?;
+        })
+        .map_err(status_from_file_error)?;
         Ok(Response::new(v1::WriteResponse { bytes_written }))
     }
 
@@ -473,7 +505,10 @@ impl DaemonService for DaemonServiceImpl {
         self.authorize(&request)?;
         self.require_guest()?;
         let request = request.into_inner();
-        files::mkdir(&self.config, &request.path, request.perm).map_err(status_from_file_error)?;
+        files::as_workload_user(&self.config, || {
+            files::mkdir(&self.config, &request.path, request.perm)
+        })
+        .map_err(status_from_file_error)?;
         Ok(Response::new(ok_status()))
     }
 
@@ -485,7 +520,8 @@ impl DaemonService for DaemonServiceImpl {
         self.require_guest()?;
         let request = request.into_inner();
         let _ = request.dir;
-        files::remove(&self.config, &request.path).map_err(status_from_file_error)?;
+        files::as_workload_user(&self.config, || files::remove(&self.config, &request.path))
+            .map_err(status_from_file_error)?;
         Ok(Response::new(ok_status()))
     }
 
@@ -496,8 +532,10 @@ impl DaemonService for DaemonServiceImpl {
         self.authorize(&request)?;
         self.require_guest()?;
         let request = request.into_inner();
-        files::rename(&self.config, &request.old_path, &request.new_path)
-            .map_err(status_from_file_error)?;
+        files::as_workload_user(&self.config, || {
+            files::rename(&self.config, &request.old_path, &request.new_path)
+        })
+        .map_err(status_from_file_error)?;
         Ok(Response::new(ok_status()))
     }
 
@@ -510,7 +548,8 @@ impl DaemonService for DaemonServiceImpl {
         let request = request.into_inner();
         validate_timestamp(request.access_time.as_ref())?;
         validate_timestamp(request.mod_time.as_ref())?;
-        files::set_stat(&self.config, &request).map_err(status_from_file_error)?;
+        files::as_workload_user(&self.config, || files::set_stat(&self.config, &request))
+            .map_err(status_from_file_error)?;
         Ok(Response::new(ok_status()))
     }
 
@@ -520,7 +559,8 @@ impl DaemonService for DaemonServiceImpl {
     ) -> Result<Response<v1::ReadlinkResponse>, Status> {
         self.authorize(&request)?;
         self.require_guest()?;
-        let target = files::readlink(&self.config, &request.into_inner().path)
+        let path = request.into_inner().path;
+        let target = files::as_workload_user(&self.config, || files::readlink(&self.config, &path))
             .map_err(status_from_file_error)?;
         Ok(Response::new(v1::ReadlinkResponse { target }))
     }
@@ -1008,6 +1048,7 @@ impl DaemonServiceImpl {
             capabilities: supported,
             state: state as i32,
             message,
+            default_shell: crate::env::default_shell_for(&self.config),
         }
     }
 }

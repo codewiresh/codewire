@@ -39,6 +39,16 @@ service DaemonService {
   rpc ExecSession(stream ExecMessage) returns (stream ExecMessage);
   rpc PtySession(stream PtyMessage) returns (stream PtyMessage);
 
+  // Requires forward.workload_loopback.v1. One TCP connection to a loopback
+  // address inside the workload's network namespace, made as the workload
+  // user, for an SSH server that runs outside it (a local VM's supervisor).
+  // The first request is `open`; the first response is `opened`, or the RPC
+  // fails: InvalidArgument or PermissionDenied for a target the daemon
+  // refuses, Unavailable when nothing accepted. Then `data` flows both ways
+  // and each side sends `end` at its end of stream, as a TCP half-close; the
+  // RPC ends once both have.
+  rpc ForwardTcp(stream ForwardTcpMessage) returns (stream ForwardTcpMessage);
+
   rpc List(ListRequest) returns (ListResponse);
   rpc Stat(StatRequest) returns (StatResponse);
   rpc OpenFile(OpenFileRequest) returns (OperationStatus);
@@ -307,6 +317,10 @@ message GetCapabilitiesResponse {
   repeated string capabilities = 4;
   DaemonState state = 5;
   string message = 6;
+  // The workspace's default shell: what a session launched without a command
+  // runs, and what an SSH exec request's command line runs through. Empty from
+  // a daemon older than this field.
+  string default_shell = 7;
 }
 
 message GetHealthRequest {}
@@ -508,6 +522,21 @@ message ExecMessage {
     google.protobuf.Empty close_stdin = 6;
     string error = 7;
   }
+}
+
+message ForwardTcpMessage {
+  oneof payload {
+    ForwardTcpOpen open = 1;
+    google.protobuf.Empty opened = 2;
+    bytes data = 3;
+    google.protobuf.Empty end = 4;
+  }
+}
+
+// A literal loopback address (127.0.0.0/8 or ::1), never a name.
+message ForwardTcpOpen {
+  string address = 1;
+  uint32 port = 2;
 }
 
 message PtyMessage {

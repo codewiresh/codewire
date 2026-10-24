@@ -55,6 +55,25 @@ pub enum FileError {
 
 pub type Result<T> = std::result::Result<T, FileError>;
 
+/// Run one file operation as the workload user (#3025). A local VM's guest
+/// daemon runs as root while its workload runs as an unprivileged user; file
+/// operations must create files that user owns and check access as theirs.
+/// `setfsuid`/`setfsgid` change only the calling thread's filesystem identity,
+/// and every file operation is synchronous, so nothing else runs on the thread
+/// before the guard restores it. Every other placement already runs as the
+/// workload user and calls `operation` unchanged.
+pub fn as_workload_user<T>(config: &Config, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    #[cfg(target_os = "linux")]
+    if let crate::execution::ProcessExecution::Runc(execution) = &config.process_execution
+        && execution.uid != 0
+    {
+        let _identity = linux::FilesystemIdentity::switch(execution.uid, execution.gid)?;
+        return operation();
+    }
+    let _ = config;
+    operation()
+}
+
 pub fn resolve_workspace_path(config: &Config, raw: &str) -> Result<PathBuf> {
     let trimmed = raw.trim();
     let raw_path = if trimmed.is_empty() {
@@ -452,6 +471,101 @@ mod tests {
             launch_projection: None,
             session_working_dir: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn runc(config: Config, uid: u32, gid: u32) -> Config {
+        Config {
+            process_execution: crate::execution::ProcessExecution::Runc(
+                crate::execution::RuncExecution {
+                    helper_path: PathBuf::from("/init"),
+                    process_directory: PathBuf::from("/run/codewire/runc"),
+                    container_id: "workspace".into(),
+                    process_wrapper: Vec::new(),
+                    default_shell: "/bin/sh".into(),
+                    base_environment: Vec::new(),
+                    uid,
+                    gid,
+                    additional_gids: Vec::new(),
+                    network_namespace: "/run/codewire/netns/workspace".into(),
+                },
+            ),
+            ..config
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn filesystem_ids() -> (u32, u32) {
+        // SAFETY: -1 queries this thread's filesystem IDs without changing them.
+        unsafe {
+            (
+                libc::setfsuid(u32::MAX) as u32,
+                libc::setfsgid(u32::MAX) as u32,
+            )
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_local_vm_file_operation_acts_as_the_workload_user_and_restores_the_thread() {
+        use std::os::unix::fs::MetadataExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let (uid, gid) = filesystem_ids();
+        // The test runs unprivileged, so the workload user it can act as is
+        // its own; the switch is still taken and read back.
+        let cfg = runc(
+            config(workspace.clone(), temp.path().join("home")),
+            uid,
+            gid,
+        );
+        let observed = as_workload_user(&cfg, || {
+            std::fs::write(workspace.join("created"), b"x").map_err(FileError::from)?;
+            Ok(filesystem_ids())
+        })
+        .unwrap();
+        assert_eq!(observed, (uid, gid));
+        let metadata = std::fs::metadata(workspace.join("created")).unwrap();
+        assert_eq!((metadata.uid(), metadata.gid()), (uid, gid));
+        assert_eq!(filesystem_ids(), (uid, gid));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_workload_user_the_daemon_cannot_become_fails_closed() {
+        let (uid, gid) = filesystem_ids();
+        if uid == 0 {
+            // Root can become any user; the refusal is for a daemon that cannot.
+            return;
+        }
+        let other = uid.checked_add(1).unwrap();
+        let cfg = runc(
+            config(PathBuf::from("/workspace"), PathBuf::from("/home")),
+            other,
+            gid,
+        );
+        let mut ran = false;
+        let result = as_workload_user(&cfg, || {
+            ran = true;
+            Ok(())
+        });
+        assert!(
+            matches!(&result, Err(FileError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied),
+            "{result:?}"
+        );
+        assert!(!ran, "no file operation runs under the wrong identity");
+        assert_eq!(
+            filesystem_ids(),
+            (uid, gid),
+            "the thread keeps its own identity"
+        );
+    }
+
+    #[test]
+    fn every_other_placement_runs_file_operations_unchanged() {
+        let cfg = config(PathBuf::from("/workspace"), PathBuf::from("/home/codewire"));
+        assert_eq!(as_workload_user(&cfg, || Ok(7)).unwrap(), 7);
     }
 
     #[test]

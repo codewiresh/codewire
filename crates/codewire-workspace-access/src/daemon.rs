@@ -7,6 +7,9 @@ use tonic::Request;
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::Channel;
 
+mod forward;
+pub use forward::DaemonForwardDialer;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStart {
     pub command: Vec<String>,
@@ -217,6 +220,23 @@ impl DaemonSessionClient {
             self.credential.expose_secret(),
         )
         .expect("DaemonAuthToken guarantees valid ASCII metadata")
+    }
+
+    /// The daemon's capabilities and default shell, for this client's
+    /// protocol.
+    pub async fn capabilities(&self) -> Result<v1::GetCapabilitiesResponse, DaemonClientError> {
+        let mut request = Request::new(v1::GetCapabilitiesRequest {
+            protocol_version: codewire_daemon::client::DAEMON_PROTOCOL_VERSION,
+            ..Default::default()
+        });
+        self.authorize(&mut request);
+        Ok(self
+            .inner
+            .clone()
+            .get_capabilities(request)
+            .await
+            .map_err(|status| self.refused(status))?
+            .into_inner())
     }
 
     fn authorize<T>(&self, request: &mut Request<T>) {
@@ -1264,6 +1284,7 @@ mod tests {
 
         type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
         type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
+        type ForwardTcpStream = ReceiverStream<Result<v1::ForwardTcpMessage, Status>>;
         type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;
         type CredentialBridgeStream =
             ReceiverStream<Result<bridge_v1::CredentialBridgeGuestMessage, Status>>;
@@ -1379,6 +1400,13 @@ mod tests {
                 .unwrap();
             }
             Ok(Response::new(ReceiverStream::new(rx)))
+        }
+
+        async fn forward_tcp(
+            &self,
+            _request: Request<tonic::Streaming<v1::ForwardTcpMessage>>,
+        ) -> Result<Response<Self::ForwardTcpStream>, Status> {
+            Err(Status::unimplemented("forward tcp"))
         }
 
         async fn pty_session(

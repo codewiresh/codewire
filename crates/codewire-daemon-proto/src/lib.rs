@@ -100,6 +100,14 @@ pub const DAEMON_CAPABILITY_SESSIONS: &str = "sessions.v1";
 pub const DAEMON_CAPABILITY_ATTACH: &str = "attach.v1";
 pub const DAEMON_CAPABILITY_SESSION_INPUT: &str = "session_input.v1";
 pub const DAEMON_CAPABILITY_SESSION_METADATA: &str = "session_metadata.v1";
+/// File operations act as the workload user: files they create belong to
+/// that user and access is checked as theirs, also where the daemon itself
+/// runs as root, as a local VM's guest daemon does (#3025).
+pub const DAEMON_CAPABILITY_WORKLOAD_FILES: &str = "files.workload_user.v1";
+/// `ForwardTcp` connects to a loopback address inside the workload's network
+/// namespace as the workload user, for SSH port forwarding served outside it
+/// (#3025).
+pub const DAEMON_CAPABILITY_FORWARD_TCP: &str = "forward.workload_loopback.v1";
 pub const SESSION_INPUT_MAX_BYTES: usize = 64 * 1024;
 pub const SESSION_INPUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub const DAEMON_CAPABILITY_CREDENTIAL_BRIDGE: &str = "credential_bridge.v1";
@@ -187,6 +195,8 @@ pub const DAEMON_CAPABILITIES: &[&str] = &[
     DAEMON_CAPABILITY_ATTACH,
     DAEMON_CAPABILITY_SESSION_INPUT,
     DAEMON_CAPABILITY_SESSION_METADATA,
+    DAEMON_CAPABILITY_WORKLOAD_FILES,
+    DAEMON_CAPABILITY_FORWARD_TCP,
 ];
 
 pub const HOST_DAEMON_CAPABILITIES: &[&str] = &[

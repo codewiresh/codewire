@@ -6781,8 +6781,10 @@ impl LocalSupervisorService for SupervisorRpc {
             .private(environment_id)
             .map_err(|_| Status::internal("local environment SSH host key is unavailable"))?;
         let daemon = ssh::daemon_client(access).await?;
+        let features = ssh::DaemonFeatures::read(&daemon).await;
         Ok(Response::new(ssh::serve(
             daemon,
+            features,
             host_key,
             inbound,
             operations,

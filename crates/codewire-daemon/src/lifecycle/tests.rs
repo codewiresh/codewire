@@ -26,6 +26,7 @@ fn config() -> Config {
             uid: 1000,
             gid: 1000,
             additional_gids: Vec::new(),
+            network_namespace: "/run/codewire/netns/workspace".into(),
         }),
         credential_bridge: Some(CredentialBridgeConfig {
             transport: CredentialBridgeTransport::Local,

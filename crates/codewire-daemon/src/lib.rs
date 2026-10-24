@@ -13,6 +13,7 @@ mod durable_session;
 pub mod env;
 pub mod execution;
 pub mod files;
+mod forward;
 #[cfg(target_os = "linux")]
 pub mod gh_config;
 #[cfg(target_os = "linux")]
