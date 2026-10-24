@@ -95,6 +95,28 @@ fn a_held_default_name_falls_back_to_a_recorded_private_directory() {
     assert_eq!(mode(&base), 0o700);
 }
 
+/// Linux only: a directory made in a setgid directory inherits the bit there,
+/// not on macOS.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_setgid_temporary_directory_keeps_one_default_directory() {
+    // A Kubernetes volume with an fsGroup is setgid, and every directory made
+    // in it inherits the bit: cw-<uid> is 2700. That is still private, so
+    // every process serving the root meets at the default directory instead
+    // of each making its own fallback (#3321).
+    let (_holder, temporary, state_root) = fixture();
+    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o2700)).unwrap();
+    let uid = current_uid();
+    let directory = prepare_in(&temporary, &state_root, uid).unwrap();
+    let base = temporary.join(format!("cw-{uid}"));
+    assert_eq!(directory, base.join(root_id(&state_root)));
+    assert_eq!(mode(&base) & 0o2000, 0o2000, "the fixture inherits setgid");
+    assert_eq!(mode(&base) & 0o777, 0o700);
+    assert_eq!(prepare_in(&temporary, &state_root, uid).unwrap(), directory);
+    assert_eq!(predicted_in(&temporary, &state_root, uid), directory);
+    assert!(!state_root.join(RECORD).exists());
+}
+
 #[test]
 fn a_link_under_the_default_name_is_not_followed() {
     let (holder, temporary, state_root) = fixture();

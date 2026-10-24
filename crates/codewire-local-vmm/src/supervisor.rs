@@ -9989,6 +9989,34 @@ mod tests {
     /// slow CI slot that stalled I/O (#3239).
     const LISTENER_HANG_GUARD: Duration = Duration::from_secs(120);
 
+    /// Starts a supervisor that must refuse to start, and returns its error.
+    /// The supervisor exiting ends the wait; one that listens instead fails at
+    /// once rather than serving until the run is stopped (#3321).
+    async fn refused_startup(config: &NativeRuntimeConfig) -> SupervisorError {
+        let socket = config.supervisor_socket();
+        let existing = SocketIdentity::capture(&socket).ok();
+        let mut supervisor = tokio::spawn(serve_supervisor(config.clone()));
+        tokio::time::timeout(LISTENER_HANG_GUARD, async {
+            loop {
+                if supervisor.is_finished() {
+                    return (&mut supervisor)
+                        .await
+                        .unwrap()
+                        .expect_err("supervisor startup succeeded");
+                }
+                if let Ok(identity) = SocketIdentity::capture(&socket)
+                    && Some(&identity) != existing.as_ref()
+                {
+                    supervisor.abort();
+                    panic!("supervisor listened instead of refusing to start");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("hang guard: supervisor startup neither refused nor listened")
+    }
+
     fn project_intent(vcpus: u32, memory_mib: u32, disk_gib: u64) -> (Vec<u8>, String) {
         let spec = codewire_project::ProjectSpec {
             image: "registry.example/codewire/workspace:latest".to_owned(),
@@ -10705,7 +10733,7 @@ mod tests {
 
         // A live owner keeps the lock for its whole life. A second supervisor
         // then fails before it binds, and the endpoint stays exactly as it is.
-        let error = serve_supervisor(config.clone()).await.unwrap_err();
+        let error = refused_startup(&config).await;
         assert!(
             matches!(error, SupervisorError::AlreadyRunning),
             "{error:?}"
@@ -15972,7 +16000,7 @@ mod tests {
         let config = core.config.clone();
         drop(core);
 
-        let error = serve_supervisor(config.clone()).await.unwrap_err();
+        let error = refused_startup(&config).await;
 
         assert!(matches!(error, SupervisorError::InvalidConfiguration));
         assert!(!config.supervisor_socket().exists());
@@ -16039,7 +16067,7 @@ mod tests {
         assert!(core.store.pending_operations().unwrap().is_empty());
         drop(core);
 
-        let error = serve_supervisor(config.clone()).await.unwrap_err();
+        let error = refused_startup(&config).await;
 
         assert!(
             matches!(

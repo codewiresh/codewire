@@ -13,7 +13,8 @@
 //! must be root-owned and sticky (or owned by this user and writable by no
 //! one else), so no other user can rename or replace `cw-<uid>` or anything
 //! beneath it. That directory is opened without following links and checked
-//! through the held descriptor: owned by this user, mode exactly 0700. An
+//! through the held descriptor: owned by this user, access bits exactly 0700
+//! (a setgid bit inherited from the temporary directory grants nothing). An
 //! existing directory is never repaired. When another user holds the name, cw
 //! falls back as ssh-agent does: a private `mkdtemp` directory whose name is
 //! recorded in the state root ([`RECORD`], 0600), so every process serving
@@ -224,7 +225,13 @@ fn ensure_private_in(
     let stat = rustix::fs::fstat(&fd)
         .map_err(|errno| io_error(format!("inspect {}", name.display()))(errno.into()))?;
     let mode = permission_bits(stat.st_mode);
-    if stat.st_uid == uid && mode == 0o700 {
+    // Private means owned by this user with access bits exactly 0700, as
+    // PrivateRoot checks. The special bits grant no access: a directory made
+    // in a setgid temporary directory, such as a Kubernetes volume with an
+    // fsGroup, inherits setgid and is 2700. Requiring 0700 there refused
+    // every directory this process made, so each call made a new fallback and
+    // a supervisor and its clients never met at one socket (#3321).
+    if stat.st_uid == uid && mode & 0o777 == 0o700 {
         Ok(None)
     } else {
         Ok(Some((stat.st_uid, mode)))
