@@ -537,8 +537,10 @@ async fn dispatch_packets<B: EgressBroker>(
 
 /// Resolve one guest question and send the reply. A lookup that fails is
 /// answered at once, with the query's ID and question only, so the guest does
-/// not wait out its timeout: REFUSED when the policy refused, SERVFAIL for
-/// anything else.
+/// not wait out its timeout: NXDOMAIN with no SOA when the policy refused it
+/// (#2537), SERVFAIL for anything else. A refused name and one whose answers
+/// are only protected addresses look exactly like a name that does not exist;
+/// the reason is counted by the broker, never sent to the guest.
 async fn answer_dns_question<B: EgressBroker>(
     question: DnsQuestion,
     broker: Arc<B>,
@@ -549,7 +551,7 @@ async fn answer_dns_question<B: EgressBroker>(
         .await
         .unwrap_or_else(|error| BrokerDnsAnswer {
             answer: if error.kind() == io::ErrorKind::PermissionDenied {
-                DnsAnswer::Refused
+                DnsAnswer::NameError
             } else {
                 DnsAnswer::ServerFailure
             },
@@ -794,11 +796,15 @@ mod tests {
         reply[DNS + 3]
     }
 
+    /// A refused lookup is NXDOMAIN with no SOA (`reply_code` checks there is
+    /// no authority record), so it fails at once on glibc, musl and Go and no
+    /// guest resolver caches the refusal (#2537). Any other failure is
+    /// SERVFAIL.
     #[tokio::test]
-    async fn a_refused_or_failed_lookup_is_answered_at_once() {
+    async fn a_refused_lookup_is_nxdomain_without_soa_and_a_failed_one_servfail() {
         let query = dns_query_packet(WORKER_IP, 53, TEST_DNS_NAME);
         let outcomes: [(DnsOutcome, u8); 4] = [
-            (|| Err(denied()), 5),
+            (|| Err(denied()), 3),
             (|| Err(io::ErrorKind::ConnectionRefused.into()), 2),
             (|| Err(io::ErrorKind::ConnectionAborted.into()), 2),
             (|| Err(io::ErrorKind::InvalidData.into()), 2),
@@ -815,7 +821,7 @@ mod tests {
         let (mut guest, mut session) = ready_session(Arc::new(DenyBroker)).await;
         for _ in 0..2 {
             let reply = exchange(&mut guest, &mut session, &query).await;
-            assert_eq!(reply_code(&reply, &query), 0x80 | 5);
+            assert_eq!(reply_code(&reply, &query), 0x80 | 3);
         }
     }
 
@@ -852,7 +858,7 @@ mod tests {
         }
         // The one reply that arrives is for the admitted question sent last.
         let reply = exchange(&mut guest, &mut session, &admitted).await;
-        assert_eq!(reply_code(&reply, &admitted), 0x80 | 5);
+        assert_eq!(reply_code(&reply, &admitted), 0x80 | 3);
         assert_eq!(broker.questions.lock().unwrap().len(), 1);
     }
 

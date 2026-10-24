@@ -52,9 +52,9 @@ pub enum DnsAnswer {
     Ipv4(Ipv4Addr),
     Ipv6(Ipv6Addr),
     NoData,
+    /// The name does not exist, or the policy refused it: NXDOMAIN with no
+    /// record, so no SOA a guest resolver could negatively cache (#2537).
     NameError,
-    /// The policy refused the name: REFUSED, with no record.
-    Refused,
     /// The lookup failed for any other reason: SERVFAIL, with no record.
     ServerFailure,
 }
@@ -65,7 +65,6 @@ impl DnsAnswer {
             Self::Ipv4(_) | Self::Ipv6(_) | Self::NoData => 0,
             Self::ServerFailure => 2,
             Self::NameError => 3,
-            Self::Refused => 5,
         }
     }
 }
@@ -244,13 +243,7 @@ pub fn build_ipv4_dns_response(
             answer_storage.copy_from_slice(&ip.octets());
             Some(16)
         }
-        (
-            _,
-            DnsAnswer::NoData
-            | DnsAnswer::NameError
-            | DnsAnswer::Refused
-            | DnsAnswer::ServerFailure,
-        ) => None,
+        (_, DnsAnswer::NoData | DnsAnswer::NameError | DnsAnswer::ServerFailure) => None,
         _ => return Err(DnsBoundaryError::AnswerTypeMismatch),
     };
 
@@ -575,7 +568,6 @@ mod tests {
             (DnsAnswer::NoData, 0),
             (DnsAnswer::ServerFailure, 2),
             (DnsAnswer::NameError, 3),
-            (DnsAnswer::Refused, 5),
         ] {
             let response = build_ipv4_dns_response(&question, answer, 30, 1500).unwrap();
             let ipv4 = Ipv4Packet::new_checked(response.as_slice()).unwrap();

@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use codewire_egress_policy::host_addresses::HostAddressSet;
 use codewire_egress_policy::lease::{
     Admission, AdmittedDnsQuery, AdmittedDnsResolution, DnsResolution, EgressLeaseTable,
-    LeaseError, LeaseInstant, TcpAdmission,
+    LeaseError, LeaseInstant, RefusalCounts, TcpAdmission, TcpVerdict,
 };
 use codewire_egress_policy::{CompiledPolicy, PolicyDecision, PolicyDigest, RouteClass};
 use thiserror::Error;
@@ -31,6 +31,13 @@ pub enum DnsRecordFamily {
 }
 
 impl DnsRecordFamily {
+    fn of(address: IpAddr) -> Self {
+        match address {
+            IpAddr::V4(_) => Self::Ipv4,
+            IpAddr::V6(_) => Self::Ipv6,
+        }
+    }
+
     fn accepts(self, address: IpAddr) -> bool {
         matches!(
             (self, address),
@@ -198,6 +205,13 @@ where
         self.state.lock().await.policy_digest()
     }
 
+    /// Refusals by reason since start, never a name or an address. They are
+    /// the only place a refusal's reason is visible (#2537): every refused
+    /// lookup looks the same to the guest.
+    pub async fn refusal_counts(&self) -> RefusalCounts {
+        self.state.lock().await.refusal_counts()
+    }
+
     /// Replace the addresses local to the host this broker dials from (#2614);
     /// later admissions, including a dial already authorized, refuse them.
     pub async fn set_host_addresses(&self, addresses: HostAddressSet) {
@@ -270,17 +284,48 @@ where
         Ok(BrokerTcpConnection { stream, admission })
     }
 
+    /// Admit a dial against the policy and the lease table. When only an
+    /// expired lease would admit it, re-resolve that lease's own name once,
+    /// never a guest-supplied one, and admit the dial only if the fresh
+    /// answer, checked like any guest lookup, still contains its address.
     async fn admit_tcp(&self, destination: SocketAddr) -> Result<TcpAdmission, BrokerError> {
+        let expired = {
+            let mut state = self.state.lock().await;
+            match state.admit_tcp_or_expired(
+                destination.ip(),
+                destination.port(),
+                self.route_class,
+                self.clock.now(),
+            )? {
+                TcpVerdict::Allowed(admission) => return Ok(admission),
+                TcpVerdict::Refused(refusal) => {
+                    return Err(BrokerError::Denied(refusal.decision().clone()));
+                }
+                TcpVerdict::LeaseExpired(expired) => expired,
+            }
+        };
+        let family = DnsRecordFamily::of(destination.ip());
+        let request = DnsResolverRequest {
+            name: expired.name().to_string(),
+            family,
+        };
+        // A failed, empty or wrong-family lookup is no answer: the dial is
+        // refused as `lease_expired`.
+        let resolution = match self.resolver.resolve(request).await {
+            Ok(DnsResolverOutcome::Positive(resolution))
+                if resolution
+                    .addresses()
+                    .iter()
+                    .all(|record| family.accepts(record.address())) =>
+            {
+                Some(resolution)
+            }
+            _ => None,
+        };
         let mut state = self.state.lock().await;
-        match state.admit_tcp(
-            destination.ip(),
-            destination.port(),
-            self.route_class,
-            self.clock.now(),
-        )? {
-            Admission::Allowed(admission) => Ok(admission),
-            Admission::Denied(decision) => Err(BrokerError::Denied(decision)),
-        }
+        state
+            .readmit_expired(expired, resolution, self.clock.now())?
+            .map_err(|refusal| BrokerError::Denied(refusal.decision().clone()))
     }
 }
 
@@ -291,12 +336,13 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use codewire_egress_policy::lease::{DnsAddress, DnsAlias};
+    use codewire_egress_policy::lease::{DnsAddress, DnsAlias, RefusalReason};
     use codewire_egress_policy::{DecisionReason, PolicyDocument};
 
     use super::*;
 
     const PUBLIC_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+    const OTHER_PUBLIC_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
     const PUBLIC_V6: IpAddr = IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111));
     const HTTPS: u16 = 443;
 
@@ -491,7 +537,9 @@ rules:
         assert_eq!(response.name(), "allowed.example.com");
         assert_eq!(response.aliases(), ["edge.example.net"]);
         assert_eq!(response.addresses(), [PUBLIC_V4]);
-        assert_eq!(response.ttl_seconds(), 45);
+        // The shortest TTL in the chain is 45 s; the lease, and so the TTL
+        // the guest gets, is clamped up to 60 s.
+        assert_eq!(response.ttl_seconds(), 60);
         assert_eq!(
             resolver.requests(),
             [DnsResolverRequest {
@@ -551,13 +599,16 @@ rules:
 
     #[tokio::test]
     async fn tcp_is_rechecked_at_dial_time_after_dns_expiry() {
+        // The answer's 1 s TTL is clamped to a 60 s lease. At expiry the dial
+        // re-resolves the lease's own name once; here that lookup fails, so
+        // the dial is refused as lease_expired and never reaches the network.
         let resolver = Arc::new(FakeResolver::new([positive(PUBLIC_V4, 1)]));
         let connector = Arc::new(FakeConnector::new([Ok(9)]));
         let clock = Arc::new(FakeClock::default());
         let broker = broker(
             named_policy(),
             RouteClass::General,
-            resolver,
+            Arc::clone(&resolver),
             Arc::clone(&connector),
             Arc::clone(&clock),
         );
@@ -565,18 +616,107 @@ rules:
             .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
             .await
             .unwrap();
-        clock.set(999);
+        clock.set(59_999);
         assert!(
             broker
                 .authorize_tcp(SocketAddr::new(PUBLIC_V4, HTTPS))
                 .await
                 .is_ok()
         );
-        clock.set(1_000);
+        assert_eq!(resolver.requests().len(), 1);
+        clock.set(60_000);
         assert!(matches!(
             broker.connect_tcp(SocketAddr::new(PUBLIC_V4, HTTPS)).await,
             Err(BrokerError::Denied(_))
         ));
+        assert_eq!(resolver.requests().len(), 2);
+        assert_eq!(
+            broker
+                .refusal_counts()
+                .await
+                .get(RefusalReason::LeaseExpired),
+            1
+        );
+        assert!(connector.destinations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_dial_on_an_expired_lease_re_resolves_its_own_name_once() {
+        let resolver = Arc::new(FakeResolver::new([
+            positive(PUBLIC_V4, 60),
+            // The re-resolve at expiry still answers the dialed address.
+            positive(PUBLIC_V4, 120),
+            // The next one has moved the name elsewhere.
+            positive(OTHER_PUBLIC_V4, 120),
+        ]));
+        let connector = Arc::new(FakeConnector::new([Ok(5)]));
+        let clock = Arc::new(FakeClock::default());
+        let broker = broker(
+            named_policy(),
+            RouteClass::General,
+            Arc::clone(&resolver),
+            Arc::clone(&connector),
+            Arc::clone(&clock),
+        );
+        broker
+            .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
+            .await
+            .unwrap();
+
+        clock.set(61_000);
+        let destination = SocketAddr::new(PUBLIC_V4, HTTPS);
+        let connection = broker.connect_tcp(destination).await.unwrap();
+        assert_eq!(connection.stream(), &5);
+        assert_eq!(
+            connection.admission().hostname(),
+            Some("allowed.example.com")
+        );
+        let lookup = DnsResolverRequest {
+            name: "allowed.example.com".to_string(),
+            family: DnsRecordFamily::Ipv4,
+        };
+        assert_eq!(resolver.requests(), [lookup.clone(), lookup.clone()]);
+        // The refreshed lease admits later dials without another lookup.
+        assert!(broker.authorize_tcp(destination).await.is_ok());
+        assert_eq!(resolver.requests().len(), 2);
+
+        // After the refreshed 120 s lease lapses, the name no longer answers
+        // the dialed address: one lookup, then lease_expired.
+        clock.set(182_000);
+        assert!(matches!(
+            broker.connect_tcp(destination).await,
+            Err(BrokerError::Denied(_))
+        ));
+        assert_eq!(
+            resolver.requests(),
+            [lookup.clone(), lookup.clone(), lookup]
+        );
+        assert_eq!(
+            broker
+                .refusal_counts()
+                .await
+                .get(RefusalReason::LeaseExpired),
+            1
+        );
+        assert_eq!(connector.destinations(), [destination]);
+    }
+
+    #[tokio::test]
+    async fn a_dial_with_no_lease_history_never_triggers_a_lookup() {
+        let resolver = Arc::new(FakeResolver::new([positive(PUBLIC_V4, 60)]));
+        let connector = Arc::new(FakeConnector::new([Ok(1)]));
+        let broker = broker(
+            named_policy(),
+            RouteClass::General,
+            Arc::clone(&resolver),
+            Arc::clone(&connector),
+            Arc::new(FakeClock::default()),
+        );
+        assert!(matches!(
+            broker.connect_tcp(SocketAddr::new(PUBLIC_V4, HTTPS)).await,
+            Err(BrokerError::Denied(_))
+        ));
+        assert!(resolver.requests().is_empty());
         assert!(connector.destinations().is_empty());
     }
 

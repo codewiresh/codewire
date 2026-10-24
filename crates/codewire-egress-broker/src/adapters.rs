@@ -646,8 +646,9 @@ mod tests {
         }
     }
 
-    /// The one-second floor does not let an answer past the address classes: a
-    /// rebinding answer is refused for its address, whatever its TTL.
+    /// An answer without a TTL gets the minimum name-bound lease, and that
+    /// never lets it past the address classes: a rebinding answer is refused
+    /// for its address, whatever its TTL.
     #[tokio::test]
     async fn an_answer_without_a_ttl_is_still_refused_for_a_protected_address() {
         let broker_answering = |address| async move {
@@ -689,7 +690,7 @@ rules:
         let Ok(BrokerDnsResponse::Positive(admitted)) = resolved else {
             panic!("a public answer without a TTL resolved to {resolved:?}");
         };
-        assert_eq!(admitted.ttl_seconds(), 1);
+        assert_eq!(admitted.ttl_seconds(), 60);
         assert!(
             broker
                 .authorize_tcp(SocketAddr::new(IpAddr::V4(TEST_V4), 443))

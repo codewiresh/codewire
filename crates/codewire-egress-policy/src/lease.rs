@@ -28,14 +28,11 @@ pub const MAX_CNAME_CHAIN: usize = 8;
 pub const MAX_DNS_ADDRESSES: usize = 16;
 pub const MAX_ACTIVE_DNS_LEASES: usize = 1_024;
 pub const MAX_DNS_TTL_SECONDS: u32 = 300;
-/// The shortest lease a clamped table grants a name-bound address; the guest
+/// The shortest lease the table grants a name-bound address; the guest
 /// receives the lease lifetime as the answer's TTL (#2537).
 pub const MIN_NAME_BOUND_LEASE_SECONDS: u32 = 60;
 /// How long an expired lease is kept so a dial can re-resolve its name.
 pub const EXPIRED_LEASE_GRACE_SECONDS: u32 = 600;
-
-/// The floor an unclamped table keeps until #2537 step 2 removes it.
-const LEGACY_MIN_LEASE_SECONDS: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LeaseInstant(u64);
@@ -500,37 +497,20 @@ pub struct EgressLeaseTable {
     leases: Vec<DnsLease>,
     maximum_leases: usize,
     host_addresses: HostAddressSet,
-    minimum_lease_seconds: u32,
     refusals: RefusalCounters,
 }
 
 impl EgressLeaseTable {
-    /// A table whose leases live as long as the shortest TTL in the answer,
-    /// capped at [`MAX_DNS_TTL_SECONDS`], with a one-second floor.
-    ///
-    /// The one-second floor is a staged rollout: #2537 step 2 makes the
-    /// clamp of [`Self::with_lease_clamp`] the only behaviour and removes it.
+    /// A table whose name-bound leases live as long as the shortest TTL in
+    /// the answer, clamped to [`MIN_NAME_BOUND_LEASE_SECONDS`] and
+    /// [`MAX_DNS_TTL_SECONDS`]; the TTL returned to the guest equals the lease.
     pub fn new(policy: CompiledPolicy) -> Self {
         Self {
             policy,
             leases: Vec::new(),
             maximum_leases: MAX_ACTIVE_DNS_LEASES,
             host_addresses: HostAddressSet::default(),
-            minimum_lease_seconds: LEGACY_MIN_LEASE_SECONDS,
             refusals: RefusalCounters::default(),
-        }
-    }
-
-    /// A table whose name-bound leases live between
-    /// [`MIN_NAME_BOUND_LEASE_SECONDS`] and [`MAX_DNS_TTL_SECONDS`]; the TTL
-    /// returned to the guest equals the lease.
-    ///
-    /// Staged rollout only: #2537 step 2 makes this clamp the table's only
-    /// behaviour and deletes this constructor. Do not build on it.
-    pub fn with_lease_clamp(policy: CompiledPolicy) -> Self {
-        Self {
-            minimum_lease_seconds: MIN_NAME_BOUND_LEASE_SECONDS,
-            ..Self::new(policy)
         }
     }
 
@@ -648,8 +628,7 @@ impl EgressLeaseTable {
 
         let ttl_seconds = resolution
             .effective_ttl_seconds()
-            .max(self.minimum_lease_seconds)
-            .min(MAX_DNS_TTL_SECONDS);
+            .clamp(MIN_NAME_BOUND_LEASE_SECONDS, MAX_DNS_TTL_SECONDS);
         let expires_at = now
             .checked_add_seconds(ttl_seconds)
             .ok_or(LeaseError::TimeOverflow)?;
@@ -761,30 +740,6 @@ impl EgressLeaseTable {
             expires_at,
             decision: query_decision,
         }))
-    }
-
-    /// Admit one TCP destination using direct-IP policy or active DNS evidence.
-    ///
-    /// Equivalent to [`Self::admit_tcp_or_expired`] with an expired lease
-    /// treated as a refusal. It is the legacy path: #2537 step 2 deletes it
-    /// once the broker re-resolves expired leases. Do not build on it.
-    pub fn admit_tcp(
-        &mut self,
-        address: IpAddr,
-        port: u16,
-        route_class: RouteClass,
-        now: LeaseInstant,
-    ) -> Result<Admission<TcpAdmission>, LeaseError> {
-        Ok(
-            match self.admit_tcp_or_expired(address, port, route_class, now)? {
-                TcpVerdict::Allowed(admission) => Admission::Allowed(admission),
-                TcpVerdict::Refused(refusal) => Admission::Denied(refusal.decision),
-                TcpVerdict::LeaseExpired(expired) => Admission::Denied(
-                    self.refuse(RefusalReason::LeaseExpired, expired.decision)
-                        .decision,
-                ),
-            },
-        )
     }
 
     /// Admit one TCP destination using direct-IP policy or active DNS evidence.
@@ -1083,6 +1038,40 @@ mod tests {
     use crate::{DecisionReason, PolicyDocument};
 
     const PUBLIC_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+
+    /// A dial's admission where an expired lease counts as a refusal, as the
+    /// broker's answer is when its one re-resolve finds nothing.
+    trait AdmitOrRefuse {
+        fn admit_or_refuse(
+            &mut self,
+            address: IpAddr,
+            port: u16,
+            route_class: RouteClass,
+            now: LeaseInstant,
+        ) -> Result<Admission<TcpAdmission>, LeaseError>;
+    }
+
+    impl AdmitOrRefuse for EgressLeaseTable {
+        fn admit_or_refuse(
+            &mut self,
+            address: IpAddr,
+            port: u16,
+            route_class: RouteClass,
+            now: LeaseInstant,
+        ) -> Result<Admission<TcpAdmission>, LeaseError> {
+            Ok(
+                match self.admit_tcp_or_expired(address, port, route_class, now)? {
+                    TcpVerdict::Allowed(admission) => Admission::Allowed(admission),
+                    TcpVerdict::Refused(refusal) => Admission::Denied(refusal.decision),
+                    TcpVerdict::LeaseExpired(expired) => Admission::Denied(
+                        self.readmit_expired(expired, None, now)?
+                            .expect_err("no answer never readmits")
+                            .decision,
+                    ),
+                },
+            )
+        }
+    }
     const OTHER_PUBLIC_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
     const PUBLIC_V6: IpAddr = IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111));
 
@@ -1132,7 +1121,7 @@ rules:
         let mut table = EgressLeaseTable::new(named_policy());
         let before = denied(
             table
-                .admit_tcp(PUBLIC_V4, 443, RouteClass::General, LeaseInstant::ZERO)
+                .admit_or_refuse(PUBLIC_V4, 443, RouteClass::General, LeaseInstant::ZERO)
                 .unwrap(),
         );
         assert_eq!(before.reason, DecisionReason::DefaultDeny);
@@ -1153,7 +1142,7 @@ rules:
 
         let tcp = allowed(
             table
-                .admit_tcp(
+                .admit_or_refuse(
                     PUBLIC_V4,
                     443,
                     RouteClass::General,
@@ -1169,7 +1158,7 @@ rules:
 
         let expired = denied(
             table
-                .admit_tcp(
+                .admit_or_refuse(
                     PUBLIC_V4,
                     443,
                     RouteClass::General,
@@ -1204,7 +1193,7 @@ rules:
         let mut table = EgressLeaseTable::new(CompiledPolicy::developer_baseline());
         let tcp = allowed(
             table
-                .admit_tcp(PUBLIC_V4, 443, RouteClass::General, LeaseInstant::ZERO)
+                .admit_or_refuse(PUBLIC_V4, 443, RouteClass::General, LeaseInstant::ZERO)
                 .unwrap(),
         );
         assert_eq!(tcp.hostname(), None);
@@ -1278,8 +1267,9 @@ rules:
         );
         assert_eq!(dns.addresses(), [PUBLIC_V4, PUBLIC_V6]);
         assert_eq!(dns.aliases(), ["edge.cdn.example.net"]);
-        assert_eq!(dns.ttl_seconds(), 20);
-        assert_eq!(dns.expires_at(), LeaseInstant::from_millis(21_000));
+        // The shortest TTL left after filtering is 20 s, clamped up to 60 s.
+        assert_eq!(dns.ttl_seconds(), 60);
+        assert_eq!(dns.expires_at(), LeaseInstant::from_millis(61_000));
         assert_eq!(table.active_leases(LeaseInstant::ZERO), 2);
     }
 
@@ -1324,10 +1314,11 @@ rules:
                 )
                 .unwrap(),
         );
-        assert_eq!(refreshed.expires_at(), LeaseInstant::from_millis(15_000));
+        // The 5 s answer is clamped up to a 60 s lease from 10 s.
+        assert_eq!(refreshed.expires_at(), LeaseInstant::from_millis(70_000));
         let tcp = allowed(
             table
-                .admit_tcp(
+                .admit_or_refuse(
                     PUBLIC_V4,
                     443,
                     RouteClass::General,
@@ -1378,7 +1369,7 @@ rules:
         }
         let tcp = allowed(
             table
-                .admit_tcp(PUBLIC_V4, 443, RouteClass::General, LeaseInstant::ZERO)
+                .admit_or_refuse(PUBLIC_V4, 443, RouteClass::General, LeaseInstant::ZERO)
                 .unwrap(),
         );
         assert_eq!(tcp.hostname(), Some("a.example.com"));
@@ -1399,7 +1390,7 @@ rules:
         );
         let credential = denied(
             table
-                .admit_tcp(PUBLIC_V4, 443, RouteClass::Credential, LeaseInstant::ZERO)
+                .admit_or_refuse(PUBLIC_V4, 443, RouteClass::Credential, LeaseInstant::ZERO)
                 .unwrap(),
         );
         assert_eq!(credential.reason, DecisionReason::DefaultDeny);
@@ -1432,7 +1423,7 @@ rules:
         assert_eq!(table.active_leases(LeaseInstant::from_millis(1_000)), 1);
         assert!(
             table
-                .admit_tcp(
+                .admit_or_refuse(
                     PUBLIC_V4,
                     443,
                     RouteClass::General,
@@ -1645,7 +1636,7 @@ rules:
             .step_by(7)
             .chain([59, 60, 61, 299, 300, 301, u32::MAX])
         {
-            let mut table = EgressLeaseTable::with_lease_clamp(named_policy());
+            let mut table = EgressLeaseTable::new(named_policy());
             let now = at(1_000);
             let dns = allowed(
                 table
@@ -1685,7 +1676,7 @@ rules:
     }
 
     #[test]
-    fn an_unclamped_table_keeps_its_one_second_floor_until_step_two() {
+    fn a_one_second_answer_gets_the_minimum_name_bound_lease() {
         let mut table = EgressLeaseTable::new(named_policy());
         resolve(
             &mut table,
@@ -1695,16 +1686,27 @@ rules:
             LeaseInstant::ZERO,
         );
         assert!(
-            !table
-                .admit_tcp(PUBLIC_V4, 443, RouteClass::General, at(1))
+            table
+                .admit_or_refuse(
+                    PUBLIC_V4,
+                    443,
+                    RouteClass::General,
+                    LeaseInstant::from_millis(59_999)
+                )
                 .unwrap()
                 .is_allowed()
         );
+        assert!(matches!(
+            table
+                .admit_tcp_or_expired(PUBLIC_V4, 443, RouteClass::General, at(60))
+                .unwrap(),
+            TcpVerdict::LeaseExpired(_)
+        ));
     }
 
     #[test]
     fn a_dial_on_an_expired_lease_names_the_lease_and_readmits_once_answered() {
-        let mut table = EgressLeaseTable::with_lease_clamp(named_policy());
+        let mut table = EgressLeaseTable::new(named_policy());
         resolve(&mut table, "Allowed.Example.COM.", PUBLIC_V4, 60, at(0));
         assert_eq!(table.active_leases(at(60)), 0);
 
@@ -1731,7 +1733,7 @@ rules:
 
     #[test]
     fn a_re_resolve_that_no_longer_answers_the_address_is_refused_as_lease_expired() {
-        let mut table = EgressLeaseTable::with_lease_clamp(named_policy());
+        let mut table = EgressLeaseTable::new(named_policy());
         resolve(&mut table, "allowed.example.com", PUBLIC_V4, 60, at(0));
 
         let expired = expired_lease(verdict(&mut table, PUBLIC_V4, 443, at(70)));
@@ -1762,7 +1764,7 @@ rules:
         resolve(&mut table, "allowed.example.com", PUBLIC_V4, 60, at(0));
         let decision = denied(
             table
-                .admit_tcp(PUBLIC_V4, 443, RouteClass::General, at(60))
+                .admit_or_refuse(PUBLIC_V4, 443, RouteClass::General, at(60))
                 .unwrap(),
         );
         assert_eq!(decision.reason, DecisionReason::DefaultDeny);
@@ -1771,7 +1773,7 @@ rules:
 
     #[test]
     fn expired_leases_are_kept_for_their_grace_and_then_forgotten() {
-        let mut table = EgressLeaseTable::with_lease_clamp(named_policy());
+        let mut table = EgressLeaseTable::new(named_policy());
         resolve(&mut table, "allowed.example.com", PUBLIC_V4, 60, at(0));
         let grace_end = 60 + u64::from(EXPIRED_LEASE_GRACE_SECONDS);
         expired_lease(verdict(&mut table, PUBLIC_V4, 443, at(grace_end - 1)));
@@ -1803,10 +1805,11 @@ rules:
         )
         .unwrap();
         let mut table = EgressLeaseTable::with_maximum_leases(policy, 2).unwrap();
+        // Both answers are clamped up to the 60 s minimum lease.
         resolve(&mut table, "a.example.com", PUBLIC_V4, 10, at(0));
-        resolve(&mut table, "b.example.com", CDN_V4, 20, at(0));
-        // Both are expired at 30 s and kept; a third name evicts the older.
-        resolve(&mut table, "c.example.com", OTHER_PUBLIC_V4, 60, at(30));
+        resolve(&mut table, "b.example.com", CDN_V4, 20, at(10));
+        // Both are expired at 80 s and kept; a third name evicts the older.
+        resolve(&mut table, "c.example.com", OTHER_PUBLIC_V4, 60, at(80));
         assert_eq!(table.leases.len(), 2);
         assert!(
             table
@@ -1815,19 +1818,19 @@ rules:
                 .all(|lease| lease.name != "a.example.com")
         );
         // A refresh of a kept expired lease reuses it instead of evicting it.
-        resolve(&mut table, "b.example.com", CDN_V4, 60, at(31));
-        assert_eq!(table.active_leases(at(31)), 2);
+        resolve(&mut table, "b.example.com", CDN_V4, 60, at(81));
+        assert_eq!(table.active_leases(at(81)), 2);
         // Active leases are never evicted.
         assert!(matches!(
             table.admit_dns(
                 "d.example.com",
                 RouteClass::General,
                 resolution(&[(PUBLIC_V6, 60)]),
-                at(32),
+                at(82),
             ),
             Err(LeaseError::CapacityExhausted { maximum: 2 })
         ));
-        assert_eq!(table.active_leases(at(32)), 2);
+        assert_eq!(table.active_leases(at(82)), 2);
     }
 
     #[test]
@@ -1843,7 +1846,7 @@ rules:
             )
             .unwrap(),
         ] {
-            let mut table = EgressLeaseTable::with_lease_clamp(named_policy());
+            let mut table = EgressLeaseTable::new(named_policy());
             resolve(&mut table, "allowed.example.com", PUBLIC_V4, 60, at(0));
             let expired = expired_lease(verdict(&mut table, PUBLIC_V4, 443, at(60)));
             let refusal = table
@@ -1871,7 +1874,7 @@ rules:
                 RefusalReason::LeaseExpired,
             ),
         ] {
-            let mut table = EgressLeaseTable::with_lease_clamp(named_policy());
+            let mut table = EgressLeaseTable::new(named_policy());
             resolve(&mut table, "allowed.example.com", PUBLIC_V4, 60, at(0));
             let expired = expired_lease(verdict(&mut table, PUBLIC_V4, 443, at(60)));
             table.set_host_addresses(HostAddressSet::new([], [PUBLIC_V4]).unwrap());
@@ -1891,7 +1894,7 @@ rules:
 
     #[test]
     fn a_re_resolve_uses_the_current_policy() {
-        let mut table = EgressLeaseTable::with_lease_clamp(named_policy());
+        let mut table = EgressLeaseTable::new(named_policy());
         resolve(&mut table, "allowed.example.com", PUBLIC_V4, 60, at(0));
         let expired = expired_lease(verdict(&mut table, PUBLIC_V4, 443, at(60)));
         // The broker resolves without the table's lock; a revision that no
@@ -1949,7 +1952,7 @@ rules:
 
     #[test]
     fn refusals_are_counted_by_reason_and_reset_only_by_the_owner() {
-        let mut table = EgressLeaseTable::with_lease_clamp(named_policy());
+        let mut table = EgressLeaseTable::new(named_policy());
         table.set_host_addresses(HostAddressSet::new([], [OTHER_PUBLIC_V4]).unwrap());
         resolve(&mut table, "allowed.example.com", PUBLIC_V4, 60, at(0));
 
@@ -2074,7 +2077,7 @@ rules:
 "#,
         )
         .unwrap();
-        let mut table = EgressLeaseTable::with_lease_clamp(policy);
+        let mut table = EgressLeaseTable::new(policy);
         resolve(&mut table, "other.example.com", PUBLIC_V4, 60, at(0));
         let refusal = refused(verdict(&mut table, PUBLIC_V4, 443, at(1)));
         assert_eq!(refusal.reason(), RefusalReason::NameNotAllowed);
@@ -2082,7 +2085,7 @@ rules:
 
     #[test]
     fn replace_policy_drops_refused_leases_and_reports_refused_flows() {
-        let mut table = EgressLeaseTable::with_lease_clamp(CompiledPolicy::developer_baseline());
+        let mut table = EgressLeaseTable::new(CompiledPolicy::developer_baseline());
         let previous = table.policy_digest();
         resolve(&mut table, "github.com", PUBLIC_V4, 60, at(0));
         resolve(&mut table, "registry.npmjs.org", CDN_V4, 60, at(0));
@@ -2131,7 +2134,7 @@ rules:
 
     #[test]
     fn replace_policy_judges_each_passed_flow_even_with_the_same_identity() {
-        let mut table = EgressLeaseTable::with_lease_clamp(named_policy());
+        let mut table = EgressLeaseTable::new(named_policy());
         resolve(&mut table, "allowed.example.com", PUBLIC_V4, 60, at(0));
         let flow = admitted(verdict(&mut table, PUBLIC_V4, 443, at(1)));
         let same = flow.clone();
@@ -2147,7 +2150,7 @@ rules:
 
     #[test]
     fn a_flow_whose_lease_is_dropped_survives_when_a_cidr_rule_still_allows_it() {
-        let mut table = EgressLeaseTable::with_lease_clamp(named_policy());
+        let mut table = EgressLeaseTable::new(named_policy());
         resolve(&mut table, "allowed.example.com", PUBLIC_V4, 60, at(0));
         let flow = admitted(verdict(&mut table, PUBLIC_V4, 443, at(1)));
         assert_eq!(flow.hostname(), Some("allowed.example.com"));
@@ -2239,7 +2242,7 @@ rules:
         for seed in 1..=64_u64 {
             let mut sequence = Sequence(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
             let mut current = 0;
-            let mut table = EgressLeaseTable::with_lease_clamp(revisions[current].1.clone());
+            let mut table = EgressLeaseTable::new(revisions[current].1.clone());
             let mut flows: Vec<TcpAdmission> = Vec::new();
             let mut now = 0;
             for _ in 0..200 {
@@ -2308,9 +2311,7 @@ rules:
     #[test]
     fn concurrent_admissions_see_the_old_or_the_new_revision_never_a_mix() {
         let revisions = Arc::new(revisions());
-        let table = Arc::new(Mutex::new(EgressLeaseTable::with_lease_clamp(
-            revisions[0].1.clone(),
-        )));
+        let table = Arc::new(Mutex::new(EgressLeaseTable::new(revisions[0].1.clone())));
         let barrier = Arc::new(Barrier::new(4));
         let mut threads = Vec::new();
         {
@@ -2369,7 +2370,7 @@ rules:
                     }
                     for (index, ip) in ADDRESSES.into_iter().enumerate() {
                         let decision = table
-                            .admit_tcp(ip, 443, RouteClass::General, at(1))
+                            .admit_or_refuse(ip, 443, RouteClass::General, at(1))
                             .unwrap();
                         // A lease from another revision must never admit a
                         // dial under this one.

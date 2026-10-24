@@ -2284,6 +2284,9 @@ rules:
             RouteClass::General,
             Arc::new(FakeResolver::new([
                 positive(PUBLIC_V4, 60),
+                // The dial at expiry re-resolves the lease's name once and
+                // finds it moved: refused as lease_expired.
+                positive(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 60),
                 positive(PUBLIC_V4, 60),
             ])),
             Arc::clone(&connector),
