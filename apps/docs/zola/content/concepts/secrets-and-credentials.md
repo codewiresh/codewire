@@ -57,7 +57,7 @@ environment only as a typed capability:
 Two exceptions exist so that the agents' plan features work: your own Codex
 sign-in and your own Claude sign-in access tokens are written as those
 clients' login files in a hosted sandbox or your own local VM. Everything in
-that environment can read them. See the [security model](@/security.md).
+that environment can read them. See the [security model](@/reference/security.md).
 
 Sign-ins are personal: an organization can hold API keys and SSH keys, never a
 Codex, Claude or GitHub login.

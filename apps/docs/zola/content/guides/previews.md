@@ -1,7 +1,7 @@
 ---
 title: Ports and previews
 description: Publish an application port as an HTTPS preview URL on the platform, or on 127.0.0.1 for a local VM.
-weight: 6
+weight: 4
 ---
 
 ## Hosted sandbox: preview URLs

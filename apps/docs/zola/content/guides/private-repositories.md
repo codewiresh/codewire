@@ -1,7 +1,7 @@
 ---
 title: Private repositories
 description: Create environments from private GitHub repositories through the Codewire GitHub App or an SSH key, without a token in the environment.
-weight: 4
+weight: 6
 ---
 
 A public repository needs nothing: pass its HTTPS URL. A private GitHub

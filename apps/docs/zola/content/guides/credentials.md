@@ -1,7 +1,7 @@
 ---
 title: Provider credentials
 description: Connect Codex, add OpenAI and Anthropic keys, a Claude subscription token or sign-in, SSH keys and GitHub, then build the credential profile an environment uses.
-weight: 3
+weight: 5
 ---
 
 A provider credential is stored once, then selected through a credential
@@ -60,7 +60,7 @@ dashboard.
 Claude's authorization page and asks you to paste the code Claude shows. A
 sign-in carries your plan, so `/usage` and plan features work in the sandbox;
 the access token is delivered to the sandbox as Claude Code's own login file.
-See the [security model](@/security.md).
+See the [security model](@/reference/security.md).
 
 The dashboard offers the API key and the subscription token under
 **Settings → Credentials → Add credential**.

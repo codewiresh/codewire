@@ -29,7 +29,22 @@ Pages use YAML front matter (`title`, `description`, `weight`); section
 landing pages (`_index.md`) use TOML front matter and render with
 `section.html`. The sidebar in `templates/base.html` lists every route by
 hand, so adding a page means adding its route, its sidebar entry and the
-count in `tests/verify_site.py` and `tests/browser.mjs`.
+count in `tests/verify_site.py` and `tests/browser.mjs`. Within a section,
+`weight` follows the sidebar order, which is also the order of `llms.txt`.
+
+A page that moves keeps its old URL with `aliases: ["/old/path"]` (relative
+to `/docs`). Zola writes a redirect page there from
+`templates/internal/alias.html`: a relative meta refresh, since the docs CSP
+forbids scripts. `tests/verify_site.py` checks every alias and its target.
+
+After Zola, `build.sh` runs `export_markdown.py`, which writes the
+machine-readable documentation from the page sources: every route as
+Markdown at its canonical path plus `.md` (`/docs/index.md` for the
+overview), `llms.txt` (an index) and `llms-full.txt` (every page in one
+file). Internal `@/` links become absolute links to the Markdown copies and
+shortcodes become plain Markdown; a shortcode the exporter does not know fails
+the build. The Rust server also serves the two text files at `/llms.txt` and
+`/llms-full.txt`.
 
 ## Production-equivalent container
 

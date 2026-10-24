@@ -1,7 +1,7 @@
 ---
 title: Application secrets
 description: Store values such as DATABASE_URL in organization, personal or project scope, and select which ones an environment's processes receive.
-weight: 5
+weight: 7
 ---
 
 An application secret is a named value your application reads from its

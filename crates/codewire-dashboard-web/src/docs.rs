@@ -19,6 +19,9 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/docs", get(docs_index))
         .route("/docs/", get(docs_trailing_slash))
         .route("/docs/{*path}", get(docs_path))
+        // The llms.txt convention looks for these at the origin root.
+        .route("/llms.txt", get(llms_index))
+        .route("/llms-full.txt", get(llms_full))
         .route("/install.sh", get(installer))
         .route(
             "/.well-known/apple-app-site-association",
@@ -28,6 +31,14 @@ pub(crate) fn router() -> Router<AppState> {
 
 async fn docs_index(State(state): State<AppState>) -> Response {
     serve_docs_file(&state, "index.html").await
+}
+
+async fn llms_index(State(state): State<AppState>) -> Response {
+    serve_docs_file(&state, "llms.txt").await
+}
+
+async fn llms_full(State(state): State<AppState>) -> Response {
+    serve_docs_file(&state, "llms-full.txt").await
 }
 
 async fn docs_trailing_slash() -> Response {
@@ -123,7 +134,9 @@ fn content_type(path: &Path) -> &'static str {
         Some("html") => "text/html; charset=utf-8",
         Some("js") => "application/javascript; charset=utf-8",
         Some("json") => "application/json; charset=utf-8",
+        Some("md") => "text/markdown; charset=utf-8",
         Some("svg") => "image/svg+xml",
+        Some("txt") => "text/plain; charset=utf-8",
         Some("xml") => "application/xml; charset=utf-8",
         _ => "application/octet-stream",
     }
@@ -186,6 +199,14 @@ mod tests {
         assert_eq!(
             content_type(Path::new("search_index.en.json")),
             "application/json; charset=utf-8"
+        );
+        assert_eq!(
+            content_type(Path::new("guides/previews.md")),
+            "text/markdown; charset=utf-8"
+        );
+        assert_eq!(
+            content_type(Path::new("llms-full.txt")),
+            "text/plain; charset=utf-8"
         );
     }
 

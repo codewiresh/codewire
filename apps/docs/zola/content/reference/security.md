@@ -1,7 +1,8 @@
 ---
 title: Security model
 description: What isolates an environment, where secrets and credentials live, and what each placement does not protect.
-weight: 2
+weight: 3
+aliases: ["/security"]
 ---
 
 This page describes the boundaries Codewire enforces and the ones it does not.

@@ -26,3 +26,4 @@ fi
   "$zola_bin" build --force --output-dir "$output"
 )
 python3 "$site_root/tests/normalize_output.py" "$output"
+python3 "$site_root/export_markdown.py" --site-root "$site_root" "$output"

@@ -1,7 +1,7 @@
 ---
 title: The project file
 description: Describe an environment once in codewire.yaml so that cw create builds it the same way every time, locally or on the platform.
-weight: 7
+weight: 2
 ---
 
 `codewire.yaml` in a project's root describes the environment that project

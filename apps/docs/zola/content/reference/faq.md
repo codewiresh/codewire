@@ -1,7 +1,7 @@
 ---
 title: FAQ
 description: Short answers to common questions about Codewire.
-weight: 3
+weight: 4
 ---
 
 ## General
@@ -62,7 +62,7 @@ kept and compute is released. Deleting removes the storage.
 **What does an agent see?** The environment's files, the application secrets
 you selected (by name), and a local route to the providers in its credential
 profile. Never the provider credentials themselves; see the
-[security model](@/security.md).
+[security model](@/reference/security.md).
 
 **An environment is stuck.** `cw info ENV` shows the state and error
 code; `cw daemon status ENV` and `cw daemon repair ENV` inspect and

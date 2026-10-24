@@ -15,6 +15,12 @@ Each environment runs in its own hardware-virtualized VM with its own kernel.
 Agents run untrusted code, whatever they generate and whatever dependency they
 pull, so the hypervisor boundary is the security boundary.
 
+{% aside(kind="note") %}
+  If you are an agent, fetch [/docs/llms-full.txt](/docs/llms-full.txt): the
+  whole documentation as one Markdown file. Every page is also Markdown at its
+  URL plus `.md`, and [/docs/llms.txt](/docs/llms.txt) lists them all.
+{% end %}
+
 ## One CLI, three placements
 
 The same `cw` command drives every environment, wherever it runs.
@@ -50,10 +56,12 @@ cw run claude --in my-app                  # Claude Code in the VM; Ctrl-B, then
   and the first hosted sandbox.
 - [Concepts](@/concepts/_index.md): environments, placements, sessions and
   agents, secrets and credentials, networking, organizations.
-- [How-to guides](@/guides/_index.md): one task per page.
+- [Guides](@/guides/_index.md): one task per page, grouped by what you are
+  working on.
 - [CLI reference](@/cli/_index.md): every command and flag.
-- [Security model](@/security.md): what isolates what, and what does not.
-- [Reference](@/reference/_index.md): environment statuses, plans, FAQ.
+- [Reference](@/reference/_index.md): environment statuses, plans, the
+  [security model](@/reference/security.md), FAQ, and the
+  [documentation for agents](@/reference/for-agents.md).
 
 ## Status
 

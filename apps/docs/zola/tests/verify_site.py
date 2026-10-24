@@ -14,7 +14,7 @@ from xml.etree import ElementTree
 
 
 CANONICAL_ORIGIN = "https://codewire.sh"
-EXPECTED_ROUTE_COUNT = 38
+EXPECTED_ROUTE_COUNT = 39
 
 
 def fail(message: str) -> None:
@@ -36,6 +36,8 @@ class DocumentParser(HTMLParser):
         self.active_navigation = 0
         self.h1_count = 0
         self.csp: str | None = None
+        self.markdown_alternate: str | None = None
+        self.refresh: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = {name: value or "" for name, value in attrs}
@@ -54,6 +56,8 @@ class DocumentParser(HTMLParser):
             href = values.get("href")
             if "canonical" in rel:
                 self.canonical = href
+            if "alternate" in rel and values.get("type") == "text/markdown":
+                self.markdown_alternate = href
             if href and rel.intersection({"stylesheet", "icon", "preload", "modulepreload"}):
                 self.resources.append((tag, href))
         if tag in {"script", "img", "iframe", "source", "video", "audio"}:
@@ -62,6 +66,8 @@ class DocumentParser(HTMLParser):
                 self.resources.append((tag, source))
         if tag == "meta" and values.get("http-equiv", "").lower() == "content-security-policy":
             self.csp = values.get("content")
+        if tag == "meta" and values.get("http-equiv", "").lower() == "refresh":
+            self.refresh = values.get("content")
 
 
 def parse_document(path: Path) -> tuple[DocumentParser, str]:
@@ -79,16 +85,42 @@ def source_documents(content_root: Path) -> set[str]:
     }
 
 
-def frontmatter_value(path: Path, key: str) -> str | None:
-    lines = path.read_text(encoding="utf-8").splitlines()
-    if not lines or lines[0] != "---":
-        return None
-    for line in lines[1:]:
-        if line == "---":
-            break
-        if line.startswith(f"{key}:"):
-            return line.split(":", 1)[1].strip()
-    return None
+def front_matter(path: Path) -> dict[str, object]:
+    # Section landing pages use TOML; pages use flat YAML whose values are
+    # scalars, quoted strings or JSON-style lists.
+    text = path.read_text(encoding="utf-8")
+    if text.startswith("+++\n"):
+        return tomllib.loads(text[4 : text.index("\n+++\n", 4)])
+    if not text.startswith("---\n"):
+        fail(f"missing front matter in {path}")
+    values: dict[str, object] = {}
+    for line in text[4 : text.index("\n---\n", 4)].splitlines():
+        key, _, value = line.partition(":")
+        value = value.strip()
+        if value.startswith("["):
+            values[key.strip()] = json.loads(value)
+        elif len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            values[key.strip()] = value[1:-1]
+        else:
+            values[key.strip()] = value
+    return values
+
+
+def markdown_path(canonical: str) -> str:
+    return "/docs/index.md" if canonical == "/docs" else f"{canonical}.md"
+
+
+def route_aliases(site_root: Path, routes: list[dict[str, str]]) -> dict[str, str]:
+    """Every old URL a page keeps, mapped to the page's canonical path."""
+    canonical_routes = {route["canonical"] for route in routes}
+    aliases: dict[str, str] = {}
+    for route in routes:
+        for alias in front_matter(site_root / route["source"]).get("aliases", []):
+            old = "/docs" + "/" + str(alias).strip("/")
+            if old in canonical_routes or old in aliases:
+                fail(f"alias {alias} of {route['source']} collides with a route or another alias")
+            aliases[old] = route["canonical"]
+    return aliases
 
 
 def verify_routes(site_root: Path, output_root: Path) -> tuple[list[dict[str, str]], dict[str, DocumentParser]]:
@@ -117,13 +149,24 @@ def verify_routes(site_root: Path, output_root: Path) -> tuple[list[dict[str, st
     if manifest_sources != actual_sources:
         fail(f"route/source mismatch: missing={sorted(actual_sources - manifest_sources)} extra={sorted(manifest_sources - actual_sources)}")
 
-    expected_outputs = {route["output"] for route in routes}
+    aliases = route_aliases(site_root, routes)
+    alias_outputs = {f'{old.removeprefix("/docs/")}/index.html': target for old, target in aliases.items()}
+    expected_outputs = {route["output"] for route in routes} | set(alias_outputs)
     actual_outputs = {
         path.relative_to(output_root).as_posix()
         for path in output_root.rglob("index.html")
     }
     if expected_outputs != actual_outputs:
         fail(f"rendered route mismatch: missing={sorted(expected_outputs - actual_outputs)} extra={sorted(actual_outputs - expected_outputs)}")
+
+    for output, target in alias_outputs.items():
+        parser, _ = parse_document(output_root / output)
+        if parser.refresh != f"0; url={target}":
+            fail(f"alias page {output} does not redirect to {target}: {parser.refresh!r}")
+        if parser.canonical != f"{CANONICAL_ORIGIN}{target}":
+            fail(f"alias page {output} names the wrong canonical URL: {parser.canonical!r}")
+        if not parser.csp or "default-src 'none'" not in parser.csp:
+            fail(f"alias page {output} is missing its script-free CSP")
 
     parsed: dict[str, DocumentParser] = {}
     combined_html = ""
@@ -140,6 +183,8 @@ def verify_routes(site_root: Path, output_root: Path) -> tuple[list[dict[str, st
             fail(f"expected one active navigation item in {route['output']}, found {parser.active_navigation}")
         if not parser.csp or "default-src 'self'" not in parser.csp or "connect-src 'self'" not in parser.csp:
             fail(f"missing restrictive CSP in {route['output']}")
+        if parser.markdown_alternate != markdown_path(route["canonical"]):
+            fail(f"wrong Markdown alternate in {route['output']}: {parser.markdown_alternate!r}")
         for tag, resource in parser.resources:
             parsed_resource = urlparse(resource)
             if parsed_resource.scheme and f"{parsed_resource.scheme}://{parsed_resource.netloc}" != CANONICAL_ORIGIN:
@@ -167,11 +212,43 @@ def verify_routes(site_root: Path, output_root: Path) -> tuple[list[dict[str, st
                     fail(f"trailing-slash internal documentation link on {route}: {href}")
                 target = canonical_path(parsed_href.path)
                 if target not in canonical_routes:
+                    if (output_root / target.removeprefix("/docs/")).is_file():
+                        continue
                     fail(f"broken internal documentation link on {route}: {href}")
                 if parsed_href.fragment and parsed_href.fragment not in parsed[target].ids:
                     fail(f"broken internal documentation anchor on {route}: {href}")
 
     return routes, parsed
+
+
+def verify_markdown(routes: list[dict[str, str]], site_root: Path, output_root: Path) -> None:
+    markdown_urls = {f"{CANONICAL_ORIGIN}{markdown_path(route['canonical'])}" for route in routes}
+    linked_markdown = re.compile(r"\]\((?P<url>https://codewire\.sh/docs[^)#\s]*)")
+    full = (output_root / "llms-full.txt").read_text(encoding="utf-8")
+    index = (output_root / "llms.txt").read_text(encoding="utf-8")
+    for route in routes:
+        path = output_root / markdown_path(route["canonical"]).removeprefix("/docs/")
+        if not path.is_file():
+            fail(f"missing Markdown copy of {route['canonical']}")
+        text = path.read_text(encoding="utf-8")
+        title = front_matter(site_root / route["source"])["title"]
+        if not text.startswith(f"# {title}\n"):
+            fail(f"Markdown copy of {route['canonical']} does not start with its title")
+        source_line = f"\nSource: {CANONICAL_ORIGIN}{route['canonical']}\n"
+        if source_line not in text:
+            fail(f"Markdown copy of {route['canonical']} has no Source line")
+        if full.count(source_line) != 1:
+            fail(f"llms-full.txt does not hold {route['canonical']} exactly once")
+        url = f"{CANONICAL_ORIGIN}{markdown_path(route['canonical'])}"
+        if index.count(f"]({url})") != 1:
+            fail(f"llms.txt does not list {url} exactly once")
+        for leftover in ("](@/", "{{", "{%"):
+            if leftover in text:
+                fail(f"unconverted Zola syntax {leftover!r} in the Markdown copy of {route['canonical']}")
+        for match in linked_markdown.finditer(text):
+            target = match.group("url")
+            if target not in markdown_urls and not (output_root / urlparse(target).path.removeprefix("/docs/")).is_file():
+                fail(f"broken link {target} in the Markdown copy of {route['canonical']}")
 
 
 def verify_search(routes: list[dict[str, str]], site_root: Path, output_root: Path) -> None:
@@ -261,6 +338,7 @@ def main() -> int:
     output_root = args.output.resolve()
 
     routes, _ = verify_routes(site_root, output_root)
+    verify_markdown(routes, site_root, output_root)
     verify_search(routes, site_root, output_root)
     verify_sitemap(routes, output_root)
     verify_supply_chain(site_root)

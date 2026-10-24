@@ -218,13 +218,19 @@ source = "content/reference/faq.md"
 output = "reference/faq/index.html"
 
 [[routes]]
+canonical = "/docs/reference/for-agents"
+redirect_from = "/docs/reference/for-agents/"
+source = "content/reference/for-agents.md"
+output = "reference/for-agents/index.html"
+
+[[routes]]
+canonical = "/docs/reference/security"
+redirect_from = "/docs/reference/security/"
+source = "content/reference/security.md"
+output = "reference/security/index.html"
+
+[[routes]]
 canonical = "/docs/reference/subscription-plans"
 redirect_from = "/docs/reference/subscription-plans/"
 source = "content/reference/subscription-plans.md"
 output = "reference/subscription-plans/index.html"
-
-[[routes]]
-canonical = "/docs/security"
-redirect_from = "/docs/security/"
-source = "content/security.md"
-output = "security/index.html"

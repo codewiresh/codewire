@@ -272,6 +272,18 @@ html {
   color: var(--accent-text);
 }
 
+.docs-nav section section {
+  margin-top: 0.75rem;
+}
+
+.docs-nav h3 {
+  margin: 0 0 0.25rem;
+  padding: 0 0.625rem;
+  color: var(--fg-tertiary);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
 .docs-nav-link {
   display: block;
   margin: 0.125rem 0;

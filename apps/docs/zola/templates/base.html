@@ -14,6 +14,7 @@
     <meta name="codewire-docs-root" content="{{ browser_docs_root | safe }}">
     <meta name="codewire-docs-search-index" content="{{ get_url(path="search_index.en.json") | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}">
     <link rel="canonical" href="{% block canonical_url %}https://codewire.sh/docs{% endblock canonical_url %}">
+    <link rel="alternate" type="text/markdown" href="{% if current_path == "/" %}/docs/index.md{% else %}/docs{{ current_path | trim_end_matches(pat="/") | safe }}.md{% endif %}">
     <link rel="icon" href="{{ get_url(path="favicon.svg", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" type="image/svg+xml">
     <link rel="stylesheet" href="{{ get_url(path="giallo.css", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}">
     <link rel="stylesheet" href="{{ get_url(path="docs.css", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}">
@@ -51,7 +52,6 @@
             <section>
               <h2>Overview</h2>
               {{ nav::item(path="/docs", label="What is Codewire?", current=current_path) }}
-              {{ nav::item(path="/docs/security", label="Security model", current=current_path) }}
             </section>
             <section>
               {{ nav::heading(path="/docs/getting-started", label="Get started", current=current_path) }}
@@ -70,17 +70,35 @@
               {{ nav::item(path="/docs/concepts/organizations", label="Organizations", current=current_path) }}
             </section>
             <section>
-              {{ nav::heading(path="/docs/guides", label="How-to guides", current=current_path) }}
-              {{ nav::item(path="/docs/guides/run-agents", label="Orchestrate agents", current=current_path) }}
-              {{ nav::item(path="/docs/guides/ssh-and-vscode", label="SSH, VS Code and files", current=current_path) }}
-              {{ nav::item(path="/docs/guides/credentials", label="Provider credentials", current=current_path) }}
-              {{ nav::item(path="/docs/guides/private-repositories", label="Private repositories", current=current_path) }}
-              {{ nav::item(path="/docs/guides/application-secrets", label="Application secrets", current=current_path) }}
-              {{ nav::item(path="/docs/guides/previews", label="Ports and previews", current=current_path) }}
-              {{ nav::item(path="/docs/guides/project-file", label="The project file", current=current_path) }}
-              {{ nav::item(path="/docs/guides/members", label="Members and sharing", current=current_path) }}
-              {{ nav::item(path="/docs/guides/update", label="Update cw", current=current_path) }}
-              {{ nav::item(path="/docs/guides/troubleshoot-local-vms", label="Troubleshoot local VMs", current=current_path) }}
+              {{ nav::heading(path="/docs/guides", label="Guides", current=current_path) }}
+              <section>
+                <h3>Agents</h3>
+                {{ nav::item(path="/docs/guides/run-agents", label="Orchestrate agents", current=current_path) }}
+              </section>
+              <section>
+                <h3>Environments</h3>
+                {{ nav::item(path="/docs/guides/project-file", label="The project file", current=current_path) }}
+              </section>
+              <section>
+                <h3>Access and networking</h3>
+                {{ nav::item(path="/docs/guides/ssh-and-vscode", label="SSH, VS Code and files", current=current_path) }}
+                {{ nav::item(path="/docs/guides/previews", label="Ports and previews", current=current_path) }}
+              </section>
+              <section>
+                <h3>Secrets and credentials</h3>
+                {{ nav::item(path="/docs/guides/credentials", label="Provider credentials", current=current_path) }}
+                {{ nav::item(path="/docs/guides/private-repositories", label="Private repositories", current=current_path) }}
+                {{ nav::item(path="/docs/guides/application-secrets", label="Application secrets", current=current_path) }}
+              </section>
+              <section>
+                <h3>Teams</h3>
+                {{ nav::item(path="/docs/guides/members", label="Members and sharing", current=current_path) }}
+              </section>
+              <section>
+                <h3>Operate</h3>
+                {{ nav::item(path="/docs/guides/update", label="Update cw", current=current_path) }}
+                {{ nav::item(path="/docs/guides/troubleshoot-local-vms", label="Troubleshoot local VMs", current=current_path) }}
+              </section>
             </section>
             <section>
               {{ nav::heading(path="/docs/cli", label="CLI reference", current=current_path) }}
@@ -97,7 +115,9 @@
               {{ nav::heading(path="/docs/reference", label="Reference", current=current_path) }}
               {{ nav::item(path="/docs/reference/environment-statuses", label="Environment statuses", current=current_path) }}
               {{ nav::item(path="/docs/reference/subscription-plans", label="Plans and billing", current=current_path) }}
+              {{ nav::item(path="/docs/reference/security", label="Security model", current=current_path) }}
               {{ nav::item(path="/docs/reference/faq", label="FAQ", current=current_path) }}
+              {{ nav::item(path="/docs/reference/for-agents", label="Documentation for agents", current=current_path) }}
             </section>
           </nav>
         </aside>

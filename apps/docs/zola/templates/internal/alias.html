@@ -1,0 +1,16 @@
+{#- Zola passes only `url`: the target's permalink under config.toml's base_url. The page's own CSP forbids scripts, so the redirect is a relative meta refresh that works on every origin serving /docs. -#}
+{%- set target = url | replace(from="https://codewire.sh/docs", to="/docs") | trim_end_matches(pat="/") -%}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta http-equiv="refresh" content="0; url={{ target | safe }}">
+    <meta name="robots" content="noindex">
+    <link rel="canonical" href="https://codewire.sh{{ target | safe }}">
+    <title>Moved</title>
+  </head>
+  <body>
+    <p>This page moved to <a href="{{ target | safe }}">{{ target | safe }}</a>.</p>
+  </body>
+</html>

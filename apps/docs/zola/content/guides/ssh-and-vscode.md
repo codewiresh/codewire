@@ -1,7 +1,7 @@
 ---
 title: SSH, VS Code and files
 description: Use OpenSSH, scp, sftp and rsync, open a hosted sandbox in VS Code, copy files with cw cp, and use the browser terminal.
-weight: 2
+weight: 3
 ---
 
 Every environment runs an SSH server with SFTP and SCP inside its daemon. For
