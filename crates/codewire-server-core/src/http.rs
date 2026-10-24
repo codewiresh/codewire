@@ -2,13 +2,18 @@
 //!
 //! Encodes the standard middleware stack every Codewire backend service
 //! wants: request IDs (mirrored to response headers + tracing fields),
-//! CORS for the dashboard, request tracing, and panic recovery. Health
-//! routes are opt-in via [`AppBuilder::with_health`].
+//! request tracing, and panic recovery. Health routes are opt-in via
+//! [`AppBuilder::with_health`].
+//!
+//! Browsers reach every service through the dashboard's own origin, so by
+//! default no service answers CORS at all (codewire#3258). A deployment whose
+//! browser front end lives on another origin names it, exactly, in
+//! [`CORS_ALLOWED_ORIGINS_ENV`]; nothing else is ever allowed.
 
 use axum::Router;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
@@ -21,6 +26,48 @@ pub struct AppBuilder {
     health: Option<HealthState>,
     user_routes: Router,
     connect_routes: Vec<Router>,
+    cors_allowed_origins: Vec<http::HeaderValue>,
+}
+
+/// Comma-separated browser origins (`scheme://host[:port]`, no path) allowed
+/// to call a service cross-origin. Unset or empty: no CORS. Any other value
+/// stops the service at startup.
+pub const CORS_ALLOWED_ORIGINS_ENV: &str = "CODEWIRE_CORS_ALLOWED_ORIGINS";
+
+/// Parses [`CORS_ALLOWED_ORIGINS_ENV`]: each entry an exact `http` or
+/// `https` origin with no path, query, fragment, credentials or wildcard.
+pub fn parse_cors_allowed_origins(raw: &str) -> Result<Vec<http::HeaderValue>, String> {
+    let mut origins = Vec::new();
+    for entry in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let url = url::Url::parse(entry).map_err(|error| format!("{entry}: {error}"))?;
+        let exact = matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some_and(|host| !host.contains('*'))
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none();
+        if !exact {
+            return Err(format!("{entry}: not an exact http(s) origin"));
+        }
+        let origin = url.origin().ascii_serialization();
+        let value =
+            http::HeaderValue::from_str(&origin).map_err(|error| format!("{entry}: {error}"))?;
+        if !origins.contains(&value) {
+            origins.push(value);
+        }
+    }
+    Ok(origins)
+}
+
+fn cors_allowed_origins_from_env() -> Vec<http::HeaderValue> {
+    let raw = std::env::var(CORS_ALLOWED_ORIGINS_ENV).unwrap_or_default();
+    parse_cors_allowed_origins(&raw)
+        .unwrap_or_else(|error| panic!("invalid {CORS_ALLOWED_ORIGINS_ENV}: {error}"))
 }
 
 impl AppBuilder {
@@ -32,7 +79,18 @@ impl AppBuilder {
             health: None,
             user_routes: Router::new(),
             connect_routes: Vec::new(),
+            cors_allowed_origins: cors_allowed_origins_from_env(),
         }
+    }
+
+    /// Replaces the CORS origin allowlist read from
+    /// [`CORS_ALLOWED_ORIGINS_ENV`]. Empty means no CORS.
+    pub fn with_cors_allowed_origins(
+        mut self,
+        origins: impl IntoIterator<Item = http::HeaderValue>,
+    ) -> Self {
+        self.cors_allowed_origins = origins.into_iter().collect();
+        self
     }
 
     /// Adds `/healthz` and `/readyz` routes.
@@ -207,12 +265,7 @@ impl AppBuilder {
             .layer(SetRequestIdLayer::new(header.clone(), MakeRequestUuid))
             .layer(TraceLayer::new_for_http())
             .layer(PropagateRequestIdLayer::new(header))
-            .layer(
-                CorsLayer::new()
-                    .allow_origin(Any)
-                    .allow_headers(Any)
-                    .allow_methods(Any),
-            )
+            .option_layer(cors_layer(self.cors_allowed_origins))
             .layer(CatchPanicLayer::new());
 
         // Metrics are mounted after caller routes, alongside health, so an
@@ -233,6 +286,25 @@ impl AppBuilder {
     }
 }
 
+/// Only the configured origins, only for what a Connect or JSON browser
+/// client sends; never credentials. `None` (no origins) adds no CORS headers.
+fn cors_layer(origins: Vec<http::HeaderValue>) -> Option<CorsLayer> {
+    if origins.is_empty() {
+        return None;
+    }
+    Some(
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods([http::Method::GET, http::Method::POST])
+            .allow_headers([
+                http::header::CONTENT_TYPE,
+                http::header::AUTHORIZATION,
+                http::HeaderName::from_static("connect-protocol-version"),
+                http::HeaderName::from_static("connect-timeout-ms"),
+            ]),
+    )
+}
+
 async fn set_service_header(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -243,4 +315,32 @@ async fn set_service_header(
         resp.headers_mut().insert("x-codewire-service", v);
     }
     resp
+}
+
+#[cfg(test)]
+mod cors_origin_tests {
+    use super::parse_cors_allowed_origins;
+
+    #[test]
+    fn only_exact_http_origins_parse() {
+        let parsed = parse_cors_allowed_origins(
+            " https://app.example.com, http://localhost:5173/ ,,https://APP.example.com",
+        )
+        .unwrap();
+        assert_eq!(parsed, ["https://app.example.com", "http://localhost:5173"]);
+        assert!(parse_cors_allowed_origins("").unwrap().is_empty());
+        for refused in [
+            "*",
+            "https://*.example.com",
+            "app.example.com",
+            "ftp://example.com",
+            "https://example.com/dashboard",
+            "https://example.com/?x=1",
+            "https://example.com/#top",
+            "https://user@example.com",
+            "null",
+        ] {
+            assert!(parse_cors_allowed_origins(refused).is_err(), "{refused}");
+        }
+    }
 }

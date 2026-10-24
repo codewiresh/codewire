@@ -120,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-That's the whole boilerplate — HTTP server, request IDs, CORS, tracing, panic
+That's the whole boilerplate — HTTP server, request IDs, configured CORS, tracing, panic
 recovery, `/healthz` + `/readyz` (with DB ping), and the typed error envelope
 are all wired up by `codewire-server-core`.
 

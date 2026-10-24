@@ -111,6 +111,14 @@ Base `config.env` leaves it empty, so every overlay sets it. The Kind
 overlays (`deployments/k8s/overlays/local-kind*` and `tests/e2e/kind`) use
 Kind's built-in `standard` class.
 
+## Browser origins
+
+Every Codewire service the browser calls is served from the dashboard's own origin, so by default no service answers cross-origin (CORS) requests at all.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `CODEWIRE_CORS_ALLOWED_ORIGINS` | No | Comma-separated browser origins, each exactly `scheme://host[:port]` with `http` or `https` and no path, query or wildcard, that may call the Codewire backend services cross-origin, for a deployment whose browser front end is on another origin. Only these get `Access-Control-Allow-Origin`, for `GET` and `POST`, never with credentials. Unset or empty means no CORS. Any other form stops the service at startup. | `https://app.example.com` |
+
 ## Workspace network
 
 | Variable | Required | Meaning | Example |
