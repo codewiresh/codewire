@@ -1118,6 +1118,12 @@ pub async fn handle_environment_destroy(
             continue;
         }
         let client = sandbox_client(ctx, &namespace)?;
+        // A namespace an older release recorded is outside orchestration's
+        // authority (codewire#2282); one that no longer exists holds nothing
+        // to delete. One that still exists fails the destroy visibly.
+        if namespace != ctx.sandbox_cfg.sandbox_namespace && !client.namespace_exists().await? {
+            continue;
+        }
         if let Err(error) = authority
             .run_external_mutation(
                 DESTROY_CLEANUP_MUTATION_STATES,

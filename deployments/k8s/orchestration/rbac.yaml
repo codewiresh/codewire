@@ -1,17 +1,16 @@
-# RBAC for the codewire-orchestration ServiceAccount.
+# RBAC for the codewire-orchestration ServiceAccount (codewire#2282).
 #
-# The Rust orchestration service took over environment lifecycle work
-# (SandboxClaim/SandboxTemplate creation, pod exec, sandbox probing)
-# that the Go monolith performed under the codewire-server SA. That SA's
-# ClusterRole grants these verbs, but its ClusterRoleBinding only lists
-# codewire-server as a subject — so the new orchestration SA had no
-# claim/exec permission. With the Temporal worker running primary, the
-# create activity (and the exec/file proxy routes) call the kube API as
-# this SA, so it needs its own grant.
+# Orchestration writes only in the shared Sandbox namespace (<env>-sandboxes)
+# and reads a few things in its own namespace. Everything it writes or
+# destroys is granted by the namespaced Role codewire-orchestration-sandboxes
+# below, so a compromised or misbehaving orchestration cannot create, exec
+# into, relabel or delete anything outside the Sandbox namespace. The
+# ClusterRole keeps only what is cluster-scoped by nature, all of it read-only
+# except TokenReview creation.
 #
-# Least-privilege: only the resources orchestration's create/exec/probe
-# paths touch. It owns Sandbox CRDs plus the per-environment Services and
-# NetworkPolicies. It gets no Deployment, ingress, Secret or RBAC authority.
+# Orchestration never creates or relabels a namespace: the Sandbox namespace
+# is provisioned with its labels by the cluster (Flux on Dev and Production,
+# `make kind-sandbox-namespace` on Kind), and orchestration only checks it.
 #
 # The ClusterRoleBinding's subject namespace is rewritten per overlay by
 # kustomize's namespace transformer (prod here, codewire-e2e in the kind
@@ -31,37 +30,16 @@ rules:
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]
-  # Sandbox namespaces must exist before a claim lands in them.
+  # The Sandbox namespace must exist with its labels before a claim lands in
+  # it, and destroy skips recorded namespaces that no longer exist. Read-only.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
-  # Pod exec/probe/file-cat/port-forward for the environment proxy routes,
-  # plus the lifecycle probe that resolves pod IP/name and readiness.
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch", "delete"]
-  # Live CPU/memory changes use the dedicated resize subresource. Delete on
-  # the parent Pod remains a separate, explicitly consented restart path.
-  - apiGroups: [""]
-    resources: ["pods/resize"]
-    verbs: ["patch"]
-  - apiGroups: [""]
-    resources: ["pods/log"]
-    verbs: ["get", "list", "watch"]
-  # Environment deletion independently proves and removes retained workspace
-  # storage after the Sandbox/SandboxClaim controllers have quiesced. Resize
-  # may only patch the existing claim's requested capacity.
-  - apiGroups: [""]
-    resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "patch", "delete"]
-  # Confidential key deletion is gated on read-only proof that Kubernetes and
-  # Longhorn have both removed the backing volume.
+    verbs: ["get"]
+  # Confidential key deletion is gated on read-only proof that Kubernetes has
+  # removed the backing volume.
   - apiGroups: [""]
     resources: ["persistentvolumes"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["longhorn.io"]
-    resources: ["volumes"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list"]
   # Disk growth is admitted only when the PVC's StorageClass explicitly
   # advertises allowVolumeExpansion.
   - apiGroups: ["storage.k8s.io"]
@@ -78,25 +56,6 @@ rules:
   - apiGroups: ["node.k8s.io"]
     resources: ["runtimeclasses"]
     verbs: ["get"]
-  - apiGroups: [""]
-    resources: ["pods/exec", "pods/portforward"]
-    verbs: ["create", "get"]
-  # Agent Sandbox CRDs — the create/start/stop/delete lifecycle.
-  - apiGroups: ["agents.x-k8s.io"]
-    resources: ["sandboxes"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["extensions.agents.x-k8s.io"]
-    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # The environment's access objects: the workspace daemon Service, the
-  # direct-UDP LoadBalancer and the workspace NetworkPolicies. Orchestration
-  # creates them alongside the SandboxClaim and removes them on stop/destroy.
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["networkpolicies"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -109,6 +68,79 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: codewire-orchestration
+subjects:
+  - kind: ServiceAccount
+    name: codewire-orchestration
+    namespace: prod
+---
+# Everything orchestration does to environments, only in the shared Sandbox
+# namespace: the package renders it in its own namespace and
+# sandbox-roles-prod-sandboxes.transformer.yaml (and each parent overlay)
+# moves it there. Each verb is one the environment lifecycle uses.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: codewire-orchestration-sandboxes
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+rules:
+  # Probe, readiness, warm-pool accounting and the consented restart.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+  # Live CPU/memory changes use the dedicated resize subresource.
+  - apiGroups: [""]
+    resources: ["pods/resize"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # The environment proxy routes: exec, file access and port-forward.
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create", "get"]
+  # Environment deletion proves and removes retained workspace storage; resize
+  # patches only the existing claim's requested capacity.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "patch", "delete"]
+  # The environment's access objects: the workspace daemon Service, the
+  # direct-UDP LoadBalancer and the workspace NetworkPolicies.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "create", "update", "delete"]
+  # Agent Sandbox objects. Orchestration never creates a Sandbox; the
+  # controller does, from a claim and template.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "patch", "update", "delete"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxtemplates"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxwarmpools"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: codewire-orchestration-sandboxes
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: codewire-orchestration-sandboxes
 subjects:
   - kind: ServiceAccount
     name: codewire-orchestration
@@ -151,7 +183,8 @@ subjects:
 ---
 # The runtime image cache orders its image sets by release: the revision of
 # the ReplicaSet that controls this Pod (a rollback renumbers the reused
-# ReplicaSet). Read-only, in orchestration's own namespace.
+# ReplicaSet), found through this Pod's own owner reference. Read-only, in
+# orchestration's own namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -161,6 +194,9 @@ metadata:
     app.kubernetes.io/name: codewire
     app.kubernetes.io/component: orchestration
 rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["get"]

@@ -268,7 +268,6 @@ impl EnvironmentResidue {
 }
 
 const DELETION_PROTECTION_FINALIZER: &str = "codewire.sh/deletion-protection";
-const LONGHORN_NAMESPACE: &str = "longhorn-system";
 const LEGACY_SHARED_WARM_POOL_PREFIX: &str = "sandbox-warmpool-workspace";
 const DEFAULT_DIRECT_UDP_LB_PORT_START: u16 = 32000;
 const DEFAULT_DIRECT_UDP_LB_PORT_END: u16 = 60999;
@@ -1612,6 +1611,35 @@ pub struct SandboxClient {
     claims: Api<DynamicObject>,
 }
 
+/// The labels a shared Sandbox namespace must carry: the Sandbox admission
+/// policy and the cluster-wide Sandbox network policies select on them.
+const SANDBOX_NAMESPACE_LABELS: [(&str, &str); 2] = [
+    ("codewire.sh/resource-type", "sandbox"),
+    ("codewire.sh/runtime-scope", "shared"),
+];
+
+fn sandbox_namespace_ready(
+    name: &str,
+    labels: Option<&BTreeMap<String, String>>,
+) -> anyhow::Result<()> {
+    let missing: Vec<String> = SANDBOX_NAMESPACE_LABELS
+        .iter()
+        .filter(|(key, value)| {
+            labels
+                .and_then(|labels| labels.get(*key))
+                .map(String::as_str)
+                != Some(*value)
+        })
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "sandbox namespace {name} lacks {}; the cluster provisions it with these labels",
+        missing.join(", ")
+    );
+    Ok(())
+}
+
 impl SandboxClient {
     /// Builds from the ambient kube config (in-cluster or KUBECONFIG),
     /// like the Go client's rest.InClusterConfig / kubeconfig fallback.
@@ -1630,60 +1658,36 @@ impl SandboxClient {
         }
     }
 
-    /// Ensures the shared sandbox namespace exists with the current Codewire labels.
+    /// Checks that the shared Sandbox namespace exists and carries the labels
+    /// the cluster's Sandbox admission and network policies select on.
+    /// Orchestration never creates or relabels a namespace (codewire#2282):
+    /// the cluster provisions it, and a namespace patch is exactly the
+    /// authority that would let a compromised orchestration switch those
+    /// policies off.
     pub async fn ensure_namespace(&self) -> anyhow::Result<()> {
         let namespaces: Api<Namespace> = Api::all(self.client.clone());
         let name = &self.namespace;
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            "app.kubernetes.io/managed-by".to_string(),
-            "codewire".to_string(),
-        );
-        labels.insert(
-            "codewire.sh/resource-type".to_string(),
-            "sandbox".to_string(),
-        );
-        labels.insert(
-            "codewire.sh/runtime-scope".to_string(),
-            "shared".to_string(),
-        );
+        let namespace = match namespaces.get(name).await {
+            Ok(namespace) => namespace,
+            Err(kube::Error::Api(e)) if e.code == 404 => anyhow::bail!(
+                "sandbox namespace {name} does not exist; the cluster provisions it with its labels"
+            ),
+            Err(e) => anyhow::bail!("get namespace {name}: {e}"),
+        };
+        sandbox_namespace_ready(name, namespace.metadata.labels.as_ref())
+    }
 
-        match namespaces.get(name).await {
-            Err(kube::Error::Api(e)) if e.code == 404 => {
-                let namespace = Namespace {
-                    metadata: ObjectMeta {
-                        name: Some(name.clone()),
-                        labels: Some(labels),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-                namespaces
-                    .create(&PostParams::default(), &namespace)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("create namespace {name}: {e}"))?;
-                tracing::info!(namespace = name, "created sandbox namespace");
-                Ok(())
-            }
-            Err(e) => Err(anyhow::anyhow!("get namespace {name}: {e}")),
-            Ok(_) => {
-                let patch: Value = serde_json::json!({
-                    "metadata": {
-                        "labels": {
-                            "app.kubernetes.io/managed-by": "codewire",
-                            "codewire.sh/resource-type": "sandbox",
-                            "codewire.sh/runtime-scope": "shared",
-                        },
-                    },
-                });
-                namespaces
-                    .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("patch namespace {name}: {e}"))?;
-                tracing::info!(namespace = name, "normalized sandbox namespace");
-                Ok(())
-            }
-        }
+    /// Whether this client's namespace exists. Destroy uses it to skip a
+    /// namespace an older release recorded that is gone: orchestration has no
+    /// authority outside the shared Sandbox namespace, so it cannot even list
+    /// a missing one (codewire#2282).
+    pub async fn namespace_exists(&self) -> anyhow::Result<bool> {
+        let namespaces: Api<Namespace> = Api::all(self.client.clone());
+        namespaces
+            .get_opt(&self.namespace)
+            .await
+            .map(|namespace| namespace.is_some())
+            .map_err(|e| anyhow::anyhow!("get namespace {}: {e}", self.namespace))
     }
 
     /// The Sandbox the environment's Claim is bound to, by the Claim's
@@ -3343,12 +3347,6 @@ impl SandboxClient {
         Api::all(self.client.clone())
     }
 
-    fn longhorn_volumes(&self) -> Api<DynamicObject> {
-        let gvk = GroupVersionKind::gvk("longhorn.io", "v1beta2", "Volume");
-        let resource = ApiResource::from_gvk_with_plural(&gvk, "volumes");
-        Api::namespaced_with(self.client.clone(), LONGHORN_NAMESPACE, &resource)
-    }
-
     fn storage_classes(&self) -> Api<StorageClass> {
         Api::all(self.client.clone())
     }
@@ -4356,10 +4354,11 @@ impl SandboxClient {
         Ok(EnvironmentResidue { resources })
     }
 
-    /// Prove that Kubernetes and Longhorn have both forgotten the workspace
-    /// volume before orchestration is allowed to delete either key copy. The
-    /// Longhorn KubernetesStatus fields retain the PVC identity while volume
-    /// deletion is in progress, including after the PVC itself disappears.
+    /// Prove that Kubernetes has forgotten the workspace volume before
+    /// orchestration is allowed to delete either key copy: no PersistentVolume
+    /// still claims the workspace PVC. Longhorn is retired on every cluster,
+    /// so its backend volume proof is gone with it (codewire#2282); the
+    /// storage backend's own absence proof belongs with its re-home (#2321).
     async fn confidential_storage_residue(
         &self,
         sandbox_names: &BTreeSet<String>,
@@ -4369,7 +4368,6 @@ impl SandboxClient {
             .map(|sandbox_name| format!("workspace-{sandbox_name}"))
             .collect();
         let mut resources = Vec::new();
-        let mut volume_handles = BTreeSet::new();
 
         let persistent_volumes = self
             .persistent_volumes()
@@ -4390,37 +4388,11 @@ impl SandboxClient {
             if !claim_matches {
                 continue;
             }
-            if let Some(handle) = spec
-                .csi
-                .as_ref()
-                .map(|source| source.volume_handle.as_str())
-            {
-                volume_handles.insert(handle.to_string());
-            }
             if let Some(name) = volume.metadata.name {
                 resources.push(format!("PersistentVolume/{name}"));
             }
         }
 
-        let longhorn_volumes = self
-            .longhorn_volumes()
-            .list(&ListParams::default())
-            .await
-            .map_err(|error| anyhow::anyhow!("list Longhorn volumes: {error}"))?;
-        for volume in longhorn_volumes.items {
-            let name = volume.metadata.name.unwrap_or_default();
-            let kubernetes_status = volume.data.pointer("/status/kubernetesStatus");
-            let pvc_matches = kubernetes_status.is_some_and(|status| {
-                status.get("namespace").and_then(Value::as_str) == Some(self.namespace.as_str())
-                    && status
-                        .get("pvcName")
-                        .and_then(Value::as_str)
-                        .is_some_and(|pvc_name| pvc_names.contains(pvc_name))
-            });
-            if pvc_matches || volume_handles.contains(&name) {
-                resources.push(format!("LonghornVolume/{name}"));
-            }
-        }
         Ok(resources)
     }
 
@@ -5696,6 +5668,37 @@ fn rendered_runtime_recovery_patch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_namespace_must_carry_the_policy_labels() {
+        let labels = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect()
+        };
+        let ready = labels(&[
+            ("codewire.sh/resource-type", "sandbox"),
+            ("codewire.sh/runtime-scope", "shared"),
+            ("app.kubernetes.io/managed-by", "flux"),
+        ]);
+        assert!(super::sandbox_namespace_ready("prod-sandboxes", Some(&ready)).is_ok());
+        let unscoped = labels(&[("codewire.sh/resource-type", "sandbox")]);
+        let error = super::sandbox_namespace_ready("dev-sandboxes", Some(&unscoped))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("codewire.sh/runtime-scope=shared"),
+            "{error}"
+        );
+        assert!(!error.contains("resource-type"), "{error}");
+        let wrong = labels(&[
+            ("codewire.sh/resource-type", "sandbox"),
+            ("codewire.sh/runtime-scope", "dedicated"),
+        ]);
+        assert!(super::sandbox_namespace_ready("dev-sandboxes", Some(&wrong)).is_err());
+        assert!(super::sandbox_namespace_ready("dev-sandboxes", None).is_err());
+    }
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Method, Request, Response, StatusCode, header};

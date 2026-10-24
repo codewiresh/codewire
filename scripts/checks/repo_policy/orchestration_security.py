@@ -45,6 +45,30 @@ def assert_internal_roots(resources: list[str], target: dict[str, str], label: s
 IMAGE_CACHE_ROLE = "codewire-orchestration-image-cache"
 IMAGE_CACHE_NAME = "cw-image-cache"
 RELEASE_REVISION_ROLE = "codewire-orchestration-release-revision"
+SANDBOX_ROLE = "codewire-orchestration-sandboxes"
+# codewire#2282: cluster-scoped grants only, all read-only but TokenReview.
+CLUSTER_ROLE_RULES = (
+    'rules: - apiGroups: - authentication.k8s.io resources: - tokenreviews verbs: - create '
+    '- apiGroups: - "" resources: - namespaces verbs: - get '
+    '- apiGroups: - "" resources: - persistentvolumes verbs: - list '
+    '- apiGroups: - storage.k8s.io resources: - storageclasses verbs: - get '
+    '- apiGroups: - "" resources: - nodes verbs: - get - list '
+    '- apiGroups: - node.k8s.io resources: - runtimeclasses verbs: - get'
+)
+# Every environment write, only in the shared Sandbox namespace.
+SANDBOX_ROLE_RULES = (
+    'rules: - apiGroups: - "" resources: - pods verbs: - get - list - delete '
+    '- apiGroups: - "" resources: - pods/resize verbs: - patch '
+    '- apiGroups: - "" resources: - pods/log verbs: - get '
+    '- apiGroups: - "" resources: - pods/exec - pods/portforward verbs: - create - get '
+    '- apiGroups: - "" resources: - persistentvolumeclaims verbs: - get - list - patch - delete '
+    '- apiGroups: - "" resources: - services verbs: - get - list - create - update - delete '
+    '- apiGroups: - networking.k8s.io resources: - networkpolicies verbs: - get - create - update - delete '
+    '- apiGroups: - agents.x-k8s.io resources: - sandboxes verbs: - get - list - patch - update - delete '
+    '- apiGroups: - extensions.agents.x-k8s.io resources: - sandboxclaims verbs: - get - list - watch - create - patch - delete '
+    '- apiGroups: - extensions.agents.x-k8s.io resources: - sandboxtemplates verbs: - get - list - create - update - patch - delete '
+    '- apiGroups: - extensions.agents.x-k8s.io resources: - sandboxwarmpools verbs: - get - list - create - update - delete'
+)
 IMAGE_CACHE_IDLE_IMAGE = (
     "docker.io/library/docker:29.7.1-dind@sha256:"
     "e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c"
@@ -68,10 +92,10 @@ def assert_image_cache(resources: list[str], target: dict[str, str], label: str,
         output.append(f"{label}: cluster-wide orchestration role must not grant DaemonSets")
     revision_role = exactly_one(resources, "Role", RELEASE_REVISION_ROLE, label, output)
     revision_binding = exactly_one(resources, "RoleBinding", RELEASE_REVISION_ROLE, label, output)
-    expected_revision_rules = compact("rules: - apiGroups: - apps resources: - replicasets verbs: - get")
+    expected_revision_rules = compact('rules: - apiGroups: - "" resources: - pods verbs: - get - apiGroups: - apps resources: - replicasets verbs: - get')
     if revision_role and (metadata_field(revision_role, "namespace") != target["subject_namespace"]
             or compact(top_level_block(revision_role, "rules")) != expected_revision_rules):
-        output.append(f"{label}: release revision Role must grant only ReplicaSet get in orchestration's namespace")
+        output.append(f"{label}: release revision Role must grant only Pod and ReplicaSet get in orchestration's namespace")
     if revision_binding:
         expected_ref = compact(f"roleRef: apiGroup: rbac.authorization.k8s.io kind: Role name: {RELEASE_REVISION_ROLE}")
         expected_subject = compact(f"subjects: - kind: ServiceAccount name: codewire-orchestration namespace: {target['subject_namespace']}")
@@ -695,6 +719,24 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             output.append(f"{label}: cluster-wide orchestration role still grants Secret access")
         if role and re.search(r"^\s*- deployments\s*$", role, re.MULTILINE):
             output.append(f"{label}: cluster-wide orchestration role still grants Deployment access")
+        if role and compact(top_level_block(role, "rules")) != CLUSTER_ROLE_RULES:
+            output.append(f"{label}: cluster-wide orchestration role must grant only its cluster-scoped reads and TokenReview")
+
+    def assert_sandbox_role(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
+        role = exactly_one(resources, "Role", SANDBOX_ROLE, label, output)
+        binding = exactly_one(resources, "RoleBinding", SANDBOX_ROLE, label, output)
+        if role and (metadata_field(role, "namespace") != target["role_namespace"]
+                or compact(top_level_block(role, "rules")) != SANDBOX_ROLE_RULES):
+            output.append(f"{label}: Sandbox Role must grant exactly the environment lifecycle in {target['role_namespace']}")
+        if binding:
+            expected_ref = compact(f"roleRef: apiGroup: rbac.authorization.k8s.io kind: Role name: {SANDBOX_ROLE}")
+            expected_subject = compact(
+                f"subjects: - kind: ServiceAccount name: {orchestration} namespace: {target['subject_namespace']}"
+            )
+            if (metadata_field(binding, "namespace") != target["role_namespace"]
+                    or compact(top_level_block(binding, "roleRef")) != expected_ref
+                    or compact(top_level_block(binding, "subjects")) != expected_subject):
+                output.append(f"{label}: Sandbox Role binding escaped its namespace or identity")
 
     def assert_token_request_authz(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
         role = exactly_one(resources, "Role", token_request_name, label, output)
@@ -765,6 +807,7 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
                 f"ClusterRoleBinding/<cluster>/{orchestration}",
                 f"RoleBinding/{target['role_namespace']}/{INTERNAL_ROOTS_ROLE}",
                 f"RoleBinding/{target['role_namespace']}/{IMAGE_CACHE_ROLE}",
+                f"RoleBinding/{target['role_namespace']}/{SANDBOX_ROLE}",
                 f"RoleBinding/{target['subject_namespace']}/{RELEASE_REVISION_ROLE}",
                 f"RoleBinding/{target['subject_namespace']}/{token_request_name}",
             ]
@@ -778,6 +821,7 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
     def verify_resources(resources: list[str], target: dict[str, str], label: str) -> list[str]:
         output: list[str] = []
         assert_cluster_role(resources, label, output)
+        assert_sandbox_role(resources, target, label, output)
         assert_token_request_authz(resources, target, label, output)
         assert_bound_surface(resources, target, label, output)
         assert_internal_roots(resources, target, label, output)
@@ -822,7 +866,7 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
         expect_rejected(
             "cluster-wide Deployment grant",
             lambda resources: [
-                resource.replace('  - services\n', '  - services\n- apiGroups:\n  - apps\n  resources:\n  - deployments\n  verbs:\n  - get\n', 1)
+                resource.replace('  - tokenreviews\n', '  - tokenreviews\n- apiGroups:\n  - apps\n  resources:\n  - deployments\n  verbs:\n  - get\n', 1)
                 if top_level_field(resource, "kind") == "ClusterRole" and metadata_field(resource, "name") == orchestration
                 else resource
                 for resource in resources
@@ -981,6 +1025,22 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             ("  - runtimeclasses\n  verbs:\n  - get", "  - runtimeclasses\n  verbs:\n  - get\n  - update"),
         ]:
             image_cache_rejected(f"warm pool ClusterRole {after.split()[-1]}", "ClusterRole", before, after, orchestration)
+        # codewire#2282: no cluster-wide write, exec or namespace mutation.
+        for before, after in [
+            ("  - namespaces\n  verbs:\n  - get", "  - namespaces\n  verbs:\n  - get\n  - patch"),
+            ("  - persistentvolumes\n  verbs:\n  - list", "  - persistentvolumes\n  - pods/exec\n  verbs:\n  - list"),
+            ("  - tokenreviews\n  verbs:\n  - create", "  - tokenreviews\n  - services\n  verbs:\n  - create"),
+        ]:
+            image_cache_rejected(f"cluster-wide {after.split()[-1]}", "ClusterRole", before, after, orchestration)
+        for before, after in [
+            ("  - sandboxes\n  verbs:\n  - get", "  - sandboxes\n  verbs:\n  - create\n  - get"),
+            ("  - pods\n  verbs:\n  - get\n  - list\n  - delete", "  - pods\n  verbs:\n  - get\n  - list\n  - delete\n  - create"),
+            ("  - networkpolicies\n  verbs:\n  - get", "  - networkpolicies\n  verbs:\n  - patch\n  - get"),
+        ]:
+            image_cache_rejected(f"Sandbox Role {after}", "Role", before, after, SANDBOX_ROLE)
+        image_cache_rejected("Sandbox Role in orchestration's namespace", "Role",
+                             "  name: codewire-orchestration-sandboxes\n  namespace: prod-sandboxes",
+                             "  name: codewire-orchestration-sandboxes\n  namespace: prod", SANDBOX_ROLE)
         expect_rejected("missing workspace binding ingress", lambda resources: [
             resource for resource in resources
             if not (top_level_field(resource, "kind") == "NetworkPolicy"
@@ -1014,7 +1074,7 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             .replace(f"name: {WORKSPACE_BINDING_INGRESS}", "name: codewire-orchestration-extra")
         ])
         expect_rejected("image cache cluster-wide DaemonSets", lambda resources: [
-            resource.replace("  - services\n", "  - services\n  - daemonsets\n", 1)
+            resource.replace("  - tokenreviews\n", "  - tokenreviews\n  - daemonsets\n", 1)
             if top_level_field(resource, "kind") == "ClusterRole" and metadata_field(resource, "name") == orchestration
             else resource for resource in resources
         ])

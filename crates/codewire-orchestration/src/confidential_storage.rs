@@ -450,8 +450,8 @@ impl ConfidentialStorageManager {
         Ok(init_data_sha256)
     }
 
-    /// Delete both key copies after the caller has proved that Sandbox, PVC,
-    /// PV, and Longhorn volume resources are absent. Every provider operation
+    /// Delete both key copies after the caller has proved that Sandbox, PVC
+    /// and PV resources are absent. Every provider operation
     /// is idempotent, so Temporal retries resume safely.
     pub async fn delete_after_storage_absent(&self, environment_id: &str) -> anyhow::Result<()> {
         validate_environment_id(environment_id)?;
