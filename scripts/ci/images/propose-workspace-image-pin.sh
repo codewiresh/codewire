@@ -100,6 +100,23 @@ platforms="$(pin index-platforms <"$index")" || die 'the published image is not 
 [[ "$platforms" == 'linux/amd64,linux/arm64' ]] ||
   die "the published image serves ${platforms:-no image platform}, not linux/amd64 and linux/arm64"
 
+# An open proposal that already pins an image of this definition stays as it
+# is, so its CI runs to the end. Replacing it would cancel that run for an
+# image that differs only in the cw it carries, which is refreshed through its
+# own runtime asset; on a busy main every head was replaced before its CI
+# finished and the pin never landed (#3295).
+curl --config "$work/api.curl" "${CURL_BOUNDS[@]}" --output "$work/open.json" \
+  "${api}/pulls?state=open&limit=50"
+proposal_open=false
+if jq -e --arg branch "$BRANCH" 'any(.[]; .head.ref == $branch)' "$work/open.json" >/dev/null; then
+  proposal_open=true
+fi
+if [[ "$proposal_open" == true ]] && git fetch -q origin "refs/heads/${BRANCH}" 2>/dev/null &&
+    [[ "$(pin show --commit FETCH_HEAD inputs-sha256)" == "$(pin inputs-sha256 --commit "$GITHUB_SHA")" ]]; then
+  echo 'workspace image pin: the open proposal already pins an image of this definition; its CI runs on'
+  exit 0
+fi
+
 git switch -q --force-create "$BRANCH" "$main_sha"
 pin render --digest "$digest" --source-sha "$GITHUB_SHA" --platforms "$platforms"
 pin check
@@ -112,9 +129,7 @@ GIT_AUTHOR_NAME="$BOT_NAME" GIT_AUTHOR_EMAIL="$BOT_EMAIL" \
   -m "support-images.yaml published ${digest} from ${GITHUB_SHA}."
 git push -q --force origin "HEAD:refs/heads/${BRANCH}"
 
-curl --config "$work/api.curl" "${CURL_BOUNDS[@]}" --output "$work/open.json" \
-  "${api}/pulls?state=open&limit=50"
-if jq -e --arg branch "$BRANCH" 'any(.[]; .head.ref == $branch)' "$work/open.json" >/dev/null; then
+if [[ "$proposal_open" == true ]]; then
   echo "workspace image pin: updated the open proposal on ${BRANCH} to ${digest}"
   exit 0
 fi

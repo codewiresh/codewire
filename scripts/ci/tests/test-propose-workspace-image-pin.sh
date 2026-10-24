@@ -170,12 +170,35 @@ if grep -rqF "$TOKEN" "$work/curl-calls" "$work/propose.out" "$work/created-body
 fi
 pass
 
-# An open proposal is updated in place; no second pull request is opened.
+OPEN='[{"number":7,"head":{"ref":"automation/workspace-image-pin"}}]'
+
+# An open proposal that already pins an image of this definition is left as it
+# is, so its CI runs to the end: a rebuilt image (only the cw it carries
+# changed) neither pushes the branch nor opens a pull request (#3295).
 rm -f "$work/created-body.json"
-propose "registry.example.invalid/codewire/workspace@$NEW" \
-  FAKE_OPEN_PULLS='[{"number":7,"head":{"ref":"automation/workspace-image-pin"}}]' \
+before="$(git -C "$origin" rev-parse automation/workspace-image-pin)"
+propose "registry.example.invalid/codewire/workspace@$NEW" FAKE_OPEN_PULLS="$OPEN" \
+  >"$work/kept.out" 2>&1 || fail "a kept proposal failed: $(cat "$work/kept.out")"
+grep -Fq 'the open proposal already pins an image of this definition' "$work/kept.out" ||
+  fail "an open proposal of the same definition was replaced: $(cat "$work/kept.out")"
+[[ "$(git -C "$origin" rev-parse automation/workspace-image-pin)" == "$before" ]] ||
+  fail 'an open proposal of the same definition was pushed over'
+[[ ! -e "$work/created-body.json" ]] || fail 'a kept proposal opened a pull request'
+pass
+
+# An open proposal of an older definition is updated in place; no second pull
+# request is opened.
+git -C "$repo" switch -q main
+write_definition 2.1.0
+git -C "$repo" commit -qam 'change the definition while the proposal is open'
+git -C "$repo" push -q origin main
+newer="$(git -C "$repo" rev-parse HEAD)"
+propose "registry.example.invalid/codewire/workspace@$NEW" GITHUB_SHA="$newer" FAKE_OPEN_PULLS="$OPEN" \
   >"$work/update.out" 2>&1 || fail "update failed: $(cat "$work/update.out")"
-grep -Fq 'updated the open proposal' "$work/update.out" || fail 'the open proposal was not updated'
+grep -Fq "updated the open proposal" "$work/update.out" || fail "the open proposal was not updated: $(cat "$work/update.out")"
+grep -Fq "pub const SOURCE_SHA: &str = \"$newer\";" \
+  <<<"$(git -C "$origin" show automation/workspace-image-pin:crates/codewire-workspace-image/src/pin.rs)" ||
+  fail 'the open proposal does not pin the newer definition'
 [[ ! -e "$work/created-body.json" ]] || fail 'a second pull request was opened'
 pass
 
@@ -184,7 +207,8 @@ git -C "$repo" switch -q main
 git -C "$repo" merge -q --ff-only "$(git -C "$origin" rev-parse automation/workspace-image-pin)"
 git -C "$repo" push -q origin main
 before="$(git -C "$origin" rev-parse automation/workspace-image-pin)"
-propose "registry.example.invalid/codewire/workspace@$NEW" >"$work/same.out" 2>&1 || fail 'a pinned digest failed'
+propose "registry.example.invalid/codewire/workspace@$NEW" GITHUB_SHA="$newer" >"$work/same.out" 2>&1 ||
+  fail 'a pinned digest failed'
 grep -Fq "main already pins $NEW" "$work/same.out" || fail 'a pinned digest was proposed again'
 [[ "$(git -C "$origin" rev-parse automation/workspace-image-pin)" == "$before" ]] ||
   fail 'a pinned digest rewrote the automation branch'
