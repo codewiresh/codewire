@@ -357,6 +357,7 @@ def produce(args):
         try:
             result = run_solve(command, source_dir, prepared.path / "build.log", time.monotonic() + producer.BUILD_BOUND)
             prepared.revalidate()
+            compiler_summary(prepared.path / "build.log")
             return producer.finish(prepared, result, args.builder)
         except SolveFailure:
             failed_solve_log(prepared.path / "build.log")
@@ -367,6 +368,22 @@ def produce(args):
             # separate image solve log; failures still need terminal diagnostics.
             stream_log(prepared.path / "build.log")
             raise
+
+
+# The producer's own compile and compiler-cache lines (Cargo's Finished line,
+# sccache's request, hit and miss counts per level, and each BuildKit step's
+# duration). The full log stays in the receipt; this keeps a delivery job's
+# compile time and cache use visible in its log (infra#1632).
+COMPILER_SUMMARY = re.compile(rb"Finished `|Compile requests  |Cache misses  |Cache hits rate  |"
+                              rb"L[01] \([a-z0-9]+\) (?:hits|misses|hit rate)  |#[0-9]+ DONE [0-9.]+s")
+
+
+def compiler_summary(path):
+    if path.exists():
+        with closing(asset.HeldFile(path, 256 * 1024 * 1024)) as held:
+            lines = [line for line in held.data.splitlines() if COMPILER_SUMMARY.search(line)]
+        if lines:
+            sys.stderr.buffer.write(b"".join(b"cw producer: " + line + b"\n" for line in lines[-40:]))
 
 
 def stream_log(path):

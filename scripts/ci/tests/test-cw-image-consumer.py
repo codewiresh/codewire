@@ -461,6 +461,23 @@ class OwnedFailureDiagnostics(unittest.TestCase):
                 self.assertRegex(stderr, rb"cw-image-consumer: refused: Refused: [^\n]+\n")
                 self.assertNotIn(b"solve failed", stderr)
 
+    def test_producer_success_reports_its_compile_and_cache_lines_only(self):
+        diagnostic = (b"#12 [cw-builder 3/3] RUN mkdir /out\n"
+                      b"#12 98.10     Finished `runtime` profile [optimized] target(s) in 1m 37s\n"
+                      b"#12 98.20 Compile requests                     604\n"
+                      b"#12 98.20 Cache hits (Rust)                    590\n"
+                      b"#12 98.20 Cache misses                           5\n"
+                      b"#12 98.20 Cache hits rate                    99.02 %\n"
+                      b"#12 98.20   L0 (disk) hit rate               97.88 %\n"
+                      b"#12 98.20   L1 (s3) hits                         0\n"
+                      b"#12 DONE 99.4s\n")
+        status, stderr = self.solve("produce", 0, diagnostic)
+        # The synthetic producer has no provenance, so admission still refuses it.
+        self.assertEqual(status, 1)
+        reported = [line for line in stderr.splitlines() if line.startswith(b"cw producer: ")]
+        self.assertEqual(reported, [b"cw producer: " + line for line in diagnostic.splitlines()
+                                    if b"RUN mkdir" not in line and b"Cache hits (Rust)" not in line])
+
 
 if __name__ == "__main__":
     unittest.main()
