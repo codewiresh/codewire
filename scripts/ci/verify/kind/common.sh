@@ -1090,6 +1090,26 @@ ingress_path_drift_check() {
   done
 }
 
+# The workspace image a local Kind run uses (#2965): the image main publishes
+# and pins, pulled by digest and proved, when this tree's workspace definition
+# is the pin's; otherwise the exact source, built and verified once. CI's
+# shards choose the same way.
+select_or_build_kind_workspace() {
+  local workspace_status=0
+  python3 "$ROOT/scripts/ci/verify/kind-build-artifacts.py" select-workspace || workspace_status=$?
+  case "$workspace_status" in
+    0)
+      log "using the workspace image main pins; this tree's workspace definition is the pin's"
+      ;;
+    3)
+      log "verifying the canonical source workspace image once for Kind"
+      "$ROOT/scripts/ci/verify/rehearse-build-local-image.sh" || return $?
+      "$ROOT/scripts/ci/verify/verify-workspace-image.sh" || return $?
+      ;;
+    *) return "$workspace_status" ;;
+  esac
+}
+
 prepare_kind_profile_runtime_inputs() {
   # Product images and clients are sealed in the profile. Workspace acceptance
   # belongs to the invoking checkout, and fixed support images may have been
@@ -1097,7 +1117,7 @@ prepare_kind_profile_runtime_inputs() {
   acquire_kind_build_publication_lock || return $?
   case "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" in
     build-ci)
-      "$ROOT/scripts/ci/verify/verify-workspace-image.sh" || return $?
+      select_or_build_kind_workspace || return $?
       ;;
     prebuilt-ci)
       RUN_DIR="$RUN_DIR" \
@@ -1130,13 +1150,16 @@ build_images_and_smokes() {
   acquire_kind_build_publication_lock || return $?
   case "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" in
     build-ci)
-      log "verifying the canonical source workspace image once for Kind"
-      "$ROOT/scripts/ci/verify/rehearse-build-local-image.sh" || return $?
-      "$ROOT/scripts/ci/verify/verify-workspace-image.sh" || return $?
+      select_or_build_kind_workspace || return $?
       log "building exact candidate product images once through the Kind Bake targets"
       local source_head
       source_head="$(git -C "$ROOT" rev-parse HEAD)" || return $?
+      # A local run keeps one persistent image builder, so its layers and
+      # compiler cache carry over between runs; CI keeps a transient one.
+      local image_builder=persistent
+      [ -z "${GITHUB_ACTIONS:-}" ] || image_builder=transient
       CODEWIRE_IMAGE_SOURCE_SHA="$source_head" \
+        CODEWIRE_KIND_IMAGE_BUILDER="${CODEWIRE_KIND_IMAGE_BUILDER:-$image_builder}" \
         CODEWIRE_BAKE_METADATA_FILE="$RUN_DIR/kind-image-build-metadata.json" \
         "$ROOT/scripts/ci/images/build-kind-images.sh" || return $?
       ;;
@@ -1516,17 +1539,14 @@ kind_workspace_runtime_image() {
   local sealed_status=0
   validate_sealed_kind_images || sealed_status=$?
   [ "$sealed_status" -le 1 ] || return "$sealed_status"
-  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-ci ]; then
-    # The consumed workspace artifact selected either the exact-source build
-    # or the published pin pulled by digest; the helper proves either one.
-    python3 "$ROOT/scripts/ci/verify/kind-build-artifacts.py" workspace-image
-    return $?
-  fi
-  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
-    python3 "$ROOT/scripts/ci/verify/workspace-image-artifact.py" reuse "$ROOT" \
-      "$ROOT/.tmp/codewire-workspace-image-verification.json"
-    return $?
-  fi
+  case "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" in
+    build-ci|prebuilt-ci)
+      # The selection names either the exact-source build or the published
+      # pin pulled by digest; the helper proves either one.
+      python3 "$ROOT/scripts/ci/verify/kind-build-artifacts.py" workspace-image
+      return $?
+      ;;
+  esac
   if [ "$sealed_status" -eq 0 ]; then
     printf '%s\n' "$KIND_WORKSPACE_LOCAL_IMAGE"
   else
@@ -1586,10 +1606,32 @@ kind_suites_need_workspace_image() {
 }
 
 load_workspace_image_into_kind() {
-  local image
+  local image archive architecture status=0
   image="$(kind_workspace_runtime_image)" || return $?
   log "loading the selected verified workspace image into Kind"
-  kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
+  case "$image" in
+    */workspace:pinned-*)
+      # The published pin is one index for linux/amd64 and linux/arm64. With
+      # Docker's containerd image store only this host's platform is pulled,
+      # and `kind load docker-image` exports the whole index, so the node's
+      # import refuses the missing platform's content. Only the Kind node's
+      # own platform is loaded (#2965).
+      architecture="$(kubectl --context "kind-${KIND_CLUSTER_NAME}" get nodes \
+        -o jsonpath='{.items[0].status.nodeInfo.architecture}')" || return $?
+      case "$architecture" in
+        amd64|arm64) ;;
+        *) echo "Kind node architecture is not amd64 or arm64: ${architecture:-none}" >&2; return 1 ;;
+      esac
+      archive="$(mktemp "${TMPDIR:-/tmp}/kind-workspace.XXXXXX")" || return $?
+      docker save --platform "linux/${architecture}" --output "$archive" "$image" &&
+        kind load image-archive --name "$KIND_CLUSTER_NAME" "$archive" || status=$?
+      rm -f -- "$archive"
+      [ "$status" -eq 0 ] || return "$status"
+      ;;
+    *)
+      kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
+      ;;
+  esac
   wait_for_kind_api_after_image_load
 }
 

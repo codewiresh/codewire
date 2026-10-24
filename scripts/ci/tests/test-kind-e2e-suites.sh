@@ -1885,14 +1885,15 @@ PY
 # selection. Source-build selection has its own closed receipt fixture.
 CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release
 
-# A build-ci workspace is selected only from the canonical verified receipt.
-# Even a valid receipt cannot bypass a partial or substituted sealed tuple.
+# A build-ci workspace is selected only through the checkout's selection helper,
+# which proves the published pin or the canonical verified receipt (#2965).
+# Even a valid selection cannot bypass a partial or substituted sealed tuple.
 (
   CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci
   source_alias="localhost/codewire-ci/workspace:source-$(printf '%064d' 3)"
   python3() {
-    [ "$*" = "$ROOT/scripts/ci/verify/workspace-image-artifact.py reuse $ROOT $ROOT/.tmp/codewire-workspace-image-verification.json" ] ||
-      fail 'workspace source selection bypassed the canonical receipt helper'
+    [ "$*" = "$ROOT/scripts/ci/verify/kind-build-artifacts.py workspace-image" ] ||
+      fail 'workspace source selection bypassed the canonical selection helper'
     [ "${receipt_valid:-1}" = 1 ] || return 42
     printf '%s\n' "$source_alias"
   }
@@ -2285,8 +2286,8 @@ cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
   CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci
   source_alias="localhost/codewire-ci/workspace:source-$(printf '%064d' 3)"
   python3() {
-    [ "$*" = "$ROOT/scripts/ci/verify/workspace-image-artifact.py reuse $ROOT $ROOT/.tmp/codewire-workspace-image-verification.json" ] ||
-      fail 'image loading used a noncanonical source receipt'
+    [ "$*" = "$ROOT/scripts/ci/verify/kind-build-artifacts.py workspace-image" ] ||
+      fail 'image loading used a noncanonical workspace selection'
     printf '%s\n' "$source_alias"
   }
   load_images_into_kind

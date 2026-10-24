@@ -1278,9 +1278,11 @@ class CommonConsumerContractTests(unittest.TestCase):
                 : >"$CALLS"
                 workspace="$(CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci kind_workspace_runtime_image)"
                 [[ "$workspace" == codewire-workspace:verified-fixture ]]
-                grep -q '^workspace-reuse ' "$CALLS" ||
-                  fail "build-ci skipped source workspace reuse"
-                ! grep -q '^workspace-select ' "$CALLS"
+                # A local build follows its own selection too (#2965): the
+                # published pin when it is this tree's, else the source receipt.
+                grep -q '^workspace-select ' "$CALLS" ||
+                  fail "build-ci skipped the workspace selection helper"
+                ! grep -q '^workspace-reuse ' "$CALLS"
                 # Prebuilt CI follows the consumed artifact: the exact-source
                 # receipt or the published pin, proven by the same helper.
                 : >"$CALLS"
@@ -1306,6 +1308,34 @@ class CommonConsumerContractTests(unittest.TestCase):
                 CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release load_images_into_kind
                 ! grep -Fq 'codewire-workspace:verified-fixture' "$CALLS"
                 ! grep -q '^workspace-reuse ' "$CALLS"
+
+                # A pulled published pin is a two-platform index; only the
+                # Kind node's own platform is saved and imported (#2965).
+                pinned=localhost/codewire-ci/workspace:pinned-fixture
+                for node_arch in amd64 arm64; do
+                  (
+                    kind_workspace_runtime_image() { printf '%s\n' "$pinned"; }
+                    docker() { record "docker $*"; }
+                    kubectl() { record "kubectl $*"; printf '%s' "$node_arch"; }
+                    : >"$CALLS"
+                    load_workspace_image_into_kind
+                    grep -Eq "^docker save --platform linux/$node_arch --output [^ ]+ $pinned\$" "$CALLS" ||
+                      fail "the pinned workspace was not saved for linux/$node_arch alone"
+                    grep -Eq '^kind load image-archive --name codewire-e2e-ci [^ ]+$' "$CALLS" ||
+                      fail 'the pinned workspace was not imported from its single-platform archive'
+                    ! grep -Fq "kind load docker-image --name codewire-e2e-ci $pinned" "$CALLS" ||
+                      fail 'the pinned workspace index was loaded whole'
+                  )
+                done
+                (
+                  kind_workspace_runtime_image() { printf '%s\n' "$pinned"; }
+                  docker() { record "docker $*"; }
+                  kubectl() { printf 's390x'; }
+                  : >"$CALLS"
+                  ! load_workspace_image_into_kind 2>/dev/null ||
+                    fail 'a Kind node of an unsupported architecture loaded the pin'
+                  ! grep -q '^docker save' "$CALLS" || fail 'an unsupported node architecture reached docker save'
+                )
 
                 # The five sealed platform images are proven in every mode, but
                 # the approved workspace is imported only where it runs: in

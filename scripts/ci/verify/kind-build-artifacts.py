@@ -384,6 +384,16 @@ def consume_pinned_workspace(directory: Path, value: dict[str, Any]) -> None:
     record = read_workspace_pin(directory / WORKSPACE_PIN)
     if record != pinned_workspace_record():
         raise ArtifactError("workspace pin record differs from the checkout's pin")
+    pull_pinned_workspace(record)
+
+
+def pull_pinned_workspace(record: dict[str, Any]) -> None:
+    """Pull the pin by digest from its public mirror, prove it, and select it.
+
+    No credential is involved: the public mirror serves the same digest. The
+    pulled image must list the requested digest reference, run on linux/amd64
+    and carry the pin's source revision before an alias is recorded.
+    """
     reference = record["image"]
     for attempt in range(1, 4):
         try:
@@ -405,6 +415,30 @@ def consume_pinned_workspace(directory: Path, value: dict[str, Any]) -> None:
         "source_sha": record["source_sha"],
     })
     print(f"Kind artifact: pinned workspace {reference} loaded as {alias}")
+
+
+def head_commit() -> str:
+    head = run("git", "-C", str(ROOT), "rev-parse", "HEAD")
+    if not HEX40.fullmatch(head):
+        raise ArtifactError("the checkout has no commit")
+    return head
+
+
+def select_local_workspace() -> str:
+    """Choose a local Kind run's workspace image the way CI does (#2965).
+
+    The published pin is used when it was built from this tree's workspace
+    image definition: it is pulled by digest with no credential and proved
+    before use, so a local cluster opens without building the workspace image.
+    Any other tree builds and verifies the exact source as before.
+    """
+    source, reason = workspace_source(head_commit(), None)
+    print(f"Kind workspace: {source} ({reason})", file=sys.stderr)
+    if source == "pinned":
+        pull_pinned_workspace(pinned_workspace_record())
+    else:
+        write_workspace_selection({"mode": "source"})
+    return source
 
 
 def workspace_runtime_image() -> str:
@@ -430,6 +464,8 @@ def workspace_runtime_image() -> str:
         raise ArtifactError("invalid pinned workspace selection")
     if value["reference"] != pinned_workspace_record()["image"]:
         raise ArtifactError("pinned workspace selection differs from the checkout's pin")
+    if workspace_source(head_commit(), None)[0] != "pinned":
+        raise ArtifactError("pinned workspace selection predates a change to this tree's workspace definition")
     if pinned_workspace_image(value["reference"], value["source_sha"],
                               alias=value["image"]) != value["image_id"]:
         raise ArtifactError("pinned workspace alias names another image")
@@ -814,6 +850,9 @@ def main() -> int:
     select.add_argument("--github-output", action="store_true")
     operations.add_parser(
         "workspace-image", help="print the workspace image the consumed artifact selected")
+    operations.add_parser(
+        "select-workspace",
+        help="local Kind: pull the published pin when it is this tree's (exit 0), else exit 3 to build")
     args = parser.parse_args()
     if args.operation == "produce":
         produce(args.group, args.directory)
@@ -826,6 +865,8 @@ def main() -> int:
         if args.github_output:
             with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
                 output.write(f"kind_workspace_source={source}\n")
+    elif args.operation == "select-workspace":
+        return 0 if select_local_workspace() == "pinned" else 3
     else:
         print(workspace_runtime_image())
     return 0

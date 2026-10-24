@@ -125,8 +125,21 @@ rm -f "$work/cpu-calls"
   fail 'buildx_builder_cap failed under bin/heavy'
 [[ "$(cat "$work/cpu-calls")" == apply ]] || fail 'buildx_builder_cap did not apply the CPU ceiling'
 # Both builder-creation paths cap their builder right after it bootstraps.
-grep -A1 -- '--bootstrap >/dev/null$' "$ROOT/scripts/ci/images/build-kind-images.sh" |
-  grep -qx 'buildx_builder_cap "$builder"' || fail 'the Kind image build does not cap its builder'
+# The Kind image build creates, or reuses a persistent, builder in one block
+# (#2965); its cap follows the last bootstrap, before the build starts.
+kind_build_caps_builder() {
+  awk '
+    /--bootstrap/ { bootstrapped = 1; capped = 0 }
+    /^buildx_builder_cap "\$builder"$/ && bootstrapped { capped = 1 }
+    /^started_at=/ { exit !(bootstrapped && capped) }
+  ' "$1"
+}
+kind_build_caps_builder "$ROOT/scripts/ci/images/build-kind-images.sh" ||
+  fail 'the Kind image build does not cap its builder'
+grep -v '^buildx_builder_cap "\$builder"$' "$ROOT/scripts/ci/images/build-kind-images.sh" >"$work/uncapped.sh"
+if kind_build_caps_builder "$work/uncapped.sh"; then
+  fail 'the Kind build cap check accepted a build that never caps its builder'
+fi
 grep -A1 -- 'buildx inspect "$builder" --bootstrap' "$ROOT/scripts/ci/images/workspace-cache.sh" |
   grep -qx '  buildx_builder_cap "$builder"' || fail 'the workspace cache build does not cap its builder'
 

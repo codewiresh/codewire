@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import sys
 from pathlib import Path
 import tarfile
 import tempfile
@@ -703,6 +704,7 @@ class PinnedWorkspaceTests(unittest.TestCase):
         for patcher in (
             mock.patch.object(artifact, "ROOT", self.checkout),
             mock.patch.object(artifact, "identity", side_effect=self._identity),
+            mock.patch.object(artifact, "head_commit", return_value=self.HEAD),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -793,7 +795,7 @@ class PinnedWorkspaceTests(unittest.TestCase):
         return calls
 
     def test_pinned_consumer_pulls_by_digest_and_records_its_alias(self):
-        self.use_pin(FakePinTool())
+        self.use_pin(FakePinTool({self.HEAD: PIN_INPUTS}))
         self.produce_pinned()
         calls = self.consume_pinned(pull_failures=1)
         alias = artifact.PINNED_WORKSPACE_ALIAS + "7" * 64
@@ -848,7 +850,7 @@ class PinnedWorkspaceTests(unittest.TestCase):
         self.assertEqual(reuse.call_args_list, [mock.call(receipt), mock.call(receipt)])
 
     def test_runtime_image_rejects_a_changed_pinned_alias(self):
-        self.use_pin(FakePinTool())
+        self.use_pin(FakePinTool({self.HEAD: PIN_INPUTS}))
         alias = artifact.PINNED_WORKSPACE_ALIAS + "7" * 64
         artifact.write_workspace_selection({
             "mode": "pinned", "image": alias, "image_id": PINNED_ID,
@@ -858,6 +860,62 @@ class PinnedWorkspaceTests(unittest.TestCase):
                                side_effect=lambda ref: pinned_inspect(ref, image_id="sha256:" + "3" * 64)), \
                 self.assertRaisesRegex(artifact.ArtifactError, "names another image"):
             artifact.workspace_runtime_image()
+
+    def select_locally(self, tool, inspect=pinned_inspect):
+        self.use_pin(tool)
+        calls = []
+
+        def command(*args, **kwargs):
+            calls.append(args)
+            return ""
+
+        with mock.patch.object(artifact, "run", side_effect=command), \
+                mock.patch.object(artifact, "inspect_image", side_effect=inspect), \
+                mock.patch.object(artifact.time, "sleep"):
+            source = artifact.select_local_workspace()
+        return source, calls
+
+    def test_local_kind_pulls_the_pin_built_from_this_definition(self):
+        # #2965: a local cluster opens on the published workspace image, pulled
+        # by digest from its public mirror and proved, instead of building it.
+        source, calls = self.select_locally(FakePinTool({self.HEAD: PIN_INPUTS}))
+        alias = artifact.PINNED_WORKSPACE_ALIAS + "7" * 64
+        self.assertEqual(source, "pinned")
+        self.assertEqual(calls, [(artifact.docker(), "pull", "--platform", "linux/amd64", PIN_IMAGE),
+                                 (artifact.docker(), "image", "tag", PINNED_ID, alias)])
+        with mock.patch.object(artifact, "inspect_image", side_effect=pinned_inspect):
+            self.assertEqual(artifact.workspace_runtime_image(), alias)
+
+    def test_local_kind_builds_the_source_when_the_definition_changed(self):
+        with mock.patch.object(artifact, "workspace_reuse", return_value="source-alias"):
+            source, calls = self.select_locally(FakePinTool({self.HEAD: "1" * 64}))
+            self.assertEqual((source, calls), ("source", []))
+            self.assertEqual(json.loads((self.checkout / artifact.WORKSPACE_SELECTION).read_text()),
+                             {"schema": artifact.WORKSPACE_SELECTION_SCHEMA, "mode": "source"})
+            self.assertEqual(artifact.workspace_runtime_image(), "source-alias")
+
+    def test_local_kind_refuses_a_pulled_image_that_is_not_the_pin(self):
+        with self.assertRaisesRegex(artifact.ArtifactError, "not the published pin"):
+            self.select_locally(FakePinTool({self.HEAD: PIN_INPUTS}),
+                                inspect=lambda ref: pinned_inspect(ref, revision="9" * 40))
+        self.assertFalse((self.checkout / artifact.WORKSPACE_SELECTION).exists())
+
+    def test_a_pinned_selection_is_refused_once_the_definition_changes(self):
+        self.select_locally(FakePinTool({self.HEAD: PIN_INPUTS}))
+        self.use_pin(FakePinTool({self.HEAD: "1" * 64}))
+        with mock.patch.object(artifact, "inspect_image", side_effect=pinned_inspect), \
+                self.assertRaisesRegex(artifact.ArtifactError, "predates a change"):
+            artifact.workspace_runtime_image()
+
+    def test_select_workspace_exit_status_tells_kind_whether_to_build(self):
+        for definition, status in ((PIN_INPUTS, 0), ("1" * 64, 3)):
+            with self.subTest(status=status):
+                self.use_pin(FakePinTool({self.HEAD: definition}))
+                with mock.patch.object(sys, "argv", ["kind-build-artifacts.py", "select-workspace"]), \
+                        mock.patch.object(artifact, "run", return_value=""), \
+                        mock.patch.object(artifact, "inspect_image", side_effect=pinned_inspect), \
+                        mock.patch.object(artifact.time, "sleep"):
+                    self.assertEqual(artifact.main(), status)
 
 
 if __name__ == "__main__":

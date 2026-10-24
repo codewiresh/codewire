@@ -93,14 +93,48 @@ case "$metadata_file" in
 esac
 mkdir -p "$(dirname "$metadata_file")"
 
-# Bake may compile four large Rust graphs concurrently. Keep one transient
-# BuildKit daemon for cross-target layer/object reuse, but bound its solver so
-# nested build containers cannot exhaust the dedicated CPX42 worker.
+# Bake may compile four large Rust graphs concurrently. Keep one BuildKit
+# daemon for cross-target layer/object reuse, but bound its solver so nested
+# build containers cannot exhaust the dedicated CPX42 worker. A CI job gets a
+# transient daemon. A local Kind run selects CODEWIRE_KIND_IMAGE_BUILDER=
+# persistent (#2965): one daemon whose layer cache and cache mounts, the
+# compiler cache among them, survive runs, so an unchanged image costs only its
+# export and a changed one rebuilds warm. The GC policy bounds what it keeps
+# (the kind-dev builder's), and the name carries the configuration's digest so a
+# changed configuration gets its own daemon.
+case "${CODEWIRE_KIND_IMAGE_BUILDER:-transient}" in
+  transient|persistent) ;;
+  *) echo 'CODEWIRE_KIND_IMAGE_BUILDER must be transient or persistent' >&2; exit 2 ;;
+esac
 umask 077
 mkdir -p "${RUNNER_TEMP:-$ROOT/.tmp}"
 work="$(mktemp -d "${RUNNER_TEMP:-$ROOT/.tmp}/codewire-kind-images.XXXXXX")"
 buildkit_config="$work/buildkitd.toml"
-builder="codewire-kind-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${BASHPID}"
+printf '%s\n' \
+  '[worker.oci]' \
+  '  max-parallelism = 2' \
+  '  gc = true' \
+  '  [[worker.oci.gcpolicy]]' \
+  '    filters = ["type==source.local", "type==source.git.checkout"]' \
+  '    keepDuration = "48h"' \
+  '    maxUsedSpace = "512MB"' \
+  '  [[worker.oci.gcpolicy]]' \
+  '    keepDuration = "336h"' \
+  '    reservedSpace = "40GB"' \
+  '    maxUsedSpace = "80GB"' \
+  '    minFreeSpace = "40GB"' \
+  '  [[worker.oci.gcpolicy]]' \
+  '    all = true' \
+  '    reservedSpace = "40GB"' \
+  '    maxUsedSpace = "80GB"' \
+  '    minFreeSpace = "40GB"' >"$buildkit_config"
+if [ "${CODEWIRE_KIND_IMAGE_BUILDER:-transient}" = persistent ]; then
+  persistent_builder=true
+  builder="codewire-kind-images-$(sha256sum "$buildkit_config" | cut -c1-8)"
+else
+  persistent_builder=false
+  builder="codewire-kind-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${BASHPID}"
+fi
 node="${builder}-node"
 builder_created=false
 
@@ -128,20 +162,24 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-printf '%s\n' \
-  '[worker.oci]' \
-  '  max-parallelism = 2' >"$buildkit_config"
-
-# The builder name reserves the cleanup scope even when create stops after
-# writing only part of its state.
-builder_created=true
-"$docker_bin" buildx create \
-  --name "$builder" \
-  --node "$node" \
-  --driver docker-container \
-  --driver-opt "image=$BUILDKIT_IMAGE" \
-  --buildkitd-config "$buildkit_config" \
-  --bootstrap >/dev/null
+if [ "$persistent_builder" = true ] && "$docker_bin" buildx inspect "$builder" >/dev/null 2>&1; then
+  printf 'Kind image build: reusing the persistent builder %s\n' "$builder" >&2
+  "$docker_bin" buildx inspect --bootstrap "$builder" >/dev/null
+else
+  # The builder name reserves the cleanup scope even when create stops after
+  # writing only part of its state. A persistent builder is never removed here.
+  [ "$persistent_builder" = true ] || builder_created=true
+  if ! "$docker_bin" buildx create \
+      --name "$builder" \
+      --node "$node" \
+      --driver docker-container \
+      --driver-opt "image=$BUILDKIT_IMAGE" \
+      --buildkitd-config "$buildkit_config" \
+      --bootstrap >/dev/null; then
+    # Another local run created the persistent builder first: use it.
+    [ "$persistent_builder" = true ] && "$docker_bin" buildx inspect --bootstrap "$builder" >/dev/null || exit 1
+  fi
+fi
 buildx_builder_cap "$builder"
 
 started_at="$(date +%s)"

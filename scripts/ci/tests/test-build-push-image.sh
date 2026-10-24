@@ -711,6 +711,16 @@ case "${1:-} ${2:-} ${3:-}" in
       [[ "$buildkit_config" == */buildkitd.toml ]]
       printf '%s\n' "${buildkit_config%/buildkitd.toml}" >"$FAKE_KIND_WORK_FILE"
     fi
+    if [[ -n "${FAKE_PERSISTENT_BUILDERS:-}" && "$4" == codewire-kind-images-* ]]; then
+      : >"$FAKE_PERSISTENT_BUILDERS/$4"
+    fi
+    ;;
+  buildx\ inspect\ --bootstrap|buildx\ inspect\ codewire-kind-images-*)
+    # A persistent local image builder exists once created and is reused.
+    [[ -n "${FAKE_PERSISTENT_BUILDERS:-}" && -e "$FAKE_PERSISTENT_BUILDERS/${*: -1}" ]] || {
+      echo "ERROR: no builder \"${*: -1}\" found" >&2
+      exit 1
+    }
     ;;
   buildx\ rm\ *)
     [[ "$*" == *' --force '* ]]
@@ -1632,6 +1642,42 @@ kind_retention_case invalid 2 none 2
 kind_retention_case retained-cleanup-failure 1 cleanup 73
 kind_retention_case default-cleanup-failure unset cleanup 73
 kind_retention_case default-cleanup-gone unset cleanup-gone 0
+
+# #2965: a local Kind build keeps one persistent image builder. The first run
+# creates it, a later run reuses it, and neither removes it; an unknown builder
+# selection is refused before any effect.
+persistent_case() {
+  local case_dir="$work/kind-persistent-$1"
+  mkdir -m 0700 "$case_dir"
+  mkdir -m 0700 "$case_dir/temp"
+  : >"$case_dir/docker-calls"
+  (
+    unset CODEWIRE_KIND_RETAIN_CW_ASSETS FAKE_KIND_PRODUCER_FAILURE FAKE_KIND_IMAGE_INVALID \
+      FAKE_KIND_BUILDER_REMOVE_FAILURE FAKE_BUILD_FATAL
+    RUNNER_TEMP="$case_dir/temp" CODEWIRE_DOCKER_BIN="$work/bin/docker" \
+    CODEWIRE_KIND_IMAGE_BUILDER="$2" FAKE_PERSISTENT_BUILDERS="$work/persistent-builders" \
+    CODEWIRE_BAKE_METADATA_FILE="$case_dir/metadata.json" FAKE_DOCKER_CALLS="$case_dir/docker-calls" \
+    FAKE_CW_CONTEXTS="$case_dir/cw-contexts.jsonl" FAKE_KIND_WORK_FILE="$case_dir/original-work" \
+      "$source_fixture/scripts/ci/images/build-kind-images.sh"
+  ) >"$case_dir/output" 2>&1
+}
+mkdir -m 0700 "$work/persistent-builders"
+for name in first second; do
+  persistent_case "$name" persistent ||
+    { cat "$work/kind-persistent-$name/output" >&2; fail "the $name persistent Kind build failed"; }
+  ! grep -Eq ' buildx rm ' "$work/kind-persistent-$name/docker-calls" ||
+    fail "the $name persistent Kind build removed its builder"
+done
+[[ "$(grep -Ec ' buildx create .*--name codewire-kind-images-' "$work/kind-persistent-first/docker-calls" || true)" -eq 1 ]] ||
+  fail 'the first persistent Kind build did not create its builder once'
+! grep -Eq ' buildx create ' "$work/kind-persistent-second/docker-calls" ||
+  fail 'the second persistent Kind build created another builder'
+grep -Fq 'reusing the persistent builder codewire-kind-images-' "$work/kind-persistent-second/output" ||
+  fail 'the second persistent Kind build did not say it reused its builder'
+if persistent_case invalid sometimes; then fail 'an unknown Kind builder selection was accepted'; fi
+grep -Fq 'CODEWIRE_KIND_IMAGE_BUILDER must be transient or persistent' "$work/kind-persistent-invalid/output" ||
+  fail 'an unknown Kind builder selection has no attributable refusal'
+[[ ! -s "$work/kind-persistent-invalid/docker-calls" ]] || fail 'an unknown Kind builder selection reached Docker'
 
 base_source_tag="registry.example.invalid/codewire/base:$source_sha"
 awk -F '\t' -v reference="$base_source_tag" \
