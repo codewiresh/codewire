@@ -91,6 +91,9 @@ struct SessionEngineInner {
     /// The reason the store last refused to open, logged once and reported
     /// in health diagnostics until the store opens.
     store_refusal: Mutex<Option<String>>,
+    /// Bounds each step of a host process group's cleanup:
+    /// [`crate::host_process::JOIN_TIMEOUT`] in the product.
+    host_cleanup_bound: Duration,
     /// How many stops and restarts asked the record helper about an active
     /// run to interrupt first.
     #[cfg(all(test, target_os = "linux"))]
@@ -494,6 +497,18 @@ impl SessionEngine {
     }
 
     pub(crate) fn new(config: &Config, credential_bridge: CredentialBridge) -> Self {
+        Self::with_host_cleanup_bound(config, credential_bridge, crate::host_process::JOIN_TIMEOUT)
+    }
+
+    /// [`Self::new`] with `bound` in place of each host cleanup step's
+    /// one-second bound. A test whose subject is not that bound lengthens it
+    /// into a hang guard, so a stalled CI slot cannot spend it and turn a
+    /// confirmed stop into an unknown one.
+    pub(crate) fn with_host_cleanup_bound(
+        config: &Config,
+        credential_bridge: CredentialBridge,
+        bound: Duration,
+    ) -> Self {
         Self {
             inner: Arc::new(SessionEngineInner {
                 config: config.clone(),
@@ -510,6 +525,7 @@ impl SessionEngine {
                 launches: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
                 store_refusal: Mutex::new(None),
+                host_cleanup_bound: bound,
                 #[cfg(all(test, target_os = "linux"))]
                 stop_interrupt_checks: std::sync::atomic::AtomicUsize::new(0),
                 #[cfg(all(test, target_os = "linux"))]
@@ -2522,10 +2538,9 @@ impl SessionEngine {
         };
         #[cfg(unix)]
         let mut host_group = if self.inner.config.host.is_some() {
-            match child
-                .id()
-                .and_then(|pid| crate::host_process::OwnedProcessGroup::new(pid).ok())
-            {
+            match child.id().and_then(|pid| {
+                crate::host_process::OwnedProcessGroup::new(pid, self.inner.host_cleanup_bound).ok()
+            }) {
                 Some(group) => Some(group),
                 None => {
                     let _ = terminate_native_launch(&mut child).await;
@@ -2748,10 +2763,9 @@ impl SessionEngine {
         let mut child = crate::execution::PtyLaunchGuard::new(child);
         #[cfg(unix)]
         let mut host_group = if self.inner.config.host.is_some() {
-            match child
-                .process_id()
-                .and_then(|pid| crate::host_process::OwnedProcessGroup::new(pid).ok())
-            {
+            match child.process_id().and_then(|pid| {
+                crate::host_process::OwnedProcessGroup::new(pid, self.inner.host_cleanup_bound).ok()
+            }) {
                 Some(group) => Some(group),
                 None => {
                     let _ = child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await;
@@ -3588,11 +3602,9 @@ async fn terminate_session_launch(
     #[cfg(unix)]
     if let Some(group) = group {
         let signals = group.terminate().await;
-        let reaped = crate::confirm::await_within(
-            crate::host_process::JOIN_TIMEOUT,
-            &mut std::pin::pin!(child.wait()),
-        )
-        .await;
+        let reaped =
+            crate::confirm::await_within(group.cleanup_bound(), &mut std::pin::pin!(child.wait()))
+                .await;
         return signals.is_ok() && matches!(reaped, Some(Ok(_)));
     }
     terminate_native_launch(child).await
@@ -3607,10 +3619,7 @@ async fn terminate_session_pty_launch(
     #[cfg(unix)]
     if let Some(group) = group {
         let signals = group.terminate().await;
-        return child
-            .terminate_confirmed(crate::host_process::JOIN_TIMEOUT)
-            .await
-            && signals.is_ok();
+        return child.terminate_confirmed(group.cleanup_bound()).await && signals.is_ok();
     }
     child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await
 }
@@ -3719,7 +3728,7 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
         tokio::select! {
             result = group.wait_for_exit() => {
                 let signals = group.terminate().await;
-                let status = crate::confirm::await_within(crate::host_process::JOIN_TIMEOUT, &mut std::pin::pin!(child.wait())).await;
+                let status = crate::confirm::await_within(group.cleanup_bound(), &mut std::pin::pin!(child.wait())).await;
                 break ProcessCompletion::Exited(result.map(|_| ()).and(signals)
                     .and_then(|()| status.ok_or_else(|| std::io::Error::other("host child reap timed out"))?)
                     .map(|status| status.code().unwrap_or(1)).map_err(|error| error.to_string()));
@@ -3744,9 +3753,10 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
         }
     };
     drop(stdin);
+    let bound = group.cleanup_bound();
     let (stdout, stderr) = tokio::join!(
-        bounded_output_join(stdout_task),
-        bounded_output_join(stderr_task)
+        bounded_output_join(stdout_task, bound),
+        bounded_output_join(stderr_task, bound)
     );
     finish_process(
         inner,
@@ -3760,8 +3770,11 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
 }
 
 #[cfg(unix)]
-async fn bounded_output_join(mut task: JoinHandle<Result<(), SessionError>>) -> Option<String> {
-    match crate::confirm::await_within(crate::host_process::JOIN_TIMEOUT, &mut task).await {
+async fn bounded_output_join(
+    mut task: JoinHandle<Result<(), SessionError>>,
+    bound: Duration,
+) -> Option<String> {
+    match crate::confirm::await_within(bound, &mut task).await {
         Some(Ok(Ok(()))) => None,
         Some(Ok(Err(error))) => Some(error.to_string()),
         Some(Err(error)) => Some(format!("host output task failed: {error}")),
@@ -3886,7 +3899,7 @@ async fn monitor_host_pty_process(monitor: HostPtyProcessMonitor) {
             result = group.wait_for_exit() => {
                 let signals = group.terminate().await;
                 // WNOWAIT proved exit and kept identity reserved through signals.
-                let status = child.terminate_confirmed(crate::host_process::JOIN_TIMEOUT).await;
+                let status = child.terminate_confirmed(group.cleanup_bound()).await;
                 break ProcessCompletion::Exited(if signals.is_ok() && status { result.map_err(|error| error.to_string()) }
                     else { Err("host PTY cleanup could not be confirmed".into()) });
             }
@@ -3916,12 +3929,11 @@ async fn monitor_host_pty_process(monitor: HostPtyProcessMonitor) {
     io_cancel.store(true, Ordering::Release);
     drop(pty_control);
     let mut join = tokio::task::spawn_blocking(move || control_thread.join());
-    let control_error =
-        match crate::confirm::await_within(crate::host_process::JOIN_TIMEOUT, &mut join).await {
-            Some(Ok(Ok(()))) => None,
-            _ => Some("host PTY control join could not be confirmed".into()),
-        };
-    let output_error = bounded_output_join(output_task).await;
+    let control_error = match crate::confirm::await_within(group.cleanup_bound(), &mut join).await {
+        Some(Ok(Ok(()))) => None,
+        _ => Some("host PTY control join could not be confirmed".into()),
+    };
+    let output_error = bounded_output_join(output_task, group.cleanup_bound()).await;
     finish_process(
         inner,
         session_id,

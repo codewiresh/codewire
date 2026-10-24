@@ -212,8 +212,11 @@ async fn a_launch_is_committed_before_its_commit_byte_so_a_later_failure_is_neve
     // fails (or is cancelled) still counts as committed: unknown, never a
     // denial.
     use std::sync::atomic::{AtomicBool, Ordering};
-    let (mut daemon, launcher) = tokio::net::UnixStream::pair().unwrap();
-    drop(launcher);
+    // The commit write fails because this end can no longer write. A dropped
+    // peer would not do: a concurrent test's fork can hold its descriptor
+    // until that child execs, and the write then succeeds.
+    let (mut daemon, _launcher) = tokio::net::UnixStream::pair().unwrap();
+    daemon.shutdown().await.unwrap();
     let committed = AtomicBool::new(false);
     assert!(commit_launch(&mut daemon, &committed).await.is_err());
     assert!(committed.load(Ordering::SeqCst));

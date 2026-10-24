@@ -105,9 +105,16 @@ pub(crate) fn stop(id: u128, scope: &Scope, session: &str, generation: u64) -> M
     .unwrap()
 }
 
+/// A host engine whose cleanup steps are bounded by HANG, not the product's
+/// one second: no test here is about that bound, and a stalled CI slot spent
+/// it, so a confirmed stop read as unknown.
+pub(crate) fn host_engine(config: &crate::Config) -> SessionEngine {
+    SessionEngine::with_host_cleanup_bound(config, CredentialBridge::new(None), HANG)
+}
+
 pub(crate) async fn owner(root: &Path) -> (Owner, SessionEngine) {
     let config = config(root);
-    let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+    let engine = host_engine(&config);
     let owner = Owner::new(
         &config,
         HostControlBinding::new(scope().environment_id).unwrap(),
@@ -336,7 +343,7 @@ async fn host_control_receipt_loss_is_unknown_and_never_relaunches_after_reload(
     drop(owner);
     drop(engine);
     let config = config(temp.path());
-    let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+    let engine = host_engine(&config);
     let owner = reopen_owner(&config, &engine).await;
     let observed = owner.observe(&request.request_id, &scope()).await.unwrap();
     assert_eq!(observed.reason, "recovered_unknown");
@@ -367,7 +374,7 @@ async fn host_control_authorization_and_service_are_host_only() {
     use v1::host_control_service_server::HostControlService as Rpc;
     let temp = tempfile::tempdir().unwrap();
     let config = config(temp.path());
-    let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+    let engine = host_engine(&config);
     let service = HostControlService::new(
         &config,
         HostControlBinding::new(scope().environment_id).unwrap(),
@@ -415,7 +422,7 @@ async fn host_control_service_pages_large_actual_records_without_drop_or_truncat
     use v1::host_control_service_server::HostControlService as Rpc;
     let temp = tempfile::tempdir().unwrap();
     let config = config(temp.path());
-    let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+    let engine = host_engine(&config);
     let service = HostControlService::new(
         &config,
         HostControlBinding::new(scope().environment_id).unwrap(),
@@ -559,7 +566,7 @@ fn host_control_abrupt_publication_cuts_recover_without_process_reissue() {
             .unwrap()
             .block_on(async {
                 let config = config(temp.path());
-                let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+                let engine = host_engine(&config);
                 let owner = Owner::new(
                     &config,
                     HostControlBinding::new(scope().environment_id).unwrap(),

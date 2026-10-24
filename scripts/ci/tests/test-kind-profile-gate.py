@@ -607,8 +607,10 @@ stop_remote_dind_kind_forwarding() {{ :; }}
 CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci
 ROOT="$RUN_DIR/synthetic-checkout"
 mkdir -p "$ROOT/scripts/ci/verify"
+printf 'raise SystemExit(3)\\n' >"$ROOT/scripts/ci/verify/kind-build-artifacts.py"
+printf '#!/usr/bin/env bash\\nexit 0\\n' >"$ROOT/scripts/ci/verify/rehearse-build-local-image.sh"
 printf '#!/usr/bin/env bash\\nexit 49\\n' >"$ROOT/scripts/ci/verify/verify-workspace-image.sh"
-chmod 0700 "$ROOT/scripts/ci/verify/verify-workspace-image.sh"
+chmod 0700 "$ROOT/scripts/ci/verify/rehearse-build-local-image.sh" "$ROOT/scripts/ci/verify/verify-workspace-image.sh"
 acquire_kind_build_publication_lock() { :; }
 prepare_kind_support_images() { echo unexpected-support-mutation >"$RUN_DIR/support"; }
 if prepare_kind_profile_runtime_inputs; then exit 90; else exit "$?"; fi

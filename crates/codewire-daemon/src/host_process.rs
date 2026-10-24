@@ -5,18 +5,28 @@ use std::io;
 use std::time::Duration;
 
 pub(crate) const TERM_GRACE: Duration = Duration::from_millis(250);
+/// The product's bound on each step of a host group's cleanup: descendants
+/// settling after KILL, the leader's reap and the output drain. A step that
+/// outlasts it leaves cleanup unknown.
 pub(crate) const JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub(crate) struct OwnedProcessGroup {
     pid: libc::pid_t,
     armed: bool,
+    cleanup_bound: Duration,
 }
 
 impl OwnedProcessGroup {
-    pub(crate) fn new(pid: u32) -> io::Result<Self> {
+    /// Owns `pid`'s group; `cleanup_bound` bounds each cleanup step, which
+    /// is [`JOIN_TIMEOUT`] in the product.
+    pub(crate) fn new(pid: u32, cleanup_bound: Duration) -> io::Result<Self> {
         let pid = libc::pid_t::try_from(pid)
             .map_err(|_| io::Error::other("host leader PID is invalid"))?;
-        let group = Self { pid, armed: true };
+        let group = Self {
+            pid,
+            armed: true,
+            cleanup_bound,
+        };
         // The caller retains the Child. waitid checks ownership without reaping.
         group.exited()?;
         // SAFETY: getpgid only queries the exact owned child.
@@ -51,6 +61,10 @@ impl OwnedProcessGroup {
         } else {
             1
         }))
+    }
+
+    pub(crate) fn cleanup_bound(&self) -> Duration {
+        self.cleanup_bound
     }
 
     pub(crate) fn exited(&self) -> io::Result<bool> {
@@ -103,7 +117,7 @@ impl OwnedProcessGroup {
     /// PTY job control can create additional process groups without escaping the
     /// owned session. Linux pidfds signal those exact processes, never bare PIDs.
     async fn terminate_session_members(&self) -> io::Result<()> {
-        crate::confirm::check_within(JOIN_TIMEOUT, || {
+        crate::confirm::check_within(self.cleanup_bound, || {
             match self.signal_session_members(libc::SIGKILL) {
                 Ok(0) => Some(Ok(())),
                 Ok(_) => None,
