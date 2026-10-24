@@ -320,7 +320,7 @@ database_lane_core() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-mesh --lib 'store::migration_tests::' \
       -- --ignored --nocapture | tee "$logfile"
-  assert_passed_count "Mesh migration ledger" "$logfile" 15
+  assert_passed_count "Mesh migration ledger" "$logfile" 16
 }
 
 database_lane_credential_service() {

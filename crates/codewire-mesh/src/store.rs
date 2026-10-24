@@ -393,6 +393,20 @@ pub trait MeshStore: Send + Sync + 'static {
         redeemed_at: DateTime<Utc>,
         node: NodeRecord,
     ) -> Result<Option<NodeEnrollment>, StoreError>;
+    /// Records that a network owner revoked a hosted environment's node. The
+    /// record lasts as long as the network.
+    async fn environment_node_revoke(
+        &self,
+        network_id: &str,
+        environment_id: &str,
+        revoked_at: DateTime<Utc>,
+    ) -> Result<(), StoreError>;
+    /// Whether a network owner revoked this environment's node.
+    async fn environment_node_revoked(
+        &self,
+        network_id: &str,
+        environment_id: &str,
+    ) -> Result<bool, StoreError>;
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError>;
     async fn access_grant_get(
         &self,
@@ -449,6 +463,7 @@ struct MemoryState {
     invites: HashMap<String, Invite>,
     nodes: HashMap<(String, String), NodeRecord>,
     node_enrollments: HashMap<String, NodeEnrollment>,
+    environment_node_revocations: HashSet<(String, String)>,
     access_grants: HashMap<(String, String), AccessGrant>,
     task_events: Vec<TaskWatchEvent>,
     next_task_seq: i64,
@@ -863,6 +878,9 @@ impl MeshStore for MemoryStore {
         state.kv.retain(|(id, _, _), _| id != network_id);
         state.access_grants.retain(|(id, _), _| id != network_id);
         state
+            .environment_node_revocations
+            .retain(|(id, _)| id != network_id);
+        state
             .task_events
             .retain(|event| event.event.network_id != network_id);
         state.networks.remove(network_id);
@@ -1175,6 +1193,33 @@ impl MeshStore for MemoryStore {
             state.nodes.insert(node_key, node);
         }
         Ok(Some(redeemed))
+    }
+
+    async fn environment_node_revoke(
+        &self,
+        network_id: &str,
+        environment_id: &str,
+        _revoked_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let mut state = self.state.lock().await;
+        if !state.networks.contains_key(network_id) {
+            return Err(StoreError::NotFound);
+        }
+        state
+            .environment_node_revocations
+            .insert((network_id.to_owned(), environment_id.to_owned()));
+        Ok(())
+    }
+
+    async fn environment_node_revoked(
+        &self,
+        network_id: &str,
+        environment_id: &str,
+    ) -> Result<bool, StoreError> {
+        let state = self.state.lock().await;
+        Ok(state
+            .environment_node_revocations
+            .contains(&(network_id.to_owned(), environment_id.to_owned())))
     }
 
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError> {
@@ -2611,6 +2656,45 @@ impl MeshStore for PostgresMeshStore {
         Ok(Some(redeemed))
     }
 
+    async fn environment_node_revoke(
+        &self,
+        network_id: &str,
+        environment_id: &str,
+        revoked_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO environment_node_revocations (network_id, environment_id, revoked_at) \
+             VALUES ($1, $2, $3) ON CONFLICT (network_id, environment_id) DO NOTHING",
+        )
+        .bind(network_id)
+        .bind(environment_id)
+        .bind(revoked_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| match &error {
+            sqlx::Error::Database(database) if database.is_foreign_key_violation() => {
+                StoreError::NotFound
+            }
+            _ => StoreError::Sqlx(error),
+        })?;
+        Ok(())
+    }
+
+    async fn environment_node_revoked(
+        &self,
+        network_id: &str,
+        environment_id: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM environment_node_revocations \
+             WHERE network_id = $1 AND environment_id = $2)",
+        )
+        .bind(network_id)
+        .bind(environment_id)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError> {
         self.network_ensure(&grant.network_id).await?;
         let verbs = serde_json::to_string(&grant.verbs).map_err(|_| StoreError::NotFound)?;
@@ -3103,7 +3187,7 @@ mod migration_tests {
 
     use super::*;
 
-    const EXPECTED_MESH_MIGRATION_COUNT: usize = 7;
+    const EXPECTED_MESH_MIGRATION_COUNT: usize = 8;
 
     include!("store/network_deletion_tests.rs");
 
@@ -3244,6 +3328,7 @@ mod migration_tests {
                 (5, "retire network auth issuer".to_string()),
                 (6, "retire raw auth session device state".to_string()),
                 (7, "network deletion".to_string()),
+                (8, "environment node revocations".to_string()),
             ]
         );
         assert!(
@@ -3251,6 +3336,58 @@ mod migration_tests {
                 .iter()
                 .all(|migration| migration.checksum.len() == 48)
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn environment_node_revocations_last_as_long_as_their_network() -> anyhow::Result<()> {
+        let test_db = TestDatabase::create(&test_database_url()?).await?;
+        let result = async {
+            let store = start(&test_db.url).await?;
+            let now = Utc::now();
+            store
+                .network_create_with_owner("network-revoked", "org", "owner", now)
+                .await?;
+            anyhow::ensure!(
+                !store
+                    .environment_node_revoked("network-revoked", "env-1")
+                    .await?
+            );
+            store
+                .environment_node_revoke("network-revoked", "env-1", now)
+                .await?;
+            // A second revocation of the same environment is the same record.
+            store
+                .environment_node_revoke("network-revoked", "env-1", now)
+                .await?;
+            anyhow::ensure!(
+                store
+                    .environment_node_revoked("network-revoked", "env-1")
+                    .await?
+            );
+            anyhow::ensure!(
+                !store
+                    .environment_node_revoked("network-revoked", "env-2")
+                    .await?
+            );
+            anyhow::ensure!(matches!(
+                store
+                    .environment_node_revoke("network-missing", "env-1", now)
+                    .await,
+                Err(StoreError::NotFound)
+            ));
+            store
+                .network_delete_by_owner("network-revoked", "org", "owner")
+                .await?;
+            let left: i64 = sqlx::query_scalar("SELECT count(*) FROM environment_node_revocations")
+                .fetch_one(&store.pool)
+                .await?;
+            anyhow::ensure!(left == 0, "{left}");
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
     }
 
     #[tokio::test]
@@ -3840,7 +3977,7 @@ mod migration_tests {
             anyhow::ensure!(!node_token_column_exists);
             anyhow::ensure!(retained_network == "org-alpha");
             anyhow::ensure!(applied.len() == EXPECTED_MESH_MIGRATION_COUNT);
-            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(7));
+            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(8));
             anyhow::Ok(())
         }
         .await;
@@ -4005,7 +4142,7 @@ mod migration_tests {
             anyhow::ensure!(legacy_count == 0);
             anyhow::ensure!(retained_value == vec![0x03, 0x04]);
             anyhow::ensure!(applied.len() == EXPECTED_MESH_MIGRATION_COUNT);
-            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(7));
+            anyhow::ensure!(applied.last().map(|migration| migration.version) == Some(8));
             anyhow::Ok(())
         }
         .await;

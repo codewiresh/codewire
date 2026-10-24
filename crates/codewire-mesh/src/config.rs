@@ -39,6 +39,15 @@ pub struct MeshAuthorizationConfig {
 }
 
 impl MeshAuthorizationConfig {
+    #[cfg(test)]
+    pub(crate) fn for_test(url: &str, hmac_secret: &str, tls_roots_file: &std::path::Path) -> Self {
+        Self {
+            url: url.to_owned(),
+            hmac_secret: hmac_secret.to_owned(),
+            tls_roots_file: tls_roots_file.to_path_buf(),
+        }
+    }
+
     pub(crate) fn hmac_secret(&self) -> &str {
         &self.hmac_secret
     }

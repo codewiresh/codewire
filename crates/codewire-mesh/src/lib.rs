@@ -1,6 +1,7 @@
 pub mod config;
 mod connect;
 mod derp_verify;
+mod environment_members;
 pub mod mesh_authorization;
 mod mesh_coordinate;
 mod product;

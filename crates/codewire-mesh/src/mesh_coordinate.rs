@@ -22,10 +22,11 @@ use connectrpc::{ConnectError, InboundStream, RequestContext, ServiceResult, Ser
 use futures_util::StreamExt;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use url::Url;
 use uuid::Uuid;
 
+use crate::environment_members::EnvironmentMember;
 use crate::mesh_authorization::forwarded_mesh_credential;
 use crate::server::AppState;
 
@@ -115,7 +116,11 @@ impl MeshCoordinateState {
             .iter()
             .filter_map(|(id, peer)| (peer.network_id == network_id).then_some(*id))
             .collect::<HashSet<_>>();
-        registry.peers.retain(|id, _| !removed.contains(id));
+        for id in &removed {
+            if let Some(peer) = registry.peers.remove(id) {
+                peer.close.notify_one();
+            }
+        }
         registry
             .tunnels
             .retain(|dial, target| !removed.contains(dial) && !removed.contains(target));
@@ -126,16 +131,61 @@ impl MeshCoordinateState {
     /// separate authorization decision.
     pub(crate) fn revoke_node(&self, network_id: &str, node_name: &str) {
         let peer_id = stable_peer_id(network_id, "peer", node_name);
+        self.end_session(peer_id, |peer| peer.network_id == network_id);
+    }
+
+    /// The streams of hosted environment members, for the recheck.
+    pub(crate) fn environment_sessions(&self) -> Vec<EnvironmentSessionRef> {
+        let registry = self.inner.lock().unwrap();
+        registry
+            .peers
+            .iter()
+            .filter_map(|(peer_id, peer)| {
+                peer.environment
+                    .clone()
+                    .map(|session| EnvironmentSessionRef {
+                        peer_id: *peer_id,
+                        session_id: peer.session_id,
+                        session,
+                    })
+            })
+            .collect()
+    }
+
+    /// Records that orchestration confirmed this exact session at `at`.
+    pub(crate) fn confirm_environment_session(
+        &self,
+        peer_id: Uuid,
+        session_id: Uuid,
+        at: tokio::time::Instant,
+    ) {
+        let mut registry = self.inner.lock().unwrap();
+        if let Some(environment) = registry
+            .peers
+            .get_mut(&peer_id)
+            .filter(|peer| peer.session_id == session_id)
+            .and_then(|peer| peer.environment.as_mut())
+        {
+            environment.verified_at = at;
+        }
+    }
+
+    /// Ends this exact session: no newer session of the node is touched.
+    pub(crate) fn end_environment_session(&self, peer_id: Uuid, session_id: Uuid) {
+        self.end_session(peer_id, |peer| peer.session_id == session_id);
+    }
+
+    /// Removes the peer when `selected` holds, ends its stream, and tells its
+    /// tunnel partners.
+    fn end_session(&self, peer_id: Uuid, selected: impl FnOnce(&Peer) -> bool) {
         let updates = {
             let mut registry = self.inner.lock().unwrap();
-            if registry
-                .peers
-                .get(&peer_id)
-                .is_none_or(|peer| peer.network_id != network_id)
-            {
+            if !registry.peers.get(&peer_id).is_some_and(selected) {
                 return;
             }
-            registry.peers.remove(&peer_id);
+            if let Some(peer) = registry.peers.remove(&peer_id) {
+                peer.close.notify_one();
+            }
             let affected = registry
                 .tunnels
                 .iter()
@@ -171,6 +221,26 @@ struct Peer {
     network_id: String,
     node: Option<Node>,
     tx: mpsc::Sender<CoordinateEvent>,
+    /// Ends this session's stream when it is revoked or replaced.
+    close: Arc<Notify>,
+    /// A hosted environment member and when orchestration last confirmed it.
+    environment: Option<EnvironmentSession>,
+}
+
+/// A hosted environment member's stream (#3350): the Pod and generation it
+/// was admitted for, and the last time orchestration confirmed them.
+#[derive(Clone, Debug)]
+pub(crate) struct EnvironmentSession {
+    pub member: EnvironmentMember,
+    pub verified_at: tokio::time::Instant,
+}
+
+/// One environment member's live stream, as the recheck sees it.
+#[derive(Clone, Debug)]
+pub(crate) struct EnvironmentSessionRef {
+    pub peer_id: Uuid,
+    pub session_id: Uuid,
+    pub session: EnvironmentSession,
 }
 
 enum CoordinateEvent {
@@ -183,6 +253,7 @@ struct AuthorizedPeer {
     peer_id: Uuid,
     network_id: String,
     role: MeshCoordinateRole,
+    environment: Option<EnvironmentMember>,
 }
 
 async fn authorize(
@@ -198,6 +269,22 @@ async fn authorize(
         .ok_or_else(|| AppError::BadRequest("coordinate role is required".into()))?;
     let credential =
         forwarded_mesh_credential(ctx.headers()).map_err(|_| AppError::Unauthorized)?;
+    // A hosted environment's code is redeemed by orchestration, never here.
+    if let Some(code) = credential.environment_enrollment_code() {
+        if role != MeshCoordinateRole::Peer {
+            return Err(AppError::Forbidden);
+        }
+        let member = state
+            .product
+            .redeem_environment_enrollment(&org_id, &network_id, code)
+            .await?;
+        return Ok(AuthorizedPeer {
+            peer_id: stable_peer_id(&member.network_id, "peer", &member.node_name),
+            network_id: member.network_id.clone(),
+            role,
+            environment: Some(member),
+        });
+    }
     let node_enrollment = credential.node_enrollment_code().is_some();
     let peer_id = match role {
         MeshCoordinateRole::Peer if !node_enrollment => return Err(AppError::Forbidden),
@@ -233,6 +320,7 @@ async fn authorize(
         peer_id,
         network_id,
         role,
+        environment: None,
     })
 }
 
@@ -252,7 +340,7 @@ async fn run_session(
     derp_map: JsonValue,
 ) {
     let (events_tx, mut events_rx) = mpsc::channel(64);
-    let Some(session_id) = register(&state, &peer, events_tx) else {
+    let Some((session_id, close)) = register(&state, &peer, events_tx) else {
         let _ = responses
             .send(Err(ConnectError::permission_denied(
                 "Mesh network was deleted",
@@ -277,6 +365,11 @@ async fn run_session(
 
     loop {
         tokio::select! {
+            // An ended membership wins over anything else ready at once. The
+            // stream ends cleanly, as a revoked node's always has; the next
+            // enrollment says why.
+            biased;
+            () = close.notified() => break,
             message = requests.next() => {
                 let Some(message) = message else {
                     break;
@@ -382,22 +475,32 @@ fn register(
     state: &MeshCoordinateState,
     peer: &AuthorizedPeer,
     tx: mpsc::Sender<CoordinateEvent>,
-) -> Option<Uuid> {
+) -> Option<(Uuid, Arc<Notify>)> {
     let session_id = Uuid::new_v4();
+    let close = Arc::new(Notify::new());
     let mut registry = state.inner.lock().unwrap();
     if registry.retired_networks.contains(&peer.network_id) {
         return None;
     }
-    registry.peers.insert(
+    let replaced = registry.peers.insert(
         peer.peer_id,
         Peer {
             session_id,
             network_id: peer.network_id.clone(),
             node: None,
             tx,
+            close: close.clone(),
+            environment: peer.environment.clone().map(|member| EnvironmentSession {
+                member,
+                verified_at: tokio::time::Instant::now(),
+            }),
         },
     );
-    Some(session_id)
+    // The node's newer session replaces an older one, which ends.
+    if let Some(replaced) = replaced {
+        replaced.close.notify_one();
+    }
+    Some((session_id, close))
 }
 
 fn deregister(state: &MeshCoordinateState, peer_id: Uuid, session_id: Uuid) {
@@ -780,11 +883,12 @@ mod tests {
             peer_id: Uuid::new_v4(),
             network_id: "network-test".to_owned(),
             role: MeshCoordinateRole::Peer,
+            environment: None,
         };
         let member = node();
         assert!(!state.knows_key(&member.key));
         let (tx, _rx) = mpsc::channel(4);
-        let session_id = register(&state, &peer, tx).expect("registered");
+        let session_id = register(&state, &peer, tx).expect("registered").0;
         assert!(!state.knows_key(&member.key), "no node sent yet");
         update_node(&state, peer.peer_id, session_id, member.clone());
         assert!(state.knows_key(&member.key));
@@ -813,9 +917,10 @@ mod tests {
             peer_id: Uuid::new_v4(),
             network_id: "network-test".to_owned(),
             role: MeshCoordinateRole::Peer,
+            environment: None,
         };
         let (tx, _rx) = mpsc::channel(4);
-        let session_id = register(&state, &peer, tx).expect("registered");
+        let session_id = register(&state, &peer, tx).expect("registered").0;
         update_node(&state, peer.peer_id, session_id, member);
         assert_eq!(verifier.verify(&key).await, Verdict::Known);
         deregister(&state, peer.peer_id, session_id);
@@ -830,6 +935,7 @@ mod tests {
             peer_id: Uuid::new_v4(),
             network_id: "deleted".to_owned(),
             role: MeshCoordinateRole::Dial,
+            environment: None,
         };
         let (tx, mut rx) = mpsc::channel(4);
         assert!(register(&state, &peer, tx).is_some());
@@ -837,6 +943,7 @@ mod tests {
             peer_id: Uuid::new_v4(),
             network_id: "retained".to_owned(),
             role: MeshCoordinateRole::Dial,
+            environment: None,
         };
         let (retained_tx, mut retained_rx) = mpsc::channel(4);
         assert!(register(&state, &retained, retained_tx).is_some());
@@ -864,6 +971,7 @@ mod tests {
                 peer_id: dial_id,
                 network_id: network_id.clone(),
                 role: MeshCoordinateRole::Dial,
+                environment: None,
             },
             dial_tx,
         );
@@ -873,10 +981,12 @@ mod tests {
                 peer_id: target_id,
                 network_id,
                 role: MeshCoordinateRole::Peer,
+                environment: None,
             },
             target_tx,
         )
-        .unwrap();
+        .unwrap()
+        .0;
 
         add_tunnel(&state, dial_id, target_id);
         assert!(

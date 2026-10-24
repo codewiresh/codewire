@@ -12,6 +12,10 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 
+use crate::environment_members::{
+    EnvironmentMember, EnvironmentMembersClient, EnvironmentMembersError, MemberRef, MemberStatus,
+    environment_of_owner, environment_owner_subject,
+};
 use crate::mesh_authorization::{
     ForwardedMeshCredential, MeshAuthorizationAdapter, MeshAuthorizationAdapterError,
     is_network_product_principal,
@@ -29,6 +33,9 @@ const INVITE_CODE_BYTES: usize = 32;
 pub(crate) struct MeshProductService {
     store: SharedStore,
     authorization: Option<MeshAuthorizationAdapter>,
+    /// Orchestration's answer about hosted environment members; hosted Mesh
+    /// only.
+    environment_members: Option<EnvironmentMembersClient>,
 }
 
 pub(crate) struct CreatedInvite {
@@ -74,7 +81,230 @@ impl MeshProductService {
         Self {
             store,
             authorization,
+            environment_members: None,
         }
+    }
+
+    pub(crate) fn with_environment_members(
+        mut self,
+        environment_members: Option<EnvironmentMembersClient>,
+    ) -> Self {
+        self.environment_members = environment_members;
+        self
+    }
+
+    pub(crate) fn environment_members(&self) -> Option<&EnvironmentMembersClient> {
+        self.environment_members.as_ref()
+    }
+
+    /// Admits one hosted environment's peer stream (#3350): orchestration
+    /// redeems the one-use code for exactly this organization and network,
+    /// then the attaching user must be a current member of the network, the
+    /// environment must not be revoked here, and its node name must be free
+    /// or already its own. Error kinds tell the daemon why:
+    /// - not_found: no such network in the organization;
+    /// - unauthenticated: the code was refused (expired, used, stale Pod);
+    /// - permission_denied: the attaching user is not a network member;
+    /// - failed_precondition: a network owner revoked this environment;
+    /// - already_exists: another node has its name.
+    pub(crate) async fn redeem_environment_enrollment(
+        &self,
+        organization_id: &str,
+        network_id: &str,
+        code: &str,
+    ) -> AppResult<EnvironmentMember> {
+        let client = self.environment_members.as_ref().ok_or_else(|| {
+            AppError::ServiceUnavailable("environment Mesh membership is unavailable".into())
+        })?;
+        let organization_id = required_identifier(organization_id, "org_id")?;
+        let network_id = validate_network_id(network_id)?;
+        // Another organization's network reads as absent.
+        if self
+            .store
+            .network_organization_id(&network_id)
+            .await
+            .map_err(store_error)?
+            .as_deref()
+            != Some(organization_id.as_str())
+        {
+            return Err(AppError::NotFound("Mesh network not found".into()));
+        }
+        let member = client
+            .redeem(code, &organization_id, &network_id)
+            .await
+            .map_err(environment_members_error)?;
+        if self
+            .store
+            .environment_node_revoked(&network_id, &member.environment_id)
+            .await
+            .map_err(store_error)?
+        {
+            return Err(AppError::Precondition(
+                "a network owner revoked this environment's node".into(),
+            ));
+        }
+        self.require_network_member(&network_id, &member.attached_by_user_id)
+            .await?;
+        let now = Utc::now();
+        let node = NodeRecord {
+            network_id: network_id.clone(),
+            name: member.node_name.clone(),
+            peer_url: String::new(),
+            github_id: None,
+            owner_subject: environment_owner_subject(&member.environment_id),
+            authorized_by: member.attached_by_user_id.clone(),
+            enrollment_id: String::new(),
+            authorized_at: now,
+            last_seen_at: now,
+        };
+        match self.store.node_register(node.clone()).await {
+            Ok(()) => Ok(member),
+            Err(StoreError::AlreadyExists) => {
+                // A destroyed environment's node may still hold the name until
+                // the recheck removes it; remove it now if so.
+                if !self
+                    .remove_gone_environment_node(&network_id, &node.name)
+                    .await?
+                {
+                    return Err(AppError::Conflict(
+                        "another node in this network has this environment's name".into(),
+                    ));
+                }
+                match self.store.node_register(node).await {
+                    Ok(()) => Ok(member),
+                    Err(StoreError::AlreadyExists) => Err(AppError::Conflict(
+                        "another node in this network has this environment's name".into(),
+                    )),
+                    Err(error) => Err(store_error(error)),
+                }
+            }
+            Err(error) => Err(store_error(error)),
+        }
+    }
+
+    /// Whether `subject` is a member or owner of the network.
+    pub(crate) async fn is_network_member(
+        &self,
+        network_id: &str,
+        subject: &str,
+    ) -> AppResult<bool> {
+        Ok(self
+            .store
+            .network_member_get(network_id, subject)
+            .await
+            .map_err(store_error)?
+            .is_some_and(|member| {
+                matches!(
+                    member.role.as_str(),
+                    NETWORK_ROLE_MEMBER | NETWORK_ROLE_OWNER
+                )
+            }))
+    }
+
+    async fn require_network_member(&self, network_id: &str, subject: &str) -> AppResult<()> {
+        if self.is_network_member(network_id, subject).await? {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden)
+        }
+    }
+
+    /// Environment-owned node rows: (network, node name, environment,
+    /// organization).
+    pub(crate) async fn environment_nodes(
+        &self,
+        network_id: Option<&str>,
+    ) -> AppResult<Vec<(String, String, String, String)>> {
+        let nodes = match network_id {
+            Some(network_id) => self.store.node_list(network_id).await,
+            None => self.store.node_list_all().await,
+        }
+        .map_err(store_error)?;
+        let mut rows = Vec::new();
+        for node in nodes {
+            let Some(environment_id) = environment_of_owner(&node.owner_subject) else {
+                continue;
+            };
+            let Some(organization_id) = self
+                .store
+                .network_organization_id(&node.network_id)
+                .await
+                .map_err(store_error)?
+            else {
+                continue;
+            };
+            rows.push((
+                node.network_id,
+                node.name,
+                environment_id.to_owned(),
+                organization_id,
+            ));
+        }
+        Ok(rows)
+    }
+
+    /// Removes an environment's node row once orchestration says it is gone.
+    /// The caller also closes any stream for it.
+    pub(crate) async fn remove_environment_node(
+        &self,
+        network_id: &str,
+        node_name: &str,
+        environment_id: &str,
+    ) -> AppResult<()> {
+        // Only the row this environment still owns.
+        let owned = self
+            .store
+            .node_get(network_id, node_name)
+            .await
+            .map_err(store_error)?
+            .is_some_and(|node| environment_of_owner(&node.owner_subject) == Some(environment_id));
+        if owned {
+            self.store
+                .node_delete(network_id, node_name)
+                .await
+                .map_err(store_error)?;
+        }
+        Ok(())
+    }
+
+    /// Removes the named node when an environment owns it and orchestration
+    /// says that environment is gone. True when it was removed.
+    async fn remove_gone_environment_node(
+        &self,
+        network_id: &str,
+        node_name: &str,
+    ) -> AppResult<bool> {
+        let Some(client) = self.environment_members.as_ref() else {
+            return Ok(false);
+        };
+        let Some(node) = self
+            .store
+            .node_get(network_id, node_name)
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok(true);
+        };
+        let Some(environment_id) = environment_of_owner(&node.owner_subject) else {
+            return Ok(false);
+        };
+        let organization_id = self.organization_for_network(network_id).await?;
+        let status = client
+            .check(&[MemberRef {
+                environment_id: environment_id.to_owned(),
+                org_id: organization_id,
+                network_id: network_id.to_owned(),
+                pod_uid: String::new(),
+                operation_generation: 0,
+            }])
+            .await
+            .map_err(environment_members_error)?;
+        if status.as_slice() != [MemberStatus::Gone] {
+            return Ok(false);
+        }
+        self.remove_environment_node(network_id, node_name, environment_id)
+            .await?;
+        Ok(true)
     }
 
     pub(crate) async fn authorize_org(
@@ -83,6 +313,11 @@ impl MeshProductService {
         credential: ForwardedMeshCredential,
     ) -> AppResult<MeshAuthorizationContext> {
         let organization_id = required_identifier(organization_id, "org_id")?;
+        // An environment's enrollment code authenticates nothing but its own
+        // peer stream; it is never forwarded as a caller credential.
+        if credential.environment_enrollment_code().is_some() {
+            return Err(AppError::Unauthorized);
+        }
         let adapter = self.authorization.as_ref().ok_or_else(|| {
             AppError::ServiceUnavailable("Mesh authorization is unavailable".into())
         })?;
@@ -203,6 +438,13 @@ impl MeshProductService {
                 RequiredRole::Owner,
             )
             .await?;
+        // A destroyed environment's node must not keep its network alive.
+        if self.environment_members.is_some() {
+            for (_, node_name, _, _) in self.environment_nodes(Some(&network_id)).await? {
+                self.remove_gone_environment_node(&network_id, &node_name)
+                    .await?;
+            }
+        }
         self.store
             .network_delete_by_owner(&network_id, &context.org_id, &context.principal_id)
             .await
@@ -329,14 +571,20 @@ impl MeshProductService {
         self.authorize_network(organization_id, network_id, credential, RequiredRole::Owner)
             .await?;
         let node_name = required_identifier(node_name, "node_name")?;
-        if self
+        let Some(node) = self
             .store
             .node_get(network_id, &node_name)
             .await
             .map_err(store_error)?
-            .is_none()
-        {
+        else {
             return Err(AppError::NotFound("Mesh node not found".into()));
+        };
+        // A revoked environment never registers here again (#3350).
+        if let Some(environment_id) = environment_of_owner(&node.owner_subject) {
+            self.store
+                .environment_node_revoke(network_id, environment_id, Utc::now())
+                .await
+                .map_err(store_error)?;
         }
         self.store
             .node_delete(network_id, &node_name)
@@ -854,6 +1102,15 @@ pub(crate) fn store_error(error: StoreError) -> AppError {
         }
         StoreError::Invalid(message) => AppError::BadRequest(message.into()),
         StoreError::Sqlx(error) => AppError::Internal(anyhow::Error::new(error)),
+    }
+}
+
+fn environment_members_error(error: EnvironmentMembersError) -> AppError {
+    match error {
+        EnvironmentMembersError::Refused => AppError::Unauthorized,
+        EnvironmentMembersError::Unavailable => {
+            AppError::ServiceUnavailable("environment Mesh membership is unavailable".into())
+        }
     }
 }
 

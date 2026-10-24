@@ -69,6 +69,16 @@ impl fmt::Debug for ForwardedMeshCredential {
 }
 
 impl ForwardedMeshCredential {
+    pub(crate) fn environment_enrollment_code(&self) -> Option<&str> {
+        let Self::Authorization(value) = self else {
+            return None;
+        };
+        value.strip_prefix("Bearer ").filter(|value| {
+            value.starts_with(crate::environment_members::ENVIRONMENT_ENROLLMENT_PREFIX)
+                && value.len() > crate::environment_members::ENVIRONMENT_ENROLLMENT_PREFIX.len()
+        })
+    }
+
     /// Return the setup-only node enrollment capability when the caller
     /// presented that exact bearer class. Callers must consume it locally and
     /// must not fall through to hosted authorization forwarding.

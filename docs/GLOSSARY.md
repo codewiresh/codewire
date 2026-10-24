@@ -124,7 +124,10 @@ RPC and receives only typed identity, organization, role, and credential-kind
 metadata. It does not store that credential. For a native VM, a confined
 one-shot enrollment issuer on the host uses the selected owner login to mint
 one narrow node enrollment and transfers it directly to the Mesh transport.
-Neither the owner login nor a workload-provider secret enters the VM.
+Neither the owner login nor a workload-provider secret enters the VM. A hosted
+environment's daemon gets a one-use enrollment code for its own node from
+orchestration, which Mesh redeems through orchestration and rechecks at least
+every 60 seconds; no user credential enters the Sandbox.
 
 Rust CLI config and environment inputs are Mesh-only: use
 `CODEWIRE_MESH_URL`, `CODEWIRE_MESH_AUTH_TOKEN`, `CODEWIRE_MESH_NETWORK`,

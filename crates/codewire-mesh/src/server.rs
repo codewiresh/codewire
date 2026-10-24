@@ -24,12 +24,19 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
-    fn new(config: Config, store: SharedStore) -> Self {
+    pub(crate) fn new(config: Config, store: SharedStore) -> Self {
         let mesh_authorization = MeshAuthorizationAdapter::from_config(
             config.mesh_authorization.as_ref(),
             config.local_authorization.as_ref(),
         );
-        let product = MeshProductService::new(store.clone(), mesh_authorization);
+        // Hosted Mesh answers hosted environment members through orchestration
+        // (#3350); a standalone Mesh has no environments.
+        let environment_members = config
+            .mesh_authorization
+            .as_ref()
+            .and_then(crate::environment_members::EnvironmentMembersClient::from_config);
+        let product = MeshProductService::new(store.clone(), mesh_authorization)
+            .with_environment_members(environment_members);
         Self {
             config,
             product,
@@ -74,6 +81,11 @@ where
         }
         None => None,
     };
+    let recheck = state
+        .product
+        .environment_members()
+        .is_some()
+        .then(|| crate::environment_members::spawn_recheck(state.clone()));
     let router = router_from_state(state);
     let result = axum::serve(http_listener, router)
         .with_graceful_shutdown(shutdown)
@@ -81,6 +93,9 @@ where
         .context("serve codewire-mesh HTTP");
     if let Some(derp_verify) = derp_verify {
         derp_verify.abort();
+    }
+    if let Some(recheck) = recheck {
+        recheck.abort();
     }
     result
 }
@@ -94,7 +109,7 @@ pub fn router_with_store(config: Config, store: SharedStore) -> Router {
     router_from_state(AppState::new(config, store))
 }
 
-fn router_from_state(state: AppState) -> Router {
+pub(crate) fn router_from_state(state: AppState) -> Router {
     AppBuilder::new("mesh")
         .with_health()
         .with_connect_routes(crate::connect::router(state.clone()))

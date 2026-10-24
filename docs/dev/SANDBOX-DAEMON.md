@@ -145,6 +145,19 @@ tailnet above: another node, keys and coordinator.
   that generation. Mesh rechecks every member it holds at least every 60
   seconds: a stopped or replaced Pod's stream closes, and a destroyed or
   detached environment's node is removed.
+- A refused peer stream says why, by its Connect code:
+  - `not_found`: no such network in the organization;
+  - `unauthenticated`: the code was refused, so ask for another;
+  - `permission_denied`: the attaching user is not a network member;
+  - `failed_precondition`: a network owner revoked the node;
+  - `already_exists`: another node has the environment's name;
+  - `unavailable`: Mesh could not reach orchestration.
+
+  A stream that a recheck, a revocation or a newer stream of the same node
+  ends just closes, and the next enrollment gives the reason.
+- Network deletion removes the nodes of destroyed environments first, so they
+  never keep a network alive. A network owner's `cw network revoke` of an
+  environment's node is permanent for that network.
 - The daemon reports what it observed with `ReportMeshAttachment`. The
   environment shows the report only for its current Pod, so a new Pod reads
   as pending until its daemon reports.
