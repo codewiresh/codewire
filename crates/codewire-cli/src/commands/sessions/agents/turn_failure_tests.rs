@@ -421,6 +421,7 @@ fn running(fixture: &[Value], model: &str, effort: &str) -> (Harness, MessageRec
         stopping: false,
         noel: Default::default(),
         cw: None,
+        takedown_marker_wait: crate::commands::sessions::agents::pause::TAKEDOWN_MARKER_WAIT,
     };
     (
         Harness {

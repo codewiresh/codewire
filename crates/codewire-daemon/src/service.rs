@@ -110,6 +110,18 @@ impl DaemonServiceImpl {
         self
     }
 
+    /// The same service whose session engine bounds each host cleanup step
+    /// by `bound`; see [`SessionEngine::with_host_cleanup_bound`]. It replaces
+    /// an engine that has not started, so it is called before serving.
+    pub(crate) fn with_host_cleanup_bound(mut self, bound: std::time::Duration) -> Self {
+        self.session_engine = SessionEngine::with_host_cleanup_bound(
+            &self.config,
+            self.credential_bridge.clone(),
+            bound,
+        );
+        self
+    }
+
     fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
         let expected = self.config.auth_token.expose_secret();
         let Some(actual) = request

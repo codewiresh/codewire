@@ -1521,8 +1521,15 @@ mod tests {
             stopping: false,
             noel: Recovery::default(),
             cw: env::current_exe().ok(),
+            takedown_marker_wait: HANG,
         }
     }
+
+    /// Replaces the product's three-second takedown marker wait in tests
+    /// whose subject is not that bound. It only turns a hang into a failure:
+    /// a stalled CI slot spent the 3 s, and "at once" there means short of
+    /// this bound, never a wall-clock guess.
+    pub(super) const HANG: Duration = Duration::from_secs(60);
 
     impl Harness {
         /// The driver crashes and a new one starts on the same records.

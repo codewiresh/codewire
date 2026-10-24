@@ -2502,6 +2502,7 @@ async fn run_agent_driver_inner(args: AgentDriverArgs, platform: bool) -> anyhow
         stopping: false,
         noel: noel::Recovery::default(),
         cw: env::current_exe().ok(),
+        takedown_marker_wait: pause::TAKEDOWN_MARKER_WAIT,
     };
     driver.run().await
 }
@@ -3246,6 +3247,9 @@ struct Driver {
     /// Linux names an executable replaced on disk `PATH (deleted)` from then
     /// on. noel's delegation skill names it.
     cw: Option<PathBuf>,
+    /// How long a stop signal with nothing recorded waits for the takedown
+    /// marker: [`pause::TAKEDOWN_MARKER_WAIT`] in the product.
+    takedown_marker_wait: Duration,
 }
 
 impl Driver {

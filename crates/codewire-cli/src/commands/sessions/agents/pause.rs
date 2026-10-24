@@ -405,10 +405,11 @@ impl Driver {
     /// from an earlier takedown, so only the marker counts for it.
     ///
     /// With neither, the signal is not the daemon's: the driver waits at
-    /// most [`TAKEDOWN_MARKER_WAIT`] for the marker of a daemon that the
+    /// most its takedown marker wait, [`TAKEDOWN_MARKER_WAIT`] in the
+    /// product, for the marker of a daemon that the
     /// same host shutdown signalled, or for an explicit stop to be recorded.
     async fn taken_down(&self, message_id: &str, active: bool) -> bool {
-        let deadline = tokio::time::Instant::now() + TAKEDOWN_MARKER_WAIT;
+        let deadline = tokio::time::Instant::now() + self.takedown_marker_wait;
         loop {
             if self.explicitly_stopped(message_id) {
                 return false;

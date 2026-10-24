@@ -1,9 +1,15 @@
 use super::*;
 
+/// Replaces the stop interrupt's product bounds in tests whose subject is
+/// neither. It only turns a hang into a failure: a stalled CI slot spent the
+/// 1 s run wait, and "at once" here means short of this bound.
+const HANG: Duration = Duration::from_secs(60);
+
 struct Fixture {
     _temp: tempfile::TempDir,
     environment: DriverEnvironment,
     scope: Scope,
+    bounds: StopInterruptBounds,
 }
 impl Fixture {
     fn new() -> Self {
@@ -26,6 +32,10 @@ impl Fixture {
                 grant_id: uuid::Uuid::new_v4().to_string(),
                 grant_revision: 1,
             },
+            bounds: StopInterruptBounds {
+                run_wait: HANG,
+                settle: HANG,
+            },
         }
     }
     fn origin(&self) -> Origin {
@@ -36,9 +46,12 @@ impl Fixture {
         }
     }
     fn run(&self, request: Request) -> anyhow::Result<Value> {
-        handle(&self.environment, request, &|agent| {
-            Ok(PathBuf::from(format!("/synthetic/bin/{}", agent.name())))
-        })
+        handle_within(
+            &self.environment,
+            request,
+            &|agent| Ok(PathBuf::from(format!("/synthetic/bin/{}", agent.name()))),
+            self.bounds,
+        )
     }
     fn prepare(&self, parent: Option<(&str, u64)>, prompt: bool) -> String {
         let origin = self.origin();
@@ -145,6 +158,7 @@ impl Fixture {
             stopping: false,
             noel: noel::Recovery::default(),
             cw: None,
+            takedown_marker_wait: pause::TAKEDOWN_MARKER_WAIT,
         }
     }
 }
@@ -1105,7 +1119,10 @@ fn stop_interrupt_is_recorded_only_for_a_noel_run_and_codex_and_claude_get_nothi
 
 #[test]
 fn stop_interrupt_waits_briefly_for_a_starting_run_to_report_its_id() {
-    let f = Fixture::new();
+    let mut f = Fixture::new();
+    // The cases with no ID are about the run wait's bound, so they run on
+    // the product's; the run that reports one uses the hang guard.
+    f.bounds.run_wait = STOP_INTERRUPT_RUN_WAIT;
     let (driver, session) = f.local(AgentKind::Noel, None);
     let task = f.busy(&driver, &session, None);
     let started = Instant::now();
@@ -1144,6 +1161,8 @@ fn stop_interrupt_waits_briefly_for_a_starting_run_to_report_its_id() {
         stop_interrupt_id(&cut.id)
     );
 
+    // A run that reports its ID during the wait gets it.
+    f.bounds.run_wait = HANG;
     let (driver, session) = f.local(AgentKind::Noel, None);
     let task = f.busy(&driver, &session, None);
     let reporting = {
@@ -1224,8 +1243,9 @@ fn stop_interrupt_wait_ends_when_the_message_ends_and_its_parent_notification_is
         json!({"settled": true, "message_state": "interrupted", "interrupt_state": "completed",
             "notification_state": "pipe_written"})
     );
+    // It ended on the event: at its bound, the message would not be settled.
     let waited = started.elapsed();
-    assert!(waited >= Duration::from_millis(450) && waited < Duration::from_secs(5));
+    assert!(waited >= Duration::from_millis(450) && waited < f.bounds.settle);
 
     // An interrupt the driver or noel refused leaves the run going, so the
     // wait ends at once rather than at its bound.
@@ -1246,7 +1266,7 @@ fn stop_interrupt_wait_ends_when_the_message_ends_and_its_parent_notification_is
         json!({"settled": false, "message_state": "running", "interrupt_state": "error",
             "notification_state": null})
     );
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(started.elapsed() < f.bounds.settle);
 
     // Only a stop interrupt is awaited.
     let mut other = MessageRecord::new(&driver, &session, MessageAction::Interrupt, String::new());

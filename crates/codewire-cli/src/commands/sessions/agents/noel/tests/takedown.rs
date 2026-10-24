@@ -301,6 +301,8 @@ async fn a_signal_with_nothing_recorded_ends_the_run_unknown_once_no_marker_came
     let mut h = host(AgentKind::Noel);
     let parent = h.with_parent();
     let main = h.running("task", Some(RUN));
+    // This test is about the wait's bound, so it runs on the product's.
+    h.driver.takedown_marker_wait = pause::TAKEDOWN_MARKER_WAIT;
     let started = Instant::now();
     h.driver
         .stopped(&mut signalled(), STOPPED.into(), true)
@@ -381,10 +383,7 @@ async fn an_explicit_stop_never_pauses_a_message_even_while_its_environment_is_t
             .stopped(&mut signalled(), STOPPED.into(), true)
             .await
             .unwrap();
-        assert!(
-            started.elapsed() < pause::TAKEDOWN_MARKER_WAIT,
-            "{evidence:?}"
-        );
+        assert!(started.elapsed() < HANG, "{evidence:?}");
         let ended = h.load(&main.id);
         assert_eq!(
             (ended.state, ended.error.as_deref()),
@@ -419,7 +418,7 @@ async fn an_explicit_stop_whose_helper_failed_never_pauses_or_resumes_the_messag
                 .stopped(&mut signalled(), STOPPED.into(), true)
                 .await
                 .unwrap();
-            assert!(started.elapsed() < pause::TAKEDOWN_MARKER_WAIT);
+            assert!(started.elapsed() < HANG);
             assert_eq!(h.load(&main.id).error.as_deref(), Some(STOPPED_UNKNOWN));
         }
         assert!(stop_intended(&h), "{killed_first}");
@@ -752,7 +751,7 @@ async fn an_explicit_stop_during_the_handshake_ends_a_paused_message_at_once() {
         .stopped(&mut signalled(), "startup stopped by SIGTERM".into(), true)
         .await
         .unwrap();
-    assert!(started.elapsed() < pause::TAKEDOWN_MARKER_WAIT);
+    assert!(started.elapsed() < HANG);
     let ended = h.load(&main.id);
     assert_eq!(
         (ended.state, ended.error.as_deref()),
@@ -960,7 +959,7 @@ async fn codex_claude_and_a_noel_that_cannot_resume_keep_their_stop_in_a_takedow
             "{agent:?}"
         );
         assert_eq!(told(&parent, &main.id), (0, 1), "{agent:?}");
-        assert!(started.elapsed() < Duration::from_secs(5), "{agent:?}");
+        assert!(started.elapsed() < HANG, "{agent:?}");
         // Their records and state keep their bytes: nothing about a pause.
         for path in [
             message_path(&h.driver.dir, &main.id),
@@ -1071,7 +1070,7 @@ async fn a_signal_with_nothing_recorded_waits_for_the_marker_its_daemon_writes()
         .unwrap();
     marked.join().unwrap();
     assert!(started.elapsed() >= late);
-    assert!(started.elapsed() < pause::TAKEDOWN_MARKER_WAIT);
+    assert!(started.elapsed() < HANG);
     assert_eq!(h.load(&main.id).state, MessageState::Paused);
     assert_eq!(told(&parent, &main.id), (1, 0));
 }
@@ -1099,7 +1098,7 @@ async fn an_explicit_stop_recorded_during_the_wait_ends_it() {
         .await
         .unwrap();
     recorded.join().unwrap();
-    assert!(started.elapsed() < pause::TAKEDOWN_MARKER_WAIT);
+    assert!(started.elapsed() < HANG);
     assert_eq!(h.load(&main.id).state, MessageState::Unknown);
     assert_eq!(told(&parent, &main.id), (0, 1));
 }

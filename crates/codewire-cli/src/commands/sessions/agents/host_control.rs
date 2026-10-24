@@ -205,6 +205,21 @@ const STOP_INTERRUPT_RUN_WAIT: Duration = Duration::from_secs(1);
 const STOP_INTERRUPT_SETTLE: Duration = Duration::from_secs(10);
 const STOP_INTERRUPT_POLL: Duration = Duration::from_millis(25);
 
+/// The bounds of an explicit stop's interrupt: how long it waits for the run
+/// to report its ID, and for the interrupted message to settle.
+#[derive(Clone, Copy, Debug)]
+struct StopInterruptBounds {
+    run_wait: Duration,
+    settle: Duration,
+}
+
+impl StopInterruptBounds {
+    const PRODUCT: Self = Self {
+        run_wait: STOP_INTERRUPT_RUN_WAIT,
+        settle: STOP_INTERRUPT_SETTLE,
+    };
+}
+
 #[derive(clap::Parser)]
 struct Arguments {
     #[arg(long)]
@@ -543,6 +558,18 @@ fn handle(
     environment: &DriverEnvironment,
     request: Request,
     resolve: &dyn Fn(AgentKind) -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<Value> {
+    handle_within(environment, request, resolve, StopInterruptBounds::PRODUCT)
+}
+
+/// [`handle`] with `bounds` in place of the stop interrupt's product bounds.
+/// A test whose subject is neither lengthens them into a hang guard, so a
+/// stalled CI slot cannot spend them.
+fn handle_within(
+    environment: &DriverEnvironment,
+    request: Request,
+    resolve: &dyn Fn(AgentKind) -> anyhow::Result<PathBuf>,
+    bounds: StopInterruptBounds,
 ) -> anyhow::Result<Value> {
     // A trusted host runs the user's own installed client.
     match request {
@@ -915,12 +942,18 @@ fn handle(
         Request::InterruptBeforeStop {
             driver_id,
             session_id,
-        } => interrupt_before_stop(environment, &driver_id, &session_id),
+        } => interrupt_before_stop(environment, &driver_id, &session_id, bounds.run_wait),
         Request::AwaitInterruptBeforeStop {
             driver_id,
             session_id,
             message_id,
-        } => await_interrupt_before_stop(environment, &driver_id, &session_id, &message_id),
+        } => await_interrupt_before_stop(
+            environment,
+            &driver_id,
+            &session_id,
+            &message_id,
+            bounds.settle,
+        ),
         Request::PauseBeforeShutdown {
             driver_id,
             session_id,
@@ -987,6 +1020,7 @@ fn interrupt_before_stop(
     environment: &DriverEnvironment,
     driver: &str,
     session: &str,
+    run_wait: Duration,
 ) -> anyhow::Result<Value> {
     let (dir, config) = bound_conversation(environment, driver, session)?;
     let agent = config.agent;
@@ -994,7 +1028,7 @@ fn interrupt_before_stop(
     if !agent.interrupts_before_stop() {
         return Ok(nothing());
     }
-    let deadline = Instant::now() + STOP_INTERRUPT_RUN_WAIT;
+    let deadline = Instant::now() + run_wait;
     let (active, run) = loop {
         let Some(state) = current_state(&dir, driver, agent)? else {
             return Ok(nothing());
@@ -1094,6 +1128,7 @@ fn await_interrupt_before_stop(
     driver: &str,
     session: &str,
     message: &str,
+    settle: Duration,
 ) -> anyhow::Result<Value> {
     let (dir, config) = bound_conversation(environment, driver, session)?;
     nonnil_id(message)?;
@@ -1108,7 +1143,7 @@ fn await_interrupt_before_stop(
             && interrupt.id == stop_interrupt_id(&active),
         "not a stop interrupt"
     );
-    let deadline = Instant::now() + STOP_INTERRUPT_SETTLE;
+    let deadline = Instant::now() + settle;
     loop {
         let interrupt = load_message(&dir, message)?;
         let run = load_message(&dir, &active)?;

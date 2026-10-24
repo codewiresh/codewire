@@ -48,9 +48,9 @@ pub use config::{
 pub use durable_session::NeverRestarts;
 pub use server::serve_grpc_with_incoming;
 #[cfg(target_os = "linux")]
-pub use server::serve_host_control_grpc_with_incoming;
-#[cfg(target_os = "linux")]
 pub use server::{
     serve_bound_hosted_grpc_with_incoming, serve_hosted_grpc_with_incoming,
     serve_native_grpc_with_incoming,
 };
+#[cfg(target_os = "linux")]
+pub use server::{serve_host_control_grpc_with_incoming, serve_host_control_grpc_within};

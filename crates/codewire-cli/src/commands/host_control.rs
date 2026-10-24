@@ -335,6 +335,48 @@ mod tests {
         assert!(crate::Cli::try_parse_from(missing).is_err());
     }
 
+    /// Bounds a wait on an event, so a hang fails instead of stalling the run.
+    /// It is never the expected duration: a loaded CI slot can stall for
+    /// seconds.
+    const HANG: Duration = Duration::from_secs(120);
+
+    /// Mutates and returns the request's outcome. The daemon answers with
+    /// the receipt it has after its RPC join bound, which on a stalled slot
+    /// can still be unsettled; the outcome is then the settled receipt.
+    async fn outcome(
+        client: &codewire_daemon::client::HostControlClient,
+        request: v1::HostControlMutationRequest,
+    ) -> v1::HostControlReceipt {
+        let receipt = client.mutate(request.clone()).await.unwrap();
+        let unsettled = |receipt: &v1::HostControlReceipt| {
+            [
+                v1::HostControlRequestPhase::Pending as i32,
+                v1::HostControlRequestPhase::Issued as i32,
+            ]
+            .contains(&receipt.phase)
+        };
+        if !unsettled(&receipt) {
+            return receipt;
+        }
+        tokio::time::timeout(HANG, async {
+            loop {
+                let receipt = client
+                    .observe(v1::HostControlObserveRequest {
+                        request_id: request.request_id.clone(),
+                        scope: request.scope.clone(),
+                    })
+                    .await
+                    .unwrap();
+                if !unsettled(&receipt) {
+                    return receipt;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn host_control_private_socket_round_trip_never_starts_or_replays_an_owner() {
         use tokio_stream::wrappers::UnixListenerStream;
@@ -382,14 +424,18 @@ mod tests {
         fs::set_permissions(&socket, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         let (closing, closed) = tokio::sync::oneshot::channel();
         let binding = codewire_daemon::host_control::HostControlBinding::new(id.clone()).unwrap();
+        // The host sessions' one-second cleanup step bound ran out on a
+        // loaded CI slot and a confirmed stop read as unknown. This test is
+        // not about that bound, so it is a hang guard here.
         let server = tokio::spawn(async move {
-            codewire_daemon::serve_host_control_grpc_with_incoming(
+            codewire_daemon::serve_host_control_grpc_within(
                 config,
                 binding,
                 UnixListenerStream::new(listener),
                 async {
                     let _ = closed.await;
                 },
+                HANG,
             )
             .await
         });
@@ -397,7 +443,7 @@ mod tests {
         // while the daemon launched the owner (#3231). This proves the
         // protocol, not its latency; the bound only turns a hang into a
         // failure.
-        let client = host_control_client_within(&environment, Duration::from_secs(120))
+        let client = host_control_client_within(&environment, HANG)
             .await
             .unwrap();
         let grant = uuid::Uuid::new_v4().to_string();
@@ -442,7 +488,7 @@ mod tests {
                 },
             )),
         };
-        let launched = client.mutate(request.clone()).await.unwrap();
+        let launched = outcome(&client, request.clone()).await;
         assert_eq!(
             launched.phase,
             v1::HostControlRequestPhase::Completed as i32
@@ -456,7 +502,7 @@ mod tests {
             session_id: launched.session_id.clone(),
             ..Default::default()
         };
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(HANG, async {
             loop {
                 if client.get(read.clone()).await.unwrap().output_end_offset == 13 {
                     break;
@@ -492,8 +538,9 @@ mod tests {
             .unwrap();
         assert_eq!(page.sessions.len(), 1);
         assert!(page.next_session_id.is_empty());
-        let stopped = client
-            .mutate(v1::HostControlMutationRequest {
+        let stopped = outcome(
+            &client,
+            v1::HostControlMutationRequest {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 scope: Some(scope.clone()),
                 operation: Some(v1::host_control_mutation_request::Operation::Stop(
@@ -502,9 +549,9 @@ mod tests {
                         expected_launch_generation: 1,
                     },
                 )),
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await;
         assert_eq!(stopped.phase, v1::HostControlRequestPhase::Completed as i32);
         assert!(!stopped.cleanup_unknown);
         client
