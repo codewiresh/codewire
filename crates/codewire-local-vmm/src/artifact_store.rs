@@ -1422,6 +1422,67 @@ fn valid_ingest_name(name: &str, prefix: &str) -> bool {
         .is_some_and(|(value, uuid)| uuid.to_string() == value)
 }
 
+/// Which store directory an unsafe-directory refusal is about, as a name
+/// compiled into this binary in the diagnostic log's `[a-z_]` vocabulary
+/// (#3271): the store itself or one of its two directories. `None` for any
+/// other failure.
+pub(crate) fn unsafe_store_location(error: &RuntimeArtifactStoreError) -> Option<&'static str> {
+    let RuntimeArtifactStoreError::Path(PathError::UnsafeDirectory { path, .. }) = error else {
+        return None;
+    };
+    let name = path.file_name().and_then(|name| name.to_str());
+    let parent = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str());
+    Some(match (parent, name) {
+        (Some(STORE_DIRECTORY), Some(BLOBS_DIRECTORY)) => "runtime_artifacts_blobs",
+        (Some(STORE_DIRECTORY), Some(GENERATIONS_DIRECTORY)) => "runtime_artifacts_generations",
+        (_, Some(STORE_DIRECTORY)) => "runtime_artifacts",
+        _ => "runtime_artifacts_other",
+    })
+}
+
+/// Each runtime artifact store directory under `engine_root` that is not a
+/// directory of this user's with mode 0700, as one line naming its path,
+/// what it is and what it must be. Read-only: nothing is repaired, since a
+/// loosened private store may have been tampered with (#3271).
+pub fn unsafe_runtime_artifact_store_directories(engine_root: &Path) -> Vec<String> {
+    let store = engine_root.join(STORE_DIRECTORY);
+    [
+        store.clone(),
+        store.join(BLOBS_DIRECTORY),
+        store.join(GENERATIONS_DIRECTORY),
+    ]
+    .into_iter()
+    .filter_map(|path| {
+        let metadata = fs::symlink_metadata(&path).ok()?;
+        let mode = metadata.mode() & 0o7777;
+        let uid = metadata.uid();
+        let owner = current_uid();
+        if metadata.is_dir() && uid == owner && mode & 0o777 == 0o700 {
+            return None;
+        }
+        let kind = if metadata.is_dir() {
+            "a directory"
+        } else if metadata.file_type().is_symlink() {
+            "a symlink"
+        } else {
+            "not a directory"
+        };
+        let fix = if metadata.is_dir() && uid == owner {
+            format!("; fix it with `chmod 700 {}`", path.display())
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "{} is {kind} with mode {mode:04o} owned by uid {uid}; it must be a directory with mode 0700 owned by uid {owner}{fix}",
+            path.display()
+        ))
+    })
+    .collect()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RuntimeArtifactStoreError {
     #[error(transparent)]
@@ -1481,6 +1542,44 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let root = PrivateRoot::open(parent.path()).unwrap();
         (parent, root)
+    }
+
+    /// #3271: a loosened store directory is refused, the refusal names
+    /// which one, and the read-only inspection names its path, its mode and
+    /// the fix; a private store passes both.
+    #[test]
+    fn a_loosened_store_directory_is_named_with_its_mode() {
+        let (parent, engine) = private_root();
+        RuntimeArtifactStore::create(&engine).unwrap();
+        assert!(unsafe_runtime_artifact_store_directories(parent.path()).is_empty());
+
+        let blobs = parent.path().join(STORE_DIRECTORY).join(BLOBS_DIRECTORY);
+        fs::set_permissions(&blobs, fs::Permissions::from_mode(0o755)).unwrap();
+        let refused = RuntimeArtifactStore::create(&engine).err().unwrap();
+        assert_eq!(
+            unsafe_store_location(&refused),
+            Some("runtime_artifacts_blobs")
+        );
+        assert!(
+            refused
+                .to_string()
+                .contains("found a directory with mode 0755")
+                && refused.to_string().contains("with mode 0700"),
+            "{refused}"
+        );
+        let uid = current_uid();
+        assert_eq!(
+            unsafe_runtime_artifact_store_directories(parent.path()),
+            [format!(
+                "{} is a directory with mode 0755 owned by uid {uid}; it must be a directory with mode 0700 owned by uid {uid}; fix it with `chmod 700 {}`",
+                blobs.display(),
+                blobs.display()
+            )]
+        );
+        assert_eq!(
+            unsafe_store_location(&RuntimeArtifactStoreError::InvalidGeneration),
+            None
+        );
     }
 
     fn spec(path: &str, bytes: &[u8]) -> ArtifactSpec {

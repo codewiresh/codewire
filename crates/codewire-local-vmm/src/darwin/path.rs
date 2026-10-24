@@ -752,10 +752,32 @@ pub fn current_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// The refusal for a directory that is not this user's own with exactly
+/// `expected_mode`, naming what was found (#3271).
+fn unsafe_directory(path: &Path, metadata: &Metadata, expected_mode: u32) -> PathError {
+    let file_type = metadata.file_type();
+    PathError::UnsafeDirectory {
+        path: path.to_owned(),
+        found_kind: if file_type.is_dir() {
+            "directory"
+        } else if file_type.is_file() {
+            "file"
+        } else if file_type.is_symlink() {
+            "symlink"
+        } else {
+            "special file"
+        },
+        found_mode: metadata.mode() & 0o7777,
+        found_uid: metadata.uid(),
+        expected_mode,
+        expected_uid: current_uid(),
+    }
+}
+
 fn validate_directory(file: &File, path: &Path, mode: u32) -> Result<(), PathError> {
     let metadata = file.metadata().map_err(|error| io_at(path, error))?;
     if !metadata.is_dir() || metadata.uid() != current_uid() || metadata.mode() & 0o777 != mode {
-        return Err(PathError::UnsafeDirectory(path.to_owned()));
+        return Err(unsafe_directory(path, &metadata, mode));
     }
     acl::require_empty(file).map_err(|error| io_at(path, error))
 }
@@ -884,8 +906,17 @@ pub enum PathError {
     InvalidRelativePath(PathBuf),
     #[error("invalid filesystem permissions: {0:o}")]
     InvalidPermissions(u32),
-    #[error("unsafe private directory: {0}")]
-    UnsafeDirectory(PathBuf),
+    #[error(
+        "unsafe private directory {path}: found a {found_kind} with mode {found_mode:04o} owned by uid {found_uid}; it must be a directory with mode {expected_mode:04o} owned by uid {expected_uid}"
+    )]
+    UnsafeDirectory {
+        path: PathBuf,
+        found_kind: &'static str,
+        found_mode: u32,
+        found_uid: u32,
+        expected_mode: u32,
+        expected_uid: u32,
+    },
     #[error("unsafe private regular file: {0}")]
     UnsafeFile(PathBuf),
     #[error("unsafe private Unix socket: {0}")]

@@ -221,6 +221,12 @@ impl NativeRuntimeConfig {
         self.root.join("engine")
     }
 
+    /// Each runtime artifact store directory that is not this user's own with
+    /// mode 0700, one line each naming its path, mode and owner (#3271).
+    pub fn unsafe_runtime_artifact_store_directories(&self) -> Vec<String> {
+        crate::artifact_store::unsafe_runtime_artifact_store_directories(&self.engine_root())
+    }
+
     fn credential_authority_config(&self) -> AuthorityRuntimeConfig {
         AuthorityRuntimeConfig {
             root: self.credential_authority_root.clone(),
@@ -759,11 +765,10 @@ fn collect_stores(
 ) -> Result<(), SupervisorError> {
     let engine = PrivateRoot::open(engine_root)?;
     collect_content(&engine, &retained.content)?;
-    let artifacts =
-        RuntimeArtifactStore::create(&engine).map_err(|_| SupervisorError::ArtifactStore)?;
+    let artifacts = RuntimeArtifactStore::create(&engine).map_err(artifact_store_error)?;
     let _collected = artifacts
         .collect_unreferenced(&retained.artifacts)
-        .map_err(|_| SupervisorError::ArtifactStore)?;
+        .map_err(artifact_store_error)?;
     Ok(())
 }
 
@@ -1864,10 +1869,10 @@ impl Supervisor {
     async fn admit_current_artifact_generation(&self) -> Result<String, SupervisorError> {
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         RuntimeArtifactStore::create(&engine)
-            .map_err(|_| SupervisorError::ArtifactStore)?
+            .map_err(artifact_store_error)?
             .admit_source(&self.config.artifact_lock, &self.config.artifact_root)
             .await
-            .map_err(|_| SupervisorError::ArtifactStore)
+            .map_err(artifact_store_error)
     }
 }
 
@@ -1895,10 +1900,10 @@ impl Supervisor {
     ) -> Result<(), SupervisorError> {
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let _ = RuntimeArtifactStore::create(&engine)
-            .map_err(|_| SupervisorError::ArtifactStore)?
+            .map_err(artifact_store_error)?
             .open_generation(artifact_generation)
             .await
-            .map_err(|_| SupervisorError::ArtifactStore)?;
+            .map_err(artifact_store_error)?;
         Ok(())
     }
 
@@ -1908,17 +1913,17 @@ impl Supervisor {
         let artifact_generation = self.admit_current_artifact_generation().await?;
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         RuntimeArtifactStore::create(&engine)
-            .map_err(|_| SupervisorError::ArtifactStore)?
+            .map_err(artifact_store_error)?
             .open_generation(&artifact_generation)
             .await
-            .map_err(|_| SupervisorError::ArtifactStore)?
+            .map_err(artifact_store_error)?
             .require_current_guest_seed_abi()?;
         if fs::symlink_metadata(self.config.cw_runtime_lock()).is_ok() {
             RuntimeArtifactStore::create(&engine)
-                .map_err(|_| SupervisorError::ArtifactStore)?
+                .map_err(artifact_store_error)?
                 .open_generation(&artifact_generation)
                 .await
-                .map_err(|_| SupervisorError::ArtifactStore)?
+                .map_err(artifact_store_error)?
                 .require_live_cw_runtime_publisher()?;
         }
         #[cfg(target_os = "linux")]
@@ -3477,6 +3482,9 @@ impl SupervisorCore {
         if let Some(code) = self.recorded_runner_error_code(name) {
             fields.push(("runner_error", LogField::Code(code)));
         }
+        if let SupervisorError::UnsafeRuntimeArtifactStore { location } = error {
+            fields.push(("location", LogField::Name(location)));
+        }
         fields.push(("error_code", LogField::Code(error_code)));
         log.record("operation_failed", &fields);
     }
@@ -4154,10 +4162,10 @@ impl Supervisor {
         }
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         RuntimeArtifactStore::create(&engine)
-            .map_err(|_| SupervisorError::ArtifactStore)?
+            .map_err(artifact_store_error)?
             .open_generation(generation)
             .await
-            .map_err(|_| SupervisorError::ArtifactStore)?
+            .map_err(artifact_store_error)?
             .require_vm_only_guest()?;
         Ok(())
     }
@@ -4168,10 +4176,10 @@ impl Supervisor {
     ) -> Result<(), SupervisorError> {
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         RuntimeArtifactStore::create(&engine)
-            .map_err(|_| SupervisorError::ArtifactStore)?
+            .map_err(artifact_store_error)?
             .open_generation(generation)
             .await
-            .map_err(|_| SupervisorError::ArtifactStore)?
+            .map_err(artifact_store_error)?
             .require_current_guest_seed_abi()?;
         Ok(())
     }
@@ -4203,10 +4211,10 @@ impl Supervisor {
         if self.environment(name)?.cw_runtime.is_some() {
             let engine = PrivateRoot::open(&self.config.engine_root())?;
             RuntimeArtifactStore::create(&engine)
-                .map_err(|_| SupervisorError::ArtifactStore)?
+                .map_err(artifact_store_error)?
                 .open_generation(&generation)
                 .await
-                .map_err(|_| SupervisorError::ArtifactStore)?
+                .map_err(artifact_store_error)?
                 .require_live_cw_runtime_publisher()?;
         }
         self.admit_environment_cw_runtime(name).await?;
@@ -9545,6 +9553,11 @@ pub enum SupervisorError {
     Artifact(#[from] crate::artifact::ArtifactError),
     #[error("runtime artifact store operation failed")]
     ArtifactStore,
+    /// A runtime artifact store directory is not this user's own with mode
+    /// 0700 (#3271). `location` names which, as a name compiled into this
+    /// binary; the CLI reads the directories to name the path and modes.
+    #[error("runtime artifact store directory {location} is not private")]
+    UnsafeRuntimeArtifactStore { location: &'static str },
     #[error(transparent)]
     CwRuntime(#[from] CwRuntimeError),
     #[error("cw runtime catalog preparation task failed")]
@@ -9588,8 +9601,25 @@ pub enum SupervisorError {
 // Persist only closed classes, never Display/Debug or a source chain: nested
 // registry, skill and filesystem errors can contain arbitrary upstream bytes
 // or owner paths. The existing operation error_code is the diagnostic surface.
+/// A runtime artifact store failure as a supervisor error, keeping which
+/// store directory was not private (#3271) and nothing else of its text.
+fn artifact_store_error(
+    error: crate::artifact_store::RuntimeArtifactStoreError,
+) -> SupervisorError {
+    match crate::artifact_store::unsafe_store_location(&error) {
+        Some(location) => SupervisorError::UnsafeRuntimeArtifactStore { location },
+        None => SupervisorError::ArtifactStore,
+    }
+}
+
+/// The operation error code for a runtime artifact store directory that is
+/// not private, whichever operation met it (#3271).
+const UNSAFE_RUNTIME_ARTIFACT_STORE_CODE: &str =
+    crate::supervisor_client::UNSAFE_RUNTIME_ARTIFACT_STORE_ERROR_CODE;
+
 fn create_failure_code(error: &SupervisorError) -> &'static str {
     match error {
+        SupervisorError::UnsafeRuntimeArtifactStore { .. } => UNSAFE_RUNTIME_ARTIFACT_STORE_CODE,
         SupervisorError::AlreadyExists(_) => "create_name_taken",
         SupervisorError::GuestDockerToolingMissing => "create_guest_docker_tooling_missing",
         SupervisorError::HostPortUnavailable => "create_host_port_unavailable",
@@ -9721,7 +9751,9 @@ fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
         SupervisorError::Serve => "serve",
         SupervisorError::Runner(_) => "runner",
         SupervisorError::Artifact(_) => "artifact",
-        SupervisorError::ArtifactStore => "artifact_store",
+        SupervisorError::ArtifactStore | SupervisorError::UnsafeRuntimeArtifactStore { .. } => {
+            "artifact_store"
+        }
         SupervisorError::CwRuntime(_) => "cw_runtime",
         SupervisorError::CwRuntimeProvisionTask => "cw_runtime_task",
         SupervisorError::ReplacementPreflight(_) => "replacement_preflight",
@@ -9757,6 +9789,9 @@ fn lifecycle_failure_code(
     error: &SupervisorError,
     runner_error_code: Option<&str>,
 ) -> String {
+    if matches!(error, SupervisorError::UnsafeRuntimeArtifactStore { .. }) {
+        return UNSAFE_RUNTIME_ARTIFACT_STORE_CODE.to_owned();
+    }
     let cause = match (error, runner_error_code) {
         (SupervisorError::VmStart(_), Some(code))
             if runner_event_error_code_valid(code)
@@ -18067,6 +18102,37 @@ mod tests {
             );
             assert!(!code.contains(CANARY));
         }
+    }
+
+    /// #3271: a store directory that is not private fails any operation
+    /// with one closed code, so the CLI can name the directory; every other
+    /// store failure keeps its generic cause.
+    #[test]
+    fn an_unsafe_runtime_artifact_store_has_its_own_code() {
+        let unsafe_store = SupervisorError::UnsafeRuntimeArtifactStore {
+            location: "runtime_artifacts_blobs",
+        };
+        assert_eq!(
+            create_failure_code(&unsafe_store),
+            "runtime_artifact_store_unsafe"
+        );
+        for prefix in ["start", "resize", "workspace_update"] {
+            assert_eq!(
+                lifecycle_failure_code(prefix, &unsafe_store, None),
+                "runtime_artifact_store_unsafe"
+            );
+        }
+        assert_eq!(lifecycle_failure_cause(&unsafe_store), "artifact_store");
+        assert!(matches!(
+            artifact_store_error(
+                crate::artifact_store::RuntimeArtifactStoreError::InvalidGeneration
+            ),
+            SupervisorError::ArtifactStore
+        ));
+        assert_eq!(
+            create_failure_code(&SupervisorError::ArtifactStore),
+            create_failure_code(&SupervisorError::Serve)
+        );
     }
 
     #[test]

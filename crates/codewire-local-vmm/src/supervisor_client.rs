@@ -159,7 +159,7 @@ impl NativeSupervisorClient {
                 " Whether the failed environment was removed is unknown; check `cw --local ls` and remove {name} if it is listed."
             ),
         };
-        Status::new(failure.code(), format!("{}{outcome}", failure.message()))
+        with_outcome(&failure, &outcome)
     }
 
     pub async fn list(&mut self) -> Result<Vec<v1::Environment>, Status> {
@@ -679,6 +679,14 @@ pub(crate) fn operation_outcome(operation: v1::Operation) -> Result<v1::Operatio
     }
 }
 
+/// `failure` with `outcome` appended to its message, keeping its metadata, so
+/// the operation's error code still reaches `operation_error_code` (#3271).
+fn with_outcome(failure: &Status, outcome: &str) -> Status {
+    let mut status = Status::new(failure.code(), format!("{}{outcome}", failure.message()));
+    *status.metadata_mut() = failure.metadata().clone();
+    status
+}
+
 /// The error code of a failed lifecycle operation, when `status` reports one,
 /// so a caller can name what failed (#3209).
 pub fn operation_error_code(status: &Status) -> Option<&str> {
@@ -689,10 +697,18 @@ pub fn operation_error_code(status: &Status) -> Option<&str> {
         .ok()
 }
 
+/// The error code of an operation that met a runtime artifact store directory
+/// that is not private (#3271). `NativeRuntimeConfig::
+/// unsafe_runtime_artifact_store_directories` names each one.
+pub const UNSAFE_RUNTIME_ARTIFACT_STORE_ERROR_CODE: &str = "runtime_artifact_store_unsafe";
+
 /// A plain-language reason for an operation error code, where the code alone
 /// does not tell the user what to change.
 fn operation_error_hint(error_code: &str) -> &'static str {
     match error_code {
+        UNSAFE_RUNTIME_ARTIFACT_STORE_ERROR_CODE => {
+            " (a directory of the local VM runtime store is not private: each must be yours with mode 0700, and nothing was changed)"
+        }
         "create_guest_docker_tooling_missing" => {
             " (the image has no Docker tooling; create with --no-docker or choose an image that includes Docker)"
         }

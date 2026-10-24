@@ -197,7 +197,7 @@ impl PrivateRoot {
         })?;
         if !metadata.is_dir() || metadata.uid() != current_uid() || metadata.mode() & 0o777 != mode
         {
-            return Err(PathError::UnsafeDirectory(self.path.join(relative)));
+            return Err(unsafe_directory(&self.path.join(relative), &metadata, mode));
         }
         Ok(file)
     }
@@ -616,9 +616,31 @@ pub fn current_uid() -> u32 {
 
 fn validate_private_directory(path: &Path, metadata: &Metadata) -> Result<(), PathError> {
     if !metadata.is_dir() || metadata.uid() != current_uid() || metadata.mode() & 0o777 != 0o700 {
-        return Err(PathError::UnsafeDirectory(path.to_owned()));
+        return Err(unsafe_directory(path, metadata, 0o700));
     }
     Ok(())
+}
+
+/// The refusal for a directory that is not this user's own with exactly
+/// `expected_mode`, naming what was found (#3271).
+fn unsafe_directory(path: &Path, metadata: &Metadata, expected_mode: u32) -> PathError {
+    let file_type = metadata.file_type();
+    PathError::UnsafeDirectory {
+        path: path.to_owned(),
+        found_kind: if file_type.is_dir() {
+            "directory"
+        } else if file_type.is_file() {
+            "file"
+        } else if file_type.is_symlink() {
+            "symlink"
+        } else {
+            "special file"
+        },
+        found_mode: metadata.mode() & 0o7777,
+        found_uid: metadata.uid(),
+        expected_mode,
+        expected_uid: current_uid(),
+    }
 }
 
 fn validate_relative(path: &Path) -> Result<(), PathError> {
@@ -653,8 +675,17 @@ pub enum PathError {
     InvalidRelativePath(PathBuf),
     #[error("private root creation requires an existing canonical private parent: {0}")]
     UnsafeCreateParent(PathBuf),
-    #[error("unsafe private directory metadata: {0}")]
-    UnsafeDirectory(PathBuf),
+    #[error(
+        "unsafe private directory {path}: found a {found_kind} with mode {found_mode:04o} owned by uid {found_uid}; it must be a directory with mode {expected_mode:04o} owned by uid {expected_uid}"
+    )]
+    UnsafeDirectory {
+        path: PathBuf,
+        found_kind: &'static str,
+        found_mode: u32,
+        found_uid: u32,
+        expected_mode: u32,
+        expected_uid: u32,
+    },
     #[error("unsafe private regular file metadata: {0}")]
     UnsafeFile(PathBuf),
     #[error("unsafe private Unix socket metadata: {0}")]
@@ -683,6 +714,36 @@ mod tests {
         fs::set_permissions(&root_path, fs::Permissions::from_mode(0o700)).unwrap();
         let root = PrivateRoot::open(&root_path).unwrap();
         (parent, root)
+    }
+
+    /// #3271: an unsafe directory is named with the mode and owner found and
+    /// the ones it must have.
+    #[test]
+    fn an_unsafe_directory_names_what_was_found_and_what_is_required() {
+        let (_parent, root) = root();
+        root.create_dir(Path::new("shared"), 0o755).unwrap();
+        let error = root
+            .open_private_directory(Path::new("shared"), 0o700)
+            .err()
+            .unwrap();
+        let uid = current_uid();
+        assert!(matches!(
+            &error,
+            PathError::UnsafeDirectory {
+                found_kind: "directory",
+                found_mode: 0o755,
+                expected_mode: 0o700,
+                found_uid,
+                expected_uid,
+                ..
+            } if *found_uid == uid && *expected_uid == uid
+        ));
+        assert!(
+            error.to_string().ends_with(&format!(
+                "shared: found a directory with mode 0755 owned by uid {uid}; it must be a directory with mode 0700 owned by uid {uid}"
+            )),
+            "{error}"
+        );
     }
 
     #[test]

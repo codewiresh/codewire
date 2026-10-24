@@ -3615,7 +3615,19 @@ fn strip_ascii_case_suffix<'a>(value: &'a str, suffixes: &[&str]) -> Option<&'a 
 }
 
 fn native_status(status: tonic::Status) -> anyhow::Error {
-    anyhow::anyhow!(status.message().to_owned())
+    let mut message = status.message().to_owned();
+    // The supervisor names only which store directory; the directories are
+    // this user's own, so read them here to name the path and modes (#3271).
+    if codewire_local_vmm::supervisor_client::operation_error_code(&status)
+        == Some(codewire_local_vmm::supervisor_client::UNSAFE_RUNTIME_ARTIFACT_STORE_ERROR_CODE)
+        && let Ok(config) = native_runtime_config()
+    {
+        for directory in config.unsafe_runtime_artifact_store_directories() {
+            message.push_str("\n  ");
+            message.push_str(&directory);
+        }
+    }
+    anyhow::anyhow!(message)
 }
 
 #[cfg(test)]

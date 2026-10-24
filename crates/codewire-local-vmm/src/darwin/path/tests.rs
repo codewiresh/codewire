@@ -142,7 +142,7 @@ fn nested_directory_admission_preserves_requested_mode() {
     root.ensure_dir(Path::new("shared-mode"), 0o755).unwrap();
     assert!(matches!(
         root.open_directory(Path::new("shared-mode"), 0o700),
-        Err(PathError::UnsafeDirectory(_))
+        Err(PathError::UnsafeDirectory { .. })
     ));
     let child = root
         .open_private_directory(Path::new("shared-mode"), 0o755)

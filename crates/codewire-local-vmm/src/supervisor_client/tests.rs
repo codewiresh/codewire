@@ -910,3 +910,19 @@ fn a_failed_operation_status_carries_its_error_code() {
         None
     );
 }
+
+/// #3271: a create failure gains the cleanup outcome without losing the
+/// operation's error code, which the CLI acts on.
+#[test]
+fn a_create_cleanup_outcome_keeps_the_error_code() {
+    let mut failed = operation(v1::OperationPhase::Failed);
+    failed.error_code = UNSAFE_RUNTIME_ARTIFACT_STORE_ERROR_CODE.to_owned();
+    let failure = operation_outcome(failed).unwrap_err();
+    let status = with_outcome(&failure, " No environment was kept.");
+    assert_eq!(
+        operation_error_code(&status),
+        Some(UNSAFE_RUNTIME_ARTIFACT_STORE_ERROR_CODE)
+    );
+    assert!(status.message().ends_with(" No environment was kept."));
+    assert_eq!(status.code(), failure.code());
+}
