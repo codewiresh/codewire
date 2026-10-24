@@ -547,7 +547,7 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 seed = root / "tests/fixtures/orchestration/seed.sql"
-assert hashlib.sha256(seed.read_bytes()).hexdigest() == "2e0c9c1fe32c34f455ce343d8e4500e304213ec14c039784fbad609272beed88"
+assert hashlib.sha256(seed.read_bytes()).hexdigest() == "55c03324246fe6c24a8b334ccc91a963485213d6771d1b29c5d26daa80209cbd"
 adapter = root / "tests/fixtures/orchestration/runtime-ready.sql"
 sql = adapter.read_text()
 for field in ["generation", "activity_id", "attempt", "phase", "status", "pod_uid"]:

@@ -75,17 +75,18 @@ pub use codewire_proto::codewire::v1::{
     ExecServiceClient as GeneratedExecServiceClient, ExtendEnvironmentTtlRequest,
     ExtendEnvironmentTtlResponse, FileEntry, FileServiceClient as GeneratedFileServiceClient,
     GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse,
-    GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentRequest,
-    GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse,
-    GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse,
-    GetOrganizationRequest, GetOrganizationResponse, GetSessionRequest, GetSessionResponse,
-    GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, InvitationStatus, IsolationTier,
-    LaunchSessionRequest, LaunchSessionResponse, ListApiKeysRequest, ListApiKeysResponse,
-    ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest,
-    ListEnvironmentsResponse, ListFilesRequest, ListFilesResponse, ListOrganizationsRequest,
-    ListOrganizationsResponse, ListPortsRequest, ListPortsResponse, ListPresetsRequest,
-    ListPresetsResponse, ListSessionsRequest, ListSessionsResponse, OrgInvitation, OrgRole,
-    Organization, OrganizationDeletionState, OrganizationMembership, PlanEnvironmentResizeRequest,
+    GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentProjectSpecRequest,
+    GetEnvironmentProjectSpecResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest,
+    GetEnvironmentResizeOperationResponse, GetEnvironmentResponse,
+    GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GetOrganizationRequest,
+    GetOrganizationResponse, GetSessionRequest, GetSessionResponse, GrantEnvironmentAccessRequest,
+    GrantEnvironmentAccessResponse, InvitationStatus, IsolationTier, LaunchSessionRequest,
+    LaunchSessionResponse, ListApiKeysRequest, ListApiKeysResponse, ListEnvironmentAccessRequest,
+    ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse,
+    ListFilesRequest, ListFilesResponse, ListOrganizationsRequest, ListOrganizationsResponse,
+    ListPortsRequest, ListPortsResponse, ListPresetsRequest, ListPresetsResponse,
+    ListSessionsRequest, ListSessionsResponse, OrgInvitation, OrgRole, Organization,
+    OrganizationDeletionState, OrganizationMembership, PlanEnvironmentResizeRequest,
     PlanEnvironmentResizeResponse, Port, PortAccess, PrepareComplete, Preset, ProjectAgents,
     ProjectCredentialBinding, ProjectResources, ProjectSecretBindings, ProjectSkillSelection,
     ProjectSkillSource, ProjectSpec, ProjectStoragePlacement, ProtectEnvironmentRequest,
@@ -1000,6 +1001,19 @@ impl CodewireClient {
     }
 
     /// The SSH host key recorded for the environment's current generation.
+    /// The environment's saved project spec, with declared environment
+    /// values withheld and named.
+    pub async fn get_environment_project_spec(
+        &self,
+        request: GetEnvironmentProjectSpecRequest,
+    ) -> Result<GetEnvironmentProjectSpecResponse, ClientError> {
+        self.environments
+            .get_environment_project_spec_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     pub async fn get_environment_host_key(
         &self,
         request: GetEnvironmentHostKeyRequest,

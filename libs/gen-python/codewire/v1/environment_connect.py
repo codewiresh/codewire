@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
+from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentProjectSpecRequest, GetEnvironmentProjectSpecResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -42,6 +42,9 @@ class EnvironmentService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_environment(self, request: GetEnvironmentRequest, ctx: RequestContext[GetEnvironmentRequest, GetEnvironmentResponse]) -> GetEnvironmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def get_environment_project_spec(self, request: GetEnvironmentProjectSpecRequest, ctx: RequestContext[GetEnvironmentProjectSpecRequest, GetEnvironmentProjectSpecResponse]) -> GetEnvironmentProjectSpecResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def plan_environment_resize(self, request: PlanEnvironmentResizeRequest, ctx: RequestContext[PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse]) -> PlanEnvironmentResizeResponse:
@@ -150,6 +153,16 @@ class EnvironmentServiceASGIApplication(ConnectASGIApplication[EnvironmentServic
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.get_environment,
+                ),
+                "/codewire.v1.EnvironmentService/GetEnvironmentProjectSpec": Endpoint.unary(
+                    method=MethodInfo(
+                        name="GetEnvironmentProjectSpec",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=GetEnvironmentProjectSpecRequest,
+                        output=GetEnvironmentProjectSpecResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.get_environment_project_spec,
                 ),
                 "/codewire.v1.EnvironmentService/PlanEnvironmentResize": Endpoint.unary(
                     method=MethodInfo(
@@ -456,6 +469,28 @@ class EnvironmentServiceClient(ConnectClient):
                 service_name="codewire.v1.EnvironmentService",
                 input=GetEnvironmentRequest,
                 output=GetEnvironmentResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def get_environment_project_spec(
+        self,
+        request: GetEnvironmentProjectSpecRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetEnvironmentProjectSpecResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetEnvironmentProjectSpec",
+                service_name="codewire.v1.EnvironmentService",
+                input=GetEnvironmentProjectSpecRequest,
+                output=GetEnvironmentProjectSpecResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
@@ -905,6 +940,9 @@ class EnvironmentServiceSync(Protocol):
     def get_environment(self, request: GetEnvironmentRequest, ctx: RequestContext[GetEnvironmentRequest, GetEnvironmentResponse]) -> GetEnvironmentResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def get_environment_project_spec(self, request: GetEnvironmentProjectSpecRequest, ctx: RequestContext[GetEnvironmentProjectSpecRequest, GetEnvironmentProjectSpecResponse]) -> GetEnvironmentProjectSpecResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def plan_environment_resize(self, request: PlanEnvironmentResizeRequest, ctx: RequestContext[PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse]) -> PlanEnvironmentResizeResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -1009,6 +1047,16 @@ class EnvironmentServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.get_environment,
+                ),
+                "/codewire.v1.EnvironmentService/GetEnvironmentProjectSpec": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="GetEnvironmentProjectSpec",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=GetEnvironmentProjectSpecRequest,
+                        output=GetEnvironmentProjectSpecResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.get_environment_project_spec,
                 ),
                 "/codewire.v1.EnvironmentService/PlanEnvironmentResize": EndpointSync.unary(
                     method=MethodInfo(
@@ -1313,6 +1361,27 @@ class EnvironmentServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.EnvironmentService",
                 input=GetEnvironmentRequest,
                 output=GetEnvironmentResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def get_environment_project_spec(
+        self,
+        request: GetEnvironmentProjectSpecRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetEnvironmentProjectSpecResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetEnvironmentProjectSpec",
+                service_name="codewire.v1.EnvironmentService",
+                input=GetEnvironmentProjectSpecRequest,
+                output=GetEnvironmentProjectSpecResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,

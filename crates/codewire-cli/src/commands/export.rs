@@ -90,6 +90,10 @@ pub(crate) enum Note {
         working_directory: Option<String>,
     },
     MeshNetwork(String),
+    /// A cloud environment's confidential isolation tier.
+    ConfidentialIsolation,
+    /// A cloud environment's time to live, in seconds.
+    Ttl(u32),
     /// Docker off (`None`) or a non-default disk, in GiB.
     DockerDisk(Option<u64>),
     /// Host port bindings, written as `host_port`/`guest_port`.
@@ -107,10 +111,64 @@ async fn read_export(globals: &Globals, target: &str) -> anyhow::Result<Export> 
         UnifiedEnvironmentTarget::NativeLocal(name) => {
             local_export(&get_native_environment(&name).await?)
         }
-        UnifiedEnvironmentTarget::Platform(_) => anyhow::bail!(
-            "exporting a cloud environment's configuration is not available yet; `cw export` reads local VMs (`cw --local export ENV`)"
-        ),
+        UnifiedEnvironmentTarget::Platform(id) => {
+            let (org_id, _, client) = resolve_platform_context(globals).await?;
+            let environment = client
+                .get_environment(&org_id, &id)
+                .await
+                .context("get environment")?;
+            let (spec, withheld) = client
+                .get_environment_project_spec(&org_id, &id)
+                .await
+                .context("read the environment's saved configuration")?;
+            cloud_export(&environment, spec, withheld)
+        }
     }
+}
+
+/// A cloud environment's saved configuration, which the platform returns
+/// with its declared environment values withheld, at its current size.
+pub(crate) fn cloud_export(
+    environment: &Environment,
+    mut spec: codewire_project::ProjectSpec,
+    withheld: Vec<String>,
+) -> anyhow::Result<Export> {
+    anyhow::ensure!(
+        spec.environment.is_empty(),
+        "the saved configuration carried environment values; refusing to export them"
+    );
+    let mut notes = Vec::new();
+    if !withheld.is_empty() {
+        notes.push(Note::EnvironmentValues(withheld));
+    }
+    let positive = |value: i32| u64::try_from(value).ok().filter(|value| *value > 0);
+    spec.resources = codewire_project::ResourceSpec {
+        cpu_millicores: positive(environment.cpu_millicores)
+            .and_then(|value| u32::try_from(value).ok()),
+        memory_mib: positive(environment.memory_mb),
+        disk_gib: positive(environment.disk_gb),
+    };
+    if environment.isolation_tier == "confidential" {
+        notes.push(Note::ConfidentialIsolation);
+    }
+    if let Some(ttl) = environment.ttl_seconds.filter(|ttl| *ttl > 0) {
+        notes.push(Note::Ttl(ttl.unsigned_abs()));
+    }
+    if let Some(note) = references_note(&spec, "") {
+        notes.push(note);
+    }
+    Ok(Export {
+        source: format!(
+            "cloud environment {}",
+            environment.name.as_deref().unwrap_or(&environment.id)
+        ),
+        document: codewire_project::ProjectDocument::new(
+            spec,
+            codewire_project::LocalProjectIntent::default(),
+            true,
+        ),
+        notes,
+    })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -230,6 +288,15 @@ fn saved_local_spec(
         environment.name
     );
     Ok(spec)
+}
+
+/// A duration `--ttl` accepts: whole hours, minutes or seconds.
+fn ttl_text(seconds: u32) -> String {
+    match seconds {
+        seconds if seconds % 3600 == 0 => format!("{}h", seconds / 3600),
+        seconds if seconds % 60 == 0 => format!("{}m", seconds / 60),
+        seconds => format!("{seconds}s"),
+    }
 }
 
 fn references_note(spec: &codewire_project::ProjectSpec, profile_name: &str) -> Option<Note> {
@@ -352,6 +419,13 @@ fn render_notes(notes: &[Note], style: Style) -> String {
                         "Not exported: {folders}{working_directory} {dash} host paths stay on this machine; run `cw create` in that folder, or pass --path"
                     )
                 }
+                Note::ConfidentialIsolation => format!(
+                    "Not exported: confidential isolation {dash} pass --isolation confidential when creating"
+                ),
+                Note::Ttl(seconds) => format!(
+                    "Not exported: time to live {ttl} {dash} pass --ttl {ttl} when creating",
+                    ttl = ttl_text(*seconds)
+                ),
                 Note::MeshNetwork(network) => format!(
                     "Not exported: Mesh network {} {dash} pass --network when creating",
                     terminal_text(network)
@@ -430,6 +504,80 @@ mod tests {
         assert_eq!(
             ascii,
             "! Not exported: Docker disk 16Gi - pass --docker-disk 16Gi when creating\n"
+        );
+    }
+
+    #[test]
+    fn a_cloud_environment_exports_its_saved_spec_at_its_current_size() {
+        let saved = codewire_project::parse_project_yaml(
+            r#"
+image: workspace
+repositories:
+  - {source: https://example.test/org/app.git, branch: main, destination: /workspace/app}
+working_directory: /workspace/app
+install_command: npm ci
+ports: [{port: 3000, label: web, access: creator}]
+cpu: "2"
+secrets: {project: "platform:id:6bf8d155-e84c-4fc5-b479-b17022fe41dd", organization: true}
+credentials: {profile: "platform:id:7c0e2a4b-3f1d-4e5a-9b8c-0d1e2f3a4b5c"}
+"#,
+        )
+        .unwrap()
+        .spec;
+        let environment = Environment {
+            id: "env_1".into(),
+            name: Some("app-cloud".into()),
+            cpu_millicores: 4000,
+            memory_mb: 8192,
+            disk_gb: 40,
+            isolation_tier: "confidential".into(),
+            ttl_seconds: Some(7200),
+            ..Default::default()
+        };
+        let export = cloud_export(&environment, saved.clone(), vec!["NODE_ENV".into()]).unwrap();
+        assert_eq!(export.source, "cloud environment app-cloud");
+        let yaml = export.document.to_yaml().unwrap();
+        let parsed = codewire_project::parse_project_yaml(&yaml).unwrap();
+        let mut expected = saved.clone();
+        expected.resources = codewire_project::ResourceSpec {
+            cpu_millicores: Some(4000),
+            memory_mib: Some(8192),
+            disk_gib: Some(40),
+        };
+        assert_eq!(parsed.spec, expected);
+        parsed.ensure_platform_compatible().unwrap();
+        assert_eq!(
+            export.notes,
+            [
+                Note::EnvironmentValues(vec!["NODE_ENV".into()]),
+                Note::ConfidentialIsolation,
+                Note::Ttl(7200),
+                Note::References {
+                    profile: None,
+                    local: false
+                },
+            ]
+        );
+
+        let mut leaked = saved;
+        leaked
+            .environment
+            .insert("API_URL".into(), "synthetic-canary".into());
+        let error = cloud_export(&environment, leaked, Vec::new()).unwrap_err();
+        assert!(error.to_string().contains("refusing to export"), "{error}");
+        assert!(!error.to_string().contains("synthetic-canary"), "{error}");
+    }
+
+    #[test]
+    fn cloud_notes_name_their_create_flags() {
+        assert_eq!(
+            render_notes(
+                &[Note::ConfidentialIsolation, Note::Ttl(5400), Note::Ttl(90)],
+                plain()
+            ),
+            "! Not exported: confidential isolation — pass --isolation confidential when creating\n\
+             ! Not exported: time to live 90m — pass --ttl 90m when creating\n\
+             ! Not exported: time to live 90s — pass --ttl 90s when creating\n"
         );
     }
 

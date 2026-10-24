@@ -29,6 +29,7 @@ use crate::api::environment_daemon::{
     EnvironmentDaemonStatus as ApiEnvironmentDaemonStatus, get_environment_daemon_logs_core,
     get_environment_daemon_status_core, repair_environment_daemon_core,
 };
+use crate::api::environment_project_spec::get_environment_project_spec_core;
 use crate::api::environment_resize::{
     EnvironmentResizeDisruptionPolicy, EnvironmentResizeExecutionMode, EnvironmentResizeOperation,
     EnvironmentResizePlan, EnvironmentResources, PlanEnvironmentResizeParams,
@@ -149,6 +150,28 @@ impl proto::EnvironmentService for EnvironmentConnectService {
             )
             .into(),
             poll_interval: poll_interval.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn get_environment_project_spec(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::GetEnvironmentProjectSpecRequest>,
+    ) -> ServiceResult<proto::GetEnvironmentProjectSpecResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let saved = get_environment_project_spec_core(
+            &self.state,
+            &user,
+            request.org_id,
+            request.environment_id,
+        )
+        .await
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto::GetEnvironmentProjectSpecResponse {
+            project_spec: Some(codewire_project_proto::to_proto(saved.spec)).into(),
+            withheld_environment_keys: saved.withheld_environment_keys,
             ..Default::default()
         })
     }

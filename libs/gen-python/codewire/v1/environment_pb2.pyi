@@ -349,6 +349,22 @@ class GetEnvironmentResponse(_message.Message):
     poll_interval: _duration_pb2.Duration
     def __init__(self, environment: _Optional[_Union[Environment, _Mapping]] = ..., poll_interval: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
 
+class GetEnvironmentProjectSpecRequest(_message.Message):
+    __slots__ = ("org_id", "environment_id")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ...) -> None: ...
+
+class GetEnvironmentProjectSpecResponse(_message.Message):
+    __slots__ = ("project_spec", "withheld_environment_keys")
+    PROJECT_SPEC_FIELD_NUMBER: _ClassVar[int]
+    WITHHELD_ENVIRONMENT_KEYS_FIELD_NUMBER: _ClassVar[int]
+    project_spec: _common_pb2.ProjectSpec
+    withheld_environment_keys: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ..., withheld_environment_keys: _Optional[_Iterable[str]] = ...) -> None: ...
+
 class GetEnvironmentHostKeyRequest(_message.Message):
     __slots__ = ("org_id", "environment_id")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]

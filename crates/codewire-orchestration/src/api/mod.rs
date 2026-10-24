@@ -12,6 +12,7 @@ pub mod create;
 pub mod cw_runtime;
 pub mod env_access;
 pub mod environment_daemon;
+pub mod environment_project_spec;
 pub mod environment_resize;
 pub mod environment_sources;
 pub mod environments;

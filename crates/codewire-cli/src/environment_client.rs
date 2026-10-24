@@ -358,6 +358,38 @@ impl EnvironmentClient {
             .ok_or_else(|| anyhow::anyhow!("GetEnvironmentTrustReport returned no trust report"))
     }
 
+    /// The environment's saved project spec and the sorted names of the
+    /// declared environment values the platform withheld from it. A response
+    /// that carries any environment value is refused, so no value can reach
+    /// an exported file.
+    pub async fn get_environment_project_spec(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+    ) -> anyhow::Result<(codewire_project::ProjectSpec, Vec<String>)> {
+        let response = self
+            .inner
+            .get_environment_project_spec(rpc::GetEnvironmentProjectSpecRequest {
+                org_id: org_id.to_string(),
+                environment_id: environment_id.to_string(),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        let spec = response
+            .project_spec
+            .into_option()
+            .ok_or_else(|| anyhow::anyhow!("GetEnvironmentProjectSpec returned no project spec"))?;
+        let spec = codewire_project_proto::from_proto(spec).map_err(|error| {
+            anyhow::anyhow!("GetEnvironmentProjectSpec returned an invalid project spec: {error}")
+        })?;
+        anyhow::ensure!(
+            spec.environment.is_empty(),
+            "GetEnvironmentProjectSpec returned environment values; refusing to export them"
+        );
+        Ok((spec, response.withheld_environment_keys))
+    }
+
     /// The SSH host key the platform recorded for the environment's current
     /// generation, or `None` when none is recorded (NOT_FOUND). Every other
     /// failure is an error, so the managed OpenSSH block fails closed instead
@@ -1649,6 +1681,82 @@ mod tests {
                 .await
                 .unwrap();
             assert!(environments.is_empty());
+        }
+    }
+
+    const PROJECT_SPEC_PATH: &str = "/codewire.v1.EnvironmentService/GetEnvironmentProjectSpec";
+
+    async fn project_spec_server(response: rpc::GetEnvironmentProjectSpecResponse) -> MockServer {
+        let server = MockServer::start().await;
+        let request = rpc::GetEnvironmentProjectSpecRequest {
+            org_id: "org_test".into(),
+            environment_id: "env_test".into(),
+            ..Default::default()
+        };
+        Mock::given(method("POST"))
+            .and(path(PROJECT_SPEC_PATH))
+            .and(body_bytes(request.encode_to_vec()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(response.encode_to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn project_spec_read_returns_the_saved_spec_and_withheld_names() {
+        let saved = codewire_project::ProjectSpec {
+            install_command: "npm ci".into(),
+            credentials: Some(codewire_project::CredentialBinding {
+                profile: "platform:id:22222222-2222-4222-8222-222222222222".into(),
+            }),
+            ..Default::default()
+        };
+        let server = project_spec_server(rpc::GetEnvironmentProjectSpecResponse {
+            project_spec: Some(codewire_project_proto::to_proto(saved.clone())).into(),
+            withheld_environment_keys: vec!["API_URL".into(), "NODE_ENV".into()],
+            ..Default::default()
+        })
+        .await;
+        let (spec, withheld) = test_client(&server)
+            .get_environment_project_spec("org_test", "env_test")
+            .await
+            .unwrap();
+        assert_eq!(spec, saved);
+        assert_eq!(withheld, ["API_URL", "NODE_ENV"]);
+    }
+
+    #[tokio::test]
+    async fn project_spec_read_refuses_values_and_a_missing_spec() {
+        let mut with_values = codewire_project::ProjectSpec::default();
+        with_values
+            .environment
+            .insert("API_URL".into(), "synthetic-canary-never-exported".into());
+        for (response, expected) in [
+            (
+                rpc::GetEnvironmentProjectSpecResponse {
+                    project_spec: Some(codewire_project_proto::to_proto(with_values.clone()))
+                        .into(),
+                    ..Default::default()
+                },
+                "refusing to export them",
+            ),
+            (
+                rpc::GetEnvironmentProjectSpecResponse::default(),
+                "returned no project spec",
+            ),
+        ] {
+            let server = project_spec_server(response).await;
+            let error = test_client(&server)
+                .get_environment_project_spec("org_test", "env_test")
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(!error.to_string().contains("synthetic-canary"), "{error}");
         }
     }
 

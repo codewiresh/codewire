@@ -47,7 +47,7 @@ resolving a preset, a repository or a branch needs a signed-in platform.
 
 ## Save an existing environment
 
-`cw export ENV` writes a local VM's saved configuration as `./codewire.yaml`,
+`cw export ENV` writes an environment's saved configuration as `./codewire.yaml`,
 the file the next `cw create` in that folder reads. `--file PATH` writes
 elsewhere, `--stdout` prints it, and an existing file is kept unless you pass
 `--force`. Export only reads: it never starts or changes the environment.
@@ -57,8 +57,9 @@ commands, resources, ports, agents, and secret and credential references as
 exact IDs, never their values. Declared `environment` values are left out
 and named. The workspace's host folder is reported, never turned into a
 repository: create again from that folder to mount it. `local:` references
-resolve only on the machine that created them. Cloud environments cannot be
-exported yet.
+resolve only on the machine that created them. A cloud environment's
+confidential isolation and time to live are create flags, so they are
+reported rather than written.
 
 ## Example
 

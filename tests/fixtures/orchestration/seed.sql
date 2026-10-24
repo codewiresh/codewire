@@ -345,7 +345,9 @@ VALUES
         'env_port_contract_viewer', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'port-contract-viewer',
         'running', 'started', 'preset_contract_in_use',
-        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
+        -- The declared value is GetEnvironmentProjectSpec's canary: only its
+        -- name may leave.
+        '{"schema_version":1,"working_directory":"/workspace","environment":{"SYNTHETIC_CANARY":"never-return-this-value"},"resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:08:00'
     ),
     (

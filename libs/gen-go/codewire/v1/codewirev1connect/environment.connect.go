@@ -42,6 +42,9 @@ const (
 	// EnvironmentServiceGetEnvironmentProcedure is the fully-qualified name of the EnvironmentService's
 	// GetEnvironment RPC.
 	EnvironmentServiceGetEnvironmentProcedure = "/codewire.v1.EnvironmentService/GetEnvironment"
+	// EnvironmentServiceGetEnvironmentProjectSpecProcedure is the fully-qualified name of the
+	// EnvironmentService's GetEnvironmentProjectSpec RPC.
+	EnvironmentServiceGetEnvironmentProjectSpecProcedure = "/codewire.v1.EnvironmentService/GetEnvironmentProjectSpec"
 	// EnvironmentServicePlanEnvironmentResizeProcedure is the fully-qualified name of the
 	// EnvironmentService's PlanEnvironmentResize RPC.
 	EnvironmentServicePlanEnvironmentResizeProcedure = "/codewire.v1.EnvironmentService/PlanEnvironmentResize"
@@ -112,6 +115,11 @@ type EnvironmentServiceClient interface {
 	ListEnvironments(context.Context, *connect.Request[v1.ListEnvironmentsRequest]) (*connect.Response[v1.ListEnvironmentsResponse], error)
 	CreateEnvironment(context.Context, *connect.Request[v1.CreateEnvironmentRequest]) (*connect.Response[v1.CreateEnvironmentResponse], error)
 	GetEnvironment(context.Context, *connect.Request[v1.GetEnvironmentRequest]) (*connect.Response[v1.GetEnvironmentResponse], error)
+	// The environment's saved declarative configuration, for `cw export`.
+	// Authorized exactly as GetEnvironment. Declared environment values are
+	// withheld and only their names are returned; never resolved secrets,
+	// provider material or runtime state.
+	GetEnvironmentProjectSpec(context.Context, *connect.Request[v1.GetEnvironmentProjectSpecRequest]) (*connect.Response[v1.GetEnvironmentProjectSpecResponse], error)
 	PlanEnvironmentResize(context.Context, *connect.Request[v1.PlanEnvironmentResizeRequest]) (*connect.Response[v1.PlanEnvironmentResizeResponse], error)
 	ResizeEnvironment(context.Context, *connect.Request[v1.ResizeEnvironmentRequest]) (*connect.Response[v1.ResizeEnvironmentResponse], error)
 	GetEnvironmentResizeOperation(context.Context, *connect.Request[v1.GetEnvironmentResizeOperationRequest]) (*connect.Response[v1.GetEnvironmentResizeOperationResponse], error)
@@ -169,6 +177,13 @@ func NewEnvironmentServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			httpClient,
 			baseURL+EnvironmentServiceGetEnvironmentProcedure,
 			connect.WithSchema(environmentServiceMethods.ByName("GetEnvironment")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		getEnvironmentProjectSpec: connect.NewClient[v1.GetEnvironmentProjectSpecRequest, v1.GetEnvironmentProjectSpecResponse](
+			httpClient,
+			baseURL+EnvironmentServiceGetEnvironmentProjectSpecProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("GetEnvironmentProjectSpec")),
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
@@ -314,6 +329,7 @@ type environmentServiceClient struct {
 	listEnvironments              *connect.Client[v1.ListEnvironmentsRequest, v1.ListEnvironmentsResponse]
 	createEnvironment             *connect.Client[v1.CreateEnvironmentRequest, v1.CreateEnvironmentResponse]
 	getEnvironment                *connect.Client[v1.GetEnvironmentRequest, v1.GetEnvironmentResponse]
+	getEnvironmentProjectSpec     *connect.Client[v1.GetEnvironmentProjectSpecRequest, v1.GetEnvironmentProjectSpecResponse]
 	planEnvironmentResize         *connect.Client[v1.PlanEnvironmentResizeRequest, v1.PlanEnvironmentResizeResponse]
 	resizeEnvironment             *connect.Client[v1.ResizeEnvironmentRequest, v1.ResizeEnvironmentResponse]
 	getEnvironmentResizeOperation *connect.Client[v1.GetEnvironmentResizeOperationRequest, v1.GetEnvironmentResizeOperationResponse]
@@ -350,6 +366,11 @@ func (c *environmentServiceClient) CreateEnvironment(ctx context.Context, req *c
 // GetEnvironment calls codewire.v1.EnvironmentService.GetEnvironment.
 func (c *environmentServiceClient) GetEnvironment(ctx context.Context, req *connect.Request[v1.GetEnvironmentRequest]) (*connect.Response[v1.GetEnvironmentResponse], error) {
 	return c.getEnvironment.CallUnary(ctx, req)
+}
+
+// GetEnvironmentProjectSpec calls codewire.v1.EnvironmentService.GetEnvironmentProjectSpec.
+func (c *environmentServiceClient) GetEnvironmentProjectSpec(ctx context.Context, req *connect.Request[v1.GetEnvironmentProjectSpecRequest]) (*connect.Response[v1.GetEnvironmentProjectSpecResponse], error) {
+	return c.getEnvironmentProjectSpec.CallUnary(ctx, req)
 }
 
 // PlanEnvironmentResize calls codewire.v1.EnvironmentService.PlanEnvironmentResize.
@@ -462,6 +483,11 @@ type EnvironmentServiceHandler interface {
 	ListEnvironments(context.Context, *connect.Request[v1.ListEnvironmentsRequest]) (*connect.Response[v1.ListEnvironmentsResponse], error)
 	CreateEnvironment(context.Context, *connect.Request[v1.CreateEnvironmentRequest]) (*connect.Response[v1.CreateEnvironmentResponse], error)
 	GetEnvironment(context.Context, *connect.Request[v1.GetEnvironmentRequest]) (*connect.Response[v1.GetEnvironmentResponse], error)
+	// The environment's saved declarative configuration, for `cw export`.
+	// Authorized exactly as GetEnvironment. Declared environment values are
+	// withheld and only their names are returned; never resolved secrets,
+	// provider material or runtime state.
+	GetEnvironmentProjectSpec(context.Context, *connect.Request[v1.GetEnvironmentProjectSpecRequest]) (*connect.Response[v1.GetEnvironmentProjectSpecResponse], error)
 	PlanEnvironmentResize(context.Context, *connect.Request[v1.PlanEnvironmentResizeRequest]) (*connect.Response[v1.PlanEnvironmentResizeResponse], error)
 	ResizeEnvironment(context.Context, *connect.Request[v1.ResizeEnvironmentRequest]) (*connect.Response[v1.ResizeEnvironmentResponse], error)
 	GetEnvironmentResizeOperation(context.Context, *connect.Request[v1.GetEnvironmentResizeOperationRequest]) (*connect.Response[v1.GetEnvironmentResizeOperationResponse], error)
@@ -515,6 +541,13 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 		EnvironmentServiceGetEnvironmentProcedure,
 		svc.GetEnvironment,
 		connect.WithSchema(environmentServiceMethods.ByName("GetEnvironment")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	environmentServiceGetEnvironmentProjectSpecHandler := connect.NewUnaryHandler(
+		EnvironmentServiceGetEnvironmentProjectSpecProcedure,
+		svc.GetEnvironmentProjectSpec,
+		connect.WithSchema(environmentServiceMethods.ByName("GetEnvironmentProjectSpec")),
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
@@ -660,6 +693,8 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 			environmentServiceCreateEnvironmentHandler.ServeHTTP(w, r)
 		case EnvironmentServiceGetEnvironmentProcedure:
 			environmentServiceGetEnvironmentHandler.ServeHTTP(w, r)
+		case EnvironmentServiceGetEnvironmentProjectSpecProcedure:
+			environmentServiceGetEnvironmentProjectSpecHandler.ServeHTTP(w, r)
 		case EnvironmentServicePlanEnvironmentResizeProcedure:
 			environmentServicePlanEnvironmentResizeHandler.ServeHTTP(w, r)
 		case EnvironmentServiceResizeEnvironmentProcedure:
@@ -721,6 +756,10 @@ func (UnimplementedEnvironmentServiceHandler) CreateEnvironment(context.Context,
 
 func (UnimplementedEnvironmentServiceHandler) GetEnvironment(context.Context, *connect.Request[v1.GetEnvironmentRequest]) (*connect.Response[v1.GetEnvironmentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.GetEnvironment is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) GetEnvironmentProjectSpec(context.Context, *connect.Request[v1.GetEnvironmentProjectSpecRequest]) (*connect.Response[v1.GetEnvironmentProjectSpecResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.GetEnvironmentProjectSpec is not implemented"))
 }
 
 func (UnimplementedEnvironmentServiceHandler) PlanEnvironmentResize(context.Context, *connect.Request[v1.PlanEnvironmentResizeRequest]) (*connect.Response[v1.PlanEnvironmentResizeResponse], error) {

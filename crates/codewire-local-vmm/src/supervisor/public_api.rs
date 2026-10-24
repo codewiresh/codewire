@@ -573,6 +573,10 @@ const ENVIRONMENT_RPC_SEMANTICS: &[RpcSemantics] = &[
         RpcBehavior::UnimplementedPlatformOnly,
     ),
     rpc(
+        proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_PROJECT_SPEC_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
         proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_HOST_KEY_SPEC,
         RpcBehavior::Local,
     ),
@@ -2541,6 +2545,16 @@ impl proto::EnvironmentService for SupervisorRpc {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, proto::GetEnvironmentTrustReportRequest>,
     ) -> ServiceResult<proto::GetEnvironmentTrustReportResponse> {
+        unsupported()
+    }
+
+    async fn get_environment_project_spec(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::GetEnvironmentProjectSpecRequest>,
+    ) -> ServiceResult<proto::GetEnvironmentProjectSpecResponse> {
+        // `cw export` reads a local VM's saved spec through the local control
+        // API's owner-only Environment, not this platform method.
         unsupported()
     }
 

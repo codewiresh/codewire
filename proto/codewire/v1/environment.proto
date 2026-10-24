@@ -19,6 +19,13 @@ service EnvironmentService {
   rpc GetEnvironment(GetEnvironmentRequest) returns (GetEnvironmentResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // The environment's saved declarative configuration, for `cw export`.
+  // Authorized exactly as GetEnvironment. Declared environment values are
+  // withheld and only their names are returned; never resolved secrets,
+  // provider material or runtime state.
+  rpc GetEnvironmentProjectSpec(GetEnvironmentProjectSpecRequest) returns (GetEnvironmentProjectSpecResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
   rpc PlanEnvironmentResize(PlanEnvironmentResizeRequest) returns (PlanEnvironmentResizeResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
@@ -227,6 +234,22 @@ message GetEnvironmentRequest {
 message GetEnvironmentResponse {
   Environment environment = 1;
   google.protobuf.Duration poll_interval = 2;
+}
+
+message GetEnvironmentProjectSpecRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message GetEnvironmentProjectSpecResponse {
+  // The saved canonical project intent: preset defaults merged at creation,
+  // later source updates applied, secret and profile selections as canonical
+  // references. environment is always empty (see withheld_environment_keys).
+  // The environment's current size is on Environment.
+  ProjectSpec project_spec = 1;
+  // Sorted names of the declared environment values withheld from
+  // project_spec.
+  repeated string withheld_environment_keys = 2;
 }
 
 message GetEnvironmentHostKeyRequest {
