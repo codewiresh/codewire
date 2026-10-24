@@ -19672,8 +19672,13 @@ mod concurrency_tests {
     };
     use super::*;
 
-    /// Well beyond an idle request, far below any operation's own waits.
-    const PROMPT: Duration = Duration::from_secs(2);
+    /// Bounds a wait that its own event ends: a read's answer, an admitted
+    /// mutation, a refusal, a writer let in, a shutdown signalled. Each
+    /// test holds what it must not wait for (a stuck create's gate, a lease)
+    /// for as long as it waits, so a request that blocked on it would never
+    /// answer. The bound only turns that hang into a failure; 2 s failed on
+    /// a loaded CI slot (#3325).
+    const HANG_GUARD: Duration = Duration::from_secs(120);
 
     /// A test's own setup steps, on a loaded host: never the bound of the
     /// behaviour under test.
@@ -19819,7 +19824,7 @@ mod concurrency_tests {
             .expect("the create reaches its runner");
 
         let listed = timeout(
-            PROMPT,
+            HANG_GUARD,
             service.list_environments(Request::new(v1::ListEnvironmentsRequest::default())),
         )
         .await
@@ -19828,7 +19833,7 @@ mod concurrency_tests {
         .into_inner();
         assert_eq!(listed.environments.len(), 2);
         let new = timeout(
-            PROMPT,
+            HANG_GUARD,
             service.get_environment(Request::new(selector(&service, "new"))),
         )
         .await
@@ -19837,14 +19842,14 @@ mod concurrency_tests {
         .into_inner();
         assert_eq!(new.state, v1::EnvironmentState::Starting as i32);
         timeout(
-            PROMPT,
+            HANG_GUARD,
             service.get_environment(Request::new(selector(&service, "dev"))),
         )
         .await
         .expect("info on another environment answers")
         .unwrap();
         timeout(
-            PROMPT,
+            HANG_GUARD,
             service.select_environment(Request::new(selector(&service, "dev"))),
         )
         .await
@@ -19852,19 +19857,19 @@ mod concurrency_tests {
         .unwrap();
         // "dev" runs no VM, so its daemon access is refused, but at once.
         timeout(
-            PROMPT,
+            HANG_GUARD,
             service.get_daemon_access(Request::new(read_selector("dev"))),
         )
         .await
         .expect("daemon access of another environment answers")
         .unwrap_err();
         let dev_id = service.supervisor.environment("dev").unwrap().id;
-        timeout(PROMPT, service.environment_daemon_access(dev_id))
+        timeout(HANG_GUARD, service.environment_daemon_access(dev_id))
             .await
             .expect("public daemon access of another environment answers")
             .unwrap_err();
         let stop = timeout(
-            PROMPT,
+            HANG_GUARD,
             service.stop_environment(Request::new(selector(&service, "dev"))),
         )
         .await
@@ -19872,7 +19877,7 @@ mod concurrency_tests {
         .unwrap()
         .into_inner();
         assert_eq!(
-            finished(&service, &stop, PROMPT).await.phase,
+            finished(&service, &stop, HANG_GUARD).await.phase,
             OperationPhase::Completed
         );
 
@@ -19968,7 +19973,7 @@ mod concurrency_tests {
             futures::poll!(writer.as_mut()).is_pending(),
             "a writer waits while a collection runs"
         );
-        let _writer = timeout(PROMPT, writer)
+        let _writer = timeout(HANG_GUARD, writer)
             .await
             .expect("the collection ends without its caller");
         let core = supervisor.core();
@@ -20003,7 +20008,7 @@ mod concurrency_tests {
             assert!(futures::poll!(retire.as_mut()).is_pending());
             assert!(service.supervisor.core().retiring);
         }
-        timeout(PROMPT, shutdown.wait_for(|stopping| *stopping))
+        timeout(HANG_GUARD, shutdown.wait_for(|stopping| *stopping))
             .await
             .expect("the retirement completes without its caller")
             .unwrap();
@@ -20025,7 +20030,7 @@ mod concurrency_tests {
         for name in ["other", "new"] {
             let held = service.supervisor.lease(name).lock_owned().await;
             let refused = timeout(
-                PROMPT,
+                HANG_GUARD,
                 service.retire_supervisor(Request::new(v1::RetireSupervisorRequest {
                     successor_protocol: NATIVE_SUPERVISOR_PROTOCOL_VERSION,
                 })),
@@ -20040,7 +20045,7 @@ mod concurrency_tests {
         }
         let held = service.supervisor.lease("other").lock_owned().await;
         timeout(
-            PROMPT,
+            HANG_GUARD,
             service.list_environments(Request::new(v1::ListEnvironmentsRequest::default())),
         )
         .await

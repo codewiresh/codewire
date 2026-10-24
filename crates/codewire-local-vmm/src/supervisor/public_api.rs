@@ -3032,12 +3032,14 @@ mod tests {
                 .is_empty()
         );
         request.confirm_personal_secrets = true;
+        // The update's answer ends the wait; the bound only turns a hang into
+        // a failure. 3 s failed on a loaded CI slot (#3325).
         let result = tokio::time::timeout(
-            Duration::from_secs(3),
+            Duration::from_secs(120),
             client.update_environment_sources(request.clone()),
         )
         .await
-        .unwrap()
+        .expect("the confirmed update answered")
         .unwrap()
         .into_owned();
         assert_eq!(result.operation_generation, 2);
