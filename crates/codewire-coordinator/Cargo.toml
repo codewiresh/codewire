@@ -28,6 +28,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+codewire-derp = { workspace = true }
 buffa-types = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["axum", "client"] }

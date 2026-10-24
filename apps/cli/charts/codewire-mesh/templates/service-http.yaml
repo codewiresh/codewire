@@ -11,5 +11,11 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+    {{- if .Values.mesh.derpVerifyPort }}
+    - port: {{ .Values.mesh.derpVerifyPort }}
+      targetPort: derp-verify
+      protocol: TCP
+      name: derp-verify
+    {{- end }}
   selector:
     {{- include "codewire-mesh.selectorLabels" . | nindent 4 }}

@@ -120,6 +120,39 @@ it, falling back to DERP on the coordinator's origin.
 
 **Why two nodes?** Tailscale's magicsock selects `preferred_derp` based on STUN latency. If STUN runs on the same node as DERP, STUN latency competes with DERP latency and can steal `preferred_derp` to a non-relay region. Separating them (STUNPort=-1 on relay, STUNOnly on STUN) keeps `preferred_derp=1` stable.
 
+## DERP client admission
+
+The public DERP relay serves only node keys that a coordinator has registered
+for a live, authorized session: the platform coordinator's sandbox daemons and
+CLI clients, and Mesh's members. Payloads are WireGuard-encrypted end to end
+either way; admission stops strangers using the relay as free bandwidth.
+
+- Every client connects to DERP before it sends its node to its coordinator,
+  and its handshake returns once it has written `ClientInfo`. The relay
+  therefore holds an unknown key before `ServerInfo`, unroutable, and asks
+  the verifiers again with backoff until the 10 s handshake deadline. A key
+  registered within that window is served; otherwise the connection closes
+  and the client's reconnect backoff retries.
+- The relay calls `codewire.internal.v1.DerpAdmissionService/CheckNodeKey`
+  on each URL in `DERP_VERIFY_CLIENT_URLS`, as a Connect unary JSON POST with
+  the 32-byte key. Any `registered: true` admits the key, which is then
+  cached for 30 s; unknown keys are never cached, and at most 64 lookups per
+  relay run at once.
+- The coordinator records each session's node key in the NATS KV bucket
+  `coordinator-node-keys` while the session lives, so either replica answers.
+  Mesh answers from its own registry. Both serve the service on a separate
+  listener (`8097`) that no edge routes to (the `derp-admission` closed
+  listener in `scripts/checks/contracts/connect-edge-ownership.json`); the
+  site's network policy admits only DERP to it.
+- When no verifier answers, new keys are refused and live sessions keep
+  relaying: admission happens once per connection. Mesh peers, which prove
+  `DERP_MESH_KEY`, are never looked up.
+- Without `DERP_VERIFY_CLIENT_URLS` the relay serves every client, as a local
+  or self-hosted relay does.
+
+`cargo run -p codewire-derp --example derp_probe -- derp.example.com:443`
+connects with a fresh, unregistered key and reports `admitted` or `refused`.
+
 ## Network Paths
 
 **DERP path:** `derp.codewire-dev.sh:443` or `derp.codewire.sh:443`
@@ -256,6 +289,9 @@ already answered rejects it as a replay, so a slow response stays valid.
 | `CODEWIRE_UDP_RELAY_ALLOCATOR_URL` | server configmap | cluster-local relay allocator URL | Internal HTTP allocation endpoint orchestration calls for `AllocatePeerRelay` |
 | `DERP_HOST` | server configmap | `derp.codewire.sh` | DERP relay hostname |
 | `DERP_MESH_KEY` | secret | 64-char hex | Shared key for multi-replica DERP mesh |
+| `DERP_VERIFY_CLIENT_URLS` | DERP deployment | comma-separated `http://host:port` | Coordinator and Mesh node-key lookups; unset serves every client |
+| `COORDINATOR_DERP_VERIFY_ADDR` | coordinator deployment | `0.0.0.0:8097` | Coordinator's node-key lookup listener |
+| `CODEWIRE_MESH_DERP_VERIFY_ADDR` | Mesh chart (`mesh.derpVerifyPort`) | `0.0.0.0:8097` | Mesh's node-key lookup listener |
 
 ## CLI debug flags
 

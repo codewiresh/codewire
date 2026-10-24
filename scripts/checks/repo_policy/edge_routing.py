@@ -161,9 +161,26 @@ WORKSPACE_BINDING_SERVICES = {
     ),
 }
 
+# The third closed listener class: Codewire's public DERP relay asks whether a
+# node key belongs to a live session (codewire#2844). The coordinator and Mesh
+# each serve it for their own sessions on 8097, which no edge routes to; the
+# site's network policy admits only the relay.
+DERP_ADMISSION_SERVICES = {
+    "codewire.internal.v1.DerpAdmissionService": "derp_verify_router",
+}
+
 CLOSED_LISTENERS = {
     "internal-connect": (8088, INTERNAL_CONNECT_SERVICES),
     "workspace-binding": (8087, WORKSPACE_BINDING_SERVICES),
+    "derp-admission": (8097, DERP_ADMISSION_SERVICES),
+}
+
+# The binaries that serve each closed listener. A single-binary class records
+# `binary`; a class served by several binaries records them as `binaries`.
+CLOSED_LISTENER_BINARIES = {
+    "internal-connect": ("orchestration",),
+    "workspace-binding": ("orchestration",),
+    "derp-admission": ("coordinator", "mesh"),
 }
 
 WORKSPACE_BINDING_SERVICE_NAME = "codewire-orchestration-workspace-binding"
@@ -757,8 +774,12 @@ def assert_internal_connect_listener_exemption(
         if not isinstance(record, dict):
             fail(f"unrouted service {service} must record binary, listener, and port")
             continue
-        if record.get("binary") != "orchestration":
-            fail(f"unrouted service {service} must be owned by orchestration")
+        binaries = CLOSED_LISTENER_BINARIES.get(listener or "", ("orchestration",))
+        if len(binaries) == 1:
+            if record.get("binary") != binaries[0] or "binaries" in record:
+                fail(f"unrouted service {service} must be owned by {binaries[0]}")
+        elif record.get("binaries") != list(binaries) or "binary" in record:
+            fail(f"unrouted service {service} must be served by exactly {', '.join(binaries)}")
         if listener is not None:
             port = CLOSED_LISTENERS[listener][0]
             if record.get("listener") != listener or record.get("port") != port:
@@ -771,11 +792,96 @@ def assert_internal_connect_listener_exemption(
     expected = set().union(*(services for _, services in CLOSED_LISTENERS.values()))
     if set(unrouted) != expected:
         fail(
-            "unrouted listener map must contain exactly MeshAuthorizationService "
-            "and WorkspaceBindingService"
+            "unrouted listener map must contain exactly MeshAuthorizationService, "
+            "WorkspaceBindingService and DerpAdmissionService"
         )
     assert_internal_connect_listener_boundary(INTERNAL_CONNECT_SERVICES, fail, reader)
     assert_workspace_binding_listener_boundary(fail, reader)
+    assert_derp_admission_listener_boundary(fail, reader)
+
+
+DERP_ADMISSION_EDGE_FILES = (
+    "deployments/k8s/base/ingress.yaml",
+    "deployments/k8s/overlays/local-kind/ingress.yaml",
+    "deployments/k8s/overlays/local-kind-static/ingress.yaml",
+    "tests/e2e/kind/ingress.yaml",
+    "Caddyfile",
+    "Caddyfile.docker",
+)
+
+
+def assert_derp_admission_listener_boundary(
+    fail: Callable[[str], None],
+    reader: Callable[[str], str] = read_text,
+) -> None:
+    """Prove 8097 carries only DerpAdmissionService, from both its binaries.
+
+    Each binary builds the admission router once, serves it only on its own
+    8097 listener and never on its public app; the manifests name the port
+    and the relay's verifier URLs; and no edge routes to it.
+    """
+    coordinator = reader("crates/codewire-coordinator/src/main.rs")
+    public_start = coordinator.find('AppBuilder::new("codewire-coordinator")')
+    if public_start < 0:
+        fail("coordinator must build its public AppBuilder app")
+    elif "derp_verify_router" in coordinator[public_start:]:
+        fail("DerpAdmissionService is prohibited from the coordinator's public app")
+    if coordinator.count("derp_verify_router(") != 1 or not re.search(
+        r'std::env::var\("COORDINATOR_DERP_VERIFY_ADDR"\)[\s\S]*?'
+        r"codewire_server_core::serve\(\s*derp_verify_router\(state\.clone\(\)\),\s*addr,",
+        coordinator,
+    ):
+        fail(
+            "the coordinator must serve DerpAdmissionService once, only on its "
+            "COORDINATOR_DERP_VERIFY_ADDR listener"
+        )
+
+    mesh = reader("crates/codewire-mesh/src/server.rs")
+    routes = mesh.find("fn router_from_state")
+    if routes < 0:
+        fail("Mesh must build its public app in router_from_state")
+    elif "derp_verify" in mesh[routes:]:
+        fail("DerpAdmissionService is prohibited from Mesh's public app")
+    if mesh.count("crate::derp_verify::router(") != 1 or not re.search(
+        r"match state\.config\.derp_verify_addr \{[\s\S]*?"
+        r"crate::derp_verify::router\(state\.mesh_coordinate\.clone\(\)\)",
+        mesh,
+    ):
+        fail("Mesh must serve DerpAdmissionService once, only on its derp_verify_addr listener")
+
+    deployment = reader("deployments/k8s/coordinator/deployment.yaml")
+    if not re.search(r"containerPort:\s*8097\s*\n\s*name:\s*derp-verify", deployment):
+        fail("coordinator Deployment must declare named derp-verify container port 8097")
+    for patch in (
+        "deployments/k8s/coordinator/deployment.yaml",
+        "deployments/k8s/overlays/local-kind/coordinator-deployment-patch.yaml",
+        "deployments/k8s/overlays/local-kind-static/coordinator-deployment-patch.yaml",
+    ):
+        if not re.search(
+            r"name:\s*COORDINATOR_DERP_VERIFY_ADDR\s*\n\s*value:\s*['\"]0\.0\.0\.0:8097['\"]",
+            reader(patch),
+        ):
+            fail(f"{patch}: must set COORDINATOR_DERP_VERIFY_ADDR=0.0.0.0:8097")
+    if ("8097", "8097", "derp-verify") not in service_ports(
+        reader("deployments/k8s/coordinator/service.yaml")
+    ):
+        fail("codewire-coordinator Service must expose derp-verify 8097 -> 8097")
+    if not re.search(r"derpVerifyPort:\s*8097\b", reader("apps/cli/charts/codewire-mesh/values.yaml")):
+        fail("the Mesh chart must default mesh.derpVerifyPort to 8097")
+    if "name: derp-verify" not in reader("apps/cli/charts/codewire-mesh/templates/service-http.yaml"):
+        fail("the Mesh chart's http Service must expose the derp-verify port")
+    derp = reader("deployments/k8s/derp/deployment.yaml")
+    for url in (
+        "http://codewire-coordinator.$(POD_NAMESPACE).svc.cluster.local:8097",
+        "http://codewire-mesh-http.$(POD_NAMESPACE).svc.cluster.local:8097",
+    ):
+        if url not in derp:
+            fail(f"DERP must verify clients against {url}")
+
+    for file in DERP_ADMISSION_EDGE_FILES:
+        source = reader(file)
+        if re.search(r":8097\b|derp-verify|DerpAdmissionService", source):
+            fail(f"{file}: no edge may route to the DERP admission listener")
 
 
 def orchestration_app_sections(main: str) -> dict[str, str] | None:
@@ -985,6 +1091,15 @@ def internal_connect_listener_self_test() -> None:
     """Exercise every closed-listener failure mode without mutating the repo."""
     paths = [
         "crates/codewire-orchestration/src/main.rs",
+        "crates/codewire-coordinator/src/main.rs",
+        "crates/codewire-mesh/src/server.rs",
+        "deployments/k8s/coordinator/deployment.yaml",
+        "deployments/k8s/coordinator/service.yaml",
+        "deployments/k8s/overlays/local-kind/coordinator-deployment-patch.yaml",
+        "deployments/k8s/overlays/local-kind-static/coordinator-deployment-patch.yaml",
+        "deployments/k8s/derp/deployment.yaml",
+        "apps/cli/charts/codewire-mesh/values.yaml",
+        "apps/cli/charts/codewire-mesh/templates/service-http.yaml",
         "deployments/k8s/orchestration/deployment.yaml",
         "deployments/k8s/orchestration/service.yaml",
         "deployments/k8s/overlays/local-kind/orchestration-deployment-patch.yaml",
@@ -997,8 +1112,15 @@ def internal_connect_listener_self_test() -> None:
         "Caddyfile.docker",
     ]
     source = {path: read_text(path) for path in paths}
+    def record(listener: str, port: int) -> dict[str, Any]:
+        binaries = CLOSED_LISTENER_BINARIES[listener]
+        owner: dict[str, Any] = (
+            {"binary": binaries[0]} if len(binaries) == 1 else {"binaries": list(binaries)}
+        )
+        return {**owner, "listener": listener, "port": port}
+
     valid_unrouted = {
-        service: {"binary": "orchestration", "listener": listener, "port": port}
+        service: record(listener, port)
         for listener, (port, services) in CLOSED_LISTENERS.items()
         for service in services
     }
@@ -1033,6 +1155,92 @@ def internal_connect_listener_self_test() -> None:
         failures = failures_for(label=label, **kwargs)
         if not any(expected in failure for failure in failures):
             raise RuntimeError(f"{label}: expected rejection {expected!r}, got {failures!r}")
+
+    derp = "codewire.internal.v1.DerpAdmissionService"
+    missing_derp = copy.deepcopy(valid_unrouted)
+    missing_derp.pop(derp)
+    expect_rejection("missing DERP admission record", "must contain exactly", unrouted=missing_derp)
+    derp_on_orchestration = copy.deepcopy(valid_unrouted)
+    derp_on_orchestration[derp] = {"binary": "orchestration", "listener": "derp-admission", "port": 8097}
+    expect_rejection(
+        "DERP admission owned by orchestration",
+        "must be served by exactly coordinator, mesh",
+        unrouted=derp_on_orchestration,
+    )
+    derp_coordinator_only = copy.deepcopy(valid_unrouted)
+    derp_coordinator_only[derp]["binaries"] = ["coordinator"]
+    expect_rejection(
+        "DERP admission without Mesh",
+        "must be served by exactly coordinator, mesh",
+        unrouted=derp_coordinator_only,
+    )
+    derp_on_8088 = copy.deepcopy(valid_unrouted)
+    derp_on_8088[derp].update(listener="internal-connect", port=8088)
+    expect_rejection(
+        "DERP admission recorded on 8088",
+        "must use the derp-admission listener on port 8097",
+        unrouted=derp_on_8088,
+    )
+    expect_rejection(
+        "public edge matcher for DERP admission",
+        "prohibited public edge matcher",
+        per_file={"fixture": {"rules": [{"service": derp, "backend": "coordinator"}]}},
+    )
+    expect_rejection(
+        "DERP admission on the coordinator's public app",
+        "prohibited from the coordinator's public app",
+        replacement=(
+            "crates/codewire-coordinator/src/main.rs",
+            ".with_routes(router(state, auth))",
+            ".with_routes(router(state.clone(), auth))\n        .merge(derp_verify_router(state))",
+        ),
+    )
+    expect_rejection(
+        "coordinator DERP admission without its listener",
+        "only on its COORDINATOR_DERP_VERIFY_ADDR listener",
+        replacement=(
+            "crates/codewire-coordinator/src/main.rs",
+            "derp_verify_router(state.clone()),\n                addr,",
+            "derp_verify_router(state.clone()),\n                cfg.bind_addr,",
+        ),
+    )
+    expect_rejection(
+        "DERP admission on Mesh's public app",
+        "prohibited from Mesh's public app",
+        replacement=(
+            "crates/codewire-mesh/src/server.rs",
+            'AppBuilder::new("mesh")',
+            'AppBuilder::new("mesh").with_connect_routes(crate::derp_verify::router(state.mesh_coordinate.clone()))',
+        ),
+    )
+    expect_rejection(
+        "coordinator Service without the derp-verify port",
+        "must expose derp-verify 8097",
+        replacement=("deployments/k8s/coordinator/service.yaml", "name: derp-verify", "name: verify"),
+    )
+    expect_rejection(
+        "Kind coordinator without the DERP admission listener",
+        "local-kind/coordinator-deployment-patch.yaml: must set COORDINATOR_DERP_VERIFY_ADDR",
+        replacement=(
+            "deployments/k8s/overlays/local-kind/coordinator-deployment-patch.yaml",
+            "- name: COORDINATOR_DERP_VERIFY_ADDR",
+            "- name: COORDINATOR_DERP_VERIFY_OFF",
+        ),
+    )
+    expect_rejection(
+        "DERP not verifying against Mesh",
+        "DERP must verify clients against http://codewire-mesh-http",
+        replacement=(
+            "deployments/k8s/derp/deployment.yaml",
+            ",http://codewire-mesh-http.$(POD_NAMESPACE).svc.cluster.local:8097",
+            "",
+        ),
+    )
+    expect_rejection(
+        "edge route to the DERP admission listener",
+        "no edge may route to the DERP admission listener",
+        replacement=("Caddyfile", "\n", "\n# reverse_proxy codewire-coordinator:8097\n"),
+    )
 
     missing = copy.deepcopy(valid_unrouted)
     missing.pop("codewire.internal.v1.MeshAuthorizationService")

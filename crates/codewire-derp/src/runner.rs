@@ -1,9 +1,11 @@
 use std::env;
 use std::net::{IpAddr, SocketAddr};
 
+use std::sync::Arc;
+
 use crate::{
-    MeshKey, Relay, self_signed_tls_config, serve_mesh_discovery, serve_plain, serve_stun,
-    serve_tls,
+    HttpKeyVerifier, MeshKey, Relay, self_signed_tls_config, serve_mesh_discovery, serve_plain,
+    serve_stun, serve_tls,
 };
 use codewire_tailnet::derp::NodePrivate;
 use rand::rngs::OsRng;
@@ -23,6 +25,13 @@ pub async fn run_from_env() -> Result<(), Box<dyn std::error::Error + Send + Syn
     let relay = match mesh_key {
         Some(mesh_key) => Relay::new_with_mesh_key(NodePrivate::generate(&mut OsRng), mesh_key),
         None => Relay::new(NodePrivate::generate(&mut OsRng)),
+    };
+    let relay = match client_verifier()? {
+        Some(verifier) => {
+            tracing::info!("codewire derp serves only clients a coordinator registered");
+            relay.with_client_verifier(Arc::new(verifier))
+        }
+        None => relay,
     };
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -129,6 +138,19 @@ fn mesh_key() -> Result<Option<MeshKey>, Box<dyn std::error::Error + Send + Sync
         return Ok(None);
     }
     Ok(Some(MeshKey::parse(&raw)?))
+}
+
+/// `DERP_VERIFY_CLIENT_URLS`: comma-separated `http://host:port` coordinator
+/// lookup listeners (#2844). Unset or empty serves every client, as a local
+/// or self-hosted relay does.
+fn client_verifier() -> Result<Option<HttpKeyVerifier>, Box<dyn std::error::Error + Send + Sync>> {
+    let Ok(raw) = env::var("DERP_VERIFY_CLIENT_URLS") else {
+        return Ok(None);
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(HttpKeyVerifier::parse(&raw)?))
 }
 
 fn mesh_hostname() -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {

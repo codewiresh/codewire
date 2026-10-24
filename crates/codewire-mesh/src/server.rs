@@ -58,11 +58,31 @@ where
     let store = store_from_config(&config)
         .await
         .context("initialize codewire-mesh store")?;
-    let router = router_from_state(AppState::new(config, store));
-    axum::serve(http_listener, router)
+    let state = AppState::new(config, store);
+    // DERP's client admission lookup (#2844), on its own listener so no
+    // ingress route reaches it.
+    let derp_verify = match state.config.derp_verify_addr {
+        Some(addr) => {
+            let listener = TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("listen codewire-mesh DERP verify {addr}"))?;
+            tracing::info!(listen_addr = %addr, "codewire mesh DERP verify listening");
+            let router = crate::derp_verify::router(state.mesh_coordinate.clone());
+            Some(tokio::spawn(
+                async move { axum::serve(listener, router).await },
+            ))
+        }
+        None => None,
+    };
+    let router = router_from_state(state);
+    let result = axum::serve(http_listener, router)
         .with_graceful_shutdown(shutdown)
         .await
-        .context("serve codewire-mesh HTTP")
+        .context("serve codewire-mesh HTTP");
+    if let Some(derp_verify) = derp_verify {
+        derp_verify.abort();
+    }
+    result
 }
 
 pub fn router(config: Config) -> Router {

@@ -10,6 +10,7 @@ use codewire_tailnet::node::Node;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use uuid::Uuid;
 
+use super::node_keys::SessionNodeKey;
 use super::peer::{PeerProof, PeerVerifier, ProofError, unix_now};
 use super::{
     COORDINATE_HEARTBEAT_INTERVAL, CoordinationPlane, PeerEvent, PeerKind, PeerRegistry,
@@ -115,6 +116,8 @@ pub(crate) async fn run_peer_session<Source, Sink>(
     };
     let owner = registration.owner;
     let mut events = registration.events;
+    // The session's node key, admitted by DERP while the session lives.
+    let node_key = SessionNodeKey::new(coordination.clone(), owner);
     let env_id = sidecar_id.unwrap_or(peer_id);
     tracing::info!(
         %env_id,
@@ -210,6 +213,7 @@ pub(crate) async fn run_peer_session<Source, Sink>(
     let derp_map = build_derp_map(derp_map_config_from_env());
     if !sink.send(SessionOutput::DerpMap(derp_map)).await {
         peers.deregister(peer_id, owner);
+        node_key.close().await;
         if let Some(task) = refresh_task {
             task.abort();
         }
@@ -279,6 +283,7 @@ pub(crate) async fn run_peer_session<Source, Sink>(
             input = source.next() => {
                 match input {
                     Some(SessionInput::Node(node)) => {
+                        node_key.observe(node.key).await;
                         handle_node_update(
                             &peers,
                             owner,
@@ -326,6 +331,7 @@ pub(crate) async fn run_peer_session<Source, Sink>(
         "coordinator peer disconnected"
     );
     peers.deregister(peer_id, owner);
+    node_key.close().await;
     if let (PeerKind::Client, Some(env_id), Some(coordination)) =
         (kind, sidecar_id, coordination.as_ref())
         && let Err(err) = coordination.publish_remove(env_id, peer_id).await
@@ -879,5 +885,74 @@ mod tests {
                 .expect("session teardown timed out")
                 .expect("session task panicked");
         }
+    }
+
+    /// #2844: DERP's admission call, made by DERP's own verifier against the
+    /// coordinator's listener, knows the key of a node a live session sent and
+    /// forgets it when the session ends. A malformed key is refused.
+    #[tokio::test]
+    async fn derp_admission_knows_a_live_session_key_until_it_ends() {
+        use codewire_derp::{HttpKeyVerifier, KeyVerifier as _, Verdict};
+        use tower::ServiceExt as _;
+
+        let peers = Arc::new(PeerRegistry::default());
+        let state = crate::CoordinatorState {
+            pool: sqlx::PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused").unwrap(),
+            session_secret: Arc::from(SECRET),
+            peers: peers.clone(),
+            coordination: None,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(codewire_server_core::serve_with_listener(
+            crate::derp_verify_router(state.clone()),
+            listener,
+        ));
+        let verifier = HttpKeyVerifier::parse(&format!("http://{addr}")).unwrap();
+        let derp_key = |raw: [u8; 32]| codewire_tailnet::derp::NodePublic::from_raw(raw);
+
+        let sidecar_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let key = derp_key(*sample_node(client_id, 1).key.as_bytes());
+        assert_eq!(verifier.verify(&key).await, Verdict::Unknown);
+
+        let (client_tx, mut client_out, client_task) =
+            spawn_session(peers.clone(), client_id, Some(sidecar_id), PeerKind::Client);
+        assert!(matches!(
+            next_output(&mut client_out).await,
+            SessionOutput::DerpMap(_)
+        ));
+        client_tx
+            .send(SessionInput::Node(sample_node(client_id, 1)))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while verifier.verify(&key).await != Verdict::Known {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the live session's key is registered");
+        assert_eq!(
+            verifier.verify(&derp_key([0x22; 32])).await,
+            Verdict::Unknown
+        );
+
+        // A key that is not 32 bytes is an invalid argument.
+        let response = crate::derp_verify_router(state)
+            .oneshot(
+                axum::http::Request::post(codewire_derp::CHECK_NODE_KEY_PATH)
+                    .header("content-type", "application/json")
+                    .header("connect-protocol-version", "1")
+                    .body(axum::body::Body::from(r#"{"nodeKey":"AAAA"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        drop(client_tx);
+        ends(client_task).await;
+        assert_eq!(verifier.verify(&key).await, Verdict::Unknown);
+        server.abort();
     }
 }

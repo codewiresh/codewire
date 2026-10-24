@@ -1,5 +1,5 @@
 {
-  "$comment": "Permanent WS18 WI-9B Mesh guard. Mesh exposes generated codewire.v1 Connect services, the typed internal coordinator, and health/readiness only; network ownership and invitation redemption are atomic, peer streams consume one-use enrollment capabilities, and persistent environment bearers remain retired.",
+  "$comment": "Permanent WS18 WI-9B Mesh guard. Mesh exposes generated codewire.v1 Connect services, the typed internal coordinator, health/readiness, and, on its separate DERP admission listener only, the generated internal DerpAdmissionService; network ownership and invitation redemption are atomic, peer streams consume one-use enrollment capabilities, and persistent environment bearers remain retired.",
   "schema_version": 1,
   "required_server_fragments": [
     "AppBuilder::new(\"mesh\")",
@@ -43,6 +43,10 @@
       "reserved \"MESH_AUTHORIZATION_PRINCIPAL_KIND_ENVIRONMENT\";",
       "reserved 4;",
       "reserved \"MESH_AUTHORIZATION_CREDENTIAL_KIND_ENVIRONMENT_TOKEN\";"
+    ],
+    "crates/codewire-mesh/src/derp_verify.rs": [
+      "impl DerpAdmissionService for DerpAdmission",
+      "codewire_server_core::connect::connect_router("
     ]
   },
   "forbidden_source_fragments": {

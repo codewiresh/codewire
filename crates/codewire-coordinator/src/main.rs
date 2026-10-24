@@ -1,6 +1,6 @@
 //! `codewire-coordinator` -- Rust tailnet coordinator entry point.
 
-use codewire_coordinator::{CoordinatorState, router};
+use codewire_coordinator::{CoordinatorState, derp_verify_router, router};
 use codewire_server_core::auth::AuthState;
 use codewire_server_core::{AppBuilder, ServiceConfig};
 use std::time::Duration;
@@ -21,18 +21,42 @@ async fn main() -> anyhow::Result<()> {
         state = state.with_nats_client(client).await?;
     }
 
+    // DERP's client admission lookup (#2844), on its own listener so no
+    // ingress route reaches it. Unset in local runs and tests.
+    let derp_verify = match std::env::var("COORDINATOR_DERP_VERIFY_ADDR") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let addr: std::net::SocketAddr = raw.trim().parse()?;
+            Some(tokio::spawn(codewire_server_core::serve(
+                derp_verify_router(state.clone()),
+                addr,
+            )))
+        }
+        _ => None,
+    };
+
     let app = AppBuilder::new("codewire-coordinator")
         .with_health_and_db(pool)
         .with_routes(router(state, auth))
         .into_router();
 
-    codewire_server_core::serve_with_h2_keepalive(
+    let main = codewire_server_core::serve_with_h2_keepalive(
         app,
         cfg.bind_addr,
         codewire_server_core::Http2KeepaliveConfig::new(
             Duration::from_secs(15),
             Duration::from_secs(20),
         ),
-    )
-    .await
+    );
+    let Some(derp_verify) = derp_verify else {
+        return main.await;
+    };
+    tokio::pin!(main);
+    tokio::select! {
+        result = &mut main => result,
+        // It ends on its own only at shutdown, or when it cannot bind.
+        result = derp_verify => {
+            result??;
+            main.await
+        }
+    }
 }

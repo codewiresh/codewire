@@ -17,6 +17,8 @@
   value:
     - name: COORDINATOR_PORT
       value: "8090"
+    - name: COORDINATOR_DERP_VERIFY_ADDR
+      value: "0.0.0.0:8097"
     - name: POD_NAMESPACE
       valueFrom:
         fieldRef:

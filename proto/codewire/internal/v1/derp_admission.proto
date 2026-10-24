@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package codewire.internal.v1;
+
+// DerpAdmissionService answers Codewire's public DERP relay, which serves only
+// node keys that a coordinator has registered for a live, authorized session
+// (codewire#2844). The platform coordinator and Mesh each serve it, for their
+// own sessions, on a cluster-local listener that no edge route reaches. The
+// answer is only whether one public key is registered; it carries no secret
+// material and grants nothing.
+service DerpAdmissionService {
+  // CheckNodeKey reports whether a live session on this service has sent a
+  // node with this WireGuard node public key.
+  rpc CheckNodeKey(CheckNodeKeyRequest) returns (CheckNodeKeyResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+message CheckNodeKeyRequest {
+  // The 32-byte node public key the client proved in its DERP handshake.
+  bytes node_key = 1;
+}
+
+message CheckNodeKeyResponse {
+  // Whether a live session has registered the key.
+  bool registered = 1;
+}

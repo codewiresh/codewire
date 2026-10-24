@@ -913,6 +913,7 @@ mod tests {
             stun_servers: Vec::new(),
             database_url: None,
             mesh_authorization: None,
+            derp_verify_addr: None,
             local_authorization: Some(LocalMeshAuthorizationConfig {
                 organization_id: ORG.to_string(),
                 api_key_hash: hash_api_key(API_KEY),

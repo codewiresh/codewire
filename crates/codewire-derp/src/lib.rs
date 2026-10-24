@@ -8,8 +8,14 @@
 //! The STUN listener covers the STUN-only edge mode used by the current Go
 //! binary. Mesh forwarding covers the multi-replica DERP deployment shape.
 
+mod admission;
 mod runner;
+pub use admission::{
+    CHECK_NODE_KEY_PATH, HttpKeyVerifier, KeyVerifier, Verdict, check_node_key_body,
+};
 pub use runner::run_from_env;
+
+use admission::ClientAdmission;
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Error as IoError, ErrorKind};
@@ -58,6 +64,12 @@ pub enum Error {
     Join(#[from] tokio::task::JoinError),
     #[error("limit: {0}")]
     Limit(&'static str),
+    /// No verifier knew the client's key before the handshake deadline.
+    #[error("client refused: {}", match .0 {
+        Verdict::Unavailable => "no client verifier answered",
+        _ => "node key not registered",
+    })]
+    Refused(Verdict),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -76,12 +88,15 @@ const PEER_PRESENT_FRAME_LEN: usize = KEY_LEN + 16 + 2 + 1;
 const PEER_GONE_REASON_DISCONNECTED: u8 = 0x00;
 const PEER_PRESENT_IS_REGULAR: u8 = 1 << 0;
 
-// DERP handshakes are unauthenticated by design, so the relay bounds what an
-// anonymous client can hold (#2505 M2).
+// The DERP handshake proves only that a client holds its node key. A relay
+// with a client verifier also requires a coordinator to know that key
+// (#2844, `admission`); either way the relay bounds what a client that has
+// not finished its handshake can hold (#2505 M2).
 
 /// Each step before relaying (TLS handshake, HTTP request head, DERP
-/// handshake) must finish within this budget, so a client that stalls or
-/// trickles bytes cannot keep its connection.
+/// handshake with its admission) must finish within this budget, so a client
+/// that stalls or trickles bytes, or whose key no coordinator registers,
+/// cannot keep its connection.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Connections one relay serves at once across its listeners. A connection
 /// holds its slot from TCP accept until it closes, and one past the cap is
@@ -142,6 +157,7 @@ pub struct Relay {
     mesh_key: Option<MeshKey>,
     inner: Arc<RelayInner>,
     connections: Arc<Semaphore>,
+    admission: Option<Arc<ClientAdmission>>,
 }
 
 #[derive(Default)]
@@ -189,6 +205,7 @@ impl Relay {
             mesh_key: None,
             inner: Arc::new(RelayInner::default()),
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            admission: None,
         }
     }
 
@@ -200,7 +217,15 @@ impl Relay {
             mesh_key: Some(mesh_key),
             inner: Arc::new(RelayInner::default()),
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            admission: None,
         }
+    }
+
+    /// Serve only clients whose node key `verifier` knows (#2844). Mesh
+    /// peers, which prove the mesh key, are not checked.
+    pub fn with_client_verifier(mut self, verifier: Arc<dyn KeyVerifier>) -> Self {
+        self.admission = Some(Arc::new(ClientAdmission::new(verifier)));
+        self
     }
 
     pub fn public_key(&self) -> &NodePublic {
@@ -221,9 +246,17 @@ impl Relay {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let handshake = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.handshake(&mut stream))
+        let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+        let handshake = tokio::time::timeout_at(deadline, self.handshake(&mut stream))
             .await
             .map_err(|_| Error::Limit("derp handshake timed out"))??;
+        // Hold an unverified client before it is routable or sees ServerInfo.
+        if let (false, Some(admission)) = (handshake.is_mesh, self.admission.as_ref()) {
+            admission
+                .admit(&handshake.peer, deadline)
+                .await
+                .map_err(Error::Refused)?;
+        }
         let peer = handshake.peer;
         let registered = !handshake.is_mesh;
         let (tx, rx) = mpsc::channel(64);
@@ -512,6 +545,13 @@ pub async fn serve_tls(listener: TcpListener, relay: Relay, config: ServerConfig
 fn log_connection_error(err: &Error, peer_addr: SocketAddr, message: &'static str) {
     match err {
         Error::Limit(reason) => tracing::debug!(%peer_addr, reason, "derp connection closed"),
+        // Unknown keys are routine on a public relay; a verifier outage is not.
+        Error::Refused(Verdict::Unavailable) => {
+            tracing::warn!(%peer_addr, "derp client refused: no client verifier answered")
+        }
+        Error::Refused(_) => {
+            tracing::debug!(%peer_addr, "derp client refused: node key not registered")
+        }
         _ => tracing::warn!(error = ?err, %peer_addr, "{message}"),
     }
 }
@@ -1802,6 +1842,250 @@ mod tests {
             String::from_utf8_lossy(&response)
         );
         wait_for_free_slots(&relay).await;
+    }
+
+    /// A verifier over an in-memory key set that can be taken down.
+    #[derive(Default)]
+    struct FakeVerifier {
+        known: std::sync::Mutex<std::collections::HashSet<[u8; KEY_LEN]>>,
+        down: std::sync::atomic::AtomicBool,
+        lookups: AtomicUsize,
+    }
+
+    impl FakeVerifier {
+        fn register(&self, key: &NodePublic) {
+            self.known.lock().unwrap().insert(*key.as_bytes());
+        }
+
+        fn set_down(&self, down: bool) {
+            self.down.store(down, Ordering::SeqCst);
+        }
+    }
+
+    impl KeyVerifier for FakeVerifier {
+        fn verify<'a>(&'a self, key: &'a NodePublic) -> admission::BoxFuture<'a, Verdict> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            let verdict = if self.down.load(Ordering::SeqCst) {
+                Verdict::Unavailable
+            } else if self.known.lock().unwrap().contains(key.as_bytes()) {
+                Verdict::Known
+            } else {
+                Verdict::Unknown
+            };
+            Box::pin(async move { verdict })
+        }
+    }
+
+    fn verified_relay() -> (Relay, Arc<FakeVerifier>) {
+        let verifier = Arc::new(FakeVerifier::default());
+        let relay =
+            Relay::new(NodePrivate::generate(&mut OsRng)).with_client_verifier(verifier.clone());
+        (relay, verifier)
+    }
+
+    async fn connect_client(addr: SocketAddr, private: NodePrivate) -> Client<TcpStream> {
+        codewire_tailnet::derp::connect_plain(&addr.to_string(), "127.0.0.1", private, &mut OsRng)
+            .await
+            .expect("client handshake")
+    }
+
+    /// The relay closes a refused client instead of sending ServerInfo.
+    async fn expect_refused<S>(client: &mut Client<S>)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let result =
+            tokio::time::timeout(HANDSHAKE_TIMEOUT + Duration::from_secs(5), client.recv())
+                .await
+                .expect("relay must close a refused client");
+        assert!(result.is_err(), "refused client got {result:?}");
+    }
+
+    /// #2844: a registered key is served and relays; an unregistered key is
+    /// closed at the handshake deadline without ever becoming routable.
+    #[tokio::test]
+    async fn verified_relay_serves_registered_keys_and_refuses_unknown_ones() {
+        let (relay, verifier) = verified_relay();
+        let (addr, _task) = spawn_plain_relay(relay.clone()).await;
+
+        let a_priv = NodePrivate::generate(&mut OsRng);
+        let b_priv = NodePrivate::generate(&mut OsRng);
+        let (a_pub, b_pub) = (a_priv.public(), b_priv.public());
+        verifier.register(&a_pub);
+        verifier.register(&b_pub);
+        let mut a = connect_client(addr, a_priv).await;
+        let mut b = connect_client(addr, b_priv).await;
+        drain_server_info(&mut a).await;
+        drain_server_info(&mut b).await;
+        a.send(&b_pub, b"registered").await.expect("send");
+        let (source, data) = next_packet(&mut b).await;
+        assert_eq!(source.as_bytes(), a_pub.as_bytes());
+        assert_eq!(data, b"registered");
+
+        let stranger_priv = NodePrivate::generate(&mut OsRng);
+        let stranger_pub = stranger_priv.public();
+        let started = tokio::time::Instant::now();
+        let mut stranger = connect_client(addr, stranger_priv).await;
+        // Unknown and unroutable while it waits.
+        stranger
+            .send(&b_pub, b"free relay")
+            .await
+            .expect("buffered send");
+        expect_refused(&mut stranger).await;
+        assert!(started.elapsed() >= HANDSHAKE_TIMEOUT - Duration::from_secs(1));
+        assert!(!relay.inner.peers.lock().await.contains_key(&stranger_pub));
+        a.send(&b_pub, b"still relaying").await.expect("send");
+        let (_, data) = next_packet(&mut b).await;
+        assert_eq!(
+            data, b"still relaying",
+            "the stranger's packet never arrives"
+        );
+        wait_for_slots(&relay, 2).await;
+    }
+
+    /// #2844: every client connects to DERP before it sends its node to a
+    /// coordinator, so a key registered while the relay holds it is served.
+    #[tokio::test]
+    async fn verified_relay_admits_a_key_registered_during_the_handshake() {
+        let (relay, verifier) = verified_relay();
+        let (addr, _task) = spawn_plain_relay(relay.clone()).await;
+
+        let a_priv = NodePrivate::generate(&mut OsRng);
+        let a_pub = a_priv.public();
+        let mut a = connect_client(addr, a_priv).await;
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        assert!(!relay.inner.peers.lock().await.contains_key(&a_pub));
+        verifier.register(&a_pub);
+        drain_server_info(&mut a).await;
+        assert!(relay.inner.peers.lock().await.contains_key(&a_pub));
+        // Backoff, not a busy loop: a handful of lookups in 1.2 s.
+        assert!(verifier.lookups.load(Ordering::SeqCst) <= 6);
+    }
+
+    /// #2844: with no verifier answering, a new key is refused and a live
+    /// session keeps relaying; a key confirmed moments ago is still served.
+    #[tokio::test]
+    async fn verifier_outage_refuses_new_keys_and_keeps_live_sessions() {
+        let (relay, verifier) = verified_relay();
+        let (addr, _task) = spawn_plain_relay(relay.clone()).await;
+
+        let a_priv = NodePrivate::generate(&mut OsRng);
+        let b_priv = NodePrivate::generate(&mut OsRng);
+        let (a_pub, b_pub) = (a_priv.public(), b_priv.public());
+        verifier.register(&a_pub);
+        verifier.register(&b_pub);
+        let mut a = connect_client(addr, a_priv.clone()).await;
+        let mut b = connect_client(addr, b_priv).await;
+        drain_server_info(&mut a).await;
+        drain_server_info(&mut b).await;
+
+        verifier.set_down(true);
+        let newcomer_priv = NodePrivate::generate(&mut OsRng);
+        verifier.register(&newcomer_priv.public());
+        let mut newcomer = connect_client(addr, newcomer_priv).await;
+        expect_refused(&mut newcomer).await;
+
+        a.send(&b_pub, b"live session").await.expect("send");
+        let (_, data) = next_packet(&mut b).await;
+        assert_eq!(data, b"live session");
+
+        // A reconnect of a key confirmed within the cache window.
+        drop(a);
+        let mut again = connect_client(addr, a_priv).await;
+        drain_server_info(&mut again).await;
+    }
+
+    /// #2844: mesh peers prove the mesh key and are never looked up.
+    #[tokio::test]
+    async fn verified_relay_admits_mesh_peers_without_a_lookup() {
+        let mesh_key = MeshKey::parse(&"ab".repeat(32)).unwrap();
+        let verifier = Arc::new(FakeVerifier::default());
+        verifier.set_down(true);
+        let server = Relay::new_with_mesh_key(NodePrivate::generate(&mut OsRng), mesh_key)
+            .with_client_verifier(verifier.clone());
+        let (addr, _task) = spawn_plain_relay(server.clone()).await;
+        let client = Relay::new_with_mesh_key(NodePrivate::generate(&mut OsRng), mesh_key);
+        let client_pub = client.public_key().clone();
+        let _mesh =
+            tokio::spawn(async move { connect_mesh_plain(client, addr, "127.0.0.1").await });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while server.inner.watchers.lock().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("mesh peer watches connections");
+        assert_eq!(verifier.lookups.load(Ordering::SeqCst), 0);
+        assert!(!server.inner.peers.lock().await.contains_key(&client_pub));
+    }
+
+    /// The HTTP verifier makes a Connect unary JSON call and reads a 200
+    /// with `registered: true` as known, any other 200 as unknown, and an
+    /// error or no listener as no answer.
+    #[tokio::test]
+    async fn http_verifier_calls_check_node_key() {
+        let known = NodePrivate::generate(&mut OsRng).public();
+        let broken = NodePrivate::generate(&mut OsRng).public();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (known_body, broken_body) = (check_node_key_body(&known), check_node_key_body(&broken));
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let (known_body, broken_body) = (known_body.clone(), broken_body.clone());
+                tokio::spawn(async move {
+                    let head = read_http_head(&mut sock).await.unwrap();
+                    assert_eq!(head.method, "POST");
+                    assert_eq!(head.path, CHECK_NODE_KEY_PATH);
+                    assert_eq!(head.header("content-type"), Some("application/json"));
+                    assert_eq!(head.header("connect-protocol-version"), Some("1"));
+                    let length: usize = head.header("content-length").unwrap().parse().unwrap();
+                    let mut body = vec![0u8; length];
+                    sock.read_exact(&mut body).await.unwrap();
+                    let body = String::from_utf8(body).unwrap();
+                    let (status, reply) = if body == known_body {
+                        ("200 OK", r#"{"registered":true}"#)
+                    } else if body == broken_body {
+                        ("503 Service Unavailable", r#"{"code":"unavailable"}"#)
+                    } else {
+                        ("200 OK", "{}")
+                    };
+                    let _ = sock
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}",
+                                reply.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                });
+            }
+        });
+        // A closed port next to a live one: the live answer wins.
+        let closed = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let verifier = HttpKeyVerifier::parse(&format!("http://{closed},http://{addr}")).unwrap();
+        let stranger = NodePrivate::generate(&mut OsRng).public();
+        assert_eq!(verifier.verify(&known).await, Verdict::Known);
+        assert_eq!(verifier.verify(&stranger).await, Verdict::Unknown);
+        assert_eq!(verifier.verify(&broken).await, Verdict::Unavailable);
+        let down = HttpKeyVerifier::parse(&format!("http://{closed}")).unwrap();
+        assert_eq!(down.verify(&known).await, Verdict::Unavailable);
+    }
+
+    async fn wait_for_slots(relay: &Relay, held: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while relay.connections.available_permits() != MAX_CONNECTIONS - held {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a refused connection returns its slot");
     }
 
     async fn wait_for_free_slots(relay: &Relay) {

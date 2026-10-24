@@ -168,6 +168,7 @@ async fn start_fixture(with_stun: bool) -> Fixture {
             .unwrap_or_default(),
         database_url: None,
         mesh_authorization: None,
+        derp_verify_addr: None,
         local_authorization: Some(LocalMeshAuthorizationConfig {
             organization_id: ORGANIZATION_ID.to_owned(),
             api_key_hash: hash_api_key(API_KEY),

@@ -95,6 +95,16 @@ impl MeshCoordinateState {
         }
     }
 
+    /// Whether a live session has sent a node with `key`: DERP serves only
+    /// such keys (#2844).
+    pub(crate) fn knows_key(&self, key: &codewire_tailnet::node::NodePublic) -> bool {
+        let registry = self.inner.lock().unwrap();
+        registry
+            .peers
+            .values()
+            .any(|peer| peer.node.as_ref().is_some_and(|node| node.key == *key))
+    }
+
     /// Drop active sessions and reject sessions authorized before deletion but
     /// not yet registered. The store permanently reserves this network name.
     pub(crate) fn revoke_network(&self, network_id: &str) {
@@ -621,6 +631,7 @@ mod tests {
             stun_servers: Vec::new(),
             database_url: None,
             mesh_authorization: None,
+            derp_verify_addr: None,
             local_authorization: Some(LocalMeshAuthorizationConfig {
                 organization_id: "org-test".to_owned(),
                 api_key_hash: codewire_server_core::auth::hash_api_key("cw_test"),
@@ -759,6 +770,57 @@ mod tests {
             endpoints: Vec::new(),
             addresses: vec![prefix_from_uuid(&id)],
         }
+    }
+
+    /// #2844: DERP admits a member's key while its session lives.
+    #[tokio::test]
+    async fn derp_lookup_knows_a_live_member_key_until_its_session_ends() {
+        let state = MeshCoordinateState::new();
+        let peer = AuthorizedPeer {
+            peer_id: Uuid::new_v4(),
+            network_id: "network-test".to_owned(),
+            role: MeshCoordinateRole::Peer,
+        };
+        let member = node();
+        assert!(!state.knows_key(&member.key));
+        let (tx, _rx) = mpsc::channel(4);
+        let session_id = register(&state, &peer, tx).expect("registered");
+        assert!(!state.knows_key(&member.key), "no node sent yet");
+        update_node(&state, peer.peer_id, session_id, member.clone());
+        assert!(state.knows_key(&member.key));
+        assert!(!state.knows_key(&NodePublic::from_raw([0x33; 32])));
+        deregister(&state, peer.peer_id, session_id);
+        assert!(!state.knows_key(&member.key));
+    }
+
+    /// #2844: DERP's own verifier, calling Mesh's admission listener, knows a
+    /// member's key while its session lives.
+    #[tokio::test]
+    async fn derp_admission_call_knows_a_live_member_key() {
+        use codewire_derp::{HttpKeyVerifier, KeyVerifier as _, Verdict};
+
+        let state = MeshCoordinateState::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = crate::derp_verify::router(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let verifier = HttpKeyVerifier::parse(&format!("http://{addr}")).unwrap();
+        let member = node();
+        let key = codewire_tailnet::derp::NodePublic::from_raw(*member.key.as_bytes());
+        assert_eq!(verifier.verify(&key).await, Verdict::Unknown);
+
+        let peer = AuthorizedPeer {
+            peer_id: Uuid::new_v4(),
+            network_id: "network-test".to_owned(),
+            role: MeshCoordinateRole::Peer,
+        };
+        let (tx, _rx) = mpsc::channel(4);
+        let session_id = register(&state, &peer, tx).expect("registered");
+        update_node(&state, peer.peer_id, session_id, member);
+        assert_eq!(verifier.verify(&key).await, Verdict::Known);
+        deregister(&state, peer.peer_id, session_id);
+        assert_eq!(verifier.verify(&key).await, Verdict::Unknown);
+        server.abort();
     }
 
     #[tokio::test]

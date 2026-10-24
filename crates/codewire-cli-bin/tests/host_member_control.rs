@@ -801,6 +801,7 @@ async fn services(direct: bool) -> Services {
             .unwrap_or_default(),
         database_url: None,
         mesh_authorization: None,
+        derp_verify_addr: None,
         local_authorization: Some(LocalMeshAuthorizationConfig {
             organization_id: ORG.into(),
             api_key_hash: hash_api_key(API_KEY),

@@ -25,8 +25,11 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 mod connect;
+mod node_keys;
 mod peer;
 mod session;
+
+pub use node_keys::router as derp_verify_router;
 
 const COORDINATOR_BUCKET: &str = "coordinator-nodes";
 const COORDINATOR_BUCKET_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -65,33 +68,32 @@ impl CoordinatorState {
 struct CoordinationPlane {
     client: async_nats::Client,
     kv: jetstream::kv::Store,
+    /// Node keys of live sessions on every replica (`node_keys`).
+    node_keys: jetstream::kv::Store,
 }
 
 impl CoordinationPlane {
     async fn setup(client: async_nats::Client) -> anyhow::Result<Arc<Self>> {
         let js = jetstream::new(client.clone());
-        let kv = match js.get_key_value(COORDINATOR_BUCKET).await {
-            Ok(kv) => kv,
-            Err(get_err) => match js
-                .create_key_value(jetstream::kv::Config {
-                    bucket: COORDINATOR_BUCKET.to_string(),
-                    description:
-                        "Latest sidecar WireGuard node per environment (cross-replica coordinator)"
-                            .to_string(),
-                    max_age: COORDINATOR_BUCKET_TTL,
-                    ..Default::default()
-                })
-                .await
-            {
-                Ok(kv) => kv,
-                Err(create_err) => js.get_key_value(COORDINATOR_BUCKET).await.map_err(|retry_err| {
-                    anyhow::anyhow!(
-                        "setup coordinator KV failed: get={get_err}; create={create_err}; retry={retry_err}"
-                    )
-                })?,
-            },
-        };
-        Ok(Arc::new(Self { client, kv }))
+        let kv = key_value_bucket(
+            &js,
+            COORDINATOR_BUCKET,
+            "Latest sidecar WireGuard node per environment (cross-replica coordinator)",
+            COORDINATOR_BUCKET_TTL,
+        )
+        .await?;
+        let node_keys = key_value_bucket(
+            &js,
+            node_keys::NODE_KEY_BUCKET,
+            "Node keys of live coordinator sessions, for DERP client admission",
+            node_keys::NODE_KEY_TTL,
+        )
+        .await?;
+        Ok(Arc::new(Self {
+            client,
+            kv,
+            node_keys,
+        }))
     }
 
     async fn subscribe_agent(&self, env_id: Uuid) -> anyhow::Result<async_nats::Subscriber> {
@@ -172,6 +174,33 @@ impl CoordinationPlane {
             self.kv.delete(sidecar_key(env_id)).await?;
         }
         Ok(())
+    }
+}
+
+async fn key_value_bucket(
+    js: &jetstream::Context,
+    bucket: &str,
+    description: &str,
+    max_age: Duration,
+) -> anyhow::Result<jetstream::kv::Store> {
+    match js.get_key_value(bucket).await {
+        Ok(kv) => Ok(kv),
+        Err(get_err) => match js
+            .create_key_value(jetstream::kv::Config {
+                bucket: bucket.to_string(),
+                description: description.to_string(),
+                max_age,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(kv) => Ok(kv),
+            Err(create_err) => js.get_key_value(bucket).await.map_err(|retry_err| {
+                anyhow::anyhow!(
+                    "setup coordinator KV {bucket} failed: get={get_err}; create={create_err}; retry={retry_err}"
+                )
+            }),
+        },
     }
 }
 
@@ -848,6 +877,15 @@ impl PeerRegistry {
         }
     }
 
+    /// Whether a session on this replica has sent a node with `key`.
+    fn knows_key(&self, key: &codewire_tailnet::node::NodePublic) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner
+            .peers
+            .values()
+            .any(|peer| peer.node.as_ref().is_some_and(|node| node.key == *key))
+    }
+
     fn send_all_client_peers(inner: &RegistryInner, sidecar_id: Uuid) {
         let Some(sidecar) = inner.peers.get(&sidecar_id) else {
             return;
@@ -1034,6 +1072,21 @@ mod tests {
         );
 
         plane.kv.delete(sidecar_key(env_id)).await.unwrap();
+
+        // #2844: a node key is registered for its session, survives another
+        // session's teardown, and goes with its own.
+        let mut raw = [0u8; 32];
+        raw[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        raw[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        let key = codewire_tailnet::node::NodePublic::from_raw(raw);
+        let (owner, other) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(!plane.node_key_registered(&key).await.unwrap());
+        plane.put_node_key(&key, owner).await.unwrap();
+        assert!(plane.node_key_registered(&key).await.unwrap());
+        plane.delete_node_key(&key, other).await.unwrap();
+        assert!(plane.node_key_registered(&key).await.unwrap());
+        plane.delete_node_key(&key, owner).await.unwrap();
+        assert!(!plane.node_key_registered(&key).await.unwrap());
     }
 
     fn register(registry: &PeerRegistry, id: Uuid, rank: Option<(i64, i64)>) -> Registration {

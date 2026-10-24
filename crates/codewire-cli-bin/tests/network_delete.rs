@@ -27,6 +27,7 @@ async fn mesh(organization: &str, key: &str) -> (String, tokio::task::JoinHandle
         stun_servers: Vec::new(),
         database_url: None,
         mesh_authorization: None,
+        derp_verify_addr: None,
         local_authorization: Some(LocalMeshAuthorizationConfig {
             organization_id: organization.into(),
             api_key_hash: hash_api_key(key),

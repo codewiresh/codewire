@@ -2,6 +2,10 @@ mesh:
   baseURL: ""  # Required: e.g. https://mesh.example.com
   derpURL: ""  # Set when the packet relay is separate from the Mesh API.
   listenAddr: "0.0.0.0:8080"
+  # Cluster-internal lookup a Codewire DERP relay uses to serve only keys of
+  # live Mesh sessions (DERP_VERIFY_CLIENT_URLS). Never route it through an
+  # ingress. 0 turns it off.
+  derpVerifyPort: 8097
 
 database:
   enabled: false

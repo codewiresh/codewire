@@ -52,6 +52,10 @@ spec:
             - {{ printf "--derp-url=%s" .Values.mesh.derpURL | quote }}
             {{- end }}
           env:
+            {{- if .Values.mesh.derpVerifyPort }}
+            - name: CODEWIRE_MESH_DERP_VERIFY_ADDR
+              value: {{ printf "0.0.0.0:%v" .Values.mesh.derpVerifyPort | quote }}
+            {{- end }}
             {{- if .Values.database.enabled }}
             - name: DATABASE_URL
               valueFrom:
@@ -80,6 +84,11 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            {{- if .Values.mesh.derpVerifyPort }}
+            - name: derp-verify
+              containerPort: {{ .Values.mesh.derpVerifyPort }}
+              protocol: TCP
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

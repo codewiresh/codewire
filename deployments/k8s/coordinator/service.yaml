@@ -15,3 +15,6 @@ spec:
     - port: 8090
       targetPort: 8090
       name: http
+    - port: 8097
+      targetPort: 8097
+      name: derp-verify

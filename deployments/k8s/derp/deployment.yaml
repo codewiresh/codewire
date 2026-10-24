@@ -42,6 +42,15 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Serve only node keys the platform coordinator or Mesh has
+            # registered for a live session (#2844). A key either knows is
+            # admitted; Mesh may be absent (local Kind).
+            - name: DERP_VERIFY_CLIENT_URLS
+              value: http://codewire-coordinator.$(POD_NAMESPACE).svc.cluster.local:8097,http://codewire-mesh-http.$(POD_NAMESPACE).svc.cluster.local:8097
             - name: DERP_MESH_HOSTNAME
               value: codewire-derp-mesh.prod.svc.cluster.local
             - name: TLS_PORT

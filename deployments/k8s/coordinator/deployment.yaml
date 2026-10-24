@@ -37,6 +37,10 @@ spec:
           ports:
             - containerPort: 8090
               name: http
+            # DERP's client admission lookup (#2844). No ingress or route
+            # reaches it; infra's CiliumNetworkPolicy admits only DERP.
+            - containerPort: 8097
+              name: derp-verify
           envFrom:
             - configMapRef:
                 name: codewire-config
@@ -45,6 +49,8 @@ spec:
           env:
             - name: COORDINATOR_PORT
               value: "8090"
+            - name: COORDINATOR_DERP_VERIFY_ADDR
+              value: "0.0.0.0:8097"
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

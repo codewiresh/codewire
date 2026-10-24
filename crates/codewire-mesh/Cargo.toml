@@ -43,6 +43,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+codewire-derp = { workspace = true }
 codewire-tls = { workspace = true, features = ["test-support"] }
 codewire-client = { workspace = true }
 reqwest = { workspace = true }

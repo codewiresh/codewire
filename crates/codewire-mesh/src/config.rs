@@ -10,6 +10,9 @@ pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8080";
 pub const MESH_URL_ENV: &str = "CODEWIRE_MESH_URL";
 pub const LISTEN_ADDR_ENV: &str = "CODEWIRE_MESH_LISTEN_ADDR";
 pub const DERP_URL_ENV: &str = "CODEWIRE_MESH_DERP_URL";
+/// The internal listener DERP asks whether a node key belongs to a
+/// registered Mesh node (#2844). Unset serves no lookup.
+pub const DERP_VERIFY_ADDR_ENV: &str = "CODEWIRE_MESH_DERP_VERIFY_ADDR";
 pub const STUN_SERVERS_ENV: &str = "CODEWIRE_MESH_STUN_SERVERS";
 pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
 pub const MESH_AUTHORIZATION_URL_ENV: &str = "CODEWIRE_MESH_AUTHORIZATION_URL";
@@ -88,6 +91,9 @@ pub struct Config {
     pub base_url: String,
     pub derp_url: Option<String>,
     pub stun_servers: Vec<StunServerConfig>,
+    /// The DERP client admission lookup listener (#2844); no ingress routes
+    /// to it.
+    pub derp_verify_addr: Option<SocketAddr>,
     pub database_url: Option<String>,
     /// Present for the hosted deployment. It is mandatory whenever Mesh owns
     /// a PostgreSQL database, so a hosted request can never fall back to
@@ -106,6 +112,7 @@ impl fmt::Debug for Config {
             .field("base_url", &self.base_url)
             .field("derp_url", &self.derp_url)
             .field("stun_servers", &self.stun_servers)
+            .field("derp_verify_addr", &self.derp_verify_addr)
             .field(
                 "database_url",
                 &self.database_url.as_ref().map(|_| "[redacted]"),
@@ -145,6 +152,9 @@ impl Config {
             validate_base_url(url)?;
         }
         let stun_servers = stun_server_config(args.stun_servers, getenv(STUN_SERVERS_ENV))?;
+        let derp_verify_addr = trim(getenv(DERP_VERIFY_ADDR_ENV))
+            .map(|raw| parse_listen_addr("DERP verify", &raw))
+            .transpose()?;
         let database_url = trim(getenv(DATABASE_URL_ENV));
         let mesh_authorization = mesh_authorization_config(
             getenv(MESH_AUTHORIZATION_URL_ENV),
@@ -167,6 +177,7 @@ impl Config {
             base_url,
             derp_url,
             stun_servers,
+            derp_verify_addr,
             database_url,
             mesh_authorization,
             local_authorization,
