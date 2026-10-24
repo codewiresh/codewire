@@ -711,6 +711,8 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/release/confirm-release-checkout.sh \
   scripts/ci/release/require-production-accepted.sh \
   scripts/ci/tests/test-require-production-accepted.sh \
+  scripts/ci/release/alias-release-images.sh \
+  scripts/ci/release/finish-prod-release.sh \
   install.sh
 # Presence matters: an unlisted existing script selects unknown/full, while
 # deleted scripts deliberately remain policy-only. Prove each new owner path.

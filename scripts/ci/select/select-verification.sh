@@ -2138,6 +2138,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/*observe*.sh|scripts/ci/*observe*.py|\
       scripts/ci/*observer*.tsv|\
       scripts/ci/release/verify-cw-release-signing-key.sh|scripts/ci/release/verify-release-tag-ref.sh|\
+      scripts/ci/release/alias-release-images.sh|scripts/ci/release/finish-prod-release.sh|\
+      scripts/ci/tests/test-deploy-prod-helpers.sh|\
       scripts/ci/release/confirm-release-checkout.sh|\
       scripts/ci/release/require-production-accepted.sh|scripts/ci/tests/test-require-production-accepted.sh|\
       scripts/ci/release/verify-release-support-pair.sh|scripts/ci/tests/test-verify-release-support-pair.sh|\

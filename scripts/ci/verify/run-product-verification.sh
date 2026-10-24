@@ -927,6 +927,7 @@ run_release() {
   scripts/ci/tests/test-verify-release-tag-ref.sh
   scripts/ci/tests/test-verify-release-tag-receipt.sh
   scripts/ci/tests/test-require-production-accepted.sh
+  scripts/ci/tests/test-deploy-prod-helpers.sh
   scripts/ci/tests/test-verify-release-support-pair.sh
   scripts/ci/tests/test-mirror-git-tags.sh
   scripts/ci/tests/test-check-mirror-content.sh

@@ -54,6 +54,7 @@ def load_production_source_files(root: Path) -> dict[str, Any]:
     return {
         "ci_workflow": read(".gitea/workflows/ci.yaml"),
         "production_workflow": read(".gitea/workflows/deploy-prod.yaml"),
+        "production_finish": read("scripts/ci/release/finish-prod-release.sh"),
         "production_dispatch": read("scripts/ci/deploy/dispatch-deploy-prod.sh"),
         "production_oidc_fetcher": read(
             "scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh"
@@ -82,15 +83,18 @@ def validate_production_source(files: dict[str, Any]) -> None:
             raise RuntimeError(f"retired Flux image setter marker remains in {path}")
 
     for required in [
-        "publish-runtime-images:",
+        "publish-release:",
         "image-bundle.py create",
         "publish-image-to-harbor.sh",
         "publish-image-to-ghcr.sh",
-        "dispatch-deploy-prod.sh",
+        "run: scripts/ci/release/finish-prod-release.sh",
         "enable-openid-connect: true",
     ]:
         if required not in files["production_workflow"]:
             raise RuntimeError(f"source production workflow lost required boundary: {required}")
+    # The workflow delivers through finish-prod-release.sh, which dispatches.
+    if "scripts/ci/deploy/dispatch-deploy-prod.sh" not in files["production_finish"]:
+        raise RuntimeError("production release finish lost its deploy-prod dispatch")
     for retired in [
         "aggregate-image-promotion:",
         "CODEWIRE_DEPLOY_PROMOTION_TOKEN",
@@ -142,6 +146,18 @@ def production_source_self_test(files: dict[str, Any]) -> None:
         fixture,
         "production workflow reintroduced the retired direct deploy script",
     )
+
+    fixture = dict(files)
+    fixture["production_finish"] = files["production_finish"].replace(
+        "scripts/ci/deploy/dispatch-deploy-prod.sh", "true"
+    )
+    expect_rejected("release finish without dispatch", fixture, "production release finish lost its deploy-prod dispatch")
+
+    fixture = dict(files)
+    fixture["production_workflow"] = files["production_workflow"].replace(
+        "run: scripts/ci/release/finish-prod-release.sh", "run: true"
+    )
+    expect_rejected("workflow without release finish", fixture, "source production workflow lost required boundary")
 
     fixture = dict(files)
     fixture["retired_control_paths_present"] = ["scripts/ci/retired-observer.sh"]

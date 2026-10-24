@@ -66,20 +66,33 @@ api_get 'runs?workflow_id=deploy-prod.yaml&status=success&page=1&limit=50' "$tmp
 # this exact tag, tag object and commit and whose dispatch saw Production
 # accept it.
 selected="^[0-9T:.-]+Z release tag verified: tag=${tag//./\\.} object=${tag_object_sha} commit=${source_sha} forgejo_signer=[^ ]+\$"
+# deploy-prod delivers from one of two jobs: the publishing job when the
+# release reuses the support pair, or the built-pair finish (#3246). Releases
+# delivered before then did so from one dispatch job; a CLI recovery for one
+# of them still finds it.
+readonly DELIVERING_JOBS=(
+  'Publish the release and deliver it to Production'
+  'Publish the built support pair and deliver the release to Production'
+  'Dispatch Signed Tag to Deploy'
+)
 accepted="^[0-9T:.-]+Z \\[dispatch-deploy-prod\\] deploy run [1-9][0-9]* succeeded: Production accepted ${tag//./\\.}\$"
 while read -r run; do
   [[ "$run" =~ ^[1-9][0-9]*$ ]] || continue
   api_get "runs/$run/jobs" "$tmp/jobs-$run.json" || continue
   jq -e '
-      ([.[] | select(.name == "Verify canonical release tag")] | length == 1 and .[0].status == "success")
-      and ([.[] | select(.name == "Dispatch Signed Tag to Deploy")] | length == 1 and .[0].status == "success")
+      [.[] | select(.name == "Verify canonical release tag")] | length == 1 and .[0].status == "success"
     ' "$tmp/jobs-$run.json" >/dev/null 2>&1 || continue
   job_log "$tmp/jobs-$run.json" 'Verify canonical release tag' "$tmp/selection-$run.log" || continue
   grep -Eq "$selected" "$tmp/selection-$run.log" || continue
-  job_log "$tmp/jobs-$run.json" 'Dispatch Signed Tag to Deploy' "$tmp/dispatch-$run.log" || continue
-  grep -Eq "$accepted" "$tmp/dispatch-$run.log" || continue
-  printf 'Production accepted %s (%s) in deploy-prod run %s\n' "$tag" "$source_sha" "$run"
-  exit 0
+  for delivering in "${DELIVERING_JOBS[@]}"; do
+    jq -e --arg name "$delivering" '
+        [.[] | select(.name == $name)] | length == 1 and .[0].status == "success"
+      ' "$tmp/jobs-$run.json" >/dev/null 2>&1 || continue
+    job_log "$tmp/jobs-$run.json" "$delivering" "$tmp/delivery-$run.log" || continue
+    grep -Eq "$accepted" "$tmp/delivery-$run.log" || continue
+    printf 'Production accepted %s (%s) in deploy-prod run %s\n' "$tag" "$source_sha" "$run"
+    exit 0
+  done
 done < <(jq -r '
     [.workflow_runs[]
       | select(.workflow_id == "deploy-prod.yaml" and .status == "success"

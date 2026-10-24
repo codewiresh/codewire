@@ -67,7 +67,11 @@ case "$path" in
     id="${path#runs/}" id="${id%/jobs}"
     dispatch=success
     [ "$id:$mode" != 500:dispatch_failed ] || dispatch=failure
-    printf '[{"id":%s1,"run_id":%s,"name":"Verify canonical release tag","status":"success","attempt":1},{"id":%s2,"run_id":%s,"name":"Dispatch Signed Tag to Deploy","status":"%s","attempt":%s}]' \
+    delivering='Publish the release and deliver it to Production'
+    [ "$id:$mode" != 500:built_pair ] ||
+      delivering='Publish the built support pair and deliver the release to Production'
+    [ "$id:$mode" != 500:before_collapse ] || delivering='Dispatch Signed Tag to Deploy'
+    printf '[{"id":%s1,"run_id":%s,"name":"Verify canonical release tag","status":"success","attempt":1},{"id":%s2,"run_id":%s,"name":"'"$delivering"'","status":"%s","attempt":%s}]' \
       "$id" "$id" "$id" "$id" "$dispatch" "$([ "$mode" = rerun_dispatch ] && echo 2 || echo 1)" >"$output"
     ;;
   jobs/*/logs\?attempt=*)
@@ -128,6 +132,9 @@ check_case() {
 
 check_case accepted success accepted "Production accepted $TAG ($SHA) in deploy-prod run 500"
 check_case rerun_dispatch rerun_dispatch accepted "in deploy-prod run 500"
+check_case built_pair built_pair accepted "in deploy-prod run 500"
+# A release delivered before the jobs were collapsed is still recognised.
+check_case before_collapse before_collapse accepted "in deploy-prod run 500"
 # Only the release's own run counts: an older release's run, or a scheduled
 # run (listed with event push), does not.
 check_case no_release_run no_release_run refused
@@ -158,7 +165,10 @@ fi
 # selection line and the dispatch's acceptance line.
 workflow="$ROOT/.gitea/workflows/deploy-prod.yaml"
 grep -Fxq '    name: Verify canonical release tag' "$workflow" || fail 'deploy-prod renamed its selection job'
-grep -Fxq '    name: Dispatch Signed Tag to Deploy' "$workflow" || fail 'deploy-prod renamed its dispatch job'
+grep -Fxq '    name: Publish the release and deliver it to Production' "$workflow" ||
+  fail 'deploy-prod renamed its publishing job'
+grep -Fxq '    name: Publish the built support pair and deliver the release to Production' "$workflow" ||
+  fail 'deploy-prod renamed its built-pair finish'
 grep -Fq "printf 'release tag verified: tag=%s object=%s commit=%s forgejo_signer=%s\\n'" \
   "$ROOT/scripts/ci/release/verify-release-tag-ref.sh" || fail 'the verifier changed its selection line'
 grep -Fq "printf '[dispatch-deploy-prod] deploy run %s succeeded: Production accepted %s\\n'" \

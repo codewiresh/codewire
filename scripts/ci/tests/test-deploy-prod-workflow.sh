@@ -22,7 +22,13 @@ if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail "production publisher retains a split Forgejo GHCR username"
 fi
 
-publish_job="$(sed -n '/^  publish-runtime-images:/,/^  dispatch-deploy-prod:/p' "$WORKFLOW")"
+readonly ALIASES="$ROOT/scripts/ci/release/alias-release-images.sh"
+readonly FINISH="$ROOT/scripts/ci/release/finish-prod-release.sh"
+
+# The common release is one protected job (#3246): it selects the support
+# pair, aliases the five runtime images, validates and publishes the runtime
+# bundle and, with a reused pair, finishes the release.
+publish_job="$(sed -n '/^  publish-release:/,/^  build-support-amd64:/p' "$WORKFLOW")"
 [[ "$(grep -Fc 'scripts/ci/images/image-bundle.py create' <<<"$publish_job")" -eq 1 ]] ||
   fail "production must validate exactly one complete runtime candidate set"
 [[ "$(grep -Fc '            --candidate ' <<<"$publish_job")" -eq 5 ]] ||
@@ -46,38 +52,48 @@ grep -Fq '            "$bundle" scripts/ci/trust/codewire-runtime-signing.pub' <
 signature_line="$(grep -n 'scripts/ci/images/verify-runtime-image-signatures.sh' <<<"$publish_job" | cut -d: -f1)"
 [[ -n "$signature_line" && "$validation_line" -lt "$signature_line" && "$signature_line" -lt "$first_copy_line" ]] ||
   fail "production signature check does not sit between validation and publication"
-
-for job in build-daemon-image build-dashboard-image build-derp build-services-image build-mesh-image; do
-  grep -Fq "      - $job" <<<"$publish_job" ||
-    fail "production aggregate does not require $job"
-done
 if grep -Fq 'always()' <<<"$publish_job"; then
-  fail "production aggregate could run after one-of-five failure"
+  fail "production publication could run after a failed step"
 fi
-[[ "$(grep -Fc "          REQUIRE_EXISTING_SOURCE_IMAGE: '1'" "$WORKFLOW")" -eq 5 ]] ||
-  fail "production may rebuild instead of requiring all five source-SHA images"
-# shellcheck disable=SC2016
-[[ "$(grep -Fc '      source_sha: ${{ steps.build.outputs.source_sha }}' "$WORKFLOW")" -eq 5 ]] ||
-  fail "all five production runtime jobs must expose source provenance"
-# shellcheck disable=SC2016
-[[ "$(grep -Fc '      candidate_ref: ${{ steps.build.outputs.candidate_ref }}' "$WORKFLOW")" -eq 5 ]] ||
-  fail "all five production runtime jobs must expose digest candidates"
-[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-harbor.sh' "$WORKFLOW")" -eq 7 ]] ||
-  fail "production must publish exactly seven image manifests to Harbor"
-[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' "$WORKFLOW")" -eq 7 ]] ||
-  fail "production must mirror exactly seven image manifests to GHCR"
-# shellcheck disable=SC2016
-[[ "$(grep -Fc '            "$SOURCE_SHA" "$RELEASE_TAG"' "$WORKFLOW")" -eq 14 ]] ||
-  fail "every production image must receive source-SHA and stable SemVer aliases in Harbor and GHCR"
-for family in base workspace; do
-  grep -Fq "            \"\$CODEWIRE_IMAGE_REGISTRY/codewire/$family\"" "$WORKFLOW" ||
-    fail "production omits the $family support image from Harbor"
-  grep -Fq "            ghcr.io/codewiresh/$family" "$WORKFLOW" ||
-    fail "production omits the $family support image from the GHCR mirror"
+
+# The five aliases run side by side in one step, each requiring the existing
+# source image, and the bundle consumes exactly what that step reported.
+[[ "$(grep -Fc '        run: scripts/ci/release/alias-release-images.sh' "$WORKFLOW")" -eq 1 ]] ||
+  fail "production must alias the runtime images in exactly one step"
+alias_step="$(sed -n '/- name: Alias the five existing runtime images side by side/,/^$/p' <<<"$publish_job")"
+for expected in '        id: alias' "          REQUIRE_EXISTING_SOURCE_IMAGE: '1'" \
+    '          CODEWIRE_SOURCE_DIR: .release-source'; do
+  grep -qxF -- "$expected" <<<"$alias_step" || fail "the alias step omits: $expected"
 done
+for image in daemon derp services mesh dashboard; do
+  for field in source_sha candidate_ref; do
+    grep -Fq "\${{ steps.alias.outputs.${image}_${field} }}" <<<"$publish_job" ||
+      fail "production does not take the $image $field from the alias step"
+  done
+done
+[[ "$(grep -oF '${{ steps.alias.outputs.' "$WORKFLOW" | wc -l)" -eq 20 ]] ||
+  fail "production consumes alias outputs outside the bundle, its publication and its mirror"
+grep -Fq '[[ "${REQUIRE_EXISTING_SOURCE_IMAGE:-}" == 1 ]] ||' "$ALIASES" ||
+  fail "the alias helper can build instead of reusing source images"
+for entry in 'daemon deployments/docker/daemon.Dockerfile' 'derp deployments/docker/derp.Dockerfile' \
+    'services deployments/docker/services.Dockerfile' 'mesh deployments/docker/mesh.Dockerfile' \
+    'dashboard apps/dashboard/Dockerfile'; do
+  grep -Fxq "  '$entry'" "$ALIASES" || fail "the alias helper omits $entry"
+done
+[[ "$(grep -c "^  '[a-z]* [^']*'$" "$ALIASES")" -eq 5 ]] || fail 'the alias helper does not alias exactly five images'
+
+# Runtime images: five to Harbor and five mirrored to GHCR in the workflow;
+# the support pair: two of each in the finishing script.
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-harbor.sh' "$WORKFLOW")" -eq 5 ]] ||
+  fail "production must publish exactly five runtime manifests to Harbor"
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' "$WORKFLOW")" -eq 5 ]] ||
+  fail "production must mirror exactly five runtime manifests to GHCR"
+# shellcheck disable=SC2016
+[[ "$(grep -Fc '            "$SOURCE_SHA" "$RELEASE_TAG"' "$WORKFLOW")" -eq 10 ]] ||
+  fail "every production runtime image must receive source-SHA and stable SemVer aliases in Harbor and GHCR"
 # Harbor gates release; every GHCR copy sits in a mirror step that continues on error.
 ghcr_steps="$(awk '/^      - name: / { capture = ($0 ~ /GHCR/) } capture' "$WORKFLOW")"
-[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$ghcr_steps")" -eq 7 ]] ||
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$ghcr_steps")" -eq 5 ]] ||
   fail "a production GHCR copy is outside a named mirror step"
 [[ "$(grep -c '^      - name: ' <<<"$ghcr_steps")" -eq "$(grep -c '^        continue-on-error: true$' <<<"$ghcr_steps")" ]] ||
   fail "a production GHCR mirror step can fail release"
@@ -85,61 +101,91 @@ if awk '/^      - name: / { capture = ($0 !~ /GHCR/) } capture' "$WORKFLOW" | gr
   fail "a required production step continues on error"
 fi
 
-support_job="$(sed -n '/^  publish-support-release-images:/,/^  publish-runtime-images:/p' "$WORKFLOW")"
-grep -Fq '    needs: [release-selection, support-pair-selection, build-support-amd64, build-support-arm64]' <<<"$support_job" ||
-  fail "support release publication does not wait for the selection and both platform builds"
+# The finishing script joins each support image (verifying the whole index),
+# checks its source, publishes both to Harbor, mirrors them without gating,
+# and only then dispatches the signed tag.
 # shellcheck disable=SC2016
-grep -Fq "    if: \${{ always() && needs.release-selection.result == 'success' && needs.support-pair-selection.result == 'success' && (needs.support-pair-selection.outputs.build == 'false' || (needs.build-support-amd64.result == 'success' && needs.build-support-arm64.result == 'success')) }}" <<<"$support_job" ||
-  fail "support release publication can run without a reused pair or both native platform builds"
-grep -Fq '        id: base' <<<"$support_job" ||
-  fail "support release job does not retain the base step output"
-grep -Fq '        id: workspace' <<<"$support_job" ||
-  fail "support release job does not retain the workspace step output"
-# shellcheck disable=SC2016
-grep -Fq '"${{ steps.workspace.outputs.candidate_ref }}"' <<<"$support_job" ||
-  fail "publisher does not consume the same-job workspace digest"
-# Publication consumes only same-job candidates. The platform digests cross
-# the job boundary only into the two joins, which verify the whole index.
-# shellcheck disable=SC2016
-[[ "$(grep -oF 'needs.build-support-' <<<"$support_job" | wc -l)" -eq 6 \
-  && "$(grep -Fc '          AMD64_DIGEST: ${{ needs.build-support-amd64.outputs.base_digest }}' <<<"$support_job")" -eq 1 \
-  && "$(grep -Fc '          ARM64_DIGEST: ${{ needs.build-support-arm64.outputs.base_digest }}' <<<"$support_job")" -eq 1 \
-  && "$(grep -Fc '          AMD64_DIGEST: ${{ needs.build-support-amd64.outputs.workspace_digest }}' <<<"$support_job")" -eq 1 \
-  && "$(grep -Fc '          ARM64_DIGEST: ${{ needs.build-support-arm64.outputs.workspace_digest }}' <<<"$support_job")" -eq 1 ]] ||
-  fail "support release publication consumes another job's output outside the verifying joins"
-workspace_line="$(grep -n 'id: workspace' <<<"$support_job" | cut -d: -f1)"
-support_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$support_job" | head -1 | cut -d: -f1)"
-[[ -n "$workspace_line" && -n "$support_copy_line" && "$workspace_line" -lt "$support_copy_line" ]] ||
-  fail "support release publication can run before the same-job workspace join"
-if grep -Fq 'build-support-platform.sh' <<<"$support_job"; then
-  fail "support release publication rebuilds a platform"
+for expected in \
+    'join base "$source_dir/images/base/Dockerfile" "$source_dir/images/base" \' \
+    'join workspace "$source_dir/images/workspace/Dockerfile" "$source_dir" \' \
+    '  [[ "$sha" == "$source_sha" ]] || fail "the $image index is from ${sha:-no source}, not $source_sha"' \
+    '    "$(<"$work/$image.ref")" "$registry/codewire/$image" "$source_sha" "$tag"' \
+    '    "$(<"$work/$image.ref")" "ghcr.io/codewiresh/$image" "$source_sha" "$tag" ||' \
+    '"$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh" "$tag"'; do
+  grep -Fxq -- "$expected" "$FINISH" || fail "the finishing script omits: $expected"
+done
+finish_order="$(grep -nE '^[^#]*(join workspace|publish-image-to-harbor|publish-image-to-ghcr|dispatch-deploy-prod)' "$FINISH" | cut -d: -f1 | tr '\n' ' ')"
+read -r join_line harbor_line ghcr_line dispatch_line <<<"$finish_order"
+[[ "$join_line" -lt "$harbor_line" && "$harbor_line" -lt "$ghcr_line" && "$ghcr_line" -lt "$dispatch_line" ]] ||
+  fail "the finishing script does not join, publish, mirror and then dispatch"
+[[ "$(tail -1 "$FINISH")" == '"$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh" "$tag"' ]] ||
+  fail "the finishing script does work after the dispatch"
+if grep -Fq 'build-support-platform.sh' "$FINISH"; then
+  fail "the finishing script rebuilds a platform"
 fi
-selection_job="$(sed -n '/^  support-pair-selection:/,/^  build-support-amd64:/p' "$WORKFLOW")"
+
+# A reused pair finishes in the publishing job, after the runtime bundle.
 # shellcheck disable=SC2016
-grep -Fq '        run: scripts/ci/images/release-support-pair-state.sh "$SOURCE_SHA"' <<<"$selection_job" ||
+reused="$(sed -n '/- name: Publish the reused support pair and deliver the release to Production/,/^$/p' <<<"$publish_job")"
+for expected in "        if: \${{ steps.pair.outputs.build == 'false' }}" "          BUILD_SUPPORT_PAIR: 'false'" \
+    '          CODEWIRE_SOURCE_DIR: .release-source' '        run: scripts/ci/release/finish-prod-release.sh'; do
+  grep -qxF -- "$expected" <<<"$reused" || fail "the reused-pair finish omits: $expected"
+done
+grep -q 'DIGEST' <<<"$reused" && fail 'the reused-pair finish takes platform digests'
+[[ "$(grep -n 'run: scripts/ci/release/finish-prod-release.sh' <<<"$publish_job" | cut -d: -f1)" -gt \
+   "$(grep -n 'Mirror the runtime release to GHCR' <<<"$publish_job" | cut -d: -f1)" ]] ||
+  fail "a reused pair finishes before the runtime release is published"
+# shellcheck disable=SC2016
+grep -Fq '        run: scripts/ci/images/release-support-pair-state.sh "$SOURCE_SHA"' <<<"$publish_job" ||
   fail "the release support pair is not selected from what main published"
+
+# A built pair finishes in its own job, only after both native builds
+# succeeded, and takes exactly their four verified digests.
+finish_job="$(sed -n '/^  finish-built-release:/,$p' "$WORKFLOW")"
+grep -Fxq '    needs: [release-selection, publish-release, build-support-amd64, build-support-arm64]' <<<"$finish_job" ||
+  fail "the built-pair finish does not wait for the publication and both platform builds"
+# shellcheck disable=SC2016
+grep -Fxq "    if: \${{ always() && needs.release-selection.result == 'success' && needs.publish-release.result == 'success' && needs.publish-release.outputs.build == 'true' && needs.build-support-amd64.result == 'success' && needs.build-support-arm64.result == 'success' }}" <<<"$finish_job" ||
+  fail "the built-pair finish can run without both native platform builds"
+# shellcheck disable=SC2016
+[[ "$(grep -oF 'needs.build-support-' <<<"$finish_job" | wc -l)" -eq 6 \
+  && "$(grep -Fxc '          BASE_AMD64_DIGEST: ${{ needs.build-support-amd64.outputs.base_digest }}' <<<"$finish_job")" -eq 1 \
+  && "$(grep -Fxc '          BASE_ARM64_DIGEST: ${{ needs.build-support-arm64.outputs.base_digest }}' <<<"$finish_job")" -eq 1 \
+  && "$(grep -Fxc '          WORKSPACE_AMD64_DIGEST: ${{ needs.build-support-amd64.outputs.workspace_digest }}' <<<"$finish_job")" -eq 1 \
+  && "$(grep -Fxc '          WORKSPACE_ARM64_DIGEST: ${{ needs.build-support-arm64.outputs.workspace_digest }}' <<<"$finish_job")" -eq 1 ]] ||
+  fail "the built-pair finish consumes another job's output outside the verifying joins"
+for expected in "          BUILD_SUPPORT_PAIR: 'true'" '        run: scripts/ci/release/finish-prod-release.sh'; do
+  grep -qxF -- "$expected" <<<"$finish_job" || fail "the built-pair finish omits: $expected"
+done
+[[ "$(grep -Fc 'run: scripts/ci/release/finish-prod-release.sh' "$WORKFLOW")" -eq 2 ]] ||
+  fail "the release finishes from other than the two finishing steps"
+if grep -v '^ *#' "$WORKFLOW" | grep -Fq 'dispatch-deploy-prod.sh'; then
+  fail "the workflow dispatches outside the finishing script"
+fi
+
 for platform in amd64 arm64; do
   case "$platform" in
     amd64) next_job=build-support-arm64 ;;
-    arm64) next_job=publish-support-release-images ;;
+    arm64) next_job=finish-built-release ;;
   esac
   platform_job="$(sed -n "/^  build-support-$platform:/,/^  $next_job:/p" "$WORKFLOW")"
   for expected in "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" '    timeout-minutes: 120' \
-      '    needs: [release-selection, support-pair-selection]' \
-      "    if: \${{ needs.support-pair-selection.outputs.build == 'true' }}" \
+      '    needs: [release-selection, publish-release]' \
+      "    if: \${{ needs.publish-release.outputs.build == 'true' }}" \
       '          CODEWIRE_SOURCE_DIR: .release-source' \
-      "          SUPPORT_PLATFORM_BASE_DIGEST: \${{ needs.support-pair-selection.outputs.base_${platform}_digest }}" \
+      "          SUPPORT_PLATFORM_BASE_DIGEST: \${{ needs.publish-release.outputs.base_${platform}_digest }}" \
       "          SUPPORT_PLATFORM_BUDGET_MINUTES: '110'" \
       "        run: scripts/ci/images/build-support-platform.sh linux/$platform"; do
     grep -qxF -- "$expected" <<<"$platform_job" || fail "linux/$platform release support build omits: $expected"
   done
-  if grep -Eq 'publish-image-to-|OPENBAO_GHCR|secrets\.' <<<"$platform_job"; then
+  # Release-source code runs here, so no publication or deploy credential does.
+  if grep -Eq 'publish-image-to-|finish-prod-release|dispatch-deploy-prod|OPENBAO_GHCR|secrets\.' <<<"$platform_job"; then
     fail "linux/$platform release support build crosses the publication boundary"
   fi
 done
 # shellcheck disable=SC2016 # Match the literal workflow expression.
 grep -qxF '      workspace_digest: ${{ steps.build.outputs.workspace_digest }}' \
-  <<<"$(sed -n '/^  build-support-arm64:/,/^  publish-support-release-images:/p' "$WORKFLOW")" ||
+  <<<"$(sed -n '/^  build-support-arm64:/,/^  finish-built-release:/p' "$WORKFLOW")" ||
   fail 'the linux/arm64 release support build does not report its workspace digest'
 
 # The release tag's own workspace agent contract runs inside the exact amd64
@@ -248,7 +294,8 @@ for job_name, job in workflow["jobs"].items():
         for match in re.finditer(r"build-support-platform\.sh (\S+)", run):
             if match.group(1) == "linux/arm64":
                 arm64_builders.append(job_name)
-        if "build-push-image.sh" in run and env.get("REQUIRE_EXISTING_SOURCE_IMAGE") != "1":
+        if ("build-push-image.sh" in run or "alias-release-images.sh" in run) \
+                and env.get("REQUIRE_EXISTING_SOURCE_IMAGE") != "1":
             sys.exit(f"{job_name}: may build an image instead of reusing its source image")
         if re.search(r"build-push-image\.sh (base|workspace)\b", run):
             sys.exit(f"{job_name}: builds a support image outside the native platform jobs")
@@ -256,25 +303,22 @@ if arm64_builders != ["build-support-arm64"]:
     sys.exit(f"linux/arm64 is built by {arm64_builders}, not exactly the native build-support-arm64 job")
 PYCHECK
 
-dispatch_job="$(sed -n '/^  dispatch-deploy-prod:/,$p' "$WORKFLOW")"
-grep -Fq '      - publish-runtime-images' <<<"$dispatch_job" ||
-  fail "production dispatch can run before runtime publication"
-grep -Fq '      - publish-support-release-images' <<<"$dispatch_job" ||
-  fail "production dispatch can run before support publication"
-# shellcheck disable=SC2016
-grep -Fq "    if: \${{ always() && needs.release-selection.result == 'success' && needs.publish-runtime-images.result == 'success' && needs.publish-support-release-images.result == 'success' }}" <<<"$dispatch_job" ||
-  fail "production dispatch does not require every direct prerequisite to succeed"
-# shellcheck disable=SC2016
-grep -Fq 'run: scripts/ci/deploy/dispatch-deploy-prod.sh "$RELEASE_TAG"' <<<"$dispatch_job" ||
-  fail "production dispatch sends more than the signed source tag"
-grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$dispatch_job" ||
-  fail "production dispatch does not use the protected CI tier"
+# The dispatch runs only in the finishing script, so only in a job that
+# finished every publication first (asserted above).
+for job in publish-release finish-built-release; do
+  job_text="$(sed -n "/^  $job:/,/^  [a-z0-9-]*:\$/p" "$WORKFLOW")"
+  grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$job_text" ||
+    fail "the $job delivery does not use the protected CI tier"
+done
 # The dispatch waits for promote-prod's verdict, so a green release run means
-# Production accepted the release (#2892). It holds one protected runner while
-# promote-prod runs on the same pool: deploy-prod's concurrency group allows
-# one such wait at a time, and the pool runs several protected jobs at once.
-grep -Fq '    timeout-minutes: 40' <<<"$dispatch_job" ||
-  fail "production dispatch has no deadline beyond its 30-minute wait"
+# Production accepted the release (#2892). The delivering job holds one
+# protected runner while promote-prod runs on the same pool: deploy-prod's
+# concurrency group allows one such wait at a time, and the pool runs several
+# protected jobs at once.
+grep -Fxq '    timeout-minutes: 75' <<<"$publish_job" ||
+  fail "the publishing job has no deadline beyond its work and 30-minute wait"
+grep -Fxq '    timeout-minutes: 50' <<<"$finish_job" ||
+  fail "the built-pair finish has no deadline beyond its work and 30-minute wait"
 grep -Fxq '  group: deploy-prod-release' "$WORKFLOW" ||
   fail "production dispatches can wait on deploy runs side by side"
 grep -A1 -Fx '  group: deploy-prod-release' "$WORKFLOW" | grep -Fxq '  cancel-in-progress: false' ||

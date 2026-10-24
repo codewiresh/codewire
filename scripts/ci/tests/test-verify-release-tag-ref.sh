@@ -502,7 +502,7 @@ if text.count("ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
     sys.exit("a later tag checkout has an unexpected shape")
 PY
 }
-assert_confirmed_checkouts "$deploy_workflow" 9
+assert_confirmed_checkouts "$deploy_workflow" 4
 assert_confirmed_checkouts "$cli_workflow" 9
 # Release selection composes its proofs in order (#2892): the tag's own
 # signature, the workspace image pin, then the receipt's source evidence,
@@ -578,43 +578,47 @@ if grep -Fq '.release-control' "$deploy_workflow"; then
   echo 'deploy workflow must not load recovery control from the selected tag' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    needs: [release-selection]' "$deploy_workflow")" -eq 6 ]]
+# One protected job publishes the release (#3246); the native builds and the
+# built-pair finish follow it only when the support pair must be built.
+[[ "$(grep -Fc '    needs: [release-selection]' "$deploy_workflow")" -eq 1 ]]
+[[ "$(grep -Fc '    needs: [release-selection, publish-release]' "$deploy_workflow")" -eq 2 ]]
 if grep -Eq 'build-(base|workspace)-support-image' "$deploy_workflow"; then
   echo 'production support publication still crosses a runner job-output boundary' >&2
   exit 1
 fi
 # The support pair is reused, or built natively per platform from the tag
 # checkout and joined without rebuilding (test-deploy-prod-workflow.sh).
-[[ "$(grep -Fc '        run: scripts/ci/images/join-release-support-image.sh' "$deploy_workflow")" -eq 2 ]]
+[[ "$(grep -Fc '        run: scripts/ci/release/finish-prod-release.sh' "$deploy_workflow")" -eq 2 ]]
 [[ "$(grep -Fc '        run: scripts/ci/images/build-support-platform.sh linux/' "$deploy_workflow")" -eq 2 ]]
-[[ "$(grep -Fc '          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}' "$deploy_workflow")" -eq 9 ]]
-[[ "$(grep -Fc '          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}' "$deploy_workflow")" -eq 9 ]]
-[[ "$(grep -Fc '          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}' "$deploy_workflow")" -eq 9 ]]
-[[ "$(grep -Fc '          CODEWIRE_SOURCE_DIR: .release-source' "$deploy_workflow")" -eq 9 ]]
-[[ "$(grep -Fc "          REQUIRE_EXISTING_SOURCE_IMAGE: '1'" "$deploy_workflow")" -eq 5 ]]
+[[ "$(grep -Fc '          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}' "$deploy_workflow")" -eq 4 ]]
+[[ "$(grep -Fc '          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}' "$deploy_workflow")" -eq 3 ]]
+[[ "$(grep -Fc '          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}' "$deploy_workflow")" -eq 3 ]]
+[[ "$(grep -Fc '          CODEWIRE_SOURCE_DIR: .release-source' "$deploy_workflow")" -eq 5 ]]
+[[ "$(grep -Fc "          REQUIRE_EXISTING_SOURCE_IMAGE: '1'" "$deploy_workflow")" -eq 1 ]]
 if grep -Fq 'CODEWIRE_PUBLISH_LATEST' "$deploy_workflow"; then
   echo 'production image workflow still publishes a moving latest alias' >&2
   exit 1
 fi
-[[ "$(grep -Fc '        run: scripts/ci/images/build-push-image.sh' "$deploy_workflow")" -eq 5 ]]
-[[ "$(grep -Fc 'Dockerfile .release-source' "$deploy_workflow")" -eq 7 ]]
-grep -Fq '  publish-runtime-images:' "$deploy_workflow"
+[[ "$(grep -Fc '        run: scripts/ci/release/alias-release-images.sh' "$deploy_workflow")" -eq 1 ]]
+if grep -Fq 'scripts/ci/images/build-push-image.sh' "$deploy_workflow"; then
+  echo 'production builds an image outside the native support jobs and the alias helper' >&2
+  exit 1
+fi
+grep -Fq '  publish-release:' "$deploy_workflow"
 grep -Fq 'scripts/ci/images/image-bundle.py create' "$deploy_workflow"
 grep -Fq -- '--environment prod' "$deploy_workflow"
 # shellcheck disable=SC2016
 grep -Fq -- '--source-sha "$SOURCE_SHA"' "$deploy_workflow"
-[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' "$deploy_workflow")" -eq 7 ]]
-grep -Fq '  publish-support-release-images:' "$deploy_workflow"
-grep -Fq '      - publish-support-release-images' "$deploy_workflow"
-grep -Fq '  dispatch-deploy-prod:' "$deploy_workflow"
+[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' "$deploy_workflow")" -eq 5 ]]
+grep -Fq '  finish-built-release:' "$deploy_workflow"
 # shellcheck disable=SC2016
-grep -Fq 'run: scripts/ci/deploy/dispatch-deploy-prod.sh "$RELEASE_TAG"' "$deploy_workflow"
+grep -Fxq '"$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh" "$tag"' "$ROOT/scripts/ci/release/finish-prod-release.sh"
 if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' "$deploy_workflow"; then
   echo 'production dispatch retains the static deploy credential' >&2
   exit 1
 fi
 grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" \
-  <(sed -n '/^  dispatch-deploy-prod:/,$p' "$deploy_workflow")
+  <(sed -n '/^  finish-built-release:/,$p' "$deploy_workflow")
 if grep -Eq 'CODEWIRE_DEPLOY_PROMOTION_USERNAME|promote-image-bundle|promote \.release-source|promotion-receipt|observe-production:|deploy-prod-observer\.sh|gitea-(upload|download)-artifact|kubectl|helm' \
   "$deploy_workflow"; then
   echo 'production workflow still contains direct deploy writes, receipt transport, or observation' >&2
