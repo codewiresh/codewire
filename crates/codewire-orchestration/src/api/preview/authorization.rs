@@ -323,7 +323,16 @@ pub(super) async fn check_access(
     )
     .map_err(|_| denied())?;
     match target.access.as_str() {
-        "creator" if user.user_id == target.created_by => Ok(()),
+        // The creator must still be a member: removal deletes only the
+        // membership row, not the environment's creator (#3254).
+        "creator" if user.user_id == target.created_by => {
+            match codewire_server_core::org::user_org_role(state.pool, user, &matched.org_id).await
+            {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err(denied()),
+                Err(_) => Err(unavailable()),
+            }
+        }
         "org_members" => super::require_environment_access(
             state.pool,
             user,

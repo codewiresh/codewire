@@ -703,3 +703,30 @@ async fn exact_port_host_and_current_audience_membership_are_revalidated() -> Re
     }.await;
     result.and(f.cleanup().await)
 }
+
+// Removing a member deletes only their membership row. Their environment's
+// creator column and any environment grant stay behind, so neither may keep
+// the preview open (#3254).
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL"]
+async fn removed_creator_loses_creator_and_member_preview_access() -> Result<()> {
+    let f = Fixture::create(2).await?;
+    let result = async {
+        let (continuation, nonce) = f.begin().await?;
+        let code = f.approve(&continuation).await?;
+        let token = f.finish(&code, &nonce).await?;
+        anyhow::ensure!(f.granted(&token).await?);
+        sqlx::raw_sql("DELETE FROM org_members WHERE id='preview-member'; INSERT INTO environment_access(id,environment_id,user_id,permission,granted_by) VALUES('preview-access','abcde-preview-env','preview-user','viewer','other-user');").execute(&f.pool).await?;
+        anyhow::ensure!(!f.granted(&token).await?, "creator access outlived the removal");
+        sqlx::query("UPDATE environment_ports SET access='org_members' WHERE id='preview-port'").execute(&f.pool).await?;
+        anyhow::ensure!(!f.granted(&token).await?, "an old grant outlived the removal");
+        // A re-added viewer is a current member again: the grant and the
+        // creator shortcut apply once more.
+        sqlx::query("INSERT INTO org_members(id,org_id,user_id,role) VALUES('preview-member','preview-org','preview-user','viewer')").execute(&f.pool).await?;
+        anyhow::ensure!(f.granted(&token).await?);
+        sqlx::query("UPDATE environment_ports SET access='creator' WHERE id='preview-port'").execute(&f.pool).await?;
+        anyhow::ensure!(f.granted(&token).await?);
+        Ok(())
+    }.await;
+    result.and(f.cleanup().await)
+}

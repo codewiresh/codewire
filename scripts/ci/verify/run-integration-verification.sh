@@ -402,7 +402,7 @@ database_lane_orchestration() {
     cargo test --locked -p codewire-orchestration --lib \
       api::preview::authorization::database_tests:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "preview browser authorization matrix" "$logfile" 7
+  assert_passed_count "preview browser authorization matrix" "$logfile" 8
 
   logfile="$RUN_DIR/public-access-profiles.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -535,6 +535,13 @@ database_lane_orchestration() {
       'api::environment_daemon::repair_database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "environment daemon repair lease matrix" "$logfile" 2
+
+  logfile="$RUN_DIR/environment-membership-access.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environments::access_database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "environment membership access matrix" "$logfile" 1
 
   logfile="$RUN_DIR/billing-session-bind.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

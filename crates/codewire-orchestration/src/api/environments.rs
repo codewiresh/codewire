@@ -285,13 +285,23 @@ pub(crate) async fn require_environment_access(
     if environment_org_id != org_id {
         return Err(coded(StatusCode::FORBIDDEN, "access_denied", denied));
     }
-    if created_by.as_deref() == Some(user.user_id.as_str()) {
-        return Ok(());
-    }
-
-    if let Some(role) = user_org_role(pool, user, org_id).await?
-        && (role == "owner" || role == "admin")
-    {
+    // Every shortcut below requires current membership. Removing a member
+    // deletes only their membership row, so without this check the creator
+    // shortcut and any old grant would outlive the removal (#3254).
+    let Some(role) = user_org_role(pool, user, org_id).await? else {
+        log_audit_event(
+            pool,
+            "environment.access.denied",
+            &user.user_id,
+            serde_json::json!({
+                "environment_id": env_id, "org_id": org_id,
+                "required": min_permission, "reason": "not a member",
+            }),
+        )
+        .await;
+        return Err(coded(StatusCode::FORBIDDEN, "access_denied", denied));
+    };
+    if created_by.as_deref() == Some(user.user_id.as_str()) || role == "owner" || role == "admin" {
         return Ok(());
     }
 
@@ -1451,6 +1461,9 @@ pub(crate) async fn extend_environment_ttl_core(
     })
     .await
 }
+
+#[cfg(test)]
+mod access_database_tests;
 
 #[cfg(test)]
 mod tests {
