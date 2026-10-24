@@ -52,8 +52,7 @@ one its supervisor keeps for it, the same for every boot, and
 `cw --local ssh known-hosts` hands OpenSSH exactly that key, so there is no
 trust-on-first-use prompt either. Commands, interactive sessions, `scp`,
 `sftp`, `rsync` and port forwarding work in a local VM created by this `cw`; a
-VM on an older runtime refuses forwarding until it is recreated. `cw vscode`
-does not open local VMs yet.
+VM on an older runtime refuses forwarding until it is recreated.
 
 A bare `cw-NAME`, such as one an editor remembers from an earlier `cw`, still
 reaches the cloud environment `NAME`, and will through at least v0.5. Before
@@ -129,9 +128,10 @@ extension connects through the same proxy. The Sandbox page in the dashboard
 has the same **Open in VS Code** action. Its link uses the bare `cw-<id>`,
 which every version of `cw` resolves, until the bare aliases are retired.
 
-VS Code's Remote-SSH forwards ports into the machine it opens, which local VMs
-do not support yet, so `cw vscode` opens cloud environments only for now and
-points a local VM to `ssh cw-local-NAME`.
+For a local VM, `cw vscode my-vm` (or `cw --local vscode` for the selected
+one) opens `ssh-remote+cw-local-<id>` the same way. Remote-SSH reaches its
+server in the VM through port forwarding, so it needs a VM created by this
+`cw`; a VM on an older runtime refuses forwarding until it is recreated.
 
 ## Copy files
 

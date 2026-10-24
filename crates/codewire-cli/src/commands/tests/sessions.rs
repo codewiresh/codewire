@@ -454,18 +454,6 @@ async fn session_commands_refuse_missing_contradictory_or_retired_selectors_befo
             "`cw-local-app` names a local VM, which --cloud does not reach",
         ),
         (
-            vec!["cw", "vscode", "cw-local-app"],
-            "`cw vscode` does not open local VMs yet; use `ssh cw-local-app`",
-        ),
-        (
-            vec!["cw", "vscode", "--local", "app"],
-            "`cw vscode` does not open local VMs yet; use `ssh cw-local-app`",
-        ),
-        (
-            vec!["cw", "vscode", "--local"],
-            "`cw vscode` does not open local VMs yet; use `ssh cw-local-NAME`",
-        ),
-        (
             vec!["cw", "run"],
             "`cw run` needs an agent or a command: `cw run claude --in ENV`, `cw run codex --in ENV`, or `cw run --in ENV -- COMMAND`",
         ),

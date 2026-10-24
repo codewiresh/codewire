@@ -1239,15 +1239,32 @@ pub(crate) async fn native_ssh_target(name: Option<&str>) -> anyhow::Result<v1::
 
 const NATIVE_SSH_UNSUPPORTED: &str = "your local VMs run on an older cw's supervisor, which has no SSH; `cw upgrade --vms` moves them to this cw once they are idle";
 
-/// `environment`'s SSH host key as its supervisor holds it: one
-/// `ssh-ed25519 <base64>` line, stable for the environment's life.
-pub(crate) async fn native_ssh_host_key(environment: &v1::Environment) -> anyhow::Result<String> {
+/// Fails with the start pointer, as its SSH does, when `environment` is not
+/// running.
+pub(crate) fn ensure_native_running(environment: &v1::Environment) -> anyhow::Result<()> {
+    let name = &environment.name;
+    anyhow::ensure!(
+        environment.state == v1::EnvironmentState::Running as i32,
+        "local environment {name} is not running; start it with `cw start {name}`"
+    );
+    Ok(())
+}
+
+/// Fails with the upgrade pointer when the local VMs' supervisor has no SSH.
+pub(crate) async fn ensure_native_ssh() -> anyhow::Result<()> {
     anyhow::ensure!(
         native_client()
             .await?
             .supports(codewire_local_vmm::supervisor_config::SupervisorFeature::Ssh),
         NATIVE_SSH_UNSUPPORTED
     );
+    Ok(())
+}
+
+/// `environment`'s SSH host key as its supervisor holds it: one
+/// `ssh-ed25519 <base64>` line, stable for the environment's life.
+pub(crate) async fn native_ssh_host_key(environment: &v1::Environment) -> anyhow::Result<String> {
+    ensure_native_ssh().await?;
     native_environment_diagnostic_client(&environment.id)
         .await?
         .host_key()
@@ -5253,6 +5270,27 @@ working_directory: /workspace/github
                 .contains("parse native OCI workspace image"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn only_a_running_local_vm_opens_in_an_editor() {
+        let environment = |state: v1::EnvironmentState| v1::Environment {
+            name: "vs1".to_owned(),
+            state: state as i32,
+            ..Default::default()
+        };
+        assert!(ensure_native_running(&environment(v1::EnvironmentState::Running)).is_ok());
+        for state in [
+            v1::EnvironmentState::Stopped,
+            v1::EnvironmentState::Starting,
+        ] {
+            assert_eq!(
+                ensure_native_running(&environment(state))
+                    .unwrap_err()
+                    .to_string(),
+                "local environment vs1 is not running; start it with `cw start vs1`"
+            );
+        }
     }
 
     #[test]

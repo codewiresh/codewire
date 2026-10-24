@@ -238,15 +238,15 @@ cw shell --stdio ENV     # for OpenSSH ProxyCommand (cw-local-NAME, cw-cloud-NAM
 
 Opens a login shell as a new session in the selected or named environment.
 
-## cw vscode (cloud)
+## cw vscode
 
 ```sh
 cw vscode [ENV] [--folder /workspace] [--org ORG]
+cw --local vscode [ENV] [--folder /workspace]
 ```
 
 Refreshes the SSH config, as `cw setup ssh` does, and opens VS Code with
-Remote-SSH on `cw-cloud-<id>`. It does not open local VMs yet; for a local VM
-it points to `ssh cw-local-NAME`.
+Remote-SSH on `cw-cloud-<id>`, or on `cw-local-<id>` for a local VM.
 
 ## cw setup ssh
 

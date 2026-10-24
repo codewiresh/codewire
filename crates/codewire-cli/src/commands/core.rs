@@ -131,20 +131,15 @@ pub(crate) async fn handle_vscode_command(
         globals.placement == Some(EnvironmentPlacement::Local),
         |alias| alias.is_local(globals.placement),
     );
-    // `cw vscode` does not open local VMs yet; the VS Code slice of #3025
-    // removes this refusal, and the local link below is ready for it.
-    if local {
-        anyhow::bail!(
-            "`cw vscode` does not open local VMs yet; use `ssh {LOCAL_ALIAS_PREFIX}{}`",
-            alias.map_or("NAME", |alias| alias.environment_ref)
-        );
-    }
     // The editor connects through the placement-qualified alias, by ID.
     let (host, shown) = if local {
         let environment = match alias {
             Some(alias) => local_ssh_target(globals, alias).await?,
             None => super::native::native_ssh_target(None).await?,
         };
+        // Refused here, not as an opaque Remote-SSH failure in the editor.
+        super::native::ensure_native_running(&environment)?;
+        super::native::ensure_native_ssh().await?;
         (
             format!("{LOCAL_ALIAS_PREFIX}{}", environment.id),
             environment.name,
