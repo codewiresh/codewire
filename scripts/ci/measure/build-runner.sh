@@ -223,13 +223,21 @@ if [ -n "${ARCHIVE_STORE_URL:-}" ]; then
   curl -fsS --retry 3 --retry-connrefused -o /dev/null -T "$archive" "$ARCHIVE_STORE_URL/v1/archives/$digest"
   upload="$(seconds "$started" "$(now)")"
   record upload "$upload" bytes="$archive_bytes"
-  fetched="$(mktemp -d /dev/shm/build-runner-fetch.XXXXXX 2>/dev/null || mktemp -d)"
+  # Into memory when /dev/shm can hold it with room to spare; a Kata guest's
+  # /dev/shm is small (a 2 GB fetch there failed with curl 23), so otherwise
+  # into this job's own output directory.
+  shm_free="$(df -PB1 /dev/shm 2>/dev/null | awk 'NR == 2 {print $4}')"
+  if [ "${shm_free:-0}" -gt "$((archive_bytes + 268435456))" ]; then
+    fetched="$(mktemp -d /dev/shm/build-runner-fetch.XXXXXX)" fetch_to=memory
+  else
+    fetched="$(mktemp -d "$out/fetch.XXXXXX")" fetch_to=disk
+  fi
   started="$(now)"
   curl -fsS --retry 3 -o "$fetched/tests.tar.zst" "$ARCHIVE_STORE_URL/v1/archives/$digest"
   copied="$(now)"
   [ "$(sha256sum "$fetched/tests.tar.zst" | cut -d' ' -f1)" = "$digest" ] || die 'the fetched archive does not match its digest'
   fetch="$(seconds "$started" "$(now)")"
-  record fetch "$fetch" copy_seconds="$(seconds "$started" "$copied")"
+  record fetch "$fetch" copy_seconds="$(seconds "$started" "$copied")" into="$fetch_to"
   rm -rf -- "$fetched"
 fi
 

@@ -51,6 +51,10 @@ if "$SCRIPT" "$ROOT" >/dev/null 2>&1; then
 fi
 [ -d "$work/root/keep" ] || fail 'a refused run touched the build disk'
 
+# A fetch goes to memory only when /dev/shm can hold the archive.
+grep -Fq 'if [ "${shm_free:-0}" -gt "$((archive_bytes + 268435456))" ]; then' "$SCRIPT" ||
+  fail 'the fetch does not check that /dev/shm can hold the archive'
+
 # Job checkouts are shallow. The persistent clone must take the checkout's
 # shallow root, on the first fetch and on a later, newer commit.
 grep -Fq 'fetch -q --no-tags --update-shallow "$checkout" HEAD' "$SCRIPT" ||
