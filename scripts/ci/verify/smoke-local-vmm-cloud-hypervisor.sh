@@ -6,14 +6,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
-readonly REQUIRED_CH_SHA256='448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc'
-readonly REQUIRED_CH_SIZE='7062256'
+readonly REQUIRED_CH_SHA256='4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b'
+readonly REQUIRED_CH_SIZE='7365360'
 readonly REQUIRED_KERNEL_RELEASE='6.18.48-codewire2'
 readonly REQUIRED_KERNEL_PATH="vmlinuz-$REQUIRED_KERNEL_RELEASE"
 readonly REQUIRED_KERNEL_SHA256='0087597973d655701cc01c313d08a534cd27134eec70061d2ae1e45165053eb5'
 readonly REQUIRED_KERNEL_SIZE='9450496'
 readonly REQUIRED_ARCH='x86_64'
-readonly REQUIRED_CH_VERSION='v53.0'
+readonly REQUIRED_CH_VERSION='v54.0'
 readonly LINUX_SUN_PATH_BYTES=108
 
 ARTIFACT_ROOT=''
@@ -41,7 +41,7 @@ usage: smoke-local-vmm-cloud-hypervisor.sh \
   [--scratch-parent ABSOLUTE_DIRECTORY]
 
 Runs the explicit Linux/x86_64 KVM qualification for codewire-local-vmm.
-The artifact root must already contain the exact locked Cloud Hypervisor v53,
+The artifact root must already contain the exact locked Cloud Hypervisor v54,
 Linux 6.18.48 LTS kernel, and canonical static-musl initramfs. The command does
 not download, extract, install, or fall back to Docker, QEMU, TCG, or another
 VMM.

@@ -159,7 +159,7 @@ def local_runtime(revision, version=VERSION):
                   "git": {"git": spec("git"), "git_remote_https": spec("git-remote-https")}}
     linux_lock = {"schema_version": 1,
                   "cloud_hypervisor": spec("cloud-hypervisor", "x86_64", executable(
-                      "x86_64-unknown-linux-musl", tag=b"cloud-hypervisor"), "v53.0"),
+                      "x86_64-unknown-linux-musl", tag=b"cloud-hypervisor"), "v54.0"),
                   "virtiofsd": spec("virtiofsd", "x86_64", executable(
                       "x86_64-unknown-linux-musl", tag=b"virtiofsd"), "v1.14.0"),
                   "kernel": spec("kernel", "x86_64", x86_bzimage()),
@@ -167,8 +167,8 @@ def local_runtime(revision, version=VERSION):
     components = [{"name": "e2fsprogs", "version": "1.47.4", "license": "GPL-2.0-only",
                    "source": ref("e2fsprogs-1.47.4.tar.gz")},
                   {"name": "git", "version": "2.56.0", "license": "GPL-2.0-only", "source": ref("git-2.56.0.tar.gz")}]
-    linux_components = [{"name": "cloud-hypervisor", "version": "53.0", "license": "Apache-2.0 AND BSD-3-Clause",
-                         "source": ref("cloud-hypervisor-v53.0.tar.xz")}]
+    linux_components = [{"name": "cloud-hypervisor", "version": "54.0", "license": "Apache-2.0 AND BSD-3-Clause",
+                         "source": ref("cloud-hypervisor-v54.0.tar.xz")}]
     document = release.canonical({"schema": release.LOCAL_RUNTIME_SCHEMA, "source_revision": revision,
                                   "targets": {
                                       "macos-aarch64": {"lock": macos_lock, "components": components,

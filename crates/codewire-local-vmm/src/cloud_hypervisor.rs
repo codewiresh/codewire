@@ -426,7 +426,7 @@ impl CloudHypervisorConfig {
         push_option(&mut arguments, "--console", "off");
         push_option(&mut arguments, "--rng", "src=/dev/urandom");
         push_option(&mut arguments, "--seccomp", "true");
-        // Native v53 Landlock derives its allowlist from the already parsed VM
+        // Native v54 Landlock derives its allowlist from the already parsed VM
         // configuration. This command admits only the durable/seed disks, an
         // optional one-boot read-only setup disk, and exact
         // private virtio-fs sockets. The kernel/initramfs, bounded diagnostics,
@@ -607,7 +607,7 @@ pub enum CloudHypervisorConfigError {
     #[error("Cloud Hypervisor seccomp mode must be exactly true")]
     InvalidSeccompValue,
     #[error(
-        "Cloud Hypervisor flag {flag} occurred {actual} times; the v53 profile requires {expected}"
+        "Cloud Hypervisor flag {flag} occurred {actual} times; the v54 profile requires {expected}"
     )]
     FlagCount {
         flag: &'static str,
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn v53_command_is_explicit_and_has_no_network_or_passthrough_devices() {
+    fn v54_command_is_explicit_and_has_no_network_or_passthrough_devices() {
         let mut config = config();
         config.vcpus = 2;
         config.memory_mib = 16_384;

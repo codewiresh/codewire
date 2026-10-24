@@ -10356,7 +10356,7 @@ mod tests {
         // A synthetic static ELF writes the exact version reply using Linux
         // syscalls. This exercises real retained-asset admission without a VMM,
         // a compiler dependency, or a bypass in the production preflight.
-        let reply = b"cloud-hypervisor v53.0\n";
+        let reply = b"cloud-hypervisor v54.0\n";
         let mut elf = vec![0_u8; 120];
         elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
         elf[16..18].copy_from_slice(&2_u16.to_le_bytes());

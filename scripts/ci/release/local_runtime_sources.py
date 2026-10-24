@@ -43,7 +43,7 @@ PIN_SECTIONS = {"schema", "kernel_builder", "kernel_bc", "guest_root_builder", "
 GUEST_TARGETS = ("aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl")
 # The Linux target's host programs: lock key -> the release artifact
 # admission requires (crates/codewire-local-vmm/src/artifact.rs).
-LINUX_RUNTIME = {"cloud_hypervisor": "v53.0", "virtiofsd": "v1.14.0"}
+LINUX_RUNTIME = {"cloud_hypervisor": "v54.0", "virtiofsd": "v1.14.0"}
 TIMEOUT = 120
 
 

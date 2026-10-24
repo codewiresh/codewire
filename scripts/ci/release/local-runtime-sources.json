@@ -70,12 +70,12 @@
   },
   "linux_runtime": {
     "cloud_hypervisor": {
-      "version": "v53.0",
+      "version": "v54.0",
       "origin": "the upstream release asset cloud-hypervisor-static: a static musl x86_64 build, the exact binary every Linux qualification ran",
-      "release": "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/tag/v53.0",
-      "url": "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0/cloud-hypervisor-static",
-      "size": 7062256,
-      "sha256": "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc"
+      "release": "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/tag/v54.0",
+      "url": "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v54.0/cloud-hypervisor-static",
+      "size": 7365360,
+      "sha256": "4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b"
     },
     "virtiofsd": {
       "version": "v1.14.0",
@@ -236,10 +236,10 @@
       "sha256": "26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3"
     },
     "cloud-hypervisor": {
-      "version": "53.0",
+      "version": "54.0",
       "license": "Apache-2.0 AND BSD-3-Clause",
-      "url": "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0/cloud-hypervisor-v53.0.tar.xz",
-      "sha256": "7d806fc1ee42dc4cf5af1293925ab0f741c676ccd29b7f1fa6cb798c01c51f1f",
+      "url": "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v54.0/cloud-hypervisor-v54.0.tar.xz",
+      "sha256": "72681ec9c85fe7a456f21eb9e716c690ff1e16a154e396fb8d0cc42e89b3db7f",
       "note": "the upstream release source, with every crate it builds vendored"
     },
     "virtiofsd": {

@@ -172,7 +172,7 @@ fn a_linux_lock_is_checked_by_its_target_architecture() {
     let linux = |arch: &str| {
         json!({
             "schema_version": 1,
-            "cloud_hypervisor": {"path": "cloud-hypervisor", "size": 1, "sha256": digest(11), "architecture": arch, "version": "v53.0"},
+            "cloud_hypervisor": {"path": "cloud-hypervisor", "size": 1, "sha256": digest(11), "architecture": arch, "version": "v54.0"},
             "kernel": {"path": "kernel", "size": 2, "sha256": digest(12), "architecture": arch},
             "initramfs": {"path": "initramfs", "size": 3, "sha256": digest(13), "architecture": arch},
         })

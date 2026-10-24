@@ -124,8 +124,8 @@ class Inputs:
         self.components = self.directory / "sources"
         self.components.mkdir()
         entries = [{"name": "busybox", "version": "1.37.0", "license": "GPL-2.0-only", "file": "busybox.tar.bz2"},
-                   {"name": "cloud-hypervisor", "version": "53.0", "license": "Apache-2.0 AND BSD-3-Clause",
-                    "file": "cloud-hypervisor-v53.0.tar.xz"}]
+                   {"name": "cloud-hypervisor", "version": "54.0", "license": "Apache-2.0 AND BSD-3-Clause",
+                    "file": "cloud-hypervisor-v54.0.tar.xz"}]
         for entry in entries:
             (self.components / entry["file"]).write_bytes(("source of %s\n" % entry["name"]).encode())
         (self.components / "components.json").write_text(json.dumps(entries))
@@ -190,7 +190,7 @@ class PackTests(unittest.TestCase):
         inputs = self.inputs
         virtiofsd = elf(tag=b"virtiofsd")
         for key, path, data, version in (
-            ("cloud_hypervisor", "cloud-hypervisor", inputs.cloud_hypervisor.read_bytes(), "v53.0"),
+            ("cloud_hypervisor", "cloud-hypervisor", inputs.cloud_hypervisor.read_bytes(), "v54.0"),
             ("virtiofsd", "virtiofsd", virtiofsd, "v1.14.0"),
             ("kernel", "kernel", inputs.kernel.read_bytes(), None),
             ("initramfs", "initramfs", inputs.initramfs.read_bytes(), None),
@@ -227,7 +227,7 @@ class PackTests(unittest.TestCase):
     def test_cloud_hypervisor_must_be_the_pinned_static_build(self):
         pin = self.inputs.pins["linux_runtime"]["cloud_hypervisor"]
         self.inputs.set_cloud_hypervisor(elf(tag=b"another build"), pin=False)
-        self.refused("is not the pinned Cloud Hypervisor v53.0")
+        self.refused("is not the pinned Cloud Hypervisor v54.0")
         for data, message in ((elf(interpreter=True), "dynamic interpreter"),
                               (elf(needed=True), "names a shared library"),
                               (elf(machine=183), "is not a static x86_64-unknown-linux-musl ELF")):

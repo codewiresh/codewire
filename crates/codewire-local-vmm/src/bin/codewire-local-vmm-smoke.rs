@@ -1694,7 +1694,7 @@ mod linux {
             minimum_worker_filters = minimum_worker_filters.min(confinement.seccomp_filters);
             maximum_worker_filters = maximum_worker_filters.max(confinement.seccomp_filters);
         }
-        // Cloud Hypervisor v53 applies role-specific filters inside its VMM,
+        // Cloud Hypervisor v54 applies role-specific filters inside its VMM,
         // API, vCPU, and virtio worker threads. Its process leader performs
         // startup, applies Landlock, and waits for those threads, but is not
         // itself seccomp-filtered. Accept a filtered leader as a future

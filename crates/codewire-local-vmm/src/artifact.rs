@@ -26,7 +26,7 @@ use crate::host::path::{FileIdentity, PathError, PrivateRoot};
 
 pub const ARTIFACT_LOCK_SCHEMA_VERSION: u32 = 1;
 #[cfg(target_os = "linux")]
-pub const CLOUD_HYPERVISOR_RELEASE: &str = "v53.0";
+pub const CLOUD_HYPERVISOR_RELEASE: &str = "v54.0";
 #[cfg(target_os = "linux")]
 pub const VIRTIOFSD_RELEASE: &str = "v1.14.0";
 #[cfg(target_os = "linux")]
@@ -1278,9 +1278,7 @@ fn expected_virtiofsd_version_output(bytes: &[u8]) -> bool {
 fn expected_cloud_hypervisor_version_output(bytes: &[u8]) -> bool {
     matches!(
         bytes,
-        b"cloud-hypervisor v53.0"
-            | b"cloud-hypervisor v53.0\n"
-            | b"cloud-hypervisor v53.0\nMigration Protocol Versions: 0\n"
+        b"cloud-hypervisor v54.0" | b"cloud-hypervisor v54.0\n"
     )
 }
 
@@ -1330,18 +1328,18 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn version_probe_accepts_exact_v53_release_output_only() {
+    fn version_probe_accepts_exact_v54_release_output_only() {
         for accepted in [
-            b"cloud-hypervisor v53.0".as_slice(),
-            b"cloud-hypervisor v53.0\n".as_slice(),
-            b"cloud-hypervisor v53.0\nMigration Protocol Versions: 0\n".as_slice(),
+            b"cloud-hypervisor v54.0".as_slice(),
+            b"cloud-hypervisor v54.0\n".as_slice(),
         ] {
             assert!(expected_cloud_hypervisor_version_output(accepted));
         }
         for rejected in [
-            b"cloud-hypervisor v53.1".as_slice(),
-            b"cloud-hypervisor v53.0\nMigration Protocol Versions: 1\n".as_slice(),
-            b"cloud-hypervisor v53.0\nunexpected\n".as_slice(),
+            b"cloud-hypervisor v53.0\n".as_slice(),
+            b"cloud-hypervisor v54.1".as_slice(),
+            b"cloud-hypervisor v54.0\nMigration Protocol Versions: 0\n".as_slice(),
+            b"cloud-hypervisor v54.0\nunexpected\n".as_slice(),
         ] {
             assert!(!expected_cloud_hypervisor_version_output(rejected));
         }
@@ -1373,7 +1371,7 @@ mod tests {
                 "size": 1,
                 "sha256": "a".repeat(64),
                 "architecture": "x86_64",
-                "version": "v53.0",
+                "version": "v54.0",
                 "surprise": true
             },
             "kernel": {

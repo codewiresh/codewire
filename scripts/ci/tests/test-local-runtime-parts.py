@@ -677,7 +677,7 @@ class SourcesTest(unittest.TestCase):
         self.assertIn(f"readonly REQUIRED_CH_SHA256='{host['cloud_hypervisor']['sha256']}'", smoke)
         self.assertIn(f"readonly REQUIRED_CH_SIZE='{host['cloud_hypervisor']['size']}'", smoke)
         self.assertEqual(host["cloud_hypervisor"]["url"], "https://github.com/cloud-hypervisor/cloud-hypervisor/"
-                                                          "releases/download/v53.0/cloud-hypervisor-static")
+                                                          "releases/download/v54.0/cloud-hypervisor-static")
         self.assertEqual(host["virtiofsd"]["member"], "target/x86_64-unknown-linux-musl/release/virtiofsd")
         self.assertTrue(host["virtiofsd"]["url"].startswith("https://gitlab.com/-/project/21523468/uploads/"))
         self.assertEqual(host["virtiofsd"]["release"], "https://gitlab.com/virtio-fs/virtiofsd/-/releases/v1.14.0")

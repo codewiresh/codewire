@@ -26,7 +26,7 @@ The runtime lives in `~/.cache/codewire/local-vmm-v1/`:
 
 | File | What it is |
 | --- | --- |
-| `artifacts/cloud-hypervisor` | Cloud Hypervisor v53.0, the upstream static build |
+| `artifacts/cloud-hypervisor` | Cloud Hypervisor v54.0, the upstream static build |
 | `artifacts/virtiofsd` | virtiofsd v1.14.0, the upstream static build, for direct host folders |
 | `artifacts/kernel` | the Codewire Linux 6.18.48 guest kernel |
 | `artifacts/initramfs` | the Codewire guest root (guest init, BusyBox, runc) |
