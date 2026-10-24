@@ -69,6 +69,7 @@ push and the untrusted one otherwise.
 |---|---|---|
 | `CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT` | Credential-free light work | selection, aggregation, the Dev delivery trigger, source approval, measures |
 | `CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY` | Sized heavy verification, for every run except a main push | `ci.yaml` build and test groups |
+| `CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD` | The pull request Rust build runner: one metal guest whose build disk keeps the build folder between jobs (infra#1632) | `build-runner-measure.yaml` |
 | `CODEWIRE_CI_RUNNER_TRUSTED_HEAVY` | Sized heavy verification on a main push; the only heavy runner that may write the protected cache | the same groups on a main push |
 | `CODEWIRE_CI_RUNNER_UNTRUSTED_KIND` | The Kind producers and Edge / Kind, for every run except a main push | `ci.yaml` Kind jobs |
 | `CODEWIRE_CI_RUNNER_TRUSTED_KIND` | The same Kind jobs on a main push | `ci.yaml` Kind jobs on a main push |

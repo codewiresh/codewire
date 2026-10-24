@@ -1,0 +1,90 @@
+# zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this measurement has no secret, OIDC or write-capable integration.
+name: Build runner measurement
+
+# Dispatch only: compile-once step 1 (infra#1632). On the pull request build
+# runner (its persistent build disk at /ci-cache) it builds one commit's test
+# archive with line-tables debug info, beside compile-all-targets.sh in a
+# second build folder, uploads the archive to the archive store and fetches it
+# back as a test job will, and records each time (build-runner.sh). The first
+# job builds cold (its build folder wiped) unless told otherwise; the second
+# runs on the next guest from the warm folder, optionally after changing one
+# file, so the two jobs show a cold build, a warm one and the guest turnover
+# between them. Nothing else reads its results; CI keeps compiling in each job
+# until the archive pipeline measures green.
+on:
+  workflow_dispatch:
+    inputs:
+      first_ref:
+        description: Ref or commit the first job builds
+        required: false
+        default: refs/pull/3280/head
+      first_wipe:
+        description: Wipe the build folder before the first build (true for a cold build)
+        required: false
+        default: 'true'
+      second_ref:
+        description: Ref or commit the second job builds, warm
+        required: false
+        default: refs/pull/3280/head
+      second_touch:
+        description: Optional source file (repository path) to change before the second build
+        required: false
+        default: ''
+      clippy:
+        description: Run compile-all-targets parallel to the archive build, serial after it, or off
+        required: false
+        default: parallel
+      jobs:
+        description: Cargo jobs for each build
+        required: false
+        default: '16'
+
+jobs:
+  first:
+    # zizmor: ignore[excessive-permissions] This job has no OIDC or secret and builds and runs repository code only.
+    name: First build (cold by default)
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD' }}
+    timeout-minutes: 60
+    outputs:
+      archive_sha256: ${{ steps.build.outputs.archive_sha256 }}
+    steps:
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.inputs.first_ref }}
+
+      - name: Verify sealed Rust toolchain
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Build, hand off and measure
+        id: build
+        env:
+          ROLE: first build
+          WIPE: ${{ github.event.inputs.first_wipe }}
+          CLIPPY: ${{ github.event.inputs.clippy }}
+          JOBS: ${{ github.event.inputs.jobs }}
+          ARCHIVE_STORE_URL: http://ci-archive-pr.forgejo-ci-archive.svc:8090
+        run: scripts/ci/measure/build-runner.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/build-runner"
+
+  second:
+    # zizmor: ignore[excessive-permissions] This job has no OIDC or secret and builds and runs repository code only.
+    name: Second build (warm)
+    needs: [first]
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD' }}
+    timeout-minutes: 60
+    steps:
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.inputs.second_ref }}
+
+      - name: Verify sealed Rust toolchain
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Build, hand off and measure
+        env:
+          ROLE: second build
+          WIPE: 'false'
+          TOUCH: ${{ github.event.inputs.second_touch }}
+          CLIPPY: ${{ github.event.inputs.clippy }}
+          JOBS: ${{ github.event.inputs.jobs }}
+          ARCHIVE_STORE_URL: http://ci-archive-pr.forgejo-ci-archive.svc:8090
+        run: scripts/ci/measure/build-runner.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/build-runner"

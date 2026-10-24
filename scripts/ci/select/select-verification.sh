@@ -725,6 +725,7 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/ci-start-latency.yaml|\
       .gitea/workflows/ci-done-measures.yaml|\
       .gitea/workflows/test-archive-measure.yaml|\
+      .gitea/workflows/build-runner-measure.yaml|\
       .gitea/workflows/rust-latest-canary.yaml|\
       .gitea/workflows/rust-cache-refresh.yaml|\
       .gitea/workflows/connect-apikey-smoke.yaml|\
@@ -800,6 +801,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-ci-runner-image-contract.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/tests/test-install-cargo-nextest.sh|\
+      scripts/ci/tests/test-build-runner-measure.sh|\
       scripts/ci/tests/test-service-ssh-image-verifier.sh|\
       scripts/ci/verify/run-product-verification.sh|\
       scripts/ci/tests/test-retired-local-sdk-contract.sh|\
