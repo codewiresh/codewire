@@ -2355,6 +2355,42 @@ mod tests {
         }));
     }
 
+    /// codewire#3332: the KBS URL is configured cluster-wide, but only a
+    /// confidential workspace may reach the Trustee namespace. A standard
+    /// workspace's template and its own daemon policy carry no Trustee rule.
+    #[test]
+    fn standard_workspaces_get_no_kbs_egress() {
+        let names_trustee = |policy: &Value| {
+            policy["egress"].as_array().into_iter().flatten().any(|rule| {
+                rule.to_string().contains("codewire-trustee")
+            })
+        };
+        for profile in ["", RUNTIME_PROFILE_COMMODITY] {
+            let opts = TemplateOpts {
+                name: "tmpl-standard".into(),
+                environment_id: "00000000-0000-4000-8000-000000000001".into(),
+                image: "ghcr.io/codewiresh/workspace:golden".into(),
+                support_image: "registry.example.invalid/codewire/daemon:test".into(),
+                runtime_profile: profile.into(),
+                daemon_auth_token: "test-daemon-token".into(),
+                kata_coco_kbs_url:
+                    "http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080".into(),
+                api_base_url: "https://codewire-dev.sh".into(),
+                server_namespace: "dev".into(),
+                cpu_millicores: 1000,
+                memory_mib: 2048,
+                ..Default::default()
+            };
+            let rendered = render_sandbox_template("codewire-runtime", &opts);
+            assert!(!names_trustee(&rendered["spec"]["networkPolicy"]), "{profile:?} template");
+            let daemon = network::render_workspace_daemon_network_policy("dev-sandboxes", &opts);
+            assert!(!names_trustee(&daemon["spec"]), "{profile:?} daemon policy");
+            assert!(!network::identity_free_workspace_egress_rules(&opts)
+                .iter()
+                .any(|rule| rule.to_string().contains("codewire-trustee")));
+        }
+    }
+
     #[test]
     fn workspace_storage_class_is_required_except_for_confidential() {
         for missing in ["", "  "] {

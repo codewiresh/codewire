@@ -78,7 +78,7 @@ pub(super) fn workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
         ingress_controller_egress_rule(opts),
     ];
     egress.extend(workspace_tailnet_egress_rules(opts));
-    if let Some(rule) = kata_coco_kbs_egress_rule(&opts.kata_coco_kbs_url) {
+    if let Some(rule) = confidential_kbs_egress_rule(opts) {
         egress.push(rule);
     }
     egress
@@ -145,10 +145,21 @@ pub(super) fn identity_free_workspace_egress_rules(opts: &TemplateOpts) -> Vec<V
         }),
     ];
     egress.extend(workspace_tailnet_egress_rules(opts));
-    if let Some(rule) = kata_coco_kbs_egress_rule(&opts.kata_coco_kbs_url) {
+    if let Some(rule) = confidential_kbs_egress_rule(opts) {
         egress.push(rule);
     }
     egress
+}
+
+/// Only a confidential workspace talks to the Trustee KBS: its guest's
+/// confidential-data-hub attests there for image and storage keys. A standard
+/// workspace, and so every identity-free warm-pool template, gets no path to
+/// the KBS namespace (codewire#3332).
+fn confidential_kbs_egress_rule(opts: &TemplateOpts) -> Option<Value> {
+    if opts.runtime_profile_spec().profile != RUNTIME_PROFILE_CONFIDENTIAL {
+        return None;
+    }
+    kata_coco_kbs_egress_rule(&opts.kata_coco_kbs_url)
 }
 
 fn kata_coco_kbs_egress_rule(kbs_url: &str) -> Option<Value> {

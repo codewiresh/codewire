@@ -18,10 +18,13 @@
 #   only volumes; the commodity
 #   runtime (Kind overlays add their diagnostic runtimes); no host namespace,
 #   host alias or node pin; its revision in the workspace container's
-#   immutable environment; no environment identity label; and no ingress
+#   immutable environment; no environment identity label; no ingress
 #   before adoption (the controller's template-owned NetworkPolicy then denies
-#   all ingress to unclaimed members). The Kind e2e overlay also admits its
-#   one side-loaded daemon image, which has no registry digest;
+#   all ingress to unclaimed members); and egress that is exactly the
+#   renderer's allowlist: the world outside every private range, plus named
+#   in-cluster peers on their exact ports (codewire#3318). The Kind e2e
+#   overlay also admits its one side-loaded daemon image, which has no
+#   registry digest, and names its own ingress controller;
 # - orchestration never creates or changes an unclaimed member Sandbox; only
 #   the agent-sandbox controller writes those.
 #
@@ -127,6 +130,33 @@ spec:
     # coordinator's extra roots; keep it third.
     - name: rootsConfigMaps
       expression: "['codewire-orchestration-internal-roots']"
+    # The ingress controller a workspace reaches on 80/443, as
+    # namespace|label=value. The Kind e2e overlay replaces this fourth
+    # variable with its in-cluster ingress-nginx; keep it fourth.
+    - name: ingressPeer
+      expression: "'kube-system|app.kubernetes.io/name=rke2-ingress-nginx'"
+    # The orchestration Service Account's own namespace: the server namespace
+    # the renderer names for orchestration, DERP and the UDP relay.
+    - name: serverNamespace
+      expression: request.userInfo.username.split(':')[2]
+    # Every in-cluster peer the identity-free egress may name, as
+    # namespace|label=value|PROTOCOL/port (crates/codewire-orchestration/src/
+    # sandbox/template/network.rs). A rule may name a subset, never more.
+    # Warm pools are never confidential, so the Trustee KBS is never a peer
+    # (codewire#3332).
+    - name: egressPeers
+      expression: >-
+        ['kube-system||UDP/53', 'kube-system||TCP/53',
+        variables.ingressPeer + '|TCP/443', variables.ingressPeer + '|TCP/80',
+        variables.serverNamespace + '|app.kubernetes.io/component=orchestration|TCP/8087',
+        variables.serverNamespace + '|app.kubernetes.io/component=derp|UDP/3478',
+        variables.serverNamespace + '|app.kubernetes.io/component=udp-relay|UDP/41641']
+    # The world rule's mandatory exceptions: every private, loopback,
+    # link-local and carrier-grade NAT range. A rule may except more.
+    - name: nonWorldIPv4
+      expression: "['10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16']"
+    - name: nonWorldIPv6
+      expression: "['fc00::/7']"
     - name: pod
       expression: object.spec.podTemplate.spec
     - name: containers
@@ -229,6 +259,32 @@ spec:
         (!has(object.spec.networkPolicy) || !has(object.spec.networkPolicy.ingress) ||
         size(object.spec.networkPolicy.ingress) == 0)
       message: unclaimed warm-pool members admit no ingress before adoption
+    # codewire#3318: the egress is Codewire's allowlist. Each rule is either
+    # the world rule (0.0.0.0/0 and ::/0, all ports, excepting at least every
+    # non-world range) or names only allowlisted namespace, Pod and port
+    # peers. Anything else (a bare 0.0.0.0/0, a private range, another
+    # Service, a wider port) is refused.
+    - expression: >-
+        has(object.spec.networkPolicy) &&
+        dyn(object.spec.networkPolicy).all(k, k in ['ingress', 'egress']) &&
+        has(object.spec.networkPolicy.egress) &&
+        object.spec.networkPolicy.egress.all(r, dyn(r).all(k, k in ['to', 'ports']) &&
+        has(r.to) && size(r.to) > 0 &&
+        ((!has(r.ports) && r.to.all(t, dyn(t).all(k, k == 'ipBlock') && has(t.ipBlock.except) &&
+        ((t.ipBlock.cidr == '0.0.0.0/0' && variables.nonWorldIPv4.all(c, c in t.ipBlock.except)) ||
+        (t.ipBlock.cidr == '::/0' && variables.nonWorldIPv6.all(c, c in t.ipBlock.except))))) ||
+        (has(r.ports) && size(r.ports) > 0 && r.to.all(t,
+        dyn(t).all(k, k in ['namespaceSelector', 'podSelector']) &&
+        has(t.namespaceSelector) && dyn(t.namespaceSelector).all(k, k == 'matchLabels') &&
+        has(t.namespaceSelector.matchLabels) && size(t.namespaceSelector.matchLabels) == 1 &&
+        'kubernetes.io/metadata.name' in t.namespaceSelector.matchLabels &&
+        (!has(t.podSelector) || (dyn(t.podSelector).all(k, k == 'matchLabels') &&
+        has(t.podSelector.matchLabels) && size(t.podSelector.matchLabels) == 1)) &&
+        r.ports.all(p, dyn(p).all(k, k in ['port', 'protocol']) && has(p.port) && has(p.protocol) &&
+        (t.namespaceSelector.matchLabels['kubernetes.io/metadata.name'] + '|' +
+        (has(t.podSelector) ? t.podSelector.matchLabels.map(k, k + '=' + t.podSelector.matchLabels[k])[0] : '') +
+        '|' + p.protocol + '/' + string(p.port)) in variables.egressPeers)))))
+      message: warm-pool egress is Codewire's allowlist only, the world outside every private range plus the named in-cluster peers and ports
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

@@ -803,3 +803,91 @@ fn a_pool_born_sandbox_must_equal_the_rendering() {
     .template;
     assert!(sandbox_matches_rendering(&sandbox, &other).is_err());
 }
+
+/// codewire#3318: the template admission policy binds egress to an
+/// allowlist. Every rule the renderer can emit for a warm pool (all optional
+/// peers on, hosted and Kind ingress) must be on it, spelled exactly as the
+/// policy builds its `namespace|label=value|PROTOCOL/port` keys.
+#[test]
+fn the_admission_policy_admits_every_rendered_egress_rule() {
+    let policy = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deployments/k8s/orchestration/warm-pool-authz.yaml"
+    ))
+    .expect("warm-pool admission policy");
+    let kind_e2e = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/e2e/kind/kustomization.yaml"
+    ))
+    .expect("Kind e2e kustomization");
+    let full = |ingress_namespace: &str, ingress_pod_name: &str| TemplateOpts {
+        udp_relay_allocator_egress_enabled: true,
+        kata_coco_kbs_url: "https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080"
+            .into(),
+        ingress_namespace: ingress_namespace.into(),
+        ingress_pod_name: ingress_pod_name.into(),
+        ..pool_opts()
+    };
+    assert!(
+        !policy.contains("codewire-trustee"),
+        "warm-pool egress admits no Trustee peer"
+    );
+    for (opts, ingress_source) in [
+        (full("", ""), &policy),
+        (full("ingress-nginx", "ingress-nginx"), &kind_e2e),
+    ] {
+        let rendered = render(&opts);
+        let egress = rendered.template["spec"]["networkPolicy"]["egress"]
+            .as_array()
+            .expect("template egress");
+        let mut peers = 0;
+        for rule in egress {
+            let Some(ports) = rule.get("ports").and_then(Value::as_array) else {
+                for peer in rule["to"].as_array().unwrap() {
+                    for except in peer["ipBlock"]["except"].as_array().unwrap() {
+                        let except = except.as_str().unwrap();
+                        assert!(
+                            policy.contains(&format!("'{except}'")),
+                            "policy lacks {except}"
+                        );
+                    }
+                }
+                continue;
+            };
+            for peer in rule["to"].as_array().unwrap() {
+                let namespace =
+                    peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
+                        .as_str()
+                        .unwrap();
+                let labels = peer["podSelector"]["matchLabels"].as_object();
+                assert!(labels.is_none_or(|labels| labels.len() == 1), "{peer}");
+                let label = labels
+                    .and_then(|labels| labels.iter().next())
+                    .map(|(key, value)| format!("{key}={}", value.as_str().unwrap()))
+                    .unwrap_or_default();
+                for port in ports {
+                    assert!(port.get("endPort").is_none(), "{port}");
+                    let port = format!("{}/{}", port["protocol"].as_str().unwrap(), port["port"]);
+                    peers += 1;
+                    let admitted = if namespace == opts.server_namespace {
+                        policy.contains(&format!("variables.serverNamespace + '|{label}|{port}'"))
+                    } else if label.starts_with("app.kubernetes.io/name=") {
+                        ingress_source.contains(&format!("'{namespace}|{label}'"))
+                            && policy.contains(&format!("variables.ingressPeer + '|{port}'"))
+                    } else {
+                        policy.contains(&format!("'{namespace}|{label}|{port}'"))
+                    };
+                    assert!(admitted, "policy refuses {namespace}|{label}|{port}");
+                }
+            }
+        }
+        // KBS is configured, but a warm pool is never confidential, so it
+        // never renders a Trustee peer and the policy admits none (#3332).
+        assert_eq!(peers, 7, "every optional peer rendered");
+        assert!(
+            !egress
+                .iter()
+                .any(|rule| rule.to_string().contains("codewire-trustee"))
+        );
+    }
+}

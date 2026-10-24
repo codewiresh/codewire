@@ -239,6 +239,14 @@ patches:
       - op: replace
         path: /spec/variables/2/expression
         value: "['codewire-orchestration-internal-roots', 'codewire-coordinator-extra-roots']"
+      # SANDBOX_INGRESS_NAMESPACE/POD_NAME (support.yaml) point workspace
+      # egress at this cluster's ingress-nginx instead of RKE2's.
+      - op: test
+        path: /spec/variables/3/name
+        value: ingressPeer
+      - op: replace
+        path: /spec/variables/3/expression
+        value: "'ingress-nginx|app.kubernetes.io/name=ingress-nginx'"
 
 # Namespace transforms do not rewrite DNS SANs inside custom resources.
 replacements:
