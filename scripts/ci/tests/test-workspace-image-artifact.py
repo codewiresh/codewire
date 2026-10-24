@@ -36,6 +36,10 @@ CONFIG_BYTES = json.dumps({"os": "linux", "architecture": "amd64",
 IMAGE_ID = "sha256:" + hashlib.sha256(CONFIG_BYTES).hexdigest()
 BASE_DIGEST = "sha256:" + "6" * 64
 OTHER_IMAGE_ID = "sha256:" + "7" * 64
+# How long the fake Docker's stalled copy sleeps. A stall test proves the
+# stall bound ended the copy, not the sleep; 5 s failed on a loaded CI slot
+# (#3277), so the proof keeps half the sleep as slack.
+STALLED_DOCKER_SECONDS = 60
 
 
 def write_archive(path, *, config=CONFIG_BYTES, change=None):
@@ -836,7 +840,8 @@ class CwCopyTests(unittest.TestCase):
         self.fake.write_text("#!/usr/bin/python3\n" + FAKE_CW_DOCKER.replace(
             "SETTINGS_PATH", repr(str(self.settings))).replace("LOG_PATH", repr(str(self.log))).replace(
             "PAYLOAD_PATH", repr(str(self.work / "build/assets/cw"))).replace(
-            "REFERENCE_PATH", repr(str(self.reference))), encoding="utf-8")
+            "REFERENCE_PATH", repr(str(self.reference))).replace(
+            "STALLED_DOCKER_SECONDS", repr(STALLED_DOCKER_SECONDS)), encoding="utf-8")
         self.fake.chmod(0o700)
         environment = {"PATH": "/usr/bin:/bin", "HOME": str(self.base), "LC_ALL": "C", "TZ": "UTC",
                        "CODEWIRE_DOCKER_BIN": str(self.fake), "PYTHONDONTWRITEBYTECODE": "1"}
@@ -1022,7 +1027,7 @@ class CwCopyTests(unittest.TestCase):
         with mock.patch.object(artifact, "CW_STALL_SECONDS", 0.5), \
                 self.assertRaisesRegex(ValueError, "docker run made no progress for 0.5 s"):
             self.verify()
-        self.assertLess(time.monotonic() - started, 5)
+        self.assertLess(time.monotonic() - started, STALLED_DOCKER_SECONDS / 2)
         self.assert_closed()
 
     def test_slow_but_progressing_copy_is_not_a_stall(self):
@@ -1154,7 +1159,7 @@ elif arguments[:1]==['run']:
         print('CW_SYNTHETIC_SECRET_MUST_NOT_RENDER',file=sys.stderr);sys.exit(47)
     if mode=='stderr-oversize':
         sys.stderr.buffer.write(b'e'*(64*1024+1));sys.stderr.buffer.flush()
-    if mode=='stall': time.sleep(60)
+    if mode=='stall': time.sleep(STALLED_DOCKER_SECONDS)
     if mode=='trickle':
         step=len(data)//6+1
         for offset in range(0,len(data),step):

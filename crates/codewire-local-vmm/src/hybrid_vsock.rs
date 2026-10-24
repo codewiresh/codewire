@@ -133,17 +133,40 @@ async fn connect_channel_admitted(
     identity: SocketIdentity,
     guest_port: u32,
 ) -> Result<tonic::transport::Channel, HybridVsockError> {
+    connect_channel_admitted_with_timeouts(
+        socket,
+        identity,
+        guest_port,
+        CONNECT_TIMEOUT,
+        HANDSHAKE_TIMEOUT,
+    )
+    .await
+}
+
+async fn connect_channel_admitted_with_timeouts(
+    socket: PathBuf,
+    identity: SocketIdentity,
+    guest_port: u32,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> Result<tonic::transport::Channel, HybridVsockError> {
     let endpoint = Endpoint::from_static("http://codewire-guest-daemon")
-        .connect_timeout(CONNECT_TIMEOUT)
+        .connect_timeout(connect_timeout)
         .timeout(Duration::from_secs(10));
     let channel = endpoint
         .connect_with_connector(tower::service_fn(move |_| {
             let socket = socket.clone();
             let identity = identity.clone();
             async move {
-                connect_admitted(&socket, &identity, guest_port)
-                    .await
-                    .map(TokioIo::new)
+                connect_admitted_with_timeouts(
+                    &socket,
+                    &identity,
+                    guest_port,
+                    connect_timeout,
+                    handshake_timeout,
+                )
+                .await
+                .map(TokioIo::new)
             }
         }))
         .await
@@ -272,6 +295,36 @@ mod tests {
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
 
+    /// Bounds a connection a test fixture answers, which ends the wait. The
+    /// bound only turns a hang into a failure; the product's 2 s connect bound
+    /// failed against an in-process daemon on a loaded CI slot (#3277).
+    const HANG_GUARD: Duration = Duration::from_secs(120);
+
+    /// `connect_hybrid_vsock` with the hang guard in place of the product's
+    /// bounds.
+    async fn connect_guarded(
+        socket: &Path,
+        guest_port: u32,
+    ) -> Result<UnixStream, HybridVsockError> {
+        let identity = SocketIdentity::capture(socket).unwrap();
+        connect_admitted_with_timeouts(socket, &identity, guest_port, HANG_GUARD, HANG_GUARD).await
+    }
+
+    /// `connect_daemon` with the hang guard in place of the product's bounds.
+    async fn connect_daemon_guarded(socket: &Path, guest_port: u32, token: &str) -> SessionClient {
+        let identity = SocketIdentity::capture(socket).unwrap();
+        let channel = connect_channel_admitted_with_timeouts(
+            socket.to_owned(),
+            identity,
+            guest_port,
+            HANG_GUARD,
+            HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        SessionClient::from_channel(channel, token).unwrap()
+    }
+
     fn privatize(path: &Path) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
@@ -351,9 +404,8 @@ mod tests {
             acceptor.abort();
         });
 
-        let client = connect_daemon(&socket, 7777, "daemon-auth-token-for-hybrid-test")
-            .await
-            .unwrap();
+        let client =
+            connect_daemon_guarded(&socket, 7777, "daemon-auth-token-for-hybrid-test").await;
         client.require_ready().await.unwrap();
         let health = client.get_health().await.unwrap();
         assert_ne!(health.state, 0);
@@ -375,7 +427,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let mut stream = connect_hybrid_vsock(&socket, 7).await.unwrap();
+        let mut stream = connect_guarded(&socket, 7).await.unwrap();
         let mut preface = [0_u8; 16];
         stream.read_exact(&mut preface).await.unwrap();
         assert_eq!(&preface, b"PRI * HTTP/2.0\r\n");
@@ -395,7 +447,7 @@ mod tests {
                 stream.write_all(acknowledgement).await.unwrap();
             });
             assert!(matches!(
-                connect_hybrid_vsock(&socket, 7).await,
+                connect_guarded(&socket, 7).await,
                 Err(HybridVsockError::InvalidAcknowledgement)
             ));
             server.await.unwrap();
@@ -438,9 +490,7 @@ mod tests {
             .await
             .unwrap();
         });
-        let client = connect_daemon(&socket, 7777, "wrong-daemon-token")
-            .await
-            .unwrap();
+        let client = connect_daemon_guarded(&socket, 7777, "wrong-daemon-token").await;
         assert!(matches!(
             client.require_ready().await,
             Err(SessionClientError::Status(_))
@@ -464,7 +514,7 @@ mod tests {
                 }
             });
             assert!(matches!(
-                connect_hybrid_vsock(&socket, 7).await,
+                connect_guarded(&socket, 7).await,
                 Err(HybridVsockError::InvalidAcknowledgement)
             ));
             server.await.unwrap();

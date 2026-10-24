@@ -5519,12 +5519,11 @@ mod tests {
     use super::*;
     use crate::host_port::tests::{free_loopback_port, once_released};
 
-    /// Bounds a wait for a fixture child's exit, which ends the wait. The
-    /// bound only turns a hang into a failure; SIGNAL_STOP_TIMEOUT (2 s)
-    /// failed around a /bin/sh child on a slow CI slot that stalled I/O
-    /// (#3239).
-    #[cfg(target_os = "linux")]
-    const CHILD_EXIT_HANG_GUARD: Duration = Duration::from_secs(120);
+    /// Bounds a wait that its own event ends: a fixture child's exit, a host
+    /// listener's release, a forwarded frame or descriptor, or a task
+    /// finishing. The bound only turns a hang into a failure. Bounds of 1 and
+    /// 2 s failed on slow CI slots that stalled I/O (#3239, #3277).
+    const HANG_GUARD: Duration = Duration::from_secs(120);
 
     /// #2638: a network role starts with at least 1024 open files, or its
     /// hard limit, even from a process that has the macOS default of 256.
@@ -5683,7 +5682,7 @@ mod tests {
     }
 
     async fn wait_for_exec(pid: u32, executable: &Path) {
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(HANG_GUARD, async {
             loop {
                 #[cfg(target_os = "linux")]
                 let current = fs::read_link(format!("/proc/{pid}/exe")).ok();
@@ -5827,7 +5826,7 @@ mod tests {
                 TOKEN,
                 vm_id,
                 9,
-                tokio::time::Instant::now() + Duration::from_secs(1),
+                tokio::time::Instant::now() + HANG_GUARD,
                 NetworkProgressGoal::NetworkReady,
             )
             .await
@@ -5861,7 +5860,7 @@ mod tests {
                 TOKEN,
                 vm_id,
                 9,
-                tokio::time::Instant::now() + Duration::from_secs(1),
+                tokio::time::Instant::now() + HANG_GUARD,
                 NetworkProgressGoal::Terminal,
             )
             .await,
@@ -5880,7 +5879,7 @@ mod tests {
             .await
             .unwrap();
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
         assert_eq!(
             read_worker_status_frame(&mut runner, deadline)
                 .await
@@ -5909,7 +5908,7 @@ mod tests {
             .await
             .unwrap();
         broker.write_all(EGRESS_BROKER_READY_MESSAGE).await.unwrap();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
         assert_eq!(
             read_egress_broker_status_frame(&mut runner, deadline)
                 .await
@@ -5941,11 +5940,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            read_worker_status_frame(
-                &mut runner,
-                tokio::time::Instant::now() + Duration::from_secs(1),
-            )
-            .await,
+            read_worker_status_frame(&mut runner, tokio::time::Instant::now() + HANG_GUARD,).await,
             Err(RunnerError::NetworkWorkerBootstrap)
         ));
     }
@@ -6167,7 +6162,7 @@ mod tests {
         // forked child holds an inherited copy until it execs (#2678). Only
         // `first_port` may be busy for that reason, and only briefly: the
         // reservation must still fail at `blocked_port`.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         loop {
             match reserve_host_ports(&bindings) {
                 Err(RunnerError::HostPortUnavailable(port)) if port == blocked_port => break,
@@ -6203,7 +6198,7 @@ mod tests {
     #[tokio::test]
     async fn expected_ingress_forwarder_completion_defers_to_process_exit() {
         let mut forwarder = Some(tokio::spawn(async { Ok::<(), RunnerError>(()) }));
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(HANG_GUARD, async {
             while !forwarder.as_ref().unwrap().is_finished() {
                 tokio::task::yield_now().await;
             }
@@ -6220,7 +6215,7 @@ mod tests {
         let mut forwarder = Some(tokio::spawn(async {
             Err::<(), RunnerError>(RunnerError::IngressControl)
         }));
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(HANG_GUARD, async {
             while !forwarder.as_ref().unwrap().is_finished() {
                 tokio::task::yield_now().await;
             }
@@ -6280,7 +6275,7 @@ mod tests {
 
         broker.signal(Signal::KILL).unwrap();
         broker_child.wait().await.unwrap();
-        let rebound = tokio::time::timeout(Duration::from_secs(1), async {
+        let rebound = tokio::time::timeout(HANG_GUARD, async {
             loop {
                 match StdTcpListener::bind((Ipv4Addr::LOCALHOST, host_port)) {
                     Ok(listener) => break listener,
@@ -6296,25 +6291,20 @@ mod tests {
         let (published_stream, mut transport_stream) = StdUnixStream::pair().unwrap();
         mesh_publisher.publish(4_000, published_stream).unwrap();
         let mut frame = [0_u8; MESH_INGRESS_CONTROL_FRAME_LEN];
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            worker_control.read_exact(&mut frame),
-        )
-        .await
-        .expect("Mesh ingress control frame was not forwarded")
-        .unwrap();
+        tokio::time::timeout(HANG_GUARD, worker_control.read_exact(&mut frame))
+            .await
+            .expect("Mesh ingress control frame was not forwarded")
+            .unwrap();
         let decoded = MeshIngressControlReceiver::new(vm_id, 1, &[4_000])
             .unwrap()
             .decode(&frame, &mesh_key)
             .unwrap();
         assert_eq!(decoded.binding.guest_port, 4_000);
-        let descriptor = tokio::time::timeout(
-            Duration::from_secs(1),
-            receive_mesh_ingress_descriptor(&worker_control),
-        )
-        .await
-        .expect("Mesh ingress descriptor was not forwarded")
-        .unwrap();
+        let descriptor =
+            tokio::time::timeout(HANG_GUARD, receive_mesh_ingress_descriptor(&worker_control))
+                .await
+                .expect("Mesh ingress descriptor was not forwarded")
+                .unwrap();
         transport_stream.write_all(b"still connected").unwrap();
         let mut admitted_stream = StdUnixStream::from(descriptor);
         let mut transferred = [0_u8; 15];
@@ -6323,7 +6313,7 @@ mod tests {
 
         worker.signal(Signal::KILL).unwrap();
         worker_child.wait().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(1), &mut forwarder)
+        tokio::time::timeout(HANG_GUARD, &mut forwarder)
             .await
             .expect("worker loss did not end the ingress forwarder")
             .unwrap()
@@ -6377,9 +6367,9 @@ mod tests {
         } else {
             worker.signal(Signal::KILL).unwrap();
             worker_child.wait().await.unwrap();
-            let _ = tokio::time::timeout(Duration::from_secs(1), &mut forwarder).await;
+            let _ = tokio::time::timeout(HANG_GUARD, &mut forwarder).await;
         }
-        let released = tokio::time::timeout(Duration::from_secs(1), async {
+        let released = tokio::time::timeout(HANG_GUARD, async {
             loop {
                 if StdTcpListener::bind((Ipv4Addr::LOCALHOST, host_port)).is_ok() {
                     break;
@@ -6471,20 +6461,17 @@ mod tests {
             .await
             .unwrap();
         let mut frame = [0_u8; HOST_PORT_CONTROL_FRAME_LEN];
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            worker_control.read_exact(&mut frame),
-        )
-        .await
-        .expect("host-port control frame was not forwarded")
-        .unwrap();
+        tokio::time::timeout(HANG_GUARD, worker_control.read_exact(&mut frame))
+            .await
+            .expect("host-port control frame was not forwarded")
+            .unwrap();
         let decoded = HostPortControlReceiver::new(vm_id, 1)
             .unwrap()
             .decode(&frame, &key)
             .unwrap();
         assert_eq!(decoded.binding, binding);
         let descriptor = tokio::time::timeout(
-            Duration::from_secs(1),
+            HANG_GUARD,
             receive_worker_host_port_descriptor(&worker_control, binding),
         )
         .await
@@ -6510,7 +6497,7 @@ mod tests {
 
         worker.signal(Signal::KILL).unwrap();
         worker_child.wait().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(1), &mut forwarder)
+        tokio::time::timeout(HANG_GUARD, &mut forwarder)
             .await
             .expect("worker loss did not end the ingress forwarder")
             .unwrap()
@@ -6989,7 +6976,7 @@ mod tests {
         assert!(start_task.await.unwrap_err().is_cancelled());
 
         // The aborted startup's drop sent SIGKILL; its exit ends the wait.
-        tokio::time::timeout(CHILD_EXIT_HANG_GUARD, async {
+        tokio::time::timeout(HANG_GUARD, async {
             loop {
                 match LiveProcess::recover(&identity) {
                     Ok(process) if !process.is_exited().unwrap() => {
@@ -7055,8 +7042,7 @@ mod tests {
             .write_atomic(&paths.state_file)
             .unwrap();
 
-        let result =
-            wait_for_endpoints_with_timeout(&paths, &process, 7_777, Duration::from_secs(2)).await;
+        let result = wait_for_endpoints_with_timeout(&paths, &process, 7_777, HANG_GUARD).await;
         assert!(matches!(result, Err(RunnerError::ExitedDuringStart)));
         terminate_failed_launch(&process, &mut child).await.unwrap();
         assert!(child.try_wait().unwrap().is_some());
@@ -7074,7 +7060,7 @@ mod tests {
         let process = LiveProcess::recover(&identity).unwrap();
 
         let result = tokio::time::timeout(
-            Duration::from_secs(1),
+            HANG_GUARD,
             wait_for_endpoints_with_timeout(&paths, &process, 7_777, Duration::from_millis(30)),
         )
         .await
@@ -7152,7 +7138,7 @@ mod tests {
         );
 
         let mut child = command.spawn().unwrap();
-        let status = tokio::time::timeout(CHILD_EXIT_HANG_GUARD, child.wait())
+        let status = tokio::time::timeout(HANG_GUARD, child.wait())
             .await
             .expect("confined fixture hung")
             .unwrap();
@@ -7333,7 +7319,7 @@ exit 0"#,
             .unwrap()
             .spawn()
             .unwrap();
-        let status = tokio::time::timeout(CHILD_EXIT_HANG_GUARD, child.wait())
+        let status = tokio::time::timeout(HANG_GUARD, child.wait())
             .await
             .expect("descriptor sentinel child hung")
             .unwrap();

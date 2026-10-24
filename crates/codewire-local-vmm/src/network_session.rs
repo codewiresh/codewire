@@ -615,6 +615,11 @@ mod tests {
     const TOKEN: &str = "portable-session-test-token-0123456789";
     const TEST_DNS_NAME: &str = "fixture.codewire.test";
     const TEST_DNS_ANSWER: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 20);
+    /// Bounds a wait that its own event ends: a reply, an answered SYN, a
+    /// reset or a lookup reaching the broker. The bound only turns a hang
+    /// into a failure; fixed windows of up to 2 s failed on a loaded CI slot
+    /// (#3277).
+    const HANG_GUARD: Duration = Duration::from_secs(120);
 
     fn identity() -> (Uuid, u64) {
         (
@@ -714,7 +719,7 @@ mod tests {
         packet: &[u8],
     ) -> Vec<u8> {
         write_guest_packet(stream, session, packet).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(2), read_guest_packet(stream, session))
+        tokio::time::timeout(HANG_GUARD, read_guest_packet(stream, session))
             .await
             .expect("the reply timed out")
             .unwrap()
@@ -871,7 +876,7 @@ mod tests {
         }
 
         async fn wait_for_slow(&self, count: usize) {
-            tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::time::timeout(HANG_GUARD, async {
                 while self.slow.load(Ordering::Acquire) < count {
                     tokio::task::yield_now().await;
                 }
@@ -946,13 +951,10 @@ mod tests {
         assert_eq!(broker.authorized.load(Ordering::Acquire), 1);
 
         broker.release.add_permits(1);
-        let reply = tokio::time::timeout(
-            Duration::from_secs(2),
-            read_guest_packet(&mut guest, &mut session),
-        )
-        .await
-        .expect("the slow lookup was answered once released")
-        .unwrap();
+        let reply = tokio::time::timeout(HANG_GUARD, read_guest_packet(&mut guest, &mut session))
+            .await
+            .expect("the slow lookup was answered once released")
+            .unwrap();
         assert!(reply.ends_with(&TEST_DNS_ANSWER.octets()));
     }
 
@@ -1020,12 +1022,50 @@ mod tests {
         packets
     }
 
-    /// Authorizes and dials as configured, counting dials, with an optional
-    /// delay before each dial answers.
+    /// Every packet up to and including the first TCP reset.
+    async fn packets_through_reset(
+        stream: &mut DuplexStream,
+        session: &mut NetworkSession,
+    ) -> Vec<Vec<u8>> {
+        let mut packets = Vec::new();
+        tokio::time::timeout(HANG_GUARD, async {
+            loop {
+                let packet = read_guest_packet(stream, session).await.unwrap();
+                let reset = packet[9] == 6 && tcp_flags(&packet) & 0x04 != 0;
+                packets.push(packet);
+                if reset {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("no TCP reset arrived");
+        packets
+    }
+
+    /// Reads packets until `answered` holds a SYN-ACK for `expected` ports.
+    async fn await_syn_acks(
+        stream: &mut DuplexStream,
+        session: &mut NetworkSession,
+        answered: &mut std::collections::BTreeMap<u16, u32>,
+        expected: usize,
+    ) {
+        tokio::time::timeout(HANG_GUARD, async {
+            while answered.len() < expected {
+                let packet = read_guest_packet(stream, session).await.unwrap();
+                note_syn_acks(answered, vec![packet]);
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{} of {expected} SYNs were answered", answered.len()));
+    }
+
+    /// Authorizes and dials as configured, counting dials. Each dial answers
+    /// once `dial` has a permit, so a test can hold dials open.
     struct DialBroker {
         authorize: bool,
         connect: bool,
-        dial: Duration,
+        dial: Semaphore,
         dials: AtomicUsize,
     }
 
@@ -1041,7 +1081,7 @@ mod tests {
 
         async fn connect_tcp(&self, _flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
             self.dials.fetch_add(1, Ordering::AcqRel);
-            tokio::time::sleep(self.dial).await;
+            drop(self.dial.acquire().await.unwrap());
             if !self.connect {
                 return Err(io::Error::from(io::ErrorKind::ConnectionRefused));
             }
@@ -1063,7 +1103,7 @@ mod tests {
             let broker = Arc::new(DialBroker {
                 authorize,
                 connect,
-                dial: Duration::ZERO,
+                dial: Semaphore::new(Semaphore::MAX_PERMITS),
                 dials: AtomicUsize::new(0),
             });
             let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
@@ -1072,7 +1112,7 @@ mod tests {
             write_guest_packet(&mut guest, &mut session, &syn)
                 .await
                 .unwrap();
-            let packets = drain(&mut guest, &mut session, Duration::from_millis(300)).await;
+            let packets = packets_through_reset(&mut guest, &mut session).await;
             let tcp: Vec<&Vec<u8>> = packets.iter().filter(|packet| packet[9] == 6).collect();
             assert!(
                 !tcp.iter().any(|packet| tcp_flags(packet) & 0x12 == 0x12),
@@ -1101,7 +1141,7 @@ mod tests {
         let broker = Arc::new(DialBroker {
             authorize: true,
             connect: true,
-            dial: Duration::ZERO,
+            dial: Semaphore::new(Semaphore::MAX_PERMITS),
             dials: AtomicUsize::new(0),
         });
         let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
@@ -1110,7 +1150,7 @@ mod tests {
             write_guest_packet(&mut guest, &mut session, &syn)
                 .await
                 .unwrap();
-            let packets = drain(&mut guest, &mut session, Duration::from_millis(200)).await;
+            let packets = packets_through_reset(&mut guest, &mut session).await;
             let tcp: Vec<&Vec<u8>> = packets.iter().filter(|packet| packet[9] == 6).collect();
             assert!(
                 !tcp.iter().any(|packet| tcp_flags(packet) & 0x12 == 0x12),
@@ -1134,15 +1174,27 @@ mod tests {
     /// guest retransmits while it runs does not dial again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_handshake_waits_for_the_dial_and_a_retransmitted_syn_dials_once() {
+        // The dial stays open until the test releases it, so no wait can
+        // outlast it on a slow runner (#3277).
         let broker = Arc::new(DialBroker {
             authorize: true,
             connect: true,
-            dial: Duration::from_millis(400),
+            dial: Semaphore::new(0),
             dials: AtomicUsize::new(0),
         });
         let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
         let destination = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 81), 443);
         let syn = tcp_packet(40_001, destination, 1, 0, 0x02);
+        write_guest_packet(&mut guest, &mut session, &syn)
+            .await
+            .unwrap();
+        tokio::time::timeout(HANG_GUARD, async {
+            while broker.dials.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the SYN reached the broker");
         write_guest_packet(&mut guest, &mut session, &syn)
             .await
             .unwrap();
@@ -1153,16 +1205,9 @@ mod tests {
                 .any(|packet| packet[9] == 6 && tcp_flags(packet) == 0x12),
             "SYN-ACK before the dial finished"
         );
-        write_guest_packet(&mut guest, &mut session, &syn)
-            .await
-            .unwrap();
-        let later = drain(&mut guest, &mut session, Duration::from_millis(800)).await;
-        assert!(
-            later
-                .iter()
-                .any(|packet| packet[9] == 6 && tcp_flags(packet) == 0x12),
-            "no SYN-ACK once the dial connected"
-        );
+        broker.dial.add_permits(1);
+        let mut answered = std::collections::BTreeMap::new();
+        await_syn_acks(&mut guest, &mut session, &mut answered, 1).await;
         assert_eq!(broker.dials.load(Ordering::Acquire), 1);
     }
 
@@ -1208,17 +1253,7 @@ mod tests {
                 drain(&mut guest, &mut session, Duration::from_millis(5)).await,
             );
         }
-        note_syn_acks(
-            &mut answered,
-            drain(&mut guest, &mut session, Duration::from_millis(500)).await,
-        );
-        for index in 0..DESTINATIONS {
-            let port = 40_000 + u16::try_from(index).unwrap();
-            assert!(
-                answered.contains_key(&port),
-                "destination {index} was not answered"
-            );
-        }
+        await_syn_acks(&mut guest, &mut session, &mut answered, DESTINATIONS).await;
         assert_eq!(broker.authorized.load(Ordering::Acquire), DESTINATIONS);
     }
 
@@ -1243,7 +1278,7 @@ mod tests {
             write_guest_packet(&mut guest, &mut session, &syn)
                 .await
                 .unwrap();
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            let deadline = tokio::time::Instant::now() + HANG_GUARD;
             while !answered.contains_key(&port) && tokio::time::Instant::now() < deadline {
                 note_syn_acks(
                     &mut answered,
@@ -1275,25 +1310,25 @@ mod tests {
         let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
         let destination = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 80), 443);
         let mut syn_acks = std::collections::BTreeMap::new();
-        let note = |packets: Vec<Vec<u8>>, syn_acks: &mut std::collections::BTreeMap<u16, u32>| {
-            for packet in packets {
-                if packet[9] == 6 && tcp_flags(&packet) == 0x12 {
-                    let port = u16::from_be_bytes([packet[22], packet[23]]);
-                    let seq = u32::from_be_bytes([packet[24], packet[25], packet[26], packet[27]]);
-                    syn_acks.insert(port, seq);
-                }
-            }
-        };
         for index in 0..CONNECTIONS {
             let syn = tcp_packet(30_000 + index, destination, 1, 0, 0x02);
             write_guest_packet(&mut guest, &mut session, &syn)
                 .await
                 .unwrap();
-            let packets = drain(&mut guest, &mut session, Duration::from_millis(5)).await;
-            note(packets, &mut syn_acks);
+            note_syn_acks(
+                &mut syn_acks,
+                drain(&mut guest, &mut session, Duration::from_millis(5)).await,
+            );
         }
-        let packets = drain(&mut guest, &mut session, Duration::from_millis(200)).await;
-        note(packets, &mut syn_acks);
+        // Every connection slot completes its handshake before the guest
+        // closes them; on a loaded runner a fixed wait saw none (#3277).
+        await_syn_acks(
+            &mut guest,
+            &mut session,
+            &mut syn_acks,
+            NetstackLimits::default().max_connections,
+        )
+        .await;
         for (port, seq) in &syn_acks {
             let ack = tcp_packet(*port, destination, 2, seq.wrapping_add(1), 0x10);
             write_guest_packet(&mut guest, &mut session, &ack)
@@ -1315,7 +1350,7 @@ mod tests {
         write_guest_packet(&mut guest, &mut session, &query)
             .await
             .unwrap();
-        let answered = tokio::time::timeout(Duration::from_secs(30), async {
+        let answered = tokio::time::timeout(HANG_GUARD, async {
             loop {
                 let packet = read_guest_packet(&mut guest, &mut session).await.unwrap();
                 if packet[9] == 17 && u16::from_be_bytes([packet[20], packet[21]]) == 53 {
@@ -1330,10 +1365,13 @@ mod tests {
              lookup answered after {elapsed:?}",
             broker.dialled.load(Ordering::Acquire)
         );
-        let answer = answered.expect("the lookup was answered within 30 s");
+        let answer = answered.expect("the lookup was answered");
         assert!(answer.ends_with(&TEST_DNS_ANSWER.octets()));
+        // #2714 held a lookup about 1 s for each connection closed, over four
+        // minutes for this burst; an unloaded run answers in under 1 ms. 10 s
+        // keeps slack for a loaded runner, where 1 s failed (#3277).
         assert!(
-            elapsed < Duration::from_secs(1),
+            elapsed < Duration::from_secs(10),
             "the lookup waited {elapsed:?}"
         );
     }
@@ -1357,13 +1395,11 @@ mod tests {
 
         broker.release.add_permits(MAX_DNS_IN_FLIGHT);
         for _ in 0..MAX_DNS_IN_FLIGHT {
-            let reply = tokio::time::timeout(
-                Duration::from_secs(2),
-                read_guest_packet(&mut guest, &mut session),
-            )
-            .await
-            .expect("every released lookup was answered")
-            .unwrap();
+            let reply =
+                tokio::time::timeout(HANG_GUARD, read_guest_packet(&mut guest, &mut session))
+                    .await
+                    .expect("every released lookup was answered")
+                    .unwrap();
             assert!(reply.ends_with(&TEST_DNS_ANSWER.octets()));
         }
         // With the bound free again, a question goes to the broker.
@@ -1406,7 +1442,7 @@ mod tests {
             .await
             .unwrap();
         let response = tokio::time::timeout(
-            Duration::from_secs(2),
+            HANG_GUARD,
             read_guest_packet(&mut guest_endpoint, &mut session),
         )
         .await
@@ -1417,7 +1453,7 @@ mod tests {
 
         drop(guest_endpoint);
         assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(2), host)
+            tokio::time::timeout(HANG_GUARD, host)
                 .await
                 .unwrap()
                 .unwrap(),
