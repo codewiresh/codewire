@@ -18,6 +18,11 @@ use uuid::Uuid;
 use super::wire::ObservedSelection;
 use super::*;
 
+/// A deadline for IO, locks and child waits whose timing is not the subject.
+/// The event ends them; this only turns a hang into a failure. A slow CI slot
+/// can stall a thread for more than a second between taking a deadline and
+/// polling, which a 1 s deadline reported as a timeout (#3312).
+const HANG: Duration = Duration::from_secs(60);
 const TARGET: &str = "x86_64-unknown-linux-musl";
 const CHILD_ROOT: &str = "CW_PLATFORM_ROLE_TEST_ROOT";
 const CHILD_MODE: &str = "CW_PLATFORM_ROLE_TEST_MODE";
@@ -110,7 +115,7 @@ impl Fixture {
     }
 
     fn engine(&self) -> Engine {
-        let mut engine = Engine::new(self.paths.clone(), Instant::now() + Duration::from_secs(10));
+        let mut engine = Engine::new(self.paths.clone(), Instant::now() + HANG);
         engine.image_fixture = Some((self.image.clone(), self.a.identity.clone()));
         engine
     }
@@ -867,7 +872,7 @@ fn nonstage_trailing_input_and_unknown_or_gnu_image_refuse_before_effects() {
         ),
         (Err(Code::InvalidFrame), false)
     );
-    let mut engine = Engine::new(f.paths.clone(), Instant::now() + Duration::from_secs(1));
+    let mut engine = Engine::new(f.paths.clone(), Instant::now() + HANG);
     assert_eq!(
         engine.execute(
             &f.request(Action::Bootstrap {
@@ -969,7 +974,7 @@ fn bootstrap_does_not_adopt_or_overwrite_an_ordinary_writer_after_absent_preflig
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
         let ordinary = thread::spawn(move || {
-            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            ready_rx.recv_timeout(HANG).unwrap();
             let result = store::install(
                 &paths.store,
                 &paths.entry,
@@ -994,9 +999,7 @@ fn bootstrap_does_not_adopt_or_overwrite_an_ordinary_writer_after_absent_preflig
             // Both snapshots saw absence and A is already fully copied/admitted.
             // The unrelated ordinary updater does not take the role-only lock.
             ready_tx.send(()).map_err(|_| Code::Io)?;
-            done_rx
-                .recv_timeout(Duration::from_secs(5))
-                .map_err(|_| Code::Deadline)?
+            done_rx.recv_timeout(HANG).map_err(|_| Code::Deadline)?
         });
         if before_creation {
             engine.before_bootstrap_publication = Some(pause);
@@ -1161,7 +1164,7 @@ fn concurrent_bootstraps_serialize_and_only_one_absent_selection_wins() {
         });
         request.request_id = Uuid::new_v4();
         threads.push(thread::spawn(move || {
-            let mut engine = Engine::new(paths, Instant::now() + Duration::from_secs(5));
+            let mut engine = Engine::new(paths, Instant::now() + HANG);
             engine.image_fixture = Some((image, identity));
             barrier.wait();
             engine.execute(&request, &mut Cursor::new([]))
@@ -1181,7 +1184,7 @@ fn real_flock_blocks_mutation_until_bounded_deadline_without_creating_job() {
     f.bootstrap();
     let tree = Tree::open(&f.paths, false).unwrap();
     let _lock = tree
-        .existing_mutation_lock(Instant::now() + Duration::from_secs(1))
+        .existing_mutation_lock(Instant::now() + HANG)
         .unwrap()
         .unwrap();
     let mut engine = f.engine();
@@ -1223,8 +1226,7 @@ fn actual_nonblocking_fd_timeout_eof_and_flags_are_preserved() {
     );
     peer.write_all(b"x").unwrap();
     drop(peer);
-    let mut bounded =
-        BoundedInput::fixture(input.as_raw_fd(), Instant::now() + Duration::from_secs(1)).unwrap();
+    let mut bounded = BoundedInput::fixture(input.as_raw_fd(), Instant::now() + HANG).unwrap();
     let mut byte = [0];
     assert_eq!(bounded.read(&mut byte).unwrap(), 1);
     assert_eq!(byte, *b"x");
@@ -1323,7 +1325,7 @@ impl OwnedChild {
     }
 
     fn wait(&mut self) -> std::process::ExitStatus {
-        let until = Instant::now() + Duration::from_secs(5);
+        let until = Instant::now() + HANG;
         while !self.terminal() && Instant::now() < until {
             thread::sleep(Duration::from_millis(10))
         }
@@ -1383,7 +1385,7 @@ fn actual_owned_child_cancellation_retains_stage_and_does_not_select_or_replay()
     let stdin = child.child.stdin.as_mut().unwrap();
     stdin.write_all(&framed(&request)).unwrap();
     stdin.write_all(&f.b.bytes[..16]).unwrap();
-    let until = Instant::now() + Duration::from_secs(5);
+    let until = Instant::now() + HANG;
     loop {
         let manifest = stdfs::read(f.job_path().join(JOB)).unwrap();
         let job: Job = serde_json::from_slice(&manifest).unwrap();

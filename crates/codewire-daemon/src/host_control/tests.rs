@@ -119,8 +119,13 @@ pub(crate) async fn owner(root: &Path) -> (Owner, SessionEngine) {
     (owner, engine)
 }
 
+/// Bounds a wait on an event, so a hang fails instead of stalling the run.
+/// It is never the expected duration: the condition is the event, and a slow
+/// CI slot can stall a process for seconds (#3309).
+const HANG: Duration = Duration::from_secs(60);
+
 pub(crate) async fn settled(owner: &Owner, request: &Mutation) -> Receipt {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG, async {
         loop {
             let receipt = owner
                 .observe(&request.request_id, &request.scope)
@@ -136,6 +141,18 @@ pub(crate) async fn settled(owner: &Owner, request: &Mutation) -> Receipt {
     .unwrap()
 }
 
+/// Mutates and returns the request's outcome. The RPC answers with the
+/// receipt it has after RPC_JOIN_TIMEOUT, which on a stalled slot can still be
+/// unsettled; the outcome is then the settled receipt (#3309).
+async fn outcome(owner: &Owner, request: Mutation) -> Receipt {
+    let receipt = owner.mutate(request.clone()).await.unwrap();
+    if receipt.unsettled() {
+        settled(owner, &request).await
+    } else {
+        receipt
+    }
+}
+
 async fn finish(owner: &Owner, engine: &SessionEngine) {
     owner.drain().await.unwrap();
     engine.shutdown().await.unwrap();
@@ -144,9 +161,10 @@ async fn finish(owner: &Owner, engine: &SessionEngine) {
 /// Reopen the store in the same process after its previous owner was dropped.
 /// A daemon restart releases the owner lock with its process; here the last
 /// clone of the dropped owner can still be releasing it, so a busy lock is
-/// retried briefly. A store that stays unreadable still fails the test.
+/// retried until that release. A store that stays unreadable still fails the
+/// test, after HANG.
 async fn reopen_owner(config: &crate::Config, engine: &SessionEngine) -> Owner {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + HANG;
     loop {
         match Owner::new(
             config,
@@ -182,9 +200,7 @@ async fn host_control_duplicate_launch_input_and_stop_have_one_effect() {
     for _ in 0..8 {
         let owner = owner.clone();
         let request = request.clone();
-        joins.push(tokio::spawn(
-            async move { owner.mutate(request).await.unwrap() },
-        ));
+        joins.push(tokio::spawn(async move { outcome(&owner, request).await }));
     }
     for task in joins {
         assert_eq!(
@@ -203,7 +219,7 @@ async fn host_control_duplicate_launch_input_and_stop_have_one_effect() {
             .unwrap()
             .input_acknowledged
     );
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(HANG, async {
         loop {
             if std::fs::read_to_string(&marker).is_ok_and(|bytes| bytes.contains("only-once")) {
                 break;
@@ -214,7 +230,7 @@ async fn host_control_duplicate_launch_input_and_stop_have_one_effect() {
     .await
     .unwrap();
     let stopped = stop(5, &scope(), &launched.session_id, 1);
-    let first = owner.mutate(stopped.clone()).await.unwrap();
+    let first = outcome(&owner, stopped.clone()).await;
     assert_eq!(first.phase, v1::HostControlRequestPhase::Completed as i32);
     assert!(!first.cleanup_unknown);
     assert_eq!(owner.mutate(stopped).await.unwrap().phase, first.phase);
@@ -303,7 +319,7 @@ async fn host_control_receipt_loss_is_unknown_and_never_relaunches_after_reload(
     let receipt = owner.mutate(request.clone()).await.unwrap();
     assert_eq!(receipt.phase, v1::HostControlRequestPhase::Unknown as i32);
     assert!(!receipt.input_acknowledged);
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(HANG, async {
         loop {
             let record = engine.get(&receipt.session_id).await.unwrap();
             if record.state == v1::SessionLifecycleState::Exited as i32
@@ -423,12 +439,12 @@ async fn host_control_service_pages_large_actual_records_without_drop_or_truncat
             )),
         })
         .unwrap();
-        let result = owner.mutate(request).await.unwrap();
+        let result = outcome(&owner, request).await;
         assert_eq!(result.phase, v1::HostControlRequestPhase::Completed as i32);
     }
     // Wait for the actual short children and their terminal metadata before
     // comparing record bytes across pages; pagination itself never rewrites.
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(HANG, async {
         loop {
             if engine
                 .list()
@@ -638,7 +654,7 @@ fn host_control_crash_child() {
                     .execute_host_control(owner.clone(), request)
                     .await
                     .unwrap();
-                tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::time::timeout(HANG, async {
                     loop {
                         let record = engine.get(&record.session_id).await.unwrap();
                         if record.state == v1::SessionLifecycleState::Exited as i32
