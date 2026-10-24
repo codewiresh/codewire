@@ -8,6 +8,7 @@ pub mod client;
 #[cfg(unix)]
 pub mod codex_home;
 pub mod config;
+mod confirm;
 mod credential_bridge;
 mod durable_session;
 pub mod env;

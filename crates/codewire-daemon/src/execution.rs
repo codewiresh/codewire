@@ -45,18 +45,17 @@ impl PtyLaunchGuard {
         // A failed signal is not proof either way: the exact child may have
         // already exited. Only a successful reap establishes completion.
         let _ = child.kill();
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => {
-                    self.0 = None;
-                    return true;
-                }
-                Err(_) => return false,
-                Ok(None) if tokio::time::Instant::now() >= deadline => return false,
-                Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
-            }
+        let reaped = crate::confirm::check_within(timeout, || match child.try_wait() {
+            Ok(Some(_)) => Some(true),
+            Err(_) => Some(false),
+            Ok(None) => None,
+        })
+        .await
+        .unwrap_or(false);
+        if reaped {
+            self.0 = None;
         }
+        reaped
     }
 }
 impl Drop for PtyLaunchGuard {

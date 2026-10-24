@@ -3572,15 +3572,13 @@ fn launch_is_cancelled(handle: &SessionHandle, cancel: &CancellationToken) -> bo
 
 async fn terminate_native_launch(child: &mut Child) -> bool {
     let _ = child.start_kill();
-    let deadline = tokio::time::Instant::now() + LAUNCH_CLEANUP_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return true,
-            Err(_) => return false,
-            Ok(None) if tokio::time::Instant::now() >= deadline => return false,
-            Ok(None) => tokio::time::sleep(Duration::from_millis(10)).await,
-        }
-    }
+    crate::confirm::check_within(LAUNCH_CLEANUP_TIMEOUT, || match child.try_wait() {
+        Ok(Some(_)) => Some(true),
+        Err(_) => Some(false),
+        Ok(None) => None,
+    })
+    .await
+    .unwrap_or(false)
 }
 
 async fn terminate_session_launch(
@@ -3590,8 +3588,12 @@ async fn terminate_session_launch(
     #[cfg(unix)]
     if let Some(group) = group {
         let signals = group.terminate().await;
-        let reaped = tokio::time::timeout(crate::host_process::JOIN_TIMEOUT, child.wait()).await;
-        return signals.is_ok() && matches!(reaped, Ok(Ok(_)));
+        let reaped = crate::confirm::await_within(
+            crate::host_process::JOIN_TIMEOUT,
+            &mut std::pin::pin!(child.wait()),
+        )
+        .await;
+        return signals.is_ok() && matches!(reaped, Some(Ok(_)));
     }
     terminate_native_launch(child).await
 }
@@ -3717,9 +3719,9 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
         tokio::select! {
             result = group.wait_for_exit() => {
                 let signals = group.terminate().await;
-                let status = tokio::time::timeout(crate::host_process::JOIN_TIMEOUT, child.wait()).await;
+                let status = crate::confirm::await_within(crate::host_process::JOIN_TIMEOUT, &mut std::pin::pin!(child.wait())).await;
                 break ProcessCompletion::Exited(result.map(|_| ()).and(signals)
-                    .and_then(|()| status.map_err(|_| std::io::Error::other("host child reap timed out"))?)
+                    .and_then(|()| status.ok_or_else(|| std::io::Error::other("host child reap timed out"))?)
                     .map(|status| status.code().unwrap_or(1)).map_err(|error| error.to_string()));
             }
             command = control.recv() => match command {
@@ -3759,11 +3761,11 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
 
 #[cfg(unix)]
 async fn bounded_output_join(mut task: JoinHandle<Result<(), SessionError>>) -> Option<String> {
-    match tokio::time::timeout(crate::host_process::JOIN_TIMEOUT, &mut task).await {
-        Ok(Ok(Ok(()))) => None,
-        Ok(Ok(Err(error))) => Some(error.to_string()),
-        Ok(Err(error)) => Some(format!("host output task failed: {error}")),
-        Err(_) => {
+    match crate::confirm::await_within(crate::host_process::JOIN_TIMEOUT, &mut task).await {
+        Some(Ok(Ok(()))) => None,
+        Some(Ok(Err(error))) => Some(error.to_string()),
+        Some(Err(error)) => Some(format!("host output task failed: {error}")),
+        None => {
             task.abort();
             let _ = task.await;
             Some("host output drain timed out; cleanup is unknown".into())
@@ -3915,8 +3917,8 @@ async fn monitor_host_pty_process(monitor: HostPtyProcessMonitor) {
     drop(pty_control);
     let mut join = tokio::task::spawn_blocking(move || control_thread.join());
     let control_error =
-        match tokio::time::timeout(crate::host_process::JOIN_TIMEOUT, &mut join).await {
-            Ok(Ok(Ok(()))) => None,
+        match crate::confirm::await_within(crate::host_process::JOIN_TIMEOUT, &mut join).await {
+            Some(Ok(Ok(()))) => None,
             _ => Some("host PTY control join could not be confirmed".into()),
         };
     let output_error = bounded_output_join(output_task).await;

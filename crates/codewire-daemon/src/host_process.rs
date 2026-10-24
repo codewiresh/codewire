@@ -103,16 +103,15 @@ impl OwnedProcessGroup {
     /// PTY job control can create additional process groups without escaping the
     /// owned session. Linux pidfds signal those exact processes, never bare PIDs.
     async fn terminate_session_members(&self) -> io::Result<()> {
-        let deadline = tokio::time::Instant::now() + JOIN_TIMEOUT;
-        loop {
-            if self.signal_session_members(libc::SIGKILL)? == 0 {
-                return Ok(());
+        crate::confirm::check_within(JOIN_TIMEOUT, || {
+            match self.signal_session_members(libc::SIGKILL) {
+                Ok(0) => Some(Ok(())),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(io::Error::other("host session descendants did not settle"));
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        })
+        .await
+        .unwrap_or_else(|| Err(io::Error::other("host session descendants did not settle")))
     }
 
     /// macOS has no pidfd. Each member is rechecked with getsid immediately
