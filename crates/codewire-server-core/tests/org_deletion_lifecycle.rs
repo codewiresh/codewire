@@ -1897,6 +1897,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "environment_access:cascade",
             "environment_lifecycle_journal:cascade",
             "environment_logs:cascade",
+            "environment_mesh_attachments:cascade",
             "environment_operation_generation_claims:cascade",
             "environment_ports:cascade",
             "environment_resize_operations:cascade",
@@ -1909,5 +1910,11 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "sandbox_ssh_host_keys:cascade",
             "sandbox_workspace_bindings:cascade",
         ]
+    );
+    // A Mesh attachment's enrollment codes go with it, so deleting an org's
+    // environments removes both.
+    assert_eq!(
+        referencing_tables(&pool, "environment_mesh_attachments").await,
+        vec!["environment_mesh_enrollments:cascade"]
     );
 }

@@ -31,7 +31,7 @@ use codewire_local_vmm::egress_broker::{
     EGRESS_BROKER_HOST_ADDRESSES_FD, EGRESS_BROKER_INHERITED_SESSIONS,
     EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES,
     EgressBrokerStartupFailure, EgressBrokerStartupStatus, decode_egress_broker_startup_status,
-    encode_developer_egress_broker_bootstrap,
+    encode_egress_broker_bootstrap,
 };
 use codewire_local_vmm::host_addresses::{HostAddressSet, encode_frame};
 use codewire_local_vmm::host_port::HOST_PORT_CONTROL_KEY_LEN;
@@ -280,6 +280,7 @@ fn product_worker_bootstrap(network_key: &NetworkKey) -> Vec<u8> {
         &[0x7b; HOST_PORT_CONTROL_KEY_LEN],
         &[0x4d; MESH_INGRESS_CONTROL_KEY_LEN],
         &[3_001],
+        codewire_egress_policy::CompiledPolicy::developer_baseline().digest(),
     )
     .unwrap()
     .to_vec()
@@ -327,7 +328,7 @@ fn broker_refusal(refused: RefusedSyscall, expected: EgressBrokerStartupFailure)
     let (vm_id, generation) = identity();
     bootstrap
         .write_all(
-            encode_developer_egress_broker_bootstrap(vm_id, generation, &BROKER_KEY)
+            developer_broker_bootstrap(vm_id, generation, &BROKER_KEY)
                 .unwrap()
                 .as_ref(),
         )
@@ -437,7 +438,7 @@ fn a_prepared_broker_holds_exactly_its_inherited_descriptors() {
     );
     bootstrap
         .write_all(
-            encode_developer_egress_broker_bootstrap(vm_id, generation, &BROKER_KEY)
+            developer_broker_bootstrap(vm_id, generation, &BROKER_KEY)
                 .unwrap()
                 .as_ref(),
         )
@@ -507,7 +508,7 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
     );
     broker_bootstrap
         .write_all(
-            encode_developer_egress_broker_bootstrap(vm_id, generation, &BROKER_KEY)
+            developer_broker_bootstrap(vm_id, generation, &BROKER_KEY)
                 .unwrap()
                 .as_ref(),
         )
@@ -950,4 +951,19 @@ fn send_descriptor(bootstrap: RawFd, descriptor: RawFd, descriptor_marker: u8) {
         unsafe { libc::sendmsg(bootstrap, &raw const message, libc::MSG_NOSIGNAL) },
         marker.len() as isize
     );
+}
+
+/// The broker bootstrap the runner writes for the developer baseline policy.
+fn developer_broker_bootstrap(
+    environment_id: Uuid,
+    generation: u64,
+    key: &[u8; BROKER_IPC_KEY_LEN],
+) -> Result<zeroize::Zeroizing<Vec<u8>>, codewire_local_vmm::egress_broker::EgressBrokerProcessError>
+{
+    encode_egress_broker_bootstrap(
+        environment_id,
+        generation,
+        key,
+        &codewire_egress_policy::CompiledPolicy::developer_baseline(),
+    )
 }

@@ -18,8 +18,7 @@ use codewire_local_vmm::egress_broker::{
     EGRESS_BROKER_HOST_ADDRESSES_FD, EGRESS_BROKER_INHERITED_SESSIONS,
     EGRESS_BROKER_POLICY_DIGEST_OFFSET, EGRESS_BROKER_PREPARED_MESSAGE,
     EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES, EgressBrokerStartupFailure,
-    EgressBrokerStartupStatus, decode_egress_broker_startup_status,
-    encode_developer_egress_broker_bootstrap,
+    EgressBrokerStartupStatus, decode_egress_broker_startup_status, encode_egress_broker_bootstrap,
 };
 use codewire_local_vmm::host_addresses::{
     HostAddressMonitor, HostAddressSet, SystemHostAddressSource, encode_frame,
@@ -246,8 +245,7 @@ fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_for
     );
 
     let (environment_id, generation) = identity();
-    let mut invalid =
-        encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
+    let mut invalid = developer_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     invalid[0] ^= 1;
     let (mut invalid_parent, _sessions, _control, mut invalid_child) =
         spawn_broker(false, &no_host_addresses());
@@ -264,7 +262,7 @@ fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_for
     );
 
     let mut wrong_policy =
-        encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
+        developer_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     wrong_policy[EGRESS_BROKER_POLICY_DIGEST_OFFSET] ^= 1;
     let (mut policy_parent, _sessions, _control, mut policy_child) =
         spawn_broker(false, &no_host_addresses());
@@ -280,8 +278,7 @@ fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_for
         Some(EgressBrokerStartupFailure::PolicyMismatch.exit_code())
     );
 
-    let bootstrap =
-        encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
+    let bootstrap = developer_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     let (mut admission_parent, _sessions, _control, mut admission_child) =
         spawn_broker(false, &no_host_addresses());
     admission_parent.write_all(bootstrap.as_ref()).unwrap();
@@ -320,8 +317,7 @@ fn a_broker_missing_an_ipc_session_refuses_to_start() {
 #[test]
 fn a_broker_without_readable_host_addresses_fails_closed_before_ready() {
     let (environment_id, generation) = identity();
-    let bootstrap =
-        encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
+    let bootstrap = developer_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     let mut malformed = no_host_addresses();
     malformed[0] ^= 1;
     let (mut parent, _sessions, _control, mut child) = spawn_broker(false, &malformed);
@@ -347,8 +343,7 @@ fn confined_product_broker_refuses_host_addresses_and_fails_closed_without_their
     let public = IpAddr::V4(Ipv4Addr::new(87, 0, 0, 180));
     let other = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443);
     let (environment_id, generation) = identity();
-    let bootstrap =
-        encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
+    let bootstrap = developer_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     let initial = encode_frame(&HostAddressSet::new([host], [public]).unwrap());
     let (mut parent, sessions, mut control, mut child) = spawn_broker(false, &initial);
     parent.write_all(bootstrap.as_ref()).unwrap();
@@ -399,8 +394,7 @@ fn confined_product_broker_refuses_host_addresses_and_fails_closed_without_their
 #[test]
 fn confined_product_broker_serves_authenticated_policy_and_closes_with_its_capability() {
     let (environment_id, generation) = identity();
-    let bootstrap =
-        encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
+    let bootstrap = developer_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     let (mut parent, sessions, _control, mut child) = spawn_broker(false, &no_host_addresses());
     parent.write_all(bootstrap.as_ref()).unwrap();
     assert_eq!(read_status_frame(&parent), EGRESS_BROKER_PREPARED_MESSAGE);
@@ -438,8 +432,7 @@ fn connect_through_broker(
     destination: SocketAddr,
 ) -> Result<std::os::fd::OwnedFd, BrokerIpcError> {
     let (environment_id, generation) = identity();
-    let bootstrap =
-        encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
+    let bootstrap = developer_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     let (mut parent, sessions, _control, _child) = spawn_broker(false, host_addresses);
     parent.write_all(bootstrap.as_ref()).unwrap();
     assert_eq!(read_status_frame(&parent), EGRESS_BROKER_PREPARED_MESSAGE);
@@ -498,4 +491,19 @@ fn read_status_frame(stream: &std::os::unix::net::UnixStream) -> Vec<u8> {
             return frame;
         }
     }
+}
+
+/// The broker bootstrap the runner writes for the developer baseline policy.
+fn developer_broker_bootstrap(
+    environment_id: Uuid,
+    generation: u64,
+    key: &[u8; codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN],
+) -> Result<zeroize::Zeroizing<Vec<u8>>, codewire_local_vmm::egress_broker::EgressBrokerProcessError>
+{
+    encode_egress_broker_bootstrap(
+        environment_id,
+        generation,
+        key,
+        &codewire_egress_policy::CompiledPolicy::developer_baseline(),
+    )
 }
