@@ -1281,6 +1281,7 @@ mod linux {
             RecoveryError::ReadProcess(_) => "recovery-read-process",
             RecoveryError::MalformedProcess => "recovery-malformed-process",
             RecoveryError::IdentityMismatch => "recovery-identity-mismatch",
+            RecoveryError::ExecutableReplaced => "recovery-executable-replaced",
             RecoveryError::UnexpectedSpawnedExecutable => "recovery-unexpected-executable",
             RecoveryError::SpawnedIdentityChangedDuringCapture => "recovery-spawn-identity-changed",
             RecoveryError::InvalidTargetFd(_) => "recovery-invalid-target-fd",

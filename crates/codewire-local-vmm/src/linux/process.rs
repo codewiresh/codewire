@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -155,10 +156,41 @@ impl LiveProcess {
         }
     }
 
+    /// The recorded process birth, still running, whose executable file was
+    /// replaced or removed after it started (#3355): `recover` refuses it with
+    /// [`RecoveryError::ExecutableReplaced`]. The pidfd pins that exact birth,
+    /// and the file it runs is the recorded inode, so it may be signalled to
+    /// retire it. It is never adopted: its identity can no longer be captured
+    /// from the path it was started from.
+    pub fn recover_replaced(expected: &ProcessIdentity) -> Result<Self, RecoveryError> {
+        let pidfd = open_process_pidfd(expected.pid)?;
+        require_birth(expected)?;
+        if !runs_replaced_executable(expected)? {
+            return Err(RecoveryError::IdentityMismatch);
+        }
+        let process = Self {
+            identity: expected.clone(),
+            pidfd,
+        };
+        if process.is_exited()? {
+            return Err(RecoveryError::ProcessExited);
+        }
+        Ok(process)
+    }
+
     fn open_stable(identity: ProcessIdentity) -> Result<Self, RecoveryError> {
         let pidfd = open_process_pidfd(identity.pid)?;
-        if ProcessIdentity::capture(identity.pid)? != identity {
-            return Err(RecoveryError::IdentityMismatch);
+        // A recycled PID is another birth. Compare births before reading the
+        // executable, so another program's unreadable or replaced executable
+        // reads as a mismatch, never as malformed data (#3355).
+        require_birth(&identity)?;
+        match ProcessIdentity::capture(identity.pid) {
+            Ok(live) if live == identity => {}
+            Ok(_) => return Err(RecoveryError::IdentityMismatch),
+            Err(RecoveryError::MalformedProcess) if runs_replaced_executable(&identity)? => {
+                return Err(RecoveryError::ExecutableReplaced);
+            }
+            Err(error) => return Err(error),
         }
         let process = Self { identity, pidfd };
         if process.is_exited()? {
@@ -166,6 +198,32 @@ impl LiveProcess {
         }
         Ok(process)
     }
+}
+
+/// Whether the live process at `expected.pid` is `expected`'s birth.
+fn require_birth(expected: &ProcessIdentity) -> Result<(), RecoveryError> {
+    let (boot_id, start_time_ticks) = birth_of(expected.pid)?;
+    if boot_id != expected.boot_id || start_time_ticks != expected.start_time_ticks {
+        return Err(RecoveryError::IdentityMismatch);
+    }
+    Ok(())
+}
+
+/// Whether the process at `expected.pid` runs the recorded executable file
+/// after that file was replaced or removed at its path: the kernel names it
+/// as the recorded path plus " (deleted)", and the running file is the
+/// recorded inode on the recorded device.
+fn runs_replaced_executable(expected: &ProcessIdentity) -> Result<bool, RecoveryError> {
+    let link = format!("/proc/{}/exe", expected.pid);
+    let named = fs::read_link(&link).map_err(RecoveryError::ReadProcess)?;
+    let mut replaced = expected.executable.clone().into_os_string();
+    replaced.push(" (deleted)");
+    if named.as_os_str() != replaced {
+        return Ok(false);
+    }
+    let running = fs::metadata(&link).map_err(RecoveryError::ReadProcess)?;
+    Ok(running.dev() == expected.executable_file.device
+        && running.ino() == expected.executable_file.inode)
 }
 
 fn open_process_pidfd(expected_pid: u32) -> Result<OwnedFd, RecoveryError> {
@@ -291,6 +349,8 @@ pub enum RecoveryError {
     MalformedProcess,
     #[error("persisted process identity no longer matches the live process")]
     IdentityMismatch,
+    #[error("the recorded process still runs, but its executable file was replaced")]
+    ExecutableReplaced,
     #[error("spawned process executable does not match the admitted VMM")]
     UnexpectedSpawnedExecutable,
     #[error("spawned process identity changed while acquiring its pidfd")]
@@ -322,6 +382,72 @@ mod tests {
         fields.extend((23..=52).map(|field| field.to_string()));
         let stat = format!("123 (tricky ) process name) {}", fields.join(" "));
         assert_eq!(parse_start_time(&stat).unwrap(), 987654);
+    }
+
+    /// A recorded process whose executable file was replaced after it started
+    /// is classified, never reported as malformed data: a supervisor that met
+    /// one stopped for good (#3355). Only its own birth may be retired.
+    #[test]
+    fn a_replaced_executable_is_classified_and_only_its_own_birth_is_retirable() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = fs::canonicalize(directory.path())
+            .unwrap()
+            .join("recorded_runner");
+        fs::copy(fs::canonicalize("/bin/sleep").unwrap(), &executable).unwrap();
+        let mut child = crate::test_child(&mut std::process::Command::new(&executable))
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fs::read_link(format!("/proc/{}/exe", child.id()))
+            .ok()
+            .as_deref()
+            != Some(executable.as_path())
+        {
+            assert!(Instant::now() < deadline, "child did not exec its copy");
+            std::thread::yield_now();
+        }
+        let identity = LiveProcess::capture_child(child.id(), &executable)
+            .unwrap()
+            .identity()
+            .clone();
+
+        // Rebuilt in place: a new file is renamed over the recorded path.
+        let rebuilt = directory.path().join("rebuilt");
+        fs::copy(&executable, &rebuilt).unwrap();
+        fs::rename(&rebuilt, &executable).unwrap();
+
+        assert!(matches!(
+            LiveProcess::recover(&identity),
+            Err(RecoveryError::ExecutableReplaced)
+        ));
+        // Another birth at the same PID, or another recorded path, is never
+        // this process.
+        let mut recycled = identity.clone();
+        recycled.start_time_ticks += 1;
+        assert!(matches!(
+            LiveProcess::recover(&recycled),
+            Err(RecoveryError::IdentityMismatch)
+        ));
+        assert!(matches!(
+            LiveProcess::recover_replaced(&recycled),
+            Err(RecoveryError::IdentityMismatch)
+        ));
+        let mut elsewhere = identity.clone();
+        elsewhere.executable = directory.path().join("another_runner");
+        assert!(matches!(
+            LiveProcess::recover_replaced(&elsewhere),
+            Err(RecoveryError::IdentityMismatch)
+        ));
+
+        let replaced = LiveProcess::recover_replaced(&identity).unwrap();
+        assert_eq!(replaced.identity(), &identity);
+        replaced.signal(Signal::KILL).unwrap();
+        child.wait().unwrap();
+        assert!(matches!(
+            LiveProcess::recover_replaced(&identity),
+            Err(RecoveryError::ProcessExited | RecoveryError::ReadProcess(_))
+        ));
     }
 
     #[test]

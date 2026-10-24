@@ -3725,9 +3725,24 @@ impl Supervisor {
                     self.core().mark_runner_dead(name)?;
                     return Ok(());
                 }
-                Err(RecoveryError::IdentityMismatch) => {
+                // A recorded process this supervisor cannot prove is its
+                // runner is never adopted. Its environment alone is marked;
+                // the supervisor serves the rest of the root (#3355).
+                Err(RecoveryError::IdentityMismatch | RecoveryError::MalformedProcess) => {
                     self.core().mark_orphaned(name)?;
                     return Ok(());
+                }
+                // The recorded runner still runs from an executable file that
+                // was since replaced, such as a cw rebuilt in place. That
+                // exact birth is retired, never adopted: its identity can no
+                // longer be admitted from its path (#3355).
+                #[cfg(target_os = "linux")]
+                Err(RecoveryError::ExecutableReplaced) => {
+                    let live = LiveProcess::recover_replaced(&record.process)?;
+                    self.core()
+                        .live_runners
+                        .insert(environment_id, Arc::new(live));
+                    return self.retire_idle_runner(name, &record).await;
                 }
                 // A runner exits with its supervisor on Darwin. One still
                 // alive belongs to the previous supervisor; wait for it to
@@ -11214,7 +11229,22 @@ mod tests {
         name: &str,
         socket_identity: SocketIdentity,
     ) -> (Uuid, ProcessIdentity) {
-        let executable = fs::canonicalize("/bin/sleep").unwrap();
+        attach_test_runner_process_running(
+            core,
+            name,
+            socket_identity,
+            &fs::canonicalize("/bin/sleep").unwrap(),
+        )
+    }
+
+    /// A recorded running runner that runs `executable`.
+    fn attach_test_runner_process_running(
+        core: &mut SupervisorCore,
+        name: &str,
+        socket_identity: SocketIdentity,
+        executable: &Path,
+    ) -> (Uuid, ProcessIdentity) {
+        let executable = executable.to_path_buf();
         let child = crate::test_child(&mut Command::new(&executable))
             .arg("60")
             .spawn()
@@ -15882,6 +15912,81 @@ mod tests {
                 remove_bound_socket(&runner_socket, &recorded_runner_socket).unwrap();
             }
         }
+    }
+
+    /// A runner that outlived its supervisor while its cw was rebuilt in
+    /// place runs a replaced executable. Startup retires that exact runner
+    /// and serves the root, instead of stopping for good with "process
+    /// identity data is malformed" (#3355).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn startup_retires_a_runner_whose_executable_was_replaced() {
+        let environment = project_environment();
+        let environment_id = environment.id;
+        let (_parent, mut core) = test_supervisor_core(environment);
+        fs::set_permissions(_parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let runner_socket = core.config.runner_socket(environment_id);
+        let (runner_socket_identity, useful_calls, shutdown_tx, runner_server) =
+            spawn_test_runner_protocol_server(&runner_socket, TestRunnerProtocolReply::Version(2));
+        let directory = fs::canonicalize(_parent.path()).unwrap();
+        let executable = directory.join("recorded_runner");
+        fs::copy(fs::canonicalize("/bin/sleep").unwrap(), &executable).unwrap();
+        let (_, process_identity) = attach_test_runner_process_running(
+            &mut core,
+            "dev",
+            runner_socket_identity,
+            &executable,
+        );
+        let mut detached_child = core.children.remove(&environment_id).unwrap();
+        core.live_runners.remove(&environment_id).unwrap();
+        let config = core.config.clone();
+        drop(core);
+
+        // The supervisor is gone and cw is rebuilt in place.
+        let rebuilt = directory.join("rebuilt");
+        fs::copy(&executable, &rebuilt).unwrap();
+        fs::rename(&rebuilt, &executable).unwrap();
+        assert!(matches!(
+            LiveProcess::recover(&process_identity),
+            Err(RecoveryError::ExecutableReplaced)
+        ));
+
+        let supervisor_socket = config.supervisor_socket();
+        let mut supervisor = tokio::spawn(serve_supervisor(config.clone()));
+        let supervisor_socket_identity = tokio::select! {
+            result = &mut supervisor => {
+                panic!("supervisor exited before listening: {result:?}");
+            }
+            identity = tokio::time::timeout(LISTENER_HANG_GUARD, async {
+                loop {
+                    if let Ok(identity) = SocketIdentity::capture(&supervisor_socket) {
+                        break identity;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }) => identity.expect("supervisor did not reach its listener after startup reconciliation"),
+        };
+
+        let root = PrivateRoot::open(&config.root).unwrap();
+        let (store, state) = SupervisorStore::inspect(&root).unwrap();
+        let environment = state.environments.get("dev").unwrap();
+        assert_eq!(environment.state, StoredEnvironmentState::Error);
+        assert!(environment.runner.is_none());
+        assert!(!runner_socket.exists());
+        assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
+        let status = detached_child.wait().unwrap();
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(libc::SIGKILL)
+        );
+        drop(store);
+        drop(root);
+
+        supervisor.abort();
+        assert!(supervisor.await.unwrap_err().is_cancelled());
+        remove_bound_socket(&supervisor_socket, &supervisor_socket_identity).unwrap();
+        shutdown_tx.send(()).unwrap();
+        runner_server.await.unwrap();
     }
 
     #[cfg(target_os = "linux")]
