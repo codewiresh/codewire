@@ -357,7 +357,7 @@ die() {
 # new stage needs its closed set there as well.
 smoke_stage() {
   case "$1" in
-    setup|principal|oauth-login|oauth-principal|oauth-cleanup|app-prepare|app-create|app-source-a|app-source-b|app-source-clear|app-cleanup|provider-ssh-prepare|provider-ssh-cleanup|create-environment|wait-environment|kube-assertions|cw-run|kube|exec|coco|docker|doctor|ssh|tailnet-ssh|derp-ssh|websocket-ssh|host-key|app-preview|resize-guest|application-secrets|application-secrets-all-scopes|provider-ssh)
+    setup|principal|oauth-login|oauth-principal|oauth-cleanup|app-prepare|app-create|app-source-a|app-source-b|app-source-clear|app-cleanup|provider-ssh-prepare|provider-ssh-cleanup|create-environment|wait-environment|kube-assertions|cw-run|kube|exec|coco|docker|doctor|ssh|direct-udp|tailnet-ssh|derp-ssh|websocket-ssh|host-key|app-preview|resize-guest|application-secrets|application-secrets-all-scopes|provider-ssh)
       SMOKE_STAGE="$1" ;;
     *) die 'unknown acceptance stage' ;;
   esac
@@ -4363,7 +4363,11 @@ assert_tailnet_doctor_direct_udp_evidence() {
     ' "$doctor_json" >/dev/null || \
     die "tailnet doctor did not prove direct_udp via Cilium LoadBalancer IP $EXPECTED_TAILNET_DIRECT_UDP_LB_IP with STUN $EXPECTED_STUN_HOST:$EXPECTED_STUN_PORT"
 
-  [[ "$SMOKE_DERP_FALLBACK" != "1" ]] || assert_tailnet_doctor_forced_derp_evidence "$doctor_json"
+  if [[ "$SMOKE_DERP_FALLBACK" == "1" ]]; then
+    smoke_stage derp-ssh
+    assert_tailnet_doctor_forced_derp_evidence "$doctor_json"
+    smoke_stage direct-udp
+  fi
 
   log "tailnet doctor proved direct_udp via Cilium LoadBalancer IP $EXPECTED_TAILNET_DIRECT_UDP_LB_IP and STUN map $EXPECTED_STUN_HOST:$EXPECTED_STUN_PORT"
 }
@@ -5141,9 +5145,15 @@ run_ssh_smoke() {
   require_bool01 SMOKE_DERP_FALLBACK "$SMOKE_DERP_FALLBACK"
   require_bool01 SMOKE_PEER_RELAY_MATRIX "$SMOKE_PEER_RELAY_MATRIX"
   require_uint SMOKE_SSH_CONNECT_TIMEOUT "$SMOKE_SSH_CONNECT_TIMEOUT"
+  # Direct UDP is the path sessions must take; its failure is named on its own
+  # (infra#1793), never folded into the SSH or fallback stages.
+  if expect_tailnet_direct_udp; then
+    smoke_stage direct-udp
+  fi
   run_tailnet_doctor
   require_cmd ssh
   run_ssh_transport_smoke tailnet
+  smoke_stage ssh
   if [[ "$SMOKE_DERP_FALLBACK" == "1" ]]; then
     run_ssh_transport_smoke tailnet tailnet-derp derp_relay 1
   fi
