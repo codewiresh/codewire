@@ -1481,6 +1481,12 @@ run_paths_case runtime_dev_auth pull_request refs/pull/1517/head false \
   scripts/runtime/dev/provision-dev-smoke-user.sh \
   scripts/runtime/dev/with-dev-smoke-auth.sh \
   scripts/runtime/tests/test-with-dev-smoke-auth.sh
+run_paths_case runtime_prod_auth pull_request refs/pull/1519/head false \
+  'policy dev_smoke_script_tests security security_dev_smoke_auth security_js' \
+  scripts/runtime/prod/provision-prod-smoke-user.sh \
+  scripts/runtime/prod/with-prod-smoke-auth.sh \
+  scripts/runtime/tests/test-provision-prod-smoke-user.sh \
+  scripts/runtime/tests/test-with-prod-smoke-auth.sh
 run_paths_case confidential_script_tests pull_request refs/pull/1518/head false \
   'policy confidential_script_tests security security_js' \
   scripts/runtime/confidential/resolve-coco-support-lock.sh \
@@ -4539,6 +4545,10 @@ grep -qF 'scripts/runtime/tests/test-run-sdk-ts-e2e.sh' \
 grep -qF 'scripts/runtime/tests/test-with-dev-smoke-auth.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'scripts/runtime/tests/test-provision-dev-smoke-user.sh' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF 'scripts/runtime/tests/test-provision-prod-smoke-user.sh' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF 'scripts/runtime/tests/test-with-prod-smoke-auth.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'scripts/runtime/tests/test-smoke-dev-commodity.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"

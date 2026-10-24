@@ -4,7 +4,8 @@
 #
 # Never put a secret here. Secrets and provider credentials come from OpenBao
 # through the repository wrappers (scripts/runtime/dev/with-dev-smoke-auth.sh,
-# make kind-credentials-real) and never touch a file.
+# scripts/runtime/prod/with-prod-smoke-auth.sh, make kind-credentials-real) and
+# never touch a file.
 
 # OpenBao that serves signing keys and publisher credentials.
 # export CODEWIRE_OPENBAO_ADDR=https://openbao.example.invalid

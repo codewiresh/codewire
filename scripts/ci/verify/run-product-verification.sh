@@ -627,6 +627,7 @@ run_dev_smoke_script_tests() {
   bun test apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts
   bun test apps/dashboard/scripts/dev-ux-ownership.test.ts
   scripts/runtime/tests/test-provision-dev-smoke-user.sh
+  scripts/runtime/tests/test-provision-prod-smoke-user.sh
   scripts/runtime/tests/test-smoke-dev-commodity.sh
   scripts/runtime/tests/test-workspace-binding-proof.sh
   scripts/runtime/tests/test-warm-pool-proof.sh
@@ -1118,6 +1119,7 @@ run_deploy() {
 run_security() {
   if selected security_dev_smoke_auth; then
     scripts/runtime/tests/test-with-dev-smoke-auth.sh
+    scripts/runtime/tests/test-with-prod-smoke-auth.sh
   fi
   if selected security_idp_kek; then
     install_kustomize

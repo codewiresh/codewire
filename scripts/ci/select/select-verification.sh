@@ -1798,7 +1798,11 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/dev/run-secrets-credentials-acceptance.sh|\
       scripts/runtime/dev/native-mesh-listener.py|\
       scripts/runtime/dev/with-dev-smoke-auth.sh|\
+      scripts/runtime/prod/provision-prod-smoke-user.sh|\
+      scripts/runtime/prod/with-prod-smoke-auth.sh|\
       scripts/runtime/tests/test-provision-dev-smoke-user.sh|\
+      scripts/runtime/tests/test-provision-prod-smoke-user.sh|\
+      scripts/runtime/tests/test-with-prod-smoke-auth.sh|\
       scripts/runtime/tests/test-provider-ssh-smoke.sh|\
       scripts/runtime/tests/test-provider-codex-smoke.sh|\
       scripts/runtime/tests/test-provider-codex-workload.py|\
@@ -1826,7 +1830,10 @@ if [ "$event_selected" = false ]; then
         case "$path" in
           scripts/runtime/dev/provision-dev-smoke-user.sh|\
           scripts/runtime/dev/with-dev-smoke-auth.sh|\
-          scripts/runtime/tests/test-with-dev-smoke-auth.sh)
+          scripts/runtime/prod/provision-prod-smoke-user.sh|\
+          scripts/runtime/prod/with-prod-smoke-auth.sh|\
+          scripts/runtime/tests/test-with-dev-smoke-auth.sh|\
+          scripts/runtime/tests/test-with-prod-smoke-auth.sh)
             select_token security
             select_token security_dev_smoke_auth
             ;;
