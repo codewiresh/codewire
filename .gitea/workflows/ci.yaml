@@ -26,6 +26,10 @@ on:
         description: Workspace layer cache mode (auto, local, or disabled)
         required: false
         default: local
+      source_sha:
+        description: With verification=edge_kind, a main commit to verify instead of main's head (dispatch-source.sh)
+        required: false
+        default: ''
   # Every four hours against the latest main: Kind alone, and only when a Kind
   # input changed since the last successful scheduled run, while
   # scripts/ci/select/main-push-switch.sh defers Kind on a push to main. While
@@ -126,10 +130,33 @@ jobs:
       superseded: ${{ steps.superseded.outputs.superseded }}
       superseded_by: ${{ steps.superseded.outputs.superseded_by }}
       kind_workspace_source: ${{ steps.kind-workspace.outputs.kind_workspace_source }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
+
+      # The commit this run verifies: its own, or, for a Kind dispatch, the
+      # earlier main commit it names, so a release candidate is verified while
+      # main moves on. Every later step and job uses that commit's checkout;
+      # the release tag receipt reads the line this prints.
+      - name: Choose the commit this run verifies
+        id: source
+        env:
+          DISPATCH_SOURCE_SHA: ${{ github.event.inputs.source_sha }}
+          VERIFICATION_REQUEST: ${{ github.event.inputs.verification }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DISPATCH_SOURCE_SHA:-}" ] && [ "${VERIFICATION_REQUEST:-}" != edge_kind ]; then
+            echo '::error::source_sha verifies Kind only: dispatch it with verification=edge_kind'
+            exit 1
+          fi
+          scripts/ci/select/dispatch-source.sh .gitea/workflows/ci.yaml
+
+      - name: Check out the commit this run verifies
+        env:
+          VERIFICATION_SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: git checkout -q --detach "$VERIFICATION_SOURCE_SHA"
 
       - name: Verify CI runner image contract
         run: |
@@ -173,6 +200,7 @@ jobs:
           SCHEDULE_BASELINE_SHA: ${{ steps.schedule-baseline.outputs.schedule_baseline }}
           VERIFICATION_REQUEST: ${{ github.event.inputs.verification }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          VERIFICATION_SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
           # A push to main reads whether its previous main run verified that
           # commit (plan-main-push.py); no other event receives the token here.
           GITEA_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}
@@ -255,8 +283,8 @@ jobs:
               echo 'main artifact facts: no trusted main-push plan; every artifact stays selected'
               python3 scripts/ci/plan/apply-verification-plan.py \
                 --unclassified \
-                --head "$GITHUB_SHA" \
-                --head-tree "$(git rev-parse "$GITHUB_SHA^{tree}")"
+                --head "$VERIFICATION_SOURCE_SHA" \
+                --head-tree "$(git rev-parse "$VERIFICATION_SOURCE_SHA^{tree}")"
             fi
           fi
           # The trusted selector's workspace-pin change class (owner,
@@ -330,6 +358,7 @@ jobs:
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
+          VERIFICATION_SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: |
           set -euo pipefail
           base=''
@@ -338,7 +367,7 @@ jobs:
             push) base="$PUSH_BEFORE_SHA" ;;
           esac
           python3 -B scripts/ci/verify/kind-build-artifacts.py workspace-source \
-            --head "$GITHUB_SHA" --base "$base" --github-output
+            --head "$VERIFICATION_SOURCE_SHA" --base "$base" --github-output
 
       - name: Emit trusted capability dispatch decisions
         id: dispatch
@@ -391,6 +420,7 @@ jobs:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
           fetch-depth: 0
 
       - name: Bound cargo jobs by memory
@@ -425,6 +455,7 @@ jobs:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
           fetch-depth: 0
 
       # On a main push or a pull request in a metal guest, start from that
@@ -552,6 +583,7 @@ jobs:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
           fetch-depth: 0
 
       - name: Bound cargo jobs by memory
@@ -636,6 +668,8 @@ jobs:
 
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
 
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
@@ -727,6 +761,8 @@ jobs:
 
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
 
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
@@ -813,6 +849,8 @@ jobs:
 
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
 
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
@@ -888,6 +926,8 @@ jobs:
 
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
 
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
@@ -1003,6 +1043,8 @@ jobs:
 
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
 
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
@@ -1139,6 +1181,8 @@ jobs:
 
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
 
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
@@ -1277,6 +1321,8 @@ jobs:
 
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
 
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
@@ -1399,6 +1445,7 @@ jobs:
       artifact_name: ${{ steps.export.outputs.artifact_name }}
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
     env:
+      CODEWIRE_VERIFICATION_SOURCE_SHA: ${{ needs.verification-selection.outputs.source_sha }}
       CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
       # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
@@ -1406,7 +1453,7 @@ jobs:
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
           persist-credentials: false
 
       - name: Verify sealed producer tools and isolated Buildx load
@@ -1451,11 +1498,12 @@ jobs:
       artifact_name: ${{ steps.export.outputs.artifact_name }}
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
     env:
-      CODEWIRE_IMAGE_SOURCE_SHA: ${{ github.sha }}
+      CODEWIRE_VERIFICATION_SOURCE_SHA: ${{ needs.verification-selection.outputs.source_sha }}
+      CODEWIRE_IMAGE_SOURCE_SHA: ${{ needs.verification-selection.outputs.source_sha }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
           persist-credentials: false
 
       - name: Verify sealed producer tools
@@ -1499,11 +1547,12 @@ jobs:
       artifact_name: ${{ steps.export.outputs.artifact_name }}
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
     env:
-      CODEWIRE_IMAGE_SOURCE_SHA: ${{ github.sha }}
+      CODEWIRE_VERIFICATION_SOURCE_SHA: ${{ needs.verification-selection.outputs.source_sha }}
+      CODEWIRE_IMAGE_SOURCE_SHA: ${{ needs.verification-selection.outputs.source_sha }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
           persist-credentials: false
 
       - name: Verify sealed producer tools
@@ -1545,12 +1594,13 @@ jobs:
       artifact_name: ${{ steps.export.outputs.artifact_name }}
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
     env:
+      CODEWIRE_VERIFICATION_SOURCE_SHA: ${{ needs.verification-selection.outputs.source_sha }}
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci
       RUN_DIR: ${{ github.workspace }}/.tmp/kind-smoke-build
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
           persist-credentials: false
 
       - name: Verify sealed producer tools
@@ -1635,6 +1685,7 @@ jobs:
           - slug: edge
             suites: edge-contract integrated
     env:
+      CODEWIRE_VERIFICATION_SOURCE_SHA: ${{ needs.verification-selection.outputs.source_sha }}
       CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
       CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
       CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV: ubuntu24-cft145
@@ -1655,6 +1706,8 @@ jobs:
 
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
@@ -1814,6 +1867,8 @@ jobs:
       - edge-kind
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
 
       - name: Require capability groups
         env:
@@ -1888,6 +1943,8 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.required-verification.result == 'success' && needs.verification-selection.outputs.superseded == 'false' }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
 
       - name: Rerun this commit's Deploy Dev publish job
         env:

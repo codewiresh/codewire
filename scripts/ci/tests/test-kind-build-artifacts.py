@@ -161,7 +161,7 @@ class KindBuildArtifactTests(unittest.TestCase):
     def test_identity_rejects_dirty_source_and_binds_build_inputs(self):
         environment = {
             "GITHUB_REPOSITORY": "codewire/codewire", "GITHUB_RUN_ID": "42",
-            "GITHUB_SHA": "a" * 40,
+            "CODEWIRE_VERIFICATION_SOURCE_SHA": "a" * 40,
         }
         with mock.patch.object(artifact, "run", return_value="?? unexpected"):
             with self.assertRaisesRegex(artifact.ArtifactError, "not clean"):
@@ -174,6 +174,12 @@ class KindBuildArtifactTests(unittest.TestCase):
         self.assertEqual(value["tree"], "b" * 40)
         self.assertRegex(value["build_entrypoint_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(value["rust_toolchain_sha256"], r"^[0-9a-f]{64}$")
+        # The checkout is the commit ci.yaml verifies, never the dispatched one.
+        with mock.patch.object(
+            artifact, "run", side_effect=("", "c" * 40 + "\n" + "b" * 40)
+        ):
+            with self.assertRaisesRegex(artifact.ArtifactError, "does not match"):
+                REAL_IDENTITY("smokes", {**environment, "GITHUB_SHA": "c" * 40})
 
     def test_smoke_consume_validates_then_installs_and_rewrites_jsonl(self):
         members = self.smoke_members()

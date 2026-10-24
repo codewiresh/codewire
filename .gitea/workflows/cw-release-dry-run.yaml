@@ -14,7 +14,9 @@ name: cw four-target dry run
 # Temporarily (owner decision 2026-10-20) a push to main builds nothing while
 # scripts/ci/select/main-push-switch.sh says so. A dispatch on a release
 # candidate and the four-hourly schedule still build, and the release tag
-# receipt needs a dry run of the exact candidate.
+# receipt needs a dry run of the exact candidate. A dispatch builds main's
+# head, or the earlier main commit its source_sha names (dispatch-source.sh),
+# so a candidate is verified while main moves on.
 #
 # The macOS arm64 cw embeds the local VM runtime (#2539). When one of the
 # runtime's inputs changed (local_runtime_parts.py RUNTIME_INPUTS), or on
@@ -98,6 +100,11 @@ on:
       - '.gitea/workflows/cli-release.yaml'
       - '.gitea/workflows/cw-release-dry-run.yaml'
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: A main commit to verify instead of main's head (dispatch-source.sh)
+        required: false
+        default: ''
   # Every four hours against the latest main: builds only when one of the push
   # paths above changed since the last successful scheduled run (see "Decide
   # whether this run builds"), while scripts/ci/select/main-push-switch.sh
@@ -143,12 +150,28 @@ jobs:
     # feature branch must not run its code there.
     name: Refuse anything but protected main
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
     steps:
       - name: Refuse anything but protected main
         run: |
           set -euo pipefail
           [ "$GITHUB_REF" = 'refs/heads/main' ]
           [ "$GITHUB_REF_NAME" = 'main' ]
+
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Every later job builds this commit: main's own, or the earlier main
+      # commit a dispatch names, so a release candidate is verified while main
+      # moves on. The release tag receipt reads the line it prints.
+      - name: Choose the commit this run verifies
+        id: source
+        env:
+          DISPATCH_SOURCE_SHA: ${{ github.event.inputs.source_sha }}
+        run: scripts/ci/select/dispatch-source.sh .gitea/workflows/cw-release-dry-run.yaml
 
   superseded:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
@@ -162,9 +185,12 @@ jobs:
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     outputs:
       superseded: ${{ steps.canonical.outputs.superseded }}
+    env:
+      SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
+          ref: ${{ needs.protected-main.outputs.source_sha }}
           fetch-depth: 0
 
       # Only a scheduled run reads the repository's runs, with the job token.
@@ -181,14 +207,14 @@ jobs:
         id: deferral
         env:
           SCHEDULE_BASELINE_SHA: ${{ steps.schedule-baseline.outputs.schedule_baseline }}
-        run: scripts/ci/release/dry-run-deferral.sh "$GITHUB_SHA"
+        run: scripts/ci/release/dry-run-deferral.sh "$SOURCE_SHA"
 
       - name: Skip a superseded commit
         id: canonical
         if: steps.deferral.outputs.build == 'true'
         env:
           BEFORE: ${{ github.event.before }}
-        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
+        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"
 
   build-runtime-linux:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
@@ -208,9 +234,12 @@ jobs:
       mode: ${{ steps.select.outputs.mode }}
       present: ${{ steps.build.outputs.present }}
       linux_sha256: ${{ steps.build.outputs.linux_sha256 }}
+    env:
+      SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
+          ref: ${{ needs.protected-main.outputs.source_sha }}
           fetch-depth: 0
 
       # Main may have moved on while this run waited for a builder: decide
@@ -220,7 +249,7 @@ jobs:
         id: superseded
         env:
           BEFORE: ${{ github.event.before }}
-        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
+        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"
 
       - name: Select the local runtime check
         id: select
@@ -232,7 +261,7 @@ jobs:
           mode=full
           if [ "$GITHUB_EVENT_NAME" = push ] && [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] &&
             [[ ! "$BEFORE" =~ ^0+$ ]] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            mode="$(git diff --name-only "$BEFORE" "$GITHUB_SHA" |
+            mode="$(git diff --name-only "$BEFORE" "$SOURCE_SHA" |
               python3 scripts/ci/release/local_runtime_parts.py runtime-mode)"
           fi
           printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
@@ -262,7 +291,7 @@ jobs:
           mkdir -m 0700 "$work" "$work/tmp"
           status=0
           TMPDIR="$work/tmp" LOCAL_RUNTIME_NO_BUILD=1 LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}" \
-            scripts/ci/release/build-local-runtime.sh linux --source-sha "$GITHUB_SHA" \
+            scripts/ci/release/build-local-runtime.sh linux --source-sha "$SOURCE_SHA" \
             --version "$DRY_RUN_VERSION" --output "$work/linux" || status=$?
           case "$status" in
             0) ;;
@@ -311,9 +340,12 @@ jobs:
     outputs:
       superseded: ${{ steps.superseded.outputs.superseded }}
       unsigned_sha256: ${{ steps.build.outputs.unsigned_sha256 }}
+    env:
+      SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
+          ref: ${{ needs.protected-main.outputs.source_sha }}
           fetch-depth: 0
 
       # The single Mac runner: decide again before holding it for a commit
@@ -322,7 +354,7 @@ jobs:
         id: superseded
         env:
           BEFORE: ${{ github.event.before }}
-        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
+        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"
 
       - name: Build the helper unless its recipe is signed
         id: build
@@ -360,8 +392,12 @@ jobs:
     if: needs.build-helper-darwin.outputs.superseded == 'false'
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     timeout-minutes: 20
+    env:
+      SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.protected-main.outputs.source_sha }}
 
       - name: Receive the unsigned helper
         if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
@@ -418,9 +454,12 @@ jobs:
       runtime: ${{ steps.runtime.outputs.present }}
       # The one local runtime document every cw embeds (#2733).
       document_sha256: ${{ steps.runtime.outputs.document_sha256 }}
+    env:
+      SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
+          ref: ${{ needs.protected-main.outputs.source_sha }}
           fetch-depth: 0
 
       # Main may have moved on while this run waited for a builder: decide
@@ -430,7 +469,7 @@ jobs:
         id: superseded
         env:
           BEFORE: ${{ github.event.before }}
-        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
+        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"
 
       - name: Receive the local runtime's Linux side
         if: steps.superseded.outputs.superseded == 'false' && needs.build-runtime-linux.outputs.present == 'true'
@@ -453,7 +492,7 @@ jobs:
           tar -xf .local-runtime-linux/runtime-linux.tar -C "$work"
           status=0
           LOCAL_RUNTIME_NO_BUILD=1 scripts/ci/release/build-local-runtime.sh macos --linux "$work/linux" \
-            --source-sha "$GITHUB_SHA" --output "$work/macos" || status=$?
+            --source-sha "$SOURCE_SHA" --output "$work/macos" || status=$?
           case "$status" in
             0) mkdir -m 0700 .local-runtime
                cp -R "$work/macos/runtime/." .local-runtime/
@@ -496,9 +535,12 @@ jobs:
     outputs:
       superseded: ${{ steps.superseded.outputs.superseded }}
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
+    env:
+      SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
+          ref: ${{ needs.protected-main.outputs.source_sha }}
           fetch-depth: 0
 
       # Main may have moved on while this run waited for a builder: decide
@@ -508,7 +550,7 @@ jobs:
         id: superseded
         env:
           BEFORE: ${{ github.event.before }}
-        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
+        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"
 
       - name: Install protoc (pinned)
         if: steps.superseded.outputs.superseded == 'false'
@@ -572,8 +614,12 @@ jobs:
     timeout-minutes: 20
     outputs:
       darwin_sums_sha256: ${{ steps.sign.outputs.darwin_sums_sha256 }}
+    env:
+      SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.protected-main.outputs.source_sha }}
 
       - name: Receive the macOS pair
         uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
@@ -641,14 +687,17 @@ jobs:
       OPENBAO_ROLE: codewire-source-release-dry-run-build
       OPENBAO_AUDIENCE: openbao-codewire-source-release-dry-run-build
       # The owner's recovery (trusted-buildkit.sh): build in the job when the
-      # repository variable CODEWIRE_IN_JOB_BUILD_SHA names this run's commit.
-      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
+      # repository variable CODEWIRE_IN_JOB_BUILD_SHA names the commit this run
+      # builds.
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == needs.protected-main.outputs.source_sha && '1' || '0' }}
+      SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
     outputs:
       superseded: ${{ steps.superseded.outputs.superseded }}
       cw_sha256: ${{ steps.build.outputs.cw_sha256 }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
+          ref: ${{ needs.protected-main.outputs.source_sha }}
           fetch-depth: 0
 
       # Main may have moved on while this run waited for a builder: decide
@@ -658,7 +707,7 @@ jobs:
         id: superseded
         env:
           BEFORE: ${{ github.event.before }}
-        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
+        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"
 
       - name: Receive the local runtime
         if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
@@ -709,14 +758,17 @@ jobs:
       OPENBAO_ROLE: codewire-source-release-dry-run-build
       OPENBAO_AUDIENCE: openbao-codewire-source-release-dry-run-build
       # The owner's recovery (trusted-buildkit.sh): build in the job when the
-      # repository variable CODEWIRE_IN_JOB_BUILD_SHA names this run's commit.
-      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
+      # repository variable CODEWIRE_IN_JOB_BUILD_SHA names the commit this run
+      # builds.
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == needs.protected-main.outputs.source_sha && '1' || '0' }}
+      SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
     outputs:
       superseded: ${{ steps.superseded.outputs.superseded }}
       cw_sha256: ${{ steps.build.outputs.cw_sha256 }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
+          ref: ${{ needs.protected-main.outputs.source_sha }}
           fetch-depth: 0
 
       # Main may have moved on while this run waited for a builder: decide
@@ -726,7 +778,7 @@ jobs:
         id: superseded
         env:
           BEFORE: ${{ github.event.before }}
-        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
+        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"
 
       - name: Receive the local runtime
         if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
@@ -769,9 +821,12 @@ jobs:
     if: needs.build-linux-musl.outputs.superseded == 'false' && needs.build-linux-gnu.outputs.superseded == 'false'
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     timeout-minutes: 30
+    env:
+      SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
+          ref: ${{ needs.protected-main.outputs.source_sha }}
           fetch-depth: 0
 
       # Main may have moved on while this run waited for a builder: decide
@@ -781,7 +836,7 @@ jobs:
         id: superseded
         env:
           BEFORE: ${{ github.event.before }}
-        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
+        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"
 
       - name: Verify sealed Rust toolchain and release targets
         if: steps.superseded.outputs.superseded == 'false'

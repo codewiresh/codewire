@@ -28,7 +28,7 @@ commit() {
   git -C "$repo" rev-parse HEAD
 }
 # main: ancestor_sha <- main_sha. A side commit off the ancestor is never on main.
-commit ancestor >/dev/null
+ancestor_sha="$(commit ancestor)"
 git -C "$repo" tag -a -m v1.2.2 v1.2.2
 git -C "$repo" switch -q -c side
 commit side >/dev/null
@@ -82,14 +82,15 @@ set -euo pipefail
 [ "${FIXTURE_MODE:?}" != api_unavailable ] || exit 1
 [ "$1 $2" = 'actions runs' ] || { echo "unexpected forge read: $*" >&2; exit 2; }
 verb="$3"; shift 3
-repo=codewire; target=''; job=''; output=text; workflow=''
+repo=codewire; target=''; job=''; output=text; workflow=''; event=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -R) [ "$2" = origin ] || exit 2; shift 2 ;;
     -r) [ "$2" = codewire/deploy ] || exit 2; repo=deploy; shift 2 ;;
     -H) [ "$2" = git.example.invalid ] || exit 2; shift 2 ;;
     --workflow) workflow="$2"; shift 2 ;;
-    --head|--event|--status|-L) shift 2 ;;
+    --event) event="$2"; shift 2 ;;
+    --head|--status|-L) shift 2 ;;
     --job) job="$2"; shift 2 ;;
     --output) output="$2"; shift 2 ;;
     [0-9]*) target="$1"; shift ;;
@@ -111,16 +112,38 @@ case "$FIXTURE_MODE" in superseded|dispatched_nothing|tested_tree) group_status=
 
 # ci.yaml on the tagged commit: the push run 701, whose Kind a push to main
 # deferred, and a later Kind run: scheduled 711 (which Forgejo lists with
-# event push) or dispatched 721.
-run() { # ID EVENT STATUS
+# event push) or dispatched 721. Forgejo reports a dispatch's event field
+# empty and lists dispatches by its event filter.
+run() { # ID EVENT STATUS [HEAD]
   printf '{"id":%s,"head_sha":"%s","workflow":"ci.yaml","status":"%s","event":"%s","ref":"main"}' \
-    "$1" "$head" "$3" "$2"
+    "$1" "${4:-$head}" "$3" "$2"
 }
 job() { # ID RUN NAME STATUS
   printf '{"id":%s,"run_id":%s,"name":"%s","status":"%s","attempt":1}' "$1" "$2" "$3" "$4"
 }
+dry() { sed 's/"ci.yaml"/"cw-release-dry-run.yaml"/'; }
 kind_run=711; kind_event=push
-[ "$FIXTURE_MODE" != kind_from_dispatch ] || { kind_run=721; kind_event=workflow_dispatch; }
+[ "$FIXTURE_MODE" != kind_from_dispatch ] || { kind_run=721; kind_event=''; }
+# A dispatch of main at FIXTURE_MAIN_SHA that verified an earlier commit
+# (dispatch-source.sh): Kind run 731 and dry run 932, the only Kind and dry
+# runs in these modes. source_head names the head the dispatch ran at.
+source_mode=false
+case "$FIXTURE_MODE" in source_*) source_mode=true ;; esac
+source_head="$FIXTURE_MAIN_SHA"
+[ "$FIXTURE_MODE" != source_head_not_descendant ] || source_head="$FIXTURE_ANCESTOR_SHA"
+# source_lines: what dispatch-source.sh logged in the source dispatch's job
+# that chose its commit.
+source_lines() {
+  local line="dispatch source: $FIXTURE_ANCESTOR_SHA on main $source_head"
+  case "$FIXTURE_MODE" in
+    source_line_missing) return 0 ;;
+    source_line_other|source_head_not_descendant)
+      line="dispatch source: $FIXTURE_MAIN_SHA on main $source_head" ;;
+    source_head_wrong) line="dispatch source: $FIXTURE_ANCESTOR_SHA on main $(printf '%040d' 5)" ;;
+  esac
+  printf '2026-10-24T11:00:01.0000000Z %s\r\n' "$line"
+  [ "$FIXTURE_MODE" != source_line_twice ] || printf '2026-10-24T11:00:01.5000000Z %s\r\n' "$line"
+}
 kind_status=success; shard_status=success; other_shard=success
 case "$FIXTURE_MODE" in
   kind_shard_failed) other_shard=failure ;;
@@ -131,17 +154,28 @@ dry_assemble=success
 case "$repo:$verb:$target" in
   codewire:list:)
     [ "$output" = json ]
-    case "$workflow" in
-      ci.yaml)
+    case "$workflow:$event" in
+      ci.yaml:)
         runs="$(run 701 push "$ci_status")"
-        [ "$FIXTURE_MODE" = no_kind_run ] || runs="$runs,$(run "$kind_run" "$kind_event" "$kind_status")"
+        [ "$FIXTURE_MODE" = no_kind_run ] || [ "$source_mode" = true ] \
+          || runs="$runs,$(run "$kind_run" "$kind_event" "$kind_status")"
         ;;
-      cw-release-dry-run.yaml)
+      ci.yaml:workflow_dispatch)
+        runs=''
+        [ "$kind_run" != 721 ] || runs="$(run 721 '' "$kind_status")"
+        [ "$source_mode" = false ] || runs="$(run 731 '' success "$source_head")"
+        ;;
+      cw-release-dry-run.yaml:)
         [ "$FIXTURE_MODE" != dry_runs_unavailable ] || exit 1
         # 901: a deferred push run, which built nothing; 902: a dispatch.
-        runs="$(run 901 push success | sed 's/"ci.yaml"/"cw-release-dry-run.yaml"/')"
-        [ "$FIXTURE_MODE" = no_dry_run ] \
-          || runs="$runs,$(run 902 workflow_dispatch success | sed 's/"ci.yaml"/"cw-release-dry-run.yaml"/')"
+        runs="$(run 901 push success | dry)"
+        [ "$FIXTURE_MODE" = no_dry_run ] || [ "$source_mode" = true ] || runs="$runs,$(run 902 '' success | dry)"
+        ;;
+      cw-release-dry-run.yaml:workflow_dispatch)
+        [ "$FIXTURE_MODE" != dry_runs_unavailable ] || exit 1
+        runs=''
+        [ "$FIXTURE_MODE" = no_dry_run ] || [ "$source_mode" = true ] || runs="$(run 902 '' success | dry)"
+        [ "$source_mode" = false ] || runs="$(run 932 '' success "$source_head" | dry)"
         ;;
       *) exit 2 ;;
     esac
@@ -166,11 +200,21 @@ case "$repo:$verb:$target" in
       "$(job "${target%1}7" "$target" 'Edge / Kind verification (dashboard)' "$other_shard")" \
       "$(job "${target%1}2" "$target" 'Required verification' "$kind_status")"
     ;;
-  codewire:view:901|codewire:view:902)
+  codewire:view:731)
+    printf '{"schema_version":1,"run":%s,"jobs":[%s,%s,%s,%s]}' \
+      "$(run 731 '' success "$source_head")" \
+      "$(job 733 731 'Verification selection' success)" \
+      "$(job 736 731 'Edge / Kind verification (environment)' success)" \
+      "$(job 737 731 'Edge / Kind verification (dashboard)' success)" \
+      "$(job 732 731 'Required verification' success)"
+    ;;
+  codewire:view:901|codewire:view:902|codewire:view:932)
+    run_head="$head" run_event=''
+    [ "$target" != 901 ] || run_event=push
+    [ "$target" != 932 ] || run_head="$source_head"
     if [ "$target" = 901 ]; then assemble=skipped; else assemble="$dry_assemble"; fi
     printf '{"schema_version":1,"run":%s,"jobs":[%s,%s,%s]}' \
-      "$(run "$target" "$([ "$target" = 901 ] && echo push || echo workflow_dispatch)" success \
-        | sed 's/"ci.yaml"/"cw-release-dry-run.yaml"/')" \
+      "$(run "$target" "$run_event" success "$run_head" | dry)" \
       "$(job "${target}0" "$target" 'Refuse anything but protected main' success)" \
       "$(job "${target}1" "$target" 'Skip a superseded commit' success)" \
       "$(job "${target}2" "$target" 'Assemble and verify the unsigned four-target delivery' "$assemble")"
@@ -207,9 +251,21 @@ case "$repo:$verb:$target" in
       *) exit 2 ;;
     esac
     ;;
-  codewire:logs:902)
-    [ "$job" = 9022 ] || exit 2
-    printf '== job 9022 Assemble and verify the unsigned four-target delivery (success) ==\r\n'
+  codewire:logs:731)
+    [ "$job" = 733 ] || exit 2
+    printf '== job 733 Verification selection (success) ==\r\n'
+    printf '2026-10-24T11:00:00.0000000Z classification=requested\r\n'
+    source_lines
+    printf '2026-10-24T11:00:02.0000000Z selection=|valid:v3|edge_kind|kind|complete|\r\n'
+    ;;
+  codewire:logs:902|codewire:logs:932)
+    if [ "$job" = "${target}0" ]; then
+      printf '== job %s Refuse anything but protected main (success) ==\r\n' "$job"
+      [ "$target" != 932 ] || [ "$FIXTURE_MODE" = source_dry_line_missing ] || source_lines
+      exit 0
+    fi
+    [ "$job" = "${target}2" ] || exit 2
+    printf '== job %s Assemble and verify the unsigned four-target delivery (success) ==\r\n' "$job"
     if [ "$FIXTURE_MODE" = dry_run_superseded ]; then
       printf "2026-10-20T14:01:00.0000000Z main is now %s; the queued dry run of %s builds this commit's changes\r\n" \
         "$FIXTURE_MAIN_SHA" "$FIXTURE_MAIN_SHA"
@@ -290,12 +346,14 @@ served() {
 case "$path" in
   runs\?*)
     endpoint=runs
-    query="${path#runs?}" workflow='' status=''
+    query="${path#runs?}" workflow='' status='' event=''
     IFS='&' read -r -a pairs <<<"$query"
     for pair in "${pairs[@]}"; do
       case "$pair" in
         workflow_id=*) workflow="${pair#workflow_id=}" ;;
         status=*) status="${pair#status=}" ;;
+        # The dispatched runs of a workflow are listed without a head.
+        event=workflow_dispatch) event=workflow_dispatch ;;
         head_sha=*) [ "${pair#head_sha=}" = "$FIXTURE_TAG_COMMIT" ] || exit 97 ;;
         page=1|limit=50) ;;
         *) echo "unexpected query: $pair" >&2; exit 97 ;;
@@ -303,6 +361,7 @@ case "$path" in
     done
     args=(list --workflow "$workflow" --output json)
     [ -z "$status" ] || args+=(--status "$status")
+    [ -z "$event" ] || args+=(--event "$event")
     answer "{total_count, workflow_runs: [.runs[] | $raw_run]}" "${args[@]}"
     ;;
   runs/[0-9]*/jobs) endpoint=jobs run="${path#runs/}"; answer '.jobs' view "${run%/jobs}" --output json ;;
@@ -312,10 +371,12 @@ case "$path" in
     endpoint=log
     job="${path#jobs/}" job="${job%/logs?attempt=1}"
     case "$job" in
-      9022) run=902 ;;
+      9020|9022) run=902 ;;
+      9320|9322) run=932 ;;
       70[0-9]) run=701 ;;
       71[0-9]) run=711 ;;
       72[0-9]) run=721 ;;
+      73[0-9]) run=731 ;;
       81[0-9]) run=801 ;;
       *) exit 96 ;;
     esac
@@ -350,6 +411,7 @@ run_case() {
     REAL_GIT="$real_git" \
     FIXTURE_MODE="$mode" \
     FIXTURE_MAIN_SHA="$main_sha" \
+    FIXTURE_ANCESTOR_SHA="$ancestor_sha" \
     FIXTURE_TAG_COMMIT="$tag_commit" \
     PREFLIGHT_RELEASE_TAG_REF="refs/tags/$tag" \
     PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$tag_object" \
@@ -465,6 +527,23 @@ source_case source_no_dry_run no_dry_run v1.2.3 fallback exact-commit-dry-run-no
 source_case source_not_on_main success v1.2.4 fallback release-tag-not-on-canonical-main
 grep -Fq 'release-tag source evidence: not proven' <<<"$case_output" \
   || fail 'a refused source-evidence check did not say so'
+# A dispatch of main that verified the tagged commit while main stood later
+# (dispatch-source.sh) is that commit's Kind and dry run: the job that chose
+# the commit logged one source line naming it and the run's own head.
+source_case source_dispatch source_dispatch v1.2.2 accepted tag-on-main-at-exact-green-commit-source-evidence
+for expected in release_tag_kind_run=731 release_tag_dry_run=932; do
+  grep -Fxq "$expected" <<<"$case_output" || fail "the source dispatch receipt does not report $expected"
+done
+# The same runs verified another commit, so they are not the evidence for a
+# tag at their own head; nor is a run with no source line, two, one naming
+# another commit or another head, or a head the tagged commit is not in.
+source_case source_dispatch_of_other source_dispatch v1.2.3 fallback exact-commit-kind-not-verified
+source_case source_line_missing source_line_missing v1.2.2 fallback exact-commit-kind-not-verified
+source_case source_line_twice source_line_twice v1.2.2 fallback exact-commit-kind-not-verified
+source_case source_line_other source_line_other v1.2.2 fallback exact-commit-kind-not-verified
+source_case source_head_wrong source_head_wrong v1.2.2 fallback exact-commit-kind-not-verified
+source_case source_head_not_descendant source_head_not_descendant v1.2.3 fallback exact-commit-kind-not-verified
+source_case source_dry_line_missing source_dry_line_missing v1.2.2 fallback exact-commit-dry-run-not-verified
 # The full receipt still refuses what only the source evidence leaves out.
 run_case full_without_keyring bad_signature v1.2.3 fallback release-tag-signature-invalid
 run_case full_without_dev failed_dev v1.2.3 fallback exact-source-dev-acceptance-not-successful

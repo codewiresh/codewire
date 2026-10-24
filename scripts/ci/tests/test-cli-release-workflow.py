@@ -47,6 +47,10 @@ LINUX_BUILDS = (("build-linux-musl", "x86_64-unknown-linux-musl"), ("build-linux
 RELEASE_BUILD_ROLE = "codewire-source-cli-release-build"
 DRY_RUN_BUILD_ROLE = "codewire-source-release-dry-run-build"
 IN_JOB_RECOVERY = "      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}\n"
+# The dry run builds the commit its main-only guard chose (dispatch-source.sh).
+DRY_RUN_SOURCE = "${{ needs.protected-main.outputs.source_sha }}"
+DRY_RUN_IN_JOB_RECOVERY = ("      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == "
+                           "needs.protected-main.outputs.source_sha && '1' || '0' }}\n")
 
 
 def by_event(name):
@@ -62,13 +66,13 @@ def builder_login(role, scheduled=False):
             f"      OPENBAO_ROLE: {name(role)}\n      OPENBAO_AUDIENCE: {name('openbao-' + role)}\n")
 
 
-def linux_build_errors(block, job, target, role, source, version):
+def linux_build_errors(block, job, target, role, source, version, recovery=IN_JOB_RECOVERY):
     """A Linux cw build job: the builder login, the recovery switch, exactly its target."""
     errors = []
     if (builder_login(role, scheduled=role != DRY_RUN_BUILD_ROLE) not in block
             or block.count("OPENBAO_ROLE:") != 1):
         errors.append(f"{job} does not log in to the trusted builder as exactly {role}")
-    if IN_JOB_RECOVERY not in block:
+    if recovery not in block:
         errors.append(f"{job} does not keep the in-job build for the owner's recovery only")
     if f'run: scripts/ci/release/build-cw-linux.sh {source} "{version}" {target} .cw-linux\n' not in block:
         errors.append(f"{job} does not build exactly the {target} cw")
@@ -1037,10 +1041,29 @@ def check_dry_run(text, release):
     darwin, assemble = blocks.get("build-darwin", ""), blocks.get("assemble", "")
     pack = blocks.get("pack-runtime", "")
     helper_build, helper_sign = blocks.get("build-helper-darwin", ""), blocks.get("sign-helper", "")
-    need("    runs-on: " + UNTRUSTED_LIGHT + "\n" in guard and "actions-checkout" not in guard
-         and "[ \"$GITHUB_REF\" = 'refs/heads/main' ]" in guard
-         and "[ \"$GITHUB_REF_NAME\" = 'main' ]" in guard and not re.search(r"^\s+if:", guard, re.M),
+    # The guard refuses every ref but main before it checks anything out, then
+    # chooses, with main's own checkout, the commit every later job builds:
+    # main's head, or the earlier main commit a dispatch names.
+    guard_steps = steps(guard)
+    need("    runs-on: " + UNTRUSTED_LIGHT + "\n" in guard and len(guard_steps) == 3
+         and guard_steps[0][0] == "Refuse anything but protected main"
+         and "[ \"$GITHUB_REF\" = 'refs/heads/main' ]" in guard_steps[0][1]
+         and "[ \"$GITHUB_REF_NAME\" = 'main' ]" in guard_steps[0][1] and not re.search(r"^\s+if:", guard, re.M),
          "the dry run does not refuse every ref but main before the protected builders")
+    need(len(guard_steps) == 3 and "actions-checkout" in guard_steps[1][0]
+         and "          fetch-depth: 0\n" in guard_steps[1][1] and "ref:" not in guard_steps[1][1]
+         and "        id: source\n" in guard_steps[2][1]
+         and "          DISPATCH_SOURCE_SHA: ${{ github.event.inputs.source_sha }}\n" in guard_steps[2][1]
+         and "        run: scripts/ci/select/dispatch-source.sh .gitea/workflows/cw-release-dry-run.yaml"
+         in guard_steps[2][1]
+         and "      source_sha: ${{ steps.source.outputs.source_sha }}\n" in guard,
+         "the dry run does not choose its commit with the checked-in rule from main's own checkout")
+    for job, body in blocks.items():
+        if job == "protected-main":
+            continue
+        need(f"      SOURCE_SHA: {DRY_RUN_SOURCE}\n" in body
+             and body.count("actions-checkout@") == body.count(f"          ref: {DRY_RUN_SOURCE}\n") > 0,
+             f"dry-run job {job} does not check out exactly the commit the guard chose")
     need("    needs: [protected-main, superseded, build-runtime-linux, build-helper-darwin, sign-helper]\n"
          in pack, "the runtime pack does not wait for the main-only guard, the runtime's Linux side and the helper")
     # As in a release, the packed runtime is the one output the macOS pair
@@ -1057,7 +1080,7 @@ def check_dry_run(text, release):
              f"dry-run job {job} may embed a runtime other than the packed one")
     for job, target in LINUX_BUILDS:
         errors.extend(linux_build_errors(blocks.get(job, ""), f"dry-run job {job}", target, DRY_RUN_BUILD_ROLE,
-                                         ".", "$DRY_RUN_VERSION"))
+                                         ".", "$DRY_RUN_VERSION", DRY_RUN_IN_JOB_RECOVERY))
         need(f"name: cw-dry-run-{target}-${{{{ github.run_id }}}}" in blocks.get(job, "")
              and f"name: cw-dry-run-{target}-${{{{ github.run_id }}}}" in assemble,
              f"dry-run job {job} does not build and hand over exactly the {target} cw")
@@ -1080,7 +1103,7 @@ def check_dry_run(text, release):
     # decision, and so do the jobs after it.
     recheck = ("      - name: Skip a superseded commit\n        id: superseded\n        env:\n"
                "          BEFORE: ${{ github.event.before }}\n"
-               '        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"')
+               '        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"')
     gate = re.compile(r"^        if: steps\.superseded\.outputs\.superseded == 'false'( && |$)", re.M)
     for job in ("build-runtime-linux", "build-helper-darwin", "pack-runtime", "build-darwin", "build-linux-musl",
                 "build-linux-gnu", "assemble"):
@@ -1105,7 +1128,7 @@ def check_dry_run(text, release):
          and not re.search(r"^    if:", superseded, re.M)
          and "      superseded: ${{ steps.canonical.outputs.superseded }}\n" in superseded
          and "          BEFORE: ${{ github.event.before }}\n" in superseded
-         and 'run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"' in superseded,
+         and 'run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"' in superseded,
          "the dry run does not decide supersession with the checked-in rule after the main-only guard")
     # Before supersession, the checked-in rule decides whether the run builds
     # at all: a push to main only while main-push-switch.sh says so (owner
@@ -1126,7 +1149,7 @@ def check_dry_run(text, release):
          "the dry run reads its last scheduled run other than once, on a schedule, with the job token")
     need("        id: deferral\n        env:\n"
          "          SCHEDULE_BASELINE_SHA: ${{ steps.schedule-baseline.outputs.schedule_baseline }}\n"
-         '        run: scripts/ci/release/dry-run-deferral.sh "$GITHUB_SHA"'
+         '        run: scripts/ci/release/dry-run-deferral.sh "$SOURCE_SHA"'
          in decided.get("Decide whether this run builds", ""),
          "the dry run does not decide whether it builds with the checked-in rule and the schedule baseline")
     need("        id: canonical\n        if: steps.deferral.outputs.build == 'true'\n"
@@ -1142,7 +1165,7 @@ def check_dry_run(text, release):
     mac_build = dict(steps(pack)).get("Build the local VM runtime from cached parts", "")
     need("LOCAL_RUNTIME_NO_BUILD=1" in linux_build and "LOCAL_RUNTIME_NO_BUILD=1" in mac_build,
          "the dry run builds slow runtime parts")
-    need('build-local-runtime.sh linux --source-sha "$GITHUB_SHA" \\\n'
+    need('build-local-runtime.sh linux --source-sha "$SOURCE_SHA" \\\n'
          '            --version "$DRY_RUN_VERSION" --output "$work/linux"' in linux_build,
          "the dry-run Linux side does not build its cws from this commit and the dry-run version")
     need("build-local-runtime.sh linux --check" in runtime and "build-local-runtime.sh macos --check" in pack,
@@ -1249,7 +1272,7 @@ DRY_RUN_CANCEL_IF = "steps.superseded.outputs.superseded == 'false' && failure()
 DRY_RUN_MUTATIONS = {
     "Linux side without a job limit": lambda t: t.replace("    timeout-minutes: 75\n", "", 1),
     "dry-run Linux side from another commit": lambda t: t.replace(
-        'linux --source-sha "$GITHUB_SHA"', 'linux --source-sha "$BEFORE"', 1),
+        'linux --source-sha "$SOURCE_SHA"', 'linux --source-sha "$BEFORE"', 1),
     "dry-run Linux side with another version": lambda t: t.replace(
         '--version "$DRY_RUN_VERSION" --output "$work/linux"', '--version v9.9.9 --output "$work/linux"', 1),
     "macOS build without a job limit": lambda t: t.replace("    timeout-minutes: 60\n", "", 1),
@@ -1276,7 +1299,7 @@ DRY_RUN_MUTATIONS = {
     "deferred push still builds": lambda t: in_job(
         t, "superseded", "        if: steps.deferral.outputs.build == 'true'\n", ""),
     "deferral without the checked-in rule": lambda t: t.replace(
-        'run: scripts/ci/release/dry-run-deferral.sh "$GITHUB_SHA"', 'run: echo build=true >> "$GITHUB_OUTPUT"', 1),
+        'run: scripts/ci/release/dry-run-deferral.sh "$SOURCE_SHA"', 'run: echo build=true >> "$GITHUB_OUTPUT"', 1),
     "schedule baseline read on every event": lambda t: t.replace(
         "        id: schedule-baseline\n        if: github.event_name == 'schedule'\n",
         "        id: schedule-baseline\n", 1),
@@ -1356,7 +1379,7 @@ DRY_RUN_MUTATIONS = {
     "dry-run Linux cw under the cli-release role": lambda t: in_job(
         t, "build-linux-gnu", f"      OPENBAO_ROLE: {DRY_RUN_BUILD_ROLE}\n", f"      OPENBAO_ROLE: {RELEASE_BUILD_ROLE}\n"),
     "dry-run Linux cw built in the job by default": lambda t: in_job(
-        t, "build-linux-musl", IN_JOB_RECOVERY, "      CODEWIRE_IN_JOB_BUILD: '1'\n"),
+        t, "build-linux-musl", DRY_RUN_IN_JOB_RECOVERY, "      CODEWIRE_IN_JOB_BUILD: '1'\n"),
     "dry-run assembly logs in to the builder": lambda t: in_job(
         t, "assemble", "    runs-on: " + TRUSTED_LIGHT + "\n",
         "    runs-on: " + TRUSTED_LIGHT + "\n" + builder_login(DRY_RUN_BUILD_ROLE).replace("    timeout-minutes: 60\n", "")),
@@ -1389,7 +1412,7 @@ DRY_RUN_MUTATIONS = {
         "        if: steps.superseded.outputs.superseded == 'false'\n",
         "      - name: Build the macOS pair\n        id: build\n"),
     "Linux side does not decide again": lambda t: in_job(
-        t, "build-runtime-linux", '        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"\n',
+        t, "build-runtime-linux", '        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"\n',
         "        run: echo superseded=false >> \"$GITHUB_OUTPUT\"\n"),
     "Linux side hides its decision": lambda t: in_job(
         t, "build-runtime-linux", "      superseded: ${{ steps.superseded.outputs.superseded }}\n", ""),
@@ -1421,8 +1444,24 @@ DRY_RUN_MUTATIONS = {
         "    name: Skip a superseded commit\n    needs: [protected-main]\n",
         "    name: Skip a superseded commit\n", 1),
     "supersession without the checked-in rule": lambda t: t.replace(
-        'run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"',
+        'run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"',
         "run: echo superseded=true >> \"$GITHUB_OUTPUT\"", 1),
+    "guard checks out before it refuses other refs": lambda t: in_job(
+        t, "protected-main", "    steps:\n      - name: Refuse anything but protected main\n",
+        "    steps:\n      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5\n\n"
+        "      - name: Refuse anything but protected main\n"),
+    "guard chooses from the dispatched source's own checkout": lambda t: in_job(
+        t, "protected-main", "          fetch-depth: 0\n",
+        "          ref: ${{ github.event.inputs.source_sha }}\n          fetch-depth: 0\n"),
+    "guard takes the dispatched source unchecked": lambda t: t.replace(
+        "        run: scripts/ci/select/dispatch-source.sh .gitea/workflows/cw-release-dry-run.yaml",
+        '        run: echo "source_sha=$DISPATCH_SOURCE_SHA" >> "$GITHUB_OUTPUT"', 1),
+    "dry-run Linux cw builds main's head": lambda t: in_job(
+        t, "build-linux-musl", f"          ref: {DRY_RUN_SOURCE}\n", ""),
+    "dry-run signing checks out main's head": lambda t: in_job(
+        t, "sign-darwin", f"        with:\n          ref: {DRY_RUN_SOURCE}\n", ""),
+    "dry-run in-job recovery keyed to main's head": lambda t: in_job(
+        t, "build-linux-gnu", DRY_RUN_IN_JOB_RECOVERY, IN_JOB_RECOVERY),
     "supersession without the push's own changes": lambda t: t.replace(
         "          BEFORE: ${{ github.event.before }}\n        run: scripts/ci/release/dry-run-superseded.sh",
         "          BEFORE: ''\n        run: scripts/ci/release/dry-run-superseded.sh", 1),

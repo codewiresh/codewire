@@ -102,7 +102,9 @@ def identity(group: str, environment: dict[str, str] | None = None) -> dict[str,
     try:
         repository = environment["GITHUB_REPOSITORY"]
         run_id = environment["GITHUB_RUN_ID"]
-        source = environment["GITHUB_SHA"]
+        # The commit ci.yaml verifies: its own, or the earlier main commit a
+        # Kind dispatch names (scripts/ci/select/dispatch-source.sh).
+        source = environment["CODEWIRE_VERIFICATION_SOURCE_SHA"]
     except KeyError as error:
         raise ArtifactError(f"missing workflow identity: {error.args[0]}") from error
     if repository != "codewire/codewire" or not POSITIVE.fullmatch(run_id):

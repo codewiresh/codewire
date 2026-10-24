@@ -2154,6 +2154,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-local-runtime-parts.py|\
       scripts/ci/release/dry-run-superseded.sh|scripts/ci/tests/test-dry-run-superseded.sh|\
       scripts/ci/release/dry-run-deferral.sh|scripts/ci/tests/test-dry-run-deferral.sh|\
+      scripts/ci/select/dispatch-source.sh|scripts/ci/tests/test-dispatch-source.sh|\
       scripts/ci/select/main-push-switch.sh|scripts/ci/select/last-scheduled-run.py|\
       scripts/ci/tests/test-cw-install.py|\
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\

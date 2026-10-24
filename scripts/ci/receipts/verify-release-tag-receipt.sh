@@ -296,16 +296,63 @@ successful_runs() {
     ' "$1"
 }
 
-# Kind: a successful ci.yaml run of the exact commit in which at least one
-# Edge / Kind verification shard ran and every shard that ran succeeded.
+# Kind and the dry run may also come from a dispatch of main that verified the
+# exact commit while main stood later (scripts/ci/select/dispatch-source.sh).
+# Forgejo reports a dispatched run's event field empty, so these runs are
+# listed with the server's own event filter, never matched by that field.
+# dispatched_runs WORKFLOW FILE: the successful dispatches of WORKFLOW on main
+# whose head is the exact commit or descends from it, newest first.
+dispatched_runs() {
+  local id head
+  list_runs "$source_repo" "workflow_id=$1&event=workflow_dispatch" "$2" || return 1
+  jq -e '.schema_version == 1 and (.runs | type == "array")' "$2" >/dev/null 2>&1 || return 1
+  jq -r --arg workflow "$1" '
+      [.runs[]
+        | select(.workflow == $workflow and .ref == "main" and .status == "success"
+            and (.id | type == "number" and . > 0) and (.head_sha | test("^[0-9a-f]{40}$")))]
+      | sort_by(.id) | reverse | .[] | "\(.id) \(.head_sha)"
+    ' "$2" >"$2.ids" || return 1
+  while read -r id head; do
+    [ "$head" = "$tag_commit" ] || git merge-base --is-ancestor "$tag_commit" "$head" 2>/dev/null || continue
+    printf '%s\n' "$id"
+  done <"$2.ids"
+}
+
+# candidates EXACT_FILE WORKFLOW DISPATCHED_FILE: both lists, newest first, once each.
+candidates() {
+  { successful_runs "$1" "$2"; cat "$3"; } | sort -rnu
+}
+
+# verified_source VIEW JOB: the run verified the exact commit. JOB, which chose
+# the commit (dispatch-source.sh), logged no source line and the run is of the
+# exact commit, or logged exactly one, naming the exact commit and the run's
+# own head.
+verified_source() {
+  local view="$1" job="$2" head log lines
+  head="$(jq -r '.run.head_sha' "$view")" || return 1
+  [[ "$head" =~ ^[0-9a-f]{40}$ ]] || return 1
+  log="$view.source.log"
+  job_log "$source_repo" "$view" "$job" "$log" || return 1
+  lines="$(grep -Ec '^[0-9T:.-]+Z dispatch source: ' "$log")" || true
+  case "$lines" in
+    0) [ "$head" = "$tag_commit" ] ;;
+    1) grep -Eq "^[0-9T:.-]+Z dispatch source: $tag_commit on main $head\$" "$log" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Kind: a successful ci.yaml run that verified the exact commit, in which at
+# least one Edge / Kind verification shard ran and every shard that ran
+# succeeded.
+dispatched_runs ci.yaml "$tmp/ci-dispatches.json" >"$tmp/ci-dispatched" \
+  || fallback 'dispatched-kind-runs-unavailable'
 while read -r candidate; do
   [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
   candidate_view="$tmp/ci-view-$candidate.json"
   view_run "$source_repo" "$candidate" "$candidate_view" || continue
-  jq -e --arg head "$tag_commit" --argjson id "$candidate" '
+  jq -e --argjson id "$candidate" '
       .schema_version == 1
       and .run.id == $id
-      and .run.head_sha == $head
       and .run.workflow == "ci.yaml"
       and .run.status == "success"
       and ([.jobs[]
@@ -313,32 +360,36 @@ while read -r candidate; do
           | select(.status != "skipped")]
         | length > 0 and all(.[]; .status == "success"))
     ' "$candidate_view" >/dev/null 2>&1 || continue
+  verified_source "$candidate_view" 'Verification selection' || continue
   kind_run_id="$candidate"
   break
-done < <(successful_runs "$runs_json" ci.yaml)
+done < <(candidates "$runs_json" ci.yaml "$tmp/ci-dispatched")
 [ -n "$kind_run_id" ] || fallback 'exact-commit-kind-not-verified'
 
-# The release dry run: a successful cw-release-dry-run.yaml run of the exact
-# commit whose assembly job verified the unsigned four-target delivery. A
-# superseded or deferred run skips that verification and does not count.
+# The release dry run: a successful cw-release-dry-run.yaml run that verified
+# the exact commit, whose assembly job verified the unsigned four-target
+# delivery. A superseded or deferred run skips that verification and does not
+# count.
 dry_runs_json="$tmp/dry-runs.json"
 list_runs "$source_repo" "head_sha=$tag_commit&workflow_id=cw-release-dry-run.yaml" "$dry_runs_json" \
   || fallback 'exact-commit-dry-runs-unavailable'
 jq -e '.schema_version == 1 and (.runs | type == "array")' \
   "$dry_runs_json" >/dev/null 2>&1 || fallback 'exact-commit-dry-runs-unavailable'
+dispatched_runs cw-release-dry-run.yaml "$tmp/dry-dispatches.json" >"$tmp/dry-dispatched" \
+  || fallback 'exact-commit-dry-runs-unavailable'
 while read -r candidate; do
   [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
   candidate_view="$tmp/dry-view-$candidate.json"
   view_run "$source_repo" "$candidate" "$candidate_view" || continue
-  jq -e --arg head "$tag_commit" --argjson id "$candidate" '
+  jq -e --argjson id "$candidate" '
       .schema_version == 1
       and .run.id == $id
-      and .run.head_sha == $head
       and .run.workflow == "cw-release-dry-run.yaml"
       and .run.status == "success"
       and ([.jobs[] | select(.name == "Assemble and verify the unsigned four-target delivery")]
         | length == 1 and .[0].status == "success")
     ' "$candidate_view" >/dev/null 2>&1 || continue
+  verified_source "$candidate_view" 'Refuse anything but protected main' || continue
   assemble_log="$tmp/dry-assemble-$candidate.log"
   job_log "$source_repo" "$candidate_view" 'Assemble and verify the unsigned four-target delivery' \
     "$assemble_log" || continue
@@ -350,7 +401,7 @@ while read -r candidate; do
   fi
   dry_run_id="$candidate"
   break
-done < <(successful_runs "$dry_runs_json" cw-release-dry-run.yaml)
+done < <(candidates "$dry_runs_json" cw-release-dry-run.yaml "$tmp/dry-dispatched")
 [ -n "$dry_run_id" ] || fallback 'exact-commit-dry-run-not-verified'
 
 # The source evidence is complete here.

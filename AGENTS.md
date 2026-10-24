@@ -282,12 +282,16 @@ no release dry run. Both still run on a dispatched release candidate, on a pull
 request labelled `ci-full`, and every four hours on a schedule against the
 latest `main` when their inputs changed. A release tag's receipt needs a green
 Kind run and a green dry run of the exact candidate commit. Dispatch both on
-`main` while it is the candidate, then tag the commit those runs report:
+`main` naming the candidate, so `main` never stops for a cut:
 
 ```sh
-fj actions dispatch -R origin ci.yaml main -I verification=edge_kind
-fj actions dispatch -R origin cw-release-dry-run.yaml main
+fj actions dispatch -R origin ci.yaml main -I verification=edge_kind -I source_sha=<candidate>
+fj actions dispatch -R origin cw-release-dry-run.yaml main -I source_sha=<candidate>
 ```
+
+The candidate must be on `main`'s first-parent history with the same
+workflow file as `main`'s head (`scripts/ci/select/dispatch-source.sh`);
+after a workflow change, take a later candidate.
 
 The switch is `MAIN_PUSH_RUNS_KIND_AND_DRY_RUN` in
 `scripts/ci/select/main-push-switch.sh`. Set it back to `true` once #2949 is

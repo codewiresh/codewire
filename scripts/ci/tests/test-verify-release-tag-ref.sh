@@ -874,6 +874,7 @@ python3 -B "$ROOT/scripts/ci/tests/test-local-runtime-parts.py" >/dev/null 2>&1 
 }
 "$ROOT/scripts/ci/tests/test-dry-run-superseded.sh" >/dev/null
 "$ROOT/scripts/ci/tests/test-dry-run-deferral.sh" >/dev/null
+"$ROOT/scripts/ci/tests/test-dispatch-source.sh" >/dev/null
 "$ROOT/scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh"
 "$ROOT/scripts/ci/tests/test-fetch-openbao-release-signing-key.sh"
 "$ROOT/scripts/ci/tests/test-fetch-openbao-macos-signing.sh"

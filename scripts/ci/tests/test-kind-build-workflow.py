@@ -89,6 +89,43 @@ class WorkflowContractTests(unittest.TestCase):
         cls.workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
         cls.jobs = cls.workflow["jobs"]
 
+    def test_every_job_verifies_the_commit_selection_chose(self) -> None:
+        # Selection chooses the commit from main's own full checkout before
+        # anything else runs (dispatch-source.sh): its own, or the earlier
+        # main commit a Kind dispatch names. Every later step and job uses it.
+        selection = self.jobs["verification-selection"]
+        source = "${{ needs.verification-selection.outputs.source_sha }}"
+        self.assertEqual(selection["outputs"]["source_sha"], "${{ steps.source.outputs.source_sha }}")
+        first, choose, switch = selection["steps"][:3]
+        self.assertIn("actions-checkout@", first["uses"])
+        self.assertEqual(first["with"], {"fetch-depth": 0})
+        self.assertEqual(choose["id"], "source")
+        self.assertEqual(choose["env"]["DISPATCH_SOURCE_SHA"], "${{ github.event.inputs.source_sha }}")
+        self.assertTrue(choose["run"].rstrip().endswith(
+            "scripts/ci/select/dispatch-source.sh .gitea/workflows/ci.yaml"))
+        self.assertEqual(switch["env"], {"VERIFICATION_SOURCE_SHA": "${{ steps.source.outputs.source_sha }}"})
+        self.assertEqual(switch["run"], 'git checkout -q --detach "$VERIFICATION_SOURCE_SHA"')
+        for name, job in self.jobs.items():
+            if name == "verification-selection":
+                continue
+            checkouts = [step for step in job["steps"] if "actions-checkout@" in step.get("uses", "")]
+            with self.subTest(job=name):
+                for step in checkouts:
+                    self.assertEqual(step.get("with", {}).get("ref"), source)
+        # A source verifies Kind only: any other family refuses it.
+        script = choose["run"].replace(
+            "scripts/ci/select/dispatch-source.sh .gitea/workflows/ci.yaml", "echo chosen")
+        for request, dispatched, chosen in (("edge_kind", "a" * 40, True), ("policy", "a" * 40, False),
+                                            ("", "a" * 40, False), ("policy", "", True)):
+            with self.subTest(request=request, dispatched=dispatched):
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-c", script],
+                    env={"PATH": os.environ["PATH"], "VERIFICATION_REQUEST": request,
+                         "DISPATCH_SOURCE_SHA": dispatched},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode == 0 and result.stdout == "chosen\n", chosen)
+
     def test_producers_are_independent_exact_head_builds(self) -> None:
         for job_name, group in PRODUCERS.items():
             with self.subTest(job=job_name):
@@ -111,10 +148,16 @@ class WorkflowContractTests(unittest.TestCase):
                      if "actions-checkout@" in step.get("uses", "")],
                     checkouts,
                 )
+                # The commit selection chose (dispatch-source.sh): its own, or
+                # the earlier main commit a Kind dispatch names.
                 self.assertEqual(checkouts[0].get("with"), {
-                    "ref": "${{ github.sha }}",
+                    "ref": "${{ needs.verification-selection.outputs.source_sha }}",
                     "persist-credentials": False,
                 })
+                self.assertEqual(
+                    job["env"]["CODEWIRE_VERIFICATION_SOURCE_SHA"],
+                    "${{ needs.verification-selection.outputs.source_sha }}",
+                )
                 export = named_step(job, next(
                     step["name"] for step in job["steps"] if step.get("id") == "export"
                 ))
@@ -173,10 +216,11 @@ class WorkflowContractTests(unittest.TestCase):
         )
         choose = next(step for step in selection["steps"] if step.get("id") == "kind-workspace")
         self.assertIn("kind-build-artifacts.py workspace-source", choose["run"])
-        self.assertIn('--head "$GITHUB_SHA" --base "$base" --github-output', choose["run"])
+        self.assertIn('--head "$VERIFICATION_SOURCE_SHA" --base "$base" --github-output', choose["run"])
         self.assertEqual(choose["env"], {
             "PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
             "PUSH_BEFORE_SHA": "${{ github.event.before }}",
+            "VERIFICATION_SOURCE_SHA": "${{ steps.source.outputs.source_sha }}",
         })
         for event, expected in (("pull_request", "pr-base"), ("push", "push-before"),
                                 ("workflow_dispatch", ""), ("schedule", "")):
@@ -187,7 +231,7 @@ class WorkflowContractTests(unittest.TestCase):
                 result = subprocess.run(
                     ["bash", "--noprofile", "--norc", "-c", script],
                     env={"PATH": os.environ["PATH"], "GITHUB_EVENT_NAME": event,
-                         "GITHUB_SHA": "head", "PR_BASE_SHA": "pr-base",
+                         "VERIFICATION_SOURCE_SHA": "head", "PR_BASE_SHA": "pr-base",
                          "PUSH_BEFORE_SHA": "push-before"},
                     capture_output=True, text=True, check=True,
                 )
