@@ -67,6 +67,7 @@ mod session_inventory;
 // The cookie-only account controls share one boundary: exact Origin, the
 // session cookie and never a bearer, an owner-first lock order and a bounded,
 // private transaction. Two-factor replacement reuses it unchanged.
+pub use session_inventory::SessionInventoryBounds;
 pub(crate) use session_inventory::{
     actor as lock_account_actor, bounded_transaction, cookie_digest, exact_origin, private,
     unavailable, valid_id,

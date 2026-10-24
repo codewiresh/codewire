@@ -2,7 +2,7 @@
 //! deletion share an owner-first transaction; middleware identity is not
 //! sufficient authority to delete a session after the actor is revoked.
 
-use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, Query, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -18,6 +18,28 @@ use super::{SessionAuthState, clear_cookie_string, format_time};
 
 const PAGE_SIZE: usize = 50;
 const REQUEST_BUDGET: Duration = Duration::from_secs(5);
+/// The server statement and idle-in-transaction ceiling of these routes.
+const STATEMENT_CEILING: Duration = Duration::from_secs(4);
+
+/// The session inventory routes' time bounds. Production never sets them, so
+/// the routes use [`SessionInventoryBounds::default`]: 5 s per request and a
+/// 4 s statement ceiling. A test whose subject is neither bound adds longer
+/// ones as a router `Extension`, a hang guard a stalled CI slot cannot spend
+/// (#3311). A client cannot set a request extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionInventoryBounds {
+    pub request: Duration,
+    pub statement: Duration,
+}
+
+impl Default for SessionInventoryBounds {
+    fn default() -> Self {
+        Self {
+            request: REQUEST_BUDGET,
+            statement: STATEMENT_CEILING,
+        }
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -140,9 +162,11 @@ pub(crate) fn private(response: impl IntoResponse) -> Response {
 
 async fn list(
     State(state): State<SessionAuthState>,
+    bounds: Option<Extension<SessionInventoryBounds>>,
     headers: HeaderMap,
     query: Result<Query<InventoryQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
+    let bounds = bounds.map(|Extension(bounds)| bounds).unwrap_or_default();
     let result = async {
         let Query(query) =
             query.map_err(|_| AppError::BadRequest("Invalid session query".into()))?;
@@ -151,7 +175,7 @@ async fn list(
         }
         let digest = cookie_digest(&headers)?;
         let mut tx = state.pool.begin().await.map_err(|_| unavailable())?;
-        bounded_transaction(&mut tx).await?;
+        bounded_transaction_within(&mut tx, bounds.statement).await?;
         let (account_id, current_session) =
             actor(&mut tx, &digest, &query.account_id, false).await?;
         let mut sessions: Vec<SessionMetadata> = sqlx::query_as(
@@ -183,7 +207,7 @@ async fn list(
             next_cursor,
         })
     };
-    match tokio::time::timeout(REQUEST_BUDGET, result).await {
+    match tokio::time::timeout(bounds.request, result).await {
         Ok(Ok(inventory)) => private(Json(inventory)),
         Ok(Err(error)) => private(error),
         Err(_) => private(unavailable()),
@@ -192,9 +216,11 @@ async fn list(
 
 async fn revoke(
     State(state): State<SessionAuthState>,
+    bounds: Option<Extension<SessionInventoryBounds>>,
     headers: HeaderMap,
     request: Result<Json<RevokeRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
+    let bounds = bounds.map(|Extension(bounds)| bounds).unwrap_or_default();
     let result =
         async {
             exact_origin(&headers, &state.frontend_url)?;
@@ -205,7 +231,7 @@ async fn revoke(
             }
             let digest = cookie_digest(&headers)?;
             let mut tx = state.pool.begin().await.map_err(|_| unavailable())?;
-            bounded_transaction(&mut tx).await?;
+            bounded_transaction_within(&mut tx, bounds.statement).await?;
             let (account_id, current) = actor(&mut tx, &digest, &request.account_id, true).await?;
             // Acquire the target before the final actor clock check.
             let target: Option<String> =
@@ -233,7 +259,7 @@ async fn revoke(
             tx.commit().await.map_err(|_| unavailable())?;
             Ok::<_, AppError>(current_session_revoked)
         };
-    match tokio::time::timeout(REQUEST_BUDGET, result).await {
+    match tokio::time::timeout(bounds.request, result).await {
         Ok(Ok(current_session_revoked)) => {
             let mut response = private(Json(Revoked {
                 revoked: true,
@@ -351,13 +377,25 @@ async fn validate_actor(
 pub(crate) async fn bounded_transaction(
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<(), AppError> {
+    bounded_transaction_within(tx, STATEMENT_CEILING).await
+}
+
+async fn bounded_transaction_within(
+    tx: &mut Transaction<'_, Postgres>,
+    ceiling: Duration,
+) -> Result<(), AppError> {
     // Cancellation alone does not end server-side lock waits. Honor stricter
     // configured limits and bound abandoned work/transactions on the server.
+    // Zero would disable the PostgreSQL timeout, so the ceiling floors at 1 ms.
+    let ceiling_ms = i64::try_from(ceiling.as_millis())
+        .unwrap_or(i64::MAX)
+        .max(1);
     let settings: Vec<String> = sqlx::query_scalar(
-        "SELECT pg_catalog.set_config(name, LEAST(4000, CASE WHEN setting::bigint=0 \
-         THEN 4000 ELSE setting::bigint END)::text, true) FROM pg_catalog.pg_settings \
+        "SELECT pg_catalog.set_config(name, LEAST($1::bigint, CASE WHEN setting::bigint=0 \
+         THEN $1::bigint ELSE setting::bigint END)::text, true) FROM pg_catalog.pg_settings \
          WHERE name IN ('statement_timeout','idle_in_transaction_session_timeout') AND unit='ms'",
     )
+    .bind(ceiling_ms)
     .fetch_all(&mut **tx)
     .await
     .map_err(|_| unavailable())?;
@@ -371,6 +409,17 @@ pub(crate) async fn bounded_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_bounds_are_five_second_requests_and_four_second_statements() {
+        assert_eq!(
+            SessionInventoryBounds::default(),
+            SessionInventoryBounds {
+                request: Duration::from_secs(5),
+                statement: Duration::from_secs(4),
+            }
+        );
+    }
 
     #[tokio::test]
     async fn database_failure_is_private_and_never_reports_success() {

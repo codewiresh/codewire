@@ -3,7 +3,9 @@
 
 use axum::http::{HeaderMap, Request};
 use axum::{Router, body::Body};
-use codewire_idp::auth_session::{SignupInvitePolicy, router_with_signup_delivery};
+use codewire_idp::auth_session::{
+    SessionInventoryBounds, SignupInvitePolicy, router_with_signup_delivery,
+};
 use codewire_server_core::auth::hash_session_token;
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -16,8 +18,11 @@ const ORIGIN: &str = "https://app.codewire.test";
 /// into a failure; 2 and 3 s windows failed on loaded runners (#3311).
 const HANG: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The session routes' own server statement ceiling (`bounded_transaction`).
-const ROUTE_STATEMENT_CEILING: std::time::Duration = std::time::Duration::from_secs(4);
+/// The statement ceiling the strict-timeout test gives the routes. It is far
+/// above the 500 ms server policy that test sets, so an answer before it can
+/// only come from that stricter policy, even after a stall of many seconds;
+/// production's own 4 s ceiling left a stall no room (#3311).
+const ROUTE_STATEMENT_CEILING: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn pool() -> Option<PgPool> {
     let Ok(url) = std::env::var("DATABASE_URL") else {
@@ -33,7 +38,25 @@ async fn pool() -> Option<PgPool> {
     )
 }
 
+/// The session routes with [`HANG`] in place of their 5 s request and 4 s
+/// statement bounds, for tests whose subject is neither; a stalled CI slot
+/// spent those bounds (#3311).
 fn app(pool: PgPool) -> Router {
+    bounded_app(
+        pool,
+        SessionInventoryBounds {
+            request: HANG,
+            statement: HANG,
+        },
+    )
+}
+
+fn bounded_app(pool: PgPool, bounds: SessionInventoryBounds) -> Router {
+    production_app(pool).layer(axum::Extension(bounds))
+}
+
+/// The routes as production mounts them; `bounded_app` adds the bounds.
+fn production_app(pool: PgPool) -> Router {
     router_with_signup_delivery(
         pool,
         true,
@@ -805,7 +828,13 @@ async fn server_lock_timeout_releases_abandoned_authority_and_does_not_claim_suc
         .execute(&mut *lock)
         .await
         .unwrap();
-    let app = app(worker.clone());
+    let app = bounded_app(
+        worker.clone(),
+        SessionInventoryBounds {
+            request: HANG,
+            statement: ROUTE_STATEMENT_CEILING,
+        },
+    );
     let started = std::time::Instant::now();
     let response = tokio::time::timeout(
         HANG,
@@ -815,7 +844,8 @@ async fn server_lock_timeout_releases_abandoned_authority_and_does_not_claim_suc
     .unwrap();
     assert_eq!(response.0, 503);
     // Only the stricter 500 ms setting can end the wait before the route's own
-    // ceiling: under that ceiling the statement alone would last at least 4 s.
+    // ceiling: under that ceiling the statement alone would last at least
+    // ROUTE_STATEMENT_CEILING.
     let elapsed = started.elapsed();
     assert!(
         elapsed < ROUTE_STATEMENT_CEILING,
