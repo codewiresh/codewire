@@ -86,6 +86,8 @@ impl Harness {
                 "SELECT (token_hash,user_id,expires_at) ON public.sessions".into(),
                 "UPDATE (expires_at,updated_at) ON public.sessions".into(),
                 "SELECT (id,user_id,org_id,key_prefix,key_hash,expires_at,disabled_at,scopes,last_used_at) ON public.api_keys".into(),
+                // A key acts only for a current member of its organization (#3254).
+                "SELECT (org_id,user_id) ON public.org_members".into(),
                 "UPDATE (last_used_at) ON public.api_keys".into(),
             ] {
                 sqlx::query(&format!("GRANT {grant} TO {}", quote(&role))).execute(&db).await?;
@@ -239,6 +241,13 @@ async fn seed(db: &PgPool) -> Result<()> {
     // Deliberately identical organization/user text IDs are separate owners.
     sqlx::query("INSERT INTO organizations(id,name,slug,created_by) VALUES ($1,'Metadata org','metadata-org',$1)")
         .bind(ALICE).execute(db).await?;
+    // An API key acts only for a current member of its organization (#3254).
+    sqlx::query(
+        "INSERT INTO org_members(id,org_id,user_id,role) VALUES ('metadata-member',$1,$1,'owner')",
+    )
+    .bind(ALICE)
+    .execute(db)
+    .await?;
     sqlx::query("INSERT INTO oidc_clients(id,name,application_type,auth_method,redirect_uris) VALUES ('metadata-client','Metadata fixture','native','none','{}')")
         .execute(db).await?;
     for (token, user, scope, lifetime) in [

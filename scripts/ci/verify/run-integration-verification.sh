@@ -543,6 +543,13 @@ database_lane_orchestration() {
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "environment membership access matrix" "$logfile" 1
 
+  logfile="$RUN_DIR/organization-membership-credentials.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::organizations::membership_database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "organization membership credential matrix" "$logfile" 1
+
   logfile="$RUN_DIR/billing-session-bind.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-orchestration --lib \

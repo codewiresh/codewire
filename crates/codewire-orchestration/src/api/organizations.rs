@@ -352,10 +352,7 @@ pub(crate) async fn remove_member_core(
             return Err(forbidden("admins cannot remove other admins"));
         }
 
-        sqlx::query(r#"DELETE FROM org_members WHERE org_id = $1 AND user_id = $2"#)
-            .bind(&org_id)
-            .bind(&user_id)
-            .execute(&state.pool)
+        delete_membership(&state.pool, &org_id, &user_id)
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "organizations: remove member failed");
@@ -373,6 +370,27 @@ pub(crate) async fn remove_member_core(
         Ok(())
     })
     .await
+}
+
+/// Deletes a membership and disables the member's API keys for that
+/// organization in one transaction. A key bound to the organization must not
+/// outlive the membership, and a later re-add does not revive it (#3254).
+async fn delete_membership(pool: &sqlx::PgPool, org_id: &str, user_id: &str) -> sqlx::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(r#"DELETE FROM org_members WHERE org_id = $1 AND user_id = $2"#)
+        .bind(org_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        r#"UPDATE api_keys SET disabled_at = NOW()
+           WHERE org_id = $1 AND user_id = $2 AND disabled_at IS NULL"#,
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
 }
 
 // ── Invitations (org-scoped CRUD) ────────────────────────────────────────
@@ -1061,6 +1079,9 @@ pub(crate) async fn create_organization_core(
         updated_at: format_time(now),
     })
 }
+
+#[cfg(test)]
+mod membership_database_tests;
 
 #[cfg(test)]
 mod tests {

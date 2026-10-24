@@ -720,7 +720,10 @@ async fn authenticate_api_key(pool: &PgPool, full_token: &str) -> Result<Authent
     let hex = hex_lower(&hasher.finalize());
 
     // Use the indexed prefix plus full hash. `disabled_at` is a timestamp,
-    // not a boolean, and only null values authenticate.
+    // not a boolean, and only null values authenticate. A key acts only for
+    // a current member of its organization: removal disables the member's
+    // keys, and this join also stops keys of members removed before that
+    // (#3254).
     let prefix = &full_token["cw_".len().."cw_".len() + 8];
     let row: Option<ApiKeyAuthRow> = sqlx::query_as(
         r#"
@@ -730,6 +733,7 @@ async fn authenticate_api_key(pool: &PgPool, full_token: &str) -> Result<Authent
                a.scopes
           FROM api_keys a
           JOIN users u ON u.id = a.user_id
+          JOIN org_members m ON m.org_id = a.org_id AND m.user_id = a.user_id
          WHERE a.key_prefix = $1
            AND a.key_hash = $2
            AND (a.expires_at IS NULL OR a.expires_at > NOW())

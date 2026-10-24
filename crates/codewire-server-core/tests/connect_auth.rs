@@ -198,6 +198,17 @@ async fn seed(pool: &PgPool, ns: &str) -> Seeded {
         .await
         .unwrap();
 
+    // An API key acts only for a current member of its organization (#3254).
+    for (uid, role) in [(&user_id, "owner"), (&admin_user_id, "member")] {
+        sqlx::query("INSERT INTO org_members (id, org_id, user_id, role) VALUES ($1, $2, $1, $3)")
+            .bind(uid)
+            .bind(&org_id)
+            .bind(role)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
     let session_token = format!("sess_cwi2_{ns}");
     let admin_session_token = format!("sess_cwi2_{ns}_admin");
     for (sid, uid, token) in [

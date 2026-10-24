@@ -327,6 +327,7 @@ suites = [
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::ssh_proxy::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'SSH proxy runtime lease matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_daemon::repair_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment daemon repair lease matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environments::access_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment membership access matrix', 'count': 1},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::organizations::membership_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'organization membership credential matrix', 'count': 1},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::billing_sessions::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'billing session bind matrix', 'count': 4},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::credential_relay::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'credential relay target matrix', 'count': 1},
 ]
@@ -445,7 +446,7 @@ assert all(command['target'] == environment['CARGO_TARGET_DIR'] and
 assert not any(suite['ci'] for suite in suites)
 executions = [command for command in commands if command['args'][0] == 'test'
               and '--no-run' not in command['args']]
-assert len(executions) == len(suites) == 43
+assert len(executions) == len(suites) == 44
 assert commands.index(actual_batches[-1]) < commands.index(executions[0]), 'a lane started before every harness compiled'
 # Against one explicit database the lanes run one after another, in lane order.
 for expected, actual in zip([suite for lane in lane_order for suite in lane_suites[lane]], executions):

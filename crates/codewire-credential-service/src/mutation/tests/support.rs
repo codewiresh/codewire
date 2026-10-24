@@ -798,6 +798,9 @@ async fn seed(pool: &PgPool) -> Result<()> {
         .bind(ALICE).bind(hash_session_token(SESSION)).execute(pool).await?;
     sqlx::query("INSERT INTO organizations(id,name,slug,created_by) VALUES ('mutation-org','Synthetic','mutation-org',$1)")
         .bind(ALICE).execute(pool).await?;
+    // An API key acts only for a current member of its organization (#3254).
+    sqlx::query("INSERT INTO org_members(id,org_id,user_id,role) VALUES ('mutation-member','mutation-org',$1,'owner')")
+        .bind(ALICE).execute(pool).await?;
     sqlx::query(
         "INSERT INTO api_keys(id,user_id,org_id,name,key_hash,key_prefix,scopes) \
         VALUES ('mutation-api-key',$1,'mutation-org','Synthetic',$2,$3,ARRAY['*'])",

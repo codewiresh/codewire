@@ -1425,6 +1425,8 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
                    u.two_factor_enabled, u.enabled, u.locked_until, u.created_at
               FROM api_keys ak
               JOIN users u ON u.id = ak.user_id
+              -- A key acts only for a current member of its organization (#3254).
+              JOIN org_members m ON m.org_id = ak.org_id AND m.user_id = ak.user_id
              WHERE ak.key_prefix = $1
                AND ak.key_hash = $2
                AND (ak.expires_at IS NULL OR ak.expires_at > NOW())

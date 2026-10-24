@@ -195,12 +195,17 @@ async fn setup_owner_sources_with_entries(
     entries: BTreeMap<CapabilitySlot, codewire_access::CredentialId>,
 ) -> Result<(OwnerLocalSelection, String)> {
     let project = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO org_members(id,org_id,user_id,role) VALUES ($1,$2,$3,'member')")
-        .bind(Uuid::new_v4().to_string())
-        .bind(ORGANIZATION)
-        .bind(ALICE)
-        .execute(&h.db.pool)
-        .await?;
+    // The shared seed already makes Alice the organization's owner (#3254);
+    // these cases run her as a plain member.
+    sqlx::query(
+        "INSERT INTO org_members(id,org_id,user_id,role) VALUES ($1,$2,$3,'member') \
+         ON CONFLICT (org_id,user_id) DO UPDATE SET role='member'",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(ORGANIZATION)
+    .bind(ALICE)
+    .execute(&h.db.pool)
+    .await?;
     sqlx::query("INSERT INTO secret_projects(id,org_id,name) VALUES($1,$2,'delegated')")
         .bind(&project)
         .bind(ORGANIZATION)

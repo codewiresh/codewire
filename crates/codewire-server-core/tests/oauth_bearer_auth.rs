@@ -339,6 +339,13 @@ async fn oauth_only_restricted_identity_login_preserves_shared_policy() -> Resul
         )
         .execute(&db.pool)
         .await?;
+        // An API key acts only for a current member of its organization (#3254).
+        sqlx::query(
+            "INSERT INTO org_members (id,org_id,user_id,role) \
+             VALUES ('cookie-owner-member','cookie-owner-org','cookie-owner','owner')",
+        )
+        .execute(&db.pool)
+        .await?;
         sqlx::query(
             "INSERT INTO api_keys (id,user_id,org_id,name,key_hash,key_prefix,scopes) \
              VALUES ('cookie-owner-api-key','cookie-owner','cookie-owner-org','Synthetic', \
