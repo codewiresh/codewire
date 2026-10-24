@@ -30,6 +30,15 @@ use crate::mutation::tests::support::{ALICE, CLIENT, Harness, oauth};
 use crate::platform_test_support::quote_ident;
 
 const ORGANIZATION: &str = "mutation-org";
+/// Replaces the product's five-second admission, publication-lock and profile
+/// statement bounds in tests whose subject is none of them. It only turns a
+/// hang into a failure; a stalled CI slot spent the 5 s bounds (#3317).
+const HANG: Duration = Duration::from_secs(60);
+
+#[test]
+fn production_owner_local_admission_bound_is_five_seconds() {
+    assert_eq!(OWNER_LOCAL_ADMISSION_TIMEOUT, Duration::from_secs(5));
+}
 
 /// Test-only provider whose envelope bytes are intentionally incompatible with
 /// the credential-store fixture provider. The tag models distinct Transit
@@ -212,7 +221,8 @@ async fn setup_owner_sources_with_entries(
         .execute(&h.db.pool)
         .await?;
 
-    let profiles = PlatformAccessProfileStore::new(h.db.pool.clone(), builtin_provider_catalog());
+    let profiles = PlatformAccessProfileStore::new(h.db.pool.clone(), builtin_provider_catalog())
+        .with_statement_timeout(HANG);
     let profile = profiles
         .create(
             &Owner::User(OwnerId::parse(ALICE)?),
@@ -273,14 +283,17 @@ async fn admitted_with_provider(
     let oauth = authentication
         .oauth_bearer_authority()
         .context("real synthetic OAuth bearer authority")?
-        .clone();
-    Ok(OwnerLocalRuntimeAuthority::new(
+        .clone()
+        .with_publication_lock_timeout(HANG);
+    Ok(OwnerLocalRuntimeAuthority::with_admission_timeout(
         h.pool.clone(),
         provider,
-        PlatformAccessProfileStore::new(h.pool.clone(), builtin_provider_catalog()),
+        PlatformAccessProfileStore::new(h.pool.clone(), builtin_provider_catalog())
+            .with_statement_timeout(HANG),
         oauth,
         selection,
         unix_seconds()?.checked_add(600).context("fixture expiry")?,
+        HANG,
     )
     .await?)
 }

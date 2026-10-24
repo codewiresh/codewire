@@ -83,6 +83,7 @@ struct OwnerLocalSource {
     selection: OwnerLocalSelection,
     expires_at_unix: u64,
     deadline: Instant,
+    admission_timeout: Duration,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -126,6 +127,32 @@ impl OwnerLocalRuntimeAuthority {
         selection: OwnerLocalSelection,
         connected_expires_at_unix: u64,
     ) -> Result<Arc<Self>, Error> {
+        Self::with_admission_timeout(
+            pool,
+            provider,
+            profiles,
+            oauth,
+            selection,
+            connected_expires_at_unix,
+            OWNER_LOCAL_ADMISSION_TIMEOUT,
+        )
+        .await
+    }
+
+    /// [`Self::new`] with `admission_timeout` in place of each admission's
+    /// bound, [`OWNER_LOCAL_ADMISSION_TIMEOUT`] by default. A test whose
+    /// subject is not that bound lengthens it into a hang guard, so a stalled
+    /// CI slot cannot spend it (#3317). The original OAuth deadline still ends
+    /// every admission.
+    pub async fn with_admission_timeout(
+        pool: PgPool,
+        provider: Arc<dyn KekProvider>,
+        profiles: PlatformAccessProfileStore,
+        oauth: OAuthBearerAuthority,
+        selection: OwnerLocalSelection,
+        connected_expires_at_unix: u64,
+        admission_timeout: Duration,
+    ) -> Result<Arc<Self>, Error> {
         if selection.platform.creator != oauth.user_id() {
             return Err(Error::Denied);
         }
@@ -159,6 +186,7 @@ impl OwnerLocalRuntimeAuthority {
             selection,
             expires_at_unix,
             deadline,
+            admission_timeout,
         };
         let initial = source.admit().await?;
         Ok(Arc::new(Self { source, initial }))
@@ -169,7 +197,7 @@ impl OwnerLocalSource {
     async fn admit(&self) -> Result<Admission, Error> {
         self.ensure_live()?;
         let timeout = Instant::now()
-            .checked_add(OWNER_LOCAL_ADMISSION_TIMEOUT)
+            .checked_add(self.admission_timeout)
             .ok_or(Error::Denied)?;
         let deadline = self.deadline.min(timeout);
         let result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {

@@ -32,6 +32,14 @@ impl AccessProfiles {
         }
     }
 
+    /// The same profiles with `bound` as the store's statement and idle
+    /// ceiling; see [`PlatformAccessProfileStore::with_statement_timeout`].
+    pub fn with_statement_timeout(self, bound: std::time::Duration) -> Self {
+        Self {
+            profiles: self.profiles.with_statement_timeout(bound),
+        }
+    }
+
     pub async fn list(
         &self,
         user: &AuthUser,

@@ -12,7 +12,11 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::{sync::oneshot, task::JoinHandle};
 
-pub const TIMEOUT: Duration = Duration::from_secs(10);
+/// Bounds a wait that ends on its event, and replaces the service's
+/// five-second response bound and statement ceiling on `Harness::rpc`. It
+/// only turns a hang into a failure; a stalled CI slot spent the 5 s bounds
+/// (#3310).
+pub const HANG: Duration = Duration::from_secs(60);
 pub const ALICE: &str = "synthetic-alice";
 pub const BOB: &str = "synthetic-bob";
 pub const ORG: &str = "synthetic-org";
@@ -30,7 +34,10 @@ pub struct Harness {
     name: String,
     stop: Option<oneshot::Sender<()>>,
     server: Option<JoinHandle<std::io::Result<()>>>,
+    /// The service with [`HANG`] in place of its five-second bounds.
     pub rpc: Rpc,
+    /// The production-mounted service, for tests whose subject is its bounds.
+    pub production_rpc: Rpc,
 }
 
 #[derive(Clone)]
@@ -268,23 +275,33 @@ impl Harness {
             url.set_username(&role).map_err(|_| anyhow::anyhow!("set synthetic login"))?;
             url.set_password(Some(PASSWORD)).map_err(|_| anyhow::anyhow!("set synthetic password"))?;
             let service_pool = PgPoolOptions::new().max_connections(4).connect(url.as_str()).await?;
-            let app = connect_unary_router_with_auth(
+            let auth = || ConnectAuthLayer::authenticated(AuthState { pool: service_pool.clone() });
+            let production = connect_unary_router_with_auth(
                 codewire_orchestration::connect::access_profiles::router(service_pool.clone()),
-                ConnectAuthLayer::authenticated(AuthState { pool: service_pool.clone() }),
+                auth(),
             );
+            let app = connect_unary_router_with_auth(
+                codewire_orchestration::connect::access_profiles::router_with_bounds(
+                    service_pool.clone(),
+                    Some(HANG),
+                ),
+                auth(),
+            )
+            .nest("/production", production);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let address = listener.local_addr()?;
-            let client = reqwest::Client::builder().no_proxy().timeout(TIMEOUT).build()?;
+            let client = reqwest::Client::builder().no_proxy().timeout(HANG).build()?;
             let (stop, stopped) = oneshot::channel();
             let server = tokio::spawn(async move {
                 axum::serve(listener, app)
                     .with_graceful_shutdown(async { let _ = stopped.await; }).await
             });
+            let production_rpc = Rpc { client: client.clone(), url: format!("http://{address}/production") };
             Ok::<_, anyhow::Error>((db, service_pool, stop, server,
-                Rpc { client, url: format!("http://{address}") }))
+                Rpc { client, url: format!("http://{address}") }, production_rpc))
         }.await;
         match prepared {
-            Ok((db, service_pool, stop, server, rpc)) => Ok(Self {
+            Ok((db, service_pool, stop, server, rpc, production_rpc)) => Ok(Self {
                 db,
                 service_pool,
                 admin,
@@ -293,6 +310,7 @@ impl Harness {
                 stop: Some(stop),
                 server: Some(server),
                 rpc,
+                production_rpc,
             }),
             Err(error) => {
                 cleanup(&admin, &name, &role).await?;
@@ -307,7 +325,7 @@ impl Harness {
             let _ = stop.send(());
         }
         let stopped = if let Some(mut server) = self.server.take() {
-            match tokio::time::timeout(TIMEOUT, &mut server).await {
+            match tokio::time::timeout(HANG, &mut server).await {
                 Ok(joined) => joined
                     .context("join generated profile listener")
                     .and_then(|result| result.context("serve generated profile listener")),
@@ -456,7 +474,7 @@ pub async fn blocked_service(
     holder: i32,
     count: usize,
 ) -> Result<Vec<i32>> {
-    tokio::time::timeout(TIMEOUT, async {
+    tokio::time::timeout(HANG, async {
         loop {
             // A second row-lock waiter can queue behind the first waiter,
             // rather than directly behind the transaction holding the row.
@@ -483,7 +501,7 @@ pub async fn blocked_service(
 }
 
 pub async fn blocked_pid(db: &PgPool, waiter: i32, holder: i32) -> Result<()> {
-    tokio::time::timeout(TIMEOUT, async {
+    tokio::time::timeout(HANG, async {
         loop {
             let blocked: bool =
                 sqlx::query_scalar("SELECT $2=ANY(pg_catalog.pg_blocking_pids($1))")
@@ -525,7 +543,7 @@ pub fn spawn<T: Send + 'static>(
 /// Abort and drain a failed waiter as well as bounding successful joins.
 pub async fn joined<T>(mut owner: TestTask<T>) -> Result<T> {
     let mut task = owner.task.take().context("missing profile fixture task")?;
-    match tokio::time::timeout(TIMEOUT, &mut task).await {
+    match tokio::time::timeout(HANG, &mut task).await {
         Ok(result) => result.context("join profile fixture operation")?,
         Err(_) => {
             task.abort();

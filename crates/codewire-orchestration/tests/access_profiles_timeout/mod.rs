@@ -40,7 +40,7 @@ async fn set_session_timeouts(
 }
 
 async fn released_backend(h: &Harness, request_pool: &PgPool, pid: i32) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(HANG, async {
         loop {
             // Observe the exact request backend, not an unrelated spare pool
             // connection. An idle backend or a terminated backend is safe;
@@ -162,7 +162,8 @@ async fn public_profile_timeouts_release_waiting_backends_and_preserve_session_s
                 sqlx::query("SELECT id FROM platform_credentials WHERE id=$1 FOR UPDATE")
                     .bind(CREDENTIAL).fetch_one(&mut *blocker).await?;
             }
-            let rpc = h.rpc.clone();
+            // The blocked create's five-second bounds are the subject here.
+            let rpc = h.production_rpc.clone();
             let pool = source_pool.clone();
             let selected = selection.clone();
             let pending = spawn(async move {

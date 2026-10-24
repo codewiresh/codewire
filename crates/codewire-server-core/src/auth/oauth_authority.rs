@@ -18,6 +18,7 @@ pub struct OAuthBearerAuthority {
     client_id: String,
     expires_at: DateTime<Utc>,
     monotonic_expires_at: Instant,
+    publication_lock_timeout: Duration,
 }
 
 impl std::fmt::Debug for OAuthBearerAuthority {
@@ -51,9 +52,19 @@ impl OAuthBearerAuthority {
             client_id,
             expires_at,
             monotonic_expires_at: captured_monotonic.checked_add(lifetime)?,
+            publication_lock_timeout: PUBLICATION_LOCK_TIMEOUT,
         };
         authority.remaining_at(Instant::now(), Utc::now()).ok()?;
         Some(authority)
+    }
+
+    /// The same authority with `bound` in place of the publication-lock bound,
+    /// [`PUBLICATION_LOCK_TIMEOUT`] by default. A test whose subject is not
+    /// that bound lengthens it into a hang guard, so a stalled CI slot cannot
+    /// spend it (#3317). It never extends the original token's lifetime.
+    pub fn with_publication_lock_timeout(mut self, bound: Duration) -> Self {
+        self.publication_lock_timeout = bound;
+        self
     }
 
     /// Immutable original token deadline. A stream must additionally retain its
@@ -124,9 +135,11 @@ impl OAuthBearerAuthority {
     ) -> Result<(), OAuthBearerAuthorityError> {
         let started = Instant::now();
         let remaining = self.remaining_at(started, Utc::now())?;
-        let deadline = started + remaining.min(PUBLICATION_LOCK_TIMEOUT);
+        let bound = self.publication_lock_timeout;
+        let deadline = started + remaining.min(bound);
         let outcome = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-            let budget_ms = timeout_milliseconds(deadline.saturating_duration_since(Instant::now()))?;
+            let budget_ms =
+                timeout_milliseconds(deadline.saturating_duration_since(Instant::now()), bound)?;
             // A separate command installs the timeout before the locking
             // statement begins. pg_settings expresses these two GUCs in ms;
             // zero means unlimited, never a smaller budget. SET LOCAL semantics
@@ -166,18 +179,19 @@ impl OAuthBearerAuthority {
         self.remaining_at(Instant::now(), Utc::now())?;
         match outcome {
             Ok(result) => result,
-            Err(_) if remaining <= PUBLICATION_LOCK_TIMEOUT => {
-                Err(OAuthBearerAuthorityError::Denied)
-            }
+            Err(_) if remaining <= bound => Err(OAuthBearerAuthorityError::Denied),
             Err(_) => Err(OAuthBearerAuthorityError::Unavailable),
         }
     }
 }
 
-fn timeout_milliseconds(remaining: Duration) -> Result<i64, OAuthBearerAuthorityError> {
+fn timeout_milliseconds(
+    remaining: Duration,
+    bound: Duration,
+) -> Result<i64, OAuthBearerAuthorityError> {
     // Floor conservatively. PostgreSQL treats zero as "disabled", so a
     // sub-millisecond remaining budget must reject, not install zero or round up.
-    let millis = remaining.min(PUBLICATION_LOCK_TIMEOUT).as_millis();
+    let millis = remaining.min(bound).as_millis();
     if millis == 0 {
         Err(OAuthBearerAuthorityError::Denied)
     } else {
@@ -252,16 +266,44 @@ mod tests {
 
     #[test]
     fn timeout_floor_never_disables_or_extends_a_submillisecond_budget() {
+        let bound = PUBLICATION_LOCK_TIMEOUT;
         assert_eq!(
-            timeout_milliseconds(Duration::ZERO),
+            timeout_milliseconds(Duration::ZERO, bound),
             Err(OAuthBearerAuthorityError::Denied)
         );
         assert_eq!(
-            timeout_milliseconds(Duration::from_nanos(999_999)),
+            timeout_milliseconds(Duration::from_nanos(999_999), bound),
             Err(OAuthBearerAuthorityError::Denied)
         );
-        assert_eq!(timeout_milliseconds(Duration::from_micros(1_999)), Ok(1));
-        assert_eq!(timeout_milliseconds(Duration::from_secs(10)), Ok(5_000));
+        assert_eq!(
+            timeout_milliseconds(Duration::from_micros(1_999), bound),
+            Ok(1)
+        );
+        assert_eq!(
+            timeout_milliseconds(Duration::from_secs(10), bound),
+            Ok(5_000)
+        );
+    }
+
+    #[test]
+    fn production_publication_lock_bound_is_five_seconds_unless_replaced() {
+        let wall = Utc::now();
+        let authority = OAuthBearerAuthority::new(
+            "synthetic-digest".into(),
+            "synthetic-user".into(),
+            "synthetic-client".into(),
+            wall + chrono::Duration::minutes(1),
+            Instant::now(),
+            wall,
+        )
+        .unwrap();
+        assert_eq!(PUBLICATION_LOCK_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(authority.publication_lock_timeout, PUBLICATION_LOCK_TIMEOUT);
+        let replaced = authority
+            .clone()
+            .with_publication_lock_timeout(Duration::from_secs(60));
+        assert_eq!(replaced.publication_lock_timeout, Duration::from_secs(60));
+        assert_eq!(replaced.expires_at(), authority.expires_at());
     }
 
     #[test]

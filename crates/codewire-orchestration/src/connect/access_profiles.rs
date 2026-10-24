@@ -21,16 +21,34 @@ use sqlx::PgPool;
 
 use crate::access_profiles::{AccessProfiles, ProfileSelector, profile_entries};
 
+/// Bounds each response's admission, including pool acquisition and waits.
+const PROFILE_REQUEST_BOUND: Duration = Duration::from_secs(5);
+
 /// Mount with the ordinary authenticated Connect layer. The service additionally
 /// rejects organization API keys for every account-scoped method.
 pub fn router(pool: PgPool) -> connectrpc::Router {
+    router_with_bounds(pool, None)
+}
+
+/// [`router`] with `bound` in place of both the response bound and the
+/// profile store's statement ceiling, five seconds each by default. A test
+/// whose subject is neither lengthens them into a hang guard, so a stalled CI
+/// slot cannot spend them (#3310). Production mounts [`router`].
+pub fn router_with_bounds(pool: PgPool, bound: Option<Duration>) -> connectrpc::Router {
+    let profiles = AccessProfiles::new(pool);
+    let (profiles, request_bound) = match bound {
+        Some(bound) => (profiles.with_statement_timeout(bound), bound),
+        None => (profiles, PROFILE_REQUEST_BOUND),
+    };
     connectrpc::Router::new().add_service(Arc::new(ProfileConnectService {
-        profiles: AccessProfiles::new(pool),
+        profiles,
+        request_bound,
     }))
 }
 
 struct ProfileConnectService {
     profiles: AccessProfiles,
+    request_bound: Duration,
 }
 
 #[allow(refining_impl_trait)]
@@ -44,6 +62,7 @@ impl AccessProfileService for ProfileConnectService {
         let request = request.view();
         let (profiles, next_page_token) = bounded(
             &ctx,
+            self.request_bound,
             self.profiles
                 .list(&user, request.page_size, request.page_token),
         )
@@ -74,7 +93,12 @@ impl AccessProfileService for ProfileConnectService {
                 ));
             }
         };
-        let profile = bounded(&ctx, self.profiles.get(&user, selector, request.revision)).await?;
+        let profile = bounded(
+            &ctx,
+            self.request_bound,
+            self.profiles.get(&user, selector, request.revision),
+        )
+        .await?;
         connectrpc::Response::ok(GetAccessProfileResponse {
             access_profile: Some(proto_profile(profile)).into(),
             ..Default::default()
@@ -95,7 +119,12 @@ impl AccessProfileService for ProfileConnectService {
                 .map(|entry| (entry.capability_slot.as_str(), entry.credential_id.as_str())),
         )
         .map_err(|error| rpc_app_error(&error, &ctx))?;
-        let profile = bounded(&ctx, self.profiles.create(&user, &request.name, entries)).await?;
+        let profile = bounded(
+            &ctx,
+            self.request_bound,
+            self.profiles.create(&user, &request.name, entries),
+        )
+        .await?;
         connectrpc::Response::ok(CreateAccessProfileResponse {
             access_profile: Some(proto_profile(profile)).into(),
             ..Default::default()
@@ -118,6 +147,7 @@ impl AccessProfileService for ProfileConnectService {
         .map_err(|error| rpc_app_error(&error, &ctx))?;
         let profile = bounded(
             &ctx,
+            self.request_bound,
             self.profiles.update(
                 &user,
                 &request.access_profile_id,
@@ -141,6 +171,7 @@ impl AccessProfileService for ProfileConnectService {
         let request = request.view();
         let profile = bounded(
             &ctx,
+            self.request_bound,
             self.profiles.rename(
                 &user,
                 request.access_profile_id,
@@ -165,6 +196,7 @@ impl AccessProfileService for ProfileConnectService {
         let request = request.view();
         bounded(
             &ctx,
+            self.request_bound,
             self.profiles
                 .delete(&user, request.access_profile_id, request.expected_revision),
         )
@@ -181,6 +213,7 @@ impl AccessProfileService for ProfileConnectService {
         let request = request.view();
         let metadata = bounded(
             &ctx,
+            self.request_bound,
             self.profiles.get_binding(&user, request.environment_id),
         )
         .await?;
@@ -205,6 +238,7 @@ fn account_user(ctx: &RequestContext) -> Result<AuthUser, connectrpc::ConnectErr
 
 async fn bounded<T>(
     ctx: &RequestContext,
+    bound: Duration,
     operation: impl Future<Output = AppResult<T>>,
 ) -> Result<T, connectrpc::ConnectError> {
     // Bound overall response admission, including pool acquisition and waits.
@@ -213,7 +247,7 @@ async fn bounded<T>(
     // and idle ownership. Network loss can still obscure cleanup/COMMIT ACKs.
     // An already-accepted COMMIT may succeed without its reply; callers must
     // inspect the current revision/binding, never blindly retry its CAS.
-    tokio::time::timeout(Duration::from_secs(5), operation)
+    tokio::time::timeout(bound, operation)
         .await
         .map_err(|_| {
             rpc_app_error(
@@ -250,5 +284,15 @@ fn proto_binding(
         access_profile_id: binding.profile_id.as_str().to_owned(),
         access_profile_revision: binding.profile_revision,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+
+    #[test]
+    fn production_response_bound_is_five_seconds() {
+        assert_eq!(PROFILE_REQUEST_BOUND, Duration::from_secs(5));
     }
 }

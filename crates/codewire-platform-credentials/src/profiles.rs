@@ -9,7 +9,7 @@
 //! A rename relabels the profile row and publishes no revision.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codewire_access::{
     AccessError, AccessProfile, AccessProfileId, AccessProfileName, AvailableGrants,
@@ -55,7 +55,7 @@ pub enum PlatformProfileError {
 
 type Error = PlatformProfileError;
 
-const PROFILE_STATEMENT_TIMEOUT_MILLIS: i64 = 5_000;
+const PROFILE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Material-free selection and personal-owner confirmation read from one row.
 ///
@@ -72,11 +72,25 @@ pub struct PlatformBindingMetadata {
 pub struct PlatformAccessProfileStore {
     pool: PgPool,
     catalog: ProviderCatalog,
+    statement_timeout: Duration,
 }
 
 impl PlatformAccessProfileStore {
     pub fn new(pool: PgPool, catalog: ProviderCatalog) -> Self {
-        Self { pool, catalog }
+        Self {
+            pool,
+            catalog,
+            statement_timeout: PROFILE_STATEMENT_TIMEOUT,
+        }
+    }
+
+    /// The same store with `bound` in place of the transaction statement and
+    /// idle ceiling, five seconds by default. A test whose subject is not that
+    /// ceiling lengthens it into a hang guard, so a stalled CI slot cannot
+    /// spend it (#3317). An existing shorter session setting still wins.
+    pub fn with_statement_timeout(mut self, bound: Duration) -> Self {
+        self.statement_timeout = bound;
+        self
     }
 
     /// Begin a short profile transaction, including caller-composed binding
@@ -103,7 +117,8 @@ impl PlatformAccessProfileStore {
              FROM pg_catalog.pg_settings \
              WHERE name IN ('statement_timeout','idle_in_transaction_session_timeout') AND unit='ms'",
         )
-        .bind(PROFILE_STATEMENT_TIMEOUT_MILLIS)
+        // Zero would disable the PostgreSQL timeout, so a bound floors at 1 ms.
+        .bind(i64::try_from(self.statement_timeout.as_millis()).unwrap_or(i64::MAX).max(1))
         .fetch_all(&mut *tx)
         .await
         .map_err(database_error)?;
@@ -1705,5 +1720,23 @@ fn access_error(error: AccessError) -> Error {
         AccessError::CredentialMissing { .. } => Error::NotFound,
         AccessError::BindingMismatch => Error::StaleBinding,
         _ => Error::UnsupportedEntry,
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn production_statement_ceiling_is_five_seconds_unless_replaced() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://synthetic@localhost/synthetic")
+            .unwrap();
+        let store =
+            PlatformAccessProfileStore::new(pool, codewire_access::builtin_provider_catalog());
+        assert_eq!(PROFILE_STATEMENT_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(store.statement_timeout, PROFILE_STATEMENT_TIMEOUT);
+        let replaced = store.with_statement_timeout(Duration::from_secs(60));
+        assert_eq!(replaced.statement_timeout, Duration::from_secs(60));
     }
 }
