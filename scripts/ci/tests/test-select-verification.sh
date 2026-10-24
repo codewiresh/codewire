@@ -1593,11 +1593,33 @@ run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false 
   scripts/ci/release/build-local-runtime.sh scripts/ci/release/build-runtime-guest-root.sh \
   scripts/ci/release/runtime-container.sh scripts/ci/release/dry-run-superseded.sh \
   scripts/ci/tests/test-dry-run-superseded.sh scripts/ci/release/build-runtime-cw.sh
-# The published workspace pin selects every consumer that compiles it; its
-# tool and post-publish proposal select the release proofs that run them.
+# The published workspace pin alone is the workspace-pin change class
+# (owner, 2026-10-24): Policy's pin check proves the file is the generator's
+# exact output, so no consumer compiles it again and its artifact facts build
+# nothing; the CI-script tests that read it still run. With any other path it
+# selects every consumer that compiles it, as before. Its tool and
+# post-publish proposal select the release proofs that run them.
 run_paths_case workspace_image_pin pull_request refs/pull/2255/head false \
-  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_server_core rust_pkg_codewire_workspace_image' \
+  'policy change_class_workspace_pin' \
   crates/codewire-workspace-image/src/pin.rs
+run_paths_case workspace_image_pin_push push refs/heads/main false \
+  'policy change_class_workspace_pin' \
+  crates/codewire-workspace-image/src/pin.rs
+run_paths_case workspace_image_pin_with_source pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_server_core rust_pkg_codewire_workspace_image' \
+  crates/codewire-workspace-image/src/pin.rs crates/codewire-workspace-image/src/lib.rs
+# The workspace image's agent manifest and lockfile alone are the
+# workspace-agents-lock class: the workspace agents check installs the
+# lockfile and starts each agent. Any other path makes the change general.
+run_paths_case workspace_agents_lock pull_request refs/pull/3274/head false \
+  'policy workspace_agents' \
+  images/workspace/agents/package.json images/workspace/agents/package-lock.json
+run_paths_case workspace_agents_lockfile_only pull_request refs/pull/3274/head false \
+  'policy workspace_agents' \
+  images/workspace/agents/package-lock.json
+run_paths_case workspace_agents_with_license pull_request refs/pull/3274/head false \
+  'confidential_script_tests go_consumer_interop go_support policy release' \
+  images/workspace/agents/package.json images/workspace/agents/LICENSE
 run_paths_case workspace_image_pin_tool pull_request refs/pull/2255/head false \
   'deploy go_consumer_interop go_support policy release confidential_script_tests security security_js' \
   scripts/ci/images/workspace-image-pin.py
@@ -4929,6 +4951,7 @@ WORK = {
     "tooling": {
         "Run Shell policy", "Run confidential script tests",
         "Run Dev smoke script tests", "Run delivery script tests", "Run Deploy", "Run Security",
+        "Run the workspace agents check",
         "Run Edge static verification and selected Kind tool tests",
     },
     "rust-compile": {"Compile every Rust target", "Compile the macOS cw for both Mac targets"},
@@ -5176,7 +5199,8 @@ realistic = [line.strip() for line in open(realistic_path) if line.strip()]
 universe = sorted({token for selection in realistic for token in selection.strip("|").split("|")}
                   - {"valid:v3", "complete"} | {"ios", "rust_pkg_codewire_desktop",
                                                 "transport_derp_contract", "contracts_proto", "go_tailnet",
-                                                "security_go", "go_consumer_interop"})
+                                                "security_go", "go_consumer_interop",
+                                                "workspace_agents", "change_class_workspace_pin"})
 synthetic = set()
 for token in universe:
     for extra in ((), ("policy", "policy_shell_omittable"), ("kind",), ("edge_kind",)):
@@ -5192,7 +5216,10 @@ for selection in sorted(set(realistic) | synthetic):
         expected = dispatch(selection, cw, desktop)
         # A scheduled selection deliberately ignores artifact facts; its steps
         # see what dispatch saw.
-        facts = ("false", "false") if scheduled_only else (cw, desktop)
+        # The workspace-pin change class clears the cw and desktop facts in
+        # the selection step (owner, 2026-10-24).
+        pin_class = "|change_class_workspace_pin|" in selection
+        facts = ("false", "false") if scheduled_only or pin_class else (cw, desktop)
         context = {
             **EVENTS[event],
             "needs.verification-selection.result": "success",

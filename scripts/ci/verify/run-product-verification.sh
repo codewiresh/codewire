@@ -1178,9 +1178,10 @@ case "$FAMILY" in
   kind-tools) run_kind_tools ;;
   release) run_release ;;
   deploy) run_deploy ;;
+  workspace-agents) scripts/ci/verify/workspace-agents.sh ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-repo-rules|policy-ci-script-tests|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|confidential-script-tests|dev-smoke-script-tests|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|kind-tools|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-repo-rules|policy-ci-script-tests|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|confidential-script-tests|dev-smoke-script-tests|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|kind-tools|release|deploy|workspace-agents|security" >&2
     exit 2
     ;;
 esac

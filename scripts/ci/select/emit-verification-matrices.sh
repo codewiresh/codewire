@@ -62,6 +62,12 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   if selected scheduled; then
     artifact_groups=false
   fi
+  # The workspace pin class changes only the pin's constants, which Policy's
+  # pin check proves are the generator's exact output: no artifact build can
+  # break on it, so its artifact facts dispatch nothing (owner, 2026-10-24).
+  if selected change_class_workspace_pin; then
+    artifact_groups=false
+  fi
   # Each group is expected exactly when one of its job's verification steps
   # will run, so a dispatched heavy job always has work
   # (test-select-verification.sh proves it against the workflow's step
@@ -77,7 +83,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
     && expected[standard]=true
   selected_any \
     deploy release confidential_script_tests dev_smoke_script_tests security \
-    policy_shell edge_kind \
+    policy_shell edge_kind workspace_agents \
     && expected[tooling]=true
   if selected policy && ! selected policy_shell_omittable; then
     expected[tooling]=true
@@ -119,6 +125,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
       contracts|contracts_proto|go_support|go_tailnet|go_consumer_interop|\
       sdk_go|sdk_ts|sdk_python|web|docs|ios|\
       deploy|release|confidential_script_tests|dev_smoke_script_tests|\
+      workspace_agents|change_class_workspace_pin|\
       security|security_go|security_js|security_dev_smoke_auth|security_idp_kek|\
       rust|rust_workspace|rust_curated_locks|rust_pkg_*|\
       transport|transport_derp_contract|transport_pkg_*|\

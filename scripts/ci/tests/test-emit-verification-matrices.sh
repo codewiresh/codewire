@@ -129,6 +129,29 @@ for group in policy rust_compile rust_transport; do
   assert_output "$full_artifact_output" "$group" true
 done
 
+# The workspace-pin class (owner, 2026-10-24) dispatches Policy alone even
+# though the pin is a cw, desktop and workspace-image input: Policy's pin check
+# proves the file is the generator's exact output.
+pin_output="$(emit '|valid:v3|change_class_workspace_pin|ci_script_tests|ci_script_tests_omittable|policy|policy_shell_omittable|complete|' fallback true true)"
+assert_output "$pin_output" policy true
+for group in standard tooling rust_compile rust_shards rust_transport database \
+    services_control services_runtime edge_kind; do
+  assert_output "$pin_output" "$group" false
+done
+# Without the class the same artifact facts still dispatch their groups.
+unclassed_pin_output="$(emit '|valid:v3|ci_script_tests|ci_script_tests_omittable|policy|policy_shell_omittable|complete|' fallback true true)"
+assert_output "$unclassed_pin_output" rust_compile true
+assert_output "$unclassed_pin_output" rust_transport true
+
+# The workspace agents check runs in Tooling.
+agents_output="$(emit '|valid:v3|ci_script_tests|ci_script_tests_omittable|policy|policy_shell_omittable|workspace_agents|complete|' fallback false false)"
+assert_output "$agents_output" policy true
+assert_output "$agents_output" tooling true
+for group in standard rust_compile rust_shards rust_transport database \
+    services_control services_runtime edge_kind; do
+  assert_output "$agents_output" "$group" false
+done
+
 web_output="$(emit '|valid:v3|web|complete|' fallback false false)"
 assert_output "$web_output" standard true
 

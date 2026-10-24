@@ -188,7 +188,8 @@ jobs:
           workflow_output="$GITHUB_OUTPUT"
           capability_output="$(mktemp)"
           plan_output="$(mktemp)"
-          trap 'rm -f "$capability_output" "$plan_output"' EXIT
+          facts_output="$(mktemp)"
+          trap 'rm -f "$capability_output" "$plan_output" "$facts_output"' EXIT
           capability_selector='scripts/ci/select/select-verification.sh'
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             capability_selector='.trusted-ci-policy/scripts/ci/select/select-verification.sh'
@@ -220,7 +221,8 @@ jobs:
             GITHUB_OUTPUT="$capability_output" "$capability_selector"
           grep -Fxq 'selector_version=v3' "$capability_output"
           cat "$capability_output" >> "$workflow_output"
-          export GITHUB_OUTPUT="$workflow_output"
+          # The artifact facts go to their own file first; see the end.
+          export GITHUB_OUTPUT="$facts_output"
 
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             trusted_planner='.trusted-ci-policy/scripts/ci/plan/planner.py'
@@ -256,6 +258,16 @@ jobs:
                 --head "$GITHUB_SHA" \
                 --head-tree "$(git rev-parse "$GITHUB_SHA^{tree}")"
             fi
+          fi
+          # The trusted selector's workspace-pin change class (owner,
+          # 2026-10-24) changes only the pin's constants, which Policy's pin
+          # check proves are the generator's exact output: no cw or desktop
+          # build can break on it, so those artifact facts are cleared.
+          if grep -q '^selection=.*|change_class_workspace_pin|' "$capability_output"; then
+            echo 'artifact facts: workspace-pin change class; the cw and desktop packages build nothing'
+            sed -E 's/^(cw_package_selected|desktop_package_selected)=.*/\1=false/' "$facts_output" >> "$workflow_output"
+          else
+            cat "$facts_output" >> "$workflow_output"
           fi
 
       - name: Verify exact tested-tree receipt
@@ -584,6 +596,12 @@ jobs:
       - name: Run Deploy
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|deploy|') }}
         run: scripts/ci/verify/run-product-verification.sh deploy
+
+      # A lockfile-only change to the workspace image's agents installs that
+      # lockfile and starts each agent (owner, 2026-10-24).
+      - name: Run the workspace agents check
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|workspace_agents|') }}
+        run: scripts/ci/verify/run-product-verification.sh workspace-agents
 
       - name: Run Security
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|security|') }}

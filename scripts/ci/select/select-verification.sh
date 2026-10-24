@@ -271,6 +271,40 @@ kind_tool_test_input() {
   return 1
 }
 
+# Change sets narrow enough to need less than their paths' families (owner,
+# 2026-10-24: "Teach the selector"). Each class names exactly the paths it
+# admits; one path outside it makes the change general. Prints the class.
+#
+# - workspace-pin: only the generated workspace image pin. Policy's repo
+#   rules parse it in the generator's exact form (workspace-image-pin), so a
+#   change that passes them compiles; its consumers read constants only. The
+#   CI-script tests that read the pin still run.
+# - workspace-agents-lock: only the workspace image's agent manifest and
+#   lockfile. The workspace agents check installs that lockfile and starts
+#   each agent, and runs the support-images contract; Policy's licence map
+#   and the CI-script tests read the same files and still run.
+change_class() {
+  local list="$1" path class='' count=0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    count=$((count + 1))
+    case "$path" in
+      crates/codewire-workspace-image/src/pin.rs) path_class=workspace-pin ;;
+      images/workspace/agents/package.json|images/workspace/agents/package-lock.json)
+        path_class=workspace-agents-lock ;;
+      *) printf 'general\n'; return ;;
+    esac
+    if [ -z "$class" ]; then
+      class="$path_class"
+    elif [ "$class" != "$path_class" ]; then
+      printf 'general\n'
+      return
+    fi
+  done < "$list"
+  [ "$count" -gt 0 ] && [ -n "$class" ] || { printf 'general\n'; return; }
+  printf '%s\n' "$class"
+}
+
 select_services() {
   select_token service_integration
   select_token service_idp
@@ -565,9 +599,28 @@ if [ "$event_selected" = false ]; then
   # Policy is the lightweight invariant for every path-selected PR/main run.
   select_token policy
 
+  path_class=''
+  change_set_class="$(change_class "$tmp")"
+  case "$change_set_class" in
+    workspace-pin)
+      # Policy alone: its repo rules are the pin check. The marker tells the
+      # dispatcher that the pin's artifact facts build nothing.
+      echo "selector: change class workspace-pin; Policy's pin check covers it" >&2
+      select_token change_class_workspace_pin
+      select_token ci_script_tests
+      ;;
+    workspace-agents-lock)
+      echo "selector: change class workspace-agents-lock; the workspace agents check covers it" >&2
+      select_token workspace_agents
+      select_token ci_script_tests
+      ;;
+  esac
+
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     saw_path=true
+    # A narrow change class has selected everything its paths need.
+    [ "$change_set_class" = general ] || continue
     recognized=false
 
     # Shell analysis is its own policy domain. The trusted selector owns this
