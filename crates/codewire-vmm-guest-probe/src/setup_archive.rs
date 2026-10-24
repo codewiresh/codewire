@@ -496,12 +496,17 @@ fn admit_layer_path(
     Ok(())
 }
 
+/// The S_IFMT values a tar header mode may carry for its typeflag (#3326).
+const MODE_TYPE_DIRECTORY: u32 = 0o040_000;
+const MODE_TYPE_REGULAR: u32 = 0o100_000;
+const MODE_TYPE_SYMLINK: u32 = 0o120_000;
+
 fn admit_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<AdmittedEntry, ArchiveError> {
     let entry_type = entry.header().entry_type();
     let raw_path = entry.path_bytes().into_owned();
     let link_name = entry.link_name_bytes().map(|name| name.into_owned());
     let size = entry.size();
-    let mode = entry
+    let raw_mode = entry
         .header()
         .mode()
         .map_err(|_| ArchiveError::InvalidTar)?;
@@ -513,8 +518,17 @@ fn admit_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<AdmittedEntry, 
         .map_err(|_| ArchiveError::InvalidTar)?;
     let security_capability = validate_pax(entry, size, uid, gid)?;
 
-    if mode & !0o7777 != 0
-        || uid >= u32::MAX as u64
+    // Go's archive/tar and tools built on it wrote the file type's S_IFMT
+    // bits into the header mode; Docker and containerd take the type from
+    // the typeflag and the permissions from the low 12 bits (#3326). Admit
+    // those bits only as the one value that matches the typeflag, checked
+    // below, and keep only the permissions.
+    let type_bits = raw_mode & !0o7777;
+    let mode = raw_mode & 0o7777;
+    if !matches!(
+        type_bits,
+        0 | MODE_TYPE_DIRECTORY | MODE_TYPE_REGULAR | MODE_TYPE_SYMLINK
+    ) || uid >= u32::MAX as u64
         || gid >= u32::MAX as u64
         || mtime > i64::MAX as u64
     {
@@ -525,6 +539,9 @@ fn admit_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<AdmittedEntry, 
         if !entry_type.is_dir() || size != 0 || link_name.is_some() || security_capability.is_some()
         {
             return Err(ArchiveError::InvalidRootEntry);
+        }
+        if !matches!(type_bits, 0 | MODE_TYPE_DIRECTORY) {
+            return Err(ArchiveError::InvalidMetadata);
         }
         return Ok(AdmittedEntry {
             path,
@@ -545,6 +562,9 @@ fn admit_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<AdmittedEntry, 
             || security_capability.is_some()
         {
             return Err(ArchiveError::InvalidWhiteout);
+        }
+        if !matches!(type_bits, 0 | MODE_TYPE_REGULAR) {
+            return Err(ArchiveError::InvalidMetadata);
         }
         return Ok(AdmittedEntry {
             path,
@@ -592,6 +612,17 @@ fn admit_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<AdmittedEntry, 
         && !matches!(&kind, AdmittedKind::Regular | AdmittedKind::Hardlink(_))
     {
         return Err(ArchiveError::InvalidXattr);
+    }
+    let kind_type_bits = match &kind {
+        AdmittedKind::Directory => MODE_TYPE_DIRECTORY,
+        AdmittedKind::Symlink(_) => MODE_TYPE_SYMLINK,
+        // A hard link's header is its target's: a regular file.
+        AdmittedKind::Regular | AdmittedKind::Hardlink(_) | AdmittedKind::Whiteout(_) => {
+            MODE_TYPE_REGULAR
+        }
+    };
+    if type_bits != 0 && type_bits != kind_type_bits {
+        return Err(ArchiveError::InvalidMetadata);
     }
 
     Ok(AdmittedEntry {
@@ -1070,6 +1101,115 @@ mod tests {
         builder.into_inner().unwrap()
     }
 
+    /// An archive whose headers carry exactly these raw mode fields.
+    fn archive_with_modes(entries: &[(EntryFixture<'_>, u32)]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (entry, mode) in entries {
+            let mut header = header(entry);
+            header.set_mode(*mode);
+            header.set_cksum();
+            builder
+                .append(&header, Cursor::new(entry.contents))
+                .unwrap();
+        }
+        builder.finish().unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    /// Go's archive/tar wrote S_IFMT bits into the header mode, and older
+    /// images carry them (#3326). Each is admitted only as the value that
+    /// matches its typeflag, and only the permissions are kept.
+    #[test]
+    fn admits_file_type_mode_bits_that_match_the_typeflag() {
+        let fixture = |path, kind, link, contents| EntryFixture {
+            path,
+            kind,
+            link,
+            contents,
+        };
+        let bytes = archive_with_modes(&[
+            (
+                fixture(b"bin", tar::EntryType::Directory, None, b""),
+                0o040_755,
+            ),
+            (
+                fixture(b"bin/busybox", tar::EntryType::Regular, None, b"elf"),
+                0o100_755,
+            ),
+            (
+                fixture(
+                    b"bin/sh",
+                    tar::EntryType::Symlink,
+                    Some(b"/bin/busybox"),
+                    b"",
+                ),
+                0o120_777,
+            ),
+            (
+                fixture(b"bin/ash", tar::EntryType::Link, Some(b"bin/busybox"), b""),
+                0o100_755,
+            ),
+            (fixture(b"etc", tar::EntryType::Directory, None, b""), 0o755),
+            (
+                fixture(b"etc/.wh.old", tar::EntryType::Regular, None, b""),
+                0o100_644,
+            ),
+        ]);
+        let scanned = scan(&bytes).unwrap();
+        let mut collector = Collector::default();
+        replay_tar(
+            &mut Cursor::new(bytes),
+            scanned.digest,
+            scanned.bytes,
+            &scanned.plan,
+            &mut collector,
+        )
+        .unwrap();
+        // The whiteout is admitted but planned, not replayed.
+        assert_eq!(collector.modes, vec![0o755, 0o755, 0o777, 0o755, 0o755]);
+
+        for (entry, mode) in [
+            // Type bits that disagree with the typeflag.
+            (
+                fixture(b"file", tar::EntryType::Regular, None, b""),
+                0o040_644,
+            ),
+            (
+                fixture(b"dir", tar::EntryType::Directory, None, b""),
+                0o100_755,
+            ),
+            (
+                fixture(b"link", tar::EntryType::Symlink, Some(b"target"), b""),
+                0o100_777,
+            ),
+            (
+                fixture(b".wh.gone", tar::EntryType::Regular, None, b""),
+                0o120_644,
+            ),
+            // Bits that are no file type tar can carry.
+            (
+                fixture(b"file", tar::EntryType::Regular, None, b""),
+                0o020_644,
+            ),
+            (
+                fixture(b"file", tar::EntryType::Regular, None, b""),
+                0o140_644,
+            ),
+            (
+                fixture(b"file", tar::EntryType::Regular, None, b""),
+                0o1_100_644,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    scan(&archive_with_modes(&[(entry, mode)])),
+                    Err(ArchiveError::InvalidMetadata)
+                ),
+                "{mode:o}"
+            );
+        }
+    }
+
     fn scan(bytes: &[u8]) -> Result<ScannedTar, ArchiveError> {
         scan_tar(
             &mut Cursor::new(bytes),
@@ -1082,6 +1222,7 @@ mod tests {
     struct Collector {
         paths: Vec<Vec<u8>>,
         payloads: Vec<Vec<u8>>,
+        modes: Vec<u32>,
     }
 
     impl EntryConsumer for Collector {
@@ -1096,6 +1237,7 @@ mod tests {
             data.read_to_end(&mut payload).unwrap();
             self.paths.push(entry.path().to_vec());
             self.payloads.push(payload);
+            self.modes.push(entry.mode());
             Ok(())
         }
     }
