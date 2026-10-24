@@ -34,7 +34,7 @@ cipher-9fbad63c4bcf4a8f = { package = "cipher", version = "0.4.4", default-featu
 cipher-d8f496e17d97b5cb = { package = "cipher", version = "0.5.2", default-features = false, features = ["block-padding", "rand_core", "stream-wrapper"] }
 connectrpc = { version = "0.9.1", features = ["axum", "client", "server"] }
 crossbeam-utils = { version = "0.8.21" }
-crypto-bigint = { version = "0.7.5", features = ["alloc", "getrandom", "hybrid-array", "subtle", "zeroize"] }
+crypto-bigint = { version = "0.7.6", features = ["alloc", "getrandom", "hybrid-array", "subtle", "zeroize"] }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2.2", default-features = false, features = ["getrandom"] }
 crypto-common-c65f7effa3be6d31 = { package = "crypto-common", version = "0.1.7", default-features = false, features = ["getrandom", "std"] }
 crypto_box = { version = "0.9.1", features = ["seal"] }
@@ -164,7 +164,7 @@ cipher-9fbad63c4bcf4a8f = { package = "cipher", version = "0.4.4", default-featu
 cipher-d8f496e17d97b5cb = { package = "cipher", version = "0.5.2", default-features = false, features = ["block-padding", "rand_core", "stream-wrapper"] }
 connectrpc = { version = "0.9.1", features = ["axum", "client", "server"] }
 crossbeam-utils = { version = "0.8.21" }
-crypto-bigint = { version = "0.7.5", features = ["alloc", "getrandom", "hybrid-array", "subtle", "zeroize"] }
+crypto-bigint = { version = "0.7.6", features = ["alloc", "getrandom", "hybrid-array", "subtle", "zeroize"] }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2.2", default-features = false, features = ["getrandom"] }
 crypto-common-c65f7effa3be6d31 = { package = "crypto-common", version = "0.1.7", default-features = false, features = ["getrandom", "std"] }
 crypto_box = { version = "0.9.1", features = ["seal"] }
