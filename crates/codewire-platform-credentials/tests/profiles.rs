@@ -669,8 +669,8 @@ async fn profile_publication_holds_credential_and_owner_fences_against_deletion(
             tokio::spawn(async move { store.delete_revoked(&org, &id, revoked.version).await })
         };
         blocker.commit().await?;
-        let profile = tokio::time::timeout(TIMEOUT, task).await???;
-        ensure!(tokio::time::timeout(TIMEOUT, deleting).await?? == Err(CredentialError::CredentialInUse));
+        let profile = tokio::time::timeout(HANG_GUARD, task).await???;
+        ensure!(tokio::time::timeout(HANG_GUARD, deleting).await?? == Err(CredentialError::CredentialInUse));
         begin_organization_deletion(&db.pool, &admin_user(), org.id().as_str()).await?;
         let profiles = profiles(&db);
         ensure!(profiles.get(&org, &profile.id).await == Err(Error::NotFound));

@@ -1000,7 +1000,7 @@ async fn paused_unwrap_rechecks_revoke_replace_expiry_and_owner_deletion() -> Re
                 _ => unreachable!(),
             }
             provider.unwrap_gate.release();
-            let outcome = tokio::time::timeout(TIMEOUT, task).await??;
+            let outcome = tokio::time::timeout(HANG_GUARD, task).await??;
             ensure!(
                 outcome.err() == Some(expected),
                 "material escaped a changed final admission fence"
@@ -1050,7 +1050,7 @@ async fn paused_preparation_cannot_resurrect_after_revoke_or_organization_deleti
             .revoke(&owner, &original.metadata.id, original.version)
             .await?;
         provider.generate_gate.release();
-        ensure!(tokio::time::timeout(TIMEOUT, task).await?? == Err(Error::StaleVersion));
+        ensure!(tokio::time::timeout(HANG_GUARD, task).await?? == Err(Error::StaleVersion));
         ensure!(store.record(&owner, &original.metadata.id).await? == revoked);
         ensure!(material_count(&db.pool, original.metadata.id.as_str()).await? == 0);
 
@@ -1090,7 +1090,7 @@ async fn paused_preparation_cannot_resurrect_after_revoke_or_organization_deleti
         provider.generate_gate.release();
         // This fixture mutates metadata without advancing its version; the
         // full-record fence detects that before checking elapsed wall expiry.
-        ensure!(tokio::time::timeout(TIMEOUT, task).await?? == Err(Error::CorruptRecord));
+        ensure!(tokio::time::timeout(HANG_GUARD, task).await?? == Err(Error::CorruptRecord));
         let after_expiry = store.record(&owner, &refresh.metadata.id).await?;
         ensure!(after_expiry.version == refresh.version);
         ensure!(
@@ -1121,12 +1121,12 @@ async fn paused_preparation_cannot_resurrect_after_revoke_or_organization_deleti
         // Production deletion entrypoint completes while provider preparation
         // is paused: no database lock/lease is held across provider work.
         tokio::time::timeout(
-            TIMEOUT,
+            HANG_GUARD,
             begin_organization_deletion(&db.pool, &admin_user(), org.id().as_str()),
         )
         .await??;
         provider.generate_gate.release();
-        ensure!(tokio::time::timeout(TIMEOUT, task).await?? == Err(Error::NotFound));
+        ensure!(tokio::time::timeout(HANG_GUARD, task).await?? == Err(Error::NotFound));
         let count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM platform_credentials WHERE organization_id=$1",
         )
@@ -1176,7 +1176,7 @@ async fn publication_holds_owner_share_fence_until_commit_then_deletion_wins() -
         ensure!(blocked.as_database_error().and_then(|error| error.code()).as_deref() == Some("55P03"));
         contender.rollback().await?;
         blocker.commit().await?;
-        let published = tokio::time::timeout(TIMEOUT, task).await???;
+        let published = tokio::time::timeout(HANG_GUARD, task).await???;
         ensure!(material_count(&db.pool, published.metadata.id.as_str()).await? == 1);
         begin_organization_deletion(&db.pool, &admin_user(), org.id().as_str()).await?;
         ensure!(store.record(&org, &published.metadata.id).await == Err(Error::NotFound));

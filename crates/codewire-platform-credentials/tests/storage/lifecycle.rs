@@ -529,7 +529,7 @@ async fn api_key_expiry_is_rechecked_after_preparation_before_publication() -> R
         let calls = provider.generate_calls.load(Ordering::SeqCst);
         // The production deadline is wall time. Wait only for this synthetic
         // two-second expiry, outside any transaction and under a finite bound.
-        tokio::time::timeout(TIMEOUT, async {
+        tokio::time::timeout(HANG_GUARD, async {
             while unix_now()? < expiry {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }

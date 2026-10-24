@@ -1428,6 +1428,11 @@ impl PostgresMeshStore {
         let pool = codewire_server_core::db::connect(database_url)
             .await
             .context("connect codewire-mesh database")?;
+        Self::migrate(pool).await
+    }
+
+    /// Applies the Mesh migrations to `pool`, then serves from it.
+    async fn migrate(pool: PgPool) -> anyhow::Result<Self> {
         MESH_MIGRATOR
             .run(&pool)
             .await
@@ -3132,8 +3137,27 @@ mod migration_tests {
         .collect()
     }
 
+    /// Bounds only a hang. Every wait in these tests ends on its event: a
+    /// connection opening, a migration finishing. The product's 5 s pool
+    /// acquisition bound failed a startup's first connection while a CI runner
+    /// stalled (#3303); it is a production setting, not what these tests check.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// Starts Mesh as `PostgresMeshStore::connect` does, one pool and then the
+    /// migrations, except that acquiring a connection waits on the hang guard
+    /// instead of the product's 5 s.
+    async fn start(database_url: &str) -> anyhow::Result<PostgresMeshStore> {
+        let pool = PgPoolOptions::new()
+            .max_connections(25)
+            .acquire_timeout(HANG_GUARD)
+            .connect(database_url)
+            .await
+            .context("connect codewire-mesh database")?;
+        PostgresMeshStore::migrate(pool).await
+    }
+
     async fn startup(database_url: String) -> anyhow::Result<()> {
-        PostgresMeshStore::connect(&database_url).await?;
+        start(&database_url).await?;
         Ok(())
     }
 
@@ -3234,7 +3258,7 @@ mod migration_tests {
     async fn fresh_database_records_mesh_ledger() -> anyhow::Result<()> {
         let test_db = TestDatabase::create(&test_database_url()?).await?;
         let result = async {
-            let store = PostgresMeshStore::connect(&test_db.url).await?;
+            let store = start(&test_db.url).await?;
             let applied = applied_migrations(&store.pool).await?;
             let registered: Vec<_> = MESH_MIGRATOR.iter().collect();
 
@@ -3280,7 +3304,7 @@ mod migration_tests {
                 .bind("preserved-network")
                 .execute(&pool)
                 .await?;
-            let startup = PostgresMeshStore::connect(&test_db.url).await;
+            let startup = start(&test_db.url).await;
             anyhow::ensure!(
                 startup.is_err(),
                 "unowned pre-launch network unexpectedly migrated"
@@ -3359,7 +3383,7 @@ mod migration_tests {
             .execute(&pool)
             .await?;
 
-            let startup = PostgresMeshStore::connect(&test_db.url).await;
+            let startup = start(&test_db.url).await;
             anyhow::ensure!(
                 startup.is_err(),
                 "nonempty legacy invitation table unexpectedly migrated"
@@ -3388,7 +3412,7 @@ mod migration_tests {
     -> anyhow::Result<()> {
         let test_db = TestDatabase::create(&test_database_url()?).await?;
         let result = async {
-            let store = Arc::new(PostgresMeshStore::connect(&test_db.url).await?);
+            let store = Arc::new(start(&test_db.url).await?);
             store
                 .network_create_with_owner(
                     "network-alpha",
@@ -3548,7 +3572,7 @@ mod migration_tests {
     -> anyhow::Result<()> {
         let test_db = TestDatabase::create(&test_database_url()?).await?;
         let result = async {
-            let store = Arc::new(PostgresMeshStore::connect(&test_db.url).await?);
+            let store = Arc::new(start(&test_db.url).await?);
             sqlx::raw_sql(
                 r#"
                 CREATE FUNCTION reject_or_block_synthetic_mesh_member()
@@ -3777,7 +3801,7 @@ mod migration_tests {
             .await?;
             drop(pool);
 
-            let store = PostgresMeshStore::connect(&test_db.url).await?;
+            let store = start(&test_db.url).await?;
             let legacy_relations: i64 = sqlx::query_scalar(
                 r#"
                 SELECT count(*)
@@ -3880,7 +3904,7 @@ mod migration_tests {
             .await?;
             drop(pool);
 
-            let startup = PostgresMeshStore::connect(&test_db.url).await;
+            let startup = start(&test_db.url).await;
             anyhow::ensure!(
                 startup.is_err(),
                 "nonempty legacy auth state unexpectedly retired"
@@ -3966,7 +3990,7 @@ mod migration_tests {
             .await?;
             drop(pool);
 
-            let store = PostgresMeshStore::connect(&test_db.url).await?;
+            let store = start(&test_db.url).await?;
             let legacy_count: i64 =
                 sqlx::query_scalar("SELECT count(*) FROM kv WHERE namespace = 'mesh.networkauth'")
                     .fetch_one(&store.pool)
@@ -3994,11 +4018,11 @@ mod migration_tests {
     async fn repeated_startup_preserves_ledger_count_and_checksum() -> anyhow::Result<()> {
         let test_db = TestDatabase::create(&test_database_url()?).await?;
         let result = async {
-            let first_store = PostgresMeshStore::connect(&test_db.url).await?;
+            let first_store = start(&test_db.url).await?;
             let first = applied_migrations(&first_store.pool).await?;
             drop(first_store);
 
-            let second_store = PostgresMeshStore::connect(&test_db.url).await?;
+            let second_store = start(&test_db.url).await?;
             let second = applied_migrations(&second_store.pool).await?;
 
             anyhow::ensure!(first.len() == EXPECTED_MESH_MIGRATION_COUNT);
@@ -4020,7 +4044,7 @@ mod migration_tests {
                 startups.spawn(startup(test_db.url.clone()));
             }
 
-            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::time::timeout(HANG_GUARD, async {
                 while let Some(joined) = startups.join_next().await {
                     joined.context("Mesh startup task panicked")??;
                 }
@@ -4078,7 +4102,7 @@ mod migration_tests {
             .await?;
             drop(pool);
 
-            let startup = PostgresMeshStore::connect(&test_db.url).await;
+            let startup = start(&test_db.url).await;
             anyhow::ensure!(startup.is_err(), "conflicting ledger unexpectedly booted");
 
             let pool = PgPoolOptions::new()

@@ -256,12 +256,12 @@ async fn network_deletion_upgrade_contract_and_disposable_rollback() -> anyhow::
         prior_network_deletion_migrator()?.run(&pool).await?;
         let prior = applied_migrations(&pool).await?;
         sqlx::raw_sql("CREATE SCHEMA retained_schema; CREATE TABLE retained_schema.marker (value int); INSERT INTO retained_schema.marker VALUES (7); INSERT INTO networks VALUES ('prior-network', now(), 'prior-org'); INSERT INTO network_members VALUES ('prior-network', 'prior-owner', 'owner', now(), 'prior-owner'); INSERT INTO kv VALUES ('prior-network', 'settings', 'key', '\\x0102', NULL);").execute(&pool).await?;
-        let store = PostgresMeshStore::connect(&test_db.url).await?;
+        let store = start(&test_db.url).await?;
         let applied = applied_migrations(&pool).await?;
         anyhow::ensure!(applied[..6] == prior);
         anyhow::ensure!(store.kv_get("prior-network", "settings", "key").await? == Some(vec![1, 2]));
         verify_network_deletion_contract(&store).await?;
-        let restarted = PostgresMeshStore::connect(&test_db.url).await?;
+        let restarted = start(&test_db.url).await?;
         anyhow::ensure!(applied_migrations(&pool).await? == applied);
         assert!(matches!(restarted.network_create_with_owner("network-delete", "org", "owner", Utc::now()).await, Err(StoreError::NetworkRetired)));
         drop(restarted);
@@ -294,7 +294,7 @@ async fn network_deletion_upgrade_refuses_orphans_without_cleanup() -> anyhow::R
         sqlx::query("INSERT INTO kv VALUES ('orphan-network', 'settings', 'key', '\\x0102', NULL)")
             .execute(&pool)
             .await?;
-        anyhow::ensure!(PostgresMeshStore::connect(&test_db.url).await.is_err());
+        anyhow::ensure!(start(&test_db.url).await.is_err());
         anyhow::ensure!(applied_migrations(&pool).await? == prior);
         anyhow::ensure!(
             sqlx::query_scalar::<_, Vec<u8>>(
@@ -338,7 +338,7 @@ async fn wait_for_deletion_lock(pool: &PgPool, query_prefix: &str) -> anyhow::Re
 async fn network_deletion_serializes_enrollment_and_late_writes() -> anyhow::Result<()> {
     let test_db = TestDatabase::create(&test_database_url()?).await?;
     let result = async {
-        let store = Arc::new(PostgresMeshStore::connect(&test_db.url).await?);
+        let store = Arc::new(start(&test_db.url).await?);
         seed_deletion_metadata(store.as_ref(), "race-network").await?;
 
         // Hold the node table so redemption can acquire its parent lock but
@@ -450,7 +450,7 @@ async fn network_deletion_serializes_enrollment_and_late_writes() -> anyhow::Res
 async fn network_deletion_failure_and_cancellation_roll_back_retirement() -> anyhow::Result<()> {
     let test_db = TestDatabase::create(&test_database_url()?).await?;
     let result = async {
-        let store = Arc::new(PostgresMeshStore::connect(&test_db.url).await?);
+        let store = Arc::new(start(&test_db.url).await?);
         seed_deletion_metadata(store.as_ref(), "rollback-network").await?;
         sqlx::raw_sql("CREATE FUNCTION reject_network_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic deletion failure'; END $$; CREATE TRIGGER reject_network_delete BEFORE DELETE ON networks FOR EACH ROW EXECUTE FUNCTION reject_network_delete();").execute(&store.pool).await?;
         anyhow::ensure!(store.network_delete_by_owner("rollback-network", "org", "owner").await.is_err());

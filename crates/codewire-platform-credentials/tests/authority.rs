@@ -142,7 +142,7 @@ async fn denied(pool: &PgPool, sql: &str) -> Result<()> {
 }
 
 async fn wait_blocked(pool: &PgPool, waiter: i32, holder: i32) -> Result<()> {
-    tokio::time::timeout(TIMEOUT, async {
+    tokio::time::timeout(HANG_GUARD, async {
         loop {
             let blocked: bool = sqlx::query_scalar(
                 "SELECT $2::integer = ANY(pg_catalog.pg_blocking_pids($1::integer))",
@@ -605,7 +605,7 @@ async fn owner_helper_locks_survive_return_and_fence_deletion_in_both_orders() -
                         format!("owner lock matrix organization={organization} deletion_first={deletion_first}")
                     })?;
                     holder.commit().await?;
-                    ensure!(!tokio::time::timeout(TIMEOUT, attempt).await???);
+                    ensure!(!tokio::time::timeout(HANG_GUARD, attempt).await???);
                 } else {
                     ensure!(lock_owner(&mut holder, &owner).await?);
                     // The helper call has returned. Its lock must still prevent
@@ -622,7 +622,7 @@ async fn owner_helper_locks_survive_return_and_fence_deletion_in_both_orders() -
                     })?;
                     holder.commit().await?;
                     ensure!(
-                        tokio::time::timeout(TIMEOUT, attempt)
+                        tokio::time::timeout(HANG_GUARD, attempt)
                             .await???
                             .rows_affected()
                             == 1
@@ -704,7 +704,7 @@ async fn environment_and_profile_helpers_fence_binding_and_revision_changes() ->
             // Rollback, as well as commit, must release locks without any helper
             // writing row data or leaving an autonomous transaction behind.
             holder.rollback().await?;
-            tokio::time::timeout(TIMEOUT, attempt).await???;
+            tokio::time::timeout(HANG_GUARD, attempt).await???;
             writer_pool.close().await;
             if change == "environment" {
                 ensure!(profiles(&pool).evaluate_grants(&context).await == Err(ProfileError::StaleEnvironment));
@@ -783,7 +783,7 @@ async fn restricted_binding_metadata_waits_for_atomic_rebind_and_clear() -> Resu
                 });
                 wait_blocked(&db.pool, waiter, holder).await?;
                 writer.commit().await?;
-                let observed = tokio::time::timeout(TIMEOUT, read).await??;
+                let observed = tokio::time::timeout(HANG_GUARD, read).await??;
                 match (reading, clear) {
                     // Without a binding, grants fall back to the account's
                     // GitHub connection, which this account does not have.
@@ -847,7 +847,7 @@ async fn restricted_broker_final_admission_rejects_revoke_and_owner_deletion_dur
                     .await?;
             }
             provider.unwrap_gate.release();
-            let outcome = tokio::time::timeout(TIMEOUT, read).await??;
+            let outcome = tokio::time::timeout(HANG_GUARD, read).await??;
             ensure!(
                 outcome.err()
                     == Some(if deletion {
@@ -1212,7 +1212,13 @@ async fn environment_fence_denies_each_condition_alone_and_stops_at_the_first() 
             tokio::spawn(async move { waiting_runtime.evaluate_grants(&waiting_context).await });
         wait_blocked(&db.pool, waiter, holder_pid).await?;
         holder.rollback().await?;
-        ensure!(tokio::time::timeout(TIMEOUT, waiting).await???.grants.len() == 1);
+        ensure!(
+            tokio::time::timeout(HANG_GUARD, waiting)
+                .await???
+                .grants
+                .len()
+                == 1
+        );
         // With the organization lock failing, the same held row is never
         // waited for: the denial returns at once, not at the statement timeout.
         sqlx::query(MARK_ORGANIZATION_DELETING)
@@ -1375,7 +1381,7 @@ async fn bound_profile_and_credential_reads_decide_each_condition_alone() -> Res
             tokio::spawn(async move { waiting_runtime.evaluate_grants(&waiting_context).await });
         wait_blocked(&db.pool, waiter, holder_pid).await?;
         holder.rollback().await?;
-        ensure!(slots(&tokio::time::timeout(TIMEOUT, waiting).await???) == all);
+        ensure!(slots(&tokio::time::timeout(HANG_GUARD, waiting).await???) == all);
         reader.close().await;
         pool.close().await;
         Ok(())

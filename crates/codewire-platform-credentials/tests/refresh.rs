@@ -578,7 +578,7 @@ async fn stage_and_abandonment_serialize_and_execution_deadline_is_rechecked_aft
             };
             ensure!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut abandonment).await.is_err(), "abandonment bypassed the credential fence");
             if deadline_passes {
-                tokio::time::timeout(TIMEOUT, async {
+                tokio::time::timeout(HANG_GUARD, async {
                     loop {
                         let expired: bool = sqlx::query_scalar("SELECT started_until<=clock_timestamp() FROM platform_credential_refresh_attempts WHERE credential_id=$1")
                             .bind(record.metadata.id.as_str()).fetch_one(&db.pool).await?;
@@ -590,8 +590,8 @@ async fn stage_and_abandonment_serialize_and_execution_deadline_is_rechecked_aft
                 }).await??;
             }
             blocker.commit().await?;
-            let staged = tokio::time::timeout(TIMEOUT, staging).await??;
-            let abandoned = tokio::time::timeout(TIMEOUT, abandonment).await??;
+            let staged = tokio::time::timeout(HANG_GUARD, staging).await??;
+            let abandoned = tokio::time::timeout(HANG_GUARD, abandonment).await??;
             ensure!(oauth.requests.load(Ordering::SeqCst) == 1);
             if deadline_passes {
                 ensure!(staged == Err(Error::StaleRefresh));
@@ -766,7 +766,7 @@ async fn hard_expiry_fences_prepare_start_stage_and_promotion_without_extending_
         expire(&db.pool, &preparing.metadata.id).await?;
         provider.generate_gate.release();
         ensure!(matches!(
-            tokio::time::timeout(TIMEOUT, task).await??,
+            tokio::time::timeout(HANG_GUARD, task).await??,
             Err(Error::Expired)
         ));
         ensure!(counts(&db.pool, &preparing.metadata.id).await? == (0, 0));
@@ -865,13 +865,13 @@ async fn owner_deletion_during_wrapped_dek_preparation_prevents_reservation() ->
         };
         provider.generate_gate.wait().await?;
         tokio::time::timeout(
-            TIMEOUT,
+            HANG_GUARD,
             begin_organization_deletion(&db.pool, &admin_user(), owner.id().as_str()),
         )
         .await??;
         provider.generate_gate.release();
         ensure!(matches!(
-            tokio::time::timeout(TIMEOUT, task).await??,
+            tokio::time::timeout(HANG_GUARD, task).await??,
             Err(Error::NotFound)
         ));
         ensure!(counts(&db.pool, &record.metadata.id).await? == (0, 0));
@@ -919,8 +919,8 @@ async fn reservation_owner_lock_precedes_deletion_and_exact_cascades_preserve_ot
         };
         ensure!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut deletion).await.is_err());
         blocker.commit().await?;
-        let prepared = tokio::time::timeout(TIMEOUT, reservation).await???;
-        tokio::time::timeout(TIMEOUT, deletion).await???;
+        let prepared = tokio::time::timeout(HANG_GUARD, reservation).await???;
+        tokio::time::timeout(HANG_GUARD, deletion).await???;
         ensure!(matches!(store.start_oauth_refresh(prepared).await, Err(Error::NotFound)));
         sqlx::query("DELETE FROM organizations WHERE id=$1").bind(org.id().as_str()).execute(&db.pool).await?;
         ensure!(counts(&db.pool, &record.metadata.id).await? == (0, 0));
@@ -1192,7 +1192,7 @@ async fn staged_integrity_and_kek_recovery_preserve_old_material_and_recheck_fin
                 _ => unreachable!(),
             }
             provider.inner.unwrap_gate.release();
-            let outcome = tokio::time::timeout(TIMEOUT, task).await??;
+            let outcome = tokio::time::timeout(HANG_GUARD, task).await??;
             match mutation {
                 "revoke" => ensure!(outcome.is_err()),
                 "expiry" => ensure!(outcome == Err(Error::Expired)),

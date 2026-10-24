@@ -23,6 +23,15 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
+/// Bounds only a hang. Every wait it bounds ends on its event: a spawned
+/// operation's result, a lock or advisory-lock waiter appearing, a provider
+/// reaching its barrier, a synthetic expiry passing. 10 s failed a profile
+/// publication's deletion wait on a stalled CI runner (#3313). A deadline under
+/// test keeps its own bound.
+pub const HANG_GUARD: Duration = Duration::from_secs(120);
+/// The 10 s bound the crates that include this module still use for their
+/// own waits; this crate's tests use `HANG_GUARD`.
+#[allow(dead_code)]
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 pub const OLD_VALUE: &[u8] = b"synthetic-platform-credential-old-never-public";
 pub const NEW_VALUE: &[u8] = b"synthetic-platform-credential-new-never-public";
@@ -290,7 +299,7 @@ impl Gate {
         }
     }
     pub async fn wait(&self) -> Result<()> {
-        tokio::time::timeout(TIMEOUT, self.entered.notified())
+        tokio::time::timeout(HANG_GUARD, self.entered.notified())
             .await
             .context("synthetic provider did not reach its barrier")?;
         Ok(())
@@ -374,7 +383,7 @@ pub async fn envelope_bytes(pool: &PgPool, id: &str) -> Result<(Vec<u8>, Vec<u8>
 }
 
 pub async fn wait_for_advisory_waiter(pool: &PgPool, key: i32) -> Result<()> {
-    tokio::time::timeout(TIMEOUT, async {
+    tokio::time::timeout(HANG_GUARD, async {
         loop {
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' \
