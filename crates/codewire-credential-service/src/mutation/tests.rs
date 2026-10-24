@@ -14,9 +14,13 @@ use codewire_server_core::auth::{
 use serde_json::{Value, json};
 
 use crate::platform_test_support as platform_support;
-use platform_support::{
-    SyntheticKek, TIMEOUT, TestDatabase, envelope_bytes, material_count, quote_ident,
-};
+use platform_support::{SyntheticKek, TestDatabase, envelope_bytes, material_count, quote_ident};
+
+/// Bounds a wait that ends on its event: a response, a stream frame, a
+/// drained owner, a held barrier. It only turns a hang into a failure. The
+/// test client's 10 s total-request timeout ran out on a loaded CI runner in
+/// a stream that waits out `MUTATION_TIMEOUT` on purpose (#3316).
+pub(crate) const HANG_GUARD: Duration = Duration::from_secs(120);
 
 mod additions;
 mod claude;
@@ -160,7 +164,7 @@ async fn disconnect_before_challenge_and_during_envelope_preparation_drains() ->
             tokio::spawn(async move { rpc.enroll(Auth::Alice, "before-challenge").await });
         h.wait_started().await?;
         request.abort();
-        match tokio::time::timeout(TIMEOUT, &mut request).await? {
+        match tokio::time::timeout(HANG_GUARD, &mut request).await? {
             Ok(response) => drop(response?),
             Err(error) => ensure!(error.is_cancelled()),
         }
@@ -426,7 +430,7 @@ async fn generated_slow_commit_outlives_mutation_deadline_and_publishes() -> Res
         ensure!(h.count().await? == 0);
 
         blocker.rollback().await?;
-        let metadata = tokio::time::timeout(TIMEOUT, response.committed())
+        let metadata = tokio::time::timeout(HANG_GUARD, response.committed())
             .await
             .context("slow COMMIT did not publish after its barrier cleared")??;
         h.drained().await?;
@@ -478,13 +482,13 @@ async fn generated_publication_cancellation_before_commit_rolls_back_after_issue
             // deterministic; response loss alone is not an instant TCP ACK.
             let owner = h.owner.clone();
             let mut shutdown = tokio::spawn(async move { owner.shutdown().await });
-            tokio::time::timeout(TIMEOUT, h.owner.stop.cancelled()).await?;
+            tokio::time::timeout(HANG_GUARD, h.owner.stop.cancelled()).await?;
             ensure!(
                 h.owner.capacity.available_permits() == MAX_OPERATIONS - 1,
                 "SQL cleanup released its admission permit early"
             );
             blocker.rollback().await?;
-            tokio::time::timeout(TIMEOUT, &mut shutdown)
+            tokio::time::timeout(HANG_GUARD, &mut shutdown)
                 .await??
                 .map_err(|error| anyhow::anyhow!("closed mutation shutdown: {error:?}"))?;
             ensure!(h.count().await? == i64::from(after_issue));
@@ -534,7 +538,7 @@ async fn generated_late_commit_continues_after_client_disconnect_and_disposes_no
         // COMMIT returns its terminal result.
         let capacity = h.pool.options().get_max_connections();
         ensure!(capacity > 1, "fixture pool must have a commit connection");
-        let replacements = tokio::time::timeout(TIMEOUT, async {
+        let replacements = tokio::time::timeout(HANG_GUARD, async {
             let mut connections = Vec::new();
             let mut pids = BTreeSet::new();
             for _ in 0..(capacity - 1) {
@@ -638,7 +642,7 @@ async fn owner_queue_preserves_terminal_failure_behind_unconsumed_challenge() ->
             .enroll(authority, "buffered-failure".into(), None, None)
             .map_err(|error| anyhow::anyhow!("closed enrollment error: {error:?}"))?;
         h.wait_started().await?;
-        tokio::time::timeout(TIMEOUT, async {
+        tokio::time::timeout(HANG_GUARD, async {
             while events.receiver.is_empty() {
                 tokio::task::yield_now().await;
             }
@@ -647,7 +651,7 @@ async fn owner_queue_preserves_terminal_failure_behind_unconsumed_challenge() ->
         h.provider.fail_generate.store(true, Ordering::SeqCst);
         h.release()?;
         h.drained().await?;
-        let challenge = tokio::time::timeout(TIMEOUT, events.receiver.recv())
+        let challenge = tokio::time::timeout(HANG_GUARD, events.receiver.recv())
             .await?
             .context("missing buffered challenge")?
             .map_err(|error| anyhow::anyhow!("unexpected challenge failure: {error:?}"))?;
@@ -655,12 +659,12 @@ async fn owner_queue_preserves_terminal_failure_behind_unconsumed_challenge() ->
             challenge.event,
             Some(enroll_codex_response::Event::Challenge(_))
         ));
-        let terminal = tokio::time::timeout(TIMEOUT, events.receiver.recv())
+        let terminal = tokio::time::timeout(HANG_GUARD, events.receiver.recv())
             .await?
             .context("buffered challenge swallowed terminal failure")?;
         ensure!(matches!(terminal, Err(Error::Unavailable)));
         ensure!(
-            tokio::time::timeout(TIMEOUT, events.receiver.recv())
+            tokio::time::timeout(HANG_GUARD, events.receiver.recv())
                 .await?
                 .is_none()
         );

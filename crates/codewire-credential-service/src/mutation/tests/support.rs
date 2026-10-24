@@ -265,7 +265,7 @@ impl ConnectStream {
         if self.terminal {
             return Ok(None);
         }
-        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
         loop {
             if self.buffer.len() >= 5 {
                 let flags = self.buffer[0];
@@ -352,7 +352,8 @@ impl Rpc {
             .post(format!("{}/{SERVICE}/{method}", self.url))
             .header("connect-protocol-version", "1")
             .json(&body);
-        let response = tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??;
+        let response =
+            tokio::time::timeout(HANG_GUARD, authenticate(request, auth).send()).await??;
         let status = response.status();
         let value: Value = response.json().await?;
         blind(&value)?;
@@ -365,7 +366,8 @@ impl Rpc {
             .post(format!("{}/{SERVICE}/{method}", self.url))
             .header("connect-protocol-version", "1")
             .json(&body);
-        let response = tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??;
+        let response =
+            tokio::time::timeout(HANG_GUARD, authenticate(request, auth).send()).await??;
         let status = response.status();
         let value: Value = response.json().await?;
         blind(&value)?;
@@ -393,7 +395,7 @@ impl Rpc {
             .header("connect-protocol-version", "1")
             .header("content-type", "application/connect+json")
             .body(frame);
-        Ok(tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??)
+        Ok(tokio::time::timeout(HANG_GUARD, authenticate(request, auth).send()).await??)
     }
 
     pub async fn enroll(&self, auth: Auth, name: &str) -> Result<ConnectStream> {
@@ -449,7 +451,8 @@ impl Rpc {
             .post(format!("{}/{SERVICE}/AddApiKeyCredential", self.url))
             .header("connect-protocol-version", "1")
             .json(&body);
-        let response = tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??;
+        let response =
+            tokio::time::timeout(HANG_GUARD, authenticate(request, auth).send()).await??;
         let status = response.status();
         let value: Value = response.json().await?;
         blind(&value)?;
@@ -473,7 +476,8 @@ impl Rpc {
             ))
             .header("connect-protocol-version", "1")
             .json(&body);
-        let response = tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??;
+        let response =
+            tokio::time::timeout(HANG_GUARD, authenticate(request, auth).send()).await??;
         let status = response.status();
         let value: Value = response.json().await?;
         blind(&value)?;
@@ -496,7 +500,8 @@ impl Rpc {
             .post(format!("{}/{SERVICE}/StartClaudeSignIn", self.url))
             .header("connect-protocol-version", "1")
             .json(&json!({}));
-        let response = tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??;
+        let response =
+            tokio::time::timeout(HANG_GUARD, authenticate(request, auth).send()).await??;
         let status = response.status();
         let value: Value = response.json().await?;
         blind(&value)?;
@@ -518,7 +523,8 @@ impl Rpc {
             .post(format!("{}/{SERVICE}/CompleteClaudeSignIn", self.url))
             .header("connect-protocol-version", "1")
             .json(&body);
-        let response = tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??;
+        let response =
+            tokio::time::timeout(HANG_GUARD, authenticate(request, auth).send()).await??;
         let status = response.status();
         let value: Value = response.json().await?;
         blind(&value)?;
@@ -545,7 +551,7 @@ impl Rpc {
         id: &str,
         revision: u64,
     ) -> Result<(StatusCode, Value)> {
-        let response = tokio::time::timeout(TIMEOUT, authenticate(self.client
+        let response = tokio::time::timeout(HANG_GUARD, authenticate(self.client
             .post(format!("{}/{SERVICE}/{method}", self.url))
             .header("connect-protocol-version", "1")
             .json(&json!({"credentialId":id,"expectedRevocationGeneration":revision.to_string()})),auth)
@@ -624,7 +630,7 @@ impl Harness {
             let provider = Arc::new(SyntheticKek::default());
             let store = Arc::new(PlatformCredentialStore::new(pool.clone(),provider.clone(),builtin_provider_catalog()));
             let owner = Arc::new(CredentialMutationOwner::new(pool.clone(),store.clone(),codex_login,claude_sign_in,Some(github_login),None));
-            let rpc = Rpc {client:Client::builder().no_proxy().timeout(TIMEOUT).build()?,url:format!("http://{address}")};
+            let rpc = Rpc {client:Client::builder().no_proxy().timeout(HANG_GUARD).build()?,url:format!("http://{address}")};
             let server = listener.map(|listener| {
                 let app = connect_router_with_auth(owner.router(),ConnectAuthLayer::credential_mutation(AuthState{pool:pool.clone()},http::HeaderValue::from_static("https://codewire.example")));
                 let (stop,stopped) = oneshot::channel();
@@ -667,7 +673,7 @@ impl Harness {
     }
 
     pub async fn wait_started(&self) -> Result<()> {
-        tokio::time::timeout(TIMEOUT, async {
+        tokio::time::timeout(HANG_GUARD, async {
             while self.device.started() == 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -678,7 +684,7 @@ impl Harness {
     }
 
     pub async fn drained(&self) -> Result<()> {
-        tokio::time::timeout(TIMEOUT, async {
+        tokio::time::timeout(HANG_GUARD, async {
             while !self.owner.workers.is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -735,14 +741,14 @@ impl Harness {
     }
 
     pub async fn wait_shutdown_started(&self) -> Result<()> {
-        tokio::time::timeout(TIMEOUT, self.owner.stop.cancelled()).await?;
+        tokio::time::timeout(HANG_GUARD, self.owner.stop.cancelled()).await?;
         Ok(())
     }
 
     pub async fn finish(self, result: Result<()>) -> Result<()> {
         self.provider.generate_gate.release();
         self.provider.unwrap_gate.release();
-        let drain = match tokio::time::timeout(TIMEOUT, self.owner.shutdown()).await {
+        let drain = match tokio::time::timeout(HANG_GUARD, self.owner.shutdown()).await {
             Ok(result) => {
                 result.map_err(|error| anyhow::anyhow!("closed mutation shutdown: {error:?}"))
             }
@@ -750,7 +756,7 @@ impl Harness {
         };
         let stopped = if let Some((stop, mut server)) = self.server {
             let _ = stop.send(());
-            match tokio::time::timeout(TIMEOUT, &mut server).await {
+            match tokio::time::timeout(HANG_GUARD, &mut server).await {
                 Ok(result) => result
                     .context("Connect fixture join")
                     .and_then(|result| result.context("Connect fixture listener")),
@@ -829,7 +835,7 @@ pub async fn denied(pool: &PgPool, statement: &str) -> Result<()> {
 }
 
 pub async fn blocked_by(pool: &PgPool, blocker: i32) -> Result<i32> {
-    tokio::time::timeout(TIMEOUT,async {
+    tokio::time::timeout(HANG_GUARD,async {
         loop {
             let pid: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_catalog.pg_stat_activity \
                 WHERE datname=current_database() AND $1=ANY(pg_catalog.pg_blocking_pids(pid)) LIMIT 1")

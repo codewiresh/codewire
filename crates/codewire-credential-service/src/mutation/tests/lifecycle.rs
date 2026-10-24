@@ -252,7 +252,7 @@ async fn generated_rotation_rechecks_original_oauth_and_concurrent_revocation() 
                     .await?
             };
             h.provider.generate_gate.release();
-            let (status, response) = tokio::time::timeout(TIMEOUT, request).await???;
+            let (status, response) = tokio::time::timeout(HANG_GUARD, request).await???;
             ensure!(
                 !status.is_success()
                     && response["code"]
@@ -302,7 +302,7 @@ async fn generated_rename_rechecks_original_oauth_before_publication() -> Result
             .execute(&h.db.pool)
             .await?;
         blocker.rollback().await?;
-        let (status, response) = tokio::time::timeout(TIMEOUT, request).await???;
+        let (status, response) = tokio::time::timeout(HANG_GUARD, request).await???;
         ensure!(!status.is_success() && response["code"] == "unauthenticated");
         h.drained().await?;
         ensure!(

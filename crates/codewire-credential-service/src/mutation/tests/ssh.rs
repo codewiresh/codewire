@@ -96,7 +96,7 @@ async fn ssh_publication_rechecks_original_oauth_after_preparation() -> Result<(
             .execute(&h.db.pool)
             .await?;
         h.provider.generate_gate.release();
-        let (status, response) = tokio::time::timeout(TIMEOUT, task).await???;
+        let (status, response) = tokio::time::timeout(HANG_GUARD, task).await???;
         ensure!(!status.is_success() && response["code"] == "unauthenticated");
         h.drained().await?;
         ensure!(h.count().await? == 0 && h.owner.capacity.available_permits() == MAX_OPERATIONS);
@@ -132,7 +132,7 @@ async fn ssh_cancel_keeps_public_metadata_and_material_at_the_same_commit_bounda
             h.owner.start_shutdown();
             ensure!(h.owner.capacity.available_permits() == MAX_OPERATIONS - 1);
             blocker.rollback().await?;
-            tokio::time::timeout(TIMEOUT, h.owner.shutdown()).await?
+            tokio::time::timeout(HANG_GUARD, h.owner.shutdown()).await?
                 .map_err(|e| anyhow::anyhow!("closed SSH shutdown: {e:?}"))?;
             let rows: Vec<(bool, bool)> = sqlx::query_as("SELECT c.ssh_public_key IS NOT NULL AND c.ssh_fingerprint IS NOT NULL, m.credential_id IS NOT NULL FROM platform_credentials c LEFT JOIN platform_credential_material m ON m.credential_id=c.id")
                 .fetch_all(&h.db.pool).await?;

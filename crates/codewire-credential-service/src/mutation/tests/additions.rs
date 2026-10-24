@@ -219,10 +219,10 @@ async fn generated_reconnect_cancellation_preserves_the_exact_publication_bounda
             drop(response);
             let owner = h.owner.clone();
             let mut shutdown = tokio::spawn(async move { owner.shutdown().await });
-            tokio::time::timeout(TIMEOUT, h.owner.stop.cancelled()).await?;
+            tokio::time::timeout(HANG_GUARD, h.owner.stop.cancelled()).await?;
             ensure!(h.owner.capacity.available_permits() == MAX_OPERATIONS - 1);
             blocker.rollback().await?;
-            tokio::time::timeout(TIMEOUT, &mut shutdown)
+            tokio::time::timeout(HANG_GUARD, &mut shutdown)
                 .await??
                 .map_err(|error| anyhow::anyhow!("closed mutation shutdown: {error:?}"))?;
             let stored = h
@@ -277,7 +277,7 @@ async fn generated_api_key_import_rechecks_original_oauth_after_envelope_prepara
             .execute(&h.db.pool)
             .await?;
         h.provider.generate_gate.release();
-        let (status, response) = tokio::time::timeout(TIMEOUT, request).await???;
+        let (status, response) = tokio::time::timeout(HANG_GUARD, request).await???;
         ensure!(!status.is_success() && response["code"] == "unauthenticated");
         h.drained().await?;
         ensure!(h.count().await? == 0);
