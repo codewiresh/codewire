@@ -15,12 +15,27 @@ fail() {
   exit 1
 }
 
+# A fake df for the cache filesystem: FAKE_DF_SIZE_KIB in all, of which
+# FAKE_DF_OTHER_KIB is used by something else and the rest by what is really
+# under the cache, so removing a directory frees exactly its size.
+mkdir -p "$work/fake"
+cat > "$work/fake/df" <<'DF'
+#!/bin/sh
+used=$(du -sk "$FAKE_DF_ROOT" | awk '{print $1}')
+used=$((used + FAKE_DF_OTHER_KIB))
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/loop1 $FAKE_DF_SIZE_KIB $used $((FAKE_DF_SIZE_KIB - used)) 0% /ci-cache"
+DF
+chmod +x "$work/fake/df"
+
 run() {
   local job="$1" event="$2" ref="$3"
   shift 3
   rm -rf "$work/workspace"
   mkdir -p "$work/workspace/target/ci-cache"
   env -i PATH="$PATH" HOME="$work" WARM_CACHE_ROOT="$work/cache" GITHUB_WORKSPACE="$work/workspace" \
+    WARM_CACHE_DF="$work/fake/df" FAKE_DF_ROOT="$work/cache" \
+    FAKE_DF_SIZE_KIB="${FAKE_DF_SIZE_KIB:-1000000000}" FAKE_DF_OTHER_KIB="${FAKE_DF_OTHER_KIB:-0}" \
     GITHUB_JOB="$job" GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" "$@" "$SELECT"
 }
 
@@ -64,6 +79,66 @@ head -c 3000000 /dev/zero > "$work/cache/v1/cargo-home/registry.blob"
 out="$(run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2 WARM_CACHE_CARGO_HOME_CAP_KIB=1000)"; grep -qF 'Cargo home cap' <<<"$out" ||
   fail 'an oversized Cargo home was kept'
 [[ ! -e "$work/cache/v1/cargo-home/registry.blob" ]] || fail 'the Cargo home was not wiped'
+
+# Under the free-space floor (a quarter of the filesystem, at least 2 GiB),
+# whole profile directories go, least recently used first and logged, until
+# the floor holds; the step continues (main run 19967).
+cache_used_kib() { du -sk "$work/cache" | awk '{print $1}'; }
+fresh_profiles() {
+  rm -rf "$work/cache/v1/ci-cache" && mkdir -p "$work/cache/v1/ci-cache"
+  for dir in host-debug host-ci desktop-release; do
+    mkdir -p "$work/cache/v1/ci-cache/$dir"
+    head -c 3000000 /dev/zero > "$work/cache/v1/ci-cache/$dir/blob"
+  done
+  touch -d '3 days ago' "$work/cache/v1/ci-cache/host-ci/.last-used"
+  touch -d '2 days ago' "$work/cache/v1/ci-cache/desktop-release/.last-used"
+  touch -d '1 day ago' "$work/cache/v1/ci-cache/host-debug/.last-used"
+}
+readonly fs_kib=40000000 floor_kib=10000000
+fresh_profiles
+# 1000 KiB short of the floor: the least recently used directory frees enough.
+other=$(( fs_kib - floor_kib + 1000 - $(cache_used_kib) ))
+out="$(FAKE_DF_SIZE_KIB=$fs_kib FAKE_DF_OTHER_KIB=$other run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2)" ||
+  fail "a cache under its floor failed instead of pruning: $out"
+grep -qE "^\[warm-rust-cache\] under $floor_kib KiB free: removing host-ci \([0-9]+ KiB\)$" <<<"$out" ||
+  fail "the least recently used removal was not logged: $out"
+[[ ! -e "$work/cache/v1/ci-cache/host-ci" && -d "$work/cache/v1/ci-cache/desktop-release" && -d "$work/cache/v1/ci-cache/host-debug" ]] ||
+  fail 'pruning to the floor removed more or other than the least recently used directory'
+grep -qF '[warm-rust-cache] using ' <<<"$out" || fail 'the step did not continue after pruning'
+# Far under the floor: every profile directory goes in order, then the Cargo
+# home; above the 2 GiB hard minimum the step still continues.
+fresh_profiles
+head -c 1000000 /dev/zero > "$work/cache/v1/cargo-home/registry.blob"
+other=$(( fs_kib - 3000000 - $(cache_used_kib) ))
+out="$(FAKE_DF_SIZE_KIB=$fs_kib FAKE_DF_OTHER_KIB=$other run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2)" ||
+  fail "a cache that pruning can bring over 2 GiB failed: $out"
+[[ "$(grep -oE 'removing [a-z-]+' <<<"$out" | tr '\n' ' ')" == 'removing host-ci removing desktop-release removing host-debug ' ]] ||
+  fail "profile directories were not removed least recently used first: $out"
+grep -qF 'with no target left: wiping the Cargo home' <<<"$out" || fail 'the Cargo home was not wiped under the floor'
+[[ ! -e "$work/cache/v1/cargo-home/registry.blob" ]] || fail 'the Cargo home survived the floor'
+# Equal last use: the name decides, so pruning is deterministic.
+fresh_profiles
+touch -d '2 days ago' "$work/cache/v1/ci-cache/host-ci/.last-used" "$work/cache/v1/ci-cache/desktop-release/.last-used"
+other=$(( fs_kib - floor_kib + 1000 - $(cache_used_kib) ))
+out="$(FAKE_DF_SIZE_KIB=$fs_kib FAKE_DF_OTHER_KIB=$other run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2)"
+grep -qE 'removing desktop-release ' <<<"$out" && [[ -d "$work/cache/v1/ci-cache/host-ci" ]] ||
+  fail "a tie in last use was not broken by name: $out"
+# Nothing left to remove and under 2 GiB free: the step fails and says why.
+fresh_profiles
+other=$(( fs_kib - 1000000 - $(cache_used_kib) ))
+if out="$(FAKE_DF_SIZE_KIB=$fs_kib FAKE_DF_OTHER_KIB=$other run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2 2>&1)"; then
+  fail 'a cache filesystem pruning cannot free was accepted'
+fi
+grep -qE 'ERROR: the cache filesystem has [0-9]+ KiB free with nothing left to remove; at least 2097152 KiB is required' <<<"$out" ||
+  fail "the hard minimum failure did not say why: $out"
+# The floor is a quarter of the filesystem but never under 2 GiB.
+fresh_profiles
+other=$(( 6000000 - 2097152 + 1000 - $(cache_used_kib) ))
+out="$(FAKE_DF_SIZE_KIB=6000000 FAKE_DF_OTHER_KIB=$other run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2)"
+grep -qF 'under 2097152 KiB free: removing host-ci' <<<"$out" || fail "a small filesystem's floor is not the 2 GiB minimum: $out"
+# The finish-step cases below start from the LRU case's directories.
+fresh_profiles
+rm -rf "$work/cache/v1/ci-cache/host-ci"
 
 # The default caps start a job at most 80% into the 110 GB image, whose
 # filesystem holds 105149384 KiB (measured on the metal guests, 2026-10-22),
@@ -135,4 +210,4 @@ for name, job in jobs.items():
 assert wired == expected, sorted(wired ^ expected)
 WIRING
 
-printf '[test-warm-rust-cache] main and pull requests only, weekly and epoch wipes, LRU and Cargo home caps: OK\n'
+printf '[test-warm-rust-cache] main and pull requests only, weekly and epoch wipes, LRU and Cargo home caps, free-space floor: OK\n'
