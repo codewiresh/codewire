@@ -197,6 +197,9 @@ async fn generated_login_cannot_outlive_original_oauth_revocation_or_expiry() ->
     .await
 }
 
+/// The original OAuth token's lifetime in the expiry half below.
+const ORIGINAL_LOGIN_LIFETIME: Duration = Duration::from_secs(10);
+
 async fn login_cannot_outlive_original_oauth_revocation_or_expiry() -> Result<()> {
     let h = Harness::new().await?;
     let result=async {
@@ -210,9 +213,14 @@ async fn login_cannot_outlive_original_oauth_revocation_or_expiry() -> Result<()
         ensure!(h.count().await?==0);
 
         h.reset_login().await?;
+        // The original token's lifetime is the request's whole lifetime, so
+        // it must outlast authentication and the challenge on a stalled CI
+        // slot: 3 s expired before the challenge there (run 20586). The
+        // expiry is the subject and is still waited out; only its slack grew.
         sqlx::query("INSERT INTO oidc_access_tokens(token_hash,client_id,user_id,scopes,expires_at) \
-            VALUES ($1,$2,$3,ARRAY['codewire.api'],clock_timestamp()+interval '3 seconds')")
-            .bind(hash_oauth_token(&oauth(ALICE))).bind(CLIENT).bind(ALICE).execute(&h.db.pool).await?;
+            VALUES ($1,$2,$3,ARRAY['codewire.api'],clock_timestamp()+make_interval(secs => $4))")
+            .bind(hash_oauth_token(&oauth(ALICE))).bind(CLIENT).bind(ALICE)
+            .bind(ORIGINAL_LOGIN_LIFETIME.as_secs_f64()).execute(&h.db.pool).await?;
         let mut response=h.rpc.enroll(Auth::Alice,"original-expiry").await?;
         let challenge=response.challenge().await?;
         let original:i64=sqlx::query_scalar("SELECT floor(extract(epoch from expires_at))::bigint FROM oidc_access_tokens WHERE token_hash=$1")
