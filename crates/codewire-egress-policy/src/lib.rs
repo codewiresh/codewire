@@ -136,6 +136,13 @@ impl PolicyDocument {
 pub struct PolicyDigest([u8; 32]);
 
 impl PolicyDigest {
+    /// A digest carried in a private bootstrap record. It names a policy; it
+    /// never stands in for one, so a reader still compiles the document and
+    /// compares.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }

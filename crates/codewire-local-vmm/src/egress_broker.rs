@@ -17,7 +17,7 @@ use codewire_egress_broker::ipc::{
     BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS, BrokerIpcBinding, BrokerIpcKey, serve_broker_ipc,
 };
 use codewire_egress_broker::{PolicyEgressBroker, SystemBrokerClock};
-use codewire_egress_policy::{CompiledPolicy, RouteClass};
+use codewire_egress_policy::{CompiledPolicy, PolicyDocument, RouteClass};
 use tokio::io::AsyncWriteExt as _;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -40,10 +40,15 @@ pub const EGRESS_BROKER_PREPARED_MESSAGE: &[u8] = b"CWEBB1 prepared\n";
 pub const EGRESS_BROKER_CONFINE_MESSAGE: &[u8] = b"CWEBB1 confine\n";
 pub const EGRESS_BROKER_READY_MESSAGE: &[u8] = b"CWEBB1 ready\n";
 pub const EGRESS_BROKER_STATUS_MAX_BYTES: usize = 64;
+/// The fixed header: magic, identity, the policy's digest and the IPC key.
+/// The canonical policy document follows it, length-prefixed (#2537).
 pub const EGRESS_BROKER_BOOTSTRAP_LEN: usize = 96;
 pub const EGRESS_BROKER_POLICY_DIGEST_OFFSET: usize = 32;
+/// The most document bytes a bootstrap carries: the library's ceiling.
+pub const EGRESS_BROKER_POLICY_DOCUMENT_MAX: usize =
+    codewire_egress_policy::MAX_POLICY_DOCUMENT_BYTES;
 
-const BOOTSTRAP_MAGIC: &[u8; 8] = b"CWEBB1\0\0";
+const BOOTSTRAP_MAGIC: &[u8; 8] = b"CWEBB2\0\0";
 const POLICY_DIGEST_LEN: usize = 32;
 const POLICY_DIGEST_END: usize = EGRESS_BROKER_POLICY_DIGEST_OFFSET + POLICY_DIGEST_LEN;
 const KEY_OFFSET: usize = POLICY_DIGEST_END;
@@ -337,25 +342,40 @@ struct PreparedBroker {
     policy: CompiledPolicy,
 }
 
-/// Encode the fixed private bootstrap record written by the environment
-/// runner. The HMAC key is never accepted through argv, environment, or disk.
-pub fn encode_developer_egress_broker_bootstrap(
+/// Encode the private bootstrap record written by the environment runner:
+/// the fixed header, then the selected policy's canonical document, which the
+/// broker compiles and checks against the header's digest. The HMAC key is
+/// never accepted through argv, environment, or disk.
+pub fn encode_egress_broker_bootstrap(
     environment_id: Uuid,
     generation: u64,
     key: &[u8; BROKER_IPC_KEY_LEN],
-) -> Result<Zeroizing<[u8; EGRESS_BROKER_BOOTSTRAP_LEN]>, EgressBrokerProcessError> {
+    policy: &CompiledPolicy,
+) -> Result<Zeroizing<Vec<u8>>, EgressBrokerProcessError> {
     validate_identity(environment_id, generation)?;
     if key.iter().all(|byte| *byte == 0) {
         return Err(EgressBrokerProcessError::InvalidBootstrap);
     }
-    let policy = CompiledPolicy::developer_baseline();
-    let mut bytes = Zeroizing::new([0_u8; EGRESS_BROKER_BOOTSTRAP_LEN]);
-    bytes[..8].copy_from_slice(BOOTSTRAP_MAGIC);
-    bytes[8..24].copy_from_slice(environment_id.as_bytes());
-    bytes[24..32].copy_from_slice(&generation.to_be_bytes());
-    bytes[EGRESS_BROKER_POLICY_DIGEST_OFFSET..POLICY_DIGEST_END]
-        .copy_from_slice(policy.digest().as_bytes());
-    bytes[KEY_OFFSET..].copy_from_slice(key);
+    let document = policy
+        .canonical_json()
+        .map_err(|_| EgressBrokerProcessError::InvalidBootstrap)?;
+    if document.len() > EGRESS_BROKER_POLICY_DOCUMENT_MAX {
+        return Err(EgressBrokerProcessError::InvalidBootstrap);
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        EGRESS_BROKER_BOOTSTRAP_LEN + 4 + document.len(),
+    ));
+    bytes.extend_from_slice(BOOTSTRAP_MAGIC);
+    bytes.extend_from_slice(environment_id.as_bytes());
+    bytes.extend_from_slice(&generation.to_be_bytes());
+    bytes.extend_from_slice(policy.digest().as_bytes());
+    bytes.extend_from_slice(key);
+    bytes.extend_from_slice(
+        &u32::try_from(document.len())
+            .expect("bounded policy document")
+            .to_be_bytes(),
+    );
+    bytes.extend_from_slice(&document);
     Ok(bytes)
 }
 
@@ -542,7 +562,7 @@ fn prepare_broker(
     bootstrap
         .read_exact(bytes.as_mut())
         .map_err(|_| EgressBrokerProcessError::BootstrapIo)?;
-    let policy = CompiledPolicy::developer_baseline();
+    let policy = read_bootstrap_policy(bootstrap)?;
     let decoded = decode_bootstrap(bytes.as_ref(), environment_id, generation, &policy)?;
     let resolver = SystemDnsResolver::from_system_config()
         .map_err(|_| EgressBrokerProcessError::ResolverInitialization)?;
@@ -553,6 +573,33 @@ fn prepare_broker(
         },
         resolver,
     ))
+}
+
+/// The length-prefixed canonical document after the header, compiled. Its
+/// digest is checked against the header by [`decode_bootstrap`].
+fn read_bootstrap_policy(
+    bootstrap: &mut StdUnixStream,
+) -> Result<CompiledPolicy, EgressBrokerProcessError> {
+    let mut length = [0_u8; 4];
+    bootstrap
+        .read_exact(&mut length)
+        .map_err(|_| EgressBrokerProcessError::BootstrapIo)?;
+    let length = usize::try_from(u32::from_be_bytes(length))
+        .map_err(|_| EgressBrokerProcessError::InvalidBootstrap)?;
+    if length == 0 || length > EGRESS_BROKER_POLICY_DOCUMENT_MAX {
+        return Err(EgressBrokerProcessError::InvalidBootstrap);
+    }
+    let mut document = vec![0_u8; length];
+    bootstrap
+        .read_exact(&mut document)
+        .map_err(|_| EgressBrokerProcessError::BootstrapIo)?;
+    compile_bootstrap_policy(&document)
+}
+
+fn compile_bootstrap_policy(document: &[u8]) -> Result<CompiledPolicy, EgressBrokerProcessError> {
+    let document: PolicyDocument =
+        serde_json::from_slice(document).map_err(|_| EgressBrokerProcessError::PolicyMismatch)?;
+    CompiledPolicy::compile(document).map_err(|_| EgressBrokerProcessError::PolicyMismatch)
 }
 
 fn decode_bootstrap(
@@ -682,9 +729,10 @@ mod tests {
     fn bootstrap_is_exact_and_generation_policy_bound() {
         let (environment_id, generation) = identity();
         let key = [0x5a; BROKER_IPC_KEY_LEN];
-        let bytes =
-            encode_developer_egress_broker_bootstrap(environment_id, generation, &key).unwrap();
         let policy = CompiledPolicy::developer_baseline();
+        let bytes =
+            encode_egress_broker_bootstrap(environment_id, generation, &key, &policy).unwrap();
+        let bytes = bytes[..EGRESS_BROKER_BOOTSTRAP_LEN].to_vec();
         let decoded =
             decode_bootstrap(bytes.as_ref(), environment_id, generation, &policy).unwrap();
         assert_eq!(decoded.binding.environment_id(), environment_id);
@@ -711,24 +759,76 @@ mod tests {
         ));
     }
 
+    /// #2537: the bootstrap carries the selected policy itself. The broker
+    /// enforces the document it compiles, and only if it is the one the
+    /// header's digest names.
+    #[test]
+    fn bootstrap_carries_the_selected_policy_document() {
+        let (environment_id, generation) = identity();
+        let selected = codewire_egress_policy::typed::TypedPolicy::new([
+            codewire_egress_policy::typed::AllowRule::new(
+                codewire_egress_policy::typed::AllowTarget::parse("github.com").unwrap(),
+                [443],
+            )
+            .unwrap(),
+        ])
+        .unwrap()
+        .compile();
+        let bytes = encode_egress_broker_bootstrap(environment_id, generation, &[7; 32], &selected)
+            .unwrap();
+        let (header, rest) = bytes.split_at(EGRESS_BROKER_BOOTSTRAP_LEN);
+        let length = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+        assert_eq!(rest.len(), 4 + length);
+        let compiled = compile_bootstrap_policy(&rest[4..]).unwrap();
+        assert_eq!(compiled.digest(), selected.digest());
+        let decoded = decode_bootstrap(header, environment_id, generation, &compiled).unwrap();
+        assert_eq!(decoded.binding.policy_digest(), selected.digest());
+
+        // A different document than the header names is refused.
+        let open = CompiledPolicy::developer_baseline();
+        assert!(matches!(
+            decode_bootstrap(header, environment_id, generation, &open),
+            Err(EgressBrokerProcessError::PolicyMismatch)
+        ));
+        assert!(matches!(
+            compile_bootstrap_policy(b"{\"version\":1}"),
+            Err(EgressBrokerProcessError::PolicyMismatch)
+        ));
+    }
+
     #[test]
     fn bootstrap_rejects_invalid_identity_magic_and_key() {
         let (environment_id, generation) = identity();
         assert!(matches!(
-            encode_developer_egress_broker_bootstrap(Uuid::nil(), generation, &[1; 32]),
+            encode_egress_broker_bootstrap(
+                Uuid::nil(),
+                generation,
+                &[1; 32],
+                &CompiledPolicy::developer_baseline()
+            ),
             Err(EgressBrokerProcessError::InvalidIdentity)
         ));
         assert!(matches!(
-            encode_developer_egress_broker_bootstrap(environment_id, 0, &[1; 32]),
+            encode_egress_broker_bootstrap(
+                environment_id,
+                0,
+                &[1; 32],
+                &CompiledPolicy::developer_baseline()
+            ),
             Err(EgressBrokerProcessError::InvalidIdentity)
         ));
         assert!(matches!(
-            encode_developer_egress_broker_bootstrap(environment_id, generation, &[0; 32]),
+            encode_egress_broker_bootstrap(
+                environment_id,
+                generation,
+                &[0; 32],
+                &CompiledPolicy::developer_baseline()
+            ),
             Err(EgressBrokerProcessError::InvalidBootstrap)
         ));
         let policy = CompiledPolicy::developer_baseline();
         let mut bytes =
-            encode_developer_egress_broker_bootstrap(environment_id, generation, &[1; 32]).unwrap();
+            encode_egress_broker_bootstrap(environment_id, generation, &[1; 32], &policy).unwrap();
         bytes[0] ^= 1;
         assert!(matches!(
             decode_bootstrap(bytes.as_ref(), environment_id, generation, &policy),

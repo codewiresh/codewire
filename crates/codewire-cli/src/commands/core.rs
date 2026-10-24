@@ -340,6 +340,7 @@ pub(crate) fn env_create_request_from_init_args(
         anyhow::bail!("--branch requires a repo URL");
     }
     let env_args = EnvCreateArgs {
+        policy: None,
         environment_type: EnvironmentTypeArg::Sandbox,
         repo_urls: args.repo_urls.clone(),
         preset_slug: args.preset_slug.clone(),

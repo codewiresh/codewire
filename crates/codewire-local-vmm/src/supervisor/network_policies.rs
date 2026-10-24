@@ -7,10 +7,72 @@ use codewire_egress_policy::reference::{PolicyId, PolicyName, PolicyReferenceErr
 use codewire_egress_policy::typed::{AllowRule, AllowTarget};
 use tonic::Status;
 
+use codewire_egress_policy::BuiltinPolicy;
+use codewire_egress_policy::reference::{PolicyReference, PolicyStore};
+
 use crate::control::v1;
 use crate::network_policy_store::{
-    NetworkPolicyStore, NetworkPolicyStoreError, PolicyBase, PolicySelector, StoredPolicy,
+    NetworkPolicyStore, NetworkPolicyStoreError, PolicyBase, PolicySelection, PolicySelector,
+    StoredPolicy,
 };
+
+/// An environment's policy reference as a selection: `None` for `open` or
+/// an empty reference.
+pub(crate) fn selection_from_reference(reference: &str) -> Result<Option<PolicySelection>, Status> {
+    if reference.is_empty() {
+        return Ok(None);
+    }
+    let parsed = PolicyReference::parse(reference).map_err(|error| {
+        Status::invalid_argument(format!("network policy {reference:?}: {error}"))
+    })?;
+    match parsed {
+        PolicyReference::Builtin(BuiltinPolicy::Open) => Ok(None),
+        PolicyReference::Builtin(BuiltinPolicy::Locked) => Ok(Some(PolicySelection::Locked)),
+        PolicyReference::Name {
+            store: Some(PolicyStore::Platform),
+            ..
+        }
+        | PolicyReference::Id {
+            store: PolicyStore::Platform,
+            ..
+        } => Err(Status::failed_precondition(
+            "platform network policies are not available yet; select a policy on this host",
+        )),
+        PolicyReference::Name { name, .. } => {
+            Ok(Some(PolicySelection::Stored(PolicySelector::Name(name))))
+        }
+        PolicyReference::Id { id, .. } => Ok(Some(PolicySelection::Stored(PolicySelector::Id(id)))),
+    }
+}
+
+/// Fail when `reference` names a policy this host does not have.
+pub(crate) fn check_selectable(store: &NetworkPolicyStore, reference: &str) -> Result<(), Status> {
+    if let Some(PolicySelection::Stored(selector)) = selection_from_reference(reference)? {
+        store.get(&selector, None).map_err(status)?;
+    }
+    Ok(())
+}
+
+/// A stored selection's `Network policy` status for an environment.
+pub(crate) fn status_proto(
+    store: &NetworkPolicyStore,
+    environment_id: uuid::Uuid,
+    running: bool,
+) -> Result<v1::EnvironmentNetworkPolicy, Status> {
+    let policy = store.environment_policy(environment_id).map_err(status)?;
+    let enforced = policy.enforced.filter(|_| running);
+    Ok(v1::EnvironmentNetworkPolicy {
+        reference: policy.selected.reference(),
+        name: policy.selected.display_name(),
+        revision: policy.selected.revision().unwrap_or(0),
+        digest: policy.selected.compile().digest().to_hex(),
+        enforced_revision: enforced.and_then(|(revision, _)| revision).unwrap_or(0),
+        enforced_digest: enforced
+            .map(|(_, digest)| digest.to_hex())
+            .unwrap_or_default(),
+        restart_required: running && policy.enforcement_is_stale(),
+    })
+}
 
 /// At most this many rules, or targets to remove, in one request.
 const MAX_REQUEST_RULES: usize = codewire_egress_policy::typed::MAX_ALLOW_RULES;
@@ -81,15 +143,16 @@ pub(super) fn update(
         .map_err(status)
 }
 
-/// Delete a policy unless `selected_by` names an environment that selects it.
+/// Delete a policy unless an environment selects it; `names` maps the
+/// selecting environments' ids to their names for the refusal.
 pub(super) fn delete(
     store: &NetworkPolicyStore,
     selector: v1::NetworkPolicySelector,
-    selected_by: impl FnOnce(&PolicyId) -> Vec<String>,
+    names: impl FnOnce(&[uuid::Uuid]) -> Vec<String>,
 ) -> Result<v1::NetworkPolicy, Status> {
     let selector = selector_from(Some(selector))?;
     store
-        .delete(&selector, selected_by)
+        .delete(&selector, names)
         .map(|stored| policy_proto(&stored))
         .map_err(status)
 }
@@ -293,6 +356,102 @@ mod tests {
     }
 
     #[test]
+    fn a_reference_selects_a_built_in_or_a_policy_on_this_host() {
+        use crate::network_policy_store::PolicySelection;
+        assert_eq!(selection_from_reference("").unwrap(), None);
+        assert_eq!(selection_from_reference("open").unwrap(), None);
+        assert_eq!(
+            selection_from_reference("locked").unwrap(),
+            Some(PolicySelection::Locked)
+        );
+        for reference in ["work", "local:work"] {
+            assert!(matches!(
+                selection_from_reference(reference).unwrap(),
+                Some(PolicySelection::Stored(PolicySelector::Name(_)))
+            ));
+        }
+        assert!(matches!(
+            selection_from_reference("local:id:3f2a7c1e-9b4d-4c2a-8e1f-0a1b2c3d4e5f").unwrap(),
+            Some(PolicySelection::Stored(PolicySelector::Id(_)))
+        ));
+        let platform = selection_from_reference("platform:work").unwrap_err();
+        assert_eq!(platform.code(), tonic::Code::FailedPrecondition);
+        assert!(platform.message().contains("not available yet"));
+        assert_eq!(
+            selection_from_reference("Work!").unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+
+        let store = NetworkPolicyStore::in_memory().unwrap();
+        assert_eq!(
+            check_selectable(&store, "work").unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+        assert!(check_selectable(&store, "locked").is_ok());
+    }
+
+    #[test]
+    fn the_status_says_when_a_running_vm_enforces_an_older_revision() {
+        use crate::network_policy_store::PolicySelection;
+        let store = NetworkPolicyStore::in_memory().unwrap();
+        create(
+            &store,
+            v1::CreateNetworkPolicyRequest {
+                name: "work".to_owned(),
+                from: None,
+                allow: vec![rule("github.com", &[443])],
+            },
+        )
+        .unwrap();
+        let environment = uuid::Uuid::new_v4();
+        let open = status_proto(&store, environment, true).unwrap();
+        assert_eq!((open.name.as_str(), open.restart_required), ("open", false));
+
+        let selected = store
+            .select(
+                environment,
+                Some(&PolicySelection::Stored(PolicySelector::Name(
+                    PolicyName::parse("work").unwrap(),
+                ))),
+            )
+            .unwrap();
+        store.record_enforced(environment, &selected).unwrap();
+        let running = status_proto(&store, environment, true).unwrap();
+        assert_eq!(
+            (
+                running.revision,
+                running.enforced_revision,
+                running.restart_required
+            ),
+            (1, 1, false)
+        );
+        update(
+            &store,
+            v1::UpdateNetworkPolicyRequest {
+                policy: by_name("work"),
+                allow: vec![rule("pypi.org", &[443])],
+                remove: vec![],
+            },
+        )
+        .unwrap();
+        let stale = status_proto(&store, environment, true).unwrap();
+        assert_eq!(
+            (
+                stale.revision,
+                stale.enforced_revision,
+                stale.restart_required
+            ),
+            (2, 1, true)
+        );
+        // A stopped VM enforces nothing, so nothing is pending a restart.
+        let stopped = status_proto(&store, environment, false).unwrap();
+        assert_eq!(
+            (stopped.enforced_revision, stopped.restart_required),
+            (0, false)
+        );
+    }
+
+    #[test]
     fn deletion_names_the_environments_that_select_the_policy() {
         let store = NetworkPolicyStore::in_memory().unwrap();
         create(
@@ -305,9 +464,20 @@ mod tests {
         )
         .unwrap();
         let selector = by_name("work").unwrap();
+        let team = uuid::Uuid::new_v4();
+        store
+            .select(
+                team,
+                Some(&crate::network_policy_store::PolicySelection::Stored(
+                    PolicySelector::Name(PolicyName::parse("work").unwrap()),
+                )),
+            )
+            .unwrap();
+        // The names come from the caller; the store's own lookup decides.
         let error = delete(&store, selector.clone(), |_| vec!["team".to_owned()]).unwrap_err();
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
         assert!(error.message().contains("selected by team"));
+        store.select(team, None).unwrap();
         assert_eq!(
             delete(&store, selector, |_| Vec::new()).unwrap().name,
             "work"

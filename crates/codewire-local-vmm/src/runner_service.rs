@@ -54,7 +54,9 @@ const RUNNER_WATCH_BUFFER: usize = 8;
 // message layout itself remains wire-compatible.
 // 6: direct shares carry vm_only paths into the digest-bound guest plan.
 // 7: those entries are patterns the guest expands at every boot.
-const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 7;
+// 8: StartVmRequest.network_policy_document selects the policy the egress
+//    broker enforces (#2537); an older runner would enforce `open` instead.
+const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 8;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
@@ -1138,6 +1140,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             None,
             state.cw_runtime_catalog_generation(),
         )?;
+        let network_policy = start_network_policy(&request.network_policy_document)?;
         let prepared = match state
             .runner
             .prepare(CreateVmRequest {
@@ -1160,6 +1163,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 environment_projection_sha256,
                 managed_credential_clients,
                 cw_runtime_catalog_generation,
+                network_policy,
             })
             .await
         {
@@ -1852,6 +1856,23 @@ fn map_host_port_error(error: RunnerError) -> Status {
         RunnerError::InvalidRequest => Status::invalid_argument("invalid host-port bindings"),
         _ => Status::internal("host-port update failed"),
     }
+}
+
+/// The policy a boot's egress broker enforces: the selected revision's
+/// canonical document, or `open` when none is selected (#2537).
+fn start_network_policy(document: &[u8]) -> Result<codewire_egress_policy::CompiledPolicy, Status> {
+    if document.is_empty() {
+        return Ok(codewire_egress_policy::CompiledPolicy::developer_baseline());
+    }
+    if document.len() > codewire_egress_policy::MAX_POLICY_DOCUMENT_BYTES {
+        return Err(Status::invalid_argument(
+            "network policy document is too large",
+        ));
+    }
+    let document: codewire_egress_policy::PolicyDocument = serde_json::from_slice(document)
+        .map_err(|_| Status::invalid_argument("network policy document is invalid"))?;
+    codewire_egress_policy::CompiledPolicy::compile(document)
+        .map_err(|_| Status::invalid_argument("network policy document is invalid"))
 }
 
 fn map_start_error(error: RunnerError) -> Status {

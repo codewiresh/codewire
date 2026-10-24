@@ -268,6 +268,34 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    /// Fails before contacting a supervisor older than protocol 17, which
+    /// would ignore a selection and enforce `open`.
+    pub fn require_network_policy_selection(&self) -> Result<(), Status> {
+        if self.supports(SupervisorFeature::NetworkPolicySelection) {
+            Ok(())
+        } else {
+            Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which cannot select a network policy; `cw upgrade --vms` moves them to this cw once they are idle",
+            ))
+        }
+    }
+
+    pub async fn update_environment_network_policy(
+        &mut self,
+        name: &str,
+        network_policy: &str,
+    ) -> Result<v1::Environment, Status> {
+        self.require_network_policy_selection()?;
+        Ok(self
+            .inner
+            .update_environment_network_policy(v1::UpdateEnvironmentNetworkPolicyRequest {
+                name: name.to_owned(),
+                network_policy: network_policy.to_owned(),
+            })
+            .await?
+            .into_inner())
+    }
+
     pub async fn delete_network_policy(
         &mut self,
         selector: v1::NetworkPolicySelector,

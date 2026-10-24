@@ -21,7 +21,7 @@ use codewire_egress_broker::ipc::{
     BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS, BrokerIpcBinding, BrokerIpcClient,
     BrokerIpcDnsResponse, BrokerIpcError, BrokerIpcKey,
 };
-use codewire_egress_policy::CompiledPolicy;
+use codewire_egress_policy::PolicyDigest;
 use codewire_netstack::{DnsAnswer, DnsQuestion, DnsRecordType};
 use codewire_vmm_guest_probe::{NETWORK_KEY_LEN, NetworkKey};
 use tokio::io::unix::AsyncFd;
@@ -667,6 +667,7 @@ pub fn encode_worker_bootstrap(
 /// Encode the product bootstrap containing one generation network key, one
 /// policy digest, separate non-provider ingress/broker HMAC keys, and the
 /// immutable Mesh guest-port allowlist.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_product_worker_bootstrap(
     vm_id: Uuid,
     generation: u64,
@@ -675,6 +676,7 @@ pub fn encode_product_worker_bootstrap(
     host_port_key: &[u8; HOST_PORT_CONTROL_KEY_LEN],
     mesh_ingress_key: &[u8; MESH_INGRESS_CONTROL_KEY_LEN],
     mesh_ingress_ports: &[u16],
+    policy_digest: PolicyDigest,
 ) -> Result<Zeroizing<[u8; PRODUCT_BOOTSTRAP_LEN]>, NetworkWorkerError> {
     validate_identity(vm_id, generation)?;
     if broker_key.iter().all(|byte| *byte == 0)
@@ -684,14 +686,13 @@ pub fn encode_product_worker_bootstrap(
     {
         return Err(NetworkWorkerError::InvalidBootstrap);
     }
-    let policy = CompiledPolicy::developer_baseline();
     let mut bytes = Zeroizing::new([0_u8; PRODUCT_BOOTSTRAP_LEN]);
     bytes[..8].copy_from_slice(PRODUCT_BOOTSTRAP_MAGIC);
     bytes[8..24].copy_from_slice(vm_id.as_bytes());
     bytes[24..32].copy_from_slice(&generation.to_le_bytes());
     network_key.with_bytes(|key| bytes[32..64].copy_from_slice(key));
     bytes[PRODUCT_POLICY_DIGEST_OFFSET..PRODUCT_BROKER_KEY_OFFSET]
-        .copy_from_slice(policy.digest().as_bytes());
+        .copy_from_slice(policy_digest.as_bytes());
     bytes[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_HOST_PORT_KEY_OFFSET].copy_from_slice(broker_key);
     bytes[PRODUCT_HOST_PORT_KEY_OFFSET..PRODUCT_MESH_INGRESS_KEY_OFFSET]
         .copy_from_slice(host_port_key);
@@ -1543,12 +1544,17 @@ fn decode_product_worker_bootstrap(
     network_key.copy_from_slice(&bytes[32..64]);
     let network_key = NetworkKey::from_derived_bytes(*network_key)
         .map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
-    let policy = CompiledPolicy::developer_baseline();
-    if bytes[PRODUCT_POLICY_DIGEST_OFFSET..PRODUCT_BROKER_KEY_OFFSET] != *policy.digest().as_bytes()
-    {
+    // The selected policy's digest (#2537). The worker enforces nothing; it
+    // binds every broker request to the digest the broker itself checked.
+    let policy_digest = PolicyDigest::from_bytes(
+        bytes[PRODUCT_POLICY_DIGEST_OFFSET..PRODUCT_BROKER_KEY_OFFSET]
+            .try_into()
+            .expect("fixed product worker policy digest"),
+    );
+    if policy_digest.as_bytes().iter().all(|byte| *byte == 0) {
         return Err(NetworkWorkerError::InvalidBootstrap);
     }
-    let broker_binding = BrokerIpcBinding::new(vm_id, generation, policy.digest())
+    let broker_binding = BrokerIpcBinding::new(vm_id, generation, policy_digest)
         .map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
     let mut broker_key = Zeroizing::new([0_u8; BROKER_IPC_KEY_LEN]);
     broker_key.copy_from_slice(&bytes[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_HOST_PORT_KEY_OFFSET]);
@@ -1748,6 +1754,7 @@ impl NetworkWorkerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codewire_egress_policy::CompiledPolicy;
     use std::io::Write as _;
     use std::net::Ipv6Addr;
     use std::sync::Mutex as StdMutex;
@@ -2217,6 +2224,7 @@ mod tests {
             &host_port_key,
             &mesh_ingress_key,
             &mesh_ingress_ports,
+            CompiledPolicy::developer_baseline().digest(),
         )
         .unwrap();
         let decoded = decode_product_worker_bootstrap(bytes.as_ref(), vm_id, generation).unwrap();
@@ -2234,9 +2242,19 @@ mod tests {
         assert_eq!(decoded.mesh_ingress_ports, mesh_ingress_ports);
         assert!(decode_product_worker_bootstrap(bytes.as_ref(), vm_id, generation + 1).is_err());
 
-        let mut wrong_policy = bytes.clone();
-        wrong_policy[PRODUCT_POLICY_DIGEST_OFFSET] ^= 1;
-        assert!(decode_product_worker_bootstrap(wrong_policy.as_ref(), vm_id, generation).is_err());
+        // The worker binds whichever selected policy the runner names; the
+        // broker, which compiles the document, refuses a mismatch (#2537).
+        let mut other_policy = bytes.clone();
+        other_policy[PRODUCT_POLICY_DIGEST_OFFSET] ^= 1;
+        let other =
+            decode_product_worker_bootstrap(other_policy.as_ref(), vm_id, generation).unwrap();
+        assert_ne!(
+            other.broker_binding.policy_digest(),
+            CompiledPolicy::developer_baseline().digest()
+        );
+        let mut zero_policy = bytes.clone();
+        zero_policy[PRODUCT_POLICY_DIGEST_OFFSET..PRODUCT_BROKER_KEY_OFFSET].fill(0);
+        assert!(decode_product_worker_bootstrap(zero_policy.as_ref(), vm_id, generation).is_err());
         let mut zero_broker_key = bytes.clone();
         zero_broker_key[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_HOST_PORT_KEY_OFFSET].fill(0);
         assert!(
@@ -2251,6 +2269,7 @@ mod tests {
                 &host_port_key,
                 &mesh_ingress_key,
                 &mesh_ingress_ports,
+                CompiledPolicy::developer_baseline().digest(),
             )
             .is_err()
         );

@@ -187,6 +187,7 @@ impl EnvironmentRecord {
             .as_ref()
             .and_then(|generation| generation.skill_snapshot.as_ref());
         v1::Environment {
+            network_policy: None,
             id: self.id.to_string(),
             name: self.name.clone(),
             state: self.state.proto() as i32,

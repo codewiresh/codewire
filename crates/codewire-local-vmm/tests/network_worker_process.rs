@@ -12,7 +12,7 @@ use codewire_local_vmm::egress_broker::{
     EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_FIRST_SESSION_FD,
     EGRESS_BROKER_HOST_ADDRESSES_FD, EGRESS_BROKER_INHERITED_SESSIONS,
     EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EgressBrokerStartupFailure,
-    encode_developer_egress_broker_bootstrap,
+    encode_egress_broker_bootstrap,
 };
 use codewire_local_vmm::host_addresses::{HostAddressSet, encode_frame};
 use codewire_local_vmm::host_port::{
@@ -283,8 +283,13 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     _host_address_control
         .write_all(&encode_frame(&HostAddressSet::default()))
         .unwrap();
-    let broker_bootstrap =
-        encode_developer_egress_broker_bootstrap(vm_id, generation, &broker_key).unwrap();
+    let broker_bootstrap = encode_egress_broker_bootstrap(
+        vm_id,
+        generation,
+        &broker_key,
+        &codewire_egress_policy::CompiledPolicy::developer_baseline(),
+    )
+    .unwrap();
     broker_parent.write_all(broker_bootstrap.as_ref()).unwrap();
     assert_eq!(
         read_status_frame(&mut broker_parent),
@@ -318,6 +323,7 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         &host_port_key,
         &mesh_ingress_key,
         &[mesh_ingress_port],
+        codewire_egress_policy::CompiledPolicy::developer_baseline().digest(),
     )
     .unwrap();
     let worker_source = worker_child_socket.as_raw_fd();

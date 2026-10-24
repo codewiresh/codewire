@@ -65,8 +65,9 @@ pub(super) fn validate_update_args(args: &EnvUpdateArgs) -> anyhow::Result<()> {
             || args.secrets.is_some()
             || args.user_secrets.is_some()
             || args.org_secrets
-            || args.profile.is_some(),
-        "select a source change with --secrets, --user-secrets, --org-secrets, --profile, --clear-secrets, or --clear-profile"
+            || args.profile.is_some()
+            || args.policy.is_some(),
+        "select a change with --secrets, --user-secrets, --org-secrets, --profile, --clear-secrets, --clear-profile, or --policy"
     );
     anyhow::ensure!(
         !(args.clear_secrets

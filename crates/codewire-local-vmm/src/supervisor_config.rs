@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 16;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 17;
 /// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
 /// update, a supervisor in [minimum, current] keeps serving its VMs; only an
 /// idle older one is replaced (`supervisor_upgrade`).
@@ -49,6 +49,10 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         16,
         "network policies (#2537): CreateNetworkPolicy, ListNetworkPolicies, GetNetworkPolicy, UpdateNetworkPolicy and DeleteNetworkPolicy over the host's policy store",
     ),
+    (
+        17,
+        "network policy selection (#2537): CreateEnvironmentRequest.network_policy, UpdateEnvironmentNetworkPolicy and Environment.network_policy; an older supervisor would ignore the selection and enforce `open`",
+    ),
 ];
 
 /// A supervisor capability newer than the minimum protocol.
@@ -60,10 +64,17 @@ pub enum SupervisorFeature {
     Ssh,
     /// The network policy RPCs.
     NetworkPolicies,
+    /// Selecting a network policy for an environment.
+    NetworkPolicySelection,
 }
 
 impl SupervisorFeature {
-    pub const ALL: [Self; 3] = [Self::Retire, Self::Ssh, Self::NetworkPolicies];
+    pub const ALL: [Self; 4] = [
+        Self::Retire,
+        Self::Ssh,
+        Self::NetworkPolicies,
+        Self::NetworkPolicySelection,
+    ];
 
     /// The protocol that introduced it.
     pub const fn since(self) -> u32 {
@@ -71,6 +82,7 @@ impl SupervisorFeature {
             Self::Retire => 12,
             Self::Ssh => 15,
             Self::NetworkPolicies => 16,
+            Self::NetworkPolicySelection => 17,
         }
     }
 }
@@ -361,7 +373,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 16);
+        assert_eq!(info.protocol_version, 17);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

@@ -143,6 +143,13 @@ impl LocalSupervisorService for ProtocolPeer {
         Err(Status::unimplemented("unused synthetic method"))
     }
 
+    async fn update_environment_network_policy(
+        &self,
+        _: Request<v1::UpdateEnvironmentNetworkPolicyRequest>,
+    ) -> Result<Response<v1::Environment>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
     async fn create_network_policy(
         &self,
         _: Request<v1::CreateNetworkPolicyRequest>,

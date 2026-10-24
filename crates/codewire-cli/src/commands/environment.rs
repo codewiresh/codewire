@@ -615,6 +615,10 @@ pub(crate) async fn handle_platform_env_command(
             }
         }
         EnvCommand::Update(args) => {
+            anyhow::ensure!(
+                args.policy.is_none(),
+                "network policies for hosted Sandboxes are not available yet; --policy applies to local VMs"
+            );
             sources::update_platform_sources(&platform, &environment_client, &org_id, args).await?;
         }
         EnvCommand::Info(args) => {
@@ -2101,6 +2105,10 @@ pub(crate) fn reject_local_create_options(args: &EnvCreateArgs) -> anyhow::Resul
             "--backend, --path, --path-mode, --spec, --docker-disk, and --no-docker require `cw create --local`"
         );
     }
+    anyhow::ensure!(
+        args.policy.is_none(),
+        "network policies for hosted Sandboxes are not available yet; --policy applies to `cw create --local`"
+    );
     Ok(())
 }
 

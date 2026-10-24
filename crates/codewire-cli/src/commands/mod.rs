@@ -1200,6 +1200,12 @@ pub(crate) struct EnvCreateArgs {
     network: Option<String>,
     #[arg(long, help = "Do not join the selected private mesh network")]
     no_network: bool,
+    #[arg(
+        long,
+        value_name = "POLICY",
+        help = "Network policy for outbound connections: open (default), locked, or a policy from `cw policy` (local VMs only; unrelated to --network, which joins a Mesh network)"
+    )]
+    policy: Option<String>,
     #[arg(short, long, default_value_t = true, help = "Watch startup progress")]
     follow: bool,
     #[arg(
@@ -1286,6 +1292,12 @@ pub(crate) struct EnvUpdateArgs {
     profile: Option<String>,
     #[arg(long, help = "Clear the selected credential profile")]
     clear_profile: bool,
+    #[arg(
+        long,
+        value_name = "POLICY",
+        help = "Select the network policy for outbound connections: open, locked, or a policy from `cw policy` (local VMs only; unrelated to Mesh networks)"
+    )]
+    policy: Option<String>,
     #[arg(short, long, help = "Apply without the confirmation prompt")]
     yes: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]

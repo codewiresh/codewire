@@ -682,7 +682,13 @@ pub(crate) async fn create_native_environment(
         platform_source_authority: selected.platform,
         local_mounts,
         implicit_vm_only,
+        network_policy: args.policy.clone().unwrap_or_default(),
     };
+    if !request.network_policy.is_empty() {
+        client
+            .require_network_policy_selection()
+            .map_err(|status| anyhow::anyhow!("{}", status.message()))?;
+    }
     crate::commands::lifecycle_output::print_context(
         &context.summary(&request.name, vcpus, memory_mib, disk_bytes),
         caps,
@@ -1050,6 +1056,16 @@ pub(crate) async fn handle_native_environment_update(
 ) -> anyhow::Result<()> {
     sources::validate_update_args(&args)?;
     let mut supervisor = native_boot_client().await?;
+    if let Some(policy) = args.policy.as_deref() {
+        let updated = supervisor
+            .update_environment_network_policy(&args.environment, policy)
+            .await
+            .map_err(native_status)?;
+        print_network_policy_update(&updated, args.output)?;
+        if !sources::selects_sources(&args) {
+            return Ok(());
+        }
+    }
     let environment = supervisor
         .get(&args.environment)
         .await
@@ -1893,6 +1909,8 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) ports: Vec<NativeHostPortView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) network: Option<String>,
+    /// The `Network policy:` line (#2537); unrelated to the Mesh network.
+    pub(crate) network_policy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error_code: Option<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -1952,8 +1970,70 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
                 .then_some(environment.access_profile_revision),
             generation: environment.generation,
             source_selection: sources::source_view(environment)?,
+            network_policy: environment.network_policy.as_ref().map(network_policy_text),
         })
     }
+}
+
+/// `work · rev 3`, then what a running VM enforces when that differs:
+/// `work · rev 4 · enforces rev 3 until restarted`.
+pub(crate) fn network_policy_text(policy: &v1::EnvironmentNetworkPolicy) -> String {
+    let selected = if policy.revision > 0 {
+        format!("{} · rev {}", policy.name, policy.revision)
+    } else {
+        policy.name.clone()
+    };
+    if !policy.restart_required {
+        return selected;
+    }
+    let enforced = if policy.enforced_revision > 0 {
+        format!("rev {}", policy.enforced_revision)
+    } else {
+        "an earlier selection".to_owned()
+    };
+    format!("{selected} · enforces {enforced} until restarted")
+}
+
+/// What `cw update ENV --policy` changed.
+pub(crate) fn print_network_policy_update(
+    environment: &v1::Environment,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let policy = environment
+        .network_policy
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("the supervisor did not report the network policy"))?;
+    match output {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "environment": environment.name,
+                "network_policy": {
+                    "reference": policy.reference,
+                    "name": policy.name,
+                    "revision": policy.revision,
+                    "digest": policy.digest,
+                    "enforced_revision": policy.enforced_revision,
+                    "enforced_digest": policy.enforced_digest,
+                    "restart_required": policy.restart_required,
+                },
+            }))?
+        ),
+        OutputFormat::Text => {
+            println!(
+                "Network policy for {}: {}",
+                environment.name,
+                network_policy_text(policy)
+            );
+            if policy.restart_required {
+                println!(
+                    "It applies at the next start: `cw restart {}`",
+                    environment.name
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn format_native_environment(
@@ -2001,6 +2081,9 @@ fn format_native_environment(
     }
     if let Some(network) = &view.network {
         output.push_str(&format!("Network:     {network}\n"));
+    }
+    if let Some(network_policy) = &view.network_policy {
+        output.push_str(&format!("Network policy: {network_policy}\n"));
     }
     if let Some(error_code) = &view.error_code {
         output.push_str(&format!("Error:       {error_code}\n"));
@@ -5364,6 +5447,7 @@ working_directory: /workspace/github
                 guest_port: 8_080,
             }],
             network: Some("mesh-dev".to_owned()),
+            network_policy: Some("work · rev 3".to_owned()),
             error_code: None,
             access_profile: "user/work".to_owned(),
             access_profile_revision: Some(2),
@@ -5374,6 +5458,7 @@ working_directory: /workspace/github
         let output = format_native_environment(&view, None, &[]);
         assert!(output.contains("Port:        127.0.0.1:18080 -> 8080\n"));
         assert!(output.contains("Network:     mesh-dev\n"));
+        assert!(output.contains("Network policy: work · rev 3\n"));
         assert!(output.contains("Access:      user/work (revision 2)\n"));
         assert!(output.contains("Docker:      8Gi\n"));
         assert!(!output.contains("Install:"));
@@ -5431,6 +5516,34 @@ working_directory: /workspace/github
         assert_eq!(
             format_native_environment_access(&none),
             "Environment:    dev\nPlacement:      local\nAccess profile: none\n"
+        );
+    }
+
+    #[test]
+    fn the_network_policy_line_names_what_a_running_vm_still_enforces() {
+        let policy = |name: &str, revision, enforced_revision, restart_required| {
+            v1::EnvironmentNetworkPolicy {
+                reference: String::new(),
+                name: name.to_owned(),
+                revision,
+                digest: String::new(),
+                enforced_revision,
+                enforced_digest: String::new(),
+                restart_required,
+            }
+        };
+        assert_eq!(network_policy_text(&policy("open", 0, 0, false)), "open");
+        assert_eq!(
+            network_policy_text(&policy("work", 3, 3, false)),
+            "work · rev 3"
+        );
+        assert_eq!(
+            network_policy_text(&policy("work", 4, 3, true)),
+            "work · rev 4 · enforces rev 3 until restarted"
+        );
+        assert_eq!(
+            network_policy_text(&policy("locked", 0, 0, true)),
+            "locked · enforces an earlier selection until restarted"
         );
     }
 }

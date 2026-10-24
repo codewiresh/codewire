@@ -141,8 +141,19 @@ more ports. Without a port it allows 22, 80 and 443. Private, loopback,
 link-local and metadata destinations can never be allowed. `check` judges a
 name by its lookup and its dial port, for a name that answers public addresses.
 
-Selecting a policy for a local VM comes next; until then every local VM keeps
-using `open`.
+A local VM selects a policy at create, and `cw update` changes it. A VM with
+no selection uses `open`:
+
+```sh
+cw create --local --policy work --path .
+cw update team --policy locked     # applies at the next start
+cw info team                       # Network policy: locked · enforces rev 3 of work until restarted
+```
+
+Each start enforces the selected policy's current revision. An edit to a
+policy, or a new selection, applies to a running VM when it restarts.
+`--policy` is unrelated to `--network`, which joins a Mesh network. A policy an
+environment selects cannot be deleted.
 
 ## SSH keys in a local VM
 

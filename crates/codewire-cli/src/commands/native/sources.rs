@@ -108,16 +108,21 @@ fn storage_placement(value: StoragePlacementArg) -> StoragePlacement {
     }
 }
 
+/// Whether `args` changes the environment's secrets or credential profile.
+pub(super) fn selects_sources(args: &EnvUpdateArgs) -> bool {
+    args.clear_secrets
+        || args.clear_profile
+        || args.secrets.is_some()
+        || args.user_secrets.is_some()
+        || args.org_secrets
+        || args.profile.is_some()
+}
+
 pub(super) fn validate_update_args(args: &EnvUpdateArgs) -> anyhow::Result<()> {
     trimmed_required(&args.environment, "environment")?;
     anyhow::ensure!(
-        args.clear_secrets
-            || args.clear_profile
-            || args.secrets.is_some()
-            || args.user_secrets.is_some()
-            || args.org_secrets
-            || args.profile.is_some(),
-        "select --secrets, --profile, --user-secrets, --org-secrets, --clear-secrets, or --clear-profile"
+        selects_sources(args) || args.policy.is_some(),
+        "select --secrets, --profile, --user-secrets, --org-secrets, --clear-secrets, --clear-profile, or --policy"
     );
     anyhow::ensure!(
         !(args.clear_secrets

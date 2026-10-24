@@ -525,6 +525,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         selections: 0,
         operation_progress: operation_progress.clone(),
         log: log.map(Arc::new),
+        network_policies: Arc::clone(&network_policies),
         _lock: lock,
     };
     #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
@@ -773,6 +774,8 @@ struct SupervisorCore {
     collecting: bool,
     // The bounded owner-only log its spawner gave this supervisor, if any.
     log: Option<Arc<DiagnosticLog>>,
+    /// The host's network policies and each environment's selection (#2537).
+    network_policies: Arc<crate::network_policy_store::NetworkPolicyStore>,
     _lock: SupervisorLock,
 }
 
@@ -1542,6 +1545,14 @@ impl SupervisorCore {
     fn environment_proto(&self, name: &str) -> Result<v1::Environment, SupervisorError> {
         let environment = self.environment(name)?;
         let mut projected = environment.proto(self.selected(name));
+        projected.network_policy = Some(
+            network_policies::status_proto(
+                &self.network_policies,
+                environment.id,
+                environment.state == StoredEnvironmentState::Running,
+            )
+            .map_err(|status| SupervisorError::NetworkPolicyStore(status.message().to_owned()))?,
+        );
         if self.incompatible_runners.contains(&environment.id) {
             projected.error_code = "runner_protocol_unsupported".to_owned();
         } else if projected.error_code.is_empty()
@@ -2634,6 +2645,19 @@ impl Supervisor {
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
             match effect {
                 LifecycleEffect::RecordEnvironment => {
+                    // The selection is recorded first, so the first boot
+                    // enforces it; a failed create's rollback clears it.
+                    let selection =
+                        network_policies::selection_from_reference(&request.network_policy)
+                            .map_err(|status| {
+                                SupervisorError::NetworkPolicySelection(status.message().to_owned())
+                            })?;
+                    self.core()
+                        .network_policies
+                        .select(environment_id, selection.as_ref())
+                        .map_err(|error| {
+                            SupervisorError::NetworkPolicySelection(error.to_string())
+                        })?;
                     let recorded = |environment: &EnvironmentRecord| {
                         Ok::<_, SupervisorError>(
                             environment.id == environment_id
@@ -3266,6 +3290,11 @@ impl Supervisor {
                 &diagnostic_log::runner_log_name(environment_id),
             );
             ssh::remove_host_key(&self.config.root, environment_id);
+            // A deleted environment selects nothing, so its policy can go too.
+            self.core()
+                .network_policies
+                .clear_environment(environment_id)
+                .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?;
         }
         Ok(())
     }
@@ -4483,7 +4512,23 @@ impl Supervisor {
             } else {
                 String::new()
             };
+        // The selected network policy at its current revision (#2537): the
+        // egress broker of this boot enforces exactly this document.
+        let network_policy = self
+            .core()
+            .network_policies
+            .environment_policy(environment.id)
+            .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?
+            .selected;
+        let network_policy_document = match &network_policy {
+            crate::network_policy_store::SelectedPolicy::Open => Vec::new(),
+            selected => selected
+                .compile()
+                .canonical_json()
+                .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?,
+        };
         let start_request = v1::StartVmRequest {
+            network_policy_document,
             cw_runtime_catalog_generation: expected_cw_runtime_generation.clone(),
             environment_id: environment.id.to_string(),
             generation,
@@ -4615,6 +4660,10 @@ impl Supervisor {
             let _ = client.stop().await;
             return Err(SupervisorError::InvalidRunnerResponse);
         }
+        self.core()
+            .network_policies
+            .record_enforced(environment.id, &network_policy)
+            .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?;
         if cw_runtime.is_some() {
             let confirmation = match client.daemon_access().await {
                 Ok(access) => runtime::confirm_boot(self, name, generation, access).await,
@@ -5859,6 +5908,7 @@ impl LocalSupervisorService for SupervisorRpc {
         request.mesh =
             canonicalize_mesh_attachment_proto(request.mesh.as_ref()).map_err(Status::from)?;
         let request_id = validate_create(&request).map_err(Status::from)?;
+        network_policies::check_selectable(&self.network_policies, &request.network_policy)?;
         self.start_drains()?;
         let lease = self
             .supervisor
@@ -7012,6 +7062,40 @@ impl LocalSupervisorService for SupervisorRpc {
         }))
     }
 
+    /// Select the network policy an environment enforces from its next start
+    /// (#2537 B1). A running VM keeps the revision it started with.
+    async fn update_environment_network_policy(
+        &self,
+        request: Request<v1::UpdateEnvironmentNetworkPolicyRequest>,
+    ) -> Result<Response<v1::Environment>, Status> {
+        let request = request.into_inner();
+        let selection = network_policies::selection_from_reference(&request.network_policy)?;
+        let _lease = self
+            .supervisor
+            .quiet_lease(&request.name)
+            .await
+            .map_err(Status::from)?;
+        let environment_id = self
+            .supervisor
+            .environment(&request.name)
+            .map_err(Status::from)?
+            .id;
+        self.network_policies
+            .select(environment_id, selection.as_ref())
+            .map_err(|error| match error {
+                crate::network_policy_store::NetworkPolicyStoreError::NotFound(_) => {
+                    Status::not_found(error.to_string())
+                }
+                other => Status::failed_precondition(other.to_string()),
+            })?;
+        Ok(Response::new(
+            self.supervisor
+                .core()
+                .environment_proto(&request.name)
+                .map_err(Status::from)?,
+        ))
+    }
+
     async fn create_network_policy(
         &self,
         request: Request<v1::CreateNetworkPolicyRequest>,
@@ -7044,9 +7128,16 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         request: Request<v1::NetworkPolicySelector>,
     ) -> Result<Response<v1::NetworkPolicy>, Status> {
-        // No environment selects a policy until selection lands (#2537 B1).
-        network_policies::delete(&self.network_policies, request.into_inner(), |_| Vec::new())
-            .map(Response::new)
+        network_policies::delete(&self.network_policies, request.into_inner(), |selecting| {
+            let core = self.supervisor.core();
+            core.state
+                .environments
+                .iter()
+                .filter(|(_, environment)| selecting.contains(&environment.id))
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .map(Response::new)
     }
 
     /// Hand this state root to a newer cw's supervisor (supervisor_handoff).
@@ -8160,7 +8251,7 @@ fn create_operation_payload(
         .as_ref()
         .map(PlatformSourceAuthority::from_proto)
         .transpose()?;
-    Ok(serde_json::json!({
+    let mut payload = serde_json::json!({
         "name": request.name,
         "source_path": request.source_path,
         "vcpus": request.vcpus,
@@ -8177,7 +8268,19 @@ fn create_operation_payload(
         "access_profile_reference": request.access_profile_reference,
         "platform_source_authority": platform_source_authority,
         "workspace_plan": workspace_plan,
-    }))
+    });
+    // Only a selection adds the key (#2537), so a create journaled before
+    // selections existed replays unchanged and selects `open`.
+    if !request.network_policy.is_empty() {
+        payload
+            .as_object_mut()
+            .expect("create payload is an object")
+            .insert(
+                "network_policy".to_owned(),
+                request.network_policy.clone().into(),
+            );
+    }
+    Ok(payload)
 }
 
 fn create_request_from_operation(
@@ -8189,8 +8292,18 @@ fn create_request_from_operation(
     let fields = operation
         .payload
         .as_object()
-        .filter(|fields| fields.len() == 16)
+        .filter(|fields| {
+            fields.len() == 16 || (fields.len() == 17 && fields.contains_key("network_policy"))
+        })
         .ok_or(SupervisorError::InvalidState)?;
+    let network_policy = match fields.get("network_policy") {
+        None => String::new(),
+        Some(value) => value
+            .as_str()
+            .filter(|reference| !reference.is_empty())
+            .ok_or(SupervisorError::InvalidState)?
+            .to_owned(),
+    };
     let name = fields
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -8291,6 +8404,7 @@ fn create_request_from_operation(
             .unwrap_or_default()
     };
     let request = v1::CreateEnvironmentRequest {
+        network_policy,
         name,
         source_path,
         vcpus,
@@ -9535,6 +9649,9 @@ impl From<SupervisorError> for Status {
             }
             SupervisorError::RetireRefused(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::NetworkPolicyStore(_) => Status::internal(error.to_string()),
+            SupervisorError::NetworkPolicySelection(_) => {
+                Status::failed_precondition(error.to_string())
+            }
             SupervisorError::Workspace(workspace) => {
                 Status::failed_precondition(workspace.to_string())
             }
@@ -9682,6 +9799,8 @@ pub enum SupervisorError {
     RetireRefused(String),
     #[error("the local network policy store could not be opened: {0}")]
     NetworkPolicyStore(String),
+    #[error("{0}")]
+    NetworkPolicySelection(String),
     #[error("spawn native environment runner failed")]
     SpawnRunner,
     #[error("native environment runner startup timed out")]
@@ -9918,6 +10037,7 @@ fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
         SupervisorError::Retiring => "supervisor_retiring",
         SupervisorError::RetireRefused(_) => "supervisor_retire_refused",
         SupervisorError::NetworkPolicyStore(_) => "supervisor_network_policy_store",
+        SupervisorError::NetworkPolicySelection(_) => "network_policy_selection",
         SupervisorError::SpawnRunner => "runner_spawn",
         SupervisorError::RunnerStartTimeout => "runner_start_timeout",
         SupervisorError::RunnerAdoption => "runner_adoption",
@@ -10643,6 +10763,9 @@ mod tests {
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
+            network_policies: Arc::new(
+                crate::network_policy_store::NetworkPolicyStore::in_memory().unwrap(),
+            ),
             _lock: lock,
         };
         (parent, core)
@@ -10883,8 +11006,7 @@ mod tests {
         let operation_progress = core.operation_progress.clone();
         let info = supervisor_info(&core.config);
         let host_keys = Arc::new(ssh::HostKeys::new(&core.config.root));
-        let network_policies =
-            Arc::new(crate::network_policy_store::NetworkPolicyStore::open(&core.root).unwrap());
+        let network_policies = Arc::clone(&core.network_policies);
         SupervisorRpc {
             info,
             supervisor: test_supervisor(core),
@@ -11211,7 +11333,7 @@ mod tests {
         );
         let live = child.capture(&executable);
         let service = TestRunnerProtocolService {
-            reply: TestRunnerProtocolReply::Version(7),
+            reply: TestRunnerProtocolReply::Version(8),
             useful_calls: Arc::new(AtomicUsize::new(0)),
             shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
             info_gate: None,
@@ -11250,7 +11372,7 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = parent.path().join("unresponsive.sock");
         let (identity, calls, stop, server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(7));
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(8));
         let executable = fs::canonicalize("/bin/sleep").unwrap();
         let mut child = ShutdownTestChild(
             crate::test_child(&mut Command::new(&executable))
@@ -11403,6 +11525,9 @@ mod tests {
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
+            network_policies: Arc::new(
+                crate::network_policy_store::NetworkPolicyStore::in_memory().unwrap(),
+            ),
             _lock: lock,
         };
         (parent, core)
@@ -13341,6 +13466,7 @@ mod tests {
             let name = format!("secret-{index}");
             let request_id = Uuid::new_v4();
             let request = v1::CreateEnvironmentRequest {
+                network_policy: String::new(),
                 implicit_vm_only: Vec::new(),
                 name: name.clone(),
                 source_path: "/workspace/source".to_owned(),
@@ -13695,6 +13821,7 @@ mod tests {
         let project_spec_json = project.canonical_json().unwrap();
         let project_spec_sha256 = format!("{:x}", Sha256::digest(&project_spec_json));
         let request = v1::CreateEnvironmentRequest {
+            network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "dev".to_owned(),
             source_path: "/workspace/source".to_owned(),
@@ -13761,8 +13888,26 @@ mod tests {
         let environment_id = operation.environment_id.unwrap();
         assert_eq!(
             create_request_from_operation(&operation).unwrap(),
-            (request, workspace_plan)
+            (request.clone(), workspace_plan.clone())
         );
+        // #2537: a selection is journaled and replays; without one the
+        // payload keeps its earlier shape, so older journals still replay.
+        assert!(operation.payload.get("network_policy").is_none());
+        let selecting = v1::CreateEnvironmentRequest {
+            network_policy: "local:work".to_owned(),
+            ..request.clone()
+        };
+        let selecting_operation = OperationRecord {
+            payload: create_operation_payload(&selecting, &workspace_plan).unwrap(),
+            ..operation.clone()
+        };
+        assert_eq!(
+            create_request_from_operation(&selecting_operation).unwrap(),
+            (selecting, workspace_plan.clone())
+        );
+        let mut empty_selection = selecting_operation.clone();
+        empty_selection.payload["network_policy"] = "".into();
+        assert!(create_request_from_operation(&empty_selection).is_err());
         let (binding, reference) = create_request_access_binding(
             &create_request_from_operation(&operation).unwrap().0,
             environment_id,
@@ -13984,6 +14129,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "copy".to_owned(),
             source_path: String::new(),
@@ -14067,6 +14213,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "copy".to_owned(),
             source_path: String::new(),
@@ -14132,6 +14279,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "direct".to_owned(),
             source_path: String::new(),
@@ -14255,6 +14403,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            network_policy: String::new(),
             implicit_vm_only: vec!["node_modules".to_owned(), ".venv".to_owned()],
             name: "copy".to_owned(),
             source_path: source.to_string_lossy().into_owned(),
@@ -14354,6 +14503,7 @@ mod tests {
         let workspace_plan = direct_workspace_plan(&source);
         let fixture = project_environment_with_access();
         let request = v1::CreateEnvironmentRequest {
+            network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "new-environment".to_owned(),
             source_path: String::new(),
@@ -14427,6 +14577,7 @@ mod tests {
         environment.workspace_plan = workspace_plan.clone();
         let environment_id = environment.id;
         let request = v1::CreateEnvironmentRequest {
+            network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "dev".to_owned(),
             source_path: String::new(),
@@ -15338,6 +15489,9 @@ mod tests {
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
+            network_policies: Arc::new(
+                crate::network_policy_store::NetworkPolicyStore::in_memory().unwrap(),
+            ),
             _lock: lock,
         };
         let core = test_supervisor(core);
@@ -16344,6 +16498,7 @@ mod tests {
         let environment_id = environment.id;
         let workspace_plan = environment.workspace_plan.clone();
         let request = v1::CreateEnvironmentRequest {
+            network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: environment.name.clone(),
             source_path: "/workspace/source".to_owned(),
@@ -18237,6 +18392,7 @@ mod tests {
         let project_spec_json = project.canonical_json().unwrap();
         let request_id = Uuid::new_v4();
         let request = v1::CreateEnvironmentRequest {
+            network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "pending".to_owned(),
             source_path: String::new(),
@@ -18879,6 +19035,9 @@ mod tests {
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
+            network_policies: Arc::new(
+                crate::network_policy_store::NetworkPolicyStore::in_memory().unwrap(),
+            ),
             _lock: lock,
         };
 
@@ -18956,6 +19115,9 @@ mod tests {
             retiring: false,
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
             log: None,
+            network_policies: Arc::new(
+                crate::network_policy_store::NetworkPolicyStore::in_memory().unwrap(),
+            ),
             _lock: lock,
         };
 
@@ -19869,6 +20031,7 @@ mod concurrency_tests {
             ));
         let environment_id = environment.id;
         let request = v1::CreateEnvironmentRequest {
+            network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: name.to_owned(),
             source_path: "/workspace/source".to_owned(),
@@ -19894,7 +20057,7 @@ mod concurrency_tests {
         let gate = RunnerInfoGate::default();
         let (socket, _calls, stop_runner, _server) = spawn_gated_test_runner_server(
             &core.config.runner_socket(environment_id),
-            TestRunnerProtocolReply::Version(7),
+            TestRunnerProtocolReply::Version(8),
             Some(gate.clone()),
         );
         attach_named_test_runner_process(core, name, socket);
@@ -20431,6 +20594,7 @@ mod concurrency_tests {
         let environment = project_environment();
         let request_id = Uuid::new_v4();
         let request = v1::CreateEnvironmentRequest {
+            network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "new".to_owned(),
             source_path: source.path().to_str().unwrap().to_owned(),

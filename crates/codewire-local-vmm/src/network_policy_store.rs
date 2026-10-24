@@ -29,7 +29,8 @@ use crate::host::path::{PathError, PrivateRoot};
 
 pub(crate) const DATABASE_FILE: &str = "network-policies.db";
 const APPLICATION_ID: i64 = 0x4357_4e50; // "CWNP"
-const SCHEMA_VERSION: i64 = 1;
+/// 1: policies and revisions. 2: which policy each environment selects.
+const SCHEMA_VERSION: i64 = 2;
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// The TCP ports a rule gets when its target names none: those `open` allows,
 /// so an allowed Git host also works over SSH.
@@ -40,7 +41,7 @@ pub const MAX_POLICIES: usize = 256;
 pub const MAX_REVISIONS: u32 = 10_000;
 
 /// `(name, CREATE statement)`, exactly as SQLite keeps them.
-const SCHEMA: [(&str, &str); 3] = [
+const SCHEMA: [(&str, &str); 4] = [
     (
         "policies",
         "CREATE TABLE policies (
@@ -66,7 +67,22 @@ const SCHEMA: [(&str, &str); 3] = [
         "CREATE TRIGGER policy_revisions_are_immutable BEFORE UPDATE ON policy_revisions
 BEGIN SELECT RAISE(ABORT, 'a policy revision is immutable'); END",
     ),
+    // An environment with no row uses `open`. A row names a stored policy,
+    // which it follows to its current revision, or a built-in; never both.
+    (
+        "environment_policies",
+        "CREATE TABLE environment_policies (
+  environment_id TEXT PRIMARY KEY NOT NULL CHECK (length(environment_id) = 36),
+  policy_id TEXT NULL REFERENCES policies(id) ON DELETE RESTRICT,
+  builtin TEXT NULL CHECK (builtin IN ('open', 'locked')),
+  enforced_revision INTEGER NULL CHECK (enforced_revision IS NULL OR enforced_revision > 0),
+  enforced_digest BLOB NULL CHECK (enforced_digest IS NULL OR length(enforced_digest) = 32),
+  CHECK ((policy_id IS NULL) != (builtin IS NULL))
+) STRICT",
+    ),
 ];
+/// The schema version 1 had: every statement but the last.
+const SCHEMA_V1_STATEMENTS: usize = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkPolicyStoreError {
@@ -148,6 +164,78 @@ impl StoredPolicy {
     /// The engine's compiled form of this revision.
     pub fn compile(&self) -> CompiledPolicy {
         self.policy.compile()
+    }
+}
+
+/// What an environment asks for: the built-in `locked` or a stored policy.
+/// `open` is the absence of a selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicySelection {
+    Locked,
+    Stored(PolicySelector),
+}
+
+/// What an environment selects, resolved: a built-in, or a stored policy at
+/// its current revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SelectedPolicy {
+    Open,
+    Locked,
+    Stored(StoredPolicy),
+}
+
+impl SelectedPolicy {
+    /// The engine form the egress broker enforces.
+    pub fn compile(&self) -> CompiledPolicy {
+        match self {
+            Self::Open => CompiledPolicy::developer_baseline(),
+            Self::Locked => TypedPolicy::default().compile(),
+            Self::Stored(stored) => stored.compile(),
+        }
+    }
+
+    /// `open`, `locked`, or the stored policy's exact `local:id:` reference.
+    pub fn reference(&self) -> String {
+        match self {
+            Self::Open => "open".to_owned(),
+            Self::Locked => "locked".to_owned(),
+            Self::Stored(stored) => format!("local:id:{}", stored.id),
+        }
+    }
+
+    /// `open`, `locked` or the stored policy's name.
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Open => "open".to_owned(),
+            Self::Locked => "locked".to_owned(),
+            Self::Stored(stored) => stored.name.to_string(),
+        }
+    }
+
+    /// The stored policy's current revision; built-ins have none.
+    pub fn revision(&self) -> Option<u32> {
+        match self {
+            Self::Stored(stored) => Some(stored.revision),
+            Self::Open | Self::Locked => None,
+        }
+    }
+}
+
+/// An environment's selection and what its running VM last started with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvironmentPolicy {
+    pub selected: SelectedPolicy,
+    /// The digest, and the stored revision if any, the egress broker of the
+    /// environment's last started boot enforces.
+    pub enforced: Option<(Option<u32>, PolicyDigest)>,
+}
+
+impl EnvironmentPolicy {
+    /// Whether the last boot enforces something other than the selection's
+    /// current revision.
+    pub fn enforcement_is_stale(&self) -> bool {
+        self.enforced
+            .is_some_and(|(_, digest)| digest != self.selected.compile().digest())
     }
 }
 
@@ -249,6 +337,8 @@ impl NetworkPolicyStore {
             }
             transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        } else if user_version == 1 {
+            upgrade_from_version_one(&transaction)?;
         }
         transaction.commit()?;
         validate_schema(&connection)?;
@@ -358,18 +448,24 @@ impl NetworkPolicyStore {
             .collect()
     }
 
-    /// Delete `selector` and every revision of it, unless `selected_by` names
-    /// an environment that selects it.
+    /// Delete `selector` and every revision of it, unless an environment
+    /// selects it: then the refusal names them, through `names`, which maps
+    /// environment ids to the names the owner knows. `names` must not use
+    /// this store.
     pub fn delete(
         &self,
         selector: &PolicySelector,
-        selected_by: impl FnOnce(&PolicyId) -> Vec<String>,
+        names: impl FnOnce(&[Uuid]) -> Vec<String>,
     ) -> Result<StoredPolicy, NetworkPolicyStoreError> {
         let mut connection = self.connection.lock().expect("policy store lock");
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = load_current(&transaction, selector)?;
-        let environments = selected_by(&current.id);
-        if !environments.is_empty() {
+        let selecting = selecting_environments(&transaction, &current.id)?;
+        if !selecting.is_empty() {
+            let mut environments = names(&selecting);
+            if environments.is_empty() {
+                environments = selecting.iter().map(Uuid::to_string).collect();
+            }
             return Err(NetworkPolicyStoreError::InUse {
                 name: current.name.to_string(),
                 environments,
@@ -384,6 +480,152 @@ impl NetworkPolicyStore {
     }
 }
 
+impl NetworkPolicyStore {
+    /// Select `selection` for `environment_id`, or `open` with `None`. The
+    /// selection follows its stored policy's current revision; what an
+    /// earlier boot enforced is kept until the next boot replaces it.
+    pub fn select(
+        &self,
+        environment_id: Uuid,
+        selection: Option<&PolicySelection>,
+    ) -> Result<SelectedPolicy, NetworkPolicyStoreError> {
+        let mut connection = self.connection.lock().expect("policy store lock");
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let id = environment_id.to_string();
+        let selected = match selection {
+            None => SelectedPolicy::Open,
+            Some(PolicySelection::Locked) => SelectedPolicy::Locked,
+            Some(PolicySelection::Stored(selector)) => {
+                SelectedPolicy::Stored(load_current(&transaction, selector)?)
+            }
+        };
+        let (policy_id, builtin) = match &selected {
+            SelectedPolicy::Open => (None, Some("open")),
+            SelectedPolicy::Locked => (None, Some("locked")),
+            SelectedPolicy::Stored(stored) => (Some(stored.id.to_string()), None),
+        };
+        transaction.execute(
+            "INSERT INTO environment_policies(environment_id, policy_id, builtin)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(environment_id) DO UPDATE SET policy_id = ?2, builtin = ?3",
+            params![id, policy_id, builtin],
+        )?;
+        transaction.commit()?;
+        Ok(selected)
+    }
+
+    /// `environment_id`'s selection, `open` when it has none.
+    pub fn environment_policy(
+        &self,
+        environment_id: Uuid,
+    ) -> Result<EnvironmentPolicy, NetworkPolicyStoreError> {
+        let connection = self.connection.lock().expect("policy store lock");
+        let row = connection
+            .query_row(
+                "SELECT policy_id, builtin, enforced_revision, enforced_digest
+                 FROM environment_policies WHERE environment_id = ?1",
+                [environment_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<u32>>(2)?,
+                        row.get::<_, Option<Vec<u8>>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((policy_id, builtin, enforced_revision, enforced_digest)) = row else {
+            return Ok(EnvironmentPolicy {
+                selected: SelectedPolicy::Open,
+                enforced: None,
+            });
+        };
+        let selected = match (policy_id, builtin.as_deref()) {
+            (Some(id), None) => SelectedPolicy::Stored(load_current(
+                &connection,
+                &PolicySelector::Id(
+                    PolicyId::parse(&id).map_err(|_| NetworkPolicyStoreError::InvalidDatabase)?,
+                ),
+            )?),
+            (None, Some("locked")) => SelectedPolicy::Locked,
+            (None, Some("open")) => SelectedPolicy::Open,
+            _ => return Err(NetworkPolicyStoreError::InvalidDatabase),
+        };
+        let enforced = enforced_digest
+            .map(|digest| {
+                <[u8; 32]>::try_from(digest.as_slice())
+                    .map(|bytes| (enforced_revision, PolicyDigest::from_bytes(bytes)))
+                    .map_err(|_| NetworkPolicyStoreError::InvalidDatabase)
+            })
+            .transpose()?;
+        Ok(EnvironmentPolicy { selected, enforced })
+    }
+
+    /// Record what `environment_id`'s just-started boot enforces.
+    pub fn record_enforced(
+        &self,
+        environment_id: Uuid,
+        selected: &SelectedPolicy,
+    ) -> Result<(), NetworkPolicyStoreError> {
+        let connection = self.connection.lock().expect("policy store lock");
+        let (policy_id, builtin) = match selected {
+            SelectedPolicy::Open => (None, Some("open")),
+            SelectedPolicy::Locked => (None, Some("locked")),
+            SelectedPolicy::Stored(stored) => (Some(stored.id.to_string()), None),
+        };
+        // An environment that never selected anything still records what its
+        // boot enforces, so a later selection can show it is not yet applied.
+        connection.execute(
+            "INSERT INTO environment_policies
+               (environment_id, policy_id, builtin, enforced_revision, enforced_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(environment_id) DO UPDATE
+               SET enforced_revision = ?4, enforced_digest = ?5",
+            params![
+                environment_id.to_string(),
+                policy_id,
+                builtin,
+                selected.revision(),
+                selected.compile().digest().as_bytes().as_slice()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forget a deleted environment's selection.
+    pub fn clear_environment(&self, environment_id: Uuid) -> Result<(), NetworkPolicyStoreError> {
+        let connection = self.connection.lock().expect("policy store lock");
+        connection.execute(
+            "DELETE FROM environment_policies WHERE environment_id = ?1",
+            [environment_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// The environments that select `policy`, by id.
+    pub fn environments_selecting(
+        &self,
+        policy: &PolicyId,
+    ) -> Result<Vec<Uuid>, NetworkPolicyStoreError> {
+        let connection = self.connection.lock().expect("policy store lock");
+        selecting_environments(&connection, policy)
+    }
+}
+
+fn selecting_environments(
+    connection: &Connection,
+    policy: &PolicyId,
+) -> Result<Vec<Uuid>, NetworkPolicyStoreError> {
+    let ids: Vec<String> = connection
+        .prepare("SELECT environment_id FROM environment_policies WHERE policy_id = ?1")?
+        .query_map([policy.as_str()], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    ids.iter()
+        .map(|id| Uuid::parse_str(id).map_err(|_| NetworkPolicyStoreError::InvalidDatabase))
+        .collect()
+}
+
 fn path_error_is_not_found(error: &PathError) -> bool {
     match error {
         #[cfg(target_os = "linux")]
@@ -393,14 +635,35 @@ fn path_error_is_not_found(error: &PathError) -> bool {
     }
 }
 
+/// Version 1 (#2537 slice A) gains the selection table, after its exact
+/// schema is checked, in one transaction.
+/// Add selections to a version 1 store, inside the transaction that
+/// decided it holds version 1. Its policies and revisions are kept.
+fn upgrade_from_version_one(connection: &Connection) -> Result<(), NetworkPolicyStoreError> {
+    validate_schema_statements(connection, 1, &SCHEMA[..SCHEMA_V1_STATEMENTS])?;
+    for (_, statement) in &SCHEMA[SCHEMA_V1_STATEMENTS..] {
+        connection.execute_batch(&format!("{statement};"))?;
+    }
+    connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
 fn validate_schema(connection: &Connection) -> Result<(), NetworkPolicyStoreError> {
+    validate_schema_statements(connection, SCHEMA_VERSION, &SCHEMA)
+}
+
+fn validate_schema_statements(
+    connection: &Connection,
+    expected_version: i64,
+    statements: &[(&str, &str)],
+) -> Result<(), NetworkPolicyStoreError> {
     let application_id: i64 =
         connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if application_id != APPLICATION_ID || version != SCHEMA_VERSION {
+    if application_id != APPLICATION_ID || version != expected_version {
         return Err(NetworkPolicyStoreError::InvalidDatabase);
     }
-    let expected: std::collections::BTreeMap<&str, &str> = SCHEMA.into_iter().collect();
+    let expected: std::collections::BTreeMap<&str, &str> = statements.iter().copied().collect();
     let mut actual = std::collections::BTreeMap::new();
     let mut statement =
         connection.prepare("SELECT name, sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'")?;
@@ -706,7 +969,14 @@ mod tests {
         store
             .update(&selector, vec![rule("pypi.org", &[443])], &[])
             .unwrap();
-        match store.delete(&selector, |_| vec!["team".to_owned()]) {
+        let team = Uuid::new_v4();
+        store
+            .select(team, Some(&PolicySelection::Stored(selector.clone())))
+            .unwrap();
+        match store.delete(&selector, |ids| {
+            assert_eq!(ids, [team]);
+            vec!["team".to_owned()]
+        }) {
             Err(NetworkPolicyStoreError::InUse { name, environments }) => {
                 assert_eq!(
                     (name.as_str(), environments),
@@ -715,6 +985,7 @@ mod tests {
             }
             other => panic!("deleted a selected policy: {other:?}"),
         }
+        store.select(team, None).unwrap();
         let deleted = store.delete(&selector, |_| Vec::new()).unwrap();
         assert_eq!(deleted.revision, 2);
         assert!(store.list().unwrap().is_empty());
@@ -772,6 +1043,144 @@ mod tests {
             NetworkPolicyStore::from_connection(claimed),
             Err(NetworkPolicyStoreError::InvalidDatabase)
         ));
+    }
+
+    #[test]
+    fn an_environment_follows_its_policy_and_knows_what_its_boot_enforces() {
+        let store = NetworkPolicyStore::in_memory().unwrap();
+        let selector = PolicySelector::Name(name("work"));
+        store
+            .create(
+                &name("work"),
+                &PolicyBase::Locked,
+                vec![rule("github.com", &[443])],
+            )
+            .unwrap();
+        let environment = Uuid::new_v4();
+        assert_eq!(
+            store.environment_policy(environment).unwrap(),
+            EnvironmentPolicy {
+                selected: SelectedPolicy::Open,
+                enforced: None
+            }
+        );
+
+        let selected = store
+            .select(
+                environment,
+                Some(&PolicySelection::Stored(selector.clone())),
+            )
+            .unwrap();
+        assert_eq!(selected.revision(), Some(1));
+        store.record_enforced(environment, &selected).unwrap();
+        let current = store.environment_policy(environment).unwrap();
+        assert!(!current.enforcement_is_stale());
+        assert_eq!(current.enforced.unwrap().0, Some(1));
+
+        // An edit moves the selection to the new revision; the running boot
+        // still enforces revision 1 until it is replaced.
+        store
+            .update(&selector, vec![rule("pypi.org", &[443])], &[])
+            .unwrap();
+        let edited = store.environment_policy(environment).unwrap();
+        assert_eq!(edited.selected.revision(), Some(2));
+        assert!(edited.enforcement_is_stale());
+        store
+            .record_enforced(environment, &edited.selected)
+            .unwrap();
+        assert!(
+            !store
+                .environment_policy(environment)
+                .unwrap()
+                .enforcement_is_stale()
+        );
+
+        // A selected policy cannot be deleted, here or by its foreign key.
+        let id = edited_id(&edited);
+        assert_eq!(store.environments_selecting(&id).unwrap(), [environment]);
+        assert!(store.delete(&selector, |_| Vec::new()).is_err());
+
+        // Built-ins: `locked` compiles to no rules, and switching to `open`
+        // keeps what the running boot enforces.
+        let locked = store
+            .select(environment, Some(&PolicySelection::Locked))
+            .unwrap();
+        assert_eq!(
+            locked.compile().digest(),
+            TypedPolicy::default().compile().digest()
+        );
+        assert!(
+            store
+                .environment_policy(environment)
+                .unwrap()
+                .enforcement_is_stale()
+        );
+        assert_eq!(
+            store.select(environment, None).unwrap(),
+            SelectedPolicy::Open
+        );
+        let open = store.environment_policy(environment).unwrap();
+        assert_eq!(open.selected, SelectedPolicy::Open);
+        assert!(open.enforcement_is_stale());
+        assert!(store.environments_selecting(&id).unwrap().is_empty());
+        store.delete(&selector, |_| Vec::new()).unwrap();
+
+        store.clear_environment(environment).unwrap();
+        assert_eq!(
+            store.environment_policy(environment).unwrap().selected,
+            SelectedPolicy::Open
+        );
+        assert!(matches!(
+            store.select(environment, Some(&PolicySelection::Stored(selector))),
+            Err(NetworkPolicyStoreError::NotFound(_))
+        ));
+    }
+
+    fn edited_id(policy: &EnvironmentPolicy) -> PolicyId {
+        match &policy.selected {
+            SelectedPolicy::Stored(stored) => stored.id.clone(),
+            other => panic!("not a stored policy: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_version_one_store_gains_selections_and_keeps_its_policies() {
+        let connection = Connection::open_in_memory().unwrap();
+        for (_, statement) in &SCHEMA[..SCHEMA_V1_STATEMENTS] {
+            connection.execute_batch(&format!("{statement};")).unwrap();
+        }
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 1_i64)
+            .unwrap();
+        let policy = TypedPolicy::default();
+        let id = PolicyId::parse(&Uuid::new_v4().to_string()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO policies(id, name, current_revision, created_unix_ms) VALUES (?1, 'work', 1, 0)",
+                [id.as_str()],
+            )
+            .unwrap();
+        insert_revision(&connection, &id, 1, &policy, 0).unwrap();
+
+        let store = NetworkPolicyStore::from_connection(connection).unwrap();
+        assert_eq!(store.list().unwrap().len(), 1);
+        let environment = Uuid::new_v4();
+        store
+            .select(
+                environment,
+                Some(&PolicySelection::Stored(PolicySelector::Id(id))),
+            )
+            .unwrap();
+        let version: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]

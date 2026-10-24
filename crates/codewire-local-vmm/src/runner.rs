@@ -1,3 +1,4 @@
+use codewire_egress_policy::CompiledPolicy;
 use std::fmt;
 use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, TcpListener as StdTcpListener};
@@ -39,7 +40,7 @@ use crate::egress_broker::{
     EGRESS_BROKER_HOST_ADDRESSES_FD, EGRESS_BROKER_INHERITED_SESSIONS,
     EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES,
     EgressBrokerStartupFailure, EgressBrokerStartupStatus, decode_egress_broker_startup_status,
-    encode_developer_egress_broker_bootstrap,
+    encode_egress_broker_bootstrap,
 };
 #[cfg(target_os = "linux")]
 use crate::host::path::current_uid;
@@ -141,6 +142,8 @@ pub struct CreateVmRequest {
     pub environment_projection_sha256: Option<Sha256Value>,
     pub managed_credential_clients: codewire_access::ManagedCredentialClients,
     pub cw_runtime_catalog_generation: Option<String>,
+    /// The network policy this boot's egress broker enforces (#2537).
+    pub network_policy: CompiledPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1533,6 +1536,7 @@ impl RunningVm {
                 deadline,
                 mesh: self.request.mesh.as_ref(),
                 mesh_credential_roots,
+                policy: &self.request.network_policy,
             };
             match spawn_network_stack_processes(&launch, key, mode).await {
                 Ok(mut worker) => {
@@ -2104,6 +2108,8 @@ struct NetworkStackLaunch<'a> {
     deadline: tokio::time::Instant,
     mesh: Option<&'a MeshAttachment>,
     mesh_credential_roots: Option<(&'a Path, &'a Path)>,
+    /// The policy the egress broker enforces and the worker binds.
+    policy: &'a CompiledPolicy,
 }
 
 struct NetworkWorkerProcess {
@@ -3478,8 +3484,9 @@ async fn spawn_egress_broker_process(
     let mut bootstrap = tokio::net::UnixStream::from_std(bootstrap_parent)
         .map_err(|_| RunnerError::EgressBrokerSpawn)?;
     let key = fresh_egress_broker_key();
-    let bytes = encode_developer_egress_broker_bootstrap(context.vm_id, context.generation, &key)
-        .map_err(|_| RunnerError::EgressBrokerBootstrap)?;
+    let bytes =
+        encode_egress_broker_bootstrap(context.vm_id, context.generation, &key, context.policy)
+            .map_err(|_| RunnerError::EgressBrokerBootstrap)?;
     let inherited_bootstrap = duplicate_inherited_descriptor(bootstrap_child.as_raw_fd())
         .map_err(|_| RunnerError::EgressBrokerSpawn)?;
     let bootstrap_fd = inherited_bootstrap.as_raw_fd();
@@ -3701,6 +3708,7 @@ async fn spawn_network_worker_process(
                     .mesh
                     .map(|attachment| attachment.guest_ports.as_slice())
                     .unwrap_or_default(),
+                context.policy.digest(),
             )
             .map(|bytes| Zeroizing::new(bytes.to_vec())),
             Some(endpoints),
@@ -5677,6 +5685,7 @@ mod tests {
     fn request(vcpus: u8, memory_mib: u32) -> CreateVmRequest {
         CreateVmRequest {
             cw_runtime_catalog_generation: None,
+            network_policy: CompiledPolicy::developer_baseline(),
             vm_id: Uuid::new_v4(),
             generation: 1,
             vsock_cid: 7,
@@ -6583,7 +6592,15 @@ mod tests {
     fn generated_egress_broker_keys_are_nonzero_and_bootstrap_admissible() {
         let key = fresh_egress_broker_key();
         assert!(key.iter().any(|byte| *byte != 0));
-        assert!(encode_developer_egress_broker_bootstrap(Uuid::new_v4(), 1, &key).is_ok());
+        assert!(
+            encode_egress_broker_bootstrap(
+                Uuid::new_v4(),
+                1,
+                &key,
+                &CompiledPolicy::developer_baseline()
+            )
+            .is_ok()
+        );
     }
 
     #[tokio::test]

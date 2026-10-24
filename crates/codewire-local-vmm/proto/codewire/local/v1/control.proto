@@ -56,6 +56,33 @@ service LocalSupervisorService {
   rpc UpdateNetworkPolicy(UpdateNetworkPolicyRequest) returns (NetworkPolicy);
   // Refused while an environment selects the policy.
   rpc DeleteNetworkPolicy(NetworkPolicySelector) returns (NetworkPolicy);
+  // Selects the network policy of an existing environment. A stopped one
+  // enforces it at its next start; a running one keeps enforcing what it
+  // started with and reports restart_required.
+  rpc UpdateEnvironmentNetworkPolicy(UpdateEnvironmentNetworkPolicyRequest) returns (Environment);
+}
+
+message EnvironmentNetworkPolicy {
+  // `open`, `locked` or `local:id:UUID`.
+  string reference = 1;
+  // `open`, `locked` or the stored policy's name.
+  string name = 2;
+  // The stored policy's current revision; zero for a built-in.
+  uint32 revision = 3;
+  string digest = 4;
+  // What the running VM's egress broker enforces; zero and empty when it is
+  // not running.
+  uint32 enforced_revision = 5;
+  string enforced_digest = 6;
+  // The running VM enforces another revision or policy than the selection
+  // until it restarts.
+  bool restart_required = 7;
+}
+
+message UpdateEnvironmentNetworkPolicyRequest {
+  string name = 1;
+  // As CreateEnvironmentRequest.network_policy.
+  string network_policy = 2;
 }
 
 message NetworkPolicySelector {
@@ -396,6 +423,10 @@ message CreateEnvironmentRequest {
   // implicit_path_mode is clone, which takes only committed files, and when
   // the project declares repositories or mounts.
   repeated string implicit_vm_only = 18;
+  // The network policy the environment selects (#2537, protocol 16): `open`
+  // or empty, `locked`, or a policy in this host's store by NAME, local:NAME
+  // or local:id:UUID. A platform policy is not available yet.
+  string network_policy = 19;
 }
 
 // Authenticated storage identity pinned at selection time, not mutable CLI
@@ -558,6 +589,8 @@ message Environment {
   bytes project_spec_json = 25;
   string access_profile_id = 26;
   PlatformSourceAuthority platform_source_authority = 27;
+  // The network policy it selects and what its running VM enforces (#2537).
+  EnvironmentNetworkPolicy network_policy = 28;
 }
 
 message ListEnvironmentsRequest {}
@@ -721,6 +754,9 @@ message StartVmRequest {
   // Lowercase SHA-256 of the independently admitted private runtime catalog.
   // The runner derives its fixed disk path; empty is allowed for raw fixtures.
   string cw_runtime_catalog_generation = 23;
+  // The selected network policy's canonical document for this boot (#2537):
+  // the revision the egress broker enforces. Empty means the built-in `open`.
+  bytes network_policy_document = 24;
 }
 
 message DirectShareAttachment {
