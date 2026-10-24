@@ -62,6 +62,9 @@ struct Recorded {
     at: Vec<tokio::time::Instant>,
     host_key: Option<String>,
     relay_requests: Vec<(Vec<String>, u32)>,
+    /// The code `IssueMeshEnrollment` answers with; `None` refuses.
+    mesh_code: Option<String>,
+    mesh_reports: Vec<i32>,
 }
 
 struct ScriptedService {
@@ -178,21 +181,41 @@ impl WorkspaceBindingService for ScriptedService {
         })
     }
 
-    // These environments join no Mesh network.
     async fn issue_mesh_enrollment(
         &self,
         _ctx: RequestContext,
         _request: ServiceRequest<'_, IssueMeshEnrollmentRequest>,
     ) -> ServiceResult<IssueMeshEnrollmentResponse> {
-        Err(ConnectError::failed_precondition("no Mesh network"))
+        let Some(code) = self.recorded.lock().unwrap().mesh_code.clone() else {
+            return Err(ConnectError::failed_precondition("no Mesh network"));
+        };
+        connectrpc::Response::ok(IssueMeshEnrollmentResponse {
+            enrollment_code: code,
+            expires_at: 1,
+            attachment: ::buffa::MessageField::some(
+                codewire_proto::codewire::internal::v1::WorkspaceMeshAttachment {
+                    mesh_url: "https://mesh.codewire.test".into(),
+                    org_id: "org-1".into(),
+                    network_id: "work".into(),
+                    node_name: "app-1".into(),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        })
     }
 
     async fn report_mesh_attachment(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, ReportMeshAttachmentRequest>,
+        request: ServiceRequest<'_, ReportMeshAttachmentRequest>,
     ) -> ServiceResult<ReportMeshAttachmentResponse> {
-        Err(ConnectError::failed_precondition("no Mesh network"))
+        self.recorded
+            .lock()
+            .unwrap()
+            .mesh_reports
+            .push(request.report.to_i32());
+        connectrpc::Response::ok(ReportMeshAttachmentResponse::default())
     }
 }
 
@@ -594,4 +617,46 @@ async fn the_listener_must_present_a_certificate_from_the_mounted_roots() {
 fn binding_authorization_is_sensitive() {
     let options = call_options(SYNTHETIC_PROJECTED_TOKEN).unwrap();
     assert!(!format!("{options:?}").contains(SYNTHETIC_PROJECTED_TOKEN));
+}
+
+#[tokio::test]
+async fn mesh_enrollment_returns_one_code_and_its_network_and_refuses_malformed_ones() {
+    use codewire_proto::codewire::internal::v1::MeshAttachmentReport;
+
+    let fixture = fixture(Vec::new()).await;
+    // An environment without a network is refused for good.
+    assert_eq!(
+        fixture.client.issue_mesh_enrollment().await.unwrap_err(),
+        AttemptError::Rejected(ErrorCode::FailedPrecondition)
+    );
+    let code = format!("cw_eenr_{}", "ab".repeat(32));
+    fixture.recorded.lock().unwrap().mesh_code = Some(code.clone());
+    let (issued, target) = fixture.client.issue_mesh_enrollment().await.unwrap();
+    assert_eq!(issued.as_str(), code);
+    assert_eq!(
+        (
+            target.mesh_url(),
+            target.org_id(),
+            target.network_id(),
+            target.node_name()
+        ),
+        ("https://mesh.codewire.test", "org-1", "work", "app-1")
+    );
+    for malformed in ["", "cw_eenr_short", "cw_enr_abababab"] {
+        fixture.recorded.lock().unwrap().mesh_code = Some(malformed.to_owned());
+        assert_eq!(
+            fixture.client.issue_mesh_enrollment().await.unwrap_err(),
+            AttemptError::InvalidResponse,
+            "{malformed}"
+        );
+    }
+    fixture
+        .client
+        .report_mesh_attachment(MeshAttachmentReport::NotAMember)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.recorded.lock().unwrap().mesh_reports,
+        [MeshAttachmentReport::NotAMember as i32]
+    );
 }

@@ -599,6 +599,7 @@ pub(crate) async fn run_host_member_helper(
         identity.wg(),
         codewire_client::member_tailnet::MemberTransportOptions {
             derp_only: args.derp_only,
+            ..Default::default()
         },
     )
     .await?;

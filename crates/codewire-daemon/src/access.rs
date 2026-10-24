@@ -29,6 +29,73 @@ pub struct AccessFields<'a> {
     pub direct_udp_endpoints: &'a [String],
     pub peer_relay_endpoints: &'a [String],
     pub app_ports: &'a [i32],
+    /// The hosted Mesh network the environment joins, if any (#3350).
+    pub mesh: Option<MeshFields<'a>>,
+}
+
+/// The raw `WorkspaceMeshAttachment` fields, before validation.
+#[derive(Clone, Copy)]
+pub struct MeshFields<'a> {
+    pub mesh_url: &'a str,
+    pub org_id: &'a str,
+    pub network_id: &'a str,
+    pub node_name: &'a str,
+}
+
+/// The one hosted Mesh network node the environment serves. Non-secret: the
+/// daemon asks for a one-use enrollment code to join it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeshTarget {
+    mesh_url: String,
+    org_id: String,
+    network_id: String,
+    node_name: String,
+}
+
+impl MeshTarget {
+    /// An `https` origin, an organization, a Mesh network name (1 to 128
+    /// letters, digits, `-` or `_`) and a node name (1 to 63 letters, digits,
+    /// `.`, `_` or `-`, starting with a letter or digit).
+    pub fn from_fields(fields: &MeshFields<'_>) -> Option<Self> {
+        Self::validate(fields)
+    }
+
+    fn validate(fields: &MeshFields<'_>) -> Option<Self> {
+        let identifier = |value: &str, max: usize, extra: &[u8]| {
+            (1..=max).contains(&value.len())
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || extra.contains(&byte))
+        };
+        let node = fields.node_name.as_bytes();
+        (valid_https_origin(fields.mesh_url)
+            && identifier(fields.org_id, 128, b"-_")
+            && identifier(fields.network_id, 128, b"-_")
+            && identifier(fields.node_name, 63, b"._-")
+            && node.first().is_some_and(u8::is_ascii_alphanumeric))
+        .then(|| Self {
+            mesh_url: fields.mesh_url.trim_end_matches('/').to_owned(),
+            org_id: fields.org_id.to_owned(),
+            network_id: fields.network_id.to_owned(),
+            node_name: fields.node_name.to_owned(),
+        })
+    }
+
+    pub fn mesh_url(&self) -> &str {
+        &self.mesh_url
+    }
+
+    pub fn org_id(&self) -> &str {
+        &self.org_id
+    }
+
+    pub fn network_id(&self) -> &str {
+        &self.network_id
+    }
+
+    pub fn node_name(&self) -> &str {
+        &self.node_name
+    }
 }
 
 /// A peer token the daemon holds. Never printed.
@@ -57,6 +124,7 @@ pub struct WorkspaceAccessGrant {
     direct_udp_endpoints: Vec<String>,
     peer_relay_endpoints: Vec<String>,
     app_ports: AppPorts,
+    mesh: Option<MeshTarget>,
 }
 
 /// An access grant the daemon refused. Value-blind.
@@ -106,7 +174,18 @@ impl WorkspaceAccessGrant {
             direct_udp_endpoints: endpoints(fields.direct_udp_endpoints)?,
             peer_relay_endpoints: endpoints(fields.peer_relay_endpoints)?,
             app_ports: app_ports(fields.app_ports).map_err(|_| invalid)?,
+            // A malformed network refuses the grant rather than detaching the
+            // environment from its network.
+            mesh: match &fields.mesh {
+                Some(mesh) => Some(MeshTarget::validate(mesh).ok_or(invalid)?),
+                None => None,
+            },
         })
+    }
+
+    /// The hosted Mesh network the environment joins, if any.
+    pub fn mesh(&self) -> Option<&MeshTarget> {
+        self.mesh.as_ref()
     }
 
     pub fn peer_token(&self) -> &PeerToken {
@@ -199,6 +278,54 @@ mod tests {
             direct_udp_endpoints: direct,
             peer_relay_endpoints: relay,
             app_ports: &[5173, 3000],
+            mesh: None,
+        }
+    }
+
+    #[test]
+    fn a_grant_names_its_mesh_network_only_when_well_formed() {
+        let none: Vec<String> = Vec::new();
+        let mesh = |mesh_url: &'static str, network: &'static str, node: &'static str| MeshFields {
+            mesh_url,
+            org_id: "org-1",
+            network_id: network,
+            node_name: node,
+        };
+        let mut with_mesh = fields("https://codewire.sh", &none, &none, 1_000_600);
+        with_mesh.mesh = Some(mesh("https://mesh.codewire.sh/", "work", "app-1"));
+        let grant = WorkspaceAccessGrant::validate(&with_mesh, now()).unwrap();
+        let target = grant.mesh().expect("the network");
+        assert_eq!(
+            (
+                target.mesh_url(),
+                target.org_id(),
+                target.network_id(),
+                target.node_name()
+            ),
+            ("https://mesh.codewire.sh", "org-1", "work", "app-1")
+        );
+        let plain = WorkspaceAccessGrant::validate(
+            &fields("https://codewire.sh", &none, &none, 1_000_600),
+            now(),
+        )
+        .unwrap();
+        assert!(plain.mesh().is_none());
+        for (url, network, node) in [
+            ("http://mesh.codewire.sh", "work", "app-1"),
+            ("https://mesh.codewire.sh/path", "work", "app-1"),
+            ("https://mesh.codewire.sh", "", "app-1"),
+            ("https://mesh.codewire.sh", "a b", "app-1"),
+            ("https://mesh.codewire.sh", "work", ""),
+            ("https://mesh.codewire.sh", "work", "-app"),
+            ("https://mesh.codewire.sh", "work", "app/1"),
+        ] {
+            let mut bad = fields("https://codewire.sh", &none, &none, 1_000_600);
+            bad.mesh = Some(mesh(url, network, node));
+            assert_eq!(
+                WorkspaceAccessGrant::validate(&bad, now()),
+                Err(InvalidAccessGrant),
+                "{url} {network} {node}"
+            );
         }
     }
 

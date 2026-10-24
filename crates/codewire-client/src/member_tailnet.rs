@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use anyhow::{Context, ensure};
 use codewire_tailnet::conn::{Conn, Options, PeerPath};
-use codewire_tailnet::derp_transport::{DerpTarget, DerpTransport, connect_derp_transport};
+use codewire_tailnet::derp_transport::{
+    DerpTarget, DerpTransport, connect_derp_transport, connect_derp_transport_absolute,
+};
 use codewire_tailnet::direct_udp;
 use codewire_tailnet::disco::DiscoPrivate;
 use codewire_tailnet::netstack::{TcpListener, TcpStream};
@@ -51,7 +53,18 @@ fn member_setup_error(phase: MemberSetupPhase, error: crate::coordinator::Error)
     // Ordinary CLI failures may render their entire anyhow source chain. Do
     // not retain the original error: its URL, credential, RPC message/details,
     // headers or JSON context are outside this closed diagnostic boundary.
-    anyhow::anyhow!("member Mesh {phase} setup failed: class={class} rpc={rpc}")
+    anyhow::Error::new(MemberSetupError { phase, class, rpc })
+}
+
+/// Why a member's coordinate setup failed, as closed labels only: the phase,
+/// the error class, and the Connect code name (`none` without one). A caller
+/// that must tell refusals apart downcasts to it; nothing dynamic is kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("member Mesh {phase} setup failed: class={class} rpc={rpc}")]
+pub struct MemberSetupError {
+    pub phase: &'static str,
+    pub class: &'static str,
+    pub rpc: &'static str,
 }
 
 /// Policy is explicit; a disabled direct path still uses the real TLS DERP
@@ -59,6 +72,10 @@ fn member_setup_error(phase: MemberSetupPhase, error: crate::coordinator::Error)
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemberTransportOptions {
     pub derp_only: bool,
+    /// Look up the Mesh origin, DERP and STUN hosts as absolute DNS names, so
+    /// a Pod resolver's search domains are never tried (#2701). TLS and the
+    /// HTTP authority keep the names as configured.
+    pub absolute_dns: bool,
 }
 
 pub struct MemberTailnet {
@@ -109,13 +126,38 @@ impl MemberTailnet {
         options: MemberTransportOptions,
     ) -> anyhow::Result<Self> {
         let origin_url = url::Url::parse(origin).context("invalid member Mesh origin")?;
-        let coordinator = MeshCoordinatorPeerSession::connect_with_setup_timeout(
-            origin,
-            enrollment,
-            MeshCoordinateIdentity::peer(org, network),
-            SETUP_TIMEOUT,
-        )
-        .await
+        let identity = MeshCoordinateIdentity::peer(org, network);
+        let coordinator = if options.absolute_dns {
+            let host = origin_url
+                .host_str()
+                .context("member Mesh origin needs a host")?;
+            let port = origin_url
+                .port_or_known_default()
+                .context("member Mesh origin needs a port")?;
+            let addresses = tokio::net::lookup_host((
+                codewire_tailnet::dns::absolute_dns_name(host).as_ref(),
+                port,
+            ))
+            .await
+            .context("resolve the member Mesh origin")?
+            .collect::<Vec<_>>();
+            MeshCoordinatorPeerSession::connect_resolved_with_setup_timeout(
+                origin,
+                enrollment,
+                identity,
+                addresses,
+                SETUP_TIMEOUT,
+            )
+            .await
+        } else {
+            MeshCoordinatorPeerSession::connect_with_setup_timeout(
+                origin,
+                enrollment,
+                identity,
+                SETUP_TIMEOUT,
+            )
+            .await
+        }
         .map_err(|error| member_setup_error(MemberSetupPhase::Peer, error))?;
         Self::assemble(
             coordinator,
@@ -138,19 +180,27 @@ impl MemberTailnet {
             .take_setup_derp_map()
             .context("member DERP map missing")?;
         let target = member_derp_target(&map, local_fixture_origin)?;
-        let fallback = connect_derp_transport(&target, &secret)
-            .await
-            .context("member TLS DERP connection failed")?;
+        let fallback = if options.absolute_dns {
+            connect_derp_transport_absolute(&target, &secret).await
+        } else {
+            connect_derp_transport(&target, &secret).await
+        }
+        .context("member TLS DERP connection failed")?;
         let disco = DiscoPrivate::generate(&mut OsRng);
         let public = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
         let (transport, direct) = if options.derp_only {
             (fallback, None)
         } else {
-            let stun = crate::tailnet::resolve_stun_servers(crate::tailnet::stun_servers_from_map(
-                Some(&map),
-            ))
-            .await
-            .context("member STUN map resolution failed")?;
+            let mut servers = crate::tailnet::stun_servers_from_map(Some(&map));
+            if options.absolute_dns {
+                for server in &mut servers {
+                    server.host =
+                        codewire_tailnet::dns::absolute_dns_name(&server.host).into_owned();
+                }
+            }
+            let stun = crate::tailnet::resolve_stun_servers(servers)
+                .await
+                .context("member STUN map resolution failed")?;
             let (transport, handle) = direct_udp::wrap_transport(
                 fallback,
                 direct_udp::Options::new(
@@ -235,6 +285,11 @@ impl MemberTailnet {
             "member topology was refused"
         );
         Ok(())
+    }
+
+    /// The member's tailnet connection, to serve its own ports on.
+    pub fn conn(&self) -> Arc<Conn> {
+        Arc::clone(&self.conn)
     }
 
     pub async fn listen_member(&self) -> anyhow::Result<TcpListener> {

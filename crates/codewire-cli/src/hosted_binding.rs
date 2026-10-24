@@ -17,11 +17,12 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use codewire_daemon::access::{AccessFields, WorkspaceAccessGrant};
+use codewire_daemon::access::{AccessFields, MeshFields, WorkspaceAccessGrant};
 use codewire_daemon::{BindResponseFields, WorkspaceBinding, WorkspaceBindingConfig};
 #[cfg(any(target_os = "linux", test))]
 use codewire_proto::codewire::internal::v1::{
-    AllocatePeerRelayRequest, AllocatePeerRelayResponse, RecordHostKeyRequest, RefreshAccessRequest,
+    AllocatePeerRelayRequest, AllocatePeerRelayResponse, IssueMeshEnrollmentRequest,
+    MeshAttachmentReport, RecordHostKeyRequest, RefreshAccessRequest, ReportMeshAttachmentRequest,
 };
 use codewire_proto::codewire::internal::v1::{
     BindWorkspaceRequest, BindWorkspaceResponse, WorkspaceAccess, WorkspaceBindingServiceClient,
@@ -271,6 +272,66 @@ impl BindingClient {
     }
 }
 
+impl BindingClient {
+    /// One Mesh enrollment code for this Pod's next Mesh peer stream, and the
+    /// network it joins (#3350). The code is never logged and is dropped
+    /// after its one use.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) async fn issue_mesh_enrollment(
+        &self,
+    ) -> Result<(Zeroizing<String>, codewire_daemon::access::MeshTarget), AttemptError> {
+        let _in_flight = self.in_flight.lock().await;
+        let options = self.authorized().await?;
+        let mut response = self
+            .client
+            .issue_mesh_enrollment_with_options(IssueMeshEnrollmentRequest::default(), options)
+            .await
+            .map_err(|error| classify(&error))?
+            .into_owned();
+        let code = Zeroizing::new(std::mem::take(&mut response.enrollment_code));
+        let target = response
+            .attachment
+            .as_option()
+            .and_then(|mesh| {
+                codewire_daemon::access::MeshTarget::from_fields(&MeshFields {
+                    mesh_url: &mesh.mesh_url,
+                    org_id: &mesh.org_id,
+                    network_id: &mesh.network_id,
+                    node_name: &mesh.node_name,
+                })
+            })
+            .ok_or(AttemptError::InvalidResponse)?;
+        let well_formed = code
+            .strip_prefix("cw_eenr_")
+            .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        if !well_formed {
+            return Err(AttemptError::InvalidResponse);
+        }
+        Ok((code, target))
+    }
+
+    /// Record what this Pod's daemon observed of its Mesh membership.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) async fn report_mesh_attachment(
+        &self,
+        report: MeshAttachmentReport,
+    ) -> Result<(), AttemptError> {
+        let _in_flight = self.in_flight.lock().await;
+        let options = self.authorized().await?;
+        self.client
+            .report_mesh_attachment_with_options(
+                ReportMeshAttachmentRequest {
+                    report: report.into(),
+                    ..Default::default()
+                },
+                options,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| classify(&error))
+    }
+}
+
 fn validate_access(access: &WorkspaceAccess) -> Result<WorkspaceAccessGrant, AttemptError> {
     WorkspaceAccessGrant::validate(
         &AccessFields {
@@ -281,6 +342,12 @@ fn validate_access(access: &WorkspaceAccess) -> Result<WorkspaceAccessGrant, Att
             direct_udp_endpoints: &access.direct_udp_endpoints,
             peer_relay_endpoints: &access.peer_relay_endpoints,
             app_ports: &access.app_ports,
+            mesh: access.mesh.as_option().map(|mesh| MeshFields {
+                mesh_url: &mesh.mesh_url,
+                org_id: &mesh.org_id,
+                network_id: &mesh.network_id,
+                node_name: &mesh.node_name,
+            }),
         },
         SystemTime::now(),
     )

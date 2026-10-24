@@ -158,6 +158,16 @@ tailnet above: another node, keys and coordinator.
 - Network deletion removes the nodes of destroyed environments first, so they
   never keep a network alive. A network owner's `cw network revoke` of an
   environment's node is permanent for that network.
+- The daemon runs the node next to the access tailnet:
+  - it has its own WireGuard and disco keys, made fresh for each stream;
+  - it has its own ephemeral UDP socket, with STUN and then Mesh's DERP;
+  - it looks up names as absolute DNS names (#2701);
+  - it serves the environment's application ports, the same set as on the
+    tailnet, on its Mesh address.
+
+  When a stream ends, the daemon rejoins with a new code. It retries a fault
+  after 1 to 30 s and a refusal after 60 to 300 s, and reports each change
+  once.
 - The daemon reports what it observed with `ReportMeshAttachment`. The
   environment shows the report only for its current Pod, so a new Pod reads
   as pending until its daemon reports.

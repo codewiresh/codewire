@@ -37,6 +37,7 @@ fn grant(token: &str, lifetime_seconds: i64, generation: i64) -> WorkspaceAccess
             direct_udp_endpoints: &[],
             peer_relay_endpoints: &[],
             app_ports: &[],
+            mesh: None,
         },
         now,
     )
@@ -524,6 +525,7 @@ fn grant_for(origin: &str) -> WorkspaceAccessGrant {
             direct_udp_endpoints: &[],
             peer_relay_endpoints: &[],
             app_ports: &[],
+            mesh: None,
         },
         now,
     )

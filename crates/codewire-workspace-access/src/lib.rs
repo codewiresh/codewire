@@ -6,6 +6,7 @@
 pub mod daemon;
 #[cfg(unix)]
 pub mod daemon_access;
+pub mod daemon_mesh;
 #[cfg(unix)]
 pub mod daemon_tailnet;
 pub mod host_key;

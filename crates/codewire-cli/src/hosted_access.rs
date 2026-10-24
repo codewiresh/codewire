@@ -29,6 +29,10 @@ use codewire_workspace_access::daemon_access::{
     AccessControlPlane, ControlPlaneError, DaemonSshRunners, HostKeyStore, PeerRelayAllocation,
     daemon_ssh_server_config, public_key_line, record_host_key_until_accepted, serve_ssh_listener,
 };
+use codewire_workspace_access::daemon_mesh::{
+    self, DaemonMeshConfig, MemberTailnetJoiner, MeshControlPlane, MeshEnrollment, MeshReport,
+    MeshTiming,
+};
 use codewire_workspace_access::daemon_tailnet::{
     self, AccessGrants, DaemonTailnetConfig, PublicCoordinator, TailnetSsh,
     record_host_key_per_generation,
@@ -75,6 +79,32 @@ impl AccessControlPlane for BindingClient {
             steady_state_lifetime_ns: response.steady_state_lifetime_ns,
             addr_ports: response.addr_ports,
         })
+    }
+}
+
+#[async_trait]
+impl MeshControlPlane for BindingClient {
+    async fn issue_mesh_enrollment(&self) -> Result<MeshEnrollment, ControlPlaneError> {
+        let (code, target) = BindingClient::issue_mesh_enrollment(self)
+            .await
+            .map_err(control_plane_error)?;
+        Ok(MeshEnrollment { code, target })
+    }
+
+    async fn report_mesh_attachment(&self, report: MeshReport) -> Result<(), ControlPlaneError> {
+        use codewire_proto::codewire::internal::v1::MeshAttachmentReport as Report;
+        let report = match report {
+            MeshReport::Attached => Report::Attached,
+            MeshReport::MeshUnreachable => Report::MeshUnreachable,
+            MeshReport::NetworkNotFound => Report::NetworkNotFound,
+            MeshReport::NotAMember => Report::NotAMember,
+            MeshReport::NodeNameTaken => Report::NodeNameTaken,
+            MeshReport::Revoked => Report::Revoked,
+            MeshReport::Refused => Report::Refused,
+        };
+        BindingClient::report_mesh_attachment(self, report)
+            .await
+            .map_err(control_plane_error)
     }
 }
 
@@ -141,6 +171,7 @@ pub(crate) async fn serve(
     ));
     tracing::info!(ssh_port = WORKSPACE_SSH_PORT, "workspace SSH listening");
 
+    let mesh_plane: Arc<dyn MeshControlPlane> = plane.clone();
     let plane: Arc<dyn AccessControlPlane> = plane;
     let grants = bound
         .grant
@@ -158,7 +189,22 @@ pub(crate) async fn serve(
                 app_ports.clone(),
                 shutdown.clone(),
             ));
-            let reserved_ports = platform.keys().copied().collect();
+            let reserved_ports: std::collections::BTreeSet<u16> =
+                platform.keys().copied().collect();
+            // The environment's node in its hosted Mesh network, when the
+            // grant names one (#3350): separate keys, socket and coordinator.
+            tokio::spawn(daemon_mesh::run(
+                DaemonMeshConfig {
+                    environment_id: bound.environment_id,
+                    reserved_ports: reserved_ports.clone(),
+                    timing: MeshTiming::default(),
+                },
+                grants.subscribe(),
+                mesh_plane,
+                Arc::new(MemberTailnetJoiner),
+                app_ports.subscribe(),
+                shutdown.clone(),
+            ));
             let tailnet = daemon_tailnet::run(
                 DaemonTailnetConfig {
                     environment_id: bound.environment_id,

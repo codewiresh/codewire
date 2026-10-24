@@ -176,6 +176,7 @@ impl Remote {
             &alias.route_name,
             MemberTransportOptions {
                 derp_only: alias.derp_only,
+                ..Default::default()
             },
         )
         .await?;
