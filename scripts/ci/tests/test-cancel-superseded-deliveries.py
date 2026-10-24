@@ -10,9 +10,14 @@ Old rules:
 - Then a delivery was never cancelled while its own main CI could still verify
   it, however many built at once.
 
-Rule now (owner, 2026-10-21, on infra#1594: "we need to cancel older if > 2"):
-- Walking from the newest, this run, newer or unrelated runs, publishing runs,
-  and the newest runs main CI can still verify keep building, up to two.
+Rule now (owner, 2026-10-21, on infra#1594: "we need to cancel older if > 2";
+owner, 2026-10-24: every green main commit newer than Dev's source is
+delivered):
+- This run, newer or unrelated runs and publishing runs keep building.
+- The newest run whose commit main CI verified keeps building unless a newer
+  commit is verified too; a newer verified commit cancels every older run.
+- Then the newest runs main CI can still verify keep building, up to two; one
+  cancelled beyond the two is restarted by main CI if it turns green.
 - Every other older run is cancelled before it publishes, even one already
   building: one beyond the two, or one whose main CI can no longer verify it.
   A red one can still be verified by a rerun.
@@ -219,7 +224,7 @@ class CancelSuperseded(unittest.TestCase):
                 api = FakeForgejo([deploy_run(50, self.b)], {50: deploy_jobs(50)}, [self.ci_b(phase)])
                 cancelled, log = self.decide(api)
                 self.assertEqual((cancelled, api.posts()), ([], []))
-                self.assertIn("its main CI can still verify it", log)
+                self.assertIn(f"Deploy Dev run 50 for {self.b} keeps delivering", log)
 
     def test_docs_only_push_cancels_a_delivery_that_can_never_sign(self) -> None:
         for phase in ("queued", "superseded-at-start", "superseded-verdict"):
@@ -242,21 +247,56 @@ class CancelSuperseded(unittest.TestCase):
         self.assertEqual((cancelled, api.posts()), ([], []))
         self.assertIn(f"Deploy Dev run 50 for {self.b} keeps delivering", log)
 
-    def test_the_third_active_delivery_cancels_the_oldest_even_while_it_builds(self) -> None:
-        # A is verified and B is verifying, so both could still sign; C makes three.
+    def test_a_green_older_delivery_beats_a_newer_pending_one(self) -> None:
+        # A is green and B is still being verified; C makes three. A keeps
+        # building, since B may still go red, and B is the one beyond two.
         for builds in ("waiting", "running"):
             with self.subTest(builds=builds):
                 api = FakeForgejo(
                     [deploy_run(60, self.c), deploy_run(50, self.b), deploy_run(40, self.a)],
-                    {40: deploy_jobs(40, builds=builds), 50: deploy_jobs(50)},
+                    {40: deploy_jobs(40, builds=builds), 50: deploy_jobs(50, builds=builds)},
                     [self.ci_a("verified"), self.ci_b("verifying")],
                 )
                 cancelled, log = self.decide(api)
-                self.assertEqual(cancelled, [40])
-                self.assertEqual(api.posts(), ["POST /actions/runs/40/cancel"])
-                self.assertIn(f"Deploy Dev run 50 for {self.b} keeps delivering", log)
-                self.assertIn(f"cancelled Deploy Dev run 40 for {self.a} (2 newer deliveries are "
-                              f"building, and at most 2 build at once)", log)
+                self.assertEqual(cancelled, [50])
+                self.assertEqual(api.posts(), ["POST /actions/runs/50/cancel"])
+                self.assertIn(f"Deploy Dev run 40 for {self.a} keeps delivering: main CI verified", log)
+                self.assertIn(f"cancelled Deploy Dev run 50 for {self.b} (2 newer deliveries are building, "
+                              f"and at most 2 build at once; if its main CI passes, main CI restarts it)", log)
+
+    def test_a_green_older_delivery_is_kept_beside_a_newer_pending_one(self) -> None:
+        # A is green and B, newer, is still being verified: both build.
+        api = FakeForgejo(
+            [deploy_run(50, self.b), deploy_run(40, self.a)],
+            {40: deploy_jobs(40), 50: deploy_jobs(50)},
+            [self.ci_a("verified"), self.ci_b("verifying")],
+        )
+        cancelled, log = self.decide(api, head=self.b)
+        self.assertEqual((cancelled, api.posts()), ([], []))
+        self.assertIn(f"Deploy Dev run 40 for {self.a} keeps delivering: main CI verified", log)
+
+    def test_a_newer_green_commit_supersedes_an_older_green_delivery(self) -> None:
+        # A and B are both green: B carries A's change, so A goes.
+        api = FakeForgejo(
+            [deploy_run(60, self.c), deploy_run(50, self.b), deploy_run(40, self.a)],
+            {40: deploy_jobs(40), 50: deploy_jobs(50)},
+            [self.ci_a("verified"), self.ci_b("verified")],
+        )
+        cancelled, log = self.decide(api)
+        self.assertEqual((cancelled, api.posts()), ([40], ["POST /actions/runs/40/cancel"]))
+        self.assertIn(f"Deploy Dev run 50 for {self.b} keeps delivering: main CI verified", log)
+        self.assertIn(f"cancelled Deploy Dev run 40 for {self.a} (newer commit's main CI has passed", log)
+
+    def test_a_green_delivery_is_not_cancelled_for_a_newer_red_one(self) -> None:
+        # B went red; A stays the green delivery of record.
+        api = FakeForgejo(
+            [deploy_run(60, self.c), deploy_run(50, self.b), deploy_run(40, self.a)],
+            {40: deploy_jobs(40), 50: deploy_jobs(50)},
+            [self.ci_a("verified"), self.ci_b("red")],
+        )
+        cancelled, log = self.decide(api)
+        self.assertEqual(cancelled, [50])
+        self.assertIn(f"Deploy Dev run 40 for {self.a} keeps delivering: main CI verified", log)
 
     def test_a_delivery_that_can_never_sign_does_not_hold_one_of_the_two(self) -> None:
         # B can never sign, so A, which main CI is verifying, keeps the second place.
@@ -366,7 +406,7 @@ class CancelSuperseded(unittest.TestCase):
         )
         cancelled, log = self.decide(api)
         self.assertEqual(cancelled, [50])
-        self.assertIn("cannot read or cancel Deploy Dev run 40", log)
+        self.assertIn("cannot read Deploy Dev run 40 or its main CI", log)
 
         # Main CI's jobs are ambiguous: keep the delivery.
         ci = self.ci_b("queued")

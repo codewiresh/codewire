@@ -178,9 +178,6 @@ class TriggerTests(unittest.TestCase):
     def test_nothing_to_deliver_is_no_error(self) -> None:
         cases = {
             "no Deploy Dev run": (forgejo(dev_jobs("success"), dev_runs=[]), "no Deploy Dev push run"),
-            "superseded, cancelled while waiting": (forgejo(dev_jobs("cancelled")), "superseded by a newer push"),
-            "superseded, cancelled while building": (
-                forgejo(dev_jobs("skipped", builds="cancelled")), "superseded by a newer push"),
             "builds failed": (forgejo(dev_jobs("skipped", builds="failure")), "builds failed"),
             "nothing selected": (forgejo(dev_jobs("skipped", builds="skipped")), "selected nothing to deliver"),
         }
@@ -189,6 +186,28 @@ class TriggerTests(unittest.TestCase):
                 status, log, _ = self.trigger(api)
                 self.assertEqual((status, api.posts), (0, []))
                 self.assertIn(expected, log)
+
+    def test_a_cancelled_delivery_of_a_green_commit_is_restarted(self) -> None:
+        # A newer push cancelled this commit's delivery while its main CI was
+        # still running; now it is green, so the whole delivery runs again.
+        for label, jobs in {
+            "cancelled while waiting": dev_jobs("cancelled", builds="cancelled"),
+            "cancelled while building": dev_jobs("skipped", builds="cancelled"),
+            "cancelled before selection": dev_jobs("skipped", builds="skipped", selection="cancelled"),
+        }.items():
+            with self.subTest(case=label):
+                api = forgejo(jobs)
+                status, log, _ = self.trigger(api)
+                self.assertEqual((status, api.posts), (0, ["/actions/jobs/601/rerun"]))
+                self.assertIn(f"Deploy Dev run {DEV_RUN} for {SHA} was cancelled before it published; "
+                              f"restarted it from its selection job", log)
+
+    def test_a_refused_restart_fails_loudly(self) -> None:
+        api = forgejo(dev_jobs("skipped", builds="cancelled"))
+        api.reruns[601] = [403]
+        status, log, _ = self.trigger(api)
+        self.assertEqual((status, api.posts), (1, ["/actions/jobs/601/rerun"]))
+        self.assertIn("missed trigger: Forgejo refused to restart cancelled Deploy Dev run", log)
 
     def test_only_the_deploy_dev_push_run_for_this_commit_is_rerun(self) -> None:
         # Never "the latest run": a newer run for another commit, a dispatch

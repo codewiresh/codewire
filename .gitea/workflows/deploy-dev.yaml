@@ -1,5 +1,5 @@
 # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; runner profiles, job-scoped OIDC, and server-side integrations enforce capabilities.
-name: Deploy Dev
+name: Build and deliver Dev
 
 on:
   push:
@@ -11,12 +11,16 @@ on:
 # while the commit descends from the source Dev runs; when main CI finishes
 # later, its final job reruns that publish job. Runs of different commits
 # never cancel or queue behind each other through concurrency: each commit has
-# its own group, so only a rerun of the same commit queues. At most two
-# deliveries build at once: a newer push cancels this run, before it
-# publishes, once two newer deliveries are building or once this commit's own
-# main CI can no longer verify it (owner, 2026-10-21, on infra#1594; #2892);
-# see "Cancel the older deliveries this push supersedes". Leaving the block
-# out would cancel on every push.
+# its own group, so only a rerun of the same commit queues. Every green main
+# commit newer than Dev's source is delivered (owner, 2026-10-24), and at most
+# two deliveries build at once (owner, 2026-10-21, on infra#1594; #2892): a
+# newer push cancels this run, before it publishes, only once a newer commit is
+# green, once this commit's own main CI can no longer verify it, or while this
+# commit is still unverified beyond the two building; a green delivery is never
+# cancelled for one that may still go red. A delivery cancelled before its
+# commit turned green is restarted by main CI's final job. See "Cancel the
+# older deliveries this push supersedes". Leaving the block out would cancel
+# on every push.
 concurrency:
   group: deploy-dev-${{ github.sha }}
   cancel-in-progress: false

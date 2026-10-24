@@ -17,8 +17,16 @@ and only while the commit moves Dev forward. Whichever finishes last delivers:
 - it is running: wait, bounded, then decide. When the bound runs out this
   fails loudly with one "missed trigger" line and starts nothing else.
 
-A missing Deploy Dev run, builds that failed, and a run cancelled because a
-newer push superseded it deliver nothing; that is logged and is no error.
+- the run was cancelled before it published (a newer push superseded it
+  while this commit's main CI was still running): this restarts the whole
+  delivery by rerunning its selection job and everything after it. Every
+  green main commit newer than Dev's source is delivered (owner, 2026-10-24:
+  "if main is green, why would dev not be deployed?"); its publish job still
+  signs only while the commit moves Dev forward, so a newer delivery that
+  already landed makes this one deliver nothing.
+
+A missing Deploy Dev run and builds that failed deliver nothing; that is
+logged and is no error.
 """
 
 from __future__ import annotations
@@ -58,6 +66,30 @@ def load_verdicts() -> ModuleType:
 
 
 verdicts = load_verdicts()
+
+
+def restart_delivery(api, jobs: list[dict], run_id: int, sha: str, log: Callable[[str], None]) -> int:
+    """Rerun a cancelled delivery from its selection job; 0 started, 1 refused."""
+    selection = verdicts.named_job(jobs, SELECTION_JOB, run_id)
+    status = api.post(f"/actions/jobs/{selection['id']}/rerun")
+    if status in (200, 201, 204):
+        log(f"Deploy Dev run {run_id} for {sha} was cancelled before it published; restarted it from "
+            f"its selection job, since {sha} is green: it signs and dispatches only while {sha} moves "
+            f"Dev forward")
+        return 0
+    log(f"::error::missed trigger: Forgejo refused to restart cancelled Deploy Dev run {run_id} "
+        f"(HTTP {status}); green {sha} is not delivered")
+    return 1
+
+
+def was_cancelled(jobs: list[dict], run_id: int) -> bool:
+    for name in (SELECTION_JOB, *BUILD_JOBS, PUBLISH_JOB):
+        try:
+            if verdicts.state_of(verdicts.named_job(jobs, name, run_id)) == "cancelled":
+                return True
+        except verdicts.Unproven:
+            continue
+    return False
 
 
 def skipped_reason(jobs: list[dict], run_id: int, sha: str) -> str:
@@ -110,12 +142,10 @@ def trigger(
             publish = verdicts.named_job(jobs, PUBLISH_JOB, run_id)
             job_id = publish["id"]
             state = verdicts.state_of(publish)
+            if state in ("skipped", "cancelled") and was_cancelled(jobs, run_id):
+                return restart_delivery(api, jobs, run_id, sha, log)
             if state == "skipped":
                 log(skipped_reason(jobs, run_id, sha))
-                return 0
-            if state == "cancelled":
-                log(f"Deploy Dev run {run_id}'s publish job was cancelled, superseded by a newer push; "
-                    f"nothing to deliver for {sha}")
                 return 0
             if state == "not-started":
                 log(f"Deploy Dev run {run_id}'s publish job {job_id} has not started; "
