@@ -1731,21 +1731,17 @@ fn a_cloud_create_refuses_a_local_network_and_conflicting_flags() {
         )
         .is_err()
     );
-    // The same refusals hold before any request is made.
-    let early = refuse_requested_cloud_mesh(&platform, Some("local:dev"), false)
+    // The local refusal holds before any request is made; a hosted network
+    // goes on to its membership check.
+    let early = refuse_requested_cloud_mesh(Some("local:dev"), false)
         .unwrap_err()
         .to_string();
     assert!(early.contains("cannot join the local Mesh service"), "{early}");
-    let hosted = refuse_requested_cloud_mesh(&platform, Some("cloud:work"), false)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        hosted.contains("network cloud:work at https://mesh.codewire-dev.sh (organization org-alpha)")
-            && hosted.contains("No environment was created"),
-        "{hosted}"
-    );
-    assert!(refuse_requested_cloud_mesh(&platform, None, false).is_ok());
-    assert!(refuse_requested_cloud_mesh(&platform, None, true).is_ok());
+    assert!(refuse_requested_cloud_mesh(Some("cloud:work"), false).is_ok());
+    assert!(refuse_requested_cloud_mesh(Some("work"), false).is_ok());
+    assert!(refuse_requested_cloud_mesh(Some("cloud:work"), true).is_err());
+    assert!(refuse_requested_cloud_mesh(None, false).is_ok());
+    assert!(refuse_requested_cloud_mesh(None, true).is_ok());
 }
 
 #[test]

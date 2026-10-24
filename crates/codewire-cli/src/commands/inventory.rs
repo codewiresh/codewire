@@ -9,9 +9,7 @@ use super::lifecycle_output::{credential_profile_names, credential_ref, listed_p
 use super::progress::terminal_text;
 use super::*;
 use crate::config::selection::{EnvironmentSelection, SelectionLocation};
-use crate::output::{
-    Allocation, Capabilities, MeshPlacement, NetworkRef, OutputMode, SourceRef, Status, Style,
-};
+use crate::output::{Allocation, Capabilities, NetworkRef, OutputMode, SourceRef, Status, Style};
 
 /// Where an inventory row runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -484,13 +482,11 @@ pub(crate) fn cloud_entry(
             environment.disk_gb,
         ),
         credentials: cloud_credentials(environment, profiles),
-        network: match environment.network.as_deref().and_then(trimmed_str) {
-            Some(network) => NetworkRef::Attached {
-                mesh: MeshPlacement::Cloud,
-                network: network.to_owned(),
-            },
-            None => NetworkRef::NotAttached,
-        },
+        network: NetworkRef::cloud(
+            environment.network.as_deref(),
+            environment.network_state.as_deref(),
+            environment.network_failure.as_deref(),
+        ),
     }
 }
 
@@ -1610,7 +1606,7 @@ mod tests {
                 &app,
                 Some(1),
                 NetworkRef::Attached {
-                    mesh: MeshPlacement::Cloud,
+                    mesh: crate::output::MeshPlacement::Cloud,
                     network: "work".into(),
                 },
             ),

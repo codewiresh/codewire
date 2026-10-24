@@ -154,6 +154,14 @@ pub(crate) fn cloud_export(
     if let Some(ttl) = environment.ttl_seconds.filter(|ttl| *ttl > 0) {
         notes.push(Note::Ttl(ttl.unsigned_abs()));
     }
+    if let Some(network) = environment
+        .network
+        .as_deref()
+        .map(str::trim)
+        .filter(|network| !network.is_empty())
+    {
+        notes.push(Note::MeshNetwork(format!("cloud:{network}")));
+    }
     if let Some(note) = references_note(&spec, "") {
         notes.push(note);
     }
@@ -557,6 +565,23 @@ credentials: {profile: "platform:id:7c0e2a4b-3f1d-4e5a-9b8c-0d1e2f3a4b5c"}
                     local: false
                 },
             ]
+        );
+
+        // A network names its create flag, as for a local VM.
+        let attached = Environment {
+            network: Some("work".into()),
+            ..environment.clone()
+        };
+        let notes = cloud_export(&attached, saved.clone(), Vec::new())
+            .unwrap()
+            .notes;
+        assert!(
+            notes.contains(&Note::MeshNetwork("cloud:work".into())),
+            "{notes:?}"
+        );
+        assert!(
+            render_notes(&notes, plain())
+                .contains("Not exported: Mesh network cloud:work — pass --network when creating")
         );
 
         let mut leaked = saved;

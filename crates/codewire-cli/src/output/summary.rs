@@ -226,14 +226,34 @@ pub(crate) enum NetworkRef {
         mesh: MeshPlacement,
         network: String,
     },
+    /// A cloud environment's hosted network and how far joining it has come,
+    /// as the platform reports it.
+    Cloud {
+        network: String,
+        state: Option<String>,
+        failure: Option<String>,
+    },
 }
 
 impl NetworkRef {
-    pub(crate) fn is_attached(&self) -> bool {
-        matches!(self, NetworkRef::Attached { .. })
+    /// A cloud environment's network as the platform reports it.
+    pub(crate) fn cloud(network: Option<&str>, state: Option<&str>, failure: Option<&str>) -> Self {
+        match network.map(str::trim).filter(|network| !network.is_empty()) {
+            Some(network) => NetworkRef::Cloud {
+                network: network.to_owned(),
+                state: state.map(str::to_owned),
+                failure: failure.map(str::to_owned),
+            },
+            None => NetworkRef::NotAttached,
+        }
     }
 
-    /// `cloud:work`, `local:work` or `not attached`.
+    pub(crate) fn is_attached(&self) -> bool {
+        !matches!(self, NetworkRef::NotAttached)
+    }
+
+    /// `cloud:work`, `local:work` or `not attached`; a cloud network adds
+    /// how far joining it has come, such as `cloud:work (attached)`.
     pub(crate) fn text(&self) -> String {
         match self {
             NetworkRef::NotAttached => "not attached".to_owned(),
@@ -243,6 +263,30 @@ impl NetworkRef {
                     MeshPlacement::Local => "local",
                 };
                 format!("{mesh}:{}", terminal_text(network))
+            }
+            NetworkRef::Cloud {
+                network,
+                state,
+                failure,
+            } => {
+                let network = format!("cloud:{}", terminal_text(network));
+                match state.as_deref() {
+                    None => network,
+                    Some("attached") => format!("{network} (attached)"),
+                    Some("pending") => format!("{network} (joining)"),
+                    Some("revoked") => format!("{network} (revoked by a network owner)"),
+                    Some("failed") => format!(
+                        "{network} (not joined: {})",
+                        match failure.as_deref() {
+                            Some("mesh_unreachable") => "Mesh is unreachable; it retries",
+                            Some("network_not_found") => "the network does not exist",
+                            Some("not_a_member") => "its creator is not a member of the network",
+                            Some("node_name_taken") => "another node in the network has its name",
+                            _ => "Mesh refused it",
+                        }
+                    ),
+                    Some(other) => format!("{network} ({})", terminal_text(other)),
+                }
             }
         }
     }
@@ -377,6 +421,53 @@ impl LifecycleSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cloud_network_shows_how_far_joining_has_come() {
+        assert_eq!(NetworkRef::cloud(None, None, None), NetworkRef::NotAttached);
+        assert_eq!(
+            NetworkRef::cloud(Some(" "), Some("pending"), None),
+            NetworkRef::NotAttached
+        );
+        for (state, failure, text) in [
+            (None, None, "cloud:work"),
+            (Some("pending"), None, "cloud:work (joining)"),
+            (Some("attached"), None, "cloud:work (attached)"),
+            (
+                Some("revoked"),
+                None,
+                "cloud:work (revoked by a network owner)",
+            ),
+            (
+                Some("failed"),
+                Some("not_a_member"),
+                "cloud:work (not joined: its creator is not a member of the network)",
+            ),
+            (
+                Some("failed"),
+                Some("node_name_taken"),
+                "cloud:work (not joined: another node in the network has its name)",
+            ),
+            (
+                Some("failed"),
+                Some("mesh_unreachable"),
+                "cloud:work (not joined: Mesh is unreachable; it retries)",
+            ),
+            (
+                Some("failed"),
+                None,
+                "cloud:work (not joined: Mesh refused it)",
+            ),
+        ] {
+            let network = NetworkRef::cloud(Some("work"), state, failure);
+            assert!(network.is_attached());
+            assert_eq!(network.text(), text);
+        }
+        assert_eq!(
+            NetworkRef::cloud(Some("evil\u{1b}[2J"), Some("attached"), None).text(),
+            format!("cloud:{} (attached)", terminal_text("evil\u{1b}[2J"))
+        );
+    }
     use crate::output::caps::Charset;
 
     const PLAIN: Style = Style::new(false, Charset::Unicode);

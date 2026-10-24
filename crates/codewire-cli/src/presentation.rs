@@ -42,6 +42,12 @@ pub struct Environment {
     pub deletion_requested_at: Option<String>,
     pub deletion_grace_until: Option<String>,
     pub network: Option<String>,
+    /// `pending`, `attached`, `failed` or `revoked` while `network` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_state: Option<String>,
+    /// Why joining `network` failed, with `network_state` `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_failure: Option<String>,
     pub operation_generation: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_selection: Option<EnvironmentSourceSelection>,
@@ -280,6 +286,9 @@ pub struct CreateEnvironmentRequest {
     pub confirm_personal_credentials: bool,
     pub confirm_personal_secrets: bool,
     pub omit_application_previews: bool,
+    /// The hosted Mesh network to join, by name, in the organization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]

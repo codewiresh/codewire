@@ -8,8 +8,7 @@ use crate::commands::lifecycle_output::{
     exact_reference_id, location_label, next_run_command, secret_refs, unless_interrupted,
 };
 use crate::output::{
-    Allocation, LifecycleSummary, MeshPlacement, NetworkRef, Outcome, SourceRef, Status,
-    StatusLine, VmLocation,
+    Allocation, LifecycleSummary, NetworkRef, Outcome, SourceRef, Status, StatusLine, VmLocation,
 };
 
 /// Display-only names of the selected credential profile and secret
@@ -30,9 +29,8 @@ pub(crate) fn display_name(environment: &Environment) -> String {
         .to_owned()
 }
 
-/// A summary of a cloud environment. Cloud VMs have no Mesh attachment
-/// today (creation refuses one), so the network reads `not attached` unless
-/// the platform reports a network.
+/// A summary of a cloud environment. Its network, when it joins one, shows
+/// how far joining has come, as the platform reports it.
 pub(crate) fn cloud_summary(
     environment: &Environment,
     outcome: Outcome,
@@ -49,13 +47,11 @@ pub(crate) fn cloud_summary(
     let secrets = selection.map_or(SourceRef::None, |selection| {
         secret_refs(&selection.secrets, names.project.as_deref())
     });
-    let network = match environment.network.as_deref().and_then(trimmed_str) {
-        Some(network) => NetworkRef::Attached {
-            mesh: MeshPlacement::Cloud,
-            network: network.to_owned(),
-        },
-        None => NetworkRef::NotAttached,
-    };
+    let network = NetworkRef::cloud(
+        environment.network.as_deref(),
+        environment.network_state.as_deref(),
+        environment.network_failure.as_deref(),
+    );
     let next = match outcome {
         Outcome::Creating => environment_command(VmLocation::Cloud, "info", &name),
         _ => next_run_command(VmLocation::Cloud, &name),

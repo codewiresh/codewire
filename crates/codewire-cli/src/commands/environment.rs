@@ -52,11 +52,12 @@ pub(crate) struct CloudMeshRequest {
     pub(crate) network_id: String,
 }
 
-/// Refuses an explicit `--network` on a cloud create before anything is
-/// requested or allocated: `local:NAME` can never join a cloud environment,
-/// and a hosted attachment awaits credential-free runtime enrollment.
+/// Refuses, before anything is requested or allocated, the `--network` a
+/// cloud create can never use: `local:NAME` (a cloud environment cannot join
+/// a local Mesh service) and `--network` with `--no-network`. A hosted
+/// network (`cloud:NAME` or `NAME`) is checked against the hosted Mesh
+/// afterwards, with the user's own sign-in.
 pub(crate) fn refuse_requested_cloud_mesh(
-    platform: &config::ResolvedPlatformConfig,
     requested_network: Option<&str>,
     disable_network: bool,
 ) -> anyhow::Result<()> {
@@ -74,11 +75,7 @@ pub(crate) fn refuse_requested_cloud_mesh(
     if requested.mesh == Some(MeshKind::Local) {
         return Err(local_mesh_refusal(&requested.network));
     }
-    Err(cloud_mesh_attachment_refusal(&CloudMeshRequest {
-        mesh_url: mesh_commands::selection::hosted_mesh_url(platform)?,
-        organization_id: platform.default_org.clone(),
-        network_id: requested.network,
-    }))
+    Ok(())
 }
 
 fn local_mesh_refusal(network: &str) -> anyhow::Error {
@@ -171,20 +168,36 @@ pub(crate) fn env_create_mesh_prompt(
     )
 }
 
-/// The explicit refusal of a cloud environment's Mesh attachment, until
-/// credential-free runtime enrollment exists. It is returned before any
-/// source preparation or allocation.
-pub(crate) fn cloud_mesh_attachment_refusal(request: &CloudMeshRequest) -> anyhow::Error {
-    let organization = request
-        .organization_id
-        .as_deref()
-        .map(|organization| format!(" (organization {})", terminal_text(organization)))
-        .unwrap_or_default();
-    anyhow::anyhow!(
-        "a cloud environment cannot join Codewire Cloud Mesh network cloud:{} at {}{organization} yet: that needs credential-free runtime enrollment, which is not implemented. No environment was created; create it with --no-network",
+/// Before a cloud create allocates anything: the hosted Mesh lists the
+/// network for the signed-in user, so it exists in the organization and they
+/// are a member of it. Mesh enforces this again when the environment joins;
+/// this check only names the mistake before an environment is created.
+async fn require_cloud_network_membership(
+    globals: &Globals,
+    paths: &ResolvePaths,
+    env: &impl config::Env,
+    request: &CloudMeshRequest,
+) -> anyhow::Result<()> {
+    let organization = request.organization_id.as_deref().unwrap_or_default();
+    let reference = format!(
+        "Codewire Cloud Mesh network cloud:{} at {} (organization {})",
         terminal_text(&request.network_id),
         terminal_text(&request.mesh_url),
-    )
+        terminal_text(organization)
+    );
+    let mesh = mesh_commands::selection::mesh_of_kind(globals, paths, env, MeshKind::Cloud)?;
+    let networks = crate::mesh::MeshClient::new(&mesh.resolved)?
+        .list_networks(organization)
+        .await
+        .with_context(|| format!("could not check {reference}. No environment was created"))?;
+    anyhow::ensure!(
+        networks
+            .iter()
+            .any(|network| network.id == request.network_id),
+        "you are not a member of {reference}, or it does not exist. No environment was created; list your networks with `cw --cloud network ls --org {}`",
+        terminal_text(organization)
+    );
+    Ok(())
 }
 
 pub(crate) async fn handle_env_command(
@@ -507,9 +520,9 @@ pub(crate) async fn handle_platform_env_command(
         _ => None,
     };
     let platform = resolve_platform(globals, &paths, &env)?;
-    // An explicit network on a cloud create is refused before any request.
+    // A network a cloud create can never use is refused before any request.
     if let EnvCommand::Create(args) = &command {
-        refuse_requested_cloud_mesh(&platform, args.network.as_deref(), args.no_network)?;
+        refuse_requested_cloud_mesh(args.network.as_deref(), args.no_network)?;
     }
     let environment_client = EnvironmentClient::new(&platform)?;
     let organization_client = organization_client(&platform)?;
@@ -535,7 +548,7 @@ pub(crate) async fn handle_platform_env_command(
             let (mut request, provenance) = prepared_create
                 .take()
                 .context("the create request was not prepared")?;
-            if let Some(request) = resolve_env_create_mesh_bootstrap(
+            if let Some(mesh) = resolve_env_create_mesh_bootstrap(
                 &paths,
                 &env,
                 &platform,
@@ -544,7 +557,8 @@ pub(crate) async fn handle_platform_env_command(
                 args.network.as_deref(),
                 args.no_network,
             )? {
-                return Err(cloud_mesh_attachment_refusal(&request));
+                require_cloud_network_membership(globals, &paths, &env, &mesh).await?;
+                request.network = Some(mesh.network_id);
             }
             let names = sources::prepare_create_sources(
                 &platform,

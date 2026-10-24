@@ -1108,6 +1108,7 @@ fn proto_create_environment_request(
         confirm_personal_credentials: request.confirm_personal_credentials,
         confirm_personal_secrets: request.confirm_personal_secrets,
         omit_application_previews: request.omit_application_previews,
+        network: request.network.clone().unwrap_or_default(),
         ..Default::default()
     }
 }
@@ -1185,6 +1186,7 @@ fn create_environment_request_from_proto(
         confirm_personal_credentials: value.confirm_personal_credentials,
         confirm_personal_secrets: value.confirm_personal_secrets,
         omit_application_previews: value.omit_application_previews,
+        network: empty_to_none(value.network),
     })
 }
 
@@ -1322,8 +1324,41 @@ fn environment_from_proto(value: rpc::Environment) -> anyhow::Result<Environment
             .deletion_grace_until
             .into_option()
             .map(timestamp_to_rfc3339),
+        network_state: network_state(value.network_state),
+        network_failure: network_failure(value.network_failure),
         network: empty_to_none(value.network),
     })
+}
+
+/// The attachment state's name; absent when the environment names no
+/// network, `unknown` for a value this CLI does not know.
+fn network_state(value: rpc::EnumValue<rpc::NetworkAttachmentState>) -> Option<String> {
+    Some(
+        match value.as_known() {
+            Some(rpc::NetworkAttachmentState::Unspecified) => return None,
+            Some(rpc::NetworkAttachmentState::Pending) => "pending",
+            Some(rpc::NetworkAttachmentState::Attached) => "attached",
+            Some(rpc::NetworkAttachmentState::Failed) => "failed",
+            Some(rpc::NetworkAttachmentState::Revoked) => "revoked",
+            None => "unknown",
+        }
+        .to_owned(),
+    )
+}
+
+fn network_failure(value: rpc::EnumValue<rpc::NetworkAttachmentFailure>) -> Option<String> {
+    Some(
+        match value.as_known() {
+            Some(rpc::NetworkAttachmentFailure::Unspecified) => return None,
+            Some(rpc::NetworkAttachmentFailure::MeshUnreachable) => "mesh_unreachable",
+            Some(rpc::NetworkAttachmentFailure::NetworkNotFound) => "network_not_found",
+            Some(rpc::NetworkAttachmentFailure::NotAMember) => "not_a_member",
+            Some(rpc::NetworkAttachmentFailure::NodeNameTaken) => "node_name_taken",
+            Some(rpc::NetworkAttachmentFailure::Refused) => "refused",
+            None => "unknown",
+        }
+        .to_owned(),
+    )
 }
 
 fn legacy_environment_resize_response(

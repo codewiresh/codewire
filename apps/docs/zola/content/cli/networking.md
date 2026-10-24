@@ -55,8 +55,22 @@ local Mesh service runs), `--network local:NAME` (the local Mesh service), or
 a bare `--network NAME` on the selected network's Mesh. Without `--network`
 it uses `CODEWIRE_MESH_NETWORK` or the selection; at a terminal `cw create
 --local` asks first unless the selection was made with `--auto-connect`, and
-`--no-network` opts out. A cloud environment cannot join a Mesh network yet:
-`cw --cloud create --network ...` is refused before anything is created.
+`--no-network` opts out.
+
+A cloud environment joins a Codewire Cloud Mesh network with `cw --cloud
+create --network cloud:NAME` (or a bare `NAME`). You must be a member of the
+network: `create` checks this before anything is created, and Mesh admits
+the node only while you remain one. `--network local:NAME` is refused,
+because a cloud environment cannot reach a local Mesh service.
+
+The node takes the environment's name and serves its application ports. It
+rejoins after every start. It carries no credential of yours: each time it
+connects, the platform issues it a code that works once, for that running
+environment only.
+
+`cw info` and the create and start results show whether it has joined, for
+example `Network: cloud:NAME (attached)`, or why not. A network owner can
+remove the node with `cw network revoke`; it then stays out of that network.
 
 `network nodes` lists enrolled nodes and the status each node last reported;
 it does not check connectivity. Deleting a network retires its name for good
