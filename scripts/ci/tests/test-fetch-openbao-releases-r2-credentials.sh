@@ -46,11 +46,12 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$output" && -n "$url" ]]
 case "$url" in
-  https://git.example.invalid/*audience=openbao-codewire-source-cli-releases-r2)
+  "https://git.example.invalid/api/actions/oidc?job=synthetic&audience=openbao-${FAKE_EXPECTED_ROLE:-codewire-source-cli-releases-r2}")
+    # The audience is the expected role's: "openbao-" plus its name.
     jq -n --arg value "${FAKE_FORGEJO_JWT:?}" '{value:$value}' >"$output"
     ;;
   https://openbao.example.invalid/v1/auth/forgejo-jwt/login)
-    jq -e '.role == "codewire-source-cli-releases-r2"' "$data_file" >/dev/null
+    jq -e --arg role "${FAKE_EXPECTED_ROLE:-codewire-source-cli-releases-r2}" '.role == $role' "$data_file" >/dev/null
     printf 'login\n' >>"$FAKE_EVENTS"
     jq -n --arg token "${FAKE_OPENBAO_TOKEN:?}" '{auth:{client_token:$token}}' >"$output"
     ;;
@@ -79,6 +80,8 @@ export GITHUB_REF=refs/heads/main
 export GITHUB_ACTOR=noel
 export GITHUB_REPOSITORY=codewire/codewire
 export RUNNER_TEMP="$work/runner"
+# The CI job's own attempt never reaches a case: each sets the one it means.
+unset GITHUB_RUN_ATTEMPT
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN BAO_TOKEN VAULT_TOKEN
 
 fetch() {
@@ -114,6 +117,58 @@ for override in GITHUB_ACTOR=mallory GITHUB_REF=refs/heads/feature GITHUB_REF=re
   fi
   [[ "$(wc -l <"$FAKE_CURL_CALLS")" -eq "$calls_before" ]] || fail "$override reached a request"
   [[ ! -e "$work/output/$name" ]] || fail "$override wrote credentials"
+  pass
+done
+
+# The schedule's pickup of a pushed release tag (#2892) reads through its own
+# role, with its own claims: event schedule, by Forgejo's Actions user.
+schedule_claims="$(jq -c '.aud = "openbao-codewire-source-cli-releases-r2-schedule" | .actor = "forgejo-actions"
+  | .event_name = "schedule" | .run_attempt = "1"' <<<"$GOOD_CLAIMS")"
+: >"$FAKE_EVENTS"
+FAKE_FORGEJO_JWT="$(jwt "$schedule_claims")" FAKE_EXPECTED_ROLE=codewire-source-cli-releases-r2-schedule \
+  fetch "$work/output/schedule-credentials" env GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=forgejo-actions GITHUB_RUN_ATTEMPT=1 \
+  >"$work/schedule.out" 2>&1 || fail "a scheduled release could not read its credential: $(cat "$work/schedule.out")"
+[[ "$(tr '\n' ' ' <"$FAKE_EVENTS")" == 'login read ' ]] || fail 'the scheduled release did not log in and read once'
+pass
+# Neither identity borrows the other's: a dispatch by the Actions user, which
+# any branch's job token can make, a schedule attributed to a person, and a
+# rerun of a scheduled run are refused before any request; a scheduled run
+# presenting dispatch claims is refused at the claim check.
+for identity in 'GITHUB_EVENT_NAME=workflow_dispatch GITHUB_ACTOR=forgejo-actions' \
+    'GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=noel GITHUB_RUN_ATTEMPT=1' \
+    'GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=forgejo-actions GITHUB_RUN_ATTEMPT=2' \
+    'GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=forgejo-actions'; do
+  calls_before="$(wc -l <"$FAKE_CURL_CALLS")"
+  # shellcheck disable=SC2086 # Each identity is a few assignments.
+  if fetch "$work/output/identity" env $identity >"$work/identity.out" 2>&1; then
+    fail "the identity $identity was accepted"
+  fi
+  [[ "$(wc -l <"$FAKE_CURL_CALLS")" -eq "$calls_before" ]] || fail "the identity $identity reached a request"
+  pass
+done
+: >"$FAKE_EVENTS"
+if FAKE_EXPECTED_ROLE=codewire-source-cli-releases-r2-schedule \
+    fetch "$work/output/mixed" env GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=forgejo-actions GITHUB_RUN_ATTEMPT=1 >"$work/mixed.out" 2>&1; then
+  fail 'a scheduled run presenting dispatch claims was accepted'
+fi
+grep -Fq 'OIDC token claims are not the protected release workflow' "$work/mixed.out" ||
+  fail "dispatch claims on a scheduled run were not refused by the claim check: $(cat "$work/mixed.out")"
+[[ ! -s "$FAKE_EVENTS" ]] || fail 'dispatch claims on a scheduled run reached OpenBao'
+pass
+# Each scheduled claim is checked on its own, before OpenBao: a dispatch's
+# actor or event, a rerun's later attempt, or no attempt at all.
+n=0
+for change in '.actor = "noel"' '.event_name = "workflow_dispatch"' '.run_attempt = "2"' 'del(.run_attempt)'; do
+  n=$((n + 1))
+  : >"$FAKE_EVENTS"
+  if FAKE_FORGEJO_JWT="$(jwt "$(jq -c "$change" <<<"$schedule_claims")")" FAKE_EXPECTED_ROLE=codewire-source-cli-releases-r2-schedule \
+      fetch "$work/output/claim-$n" env GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=forgejo-actions GITHUB_RUN_ATTEMPT=1 \
+      >"$work/claim.out" 2>&1; then
+    fail "a scheduled run whose claims were changed by $change was accepted"
+  fi
+  grep -Fq 'OIDC token claims are not the protected release workflow' "$work/claim.out" ||
+    fail "$change was not refused by the claim check: $(cat "$work/claim.out")"
+  [[ ! -s "$FAKE_EVENTS" ]] || fail "$change reached OpenBao"
   pass
 done
 

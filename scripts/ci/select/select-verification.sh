@@ -2133,6 +2133,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/sign-cw-release.sh|scripts/ci/release/sign-macos-cw.sh|\
       scripts/ci/release/sign-macos-helper.sh|scripts/ci/release/macos-signing.sh|\
       scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh|\
+      scripts/ci/setup/release-run-identity.sh|\
       scripts/ci/setup/fetch-openbao-release-signing-key.sh|\
       scripts/ci/setup/fetch-openbao-macos-signing.sh|\
       scripts/ci/tests/cw_release_fixtures.py|scripts/ci/tests/test-cli-release-workflow.py|\
@@ -2192,6 +2193,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/*observer*.tsv|\
       scripts/ci/release/verify-cw-release-signing-key.sh|scripts/ci/release/verify-release-tag-ref.sh|\
       scripts/ci/release/alias-release-images.sh|scripts/ci/release/finish-prod-release.sh|\
+      scripts/ci/release/find-pending-release.sh|scripts/ci/tests/test-find-pending-release.sh|\
+      scripts/ci/release/release-tags.sh|scripts/ci/release/require-current-release.sh|\
       scripts/ci/tests/test-deploy-prod-helpers.sh|\
       scripts/ci/release/confirm-release-checkout.sh|\
       scripts/ci/release/require-production-accepted.sh|scripts/ci/tests/test-require-production-accepted.sh|\
@@ -2209,6 +2212,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh|\
       scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh|\
       scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh|\
+      scripts/ci/setup/release-run-identity.sh|\
       scripts/ci/release/mint-github-app-token.sh|\
       scripts/ci/release/mirror-github.sh|\
       scripts/ci/release/check-mirror-content.sh|\

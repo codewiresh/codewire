@@ -23,9 +23,18 @@ readonly private_key_file="$3"
 
 case "${OPENBAO_GITHUB_ROLE}|${OPENBAO_GITHUB_AUDIENCE}" in
   codewire-source-github-mirror\|openbao-codewire-source-github-mirror | \
-  codewire-source-cli-github-mirror\|openbao-codewire-source-cli-github-mirror) ;;
+  codewire-source-cli-github-mirror\|openbao-codewire-source-cli-github-mirror | \
+  codewire-source-cli-github-mirror-schedule\|openbao-codewire-source-cli-github-mirror-schedule) ;;
   *) fail 'OpenBao role and audience are not an approved GitHub mirror pair' ;;
 esac
+# A schedule role is read only by the release schedule's own first attempt
+# (#2892).
+# shellcheck source=scripts/ci/setup/release-run-identity.sh
+. "$(dirname "$0")/release-run-identity.sh"
+release_schedule_guard "${OPENBAO_GITHUB_ROLE}" || {
+  printf '%s\n' "only the release schedule's first attempt reads a schedule role" >&2
+  exit 1
+}
 
 for output in "$app_id_file" "$installation_id_file" "$private_key_file"; do
   [[ -d "$(dirname "$output")" && ! -e "$output" && ! -L "$output" ]] ||

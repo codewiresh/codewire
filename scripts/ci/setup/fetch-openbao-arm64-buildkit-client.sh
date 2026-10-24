@@ -30,12 +30,22 @@ readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}
 readonly CREDENTIAL_PATH='platform/data/ci/codewire/arm64-buildkit-client'
 readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
 # Only the two protected-main support-pair publishers may read the node's
-# client tuple: the support publisher and the production publisher.
+# client tuple: the support publisher and the production publisher, whose
+# scheduled release has its own role (#2892).
 case "$OPENBAO_ROLE|$OPENBAO_AUDIENCE" in
   'codewire-source-support-publisher|openbao-codewire-source-support-publisher' | \
-    'codewire-source-prod-publisher|openbao-codewire-source-prod-publisher') ;;
+    'codewire-source-prod-publisher|openbao-codewire-source-prod-publisher' | \
+    'codewire-source-prod-publisher-schedule|openbao-codewire-source-prod-publisher-schedule') ;;
   *) fail 'only the support and production publisher roles read the arm64 BuildKit client certificate' ;;
 esac
+# A schedule role is read only by the release schedule's own first attempt
+# (#2892).
+# shellcheck source=scripts/ci/setup/release-run-identity.sh
+. "$(dirname "$0")/release-run-identity.sh"
+release_schedule_guard "${OPENBAO_ROLE}" || {
+  printf '%s\n' "only the release schedule's first attempt reads a schedule role" >&2
+  exit 1
+}
 [[ "$output_dir" == /* && -d "$output_dir" && ! -L "$output_dir" \
   && "$(stat -c '%u %a' -- "$output_dir")" == "$(id -u) 700" \
   && -z "$(find "$output_dir" -mindepth 1 -print -quit)" ]] ||

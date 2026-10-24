@@ -61,6 +61,18 @@ approval. First diagnose why the prior attempt did not produce reusable
 evidence, preserve the selected gate, and honor any explicit named exclusion
 for the exact run it names.
 
+A pushed `v*` tag is a Production action. Within five minutes the scheduled
+`deploy-prod` picks it up, verifies it from main's code and delivers it to
+Production, and `cli-release` then publishes the CLI (owner, 2026-10-23,
+#2892). Pushing one still needs the owner's explicit, action-scoped authority.
+The schedule takes only the newest release tag signed by the release tagger,
+and only within 24 hours of its signing: a tag that was not picked up within
+24 hours of tagging is delivered only by dispatching the workflow for it. A
+release that fails or does not finish is not retried by the schedule, and a
+rerun of a scheduled run's jobs reads no release credential; recover it by
+dispatching `deploy-prod`, then `cli-release`, for that tag, which stays
+explicit.
+
 ## Method and risk
 
 Use Noel Method v0.11.0, exact merged commit

@@ -20,6 +20,12 @@ on:
         default: none
         options: [none, stable]
 
+  # A pushed, signed release tag is picked up within five minutes (owner,
+  # 2026-10-23, #2892). A scheduled run is main's workflow; its first job only
+  # looks, and everything after it runs only for a pending tag.
+  schedule:
+    - cron: '2-59/5 * * * *'
+
 concurrency:
   group: cli-release
   cancel-in-progress: false
@@ -42,18 +48,48 @@ env:
   # TLS handshake or transfer in 20 s, and cargo logs and retries it.
   CARGO_HTTP_TIMEOUT: '20'
   CARGO_NET_RETRY: '5'
-  OPENBAO_GITHUB_ROLE: codewire-source-cli-github-mirror
-  OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-cli-github-mirror
+  OPENBAO_GITHUB_ROLE: ${{ github.event_name == 'schedule' && 'codewire-source-cli-github-mirror-schedule' || 'codewire-source-cli-github-mirror' }}
+  OPENBAO_GITHUB_AUDIENCE: ${{ github.event_name == 'schedule' && 'openbao-codewire-source-cli-github-mirror-schedule' || 'openbao-codewire-source-cli-github-mirror' }}
   # The scoped R2 release route is admitted; publication and channel changes
   # remain explicit dispatch inputs (runbooks/cw-release-delivery.md).
   CW_RELEASE_R2_ROUTE_ADMITTED: 'true'
 
 jobs:
+  # The schedule and a dispatch both start here. This job holds only the
+  # job token and runs main's code: it names the release to deliver, or none,
+  # and nothing after it runs without one (find-pending-release.sh).
+  pending:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
+    name: Find the release to deliver
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    timeout-minutes: 5
+    outputs:
+      release_tag: ${{ steps.find.outputs.release_tag }}
+      r2_publication: ${{ steps.find.outputs.r2_publication }}
+      r2_promote_channel: ${{ steps.find.outputs.r2_promote_channel }}
+    steps:
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Find the pending release
+        id: find
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+          DISPATCHED_TAG: ${{ inputs.release_tag }}
+          DISPATCHED_R2_PUBLICATION: ${{ inputs.r2_publication }}
+          DISPATCHED_R2_PROMOTE_CHANNEL: ${{ inputs.r2_promote_channel }}
+        run: scripts/ci/release/find-pending-release.sh cli-release
+
   release-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Verify canonical CLI release tag
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    needs: [pending]
+    if: ${{ needs.pending.outputs.release_tag != '' }}
     outputs:
+      # A scheduled release publishes immutably and moves stable (owner,
+      # 2026-10-23); a dispatch publishes as its inputs say.
+      r2_publication: ${{ needs.pending.outputs.r2_publication }}
+      r2_promote_channel: ${{ needs.pending.outputs.r2_promote_channel }}
       release_tag: ${{ steps.select.outputs.release_tag }}
       source_sha: ${{ steps.select.outputs.source_sha }}
       tag_object_sha: ${{ steps.select.outputs.tag_object_sha }}
@@ -62,44 +98,35 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Refuse recovery control outside protected main
-        if: github.event_name == 'workflow_dispatch'
+      - name: Refuse release control outside protected main
         env:
-          RECOVERY_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ needs.pending.outputs.release_tag }}
         run: |
           set -euo pipefail
           [ "$GITHUB_REF" = 'refs/heads/main' ]
           [ "$GITHUB_REF_NAME" = 'main' ]
-          [[ "$RECOVERY_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        if: github.event_name == 'workflow_dispatch'
-        with:
-          ref: refs/tags/${{ inputs.release_tag }}
-          path: .release-source
-          fetch-depth: 0
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 
       - name: Select exact canonical release source
         id: select
         env:
-          RECOVERY_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ needs.pending.outputs.release_tag }}
           # Reads Forgejo's signature verification for the release tag.
           GITEA_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          selected_tag="$GITHUB_REF_NAME"
-          source_dir='.'
-          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then
-            selected_tag="$RECOVERY_TAG"
-            source_dir='.release-source'
-          fi
+          # The tag is verified from main's checkout before anything checks
+          # out or runs its content: it must name a commit on main and carry
+          # its own signature by the release tagger's account. Fetching it
+          # only adds its objects; nothing here checks it out.
+          selected_tag="$RELEASE_TAG"
           remote_refs="$(git ls-remote --tags origin \
             "refs/tags/${selected_tag}" \
             "refs/tags/${selected_tag}^{}")"
           remote_object_sha="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${selected_tag}" '$2 == ref { print $1 }')"
           remote_peeled_sha="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${selected_tag}^{}" '$2 == ref { print $1 }')"
           canonical_main_sha="$(git ls-remote origin refs/heads/main | awk '$2 == "refs/heads/main" { print $1 }')"
-          source_sha="$(git -C "$source_dir" rev-parse HEAD)"
+          source_sha="$remote_peeled_sha"
           git fetch --no-tags origin \
             "+refs/heads/main:refs/remotes/origin/main" \
             "+refs/tags/${selected_tag}:refs/tags/${selected_tag}"
@@ -107,7 +134,7 @@ jobs:
             "$GITHUB_EVENT_NAME" \
             "$GITHUB_REF" \
             "$GITHUB_REF_NAME" \
-            "$RECOVERY_TAG" \
+            "$selected_tag" \
             "$GITHUB_SERVER_URL" \
             "$GITHUB_REPOSITORY" \
             "$source_sha" \
@@ -671,8 +698,8 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 60
     env:
-      OPENBAO_ROLE: codewire-source-cli-release-build
-      OPENBAO_AUDIENCE: openbao-codewire-source-cli-release-build
+      OPENBAO_ROLE: ${{ github.event_name == 'schedule' && 'codewire-source-cli-release-build-schedule' || 'codewire-source-cli-release-build' }}
+      OPENBAO_AUDIENCE: ${{ github.event_name == 'schedule' && 'openbao-codewire-source-cli-release-build-schedule' || 'openbao-codewire-source-cli-release-build' }}
       # The owner's recovery (trusted-buildkit.sh): build in the job when the
       # repository variable CODEWIRE_IN_JOB_BUILD_SHA names this run's commit.
       CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
@@ -745,8 +772,8 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 60
     env:
-      OPENBAO_ROLE: codewire-source-cli-release-build
-      OPENBAO_AUDIENCE: openbao-codewire-source-cli-release-build
+      OPENBAO_ROLE: ${{ github.event_name == 'schedule' && 'codewire-source-cli-release-build-schedule' || 'codewire-source-cli-release-build' }}
+      OPENBAO_AUDIENCE: ${{ github.event_name == 'schedule' && 'openbao-codewire-source-cli-release-build-schedule' || 'openbao-codewire-source-cli-release-build' }}
       # The owner's recovery (trusted-buildkit.sh): build in the job when the
       # repository variable CODEWIRE_IN_JOB_BUILD_SHA names this run's commit.
       CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
@@ -980,6 +1007,14 @@ jobs:
           TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
         run: scripts/ci/release/confirm-release-checkout.sh .release-source
 
+      # An old release run's jobs can be rerun, keeping that run's selection;
+      # they publish only while the tag is still the newest release (#2892).
+      - name: Refuse a release that is no longer the newest
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          GITEA_TOKEN: ${{ github.token }}
+        run: scripts/ci/release/require-current-release.sh "$RELEASE_TAG"
+
       - name: Receive the unsigned delivery
         uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
@@ -1012,7 +1047,7 @@ jobs:
           chmod 0500 .release-verifier/verify-release-signatures
 
       - name: Reuse an already-published signed R2 release
-        if: ${{ inputs.r2_publication == 'immutable' }}
+        if: ${{ needs.release-selection.outputs.r2_publication == 'immutable' }}
         working-directory: .release-source
         env:
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
@@ -1071,10 +1106,10 @@ jobs:
             A38FF6BC6623FCA611A7A32B5EFBF0F4A5870815 dist/cw-release
 
       - name: Publish immutable R2 release objects
-        if: ${{ inputs.r2_publication == 'immutable' }}
+        if: ${{ needs.release-selection.outputs.r2_publication == 'immutable' }}
         working-directory: .release-source
         env:
-          PROMOTE_CHANNEL: ${{ inputs.r2_promote_channel }}
+          PROMOTE_CHANNEL: ${{ needs.release-selection.outputs.r2_promote_channel }}
         run: |
           set -euo pipefail
           [ "$CW_RELEASE_R2_ROUTE_ADMITTED" = 'true' ]
@@ -1083,7 +1118,7 @@ jobs:
             --promote "$PROMOTE_CHANNEL"
 
       - name: Receive the runtime part records
-        if: ${{ inputs.r2_publication == 'immutable' && needs.pack-runtime.outputs.records_sha256 != '' }}
+        if: ${{ needs.release-selection.outputs.r2_publication == 'immutable' && needs.pack-runtime.outputs.records_sha256 != '' }}
         uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
         with:
           name: cw-release-runtime-records-${{ github.run_id }}
@@ -1092,7 +1127,7 @@ jobs:
       # A record names blobs this release published, so it is written after
       # them; a later release with the same recipe then reuses those bytes.
       - name: Record the runtime parts this release built
-        if: ${{ inputs.r2_publication == 'immutable' && needs.pack-runtime.outputs.records_sha256 != '' }}
+        if: ${{ needs.release-selection.outputs.r2_publication == 'immutable' && needs.pack-runtime.outputs.records_sha256 != '' }}
         working-directory: .release-source
         env:
           RECORDS_SHA256: ${{ needs.pack-runtime.outputs.records_sha256 }}
@@ -1111,7 +1146,7 @@ jobs:
             --records "$records" --credentials "${RUNNER_TEMP:?}/codewire-release-r2/aws-credentials"
 
       - name: Remove the R2 publisher credential
-        if: ${{ always() && inputs.r2_publication == 'immutable' }}
+        if: ${{ always() && needs.release-selection.outputs.r2_publication == 'immutable' }}
         run: |
           r2_work="${RUNNER_TEMP:?}/codewire-release-r2"
           [ ! -d "$r2_work" ] || { find "$r2_work" -type f -exec shred -u {} + && rmdir "$r2_work"; }

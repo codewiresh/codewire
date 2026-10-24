@@ -94,4 +94,27 @@ fi
 [[ "$(wc -l <"$FAKE_CURL_CALLS")" -eq "$calls_before" ]] ||
   fail 'unapproved role reached an external request'
 
+# A schedule role is read only by the release schedule's own first attempt
+# (#2892): under the owner's dispatch, or on a rerun, it is refused before any
+# request; the schedule's first attempt passes the guard.
+for identity in 'GITHUB_EVENT_NAME=workflow_dispatch GITHUB_ACTOR=noel GITHUB_RUN_ATTEMPT=1' \
+    'GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=forgejo-actions GITHUB_RUN_ATTEMPT=2' \
+    'GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=forgejo-actions GITHUB_RUN_ATTEMPT=1'; do
+  calls_before="$(wc -l <"$FAKE_CURL_CALLS")"
+  # shellcheck disable=SC2086 # Each identity is three assignments.
+  env $identity GITHUB_REF=refs/heads/main GITHUB_REPOSITORY=codewire/codewire \
+    OPENBAO_GITHUB_ROLE=codewire-source-cli-github-mirror-schedule OPENBAO_GITHUB_AUDIENCE=openbao-codewire-source-cli-github-mirror-schedule \
+    "$FETCHER" "$work/output/schedule-app" "$work/output/schedule-installation" "$work/output/schedule-key" >"$work/schedule-guard.out" 2>&1 && guarded=0 || guarded=$?
+  if [[ "$identity" == *GITHUB_RUN_ATTEMPT=1 && "$identity" == *schedule* ]]; then
+    ! grep -Fq "only the release schedule's first attempt" "$work/schedule-guard.out" ||
+      fail "the schedule's first attempt was refused a schedule role"
+  else
+    [[ "$guarded" -ne 0 ]] || fail "a schedule role was read under $identity"
+    grep -Fq "only the release schedule's first attempt" "$work/schedule-guard.out" ||
+      fail "a schedule role under $identity was not refused by the guard: $(cat "$work/schedule-guard.out")"
+    [[ "$(wc -l <"$FAKE_CURL_CALLS")" -eq "$calls_before" ]] ||
+      fail "a schedule role under $identity reached a request"
+  fi
+done
+
 printf '[test-fetch-openbao-github-mirror-credentials] exact-role private-file contract passed\n'

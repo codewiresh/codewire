@@ -24,12 +24,21 @@ readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
 case "${OPENBAO_GHCR_ROLE}|${OPENBAO_GHCR_AUDIENCE}" in
   codewire-source-dev-publisher\|openbao-codewire-source-dev-publisher | \
   codewire-source-support-publisher\|openbao-codewire-source-support-publisher | \
-  codewire-source-prod-publisher\|openbao-codewire-source-prod-publisher) ;;
+  codewire-source-prod-publisher\|openbao-codewire-source-prod-publisher | \
+  codewire-source-prod-publisher-schedule\|openbao-codewire-source-prod-publisher-schedule) ;;
   *)
     echo 'OpenBao role and audience are not an approved GHCR publisher pair' >&2
     exit 1
     ;;
 esac
+# A schedule role is read only by the release schedule's own first attempt
+# (#2892).
+# shellcheck source=scripts/ci/setup/release-run-identity.sh
+. "$(dirname "$0")/release-run-identity.sh"
+release_schedule_guard "${OPENBAO_GHCR_ROLE}" || {
+  printf '%s\n' "only the release schedule's first attempt reads a schedule role" >&2
+  exit 1
+}
 
 for output in "$username_file" "$token_file"; do
   [[ -d "$(dirname "$output")" && ! -e "$output" && ! -L "$output" ]] || {

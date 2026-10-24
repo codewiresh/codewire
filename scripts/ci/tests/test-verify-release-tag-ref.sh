@@ -285,6 +285,19 @@ expect_failure unmerged-tag-source \
   workflow_dispatch refs/heads/main main v0.3.360 \
   https://git.example.invalid codewire/codewire \
   "$unmerged_sha" "$unmerged_tag_object" "$unmerged_sha" "$canonical_main_sha"
+# The schedule picks up a pushed release tag on the same terms as a dispatch.
+run_verify \
+  schedule refs/heads/main main v0.3.359 \
+  https://git.example.invalid codewire/codewire \
+  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha" >/dev/null
+expect_failure branch-schedule \
+  schedule refs/heads/feature feature v0.3.359 \
+  https://git.example.invalid codewire/codewire \
+  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
+expect_failure schedule-without-tag \
+  schedule refs/heads/main main '' \
+  https://git.example.invalid codewire/codewire \
+  "$source_sha" "$tag_object_sha" "$source_sha" "$canonical_main_sha"
 expect_failure branch-recovery-dispatch \
   workflow_dispatch refs/heads/feature feature v0.3.359 \
   https://git.example.invalid codewire/codewire \
@@ -539,6 +552,89 @@ PY
 }
 assert_composed_selection "$deploy_workflow" deploy
 assert_composed_selection "$cli_workflow" cli
+# The scheduled pickup (#2892, Forgejo's security guidance): the pending job
+# holds only the job token; release selection verifies the tag from main's
+# checkout before anything checks out or runs tag content, and no credential
+# step runs before that; tag values reach scripts only through env; a release
+# is never cancelled mid-flight.
+assert_scheduled_pickup() {
+  python3 -I - "$1" "$2" "$3" "$RUNS_ON_UNTRUSTED_LIGHT" <<'PY'
+import re
+import sys
+
+import yaml
+
+path, workflow, cron, untrusted_light = sys.argv[1:]
+text = open(path).read()
+document = yaml.safe_load(text)
+on = document.get("on", document.get(True))
+if on.get("schedule") != [{"cron": cron}]:
+    sys.exit(f"{workflow} is not scheduled at {cron}")
+if document.get("concurrency", {}).get("cancel-in-progress") is not False:
+    sys.exit(f"{workflow} can cancel a release in flight")
+jobs = document["jobs"]
+if list(jobs)[:2] != ["pending", "release-selection"]:
+    sys.exit(f"{workflow} does not start with pending, then release selection")
+pending = jobs["pending"]
+if pending.get("runs-on") != untrusted_light or pending.get("needs"):
+    sys.exit("the pending job is not the first, unprivileged job")
+steps = pending["steps"]
+if len(steps) != 2 or "with" in steps[0] or not steps[0]["uses"].startswith("noel/actions-checkout@"):
+    sys.exit("the pending job does more than check out main and find the release")
+if steps[1].get("run") != f"scripts/ci/release/find-pending-release.sh {workflow}":
+    sys.exit("the pending job does not run the release finder")
+if set(steps[1].get("env", {})) - {"GITEA_TOKEN", "DISPATCHED_TAG", "DISPATCHED_R2_PUBLICATION",
+                                     "DISPATCHED_R2_PROMOTE_CHANNEL"}:
+    sys.exit("the pending job receives more than the job token and the dispatch inputs")
+selection = jobs["release-selection"]
+if selection.get("needs") != ["pending"] or selection.get("if") != "${{ needs.pending.outputs.release_tag != '' }}":
+    sys.exit("release selection runs without a pending release")
+if selection.get("runs-on") != untrusted_light:
+    sys.exit("release selection is not unprivileged")
+for step in selection["steps"]:
+    if "uses" in step and "with" in step and "ref" in step["with"]:
+        sys.exit("release selection checks out tag content")
+    if re.search(r"fetch-openbao|fetch-forgejo|ACTIONS_ID_TOKEN|bao ", step.get("run", "")):
+        sys.exit("release selection runs a credential step")
+first = next(index for index, step in enumerate(selection["steps"]) if step.get("id") == "select")
+script = selection["steps"][first]["run"]
+verify = script.index("scripts/ci/release/verify-release-tag-ref.sh")
+for later in ("workspace-image-pin.py", "verify-release-tag-receipt.sh", "GITHUB_OUTPUT"):
+    if script.index(later) < verify:
+        sys.exit(f"release selection runs {later} before verifying the tag")
+# Every job after release selection needs it, so none runs unverified.
+for name, job in jobs.items():
+    if name in ("pending", "release-selection"):
+        continue
+    needs = job.get("needs") or []
+    needs = [needs] if isinstance(needs, str) else needs
+    if "release-selection" not in needs:
+        sys.exit(f"{name} can run before the tag is verified")
+# Tag values never interpolate into a shell script.
+for name, job in jobs.items():
+    for step in job.get("steps", []):
+        run = step.get("run", "")
+        if re.search(r"\$\{\{[^}]*(release_tag|inputs\.)[^}]*\}\}", run):
+            sys.exit(f"{name} interpolates a tag value into a shell script")
+PY
+}
+assert_scheduled_pickup "$deploy_workflow" deploy-prod '*/5 * * * *'
+assert_scheduled_pickup "$cli_workflow" cli-release '2-59/5 * * * *'
+for mutation in "s|    - cron: '\*/5 \* \* \* \*'|    - cron: '0 * * * *'|" \
+    's|  cancel-in-progress: false|  cancel-in-progress: true|' \
+    '/^  pending:/,/^  release-selection:/{s|CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT|CODEWIRE_CI_RUNNER_TRUSTED_LIGHT|g}' \
+    "s|    if: \${{ needs.pending.outputs.release_tag != '' }}|    if: true|" \
+    's|          source_sha="\$remote_peeled_sha"|          source_sha="$remote_peeled_sha"; scripts/ci/setup/fetch-openbao-harbor-credentials.sh --pull u p|' \
+    '/^  release-selection:/,/^  publish-release:/{s|^          fetch-depth: 0$|          fetch-depth: 0\n          ref: refs/tags/v0.0.1|}' \
+    's|        run: scripts/ci/release/confirm-release-checkout.sh .release-source|        run: echo ${{ needs.release-selection.outputs.release_tag }}|'; do
+  sed "$mutation" "$deploy_workflow" >"$fixture/scheduled-deploy-prod.yaml"
+  cmp -s "$deploy_workflow" "$fixture/scheduled-deploy-prod.yaml" &&
+    { printf 'scheduled pickup mutation did not apply: %s\n' "$mutation" >&2; exit 1; }
+  if assert_scheduled_pickup "$fixture/scheduled-deploy-prod.yaml" deploy-prod '*/5 * * * *' 2>/dev/null; then
+    printf 'scheduled pickup fixture accepted: %s\n' "$mutation" >&2
+    exit 1
+  fi
+done
 for mutation in 's/--source-evidence)"/)"/' "/release_tag_scope=source-evidence/d" \
     '/workspace-image-pin.py check --release/d' '/require-production-accepted.sh/d'; do
   sed "$mutation" "$cli_workflow" >"$fixture/composed-cli-release.yaml"
@@ -635,8 +731,13 @@ if grep -q '^enable-openid-connect:' "$cli_workflow"; then
   echo 'CLI release exposes Forgejo OIDC to the compilation job' >&2
   exit 1
 fi
-grep -Fq '  OPENBAO_GITHUB_ROLE: codewire-source-cli-github-mirror' "$cli_workflow"
-grep -Fq '  OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-cli-github-mirror' "$cli_workflow"
+# role_by_event KEY NAME: the workflow line that picks NAME, or its schedule
+# twin when the run is the release schedule's pickup (#2892).
+role_by_event() {
+  printf "  %s: \${{ github.event_name == 'schedule' && '%s-schedule' || '%s' }}" "$1" "$2" "$2"
+}
+grep -Fxq "$(role_by_event OPENBAO_GITHUB_ROLE codewire-source-cli-github-mirror)" "$cli_workflow"
+grep -Fxq "$(role_by_event OPENBAO_GITHUB_AUDIENCE openbao-codewire-source-cli-github-mirror)" "$cli_workflow"
 grep -Fq '  release-selection:' "$cli_workflow"
 grep -Fq '  build-release:' "$cli_workflow"
 grep -Fq '  package-release:' "$cli_workflow"

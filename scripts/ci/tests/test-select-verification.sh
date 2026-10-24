@@ -713,6 +713,11 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/tests/test-require-production-accepted.sh \
   scripts/ci/release/alias-release-images.sh \
   scripts/ci/release/finish-prod-release.sh \
+  scripts/ci/release/find-pending-release.sh \
+  scripts/ci/tests/test-find-pending-release.sh \
+  scripts/ci/release/release-tags.sh \
+  scripts/ci/release/require-current-release.sh \
+  scripts/ci/release/confirm-release-checkout.sh \
   install.sh
 # Presence matters: an unlisted existing script selects unknown/full, while
 # deleted scripts deliberately remain policy-only. Prove each new owner path.
@@ -730,6 +735,7 @@ run_paths_case protected_delivery_credentials pull_request refs/pull/31/head fal
   scripts/ci/setup/curl-transport-retry.sh \
   scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh \
   scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh \
+  scripts/ci/setup/release-run-identity.sh \
   scripts/ci/release/mint-github-app-token.sh \
   scripts/ci/release/mirror-github.sh \
   scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh \

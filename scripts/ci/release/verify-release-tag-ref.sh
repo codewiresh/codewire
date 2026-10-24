@@ -45,15 +45,17 @@ release_tagger="${CODEWIRE_RELEASE_TAGGER:-}"
 [[ "$release_tagger" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] ||
   fail "CODEWIRE_RELEASE_TAGGER must name the release tagger's Forgejo account"
 
-# Release workflows run only main's code; a tag push never selects a release.
+# Release workflows run only main's code: the owner's dispatch, or the
+# schedule that picks up a pushed release tag (#2892). A tag push never
+# selects a release.
 case "$event" in
-  workflow_dispatch)
+  workflow_dispatch|schedule)
     [[ "$workflow_ref" == "refs/heads/main" ]] ||
-      fail "recovery dispatch must run from refs/heads/main, got '$workflow_ref'"
+      fail "a release must run from refs/heads/main, got '$workflow_ref'"
     [[ "$workflow_ref_name" == "main" ]] ||
-      fail "recovery dispatch ref name must be main, got '$workflow_ref_name'"
+      fail "a release's ref name must be main, got '$workflow_ref_name'"
     if [[ ! "$recovery_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-      fail "recovery tag must be exact semver, got '$recovery_tag'"
+      fail "the release tag must be exact semver, got '$recovery_tag'"
     fi
     tag="$recovery_tag"
     ;;

@@ -39,10 +39,20 @@ case "$OPENBAO_ROLE|$OPENBAO_AUDIENCE" in
   'codewire-source-dev-publisher|openbao-codewire-source-dev-publisher' | \
     'codewire-source-support-publisher|openbao-codewire-source-support-publisher' | \
     'codewire-source-prod-publisher|openbao-codewire-source-prod-publisher' | \
+    'codewire-source-prod-publisher-schedule|openbao-codewire-source-prod-publisher-schedule' | \
     'codewire-source-cli-release-build|openbao-codewire-source-cli-release-build' | \
+    'codewire-source-cli-release-build-schedule|openbao-codewire-source-cli-release-build-schedule' | \
     'codewire-source-release-dry-run-build|openbao-codewire-source-release-dry-run-build') ;;
   *) fail 'only the Dev, support and production publisher roles and the two release builds read the trusted BuildKit client certificate' ;;
 esac
+# A schedule role is read only by the release schedule's own first attempt
+# (#2892).
+# shellcheck source=scripts/ci/setup/release-run-identity.sh
+. "$(dirname "$0")/release-run-identity.sh"
+release_schedule_guard "${OPENBAO_ROLE}" || {
+  printf '%s\n' "only the release schedule's first attempt reads a schedule role" >&2
+  exit 1
+}
 [[ "$output_dir" == /* && -d "$output_dir" && ! -L "$output_dir" \
   && "$(stat -c '%u %a' -- "$output_dir")" == "$(id -u) 700" \
   && -z "$(find "$output_dir" -mindepth 1 -print -quit)" ]] ||

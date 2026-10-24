@@ -14,10 +14,16 @@ fail() {
 
 bash -n "$0"
 
-grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-prod-publisher' \
-  "$WORKFLOW" || fail "production publisher lacks its exact OpenBao GHCR role"
-grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-prod-publisher' \
-  "$WORKFLOW" || fail "production publisher lacks its exact OpenBao GHCR audience"
+# role_by_event KEY NAME: the workflow line that picks NAME, or its schedule
+# twin when the run is the release schedule's pickup (#2892).
+role_by_event() {
+  printf "  %s: \${{ github.event_name == 'schedule' && '%s-schedule' || '%s' }}" "$1" "$2" "$2"
+}
+for pair in OPENBAO_ROLE:codewire-source-prod-publisher OPENBAO_AUDIENCE:openbao-codewire-source-prod-publisher \
+    OPENBAO_GHCR_ROLE:codewire-source-prod-publisher OPENBAO_GHCR_AUDIENCE:openbao-codewire-source-prod-publisher; do
+  expected="$(role_by_event "${pair%%:*}" "${pair#*:}")"
+  grep -Fxq -- "$expected" "$WORKFLOW" || fail "production publisher lacks: $expected"
+done
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail "production publisher retains a split Forgejo GHCR username"
 fi

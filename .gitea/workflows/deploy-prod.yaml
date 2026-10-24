@@ -13,6 +13,12 @@ on:
         default: false
         type: boolean
 
+  # A pushed, signed release tag is picked up within five minutes (owner,
+  # 2026-10-23, #2892). A scheduled run is main's workflow; its first job only
+  # looks, and everything after it runs only for a pending tag.
+  schedule:
+    - cron: '*/5 * * * *'
+
 concurrency:
   group: deploy-prod-release
   cancel-in-progress: false
@@ -28,16 +34,38 @@ env:
   CODEWIRE_IMAGE_REGISTRY: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}
   CODEWIRE_SOURCE_URL: ${{ vars.CODEWIRE_SOURCE_URL }}
   CODEWIRE_RELEASE_TAGGER: ${{ vars.CODEWIRE_RELEASE_TAGGER }}
-  OPENBAO_ROLE: codewire-source-prod-publisher
-  OPENBAO_AUDIENCE: openbao-codewire-source-prod-publisher
-  OPENBAO_GHCR_ROLE: codewire-source-prod-publisher
-  OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-prod-publisher
+  OPENBAO_ROLE: ${{ github.event_name == 'schedule' && 'codewire-source-prod-publisher-schedule' || 'codewire-source-prod-publisher' }}
+  OPENBAO_AUDIENCE: ${{ github.event_name == 'schedule' && 'openbao-codewire-source-prod-publisher-schedule' || 'openbao-codewire-source-prod-publisher' }}
+  OPENBAO_GHCR_ROLE: ${{ github.event_name == 'schedule' && 'codewire-source-prod-publisher-schedule' || 'codewire-source-prod-publisher' }}
+  OPENBAO_GHCR_AUDIENCE: ${{ github.event_name == 'schedule' && 'openbao-codewire-source-prod-publisher-schedule' || 'openbao-codewire-source-prod-publisher' }}
 
 jobs:
+  # The schedule and a dispatch both start here. This job holds only the
+  # job token and runs main's code: it names the release to deliver, or none,
+  # and nothing after it runs without one (find-pending-release.sh).
+  pending:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
+    name: Find the release to deliver
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    timeout-minutes: 5
+    outputs:
+      release_tag: ${{ steps.find.outputs.release_tag }}
+    steps:
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Find the pending release
+        id: find
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+          DISPATCHED_TAG: ${{ inputs.release_tag }}
+        run: scripts/ci/release/find-pending-release.sh deploy-prod
+
   release-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Verify canonical release tag
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    needs: [pending]
+    if: ${{ needs.pending.outputs.release_tag != '' }}
     outputs:
       release_tag: ${{ steps.select.outputs.release_tag }}
       source_sha: ${{ steps.select.outputs.source_sha }}
@@ -47,46 +75,37 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Refuse recovery control outside protected main
-        if: github.event_name == 'workflow_dispatch'
+      - name: Refuse release control outside protected main
         env:
-          RECOVERY_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ needs.pending.outputs.release_tag }}
         run: |
           set -euo pipefail
           [ "$GITHUB_REF" = 'refs/heads/main' ]
           [ "$GITHUB_REF_NAME" = 'main' ]
-          [[ "$RECOVERY_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 
       # Recovery control stays on protected main. Release source is checked
       # out separately from the exact tag and is the only source built below.
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        if: github.event_name == 'workflow_dispatch'
-        with:
-          ref: refs/tags/${{ inputs.release_tag }}
-          path: .release-source
-          fetch-depth: 0
-
       - name: Select exact canonical release source
         id: select
         env:
-          RECOVERY_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ needs.pending.outputs.release_tag }}
           # Reads Forgejo's signature verification for the release tag.
           GITEA_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          selected_tag="$GITHUB_REF_NAME"
-          source_dir='.'
-          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then
-            selected_tag="$RECOVERY_TAG"
-            source_dir='.release-source'
-          fi
+          # The tag is verified from main's checkout before anything checks
+          # out or runs its content: it must name a commit on main and carry
+          # its own signature by the release tagger's account. Fetching it
+          # only adds its objects; nothing here checks it out.
+          selected_tag="$RELEASE_TAG"
           remote_refs="$(git ls-remote --tags origin \
             "refs/tags/${selected_tag}" \
             "refs/tags/${selected_tag}^{}")"
           remote_object_sha="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${selected_tag}" '$2 == ref { print $1 }')"
           remote_peeled_sha="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${selected_tag}^{}" '$2 == ref { print $1 }')"
           canonical_main_sha="$(git ls-remote origin refs/heads/main | awk '$2 == "refs/heads/main" { print $1 }')"
-          source_sha="$(git -C "$source_dir" rev-parse HEAD)"
+          source_sha="$remote_peeled_sha"
           git fetch --no-tags origin \
             "+refs/heads/main:refs/remotes/origin/main" \
             "+refs/tags/${selected_tag}:refs/tags/${selected_tag}"
@@ -94,7 +113,7 @@ jobs:
             "$GITHUB_EVENT_NAME" \
             "$GITHUB_REF" \
             "$GITHUB_REF_NAME" \
-            "$RECOVERY_TAG" \
+            "$selected_tag" \
             "$GITHUB_SERVER_URL" \
             "$GITHUB_REPOSITORY" \
             "$source_sha" \
@@ -159,6 +178,14 @@ jobs:
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
         run: scripts/ci/release/confirm-release-checkout.sh .release-source
+
+      # An old release run's jobs can be rerun, keeping that run's selection;
+      # they publish only while the tag is still the newest release (#2892).
+      - name: Refuse a release that is no longer the newest
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          GITEA_TOKEN: ${{ github.token }}
+        run: scripts/ci/release/require-current-release.sh "$RELEASE_TAG"
 
       # A release reuses the support pair main published for its exact source.
       # Otherwise the pair is built natively, exactly as support-images.yaml
@@ -381,6 +408,14 @@ jobs:
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
         run: scripts/ci/release/confirm-release-checkout.sh .release-source
+
+      # An old release run's jobs can be rerun, keeping that run's selection;
+      # they publish only while the tag is still the newest release (#2892).
+      - name: Refuse a release that is no longer the newest
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          GITEA_TOKEN: ${{ github.token }}
+        run: scripts/ci/release/require-current-release.sh "$RELEASE_TAG"
 
       - name: Publish the built support pair and deliver the release to Production
         env:

@@ -23,9 +23,12 @@ readonly OTHER_SHA=2222222222222222222222222222222222222222
 readonly TOKEN=forgejo-production-token-canary-81f2
 mkdir -p "$TMP/bin"
 
-# Forgejo's Actions API for codewire/codewire. Run 500 is the release's
-# deploy-prod run; FIXTURE_MODE changes one fact about it. Run 400 is an older
-# release, and run 450 a scheduled run, which never counts.
+# Forgejo's API for codewire/codewire. The tag was signed at 09:00, so runs
+# are read back to 08:00 (an hour's slack for the tagger's clock). Run 500
+# (10:00) is the release's deploy-prod run; FIXTURE_MODE changes one fact
+# about it. Run 450 (09:30) is a scheduled tick that delivered nothing, and
+# run 400 (the day before) an older release, read only if the reading does
+# not stop at that time.
 cat >"$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -44,27 +47,62 @@ done
 # The token arrives on stdin, never in a file.
 [ "$config" = - ] || exit 94
 grep -Fqx "header = \"Authorization: token ${FIXTURE_TOKEN:?}\"" || exit 99
-prefix='https://git.example.invalid/api/v1/repos/codewire/codewire/actions/'
+prefix='https://git.example.invalid/api/v1/repos/codewire/codewire/'
 [[ "$url" == "$prefix"* ]] || exit 98
 path="${url#"$prefix"}"
 mode="${FIXTURE_MODE:?}"
-run() { # ID EVENT [REF]
-  printf '{"id":%s,"workflow_id":"deploy-prod.yaml","status":"success","event":"%s","prettyref":"%s","commit_sha":"%s"}' \
-    "$1" "$2" "${3:-main}" "$FIXTURE_MAIN_SHA"
+printf '%s\n' "$path" >>"$FIXTURE_PATHS_LOG"
+run() { # ID EVENT CREATED [REF [TRIGGER_EVENT]]
+  printf '{"id":%s,"workflow_id":"deploy-prod.yaml","status":"success","event":"%s","created":"%s","prettyref":"%s","trigger_event":"%s","commit_sha":"%s"}' \
+    "$1" "$2" "$3" "${4:-main}" "${5:-$2}" "$FIXTURE_MAIN_SHA"
 }
+release_created=2026-10-23T10:00:00Z
+[ "$mode" != stale_run ] || release_created=2026-10-23T07:30:00Z
+tagger_date=2026-10-23T11:00:00+02:00
+# A tagger clock half an hour ahead of Forgejo's.
+[ "$mode" != clock_ahead ] || tagger_date=2026-10-23T12:30:00+02:00
 case "$path" in
-  'runs?workflow_id=deploy-prod.yaml&status=success&page=1&limit=50')
+  "git/tags/$FIXTURE_OBJECT")
+    jq -n --arg date "$tagger_date" '{tagger: {date: $date}}' >"$output"
+    ;;
+  'actions/runs?workflow_id=deploy-prod.yaml&status=success&page=1&limit=50')
     [ "$mode" != runs_unavailable ] || { printf 500; exit 0; }
-    runs="$(run 400 workflow_dispatch),$(run 450 push)"
-    if [ "$mode" = branch_run ]; then
-      runs="$runs,$(run 500 workflow_dispatch feature)"
+    runs="$(run 450 push 2026-10-23T09:30:00Z main schedule),$(run 400 workflow_dispatch 2026-10-22T10:00:00Z)"
+    if [ "$mode" = second_page ]; then
+      # Fifty later scheduled ticks fill the first page.
+      runs="$(for id in $(seq 600 649); do
+        [ "$id" = 600 ] || printf ,
+        run "$id" push 2026-10-23T12:00:00Z main schedule
+      done)"
+    elif [ "$mode" = branch_run ]; then
+      runs="$runs,$(run 500 workflow_dispatch "$release_created" feature)"
+    elif [ "$mode" = scheduled_run ]; then
+      # Forgejo lists a scheduled run with its registering push's event.
+      runs="$runs,$(run 500 push "$release_created" main schedule)"
+    elif [ "$mode" = push_run ]; then
+      runs="$runs,$(run 500 push "$release_created" main push)"
     elif [ "$mode" != no_release_run ]; then
-      runs="$runs,$(run 500 workflow_dispatch)"
+      runs="$runs,$(run 500 workflow_dispatch "$release_created")"
     fi
     printf '{"total_count":3,"workflow_runs":[%s]}' "$runs" >"$output"
     ;;
-  runs/400/jobs|runs/450/jobs|runs/500/jobs)
-    id="${path#runs/}" id="${id%/jobs}"
+  'actions/runs?workflow_id=deploy-prod.yaml&status=success&page=2&limit=50')
+    [ "$mode" = second_page ] || exit 96
+    # A full page that reaches back before the tag: the reading stops here,
+    # and a third page is never requested.
+    printf '{"total_count":150,"workflow_runs":[%s,%s,%s]}' \
+      "$(run 500 push "$release_created" main schedule)" "$(run 400 workflow_dispatch 2026-10-22T10:00:00Z)" \
+      "$(for id in $(seq 300 347); do
+        [ "$id" = 300 ] || printf ,
+        run "$id" workflow_dispatch 2026-10-22T09:00:00Z
+      done)" >"$output"
+    ;;
+  actions/runs/6[0-9][0-9]/jobs|actions/runs/450/jobs)
+    id="${path#actions/runs/}" id="${id%/jobs}"
+    printf '[{"id":%s1,"run_id":%s,"name":"Verify canonical release tag","status":"skipped","attempt":1}]' "$id" "$id" >"$output"
+    ;;
+  actions/runs/400/jobs|actions/runs/500/jobs)
+    id="${path#actions/runs/}" id="${id%/jobs}"
     dispatch=success
     [ "$id:$mode" != 500:dispatch_failed ] || dispatch=failure
     delivering='Publish the release and deliver it to Production'
@@ -74,8 +112,8 @@ case "$path" in
     printf '[{"id":%s1,"run_id":%s,"name":"Verify canonical release tag","status":"success","attempt":1},{"id":%s2,"run_id":%s,"name":"'"$delivering"'","status":"%s","attempt":%s}]' \
       "$id" "$id" "$id" "$id" "$dispatch" "$([ "$mode" = rerun_dispatch ] && echo 2 || echo 1)" >"$output"
     ;;
-  jobs/*/logs\?attempt=*)
-    job="${path#jobs/}" job="${job%/logs*}" attempt="${path##*=}"
+  actions/jobs/*/logs\?attempt=*)
+    job="${path#actions/jobs/}" job="${job%/logs*}" attempt="${path##*=}"
     run_id="${job%?}"
     tag="$FIXTURE_TAG" sha="$FIXTURE_SHA" object="$FIXTURE_OBJECT"
     [ "$run_id:$mode" != 500:other_object ] || object="$FIXTURE_OTHER_OBJECT"
@@ -112,7 +150,7 @@ check_case() {
     GITEA_TOKEN="$TOKEN" RUNNER_TEMP="$TMP" FIXTURE_TOKEN="$TOKEN" FIXTURE_MODE="$mode" \
     FIXTURE_ARGV_LOG="$argv_log" FIXTURE_TAG="$TAG" FIXTURE_SHA="$SHA" \
     FIXTURE_OTHER_SHA="$OTHER_SHA" FIXTURE_MAIN_SHA="$SHA" \
-    FIXTURE_OBJECT="$OBJECT" FIXTURE_OTHER_OBJECT="$OTHER_OBJECT" \
+    FIXTURE_OBJECT="$OBJECT" FIXTURE_OTHER_OBJECT="$OTHER_OBJECT" FIXTURE_PATHS_LOG="$TMP/paths.log" \
     "$CHECK" "$TAG" "$OBJECT" "$SHA" 2>&1)" || status=$?
   if grep -Fq "$TOKEN" <<<"$output" || grep -Fq "$TOKEN" "$argv_log"; then
     fail "$name leaked the token"
@@ -133,11 +171,24 @@ check_case() {
 check_case accepted success accepted "Production accepted $TAG ($SHA) in deploy-prod run 500"
 check_case rerun_dispatch rerun_dispatch accepted "in deploy-prod run 500"
 check_case built_pair built_pair accepted "in deploy-prod run 500"
+# A scheduled release counts; a run of any other push does not.
+check_case scheduled_run scheduled_run accepted "in deploy-prod run 500"
+check_case push_run push_run refused
+# The release run is found past a page of later scheduled ticks; a run from
+# before the tag was signed is never its release, and the older release's run
+# is never read.
+: >"$TMP/paths.log"
+check_case second_page second_page accepted "in deploy-prod run 500"
+! grep -q 'page=3' "$TMP/paths.log" || fail 'the gate read past a page that reached before the tag'
+check_case stale_run stale_run refused
+check_case clock_ahead clock_ahead accepted "in deploy-prod run 500"
 # A release delivered before the jobs were collapsed is still recognised.
 check_case before_collapse before_collapse accepted "in deploy-prod run 500"
 # Only the release's own run counts: an older release's run, or a scheduled
 # run (listed with event push), does not.
+: >"$TMP/paths.log"
 check_case no_release_run no_release_run refused
+! grep -q 'actions/runs/400/' "$TMP/paths.log" || fail 'the gate read a run from before the tag'
 check_case other_commit other_commit refused
 check_case other_tag other_tag refused
 # A tag deleted and signed again on the same commit is another release.

@@ -22,8 +22,8 @@ fail() {
 readonly credentials_file="$1"
 
 readonly openbao_addr="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
-readonly openbao_role='codewire-source-cli-releases-r2'
-readonly openbao_audience='openbao-codewire-source-cli-releases-r2'
+readonly base_openbao_role='codewire-source-cli-releases-r2'
+readonly base_openbao_audience='openbao-codewire-source-cli-releases-r2'
 readonly secret_path='platform/data/ci/codewire/releases-r2'
 readonly repository='codewire/codewire'
 readonly subject='repo:codewire-41/codewire-58:ref:refs/heads/main'
@@ -32,9 +32,11 @@ readonly -a curl_bounds=(--connect-timeout 10 --max-time 30)
 
 : "${ACTIONS_ID_TOKEN_REQUEST_URL:?Forgejo OIDC request URL is required}"
 : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?Forgejo OIDC request token is required}"
-[[ "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}|${GITHUB_ACTOR:-}|${GITHUB_REPOSITORY:-}" == \
-  "workflow_dispatch|refs/heads/main|noel|$repository" ]] ||
-  fail 'only the protected-main workflow_dispatch run by noel may read the release credential'
+# shellcheck source=scripts/ci/setup/release-run-identity.sh
+. "$(dirname "$0")/release-run-identity.sh"
+release_run_identity "$base_openbao_role" "$base_openbao_audience" ||
+  fail 'only a protected-main release, the owner'"'"'s dispatch or the schedule, may read the release credential'
+readonly openbao_role="$release_role" openbao_audience="$release_audience"
 for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN BAO_TOKEN VAULT_TOKEN; do
   [[ -z "${!name:-}" ]] || fail "ambient $name is set; refusing a cached or ambient credential"
 done
@@ -84,10 +86,12 @@ while (( ${#payload} % 4 )); do payload="$payload="; done
 printf '%s' "$payload" | base64 -d >"$work/claims.json" 2>/dev/null || fail 'OIDC token claims are malformed'
 payload=''
 jq -e --arg aud "$openbao_audience" --arg sub "$subject" --arg repository "$repository" \
-  --arg workflow_ref "$workflow_ref" '
+  --arg workflow_ref "$workflow_ref" --arg actor "$release_actor" --arg event "$release_event" \
+  --arg attempt "$release_attempt" '
     (.aud == $aud or (.aud | type == "array" and . == [$aud])) and .sub == $sub and
-    .repository == $repository and .actor == "noel" and .workflow_ref == $workflow_ref and
-    .ref == "refs/heads/main" and .event_name == "workflow_dispatch"
+    .repository == $repository and .actor == $actor and .workflow_ref == $workflow_ref and
+    .ref == "refs/heads/main" and .event_name == $event and
+    ($attempt == "" or .run_attempt == $attempt)
   ' "$work/claims.json" >/dev/null 2>&1 ||
   fail 'OIDC token claims are not the protected release workflow'
 

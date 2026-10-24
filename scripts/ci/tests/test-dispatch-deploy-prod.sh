@@ -8,6 +8,7 @@ readonly SOURCE_TAG='v0.3.367'
 readonly TEST_REQUEST_TOKEN='test-only-oidc-request-token'
 readonly TEST_JWT='synthetic.header.signature'
 readonly EXPECTED_AUDIENCE='u:36:743b0975-b91c-4323-be37-a55707687c78'
+readonly SCHEDULE_AUDIENCE='u:36:ae5a19f7-8bfe-4f85-a25f-3b743b38f437'
 
 fail() {
   printf '[test-dispatch-deploy-prod] ERROR: %s\n' "$*" >&2
@@ -76,6 +77,8 @@ chmod +x "$work/bin/curl"
 
 export ACTIONS_ID_TOKEN_REQUEST_URL='https://git.example.invalid/api/actions/oidc?job=synthetic'
 export GITHUB_SERVER_URL='https://git.example.invalid'
+export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF=refs/heads/main GITHUB_ACTOR=noel
+export GITHUB_REPOSITORY=codewire/codewire
 export ACTIONS_ID_TOKEN_REQUEST_TOKEN="$TEST_REQUEST_TOKEN"
 export CURL_BIN="$work/bin/curl"
 export MOCK_CAPTURE_DIR="$work/capture"
@@ -167,6 +170,33 @@ grep -Fxq "Authorization: Bearer $TEST_JWT" "$work/capture/auth-header" ||
 grep -Fxq "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${EXPECTED_AUDIENCE}" \
   "$work/capture/oidc-url" ||
   fail 'OIDC request used the wrong production integration audience'
+# The schedule's pickup uses its own integration, bound to its own claims;
+# any other event is refused before a token is requested.
+reset_wait
+MOCK_RUN_STATES=success GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=forgejo-actions GITHUB_RUN_ATTEMPT=1 "$DISPATCH" "$SOURCE_TAG" >"$work/schedule.out" 2>&1 ||
+  fail "a scheduled release was not delivered: $(cat "$work/schedule.out")"
+grep -Fxq "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SCHEDULE_AUDIENCE}" "$work/capture/oidc-url" ||
+  fail 'the schedule did not use its own integration audience'
+reset_wait
+rm -f "$work/capture/oidc-url"
+if MOCK_RUN_STATES=success GITHUB_EVENT_NAME=push "$DISPATCH" "$SOURCE_TAG" >"$work/push.out" 2>&1; then
+  fail 'a push run requested the deploy integration'
+fi
+[[ ! -e "$work/capture/oidc-url" ]] || fail 'a push run reached the OIDC endpoint'
+# Neither integration takes the other's identity: a dispatch by the Actions
+# user, which any branch's job token can make, a schedule attributed to a
+# person, or a rerun of a scheduled run.
+for identity in 'GITHUB_EVENT_NAME=workflow_dispatch GITHUB_ACTOR=forgejo-actions' \
+    'GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=noel GITHUB_RUN_ATTEMPT=1' \
+    'GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=forgejo-actions GITHUB_RUN_ATTEMPT=2'; do
+  reset_wait
+  # shellcheck disable=SC2086 # Each identity is a few assignments.
+  if env MOCK_RUN_STATES=success $identity "$DISPATCH" "$SOURCE_TAG" >"$work/identity.out" 2>&1; then
+    fail "the identity $identity requested the deploy integration"
+  fi
+  [[ ! -e "$work/capture/oidc-url" ]] || fail "the identity $identity reached the OIDC endpoint"
+done
+reset_wait
 failure_output="$work/failure.out"
 export MOCK_DISPATCH_HTTP_STATUS=403
 if "$DISPATCH" "$SOURCE_TAG" >"$failure_output" 2>&1; then

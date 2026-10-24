@@ -49,16 +49,24 @@ DRY_RUN_BUILD_ROLE = "codewire-source-release-dry-run-build"
 IN_JOB_RECOVERY = "      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}\n"
 
 
-def builder_login(role):
-    """The exact OIDC grant and env of a Linux cw build job."""
+def by_event(name):
+    """A role name chosen by how the run started: the schedule has its own twin (#2892)."""
+    return f"${{{{ github.event_name == 'schedule' && '{name}-schedule' || '{name}' }}}}"
+
+
+def builder_login(role, scheduled=False):
+    """The exact OIDC grant and env of a Linux cw build job; a release's has a
+    schedule twin, the dry run's does not."""
+    name = by_event if scheduled else (lambda value: value)
     return (f"    enable-openid-connect: true\n    timeout-minutes: 60\n    env:\n"
-            f"      OPENBAO_ROLE: {role}\n      OPENBAO_AUDIENCE: openbao-{role}\n")
+            f"      OPENBAO_ROLE: {name(role)}\n      OPENBAO_AUDIENCE: {name('openbao-' + role)}\n")
 
 
 def linux_build_errors(block, job, target, role, source, version):
     """A Linux cw build job: the builder login, the recovery switch, exactly its target."""
     errors = []
-    if builder_login(role) not in block or block.count("OPENBAO_ROLE:") != 1:
+    if (builder_login(role, scheduled=role != DRY_RUN_BUILD_ROLE) not in block
+            or block.count("OPENBAO_ROLE:") != 1):
         errors.append(f"{job} does not log in to the trusted builder as exactly {role}")
     if IN_JOB_RECOVERY not in block:
         errors.append(f"{job} does not keep the in-job build for the owner's recovery only")
@@ -305,7 +313,7 @@ def check(text, ci_text):
          "channel promotion does not default to none")
     need("tags:" not in header, "tag-owned workflow code may release")
     blocks = jobs(text)
-    need(list(blocks) == ["release-selection", "build-runtime-linux", "build-helper-darwin", "sign-helper",
+    need(list(blocks) == ["pending", "release-selection", "build-runtime-linux", "build-helper-darwin", "sign-helper",
                           "pack-runtime", "build-darwin", "sign-darwin", "build-linux-musl", "build-linux-gnu",
                           "build-release", "package-release"], "unexpected job set")
     runtime, darwin = blocks.get("build-runtime-linux", ""), blocks.get("build-darwin", "")
@@ -586,7 +594,7 @@ def check(text, ci_text):
     probe = by_name.get("Reuse an already-published signed R2 release", "")
     publish = by_name.get("Publish immutable R2 release objects", "")
     for step in (probe, publish):
-        need("if: ${{ inputs.r2_publication == 'immutable' }}" in step, "an R2 step is not opt-in")
+        need("if: ${{ needs.release-selection.outputs.r2_publication == 'immutable' }}" in step, "an R2 step is not opt-in")
         need("always()" not in step and "failure()" not in step, "an R2 step runs after failure")
     admitted = probe.find("[ \"$CW_RELEASE_R2_ROUTE_ADMITTED\" = 'true' ]")
     fetch = probe.find("fetch-openbao-releases-r2-credentials.sh")
@@ -594,14 +602,14 @@ def check(text, ci_text):
     need([step for step, body in steps(package) if "fetch-openbao-releases-r2-credentials.sh" in body]
          == ["Reuse an already-published signed R2 release"], "the R2 credential is read in an unexpected step")
     records = by_name.get("Record the runtime parts this release built", "")
-    need("if: ${{ inputs.r2_publication == 'immutable' && needs.pack-runtime.outputs.records_sha256 != '' }}"
+    need("if: ${{ needs.release-selection.outputs.r2_publication == 'immutable' && needs.pack-runtime.outputs.records_sha256 != '' }}"
          in records and "always()" not in records, "runtime part records are written without R2 publication")
     need('[ "$(sha256sum ../.runtime-records/runtime-records.tar | cut -c1-64)" = "$RECORDS_SHA256" ]' in records,
          "the received runtime part records are not checked against the built records")
     need('if [ "$CW_RELEASE_R2_STATE" = retained ]; then' in records
          and "printf 'CW_RELEASE_R2_STATE=%s\\n' \"$state\" >> \"$GITHUB_ENV\"" in probe,
          "a retained release writes records for blobs it did not publish")
-    need("--promote \"$PROMOTE_CHANNEL\"" in publish and "PROMOTE_CHANNEL: ${{ inputs.r2_promote_channel }}"
+    need("--promote \"$PROMOTE_CHANNEL\"" in publish and "PROMOTE_CHANNEL: ${{ needs.release-selection.outputs.r2_promote_channel }}"
          in publish, "promotion is not the explicit input")
     need("cw_release.py digest --dist dist/cw-release)\" = \"$DELIVERY_SHA256\" ]"
          in by_name.get("Verify the received delivery is the built delivery", ""),
@@ -651,10 +659,16 @@ MUTATIONS = {
                                                 "    runs-on: " + MACOS + "\n    enable-openid-connect: true\n"
                                                 "    timeout-minutes: 45\n", 1),
     "Linux cw build under the signing role": lambda t: t.replace(
-        f"      OPENBAO_ROLE: {RELEASE_BUILD_ROLE}\n", "      OPENBAO_ROLE: codewire-source-cli-release-signing\n", 1),
+        f"      OPENBAO_ROLE: {by_event(RELEASE_BUILD_ROLE)}\n",
+        f"      OPENBAO_ROLE: {by_event('codewire-source-cli-release-signing')}\n", 1),
     "Linux cw build with a second role": lambda t: t.replace(
-        f"      OPENBAO_ROLE: {RELEASE_BUILD_ROLE}\n",
-        f"      OPENBAO_ROLE: {RELEASE_BUILD_ROLE}\n      OPENBAO_ROLE_R2: codewire-source-cli-releases-r2\n", 1),
+        f"      OPENBAO_ROLE: {by_event(RELEASE_BUILD_ROLE)}\n",
+        f"      OPENBAO_ROLE: {by_event(RELEASE_BUILD_ROLE)}\n      OPENBAO_ROLE_R2: codewire-source-cli-releases-r2\n", 1),
+    "scheduled Linux cw build under the dispatch role": lambda t: t.replace(
+        f"'{RELEASE_BUILD_ROLE}-schedule'", f"'{RELEASE_BUILD_ROLE}'", 1),
+    "Linux cw build role chosen by the actor": lambda t: t.replace(
+        f"      OPENBAO_ROLE: ${{{{ github.event_name == 'schedule' && '{RELEASE_BUILD_ROLE}",
+        f"      OPENBAO_ROLE: ${{{{ github.actor == 'forgejo-actions' && '{RELEASE_BUILD_ROLE}", 1),
     "Linux cw built in the job by default": lambda t: t.replace(IN_JOB_RECOVERY, "      CODEWIRE_IN_JOB_BUILD: '1'\n", 1),
     "Linux cw build hands on the OIDC request token": lambda t: t.replace(
         "          CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}\n"
@@ -848,7 +862,7 @@ MUTATIONS = {
     "records before their blobs": lambda t: move_step(
         t, "Record the runtime parts this release built", "Publish immutable R2 release objects"),
     "records without R2 publication": lambda t: t.replace(
-        "        if: ${{ inputs.r2_publication == 'immutable' && needs.pack-runtime.outputs.records_sha256 != '' }}\n"
+        "        if: ${{ needs.release-selection.outputs.r2_publication == 'immutable' && needs.pack-runtime.outputs.records_sha256 != '' }}\n"
         "        working-directory: .release-source\n",
         "        if: ${{ needs.pack-runtime.outputs.records_sha256 != '' }}\n"
         "        working-directory: .release-source\n", 1),
@@ -900,7 +914,7 @@ MUTATIONS = {
     "conditional verification": lambda t: t.replace(
         "      - name: Verify the signed delivery with cw's built-in verifier\n",
         "      - name: Verify the signed delivery with cw's built-in verifier\n"
-        "        if: ${{ inputs.r2_publication == 'immutable' }}\n", 1),
+        "        if: ${{ needs.release-selection.outputs.r2_publication == 'immutable' }}\n", 1),
     "verification by another key": lambda t: t.replace(
         "            A38FF6BC6623FCA611A7A32B5EFBF0F4A5870815 dist/cw-release",
         "            0000000000000000000000000000000000000000 dist/cw-release", 1),

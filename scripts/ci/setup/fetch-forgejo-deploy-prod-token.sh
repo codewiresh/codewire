@@ -15,7 +15,17 @@ fail() {
   exit 2
 }
 readonly token_file="$1"
-readonly audience='u:36:743b0975-b91c-4323-be37-a55707687c78'
+# The owner's dispatch and the schedule's pickup of a pushed release tag
+# (#2892) are separate integrations, each bound to exactly its own claims, so
+# a dispatch by Forgejo's Actions user matches neither.
+# shellcheck source=scripts/ci/setup/release-run-identity.sh
+. "$(dirname "$0")/release-run-identity.sh"
+release_run_identity deploy-prod deploy-prod ||
+  fail 'only a release dispatch or the release schedule requests the deploy integration'
+case "$release_event" in
+  workflow_dispatch) readonly audience='u:36:743b0975-b91c-4323-be37-a55707687c78' ;;
+  schedule) readonly audience='u:36:ae5a19f7-8bfe-4f85-a25f-3b743b38f437' ;;
+esac
 : "${ACTIONS_ID_TOKEN_REQUEST_URL:?Forgejo OIDC request URL is required}"
 : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?Forgejo OIDC request token is required}"
 [[ -d "$(dirname "$token_file")" && ! -e "$token_file" && ! -L "$token_file" ]] ||
