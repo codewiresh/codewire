@@ -1975,8 +1975,8 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
     }
 }
 
-/// `work · rev 3`, then what a running VM enforces when that differs:
-/// `work · rev 4 · enforces rev 3 until restarted`.
+/// `work · rev 3`, then what a running VM enforces when it could not take
+/// the selection (#2537): `work · rev 4 · enforces rev 3 until restarted`.
 pub(crate) fn network_policy_text(policy: &v1::EnvironmentNetworkPolicy) -> String {
     let selected = if policy.revision > 0 {
         format!("{} · rev {}", policy.name, policy.revision)
@@ -2027,7 +2027,7 @@ pub(crate) fn print_network_policy_update(
             );
             if policy.restart_required {
                 println!(
-                    "It applies at the next start: `cw restart {}`",
+                    "Its running VM could not take it, so it applies at the next start: `cw restart {}`",
                     environment.name
                 );
             }

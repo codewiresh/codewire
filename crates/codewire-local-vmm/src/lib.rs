@@ -9,6 +9,8 @@
 pub mod artifact;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod artifact_store;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod broker_control;
 #[cfg(target_os = "linux")]
 pub mod ch_api;
 #[cfg(target_os = "linux")]

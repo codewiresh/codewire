@@ -1195,6 +1195,7 @@ mod linux {
             RunnerError::NetworkWorkerKillTimeout => "network-worker-kill-timeout",
             RunnerError::HostPortUnavailable(_) => "host-port-unavailable",
             RunnerError::IngressControl => "ingress-control",
+            RunnerError::EgressPolicyControl => "egress-policy-control",
             RunnerError::EgressBrokerSpawn => "egress-broker-spawn",
             RunnerError::EgressBrokerStartTimeout => "egress-broker-start-timeout",
             RunnerError::EgressBrokerBootstrap => "egress-broker-bootstrap",

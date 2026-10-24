@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 17;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 18;
 /// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
 /// update, a supervisor in [minimum, current] keeps serving its VMs; only an
 /// idle older one is replaced (`supervisor_upgrade`).
@@ -52,6 +52,10 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
     (
         17,
         "network policy selection (#2537): CreateEnvironmentRequest.network_policy, UpdateEnvironmentNetworkPolicy and Environment.network_policy; an older supervisor would ignore the selection and enforce `open`",
+    ),
+    (
+        18,
+        "live network policies (#2537): an edit to a selected policy, or a new selection, applies to a running VM's egress broker at once and ends the flows it refuses; NetworkPolicy.enforced_in and restart_required_in name those VMs; an older supervisor applies it at the next start",
     ),
 ];
 
@@ -373,7 +377,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 17);
+        assert_eq!(info.protocol_version, 18);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

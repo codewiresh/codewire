@@ -12,7 +12,7 @@ async-trait = { workspace = true }
 codewire-egress-policy = { workspace = true }
 hickory-resolver = { workspace = true }
 hmac = { workspace = true }
-rustix = { workspace = true, features = ["net"] }
+rustix = { workspace = true, features = ["event", "net"] }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

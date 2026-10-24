@@ -5081,6 +5081,79 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Apply `name`'s selected network policy to its running VM's egress
+    /// broker unless the broker already enforces it, and record what the
+    /// broker acknowledged (#2537). The caller holds `name`'s lease. It is
+    /// `false` when the environment is not running: it takes its selection
+    /// at its next start. A broker that cannot take it fails closed, and the
+    /// environment reports the earlier revision until it restarts.
+    async fn apply_network_policy(&self, name: &str) -> Result<bool, SupervisorError> {
+        let environment = self.environment(name)?;
+        if environment.state != StoredEnvironmentState::Running {
+            return Ok(false);
+        }
+        let store = Arc::clone(&self.core().network_policies);
+        let store_error = |error: crate::network_policy_store::NetworkPolicyStoreError| {
+            SupervisorError::NetworkPolicyStore(error.to_string())
+        };
+        let current = store
+            .environment_policy(environment.id)
+            .map_err(store_error)?;
+        if !current.enforcement_is_stale() {
+            return Ok(true);
+        }
+        let policy = current.selected.compile();
+        let artifact_generation = artifact_generation_for_boot(&environment, false)?.to_owned();
+        let mut runner = self
+            .runner_client_for_artifact(name, &artifact_generation)
+            .await?;
+        let enforced = runner
+            .replace_network_policy(environment.id, environment.generation, &policy)
+            .await
+            .map_err(|_| SupervisorError::InvalidRunnerResponse)?;
+        if enforced != policy.digest() {
+            return Err(SupervisorError::InvalidRunnerResponse);
+        }
+        store
+            .record_enforced(environment.id, &current.selected)
+            .map_err(store_error)?;
+        Ok(true)
+    }
+
+    /// Apply every running selection of `policy` (#2537): the names that now
+    /// enforce its current revision, and those that take it at their next
+    /// start.
+    pub(crate) async fn apply_network_policy_everywhere(
+        &self,
+        policy: &codewire_egress_policy::reference::PolicyId,
+    ) -> Result<(Vec<String>, Vec<String>), SupervisorError> {
+        let store = Arc::clone(&self.core().network_policies);
+        let selecting = store
+            .environments_selecting(policy)
+            .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?;
+        let names: Vec<String> = {
+            let core = self.core();
+            core.state
+                .environments
+                .iter()
+                .filter(|(_, environment)| selecting.contains(&environment.id))
+                .map(|(name, _)| name.clone())
+                .collect()
+        };
+        let (mut enforced, mut restart_required) = (Vec::new(), Vec::new());
+        for name in names {
+            let lease = self.quiet_lease(&name).await?;
+            match self.apply_network_policy(&name).await {
+                Ok(true) => enforced.push(name),
+                Ok(false) => {}
+                Err(SupervisorError::NotFound(_)) => {}
+                Err(_) => restart_required.push(name),
+            }
+            drop(lease);
+        }
+        Ok((enforced, restart_required))
+    }
+
     async fn update_host_ports(
         &self,
         name: &str,
@@ -7088,6 +7161,9 @@ impl LocalSupervisorService for SupervisorRpc {
                 }
                 other => Status::failed_precondition(other.to_string()),
             })?;
+        // A running VM takes it at once; one whose broker cannot take it
+        // reports the earlier selection until it restarts.
+        let _ = self.supervisor.apply_network_policy(&request.name).await;
         Ok(Response::new(
             self.supervisor
                 .core()
@@ -7121,7 +7197,16 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         request: Request<v1::UpdateNetworkPolicyRequest>,
     ) -> Result<Response<v1::NetworkPolicy>, Status> {
-        network_policies::update(&self.network_policies, request.into_inner()).map(Response::new)
+        let mut updated = network_policies::update(&self.network_policies, request.into_inner())?;
+        let id = network_policies::policy_id(&updated)?;
+        let (enforced, restart_required) = self
+            .supervisor
+            .apply_network_policy_everywhere(&id)
+            .await
+            .map_err(Status::from)?;
+        updated.enforced_in = enforced;
+        updated.restart_required_in = restart_required;
+        Ok(Response::new(updated))
     }
 
     async fn delete_network_policy(
@@ -11144,6 +11229,13 @@ mod tests {
             self.unexpected_use()
         }
 
+        async fn replace_network_policy(
+            &self,
+            _request: Request<v1::ReplaceNetworkPolicyRequest>,
+        ) -> Result<Response<v1::ReplaceNetworkPolicyResponse>, Status> {
+            self.unexpected_use()
+        }
+
         async fn prepare_retire_runner(
             &self,
             _request: Request<v1::PrepareRetireRunnerRequest>,
@@ -11333,7 +11425,7 @@ mod tests {
         );
         let live = child.capture(&executable);
         let service = TestRunnerProtocolService {
-            reply: TestRunnerProtocolReply::Version(8),
+            reply: TestRunnerProtocolReply::Version(9),
             useful_calls: Arc::new(AtomicUsize::new(0)),
             shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
             info_gate: None,
@@ -11372,7 +11464,7 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = parent.path().join("unresponsive.sock");
         let (identity, calls, stop, server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(8));
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(9));
         let executable = fs::canonicalize("/bin/sleep").unwrap();
         let mut child = ShutdownTestChild(
             crate::test_child(&mut Command::new(&executable))
@@ -20057,7 +20149,7 @@ mod concurrency_tests {
         let gate = RunnerInfoGate::default();
         let (socket, _calls, stop_runner, _server) = spawn_gated_test_runner_server(
             &core.config.runner_socket(environment_id),
-            TestRunnerProtocolReply::Version(8),
+            TestRunnerProtocolReply::Version(9),
             Some(gate.clone()),
         );
         attach_named_test_runner_process(core, name, socket);

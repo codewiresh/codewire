@@ -28,7 +28,7 @@ use codewire_egress_policy::host_addresses::{
 };
 use rand::RngCore;
 use rand::rngs::OsRng;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub const INTERFACE_POLL: Duration = Duration::from_secs(5);
 pub const PUBLIC_RELEARN: Duration = Duration::from_secs(300);
@@ -78,10 +78,29 @@ pub fn encode_frame(set: &HostAddressSet) -> Vec<u8> {
 /// Read one complete control frame. Anything malformed is an error, and the
 /// broker fails closed on it.
 pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<HostAddressSet> {
+    let mut magic = [0_u8; 4];
+    reader.read_exact(&mut magic).await?;
+    if magic != FRAME_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "host address frame has an unknown header",
+        ));
+    }
+    read_frame_after_magic(reader).await
+}
+
+/// The magic that starts a host address frame on the broker control channel.
+pub(crate) const HOST_ADDRESS_FRAME_MAGIC: [u8; 4] = FRAME_MAGIC;
+
+/// Read the rest of a host address frame whose magic was already read.
+pub(crate) async fn read_frame_after_magic<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> io::Result<HostAddressSet> {
     let mut header = [0_u8; FRAME_HEADER_LEN];
-    reader.read_exact(&mut header).await?;
+    header[..4].copy_from_slice(&FRAME_MAGIC);
+    reader.read_exact(&mut header[4..]).await?;
     let invalid = |reason: &str| io::Error::new(io::ErrorKind::InvalidData, reason.to_string());
-    if header[..4] != FRAME_MAGIC || header[4] != FRAME_VERSION {
+    if header[4] != FRAME_VERSION {
         return Err(invalid("host address frame has an unknown header"));
     }
     let interfaces = usize::from(u16::from_be_bytes([header[5], header[6]]));
@@ -345,11 +364,12 @@ impl<S: HostAddressSource> HostAddressMonitor<S> {
 
     /// Keep the broker current: learn the public address now, then poll
     /// interfaces every `poll` and relearn on any change and every `relearn`.
-    /// The runner aborts it with the broker; a write to a closed broker ends
-    /// it with that error.
-    pub async fn run<W: AsyncWrite + Unpin>(
+    /// Each changed set goes to the runner's broker control task
+    /// ([`crate::broker_control`]). The runner aborts it with the broker; it
+    /// ends when that task has stopped.
+    pub async fn run(
         mut self,
-        mut writer: W,
+        updates: tokio::sync::mpsc::Sender<HostAddressSet>,
         mut current: HostAddressSet,
         poll: Duration,
         relearn: Duration,
@@ -363,8 +383,10 @@ impl<S: HostAddressSource> HostAddressMonitor<S> {
             }
             let next = self.set()?;
             if next != current {
-                writer.write_all(&encode_frame(&next)).await?;
-                writer.flush().await?;
+                updates
+                    .send(next.clone())
+                    .await
+                    .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
                 current = next;
             }
             tokio::time::sleep(poll).await;

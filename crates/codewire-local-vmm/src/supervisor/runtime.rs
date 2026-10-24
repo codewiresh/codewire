@@ -2144,6 +2144,12 @@ mod tests {
         ) -> Result<Response<v1::SetHostPortsResponse>, Status> {
             self.forbidden()
         }
+        async fn replace_network_policy(
+            &self,
+            _: Request<v1::ReplaceNetworkPolicyRequest>,
+        ) -> Result<Response<v1::ReplaceNetworkPolicyResponse>, Status> {
+            self.forbidden()
+        }
         async fn prepare_retire_runner(
             &self,
             _: Request<v1::PrepareRetireRunnerRequest>,
@@ -2187,7 +2193,7 @@ mod tests {
             cw_runtime_catalog_generation: binding.bootstrap_catalog_sha256.clone(),
         };
         let service = ObservedRunnerFixture {
-            protocol: Arc::new(std::sync::atomic::AtomicU32::new(8)),
+            protocol: Arc::new(std::sync::atomic::AtomicU32::new(9)),
             info: Arc::new(std::sync::Mutex::new(info.clone())),
             reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             access_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -2227,7 +2233,7 @@ mod tests {
         assert_eq!(access.guest_port, DAEMON_VSOCK_PORT);
         assert_eq!(service.reads.load(Ordering::SeqCst), 2);
         assert_eq!(service.access_reads.load(Ordering::SeqCst), 1);
-        for protocol in [0, 7, 9] {
+        for protocol in [0, 8, 10] {
             service.protocol.store(protocol, Ordering::SeqCst);
             let reads = service.reads.load(Ordering::SeqCst);
             assert!(
@@ -2237,7 +2243,7 @@ mod tests {
             );
             assert_eq!(service.reads.load(Ordering::SeqCst), reads);
         }
-        service.protocol.store(7, Ordering::SeqCst);
+        service.protocol.store(8, Ordering::SeqCst);
         for mismatch in 0..6 {
             let mut changed = info.clone();
             match mismatch {

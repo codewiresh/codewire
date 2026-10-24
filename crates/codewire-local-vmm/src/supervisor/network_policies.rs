@@ -116,6 +116,11 @@ pub(super) fn get(
         .map_err(status)
 }
 
+/// The stored policy a `NetworkPolicy` message describes.
+pub(super) fn policy_id(policy: &v1::NetworkPolicy) -> Result<PolicyId, Status> {
+    PolicyId::parse(&policy.id).map_err(|_| Status::internal("stored policy id is not canonical"))
+}
+
 pub(super) fn update(
     store: &NetworkPolicyStore,
     request: v1::UpdateNetworkPolicyRequest,
@@ -226,6 +231,8 @@ pub(super) fn policy_proto(stored: &StoredPolicy) -> v1::NetworkPolicy {
             .collect(),
         digest: stored.digest.to_hex(),
         created_unix_ms: stored.created_unix_ms,
+        enforced_in: Vec::new(),
+        restart_required_in: Vec::new(),
     }
 }
 

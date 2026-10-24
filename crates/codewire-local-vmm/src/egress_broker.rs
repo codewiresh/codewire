@@ -12,6 +12,7 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::broker_control::ControlFrame;
 use codewire_egress_broker::adapters::{SystemDnsResolver, SystemTcpConnector};
 use codewire_egress_broker::ipc::{
     BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS, BrokerIpcBinding, BrokerIpcKey, serve_broker_ipc,
@@ -301,9 +302,10 @@ pub enum EgressBrokerProcessError {
     StatusIo,
     #[error("egress broker authenticated protocol failed")]
     Protocol,
-    /// The runner's host addresses could not be read: the broker never runs
-    /// without them (#2614).
-    #[error("egress broker host-address control failed")]
+    /// The runner's control channel failed: its host addresses could not be
+    /// read (the broker never runs without them, #2614), or a frame on it
+    /// was malformed.
+    #[error("egress broker control channel failed")]
     HostAddresses,
 }
 
@@ -490,13 +492,24 @@ pub async fn run_inherited_egress_broker(
     let updated = Arc::clone(&broker);
     let updates = async move {
         loop {
-            match crate::host_addresses::read_frame(&mut control).await {
-                Ok(addresses) => updated.set_host_addresses(addresses).await,
-                Err(error) => break error,
+            match crate::broker_control::read_control_frame(&mut control).await {
+                Ok(ControlFrame::HostAddresses(addresses)) => {
+                    updated.set_host_addresses(addresses).await;
+                }
+                // A new revision applies at once, and every flow it refuses
+                // ends before the runner hears it is enforced (#2537).
+                Ok(ControlFrame::ReplacePolicy(policy)) => {
+                    let enforced = updated.replace_policy(policy).await.current_digest();
+                    let ack = crate::broker_control::encode_policy_ack(enforced);
+                    if control.write_all(&ack).await.is_err() || control.flush().await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
             }
         }
     };
-    // A malformed update or a closed control socket fails the broker closed.
+    // A malformed frame or a closed control socket fails the broker closed.
     tokio::select! {
         served = serve_broker_ipc(streams, decoded.binding, decoded.key, broker) => {
             served.map_err(|_| EgressBrokerProcessError::Protocol)

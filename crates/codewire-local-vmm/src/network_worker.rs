@@ -1095,11 +1095,21 @@ impl Drop for TransferredStream {
     /// has one thread, so closing inline stopped all of the VM's traffic for
     /// about a second per closed connection (#2714). Linux has no such hold,
     /// and its confined worker may not start threads, so it closes inline.
+    ///
+    /// The broker keeps its own copy of the socket so that a policy
+    /// replacement can end the flow (#2537), so closing this descriptor alone
+    /// no longer closes the connection: it is shut down in both directions
+    /// first, which ends it for every holder.
     fn drop(&mut self) {
         let Some(descriptor) = self.descriptor.take() else {
             return;
         };
         let descriptor = descriptor.into_inner();
+        // SAFETY: shutdown(2) on a descriptor this stream owns; a failure, as
+        // for one that is already shut down, leaves nothing to undo.
+        unsafe {
+            libc::shutdown(descriptor.as_raw_fd(), libc::SHUT_RDWR);
+        }
         #[cfg(target_os = "macos")]
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             drop(runtime.spawn_blocking(move || drop(descriptor)));

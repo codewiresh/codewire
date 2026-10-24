@@ -24,10 +24,11 @@ use std::time::Duration;
 
 use codewire_egress_policy::{PolicyDigest, RouteClass};
 use hmac::{Hmac, Mac as _};
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::{FdFlags, fcntl_setfd};
 use rustix::net::{
     RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
-    SendAncillaryMessage, SendFlags, SocketType, recvmsg, sendmsg,
+    SendAncillaryMessage, SendFlags, Shutdown, SocketType, recvmsg, sendmsg, shutdown,
 };
 use sha2::Sha256;
 use thiserror::Error;
@@ -41,7 +42,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
     BrokerAdapterFailure, BrokerClock, BrokerDnsResponse, BrokerError, DnsRecordFamily,
-    DnsResolver, PolicyEgressBroker, TcpConnector,
+    DnsResolver, PassedFlow, PolicyEgressBroker, TcpConnector,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -697,34 +698,35 @@ where
                 )
                 .await?;
             }
-            BrokerRequest::ConnectTcp(destination) => match broker.connect_tcp(destination).await {
-                Ok(connection) => {
-                    let (connected, _) = connection.into_parts();
-                    let payload = [OP_CONNECT_TCP, STATUS_OK];
-                    write_frame(
-                        &mut stream,
-                        FRAME_KIND_RESPONSE,
-                        sequence,
-                        binding,
-                        &key,
-                        &payload,
-                    )
-                    .await?;
-                    send_connected_descriptor(&stream, connected.as_fd()).await?;
+            BrokerRequest::ConnectTcp(destination) => {
+                match connect_and_record(&broker, destination).await {
+                    Ok(connected) => {
+                        let payload = [OP_CONNECT_TCP, STATUS_OK];
+                        write_frame(
+                            &mut stream,
+                            FRAME_KIND_RESPONSE,
+                            sequence,
+                            binding,
+                            &key,
+                            &payload,
+                        )
+                        .await?;
+                        send_connected_descriptor(&stream, connected.as_fd()).await?;
+                    }
+                    Err(error) => {
+                        let payload = [OP_CONNECT_TCP, status_for_broker_error(&error)];
+                        write_frame(
+                            &mut stream,
+                            FRAME_KIND_RESPONSE,
+                            sequence,
+                            binding,
+                            &key,
+                            &payload,
+                        )
+                        .await?;
+                    }
                 }
-                Err(error) => {
-                    let payload = [OP_CONNECT_TCP, status_for_broker_error(&error)];
-                    write_frame(
-                        &mut stream,
-                        FRAME_KIND_RESPONSE,
-                        sequence,
-                        binding,
-                        &key,
-                        &payload,
-                    )
-                    .await?;
-                }
-            },
+            }
         }
         sequence = sequence
             .checked_add(1)
@@ -838,9 +840,55 @@ fn encode_empty_broker_response(operation: u8, response: Result<(), BrokerError>
     ]
 }
 
+/// Dial an admitted destination and record a copy of the connected socket,
+/// so a later revision that refuses the flow ends it (#2537). A connection
+/// that cannot be recorded is closed instead of passed.
+async fn connect_and_record<R, C, K>(
+    broker: &PolicyEgressBroker<R, C, K>,
+    destination: SocketAddr,
+) -> Result<C::Stream, BrokerError>
+where
+    R: DnsResolver,
+    C: TcpConnector,
+    C::Stream: AsFd,
+    K: BrokerClock,
+{
+    let (connected, admission) = broker.connect_tcp(destination).await?.into_parts();
+    let kept = connected
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|_| BrokerError::Connector(BrokerAdapterFailure::Unavailable))?;
+    broker
+        .record_passed_flow(admission, Box::new(PassedSocket(kept)))
+        .await?;
+    Ok(connected)
+}
+
+/// The broker's copy of a socket it passed to the worker. Ending it shuts the
+/// connection down in both directions for every holder; it finishes once both
+/// directions are shut down or the connection reset.
+struct PassedSocket(OwnedFd);
+
+impl PassedFlow for PassedSocket {
+    fn finished(&self) -> bool {
+        let mut descriptors = [PollFd::new(&self.0, PollFlags::IN)];
+        match poll(&mut descriptors, Some(&Timespec::default())) {
+            Ok(_) => descriptors[0]
+                .revents()
+                .intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL),
+            Err(_) => false,
+        }
+    }
+
+    fn end(&self) {
+        let _ = shutdown(&self.0, Shutdown::Both);
+    }
+}
+
 fn status_for_broker_error(error: &BrokerError) -> u8 {
     match error {
         BrokerError::Denied(_) => STATUS_DENIED,
+        BrokerError::PolicyReplaced | BrokerError::TooManyPassedFlows => STATUS_UNAVAILABLE,
         BrokerError::Resolver(
             BrokerAdapterFailure::Unavailable | BrokerAdapterFailure::Timeout,
         )
@@ -1901,6 +1949,37 @@ rules:
         accepted.read_exact(&mut byte).unwrap();
         assert_eq!(byte, [b'x']);
         server.await.unwrap();
+    }
+
+    /// #2537: the broker's copy of a passed socket ends the connection for
+    /// the worker that holds it, and is finished once the worker has shut it.
+    #[test]
+    fn a_passed_socket_is_ended_through_the_brokers_copy() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let held = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut remote, _) = listener.accept().unwrap();
+        let copy = PassedSocket(held.as_fd().try_clone_to_owned().unwrap());
+        assert!(!copy.finished());
+
+        copy.end();
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            remote.read(&mut byte).unwrap(),
+            0,
+            "the server sees the flow end"
+        );
+        assert!(
+            (&held).write_all(b"x").is_err(),
+            "the worker can no longer send"
+        );
+        assert!(copy.finished());
+
+        // A flow the worker shut itself is finished too, so it is forgotten.
+        let held = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _remote = listener.accept().unwrap();
+        let copy = PassedSocket(held.as_fd().try_clone_to_owned().unwrap());
+        held.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(copy.finished());
     }
 
     #[tokio::test]

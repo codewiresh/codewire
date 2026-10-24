@@ -398,6 +398,8 @@ fn policy_json(policy: &codewire_local_vmm::control::v1::NetworkPolicy) -> serde
             "ports": rule.ports,
         })).collect::<Vec<_>>(),
         "created_unix_ms": policy.created_unix_ms,
+        "enforced_in": policy.enforced_in,
+        "restart_required_in": policy.restart_required_in,
     })
 }
 
@@ -430,14 +432,38 @@ fn print_policy(
 ) -> anyhow::Result<()> {
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&policy_json(policy))?),
-        OutputFormat::Text => println!(
-            "{verb} network policy {} · rev {}\n  Allows: {}",
-            policy.name,
-            policy.revision,
-            rules_text(policy)
-        ),
+        OutputFormat::Text => {
+            println!(
+                "{verb} network policy {} · rev {}\n  Allows: {}",
+                policy.name,
+                policy.revision,
+                rules_text(policy)
+            );
+            for line in applied_text(policy) {
+                println!("  {line}");
+            }
+        }
     }
     Ok(())
+}
+
+/// Where an edit took effect at once, and where it waits for a restart.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn applied_text(policy: &codewire_local_vmm::control::v1::NetworkPolicy) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !policy.enforced_in.is_empty() {
+        lines.push(format!(
+            "Enforced now in: {}",
+            policy.enforced_in.join(", ")
+        ));
+    }
+    if !policy.restart_required_in.is_empty() {
+        lines.push(format!(
+            "Applies after a restart in: {} (their broker could not take it)",
+            policy.restart_required_in.join(", ")
+        ));
+    }
+    lines
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -536,6 +562,24 @@ fn check_networks_text(check: &PolicyCheck) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn an_edit_names_where_it_took_effect() {
+        let policy = codewire_local_vmm::control::v1::NetworkPolicy {
+            enforced_in: vec!["j-a".into(), "j-b".into()],
+            restart_required_in: vec!["j-c".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            applied_text(&policy),
+            [
+                "Enforced now in: j-a, j-b",
+                "Applies after a restart in: j-c (their broker could not take it)"
+            ]
+        );
+        assert!(applied_text(&Default::default()).is_empty());
+    }
 
     #[test]
     fn a_check_names_the_networks_that_would_change_its_answer() {

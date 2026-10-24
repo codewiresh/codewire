@@ -6,6 +6,7 @@
 //! Unix, defines the authenticated capability IPC used to reach that core
 //! across a confinement boundary.
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,7 +15,7 @@ use async_trait::async_trait;
 use codewire_egress_policy::host_addresses::HostAddressSet;
 use codewire_egress_policy::lease::{
     Admission, AdmittedDnsQuery, AdmittedDnsResolution, DnsResolution, EgressLeaseTable,
-    LeaseError, LeaseInstant, RefusalCounts, TcpAdmission, TcpVerdict,
+    LeaseError, LeaseInstant, PolicyReplacement, RefusalCounts, TcpAdmission, TcpVerdict,
 };
 use codewire_egress_policy::{CompiledPolicy, PolicyDecision, PolicyDigest, RouteClass};
 use thiserror::Error;
@@ -165,11 +166,44 @@ pub enum BrokerError {
     Connector(BrokerAdapterFailure),
     #[error("egress resolver returned an address outside the requested family")]
     MalformedDnsAnswer,
+    #[error("the egress policy was replaced while the dial was in progress")]
+    PolicyReplaced,
+    #[error("the broker already holds its maximum of passed flows")]
+    TooManyPassedFlows,
+}
+
+/// At most this many passed flows are recorded at once. It is above every
+/// worker's own bound on the flows it holds (its netstack's connections and
+/// the dials waiting for their SYN), so it only refuses a worker that leaks.
+pub const MAX_PASSED_FLOWS: usize = 1024;
+
+/// A TCP flow the broker dialed and passed on, which it ends if a later
+/// policy revision refuses it (#2537). The broker keeps it only while it can
+/// still carry traffic.
+pub trait PassedFlow: Send + Sync + 'static {
+    /// Whether the flow has ended where it was passed, in both directions.
+    fn finished(&self) -> bool;
+    /// End the flow in both directions, wherever it is held.
+    fn end(&self);
+}
+
+struct PassedFlows {
+    next: u64,
+    flows: BTreeMap<u64, (Box<dyn PassedFlow>, TcpAdmission)>,
+}
+
+impl PassedFlows {
+    fn forget_finished(&mut self) {
+        self.flows.retain(|_, (flow, _)| !flow.finished());
+    }
 }
 
 pub struct PolicyEgressBroker<R, C, K> {
     route_class: RouteClass,
     state: Mutex<EgressLeaseTable>,
+    /// Taken only while `state` is held, so a replacement sees every passed
+    /// flow and no flow is recorded against a replaced revision.
+    passed: std::sync::Mutex<PassedFlows>,
     resolver: Arc<R>,
     connector: Arc<C>,
     clock: Arc<K>,
@@ -191,6 +225,10 @@ where
         Self {
             route_class,
             state: Mutex::new(EgressLeaseTable::new(policy)),
+            passed: std::sync::Mutex::new(PassedFlows {
+                next: 0,
+                flows: BTreeMap::new(),
+            }),
             resolver,
             connector,
             clock,
@@ -210,6 +248,72 @@ where
     /// lookup looks the same to the guest.
     pub async fn refusal_counts(&self) -> RefusalCounts {
         self.state.lock().await.refusal_counts()
+    }
+
+    /// Enforce `policy` from now on (#2537): later lookups and dials see only
+    /// it, every lease it refuses is dropped, and every passed flow it refuses
+    /// is ended. Nothing observes the broker between the two revisions.
+    pub async fn replace_policy(&self, policy: CompiledPolicy) -> PolicyReplacement<u64> {
+        let mut state = self.state.lock().await;
+        let mut passed = self
+            .passed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        passed.forget_finished();
+        let replacement = state.replace_policy(
+            policy,
+            passed
+                .flows
+                .iter()
+                .map(|(key, (_, admission))| (*key, admission)),
+            self.clock.now(),
+        );
+        for key in replacement.refused_flows() {
+            if let Some((flow, _)) = passed.flows.remove(key) {
+                flow.end();
+            }
+        }
+        replacement
+    }
+
+    /// Record a flow `connect_tcp` admitted before it is passed on, so a later
+    /// revision can end it. It is refused when the policy was replaced since
+    /// its admission, or when the record holds [`MAX_PASSED_FLOWS`] live flows;
+    /// the caller then drops the connection instead of passing it.
+    pub async fn record_passed_flow(
+        &self,
+        admission: TcpAdmission,
+        flow: Box<dyn PassedFlow>,
+    ) -> Result<(), BrokerError> {
+        let state = self.state.lock().await;
+        if admission.decision().policy_digest != state.policy_digest() {
+            return Err(BrokerError::PolicyReplaced);
+        }
+        let mut passed = self
+            .passed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if passed.flows.len() >= MAX_PASSED_FLOWS {
+            passed.forget_finished();
+        }
+        if passed.flows.len() >= MAX_PASSED_FLOWS {
+            return Err(BrokerError::TooManyPassedFlows);
+        }
+        let key = passed.next;
+        passed.next += 1;
+        passed.flows.insert(key, (flow, admission));
+        Ok(())
+    }
+
+    /// Passed flows that can still carry traffic.
+    pub async fn passed_flows(&self) -> usize {
+        let _state = self.state.lock().await;
+        let mut passed = self
+            .passed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        passed.forget_finished();
+        passed.flows.len()
     }
 
     /// Replace the addresses local to the host this broker dials from (#2614);
@@ -737,6 +841,155 @@ rules:
         assert_eq!(connection.admission().hostname(), None);
         assert!(resolver.requests().is_empty());
         assert_eq!(connector.destinations(), [destination]);
+    }
+
+    #[derive(Default)]
+    struct FakeFlow {
+        finished: std::sync::atomic::AtomicBool,
+        ended: std::sync::atomic::AtomicBool,
+    }
+
+    struct SharedFlow(Arc<FakeFlow>);
+
+    impl PassedFlow for SharedFlow {
+        fn finished(&self) -> bool {
+            self.0.finished.load(Ordering::Relaxed)
+        }
+
+        fn end(&self) {
+            self.0.ended.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn v4_https_only() -> CompiledPolicy {
+        PolicyDocument::parse_yaml(
+            br#"
+version: 1
+default: deny
+rules:
+  - id: one-network
+    action: allow
+    protocols: [tcp]
+    ports: [443]
+    cidrs: [93.184.216.0/24]
+    route_classes: [general]
+"#,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_replacement_ends_the_passed_flows_it_refuses_and_keeps_the_rest() {
+        let connector = Arc::new(FakeConnector::new([Ok(1), Ok(2), Ok(3)]));
+        let broker = broker(
+            CompiledPolicy::developer_baseline(),
+            RouteClass::General,
+            Arc::new(FakeResolver::new([])),
+            connector,
+            Arc::new(FakeClock::default()),
+        );
+        let mut flows = Vec::new();
+        for destination in [PUBLIC_V4, PUBLIC_V6, PUBLIC_V6] {
+            let (_, admission) = broker
+                .connect_tcp(SocketAddr::new(destination, HTTPS))
+                .await
+                .unwrap()
+                .into_parts();
+            let flow = Arc::new(FakeFlow::default());
+            broker
+                .record_passed_flow(admission, Box::new(SharedFlow(Arc::clone(&flow))))
+                .await
+                .unwrap();
+            flows.push(flow);
+        }
+        // The guest already closed the last one; it is forgotten, not ended.
+        flows[2].finished.store(true, Ordering::Relaxed);
+        assert_eq!(broker.passed_flows().await, 2);
+
+        let replacement = broker.replace_policy(v4_https_only()).await;
+        assert_eq!(replacement.current_digest(), v4_https_only().digest());
+        assert_eq!(broker.policy_digest().await, v4_https_only().digest());
+        assert_eq!(replacement.refused_flows().len(), 1);
+        assert!(
+            !flows[0].ended.load(Ordering::Relaxed),
+            "an allowed flow is kept"
+        );
+        assert!(
+            flows[1].ended.load(Ordering::Relaxed),
+            "a refused flow is ended"
+        );
+        assert!(!flows[2].ended.load(Ordering::Relaxed));
+        assert_eq!(broker.passed_flows().await, 1);
+        assert!(matches!(
+            broker.connect_tcp(SocketAddr::new(PUBLIC_V6, HTTPS)).await,
+            Err(BrokerError::Denied(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_flow_admitted_before_a_replacement_is_not_recorded_after_it() {
+        let broker = broker(
+            CompiledPolicy::developer_baseline(),
+            RouteClass::General,
+            Arc::new(FakeResolver::new([])),
+            Arc::new(FakeConnector::new([Ok(1)])),
+            Arc::new(FakeClock::default()),
+        );
+        let (_, admission) = broker
+            .connect_tcp(SocketAddr::new(PUBLIC_V4, HTTPS))
+            .await
+            .unwrap()
+            .into_parts();
+        broker.replace_policy(v4_https_only()).await;
+        assert!(matches!(
+            broker
+                .record_passed_flow(admission, Box::new(SharedFlow(Arc::default())))
+                .await,
+            Err(BrokerError::PolicyReplaced)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_record_holds_a_bounded_number_of_live_flows() {
+        let connector = Arc::new(FakeConnector::new((0..=MAX_PASSED_FLOWS as u64).map(Ok)));
+        let broker = broker(
+            CompiledPolicy::developer_baseline(),
+            RouteClass::General,
+            Arc::new(FakeResolver::new([])),
+            connector,
+            Arc::new(FakeClock::default()),
+        );
+        let mut first = None;
+        for _ in 0..MAX_PASSED_FLOWS {
+            let (_, admission) = broker
+                .connect_tcp(SocketAddr::new(PUBLIC_V4, HTTPS))
+                .await
+                .unwrap()
+                .into_parts();
+            let flow = Arc::new(FakeFlow::default());
+            first.get_or_insert_with(|| Arc::clone(&flow));
+            broker
+                .record_passed_flow(admission, Box::new(SharedFlow(flow)))
+                .await
+                .unwrap();
+        }
+        let (_, admission) = broker
+            .connect_tcp(SocketAddr::new(PUBLIC_V4, HTTPS))
+            .await
+            .unwrap()
+            .into_parts();
+        assert!(matches!(
+            broker
+                .record_passed_flow(admission.clone(), Box::new(SharedFlow(Arc::default())))
+                .await,
+            Err(BrokerError::TooManyPassedFlows)
+        ));
+        // Once one finishes, its place is free again.
+        first.unwrap().finished.store(true, Ordering::Relaxed);
+        broker
+            .record_passed_flow(admission, Box::new(SharedFlow(Arc::default())))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -400,6 +400,26 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     }
     assert_eq!(ready_status.unwrap(), WORKER_READY_MESSAGE);
 
+    // The confined broker takes a new policy on its control channel and
+    // acknowledges the digest it enforces from then on (#2537).
+    let locked = codewire_egress_policy::CompiledPolicy::locked();
+    _host_address_control
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    _host_address_control
+        .write_all(&codewire_local_vmm::broker_control::encode_policy_frame(&locked).unwrap())
+        .unwrap();
+    let mut ack = [0_u8; 37];
+    _host_address_control.read_exact(&mut ack).unwrap();
+    let enforced = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(codewire_local_vmm::broker_control::read_policy_ack(
+            &mut ack.as_slice(),
+        ))
+        .unwrap();
+    assert_eq!(enforced, locked.digest());
+
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();
     let mut host_client = std::net::TcpStream::connect(address).unwrap();

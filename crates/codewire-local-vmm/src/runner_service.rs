@@ -56,7 +56,9 @@ const RUNNER_WATCH_BUFFER: usize = 8;
 // 7: those entries are patterns the guest expands at every boot.
 // 8: StartVmRequest.network_policy_document selects the policy the egress
 //    broker enforces (#2537); an older runner would enforce `open` instead.
-const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 8;
+// 9: ReplaceNetworkPolicy enforces a new policy on the running broker, which
+//    ends the flows it refuses (#2537).
+const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 9;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
@@ -174,6 +176,34 @@ impl RunnerClient {
             })
             .await?;
         Ok(())
+    }
+
+    /// Enforce `policy` on the running generation's egress broker; the
+    /// digest it acknowledged.
+    pub async fn replace_network_policy(
+        &mut self,
+        environment_id: Uuid,
+        generation: u64,
+        policy: &codewire_egress_policy::CompiledPolicy,
+    ) -> Result<codewire_egress_policy::PolicyDigest, Status> {
+        let document = policy
+            .canonical_json()
+            .map_err(|_| Status::internal("network policy has no canonical document"))?;
+        let response = self
+            .inner
+            .replace_network_policy(v1::ReplaceNetworkPolicyRequest {
+                environment_id: environment_id.to_string(),
+                generation,
+                network_policy_document: document,
+            })
+            .await?
+            .into_inner();
+        let digest: [u8; 32] = response
+            .enforced_digest
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::internal("runner returned a malformed policy digest"))?;
+        Ok(codewire_egress_policy::PolicyDigest::from_bytes(digest))
     }
 
     pub async fn prepare_retire(&mut self) -> Result<(), Status> {
@@ -1625,6 +1655,47 @@ impl EnvironmentRunnerService for RunnerRpc {
         Ok(Response::new(v1::SetHostPortsResponse {}))
     }
 
+    async fn replace_network_policy(
+        &self,
+        request: Request<v1::ReplaceNetworkPolicyRequest>,
+    ) -> Result<Response<v1::ReplaceNetworkPolicyResponse>, Status> {
+        let request = request.into_inner();
+        let environment_id = parse_environment_id(&request.environment_id)?;
+        if request.network_policy_document.is_empty() {
+            return Err(Status::invalid_argument("network policy document is empty"));
+        }
+        let policy = start_network_policy(&request.network_policy_document)?;
+        let mut state = self.state.lock().await;
+        state.retirement.require_active()?;
+        if !state.adopted {
+            return Err(Status::failed_precondition("runner is not adopted"));
+        }
+        if environment_id != state.environment_id {
+            return Err(Status::permission_denied("runner identity mismatch"));
+        }
+        state
+            .observe_exit()
+            .await
+            .map_err(|_| Status::internal("observe VMM state failed"))?;
+        if state.generation != request.generation || state.state != v1::EnvironmentState::Running {
+            return Err(Status::failed_precondition(
+                "a network policy is replaced only on the running generation",
+            ));
+        }
+        let running = state.running.as_mut().ok_or_else(|| {
+            Status::failed_precondition(
+                "a network policy is replaced only on the running generation",
+            )
+        })?;
+        let enforced = running
+            .replace_network_policy(policy)
+            .await
+            .map_err(|error| Status::unavailable(error.to_string()))?;
+        Ok(Response::new(v1::ReplaceNetworkPolicyResponse {
+            enforced_digest: enforced.as_bytes().to_vec(),
+        }))
+    }
+
     async fn get_daemon_access(
         &self,
         _request: Request<v1::GetDaemonAccessRequest>,
@@ -1911,6 +1982,7 @@ fn network_start_error_code(error: &RunnerError) -> &'static str {
         RunnerError::NetworkWorkerKillTimeout => "network_worker_kill_timeout",
         RunnerError::HostPortUnavailable(_) => HOST_PORT_UNAVAILABLE,
         RunnerError::IngressControl => "ingress_forwarder_start",
+        RunnerError::EgressPolicyControl => "egress_policy_control",
         RunnerError::EgressBrokerSpawn => "egress_broker_spawn",
         RunnerError::EgressBrokerStartTimeout => "egress_broker_start_timeout",
         RunnerError::EgressBrokerBootstrap => "egress_broker_bootstrap",

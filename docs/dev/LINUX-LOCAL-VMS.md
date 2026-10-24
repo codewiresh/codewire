@@ -146,12 +146,17 @@ no selection uses `open`:
 
 ```sh
 cw create --local --policy work --path .
-cw update team --policy locked     # applies at the next start
-cw info team                       # Network policy: locked · enforces rev 3 of work until restarted
+cw update team --policy locked     # applies to the running VM at once
+cw info team                       # Network policy: locked
 ```
 
 Each start enforces the selected policy's current revision. An edit to a
-policy, or a new selection, applies to a running VM when it restarts.
+policy, or a new selection, also applies at once to every running VM that
+selects it: new lookups and connections follow the new revision, and every
+open connection it refuses is ended. `cw policy allow` and `rm` name the
+running VMs that now enforce the edit. A VM whose network could not take it
+fails closed, keeps reporting the earlier revision in `cw info` (`· enforces
+rev 3 until restarted`) and takes the selection at its next start.
 `--policy` is unrelated to `--network`, which joins a Mesh network. A policy an
 environment selects cannot be deleted.
 

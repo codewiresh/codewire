@@ -1262,6 +1262,35 @@ impl RunningVm {
         self.request.vm_id
     }
 
+    /// Enforce `policy` on this generation's egress broker from now on
+    /// (#2537). It returns the digest the broker acknowledged, once every
+    /// flow the policy refuses has ended. A failure closes the broker's
+    /// control channel, so the broker fails closed.
+    pub async fn replace_network_policy(
+        &mut self,
+        policy: CompiledPolicy,
+    ) -> Result<codewire_egress_policy::PolicyDigest, RunnerError> {
+        let control = self
+            .network_worker
+            .as_ref()
+            .and_then(|worker| worker.broker.as_ref())
+            .and_then(|broker| broker.policy_control.clone())
+            .ok_or(RunnerError::EgressPolicyControl)?;
+        let (reply, acknowledged) = tokio::sync::oneshot::channel();
+        control
+            .send(crate::broker_control::PolicyReplacementRequest {
+                policy: policy.clone(),
+                reply,
+            })
+            .await
+            .map_err(|_| RunnerError::EgressPolicyControl)?;
+        let enforced = acknowledged
+            .await
+            .map_err(|_| RunnerError::EgressPolicyControl)?;
+        self.request.network_policy = policy;
+        Ok(enforced)
+    }
+
     /// Converges this generation's published host ports to `bindings`. New
     /// ports bind all-or-nothing before anything changes; a host port keeps
     /// its guest port until it is withdrawn.
@@ -2016,8 +2045,12 @@ enum WorkerBrokerAttachment {
 struct EgressBrokerProcess {
     child: tokio::process::Child,
     process: LiveProcess,
-    /// The runner's host-address monitor for this broker (#2614).
+    /// The runner's host-address monitor and control channel for this broker
+    /// (#2614, #2537).
     host_addresses: Option<HostAddressTask>,
+    /// Policy replacements for the control channel (#2537).
+    policy_control:
+        Option<tokio::sync::mpsc::Sender<crate::broker_control::PolicyReplacementRequest>>,
 }
 
 /// Ends the host-address monitor with its broker.
@@ -2267,6 +2300,7 @@ impl EgressBrokerStartup {
                 .take()
                 .expect("admitted egress broker owns its process identity"),
             host_addresses: None,
+            policy_control: None,
         }
     }
 }
@@ -3660,11 +3694,23 @@ async fn spawn_egress_broker_process(
     endpoints.push(endpoint);
     endpoints.extend(worker_endpoints);
     let mut process = startup.disarm();
+    // One task owns the control socket: the monitor's host address updates
+    // and each policy replacement (#2537). When either ends, the socket
+    // closes and the broker fails closed.
+    let (address_updates, addresses) = tokio::sync::mpsc::channel(1);
+    let (replace, replacements) = tokio::sync::mpsc::channel(1);
     process.host_addresses = Some(HostAddressTask(tokio::spawn(async move {
-        let _ = monitor
-            .run(control, host_addresses, INTERFACE_POLL, PUBLIC_RELEARN)
-            .await;
+        tokio::select! {
+            _ = monitor.run(address_updates, host_addresses, INTERFACE_POLL, PUBLIC_RELEARN) => {}
+            _ = crate::broker_control::serve_runner_control(
+                control,
+                addresses,
+                replacements,
+                crate::broker_control::POLICY_ACK_TIMEOUT,
+            ) => {}
+        }
     })));
+    process.policy_control = Some(replace);
     Ok(EgressBrokerLaunch {
         process,
         endpoints,
@@ -5397,6 +5443,10 @@ pub enum RunnerError {
     HostPortUnavailable(u16),
     #[error("ingress forwarding control failed")]
     IngressControl,
+    /// The running egress broker did not acknowledge a policy replacement;
+    /// its control channel is closed, so it fails closed (#2537).
+    #[error("egress broker policy control failed")]
+    EgressPolicyControl,
     #[error("egress broker process spawn failed")]
     EgressBrokerSpawn,
     #[error("egress broker did not become ready before the startup deadline")]
@@ -5512,6 +5562,7 @@ impl RunnerError {
             Self::NetworkWorkerKillTimeout => "network_worker_kill_timeout",
             Self::HostPortUnavailable(_) => "host_port_unavailable",
             Self::IngressControl => "ingress_control",
+            Self::EgressPolicyControl => "egress_policy_control",
             Self::EgressBrokerSpawn => "egress_broker_spawn",
             Self::EgressBrokerStartTimeout => "egress_broker_start_timeout",
             Self::EgressBrokerBootstrap => "egress_broker_bootstrap",
@@ -6089,6 +6140,7 @@ mod tests {
                 child: broker_child,
                 process: broker_process,
                 host_addresses: None,
+                policy_control: None,
             }),
             ingress_control: None,
             host_port_key: None,

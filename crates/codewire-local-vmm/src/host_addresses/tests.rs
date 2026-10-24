@@ -202,28 +202,27 @@ async fn the_monitor_pushes_interfaces_then_learned_and_changed_addresses() {
     let (monitor, initial) = HostAddressMonitor::start(source).unwrap();
     assert_eq!(initial, HostAddressSet::new([first], []).unwrap());
 
-    let (writer, mut reader) = tokio::io::duplex(MAX_FRAME_LEN * 4);
+    let (updates, mut received) = tokio::sync::mpsc::channel(4);
     let task = tokio::spawn(monitor.run(
-        writer,
+        updates,
         initial,
         Duration::from_millis(5),
         Duration::from_secs(3600),
     ));
     // The learned public address is pushed with the interfaces.
     assert_eq!(
-        read_frame(&mut reader).await.unwrap(),
+        received.recv().await.unwrap(),
         HostAddressSet::new([first], [v4(87, 0, 0, 180)]).unwrap()
     );
     // An interface change pushes again and relearns; learned addresses accumulate.
     assert_eq!(
-        read_frame(&mut reader).await.unwrap(),
+        received.recv().await.unwrap(),
         HostAddressSet::new([first, second], [v4(87, 0, 0, 180), v4(87, 0, 0, 181)]).unwrap()
     );
     // Nothing changes after that, so nothing more is pushed. The runner ends
     // the monitor with its broker.
-    let mut header = [0_u8; FRAME_HEADER_LEN];
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), reader.read_exact(&mut header))
+        tokio::time::timeout(Duration::from_millis(100), received.recv())
             .await
             .is_err()
     );
@@ -235,17 +234,16 @@ async fn without_stun_only_interfaces_are_refused_and_nothing_is_lost() {
     let interface = v4(203, 0, 114, 7);
     let source = FakeSource::new(vec![Ok(vec![interface])], vec![None, None]);
     let (monitor, initial) = HostAddressMonitor::start(source).unwrap();
-    let (writer, mut reader) = tokio::io::duplex(MAX_FRAME_LEN);
+    let (updates, mut received) = tokio::sync::mpsc::channel(4);
     let task = tokio::spawn(monitor.run(
-        writer,
+        updates,
         initial.clone(),
         Duration::from_millis(5),
         Duration::from_millis(20),
     ));
     // Nothing new to push while STUN fails: the broker keeps the initial set.
-    let mut header = [0_u8; FRAME_HEADER_LEN];
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), reader.read_exact(&mut header))
+        tokio::time::timeout(Duration::from_millis(200), received.recv())
             .await
             .is_err()
     );

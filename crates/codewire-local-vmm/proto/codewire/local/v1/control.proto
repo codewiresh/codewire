@@ -74,8 +74,9 @@ message EnvironmentNetworkPolicy {
   // not running.
   uint32 enforced_revision = 5;
   string enforced_digest = 6;
-  // The running VM enforces another revision or policy than the selection
-  // until it restarts.
+  // The running VM enforces another revision or policy than the selection,
+  // because its broker could not take the selection; it takes it at its
+  // next start.
   bool restart_required = 7;
 }
 
@@ -111,6 +112,11 @@ message NetworkPolicy {
   // Lowercase hex SHA-256 of the canonical document the brokers enforce.
   string digest = 6;
   int64 created_unix_ms = 7;
+  // After an edit (#2537): the running environments that select this policy
+  // and now enforce this revision or a later one, and those whose broker
+  // could not take it and which take it at their next start.
+  repeated string enforced_in = 8;
+  repeated string restart_required_in = 9;
 }
 
 message CreateNetworkPolicyRequest {
@@ -236,6 +242,10 @@ service EnvironmentRunnerService {
   // New ports bind all-or-nothing before any change; withdrawn ones are
   // closed before the reply.
   rpc SetHostPorts(SetHostPortsRequest) returns (SetHostPortsResponse);
+  // Enforces this network policy on the running generation's egress broker
+  // at once (#2537). Replies after the broker acknowledges it, when every
+  // flow the policy refuses has ended.
+  rpc ReplaceNetworkPolicy(ReplaceNetworkPolicyRequest) returns (ReplaceNetworkPolicyResponse);
   // Stops the exact owned VMM and releases its device handles. The runner
   // never removes environment storage; only the supervisor may tombstone it.
   rpc PrepareRetireRunner(PrepareRetireRunnerRequest) returns (PrepareRetireRunnerResponse);
@@ -788,6 +798,16 @@ message SetHostPortsRequest {
   repeated HostPortBinding host_ports = 3;
 }
 message SetHostPortsResponse {}
+message ReplaceNetworkPolicyRequest {
+  string environment_id = 1;
+  uint64 generation = 2;
+  // The canonical policy document, as in StartVmRequest.
+  bytes network_policy_document = 3;
+}
+message ReplaceNetworkPolicyResponse {
+  // The digest the broker acknowledged.
+  bytes enforced_digest = 1;
+}
 message PrepareRetireRunnerRequest {}
 message PrepareRetireRunnerResponse {}
 message ShutdownRunnerRequest {
