@@ -355,6 +355,19 @@ pub(crate) async fn handle_network_command(
                 )
             );
         }
+        NetworkCommand::Connect(args) => {
+            #[cfg(unix)]
+            {
+                network_connect(&args.node, args.port).await?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = args;
+                anyhow::bail!(
+                    "`cw network connect` works only inside a cloud environment that joined a network"
+                );
+            }
+        }
         NetworkCommand::Enroll { command } => match command {
             NetworkEnrollCommand::Create(args) => {
                 let org_id = trimmed_required(&args.org, "organization ID")?;
@@ -1769,5 +1782,164 @@ pub(crate) fn local_process_is_running(pid: u32) -> bool {
     #[cfg(not(any(unix, windows)))]
     {
         false
+    }
+}
+
+/// One stream to `port` on the member `node` of this cloud environment's
+/// network, through the workspace daemon's owner-only socket (#3350),
+/// carried on standard input and output.
+#[cfg(unix)]
+async fn network_connect(node: &str, port: u16) -> anyhow::Result<()> {
+    network_connect_at(
+        std::path::Path::new(codewire_daemon_proto::HOSTED_DAEMON_MESH_SOCKET),
+        node,
+        port,
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
+#[cfg(unix)]
+pub(crate) async fn network_connect_at(
+    socket: &std::path::Path,
+    node: &str,
+    port: u16,
+    mut input: impl tokio::io::AsyncRead + Unpin,
+    mut output: impl tokio::io::AsyncWrite + Unpin,
+) -> anyhow::Result<()> {
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
+
+    let request = codewire_daemon_proto::mesh_connect_request(node, port).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} is not a Mesh node name, or {port} is not a port",
+            terminal_text(node)
+        )
+    })?;
+    let stream = tokio::net::UnixStream::connect(socket).await.map_err(|_| {
+        anyhow::anyhow!(
+            "`cw network connect` works only inside a cloud environment that joined a Mesh network"
+        )
+    })?;
+    let mut stream = tokio::io::BufReader::new(stream);
+    stream.get_mut().write_all(request.as_bytes()).await?;
+    let mut answer = String::new();
+    (&mut stream)
+        .take(codewire_daemon_proto::MESH_CONNECT_MAX_LINE as u64)
+        .read_line(&mut answer)
+        .await?;
+    match answer.as_str() {
+        "OK\n" => {}
+        "ERR not_joined\n" => {
+            anyhow::bail!("this environment has not joined its Mesh network; `cw info` shows why")
+        }
+        "ERR unreachable\n" => anyhow::bail!(
+            "member {} did not answer on port {port} in this environment's network",
+            terminal_text(node)
+        ),
+        _ => anyhow::bail!("the workspace daemon refused the connection"),
+    }
+    let (mut from_member, mut to_member) = tokio::io::split(stream);
+    let sending = async {
+        tokio::io::copy(&mut input, &mut to_member).await?;
+        to_member.shutdown().await
+    };
+    let receiving = async {
+        tokio::io::copy(&mut from_member, &mut output).await?;
+        output.flush().await
+    };
+    let (sent, received) = tokio::join!(sending, receiving);
+    received?;
+    // The member may close first; a stream it already ended is not a failure.
+    if let Err(error) = sent
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod network_connect_tests {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    use super::network_connect_at;
+
+    /// A daemon socket that answers `answer` to one request, then echoes.
+    async fn daemon(answer: &'static str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mesh.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = tokio::io::BufReader::new(stream);
+            let mut request = String::new();
+            stream.read_line(&mut request).await.unwrap();
+            assert_eq!(request, "CWMESHCONNECT1 app-2 8080\n");
+            stream.get_mut().write_all(answer.as_bytes()).await.unwrap();
+            if answer == "OK\n" {
+                let (mut read, mut write) = tokio::io::split(stream);
+                let _ = tokio::io::copy(&mut read, &mut write).await;
+            }
+        });
+        (directory, path)
+    }
+
+    #[tokio::test]
+    async fn a_member_stream_carries_standard_input_and_output() {
+        let (_directory, socket) = daemon("OK\n").await;
+        let mut output = Vec::new();
+        network_connect_at(
+            &socket,
+            "app-2",
+            8080,
+            &b"synthetic canary\n"[..],
+            &mut output,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output, b"synthetic canary\n");
+    }
+
+    #[tokio::test]
+    async fn refusals_name_their_repair() {
+        for (answer, expected) in [
+            ("ERR not_joined\n", "has not joined its Mesh network"),
+            (
+                "ERR unreachable\n",
+                "member app-2 did not answer on port 8080",
+            ),
+            ("ERR invalid\n", "refused the connection"),
+        ] {
+            let (_directory, socket) = daemon(answer).await;
+            let error = network_connect_at(&socket, "app-2", 8080, &b""[..], Vec::new())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        let missing = tempfile::tempdir().unwrap();
+        let error = network_connect_at(
+            &missing.path().join("mesh.sock"),
+            "app-2",
+            8080,
+            &b""[..],
+            Vec::new(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("only inside a cloud environment"), "{error}");
+        let error = network_connect_at(
+            &missing.path().join("x"),
+            "../x",
+            8080,
+            &b""[..],
+            Vec::new(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("is not a Mesh node name"), "{error}");
     }
 }

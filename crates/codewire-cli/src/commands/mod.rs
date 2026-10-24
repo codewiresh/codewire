@@ -1997,6 +1997,11 @@ pub(crate) enum NetworkCommand {
     Join(NetworkJoinArgs),
     #[command(about = "Revoke a node from the selected Mesh network")]
     Revoke(NetworkRevokeArgs),
+    #[command(
+        about = "Open a stream to another member of this cloud environment's network",
+        long_about = "Inside a cloud environment that joined a Mesh network, open one TCP stream to PORT on the member NODE of the same network, carried on standard input and output:\n  cw network connect app-2 8080\n\nThe member serves only its own application ports. Members of other networks are never reachable."
+    )]
+    Connect(NetworkConnectArgs),
     #[command(about = "Create or redeem node enrollment grants")]
     Enroll {
         #[command(subcommand)]
@@ -2199,6 +2204,14 @@ pub(crate) struct NetworkRevokeArgs {
     org: String,
     #[arg(long, help = "Network for the target node")]
     network: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct NetworkConnectArgs {
+    #[arg(help = "The member's node name: its environment's name")]
+    node: String,
+    #[arg(help = "One of the member's application ports")]
+    port: u16,
 }
 
 #[derive(Debug, Args)]

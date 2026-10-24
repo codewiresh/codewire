@@ -84,6 +84,30 @@ pub struct MemberTailnet {
     coordinator_task: tokio::task::JoinHandle<()>,
     direct: Option<direct_udp::Handle>,
     refused: Arc<AtomicBool>,
+    /// The network this member is in, which names its peers' ids.
+    network: String,
+    /// Members this one has asked to reach (#3350).
+    subscriptions: mpsc::UnboundedSender<String>,
+    subscribed: std::sync::Mutex<HashSet<String>>,
+}
+
+/// The id Mesh gives the member named `node_name` in `network_id`: the
+/// first 16 bytes of SHA-256 over `network\0peer\0name`, as a version-5
+/// RFC 4122 UUID. Mesh pins the same value (`a_members_peer_id_is_pinned`).
+pub fn mesh_peer_id(network_id: &str, node_name: &str) -> Uuid {
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(network_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(b"peer");
+    hasher.update(b"\0");
+    hasher.update(node_name.as_bytes());
+    let sum = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&sum[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 impl MemberTailnet {
@@ -107,6 +131,7 @@ impl MemberTailnet {
             .context("member subscription failed")?;
         Self::assemble(
             coordinator,
+            network,
             Uuid::new_v4(),
             StaticSecret::random_from_rng(OsRng),
             options,
@@ -161,6 +186,7 @@ impl MemberTailnet {
         .map_err(|error| member_setup_error(MemberSetupPhase::Peer, error))?;
         Self::assemble(
             coordinator,
+            network,
             environment_id,
             secret,
             options,
@@ -171,6 +197,7 @@ impl MemberTailnet {
 
     async fn assemble(
         mut coordinator: MeshCoordinatorPeerSession,
+        network: &str,
         id: Uuid,
         secret: StaticSecret,
         options: MemberTransportOptions,
@@ -230,6 +257,7 @@ impl MemberTailnet {
             let _ = updates.send(node.clone());
         });
         let (peer_tx, peers) = watch::channel(Vec::new());
+        let (subscriptions, subscription_rx) = mpsc::unbounded_channel();
         let refused = Arc::new(AtomicBool::new(false));
         let peer_refused = Arc::clone(&refused);
         let map_refused = Arc::clone(&refused);
@@ -238,8 +266,9 @@ impl MemberTailnet {
         let coordinator_task = tokio::spawn(async move {
             let update_conn = Arc::clone(&task_conn);
             let _ = coordinator
-                .run_with_node_updates(
+                .run_with_node_updates_and_subscriptions(
                     update_rx,
+                    subscription_rx,
                     CoordinatorHandlers {
                         on_peers: move |nodes| {
                             let mut keys = HashSet::new();
@@ -272,6 +301,9 @@ impl MemberTailnet {
             coordinator_task,
             direct,
             refused,
+            network: network.to_owned(),
+            subscriptions,
+            subscribed: std::sync::Mutex::new(HashSet::new()),
         })
     }
 
@@ -290,6 +322,49 @@ impl MemberTailnet {
     /// The member's tailnet connection, to serve its own ports on.
     pub fn conn(&self) -> Arc<Conn> {
         Arc::clone(&self.conn)
+    }
+
+    /// Open a TCP stream to `port` on the member named `node_name` in this
+    /// member's own network (#3350). The first stream to a member subscribes
+    /// to it; Mesh then exchanges the two nodes, and only within one network.
+    pub async fn dial_node(&self, node_name: &str, port: u16) -> anyhow::Result<TcpStream> {
+        self.ready()?;
+        let target = mesh_peer_id(&self.network, node_name);
+        let first = self
+            .subscribed
+            .lock()
+            .map_err(|_| anyhow::anyhow!("member subscriptions are unavailable"))?
+            .insert(node_name.to_owned());
+        if first {
+            self.subscriptions
+                .send(node_name.to_owned())
+                .map_err(|_| anyhow::anyhow!("member coordinate owner is unavailable"))?;
+        }
+        let mut peers = self.peers.clone();
+        let address = tokio::time::timeout(SETUP_TIMEOUT, async {
+            loop {
+                self.ready()?;
+                let found = peers
+                    .borrow_and_update()
+                    .iter()
+                    .find(|node| node.id == target)
+                    .and_then(|node| node.addresses.first().map(|prefix| prefix.addr()));
+                if let Some(address) = found {
+                    return Ok::<_, anyhow::Error>(address);
+                }
+                peers.changed().await.context("member peer owner closed")?;
+            }
+        })
+        .await
+        .context("the member did not appear in this network")??;
+        let stream = tokio::time::timeout(
+            SETUP_TIMEOUT,
+            self.conn.dial_context_tcp(SocketAddr::new(address, port)),
+        )
+        .await
+        .context("member TCP dial timed out")?
+        .context("member TCP dial failed")?;
+        Ok(stream)
     }
 
     pub async fn listen_member(&self) -> anyhow::Result<TcpListener> {
@@ -441,6 +516,14 @@ mod tests {
         for rendered in [format!("{error:?}"), format!("{error:#?}")] {
             assert!(!rendered.contains(DIAGNOSTIC_CANARY));
         }
+    }
+
+    #[test]
+    fn a_members_peer_id_matches_meshs_pinned_value() {
+        assert_eq!(
+            mesh_peer_id("network-test", "app-2").to_string(),
+            "360189e4-fc1d-53e5-ba42-755ed27d23ce"
+        );
     }
 
     #[test]

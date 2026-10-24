@@ -619,3 +619,169 @@ async fn a_destroyed_environment_never_blocks_network_deletion() {
     delete().await.unwrap();
     ended(&mut stream).await;
 }
+
+fn node(byte: u8) -> codewire_tailnet::node::Node {
+    let id = uuid::Uuid::new_v4();
+    codewire_tailnet::node::Node {
+        id,
+        as_of: "2026-10-24T12:00:00Z".parse().unwrap(),
+        key: codewire_tailnet::node::NodePublic::from_raw([byte; 32]),
+        disco_key: codewire_tailnet::node::DiscoPublic::from_raw([byte + 1; 32]),
+        preferred_derp: 1,
+        derp_latency: None,
+        endpoints: Vec::new(),
+        addresses: vec![codewire_tailnet::node::prefix_from_uuid(&id)],
+    }
+}
+
+async fn send(stream: &mut Stream, msg: mesh_coordinator_service_coordinate_request::Msg) {
+    stream
+        .send(MeshCoordinatorServiceCoordinateRequest {
+            msg: Some(msg),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+}
+
+async fn publish(stream: &mut Stream, byte: u8) {
+    send(
+        stream,
+        mesh_coordinator_service_coordinate_request::Msg::Node(Box::new(
+            crate::mesh_coordinate::tailnet_node_to_proto(node(byte)).unwrap(),
+        )),
+    )
+    .await;
+}
+
+async fn subscribe(stream: &mut Stream, target: &str) {
+    send(
+        stream,
+        mesh_coordinator_service_coordinate_request::Msg::Subscribe(Box::new(
+            codewire_proto::codewire::internal::v1::MeshCoordinateSubscribe {
+                target_node: target.to_owned(),
+                ..Default::default()
+            },
+        )),
+    )
+    .await;
+}
+
+/// The node key of the next peer update, past heartbeats.
+async fn next_peer_key(stream: &mut Stream) -> String {
+    loop {
+        let message = first(stream).await.expect("the stream stays open");
+        if let Some(mesh_coordinator_service_coordinate_response::Msg::PeerUpdate(update)) =
+            message.msg
+        {
+            return update.nodes[0].key.clone();
+        }
+    }
+}
+
+#[tokio::test]
+async fn members_reach_each_other_and_never_another_networks_node() {
+    let harness = harness().await;
+    harness
+        .store
+        .network_create_with_owner("network-other", ORG, OWNER, chrono::Utc::now())
+        .await
+        .unwrap();
+    harness
+        .store
+        .network_member_upsert(NetworkMember {
+            network_id: "network-other".to_owned(),
+            subject: MEMBER.to_owned(),
+            role: NETWORK_ROLE_MEMBER.to_owned(),
+            created_at: chrono::Utc::now(),
+            created_by: OWNER.to_owned(),
+        })
+        .await
+        .unwrap();
+    harness.admit(&code(1), member(ENV, "app-1", MEMBER));
+    harness.admit(&code(2), member("env-2", "app-2", MEMBER));
+    harness.admit(
+        &code(3),
+        EnvironmentMember {
+            network_id: "network-other".to_owned(),
+            ..member("env-3", "app-3", MEMBER)
+        },
+    );
+    let mut first_member = harness.peer(&code(1), ORG, MeshCoordinateRole::Peer).await;
+    admitted(&mut first_member).await;
+    let mut second_member = harness.peer(&code(2), ORG, MeshCoordinateRole::Peer).await;
+    admitted(&mut second_member).await;
+    publish(&mut first_member, 0x11).await;
+    publish(&mut second_member, 0x21).await;
+
+    // app-1 reaches app-2 by name; each learns only the other.
+    subscribe(&mut first_member, "app-2").await;
+    let key = |byte| {
+        crate::mesh_coordinate::tailnet_node_to_proto(node(byte))
+            .unwrap()
+            .key
+    };
+    assert_eq!(next_peer_key(&mut first_member).await, key(0x21));
+    assert_eq!(next_peer_key(&mut second_member).await, key(0x11));
+
+    // A member of another network names app-1 and learns nothing; app-1
+    // never learns it.
+    let client = MeshCoordinatorServiceClient::new(
+        HttpClient::plaintext_http2_only(),
+        ClientConfig::new(harness.connect_url()).with_default_header(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", code(3)),
+        ),
+    );
+    let mut outsider = client.coordinate().await.unwrap();
+    outsider
+        .send(MeshCoordinatorServiceCoordinateRequest {
+            msg: Some(mesh_coordinator_service_coordinate_request::Msg::Hello(
+                Box::new(MeshCoordinateHello {
+                    org_id: ORG.to_owned(),
+                    network_id: "network-other".to_owned(),
+                    role: MeshCoordinateRole::Peer.into(),
+                    ..Default::default()
+                }),
+            )),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    admitted(&mut outsider).await;
+    publish(&mut outsider, 0x31).await;
+    subscribe(&mut outsider, "app-1").await;
+    // Only heartbeats arrive within a few seconds, on both sides.
+    for stream in [&mut outsider, &mut first_member] {
+        let quiet = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let message = first(stream).await.expect("the stream stays open");
+                if matches!(
+                    message.msg,
+                    Some(mesh_coordinator_service_coordinate_response::Msg::PeerUpdate(_))
+                ) {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(quiet.is_err(), "a node of another network was exchanged");
+    }
+
+    // A node never subscribes to itself.
+    subscribe(&mut second_member, "app-2").await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match second_member.message().await {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => return None,
+                    Err(error) => return Some(error.code),
+                }
+            }
+        })
+        .await
+        .unwrap(),
+        Some(ErrorCode::InvalidArgument)
+    );
+}

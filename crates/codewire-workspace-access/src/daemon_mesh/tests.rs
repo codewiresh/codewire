@@ -107,6 +107,7 @@ struct Membership {
     ready: Arc<AtomicBool>,
 }
 
+#[async_trait]
 impl MeshMembership for Membership {
     fn conn(&self) -> Arc<Conn> {
         self.conn.clone()
@@ -114,6 +115,18 @@ impl MeshMembership for Membership {
 
     fn is_ready(&self) -> bool {
         self.ready.load(Ordering::SeqCst)
+    }
+
+    /// `echo` on port 7 answers what it is sent; anything else is
+    /// unreachable.
+    async fn dial(&self, node: &str, port: u16) -> anyhow::Result<Box<dyn MeshStream>> {
+        anyhow::ensure!(node == "app-2" && port == 7, "unreachable");
+        let (near, mut far) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            let (mut read, mut write) = tokio::io::split(&mut far);
+            let _ = tokio::io::copy(&mut read, &mut write).await;
+        });
+        Ok(Box::new(near))
     }
 }
 
@@ -133,7 +146,7 @@ impl MeshJoiner for Joiner {
         target: &MeshTarget,
         code: &str,
         environment_id: Uuid,
-    ) -> Result<Box<dyn MeshMembership>, JoinError> {
+    ) -> Result<Arc<dyn MeshMembership>, JoinError> {
         assert_eq!(environment_id, ENVIRONMENT);
         self.joined
             .lock()
@@ -142,7 +155,7 @@ impl MeshJoiner for Joiner {
         self.answers.lock().unwrap().pop_front().unwrap_or(Ok(()))?;
         let ready = Arc::new(AtomicBool::new(true));
         *self.latest.lock().unwrap() = Some(ready.clone());
-        Ok(Box::new(Membership {
+        Ok(Arc::new(Membership {
             conn: idle_conn(),
             ready,
         }))
@@ -152,6 +165,7 @@ impl MeshJoiner for Joiner {
 struct Harness {
     plane: Arc<Plane>,
     joiner: Arc<Joiner>,
+    current: CurrentMembership,
     grants: watch::Sender<WorkspaceAccessGrant>,
     shutdown: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
@@ -167,6 +181,7 @@ fn start(network: Option<&str>, answers: Vec<Result<(), JoinError>>) -> Harness 
     let (shutdown, shutdown_rx) = watch::channel(false);
     let (_ports, ports_rx) = watch::channel(AppPorts::default());
     std::mem::forget(_ports);
+    let (current_tx, current) = watch::channel(None);
     let task = tokio::spawn(run(
         DaemonMeshConfig {
             environment_id: ENVIRONMENT,
@@ -183,11 +198,13 @@ fn start(network: Option<&str>, answers: Vec<Result<(), JoinError>>) -> Harness 
         plane.clone(),
         joiner.clone(),
         ports_rx,
+        current_tx,
         shutdown_rx,
     ));
     Harness {
         plane,
         joiner,
+        current,
         grants,
         shutdown,
         task,
@@ -350,4 +367,63 @@ fn refused_stream_codes_map_to_reports() {
         target: grant(Some("work")).mesh().unwrap().clone(),
     };
     assert!(!format!("{enrollment:?}").contains("secret-canary"));
+}
+
+/// One request on a connect socket served for `current`; the answer line and
+/// the stream after it.
+async fn connect(
+    current: CurrentMembership,
+    request: &[u8],
+) -> (String, tokio::io::BufReader<tokio::net::UnixStream>) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mesh.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let (_stop, stop) = watch::channel(false);
+    tokio::spawn(serve_connect(listener, current, stop));
+    std::mem::forget(_stop);
+    let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+    stream.write_all(request).await.unwrap();
+    let mut reader = tokio::io::BufReader::new(stream);
+    let mut answer = String::new();
+    tokio::time::timeout(HANG_GUARD, reader.read_line(&mut answer))
+        .await
+        .unwrap()
+        .unwrap();
+    std::mem::forget(directory);
+    (answer, reader)
+}
+
+#[tokio::test]
+async fn the_connect_socket_carries_one_stream_to_a_member_of_the_network() {
+    let harness = start(Some("work"), Vec::new());
+    harness
+        .until(|plane, _| reports(plane) == [MeshReport::Attached])
+        .await;
+    let (answer, mut stream) = connect(harness.current.clone(), b"CWMESHCONNECT1 app-2 7\n").await;
+    assert_eq!(answer, "OK\n");
+    stream
+        .get_mut()
+        .write_all(b"synthetic canary\n")
+        .await
+        .unwrap();
+    let mut echoed = String::new();
+    tokio::time::timeout(HANG_GUARD, stream.read_line(&mut echoed))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(echoed, "synthetic canary\n");
+
+    // A member it cannot reach, and a malformed request.
+    let (answer, _) = connect(harness.current.clone(), b"CWMESHCONNECT1 app-3 7\n").await;
+    assert_eq!(answer, "ERR unreachable\n");
+    let (answer, _) = connect(harness.current.clone(), b"CWMESHCONNECT1 ../x 7\n").await;
+    assert_eq!(answer, "ERR invalid\n");
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn the_connect_socket_refuses_until_the_environment_joined() {
+    let (_none, current) = watch::channel::<Option<Arc<dyn MeshMembership>>>(None);
+    let (answer, _) = connect(current, b"CWMESHCONNECT1 app-2 7\n").await;
+    assert_eq!(answer, "ERR not_joined\n");
 }

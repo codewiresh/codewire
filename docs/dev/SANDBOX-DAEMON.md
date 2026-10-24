@@ -168,6 +168,12 @@ tailnet above: another node, keys and coordinator.
   When a stream ends, the daemon rejoins with a new code. It retries a fault
   after 1 to 30 s and a refusal after 60 to 300 s, and reports each change
   once.
+- Members reach each other. A member's peer stream may subscribe to up to
+  64 other members of its own network: Mesh derives the target from the
+  subscriber's own network, so another network's node is never addressed.
+  The daemon serves `cw network connect NODE PORT` on its owner-only socket
+  `/codewire/run/daemon/mesh.sock`: one request line, then a TCP stream to
+  that member's port. A member serves only its application ports there.
 - The daemon reports what it observed with `ReportMeshAttachment`. The
   environment shows the report only for its current Pod, so a new Pod reads
   as pending until its daemon reports.

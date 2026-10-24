@@ -964,7 +964,7 @@ impl MeshCoordinatorPeerSession {
         P: FnMut(&[Node]),
         D: FnMut(&serde_json::Value),
     {
-        self.run_inner(None, &mut handlers).await
+        self.run_inner(None, None, &mut handlers).await
     }
 
     /// Drive the Mesh receive loop while publishing local node updates.
@@ -977,7 +977,25 @@ impl MeshCoordinatorPeerSession {
         P: FnMut(&[Node]),
         D: FnMut(&serde_json::Value),
     {
-        self.run_inner(Some(node_updates), &mut handlers).await
+        self.run_inner(Some(node_updates), None, &mut handlers)
+            .await
+    }
+
+    /// Like [`Self::run_with_node_updates`], also subscribing to each member
+    /// named on `subscriptions` (a peer reaching other members of its own
+    /// network, #3350).
+    pub async fn run_with_node_updates_and_subscriptions<P, D>(
+        &mut self,
+        node_updates: mpsc::UnboundedReceiver<Node>,
+        subscriptions: mpsc::UnboundedReceiver<String>,
+        mut handlers: Handlers<P, D>,
+    ) -> Result<(), Error>
+    where
+        P: FnMut(&[Node]),
+        D: FnMut(&serde_json::Value),
+    {
+        self.run_inner(Some(node_updates), Some(subscriptions), &mut handlers)
+            .await
     }
 
     /// Drive a bounded disposable KIND Mesh probe.
@@ -1048,6 +1066,7 @@ impl MeshCoordinatorPeerSession {
     async fn run_inner<P, D>(
         &mut self,
         node_updates: Option<mpsc::UnboundedReceiver<Node>>,
+        subscriptions: Option<mpsc::UnboundedReceiver<String>>,
         handlers: &mut Handlers<P, D>,
     ) -> Result<(), Error>
     where
@@ -1055,6 +1074,7 @@ impl MeshCoordinatorPeerSession {
         D: FnMut(&serde_json::Value),
     {
         let mut node_updates = node_updates;
+        let mut subscriptions = subscriptions;
         let mut heartbeat = tokio::time::interval_at(
             tokio::time::Instant::now() + COORDINATOR_HEARTBEAT_INTERVAL,
             COORDINATOR_HEARTBEAT_INTERVAL,
@@ -1088,6 +1108,14 @@ impl MeshCoordinatorPeerSession {
                     match maybe {
                         Some(node) => self.update_node(&node).await?,
                         None => node_updates = None,
+                    }
+                }
+                maybe = async {
+                    subscriptions.as_mut().expect("guarded subscription receiver").recv().await
+                }, if subscriptions.is_some() => {
+                    match maybe {
+                        Some(target) => self.subscribe(target).await?,
+                        None => subscriptions = None,
                     }
                 }
                 _ = heartbeat.tick() => {

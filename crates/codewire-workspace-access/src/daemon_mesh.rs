@@ -22,6 +22,9 @@ use async_trait::async_trait;
 use codewire_daemon::access::{MeshTarget, WorkspaceAccessGrant};
 use codewire_daemon::app_ports::AppPorts;
 use codewire_tailnet::conn::Conn;
+use tokio::io::{
+    AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _,
+};
 use tokio::sync::watch;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -78,11 +81,23 @@ pub enum JoinError {
     Unreachable,
 }
 
+/// A byte stream to another member.
+pub trait MeshStream: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> MeshStream for T {}
+
 /// One open membership: its tailnet connection, while it lasts.
+#[async_trait]
 pub trait MeshMembership: Send + Sync {
     fn conn(&self) -> Arc<Conn>;
     fn is_ready(&self) -> bool;
+    /// One TCP stream to `port` on the member named `node` in this network.
+    async fn dial(&self, node: &str, port: u16) -> anyhow::Result<Box<dyn MeshStream>>;
 }
+
+/// The open membership, for the local connect socket: `None` while the
+/// environment has not joined.
+pub type CurrentMembership = watch::Receiver<Option<Arc<dyn MeshMembership>>>;
 
 /// Opens one peer stream with one code.
 #[async_trait]
@@ -92,7 +107,7 @@ pub trait MeshJoiner: Send + Sync {
         target: &MeshTarget,
         code: &str,
         environment_id: Uuid,
-    ) -> Result<Box<dyn MeshMembership>, JoinError>;
+    ) -> Result<Arc<dyn MeshMembership>, JoinError>;
 }
 
 /// Joins through [`codewire_client::member_tailnet::MemberTailnet`], with a
@@ -102,6 +117,7 @@ pub trait MeshJoiner: Send + Sync {
 pub struct MemberTailnetJoiner;
 
 #[cfg(target_os = "linux")]
+#[async_trait]
 impl MeshMembership for codewire_client::member_tailnet::MemberTailnet {
     fn conn(&self) -> Arc<Conn> {
         codewire_client::member_tailnet::MemberTailnet::conn(self)
@@ -109,6 +125,11 @@ impl MeshMembership for codewire_client::member_tailnet::MemberTailnet {
 
     fn is_ready(&self) -> bool {
         codewire_client::member_tailnet::MemberTailnet::is_ready(self)
+    }
+
+    async fn dial(&self, node: &str, port: u16) -> anyhow::Result<Box<dyn MeshStream>> {
+        let stream = self.dial_node(node, port).await?;
+        Ok(Box::new(stream))
     }
 }
 
@@ -120,7 +141,7 @@ impl MeshJoiner for MemberTailnetJoiner {
         target: &MeshTarget,
         code: &str,
         environment_id: Uuid,
-    ) -> Result<Box<dyn MeshMembership>, JoinError> {
+    ) -> Result<Arc<dyn MeshMembership>, JoinError> {
         use codewire_client::member_tailnet::{
             MemberSetupError, MemberTailnet, MemberTransportOptions,
         };
@@ -139,7 +160,7 @@ impl MeshJoiner for MemberTailnetJoiner {
         )
         .await
         {
-            Ok(member) => Ok(Box::new(member)),
+            Ok(member) => Ok(Arc::new(member)),
             Err(error) => {
                 let rpc = error
                     .downcast_ref::<MemberSetupError>()
@@ -207,6 +228,7 @@ pub async fn run(
     plane: Arc<dyn MeshControlPlane>,
     joiner: Arc<dyn MeshJoiner>,
     app_ports: watch::Receiver<AppPorts>,
+    current: watch::Sender<Option<Arc<dyn MeshMembership>>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let timing = config.timing;
@@ -268,6 +290,7 @@ pub async fn run(
                     node = target.node_name(),
                     "workspace joined its Mesh network"
                 );
+                current.send_replace(Some(membership.clone()));
                 let (stop, stopped) = watch::channel(false);
                 let forwarding = tokio::spawn(forward_app_ports(
                     membership.conn(),
@@ -283,6 +306,7 @@ pub async fn run(
                     timing.readiness_poll,
                 )
                 .await;
+                current.send_replace(None);
                 let _ = stop.send(true);
                 forwarding.abort();
                 drop(membership);
@@ -316,6 +340,75 @@ pub async fn run(
             }
         }
     }
+}
+
+/// How long a local client has to send its request line.
+const CONNECT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Serve [`codewire_daemon_proto::HOSTED_DAEMON_MESH_SOCKET`] until
+/// `shutdown`: each connection names one member and port, gets `OK` and a
+/// stream to it, or `ERR <reason>` (`invalid`, `not_joined`,
+/// `unreachable`). Only processes that can open the owner-only socket, the
+/// workspace's own, reach other members; the stream carries their bytes and
+/// nothing else.
+pub async fn serve_connect(
+    listener: tokio::net::UnixListener,
+    current: CurrentMembership,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => return,
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else {
+                    continue;
+                };
+                while connections.try_join_next().is_some() {}
+                connections.spawn(connect_one(stream, current.clone()));
+            }
+        }
+    }
+}
+
+async fn connect_one(stream: tokio::net::UnixStream, current: CurrentMembership) {
+    let mut local = tokio::io::BufReader::new(stream);
+    let mut line = String::new();
+    let read = tokio::time::timeout(
+        CONNECT_REQUEST_TIMEOUT,
+        (&mut local)
+            .take(codewire_daemon_proto::MESH_CONNECT_MAX_LINE as u64)
+            .read_line(&mut line),
+    )
+    .await;
+    let request = match read {
+        Ok(Ok(_)) => line
+            .strip_suffix('\n')
+            .and_then(codewire_daemon_proto::parse_mesh_connect_request),
+        _ => None,
+    };
+    let Some((node, port)) = request else {
+        let _ = local.get_mut().write_all(b"ERR invalid\n").await;
+        return;
+    };
+    let membership = current.borrow().clone();
+    let Some(membership) = membership else {
+        let _ = local.get_mut().write_all(b"ERR not_joined\n").await;
+        return;
+    };
+    let mut remote = match membership.dial(node, port).await {
+        Ok(remote) => remote,
+        Err(error) => {
+            tracing::info!(node, port, error = %format!("{error:#}"), "workspace Mesh connect failed");
+            let _ = local.get_mut().write_all(b"ERR unreachable\n").await;
+            return;
+        }
+    };
+    drop(membership);
+    if local.get_mut().write_all(b"OK\n").await.is_err() {
+        return;
+    }
+    let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
 }
 
 /// Serve while the membership lasts and the grant still names `target`.

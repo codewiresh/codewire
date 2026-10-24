@@ -72,6 +72,18 @@ environment only.
 example `Network: cloud:NAME (attached)`, or why not. A network owner can
 remove the node with `cw network revoke`; it then stays out of that network.
 
+Inside such an environment, `cw network connect NODE PORT` opens one TCP
+stream to PORT on another member of the same network. NODE is the other
+environment's name. The stream is carried on standard input and output, so
+it works with tools that take a proxy command:
+
+```sh
+printf 'GET / HTTP/1.0\r\n\r\n' | cw network connect app-2 8080
+```
+
+A member serves only its own application ports, and members of other
+networks are never reachable.
+
 `network nodes` lists enrolled nodes and the status each node last reported;
 it does not check connectivity. Deleting a network retires its name for good
 (old connections must never reach a replacement); stop or detach its

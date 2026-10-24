@@ -59,6 +59,48 @@ pub const WORKSPACE_BINDING_TLS_ROOTS_FILE: &str =
 pub const WORKSPACE_POD_UID_ENV: &str = "CODEWIRE_POD_UID";
 /// Owner-only (0700) daemon state directory under the Pod's `/codewire/run`.
 pub const HOSTED_DAEMON_STATE_DIRECTORY: &str = "/codewire/run/daemon";
+/// The daemon's local Unix socket for `cw network connect` (#3350): a
+/// process in the workspace asks for one TCP stream to another member of the
+/// environment's Mesh network. It lives in the owner-only state directory.
+pub const HOSTED_DAEMON_MESH_SOCKET: &str = "/codewire/run/daemon/mesh.sock";
+
+/// The one request line on [`HOSTED_DAEMON_MESH_SOCKET`]:
+/// `CWMESHCONNECT1 <node> <port>\n`. The daemon answers `OK\n` and then
+/// carries the stream, or `ERR <reason>\n` and closes.
+pub const MESH_CONNECT_PREFIX: &str = "CWMESHCONNECT1";
+
+/// The longest request or answer line on [`HOSTED_DAEMON_MESH_SOCKET`].
+pub const MESH_CONNECT_MAX_LINE: usize = 128;
+
+/// A Mesh node name a connect request may name: 1 to 63 letters, digits,
+/// `.`, `_` or `-`, starting with a letter or digit.
+pub fn valid_mesh_node_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=63).contains(&bytes.len())
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// The request line for one stream to `port` on `node`.
+pub fn mesh_connect_request(node: &str, port: u16) -> Option<String> {
+    (valid_mesh_node_name(node) && port > 0)
+        .then(|| format!("{MESH_CONNECT_PREFIX} {node} {port}\n"))
+}
+
+/// The node and port of one request line, without its newline.
+pub fn parse_mesh_connect_request(line: &str) -> Option<(&str, u16)> {
+    let mut parts = line.split(' ');
+    let (Some(MESH_CONNECT_PREFIX), Some(node), Some(port), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let port = port.parse::<u16>().ok().filter(|port| *port > 0)?;
+    valid_mesh_node_name(node).then_some((node, port))
+}
+
 /// Local readiness marker: the daemon process is up and its binding loop
 /// runs. It never depends on binding, because orchestration binds a Pod only
 /// after the Pod is Ready.
@@ -296,6 +338,34 @@ pub mod broker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mesh_connect_requests_name_one_valid_node_and_port() {
+        let request = mesh_connect_request("app-2", 8080).unwrap();
+        assert_eq!(request, "CWMESHCONNECT1 app-2 8080\n");
+        assert_eq!(
+            parse_mesh_connect_request(request.trim_end()),
+            Some(("app-2", 8080))
+        );
+        assert!(request.len() <= MESH_CONNECT_MAX_LINE);
+        assert!(
+            mesh_connect_request(&"n".repeat(63), 65535).unwrap().len() <= MESH_CONNECT_MAX_LINE
+        );
+        for (node, port) in [("", 1), ("-app", 1), ("a b", 1), ("app", 0)] {
+            assert!(mesh_connect_request(node, port).is_none(), "{node} {port}");
+        }
+        for line in [
+            "",
+            "CWMESHCONNECT1 app-2",
+            "CWMESHCONNECT1 app-2 0",
+            "CWMESHCONNECT1 app-2 65536",
+            "CWMESHCONNECT1 app/2 80",
+            "CWMESHCONNECT1 app-2 80 extra",
+            "OTHER app-2 80",
+        ] {
+            assert!(parse_mesh_connect_request(line).is_none(), "{line}");
+        }
+    }
     use prost::Message;
 
     #[test]
@@ -358,6 +428,10 @@ mod tests {
         );
         assert_eq!(WORKSPACE_POD_UID_ENV, "CODEWIRE_POD_UID");
         assert_eq!(HOSTED_DAEMON_STATE_DIRECTORY, "/codewire/run/daemon");
+        assert_eq!(
+            HOSTED_DAEMON_MESH_SOCKET,
+            format!("{HOSTED_DAEMON_STATE_DIRECTORY}/mesh.sock")
+        );
         for file in [HOSTED_DAEMON_READY_FILE, HOSTED_DAEMON_CREDENTIAL_FILE] {
             let (directory, name) = file.rsplit_once('/').unwrap();
             assert_eq!(directory, HOSTED_DAEMON_STATE_DIRECTORY);

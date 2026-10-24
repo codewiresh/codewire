@@ -123,7 +123,7 @@ impl MeshCoordinateState {
         }
         registry
             .tunnels
-            .retain(|dial, target| !removed.contains(dial) && !removed.contains(target));
+            .retain(|(dial, target)| !removed.contains(dial) && !removed.contains(target));
     }
 
     /// Disconnect the active peer addressed by this exact registered node.
@@ -186,22 +186,7 @@ impl MeshCoordinateState {
             if let Some(peer) = registry.peers.remove(&peer_id) {
                 peer.close.notify_one();
             }
-            let affected = registry
-                .tunnels
-                .iter()
-                .filter_map(|(dial, target)| {
-                    ((*dial == peer_id) || (*target == peer_id)).then_some((*dial, *target))
-                })
-                .collect::<Vec<_>>();
-            let mut updates = Vec::new();
-            for (dial, target) in affected {
-                registry.tunnels.remove(&dial);
-                let recipient = if dial == peer_id { target } else { dial };
-                if let Some(peer) = registry.peers.get(&recipient) {
-                    updates.push(peer.tx.clone());
-                }
-            }
-            updates
+            remove_tunnels(&mut registry, peer_id)
         };
         for tx in updates {
             let _ = tx.try_send(CoordinateEvent::Remove(peer_id));
@@ -212,7 +197,9 @@ impl MeshCoordinateState {
 #[derive(Default)]
 struct Registry {
     peers: HashMap<Uuid, Peer>,
-    tunnels: HashMap<Uuid, Uuid>,
+    /// Subscriptions as (subscriber, target) edges. A dial session holds at
+    /// most one; a peer at most [`MAX_PEER_SUBSCRIPTIONS`] (#3350).
+    tunnels: HashSet<(Uuid, Uuid)>,
     retired_networks: HashSet<String>,
 }
 
@@ -393,18 +380,8 @@ async fn run_session(
                         }
                     }
                     Some(mesh_coordinator_service_coordinate_request::Msg::Subscribe(subscribe)) => {
-                        if peer.role != MeshCoordinateRole::Dial {
-                            if responses
-                                .send(Err(ConnectError::permission_denied(
-                                    "only dial sessions may subscribe",
-                                )))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                            continue;
-                        }
+                        // A user's dial session reaches one node; a member
+                        // reaches other members of its own network (#3350).
                         let target = subscribe.target_node.trim();
                         if target.is_empty() {
                             if responses
@@ -419,7 +396,20 @@ async fn run_session(
                             continue;
                         }
                         let target_id = stable_peer_id(&peer.network_id, "peer", target);
-                        add_tunnel(&state, peer.peer_id, target_id);
+                        let refused = match add_tunnel(&state, peer.peer_id, target_id, peer.role) {
+                            Ok(()) => None,
+                            Err(SubscribeError::Itself) => Some(ConnectError::invalid_argument(
+                                "a node cannot subscribe to itself",
+                            )),
+                            Err(SubscribeError::TooMany) => Some(ConnectError::resource_exhausted(
+                                "this node already reaches as many members as it may",
+                            )),
+                        };
+                        if let Some(error) = refused
+                            && responses.send(Err(error)).await.is_err()
+                        {
+                            break;
+                        }
                     }
                     Some(mesh_coordinator_service_coordinate_request::Msg::Ping(_)) => {}
                     Some(mesh_coordinator_service_coordinate_request::Msg::Hello(_)) | None => {
@@ -514,22 +504,7 @@ fn deregister(state: &MeshCoordinateState, peer_id: Uuid, session_id: Uuid) {
             return;
         }
         registry.peers.remove(&peer_id);
-        let affected = registry
-            .tunnels
-            .iter()
-            .filter_map(|(dial, target)| {
-                ((*dial == peer_id) || (*target == peer_id)).then_some((*dial, *target))
-            })
-            .collect::<Vec<_>>();
-        let mut updates = Vec::new();
-        for (dial, target) in affected {
-            registry.tunnels.remove(&dial);
-            let recipient = if dial == peer_id { target } else { dial };
-            if let Some(peer) = registry.peers.get(&recipient) {
-                updates.push(peer.tx.clone());
-            }
-        }
-        updates
+        remove_tunnels(&mut registry, peer_id)
     };
     for tx in updates {
         let _ = tx.try_send(CoordinateEvent::Remove(peer_id));
@@ -551,7 +526,51 @@ fn update_node(state: &MeshCoordinateState, peer_id: Uuid, session_id: Uuid, nod
     send_updates(peer_id, updates);
 }
 
-fn add_tunnel(state: &MeshCoordinateState, dial_id: Uuid, target_id: Uuid) {
+/// Removes every subscription edge touching `peer_id` and returns the other
+/// ends to tell.
+fn remove_tunnels(registry: &mut Registry, peer_id: Uuid) -> Vec<mpsc::Sender<CoordinateEvent>> {
+    let affected = registry
+        .tunnels
+        .iter()
+        .filter(|(dial, target)| *dial == peer_id || *target == peer_id)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut updates = Vec::new();
+    for (dial, target) in affected {
+        registry.tunnels.remove(&(dial, target));
+        let recipient = if dial == peer_id { target } else { dial };
+        if let Some(peer) = registry.peers.get(&recipient) {
+            updates.push(peer.tx.clone());
+        }
+    }
+    updates
+}
+
+/// Subscriptions one peer session may hold: each is another member of its
+/// own network it can reach (#3350).
+pub(crate) const MAX_PEER_SUBSCRIPTIONS: usize = 64;
+
+#[derive(Debug, PartialEq, Eq)]
+enum SubscribeError {
+    /// A node never subscribes to itself.
+    Itself,
+    /// The peer already holds [`MAX_PEER_SUBSCRIPTIONS`].
+    TooMany,
+}
+
+/// Subscribes `dial_id` to `target_id`. A dial session's subscription
+/// replaces its previous one; a peer adds one, up to its limit. Both ends must
+/// be in one network: a target id is derived from the subscriber's own network,
+/// so another network's node is never addressed.
+fn add_tunnel(
+    state: &MeshCoordinateState,
+    dial_id: Uuid,
+    target_id: Uuid,
+    role: MeshCoordinateRole,
+) -> Result<(), SubscribeError> {
+    if dial_id == target_id {
+        return Err(SubscribeError::Itself);
+    }
     let updates = {
         let mut registry = state.inner.lock().unwrap();
         let same_network = match (registry.peers.get(&dial_id), registry.peers.get(&target_id)) {
@@ -560,12 +579,25 @@ fn add_tunnel(state: &MeshCoordinateState, dial_id: Uuid, target_id: Uuid) {
             _ => false,
         };
         if !same_network {
-            return;
+            return Ok(());
         }
-        registry.tunnels.insert(dial_id, target_id);
+        if role == MeshCoordinateRole::Dial {
+            registry.tunnels.retain(|(dial, _)| *dial != dial_id);
+        } else if !registry.tunnels.contains(&(dial_id, target_id))
+            && registry
+                .tunnels
+                .iter()
+                .filter(|(dial, _)| *dial == dial_id)
+                .count()
+                >= MAX_PEER_SUBSCRIPTIONS
+        {
+            return Err(SubscribeError::TooMany);
+        }
+        registry.tunnels.insert((dial_id, target_id));
         tunnel_updates(&registry, dial_id)
     };
     send_updates(dial_id, updates);
+    Ok(())
 }
 
 fn tunnel_updates(
@@ -649,7 +681,7 @@ fn proto_node_to_tailnet(node: CoordinateNode) -> Result<Node, ConnectError> {
     serde_json::from_value(value).map_err(|_| ConnectError::invalid_argument("invalid node"))
 }
 
-fn tailnet_node_to_proto(node: Node) -> Result<CoordinateNode, ConnectError> {
+pub(crate) fn tailnet_node_to_proto(node: Node) -> Result<CoordinateNode, ConnectError> {
     serde_json::from_value(
         serde_json::to_value(node).map_err(|_| ConnectError::internal("encode node"))?,
     )
@@ -875,6 +907,15 @@ mod tests {
         }
     }
 
+    /// Clients name a member by this id (#3350); it must never change.
+    #[test]
+    fn a_members_peer_id_is_pinned() {
+        assert_eq!(
+            stable_peer_id("network-test", "peer", "app-2").to_string(),
+            "360189e4-fc1d-53e5-ba42-755ed27d23ce"
+        );
+    }
+
     /// #2844: DERP admits a member's key while its session lives.
     #[tokio::test]
     async fn derp_lookup_knows_a_live_member_key_until_its_session_ends() {
@@ -988,7 +1029,7 @@ mod tests {
         .unwrap()
         .0;
 
-        add_tunnel(&state, dial_id, target_id);
+        add_tunnel(&state, dial_id, target_id, MeshCoordinateRole::Dial).unwrap();
         assert!(
             dial_rx.try_recv().is_err(),
             "subscription without a target node must not invent an update"

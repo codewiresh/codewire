@@ -193,6 +193,7 @@ pub(crate) async fn serve(
                 platform.keys().copied().collect();
             // The environment's node in its hosted Mesh network, when the
             // grant names one (#3350): separate keys, socket and coordinator.
+            let (current_membership, membership) = watch::channel(None);
             tokio::spawn(daemon_mesh::run(
                 DaemonMeshConfig {
                     environment_id: bound.environment_id,
@@ -203,8 +204,23 @@ pub(crate) async fn serve(
                 mesh_plane,
                 Arc::new(MemberTailnetJoiner),
                 app_ports.subscribe(),
+                current_membership,
                 shutdown.clone(),
             ));
+            // `cw network connect` in the workspace reaches other members
+            // through this owner-only socket.
+            match bind_mesh_socket(&paths) {
+                Ok(listener) => {
+                    tokio::spawn(daemon_mesh::serve_connect(
+                        listener,
+                        membership,
+                        shutdown.clone(),
+                    ));
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "workspace Mesh connect socket unavailable");
+                }
+            }
             let tailnet = daemon_tailnet::run(
                 DaemonTailnetConfig {
                     environment_id: bound.environment_id,
@@ -267,6 +283,28 @@ pub(crate) async fn serve(
     ssh.await
         .context("workspace SSH listener task")?
         .context("serve workspace SSH")
+}
+
+/// Bind the Mesh connect socket in the owner-only state directory, owner
+/// read and write only, replacing a socket a previous daemon left.
+fn bind_mesh_socket(paths: &HostedStatePaths) -> std::io::Result<tokio::net::UnixListener> {
+    use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+    paths.prepare()?;
+    // `HOSTED_DAEMON_MESH_SOCKET` below the state directory.
+    let path = paths.state_directory.join("mesh.sock");
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(&path)?,
+        Ok(_) => {
+            return Err(std::io::Error::other(
+                "the Mesh connect socket path is not a socket",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let listener = tokio::net::UnixListener::bind(&path)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
 }
 
 /// Replace the application ports with each renewed grant's set.
