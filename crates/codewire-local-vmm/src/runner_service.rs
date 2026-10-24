@@ -576,6 +576,10 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
     if !config.mesh_data_dir.is_absolute() || !config.platform_config_dir.is_absolute() {
         return Err(RunnerServiceError::Configuration);
     }
+    // Taken while the parent-death signal still holds, so the parent is the
+    // supervisor that spawned this runner.
+    #[cfg(target_os = "linux")]
+    let spawner = spawning_supervisor()?;
     let engine = PrivateRoot::open(&config.engine_state_root).map_err(RunnerError::from)?;
     let artifacts = RuntimeArtifactStore::create(&engine)
         .map_err(|_| RunnerServiceError::ArtifactStore)?
@@ -627,12 +631,69 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
             ("generation", LogField::Count(generation)),
         ],
     );
+    #[cfg(target_os = "linux")]
+    drop(tokio::spawn(exit_when_idle_without_supervisor(
+        spawner,
+        Arc::clone(&service.state),
+        Arc::clone(&service.events),
+        service.shutdown.clone(),
+    )));
     let server = tokio::spawn(serve_runner_rpc(config.socket, service));
     let adoption = adoption_rx.recv().await.ok_or(RunnerServiceError::Serve)?;
     #[cfg(target_os = "linux")]
     clear_parent_death_signal().map_err(|_| RunnerServiceError::Adoption)?;
     let _ = adoption.acknowledged.send(());
     server.await.map_err(|_| RunnerServiceError::Serve)?
+}
+
+/// A pidfd for the supervisor that spawned this runner. A parent already
+/// gone is init's, so the runner exits rather than watch the wrong process.
+#[cfg(target_os = "linux")]
+fn spawning_supervisor() -> Result<OwnedFd, RunnerServiceError> {
+    let parent = rustix::process::getppid().ok_or(RunnerServiceError::Configuration)?;
+    let pidfd = rustix::process::pidfd_open(parent, rustix::process::PidfdFlags::empty())
+        .map_err(|_| RunnerServiceError::Configuration)?;
+    if rustix::process::getppid() != Some(parent) {
+        return Err(RunnerServiceError::Configuration);
+    }
+    Ok(pidfd)
+}
+
+/// Once the supervisor that spawned this runner is gone, end the runner as
+/// soon as it has no VM to keep (#3270). A runner with a running VM still
+/// outlives its supervisor, and a new one adopts the VM; an idle one never
+/// lingers without a supervisor to reuse or retire it.
+#[cfg(target_os = "linux")]
+async fn exit_when_idle_without_supervisor(
+    spawner: OwnedFd,
+    state: Arc<Mutex<RunnerState>>,
+    events: Arc<RunnerEvents>,
+    shutdown: watch::Sender<Option<v1::RunnerEvent>>,
+) {
+    // RUSTSEC-2026-0386: an owned `OwnedFd` is outside `AsyncFd::new`'s unsound case; `register` migration is #3249.
+    #[allow(deprecated)]
+    let Ok(spawner) =
+        tokio::io::unix::AsyncFd::with_interest(spawner, tokio::io::Interest::READABLE)
+    else {
+        return;
+    };
+    if spawner.readable().await.is_err() {
+        return;
+    }
+    let mut changes = events.sender.subscribe();
+    loop {
+        {
+            let mut state = state.lock().await;
+            if state.running.is_none() && state.retirement == RetirementState::Active {
+                state.retirement = RetirementState::ShutdownRequested;
+                shutdown.send_replace(Some(events.sender.borrow().clone()));
+                return;
+            }
+        }
+        if changes.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 async fn wait_runner_shutdown(shutdown: &mut watch::Receiver<Option<v1::RunnerEvent>>) {
@@ -2303,6 +2364,48 @@ mod tests {
             shutdown: watch::channel(None).0,
         };
         (parent, rpc)
+    }
+
+    /// #3270: an idle runner shuts down once the supervisor that spawned it
+    /// is gone, and only then.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_idle_runner_shuts_down_when_its_supervisor_is_gone() {
+        let (_parent, rpc) = bootstrap_rpc();
+        let mut supervisor = crate::test_child(&mut std::process::Command::new(
+            std::fs::canonicalize("/bin/sleep").unwrap(),
+        ))
+        .arg("60")
+        .spawn()
+        .unwrap();
+        let pidfd = rustix::process::pidfd_open(
+            rustix::process::Pid::from_raw(i32::try_from(supervisor.id()).unwrap()).unwrap(),
+            rustix::process::PidfdFlags::empty(),
+        )
+        .unwrap();
+        let shutdown = rpc.shutdown.subscribe();
+        let watcher = tokio::spawn(exit_when_idle_without_supervisor(
+            pidfd,
+            Arc::clone(&rpc.state),
+            Arc::clone(&rpc.events),
+            rpc.shutdown.clone(),
+        ));
+        tokio::task::yield_now().await;
+        assert!(shutdown.borrow().is_none(), "its supervisor still runs");
+
+        supervisor.kill().unwrap();
+        supervisor.wait().unwrap();
+        // The supervisor's exit ends the wait; the bound only turns a hang
+        // into a failure.
+        tokio::time::timeout(std::time::Duration::from_secs(120), watcher)
+            .await
+            .expect("the idle runner did not see its supervisor exit")
+            .unwrap();
+        assert!(shutdown.borrow().is_some());
+        assert_eq!(
+            rpc.state.lock().await.retirement,
+            RetirementState::ShutdownRequested
+        );
     }
 
     #[test]

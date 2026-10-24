@@ -59,9 +59,7 @@ use crate::cw_runtime::{CwRuntimeError, CwRuntimeStore};
 use crate::diagnostic_log::{self, DiagnosticLog, LogField};
 use crate::generation::{GenerationError, ensure_root_generation};
 use crate::host::path::{PathError, PrivateRoot, SocketIdentity};
-#[cfg(test)]
-use crate::host::process::ProcessIdentity;
-use crate::host::process::{LiveProcess, RecoveryError, signal_unreaped_child};
+use crate::host::process::{LiveProcess, ProcessIdentity, RecoveryError, signal_unreaped_child};
 use crate::host_port::{
     HostPortBinding, canonical_host_port_bindings, validate_canonical_host_port_bindings,
 };
@@ -116,6 +114,13 @@ use codewire_project::valid_vm_only_patterns;
 
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a stopped environment keeps its runner for a restart to reuse
+/// (#3270). A start within it skips spawning one; after it the reaper retires
+/// the runner, so a stopped VM holds no process, memory or open runtime
+/// artifacts for long.
+const IDLE_RUNNER_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// How often the reaper looks for runners past their window.
+const IDLE_RUNNER_SWEEP: Duration = Duration::from_secs(30);
 /// An environment's runner is gone while the environment should be running;
 /// `cw --local daemon repair` or a restart recovers it.
 const RUNNER_EXIT_ERROR_CODE: &str = "runner_exit";
@@ -503,6 +508,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         state,
         children: HashMap::new(),
         live_runners: HashMap::new(),
+        idle_runners: HashMap::new(),
         runtime_operations: BTreeSet::new(),
         incompatible_runners: BTreeSet::new(),
         download_cache: BTreeMap::new(),
@@ -549,6 +555,9 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     }
     drop(tokio::spawn(
         Arc::clone(&service.supervisor).run_collector(),
+    ));
+    drop(tokio::spawn(
+        Arc::clone(&service.supervisor).run_idle_runner_reaper(),
     ));
     // Nothing pending was admitted by this process, so every drain recovers.
     for name in service.supervisor.names_with_pending_work()? {
@@ -709,6 +718,13 @@ fn orphan_inventory_response(
 /// The supervisor's state: its store, the in-memory copy of its durable state
 /// and the runner processes it owns. Only short synchronous sections of
 /// [`Supervisor::core`]'s lock touch it, never across an await (#2978).
+/// A stopped environment's runner and since when it has had no VM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IdleRunner {
+    process: ProcessIdentity,
+    since: tokio::time::Instant,
+}
+
 struct SupervisorCore {
     config: NativeRuntimeConfig,
     root: Arc<PrivateRoot>,
@@ -716,6 +732,10 @@ struct SupervisorCore {
     state: SupervisorState,
     children: HashMap<Uuid, Child>,
     live_runners: HashMap<Uuid, Arc<LiveProcess>>,
+    /// Since when each stopped environment's runner has been idle, by
+    /// environment, for the reaper (#3270). Memory only: a new supervisor
+    /// starts every window again.
+    idle_runners: HashMap<Uuid, IdleRunner>,
     runtime_operations: BTreeSet<Uuid>,
     // Observation only: an unsupported protocol never grants runner RPC or
     // retirement authority, and does not rewrite the durable lifecycle state.
@@ -1058,6 +1078,94 @@ impl Supervisor {
                 diagnostic_log::record(self.log.as_deref(), "content_collection_failed", &[]);
             }
         }
+    }
+
+    /// The idle-runner reaper (#3270): every sweep it retires the runner of
+    /// each stopped environment idle for [`IDLE_RUNNER_WINDOW`].
+    async fn run_idle_runner_reaper(self: Arc<Self>) {
+        let mut sweeps = tokio::time::interval(IDLE_RUNNER_SWEEP);
+        sweeps.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            sweeps.tick().await;
+            for name in self.expired_idle_runners(tokio::time::Instant::now()) {
+                if self.retire_expired_idle_runner(&name).await.is_err() {
+                    diagnostic_log::record(self.log.as_deref(), "idle_runner_retire_failed", &[]);
+                }
+            }
+        }
+    }
+
+    /// Notes when each stopped environment's runner became idle, forgets the
+    /// rest, and names those idle for the whole window at `now`.
+    fn expired_idle_runners(&self, now: tokio::time::Instant) -> Vec<String> {
+        let mut core = self.core();
+        let idle = core
+            .state
+            .environments
+            .values()
+            .filter(|environment| environment.state == StoredEnvironmentState::Stopped)
+            .filter_map(|environment| {
+                let runner = environment.runner.as_ref()?;
+                Some((
+                    environment.id,
+                    environment.name.clone(),
+                    runner.process.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let mut expired = Vec::new();
+        let mut tracked = HashMap::new();
+        for (environment_id, name, process) in idle {
+            let since = match core.idle_runners.get(&environment_id) {
+                Some(idle) if idle.process == process => idle.since,
+                _ => now,
+            };
+            if now.duration_since(since) >= IDLE_RUNNER_WINDOW {
+                expired.push(name);
+            }
+            tracked.insert(environment_id, IdleRunner { process, since });
+        }
+        core.idle_runners = tracked;
+        expired
+    }
+
+    /// Retire `name`'s idle runner if it is still idle past its window. An
+    /// environment with an operation pending or holding its lease is left to
+    /// the next sweep, so a start never races its runner's retirement.
+    async fn retire_expired_idle_runner(&self, name: &str) -> Result<(), SupervisorError> {
+        if !self.pending_for(name)?.is_empty() {
+            return Ok(());
+        }
+        let Ok(_lease) = self.lease(name).try_lock_owned() else {
+            return Ok(());
+        };
+        if !self.core().state.environments.contains_key(name) || !self.pending_for(name)?.is_empty()
+        {
+            return Ok(());
+        }
+        // A runner recovered from the store is checked before it is acted on;
+        // one this supervisor holds is already tracked and needs no RPC.
+        let environment_id = self.environment(name)?.id;
+        if !self.core().live_runners.contains_key(&environment_id) {
+            self.reconcile(name).await?;
+        }
+        let environment = self.environment(name)?;
+        let Some(runner) = environment.runner.clone() else {
+            return Ok(());
+        };
+        let expired = self
+            .core()
+            .idle_runners
+            .get(&environment.id)
+            .is_some_and(|idle| {
+                idle.process == runner.process && idle.since.elapsed() >= IDLE_RUNNER_WINDOW
+            });
+        if environment.state != StoredEnvironmentState::Stopped || !expired {
+            return Ok(());
+        }
+        self.retire_idle_runner(name, &runner).await?;
+        self.core().idle_runners.remove(&environment.id);
+        Ok(())
     }
 
     /// The lease for cw-runtime work on environment `id`: that of the name
@@ -4832,8 +4940,8 @@ impl Supervisor {
     }
 
     /// End a stopped environment's idle runner, which holds no VM: one from
-    /// another cw (see `reconcile_runner`), or this cw's own before it hands
-    /// the root over (`retire_supervisor`). Its exact recorded process, then
+    /// another cw (see `reconcile_runner`), this cw's own before it hands the
+    /// root over (`retire_supervisor`), or one idle past its window (#3270). Its exact recorded process, then
     /// its socket, at this root's runner path or the pre-#2735 one, removed
     /// only while it is still the recorded socket; the record is cleared, so
     /// the next start runs the runner of whichever cw starts it.
@@ -10413,6 +10521,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            idle_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
@@ -11154,6 +11263,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            idle_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
@@ -15088,6 +15198,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            idle_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
@@ -18540,6 +18651,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            idle_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
@@ -18616,6 +18728,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            idle_runners: HashMap::new(),
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
@@ -19073,8 +19186,8 @@ mod runner_exit_tests {
 #[cfg(test)]
 mod retire_tests {
     use super::tests::{
-        attach_named_test_runner_process, project_environment, test_supervisor_core,
-        test_supervisor_service,
+        attach_named_test_runner_process, project_environment, test_supervisor,
+        test_supervisor_core, test_supervisor_service,
     };
     use super::*;
 
@@ -19133,6 +19246,130 @@ mod retire_tests {
             environment.state = state;
             assert_eq!(may_run_a_vm(&environment), may_run, "{state:?}");
         }
+    }
+
+    /// #3270: a stopped environment's runner stays for [`IDLE_RUNNER_WINDOW`]
+    /// so a restart can reuse it, then the reaper retires it, process and
+    /// record. Time is tokio's paused clock: nothing sleeps.
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_runner_stays_for_its_window_then_is_retired() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        // This supervisor's own runner, not another cw's, which reconcile ends
+        // at once.
+        core.config.executable = fs::canonicalize("/bin/sleep").unwrap();
+        let socket = SocketIdentity {
+            device: 1,
+            inode: 2,
+            uid: 4,
+            mode: 0o140600,
+            pin: Default::default(),
+        };
+        let (environment_id, process) = attach_named_test_runner_process(&mut core, "dev", socket);
+        core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;
+        core.save().unwrap();
+        let supervisor = test_supervisor(core);
+
+        assert!(
+            supervisor
+                .expired_idle_runners(tokio::time::Instant::now())
+                .is_empty()
+        );
+        tokio::time::advance(IDLE_RUNNER_WINDOW - Duration::from_secs(1)).await;
+        assert!(
+            supervisor
+                .expired_idle_runners(tokio::time::Instant::now())
+                .is_empty()
+        );
+        supervisor.retire_expired_idle_runner("dev").await.unwrap();
+        assert_eq!(
+            supervisor
+                .environment("dev")
+                .unwrap()
+                .runner
+                .as_ref()
+                .map(|runner| &runner.process),
+            Some(&process),
+            "a start within the window reuses the runner"
+        );
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            supervisor.expired_idle_runners(tokio::time::Instant::now()),
+            ["dev"]
+        );
+        supervisor.retire_expired_idle_runner("dev").await.unwrap();
+        let environment = supervisor.environment("dev").unwrap();
+        assert!(environment.runner.is_none());
+        assert_eq!(environment.state, StoredEnvironmentState::Stopped);
+        assert!(!supervisor.core().live_runners.contains_key(&environment_id));
+        assert!(!supervisor.core().idle_runners.contains_key(&environment_id));
+        assert!(
+            rustix::process::test_kill_process(
+                rustix::process::Pid::from_raw(process.pid as i32).unwrap()
+            )
+            .is_err(),
+            "the idle runner {} still runs",
+            process.pid
+        );
+    }
+
+    /// #3270: a runner that is not idle, or whose environment started again,
+    /// starts no window; a restart's new runner starts its own.
+    #[tokio::test(start_paused = true)]
+    async fn only_a_stopped_environment_runner_counts_as_idle() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        core.config.executable = fs::canonicalize("/bin/sleep").unwrap();
+        let socket = SocketIdentity {
+            device: 1,
+            inode: 2,
+            uid: 4,
+            mode: 0o140600,
+            pin: Default::default(),
+        };
+        let (environment_id, _process) = attach_named_test_runner_process(&mut core, "dev", socket);
+        let supervisor = test_supervisor(core);
+        // Running: never idle, however long.
+        tokio::time::advance(IDLE_RUNNER_WINDOW * 2).await;
+        assert!(
+            supervisor
+                .expired_idle_runners(tokio::time::Instant::now())
+                .is_empty()
+        );
+        assert!(!supervisor.core().idle_runners.contains_key(&environment_id));
+        // Stopped: the window starts now, not when the runner started.
+        supervisor.core().environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;
+        assert!(
+            supervisor
+                .expired_idle_runners(tokio::time::Instant::now())
+                .is_empty()
+        );
+        // Started again within it: the window is forgotten.
+        tokio::time::advance(IDLE_RUNNER_WINDOW / 2).await;
+        supervisor.core().environment_mut("dev").unwrap().state = StoredEnvironmentState::Running;
+        assert!(
+            supervisor
+                .expired_idle_runners(tokio::time::Instant::now())
+                .is_empty()
+        );
+        assert!(!supervisor.core().idle_runners.contains_key(&environment_id));
+        // Stopped once more: a full window again.
+        supervisor.core().environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;
+        assert!(
+            supervisor
+                .expired_idle_runners(tokio::time::Instant::now())
+                .is_empty()
+        );
+        tokio::time::advance(IDLE_RUNNER_WINDOW / 2).await;
+        assert!(
+            supervisor
+                .expired_idle_runners(tokio::time::Instant::now())
+                .is_empty()
+        );
+        tokio::time::advance(IDLE_RUNNER_WINDOW / 2).await;
+        assert_eq!(
+            supervisor.expired_idle_runners(tokio::time::Instant::now()),
+            ["dev"]
+        );
     }
 
     #[tokio::test]
