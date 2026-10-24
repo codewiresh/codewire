@@ -74,6 +74,9 @@ pub(crate) struct GithubRepositoryOwner {
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     capacity: Arc<Semaphore>,
     status_capacity: Arc<Semaphore>,
+    /// The advisory status's own budget: `STATUS_TIMEOUT`, except in tests
+    /// whose subject is not that deadline (#3304).
+    status_timeout: Duration,
     workers: TaskTracker,
     stop: CancellationToken,
 }
@@ -92,9 +95,18 @@ impl GithubRepositoryOwner {
             github_app_authorization,
             capacity: Arc::new(Semaphore::new(MAX_OPERATIONS)),
             status_capacity: Arc::new(Semaphore::new(MAX_STATUS_OPERATIONS)),
+            status_timeout: STATUS_TIMEOUT,
             workers: TaskTracker::new(),
             stop: CancellationToken::new(),
         }
+    }
+
+    /// A test owner whose advisory status gets `timeout` instead of
+    /// `STATUS_TIMEOUT`.
+    #[cfg(test)]
+    fn with_status_timeout(mut self, timeout: Duration) -> Self {
+        self.status_timeout = timeout;
+        self
     }
 
     pub(crate) fn router(self: &Arc<Self>) -> connectrpc::Router {
@@ -212,7 +224,8 @@ impl GithubRepositoryOwner {
                 ..Default::default()
             })
         };
-        self.bounded(&authority, STATUS_TIMEOUT, operation).await
+        self.bounded(&authority, self.status_timeout, operation)
+            .await
     }
 
     /// Run one request-owned operation within the original authority's

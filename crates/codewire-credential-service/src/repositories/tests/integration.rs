@@ -3,7 +3,6 @@ use super::*;
 use crate::mutation::tests::support::{
     ALICE, BOB, GITHUB_TOKEN, Harness, SESSION, api_key, blind, oauth,
 };
-use crate::platform_test_support::TIMEOUT;
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use codewire_access::{AccessProfile, AccessProfileName, ProviderId, builtin_provider_catalog};
@@ -24,6 +23,12 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
+
+/// Bounds a request that ends on its response, and the advisory status's own
+/// budget in tests whose subject is not that deadline. It only turns a hang
+/// into a failure: the status's 2 s budget expired on a loaded CI runner
+/// while the read was making progress (#3304).
+const HANG_GUARD: Duration = Duration::from_secs(120);
 
 const GITHUB_APP_INITIAL_TOKEN: &str = "ghu_synthetic_app_initial_token_1234567890";
 const GITHUB_APP_REFRESH_TOKEN: &str = "ghr_synthetic_app_refresh_token_1234567890";
@@ -350,12 +355,15 @@ impl Fixture {
                 provider.clone(),
             ))
         });
-        let owner = Arc::new(GithubRepositoryOwner::new(
-            h.pool.clone(),
-            h.store.clone(),
-            provider.clone(),
-            github_app_authorization.clone(),
-        ));
+        let owner = Arc::new(
+            GithubRepositoryOwner::new(
+                h.pool.clone(),
+                h.store.clone(),
+                provider.clone(),
+                github_app_authorization.clone(),
+            )
+            .with_status_timeout(HANG_GUARD),
+        );
         let app = connect_router_with_auth(
             owner.router(),
             ConnectAuthLayer::github_repository(
@@ -374,7 +382,7 @@ impl Fixture {
             server,
             client: reqwest::Client::builder()
                 .no_proxy()
-                .timeout(TIMEOUT)
+                .timeout(HANG_GUARD)
                 .build()?,
             url: format!(
                 "http://{address}/codewire.v1.GithubRepositoryService/ListGithubRepositories"
@@ -698,7 +706,7 @@ async fn original_authority_and_credential_races_never_release_metadata() -> Res
             if unwrap {
                 f.h.provider.unwrap_gate.wait().await?;
             } else {
-                tokio::time::timeout(TIMEOUT, f.provider.entered.notified()).await?;
+                tokio::time::timeout(HANG_GUARD, f.provider.entered.notified()).await?;
             }
             let expected = if scenario.starts_with("credential") {
                 f.h.store
@@ -727,7 +735,7 @@ async fn original_authority_and_credential_races_never_release_metadata() -> Res
             } else {
                 f.provider.released.notify_one();
             }
-            let (status, value) = tokio::time::timeout(TIMEOUT, task).await???;
+            let (status, value) = tokio::time::timeout(HANG_GUARD, task).await???;
             ensure!(
                 !status.is_success()
                     && value["code"] == expected
@@ -756,7 +764,7 @@ async fn github_discovery_does_not_require_a_credential_profile() -> Result<()> 
         let profile = f.github_profile().await?;
         f.provider.hold.store(true, Ordering::SeqCst);
         let task = tokio::spawn(response(f.post(&credential).bearer_auth(oauth(ALICE))));
-        tokio::time::timeout(TIMEOUT, f.provider.entered.notified()).await?;
+        tokio::time::timeout(HANG_GUARD, f.provider.entered.notified()).await?;
         f.profiles()
             .update(
                 &profile.owner,
@@ -766,7 +774,7 @@ async fn github_discovery_does_not_require_a_credential_profile() -> Result<()> 
             )
             .await?;
         f.provider.released.notify_one();
-        let (status, page) = tokio::time::timeout(TIMEOUT, task).await???;
+        let (status, page) = tokio::time::timeout(HANG_GUARD, task).await???;
         ensure!(
             status == StatusCode::OK
                 && page["repositories"]
@@ -924,7 +932,7 @@ async fn drop_and_shutdown_release_finite_account_capacity() -> Result<()> {
             let mut task = tokio::spawn(async move { owner.list(authority, request).await });
             tokio::select! {
                 result = &mut task => anyhow::bail!("discovery ended before provider barrier: {:?}",result?.err()),
-                result = tokio::time::timeout(TIMEOUT, f.provider.entered.notified()) => {
+                result = tokio::time::timeout(HANG_GUARD, f.provider.entered.notified()) => {
                     result.context("discovery did not enter provider barrier")?;
                 }
             }
@@ -960,7 +968,7 @@ async fn deadline_releases_finite_account_capacity() -> Result<()> {
         let mut task = tokio::spawn(async move {owner.list(authority,request).await});
         tokio::select! {
             result = &mut task => anyhow::bail!("discovery ended before deadline barrier: {:?}",result?.err()),
-            result = tokio::time::timeout(TIMEOUT,f.provider.entered.notified()) => {result.context("deadline provider barrier")?;}
+            result = tokio::time::timeout(HANG_GUARD,f.provider.entered.notified()) => {result.context("deadline provider barrier")?;}
         }
         ensure!(f.owner.capacity.available_permits()==MAX_OPERATIONS-1);
         // Advance only once all real DB/auth I/O has finished. Do not admit a
@@ -1140,8 +1148,11 @@ async fn github_pending_permissions_follow_the_live_grant_under_discovery_author
             status == StatusCode::OK && value.get("pendingPermissions").is_none(),
             "{value}"
         );
+        // Waiting for the other renewal, which stays live until it is
+        // cancelled below, would take every wait interval and then fail as
+        // unavailable; the empty answer above is the read not waiting.
         ensure!(
-            started.elapsed() < std::time::Duration::from_secs(1),
+            started.elapsed() < REFRESH_WAIT_INTERVAL * REFRESH_WAIT_ATTEMPTS as u32,
             "the advisory read waited for another renewal"
         );
         ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 0);
