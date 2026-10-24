@@ -251,6 +251,11 @@ const ENVIRONMENT_FIELDS: &[FieldSemantics] = &[
     field(32, "isolation_tier", FIXED),
     field(33, "operation_generation", LOCAL),
     field(34, "source_selection", LOCAL),
+    // A local VM's Mesh attachment is reported by its supervisor's own
+    // control API, never through this public view: like `network`, the hosted
+    // attachment state stays absent (#3350).
+    field(35, "network_state", ZERO),
+    field(36, "network_failure", ZERO),
 ];
 
 const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[
