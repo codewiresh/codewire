@@ -214,6 +214,72 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    /// Fails with `Unimplemented` before contacting a supervisor older than
+    /// protocol 16, which has no network policies.
+    fn require_network_policies(&self) -> Result<(), Status> {
+        if self.supports(SupervisorFeature::NetworkPolicies) {
+            Ok(())
+        } else {
+            Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which has no network policies; `cw upgrade --vms` moves them to this cw once they are idle",
+            ))
+        }
+    }
+
+    pub async fn create_network_policy(
+        &mut self,
+        request: v1::CreateNetworkPolicyRequest,
+    ) -> Result<v1::NetworkPolicy, Status> {
+        self.require_network_policies()?;
+        Ok(self
+            .inner
+            .create_network_policy(request)
+            .await?
+            .into_inner())
+    }
+
+    pub async fn list_network_policies(&mut self) -> Result<Vec<v1::NetworkPolicy>, Status> {
+        self.require_network_policies()?;
+        Ok(self
+            .inner
+            .list_network_policies(v1::ListNetworkPoliciesRequest {})
+            .await?
+            .into_inner()
+            .policies)
+    }
+
+    pub async fn get_network_policy(
+        &mut self,
+        request: v1::GetNetworkPolicyRequest,
+    ) -> Result<v1::NetworkPolicy, Status> {
+        self.require_network_policies()?;
+        Ok(self.inner.get_network_policy(request).await?.into_inner())
+    }
+
+    pub async fn update_network_policy(
+        &mut self,
+        request: v1::UpdateNetworkPolicyRequest,
+    ) -> Result<v1::NetworkPolicy, Status> {
+        self.require_network_policies()?;
+        Ok(self
+            .inner
+            .update_network_policy(request)
+            .await?
+            .into_inner())
+    }
+
+    pub async fn delete_network_policy(
+        &mut self,
+        selector: v1::NetworkPolicySelector,
+    ) -> Result<v1::NetworkPolicy, Status> {
+        self.require_network_policies()?;
+        Ok(self
+            .inner
+            .delete_network_policy(selector)
+            .await?
+            .into_inner())
+    }
+
     pub async fn list_orphans(&mut self) -> Result<v1::ListOrphansResponse, Status> {
         Ok(self
             .inner

@@ -143,6 +143,41 @@ impl LocalSupervisorService for ProtocolPeer {
         Err(Status::unimplemented("unused synthetic method"))
     }
 
+    async fn create_network_policy(
+        &self,
+        _: Request<v1::CreateNetworkPolicyRequest>,
+    ) -> Result<Response<v1::NetworkPolicy>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
+    async fn list_network_policies(
+        &self,
+        _: Request<v1::ListNetworkPoliciesRequest>,
+    ) -> Result<Response<v1::ListNetworkPoliciesResponse>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
+    async fn get_network_policy(
+        &self,
+        _: Request<v1::GetNetworkPolicyRequest>,
+    ) -> Result<Response<v1::NetworkPolicy>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
+    async fn update_network_policy(
+        &self,
+        _: Request<v1::UpdateNetworkPolicyRequest>,
+    ) -> Result<Response<v1::NetworkPolicy>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
+    async fn delete_network_policy(
+        &self,
+        _: Request<v1::NetworkPolicySelector>,
+    ) -> Result<Response<v1::NetworkPolicy>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
     async fn list_orphans(
         &self,
         _: Request<v1::ListOrphansRequest>,

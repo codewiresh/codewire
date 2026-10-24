@@ -117,6 +117,33 @@ parent and child agents, and
 [SECRETS-AND-CREDENTIALS.md](SECRETS-AND-CREDENTIALS.md) covers credentials
 and profiles.
 
+## Network policies
+
+A network policy names the destinations an environment may reach. It is named,
+reusable and stored on this host. Every edit makes a new revision with its own
+digest. Two policies are built in: `open` (every public destination on TCP 22,
+80 and 443, what every local VM uses today) and `locked` (nothing). `cw network`
+is something else: it manages Mesh networks.
+
+```sh
+cw policy --local create work --allow github.com,'*.npmjs.org:443'
+cw policy --local create work-plus --from work --allow extra.example.org:443
+cw policy --local ls
+cw policy --local allow work pypi.org:443     # a new revision
+cw policy --local rm work '*.npmjs.org'       # a new revision
+cw policy --local check work github.com:22    # Allowed / Refused, with the reason
+cw policy --local delete work-plus            # refused while an environment selects it
+```
+
+A target is a DNS name, a `*.` pattern (every name under a domain, not the
+domain itself) or a public CIDR, with an optional `:PORT`; repeat a target for
+more ports. Without a port it allows 22, 80 and 443. Private, loopback,
+link-local and metadata destinations can never be allowed. `check` judges a
+name by its lookup and its dial port, for a name that answers public addresses.
+
+Selecting a policy for a local VM comes next; until then every local VM keeps
+using `open`.
+
 ## SSH keys in a local VM
 
 A local VM has no SSH key unless its credential profile has one. The key stays

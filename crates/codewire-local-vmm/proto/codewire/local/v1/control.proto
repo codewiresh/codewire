@@ -45,6 +45,72 @@ service LocalSupervisorService {
   // supervisor refuses every later request and exits. Every protocol from 12
   // on keeps this RPC unchanged.
   rpc RetireSupervisor(RetireSupervisorRequest) returns (RetireSupervisorResponse);
+  // This host's network policies (#2537, protocol 16): named, each edit an
+  // immutable revision with its own digest. `open` and `locked` are built-ins
+  // and never stored. A policy holds no secret.
+  rpc CreateNetworkPolicy(CreateNetworkPolicyRequest) returns (NetworkPolicy);
+  rpc ListNetworkPolicies(ListNetworkPoliciesRequest) returns (ListNetworkPoliciesResponse);
+  rpc GetNetworkPolicy(GetNetworkPolicyRequest) returns (NetworkPolicy);
+  // Adds and removes rules in one new revision; a change that changes nothing
+  // is refused.
+  rpc UpdateNetworkPolicy(UpdateNetworkPolicyRequest) returns (NetworkPolicy);
+  // Refused while an environment selects the policy.
+  rpc DeleteNetworkPolicy(NetworkPolicySelector) returns (NetworkPolicy);
+}
+
+message NetworkPolicySelector {
+  oneof selector {
+    string name = 1;
+    // The canonical UUID a `local:id:` reference names.
+    string id = 2;
+  }
+}
+
+// One allow rule: an exact name, a `*.` descendant pattern or a public CIDR,
+// and the TCP ports it may be dialed on.
+message NetworkPolicyRule {
+  string target = 1;
+  repeated uint32 ports = 2;
+}
+
+message NetworkPolicy {
+  string id = 1;
+  string name = 2;
+  // The revision this message describes.
+  uint32 revision = 3;
+  uint32 current_revision = 4;
+  // In canonical order.
+  repeated NetworkPolicyRule rules = 5;
+  // Lowercase hex SHA-256 of the canonical document the brokers enforce.
+  string digest = 6;
+  int64 created_unix_ms = 7;
+}
+
+message CreateNetworkPolicyRequest {
+  string name = 1;
+  // Unset starts from the built-in `locked`.
+  NetworkPolicySelector from = 2;
+  repeated NetworkPolicyRule allow = 3;
+}
+
+message ListNetworkPoliciesRequest {}
+
+message ListNetworkPoliciesResponse {
+  // Each at its current revision, by name.
+  repeated NetworkPolicy policies = 1;
+}
+
+message GetNetworkPolicyRequest {
+  NetworkPolicySelector policy = 1;
+  // Zero means the current revision.
+  uint32 revision = 2;
+}
+
+message UpdateNetworkPolicyRequest {
+  NetworkPolicySelector policy = 1;
+  repeated NetworkPolicyRule allow = 2;
+  // Targets whose rules the new revision drops.
+  repeated string remove = 3;
 }
 
 message SshStreamFrame {

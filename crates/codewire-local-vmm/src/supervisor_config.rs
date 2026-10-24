@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 15;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 16;
 /// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
 /// update, a supervisor in [minimum, current] keeps serving its VMs; only an
 /// idle older one is replaced (`supervisor_upgrade`).
@@ -45,6 +45,10 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         15,
         "SSH (#3025): OpenEnvironmentSshStream, and GetEnvironmentHostKey answers with the environment's host key",
     ),
+    (
+        16,
+        "network policies (#2537): CreateNetworkPolicy, ListNetworkPolicies, GetNetworkPolicy, UpdateNetworkPolicy and DeleteNetworkPolicy over the host's policy store",
+    ),
 ];
 
 /// A supervisor capability newer than the minimum protocol.
@@ -54,16 +58,19 @@ pub enum SupervisorFeature {
     Retire,
     /// `OpenEnvironmentSshStream` and the local `GetEnvironmentHostKey`.
     Ssh,
+    /// The network policy RPCs.
+    NetworkPolicies,
 }
 
 impl SupervisorFeature {
-    pub const ALL: [Self; 2] = [Self::Retire, Self::Ssh];
+    pub const ALL: [Self; 3] = [Self::Retire, Self::Ssh, Self::NetworkPolicies];
 
     /// The protocol that introduced it.
     pub const fn since(self) -> u32 {
         match self {
             Self::Retire => 12,
             Self::Ssh => 15,
+            Self::NetworkPolicies => 16,
         }
     }
 }
@@ -354,7 +361,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 15);
+        assert_eq!(info.protocol_version, 16);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

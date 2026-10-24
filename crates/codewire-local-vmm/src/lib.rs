@@ -44,6 +44,8 @@ pub mod mesh_process;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod mesh_transport;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod network_policy_store;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod network_session;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod network_worker;

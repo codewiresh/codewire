@@ -13,6 +13,7 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 mod builtin;
+pub mod check;
 mod cidr;
 pub mod host_addresses;
 mod hostname;
@@ -361,6 +362,20 @@ impl CompiledRule {
     }
 
     fn matches_any_port(&self, request: &EgressRequest) -> bool {
+        self.matches_traffic(request)
+            && (self.networks.is_empty()
+                || request.address.is_some_and(|address| {
+                    self.networks
+                        .iter()
+                        .any(|network| network.contains(address))
+                }))
+    }
+}
+
+impl CompiledRule {
+    /// Whether the rule selects the request's protocol, route class and
+    /// name, whatever its port and address.
+    fn matches_traffic(&self, request: &EgressRequest) -> bool {
         self.protocols.binary_search(&request.protocol).is_ok()
             && self
                 .route_classes
@@ -372,13 +387,42 @@ impl CompiledRule {
                         .iter()
                         .any(|pattern| pattern.matches(hostname))
                 }))
-            && (self.networks.is_empty()
-                || request.address.is_some_and(|address| {
-                    self.networks
-                        .iter()
-                        .any(|network| network.contains(address))
-                }))
     }
+
+    fn matches_port(&self, port: u16) -> bool {
+        self.ports.is_empty() || self.ports.binary_search(&port).is_ok()
+    }
+
+    /// Whether the rule matches every address of both families, so an
+    /// answer's address cannot change whether it applies.
+    fn matches_every_address(&self) -> bool {
+        self.networks.is_empty()
+            || (self
+                .networks
+                .iter()
+                .any(|network| matches!(network, IpNetwork::V4 { prefix: 0, .. }))
+                && self
+                    .networks
+                    .iter()
+                    .any(|network| matches!(network, IpNetwork::V6 { prefix: 0, .. })))
+    }
+}
+
+/// How a policy judges a TCP dial to a name before its answers are known
+/// (#2537 `cw policy check`). Rules that match whatever the answer decide it;
+/// rules that also need the answer inside a network are reported apart,
+/// because only the answer the guest dials decides them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NamedDial {
+    /// The rule that decides the dial whatever the answer, and whether it
+    /// allows it.
+    pub(crate) decided_by: Option<(PolicyAction, String)>,
+    /// A name rule allows the name on another port.
+    pub(crate) allowed_on_another_port: bool,
+    /// Networks that allow the dial when the answer is inside one.
+    pub(crate) allowed_within: Vec<String>,
+    /// Networks that refuse the dial when the answer is inside one.
+    pub(crate) refused_within: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -561,6 +605,64 @@ impl CompiledPolicy {
         } else {
             self.deny(DecisionReason::DefaultDeny, None)
         }
+    }
+
+    /// How this policy judges a TCP dial to `hostname` on `port` before the
+    /// name's answers are known. Only rules that match every address decide
+    /// it; deny wins, then the first allow rule, as in [`Self::evaluate`].
+    pub(crate) fn judge_named_dial(
+        &self,
+        hostname: &str,
+        port: u16,
+        route_class: RouteClass,
+    ) -> Result<NamedDial, PolicyError> {
+        if port == 0 {
+            return Err(PolicyError::InvalidRequest {
+                field: "port",
+                detail: "TCP port must be non-zero".to_string(),
+            });
+        }
+        let mut request = EgressRequest::dns_query(hostname, route_class)?;
+        request.protocol = EgressProtocol::Tcp;
+        request.port = port;
+        let mut dial = NamedDial {
+            decided_by: None,
+            allowed_on_another_port: false,
+            allowed_within: Vec::new(),
+            refused_within: Vec::new(),
+        };
+        for rule in self
+            .rules
+            .iter()
+            .filter(|rule| rule.matches_traffic(&request))
+        {
+            let every_address = rule.matches_every_address();
+            if !rule.matches_port(port) {
+                dial.allowed_on_another_port |= rule.action == PolicyAction::Allow && every_address;
+                continue;
+            }
+            match (rule.action, every_address) {
+                (PolicyAction::Deny, true) => {
+                    dial.decided_by = Some((PolicyAction::Deny, rule.id.clone()));
+                    break;
+                }
+                (PolicyAction::Allow, true) => {
+                    dial.decided_by
+                        .get_or_insert_with(|| (PolicyAction::Allow, rule.id.clone()));
+                }
+                (PolicyAction::Allow, false) => dial
+                    .allowed_within
+                    .extend(rule.networks.iter().map(ToString::to_string)),
+                (PolicyAction::Deny, false) => dial
+                    .refused_within
+                    .extend(rule.networks.iter().map(ToString::to_string)),
+            }
+        }
+        for networks in [&mut dial.allowed_within, &mut dial.refused_within] {
+            networks.sort();
+            networks.dedup();
+        }
+        Ok(dial)
     }
 
     /// Whether some allow rule matches `request` on any port. It only

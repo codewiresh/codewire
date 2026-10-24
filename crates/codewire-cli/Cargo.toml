@@ -30,6 +30,7 @@ codewire-cw-release = { workspace = true }
 codewire-workspace-image = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-daemon-proto = { workspace = true }
+codewire-egress-policy = { workspace = true }
 codewire-project = { workspace = true }
 codewire-project-proto = { workspace = true }
 codewire-protected-store = { workspace = true }

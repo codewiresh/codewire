@@ -171,7 +171,15 @@ const HELP_SECTIONS: &[HelpSection] = &[
     ),
     HelpSection::everyday(
         "Configuration and transfer",
-        &["init", "update", "export", "cp", "credentials", "secrets"],
+        &[
+            "init",
+            "update",
+            "export",
+            "cp",
+            "credentials",
+            "secrets",
+            "policy",
+        ],
     ),
     HelpSection::everyday("Codewire", &["upgrade", "doctor", "help"]),
     HelpSection::full(
@@ -444,6 +452,11 @@ enum Command {
     Secrets(SecretsArgs),
     #[command(about = "Manage protected credentials and access profiles")]
     Credentials(CredentialsArgs),
+    #[command(
+        about = "Manage network policies: which destinations an environment may reach",
+        long_about = "Manage network policies: which destinations an environment may reach.\n\nA network policy is named and reusable, and every edit makes a new revision. `open` (every public destination on TCP 22, 80 and 443) and `locked` (nothing) are built in. This is not `cw network`, which manages Mesh networks."
+    )]
+    Policy(PolicyArgs),
     #[command(
         alias = "networks",
         about = "Manage Mesh networks for environments and nodes",
@@ -895,6 +908,7 @@ where
         Command::Preset { command } => handle_preset_command(&globals, command).await,
         Command::Secrets(args) => handle_secrets_command(&globals, args).await,
         Command::Credentials(args) => handle_credentials_command(&globals, args).await,
+        Command::Policy(args) => handle_policy_command(&globals, args).await,
         Command::Network { command } => handle_network_command(&globals, command).await,
         Command::Mesh { command } => handle_mesh_command(&globals, command).await,
         #[cfg(target_os = "linux")]
@@ -1008,6 +1022,7 @@ fn validate_placement_scope(
         Command::Setup(_)
             | Command::Use(_)
             | Command::Credentials(_)
+            | Command::Policy(_)
             | Command::Secrets(_)
             | Command::Env(_)
             | Command::Run(_)

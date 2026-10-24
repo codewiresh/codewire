@@ -1435,6 +1435,7 @@ dependencies = [
  "codewire-cw-release",
  "codewire-daemon",
  "codewire-daemon-proto",
+ "codewire-egress-policy",
  "codewire-local-credentials",
  "codewire-local-vmm",
  "codewire-project",

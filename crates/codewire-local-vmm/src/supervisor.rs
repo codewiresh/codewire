@@ -6,6 +6,7 @@
 
 mod bootstrap;
 mod metadata;
+mod network_policies;
 mod runtime;
 mod sources;
 mod ssh;
@@ -497,6 +498,10 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         ],
     );
     let (store, state) = SupervisorStore::open(&root)?;
+    let network_policies = Arc::new(
+        crate::network_policy_store::NetworkPolicyStore::open(&root)
+            .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?,
+    );
     let operation_events = store.operation_events();
     let operation_reader = SupervisorOperationReader::open(&root)?;
     let operation_progress = broadcast::channel(OPERATION_PROGRESS_CAPACITY).0;
@@ -539,6 +544,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         operation_progress,
         host_keys: Arc::new(ssh::HostKeys::new(&config.root)),
         ssh_streams: Arc::default(),
+        network_policies,
         #[cfg(test)]
         hold_drains: Arc::default(),
     };
@@ -5754,6 +5760,8 @@ struct SupervisorRpc {
     operation_progress: broadcast::Sender<OperationProgress>,
     host_keys: Arc<ssh::HostKeys>,
     ssh_streams: Arc<ssh::SshStreams>,
+    /// The host's network policies (#2537).
+    network_policies: Arc<crate::network_policy_store::NetworkPolicyStore>,
     /// Tests only: admitted operations wait instead of draining, so a test
     /// observes them as admitted.
     #[cfg(test)]
@@ -7002,6 +7010,43 @@ impl LocalSupervisorService for SupervisorRpc {
             catalog_json,
             cw_runtime_catalog_generation: runtime_generation,
         }))
+    }
+
+    async fn create_network_policy(
+        &self,
+        request: Request<v1::CreateNetworkPolicyRequest>,
+    ) -> Result<Response<v1::NetworkPolicy>, Status> {
+        network_policies::create(&self.network_policies, request.into_inner()).map(Response::new)
+    }
+
+    async fn list_network_policies(
+        &self,
+        _request: Request<v1::ListNetworkPoliciesRequest>,
+    ) -> Result<Response<v1::ListNetworkPoliciesResponse>, Status> {
+        network_policies::list(&self.network_policies).map(Response::new)
+    }
+
+    async fn get_network_policy(
+        &self,
+        request: Request<v1::GetNetworkPolicyRequest>,
+    ) -> Result<Response<v1::NetworkPolicy>, Status> {
+        network_policies::get(&self.network_policies, request.into_inner()).map(Response::new)
+    }
+
+    async fn update_network_policy(
+        &self,
+        request: Request<v1::UpdateNetworkPolicyRequest>,
+    ) -> Result<Response<v1::NetworkPolicy>, Status> {
+        network_policies::update(&self.network_policies, request.into_inner()).map(Response::new)
+    }
+
+    async fn delete_network_policy(
+        &self,
+        request: Request<v1::NetworkPolicySelector>,
+    ) -> Result<Response<v1::NetworkPolicy>, Status> {
+        // No environment selects a policy until selection lands (#2537 B1).
+        network_policies::delete(&self.network_policies, request.into_inner(), |_| Vec::new())
+            .map(Response::new)
     }
 
     /// Hand this state root to a newer cw's supervisor (supervisor_handoff).
@@ -9489,6 +9534,7 @@ impl From<SupervisorError> for Status {
                 Status::unavailable(error.to_string())
             }
             SupervisorError::RetireRefused(_) => Status::failed_precondition(error.to_string()),
+            SupervisorError::NetworkPolicyStore(_) => Status::internal(error.to_string()),
             SupervisorError::Workspace(workspace) => {
                 Status::failed_precondition(workspace.to_string())
             }
@@ -9634,6 +9680,8 @@ pub enum SupervisorError {
     Retiring,
     #[error("local environment {0:?} may still run a VM, so the local VM supervisor stays")]
     RetireRefused(String),
+    #[error("the local network policy store could not be opened: {0}")]
+    NetworkPolicyStore(String),
     #[error("spawn native environment runner failed")]
     SpawnRunner,
     #[error("native environment runner startup timed out")]
@@ -9869,6 +9917,7 @@ fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
         SupervisorError::SupervisorConfigurationMismatch => "supervisor_configuration_mismatch",
         SupervisorError::Retiring => "supervisor_retiring",
         SupervisorError::RetireRefused(_) => "supervisor_retire_refused",
+        SupervisorError::NetworkPolicyStore(_) => "supervisor_network_policy_store",
         SupervisorError::SpawnRunner => "runner_spawn",
         SupervisorError::RunnerStartTimeout => "runner_start_timeout",
         SupervisorError::RunnerAdoption => "runner_adoption",
@@ -10834,6 +10883,8 @@ mod tests {
         let operation_progress = core.operation_progress.clone();
         let info = supervisor_info(&core.config);
         let host_keys = Arc::new(ssh::HostKeys::new(&core.config.root));
+        let network_policies =
+            Arc::new(crate::network_policy_store::NetworkPolicyStore::open(&core.root).unwrap());
         SupervisorRpc {
             info,
             supervisor: test_supervisor(core),
@@ -10842,6 +10893,7 @@ mod tests {
             operation_progress,
             host_keys,
             ssh_streams: Arc::default(),
+            network_policies,
             hold_drains: Arc::default(),
         }
     }

@@ -2081,7 +2081,7 @@ pub(crate) async fn native_runtime_control_client() -> anyhow::Result<NativeSupe
         .context("connect to existing native runtime publisher")
 }
 
-async fn native_client() -> anyhow::Result<NativeSupervisorClient> {
+pub(crate) async fn native_client() -> anyhow::Result<NativeSupervisorClient> {
     let config = native_runtime_config()?;
     connect_native_after_authority_admission(
         || async {
