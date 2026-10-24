@@ -235,6 +235,12 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
     let runtime_spec = opts.runtime_profile_spec();
     let mut annotations = Map::new();
     annotations.insert(WORKSPACE_ANNOTATION_KEY.into(), "true".into());
+    if !opts.egress_bandwidth.is_empty() {
+        annotations.insert(
+            super::EGRESS_BANDWIDTH_ANNOTATION_KEY.into(),
+            opts.egress_bandwidth.clone().into(),
+        );
+    }
     if opts.disk_gib > 0 {
         annotations.insert(
             WORKSPACE_DISK_GIB_ANNOTATION_KEY.into(),

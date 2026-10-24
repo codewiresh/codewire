@@ -965,6 +965,59 @@ mod tests {
     }
 
     #[test]
+    fn workspace_pod_carries_the_configured_egress_bandwidth_cap() {
+        for profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL] {
+            let capped = render_sandbox_template(
+                "dev-sandboxes",
+                &TemplateOpts {
+                    runtime_profile: profile.into(),
+                    egress_bandwidth: "100M".into(),
+                    ..commodity_opts()
+                },
+            );
+            assert_eq!(
+                capped["spec"]["podTemplate"]["metadata"]["annotations"]
+                    [EGRESS_BANDWIDTH_ANNOTATION_KEY]
+                    .as_str(),
+                Some("100M"),
+                "{profile}"
+            );
+        }
+        let uncapped = render_sandbox_template(
+            "dev-sandboxes",
+            &TemplateOpts {
+                egress_bandwidth: String::new(),
+                ..commodity_opts()
+            },
+        );
+        assert!(
+            uncapped["spec"]["podTemplate"]["metadata"]["annotations"]
+                .get(EGRESS_BANDWIDTH_ANNOTATION_KEY)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn egress_bandwidth_defaults_to_100m_and_refuses_malformed_values() {
+        assert_eq!(sandbox_egress_bandwidth(None).unwrap(), "100M");
+        assert_eq!(sandbox_egress_bandwidth(Some("")).unwrap(), "100M");
+        assert_eq!(sandbox_egress_bandwidth(Some(" ")).unwrap(), "100M");
+        for accepted in ["100M", "1G", "500K", "250000000", " 50M "] {
+            assert_eq!(
+                sandbox_egress_bandwidth(Some(accepted)).unwrap(),
+                accepted.trim()
+            );
+        }
+        for refused in [
+            "0", "0M", "010M", "100m", "100Mi", "100Mbit", "M", "-1M", "1.5G", "100 M",
+            "1T", "9999999999999",
+        ] {
+            let error = sandbox_egress_bandwidth(Some(refused)).unwrap_err();
+            assert!(error.contains(EGRESS_BANDWIDTH_ENV), "{refused}: {error}");
+        }
+    }
+
+    #[test]
     fn commodity_template_uses_neutral_annotations_and_guest_dockerd() {
         let rendered = render_sandbox_template(
             "codewire-runtime",

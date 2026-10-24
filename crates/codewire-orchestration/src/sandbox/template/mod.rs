@@ -101,6 +101,36 @@ const WORKSPACE_EPHEMERAL_STORAGE_GI: i64 = 8;
 const HOME_ROOT: &str = "/home/codewire";
 const WORKSPACE_ANNOTATION_KEY: &str = "codewire.sh/workspace";
 const WORKSPACE_DISK_GIB_ANNOTATION_KEY: &str = "codewire.sh/disk-gib";
+/// The Pod annotation Cilium's bandwidth manager enforces as an egress rate.
+pub const EGRESS_BANDWIDTH_ANNOTATION_KEY: &str = "kubernetes.io/egress-bandwidth";
+/// The egress rate cap on every workspace Pod (`SANDBOX_EGRESS_BANDWIDTH`), as
+/// a decimal count of bits per second with an optional `K`, `M` or `G`
+/// suffix. A cluster without an enforcing CNI ignores the annotation.
+pub const EGRESS_BANDWIDTH_ENV: &str = "SANDBOX_EGRESS_BANDWIDTH";
+pub const DEFAULT_EGRESS_BANDWIDTH: &str = "100M";
+
+/// [`EGRESS_BANDWIDTH_ENV`], or [`DEFAULT_EGRESS_BANDWIDTH`] when unset or
+/// empty. Anything else than digits with an optional `K`, `M` or `G` suffix,
+/// or zero, is refused, so a typo stops orchestration instead of rendering a
+/// value the CNI would ignore.
+pub fn sandbox_egress_bandwidth(value: Option<&str>) -> Result<String, String> {
+    let value = match value.map(str::trim) {
+        None | Some("") => return Ok(DEFAULT_EGRESS_BANDWIDTH.to_string()),
+        Some(value) => value,
+    };
+    let digits = value.strip_suffix(['K', 'M', 'G']).unwrap_or(value);
+    let valid = !digits.is_empty()
+        && digits.len() <= 12
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && !digits.starts_with('0');
+    if valid {
+        Ok(value.to_string())
+    } else {
+        Err(format!(
+            "{EGRESS_BANDWIDTH_ENV} must be a positive whole number of bits per second with an optional K, M or G suffix, such as {DEFAULT_EGRESS_BANDWIDTH}; got {value:?}"
+        ))
+    }
+}
 const APP_PREVIEW_MIN_PORT: i64 = 1;
 const APP_PREVIEW_MAX_PORT: i64 = 65535;
 
@@ -157,6 +187,9 @@ pub struct TemplateOpts {
     /// fields keep RKE2's `kube-system`/`rke2-ingress-nginx`.
     pub ingress_namespace: String,
     pub ingress_pod_name: String,
+    /// The workspace Pod's [`EGRESS_BANDWIDTH_ANNOTATION_KEY`] value; empty
+    /// renders no cap.
+    pub egress_bandwidth: String,
     pub derp_host: String,
     pub derp_port: i64,
     pub stun_host: String,

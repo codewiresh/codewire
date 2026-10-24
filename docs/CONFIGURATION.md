@@ -110,3 +110,9 @@ its last value.
 Base `config.env` leaves it empty, so every overlay sets it. The Kind
 overlays (`deployments/k8s/overlays/local-kind*` and `tests/e2e/kind`) use
 Kind's built-in `standard` class.
+
+## Workspace network
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `SANDBOX_EGRESS_BANDWIDTH` | No | The egress rate cap on every workspace Pod, rendered as its `kubernetes.io/egress-bandwidth` annotation: a positive whole number of bits per second with an optional `K`, `M` or `G` suffix. Unset or empty means `100M`. Any other form stops orchestration at startup. The cap holds only where the CNI enforces the annotation, such as Cilium with its bandwidth manager enabled; elsewhere the annotation is ignored. | `100M` |

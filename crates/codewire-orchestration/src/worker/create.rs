@@ -282,6 +282,9 @@ pub struct SandboxWorkerCfg {
     /// the RKE2 controller in `kube-system`.
     pub ingress_namespace: String,
     pub ingress_pod_name: String,
+    /// Every workspace Pod's egress rate cap
+    /// ([`crate::sandbox::template::EGRESS_BANDWIDTH_ENV`]).
+    pub egress_bandwidth: String,
     /// How often an environment's workspace daemon checks its delivered Codex
     /// login. Only the Kind test deployment sets it
     /// ([`KIND_CODEX_LOGIN_CHECK_PERIOD_ENV`], read only when built with
@@ -349,6 +352,12 @@ impl SandboxWorkerCfg {
                 .unwrap_or_default(),
         )
         .unwrap_or_else(|error| panic!("{error}"));
+        let egress_bandwidth = crate::sandbox::template::sandbox_egress_bandwidth(
+            std::env::var(crate::sandbox::template::EGRESS_BANDWIDTH_ENV)
+                .ok()
+                .as_deref(),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         Self {
             session_secret: getenv("SESSION_SECRET", ""),
             sandbox_namespace,
@@ -403,6 +412,7 @@ impl SandboxWorkerCfg {
             coordinator_extra_roots: getenv("SANDBOX_COORDINATOR_EXTRA_ROOTS", "false") == "true",
             ingress_namespace: getenv("SANDBOX_INGRESS_NAMESPACE", ""),
             ingress_pod_name: getenv("SANDBOX_INGRESS_POD_NAME", ""),
+            egress_bandwidth,
             codex_login_check_period_seconds: kind_codex_login_check_period_seconds(
                 std::env::var_os(KIND_CODEX_LOGIN_CHECK_PERIOD_ENV),
             ),
@@ -580,6 +590,7 @@ pub fn shape_template_opts(
         coordinator_extra_roots: cfg.coordinator_extra_roots,
         ingress_namespace: cfg.ingress_namespace.clone(),
         ingress_pod_name: cfg.ingress_pod_name.clone(),
+        egress_bandwidth: cfg.egress_bandwidth.clone(),
         // An environment's own rendering sets this. A warm pool member keeps
         // the production period: pool template admission names no such
         // variable.
@@ -2761,6 +2772,34 @@ mod tests {
         };
         let pool = warm_pool_template_opts(&cfg, shape).unwrap();
         assert_eq!(pool.codex_login_check_period_seconds, None);
+    }
+
+    #[test]
+    fn environment_and_pool_templates_carry_the_configured_egress_bandwidth() {
+        let cfg = SandboxWorkerCfg {
+            runtime_profile: "commodity".into(),
+            pod_namespace: "dev".into(),
+            api_base_url: "https://codewire-dev.sh".into(),
+            egress_bandwidth: "100M".into(),
+            ..Default::default()
+        };
+        let environment = environment_template_opts(
+            &cfg,
+            "ghcr.io/codewiresh/workspace:1",
+            "base",
+            &identity_mode_env(),
+            7,
+            "daemon-tok",
+        )
+        .unwrap();
+        assert_eq!(environment.egress_bandwidth, "100M");
+        let shape = WorkspaceShape {
+            cpu_millicores: 500,
+            memory_mib: 1024,
+            disk_gib: 5,
+        };
+        let pool = warm_pool_template_opts(&cfg, shape).unwrap();
+        assert_eq!(pool.egress_bandwidth, "100M");
     }
 
     #[test]
