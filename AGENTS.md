@@ -270,13 +270,17 @@ release (owner, 2026-10-15, cited on #2892).
 hand, and fix forward when one fails. `main` CI and
 release publication always finish; a newer `main` push cancels the superseded
 support-image and release dry-run runs itself.
-Dev runs only commits whose main CI passed: Deploy Dev signs and dispatches a
-commit only after its own `main` CI run's verdict, and only while it descends
-from the source Dev runs. At most two Dev deliveries build at once: a newer
-push cancels an older one, queued or building, once two newer deliveries are
-building or once its own `main` CI can no longer verify it, but never one
-that has started publishing, so a cancelled run never signs or dispatches
-(owner, 2026-10-21, cited on infra#1594; #2892).
+Dev runs only commits whose main CI passed, and every green `main` commit
+newer than Dev's source is delivered (owner, 2026-10-24, cited on #3013).
+Build and deliver Dev signs and dispatches a commit only after its own `main`
+CI run's verdict, and only while it descends from the source Dev runs. A newer
+push cancels an older delivery before it publishes only once a newer commit's
+`main` CI has passed, or once the older commit's own `main` CI can no longer
+verify it; a delivery cancelled before its commit turned green is restarted
+by `main` CI's final job. At most two deliveries build at once (owner,
+2026-10-21, cited on infra#1594; #2892), briefly three for a protected green
+or restarted delivery. A run that has started publishing is never cancelled,
+so a cancelled run never signs or dispatches.
 Temporary rule (owner decision, 2026-10-20): a push to `main` runs no Kind and
 no release dry run. Both still run on a dispatched release candidate, on a pull
 request labelled `ci-full`, and every four hours on a schedule against the
