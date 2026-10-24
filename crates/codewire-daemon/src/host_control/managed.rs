@@ -14,7 +14,7 @@ pub(crate) const MAX_CHUNK: usize = 256 * 1024;
 // A legal 64 KiB text can expand sixfold in JSON. The closed metadata,
 // including a 4 KiB working directory, fits in the remaining 128 KiB.
 const MAX_REQUEST: usize = 512 * 1024;
-const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 /// The whole interrupt before an explicit stop or restart: recording it,
 /// writing its control line, and the helper's wait of at most 10 s for the
 /// interrupted message to end and its parent notification to be written.

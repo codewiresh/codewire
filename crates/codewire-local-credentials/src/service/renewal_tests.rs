@@ -18,6 +18,16 @@ const RENEWAL: BrokerRenewal = BrokerRenewal {
     lifetime: Duration::from_millis(1600),
     lead: Duration::from_millis(600),
 };
+/// For the overlap test: a successor has the whole lead to spawn and answer
+/// before its predecessor's lifetime ends, and a slow CI slot can stall the
+/// test process for seconds. A successor that misses the lead is a gap the
+/// test rightly reports, so the lead is far longer than any spawn (#3277).
+/// The fail-closed test keeps RENEWAL: it needs a successor retry that is not
+/// due before the lifetime ends.
+const SLOW_SLOT_RENEWAL: BrokerRenewal = BrokerRenewal {
+    lifetime: Duration::from_millis(8000),
+    lead: Duration::from_millis(6000),
+};
 const PROBE_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Default)]
@@ -213,6 +223,10 @@ struct Lifecycle {
 
 impl Lifecycle {
     fn start(spawner: Arc<RenewalSpawner>) -> Self {
+        Self::start_with(spawner, RENEWAL)
+    }
+
+    fn start_with(spawner: Arc<RenewalSpawner>, renewal: BrokerRenewal) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let authority = Arc::new(
             LocalCredentialAuthority::open(
@@ -254,7 +268,7 @@ impl Lifecycle {
                 projection: None,
                 platform: None,
                 local_profile: None,
-                renewal: RENEWAL,
+                renewal,
                 log: Arc::new(crate::broker_log::BrokerLog::disabled()),
             }),
             shutdown_rx,
@@ -316,7 +330,7 @@ fn process_gone(pid: u32) -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_successor_runs_before_its_predecessor_stops_and_no_request_meets_a_gap() {
-    let lifecycle = Lifecycle::start(RenewalSpawner::new(BTreeSet::new()));
+    let lifecycle = Lifecycle::start_with(RenewalSpawner::new(BTreeSet::new()), SLOW_SLOT_RENEWAL);
     // Two renewals: children 0 to 1 and 1 to 2, each predecessor stopped.
     lifecycle
         .until(|spawner| spawner.ready_count() >= 3 && spawner.closed(1))
@@ -345,7 +359,7 @@ async fn a_successor_runs_before_its_predecessor_stops_and_no_request_meets_a_ga
             "child {index} stopped serving at its successor's start: {children:?}"
         );
         // It drained until its lifetime ended, and no longer.
-        let lifetime_end = predecessor.spawned.unwrap() + RENEWAL.lifetime;
+        let lifetime_end = predecessor.spawned.unwrap() + SLOW_SLOT_RENEWAL.lifetime;
         assert!(
             closed + Duration::from_millis(100) >= lifetime_end,
             "child {index} stopped before its lifetime ended: {children:?}"

@@ -4984,6 +4984,11 @@ mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
 
+    /// Bounds a wait on an event, so a hang fails instead of stalling the
+    /// run. It is never the expected duration: the condition is the event,
+    /// and a slow CI slot can stall a process for seconds (#3277).
+    pub(super) const HANG: Duration = Duration::from_secs(60);
+
     #[test]
     fn slow_control_records_each_phase_in_order() {
         let mut timing = SlowControl::new("resize", "session-test");
@@ -5175,7 +5180,7 @@ mod tests {
         });
         entered_rx.await.unwrap();
         caller.abort();
-        tokio::time::timeout(Duration::from_secs(1), settled_rx)
+        tokio::time::timeout(HANG, settled_rx)
             .await
             .unwrap()
             .unwrap();
@@ -5291,7 +5296,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(!stopping.is_finished());
         settle_tx.send(()).unwrap();
-        let stopped = tokio::time::timeout(Duration::from_secs(1), stopping)
+        let stopped = tokio::time::timeout(HANG, stopping)
             .await
             .unwrap()
             .unwrap()
@@ -5346,7 +5351,7 @@ mod tests {
         let first_engine = engine.clone();
         let first_id = id.clone();
         let first = tokio::spawn(async move { first_engine.restart(&first_id).await });
-        tokio::time::timeout(Duration::from_secs(1), dispatched)
+        tokio::time::timeout(HANG, dispatched)
             .await
             .unwrap()
             .unwrap();
@@ -5363,13 +5368,13 @@ mod tests {
         assert!(!second.is_finished());
         assert!(!marker.exists());
         release.send(()).unwrap();
-        let next = tokio::time::timeout(Duration::from_secs(3), second)
+        let next = tokio::time::timeout(HANG, second)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
         assert_eq!(next.session_id, id);
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(HANG, async {
             while !marker.exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -5468,16 +5473,10 @@ mod tests {
                 })
                 .await
         });
-        let record = tokio::time::timeout(Duration::from_secs(3), observed)
-            .await
-            .unwrap()
-            .unwrap();
+        let record = tokio::time::timeout(HANG, observed).await.unwrap().unwrap();
         caller.abort();
         let _ = caller.await;
-        tokio::time::timeout(Duration::from_secs(1), finished)
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(HANG, finished).await.unwrap().unwrap();
         assert_eq!(
             engine.get(&record.session_id).await.unwrap().state,
             v1::SessionLifecycleState::Running as i32
@@ -5486,7 +5485,7 @@ mod tests {
             .input(&record.session_id, b"still-alive\n".to_vec())
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(HANG, async {
             while !std::fs::read_to_string(&marker).is_ok_and(|value| value == "still-alive") {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -5522,14 +5521,11 @@ mod tests {
             .unwrap();
         let handle = engine.handle(&record.session_id).unwrap();
         let capture = handle.metadata.lock().await;
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            engine.input(&record.session_id, b"typed\n".to_vec()),
-        )
-        .await
-        .expect("input waited for output capture's metadata lock")
-        .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(HANG, engine.input(&record.session_id, b"typed\n".to_vec()))
+            .await
+            .expect("input waited for output capture's metadata lock")
+            .unwrap();
+        tokio::time::timeout(HANG, async {
             while !std::fs::read_to_string(&marker).is_ok_and(|value| value == "typed") {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }

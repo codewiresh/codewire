@@ -1,3 +1,4 @@
+use super::tests::HANG;
 use super::*;
 
 #[cfg(target_os = "linux")]
@@ -13,7 +14,7 @@ mod proc_children;
 
 #[cfg(target_os = "linux")]
 async fn completed_directory_command(engine: &SessionEngine, session: &str) -> v1::SessionRecord {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(HANG, async {
         loop {
             let record = engine.get(session).await.unwrap();
             if !is_live_state(record.state) {
@@ -388,7 +389,7 @@ async fn wait_control_pending(
     owner: &crate::host_control::Owner,
     request: &crate::host_control::Mutation,
 ) {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(HANG, async {
         loop {
             if owner
                 .observe(&request.request_id, &request.scope)
@@ -632,7 +633,7 @@ async fn host_control_issued_input_timeout_is_retained_ambiguous_without_replay(
     );
     let receipt = owner.mutate(request.clone()).await.unwrap();
     assert!(receipt.unsettled());
-    let terminal = tokio::time::timeout(Duration::from_secs(12), async {
+    let terminal = tokio::time::timeout(HANG, async {
         loop {
             let receipt = owner
                 .observe(&request.request_id, &request.scope)
@@ -675,7 +676,7 @@ async fn host_control_preserves_legacy_local_stop_prelock_projection_cancellatio
     let stopping_engine = engine.clone();
     let session = launched.session_id;
     let stopper = tokio::spawn(async move { stopping_engine.stop(&session).await });
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(HANG, async {
         loop {
             if *handle.launch_cancellation.borrow() {
                 break;
@@ -777,7 +778,7 @@ async fn witnessing_driver_session(
 #[cfg(target_os = "linux")]
 async fn witness_ready(root: &Path) {
     let ready = root.join("driver").join("ready");
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(HANG, async {
         while !ready.exists() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -918,7 +919,8 @@ async fn explicit_stop_and_restart_check_for_a_run_to_interrupt_and_shutdown_nev
     // refused: the explicit stop still checks once and then stops at once.
     let started = Instant::now();
     let stopped = engine.stop(&driver).await.unwrap();
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // Refused at once, not after waiting out the helper's own bound.
+    assert!(started.elapsed() < crate::host_control::managed::HELPER_TIMEOUT);
     assert_eq!(stopped.state, stopped_state);
     assert!(!stopped.cleanup_unknown);
     assert_eq!(stop_interrupt_checks(&engine), 1);
@@ -1017,7 +1019,8 @@ async fn shutdown_checks_each_running_conversation_for_a_run_to_pause_and_an_exp
     // the record helper is refused and the stop goes on at once.
     let started = Instant::now();
     engine.shutdown().await.unwrap();
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // Refused at once, not after waiting out the helper's own bound.
+    assert!(started.elapsed() < crate::host_control::managed::HELPER_TIMEOUT);
     assert_eq!(shutdown_pause_checks(&engine), 1);
     assert_eq!(stop_interrupt_checks(&engine), interrupts);
     for id in [&driver, &ordinary.session_id] {
@@ -1055,7 +1058,8 @@ async fn an_explicit_stop_of_a_stopped_conversation_checks_for_a_paused_message_
     // logged and the stop answers as before.
     let started = Instant::now();
     let again = engine.stop(&driver).await.unwrap();
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // Refused at once, not after waiting out the helper's own bound.
+    assert!(started.elapsed() < crate::host_control::managed::HELPER_TIMEOUT);
     assert_eq!(again.state, stopped_state);
     assert_eq!(stopped_pause_checks(&engine), 1);
     // Only a host owner's managed conversation is asked.
@@ -1086,7 +1090,8 @@ async fn retention_asks_a_stopped_conversation_what_can_never_resume_before_remo
     let started = Instant::now();
     prune_session_records(&engine.inner, 0, true).await.unwrap();
     drop(admission);
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // Refused at once, not after waiting out the helper's own bound.
+    assert!(started.elapsed() < crate::host_control::managed::HELPER_TIMEOUT);
     assert_eq!(prune_retire_checks(&engine), 1);
     for id in [&driver, &ordinary.session_id] {
         assert!(matches!(
@@ -1134,7 +1139,7 @@ fn request(command: &str, pty: bool) -> v1::LaunchSessionRequest {
 }
 
 async fn wait_file(path: &Path) -> String {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(HANG, async {
         loop {
             if let Ok(value) = tokio::fs::read_to_string(path).await
                 && !value.trim().is_empty()
@@ -1230,11 +1235,11 @@ async fn isolated_descendant_fixture(case: &str) -> bool {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let status = match tokio::time::timeout(Duration::from_secs(20), child.wait()).await {
+    let status = match tokio::time::timeout(HANG, child.wait()).await {
         Ok(Ok(status)) => status,
         outcome => {
             let _ = child.start_kill();
-            tokio::time::timeout(Duration::from_secs(3), child.wait())
+            tokio::time::timeout(HANG, child.wait())
                 .await
                 .expect("isolated descendant fixture cleanup remains unknown")
                 .expect("isolated descendant fixture child was not reaped");
@@ -1397,7 +1402,7 @@ async fn host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_
         let descendant_pid: u32 = wait_file(&descendant).await.trim().parse().unwrap();
         #[cfg(target_os = "linux")]
         let descendant = FixtureDescendant::capture(descendant_pid);
-        let stopped = tokio::time::timeout(Duration::from_secs(4), engine.stop(&record.session_id))
+        let stopped = tokio::time::timeout(HANG, engine.stop(&record.session_id))
             .await
             .unwrap()
             .unwrap();
@@ -1450,7 +1455,7 @@ async fn host_stop_reaches_job_control_groups_in_the_owned_session() {
         pid as i32,
         "job control did not give the background job its own group"
     );
-    let stopped = tokio::time::timeout(Duration::from_secs(4), engine.stop(&record.session_id))
+    let stopped = tokio::time::timeout(HANG, engine.stop(&record.session_id))
         .await
         .unwrap()
         .unwrap();
@@ -1491,7 +1496,7 @@ async fn host_exit_cleans_remaining_descendants_before_reaping_group_leader() {
         let pid: u32 = wait_file(&descendant).await.trim().parse().unwrap();
         #[cfg(target_os = "linux")]
         let descendant = FixtureDescendant::capture(pid);
-        let ended = tokio::time::timeout(Duration::from_secs(4), async {
+        let ended = tokio::time::timeout(HANG, async {
             loop {
                 let record = engine.get(&record.session_id).await.unwrap();
                 if !is_live_state(record.state) {
@@ -1546,7 +1551,7 @@ async fn host_shutdown_cleans_owned_groups_and_records_confirmed_completion() {
         descendants.insert(pid, FixtureDescendant::capture(pid));
         ids.push((record.session_id, pid));
     }
-    tokio::time::timeout(Duration::from_secs(5), engine.shutdown())
+    tokio::time::timeout(HANG, engine.shutdown())
         .await
         .unwrap()
         .unwrap();
@@ -1827,7 +1832,7 @@ async fn acknowledged_host_input_reaches_owned_stdin_and_rejects_empty_oversized
             .send_input(&record.session_id, b"acknowledged\n".to_vec())
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(HANG, async {
             loop {
                 let output = engine
                     .read_output(v1::ReadSessionOutputRequest {
@@ -1956,7 +1961,7 @@ async fn host_launch_cancellation_cleans_spawned_descendants_before_failed_ackno
         // LAUNCH_CLEANUP_TIMEOUT (5 s) for confirmed termination, so on a
         // loaded host cancellation and cleanup take longer than they do
         // alone. The bound only catches a hang; the outcome is asserted below.
-        let record = tokio::time::timeout(Duration::from_secs(30), task)
+        let record = tokio::time::timeout(HANG, task)
             .await
             .unwrap()
             .unwrap()
@@ -2027,7 +2032,7 @@ async fn acknowledged_host_input_accepts_maximum_and_times_out_without_replay_or
     );
     #[cfg(target_os = "linux")]
     let (_blocked_leader, blocked_descendants) = FixtureDescendant::capture_fixture_descendants();
-    let stopped = tokio::time::timeout(Duration::from_secs(3), engine.stop(&blocked.session_id))
+    let stopped = tokio::time::timeout(HANG, engine.stop(&blocked.session_id))
         .await
         .unwrap()
         .unwrap();
@@ -2131,13 +2136,10 @@ async fn assert_guarded_restart_has_no_effects(
     let active = lock(&engine.inner.active)
         .get(id)
         .map(|active| active.token);
-    let error = tokio::time::timeout(
-        Duration::from_secs(3),
-        engine.restart_with_generation(id, Some(expected)),
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
+    let error = tokio::time::timeout(HANG, engine.restart_with_generation(id, Some(expected)))
+        .await
+        .unwrap()
+        .unwrap_err();
     assert_eq!(engine.get(id).await.unwrap(), before);
     assert_eq!(tokio::fs::read(metadata_path).await.unwrap(), saved);
     assert_eq!(*handle.launch_cancellation.borrow(), cancellation);
@@ -2187,10 +2189,7 @@ async fn guarded_restart_duplicate_callers_cannot_stop_an_admitted_replacement()
     barrier.wait().await;
     let mut admitted = Vec::new();
     let mut refused = 0;
-    while let Some(result) = tokio::time::timeout(Duration::from_secs(3), calls.join_next())
-        .await
-        .unwrap()
-    {
+    while let Some(result) = tokio::time::timeout(HANG, calls.join_next()).await.unwrap() {
         match result.unwrap() {
             Ok(record) => admitted.push(record),
             Err(SessionError::FailedPrecondition(_)) => refused += 1,
@@ -2247,7 +2246,7 @@ async fn guarded_restart_cancelled_while_waiting_cannot_cancel_or_consume_an_inc
             .await
     });
     observed.await.unwrap();
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(HANG, async {
         loop {
             if engine.inner.retention_admission.try_lock().is_err() {
                 break;
@@ -2263,10 +2262,7 @@ async fn guarded_restart_cancelled_while_waiting_cannot_cancel_or_consume_an_inc
     assert!(!*handle.launch_cancellation.borrow());
     caller.abort();
     let _ = caller.await;
-    tokio::time::timeout(Duration::from_secs(3), finished)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(HANG, finished).await.unwrap().unwrap();
     assert!(!*handle.launch_cancellation.borrow());
     assert_eq!(engine.get(&id).await.unwrap(), before);
     assert!(!marker.exists());
@@ -2308,18 +2304,12 @@ async fn guarded_restart_lost_response_keeps_new_process_and_consumed_generation
             })
             .await
     });
-    let admitted = tokio::time::timeout(Duration::from_secs(3), observed)
-        .await
-        .unwrap()
-        .unwrap();
+    let admitted = tokio::time::timeout(HANG, observed).await.unwrap().unwrap();
     assert_eq!(admitted.launch_generation, 2);
     let replacement_pid: u32 = wait_file(&pid_path).await.parse().unwrap();
     caller.abort();
     let _ = caller.await;
-    tokio::time::timeout(Duration::from_secs(3), finished)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(HANG, finished).await.unwrap().unwrap();
     assert!(matches!(
         assert_guarded_restart_has_no_effects(&engine, &original.session_id, 1).await,
         SessionError::FailedPrecondition(_)
