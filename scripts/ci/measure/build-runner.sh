@@ -124,7 +124,9 @@ if [ ! -d "$src/.git" ]; then
   git init -q "$src"
 fi
 [ "$(git -C "$checkout" rev-parse HEAD)" = "$commit" ] || die 'the checkout moved'
-"${git_quiet[@]}" fetch -q --no-tags "$checkout" HEAD
+# The job's checkout is shallow (depth 1); without --update-shallow git
+# refuses its shallow root and the fetch brings nothing.
+"${git_quiet[@]}" fetch -q --no-tags --update-shallow "$checkout" HEAD
 [ "$("${git_quiet[@]}" rev-parse FETCH_HEAD)" = "$commit" ] || die 'the fetch did not bring the commit'
 "${git_quiet[@]}" checkout -q --force --detach "$commit"
 "${git_quiet[@]}" clean -q -ffdx

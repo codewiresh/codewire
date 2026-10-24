@@ -50,4 +50,25 @@ if "$SCRIPT" "$ROOT" >/dev/null 2>&1; then
   fail 'the script ran without an output directory'
 fi
 [ -d "$work/root/keep" ] || fail 'a refused run touched the build disk'
+
+# Job checkouts are shallow. The persistent clone must take the checkout's
+# shallow root, on the first fetch and on a later, newer commit.
+grep -Fq 'fetch -q --no-tags --update-shallow "$checkout" HEAD' "$SCRIPT" ||
+  fail 'the persistent clone does not accept a shallow checkout'
+git_t=(git -c user.email=ci@example.invalid -c user.name=ci -c init.defaultBranch=main)
+"${git_t[@]}" init -q "$work/origin"
+for n in 1 2 3; do
+  echo "$n" >"$work/origin/f"
+  "${git_t[@]}" -C "$work/origin" add f
+  "${git_t[@]}" -C "$work/origin" commit -qm "c$n"
+done
+"${git_t[@]}" clone -q --depth=1 "file://$work/origin" "$work/checkout"
+"${git_t[@]}" init -q "$work/src"
+for round in first later; do
+  "${git_t[@]}" -C "$work/src" fetch -q --no-tags --update-shallow "$work/checkout" HEAD
+  [ "$(git -C "$work/src" rev-parse FETCH_HEAD)" = "$(git -C "$work/checkout" rev-parse HEAD)" ] ||
+    fail "the $round fetch from a shallow checkout did not bring the commit"
+  echo "$round" >"$work/checkout/f"
+  "${git_t[@]}" -C "$work/checkout" commit -qam later
+done
 echo 'test-build-runner-measure: build runner only, no credential, pinned tools, bad input refused'
