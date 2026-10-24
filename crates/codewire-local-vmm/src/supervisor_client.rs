@@ -21,6 +21,13 @@ use crate::uds::{capture_supervisor_peer, connect_supervisor_peer};
 use std::sync::Arc;
 
 const SUPERVISOR_INFO_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a failed create waits for its rollback delete to remove the
+/// environment before it reports the environment as kept (#3329).
+#[cfg(not(test))]
+const CREATE_ROLLBACK_WAIT: Duration = Duration::from_secs(20);
+#[cfg(test)]
+const CREATE_ROLLBACK_WAIT: Duration = Duration::from_millis(500);
+const CREATE_ROLLBACK_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
 pub struct NativeSupervisorClient {
@@ -144,20 +151,32 @@ impl NativeSupervisorClient {
     }
 
     /// A failed create removes what it recorded (#2491); the image layers it
-    /// downloaded stay as download cache (#2952). Reading the environment
-    /// waits for that rollback, so the message says only what is known:
-    /// removed, kept, or unknown.
+    /// downloaded stay as download cache (#2952). The supervisor publishes
+    /// the failure as it begins that rollback delete, so the environment can
+    /// still be listed for a moment: read it until it is gone, for a bounded
+    /// time, so the message says only what is known: removed, kept, or
+    /// unknown (#3329).
     async fn with_create_cleanup_outcome(&mut self, failure: Status, name: &str) -> Status {
-        let outcome = match self.get(name).await {
-            Err(status) if status.code() == tonic::Code::NotFound => {
-                " No environment was kept; the image layers it downloaded stay cached, so a retry resumes.".to_owned()
+        let deadline = tokio::time::Instant::now() + CREATE_ROLLBACK_WAIT;
+        let outcome = loop {
+            match self.get(name).await {
+                Err(status) if status.code() == tonic::Code::NotFound => {
+                    break " No environment was kept; the image layers it downloaded stay cached, so a retry resumes.".to_owned();
+                }
+                Ok(_) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(CREATE_ROLLBACK_POLL).await;
+                }
+                Ok(_) => {
+                    break format!(
+                        " The failed environment could not be removed; run `cw --local rm {name}`."
+                    );
+                }
+                Err(_) => {
+                    break format!(
+                        " Whether the failed environment was removed is unknown; check `cw --local ls` and remove {name} if it is listed."
+                    );
+                }
             }
-            Ok(_) => {
-                format!(" The failed environment could not be removed; run `cw --local rm {name}`.")
-            }
-            Err(_) => format!(
-                " Whether the failed environment was removed is unknown; check `cw --local ls` and remove {name} if it is listed."
-            ),
         };
         with_outcome(&failure, &outcome)
     }

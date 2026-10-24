@@ -30,9 +30,9 @@ struct ProtocolPeer {
     info: Result<v1::SupervisorInfo, tonic::Code>,
     calls: Arc<Mutex<Vec<String>>>,
     replies: Arc<Mutex<VecDeque<WatchReply>>>,
-    /// Whether `get` finds the environment; false answers NotFound, as after
-    /// a failed create's rollback.
-    environment_present: bool,
+    /// How many more `get` calls find the environment; after them `get`
+    /// answers NotFound, as once a failed create's rollback has removed it.
+    environment_present_gets: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ProtocolPeer {
@@ -75,7 +75,15 @@ impl LocalSupervisorService for ProtocolPeer {
         assert!(request.request_id.is_empty());
         assert!(request.environment_id.is_empty());
         self.record("get");
-        if !self.environment_present {
+        let remaining = &self.environment_present_gets;
+        if remaining
+            .try_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |gets| gets.checked_sub(1),
+            )
+            .is_err()
+        {
             return Err(Status::not_found("local environment was not found"));
         }
         Ok(Response::new(environment()))
@@ -245,15 +253,15 @@ impl TestServer {
         info: impl FnOnce(&NativeRuntimeConfig) -> Result<v1::SupervisorInfo, tonic::Code>,
         replies: Vec<WatchReply>,
     ) -> Self {
-        Self::start_with_environment(info, replies, true)
+        Self::start_with_environment(info, replies, usize::MAX)
     }
 
     fn start_with_environment(
         info: impl FnOnce(&NativeRuntimeConfig) -> Result<v1::SupervisorInfo, tonic::Code>,
         replies: Vec<WatchReply>,
-        environment_present: bool,
+        environment_present_gets: usize,
     ) -> Self {
-        Self::start_listening(info, replies, environment_present, false).0
+        Self::start_listening(info, replies, environment_present_gets, false).0
     }
 
     /// A server whose listener the test can close while the connections it
@@ -263,14 +271,14 @@ impl TestServer {
         info: impl FnOnce(&NativeRuntimeConfig) -> Result<v1::SupervisorInfo, tonic::Code>,
         replies: Vec<WatchReply>,
     ) -> (Self, tokio::task::JoinHandle<()>) {
-        let (server, accept) = Self::start_listening(info, replies, true, true);
+        let (server, accept) = Self::start_listening(info, replies, usize::MAX, true);
         (server, accept.unwrap())
     }
 
     fn start_listening(
         info: impl FnOnce(&NativeRuntimeConfig) -> Result<v1::SupervisorInfo, tonic::Code>,
         replies: Vec<WatchReply>,
-        environment_present: bool,
+        environment_present_gets: usize,
         closable: bool,
     ) -> (Self, Option<tokio::task::JoinHandle<()>>) {
         // Keep Unix paths short and canonical on both hosts. This creates only
@@ -300,7 +308,9 @@ impl TestServer {
             info: info(&config),
             calls: calls.clone(),
             replies: Arc::new(Mutex::new(replies.into())),
-            environment_present,
+            environment_present_gets: Arc::new(std::sync::atomic::AtomicUsize::new(
+                environment_present_gets,
+            )),
         };
         let (shutdown, receiver) = oneshot::channel();
         let mut accept = None;
@@ -616,13 +626,19 @@ async fn observe_sees_the_initial_and_each_non_terminal_update() {
 
 #[tokio::test]
 async fn a_failed_create_says_whether_its_rollback_removed_it() {
-    for (present, expected) in [
+    for (present_gets, expected) in [
         (
-            false,
+            0,
+            " No environment was kept; the image layers it downloaded stay cached, so a retry resumes.",
+        ),
+        // The rollback delete is still running when the failure arrives;
+        // it removes the environment after three more reads (#3329).
+        (
+            3,
             " No environment was kept; the image layers it downloaded stay cached, so a retry resumes.",
         ),
         (
-            true,
+            usize::MAX,
             " The failed environment could not be removed; run `cw --local rm dev`.",
         ),
     ] {
@@ -631,7 +647,7 @@ async fn a_failed_create_says_whether_its_rollback_removed_it() {
         let server = TestServer::start_with_environment(
             valid_info,
             vec![WatchReply::Updates(vec![Ok(failed)])],
-            present,
+            present_gets,
         );
         let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
             .await
@@ -649,15 +665,23 @@ async fn a_failed_create_says_whether_its_rollback_removed_it() {
                 .contains("failed: create_registry_platform (")
         );
         assert!(error.message().ends_with(expected), "{}", error.message());
+        let calls = server.calls();
         assert_eq!(
-            server.calls(),
+            calls[..3],
             [
                 "info",
                 "create",
                 "watch:f30e0037-c1b1-46d0-8d8d-cd512049a002",
-                "get"
             ]
         );
+        let gets = &calls[3..];
+        assert!(gets.iter().all(|call| call == "get"), "{calls:?}");
+        match present_gets {
+            // Removed: one read past the last that found it.
+            0 | 3 => assert_eq!(gets.len(), present_gets + 1, "{calls:?}"),
+            // Kept: it read again until the bounded wait ended.
+            _ => assert!(gets.len() > 1, "{calls:?}"),
+        }
         drop(client);
         server.finish().await;
     }
@@ -844,7 +868,7 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
         info: valid_info(&server.config),
         calls: replacement_calls.clone(),
         replies: Arc::new(Mutex::new(VecDeque::new())),
-        environment_present: true,
+        environment_present_gets: Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX)),
     };
     let (replacement_shutdown, receiver) = oneshot::channel();
     let replacement_task = tokio::spawn(async move {
