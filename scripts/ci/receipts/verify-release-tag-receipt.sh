@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Permit a release tag push to reuse successful exact-commit main CI. The
+# Prove a release tag's commit passed successful exact-commit main CI. The
 # tagged commit is canonical main or an ancestor of it, so main may move on
 # while a release is cut. It also needs a green Kind run and a green release
 # dry run of the exact commit, which a push to main may defer to a dispatch or
-# the schedule. Every uncertainty returns a fallback receipt so pre-push can
-# run its full gate.
+# the schedule. Every uncertainty returns a fallback receipt, which release
+# selection refuses.
 #
-# The full receipt (no argument) is what a release tag push needs: the source
-# evidence, the tag's signature in the pusher's keyring, and Dev acceptance.
+# The full receipt (no argument) adds the tag's signature in the caller's
+# keyring and Dev acceptance; a release tag push no longer asks for it, since
+# it checks only local facts and release selection reverifies the rest (#2892).
 # --source-evidence proves the source evidence alone: main CI on the exact
 # commit, not superseded, verifying something, and Kind and the dry run of that
 # commit. Release selection composes it with the proofs it has elsewhere
@@ -63,7 +64,7 @@ remote="${PREFLIGHT_PUSH_REMOTE_NAME:-}"
 [ -n "$remote" ] || fallback 'push-remote-unavailable'
 
 # The canonical forge is GITHUB_SERVER_URL, set in every Forgejo job; a local
-# tag push sets it to the same Forgejo base URL.
+# caller sets it to the same Forgejo base URL.
 server_url="${GITHUB_SERVER_URL:-}"
 server_url="${server_url%/}"
 [[ "$server_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] \
@@ -76,7 +77,7 @@ for required_tool in git jq curl; do
 done
 
 # Forgejo evidence is read from its REST API with GITEA_TOKEN: a job's own
-# token in CI; locally, the token scripts/release/release loads. The token
+# token in CI, or one the caller exports. The token
 # leaves the environment at once and reaches curl only through a pipe: never
 # argv, a file or output.
 [ -n "${GITEA_TOKEN:-}" ] || fallback 'forgejo-token-unavailable'

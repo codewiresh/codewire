@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # The fast pre-push hook (#3119 step 2.3): every branch push runs the push
 # check, main takes changes only through pull requests, deletions need no
-# check, and a release tag push checks its release receipt. Pull-request CI
-# is the merge gate; nothing local records a receipt. The real environment
-# precheck is exercised at the end.
+# check, and a release tag push checks only local facts: its signature, that
+# it is on main, the workspace pin and the support pair. Pull-request CI is the
+# merge gate; nothing local records a receipt. The real environment precheck is
+# exercised at the end.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -46,7 +47,7 @@ git init -q -b main "$repo"
 git -C "$repo" config user.name 'Preflight Fixture'
 git -C "$repo" config user.email preflight-fixture@codewire.invalid
 git -C "$repo" config tag.gpgSign false
-mkdir -p "$repo"/{.githooks,docs,scripts/dev,scripts/ci/select,scripts/ci/verify,scripts/ci/receipts} \
+mkdir -p "$repo"/{.githooks,docs,scripts/dev,scripts/ci/select,scripts/ci/verify} \
   "$repo"/{scripts/ci/release,scripts/ci/images,crates/codewire-cli/src} "$TMP/bin"
 for path in .githooks/pre-push scripts/dev/pre-push.sh scripts/dev/preflight.sh \
     scripts/dev/preflight-push.sh scripts/dev/install-hooks.sh \
@@ -72,9 +73,6 @@ stub scripts/ci/verify/run-integration-verification.sh ''
 printf 'import os, sys\nopen(os.environ["PREFLIGHT_TEST_TOOL_LOG"], "a").write("workspace-image-pin %%s\\n" %% sys.argv[1:])\n' \
   > "$repo/scripts/ci/images/workspace-image-pin.py"
 stub scripts/ci/release/verify-release-support-pair.sh ''
-stub scripts/ci/receipts/verify-release-tag-receipt.sh \
-  'printf "release_tag_receipt=accepted\nrelease_tag_scope=%s\nrelease_tag_reason=fixture\nrelease_tag_run=1\n" \
-  "${PREFLIGHT_TEST_RECEIPT_SCOPE:-full}"'
 cat > "$TMP/bin/tool-stub" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -130,19 +128,76 @@ assert_contains multi_ref "$output" 'multi-ref pushes are unsupported'
 git -C "$repo" branch -q other HEAD~1
 if output="$(push other:refs/heads/other)"; then fail 'a commit not checked out was pushed'; fi
 assert_contains not_checked_out "$output" 'is not checked out here'
-# A release tag push checks its release receipt and runs nothing else.
-git -C "$repo" tag v9.9.9
-output="$(push refs/tags/v9.9.9)" || fail "a release tag push failed: $output"
-assert_contains tag_push "$(cat "$log")" 'verify-release-tag-receipt.sh'
-grep -q '^cargo ' "$log" && fail 'a release tag push ran the push check'
-# Source evidence alone is not a tag push's receipt: it proves neither the
-# signature nor Dev acceptance (#2892).
-git -C "$repo" tag v9.9.8
-if output="$(PREFLIGHT_RECEIPT_ONLY=true PREFLIGHT_TEST_RECEIPT_SCOPE=source-evidence \
-    push refs/tags/v9.9.8)"; then
-  fail 'a release tag push was accepted on source evidence alone'
-fi
-assert_contains source_evidence_only "$output" 'exact-main release receipt is unavailable'
+# A release tag push checks only local facts and needs no Forgejo token: just
+# tag and push (#2892). Release selection reverifies the tag before publishing.
+# Remote main is now two commits, so the seed is an ancestor of it.
+git -C "$TMP/remote.git" fetch -q "$repo" main:main
+seed="$(git -C "$repo" rev-parse HEAD~1)"
+side="$(git -C "$repo" commit-tree 'HEAD^{tree}' -p HEAD -m 'side: never on main')"
+signing_key() { # HOME_DIR: a throwaway OpenPGP signing key; prints its fingerprint
+  mkdir -m 700 "$1"
+  GNUPGHOME="$1" gpg --batch --pinentry-mode loopback --passphrase '' \
+    --quick-gen-key 'Synthetic release tagger <synthetic@example.invalid>' ed25519 sign never 2>/dev/null
+  GNUPGHOME="$1" gpg --batch --with-colons --list-secret-keys 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }'
+}
+# GnuPG sockets live in GNUPGHOME, so keep it short.
+gpg_root="$(mktemp -d "$ORIGINAL_TMPDIR/ppw-gpg.XXXXXX")"
+remove_signing_keys() { # stop both keys' agents, then delete their homes
+  local home
+  for home in release other; do
+    [ ! -d "$gpg_root/$home" ] || GNUPGHOME="$gpg_root/$home" gpgconf --kill all 2>/dev/null || true
+  done
+  rm -rf "$gpg_root"
+}
+trap 'remove_signing_keys; chmod -R u+w "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+release_key="$(signing_key "$gpg_root/release")"
+other_key="$(signing_key "$gpg_root/other")"
+export GNUPGHOME="$gpg_root/release"
+signed_tag() { # TAG COMMIT [KEY_HOME KEY]
+  GNUPGHOME="${3:-$GNUPGHOME}" git -C "$repo" -c user.signingkey="${4:-$release_key}" \
+    tag -s -m "release $1" "$1" "$2"
+}
+assert_tag_push_passes() { # NAME TAG
+  local output
+  output="$(push "refs/tags/$2")" || fail "$1: a release tag push failed: $output"
+  assert_contains "$1" "$output" 'preflight: signed release tag on main'
+  assert_contains "$1" "$(cat "$log")" 'workspace-image-pin'
+  assert_contains "$1" "$(cat "$log")" 'verify-release-support-pair.sh'
+  assert_not_contains "$1" "$(cat "$log")" 'verify-release-tag-receipt'
+  if grep -q '^cargo ' "$log"; then fail "$1: a release tag push ran the push check"; fi
+}
+assert_tag_push_refused() { # NAME TAG EXPECTED
+  local output
+  if output="$(push "refs/tags/$2")"; then fail "$1: a release tag push was accepted: $output"; fi
+  assert_contains "$1" "$output" "$3"
+  assert_not_contains "$1" "$(cat "$log")" 'verify-release-support-pair.sh'
+}
+# Without a token, a signed tag at main or on main pushes. Before #2892 made
+# the push local, both were refused: "exact-main release receipt is unavailable".
+signed_tag v9.9.9 HEAD
+(unset GITEA_TOKEN GITHUB_SERVER_URL; assert_tag_push_passes tag_at_main v9.9.9)
+signed_tag v9.9.8 "$seed"
+(unset GITEA_TOKEN GITHUB_SERVER_URL; assert_tag_push_passes tag_on_main v9.9.8)
+# A commit that is not on the remote's main is refused.
+signed_tag v9.9.7 "$side"
+assert_tag_push_refused tag_off_main v9.9.7 "which is not on origin's main"
+# An unsigned or lightweight tag is refused.
+git -C "$repo" tag -a -m 'release v9.9.6' v9.9.6 HEAD
+assert_tag_push_refused unsigned_tag v9.9.6 'release tag signature does not verify'
+git -C "$repo" tag v9.9.5 HEAD
+assert_tag_push_refused lightweight_tag v9.9.5 'release tag is not an annotated tag'
+# A tag signed by a key the pusher's keyring does not hold is refused.
+signed_tag v9.9.4 HEAD "$gpg_root/other" "$other_key"
+assert_tag_push_refused unknown_key_tag v9.9.4 'release tag signature does not verify'
+# A signed tag whose content was altered after signing is refused.
+signed_tag v9.9.3-signed HEAD
+git -C "$repo" cat-file tag v9.9.3-signed | sed 's/^tag v9.9.3-signed$/tag v9.9.3/; s/^release v9.9.3-signed$/release v9.9.3 altered/' \
+  > "$TMP/altered-tag"
+git -C "$repo" update-ref refs/tags/v9.9.3 "$(git -C "$repo" mktag < "$TMP/altered-tag")"
+assert_tag_push_refused altered_tag v9.9.3 'release tag signature does not verify'
+remove_signing_keys
+unset GNUPGHOME
+trap 'chmod -R u+w "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 # The retired merge qualification flags are gone.
 for retired in --for-merge --emit-receipt; do
   if (cd "$repo" && scripts/dev/preflight.sh "$retired" >/dev/null 2>&1); then

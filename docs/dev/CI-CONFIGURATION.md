@@ -95,20 +95,19 @@ export CODEWIRE_CI_SCCACHE_BUCKET_UNTRUSTED=example-ci-cache-untrusted
   local workspace build uses in `r2` mode without main or pull-request trust.
   CI never selects it, so it is not an Actions variable.
 
-- `GITHUB_SERVER_URL` is the Forgejo base URL. A release tag push's receipt
-  check needs it (without it the push falls back to full local verification),
-  and so do the CI measures and the local VM journeys that clone a
-  Forgejo-hosted source.
+- `GITHUB_SERVER_URL` is the Forgejo base URL. The CI measures and the local
+  VM journeys that clone a Forgejo-hosted source need it.
 - `CODEWIRE_FORGEJO_FIXTURE_REPOSITORY` is the `owner/name` of that
   Forgejo-hosted source: a public repository on the same instance that holds
   the pinned commit the journeys check out. Mirror the public supply-chain
   scanner repository, `https://github.com/noeljackson/supplychain`, to get it.
   The Linux native smoke and the macOS local VM inputs journey need it.
-- A release tag push's receipt check reads its evidence from Forgejo's REST
-  API with `GITEA_TOKEN`, a token that can read both repositories' Actions
-  runs: a job's own token in CI. Locally, the release command loads it, through
-  pipes only. Never set it by hand, put it in a file, or paste it. Without it, a
-  tag push falls back to full local verification.
+- A release tag push needs no token. The pre-push hook checks only local facts:
+  the tag is annotated and its signature verifies, it names a commit on the
+  push remote's `main`, the workspace pin is current, and the support pair is
+  published. Release selection in `deploy-prod` and `cli-release` reverifies
+  the tag from main's code with the job's own token before anything is
+  published.
 - `CODEWIRE_IMAGE_REGISTRY` is needed by the Dev and confidential smokes and
   Kind's sealed CI inputs. A local Kind loop that builds its own images does
   not need it.

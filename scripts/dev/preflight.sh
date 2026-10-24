@@ -6,7 +6,6 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SELECTOR="$REPO_ROOT/scripts/ci/select/select-verification.sh"
-RELEASE_TAG_RECEIPT="$REPO_ROOT/scripts/ci/receipts/verify-release-tag-receipt.sh"
 PRODUCT_RUNNER="$REPO_ROOT/scripts/ci/verify/run-product-verification.sh"
 INTEGRATION_RUNNER="$REPO_ROOT/scripts/ci/verify/run-integration-verification.sh"
 ENVIRONMENT_CHECK="$REPO_ROOT/scripts/dev/preflight-environment.sh"
@@ -237,13 +236,38 @@ selection_has_any() {
 collect_changed_paths "$PREFLIGHT_CHANGED_PATHS"
 
 if [ -n "${PREFLIGHT_RELEASE_TAG_REF:-}" ]; then
+  # A release tag push checks only what this checkout can know, so it needs no
+  # Forgejo token: just tag and push (owner, 2026-10-23, #2892). deploy-prod's
+  # release selection reverifies the tag from main's code before anything is
+  # published: the release tagger's signature, main CI, Kind, the dry run and
+  # Dev acceptance of the exact commit.
+  printf '==> release tag signature\n'
+  release_tag_object="${PREFLIGHT_RELEASE_TAG_OBJECT_SHA:-}"
+  [ "$(git -C "$REPO_ROOT" cat-file -t "$release_tag_object" 2>/dev/null)" = tag ] ||
+    fail 'release tag is not an annotated tag; create it with git tag -s'
+  git -C "$REPO_ROOT" verify-tag "$release_tag_object" ||
+    fail 'release tag signature does not verify; sign it with git tag -s and your release key'
+  release_commit="$(git -C "$REPO_ROOT" rev-parse --verify --quiet \
+    "${release_tag_object}^{commit}")" ||
+    fail 'release tag does not name a commit'
+  # Only a commit on main is released.
+  printf '==> release tag on main\n'
+  release_remote="${PREFLIGHT_PUSH_REMOTE_NAME:-}"
+  [ -n "$release_remote" ] || fail 'the push remote is unknown'
+  release_main="$(git -C "$REPO_ROOT" ls-remote "$release_remote" refs/heads/main |
+    awk '$2 == "refs/heads/main" { print $1 }')" || release_main=''
+  [[ "$release_main" =~ ^[0-9a-f]{40}$ ]] || fail "$release_remote's main is unavailable"
+  if [ "$release_commit" != "$release_main" ]; then
+    git -C "$REPO_ROOT" cat-file -e "${release_main}^{commit}" 2>/dev/null ||
+      git -C "$REPO_ROOT" fetch --quiet --no-tags "$release_remote" refs/heads/main ||
+      fail "could not fetch $release_remote's main"
+    git -C "$REPO_ROOT" merge-base --is-ancestor "$release_commit" "$release_main" ||
+      fail "release tag names $release_commit, which is not on $release_remote's main"
+  fi
   # A release ships the workspace image its tree pins. A changed image
   # definition must first be published and its proposed pin landed; no other
   # verification substitutes for that, so a stale pin refuses the tag.
   printf '==> release tag workspace image pin\n'
-  release_commit="$(git -C "$REPO_ROOT" rev-parse --verify --quiet \
-    "${PREFLIGHT_RELEASE_TAG_OBJECT_SHA:-}^{commit}")" ||
-    fail 'release tag does not name a commit'
   python3 "$REPO_ROOT/scripts/ci/images/workspace-image-pin.py" check --release \
     --commit "$release_commit" ||
     fail 'release commit pins a stale workspace image; land the proposed pin before tagging'
@@ -253,28 +277,9 @@ if [ -n "${PREFLIGHT_RELEASE_TAG_REF:-}" ]; then
   printf '==> release tag support pair\n'
   "$REPO_ROOT/scripts/ci/release/verify-release-support-pair.sh" "$release_commit" ||
     fail 'release commit has no published support pair; tag a commit support-images published'
-  printf '==> release tag tested-tree receipt\n'
-  if ! receipt_output="$($RELEASE_TAG_RECEIPT 2>&1)"; then
-    printf 'release-tag receipt: checker failed unexpectedly; full local verification required\n' >&2
-    receipt_output='release_tag_receipt=fallback
-release_tag_reason=checker-failed
-release_tag_run='
-  fi
-  printf '%s\n' "$receipt_output"
-  # A tag push needs the full receipt; source evidence alone proves neither
-  # the signature nor Dev acceptance.
-  if grep -Fxq 'release_tag_receipt=accepted' <<<"$receipt_output" &&
-      grep -Fxq 'release_tag_scope=full' <<<"$receipt_output"; then
-    printf 'preflight: exact-main CI receipt accepted; signed release tag verified\n'
-    printf 'preflight: OK\n'
-    exit 0
-  fi
-  if [ "${PREFLIGHT_RECEIPT_ONLY:-false}" = true ]; then
-    fail "exact-main release receipt is unavailable"
-  fi
-  printf 'preflight: release receipt unavailable; running full fail-closed verification\n'
-  printf '__unknown__\n' > "$PREFLIGHT_CHANGED_PATHS"
-  PREFLIGHT_MODE=full
+  printf 'preflight: signed release tag on main; deploy-prod verifies the rest before it publishes\n'
+  printf 'preflight: OK\n'
+  exit 0
 fi
 
 printf '==> preflight path selection\n'

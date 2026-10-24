@@ -47,7 +47,6 @@ if [ "$push_count" -eq 1 ]; then
     export PREFLIGHT_RELEASE_TAG_REF="$local_ref"
     export PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$head_sha"
     export PREFLIGHT_PUSH_REMOTE_NAME="${1:-}"
-    export PREFLIGHT_RECEIPT_ONLY=true
     exec "$PREFLIGHT"
   fi
   if [ "$remote_ref" = refs/heads/main ]; then
