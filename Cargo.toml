@@ -220,6 +220,8 @@ async-stripe-billing = { version = "1.0.0-rc.6", features = ["billing_portal_ses
 async-stripe-shared = "1.0.0-rc.6"
 async-stripe-webhook = "1.0.0-rc.6"
 async-stripe-types = "1.0.0-rc.6"
+async-stripe-client-core = "1.0.0-rc.6"
+miniserde = "0.1"
 
 # Temporal (replaces go.temporal.io/sdk for the environment workflow,
 # #36 Stage D). Prerelease SDK; pinned exactly.

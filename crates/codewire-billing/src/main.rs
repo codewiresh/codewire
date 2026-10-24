@@ -59,6 +59,16 @@ async fn main() -> anyhow::Result<()> {
         )?,
     };
 
+    // Every replica checks billing's own Stripe webhook endpoint at startup
+    // and hourly. A mismatch reports degraded; it never fails readiness.
+    codewire_billing::stripe_endpoint_check::spawn(
+        state.stripe.clone(),
+        codewire_billing::stripe_endpoint_check::webhook_url(
+            std::env::var("STRIPE_WEBHOOK_URL").ok().as_deref(),
+            &state.frontend_origin,
+        ),
+    );
+
     // Leader-gated billing loops: usage metering, overage invoicing,
     // trial expiry. BILLING_LOOPS remains an explicit override for
     // focused diagnostics; unset means the Rust-owned production set.

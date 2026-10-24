@@ -47,6 +47,9 @@ async-stripe-billing = { workspace = true }
 async-stripe-shared = { workspace = true }
 async-stripe-webhook = { workspace = true }
 async-stripe-types = { workspace = true }
+async-stripe-client-core = { workspace = true }
+miniserde = { workspace = true }
+prometheus = { workspace = true }
 
 # Temporal worker (#38): OrgTeardownWorkflow + the subscription-cancel
 # activity, on the codewire-billing task queue. Same pinned SDK the

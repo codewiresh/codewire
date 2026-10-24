@@ -51,6 +51,12 @@ impl FrontendOrigin {
         Ok(Self(url.origin()))
     }
 
+    /// Billing's public Stripe webhook URL on this origin: the ingress routes
+    /// `/api/webhooks/stripe` on the frontend host to billing.
+    pub fn webhook_url(&self) -> String {
+        format!("{}/api/webhooks/stripe", self.0.ascii_serialization())
+    }
+
     fn validate_redirect(&self, field: &str, value: &str) -> Result<(), AppError> {
         let url = Url::parse(value).map_err(|_| {
             AppError::BadRequest(

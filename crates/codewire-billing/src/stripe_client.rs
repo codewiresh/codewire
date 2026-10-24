@@ -21,6 +21,7 @@ use stripe_checkout::checkout_session::{
     CreateCheckoutSessionLineItemsAdjustableQuantity, CreateCheckoutSessionSubscriptionData,
     ExpireCheckoutSession, ListCheckoutSession,
 };
+use stripe_client_core::{RequestBuilder, StripeMethod};
 use stripe_core::customer::{
     CreateCustomer, RetrieveCustomer, UpdateCustomer, UpdateCustomerInvoiceSettings,
 };
@@ -411,6 +412,58 @@ impl StripeHandle {
             .await
             .map_err(stripe_err)?;
         Ok(session.url.unwrap_or_default())
+    }
+}
+
+// ── Webhook endpoint self-check (#3263) ─────────────────────────────
+
+/// The fields of a Stripe webhook endpoint that billing checks. The SDK's
+/// webhook-endpoint types live in a crate billing does not otherwise need,
+/// so this reads the list response through the existing client.
+#[derive(Clone, Debug, miniserde::Deserialize)]
+pub struct WebhookEndpoint {
+    pub id: String,
+    pub url: String,
+    pub status: String,
+    pub livemode: bool,
+    pub api_version: Option<String>,
+    pub enabled_events: Vec<String>,
+}
+
+#[derive(miniserde::Deserialize)]
+struct WebhookEndpointList {
+    data: Vec<WebhookEndpoint>,
+    has_more: bool,
+}
+
+#[derive(serde::Serialize)]
+struct WebhookEndpointListParams {
+    limit: u8,
+}
+
+impl StripeHandle {
+    /// `true` for an `sk_live_` key: its webhook endpoints must be live too.
+    pub fn is_live(&self) -> bool {
+        self.live
+    }
+
+    /// Every webhook endpoint of the account. More than one page is an
+    /// explicit failure, never silent partial evidence.
+    pub async fn list_webhook_endpoints(&self) -> Result<Vec<WebhookEndpoint>, AppError> {
+        let client = self.client()?;
+        let page: WebhookEndpointList =
+            RequestBuilder::new(StripeMethod::Get, "/webhook_endpoints")
+                .query(&WebhookEndpointListParams { limit: 100 })
+                .customize()
+                .send(client)
+                .await
+                .map_err(stripe_err)?;
+        if page.has_more {
+            return Err(AppError::InternalMsg(
+                "stripe webhook-endpoint enumeration exceeded one page".into(),
+            ));
+        }
+        Ok(page.data)
     }
 }
 

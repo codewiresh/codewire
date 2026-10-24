@@ -94,6 +94,20 @@ pub async fn stripe_webhook(
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
 }
 
+/// The Stripe event types `handle_webhook_event` acts on. Billing's Stripe
+/// endpoint check requires its endpoint to send each of them and nothing
+/// else (#3263), so keep this list and the match in step.
+pub const HANDLED_EVENT_TYPES: [&str; 8] = [
+    "checkout.session.completed",
+    "customer.subscription.updated",
+    "customer.subscription.deleted",
+    "customer.subscription.trial_will_end",
+    "invoice.created",
+    "invoice.paid",
+    "invoice.payment_failed",
+    "invoice.finalized",
+];
+
 /// Mirrors `billing.HandleWebhookEvent`.
 pub async fn handle_webhook_event(state: &BillingState, event: Event) -> anyhow::Result<()> {
     let pool = &state.pool;

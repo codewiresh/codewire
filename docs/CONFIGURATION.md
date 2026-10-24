@@ -72,6 +72,35 @@ With neither, the workload starts with email delivery disabled.
 The Kind overlays provide neither credential, so local email delivery stays
 disabled and needs no sender.
 
+## Stripe billing
+
+Billing is disabled unless `STRIPE_SECRET_KEY` is set.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `STRIPE_SECRET_KEY` | Required for billing | The Stripe secret key. An `sk_live_` key selects live prices; any other key selects test prices. | `sk_test_…` |
+| `STRIPE_WEBHOOK_SECRET` | Required with `STRIPE_SECRET_KEY` | The signing secret of the Stripe webhook endpoint. Without it, billing refuses every delivery. | `whsec_…` |
+| `FRONTEND_URL` | Yes | The dashboard origin. Checkout and portal redirects must stay on it, and it names the default webhook URL below. | `https://codewire.example.com` |
+| `STRIPE_WEBHOOK_URL` | No | The public URL of billing's Stripe webhook endpoint. Unset or empty means `FRONTEND_URL`'s origin plus `/api/webhooks/stripe`. `off` disables the endpoint check, for example when `stripe listen` forwards events in development. | `https://billing.example.com/api/webhooks/stripe` |
+
+With Stripe configured, every billing replica checks its webhook endpoint at
+startup and then hourly, using its own key. It lists the account's webhook
+endpoints and requires exactly one endpoint for the webhook URL. That
+endpoint must be enabled and in the key's mode, use the Stripe API version of
+billing's SDK, and send exactly the event types billing handles:
+`checkout.session.completed`, `customer.subscription.updated`,
+`customer.subscription.deleted`, `customer.subscription.trial_will_end`,
+`invoice.created`, `invoice.paid`, `invoice.payment_failed` and
+`invoice.finalized`.
+
+A mismatch logs `billing: Stripe webhook endpoint check failed` at ERROR with
+every difference. It also sets the `codewire_billing_stripe_webhook_endpoint_healthy`
+metric to 0 and reports `degraded` at billing's internal
+`/healthz/stripe-webhook-endpoint`. It never fails readiness or liveness, so
+a Stripe outage or a mismatched endpoint cannot take billing out of service.
+When Stripe cannot be reached, the report says `unknown` and the metric keeps
+its last value.
+
 ## Workspace storage
 
 | Variable | Required | Meaning | Example |

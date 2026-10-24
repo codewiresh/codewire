@@ -14,6 +14,7 @@ pub mod email;
 pub mod metering;
 pub mod overview;
 pub mod stripe_client;
+pub mod stripe_endpoint_check;
 pub mod subscription_migration;
 pub mod temporal;
 pub mod webhook;
