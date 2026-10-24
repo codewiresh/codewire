@@ -721,7 +721,12 @@ mod tests {
     #[test]
     fn an_unsafe_directory_names_what_was_found_and_what_is_required() {
         let (_parent, root) = root();
-        root.create_dir(Path::new("shared"), 0o755).unwrap();
+        // Made outside PrivateRoot, with its mode set after creation: the
+        // process umask (077 on some hosts) would otherwise mask 0755 to a
+        // safe 0700, and `create_dir` itself checks the exact mode.
+        let shared = root.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
         let error = root
             .open_private_directory(Path::new("shared"), 0o700)
             .err()
