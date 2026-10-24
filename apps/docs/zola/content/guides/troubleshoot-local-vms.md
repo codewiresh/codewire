@@ -49,6 +49,13 @@ variant. Pass `--image` with one.
 **`create_guest_docker_tooling_missing`**. The image has no Docker tooling.
 Create with `--no-docker`.
 
+**`create_guest_setup_failed`**, at "Starting the VM". The VM could not
+install the workspace image. Try another image, or a current release of the
+same one.
+
+**`create_guest_workspace_failed`**, at "Starting the VM". The image was
+installed, but the workspace could not start inside the VM.
+
 **`start_direct_share_changed`**, at "Checking mounted folders". A directly
 mounted folder was moved, removed or replaced while the VM was stopped. Move
 it back and start again. A removed folder cannot come back, even recreated at

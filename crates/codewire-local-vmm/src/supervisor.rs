@@ -4569,6 +4569,12 @@ impl Supervisor {
                 if error_code == crate::runner_service::GUEST_DOCKER_TOOLING_MISSING {
                     return Err(SupervisorError::GuestDockerToolingMissing);
                 }
+                if error_code == crate::runner_service::GUEST_SETUP_FAILED {
+                    return Err(SupervisorError::GuestSetupFailed);
+                }
+                if error_code == crate::runner_service::GUEST_WORKSPACE_FAILED {
+                    return Err(SupervisorError::GuestWorkspaceFailed);
+                }
                 if error_code == crate::runner_service::HOST_PORT_UNAVAILABLE {
                     return Err(SupervisorError::HostPortUnavailable);
                 }
@@ -9490,6 +9496,8 @@ impl From<SupervisorError> for Status {
             SupervisorError::CwRuntime(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::VmStart(_)
             | SupervisorError::GuestDockerToolingMissing
+            | SupervisorError::GuestSetupFailed
+            | SupervisorError::GuestWorkspaceFailed
             | SupervisorError::HostPortUnavailable
             | SupervisorError::VmStop
             | SupervisorError::VmResize
@@ -9638,6 +9646,12 @@ pub enum SupervisorError {
     )]
     GuestDockerToolingMissing,
     #[error(
+        "the VM could not install the workspace image (guest setup failed); try another image or a current release of it"
+    )]
+    GuestSetupFailed,
+    #[error("the workspace could not start inside the VM (guest workspace startup failed)")]
+    GuestWorkspaceFailed,
+    #[error(
         "a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; stop it, or publish a different host port"
     )]
     HostPortUnavailable,
@@ -9730,6 +9744,8 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
         SupervisorError::UnsafeRuntimeArtifactStore { .. } => UNSAFE_RUNTIME_ARTIFACT_STORE_CODE,
         SupervisorError::AlreadyExists(_) => "create_name_taken",
         SupervisorError::GuestDockerToolingMissing => "create_guest_docker_tooling_missing",
+        SupervisorError::GuestSetupFailed => "create_guest_setup_failed",
+        SupervisorError::GuestWorkspaceFailed => "create_guest_workspace_failed",
         SupervisorError::HostPortUnavailable => "create_host_port_unavailable",
         #[cfg(target_os = "macos")]
         SupervisorError::VzHelperMissing(_) => "create_vz_helper_missing",
@@ -9849,6 +9865,8 @@ fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
         SupervisorError::ArtifactGenerationChanged => "artifact_generation_changed",
         SupervisorError::VmStart(_) => "vm_start",
         SupervisorError::GuestDockerToolingMissing => "guest_docker_tooling_missing",
+        SupervisorError::GuestSetupFailed => "guest_setup_failed",
+        SupervisorError::GuestWorkspaceFailed => "guest_workspace_failed",
         SupervisorError::HostPortUnavailable => "host_port_unavailable",
         SupervisorError::VmStop => "vm_stop",
         SupervisorError::VmResize => "vm_resize",
@@ -18199,6 +18217,14 @@ mod tests {
                 "create_guest_docker_tooling_missing",
             ),
             (
+                SupervisorError::GuestSetupFailed,
+                "create_guest_setup_failed",
+            ),
+            (
+                SupervisorError::GuestWorkspaceFailed,
+                "create_guest_workspace_failed",
+            ),
+            (
                 SupervisorError::HostPortUnavailable,
                 "create_host_port_unavailable",
             ),
@@ -18300,6 +18326,11 @@ mod tests {
             (
                 SupervisorError::HostPortUnavailable,
                 "host_port_unavailable",
+            ),
+            (SupervisorError::GuestSetupFailed, "guest_setup_failed"),
+            (
+                SupervisorError::GuestWorkspaceFailed,
+                "guest_workspace_failed",
             ),
         ];
         for (error, expected) in &cases {

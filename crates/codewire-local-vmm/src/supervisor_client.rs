@@ -712,6 +712,10 @@ fn operation_error_hint(error_code: &str) -> &'static str {
         "create_guest_docker_tooling_missing" => {
             " (the image has no Docker tooling; create with --no-docker or choose an image that includes Docker)"
         }
+        "create_guest_setup_failed" => {
+            " (the VM could not install the workspace image; try another image or a current release of it)"
+        }
+        "create_guest_workspace_failed" => " (the workspace could not start inside the VM)",
         "delete_failed" | "delete_interrupted" => {
             " (nothing was removed and the environment was kept; see cw info, then run cw rm again)"
         }

@@ -1627,10 +1627,7 @@ impl RunningVm {
             .await
             {
                 Ok(stage) if !stage.is_failure() => return Ok(()),
-                Ok(GuestBootStage::DockerToolingMissing) => {
-                    return Err(RunnerError::GuestDockerToolingMissing);
-                }
-                Ok(_) => return Err(RunnerError::NetworkWorkerBootstrap),
+                Ok(stage) => return Err(guest_readiness_failure(stage)),
                 Err(NetworkProgressAttemptError::Retry)
                     if tokio::time::Instant::now() < deadline =>
                 {
@@ -1976,6 +1973,17 @@ async fn wait_for_network_progress_attempt(
         }
     }
     Err(NetworkProgressAttemptError::Rejected)
+}
+
+/// The error for a terminal guest failure reported before network readiness
+/// (#3322). Each names the guest's own failure, never the network worker,
+/// which has not started yet.
+fn guest_readiness_failure(stage: GuestBootStage) -> RunnerError {
+    match stage {
+        GuestBootStage::DockerToolingMissing => RunnerError::GuestDockerToolingMissing,
+        GuestBootStage::SetupFailed => RunnerError::GuestSetupFailed,
+        _ => RunnerError::GuestWorkspaceFailed,
+    }
 }
 
 fn network_stack_attach_timeout(requested: Duration, mode: NetworkWorkerMode) -> Duration {
@@ -5221,6 +5229,12 @@ pub enum RunnerError {
         "Docker is enabled but the workspace image has no Docker tooling (dockerd, xtables-nft-multi); create with --no-docker or choose an image that includes Docker"
     )]
     GuestDockerToolingMissing,
+    #[error(
+        "the VM could not install the workspace image (guest setup failed); try another image or a current release of it"
+    )]
+    GuestSetupFailed,
+    #[error("the workspace could not start inside the VM (guest workspace startup failed)")]
+    GuestWorkspaceFailed,
     #[cfg(target_os = "macos")]
     #[error(
         "a previous VM helper (pid {0}) is still running after its runner exited; it is never adopted, so stop that process and start again"
@@ -5429,6 +5443,8 @@ impl RunnerError {
     pub(crate) fn variant_name(&self) -> &'static str {
         match self {
             Self::GuestDockerToolingMissing => "guest_docker_tooling_missing",
+            Self::GuestSetupFailed => "guest_setup_failed",
+            Self::GuestWorkspaceFailed => "guest_workspace_failed",
             #[cfg(target_os = "macos")]
             Self::OrphanedVmm(_) => "orphaned_vmm",
             Self::CwRuntimeDiskChanged => "cw_runtime_disk_changed",
@@ -5867,6 +5883,54 @@ mod tests {
             Ok(GuestBootStage::WorkspaceFailed)
         );
         server.await.unwrap();
+    }
+
+    /// A guest that fails before network readiness reports its own failure,
+    /// never a network worker bootstrap fault: the worker has not started
+    /// (#3322). An image the guest cannot install failed create with
+    /// `network_worker_bootstrap`.
+    #[tokio::test]
+    async fn guest_failure_before_network_readiness_names_the_guest_failure() {
+        const TOKEN: &str = "network-progress-test-token-0123456789abcdef";
+        for (stage, expected) in [
+            (GuestBootStage::SetupFailed, "guest_setup_failed"),
+            (GuestBootStage::WorkspaceFailed, "guest_workspace_failed"),
+            (
+                GuestBootStage::DockerToolingMissing,
+                "guest_docker_tooling_missing",
+            ),
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let socket = temporary.path().join("hybrid.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            set_socket_private(&socket).unwrap();
+            let target = HybridVsockTarget::new(socket, 7_777).unwrap();
+            let vm_id = Uuid::new_v4();
+            let server = tokio::spawn(serve_progress_fixture(
+                listener,
+                TOKEN,
+                vm_id,
+                9,
+                vec![GuestBootStage::RootMounted, stage],
+            ));
+
+            let reported = wait_for_network_progress_attempt(
+                &target,
+                TOKEN,
+                vm_id,
+                9,
+                tokio::time::Instant::now() + HANG_GUARD,
+                NetworkProgressGoal::NetworkReady,
+            )
+            .await
+            .unwrap();
+            assert_eq!(reported, stage);
+            let error = guest_readiness_failure(reported);
+            assert!(!matches!(error, RunnerError::NetworkWorkerBootstrap));
+            assert_eq!(error.variant_name(), expected);
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

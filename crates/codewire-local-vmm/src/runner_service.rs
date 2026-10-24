@@ -1860,6 +1860,11 @@ fn map_start_error(error: RunnerError) -> Status {
 
 /// The runner error code for a guest whose image lacks Docker tooling.
 pub(crate) const GUEST_DOCKER_TOOLING_MISSING: &str = "guest_docker_tooling_missing";
+/// The runner error code for a guest that could not install the workspace
+/// image (#3322).
+pub(crate) const GUEST_SETUP_FAILED: &str = "guest_setup_failed";
+/// The runner error code for a workspace the guest could not start (#3322).
+pub(crate) const GUEST_WORKSPACE_FAILED: &str = "guest_workspace_failed";
 /// The runner error code for a published host port another program holds.
 pub(crate) const HOST_PORT_UNAVAILABLE: &str = "host_port_unavailable";
 
@@ -1878,6 +1883,8 @@ fn network_start_error_code(error: &RunnerError) -> &'static str {
         RunnerError::NetworkWorkerStartTimeout => "network_worker_start_timeout",
         RunnerError::NetworkWorkerBootstrap => "network_worker_bootstrap",
         RunnerError::GuestDockerToolingMissing => GUEST_DOCKER_TOOLING_MISSING,
+        RunnerError::GuestSetupFailed => GUEST_SETUP_FAILED,
+        RunnerError::GuestWorkspaceFailed => GUEST_WORKSPACE_FAILED,
         RunnerError::NetworkWorkerStartup(failure) => failure.runner_error_code(),
         RunnerError::NetworkWorkerWait => "network_worker_wait",
         RunnerError::NetworkWorkerKillTimeout => "network_worker_kill_timeout",
@@ -2209,9 +2216,9 @@ async fn wait_for_guest_daemon(
 
 fn guest_failure_detail(stage: GuestBootStage) -> &'static str {
     match stage {
-        GuestBootStage::SetupFailed => "guest_setup_failed",
-        GuestBootStage::DockerToolingMissing => "guest_docker_tooling_missing",
-        _ => "guest_workspace_failed",
+        GuestBootStage::SetupFailed => GUEST_SETUP_FAILED,
+        GuestBootStage::DockerToolingMissing => GUEST_DOCKER_TOOLING_MISSING,
+        _ => GUEST_WORKSPACE_FAILED,
     }
 }
 
@@ -3362,6 +3369,14 @@ mod tests {
         assert_eq!(
             network_start_error_code(&RunnerError::StartTimeout),
             "network_stack_failed"
+        );
+        assert_eq!(
+            network_start_error_code(&RunnerError::GuestSetupFailed),
+            GUEST_SETUP_FAILED
+        );
+        assert_eq!(
+            network_start_error_code(&RunnerError::GuestWorkspaceFailed),
+            GUEST_WORKSPACE_FAILED
         );
     }
 
