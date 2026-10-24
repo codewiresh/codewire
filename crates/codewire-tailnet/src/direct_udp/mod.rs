@@ -42,7 +42,7 @@ const STUN_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const DERP_MAGIC_IP: Ipv4Addr = Ipv4Addr::new(127, 3, 3, 40);
 const DEFAULT_DERP_REGION_ID: u16 = 1;
 
-fn derp_magic_addr(region_id: u16) -> SocketAddr {
+pub(crate) fn derp_magic_addr(region_id: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(DERP_MAGIC_IP), region_id)
 }
 

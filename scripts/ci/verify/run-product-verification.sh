@@ -34,13 +34,11 @@ install_bun_dependencies() {
 GO_MODULE_DIRS=(
   libs/gen-go
   libs/sdk-go
-  libs/tailnet
   tests/contract
 )
 GO_PACKAGE_PATTERNS=(
   ./libs/gen-go/...
   ./libs/sdk-go/...
-  ./libs/tailnet/...
   ./tests/contract/...
 )
 
@@ -472,7 +470,6 @@ run_contracts() {
 
 run_go_support() {
   if selected go_tailnet; then
-    (cd libs/tailnet && GOWORK=off go vet ./... && GOWORK=off go test -short ./...)
     scripts/ci/verify/tailnet-parity.sh
   fi
   if selected go_consumer_interop; then
@@ -1133,8 +1130,8 @@ run_security() {
     local go_bin
     go_bin="$(go env GOPATH)/bin"
     export PATH="$go_bin:$PATH"
-    go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-    go install honnef.co/go/tools/cmd/staticcheck@2026.1
+    go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+    go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
     go install github.com/securego/gosec/v2/cmd/gosec@latest
     for module in "${GO_MODULE_DIRS[@]}"; do
       (cd "$module" && GOWORK=off govulncheck ./...)

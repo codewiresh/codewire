@@ -200,7 +200,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
     go_licenses = {
         "libs/gen-go/go.mod": "MIT",
         "libs/sdk-go/go.mod": "MIT",
-        "libs/tailnet/go.mod": "BSD-3-Clause",
         "tests/contract/go.mod": "AGPL-3.0-only",
     }
     actual_go_modules = {rel for rel in git_source_files() if rel.endswith("go.mod")}

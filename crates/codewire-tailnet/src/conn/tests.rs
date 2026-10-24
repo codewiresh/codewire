@@ -26,7 +26,6 @@ use std::time::Duration;
 
 use boringtun::x25519::{PublicKey, StaticSecret};
 use rand::rngs::OsRng;
-use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -35,72 +34,12 @@ use chrono::{DateTime, Utc};
 
 use super::{Conn, Options, PeerPath, PeerTransport, Transport, WgDatagram};
 use crate::derp::NodePublic as DerpPublic;
-use crate::node::{prefix_from_uuid, AddrPort, DiscoPublic, Node, NodePublic, Prefix};
+use crate::node::{AddrPort, DiscoPublic, Node, NodePublic, Prefix};
 
 // Two ULA addresses inside Codewire's `fd7a:115c:a1e0::/48` range. A is `::a`,
 // B is `::b`; the peers route to each other by these /128 AllowedIPs.
 const A_IP: Ipv6Addr = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x000a);
 const B_IP: Ipv6Addr = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x000b);
-const GO_TAILNET_PARITY_FIXTURE: &str =
-    include_str!("../../../../tests/fixtures/tailnet/go_tailnet_parity.json");
-
-#[derive(Deserialize)]
-struct GoTailnetParityFixture {
-    version: u32,
-    oracle: GoOracleMetadata,
-    path_cases: Vec<GoPathCase>,
-    derp_magic_cases: Vec<GoDERPMagicCase>,
-    prefix_cases: Vec<GoPrefixCase>,
-    node_json: String,
-}
-
-#[derive(Deserialize)]
-struct GoOracleMetadata {
-    modules: Vec<GoOracleModule>,
-    source_files: Vec<GoOracleSource>,
-}
-
-#[derive(Deserialize)]
-struct GoOracleModule {
-    path: String,
-    version: String,
-}
-
-#[derive(Deserialize)]
-struct GoOracleSource {
-    path: String,
-    sha256: String,
-}
-
-#[derive(Deserialize)]
-struct GoPathCase {
-    name: String,
-    expected: GoPeerPath,
-}
-
-#[derive(Deserialize)]
-struct GoPeerPath {
-    transport: String,
-    #[serde(default)]
-    endpoint: Option<String>,
-    #[serde(default)]
-    peer_relay: Option<String>,
-    #[serde(default)]
-    derp_region_id: Option<i32>,
-}
-
-#[derive(Deserialize)]
-struct GoDERPMagicCase {
-    region_id: u16,
-    addr_port: String,
-}
-
-#[derive(Deserialize)]
-struct GoPrefixCase {
-    uuid: String,
-    prefix: String,
-}
-
 /// Build a `Node` record for a peer: its WG public key (== DERP routing key)
 /// and the single /128 ULA it owns.
 fn peer_node(pubkey: &PublicKey, ip: Ipv6Addr) -> Node {
@@ -126,23 +65,6 @@ fn conn_opts(secret: &StaticSecret, ip: Ipv6Addr) -> Options {
         private_key: Some(secret.clone()),
         disco_private: None,
     }
-}
-
-fn transport_label(transport: PeerTransport) -> &'static str {
-    match transport {
-        PeerTransport::DirectUdp => "direct_udp",
-        PeerTransport::PeerRelay => "peer_relay",
-        PeerTransport::DerpRelay => "derp_relay",
-        PeerTransport::Unknown => "unknown",
-    }
-}
-
-fn relay_descriptor_addr(descriptor: &str) -> SocketAddr {
-    let (addr, _) = descriptor
-        .rsplit_once(":vni:")
-        .expect("peer relay fixture descriptor must include :vni:");
-    addr.parse()
-        .expect("peer relay fixture descriptor must start with host:port")
 }
 
 fn peer_relay_packet_len_for_wg(wg_packet_len: usize) -> usize {
@@ -268,85 +190,26 @@ async fn exercise_tunnel_payload(a: &Conn, b: &Conn, port: u16, req: &[u8], resp
 }
 
 #[test]
-fn go_tailnet_parity_fixture_matches_rust_contracts() {
-    let fixture: GoTailnetParityFixture =
-        serde_json::from_str(GO_TAILNET_PARITY_FIXTURE).expect("Go tailnet parity fixture");
-    assert_eq!(fixture.version, 3);
-    assert!(
-        fixture
-            .oracle
-            .modules
-            .iter()
-            .any(|module| module.path == "tailscale.com" && !module.version.is_empty()),
-        "Go parity fixture must record the tailscale.com oracle version"
-    );
-    assert!(
-        fixture
-            .oracle
-            .source_files
-            .iter()
-            .any(|source| source.path == "libs/tailnet/conn.go" && source.sha256.len() == 64),
-        "Go parity fixture must fingerprint the tailnet source oracle"
-    );
+fn peer_path_constructors_report_their_transport() {
+    let endpoint: SocketAddr = "203.0.113.10:41641".parse().unwrap();
 
-    for case in fixture.path_cases {
-        let path = match case.expected.transport.as_str() {
-            "direct_udp" => {
-                let endpoint = case
-                    .expected
-                    .endpoint
-                    .as_deref()
-                    .expect("direct_udp fixture must include endpoint")
-                    .parse()
-                    .expect("direct_udp endpoint must parse");
-                PeerPath::direct_udp(endpoint)
-            }
-            "peer_relay" => {
-                let endpoint = relay_descriptor_addr(
-                    case.expected
-                        .peer_relay
-                        .as_deref()
-                        .expect("peer_relay fixture must include relay descriptor"),
-                );
-                PeerPath::peer_relay(endpoint)
-            }
-            "derp_relay" => PeerPath::derp_relay(
-                case.expected
-                    .derp_region_id
-                    .expect("derp_relay fixture must include derp region"),
-            ),
-            "unknown" => PeerPath::unknown(),
-            other => panic!("unsupported Go tailnet transport label {other:?}"),
-        };
+    let direct = PeerPath::direct_udp(endpoint);
+    assert_eq!(direct.transport, PeerTransport::DirectUdp);
+    assert_eq!(direct.endpoint, Some(endpoint));
 
-        assert_eq!(
-            transport_label(path.transport),
-            case.expected.transport,
-            "transport label drift in Go fixture case {:?}",
-            case.name
-        );
-    }
+    let relay = PeerPath::peer_relay(endpoint);
+    assert_eq!(relay.transport, PeerTransport::PeerRelay);
+    assert_eq!(relay.endpoint, Some(endpoint));
 
-    for case in fixture.derp_magic_cases {
-        assert_eq!(
-            case.addr_port,
-            format!("127.3.3.40:{}", case.region_id),
-            "DERP magic address drift for region {}",
-            case.region_id
-        );
-    }
+    let derp = PeerPath::derp_relay(3);
+    assert_eq!(derp.transport, PeerTransport::DerpRelay);
+    assert_eq!(derp.derp_region_id, Some(3));
+    // Region 0 means "unset" and falls back to the default region.
+    assert_eq!(PeerPath::derp_relay(0).derp_region_id, Some(1));
 
-    for case in fixture.prefix_cases {
-        let id = Uuid::parse_str(&case.uuid).expect("prefix fixture UUID");
-        assert_eq!(prefix_from_uuid(&id).to_string(), case.prefix);
-    }
-
-    let node: Node = serde_json::from_str(&fixture.node_json).expect("Go node JSON");
-    let encoded = serde_json::to_string(&node).expect("Rust node JSON");
-    assert_eq!(
-        encoded, fixture.node_json,
-        "Rust Node JSON must round-trip the Go fixture byte-for-byte"
-    );
+    let unknown = PeerPath::unknown();
+    assert_eq!(unknown.transport, PeerTransport::Unknown);
+    assert_eq!((unknown.endpoint, unknown.derp_region_id), (None, None));
 }
 
 // ---------------------------------------------------------------------------

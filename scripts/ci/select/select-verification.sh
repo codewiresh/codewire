@@ -1091,7 +1091,20 @@ if [ "$event_selected" = false ]; then
         select_token transport_pkg_codewire_vmm_guest_probe
         recognized=true
         ;;
-      libs/tailnet/*|scripts/ci/verify/tailnet-parity.sh)
+      libs/tailnet/*)
+        # The Go tailnet oracle is retired: Tailscale wire formats are checked
+        # by tests/contract/tailscalegolden instead. Recognize its deletion and
+        # reject any attempt to recreate it.
+        if [ -e "$repo_root/$path" ]; then
+          echo "::error::retired Go tailnet oracle path recreated: $path" >&2
+          exit 1
+        fi
+        select_token go_support
+        select_token go_tailnet
+        recognized=true
+        ;;
+      tests/contract/tailscalegolden/*|tests/fixtures/tailnet/*|\
+      scripts/ci/verify/tailnet-parity.sh)
         select_token go_support
         select_token go_tailnet
         recognized=true
@@ -1596,6 +1609,9 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       tests/contract/go.mod|tests/contract/go.sum)
+        # A tailscale.com bump must rerun the Tailscale wire-format golden.
+        select_token go_support
+        select_token go_tailnet
         select_token security
         select_token security_go
         select_token transport

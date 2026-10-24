@@ -62,7 +62,7 @@ checkout to select the API version; run Go checks with `GOWORK=off` unless a
 task explicitly creates a pinned temporary workspace.
 
 The Rust CLI and tailnet modules are inside this repo (`crates/codewire-cli`
-and `libs/tailnet`); they are not separate sibling checkouts. `apps/cli` now
+and `crates/codewire-tailnet`); they are not separate sibling checkouts. `apps/cli` now
 holds release/install packaging and the Mesh chart, not a second CLI runtime.
 
 ## Non-Kind App Loop

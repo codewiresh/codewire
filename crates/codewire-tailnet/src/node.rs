@@ -2,7 +2,7 @@
 //!
 //! The [`crate::node::Node`] struct is the WireGuard connectivity record exchanged
 //! between clients and environment sidecars via the coordinator (JSON over
-//! WebSocket). It is the Rust port of `libs/tailnet/node.go` and its JSON
+//! WebSocket). It is the Rust port of the retired Go `libs/tailnet/node.go` and its JSON
 //! encoding must preserve the Go wire contract **byte-for-byte**.
 //!
 //! Field-name + encoding parity with Go (`json` tags / stdlib marshalers):
@@ -309,7 +309,7 @@ impl<'de> Deserialize<'de> for AddrPort {
 /// The WireGuard connectivity information for a single peer.
 ///
 /// Exchanged between clients and agents via the coordinator (JSON over
-/// WebSocket). Field names and ordering match `libs/tailnet/node.go`.
+/// WebSocket). Field names and ordering match the retired Go `libs/tailnet/node.go`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Node {
     /// Stable identity (the environment UUID for a sidecar; a per-connection
@@ -370,9 +370,9 @@ pub fn prefix_from_uuid(uid: &Uuid) -> Prefix {
 mod tests {
     use super::*;
 
-    // Vectors captured from the Go source via `go test` against
-    // `libs/tailnet/node.go` (CWServicePrefix.PrefixFromUUID). These are the
-    // cross-language parity anchors; if Go changes, regenerate.
+    // Vectors captured from the retired Go `libs/tailnet/node.go`
+    // (CWServicePrefix.PrefixFromUUID). They fix the wire contract; the Go
+    // source is gone, so they are not regenerated.
     const ULA_UUID_1: &str = "12345678-1234-5678-1234-567812345678";
     const ULA_PREFIX_1: &str = "fd7a:115c:a1e0:1234:5678:1234:5678:1234/128";
     const ULA_UUID_2: &str = "00112233-4455-6677-8899-aabbccddeeff";

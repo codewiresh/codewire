@@ -62,8 +62,6 @@ def check_retired_reference_source(_args: argparse.Namespace) -> int:
     retired_coder_pattern = re.compile(r"(?<![A-Za-z])coder(?![A-Za-z])", re.IGNORECASE)
     allowed: list[dict[str, Any]] = []
     for path in [
-        "libs/tailnet/go.mod",
-        "libs/tailnet/go.sum",
         "tests/contract/go.mod",
         "tests/contract/go.sum",
     ]:
@@ -134,6 +132,7 @@ def check_go_source_classification(_args: argparse.Namespace) -> int:
         "libs/daemon-proto/go.mod",
         "libs/daemon-proto/go.sum",
         "libs/gatewayauth",
+        "libs/tailnet",
         "tests/contract/billing",
         "tests/contract/connectcore",
         "tests/contract/coordinator",
@@ -145,7 +144,10 @@ def check_go_source_classification(_args: argparse.Namespace) -> int:
             "Tailscale Go-client DERP interoperability",
             re.compile(r"^tests/contract/derp/.*\.go$"),
         ),
-        ("bounded Go Tailnet oracle", re.compile(r"^libs/tailnet/.*\.go$")),
+        (
+            "Tailscale wire-format golden",
+            re.compile(r"^tests/contract/tailscalegolden/.*\.go$"),
+        ),
         (
             "generated Go API consumers",
             re.compile(r"^libs/gen-go/.*\.go$"),

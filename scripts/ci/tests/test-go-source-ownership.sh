@@ -11,6 +11,7 @@ retired_paths=(
   libs/daemon-proto/go.mod
   libs/daemon-proto/go.sum
   libs/gatewayauth
+  libs/tailnet
   tests/contract/billing
   tests/contract/connectcore
   tests/contract/coordinator
@@ -28,7 +29,6 @@ done
 expected_modules="$(cat <<'EOF'
 libs/gen-go/go.mod
 libs/sdk-go/go.mod
-libs/tailnet/go.mod
 tests/contract/go.mod
 EOF
 )"
@@ -62,7 +62,7 @@ fi
 
 actual_modules="$(repository_go_modules "$ROOT")"
 if [ "$actual_modules" != "$expected_modules" ]; then
-  echo 'Go module ownership differs from the accepted four-module boundary' >&2
+  echo 'Go module ownership differs from the accepted three-module boundary' >&2
   diff -u <(printf '%s\n' "$expected_modules") <(printf '%s\n' "$actual_modules") >&2 || true
   exit 1
 fi
@@ -85,13 +85,14 @@ if grep -Eq '(^|[[:space:]])\.\./' "$ROOT/go.work"; then
   exit 1
 fi
 
-expected_contract_source='tests/contract/derp/derp_test.go'
+expected_contract_source='tests/contract/derp/derp_test.go
+tests/contract/tailscalegolden/golden_test.go'
 actual_contract_source="$(
   cd "$ROOT"
   find tests/contract -type f -name '*.go' -print | LC_ALL=C sort
 )"
 if [ "$actual_contract_source" != "$expected_contract_source" ]; then
-  echo 'tests/contract must contain only the retained Go/Tailscale DERP client' >&2
+  echo 'tests/contract must contain only the Go/Tailscale DERP client and the Tailscale wire-format golden' >&2
   diff -u <(printf '%s\n' "$expected_contract_source") \
     <(printf '%s\n' "$actual_contract_source") >&2 || true
   exit 1

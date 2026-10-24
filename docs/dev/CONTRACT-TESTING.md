@@ -25,8 +25,9 @@ Go has two explicit, narrower roles:
 
 - generated Connect client and ergonomic SDK interoperability, selected for
   proto/generated-Go/Go-SDK or release changes; and
-- Tailscale Go-client transport interoperability plus the bounded Go Tailnet
-  differential diagnostic, selected only for the relevant transport surface or
+- Tailscale Go-client transport interoperability plus the Tailscale
+  wire-format golden (`tests/contract/tailscalegolden`), which the Rust
+  tailnet port must match, selected only for the relevant transport surface or
   dispatched manually.
 
 Neither is a complete Rust-server acceptance suite. The deleted Go product

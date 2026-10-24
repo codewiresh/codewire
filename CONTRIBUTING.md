@@ -45,8 +45,8 @@ local Kind cluster (`make kind-up`, then `make kind-deploy SERVICE=...` and
 Run the bounded Go/Tailscale support tests when changing those surfaces:
 
 ```bash
-(cd libs/tailnet && GOWORK=off go test -short ./...)
 (cd tests/contract && GOWORK=off go test ./...)
+cargo test -p codewire-tailnet golden_tests
 ```
 
 Useful repo-level checks:

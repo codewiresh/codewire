@@ -75,7 +75,7 @@ impl BindingRequest {
         Self::with_transaction_id(transaction_id)
     }
 
-    fn with_transaction_id(transaction_id: [u8; TRANSACTION_ID_LEN]) -> Self {
+    pub(crate) fn with_transaction_id(transaction_id: [u8; TRANSACTION_ID_LEN]) -> Self {
         Self {
             transaction_id,
             packet: binding_request(transaction_id),

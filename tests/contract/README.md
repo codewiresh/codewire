@@ -22,6 +22,23 @@ DERP_BASE_URL=http://127.0.0.1:8080 \
 Set `DERP_WEBSOCKET=1` to run the WebSocket fallback case as well as the raw
 HTTP upgrade case.
 
+## Tailscale wire-format golden
+
+`tailscalegolden` records the Tailscale wire formats the Rust
+`codewire-tailnet` port reimplements (DERP frames and constants, disco
+messages, STUN, UDP-relay Geneve headers, key encodings), produced by
+Tailscale's own Go packages at the `tailscale.com` version in `go.mod`. It
+needs no service and always runs:
+
+```sh
+GOWORK=off go test ./tailscalegolden/
+```
+
+It fails when the pinned Tailscale produces different bytes than
+`tests/fixtures/tailnet/tailscale_golden.json`. After a `tailscale.com` bump,
+regenerate with `UPDATE_TAILSCALE_GOLDEN=1`, review the diff, and make
+`cargo test -p codewire-tailnet golden_tests` pass.
+
 ## Writing a suite
 
 - Do not add another general Rust-service suite here.

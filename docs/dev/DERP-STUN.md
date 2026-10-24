@@ -303,9 +303,6 @@ Tailscale's `TS_DEBUG_NEVER_DIRECT_UDP=1`.
   daemon's `AllocatePeerRelay`.
 - **CLI bootstrap:** `crates/codewire-cli/src/tailnet_ssh.rs` and the
   `cw doctor tailnet` implementation in `crates/codewire-cli/src/lib.rs`
-- **tailnet library:** `libs/tailnet/derp.go` (NewDERPMap, WithSTUNNode),
-  `libs/tailnet/conn.go` (SetDERPMap, ReSTUN), and `libs/tailnet/path.go`
-  (direct UDP, UDP relay, and DERP relay path probe)
 - **Rust tailnet candidate:** `crates/codewire-tailnet/src/disco.rs`,
   `crates/codewire-tailnet/src/endpoint_tracker.rs`,
   `crates/codewire-tailnet/src/stun.rs`,

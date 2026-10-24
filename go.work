@@ -1,8 +1,7 @@
-go 1.26.10
+go 1.27.3
 
 use (
 	./libs/gen-go
 	./libs/sdk-go
-	./libs/tailnet
 	./tests/contract
 )

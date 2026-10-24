@@ -38,7 +38,7 @@ In scope:
   orchestration, IdP/auth, credential service, coordinator, Mesh, the
   workspace daemon, DERP, the local VM runtime, and the `cw` CLI.
 - The retained Go SDK/generated-client modules, Tailscale-client
-  interoperability suite, and bounded Tailnet diagnostic.
+  interoperability suite, and Tailscale wire-format golden.
 - The dashboard (`apps/dashboard`) and other client apps in this repository.
 - The published SDKs and generated clients in `libs/` and `packages/`.
 - The Kubernetes manifests in `deployments/k8s/`.

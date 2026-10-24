@@ -1202,6 +1202,9 @@ run_paths_case rust_derp pull_request refs/pull/91/head false \
 run_paths_case go_tailnet pull_request refs/pull/10/head false \
   'go_support go_tailnet policy' \
   libs/tailnet/peer.go
+run_paths_case tailscale_golden pull_request refs/pull/10/head false \
+  'go_support go_tailnet policy' \
+  tests/contract/tailscalegolden/golden_test.go tests/fixtures/tailnet/tailscale_golden.json
 run_paths_case derp_contract pull_request refs/pull/101/head false \
   'policy transport transport_derp_contract transport_pkg_codewire_derp' \
   tests/contract/derp/derp_test.go
@@ -1389,7 +1392,7 @@ run_paths_case go_consumer_interop_harness pull_request refs/pull/131/head false
   'go_consumer_interop go_support policy rust rust_pkg_codewire_server_core' \
   crates/codewire-server-core/tests/go_consumer_interop.rs
 run_paths_case contract_go_module pull_request refs/pull/132/head false \
-  'policy security security_go transport transport_derp_contract transport_pkg_codewire_derp' \
+  'go_support go_tailnet policy security security_go transport transport_derp_contract transport_pkg_codewire_derp' \
   tests/contract/go.mod tests/contract/go.sum
 run_paths_case sdk_ts pull_request refs/pull/14/head false \
   'policy sdk_ts' libs/sdk-ts/src/index.ts
@@ -2099,8 +2102,11 @@ if rg -n 'tests/contract' "$contracts_proto_runner"; then
 fi
 grep -qF 'selected go_consumer_interop' "$go_support_runner"
 grep -qF 'selected go_tailnet' "$go_support_runner"
-grep -qF 'GOWORK=off go vet ./...' "$go_support_runner"
-grep -qF 'GOWORK=off go test -short ./...' "$go_support_runner"
+grep -qF 'scripts/ci/verify/tailnet-parity.sh' "$go_support_runner"
+if grep -qF 'cd libs/tailnet' "$go_support_runner"; then
+  echo 'go_tailnet still runs the retired Go tailnet oracle' >&2
+  exit 1
+fi
 grep -qF 'cargo test --locked -p codewire-server-core' "$go_support_runner"
 grep -qF -- '--test go_consumer_interop generated_go_client_consumes_rust_connect' \
   "$go_support_runner"
@@ -4954,7 +4960,7 @@ SUPPORT = {
     "Install pinned protoc for Rust builds", "Install pinned protoc for Rust-backed standard checks",
     "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",
     "Install locked dashboard browser-test dependencies",
-    "Set up Go 1.26.10", "Set up Go 1.26.10 for security checks", "Set up Go 1.26.10 for DERP interop",
+    "Set up Go 1.27.3", "Set up Go 1.27.3 for security checks", "Set up Go 1.27.3 for DERP interop",
     "Set up pinned Darwin C cross-check tools",
     "Clean workspace cache credentials",
     "Clean compiler cache credentials", "Report and clean Rust cache", "Start integration Postgres",

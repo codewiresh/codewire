@@ -1,0 +1,289 @@
+{
+  "version": 1,
+  "generated_by": "tests/contract/tailscalegolden/golden_test.go",
+  "tailscale": {
+    "module": "tailscale.com",
+    "version": "v1.104.2",
+    "sum": "h1:zBbSW0tI4Xi2PhrZEl9yt6oWay3l8A+M8scsTnZpyAk="
+  },
+  "keys": {
+    "node_a": {
+      "private_hex": "eb51765019cead2180cba46026fad344661d4a836ca9ff4a0ed695460c95db37",
+      "public_hex": "0e8576f74117b5dd0d82ba523ad5aec2fa27ab600b5ff4b5f6422d1c0f67e84d",
+      "public_text": "nodekey:0e8576f74117b5dd0d82ba523ad5aec2fa27ab600b5ff4b5f6422d1c0f67e84d"
+    },
+    "node_b": {
+      "private_hex": "5a0a565595da209b53f68cbf56f3efff710b64a9a1e57cc3b3db609bb94c77b7",
+      "public_hex": "24a9deb79ec2cd382f5b96701191efea6553578d4e14a8bb3b27bc07def94b6d",
+      "public_text": "nodekey:24a9deb79ec2cd382f5b96701191efea6553578d4e14a8bb3b27bc07def94b6d"
+    },
+    "disco_a": {
+      "private_hex": "6aad68448e065e923363d7ba29390631bc7d7976bb32d4f7b86819b7a25f8231",
+      "public_hex": "0c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815c",
+      "public_text": "discokey:0c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815c"
+    },
+    "disco_b": {
+      "private_hex": "b72bc800fe38acfc194d32f9c01516bb1a0d538bec490e481b9590eccd7be7a6",
+      "public_hex": "abb295327f74993172a3e2e48e17925ac3c9336c5777163720351d7678121f56",
+      "public_text": "discokey:abb295327f74993172a3e2e48e17925ac3c9336c5777163720351d7678121f56"
+    }
+  },
+  "derp": {
+    "magic_hex": "44455250f09f9491",
+    "protocol_version": 2,
+    "frame_header_len": 5,
+    "max_packet_size": 65536,
+    "magic_ip_addr": "127.3.3.40",
+    "frame_types": {
+      "client_info": 2,
+      "close_peer": 17,
+      "forward_packet": 10,
+      "health": 20,
+      "keep_alive": 6,
+      "note_preferred": 7,
+      "peer_gone": 8,
+      "peer_present": 9,
+      "ping": 18,
+      "pong": 19,
+      "recv_packet": 5,
+      "restarting": 21,
+      "send_packet": 4,
+      "server_info": 3,
+      "server_key": 1,
+      "watch_conns": 16
+    },
+    "frames": [
+      {
+        "name": "server_key",
+        "type": 1,
+        "payload_hex": "44455250f09f949124a9deb79ec2cd382f5b96701191efea6553578d4e14a8bb3b27bc07def94b6d",
+        "frame_hex": "010000002844455250f09f949124a9deb79ec2cd382f5b96701191efea6553578d4e14a8bb3b27bc07def94b6d"
+      },
+      {
+        "name": "send_packet",
+        "type": 4,
+        "payload_hex": "24a9deb79ec2cd382f5b96701191efea6553578d4e14a8bb3b27bc07def94b6d68656c6c6f206f7665722064657270",
+        "frame_hex": "040000002f24a9deb79ec2cd382f5b96701191efea6553578d4e14a8bb3b27bc07def94b6d68656c6c6f206f7665722064657270"
+      },
+      {
+        "name": "recv_packet",
+        "type": 5,
+        "payload_hex": "0e8576f74117b5dd0d82ba523ad5aec2fa27ab600b5ff4b5f6422d1c0f67e84d68656c6c6f206f7665722064657270",
+        "frame_hex": "050000002f0e8576f74117b5dd0d82ba523ad5aec2fa27ab600b5ff4b5f6422d1c0f67e84d68656c6c6f206f7665722064657270"
+      },
+      {
+        "name": "keep_alive",
+        "type": 6,
+        "payload_hex": "",
+        "frame_hex": "0600000000"
+      },
+      {
+        "name": "note_preferred",
+        "type": 7,
+        "payload_hex": "01",
+        "frame_hex": "070000000101"
+      },
+      {
+        "name": "peer_gone",
+        "type": 8,
+        "payload_hex": "0e8576f74117b5dd0d82ba523ad5aec2fa27ab600b5ff4b5f6422d1c0f67e84d00",
+        "frame_hex": "08000000210e8576f74117b5dd0d82ba523ad5aec2fa27ab600b5ff4b5f6422d1c0f67e84d00"
+      },
+      {
+        "name": "ping",
+        "type": 18,
+        "payload_hex": "8b8194343af3185c",
+        "frame_hex": "12000000088b8194343af3185c"
+      },
+      {
+        "name": "pong",
+        "type": 19,
+        "payload_hex": "8b8194343af3185c",
+        "frame_hex": "13000000088b8194343af3185c"
+      }
+    ],
+    "sealed": [
+      {
+        "name": "client_info",
+        "from": "node_a",
+        "to": "node_b",
+        "plaintext_hex": "7b2276657273696f6e223a322c226d6573684b6579223a22222c2263616e41636b50696e6773223a747275652c22697350726f626572223a66616c73657d",
+        "sealed_hex": "da9e8de7fcdbb2a07fdd94bf3f639654737a413f974c1164d3931a98aa1696e7bf9c67f1d06e671672d9a6aec2db5f05adb42ad9c647513a4af4f1e4361a66d137d065a20d63f4b12e6e426b19dff2d3e39218b119fc148696f7fd65548b884a80a14771a5fd"
+      }
+    ]
+  },
+  "disco": {
+    "magic_hex": "5453f09f92ac",
+    "nonce_len": 24,
+    "messages": [
+      {
+        "name": "ping",
+        "type": 1,
+        "tx_id_hex": "d26d658b3f6bd2520cf9fec7",
+        "payload_hex": "0100d26d658b3f6bd2520cf9fec7"
+      },
+      {
+        "name": "ping_with_node_key",
+        "type": 1,
+        "tx_id_hex": "d26d658b3f6bd2520cf9fec7",
+        "node_key_hex": "0e8576f74117b5dd0d82ba523ad5aec2fa27ab600b5ff4b5f6422d1c0f67e84d",
+        "payload_hex": "0100d26d658b3f6bd2520cf9fec70e8576f74117b5dd0d82ba523ad5aec2fa27ab600b5ff4b5f6422d1c0f67e84d"
+      },
+      {
+        "name": "ping_padded",
+        "type": 1,
+        "tx_id_hex": "d26d658b3f6bd2520cf9fec7",
+        "node_key_hex": "0e8576f74117b5dd0d82ba523ad5aec2fa27ab600b5ff4b5f6422d1c0f67e84d",
+        "padding": 16,
+        "payload_hex": "0100d26d658b3f6bd2520cf9fec70e8576f74117b5dd0d82ba523ad5aec2fa27ab600b5ff4b5f6422d1c0f67e84d00000000000000000000000000000000"
+      },
+      {
+        "name": "pong_v4",
+        "type": 2,
+        "tx_id_hex": "d26d658b3f6bd2520cf9fec7",
+        "src": "198.51.100.7:41641",
+        "payload_hex": "0200d26d658b3f6bd2520cf9fec700000000000000000000ffffc6336407a2a9"
+      },
+      {
+        "name": "pong_v6",
+        "type": 2,
+        "tx_id_hex": "d26d658b3f6bd2520cf9fec7",
+        "src": "[2001:db8::7]:41641",
+        "payload_hex": "0200d26d658b3f6bd2520cf9fec720010db8000000000000000000000007a2a9"
+      },
+      {
+        "name": "call_me_maybe",
+        "type": 3,
+        "endpoints": [
+          "198.51.100.7:41641",
+          "[2001:db8::7]:41641"
+        ],
+        "payload_hex": "030000000000000000000000ffffc6336407a2a920010db8000000000000000000000007a2a9"
+      },
+      {
+        "name": "bind_udp_relay_endpoint",
+        "type": 4,
+        "vni": 43981,
+        "generation": 3,
+        "remote_key_hex": "0c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815c",
+        "challenge_hex": "86744c5478fbb2d3e374065b513a386f23982b2ac5794041a056deaa0bd28b7a",
+        "payload_hex": "04000000abcd000000030c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815c86744c5478fbb2d3e374065b513a386f23982b2ac5794041a056deaa0bd28b7a"
+      },
+      {
+        "name": "bind_udp_relay_endpoint_challenge",
+        "type": 5,
+        "vni": 43981,
+        "generation": 3,
+        "remote_key_hex": "0c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815c",
+        "challenge_hex": "86744c5478fbb2d3e374065b513a386f23982b2ac5794041a056deaa0bd28b7a",
+        "payload_hex": "05000000abcd000000030c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815c86744c5478fbb2d3e374065b513a386f23982b2ac5794041a056deaa0bd28b7a"
+      },
+      {
+        "name": "bind_udp_relay_endpoint_answer",
+        "type": 6,
+        "vni": 43981,
+        "generation": 3,
+        "remote_key_hex": "0c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815c",
+        "challenge_hex": "86744c5478fbb2d3e374065b513a386f23982b2ac5794041a056deaa0bd28b7a",
+        "payload_hex": "06000000abcd000000030c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815c86744c5478fbb2d3e374065b513a386f23982b2ac5794041a056deaa0bd28b7a"
+      },
+      {
+        "name": "allocate_udp_relay_endpoint_request",
+        "type": 8,
+        "generation": 9,
+        "client_disco_hex": [
+          "0c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815c",
+          "abb295327f74993172a3e2e48e17925ac3c9336c5777163720351d7678121f56"
+        ],
+        "payload_hex": "08000c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815cabb295327f74993172a3e2e48e17925ac3c9336c5777163720351d7678121f5600000009"
+      },
+      {
+        "name": "allocate_udp_relay_endpoint_response",
+        "type": 9,
+        "endpoints": [
+          "203.0.113.10:7777",
+          "[2001:db8::10]:7777"
+        ],
+        "vni": 43981,
+        "generation": 9,
+        "client_disco_hex": [
+          "0c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815c",
+          "abb295327f74993172a3e2e48e17925ac3c9336c5777163720351d7678121f56"
+        ],
+        "server_disco_hex": "abb295327f74993172a3e2e48e17925ac3c9336c5777163720351d7678121f56",
+        "lamport_id": 7,
+        "bind_lifetime_ns": 5000000000,
+        "steady_state_lifetime_ns": 300000000000,
+        "payload_hex": "090000000009abb295327f74993172a3e2e48e17925ac3c9336c5777163720351d7678121f560c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815cabb295327f74993172a3e2e48e17925ac3c9336c5777163720351d7678121f5600000000000000070000abcd000000012a05f20000000045d964b80000000000000000000000ffffcb00710a1e6120010db80000000000000000000000101e61"
+      },
+      {
+        "name": "call_me_maybe_via",
+        "type": 7,
+        "endpoints": [
+          "203.0.113.10:7777",
+          "[2001:db8::10]:7777"
+        ],
+        "vni": 43981,
+        "client_disco_hex": [
+          "0c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815c",
+          "abb295327f74993172a3e2e48e17925ac3c9336c5777163720351d7678121f56"
+        ],
+        "server_disco_hex": "abb295327f74993172a3e2e48e17925ac3c9336c5777163720351d7678121f56",
+        "lamport_id": 7,
+        "bind_lifetime_ns": 5000000000,
+        "steady_state_lifetime_ns": 300000000000,
+        "payload_hex": "0700abb295327f74993172a3e2e48e17925ac3c9336c5777163720351d7678121f560c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815cabb295327f74993172a3e2e48e17925ac3c9336c5777163720351d7678121f5600000000000000070000abcd000000012a05f20000000045d964b80000000000000000000000ffffcb00710a1e6120010db80000000000000000000000101e61"
+      }
+    ],
+    "sealed": [
+      {
+        "name": "ping",
+        "from": "disco_a",
+        "to": "disco_b",
+        "payload_hex": "0100d26d658b3f6bd2520cf9fec70e8576f74117b5dd0d82ba523ad5aec2fa27ab600b5ff4b5f6422d1c0f67e84d",
+        "packet_hex": "5453f09f92ac0c2d8066a0e1300b2686dde04da212f153fe8ec5d3991148e8d0a632a91b815c0573358bc7ccf8cffe00ad87da48cfd3d02586f4fa5688bbbf60ad992d6fbfb62d85443ed464c3782ed8f9fda0b79353471dd538717b746e307220a14d4e4f52345785135cc4f0b13ba4439f36f5409af3b94d611628"
+      }
+    ]
+  },
+  "stun": {
+    "request": {
+      "tx_id_hex": "586a8d8d4bac41baa14f0d02",
+      "packet_hex": "000100142112a442586a8d8d4bac41baa14f0d02802200087461696c6e6f6465802800047f5b7eae"
+    },
+    "responses": [
+      {
+        "tx_id_hex": "586a8d8d4bac41baa14f0d02",
+        "addr": "203.0.113.7:41641",
+        "packet_hex": "0101000c2112a442586a8d8d4bac41baa14f0d0200200008000183bbea12d545"
+      },
+      {
+        "tx_id_hex": "586a8d8d4bac41baa14f0d02",
+        "addr": "[2001:db8::7]:41641",
+        "packet_hex": "010100182112a442586a8d8d4bac41baa14f0d0200200014000283bb0113a9fa586a8d8d4bac41baa14f0d05"
+      }
+    ]
+  },
+  "geneve": [
+    {
+      "name": "control_disco",
+      "vni": 43981,
+      "control": true,
+      "protocol": 31249,
+      "header_hex": "00807a1100abcd00"
+    },
+    {
+      "name": "relay_disco",
+      "vni": 43981,
+      "control": false,
+      "protocol": 31249,
+      "header_hex": "00007a1100abcd00"
+    },
+    {
+      "name": "relay_wireguard",
+      "vni": 43981,
+      "control": false,
+      "protocol": 31250,
+      "header_hex": "00007a1200abcd00"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 //! `codewire-tailnet` — a minimal, Codewire-owned tailnet client.
 //!
-//! This is the Rust port of `libs/tailnet` (#59). It is **bounded by the
+//! This is the Rust port of the retired Go `libs/tailnet` (#59). It is **bounded by the
 //! ~933 LoC of behaviour Codewire actually uses**, not by Tailscale's full
 //! stack. The Go side wraps `wgengine` + `magicsock` + gvisor `netstack`;
 //! here we reimplement only the subset behind a small public API:
@@ -17,7 +17,7 @@
 //!   CallMeMaybeVia/UDP-relay allocation and bind handshake messages used by
 //!   magicsock.
 //!
-//! Consumer API surface to reach (from `libs/tailnet/conn.go` + the gateway):
+//! Consumer API surface (from the retired `libs/tailnet/conn.go` + the gateway):
 //! `Conn::new` · `listen` · `dial_tcp` · `update_peers` · `set_node_callback`
 //! · `set_derp_map` · `node` · `close`; plus `Node`, `DerpMap`, the
 //! `CWServicePrefix` ULA helper.
@@ -67,7 +67,7 @@ pub mod netstack;
 /// The top-level [`conn::Conn`] (#59 capstone): ties the WireGuard data plane
 /// (#45), relay/direct transport (#46/#265), node/peer state (#48), and
 /// userspace netstack (#59) into a working tunnel exposing `listen` /
-/// `dial_context_tcp`. Mirrors `libs/tailnet/conn.go`.
+/// `dial_context_tcp`. Mirrors the retired Go `libs/tailnet/conn.go`.
 pub mod conn;
 
 /// WireGuard data-plane core (boringtun). Spike for #45.
@@ -100,6 +100,10 @@ pub mod wg {
         }
     }
 }
+
+/// Tailscale wire-format golden vectors (`tests/fixtures/tailnet/tailscale_golden.json`).
+#[cfg(test)]
+mod golden_tests;
 
 #[cfg(test)]
 mod spike_tests {

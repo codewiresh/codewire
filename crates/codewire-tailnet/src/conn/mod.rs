@@ -1,7 +1,7 @@
 //! The top-level [`crate::conn::Conn`] — the capstone that ties the four proven
 //! sub-components into a working WireGuard-over-DERP tunnel (#59).
 //!
-//! This is the Rust equivalent of `libs/tailnet/conn.go`. The Go side wraps
+//! This is the Rust equivalent of the retired Go `libs/tailnet/conn.go`, which wrapped
 //! Tailscale's `wgengine` + `magicsock` + gvisor `netstack`; here we assemble
 //! the same data path from our own pieces:
 //!
