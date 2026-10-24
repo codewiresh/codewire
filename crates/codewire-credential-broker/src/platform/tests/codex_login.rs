@@ -527,6 +527,115 @@ async fn concurrent_logins_and_proxied_requests_across_epochs_refresh_once() -> 
     f.finish(result).await
 }
 
+/// A lease of one epoch whose two record reads straddle another epoch's
+/// refresh commit: the record it read first has moved to the next revocation
+/// generation by its second read. The lease evaluates again once, as the
+/// fresh lease it would have been, and delivers the rotated login or sends the
+/// rotated token; it never releases the replaced one (main run 19775).
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn a_lease_straddling_another_epochs_refresh_commit_evaluates_again() -> Result<()> {
+    for case in ["codex login", "proxied request"] {
+        let f = Fixture::create_for_bridge().await?;
+        let result = async {
+            let rotated = token(serde_json::json!({"exp": unix_now()? + 7_200}));
+            let provider = Provider {
+                exchanges: Arc::new(AtomicUsize::new(0)),
+                responses: Arc::new(AtomicUsize::new(0)),
+                rotated: rotated.clone(),
+            };
+            let first = Arc::new(OpenAiBroker::new(f.second().await?.1, provider.clone())?);
+            let second = Arc::new(OpenAiBroker::new(f.second().await?.1, provider.clone())?);
+            let login_request = || -> Result<_> {
+                let recipient = ProjectionRecipient::new();
+                let request = codewire_daemon_proto::codewire::bridge::v1::CodexLoginRequest {
+                    request_id: Uuid::new_v4().to_string(),
+                    recipient_public_key: recipient.public_key().to_vec(),
+                    deadline_unix_ms: unix_now()? * 1_000 + 25_000,
+                };
+                Ok((recipient, request))
+            };
+            let open =
+                |recipient: ProjectionRecipient,
+                 request: &codewire_daemon_proto::codewire::bridge::v1::CodexLoginRequest,
+                 sealed: &[u8]|
+                 -> Result<_> {
+                    Ok(recipient.open_codex_login(
+                        sealed,
+                        &CodexLoginContext {
+                            environment_id: *Uuid::parse_str(f.context.environment_id.as_str())?
+                                .as_bytes(),
+                            environment_generation: f.context.environment_generation,
+                            request_id: *Uuid::parse_str(&request.request_id)?.as_bytes(),
+                            deadline_unix_ms: request.deadline_unix_ms,
+                        },
+                        unix_now()? * 1_000,
+                    )?)
+                };
+            // The second epoch's first lease stops between its two record
+            // reads, holding the record and material of generation 1.
+            let gate = Arc::new(SessionGate::default());
+            gate.arm(1);
+            let (straddling, login) = match case {
+                "codex login" => {
+                    let (recipient, request) = login_request()?;
+                    let broker = Arc::clone(&second);
+                    let sent = request.clone();
+                    let task = spawn(BETWEEN_RECORD_READS.scope(gate.clone(), async move {
+                        Ok::<_, anyhow::Error>(Some(broker.codex_login(sent).await?))
+                    }));
+                    (task, Some((recipient, request)))
+                }
+                _ => {
+                    let broker = Arc::clone(&second);
+                    let task = spawn(BETWEEN_RECORD_READS.scope(gate.clone(), async move {
+                        let response = broker.execute(proxied_request()).await?;
+                        let (status, _, mut body) = response.into_parts();
+                        while let Some(chunk) = futures::StreamExt::next(&mut body).await {
+                            chunk?;
+                        }
+                        ensure!(status == StatusCode::OK);
+                        Ok::<Option<Vec<u8>>, anyhow::Error>(None)
+                    }));
+                    (task, None)
+                }
+            };
+            gate.wait().await?;
+            // The first epoch refreshes and commits generation 2 meanwhile.
+            let (recipient, request) = login_request()?;
+            let sealed = {
+                let broker = Arc::clone(&first);
+                let sent = request.clone();
+                finish_task(spawn(async move { broker.codex_login(sent).await })).await??
+            };
+            ensure!(open(recipient, &request, &sealed)?.login.access_token() == rotated);
+            let committed = f.store.record(&f.owner, &f.record.metadata.id).await?;
+            ensure!(committed.version.revocation_generation == 2);
+            ensure!(committed.version.material_generation == 2);
+            gate.release();
+            let straddled = finish_task(straddling).await?;
+            let straddled = match straddled {
+                Ok(sealed) => sealed,
+                Err(error) => anyhow::bail!("{case} straddling the refresh commit: {error}"),
+            };
+            if let (Some(sealed), Some((recipient, request))) = (straddled, login) {
+                let opened = open(recipient, &request, &sealed)?;
+                ensure!(opened.login.access_token() == rotated);
+                ensure!(opened.binding.revocation_generation == 2);
+                ensure!(opened.binding.material_generation == 2);
+            } else {
+                // The provider answers only the rotated token.
+                ensure!(provider.responses.load(Ordering::SeqCst) == 1);
+            }
+            ensure!(provider.exchanges.load(Ordering::SeqCst) == 1);
+            Ok(())
+        }
+        .await;
+        f.finish(result).await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn a_login_selected_by_a_new_profile_revision_is_rechecked_after_refresh() -> Result<()> {

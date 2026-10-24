@@ -514,7 +514,10 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         permission: GrantPermission,
     ) -> Result<Admission, BrokerLeaseError> {
         let session = self.session().await?;
-        let mut admission = self.grant_and_record(&session, slot, permission).await?;
+        let mut admission = self
+            .grant_and_record(&session, slot, permission)
+            .await
+            .map_err(Checked::refused)?;
         // The profile/record reads can wait for SQL locks. Their completion
         // cannot preserve runtime authority that was revoked during that wait.
         let current = self.session().await?;
@@ -534,7 +537,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         session: &PlatformRuntimeSession,
         slot: &CapabilitySlot,
         permission: GrantPermission,
-    ) -> Result<Admission, BrokerLeaseError> {
+    ) -> Result<Admission, Checked> {
         let available = self.available_grants(session).await?;
         let grant = select_grant(&available, session, slot, &permission)?;
         let record = match self
@@ -544,12 +547,12 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             Ok(record) => record,
             Err(error) => {
                 self.forget_material(&grant.credential_id);
-                return Err(error);
+                return Err(error.into());
             }
         };
         if !record_matches(&record, &grant, &session.credential_owner) {
             self.forget_material(&grant.credential_id);
-            return Err(BrokerLeaseError::Denied);
+            return Err(Checked::moved(&grant, &session.credential_owner, &record));
         }
         Ok(Admission {
             record,
@@ -712,12 +715,37 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
     /// a runtime authority or grant denial, or a credential no longer granted,
     /// drops what it can no longer use. Direct delivery (a lease with a
     /// delivery predicate) and SSH keys never reuse or retain material.
+    ///
+    /// A record that moved to another revocation generation while the lease
+    /// read it (a refresh, replacement or Reconnect committed in between)
+    /// evaluates the whole lease again once, as the next request would. If
+    /// that evaluation refuses too, the lease is denied, as it was before the
+    /// record moved. Nothing read for the moved record is released.
     async fn lease_checked(
         &self,
         slot: CapabilitySlot,
         permission: GrantPermission,
         admissible: Option<DeliveryPredicate>,
     ) -> Result<PlatformCredentialLease, BrokerLeaseError> {
+        match self
+            .lease_checked_once(slot.clone(), permission.clone(), admissible)
+            .await
+        {
+            Err(Checked::Moved) => self
+                .lease_checked_once(slot, permission, admissible)
+                .await
+                .map_err(|_| BrokerLeaseError::Denied),
+            leased => leased.map_err(Checked::refused),
+        }
+    }
+
+    /// One evaluation of [`Self::lease_checked`].
+    async fn lease_checked_once(
+        &self,
+        slot: CapabilitySlot,
+        permission: GrantPermission,
+        admissible: Option<DeliveryPredicate>,
+    ) -> Result<PlatformCredentialLease, Checked> {
         timing::authority(AuthorityUse::Evaluated);
         // Two runtime authority checks bracket the whole lease. Both grant
         // evaluations use the first response, and the last response must be
@@ -748,7 +776,10 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 None => self
                     .read_material(&before.record)
                     .await
-                    .map_err(credential_error)?,
+                    .map_err(|error| match error {
+                        PlatformCredentialError::StaleVersion => Checked::Moved,
+                        error => credential_error(error).into(),
+                    })?,
             };
             #[cfg(test)]
             tests::between_record_reads().await;
@@ -760,11 +791,17 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             let mut after = self.grant_and_record(&initial, &slot, permission).await?;
             let current = self.forget_material_on_denial(self.session().await)?;
             if !initial.same_except_expiry(&current)
-                || before.record != after.record
                 || before.permission != after.permission
                 || !same_grant_binding(&before.grant, &after.grant)
             {
-                return Err(BrokerLeaseError::Denied);
+                return Err(BrokerLeaseError::Denied.into());
+            }
+            if before.record != after.record {
+                return Err(Checked::moved(
+                    &before.grant,
+                    &initial.credential_owner,
+                    &after.record,
+                ));
             }
             after.grant.expires_at_unix = before
                 .grant
@@ -1497,6 +1534,49 @@ fn select_grant(
             .min(session.identity_expires_at_unix),
     );
     Ok(grant)
+}
+
+/// Why one evaluation of a checked lease failed.
+#[derive(Debug, PartialEq, Eq)]
+enum Checked {
+    /// A refusal, which stands.
+    Refused(BrokerLeaseError),
+    /// The credential's record moved to another revocation generation, still
+    /// active, while the lease read it.
+    Moved,
+}
+
+impl Checked {
+    /// `record`, read for `grant`'s credential and found not to match it:
+    /// `Moved` when it is that same active platform credential of `owner` at
+    /// another revocation generation, otherwise a denial.
+    fn moved(grant: &DerivedGrant, owner: &Owner, record: &CredentialRecord) -> Self {
+        let metadata = &record.metadata;
+        if metadata.id == grant.credential_id
+            && metadata.placement == Placement::Platform
+            && metadata.owner == *owner
+            && metadata.status == CredentialStatus::Active
+            && record.version.revocation_generation != grant.credential_revocation_generation
+        {
+            Self::Moved
+        } else {
+            Self::Refused(BrokerLeaseError::Denied)
+        }
+    }
+
+    /// The answer of a lease that is not evaluated again.
+    fn refused(self) -> BrokerLeaseError {
+        match self {
+            Self::Refused(error) => error,
+            Self::Moved => BrokerLeaseError::Denied,
+        }
+    }
+}
+
+impl From<BrokerLeaseError> for Checked {
+    fn from(error: BrokerLeaseError) -> Self {
+        Self::Refused(error)
+    }
 }
 
 /// Whether `record` is the exact platform record `grant` was derived for,

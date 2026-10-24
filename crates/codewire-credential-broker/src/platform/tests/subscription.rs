@@ -240,8 +240,9 @@ async fn a_provider_401_leaves_the_subscription_token_active_with_its_material()
 /// ever releases the replaced token, and the next request presents the new
 /// one. A hosted epoch's lease reread its record before the replacement, so
 /// the material fence fails the stale version and the lease is admitted again
-/// for the replacement. A lease with full per-request checks is denied by its
-/// second record read.
+/// for the replacement. A lease with full per-request checks finds the record
+/// moved at its second record read and evaluates again once, for the
+/// replacement (owner, 2026-10-24).
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn a_replacement_racing_an_in_flight_request_never_releases_the_replaced_token() -> Result<()>
@@ -278,7 +279,8 @@ async fn a_replacement_racing_an_in_flight_request_never_releases_the_replaced_t
         ensure!(material(lease_anthropic(&hosted).await?) == REPLACEMENT);
 
         // Full per-request checks, outside any hosted epoch: the replacement
-        // lands between the lease's two record reads and the lease is denied.
+        // lands between the lease's two record reads. The lease evaluates
+        // again and releases the replacement, never the replaced token.
         {
             let (pool, checked) = f.second().await?;
             let checked = Arc::new(checked);
@@ -291,12 +293,14 @@ async fn a_replacement_racing_an_in_flight_request_never_releases_the_replaced_t
             gate.wait().await?;
             let again = replace_token(&f, &replaced, TOKEN).await?;
             gate.release();
-            let leased = finish_task(operation).await?;
+            let leased = finish_task(operation)
+                .await?
+                .map_err(|error| anyhow::anyhow!("checked lease: {error:?}"))?;
             ensure!(
-                leased == Err(BrokerLeaseError::Denied),
-                "the in-flight lease released a replaced token: {:?}",
-                leased.as_ref().err()
+                leased != REPLACEMENT,
+                "the in-flight lease released the replaced token"
             );
+            ensure!(leased == TOKEN);
             let next = lease_anthropic(&checked).await?;
             ensure!(
                 next.grant().credential_revocation_generation

@@ -37,6 +37,7 @@ async fn unwrap_rechecks_replacement_revocation_rebinding_stop_generation_and_ha
         let f = Fixture::create().await?;
         let result = async {
             let (pool, adapter) = checked(&f, false).await?;
+            let replacement = bundle(false, "replacement");
             f.provider.unwrap_gate.arm();
             let operation = spawn({
                 let adapter = adapter.clone();
@@ -50,7 +51,7 @@ async fn unwrap_rechecks_replacement_revocation_rebinding_stop_generation_and_ha
                             &f.owner,
                             &f.record.metadata.id,
                             f.record.version,
-                            &value(bundle(false, "replacement").as_bytes()),
+                            &value(replacement.as_bytes()),
                             None,
                         )
                         .await?;
@@ -79,10 +80,27 @@ async fn unwrap_rechecks_replacement_revocation_rebinding_stop_generation_and_ha
                 _ => unreachable!(),
             }
             f.provider.unwrap_gate.release();
-            ensure!(
-                matches!(finish_task(operation).await?, Err(BrokerLeaseError::Denied)),
-                "{mutation} exposed stale material"
-            );
+            let leased = finish_task(operation).await?;
+            if mutation == "replace" {
+                // The record moved under the lease, which evaluates again
+                // once and releases the replacement, never the replaced
+                // material (owner, 2026-10-24).
+                let leased = leased.map_err(|error| anyhow::anyhow!("replace: {error:?}"))?;
+                leased.with_material(|material| {
+                    let released = crate::codex_oauth::CodexOAuthCredential::parse(material)?;
+                    ensure!(
+                        released.refresh_token() != "synthetic-refresh-old",
+                        "replace exposed stale material"
+                    );
+                    ensure!(material == replacement.as_bytes());
+                    Ok(())
+                })?;
+            } else {
+                ensure!(
+                    matches!(leased, Err(BrokerLeaseError::Denied)),
+                    "{mutation} exposed stale material"
+                );
+            }
             pool.close().await;
             Ok(())
         }
@@ -299,7 +317,7 @@ async fn cache_hit_rechecks_replacement_revocation_rebinding_stop_generation_exp
         } else {
             BrokerLeaseError::Denied
         };
-        let result = deny_mutated_hit(&f, mutation, denial, async || {
+        let mutated = async || {
             match mutation {
                 "replace" => {
                     f.store
@@ -350,10 +368,58 @@ async fn cache_hit_rechecks_replacement_revocation_rebinding_stop_generation_exp
                 _ => unreachable!(),
             }
             Ok(())
-        })
-        .await;
+        };
+        let result = if mutation == "replace" {
+            reevaluate_replaced_hit(&f, mutated).await
+        } else {
+            deny_mutated_hit(&f, mutation, denial, mutated).await
+        };
         f.finish(result).await?;
     }
+    Ok(())
+}
+
+/// A cache-hit lease whose credential is replaced between its two record
+/// reads: the record moved, so the lease evaluates again once and releases
+/// the replacement, read through the store, never the value it held for the
+/// replaced record (owner, 2026-10-24).
+async fn reevaluate_replaced_hit(
+    f: &Fixture,
+    replace: impl AsyncFnOnce() -> Result<()>,
+) -> Result<()> {
+    let (pool, adapter) = checked(f, true).await?;
+    lease(&adapter).await?;
+    ensure!(retained(&adapter) == 1);
+    let initial = unwraps(f);
+    let gate = Arc::new(SessionGate::default());
+    gate.arm(1);
+    let operation = spawn(BETWEEN_RECORD_READS.scope(gate.clone(), {
+        let adapter = adapter.clone();
+        async move { lease(&adapter).await }
+    }));
+    gate.wait().await?;
+    ensure!(
+        unwraps(f) == initial,
+        "replace: the gated lease was not a reuse"
+    );
+    replace().await?;
+    gate.release();
+    let leased = finish_task(operation)
+        .await?
+        .map_err(|error| anyhow::anyhow!("replace: {error:?}"))?;
+    leased.with_material(|material| {
+        let released = crate::codex_oauth::CodexOAuthCredential::parse(material)?;
+        ensure!(
+            released.refresh_token() != "synthetic-refresh-old",
+            "replace released reused material"
+        );
+        ensure!(released.refresh_token() == "synthetic-refresh-replacement");
+        Ok(())
+    })?;
+    // One read, for the replacement, which the cache now holds instead.
+    ensure!(unwraps(f) == initial + 1);
+    ensure!(retained(&adapter) == 1);
+    pool.close().await;
     Ok(())
 }
 
