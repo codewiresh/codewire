@@ -11,6 +11,11 @@
 # caller's scratch directory that is deleted after its task.
 unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR
 if [[ -x "${CODEWIRE_LOCAL_SCCACHE_BIN:-}" && -n "${CODEWIRE_LOCAL_SCCACHE_TMPDIR:-}" ]]; then
+  # A compile that finds the server down starts it; no caller's lock may pass
+  # to that long-lived server (#3323).
+  # shellcheck source=scripts/ci/verify/close-inherited-locks.sh
+  source "$(dirname -- "${BASH_SOURCE[0]}")/close-inherited-locks.sh"
+  close_inherited_lock_fds
   export TMPDIR="$CODEWIRE_LOCAL_SCCACHE_TMPDIR"
   restarts="${CODEWIRE_LOCAL_SCCACHE_RESTARTS:-}"
   [[ -n "$restarts" ]] || exec "$CODEWIRE_LOCAL_SCCACHE_BIN" "$@"

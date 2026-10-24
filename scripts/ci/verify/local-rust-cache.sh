@@ -410,7 +410,13 @@ select_local_rust_cache() {
   # first compile time out. In sccache 0.17 --show-stats never starts a server
   # and --zero-stats would reset the counters every other build on the account
   # reports; --dist-status connects or starts one and changes nothing.
-  if ! env -i "${server_env[@]}" "$sccache_bin" --dist-status >/dev/null 2>&1; then
+  # The started server outlives this build: no caller's lock may pass to it (#3323).
+  if ! (
+    # shellcheck source=scripts/ci/verify/close-inherited-locks.sh
+    source "$root/scripts/ci/verify/close-inherited-locks.sh" &&
+      close_inherited_lock_fds &&
+      exec env -i "${server_env[@]}" "$sccache_bin" --dist-status
+  ) >/dev/null 2>&1; then
     local_rust_cache_status 'state=disabled reason=server-unavailable'
     return 1
   fi

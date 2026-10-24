@@ -49,6 +49,8 @@ case "${1:-}" in
   --version) printf '%s\n' "${FAKE_SCCACHE_VERSION:-sccache 0.17.0}" ;;
   --dist-status)
     env >"$log.server-env"
+    # The server outlives its build: record any caller lock it would keep.
+    for fd in /proc/$$/fd/*; do readlink "$fd"; done 2>/dev/null | grep '\.lock$' >"$log.server-locks" || true
     printf 'start\n' >>"$log.starts"
     [[ ! -e "$here/start-fails" ]] || exit 2
     printf '{"Disabled":"disabled"}\n'
@@ -56,12 +58,13 @@ case "${1:-}" in
   *)
     printf '%s\n' "$*" >"$log.compile"
     env >"$log.compile-env"
+    for fd in /proc/$$/fd/*; do readlink "$fd"; done 2>/dev/null | grep '\.lock$' >"$log.compile-locks" || true
     ;;
 esac
 EOF
 chmod +x "$work/fake/sccache"
 # A PATH with no sccache at all, whatever the host has installed.
-for tool in bash env mkdir cat mv rm dirname; do
+for tool in bash env mkdir cat mv rm dirname readlink grep; do
   ln -s "$(command -v "$tool")" "$work/tools/$tool"
 done
 
@@ -197,6 +200,27 @@ env CODEWIRE_LOCAL_SCCACHE_BIN="$work/fake/sccache" \
 [[ "$(env_value CARGO_MANIFEST_DIR "$log.compile-env")" == /registry/crate ]] ||
   fail 'wrapper removed a compiler input'
 [[ "$(env_value TMPDIR "$log.compile-env")" == "$base/tmp" ]] || fail 'wrapper tmpdir'
+# A compile can start the shared server, which outlives the build: no lock
+# the build holds reaches sccache, so none outlives it (#3323). Other
+# descriptors, such as Cargo's jobserver, stay.
+if [[ -d /proc/self/fd ]]; then
+  : >"$work/held.lock"
+  (
+    exec {held}<>"$work/held.lock" {other}<"$work/fake/log-path"
+    rm -f -- "$log".*
+    env CODEWIRE_LOCAL_SCCACHE_BIN="$work/fake/sccache" CODEWIRE_LOCAL_SCCACHE_TMPDIR="$base/tmp" \
+      "$WRAPPER" /toolchain/rustc --crate-name fixture
+    [[ ! -s "$log.compile-locks" ]] || fail "a compile passed a held lock to sccache: $(cat "$log.compile-locks")"
+    rm -f -- "$log".*
+    run_helper
+    [[ -e "$log.starts" ]] || fail 'the held-lock run started no server'
+    [[ ! -s "$log.server-locks" ]] || fail "the server start inherited a held lock: $(cat "$log.server-locks")"
+    # The caller's own descriptors stay open: closing a child's copy never
+    # releases the caller's lock.
+    [[ -e "/proc/$BASHPID/fd/$held" && -e "/proc/$BASHPID/fd/$other" ]] ||
+      fail "the caller lost its own descriptors"
+  )
+fi
 direct="$(env -u CODEWIRE_LOCAL_SCCACHE_BIN CARGO_TARGET_DIR="$work/target" \
   "$WRAPPER" bash -c 'printf "%s" "${CARGO_TARGET_DIR-unset}"')"
 [[ "$direct" == unset ]] || fail 'uncached fallback kept the target directory'
