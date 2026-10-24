@@ -310,30 +310,18 @@ mod tests {
                         disable.await??;
                     } else {
                         let mut disable = pool.begin().await?;
+                        let disable_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                            .fetch_one(&mut *disable)
+                            .await?;
                         sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
                             .bind(&user_id)
                             .fetch_one(&mut *disable)
                             .await?;
-                        let update_pool = pool.clone();
-                        let update_id = update_id.clone();
-                        let mut update = tokio::spawn(async move {
-                            let mut tx = update_pool.begin().await?;
-                            sqlx::query(update_sql)
-                                .bind(update_id)
-                                .execute(&mut *tx)
-                                .await?;
-                            tx.commit().await?;
-                            anyhow::Ok(())
-                        });
-                        match tokio::time::timeout(Duration::from_millis(500), &mut update).await {
-                            Ok(result) => result??,
-                            Err(_) => {
-                                disable.rollback().await?;
-                                let _ = update.await;
-                                anyhow::bail!(
-                                    "ordinary {capability} update waited on the account lock in {order}"
-                                );
-                            }
+                        if update_waits_on(&pool, update_sql, &update_id, disable_pid).await? {
+                            disable.rollback().await?;
+                            anyhow::bail!(
+                                "ordinary {capability} update waited on the account lock in {order}"
+                            );
                         }
                         sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
                             .bind(&user_id)
@@ -360,6 +348,31 @@ mod tests {
                     );
                 }
             }
+
+            // Control: a statement that does take the account lock is reported
+            // as waiting on it, so the check above cannot pass vacuously.
+            let user_id = "account-access-existing-update-user-control";
+            sqlx::query("INSERT INTO users (id, email) VALUES ($1, $1 || '@example.test')")
+                .bind(user_id)
+                .execute(&pool)
+                .await?;
+            let mut disable = pool.begin().await?;
+            let disable_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *disable)
+                .await?;
+            sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                .bind(user_id)
+                .fetch_one(&mut *disable)
+                .await?;
+            let waited = update_waits_on(
+                &pool,
+                "SELECT id FROM users WHERE id = $1 FOR KEY SHARE",
+                user_id,
+                disable_pid,
+            )
+            .await;
+            disable.rollback().await?;
+            anyhow::ensure!(waited?, "an account-lock wait was not reported");
             pool.close().await;
             anyhow::Ok(())
         }
@@ -1377,8 +1390,68 @@ mod tests {
         format!(r#""{}""#, identifier.replace('"', r#""""#))
     }
 
+    /// Bounds only a hang: every lock wait in these tests ends on its event.
+    const LOCK_WAIT_HANG_GUARD: Duration = Duration::from_secs(60);
+
+    /// Runs `sql` with `id` in its own transaction and commits it, unless
+    /// Postgres reports it waiting on `holder`'s locks; then it returns true,
+    /// leaving the statement waiting until `holder` ends. A slow connection,
+    /// statement or commit is not a wait on `holder` (#3289).
+    async fn update_waits_on(
+        pool: &PgPool,
+        sql: &'static str,
+        id: &str,
+        holder: i32,
+    ) -> anyhow::Result<bool> {
+        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+        let update_pool = pool.clone();
+        let id = id.to_owned();
+        let mut update = tokio::spawn(async move {
+            let mut tx = update_pool.begin().await?;
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await?;
+            let _ = pid_tx.send(pid);
+            sqlx::query(sql).bind(id).execute(&mut *tx).await?;
+            tx.commit().await?;
+            anyhow::Ok(())
+        });
+        tokio::time::timeout(LOCK_WAIT_HANG_GUARD, async {
+            let waiter = tokio::select! {
+                biased;
+                finished = &mut update => {
+                    finished??;
+                    return anyhow::Ok(false);
+                }
+                pid = pid_rx => pid?,
+            };
+            loop {
+                tokio::select! {
+                    biased;
+                    finished = &mut update => {
+                        finished??;
+                        return Ok(false);
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                }
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT $2::integer = ANY(pg_catalog.pg_blocking_pids($1::integer))",
+                )
+                .bind(waiter)
+                .bind(holder)
+                .fetch_one(pool)
+                .await?;
+                if blocked {
+                    return Ok(true);
+                }
+            }
+        })
+        .await
+        .context("an ordinary update neither finished nor waited on the account lock")?
+    }
+
     async fn wait_for_lock_blocker(pool: &PgPool, waiter: i32, blocker: i32) -> anyhow::Result<()> {
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(LOCK_WAIT_HANG_GUARD, async {
             loop {
                 let blocked: bool = sqlx::query_scalar(
                     "SELECT $2::integer = ANY(pg_catalog.pg_blocking_pids($1::integer))",
