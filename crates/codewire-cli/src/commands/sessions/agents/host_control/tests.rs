@@ -762,9 +762,10 @@ fn member_helper_private_records_and_locks_refuse_links_fifo_and_unsafe_ancestor
 }
 
 #[test]
-fn private_record_reads_a_record_replaced_during_its_read_again() {
-    // A driver rewrites its state while a helper reads it (#2782): every read
-    // returns one complete version, in order, and none reports a change.
+fn private_record_reads_a_record_being_replaced_as_one_complete_version() {
+    // A driver rewrites its state while a helper reads it (#2782, #3283):
+    // every read returns one complete version, in order, and none reports a
+    // change.
     let temp = tempfile::tempdir().unwrap();
     let dir = fs::canonicalize(temp.path()).unwrap().join("records");
     private_directory(&dir).unwrap();
@@ -809,6 +810,69 @@ fn private_record_reads_a_record_replaced_during_its_read_again() {
         assert!(refused.is_empty(), "of {reads} reads, refused: {refused:?}");
         assert!(seen > 1, "the reads did not overlap the replacements");
     });
+}
+
+/// Reads `path` while every read is overlapped by a replacement at `stage`,
+/// returning the read's outcome and how many replacements it overlapped.
+fn read_replaced_at_every(stage: RecordReadStage, path: &Path) -> (anyhow::Result<Value>, u64) {
+    let version = |n: u64| json!({"version": n});
+    write_private_json(path, &version(0)).unwrap();
+    let replaced = std::rc::Rc::new(std::cell::Cell::new(0u64));
+    let (hook_path, count) = (path.to_owned(), replaced.clone());
+    DURING_RECORD_READ.set(Some(Box::new(move |at| {
+        if at == stage {
+            count.set(count.get() + 1);
+            write_private_json(&hook_path, &version(count.get())).unwrap();
+        }
+    })));
+    let outcome = private_record::<Value>(path);
+    DURING_RECORD_READ.set(None);
+    (outcome, replaced.get())
+}
+
+#[test]
+fn private_record_returns_the_version_it_opened_when_every_read_is_replaced() {
+    // A driver that replaces a record during every read never starves a
+    // reader (#3283). The read returns the complete version the path named
+    // when it was opened, at either point of the read.
+    for stage in [RecordReadStage::Opened, RecordReadStage::Read] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = fs::canonicalize(temp.path()).unwrap().join("records");
+        private_directory(&dir).unwrap();
+        let (outcome, replaced) = read_replaced_at_every(stage, &dir.join("state.json"));
+        let record = outcome.unwrap_or_else(|error| panic!("{stage:?}: {error:#}"));
+        assert_eq!(record, json!({"version": 0}), "{stage:?}");
+        assert_eq!(replaced, 1, "{stage:?}: the record was read more than once");
+    }
+}
+
+#[test]
+fn private_record_refuses_a_record_changed_in_place_during_its_read() {
+    // Only a rename may replace a record. A write into the open file while it
+    // is read is refused, not returned and not read again.
+    let temp = tempfile::tempdir().unwrap();
+    let dir = fs::canonicalize(temp.path()).unwrap().join("records");
+    private_directory(&dir).unwrap();
+    let path = dir.join("state.json");
+    write_private_json(&path, &json!({"version": 0})).unwrap();
+    let hook_path = path.clone();
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = reads.clone();
+    DURING_RECORD_READ.set(Some(Box::new(move |at| {
+        if at == RecordReadStage::Read {
+            count.set(count.get() + 1);
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&hook_path)
+                .unwrap();
+            std::io::Write::write_all(&mut file, b" ").unwrap();
+        }
+    })));
+    let outcome = private_record::<Value>(&path);
+    DURING_RECORD_READ.set(None);
+    let error = outcome.expect_err("a record changed in place was returned");
+    assert_eq!(error.to_string(), "managed record changed");
+    assert_eq!(reads.get(), 1);
 }
 
 #[test]

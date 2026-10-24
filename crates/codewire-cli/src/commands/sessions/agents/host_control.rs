@@ -340,49 +340,60 @@ impl DirectoryPin {
         Ok(())
     }
 }
-/// Pauses before each further read of a record that a writer is replacing.
-/// The path names the replaced file, unlinked, until the rename completes,
-/// which a loaded host can hold for tens of milliseconds.
-const REPLACED_RECORD_PAUSES: [Duration; 4] = [
-    Duration::from_millis(2),
-    Duration::from_millis(8),
-    Duration::from_millis(32),
-    Duration::from_millis(128),
-];
 /// Reads one complete owner-private managed record. A writer replaces a
-/// record by renaming a complete sibling over it (`write_private`), so a read
-/// that overlaps the rename holds the file being replaced. That read is
-/// discarded and the path read again, a bounded number of times. Every read
-/// makes every check, and none returns a file that changed while it was read.
+/// record by renaming a complete sibling over it (`write_private`), so the
+/// file a read opens is one complete version even when a rename replaces it
+/// during the read. The read returns that version, the one the path named
+/// when it was opened, and is never repeated: a writer that keeps replacing
+/// the record cannot starve it (#3283). Every read makes every check, and
+/// none returns a file that changed while it was read.
 pub(super) fn private_record<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
     let directory = DirectoryPin::open(path.parent().context("managed record parent")?)?;
-    let mut pauses = REPLACED_RECORD_PAUSES.iter();
-    let bytes = loop {
-        if let Some(bytes) = read_record_once(path)? {
-            break bytes;
-        }
-        std::thread::sleep(*pauses.next().context("managed record changed")?);
-    };
+    let bytes = read_record_once(path)?;
     directory.check()?;
     serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid managed record"))
 }
-/// The bytes of the record `path` names, or `None` when a rename over it
-/// overlapped this read.
-fn read_record_once(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+/// The points in a record read where a test replaces the record.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RecordReadStage {
+    /// The record is open and not yet checked.
+    Opened,
+    /// The record's bytes are read and not yet compared with its checks.
+    Read,
+}
+#[cfg(test)]
+type RecordReadHook = Box<dyn FnMut(RecordReadStage)>;
+#[cfg(test)]
+thread_local! {
+    pub(super) static DURING_RECORD_READ: std::cell::RefCell<Option<RecordReadHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn during_record_read(stage: RecordReadStage) {
+    DURING_RECORD_READ.with_borrow_mut(|hook| {
+        if let Some(hook) = hook {
+            hook(stage);
+        }
+    });
+}
+/// The bytes of the record `path` names when it is opened.
+fn read_record_once(path: &Path) -> anyhow::Result<Vec<u8>> {
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)?;
+    #[cfg(test)]
+    during_record_read(RecordReadStage::Opened);
     let a = file.metadata()?;
-    // A rename over a file unlinks it, which changes its link count and change
-    // time but not what was written, then points the path at the new file.
-    if a.nlink() == 0 {
-        return Ok(None);
-    }
+    // A rename over the open file unlinks it, which changes its link count
+    // and change time but not what was written. A file with no link left is
+    // still the version the path named when it was opened; a second link is
+    // refused.
     ensure!(
         a.is_file()
             && a.uid() == euid()
-            && a.nlink() == 1
+            && a.nlink() <= 1
             && a.mode() & 0o7777 == 0o600
             && a.len() <= MAX_RECORD_BYTES,
         "managed record is unsafe"
@@ -399,27 +410,18 @@ fn read_record_once(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
             m.mtime_nsec(),
         )
     }
-    fn stamp(m: &fs::Metadata) -> (Written, u64, i64, i64) {
-        (written(m), m.nlink(), m.ctime(), m.ctime_nsec())
-    }
     let mut bytes = Vec::new();
     (&mut file)
         .take(MAX_RECORD_BYTES + 1)
         .read_to_end(&mut bytes)?;
+    #[cfg(test)]
+    during_record_read(RecordReadStage::Read);
     let held = file.metadata()?;
-    let named = fs::symlink_metadata(path)?;
-    if bytes.len() as u64 <= MAX_RECORD_BYTES
-        && stamp(&a) == stamp(&held)
-        && stamp(&a) == stamp(&named)
-    {
-        return Ok(Some(bytes));
-    }
-    let renamed = (named.dev(), named.ino()) != (a.dev(), a.ino());
     ensure!(
-        written(&a) == written(&held) && (renamed || written(&a) == written(&named)),
+        bytes.len() as u64 <= MAX_RECORD_BYTES && written(&a) == written(&held),
         "managed record changed"
     );
-    Ok(None)
+    Ok(bytes)
 }
 fn marker(environment: &DriverEnvironment, driver: &str) -> anyhow::Result<Option<Marker>> {
     nonnil_id(driver)?;
