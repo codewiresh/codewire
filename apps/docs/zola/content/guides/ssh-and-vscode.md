@@ -24,10 +24,6 @@ Host cw-cloud-*
   ProxyCommand cw --cloud shell --stdio %n
   KnownHostsCommand cw --cloud ssh known-hosts %H
   ...
-Host cw-*
-  ProxyCommand cw shell --stdio %n
-  KnownHostsCommand cw ssh known-hosts %H
-  ...
 Host *
 # ---- END CODEWIRE ----
 ```
@@ -54,14 +50,9 @@ trust-on-first-use prompt either. Commands, interactive sessions, `scp`,
 `sftp`, `rsync` and port forwarding work in a local VM created by this `cw`; a
 VM on an older runtime refuses forwarding until it is recreated.
 
-A bare `cw-NAME`, such as one an editor remembers from an earlier `cw`, still
-reaches the cloud environment `NAME`, and will through at least v0.5. Before
-the aliases were qualified, `cw-cloud-x` meant a cloud environment named
-`cloud-x`; it still does when nothing else is named `x`. When both `x` and
-`cloud-x` exist, `cw` refuses rather than guess, and names both IDs, so you
-can connect with `cw-cloud-<id>`. A cloud environment named `local-x` is
-`cw-cloud-local-x`; when `cw-local-x` names no local VM and such a cloud
-environment exists, the error says so.
+There is no bare `cw-NAME` alias: an environment is reached only as
+`cw-cloud-NAME` or `cw-local-NAME`. The part after the prefix is the name or
+ID as given, so a cloud environment named `cloud-x` is `cw-cloud-cloud-x`.
 
 The block passes the host name to `ProxyCommand` (`%n`) for every `cw-` host,
 so use OpenSSH 9.6 or later, or a distribution build that includes the fix for
@@ -125,11 +116,11 @@ cw vscode my-app --folder /workspace/my-repo
 This refreshes your SSH config and opens
 `vscode://vscode-remote/ssh-remote+cw-cloud-<id>/<folder>`, so the Remote-SSH
 extension connects through the same proxy. The Sandbox page in the dashboard
-has the same **Open in VS Code** action. Its link uses the bare `cw-<id>`,
-which every version of `cw` resolves, until the bare aliases are retired.
+has the same **Open in VS Code** action, with the same `cw-cloud-<id>` link.
 
-For a local VM, `cw vscode my-vm` (or `cw --local vscode` for the selected
-one) opens `ssh-remote+cw-local-<id>` the same way. Remote-SSH reaches its
+For a local VM, `cw --local vscode my-vm`, `cw vscode cw-local-my-vm`, or
+`cw --local vscode` for the selected one, opens `ssh-remote+cw-local-<id>` the
+same way. Remote-SSH reaches its
 server in the VM through port forwarding, so it needs a VM created by this
 `cw`; a VM on an older runtime refuses forwarding until it is recreated.
 

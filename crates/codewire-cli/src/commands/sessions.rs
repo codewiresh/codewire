@@ -1888,7 +1888,7 @@ pub(crate) async fn handle_environment_shell_command(
         if let Some(alias) = alias {
             alias.check_placement(globals.placement)?;
             if alias.is_local(globals.placement) {
-                let environment = local_ssh_target(globals, alias).await?;
+                let environment = local_ssh_target(alias).await?;
                 return super::native::native_pipe_ssh(&environment).await;
             }
         }

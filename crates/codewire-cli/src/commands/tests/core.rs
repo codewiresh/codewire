@@ -148,22 +148,6 @@ Host cw-cloud-*
     PubkeyAuthentication no
     GSSAPIAuthentication no
     GSSAPIDelegateCredentials no
-Host cw-*
-    ProxyCommand /opt/codewire/bin/cw shell --stdio %n
-    User codewire
-    StrictHostKeyChecking yes
-    UserKnownHostsFile /dev/null
-    GlobalKnownHostsFile /dev/null
-    KnownHostsCommand /opt/codewire/bin/cw ssh known-hosts %H
-    HostKeyAlgorithms ssh-ed25519
-    UpdateHostKeys no
-    ForwardAgent no
-    ForwardX11 no
-    PasswordAuthentication no
-    KbdInteractiveAuthentication no
-    PubkeyAuthentication no
-    GSSAPIAuthentication no
-    GSSAPIDelegateCredentials no
 Host *
 # ---- END CODEWIRE ----";
 
@@ -231,8 +215,8 @@ fn managed_ssh_block_placement_is_idempotent() {
     assert_eq!(once, twice);
     assert!(once.contains("    ServerAliveInterval 30\nHost *\n"));
     // A user option applies to both managed host blocks.
-    assert_eq!(once.matches("    ServerAliveInterval 30\n").count(), 3);
-    assert!(once.contains("    ServerAliveInterval 30\nHost cw-*\n"));
+    assert_eq!(once.matches("    ServerAliveInterval 30\n").count(), 2);
+    assert!(once.contains("    ServerAliveInterval 30\nHost cw-cloud-*\n"));
 }
 
 #[test]
@@ -322,7 +306,7 @@ fn openssh_resolves_the_managed_block_first() {
         String::from_utf8(output.stdout).unwrap()
     };
     // A qualified alias takes its own block's commands, which pass its
-    // placement; a bare alias keeps the catch-all block's.
+    // placement. The bare `cw-<ref>` is retired: no managed block applies.
     let local = resolve("cw-local-demo");
     for (keyword, value) in [
         ("proxycommand", "/opt/codewire/bin/cw --local shell --stdio %n"),
@@ -351,12 +335,18 @@ fn openssh_resolves_the_managed_block_first() {
             "cw-cloud-demo {keyword}:\n{cloud}"
         );
     }
-    let codewire = resolve("cw-demo");
+    let bare = resolve("cw-demo");
+    assert!(
+        !bare.lines().any(|line| line.starts_with("proxycommand ")
+            && line.contains("/opt/codewire/bin/cw")),
+        "cw-demo must not reach a managed block:\n{bare}"
+    );
+    let codewire = cloud;
     // OpenSSH versions spell some booleans differently (`no` or `false`).
     for (keyword, accepted) in [
         (
             "proxycommand",
-            &["/opt/codewire/bin/cw shell --stdio %n"][..],
+            &["/opt/codewire/bin/cw --cloud shell --stdio %n"][..],
         ),
         ("user", &["codewire"]),
         ("stricthostkeychecking", &["true", "yes"]),
@@ -364,7 +354,7 @@ fn openssh_resolves_the_managed_block_first() {
         ("globalknownhostsfile", &["/dev/null"]),
         (
             "knownhostscommand",
-            &["/opt/codewire/bin/cw ssh known-hosts %H"],
+            &["/opt/codewire/bin/cw --cloud ssh known-hosts %H"],
         ),
         ("updatehostkeys", &["false", "no"]),
         ("forwardagent", &["no", "false"]),
@@ -458,22 +448,28 @@ fn managed_ssh_section_is_current_only_for_the_same_cw() {
     assert!(!managed_ssh_section_is_current(&content, "/usr/bin/cw"));
     let bare = CURRENT_MANAGED_SSH_BLOCK.replace(TEST_CW, "cw");
     assert!(!managed_ssh_section_is_current(&bare, TEST_CW));
-    // Sections an older cw wrote, with only `Host cw-*` or without the
-    // local block, are outdated.
+    // Sections an older cw wrote are outdated: one with only `Host cw-*`,
+    // one without the local block, and one that still ends with the retired
+    // catch-all `Host cw-*`.
     let (head, qualified_and_rest) = CURRENT_MANAGED_SSH_BLOCK
         .split_once("Host cw-local-*\n")
         .unwrap();
-    let (_, rest) = qualified_and_rest.split_once("Host cw-*\n").unwrap();
-    let single = format!("{head}Host cw-*\n{rest}\n");
-    assert!(!managed_ssh_section_is_current(&single, TEST_CW));
     let (_, cloud_and_rest) = qualified_and_rest.split_once("Host cw-cloud-*\n").unwrap();
+    let single = format!("{head}Host cw-*\n{cloud_and_rest}\n");
+    assert!(!managed_ssh_section_is_current(&single, TEST_CW));
     let without_local = format!("{head}Host cw-cloud-*\n{cloud_and_rest}\n");
     assert!(!managed_ssh_section_is_current(&without_local, TEST_CW));
-    // So is one whose blocks are swapped: the catch-all would win.
+    let with_catch_all = content.replacen(
+        "Host *\n",
+        "Host cw-*\n    ProxyCommand /opt/codewire/bin/cw shell --stdio %n\nHost *\n",
+        1,
+    );
+    assert!(!managed_ssh_section_is_current(&with_catch_all, TEST_CW));
+    // So is one whose blocks are swapped.
     let swapped = content
         .replace("Host cw-local-*\n", "Host SWAP\n")
-        .replace("Host cw-*\n", "Host cw-local-*\n")
-        .replace("Host SWAP\n", "Host cw-*\n");
+        .replace("Host cw-cloud-*\n", "Host cw-local-*\n")
+        .replace("Host SWAP\n", "Host cw-cloud-*\n");
     assert!(!managed_ssh_section_is_current(&swapped, TEST_CW));
 }
 

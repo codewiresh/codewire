@@ -209,8 +209,7 @@ cw setup ssh remove
 
 `cw setup ssh` writes its managed block first in `~/.ssh/config`: `Host
 cw-local-*` and `Host cw-cloud-*`, whose commands pass `--local` and
-`--cloud`, then the catch-all `Host cw-*`, which keeps bare `cw-NAME` aliases
-on the cloud through at least v0.5. A local VM's SSH is served by its
+`--cloud`. There is no bare `cw-NAME` alias. A local VM's SSH is served by its
 supervisor with the VM's own host key, with file transfer and port forwarding.
 The block goes first
 because OpenSSH keeps the first value it finds. The block runs the `cw` that

@@ -46,7 +46,7 @@ async fn handle_ssh_known_hosts(globals: &Globals, host: &str) -> anyhow::Result
     let target = KnownHostsTarget::parse(host)?;
     target.alias().check_placement(globals.placement)?;
     let line = if target.is_local(globals.placement) {
-        let environment = local_ssh_target(globals, target.alias()).await?;
+        let environment = local_ssh_target(target.alias()).await?;
         local_known_hosts_line(
             &target,
             &super::native::native_ssh_host_key(&environment).await?,
@@ -126,15 +126,13 @@ pub(crate) const LOCAL_ALIAS_PREFIX: &str = "cw-local-";
 
 /// The placement an SSH host alias names (#3025). `cw-cloud-<ref>` is a
 /// cloud environment and `cw-local-<ref>` a local VM; neither ever resolves
-/// in the other placement. A bare `cw-<ref>`, or a plain reference, keeps
-/// resolving in the cloud while the transition lasts, through at least
-/// v0.5.x, because editors remember the aliases they connected to; ending it
-/// is an owner decision.
+/// in the other placement. Anything else is a plain environment reference,
+/// taken as given: the bare `cw-<ref>` alias is retired (owner, 2026-10-24).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AliasPlacement {
     Cloud,
     Local,
-    Bare,
+    Plain,
 }
 
 /// An SSH host alias, or a plain environment reference, split into the
@@ -156,10 +154,7 @@ impl<'a> SshAlias<'a> {
             } else if let Some(rest) = value.strip_prefix(LOCAL_ALIAS_PREFIX) {
                 (AliasPlacement::Local, rest)
             } else {
-                (
-                    AliasPlacement::Bare,
-                    value.strip_prefix("cw-").unwrap_or(value),
-                )
+                (AliasPlacement::Plain, value)
             };
         (!environment_ref.is_empty()).then_some(Self {
             placement,
@@ -187,110 +182,46 @@ impl<'a> SshAlias<'a> {
     }
 
     /// Whether this alias, under `placement`, names a local VM: a
-    /// `cw-local-` alias always, any other only under `--local`.
+    /// `cw-local-` alias always, a plain reference only under `--local`.
     pub(crate) fn is_local(self, placement: Option<EnvironmentPlacement>) -> bool {
         self.placement == AliasPlacement::Local
-            || (self.placement == AliasPlacement::Bare
+            || (self.placement == AliasPlacement::Plain
                 && placement == Some(EnvironmentPlacement::Local))
     }
 }
 
 /// The cloud environment a qualified `cw-cloud-<ref>` names: `<ref>` as any
-/// reference resolves (ID, name, unique ID prefix), or, when that matches
-/// nothing, the environment named exactly `cloud-<ref>`, which is what the
-/// alias meant before it was qualified. When both exist it refuses rather
-/// than pick one, because the trusted host key follows the choice.
+/// reference resolves (ID, name, unique ID prefix).
 pub(crate) fn resolve_qualified_cloud_ref(
     environments: &[Environment],
     environment_ref: &str,
 ) -> anyhow::Result<String> {
-    let qualified = find_environment_match(environments, environment_ref)?.map(|(id, _)| id);
-    let literal_name = format!("cloud-{environment_ref}");
-    let literal = match environments
-        .iter()
-        .filter(|environment| environment.name.as_deref() == Some(literal_name.as_str()))
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        [] => None,
-        [environment] => Some(environment.id.clone()),
-        many => anyhow::bail!(
-            "multiple environments named {literal_name:?}, use ID: {}",
-            many.iter()
-                .map(|environment| environment.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    };
-    match (qualified, literal) {
-        (Some(qualified), Some(literal)) if qualified != literal => anyhow::bail!(
-            "`{CLOUD_ALIAS_PREFIX}{environment_ref}` matches two cloud environments: {environment_ref:?} ({qualified}) and {literal_name:?} ({literal}); connect by ID, for example `{CLOUD_ALIAS_PREFIX}{qualified}`"
-        ),
-        (Some(id), _) | (None, Some(id)) => Ok(id),
-        (None, None) => anyhow::bail!(
-            "no cloud environment matches {environment_ref:?} (from `{CLOUD_ALIAS_PREFIX}{environment_ref}`); `cw --cloud ls` lists yours"
-        ),
-    }
+    find_environment_match(environments, environment_ref)?
+        .map(|(id, _)| id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no cloud environment matches {environment_ref:?} (from `{CLOUD_ALIAS_PREFIX}{environment_ref}`); `cw --cloud ls` lists yours"
+            )
+        })
 }
 
-/// `cw-local-<ref>` named no local VM. When a cloud environment is named
-/// exactly `local-<ref>`, which the alias meant before it was reserved, the
-/// error names the aliases that reach it.
-pub(crate) fn local_alias_not_found(
-    environment_ref: &str,
-    environments: Option<&[Environment]>,
-) -> anyhow::Error {
-    let mut message = format!(
+/// `cw-local-<ref>` named no local VM.
+pub(crate) fn local_alias_not_found(environment_ref: &str) -> anyhow::Error {
+    anyhow::anyhow!(
         "no local VM matches {environment_ref:?} (from `{LOCAL_ALIAS_PREFIX}{environment_ref}`); `cw --local ls` lists yours"
-    );
-    let literal = format!("local-{environment_ref}");
-    if let Some(environment) = environments.and_then(|environments| {
-        environments
-            .iter()
-            .find(|environment| environment.name.as_deref() == Some(literal.as_str()))
-    }) {
-        message.push_str(&format!(
-            ". The cloud environment {literal:?} is `{CLOUD_ALIAS_PREFIX}{literal}` or `cw-{}`",
-            environment.id
-        ));
-    }
-    anyhow::anyhow!(message)
+    )
 }
 
-/// The not-found error for a local alias, naming a same-named cloud
-/// environment's aliases when the cloud can be read within a few seconds.
-async fn local_alias_not_found_with_hint(
-    globals: &Globals,
-    environment_ref: &str,
-) -> anyhow::Error {
-    let environments = crate::commands::lifecycle_output::bounded(async {
-        let env = OsEnv;
-        let paths = ResolvePaths::from_env(&env)?;
-        let platform = resolve_platform(globals, &paths, &env)?;
-        let orgs = organization_client(&platform)?.list_orgs().await?;
-        let org_id = resolve_org_id(&platform, &orgs, None)?;
-        EnvironmentClient::new(&platform)?
-            .list_environments(&org_id, false)
-            .await
-    })
-    .await;
-    local_alias_not_found(environment_ref, environments.as_deref())
-}
-
-/// The local VM a local alias, or a reference under `--local`, names. A
-/// `cw-local-<ref>` that matches no local VM says where a same-named cloud
-/// environment went.
+/// The local VM a local alias, or a reference under `--local`, names.
 pub(crate) async fn local_ssh_target(
-    globals: &Globals,
     alias: SshAlias<'_>,
 ) -> anyhow::Result<codewire_local_vmm::control::v1::Environment> {
     if alias.placement != AliasPlacement::Local {
         return super::native::native_ssh_target(Some(alias.environment_ref)).await;
     }
-    match super::native::native_environment(alias.environment_ref).await? {
-        Some(environment) => Ok(environment),
-        None => Err(local_alias_not_found_with_hint(globals, alias.environment_ref).await),
-    }
+    super::native::native_environment(alias.environment_ref)
+        .await?
+        .ok_or_else(|| local_alias_not_found(alias.environment_ref))
 }
 
 /// The known_hosts line for a local VM's supervisor-held key, under the host
@@ -303,7 +234,7 @@ pub(crate) fn local_known_hosts_line(
     Ok(format!("{} {key}\n", target.token))
 }
 
-/// The cloud environment `alias` names: a bare one as any reference
+/// The cloud environment `alias` names: a plain reference as any reference
 /// resolves, a qualified one by [`resolve_qualified_cloud_ref`]. A local
 /// alias never resolves here.
 pub(crate) async fn resolve_cloud_alias(
@@ -312,7 +243,9 @@ pub(crate) async fn resolve_cloud_alias(
     alias: SshAlias<'_>,
 ) -> anyhow::Result<String> {
     match alias.placement {
-        AliasPlacement::Bare => resolve_environment_id(client, org_id, alias.environment_ref).await,
+        AliasPlacement::Plain => {
+            resolve_environment_id(client, org_id, alias.environment_ref).await
+        }
         AliasPlacement::Cloud => {
             let environments = client
                 .list_environments(org_id, false)
@@ -350,6 +283,8 @@ impl KnownHostsTarget {
             }
             None => host,
         };
+        // Only the managed blocks' qualified aliases: the bare `cw-<ref>` is
+        // retired (owner, 2026-10-24).
         let alias = name
             .strip_prefix("cw-")
             .filter(|rest| {
@@ -357,6 +292,7 @@ impl KnownHostsTarget {
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
             })
             .and_then(|_| SshAlias::parse(name))
+            .filter(|alias| alias.placement != AliasPlacement::Plain)
             .ok_or_else(|| anyhow::anyhow!("unsupported SSH host {host:?}"))?;
         Ok(Self {
             token: host.to_string(),

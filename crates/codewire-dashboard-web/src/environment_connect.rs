@@ -960,7 +960,7 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
         setup_failure,
         confidential_actions_allowed: true,
         vscode_url: format!(
-            "vscode://vscode-remote/ssh-remote+cw-{}/workspace",
+            "vscode://vscode-remote/ssh-remote+cw-cloud-{}/workspace",
             environment.id
         ),
         ports: environment.ports.into_iter().map(port_row).collect(),

@@ -1991,16 +1991,12 @@ pub(crate) struct SshConfigOptions {
     pub(crate) ssh_options: Vec<String>,
 }
 
-/// The managed host blocks, most specific first, with the placement flag
-/// each block's commands pass. OpenSSH takes each option from the first block
-/// that sets it, so `cw-local-*` and `cw-cloud-*` precede the catch-all
-/// `cw-*`, which keeps resolving bare aliases in the cloud during the
-/// transition (#3025) and would otherwise send `cw-local-NAME` there.
-pub(crate) const MANAGED_SSH_HOSTS: &[(&str, &str)] = &[
-    ("cw-local-*", " --local"),
-    ("cw-cloud-*", " --cloud"),
-    ("cw-*", ""),
-];
+/// The managed host blocks, with the placement flag each block's commands
+/// pass (#3025). There is no catch-all `cw-*` block: the bare `cw-<ref>`
+/// alias is retired (owner, 2026-10-24), so an environment is reached only by
+/// its placement-qualified alias.
+pub(crate) const MANAGED_SSH_HOSTS: &[(&str, &str)] =
+    &[("cw-local-*", " --local"), ("cw-cloud-*", " --cloud")];
 
 /// The managed directives with `cw_command` and the block's placement flag
 /// in place of the executable.

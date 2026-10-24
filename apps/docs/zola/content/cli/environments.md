@@ -255,12 +255,11 @@ cw setup ssh [--ssh-config-file ~/.ssh/config] [-o|--ssh-option OPTION]... [-n|-
 cw setup ssh remove [--ssh-config-file ~/.ssh/config] [-n|--dry-run]
 ```
 
-Writes the managed `Host cw-local-*`, `Host cw-cloud-*` and `Host cw-*`
-blocks, whose `ProxyCommand` runs `cw [--local|--cloud] shell --stdio %n` and
+Writes the managed `Host cw-local-*` and `Host cw-cloud-*` blocks, whose `ProxyCommand` runs `cw [--local|--cloud] shell --stdio %n` and
 whose `KnownHostsCommand` runs `cw [--local|--cloud] ssh known-hosts %H`, so
 that `ssh`, `scp`, `sftp`, `rsync` and VS Code Remote-SSH reach cloud
-environments as `cw-cloud-NAME`, and local VMs as `cw-local-NAME`. It reports whether the block was written or unchanged. A bare
-`cw-NAME` still reaches the cloud environment through at least v0.5. `--dry-run` shows the change to the
+environments as `cw-cloud-NAME`, and local VMs as `cw-local-NAME`. It reports whether the block was written or unchanged. There is no bare
+`cw-NAME` alias. `--dry-run` shows the change to the
 managed block without writing it; the rest of the file is not printed.
 `cw setup` writes the same block unless `--skip-ssh` is given.
 

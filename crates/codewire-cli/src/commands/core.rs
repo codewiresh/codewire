@@ -134,7 +134,7 @@ pub(crate) async fn handle_vscode_command(
     // The editor connects through the placement-qualified alias, by ID.
     let (host, shown) = if local {
         let environment = match alias {
-            Some(alias) => local_ssh_target(globals, alias).await?,
+            Some(alias) => local_ssh_target(alias).await?,
             None => super::native::native_ssh_target(None).await?,
         };
         // Refused here, not as an opaque Remote-SSH failure in the editor.
@@ -241,8 +241,6 @@ async fn resolve_alias_or_selected(
 
 /// The editor link for `host`, a placement-qualified alias. `cw vscode`
 /// writes the managed SSH section first, so the alias is always configured.
-/// (The dashboard's link stays on the bare `cw-<id>`, which every `cw`
-/// resolves, until the bare-alias transition ends.)
 pub(crate) fn vscode_remote_uri(host: &str, folder: &str) -> String {
     format!("vscode://vscode-remote/ssh-remote+{host}/{folder}")
 }

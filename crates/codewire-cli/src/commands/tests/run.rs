@@ -21,12 +21,13 @@ fn vscode_command_parser_accepts_folder_and_org() {
 
 #[test]
 fn vscode_uri_helpers_use_environment_ids() {
-    let bare = |environment_ref| SshAlias {
-        placement: AliasPlacement::Bare,
+    let plain = |environment_ref| SshAlias {
+        placement: AliasPlacement::Plain,
         environment_ref,
     };
-    assert_eq!(SshAlias::parse("cw-env_123"), Some(bare("env_123")));
-    assert_eq!(SshAlias::parse("env_123"), Some(bare("env_123")));
+    // The bare `cw-<ref>` alias is retired: it is a plain reference as given.
+    assert_eq!(SshAlias::parse("cw-env_123"), Some(plain("cw-env_123")));
+    assert_eq!(SshAlias::parse("env_123"), Some(plain("env_123")));
     assert_eq!(SshAlias::parse(" "), None);
     // The editor connects through the placement-qualified alias.
     assert_eq!(

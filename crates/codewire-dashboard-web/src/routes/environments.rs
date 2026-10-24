@@ -3905,7 +3905,7 @@ mod tests {
         let html = render_terminal(&organization, row.clone());
         assert!(html.contains("<h1>quiet-mesa</h1><span class=\"cw-status cw-status--pill\" data-sandbox-state data-tone=\"success\">running</span><span class=\"cw-workspace-resources\" data-sandbox-resources>1 vCPU · 2 GiB · 10 GiB</span>"));
         assert!(html.contains("<dt>Last event</dt><dd data-sandbox-last-event>6m ago</dd>"));
-        assert!(html.contains(&format!("href=\"vscode://vscode-remote/ssh-remote+cw-{ID}/workspace\" data-sandbox-action=\"connect\">Open in VS Code</a>")));
+        assert!(html.contains(&format!("href=\"vscode://vscode-remote/ssh-remote+cw-cloud-{ID}/workspace\" data-sandbox-action=\"connect\">Open in VS Code</a>")));
         for (state, label) in [
             ("unscheduled", "off"),
             ("protected", "off (protected)"),

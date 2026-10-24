@@ -5021,20 +5021,13 @@ run_user_ssh_journey() {
     sed 's/[[:cntrl:]]//g' "$TMPDIR_SMOKE/ssh-journey.err" >&2 || true
     die "ssh did not run a shell command line: output '$output', exit $status (want 'aB', 7)"
   }
-  # The bare `cw-<id>` alias still reaches the cloud through the managed
-  # `Host cw-*` block, with the same trust as `cw-cloud-<id>`.
-  output="$(user_ssh_as "cw-$ENV_ID" 'printf bare-alias-ok' 2>"$TMPDIR_SMOKE/ssh-bare.err" </dev/null)" || true
-  [[ "$output" == "bare-alias-ok" ]] || {
-    sed 's/[[:cntrl:]]//g' "$TMPDIR_SMOKE/ssh-bare.err" >&2 || true
-    die "ssh cw-$ENV_ID did not run through the managed Host cw-* block: output '$output'"
-  }
   up="$TMPDIR_SMOKE/scp-up.txt"
   down="$TMPDIR_SMOKE/scp-down.txt"
   printf 'smoke-scp-%s\n' "$ENV_ID" >"$up"
   user_scp "$up" "cw-cloud-$ENV_ID:smoke-scp.txt" </dev/null || die "scp (SFTP mode) upload to the home directory failed"
   user_scp "cw-cloud-$ENV_ID:smoke-scp.txt" "$down" </dev/null || die "scp (SFTP mode) download from the home directory failed"
   cmp -s "$up" "$down" || die "scp (SFTP mode) round trip changed the file"
-  log "user SSH: shell command lines keep their exit status; the bare cw-<id> alias works; SFTP-mode scp round-trips"
+  log "user SSH: shell command lines keep their exit status; SFTP-mode scp round-trips"
 }
 
 # The recorded key must be served: retry only until the daemon answers.
