@@ -348,7 +348,7 @@ enum Command {
     Init(InitArgs),
     #[command(
         about = "Open a running environment in VS Code",
-        long_about = "Open VS Code connected to a running environment via Remote-SSH. Ensures your SSH config is up to date before launching VS Code with the vscode:// URI scheme."
+        long_about = "Open VS Code connected to a running cloud environment via Remote-SSH, through its `cw-cloud-<id>` alias. Ensures your SSH config is up to date before launching VS Code with the vscode:// URI scheme. Local VMs need port forwarding for VS Code, which is not available yet; use `ssh cw-local-NAME`."
     )]
     Vscode(VscodeArgs),
     #[command(

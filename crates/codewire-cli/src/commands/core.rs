@@ -123,40 +123,63 @@ pub(crate) async fn handle_vscode_command(
 ) -> anyhow::Result<()> {
     let environment =
         super::flat::select_environment("vscode", args.environment, args.in_environment, &[])?;
-    anyhow::ensure!(
-        globals.placement != Some(EnvironmentPlacement::Local),
-        "`cw vscode` opens cloud environments; for a local VM use `cw shell ENV`"
-    );
-    if let Some(alias) = environment.as_deref().and_then(SshAlias::parse)
-        && alias.placement == AliasPlacement::Local
-    {
-        return Err(refuse_local_alias(globals, alias.environment_ref).await);
-    }
-    let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env)?;
-    let platform = resolve_platform(globals, &paths, &env)?;
-    let environment_client = EnvironmentClient::new(&platform)?;
-    let orgs = organization_client(&platform)?
-        .list_orgs()
-        .await
-        .context("list orgs")?;
-    let org_id = resolve_org_id(&platform, &orgs, args.org.as_deref())?;
     let alias = environment.as_deref().and_then(SshAlias::parse);
-    let environment_id =
-        resolve_alias_or_selected(&environment_client, &org_id, &paths.mesh_data_dir, alias)
-            .await?;
+    if let Some(alias) = alias {
+        alias.check_placement(globals.placement)?;
+    }
+    let local = alias.map_or(
+        globals.placement == Some(EnvironmentPlacement::Local),
+        |alias| alias.is_local(globals.placement),
+    );
+    // `cw vscode` does not open local VMs yet; the VS Code slice of #3025
+    // removes this refusal, and the local link below is ready for it.
+    if local {
+        anyhow::bail!(
+            "`cw vscode` does not open local VMs yet; use `ssh {LOCAL_ALIAS_PREFIX}{}`",
+            alias.map_or("NAME", |alias| alias.environment_ref)
+        );
+    }
+    // The editor connects through the placement-qualified alias, by ID.
+    let (host, shown) = if local {
+        let environment = match alias {
+            Some(alias) => local_ssh_target(globals, alias).await?,
+            None => super::native::native_ssh_target(None).await?,
+        };
+        (
+            format!("{LOCAL_ALIAS_PREFIX}{}", environment.id),
+            environment.name,
+        )
+    } else {
+        let env = OsEnv;
+        let paths = ResolvePaths::from_env(&env)?;
+        let platform = resolve_platform(globals, &paths, &env)?;
+        let environment_client = EnvironmentClient::new(&platform)?;
+        let orgs = organization_client(&platform)?
+            .list_orgs()
+            .await
+            .context("list orgs")?;
+        let org_id = resolve_org_id(&platform, &orgs, args.org.as_deref())?;
+        let environment_id =
+            resolve_alias_or_selected(&environment_client, &org_id, &paths.mesh_data_dir, alias)
+                .await?;
+        let shown = alias.map_or_else(
+            || environment_id.clone(),
+            |alias| alias.environment_ref.to_owned(),
+        );
+        (format!("{CLOUD_ALIAS_PREFIX}{environment_id}"), shown)
+    };
 
     // Keeps the managed SSH section current, silently: the link below
     // connects through it.
     install_default_managed_ssh_config().context("update ssh config")?;
 
-    let uri = vscode_remote_uri(&environment_id, &args.folder);
+    let uri = vscode_remote_uri(&host, &args.folder);
     let style =
         crate::output::Capabilities::from_process(crate::output::OutputMode::Text).stderr_style();
     eprintln!(
         "{} Opening VS Code for {}{}",
         style.status(crate::output::Status::Next),
-        terminal_text(alias.map_or(environment_id.as_str(), |alias| alias.environment_ref)),
+        terminal_text(&shown),
         style.paint(
             crate::output::Role::Dim,
             &format!("{}{}", style.separator(), terminal_text(&args.folder))
@@ -172,9 +195,6 @@ pub(crate) async fn handle_shell_stdio(
     let alias = environment.and_then(SshAlias::parse);
     if let Some(alias) = alias {
         alias.check_placement(globals.placement)?;
-        if alias.placement == AliasPlacement::Local {
-            return Err(refuse_local_alias(globals, alias.environment_ref).await);
-        }
     }
     if std::env::var_os("CW_DEBUG_TAILNET").is_some() {
         init_tailnet_debug_log();
@@ -224,12 +244,12 @@ async fn resolve_alias_or_selected(
     }
 }
 
-/// The editor link for a cloud environment, by its placement-qualified
-/// alias. `cw vscode` writes the managed SSH section first, so the alias is
-/// always configured. (The dashboard's link stays on the bare `cw-<id>`,
-/// which every `cw` resolves, until the bare-alias transition ends.)
-pub(crate) fn vscode_remote_uri(environment_id: &str, folder: &str) -> String {
-    format!("vscode://vscode-remote/ssh-remote+{CLOUD_ALIAS_PREFIX}{environment_id}/{folder}")
+/// The editor link for `host`, a placement-qualified alias. `cw vscode`
+/// writes the managed SSH section first, so the alias is always configured.
+/// (The dashboard's link stays on the bare `cw-<id>`, which every `cw`
+/// resolves, until the bare-alias transition ends.)
+pub(crate) fn vscode_remote_uri(host: &str, folder: &str) -> String {
+    format!("vscode://vscode-remote/ssh-remote+{host}/{folder}")
 }
 
 pub(crate) fn init_request_from_args(args: &InitArgs) -> anyhow::Result<CreateEnvironmentRequest> {

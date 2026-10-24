@@ -233,7 +233,7 @@ without `--force`. See [The project file](@/guides/project-file.md).
 
 ```sh
 cw shell [ENV]
-cw shell --stdio ENV     # for OpenSSH ProxyCommand (cloud)
+cw shell --stdio ENV     # for OpenSSH ProxyCommand (cw-local-NAME, cw-cloud-NAME)
 ```
 
 Opens a login shell as a new session in the selected or named environment.
@@ -245,7 +245,8 @@ cw vscode [ENV] [--folder /workspace] [--org ORG]
 ```
 
 Refreshes the SSH config, as `cw setup ssh` does, and opens VS Code with
-Remote-SSH on `cw-cloud-<id>`.
+Remote-SSH on `cw-cloud-<id>`. It does not open local VMs yet; for a local VM
+it points to `ssh cw-local-NAME`.
 
 ## cw setup ssh
 
@@ -254,13 +255,12 @@ cw setup ssh [--ssh-config-file ~/.ssh/config] [-o|--ssh-option OPTION]... [-n|-
 cw setup ssh remove [--ssh-config-file ~/.ssh/config] [-n|--dry-run]
 ```
 
-Writes the managed `Host cw-cloud-*` and `Host cw-*` blocks, whose
-`ProxyCommand` runs `cw [--cloud] shell --stdio %n` and whose
-`KnownHostsCommand` runs `cw [--cloud] ssh known-hosts %H`, so that `ssh`,
-`scp`, `sftp`, `rsync` and VS Code Remote-SSH reach cloud environments as
-`cw-cloud-NAME`. It reports whether the block was written or unchanged. A
-bare `cw-NAME` still reaches the cloud environment through at least v0.5, and
-`cw-local-` is reserved for local VMs and refused for now. `--dry-run` shows the change to the
+Writes the managed `Host cw-local-*`, `Host cw-cloud-*` and `Host cw-*`
+blocks, whose `ProxyCommand` runs `cw [--local|--cloud] shell --stdio %n` and
+whose `KnownHostsCommand` runs `cw [--local|--cloud] ssh known-hosts %H`, so
+that `ssh`, `scp`, `sftp`, `rsync` and VS Code Remote-SSH reach cloud
+environments as `cw-cloud-NAME`, and local VMs as `cw-local-NAME`. It reports whether the block was written or unchanged. A bare
+`cw-NAME` still reaches the cloud environment through at least v0.5. `--dry-run` shows the change to the
 managed block without writing it; the rest of the file is not printed.
 `cw setup` writes the same block unless `--skip-ssh` is given.
 

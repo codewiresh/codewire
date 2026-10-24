@@ -13,11 +13,12 @@ use codewire_client::{
 use codewire_proto::codewire::v1::{
     DownloadFileRequest, DownloadFileResponse, Environment, EnvironmentDaemonStatus,
     EnvironmentServiceClient, ExecRequest, ExecResponse, ExecServiceClient, FileEntry,
-    FileServiceClient, GetEnvironmentDaemonStatusRequest, GetSessionRequest,
-    ListEnvironmentsRequest, ListFilesRequest, RepairEnvironmentDaemonRequest, RunRequest,
-    RunResponse, RunStart, StopSessionRequest, StreamEnvironmentDaemonLogsRequest,
-    StreamEnvironmentDaemonLogsResponse, UploadFileHeader, UploadFileRequest, UploadFileResponse,
-    download_file_response, run_request, run_response, upload_file_request,
+    FileServiceClient, GetEnvironmentDaemonStatusRequest, GetEnvironmentHostKeyRequest,
+    GetEnvironmentHostKeyResponse, GetSessionRequest, ListEnvironmentsRequest, ListFilesRequest,
+    RepairEnvironmentDaemonRequest, RunRequest, RunResponse, RunStart, StopSessionRequest,
+    StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, UploadFileHeader,
+    UploadFileRequest, UploadFileResponse, download_file_response, run_request, run_response,
+    upload_file_request,
 };
 use connectrpc::client::{ClientConfig, Http2Connection, SharedHttp2Connection};
 use std::sync::Arc;
@@ -78,6 +79,22 @@ impl NativePublicEnvironmentClient {
             .status
             .into_option()
             .ok_or(NativePublicClientError::Protocol)
+    }
+
+    /// The environment's SSH host key as the supervisor holds it (#3025):
+    /// one `ssh-ed25519 <base64>` line with no host field, stable for the
+    /// environment's life.
+    pub async fn host_key(&self) -> Result<String, NativePublicClientError> {
+        host_key_line(
+            self.inner
+                .get_environment_host_key(GetEnvironmentHostKeyRequest {
+                    org_id: self.org_id.clone(),
+                    environment_id: self.environment_id.clone(),
+                    ..Default::default()
+                })
+                .await?
+                .into_owned(),
+        )
     }
 
     pub async fn daemon_logs(&self) -> Result<Vec<u8>, NativePublicClientError> {
@@ -629,6 +646,18 @@ impl RunOutput {
     }
 }
 
+/// The key line of a host-key response: one non-empty line without control
+/// characters. The caller checks the key itself.
+fn host_key_line(
+    response: GetEnvironmentHostKeyResponse,
+) -> Result<String, NativePublicClientError> {
+    let line = response.public_key_openssh.trim();
+    if line.is_empty() || line.chars().any(char::is_control) {
+        return Err(NativePublicClientError::Protocol);
+    }
+    Ok(line.to_owned())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NativePublicClientError {
     #[error("local public client configuration is invalid")]
@@ -684,6 +713,33 @@ mod tests {
         assert_eq!(response.exit_code, 7);
         assert_eq!(response.stdout, b"out-1 out-2");
         assert_eq!(response.stderr, b"err");
+    }
+
+    #[test]
+    fn host_key_line_is_one_line_without_control_characters() {
+        let response = |key: &str| GetEnvironmentHostKeyResponse {
+            generation: 1,
+            public_key_openssh: key.to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            host_key_line(response("ssh-ed25519 AAAAC3Nz\n")).expect("key line"),
+            "ssh-ed25519 AAAAC3Nz"
+        );
+        for invalid in [
+            "",
+            "  ",
+            "ssh-ed25519 AAAA\ncw-x ssh-ed25519 BBBB",
+            "ssh-ed25519 \u{1b}[2J",
+        ] {
+            assert!(
+                matches!(
+                    host_key_line(response(invalid)),
+                    Err(NativePublicClientError::Protocol)
+                ),
+                "{invalid:?}"
+            );
+        }
     }
 
     #[test]

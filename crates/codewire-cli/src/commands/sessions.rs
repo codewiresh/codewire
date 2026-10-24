@@ -1882,11 +1882,18 @@ pub(crate) async fn handle_environment_shell_command(
     let environment =
         super::flat::select_environment("shell", args.environment, args.in_environment, &[])?;
     if args.stdio {
-        if globals.placement == Some(EnvironmentPlacement::Local) {
-            if let Some(alias) = environment.as_deref().and_then(SshAlias::parse) {
-                alias.check_placement(globals.placement)?;
+        // The OpenSSH ProxyCommand: a `cw-local-` alias, or any reference
+        // under --local, is a local VM; everything else is the cloud.
+        let alias = environment.as_deref().and_then(SshAlias::parse);
+        if let Some(alias) = alias {
+            alias.check_placement(globals.placement)?;
+            if alias.is_local(globals.placement) {
+                let environment = local_ssh_target(globals, alias).await?;
+                return super::native::native_pipe_ssh(&environment).await;
             }
-            return super::native::native_shell_stdio(environment.as_deref()).await;
+        }
+        if globals.placement == Some(EnvironmentPlacement::Local) {
+            return super::native::native_shell_stdio(None).await;
         }
         return handle_shell_stdio(globals, environment.as_deref()).await;
     }

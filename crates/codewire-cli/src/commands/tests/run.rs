@@ -30,7 +30,7 @@ fn vscode_uri_helpers_use_environment_ids() {
     assert_eq!(SshAlias::parse(" "), None);
     // The editor connects through the placement-qualified cloud alias.
     assert_eq!(
-        vscode_remote_uri("env_123", "/workspace/app"),
+        vscode_remote_uri("cw-cloud-env_123", "/workspace/app"),
         "vscode://vscode-remote/ssh-remote+cw-cloud-env_123//workspace/app"
     );
 }

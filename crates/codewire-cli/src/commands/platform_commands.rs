@@ -1993,9 +1993,14 @@ pub(crate) struct SshConfigOptions {
 
 /// The managed host blocks, most specific first, with the placement flag
 /// each block's commands pass. OpenSSH takes each option from the first block
-/// that sets it, so `cw-cloud-*` precedes the catch-all `cw-*`, which keeps
-/// resolving bare aliases in the cloud during the transition (#3025).
-pub(crate) const MANAGED_SSH_HOSTS: &[(&str, &str)] = &[("cw-cloud-*", " --cloud"), ("cw-*", "")];
+/// that sets it, so `cw-local-*` and `cw-cloud-*` precede the catch-all
+/// `cw-*`, which keeps resolving bare aliases in the cloud during the
+/// transition (#3025) and would otherwise send `cw-local-NAME` there.
+pub(crate) const MANAGED_SSH_HOSTS: &[(&str, &str)] = &[
+    ("cw-local-*", " --local"),
+    ("cw-cloud-*", " --cloud"),
+    ("cw-*", ""),
+];
 
 /// The managed directives with `cw_command` and the block's placement flag
 /// in place of the executable.
@@ -2344,22 +2349,22 @@ impl SshConfigOutcome {
         match self.change {
             SshConfigChange::Written | SshConfigChange::Unchanged => {
                 let ssh = if self.file.named {
-                    format!(
-                        "ssh -F {} {CLOUD_ALIAS_PREFIX}NAME",
-                        shell_word(&self.file.path.to_string_lossy())
-                    )
+                    format!("ssh -F {} ", shell_word(&self.file.path.to_string_lossy()))
                 } else {
-                    format!("ssh {CLOUD_ALIAS_PREFIX}NAME")
+                    "ssh ".to_string()
                 };
-                out.push_str(&format!(
-                    "\n{} {}\n  {}\n",
-                    style.status(Status::Next),
-                    terminal_text(&ssh),
-                    style.paint(
-                        Role::Dim,
-                        "A cloud environment, by name or ID. Local VMs: use `cw shell NAME`."
-                    )
-                ));
+                out.push('\n');
+                for (prefix, what) in [
+                    (LOCAL_ALIAS_PREFIX, "A local VM, by name or ID."),
+                    (CLOUD_ALIAS_PREFIX, "A cloud environment, by name or ID."),
+                ] {
+                    out.push_str(&format!(
+                        "{} {}\n  {}\n",
+                        style.status(Status::Next),
+                        terminal_text(&format!("{ssh}{prefix}NAME")),
+                        style.paint(Role::Dim, what)
+                    ));
+                }
             }
             SshConfigChange::Removed => out.push_str(&format!(
                 "\n{} Add it back: {}\n",

@@ -243,8 +243,10 @@
                 .await
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("names a local VM"), "{error}");
-            assert!(error.contains("use `cw shell my-app`"), "{error}");
+            assert!(
+                error.contains("names a local VM, which the cloud does not serve"),
+                "{error}"
+            );
             assert!(
                 source.seen.lock().unwrap().is_empty(),
                 "{host} read the platform"
@@ -361,17 +363,18 @@
 
     #[test]
     fn a_local_alias_names_the_cloud_aliases_of_its_old_meaning() {
-        let error = local_alias_refusal("app", None).to_string();
+        let error = local_alias_not_found("app", None).to_string();
         assert_eq!(
             error,
-            "`cw-local-app` names a local VM, and SSH aliases for local VMs are not available yet; use `cw shell app`"
+            "no local VM matches \"app\" (from `cw-local-app`); `cw --local ls` lists yours"
         );
         let local_app = test_environment(
             "44444444-0000-4000-8000-000000000004",
             Some("local-app"),
             "running",
         );
-        let error = local_alias_refusal("app", Some(std::slice::from_ref(&local_app))).to_string();
+        let error =
+            local_alias_not_found("app", Some(std::slice::from_ref(&local_app))).to_string();
         assert!(
             error.ends_with(&format!(
                 ". The cloud environment \"local-app\" is `cw-cloud-local-app` or `cw-{}`",
@@ -379,6 +382,53 @@
             )),
             "{error}"
         );
+    }
+
+    #[test]
+    fn an_alias_names_its_placement_and_refuses_the_other_flag() {
+        let local = SshAlias::parse("cw-local-app").unwrap();
+        assert!(local.is_local(None));
+        assert!(local.is_local(Some(EnvironmentPlacement::Local)));
+        let error = local
+            .check_placement(Some(EnvironmentPlacement::Platform))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "`cw-local-app` names a local VM, which --cloud does not reach"
+        );
+        // A bare alias is local only under --local; a cloud alias never is.
+        let bare = SshAlias::parse("cw-app").unwrap();
+        assert!(!bare.is_local(None));
+        assert!(!bare.is_local(Some(EnvironmentPlacement::Platform)));
+        assert!(bare.is_local(Some(EnvironmentPlacement::Local)));
+        let cloud = SshAlias::parse("cw-cloud-app").unwrap();
+        assert!(!cloud.is_local(None));
+    }
+
+    #[test]
+    fn a_local_known_hosts_line_carries_the_host_as_asked() {
+        let encoded = ed25519_public_key_base64();
+        for host in ["cw-local-app", "[cw-local-app]:22"] {
+            let target = KnownHostsTarget::parse(host).unwrap();
+            // The supervisor's key line has no host field.
+            let line = local_known_hosts_line(&target, &format!("ssh-ed25519 {encoded}")).unwrap();
+            assert_eq!(line, format!("{host} ssh-ed25519 {encoded}\n"));
+        }
+        let target = KnownHostsTarget::parse("cw-local-app").unwrap();
+        for invalid in ["", "ssh-rsa AAAAB3NzaC1yc2E", "ssh-ed25519 !!!"] {
+            assert!(
+                local_known_hosts_line(&target, invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_hosts_takes_a_placement() {
+        let cli =
+            Cli::try_parse_from(["cw", "--local", "ssh", "known-hosts", "cw-local-app"]).unwrap();
+        crate::validate_placement_scope(&cli.command, "ssh", cli.placement().unwrap(), false)
+            .unwrap();
     }
 
     #[test]

@@ -1210,7 +1210,13 @@ pub(crate) async fn get_native_environment(name: &str) -> anyhow::Result<v1::Env
 /// (#3025): this process's stdin and stdout carry the SSH connection, which
 /// the supervisor serves with the environment's own host key.
 pub(crate) async fn native_shell_stdio(name: Option<&str>) -> anyhow::Result<()> {
-    let environment = match name {
+    native_pipe_ssh(&native_ssh_target(name).await?).await
+}
+
+/// The local VM an SSH command names, or with no name the one `cw --local
+/// use` selected.
+pub(crate) async fn native_ssh_target(name: Option<&str>) -> anyhow::Result<v1::Environment> {
+    match name {
         Some(name) => native_environment(name).await?,
         // Only an explicit `cw use` selects; the supervisor's own flag does not.
         None => {
@@ -1228,12 +1234,40 @@ pub(crate) async fn native_shell_stdio(name: Option<&str>) -> anyhow::Result<()>
         None => anyhow::anyhow!(
             "no local environment is selected; name one, or select one with `cw --local use ENV`"
         ),
-    })?;
+    })
+}
+
+const NATIVE_SSH_UNSUPPORTED: &str = "your local VMs run on an older cw's supervisor, which has no SSH; `cw upgrade --vms` moves them to this cw once they are idle";
+
+/// `environment`'s SSH host key as its supervisor holds it: one
+/// `ssh-ed25519 <base64>` line, stable for the environment's life.
+pub(crate) async fn native_ssh_host_key(environment: &v1::Environment) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        native_client()
+            .await?
+            .supports(codewire_local_vmm::supervisor_config::SupervisorFeature::Ssh),
+        NATIVE_SSH_UNSUPPORTED
+    );
+    native_environment_diagnostic_client(&environment.id)
+        .await?
+        .host_key()
+        .await
+        .with_context(|| {
+            format!(
+                "read the SSH host key of local environment {}",
+                environment.name
+            )
+        })
+}
+
+/// Carries an SSH connection between this process's stdin and stdout and
+/// `environment`'s supervisor-served SSH.
+pub(crate) async fn native_pipe_ssh(environment: &v1::Environment) -> anyhow::Result<()> {
     let environment_id = Uuid::parse_str(&environment.id).context("local environment UUID")?;
     let mut client = native_client().await?;
     anyhow::ensure!(
         client.supports(codewire_local_vmm::supervisor_config::SupervisorFeature::Ssh),
-        "your local VMs run on an older cw's supervisor, which has no SSH; `cw upgrade --vms` moves them to this cw once they are idle"
+        NATIVE_SSH_UNSUPPORTED
     );
     client
         .pipe_ssh(environment_id, tokio::io::stdin(), tokio::io::stdout())

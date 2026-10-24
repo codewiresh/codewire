@@ -446,8 +446,24 @@ async fn session_commands_refuse_missing_contradictory_or_retired_selectors_befo
             "name the environment once: `cw vscode ENV` or `cw vscode --in ENV`, not both",
         ),
         (
+            vec!["cw", "vscode", "--local", "cw-cloud-app"],
+            "`cw-cloud-app` names a cloud environment, which --local does not reach",
+        ),
+        (
+            vec!["cw", "vscode", "--cloud", "cw-local-app"],
+            "`cw-local-app` names a local VM, which --cloud does not reach",
+        ),
+        (
+            vec!["cw", "vscode", "cw-local-app"],
+            "`cw vscode` does not open local VMs yet; use `ssh cw-local-app`",
+        ),
+        (
             vec!["cw", "vscode", "--local", "app"],
-            "`cw vscode` opens cloud environments; for a local VM use `cw shell ENV`",
+            "`cw vscode` does not open local VMs yet; use `ssh cw-local-app`",
+        ),
+        (
+            vec!["cw", "vscode", "--local"],
+            "`cw vscode` does not open local VMs yet; use `ssh cw-local-NAME`",
         ),
         (
             vec!["cw", "run"],

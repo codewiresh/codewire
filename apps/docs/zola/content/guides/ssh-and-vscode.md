@@ -5,8 +5,9 @@ weight: 2
 ---
 
 Every environment runs an SSH server with SFTP and SCP inside its daemon. For
-a hosted sandbox, `cw` reaches it over the Codewire tailnet, and your OpenSSH
-config can use `cw` as its proxy.
+a hosted sandbox, `cw` reaches it over the Codewire tailnet; for a local VM,
+through the local supervisor, which serves SSH with the VM's own host key.
+Your OpenSSH config can use `cw` as its proxy for both.
 
 ## OpenSSH
 
@@ -15,6 +16,10 @@ of `~/.ssh/config` and reports whether it wrote the block or found it current:
 
 ```text
 # ---- START CODEWIRE ----
+Host cw-local-*
+  ProxyCommand cw --local shell --stdio %n
+  KnownHostsCommand cw --local ssh known-hosts %H
+  ...
 Host cw-cloud-*
   ProxyCommand cw --cloud shell --stdio %n
   KnownHostsCommand cw --cloud ssh known-hosts %H
@@ -27,19 +32,28 @@ Host *
 # ---- END CODEWIRE ----
 ```
 
-Then `cw-cloud-` followed by a cloud environment's name or ID is a host:
+Then `cw-cloud-` followed by a cloud environment's name or ID is a host, and
+`cw-local-` followed by a local VM's name or ID is one too:
 
 ```sh
 ssh cw-cloud-my-app
 scp ./fixture.json cw-cloud-my-app:/workspace/
 rsync -av cw-cloud-my-app:/workspace/out/ ./out/
 sftp cw-cloud-my-app
+
+ssh cw-local-my-vm
+ssh cw-local-my-vm 'make test'
 ```
 
 The placement in the alias means a local VM and a cloud environment with the
-same name never get mixed up. `cw-local-` is reserved for local VMs: SSH
-aliases for them are not available yet, so `ssh cw-local-NAME` is refused with
-a pointer to `cw shell NAME`, and is never sent to the cloud.
+same name never get mixed up: a `cw-local-` name is never sent to the cloud,
+and a `cw-cloud-` name never reaches a local VM. A local VM's host key is the
+one its supervisor keeps for it, the same for every boot, and
+`cw --local ssh known-hosts` hands OpenSSH exactly that key, so there is no
+trust-on-first-use prompt either. Commands, interactive sessions, `scp`,
+`sftp`, `rsync` and port forwarding work in a local VM created by this `cw`; a
+VM on an older runtime refuses forwarding until it is recreated. `cw vscode`
+does not open local VMs yet.
 
 A bare `cw-NAME`, such as one an editor remembers from an earlier `cw`, still
 reaches the cloud environment `NAME`, and will through at least v0.5. Before
@@ -47,7 +61,8 @@ the aliases were qualified, `cw-cloud-x` meant a cloud environment named
 `cloud-x`; it still does when nothing else is named `x`. When both `x` and
 `cloud-x` exist, `cw` refuses rather than guess, and names both IDs, so you
 can connect with `cw-cloud-<id>`. A cloud environment named `local-x` is
-`cw-cloud-local-x`.
+`cw-cloud-local-x`; when `cw-local-x` names no local VM and such a cloud
+environment exists, the error says so.
 
 The block passes the host name to `ProxyCommand` (`%n`) for every `cw-` host,
 so use OpenSSH 9.6 or later, or a distribution build that includes the fix for
@@ -79,8 +94,8 @@ half written. A symlinked config stays a symlink, because `cw` writes the file
 it points to. A file `cw` creates is readable only by you, and an existing
 one keeps its permissions.
 
-`cw shell --stdio` is for hosted sandboxes. For a local VM or a trusted host,
-use `cw shell ENV` and the session commands.
+`cw shell --stdio` is the proxy for both placements. For a trusted host, use
+`cw shell ENV` and the session commands.
 
 ## Port forwarding
 
@@ -113,6 +128,10 @@ This refreshes your SSH config and opens
 extension connects through the same proxy. The Sandbox page in the dashboard
 has the same **Open in VS Code** action. Its link uses the bare `cw-<id>`,
 which every version of `cw` resolves, until the bare aliases are retired.
+
+VS Code's Remote-SSH forwards ports into the machine it opens, which local VMs
+do not support yet, so `cw vscode` opens cloud environments only for now and
+points a local VM to `ssh cw-local-NAME`.
 
 ## Copy files
 
