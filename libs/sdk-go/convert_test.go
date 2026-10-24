@@ -267,6 +267,40 @@ func TestCreateEnvironmentPreviewOmissionIsExplicitAndBoolean(t *testing.T) {
 	}
 }
 
+func TestEnvironmentNetworkAttachmentRoundTrips(t *testing.T) {
+	network := "work"
+	request, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{Network: &network})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.GetNetwork() != "work" {
+		t.Fatalf("network = %q", request.GetNetwork())
+	}
+	request, err = createEnvironmentRequest("org_1", CreateEnvironmentBody{})
+	if err != nil || request.GetNetwork() != "" {
+		t.Fatalf("an omitted network must join none: %q %v", request.GetNetwork(), err)
+	}
+	environment, err := fromProtoEnvironment(&codewirev1.Environment{
+		Network:        "work",
+		NetworkState:   codewirev1.NetworkAttachmentState_NETWORK_ATTACHMENT_STATE_FAILED,
+		NetworkFailure: codewirev1.NetworkAttachmentFailure_NETWORK_ATTACHMENT_FAILURE_NOT_A_MEMBER,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if valueOrEmpty(environment.Network) != "work" || valueOrEmpty(environment.NetworkState) != "failed" ||
+		valueOrEmpty(environment.NetworkFailure) != "not_a_member" {
+		t.Fatalf("network attachment changed: %+v", environment)
+	}
+	detached, err := fromProtoEnvironment(&codewirev1.Environment{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detached.Network != nil || detached.NetworkState != nil || detached.NetworkFailure != nil {
+		t.Fatalf("an environment without a network reports none: %+v", detached)
+	}
+}
+
 func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	empty := ""
 	zero := int64(0)

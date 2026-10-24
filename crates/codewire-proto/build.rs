@@ -15,6 +15,7 @@ fn main() {
         "codewire/console/v1/environment_setup.proto",
         "codewire/internal/v1/coordinate.proto",
         "codewire/internal/v1/derp_admission.proto",
+        "codewire/internal/v1/environment_mesh.proto",
         "codewire/internal/v1/mesh_authorization.proto",
         "codewire/internal/v1/workspace_binding.proto",
         "codewire/v1/access_profile.proto",

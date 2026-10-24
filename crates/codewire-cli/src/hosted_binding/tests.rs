@@ -7,7 +7,9 @@ use axum::Router;
 use codewire_daemon::HostedDaemonMode;
 use codewire_daemon::config::{WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV};
 use codewire_proto::codewire::internal::v1::{
-    RecordHostKeyResponse, RefreshAccessResponse, WorkspaceBindingService,
+    IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse, RecordHostKeyResponse,
+    RefreshAccessResponse, ReportMeshAttachmentRequest, ReportMeshAttachmentResponse,
+    WorkspaceBindingService,
 };
 use codewire_tls::test_support::SyntheticPki;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
@@ -174,6 +176,23 @@ impl WorkspaceBindingService for ScriptedService {
             addr_ports: vec!["203.0.113.9:41641".into()],
             ..Default::default()
         })
+    }
+
+    // These environments join no Mesh network.
+    async fn issue_mesh_enrollment(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, IssueMeshEnrollmentRequest>,
+    ) -> ServiceResult<IssueMeshEnrollmentResponse> {
+        Err(ConnectError::failed_precondition("no Mesh network"))
+    }
+
+    async fn report_mesh_attachment(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, ReportMeshAttachmentRequest>,
+    ) -> ServiceResult<ReportMeshAttachmentResponse> {
+        Err(ConnectError::failed_precondition("no Mesh network"))
     }
 }
 

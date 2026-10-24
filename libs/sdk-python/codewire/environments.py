@@ -88,6 +88,7 @@ class Environments:
         confirm_personal_credentials: bool = False,
         confirm_personal_secrets: bool = False,
         omit_application_previews: bool = False,
+        network: str | None = None,
         wait: bool = False,
         wait_timeout: float = 300,
     ) -> Environment:
@@ -116,6 +117,11 @@ class Environments:
             request.name = name
         if ttl_seconds is not None:
             request.ttl_seconds = ttl_seconds
+        if network is not None:
+            # A hosted Codewire Mesh network, by name, in the organization.
+            if not isinstance(network, str) or not network:
+                raise ValueError("codewire: network must be a nonempty Mesh network name")
+            request.network = network
         request.project_spec.CopyFrom(project_spec_from_dict(project_spec))
         if request.project_spec.HasField("credentials") != request.HasField("expected_profile_revision"):
             raise ValueError("codewire: credential profile selection requires its exact revision")

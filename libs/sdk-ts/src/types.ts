@@ -100,6 +100,10 @@ export interface EnvironmentData {
   memory_mb: number;
   name?: string | null;
   network?: string | null;
+  /** Present when `network` is set: how far joining it has come. */
+  network_state?: NetworkAttachmentState;
+  /** Why joining `network` failed, with `network_state` "failed". */
+  network_failure?: NetworkAttachmentFailure;
   org_id: string;
   ports?: EnvironmentPort[];
   preset_id?: string;
@@ -209,7 +213,19 @@ export interface CreateEnvironmentRequest {
   confirm_personal_secrets?: boolean;
   /** Suppress inherited preview defaults during creation, not network access. */
   omit_application_previews?: boolean;
+  /** Join this hosted Codewire Mesh network, by name, in the organization. */
+  network?: string | null;
 }
+
+export type NetworkAttachmentState = "pending" | "attached" | "failed" | "revoked" | "unknown";
+
+export type NetworkAttachmentFailure =
+  | "mesh_unreachable"
+  | "network_not_found"
+  | "not_a_member"
+  | "node_name_taken"
+  | "refused"
+  | "unknown";
 
 export interface UpdateEnvironmentSourcesRequest {
   expected_operation_generation: bigint;

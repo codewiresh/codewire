@@ -249,7 +249,7 @@ database_lane_core() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 21
+  assert_passed_count "server-core migration matrix" "$logfile" 22
 
   logfile="$RUN_DIR/platform-credential-storage.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -500,6 +500,13 @@ database_lane_orchestration() {
       'workspace_binding::store::database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "workspace binding access store matrix" "$logfile" 4
+
+  logfile="$RUN_DIR/environment-mesh-membership.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'environment_mesh::database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "environment Mesh membership matrix" "$logfile" 3
 
   logfile="$RUN_DIR/platform-cw-runtime-journal.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

@@ -80,6 +80,12 @@ pub struct Environment {
     pub preset_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
+    /// `pending`, `attached`, `failed` or `revoked` when `network` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_state: Option<String>,
+    /// Why joining `network` failed, with `network_state` `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_failure: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub ports: Vec<EnvironmentPort>,
 }
@@ -153,11 +159,18 @@ pub(crate) const ENV_SELECT_COLS: &str = r#"e.id, e.org_id, e.created_by, e.pres
     e.total_running_seconds,
     e.created_at, e.started_at, e.stopped_at, e.destroyed_at,
     e.protected, e.deletion_requested_at, e.deletion_grace_until,
-    t.name AS preset_name"#;
+    t.name AS preset_name,
+    ma.network_id AS mesh_network_id,
+    CASE WHEN ma.environment_id IS NULL THEN NULL
+         WHEN ma.status = 'pending' OR ma.status_pod_uid IS DISTINCT FROM b.pod_uid THEN 'pending'
+         ELSE ma.status END AS mesh_network_state,
+    CASE WHEN ma.status = 'failed' AND ma.status_pod_uid IS NOT DISTINCT FROM b.pod_uid
+         THEN ma.failure END AS mesh_network_failure"#;
 
 pub(crate) const ENV_SELECT_JOINS: &str = r#"LEFT JOIN environment_presets t ON e.preset_id = t.id
     LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id
-    LEFT JOIN platform_environment_access_bindings ab ON ab.environment_id = e.id"#;
+    LEFT JOIN platform_environment_access_bindings ab ON ab.environment_id = e.id
+    LEFT JOIN environment_mesh_attachments ma ON ma.environment_id = e.id"#;
 
 pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> {
     let setup_error: String = row.try_get("setup_error")?;
@@ -211,9 +224,12 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
         deletion_requested_at: format_time_opt(row.try_get("deletion_requested_at")?),
         deletion_grace_until: format_time_opt(row.try_get("deletion_grace_until")?),
         preset_name: row.try_get("preset_name")?,
-        // Runtime network enrollment needs a dedicated credential-free
-        // contract; workload environment values are never control input.
-        network: None,
+        // Only the recorded attachment names a network; workload environment
+        // values are never control input. A report for an earlier Pod reads
+        // as pending.
+        network: row.try_get("mesh_network_id")?,
+        network_state: row.try_get("mesh_network_state")?,
+        network_failure: row.try_get("mesh_network_failure")?,
         ports: Vec::new(),
     })
 }
@@ -1628,6 +1644,8 @@ mod tests {
             deletion_grace_until: None,
             preset_name: None,
             network: None,
+            network_state: None,
+            network_failure: None,
             ports: Vec::new(),
         };
         let v: serde_json::Value = serde_json::to_value(&env).unwrap();
@@ -1641,6 +1659,8 @@ mod tests {
             "started_at",
             "ports",
             "network",
+            "network_state",
+            "network_failure",
             "preset_name",
         ] {
             assert!(v.get(absent).is_none(), "{absent} should be omitted");

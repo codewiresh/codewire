@@ -56,10 +56,12 @@ mod tests {
     };
     use super::codewire::internal::v1::{
         BindWorkspaceResponse, COORDINATOR_SERVICE_SERVICE_NAME, CoordinateNode,
+        ENVIRONMENT_MESH_SERVICE_SERVICE_NAME, IssueMeshEnrollmentResponse,
         MESH_AUTHORIZATION_SERVICE_SERVICE_NAME, MESH_COORDINATOR_SERVICE_SERVICE_NAME,
         MeshAuthorizationContext, MeshAuthorizationCredentialKind, MeshAuthorizationPrincipalKind,
         MeshCoordinateHello, MeshCoordinateRole, MeshCoordinatorServiceCoordinateRequest,
-        ResolveMeshAuthorizationResponse, WORKSPACE_BINDING_SERVICE_SERVICE_NAME,
+        RedeemEnvironmentEnrollmentRequest, ResolveMeshAuthorizationResponse,
+        WORKSPACE_BINDING_SERVICE_SERVICE_NAME,
     };
     use super::codewire::v1::{
         AcceptInvitationRequest, ApiKey, ApplicationPort, CreateApiKeyResponse,
@@ -119,9 +121,32 @@ mod tests {
                 WORKSPACE_BINDING_SERVICE_SERVICE_NAME,
                 "codewire.internal.v1.WorkspaceBindingService",
             ),
+            (
+                ENVIRONMENT_MESH_SERVICE_SERVICE_NAME,
+                "codewire.internal.v1.EnvironmentMeshService",
+            ),
         ] {
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn environment_mesh_enrollment_codes_are_redacted_from_debug() {
+        let issued = IssueMeshEnrollmentResponse {
+            enrollment_code: "cw_eenr_synthetic-issued".into(),
+            expires_at: 60,
+            ..Default::default()
+        };
+        let redeemed = RedeemEnvironmentEnrollmentRequest {
+            enrollment_code: "cw_eenr_synthetic-redeemed".into(),
+            org_id: "org-alpha".into(),
+            network_id: "network-alpha".into(),
+            ..Default::default()
+        };
+        for debug in [format!("{issued:?}"), format!("{redeemed:?}")] {
+            assert!(!debug.contains("synthetic"), "{debug}");
+        }
+        assert!(format!("{redeemed:?}").contains("network-alpha"));
     }
 
     #[test]

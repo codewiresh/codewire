@@ -52,6 +52,23 @@ class IsolationTier(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     ISOLATION_TIER_STANDARD: _ClassVar[IsolationTier]
     ISOLATION_TIER_CONFIDENTIAL: _ClassVar[IsolationTier]
 
+class NetworkAttachmentState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    NETWORK_ATTACHMENT_STATE_UNSPECIFIED: _ClassVar[NetworkAttachmentState]
+    NETWORK_ATTACHMENT_STATE_PENDING: _ClassVar[NetworkAttachmentState]
+    NETWORK_ATTACHMENT_STATE_ATTACHED: _ClassVar[NetworkAttachmentState]
+    NETWORK_ATTACHMENT_STATE_FAILED: _ClassVar[NetworkAttachmentState]
+    NETWORK_ATTACHMENT_STATE_REVOKED: _ClassVar[NetworkAttachmentState]
+
+class NetworkAttachmentFailure(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    NETWORK_ATTACHMENT_FAILURE_UNSPECIFIED: _ClassVar[NetworkAttachmentFailure]
+    NETWORK_ATTACHMENT_FAILURE_MESH_UNREACHABLE: _ClassVar[NetworkAttachmentFailure]
+    NETWORK_ATTACHMENT_FAILURE_NETWORK_NOT_FOUND: _ClassVar[NetworkAttachmentFailure]
+    NETWORK_ATTACHMENT_FAILURE_NOT_A_MEMBER: _ClassVar[NetworkAttachmentFailure]
+    NETWORK_ATTACHMENT_FAILURE_NODE_NAME_TAKEN: _ClassVar[NetworkAttachmentFailure]
+    NETWORK_ATTACHMENT_FAILURE_REFUSED: _ClassVar[NetworkAttachmentFailure]
+
 class EnvironmentSourcesUpdateOutcome(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     ENVIRONMENT_SOURCES_UPDATE_OUTCOME_UNSPECIFIED: _ClassVar[EnvironmentSourcesUpdateOutcome]
@@ -131,6 +148,17 @@ DESIRED_STATE_RESIZED: DesiredState
 ISOLATION_TIER_UNSPECIFIED: IsolationTier
 ISOLATION_TIER_STANDARD: IsolationTier
 ISOLATION_TIER_CONFIDENTIAL: IsolationTier
+NETWORK_ATTACHMENT_STATE_UNSPECIFIED: NetworkAttachmentState
+NETWORK_ATTACHMENT_STATE_PENDING: NetworkAttachmentState
+NETWORK_ATTACHMENT_STATE_ATTACHED: NetworkAttachmentState
+NETWORK_ATTACHMENT_STATE_FAILED: NetworkAttachmentState
+NETWORK_ATTACHMENT_STATE_REVOKED: NetworkAttachmentState
+NETWORK_ATTACHMENT_FAILURE_UNSPECIFIED: NetworkAttachmentFailure
+NETWORK_ATTACHMENT_FAILURE_MESH_UNREACHABLE: NetworkAttachmentFailure
+NETWORK_ATTACHMENT_FAILURE_NETWORK_NOT_FOUND: NetworkAttachmentFailure
+NETWORK_ATTACHMENT_FAILURE_NOT_A_MEMBER: NetworkAttachmentFailure
+NETWORK_ATTACHMENT_FAILURE_NODE_NAME_TAKEN: NetworkAttachmentFailure
+NETWORK_ATTACHMENT_FAILURE_REFUSED: NetworkAttachmentFailure
 ENVIRONMENT_SOURCES_UPDATE_OUTCOME_UNSPECIFIED: EnvironmentSourcesUpdateOutcome
 ENVIRONMENT_SOURCES_UPDATE_OUTCOME_UNCHANGED: EnvironmentSourcesUpdateOutcome
 ENVIRONMENT_SOURCES_UPDATE_OUTCOME_STORED: EnvironmentSourcesUpdateOutcome
@@ -164,7 +192,7 @@ ENVIRONMENT_DAEMON_STATE_UNHEALTHY: EnvironmentDaemonState
 ENVIRONMENT_DAEMON_STATE_UPGRADE_REQUIRED: EnvironmentDaemonState
 
 class Environment(_message.Message):
-    __slots__ = ("id", "org_id", "created_by", "preset_id", "type", "name", "state", "desired_state", "error_reason", "recoverable", "state_changed_at", "retry_count", "setup_phase", "setup_complete", "setup_error", "ttl_seconds", "shutdown_at", "cpu_millicores", "memory_mb", "disk_gb", "total_running_seconds", "created_at", "started_at", "stopped_at", "destroyed_at", "protected", "deletion_requested_at", "deletion_grace_until", "preset_name", "network", "ports", "isolation_tier", "operation_generation", "source_selection")
+    __slots__ = ("id", "org_id", "created_by", "preset_id", "type", "name", "state", "desired_state", "error_reason", "recoverable", "state_changed_at", "retry_count", "setup_phase", "setup_complete", "setup_error", "ttl_seconds", "shutdown_at", "cpu_millicores", "memory_mb", "disk_gb", "total_running_seconds", "created_at", "started_at", "stopped_at", "destroyed_at", "protected", "deletion_requested_at", "deletion_grace_until", "preset_name", "network", "ports", "isolation_tier", "operation_generation", "source_selection", "network_state", "network_failure")
     ID_FIELD_NUMBER: _ClassVar[int]
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     CREATED_BY_FIELD_NUMBER: _ClassVar[int]
@@ -199,6 +227,8 @@ class Environment(_message.Message):
     ISOLATION_TIER_FIELD_NUMBER: _ClassVar[int]
     OPERATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
     SOURCE_SELECTION_FIELD_NUMBER: _ClassVar[int]
+    NETWORK_STATE_FIELD_NUMBER: _ClassVar[int]
+    NETWORK_FAILURE_FIELD_NUMBER: _ClassVar[int]
     id: str
     org_id: str
     created_by: str
@@ -233,7 +263,9 @@ class Environment(_message.Message):
     isolation_tier: IsolationTier
     operation_generation: int
     source_selection: EnvironmentSourceSelection
-    def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., created_by: _Optional[str] = ..., preset_id: _Optional[str] = ..., type: _Optional[str] = ..., name: _Optional[str] = ..., state: _Optional[_Union[EnvironmentState, str]] = ..., desired_state: _Optional[_Union[DesiredState, str]] = ..., error_reason: _Optional[str] = ..., recoverable: _Optional[bool] = ..., state_changed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., retry_count: _Optional[int] = ..., setup_phase: _Optional[int] = ..., setup_complete: _Optional[bool] = ..., setup_error: _Optional[str] = ..., ttl_seconds: _Optional[int] = ..., shutdown_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ..., total_running_seconds: _Optional[int] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., stopped_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., destroyed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., protected: _Optional[bool] = ..., deletion_requested_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., deletion_grace_until: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., preset_name: _Optional[str] = ..., network: _Optional[str] = ..., ports: _Optional[_Iterable[_Union[_port_pb2.Port, _Mapping]]] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., operation_generation: _Optional[int] = ..., source_selection: _Optional[_Union[EnvironmentSourceSelection, _Mapping]] = ...) -> None: ...
+    network_state: NetworkAttachmentState
+    network_failure: NetworkAttachmentFailure
+    def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., created_by: _Optional[str] = ..., preset_id: _Optional[str] = ..., type: _Optional[str] = ..., name: _Optional[str] = ..., state: _Optional[_Union[EnvironmentState, str]] = ..., desired_state: _Optional[_Union[DesiredState, str]] = ..., error_reason: _Optional[str] = ..., recoverable: _Optional[bool] = ..., state_changed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., retry_count: _Optional[int] = ..., setup_phase: _Optional[int] = ..., setup_complete: _Optional[bool] = ..., setup_error: _Optional[str] = ..., ttl_seconds: _Optional[int] = ..., shutdown_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ..., total_running_seconds: _Optional[int] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., stopped_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., destroyed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., protected: _Optional[bool] = ..., deletion_requested_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., deletion_grace_until: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., preset_name: _Optional[str] = ..., network: _Optional[str] = ..., ports: _Optional[_Iterable[_Union[_port_pb2.Port, _Mapping]]] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., operation_generation: _Optional[int] = ..., source_selection: _Optional[_Union[EnvironmentSourceSelection, _Mapping]] = ..., network_state: _Optional[_Union[NetworkAttachmentState, str]] = ..., network_failure: _Optional[_Union[NetworkAttachmentFailure, str]] = ...) -> None: ...
 
 class ListEnvironmentsRequest(_message.Message):
     __slots__ = ("org_id", "type", "state", "include_destroyed", "page_size", "page_token")
@@ -262,7 +294,7 @@ class ListEnvironmentsResponse(_message.Message):
     def __init__(self, environments: _Optional[_Iterable[_Union[Environment, _Mapping]]] = ..., next_page_token: _Optional[str] = ..., poll_interval: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
 
 class CreateEnvironmentRequest(_message.Message):
-    __slots__ = ("org_id", "preset_id", "name", "ttl_seconds", "isolation_tier", "project_spec", "expected_profile_revision", "confirm_personal_credentials", "confirm_personal_secrets", "omit_application_previews")
+    __slots__ = ("org_id", "preset_id", "name", "ttl_seconds", "isolation_tier", "project_spec", "expected_profile_revision", "confirm_personal_credentials", "confirm_personal_secrets", "omit_application_previews", "network")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     PRESET_ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
@@ -273,6 +305,7 @@ class CreateEnvironmentRequest(_message.Message):
     CONFIRM_PERSONAL_CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
     CONFIRM_PERSONAL_SECRETS_FIELD_NUMBER: _ClassVar[int]
     OMIT_APPLICATION_PREVIEWS_FIELD_NUMBER: _ClassVar[int]
+    NETWORK_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     preset_id: str
     name: str
@@ -283,7 +316,8 @@ class CreateEnvironmentRequest(_message.Message):
     confirm_personal_credentials: bool
     confirm_personal_secrets: bool
     omit_application_previews: bool
-    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., ttl_seconds: _Optional[int] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ..., expected_profile_revision: _Optional[int] = ..., confirm_personal_credentials: _Optional[bool] = ..., confirm_personal_secrets: _Optional[bool] = ..., omit_application_previews: _Optional[bool] = ...) -> None: ...
+    network: str
+    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., ttl_seconds: _Optional[int] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ..., expected_profile_revision: _Optional[int] = ..., confirm_personal_credentials: _Optional[bool] = ..., confirm_personal_secrets: _Optional[bool] = ..., omit_application_previews: _Optional[bool] = ..., network: _Optional[str] = ...) -> None: ...
 
 class EnvironmentSourceSelection(_message.Message):
     __slots__ = ("secrets", "credentials", "profile_revision")

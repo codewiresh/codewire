@@ -18,6 +18,8 @@ import {
   EnvironmentSourcesUpdateOutcome,
   EnvironmentState,
   IsolationTier,
+  NetworkAttachmentFailure,
+  NetworkAttachmentState,
 } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import { ExecResponseSchema, ExecService } from "@codewire/proto-ts/gen/codewire/v1/exec_pb";
 import { FileEntrySchema, FileService } from "@codewire/proto-ts/gen/codewire/v1/file_pb";
@@ -772,6 +774,16 @@ async function runTests() {
   assert(convertedEnvironment.source_selection?.secrets?.user === "platform", "environment personal-secret origins remain typed");
   assert(convertedEnvironment.source_selection?.credentials?.profile === "platform:id:22222222-2222-4222-8222-222222222222", "environment credential profiles are retained");
   assert(convertedEnvironment.source_selection?.profile_revision === 9_007_199_254_741_009n, "environment profile revisions remain lossless");
+  assert(convertedEnvironment.network_state === undefined && convertedEnvironment.network_failure === undefined,
+    "an unspecified network attachment is absent");
+  const attachedEnvironment = fromProtoEnvironment(create(EnvironmentSchema, {
+    ...environment("env_attached", EnvironmentState.RUNNING),
+    network: "work",
+    networkState: NetworkAttachmentState.FAILED,
+    networkFailure: NetworkAttachmentFailure.NOT_A_MEMBER,
+  }));
+  assert(attachedEnvironment.network === "work" && attachedEnvironment.network_state === "failed"
+    && attachedEnvironment.network_failure === "not_a_member", "environment network attachments keep public values");
 
   const createEnvironment = toProtoCreateEnvironmentRequest("org_test", {
     isolation_tier: "confidential",
@@ -805,6 +817,18 @@ async function runTests() {
   assert(createEnvironment.expectedProfileRevision === 9_007_199_254_741_009n, "create environment preserves profile revision losslessly");
   assert(createEnvironment.confirmPersonalCredentials && createEnvironment.confirmPersonalSecrets, "create environment preserves explicit personal-source confirmations");
   assert(createEnvironment.omitApplicationPreviews === false, "create preview omission defaults false");
+  assert(createEnvironment.network === "", "create joins no network unless asked");
+  assert(toProtoCreateEnvironmentRequest("org_test", { project_spec: { schema_version: 1, working_directory: "/workspace" }, network: "work" }).network === "work",
+    "create preserves the requested network");
+  for (const invalid of ["", 1]) {
+    let rejected = false;
+    try {
+      toProtoCreateEnvironmentRequest("org_test", { project_spec: { schema_version: 1, working_directory: "/workspace" }, network: invalid as never });
+    } catch (error) {
+      rejected = error instanceof Error && error.message.includes("Mesh network name");
+    }
+    assert(rejected, "create rejects an empty or non-string network");
+  }
   for (const omit of [true, false]) {
     assert(toProtoCreateEnvironmentRequest("org_test", { project_spec: { schema_version: 1, working_directory: "/workspace" }, omit_application_previews: omit }).omitApplicationPreviews === omit,
       "create preserves explicit preview omission");
@@ -1518,7 +1542,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 168;
+  const expectedAssertions = 174;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

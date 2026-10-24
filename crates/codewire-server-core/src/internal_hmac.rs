@@ -122,6 +122,20 @@ fn validate_inputs(secret: &str, service: &str, method: &str) -> Result<(), Inte
     Ok(())
 }
 
+/// Derives the signing key of one internal service from a shared root
+/// secret: lowercase hex of HMAC-SHA256(root, label). A credential signed for
+/// one label never verifies under another, so a hop that shares the root
+/// with another service cannot be replayed against it.
+pub fn derive_internal_hmac_secret(root: &str, label: &str) -> Result<String, InternalHmacError> {
+    if root.is_empty() || label.is_empty() {
+        return Err(InternalHmacError::InvalidConfiguration);
+    }
+    Ok(sign(root, label.as_bytes())?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 fn sign(secret: &str, payload: &[u8]) -> Result<Vec<u8>, InternalHmacError> {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
         .map_err(|_| InternalHmacError::InvalidConfiguration)?;
@@ -155,6 +169,30 @@ mod tests {
                 now + INTERNAL_HMAC_TOKEN_TTL,
             ),
             Err(InternalHmacError::Expired)
+        );
+    }
+
+    #[test]
+    fn derived_service_keys_do_not_verify_each_other() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp");
+        let first = derive_internal_hmac_secret("root", "codewire/first/v1").expect("derive");
+        let second = derive_internal_hmac_secret("root", "codewire/second/v1").expect("derive");
+        assert_eq!(first.len(), 64);
+        assert_ne!(first, second);
+        assert_ne!(first, "root");
+        let token =
+            issue_internal_hmac_token(&first, "mesh", "service/method", now).expect("issue HMAC");
+        assert_eq!(
+            verify_internal_hmac_token(&second, &token, "mesh", "service/method", now),
+            Err(InternalHmacError::InvalidToken)
+        );
+        assert_eq!(
+            verify_internal_hmac_token("root", &token, "mesh", "service/method", now),
+            Err(InternalHmacError::InvalidToken)
+        );
+        assert_eq!(
+            derive_internal_hmac_secret("", "label"),
+            Err(InternalHmacError::InvalidConfiguration)
         );
     }
 }

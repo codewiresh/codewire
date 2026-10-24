@@ -2,15 +2,15 @@
 // @generated from file codewire/internal/v1/workspace_binding.proto (package codewire.internal.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file codewire/internal/v1/workspace_binding.proto.
  */
 export const file_codewire_internal_v1_workspace_binding: GenFile = /*@__PURE__*/
-  fileDesc("Cixjb2Rld2lyZS9pbnRlcm5hbC92MS93b3Jrc3BhY2VfYmluZGluZy5wcm90bxIUY29kZXdpcmUuaW50ZXJuYWwudjEiLAoUQmluZFdvcmtzcGFjZVJlcXVlc3QSFAoMd2FpdF9zZWNvbmRzGAEgASgNIpkCChVCaW5kV29ya3NwYWNlUmVzcG9uc2USFgoOZW52aXJvbm1lbnRfaWQYASABKAkSDwoHcG9kX3VpZBgCIAEoCRIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgDIAEoAxIeChFkYWVtb25fY3JlZGVudGlhbBgEIAEoCUIDgAEBEiMKG3Byb2plY3Rpb25fc2VsZWN0aW9uX3NoYTI1NhgFIAEoCRIiChptYW5hZ2VkX2NyZWRlbnRpYWxfY2xpZW50cxgGIAEoCRI1CgZhY2Nlc3MYByABKAsyJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Xb3Jrc3BhY2VBY2Nlc3MSGQoRd29ya2luZ19kaXJlY3RvcnkYCCABKAkizwEKD1dvcmtzcGFjZUFjY2VzcxIXCgpwZWVyX3Rva2VuGAEgASgJQgOAAQESHQoVcGVlcl90b2tlbl9leHBpcmVzX2F0GAIgASgDEhwKFG9wZXJhdGlvbl9nZW5lcmF0aW9uGAMgASgDEhcKD2Nvb3JkaW5hdG9yX3VybBgEIAEoCRIcChRkaXJlY3RfdWRwX2VuZHBvaW50cxgFIAMoCRIcChRwZWVyX3JlbGF5X2VuZHBvaW50cxgGIAMoCRIRCglhcHBfcG9ydHMYByADKAUiFgoUUmVmcmVzaEFjY2Vzc1JlcXVlc3QiTgoVUmVmcmVzaEFjY2Vzc1Jlc3BvbnNlEjUKBmFjY2VzcxgBIAEoCzIlLmNvZGV3aXJlLmludGVybmFsLnYxLldvcmtzcGFjZUFjY2VzcyIyChRSZWNvcmRIb3N0S2V5UmVxdWVzdBIaChJwdWJsaWNfa2V5X29wZW5zc2gYASABKAkiFwoVUmVjb3JkSG9zdEtleVJlc3BvbnNlIkgKGEFsbG9jYXRlUGVlclJlbGF5UmVxdWVzdBISCgpkaXNjb19rZXlzGAEgAygJEhgKEHJlbGF5X2dlbmVyYXRpb24YAiABKA0i1AEKGUFsbG9jYXRlUGVlclJlbGF5UmVzcG9uc2USGAoQcmVsYXlfZ2VuZXJhdGlvbhgBIAEoDRIYChBzZXJ2ZXJfZGlzY29fa2V5GAIgASgJEhIKCmRpc2NvX2tleXMYAyADKAkSEgoKbGFtcG9ydF9pZBgEIAEoBBILCgN2bmkYBSABKA0SGAoQYmluZF9saWZldGltZV9ucxgGIAEoBBIgChhzdGVhZHlfc3RhdGVfbGlmZXRpbWVfbnMYByABKAQSEgoKYWRkcl9wb3J0cxgIIAMoCTLcAwoXV29ya3NwYWNlQmluZGluZ1NlcnZpY2USbQoNQmluZFdvcmtzcGFjZRIqLmNvZGV3aXJlLmludGVybmFsLnYxLkJpbmRXb3Jrc3BhY2VSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuQmluZFdvcmtzcGFjZVJlc3BvbnNlIgOQAgISbQoNUmVmcmVzaEFjY2VzcxIqLmNvZGV3aXJlLmludGVybmFsLnYxLlJlZnJlc2hBY2Nlc3NSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuUmVmcmVzaEFjY2Vzc1Jlc3BvbnNlIgOQAgESbQoNUmVjb3JkSG9zdEtleRIqLmNvZGV3aXJlLmludGVybmFsLnYxLlJlY29yZEhvc3RLZXlSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuUmVjb3JkSG9zdEtleVJlc3BvbnNlIgOQAgISdAoRQWxsb2NhdGVQZWVyUmVsYXkSLi5jb2Rld2lyZS5pbnRlcm5hbC52MS5BbGxvY2F0ZVBlZXJSZWxheVJlcXVlc3QaLy5jb2Rld2lyZS5pbnRlcm5hbC52MS5BbGxvY2F0ZVBlZXJSZWxheVJlc3BvbnNlQu8BChhjb20uY29kZXdpcmUuaW50ZXJuYWwudjFCFVdvcmtzcGFjZUJpbmRpbmdQcm90b1ABWkpnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvaW50ZXJuYWwvdjE7aW50ZXJuYWx2MaICA0NJWKoCFENvZGV3aXJlLkludGVybmFsLlYxygIUQ29kZXdpcmVcSW50ZXJuYWxcVjHiAiBDb2Rld2lyZVxJbnRlcm5hbFxWMVxHUEJNZXRhZGF0YeoCFkNvZGV3aXJlOjpJbnRlcm5hbDo6VjFiBnByb3RvMw");
+  fileDesc("Cixjb2Rld2lyZS9pbnRlcm5hbC92MS93b3Jrc3BhY2VfYmluZGluZy5wcm90bxIUY29kZXdpcmUuaW50ZXJuYWwudjEiLAoUQmluZFdvcmtzcGFjZVJlcXVlc3QSFAoMd2FpdF9zZWNvbmRzGAEgASgNIpkCChVCaW5kV29ya3NwYWNlUmVzcG9uc2USFgoOZW52aXJvbm1lbnRfaWQYASABKAkSDwoHcG9kX3VpZBgCIAEoCRIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgDIAEoAxIeChFkYWVtb25fY3JlZGVudGlhbBgEIAEoCUIDgAEBEiMKG3Byb2plY3Rpb25fc2VsZWN0aW9uX3NoYTI1NhgFIAEoCRIiChptYW5hZ2VkX2NyZWRlbnRpYWxfY2xpZW50cxgGIAEoCRI1CgZhY2Nlc3MYByABKAsyJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Xb3Jrc3BhY2VBY2Nlc3MSGQoRd29ya2luZ19kaXJlY3RvcnkYCCABKAkijAIKD1dvcmtzcGFjZUFjY2VzcxIXCgpwZWVyX3Rva2VuGAEgASgJQgOAAQESHQoVcGVlcl90b2tlbl9leHBpcmVzX2F0GAIgASgDEhwKFG9wZXJhdGlvbl9nZW5lcmF0aW9uGAMgASgDEhcKD2Nvb3JkaW5hdG9yX3VybBgEIAEoCRIcChRkaXJlY3RfdWRwX2VuZHBvaW50cxgFIAMoCRIcChRwZWVyX3JlbGF5X2VuZHBvaW50cxgGIAMoCRIRCglhcHBfcG9ydHMYByADKAUSOwoEbWVzaBgIIAEoCzItLmNvZGV3aXJlLmludGVybmFsLnYxLldvcmtzcGFjZU1lc2hBdHRhY2htZW50ImIKF1dvcmtzcGFjZU1lc2hBdHRhY2htZW50EhAKCG1lc2hfdXJsGAEgASgJEg4KBm9yZ19pZBgCIAEoCRISCgpuZXR3b3JrX2lkGAMgASgJEhEKCW5vZGVfbmFtZRgEIAEoCSIWChRSZWZyZXNoQWNjZXNzUmVxdWVzdCJOChVSZWZyZXNoQWNjZXNzUmVzcG9uc2USNQoGYWNjZXNzGAEgASgLMiUuY29kZXdpcmUuaW50ZXJuYWwudjEuV29ya3NwYWNlQWNjZXNzIjIKFFJlY29yZEhvc3RLZXlSZXF1ZXN0EhoKEnB1YmxpY19rZXlfb3BlbnNzaBgBIAEoCSIXChVSZWNvcmRIb3N0S2V5UmVzcG9uc2UiSAoYQWxsb2NhdGVQZWVyUmVsYXlSZXF1ZXN0EhIKCmRpc2NvX2tleXMYASADKAkSGAoQcmVsYXlfZ2VuZXJhdGlvbhgCIAEoDSLUAQoZQWxsb2NhdGVQZWVyUmVsYXlSZXNwb25zZRIYChByZWxheV9nZW5lcmF0aW9uGAEgASgNEhgKEHNlcnZlcl9kaXNjb19rZXkYAiABKAkSEgoKZGlzY29fa2V5cxgDIAMoCRISCgpsYW1wb3J0X2lkGAQgASgEEgsKA3ZuaRgFIAEoDRIYChBiaW5kX2xpZmV0aW1lX25zGAYgASgEEiAKGHN0ZWFkeV9zdGF0ZV9saWZldGltZV9ucxgHIAEoBBISCgphZGRyX3BvcnRzGAggAygJIhwKGklzc3VlTWVzaEVucm9sbG1lbnRSZXF1ZXN0IpIBChtJc3N1ZU1lc2hFbnJvbGxtZW50UmVzcG9uc2USHAoPZW5yb2xsbWVudF9jb2RlGAEgASgJQgOAAQESEgoKZXhwaXJlc19hdBgCIAEoAxJBCgphdHRhY2htZW50GAMgASgLMi0uY29kZXdpcmUuaW50ZXJuYWwudjEuV29ya3NwYWNlTWVzaEF0dGFjaG1lbnQiWQobUmVwb3J0TWVzaEF0dGFjaG1lbnRSZXF1ZXN0EjoKBnJlcG9ydBgBIAEoDjIqLmNvZGV3aXJlLmludGVybmFsLnYxLk1lc2hBdHRhY2htZW50UmVwb3J0Ih4KHFJlcG9ydE1lc2hBdHRhY2htZW50UmVzcG9uc2Uq2wIKFE1lc2hBdHRhY2htZW50UmVwb3J0EiYKIk1FU0hfQVRUQUNITUVOVF9SRVBPUlRfVU5TUEVDSUZJRUQQABIjCh9NRVNIX0FUVEFDSE1FTlRfUkVQT1JUX0FUVEFDSEVEEAESKwonTUVTSF9BVFRBQ0hNRU5UX1JFUE9SVF9NRVNIX1VOUkVBQ0hBQkxFEAISLAooTUVTSF9BVFRBQ0hNRU5UX1JFUE9SVF9ORVRXT1JLX05PVF9GT1VORBADEicKI01FU0hfQVRUQUNITUVOVF9SRVBPUlRfTk9UX0FfTUVNQkVSEAQSKgomTUVTSF9BVFRBQ0hNRU5UX1JFUE9SVF9OT0RFX05BTUVfVEFLRU4QBRIiCh5NRVNIX0FUVEFDSE1FTlRfUkVQT1JUX1JFVk9LRUQQBhIiCh5NRVNIX0FUVEFDSE1FTlRfUkVQT1JUX1JFRlVTRUQQBzLdBQoXV29ya3NwYWNlQmluZGluZ1NlcnZpY2USbQoNQmluZFdvcmtzcGFjZRIqLmNvZGV3aXJlLmludGVybmFsLnYxLkJpbmRXb3Jrc3BhY2VSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuQmluZFdvcmtzcGFjZVJlc3BvbnNlIgOQAgISbQoNUmVmcmVzaEFjY2VzcxIqLmNvZGV3aXJlLmludGVybmFsLnYxLlJlZnJlc2hBY2Nlc3NSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuUmVmcmVzaEFjY2Vzc1Jlc3BvbnNlIgOQAgESbQoNUmVjb3JkSG9zdEtleRIqLmNvZGV3aXJlLmludGVybmFsLnYxLlJlY29yZEhvc3RLZXlSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuUmVjb3JkSG9zdEtleVJlc3BvbnNlIgOQAgISdAoRQWxsb2NhdGVQZWVyUmVsYXkSLi5jb2Rld2lyZS5pbnRlcm5hbC52MS5BbGxvY2F0ZVBlZXJSZWxheVJlcXVlc3QaLy5jb2Rld2lyZS5pbnRlcm5hbC52MS5BbGxvY2F0ZVBlZXJSZWxheVJlc3BvbnNlEnoKE0lzc3VlTWVzaEVucm9sbG1lbnQSMC5jb2Rld2lyZS5pbnRlcm5hbC52MS5Jc3N1ZU1lc2hFbnJvbGxtZW50UmVxdWVzdBoxLmNvZGV3aXJlLmludGVybmFsLnYxLklzc3VlTWVzaEVucm9sbG1lbnRSZXNwb25zZRKCAQoUUmVwb3J0TWVzaEF0dGFjaG1lbnQSMS5jb2Rld2lyZS5pbnRlcm5hbC52MS5SZXBvcnRNZXNoQXR0YWNobWVudFJlcXVlc3QaMi5jb2Rld2lyZS5pbnRlcm5hbC52MS5SZXBvcnRNZXNoQXR0YWNobWVudFJlc3BvbnNlIgOQAgJC7wEKGGNvbS5jb2Rld2lyZS5pbnRlcm5hbC52MUIVV29ya3NwYWNlQmluZGluZ1Byb3RvUAFaSmdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS9pbnRlcm5hbC92MTtpbnRlcm5hbHYxogIDQ0lYqgIUQ29kZXdpcmUuSW50ZXJuYWwuVjHKAhRDb2Rld2lyZVxJbnRlcm5hbFxWMeICIENvZGV3aXJlXEludGVybmFsXFYxXEdQQk1ldGFkYXRh6gIWQ29kZXdpcmU6OkludGVybmFsOjpWMWIGcHJvdG8z");
 
 /**
  * @generated from message codewire.internal.v1.BindWorkspaceRequest
@@ -160,6 +160,14 @@ export type WorkspaceAccess = Message<"codewire.internal.v1.WorkspaceAccess"> & 
    * @generated from field: repeated int32 app_ports = 7;
    */
   appPorts: number[];
+
+  /**
+   * The hosted Mesh network the environment joins, or absent. Non-secret:
+   * the daemon asks IssueMeshEnrollment for the capability to join it.
+   *
+   * @generated from field: codewire.internal.v1.WorkspaceMeshAttachment mesh = 8;
+   */
+  mesh?: WorkspaceMeshAttachment | undefined;
 };
 
 /**
@@ -168,6 +176,45 @@ export type WorkspaceAccess = Message<"codewire.internal.v1.WorkspaceAccess"> & 
  */
 export const WorkspaceAccessSchema: GenMessage<WorkspaceAccess> = /*@__PURE__*/
   messageDesc(file_codewire_internal_v1_workspace_binding, 2);
+
+/**
+ * WorkspaceMeshAttachment names the one hosted Mesh network node the bound
+ * environment serves. It holds no credential.
+ *
+ * @generated from message codewire.internal.v1.WorkspaceMeshAttachment
+ */
+export type WorkspaceMeshAttachment = Message<"codewire.internal.v1.WorkspaceMeshAttachment"> & {
+  /**
+   * Public https origin of the hosted Mesh service.
+   *
+   * @generated from field: string mesh_url = 1;
+   */
+  meshUrl: string;
+
+  /**
+   * @generated from field: string org_id = 2;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string network_id = 3;
+   */
+  networkId: string;
+
+  /**
+   * The node's fixed name in the network: the environment's name.
+   *
+   * @generated from field: string node_name = 4;
+   */
+  nodeName: string;
+};
+
+/**
+ * Describes the message codewire.internal.v1.WorkspaceMeshAttachment.
+ * Use `create(WorkspaceMeshAttachmentSchema)` to create a new message.
+ */
+export const WorkspaceMeshAttachmentSchema: GenMessage<WorkspaceMeshAttachment> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 3);
 
 /**
  * @generated from message codewire.internal.v1.RefreshAccessRequest
@@ -180,7 +227,7 @@ export type RefreshAccessRequest = Message<"codewire.internal.v1.RefreshAccessRe
  * Use `create(RefreshAccessRequestSchema)` to create a new message.
  */
 export const RefreshAccessRequestSchema: GenMessage<RefreshAccessRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 3);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 4);
 
 /**
  * @generated from message codewire.internal.v1.RefreshAccessResponse
@@ -197,7 +244,7 @@ export type RefreshAccessResponse = Message<"codewire.internal.v1.RefreshAccessR
  * Use `create(RefreshAccessResponseSchema)` to create a new message.
  */
 export const RefreshAccessResponseSchema: GenMessage<RefreshAccessResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 4);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 5);
 
 /**
  * @generated from message codewire.internal.v1.RecordHostKeyRequest
@@ -216,7 +263,7 @@ export type RecordHostKeyRequest = Message<"codewire.internal.v1.RecordHostKeyRe
  * Use `create(RecordHostKeyRequestSchema)` to create a new message.
  */
 export const RecordHostKeyRequestSchema: GenMessage<RecordHostKeyRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 5);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 6);
 
 /**
  * @generated from message codewire.internal.v1.RecordHostKeyResponse
@@ -229,7 +276,7 @@ export type RecordHostKeyResponse = Message<"codewire.internal.v1.RecordHostKeyR
  * Use `create(RecordHostKeyResponseSchema)` to create a new message.
  */
 export const RecordHostKeyResponseSchema: GenMessage<RecordHostKeyResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 6);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 7);
 
 /**
  * @generated from message codewire.internal.v1.AllocatePeerRelayRequest
@@ -256,7 +303,7 @@ export type AllocatePeerRelayRequest = Message<"codewire.internal.v1.AllocatePee
  * Use `create(AllocatePeerRelayRequestSchema)` to create a new message.
  */
 export const AllocatePeerRelayRequestSchema: GenMessage<AllocatePeerRelayRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 7);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 8);
 
 /**
  * @generated from message codewire.internal.v1.AllocatePeerRelayResponse
@@ -310,7 +357,136 @@ export type AllocatePeerRelayResponse = Message<"codewire.internal.v1.AllocatePe
  * Use `create(AllocatePeerRelayResponseSchema)` to create a new message.
  */
 export const AllocatePeerRelayResponseSchema: GenMessage<AllocatePeerRelayResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_workspace_binding, 8);
+  messageDesc(file_codewire_internal_v1_workspace_binding, 9);
+
+/**
+ * @generated from message codewire.internal.v1.IssueMeshEnrollmentRequest
+ */
+export type IssueMeshEnrollmentRequest = Message<"codewire.internal.v1.IssueMeshEnrollmentRequest"> & {
+};
+
+/**
+ * Describes the message codewire.internal.v1.IssueMeshEnrollmentRequest.
+ * Use `create(IssueMeshEnrollmentRequestSchema)` to create a new message.
+ */
+export const IssueMeshEnrollmentRequestSchema: GenMessage<IssueMeshEnrollmentRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 10);
+
+/**
+ * @generated from message codewire.internal.v1.IssueMeshEnrollmentResponse
+ */
+export type IssueMeshEnrollmentResponse = Message<"codewire.internal.v1.IssueMeshEnrollmentResponse"> & {
+  /**
+   * One-use Mesh peer enrollment capability ("cw_eenr_<64 hex>").
+   *
+   * @generated from field: string enrollment_code = 1;
+   */
+  enrollmentCode: string;
+
+  /**
+   * Unix seconds after which the code is refused.
+   *
+   * @generated from field: int64 expires_at = 2;
+   */
+  expiresAt: bigint;
+
+  /**
+   * @generated from field: codewire.internal.v1.WorkspaceMeshAttachment attachment = 3;
+   */
+  attachment?: WorkspaceMeshAttachment | undefined;
+};
+
+/**
+ * Describes the message codewire.internal.v1.IssueMeshEnrollmentResponse.
+ * Use `create(IssueMeshEnrollmentResponseSchema)` to create a new message.
+ */
+export const IssueMeshEnrollmentResponseSchema: GenMessage<IssueMeshEnrollmentResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 11);
+
+/**
+ * @generated from message codewire.internal.v1.ReportMeshAttachmentRequest
+ */
+export type ReportMeshAttachmentRequest = Message<"codewire.internal.v1.ReportMeshAttachmentRequest"> & {
+  /**
+   * @generated from field: codewire.internal.v1.MeshAttachmentReport report = 1;
+   */
+  report: MeshAttachmentReport;
+};
+
+/**
+ * Describes the message codewire.internal.v1.ReportMeshAttachmentRequest.
+ * Use `create(ReportMeshAttachmentRequestSchema)` to create a new message.
+ */
+export const ReportMeshAttachmentRequestSchema: GenMessage<ReportMeshAttachmentRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 12);
+
+/**
+ * @generated from message codewire.internal.v1.ReportMeshAttachmentResponse
+ */
+export type ReportMeshAttachmentResponse = Message<"codewire.internal.v1.ReportMeshAttachmentResponse"> & {
+};
+
+/**
+ * Describes the message codewire.internal.v1.ReportMeshAttachmentResponse.
+ * Use `create(ReportMeshAttachmentResponseSchema)` to create a new message.
+ */
+export const ReportMeshAttachmentResponseSchema: GenMessage<ReportMeshAttachmentResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 13);
+
+/**
+ * MeshAttachmentReport is what the daemon observed of its Mesh membership.
+ *
+ * @generated from enum codewire.internal.v1.MeshAttachmentReport
+ */
+export enum MeshAttachmentReport {
+  /**
+   * @generated from enum value: MESH_ATTACHMENT_REPORT_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * The daemon's Mesh peer stream is open.
+   *
+   * @generated from enum value: MESH_ATTACHMENT_REPORT_ATTACHED = 1;
+   */
+  ATTACHED = 1,
+
+  /**
+   * @generated from enum value: MESH_ATTACHMENT_REPORT_MESH_UNREACHABLE = 2;
+   */
+  MESH_UNREACHABLE = 2,
+
+  /**
+   * @generated from enum value: MESH_ATTACHMENT_REPORT_NETWORK_NOT_FOUND = 3;
+   */
+  NETWORK_NOT_FOUND = 3,
+
+  /**
+   * @generated from enum value: MESH_ATTACHMENT_REPORT_NOT_A_MEMBER = 4;
+   */
+  NOT_A_MEMBER = 4,
+
+  /**
+   * @generated from enum value: MESH_ATTACHMENT_REPORT_NODE_NAME_TAKEN = 5;
+   */
+  NODE_NAME_TAKEN = 5,
+
+  /**
+   * @generated from enum value: MESH_ATTACHMENT_REPORT_REVOKED = 6;
+   */
+  REVOKED = 6,
+
+  /**
+   * @generated from enum value: MESH_ATTACHMENT_REPORT_REFUSED = 7;
+   */
+  REFUSED = 7,
+}
+
+/**
+ * Describes the enum codewire.internal.v1.MeshAttachmentReport.
+ */
+export const MeshAttachmentReportSchema: GenEnum<MeshAttachmentReport> = /*@__PURE__*/
+  enumDesc(file_codewire_internal_v1_workspace_binding, 0);
 
 /**
  * WorkspaceBindingService binds one identity-free workspace Pod to the
@@ -372,6 +548,31 @@ export const WorkspaceBindingService: GenService<{
     methodKind: "unary";
     input: typeof AllocatePeerRelayRequestSchema;
     output: typeof AllocatePeerRelayResponseSchema;
+  },
+  /**
+   * Issues one enrollment code for the bound environment's Mesh network
+   * node: one use, 60 seconds, bound to this Pod, the binding's operation
+   * generation, and the environment's attachment. The daemon presents it once
+   * to open one Mesh peer coordinate stream, and asks again for every new
+   * stream. failed_precondition when the environment joins no network or
+   * this platform has no hosted Mesh.
+   *
+   * @generated from rpc codewire.internal.v1.WorkspaceBindingService.IssueMeshEnrollment
+   */
+  issueMeshEnrollment: {
+    methodKind: "unary";
+    input: typeof IssueMeshEnrollmentRequestSchema;
+    output: typeof IssueMeshEnrollmentResponseSchema;
+  },
+  /**
+   * Records how far this Pod's Mesh network membership has come.
+   *
+   * @generated from rpc codewire.internal.v1.WorkspaceBindingService.ReportMeshAttachment
+   */
+  reportMeshAttachment: {
+    methodKind: "unary";
+    input: typeof ReportMeshAttachmentRequestSchema;
+    output: typeof ReportMeshAttachmentResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_codewire_internal_v1_workspace_binding, 0);

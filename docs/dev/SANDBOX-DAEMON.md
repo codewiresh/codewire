@@ -26,11 +26,14 @@ cert-manager leaf of its internal authority:
 - **8087, workspace binding**, for
   `codewire-orchestration-workspace-binding.<namespace>.svc.cluster.local`.
   It serves only `WorkspaceBindingService` (BindWorkspace, RefreshAccess,
-  RecordHostKey, AllocatePeerRelay) to workspace Pods in the sandbox
-  namespace, under its own connection, request and database limits.
+  RecordHostKey, AllocatePeerRelay, IssueMeshEnrollment,
+  ReportMeshAttachment) to workspace Pods in the sandbox namespace, under its
+  own connection, request and database limits.
 - **8088, internal Connect**, for
   `codewire-orchestration.<namespace>.svc.cluster.local`. It serves only
-  `MeshAuthorizationService`, to Mesh.
+  `MeshAuthorizationService` and `EnvironmentMeshService`, to Mesh. The
+  second accepts only a service credential signed with its own derived key,
+  never a forwarded user credential.
 
 There is no plaintext listener.
 
@@ -119,6 +122,46 @@ same process:
 listens and the host key is recorded. `RefreshAccess` renews the access
 material before it expires. Nothing listens on 2222, 7777 or 31000 before
 binding.
+
+### Mesh network membership
+
+An environment created with a network (`CreateEnvironmentRequest.network`)
+joins that hosted Codewire Mesh network as one node, named after the
+environment. This membership is separate from the environment's own access
+tailnet above: another node, keys and coordinator.
+
+- The creating user is recorded as the one who attached it. Mesh admits the
+  node only while that user is enabled, still in the organization and a
+  member of the network.
+- The access grant names the network (`WorkspaceAccess.mesh`: Mesh origin,
+  organization, network, node name) and no credential for it.
+- For each Mesh peer stream the daemon calls `IssueMeshEnrollment`. It gets
+  one enrollment code (`cw_eenr_…`): used once, refused after 60 seconds,
+  and bound to its Pod and the environment's operation generation.
+  Orchestration stores only the code's SHA-256, and holds at most eight
+  unused codes per environment.
+- Mesh redeems the code with orchestration's `EnvironmentMeshService`, which
+  consumes it only while its Pod is still the environment's live binding at
+  that generation. Mesh rechecks every member it holds at least every 60
+  seconds: a stopped or replaced Pod's stream closes, and a destroyed or
+  detached environment's node is removed.
+- The daemon reports what it observed with `ReportMeshAttachment`. The
+  environment shows the report only for its current Pod, so a new Pod reads
+  as pending until its daemon reports.
+
+The workload shares the daemon's UID, so it can read a code during its 60
+seconds, like the access peer token, and it can make the daemon's reports:
+the attachment state an environment shows is what its runtime reported. A
+code admits only its own environment's node, and only while its Pod is live.
+No user, platform or long-lived Mesh credential enters the Sandbox.
+
+The node acts for the user who attached the environment. Anyone who can run
+commands in the environment (its creator, an organization owner or admin, or
+a user granted operator access) can use the node's membership.
+
+The hop from Mesh is signed with a key derived for it alone. This separates
+it from every other credential made from the same internal secret. It does
+not isolate orchestration from a Mesh that holds that secret.
 
 ## Startup Sequence
 

@@ -53,6 +53,11 @@
   },
   "pending": {},
   "unrouted": {
+    "codewire.internal.v1.EnvironmentMeshService": {
+      "binary": "orchestration",
+      "listener": "internal-connect",
+      "port": 8088
+    },
     "codewire.internal.v1.MeshAuthorizationService": {
       "binary": "orchestration",
       "listener": "internal-connect",

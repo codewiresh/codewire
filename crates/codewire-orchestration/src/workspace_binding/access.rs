@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 pub struct AccessSettings {
     /// Public origin of the coordinator's `CoordinatorService` route.
     pub coordinator_url: String,
+    /// Public https origin of the hosted Mesh service environments join
+    /// networks on. Empty: this platform offers no hosted Mesh to them.
+    pub mesh_url: String,
 }
 
 /// Length of an `ssh-ed25519` public key blob: the string "ssh-ed25519" and

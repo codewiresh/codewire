@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package codewire.internal.v1;
+
+// EnvironmentMeshService is orchestration's private answer to hosted Mesh
+// about hosted environments that join a Mesh network. Orchestration serves it
+// only on its cluster-internal TLS listener. Mesh authenticates every call
+// with a short-lived service credential scoped to caller "codewire-mesh" and
+// the exact method, signed with a key derived for this service only. No user
+// credential travels on this hop.
+//
+// Authority comes from the environment's recorded attachment and its live
+// workspace binding: the Pod UID and operation generation an enrollment was
+// issued for. Mesh keeps no decision longer than its recheck interval.
+service EnvironmentMeshService {
+  // Consumes one enrollment code issued by
+  // WorkspaceBindingService.IssueMeshEnrollment and returns the member it
+  // admits. permission_denied when the code is unknown, expired, already
+  // used, for another organization or network, or when the Pod it was issued
+  // to is no longer the environment's live binding.
+  rpc RedeemEnvironmentEnrollment(RedeemEnvironmentEnrollmentRequest) returns (RedeemEnvironmentEnrollmentResponse);
+
+  // Reports, for each member Mesh holds, whether it may stay. Answers are in
+  // request order.
+  rpc CheckEnvironmentMembers(CheckEnvironmentMembersRequest) returns (CheckEnvironmentMembersResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+message RedeemEnvironmentEnrollmentRequest {
+  // The capability the daemon presented to Mesh ("cw_eenr_<64 hex>").
+  string enrollment_code = 1 [debug_redact = true];
+  // The organization and network the daemon asked Mesh to join.
+  string org_id = 2;
+  string network_id = 3;
+}
+
+// EnvironmentMeshMember is one admitted environment node.
+message EnvironmentMeshMember {
+  string environment_id = 1;
+  string org_id = 2;
+  string network_id = 3;
+  string node_name = 4;
+  // The Pod the enrollment was issued to.
+  string pod_uid = 5;
+  int64 operation_generation = 6;
+  // The user who attached the environment; Mesh requires them to be a
+  // current member of the network.
+  string attached_by_user_id = 7;
+}
+
+message RedeemEnvironmentEnrollmentResponse {
+  EnvironmentMeshMember member = 1;
+}
+
+// EnvironmentMeshMemberRef names one member Mesh holds. pod_uid is empty
+// for a registered node with no open stream.
+message EnvironmentMeshMemberRef {
+  string environment_id = 1;
+  string org_id = 2;
+  string network_id = 3;
+  string pod_uid = 4;
+  int64 operation_generation = 5;
+}
+
+message CheckEnvironmentMembersRequest {
+  // At most 256.
+  repeated EnvironmentMeshMemberRef members = 1;
+}
+
+enum EnvironmentMeshMemberStatus {
+  ENVIRONMENT_MESH_MEMBER_STATUS_UNSPECIFIED = 0;
+  // The environment is still attached and, when a Pod is named, that Pod and
+  // generation are its live binding.
+  ENVIRONMENT_MESH_MEMBER_STATUS_LIVE = 1;
+  // Still attached, but the named Pod or generation is no longer live: the
+  // environment stopped or its Pod was replaced. Its stream must close; its
+  // node may stay registered.
+  ENVIRONMENT_MESH_MEMBER_STATUS_STALE = 2;
+  // The environment is destroyed, being destroyed, or no longer attached to
+  // this organization and network. Its node must be removed.
+  ENVIRONMENT_MESH_MEMBER_STATUS_GONE = 3;
+}
+
+message CheckEnvironmentMembersResponse {
+  repeated EnvironmentMeshMemberStatus statuses = 1;
+}

@@ -14,8 +14,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::http::HeaderMap;
 use codewire_proto::codewire::internal::v1::{
     AllocatePeerRelayRequest, AllocatePeerRelayResponse, BindWorkspaceRequest,
-    BindWorkspaceResponse, RecordHostKeyRequest, RecordHostKeyResponse, RefreshAccessRequest,
-    RefreshAccessResponse, WorkspaceAccess, WorkspaceBindingService,
+    BindWorkspaceResponse, IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse,
+    MeshAttachmentReport as ProtoMeshAttachmentReport, RecordHostKeyRequest, RecordHostKeyResponse,
+    RefreshAccessRequest, RefreshAccessResponse, ReportMeshAttachmentRequest,
+    ReportMeshAttachmentResponse, WorkspaceAccess, WorkspaceBindingService,
+    WorkspaceMeshAttachment,
 };
 use codewire_server_core::bounded_http1::PeerAddr;
 use codewire_server_core::peer_token::{self, PEER_TOKEN_LIFETIME_SECS};
@@ -35,8 +38,14 @@ use super::access::{
 use super::authorize::{self, SandboxOwner, canonical_uid};
 use super::limits::{PodSlot, RequestLimits};
 use super::metrics;
-use super::store::{BindingNotifications, BindingStore, HostKeyRecord, LiveBinding};
+use super::store::{
+    BindingNotifications, BindingStore, HostKeyRecord, LiveBinding, MeshAttachment,
+    MeshAttachmentReport, MeshIssueOutcome,
+};
 use super::{BINDING_REQUERY_INTERVAL, MAX_BIND_WAIT};
+use crate::environment_mesh::{
+    ENROLLMENT_LIFETIME_SECS, enrollment_code_sha256, generate_enrollment_code,
+};
 use crate::runtime_transport::{RuntimeTransportZone, TRANSPORT_ZONE_LABEL};
 use crate::sandbox::{CRD_VERSION, SANDBOX_GROUP};
 use crate::worker::environment_auth::{
@@ -435,6 +444,102 @@ impl WorkspaceBindingState {
         })
     }
 
+    /// Issues one Mesh enrollment code to the bound Pod for its current
+    /// generation (#3350). The code is returned once and stored only as its
+    /// digest.
+    pub(crate) async fn issue_mesh_enrollment(
+        &self,
+        headers: &HeaderMap,
+        peer: Option<IpAddr>,
+    ) -> Result<IssueMeshEnrollmentResponse, BindError> {
+        let bound = self.bound(headers, peer).await?;
+        let attachment = self
+            .mesh_target(&bound.binding)
+            .await?
+            .ok_or(BindError::FailedPrecondition)?;
+        let code = generate_enrollment_code().map_err(|_| BindError::Unavailable)?;
+        let expires_at = i64::try_from(unix_now()?)
+            .map_err(|_| BindError::Unavailable)?
+            .saturating_add(ENROLLMENT_LIFETIME_SECS);
+        still_valid(&bound.caller.identity)?;
+        let outcome = self
+            .store
+            .issue_mesh_enrollment(
+                &bound.binding.environment_id,
+                &bound.binding.pod_uid,
+                bound.binding.environment_generation,
+                &enrollment_code_sha256(&code),
+            )
+            .await
+            .map_err(|_| BindError::Unavailable)?;
+        match outcome {
+            MeshIssueOutcome::Issued => Ok(IssueMeshEnrollmentResponse {
+                enrollment_code: code,
+                expires_at,
+                attachment: Some(attachment).into(),
+                ..Default::default()
+            }),
+            MeshIssueOutcome::NotAttached => Err(BindError::FailedPrecondition),
+            MeshIssueOutcome::Exhausted => Err(BindError::ResourceExhausted),
+        }
+    }
+
+    /// Records what the bound Pod's daemon observed of its Mesh membership.
+    pub(crate) async fn report_mesh_attachment(
+        &self,
+        headers: &HeaderMap,
+        peer: Option<IpAddr>,
+        report: ProtoMeshAttachmentReport,
+    ) -> Result<ReportMeshAttachmentResponse, BindError> {
+        let bound = self.bound(headers, peer).await?;
+        let report = mesh_report(report).ok_or(BindError::InvalidArgument)?;
+        still_valid(&bound.caller.identity)?;
+        let recorded = self
+            .store
+            .report_mesh_attachment(
+                &bound.binding.environment_id,
+                &bound.binding.pod_uid,
+                report,
+            )
+            .await
+            .map_err(|_| BindError::Unavailable)?;
+        if !recorded {
+            return Err(BindError::FailedPrecondition);
+        }
+        Ok(ReportMeshAttachmentResponse::default())
+    }
+
+    /// The Mesh network node the bound environment serves, when it joins one
+    /// and this platform offers hosted Mesh.
+    async fn mesh_target(
+        &self,
+        binding: &LiveBinding,
+    ) -> Result<Option<WorkspaceMeshAttachment>, BindError> {
+        if self.access.mesh_url.is_empty() {
+            return Ok(None);
+        }
+        let attachment = self
+            .store
+            .mesh_attachment(&binding.environment_id)
+            .await
+            .map_err(|_| BindError::Unavailable)?;
+        Ok(attachment.map(
+            |MeshAttachment {
+                 org_id,
+                 network_id,
+                 node_name,
+             }| {
+                WorkspaceMeshAttachment {
+                    mesh_url: self.access.mesh_url.clone(),
+                    org_id,
+                    network_id,
+                    node_name,
+                    ..Default::default()
+                }
+            },
+        ))
+    }
+
     /// The bound environment's tailnet access: a peer token for its current
     /// generation and the public endpoints its daemon may use.
     async fn access_grant(
@@ -454,11 +559,15 @@ impl WorkspaceBindingState {
         .map_err(|_| BindError::Unavailable)?;
         // Endpoints are best effort: a missing Service or zone only narrows
         // the paths the daemon advertises.
-        let (direct_udp_endpoints, zone, app_ports) = tokio::join!(
+        let (direct_udp_endpoints, zone, app_ports, mesh) = tokio::join!(
             access::direct_udp_endpoints(self.kube()?, &binding.namespace, &binding.environment_id),
             self.node_zone(pod),
             self.store.app_ports(&binding.environment_id),
+            self.mesh_target(binding),
         );
+        // The daemon leaves its network when a grant names none, so an
+        // unknown attachment fails the grant rather than detaching it.
+        let mesh = mesh?;
         // The daemon replaces its served ports with this set, so an unknown
         // set fails the grant rather than clearing them.
         let app_ports = app_ports.map_err(|_| BindError::Unavailable)?;
@@ -476,6 +585,7 @@ impl WorkspaceBindingState {
             direct_udp_endpoints,
             peer_relay_endpoints,
             app_ports,
+            mesh: mesh.into(),
             ..Default::default()
         })
     }
@@ -576,6 +686,24 @@ fn respond(
         access: Some(access).into(),
         working_directory: binding.working_directory,
         ..Default::default()
+    })
+}
+
+/// The stored form of a daemon's report; `None` for an unknown value.
+fn mesh_report(report: ProtoMeshAttachmentReport) -> Option<MeshAttachmentReport> {
+    Some(match report {
+        ProtoMeshAttachmentReport::Attached => MeshAttachmentReport::Attached,
+        ProtoMeshAttachmentReport::Revoked => MeshAttachmentReport::Revoked,
+        ProtoMeshAttachmentReport::MeshUnreachable => {
+            MeshAttachmentReport::Failed("mesh_unreachable")
+        }
+        ProtoMeshAttachmentReport::NetworkNotFound => {
+            MeshAttachmentReport::Failed("network_not_found")
+        }
+        ProtoMeshAttachmentReport::NotAMember => MeshAttachmentReport::Failed("not_a_member"),
+        ProtoMeshAttachmentReport::NodeNameTaken => MeshAttachmentReport::Failed("node_name_taken"),
+        ProtoMeshAttachmentReport::Refused => MeshAttachmentReport::Failed("refused"),
+        ProtoMeshAttachmentReport::Unspecified => return None,
     })
 }
 
@@ -686,5 +814,33 @@ impl WorkspaceBindingService for WorkspaceBindingConnectService {
             .allocate_peer_relay(ctx.headers(), peer_of(&ctx), &request.to_owned_message())
             .await;
         observe("allocate_peer_relay", result)
+    }
+
+    async fn issue_mesh_enrollment(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, IssueMeshEnrollmentRequest>,
+    ) -> ServiceResult<IssueMeshEnrollmentResponse> {
+        let result = self
+            .state
+            .issue_mesh_enrollment(ctx.headers(), peer_of(&ctx))
+            .await;
+        observe("issue_mesh_enrollment", result)
+    }
+
+    async fn report_mesh_attachment(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, ReportMeshAttachmentRequest>,
+    ) -> ServiceResult<ReportMeshAttachmentResponse> {
+        let report = request
+            .report
+            .as_known()
+            .unwrap_or(ProtoMeshAttachmentReport::Unspecified);
+        let result = self
+            .state
+            .report_mesh_attachment(ctx.headers(), peer_of(&ctx), report)
+            .await;
+        observe("report_mesh_attachment", result)
     }
 }

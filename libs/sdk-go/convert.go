@@ -649,6 +649,7 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 		ExpectedProfileRevision:    copyUint64Pointer(body.ExpectedProfileRevision),
 		ConfirmPersonalCredentials: body.ConfirmPersonalCredentials, ConfirmPersonalSecrets: body.ConfirmPersonalSecrets,
 		OmitApplicationPreviews: body.OmitApplicationPreviews,
+		Network:                 valueOrEmpty(body.Network),
 	}, nil
 }
 
@@ -716,6 +717,8 @@ func fromProtoEnvironment(environment *codewirev1.Environment) (EnvironmentData,
 		Id: environment.GetId(), IsolationTier: isolation,
 		MemoryMb: int64(environment.GetMemoryMb()), Name: stringPointer(environment.GetName()),
 		Network: stringPointer(environment.GetNetwork()), OrgId: environment.GetOrgId(), Ports: ports,
+		NetworkState:        networkAttachmentState(environment.GetNetworkState()),
+		NetworkFailure:      networkAttachmentFailure(environment.GetNetworkFailure()),
 		OperationGeneration: environment.GetOperationGeneration(), SourceSelection: sourceSelection,
 		PresetId: stringPointer(environment.GetPresetId()), PresetName: stringPointer(environment.GetPresetName()),
 		Protected: environment.GetProtected(), Recoverable: environment.GetRecoverable(), RetryCount: int64(environment.GetRetryCount()),
@@ -990,6 +993,46 @@ func environmentDesiredState(state codewirev1.DesiredState) string {
 	}
 }
 
+func networkAttachmentState(state codewirev1.NetworkAttachmentState) *string {
+	var name string
+	switch state {
+	case codewirev1.NetworkAttachmentState_NETWORK_ATTACHMENT_STATE_UNSPECIFIED:
+		return nil
+	case codewirev1.NetworkAttachmentState_NETWORK_ATTACHMENT_STATE_PENDING:
+		name = "pending"
+	case codewirev1.NetworkAttachmentState_NETWORK_ATTACHMENT_STATE_ATTACHED:
+		name = "attached"
+	case codewirev1.NetworkAttachmentState_NETWORK_ATTACHMENT_STATE_FAILED:
+		name = "failed"
+	case codewirev1.NetworkAttachmentState_NETWORK_ATTACHMENT_STATE_REVOKED:
+		name = "revoked"
+	default:
+		name = "unknown"
+	}
+	return &name
+}
+
+func networkAttachmentFailure(failure codewirev1.NetworkAttachmentFailure) *string {
+	var name string
+	switch failure {
+	case codewirev1.NetworkAttachmentFailure_NETWORK_ATTACHMENT_FAILURE_UNSPECIFIED:
+		return nil
+	case codewirev1.NetworkAttachmentFailure_NETWORK_ATTACHMENT_FAILURE_MESH_UNREACHABLE:
+		name = "mesh_unreachable"
+	case codewirev1.NetworkAttachmentFailure_NETWORK_ATTACHMENT_FAILURE_NETWORK_NOT_FOUND:
+		name = "network_not_found"
+	case codewirev1.NetworkAttachmentFailure_NETWORK_ATTACHMENT_FAILURE_NOT_A_MEMBER:
+		name = "not_a_member"
+	case codewirev1.NetworkAttachmentFailure_NETWORK_ATTACHMENT_FAILURE_NODE_NAME_TAKEN:
+		name = "node_name_taken"
+	case codewirev1.NetworkAttachmentFailure_NETWORK_ATTACHMENT_FAILURE_REFUSED:
+		name = "refused"
+	default:
+		name = "unknown"
+	}
+	return &name
+}
+
 func isolationTier(tier codewirev1.IsolationTier) (string, error) {
 	switch tier {
 	case codewirev1.IsolationTier_ISOLATION_TIER_UNSPECIFIED,
@@ -1130,13 +1173,13 @@ func ensureEnvironmentConverterCoverage() error {
 		messages := codewirev1.File_codewire_v1_environment_proto.Messages()
 		environmentCoverageErr = ensureDescriptorCoverage("environment", messages.ByName("Environment"), map[protoreflect.FieldNumber]protoreflect.Name{
 			1: "id", 2: "org_id", 3: "created_by", 4: "preset_id", 5: "type", 6: "name", 7: "state", 8: "desired_state", 9: "error_reason", 10: "recoverable", 11: "state_changed_at", 12: "retry_count", 13: "setup_phase", 14: "setup_complete", 15: "setup_error", 16: "ttl_seconds", 17: "shutdown_at", 18: "cpu_millicores", 19: "memory_mb", 20: "disk_gb", 21: "total_running_seconds", 22: "created_at", 23: "started_at", 24: "stopped_at", 25: "destroyed_at", 26: "protected", 27: "deletion_requested_at", 28: "deletion_grace_until", 29: "preset_name", 30: "network", 31: "ports", 32: "isolation_tier",
-			33: "operation_generation", 34: "source_selection",
+			33: "operation_generation", 34: "source_selection", 35: "network_state", 36: "network_failure",
 		})
 		if environmentCoverageErr != nil {
 			return
 		}
 		environmentCoverageErr = ensureDescriptorCoverage("create environment request", messages.ByName("CreateEnvironmentRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
-			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision", 27: "confirm_personal_credentials", 28: "confirm_personal_secrets", 29: "omit_application_previews",
+			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision", 27: "confirm_personal_credentials", 28: "confirm_personal_secrets", 29: "omit_application_previews", 30: "network",
 		})
 		if environmentCoverageErr != nil {
 			return

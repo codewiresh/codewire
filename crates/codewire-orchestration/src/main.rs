@@ -558,6 +558,7 @@ async fn main() -> anyhow::Result<()> {
                         .as_deref(),
                     &api_state.sandbox_cfg.api_base_url,
                 ),
+                mesh_url: api_state.sandbox_cfg.mesh_public_url.clone(),
             },
             Arc::new(
                 codewire_orchestration::workspace_binding::HttpRelayAllocator::new(Some(
@@ -585,6 +586,12 @@ async fn main() -> anyhow::Result<()> {
         .with_unary_connect_routes_mesh_authorization(
             codewire_orchestration::connect::mesh_authorization::router(pool.clone()),
             mesh_authorization,
+        )
+        // Hosted Mesh's questions about environment members (#3350), behind
+        // a service-only credential signed with this hop's own derived key.
+        .with_unary_connect_routes_internal_service(
+            codewire_orchestration::environment_mesh::environment_mesh_router(pool.clone()),
+            codewire_orchestration::environment_mesh::internal_service_layer(&cfg.session_secret)?,
         )
         .into_router();
 

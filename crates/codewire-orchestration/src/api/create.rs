@@ -53,6 +53,11 @@ pub struct CreateEnvironmentBody {
     pub confirm_personal_secrets: bool,
     #[serde(default)]
     pub omit_application_previews: bool,
+    /// The hosted Mesh network to join, by name, in the environment's
+    /// organization. The creating user is recorded as the one who attached
+    /// it; Mesh admits the node only while they are a member of the network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
 }
 
 /// Mirrors `api.Preset` (the slice the create flow consumes; the full
@@ -689,6 +694,23 @@ async fn insert_environment(
         &mut admitted,
     )
     .await?;
+    if let Some(network_id) = p.body.network.as_deref() {
+        // The node takes the environment's name, generated or chosen.
+        if !crate::environment_mesh::valid_node_name(&name) {
+            return Err(invalid_node_name());
+        }
+        crate::environment_mesh::insert_attachment(
+            &mut transaction,
+            &environment_id,
+            &crate::environment_mesh::Attachment {
+                org_id: p.org_id.to_owned(),
+                network_id: network_id.to_owned(),
+                node_name: name.clone(),
+            },
+            &p.user.user_id,
+        )
+        .await?;
+    }
     // Admission has resolved exact source IDs and created the immutable profile
     // pin. Only this final, same-transaction read describes the published row.
     let sql =
@@ -700,6 +722,46 @@ async fn insert_environment(
     let environment = scan_environment(&row)?;
     transaction.commit().await?;
     Ok(environment)
+}
+
+/// A network on create must be a hosted Mesh network name, and this platform
+/// must hand its daemons a hosted Mesh. A chosen environment name must also
+/// be usable as the node's name. Checked before anything is written.
+fn validate_network_request(
+    network: Option<&str>,
+    name: Option<&str>,
+    sandbox_cfg: &crate::worker::create::SandboxWorkerCfg,
+) -> AppResult<()> {
+    let Some(network) = network else {
+        return Ok(());
+    };
+    if !crate::environment_mesh::valid_network_id(network) {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_network",
+            "network must be a Mesh network name: 1 to 128 letters, digits, '-' or '_'",
+        ));
+    }
+    if sandbox_cfg.mesh_public_url.is_empty() {
+        return Err(coded(
+            StatusCode::PRECONDITION_FAILED,
+            "mesh_unavailable",
+            "this platform offers no hosted Mesh network to environments",
+        ));
+    }
+    if name.is_some_and(|name| !name.is_empty() && !crate::environment_mesh::valid_node_name(name))
+    {
+        return Err(invalid_node_name());
+    }
+    Ok(())
+}
+
+fn invalid_node_name() -> AppError {
+    coded(
+        StatusCode::BAD_REQUEST,
+        "invalid_node_name",
+        "an environment that joins a Mesh network needs a name of 1 to 63 letters, digits, '.', '_' or '-', starting with a letter or digit",
+    )
 }
 
 /// Checks the catalog entitlement and concurrent capacity while holding an
@@ -872,6 +934,11 @@ pub(crate) async fn create_environment_core(
     let mut body = input;
 
     require_org_member(pool, user, org_id).await?;
+    validate_network_request(
+        body.network.as_deref(),
+        body.name.as_deref(),
+        &state.sandbox_cfg,
+    )?;
     let isolation_tier = match body.isolation_tier.trim() {
         "" | "standard" => "standard",
         "confidential" => "confidential",
@@ -2043,6 +2110,44 @@ credentials: {profile: user/work}
     }
 
     #[test]
+    fn a_network_on_create_needs_a_mesh_name_hosted_mesh_and_a_node_name() {
+        let code = |result: AppResult<()>| match result {
+            Err(AppError::Coded { code, .. }) => code,
+            other => panic!("unexpected {other:?}"),
+        };
+        let hosted = crate::worker::create::SandboxWorkerCfg {
+            mesh_public_url: "https://mesh.example.test".into(),
+            ..Default::default()
+        };
+        let none = crate::worker::create::SandboxWorkerCfg::default();
+
+        // No network: nothing to check, whatever the name or platform.
+        assert!(validate_network_request(None, Some("not a node"), &none).is_ok());
+        assert!(validate_network_request(Some("work"), None, &hosted).is_ok());
+        assert!(validate_network_request(Some("work"), Some("app-1"), &hosted).is_ok());
+        assert!(validate_network_request(Some("work"), Some(""), &hosted).is_ok());
+        for network in ["", "a b", "cloud:work", "local:work"] {
+            assert_eq!(
+                code(validate_network_request(Some(network), None, &hosted)),
+                "invalid_network",
+                "{network}"
+            );
+        }
+        assert_eq!(
+            code(validate_network_request(Some("work"), None, &none)),
+            "mesh_unavailable"
+        );
+        assert_eq!(
+            code(validate_network_request(
+                Some("work"),
+                Some("my app"),
+                &hosted
+            )),
+            "invalid_node_name"
+        );
+    }
+
+    #[test]
     fn create_environment_schema_exposes_only_placement_and_project_spec() {
         let schema = serde_json::to_value(schemars::schema_for!(CreateEnvironmentBody)).unwrap();
         let properties = schema["properties"].as_object().unwrap();
@@ -2054,6 +2159,7 @@ credentials: {profile: user/work}
                 "expected_profile_revision",
                 "isolation_tier",
                 "name",
+                "network",
                 "omit_application_previews",
                 "preset_id",
                 "project_spec",

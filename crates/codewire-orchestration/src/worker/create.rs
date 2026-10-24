@@ -290,6 +290,37 @@ pub struct SandboxWorkerCfg {
     /// ([`KIND_CODEX_LOGIN_CHECK_PERIOD_ENV`], read only when built with
     /// `kind-e2e`); `None` keeps the daemon's production period.
     pub codex_login_check_period_seconds: Option<u64>,
+    /// Public https origin of the hosted Mesh service environments may join
+    /// networks on ([`SANDBOX_PUBLIC_MESH_URL_ENV`]). Empty: this platform
+    /// offers none, and a create that names a network is refused.
+    pub mesh_public_url: String,
+}
+
+/// The hosted Mesh origin handed to workspace daemons, without a trailing
+/// slash. It must be an `https` origin with no path, query or credentials.
+pub const SANDBOX_PUBLIC_MESH_URL_ENV: &str = "CODEWIRE_SANDBOX_PUBLIC_MESH_URL";
+
+/// [`SANDBOX_PUBLIC_MESH_URL_ENV`] as configured: empty, or an exact https
+/// origin. Anything else stops orchestration rather than handing daemons a
+/// Mesh they cannot verify.
+pub fn sandbox_public_mesh_url(value: Option<&str>) -> String {
+    let value = value.map(str::trim).unwrap_or_default();
+    if value.is_empty() {
+        return String::new();
+    }
+    let url = url::Url::parse(value)
+        .unwrap_or_else(|_| panic!("{SANDBOX_PUBLIC_MESH_URL_ENV} must be an https origin"));
+    assert!(
+        url.scheme() == "https"
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "{SANDBOX_PUBLIC_MESH_URL_ENV} must be an https origin"
+    );
+    value.trim_end_matches('/').to_owned()
 }
 
 /// Kind's test deployment only: the workspace daemon's Codex login check
@@ -415,6 +446,9 @@ impl SandboxWorkerCfg {
             egress_bandwidth,
             codex_login_check_period_seconds: kind_codex_login_check_period_seconds(
                 std::env::var_os(KIND_CODEX_LOGIN_CHECK_PERIOD_ENV),
+            ),
+            mesh_public_url: sandbox_public_mesh_url(
+                std::env::var(SANDBOX_PUBLIC_MESH_URL_ENV).ok().as_deref(),
             ),
         }
     }

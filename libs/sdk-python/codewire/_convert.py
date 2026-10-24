@@ -23,14 +23,14 @@ _ENVIRONMENT_DESCRIPTOR_FIELDS = {
     25: "destroyed_at", 26: "protected", 27: "deletion_requested_at",
     28: "deletion_grace_until", 29: "preset_name", 30: "network",
     31: "ports", 32: "isolation_tier", 33: "operation_generation",
-    34: "source_selection",
+    34: "source_selection", 35: "network_state", 36: "network_failure",
 }
 
 _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
     1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds",
     24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision",
     27: "confirm_personal_credentials", 28: "confirm_personal_secrets",
-    29: "omit_application_previews",
+    29: "omit_application_previews", 30: "network",
 }
 
 _SOURCE_DESCRIPTOR_FIELDS = {
@@ -126,8 +126,23 @@ def environment_to_dict(message: Message) -> dict[str, Any]:
     value["isolation_tier"] = (
         "standard" if isolation_tier in ("unspecified", "standard") else isolation_tier
     )
+    for field, prefix in (
+        ("network_state", "NETWORK_ATTACHMENT_STATE_"),
+        ("network_failure", "NETWORK_ATTACHMENT_FAILURE_"),
+    ):
+        # Absent when unspecified, like the REST resource.
+        if int(getattr(message, field)) == 0:
+            value.pop(field, None)
+        else:
+            value[field] = _enum_suffix_or_unknown(message, field, prefix)
     value["ports"] = [port_to_dict(port) for port in message.ports]
     return value
+
+
+def _enum_suffix_or_unknown(message: Message, field_name: str, prefix: str) -> str:
+    field = message.DESCRIPTOR.fields_by_name[field_name]
+    known = field.enum_type.values_by_number.get(int(getattr(message, field_name)))
+    return known.name.removeprefix(prefix).lower() if known is not None else "unknown"
 
 
 def assert_environment_converter_coverage() -> None:

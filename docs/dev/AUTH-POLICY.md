@@ -41,7 +41,12 @@ workspace daemon uses to fetch its binding.
   credentials are not approved flavors.
 - A Mesh peer coordinate stream starts only by consuming its fixed-name,
   one-use enrollment capability. It never falls back to a persistent node or
-  environment bearer.
+  environment bearer. A hosted environment's capability (`cw_eenr_`) is
+  issued by orchestration to the environment's live bound Pod. It is valid
+  for 60 seconds and redeemed by Mesh through orchestration's
+  `EnvironmentMeshService`, which consumes it only while that Pod and its
+  operation generation are still the live binding. Mesh rechecks those
+  members at least every 60 seconds.
 - A trusted service hop may transport the caller's existing credential for a
   canonical authorization decision without creating a new flavor. The WS18
   Mesh boundary authenticates the hop with flavor 4, carries exactly one

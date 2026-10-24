@@ -330,17 +330,43 @@ pub fn connect_unary_router_with_mesh_authorization(
     build_connect_router(
         connect,
         None,
-        Some(authorization),
+        Some(PrivateHopLayer::MeshAuthorization(authorization)),
         ProtocolPolicy::ConnectOnly,
         Some(deadline_policy),
         None,
     )
 }
 
+/// Builds an all-unary private Connect mount reachable only with a scoped
+/// service-only HMAC credential ([`InternalServiceLayer`]). No user
+/// credential is accepted on it, and none reaches its handlers.
+pub fn connect_unary_router_with_internal_service(
+    connect: connectrpc::Router,
+    layer: InternalServiceLayer,
+) -> axum::Router {
+    let deadline_policy = connectrpc::DeadlinePolicy::new()
+        .with_default_timeout(CONNECT_UNARY_SERVER_TIMEOUT)
+        .with_max(CONNECT_UNARY_SERVER_TIMEOUT);
+    build_connect_router(
+        connect,
+        None,
+        Some(PrivateHopLayer::InternalService(layer)),
+        ProtocolPolicy::ConnectOnly,
+        Some(deadline_policy),
+        None,
+    )
+}
+
+/// The authentication boundary of a private, cluster-local mount.
+enum PrivateHopLayer {
+    MeshAuthorization(MeshAuthorizationLayer),
+    InternalService(InternalServiceLayer),
+}
+
 fn build_connect_router(
     connect: connectrpc::Router,
     auth: Option<ConnectAuthLayer>,
-    mesh_authorization: Option<MeshAuthorizationLayer>,
+    private_hop: Option<PrivateHopLayer>,
     protocol_policy: ProtocolPolicy,
     deadline_policy: Option<connectrpc::DeadlinePolicy>,
     limits: Option<connectrpc::Limits>,
@@ -368,8 +394,14 @@ fn build_connect_router(
     if let Some(auth) = auth {
         router = auth.apply(router);
     }
-    if let Some(authorization) = mesh_authorization {
-        router = authorization.apply(router);
+    match private_hop {
+        Some(PrivateHopLayer::MeshAuthorization(authorization)) => {
+            router = authorization.apply(router);
+        }
+        Some(PrivateHopLayer::InternalService(layer)) => {
+            router = layer.apply(router);
+        }
+        None => {}
     }
 
     // `.layer` wraps outside-in as written bottom-to-top, so the log event
@@ -841,6 +873,126 @@ async fn enforce_mesh_authorization(
     response.extensions_mut().insert(credential);
     response.extensions_mut().insert(principal_evidence);
     response
+}
+
+/// Service-only HMAC boundary for a private generated service.
+///
+/// The one `Authorization` header is a short-lived internal credential
+/// ([`crate::internal_hmac`]) for exactly the calling service and the exact
+/// requested method, which must be one of the mount's methods. Cookies and
+/// forwarded caller credentials are refused: this hop carries no user. The
+/// credential is removed before Connect dispatch.
+#[derive(Clone)]
+pub struct InternalServiceLayer {
+    hmac_secret: String,
+    expected_service: String,
+    methods: BTreeSet<String>,
+}
+
+impl std::fmt::Debug for InternalServiceLayer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InternalServiceLayer")
+            .field("expected_service", &self.expected_service)
+            .field("methods", &self.methods)
+            .field("hmac_secret", &"[redacted]")
+            .finish()
+    }
+}
+
+impl InternalServiceLayer {
+    /// One calling service and its exact generated methods
+    /// (`package.Service/Method`), verified with `hmac_secret`.
+    pub fn new<I, M>(
+        hmac_secret: impl Into<String>,
+        expected_service: impl Into<String>,
+        methods: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = M>,
+        M: Into<String>,
+    {
+        Self {
+            hmac_secret: hmac_secret.into(),
+            expected_service: expected_service.into(),
+            methods: methods.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Applies the boundary inside the normal Connect content-type and
+    /// per-RPC observability layers.
+    pub fn apply(self, router: axum::Router) -> axum::Router {
+        let layer = Arc::new(self);
+        router.layer(axum::middleware::from_fn(
+            move |req: Request, next: Next| {
+                let layer = Arc::clone(&layer);
+                async move { enforce_internal_service(layer, req, next).await }
+            },
+        ))
+    }
+}
+
+async fn enforce_internal_service(
+    layer: Arc<InternalServiceLayer>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let mut safe_headers = req.headers().clone();
+    safe_headers.remove(header::AUTHORIZATION);
+    safe_headers.remove(header::COOKIE);
+    safe_headers.remove(MESH_FORWARDED_SESSION_METADATA);
+    safe_headers.remove(MESH_FORWARDED_AUTHORIZATION_METADATA);
+    let reject = |headers: &http::HeaderMap| {
+        rejection_response(&AppError::Unauthorized, request_id.as_deref(), headers)
+    };
+
+    let Some(method) = req
+        .uri()
+        .path()
+        .strip_prefix('/')
+        .filter(|method| layer.methods.contains(*method))
+        .map(str::to_owned)
+    else {
+        return reject(&safe_headers);
+    };
+    // This hop never carries a caller: any cookie or forwarded credential is
+    // a misrouted request, refused before it can reach a handler.
+    if req.headers().contains_key(header::COOKIE)
+        || req.headers().contains_key(MESH_FORWARDED_SESSION_METADATA)
+        || req
+            .headers()
+            .contains_key(MESH_FORWARDED_AUTHORIZATION_METADATA)
+    {
+        return reject(&safe_headers);
+    }
+    let Ok(bearer) = exactly_one_header(req.headers(), header::AUTHORIZATION.as_str()) else {
+        return reject(&safe_headers);
+    };
+    let Some(token) = bearer
+        .strip_prefix("Bearer ")
+        .or_else(|| bearer.strip_prefix("bearer "))
+        .filter(|token| !token.is_empty())
+    else {
+        return reject(&safe_headers);
+    };
+    if verify_internal_hmac_token(
+        &layer.hmac_secret,
+        token,
+        &layer.expected_service,
+        &method,
+        chrono::Utc::now(),
+    )
+    .is_err()
+    {
+        return reject(&safe_headers);
+    }
+    req.headers_mut().remove(header::AUTHORIZATION);
+    next.run(req).await
 }
 
 fn exactly_one_header<'a>(headers: &'a http::HeaderMap, name: &str) -> Result<&'a str, AppError> {
@@ -1519,6 +1671,100 @@ fn connect_code_for_http_status(status: StatusCode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn internal_service_layer_admits_only_its_scoped_service_credential() {
+        use tower::ServiceExt as _;
+
+        const METHOD: &str = "codewire.internal.v1.ExampleService/Admit";
+        const OTHER: &str = "codewire.internal.v1.ExampleService/Other";
+        let secret = "test-internal-service-secret";
+        let layer = InternalServiceLayer::new(secret, "codewire-mesh", [METHOD]);
+        assert!(!format!("{layer:?}").contains(secret));
+        let router = layer.apply(
+            axum::Router::new()
+                .route(
+                    &format!("/{METHOD}"),
+                    axum::routing::post(|headers: http::HeaderMap| async move {
+                        // The hop credential never reaches the handler.
+                        assert!(!headers.contains_key(header::AUTHORIZATION));
+                        StatusCode::OK
+                    }),
+                )
+                .route(
+                    &format!("/{OTHER}"),
+                    axum::routing::post(|| async { StatusCode::OK }),
+                ),
+        );
+        let now = chrono::Utc::now();
+        let token = |service: &str, method: &str, key: &str| {
+            crate::internal_hmac::issue_internal_hmac_token(key, service, method, now)
+                .expect("issue")
+        };
+        let send = |path: &str, headers: Vec<(&'static str, String)>| {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json");
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            router
+                .clone()
+                .oneshot(request.body(Body::empty()).expect("request"))
+        };
+        let bearer = |token: String| ("authorization", format!("Bearer {token}"));
+
+        let admitted = send(
+            &format!("/{METHOD}"),
+            vec![bearer(token("codewire-mesh", METHOD, secret))],
+        )
+        .await
+        .expect("response");
+        assert_eq!(admitted.status(), StatusCode::OK);
+
+        for (path, headers) in [
+            // No credential, another key, another caller, another method's
+            // credential, a method outside the mount, and a forwarded caller.
+            (format!("/{METHOD}"), vec![]),
+            (
+                format!("/{METHOD}"),
+                vec![bearer(token("codewire-mesh", METHOD, "other-secret"))],
+            ),
+            (
+                format!("/{METHOD}"),
+                vec![bearer(token("codewire-other", METHOD, secret))],
+            ),
+            (
+                format!("/{METHOD}"),
+                vec![bearer(token("codewire-mesh", OTHER, secret))],
+            ),
+            (
+                format!("/{OTHER}"),
+                vec![bearer(token("codewire-mesh", OTHER, secret))],
+            ),
+            (
+                format!("/{METHOD}"),
+                vec![
+                    bearer(token("codewire-mesh", METHOD, secret)),
+                    ("cookie", "codewire_session=synthetic".to_owned()),
+                ],
+            ),
+            (
+                format!("/{METHOD}"),
+                vec![
+                    bearer(token("codewire-mesh", METHOD, secret)),
+                    (
+                        MESH_FORWARDED_AUTHORIZATION_METADATA,
+                        "c3ludGhldGlj".to_owned(),
+                    ),
+                ],
+            ),
+        ] {
+            let response = send(&path, headers).await.expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
 
     #[tokio::test]
     async fn mesh_authorization_debug_values_redact_hop_and_forwarded_credentials() {

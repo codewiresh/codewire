@@ -736,6 +736,7 @@ fn create_body(request: proto::CreateEnvironmentRequest) -> AppResult<CreateEnvi
         confirm_personal_credentials: request.confirm_personal_credentials,
         confirm_personal_secrets: request.confirm_personal_secrets,
         omit_application_previews: request.omit_application_previews,
+        network: (!request.network.is_empty()).then_some(request.network),
     })
 }
 
@@ -977,6 +978,7 @@ fn proto_create_request(
         confirm_personal_credentials: body.confirm_personal_credentials,
         confirm_personal_secrets: body.confirm_personal_secrets,
         omit_application_previews: body.omit_application_previews,
+        network: body.network.unwrap_or_default(),
         ..Default::default()
     }
 }
@@ -1146,6 +1148,8 @@ fn proto_environment(environment: Environment) -> AppResult<proto::Environment> 
         deletion_requested_at: optional_timestamp(environment.deletion_requested_at)?,
         deletion_grace_until: optional_timestamp(environment.deletion_grace_until)?,
         preset_name: environment.preset_name.unwrap_or_default(),
+        network_state: proto_network_state(environment.network_state.as_deref())?.into(),
+        network_failure: proto_network_failure(environment.network_failure.as_deref())?.into(),
         network: environment.network.unwrap_or_default(),
         ports: environment
             .ports
@@ -1158,6 +1162,29 @@ fn proto_environment(environment: Environment) -> AppResult<proto::Environment> 
             unexpected => return invalid_stored_value("environment isolation tier", unexpected),
         },
         ..Default::default()
+    })
+}
+
+fn proto_network_state(state: Option<&str>) -> AppResult<proto::NetworkAttachmentState> {
+    Ok(match state {
+        None => proto::NetworkAttachmentState::Unspecified,
+        Some("pending") => proto::NetworkAttachmentState::Pending,
+        Some("attached") => proto::NetworkAttachmentState::Attached,
+        Some("failed") => proto::NetworkAttachmentState::Failed,
+        Some("revoked") => proto::NetworkAttachmentState::Revoked,
+        Some(unexpected) => return invalid_stored_value("network attachment state", unexpected),
+    })
+}
+
+fn proto_network_failure(failure: Option<&str>) -> AppResult<proto::NetworkAttachmentFailure> {
+    Ok(match failure {
+        None => proto::NetworkAttachmentFailure::Unspecified,
+        Some("mesh_unreachable") => proto::NetworkAttachmentFailure::MeshUnreachable,
+        Some("network_not_found") => proto::NetworkAttachmentFailure::NetworkNotFound,
+        Some("not_a_member") => proto::NetworkAttachmentFailure::NotAMember,
+        Some("node_name_taken") => proto::NetworkAttachmentFailure::NodeNameTaken,
+        Some("refused") => proto::NetworkAttachmentFailure::Refused,
+        Some(unexpected) => return invalid_stored_value("network attachment failure", unexpected),
     })
 }
 
@@ -2004,6 +2031,8 @@ ports: [{port: 3000, label: web, access: public}]
             deletion_grace_until: None,
             preset_name: None,
             network: None,
+            network_state: None,
+            network_failure: None,
             ports: Vec::new(),
         }
     }

@@ -242,6 +242,21 @@ impl AppBuilder {
         self
     }
 
+    /// Mounts one all-unary, cluster-local generated service reachable only
+    /// with a scoped service-only HMAC credential. Like the Mesh
+    /// authorization mount, it must never expose a public route.
+    pub fn with_unary_connect_routes_internal_service(
+        mut self,
+        connect: connectrpc::Router,
+        layer: crate::connect::InternalServiceLayer,
+    ) -> Self {
+        self.connect_routes
+            .push(crate::connect::connect_unary_router_with_internal_service(
+                connect, layer,
+            ));
+        self
+    }
+
     /// Mounts the never-routed Connect conformance probe
     /// (`codewire.testing.v1.PingService`, doc 03 D8) when
     /// `CONNECT_TESTING_SURFACE=1`; a no-op otherwise, leaving the router

@@ -36,6 +36,19 @@ service WorkspaceBindingService {
   // tailnet node and one peer, with orchestration's own allocator
   // credential. failed_precondition when the runtime has no peer relay.
   rpc AllocatePeerRelay(AllocatePeerRelayRequest) returns (AllocatePeerRelayResponse);
+
+  // Issues one enrollment code for the bound environment's Mesh network
+  // node: one use, 60 seconds, bound to this Pod, the binding's operation
+  // generation, and the environment's attachment. The daemon presents it once
+  // to open one Mesh peer coordinate stream, and asks again for every new
+  // stream. failed_precondition when the environment joins no network or
+  // this platform has no hosted Mesh.
+  rpc IssueMeshEnrollment(IssueMeshEnrollmentRequest) returns (IssueMeshEnrollmentResponse);
+
+  // Records how far this Pod's Mesh network membership has come.
+  rpc ReportMeshAttachment(ReportMeshAttachmentRequest) returns (ReportMeshAttachmentResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
 }
 
 message BindWorkspaceRequest {
@@ -86,6 +99,20 @@ message WorkspaceAccess {
   // address, forwarded to its own loopback; orchestration also pushes each
   // change to the daemon, and every grant restates the current set.
   repeated int32 app_ports = 7;
+  // The hosted Mesh network the environment joins, or absent. Non-secret:
+  // the daemon asks IssueMeshEnrollment for the capability to join it.
+  WorkspaceMeshAttachment mesh = 8;
+}
+
+// WorkspaceMeshAttachment names the one hosted Mesh network node the bound
+// environment serves. It holds no credential.
+message WorkspaceMeshAttachment {
+  // Public https origin of the hosted Mesh service.
+  string mesh_url = 1;
+  string org_id = 2;
+  string network_id = 3;
+  // The node's fixed name in the network: the environment's name.
+  string node_name = 4;
 }
 
 message RefreshAccessRequest {}
@@ -120,3 +147,32 @@ message AllocatePeerRelayResponse {
   // Public host:port addresses of the relay endpoint.
   repeated string addr_ports = 8;
 }
+
+message IssueMeshEnrollmentRequest {}
+
+message IssueMeshEnrollmentResponse {
+  // One-use Mesh peer enrollment capability ("cw_eenr_<64 hex>").
+  string enrollment_code = 1 [debug_redact = true];
+  // Unix seconds after which the code is refused.
+  int64 expires_at = 2;
+  WorkspaceMeshAttachment attachment = 3;
+}
+
+// MeshAttachmentReport is what the daemon observed of its Mesh membership.
+enum MeshAttachmentReport {
+  MESH_ATTACHMENT_REPORT_UNSPECIFIED = 0;
+  // The daemon's Mesh peer stream is open.
+  MESH_ATTACHMENT_REPORT_ATTACHED = 1;
+  MESH_ATTACHMENT_REPORT_MESH_UNREACHABLE = 2;
+  MESH_ATTACHMENT_REPORT_NETWORK_NOT_FOUND = 3;
+  MESH_ATTACHMENT_REPORT_NOT_A_MEMBER = 4;
+  MESH_ATTACHMENT_REPORT_NODE_NAME_TAKEN = 5;
+  MESH_ATTACHMENT_REPORT_REVOKED = 6;
+  MESH_ATTACHMENT_REPORT_REFUSED = 7;
+}
+
+message ReportMeshAttachmentRequest {
+  MeshAttachmentReport report = 1;
+}
+
+message ReportMeshAttachmentResponse {}

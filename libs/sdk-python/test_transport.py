@@ -242,6 +242,27 @@ class TransportTestCase(unittest.TestCase):
             },
         )
 
+    def test_environment_converter_renders_the_network_attachment(self) -> None:
+        from codewire.v1.environment_pb2 import (
+            NetworkAttachmentFailure,
+            NetworkAttachmentState,
+        )
+
+        value = environment_to_dict(
+            Environment(
+                network="work",
+                network_state=NetworkAttachmentState.NETWORK_ATTACHMENT_STATE_FAILED,
+                network_failure=NetworkAttachmentFailure.NETWORK_ATTACHMENT_FAILURE_NOT_A_MEMBER,
+            )
+        )
+        self.assertEqual(
+            (value["network"], value["network_state"], value["network_failure"]),
+            ("work", "failed", "not_a_member"),
+        )
+        detached = environment_to_dict(Environment())
+        self.assertNotIn("network_state", detached)
+        self.assertNotIn("network_failure", detached)
+
     def test_environment_converter_preserves_native_values_and_short_enums(self) -> None:
         created_at = Timestamp()
         created_at.FromJsonString("2026-01-01T00:00:00.987654321Z")

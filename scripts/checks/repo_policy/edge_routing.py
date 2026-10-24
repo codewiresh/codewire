@@ -151,6 +151,10 @@ INTERNAL_CONNECT_SERVICES = {
     "codewire.internal.v1.MeshAuthorizationService": (
         "codewire_orchestration::connect::mesh_authorization::router"
     ),
+    # Hosted Mesh's questions about environment members (#3350).
+    "codewire.internal.v1.EnvironmentMeshService": (
+        "codewire_orchestration::environment_mesh::environment_mesh_router"
+    ),
 }
 
 # The second closed listener class: every tenant workload can open TCP to it,
@@ -793,7 +797,7 @@ def assert_internal_connect_listener_exemption(
     if set(unrouted) != expected:
         fail(
             "unrouted listener map must contain exactly MeshAuthorizationService, "
-            "WorkspaceBindingService and DerpAdmissionService"
+            "EnvironmentMeshService, WorkspaceBindingService and DerpAdmissionService"
         )
     assert_internal_connect_listener_boundary(INTERNAL_CONNECT_SERVICES, fail, reader)
     assert_workspace_binding_listener_boundary(fail, reader)

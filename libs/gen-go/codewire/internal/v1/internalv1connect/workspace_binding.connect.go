@@ -45,6 +45,12 @@ const (
 	// WorkspaceBindingServiceAllocatePeerRelayProcedure is the fully-qualified name of the
 	// WorkspaceBindingService's AllocatePeerRelay RPC.
 	WorkspaceBindingServiceAllocatePeerRelayProcedure = "/codewire.internal.v1.WorkspaceBindingService/AllocatePeerRelay"
+	// WorkspaceBindingServiceIssueMeshEnrollmentProcedure is the fully-qualified name of the
+	// WorkspaceBindingService's IssueMeshEnrollment RPC.
+	WorkspaceBindingServiceIssueMeshEnrollmentProcedure = "/codewire.internal.v1.WorkspaceBindingService/IssueMeshEnrollment"
+	// WorkspaceBindingServiceReportMeshAttachmentProcedure is the fully-qualified name of the
+	// WorkspaceBindingService's ReportMeshAttachment RPC.
+	WorkspaceBindingServiceReportMeshAttachmentProcedure = "/codewire.internal.v1.WorkspaceBindingService/ReportMeshAttachment"
 )
 
 // WorkspaceBindingServiceClient is a client for the codewire.internal.v1.WorkspaceBindingService
@@ -66,6 +72,15 @@ type WorkspaceBindingServiceClient interface {
 	// tailnet node and one peer, with orchestration's own allocator
 	// credential. failed_precondition when the runtime has no peer relay.
 	AllocatePeerRelay(context.Context, *connect.Request[v1.AllocatePeerRelayRequest]) (*connect.Response[v1.AllocatePeerRelayResponse], error)
+	// Issues one enrollment code for the bound environment's Mesh network
+	// node: one use, 60 seconds, bound to this Pod, the binding's operation
+	// generation, and the environment's attachment. The daemon presents it once
+	// to open one Mesh peer coordinate stream, and asks again for every new
+	// stream. failed_precondition when the environment joins no network or
+	// this platform has no hosted Mesh.
+	IssueMeshEnrollment(context.Context, *connect.Request[v1.IssueMeshEnrollmentRequest]) (*connect.Response[v1.IssueMeshEnrollmentResponse], error)
+	// Records how far this Pod's Mesh network membership has come.
+	ReportMeshAttachment(context.Context, *connect.Request[v1.ReportMeshAttachmentRequest]) (*connect.Response[v1.ReportMeshAttachmentResponse], error)
 }
 
 // NewWorkspaceBindingServiceClient constructs a client for the
@@ -107,15 +122,30 @@ func NewWorkspaceBindingServiceClient(httpClient connect.HTTPClient, baseURL str
 			connect.WithSchema(workspaceBindingServiceMethods.ByName("AllocatePeerRelay")),
 			connect.WithClientOptions(opts...),
 		),
+		issueMeshEnrollment: connect.NewClient[v1.IssueMeshEnrollmentRequest, v1.IssueMeshEnrollmentResponse](
+			httpClient,
+			baseURL+WorkspaceBindingServiceIssueMeshEnrollmentProcedure,
+			connect.WithSchema(workspaceBindingServiceMethods.ByName("IssueMeshEnrollment")),
+			connect.WithClientOptions(opts...),
+		),
+		reportMeshAttachment: connect.NewClient[v1.ReportMeshAttachmentRequest, v1.ReportMeshAttachmentResponse](
+			httpClient,
+			baseURL+WorkspaceBindingServiceReportMeshAttachmentProcedure,
+			connect.WithSchema(workspaceBindingServiceMethods.ByName("ReportMeshAttachment")),
+			connect.WithIdempotency(connect.IdempotencyIdempotent),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // workspaceBindingServiceClient implements WorkspaceBindingServiceClient.
 type workspaceBindingServiceClient struct {
-	bindWorkspace     *connect.Client[v1.BindWorkspaceRequest, v1.BindWorkspaceResponse]
-	refreshAccess     *connect.Client[v1.RefreshAccessRequest, v1.RefreshAccessResponse]
-	recordHostKey     *connect.Client[v1.RecordHostKeyRequest, v1.RecordHostKeyResponse]
-	allocatePeerRelay *connect.Client[v1.AllocatePeerRelayRequest, v1.AllocatePeerRelayResponse]
+	bindWorkspace        *connect.Client[v1.BindWorkspaceRequest, v1.BindWorkspaceResponse]
+	refreshAccess        *connect.Client[v1.RefreshAccessRequest, v1.RefreshAccessResponse]
+	recordHostKey        *connect.Client[v1.RecordHostKeyRequest, v1.RecordHostKeyResponse]
+	allocatePeerRelay    *connect.Client[v1.AllocatePeerRelayRequest, v1.AllocatePeerRelayResponse]
+	issueMeshEnrollment  *connect.Client[v1.IssueMeshEnrollmentRequest, v1.IssueMeshEnrollmentResponse]
+	reportMeshAttachment *connect.Client[v1.ReportMeshAttachmentRequest, v1.ReportMeshAttachmentResponse]
 }
 
 // BindWorkspace calls codewire.internal.v1.WorkspaceBindingService.BindWorkspace.
@@ -138,6 +168,16 @@ func (c *workspaceBindingServiceClient) AllocatePeerRelay(ctx context.Context, r
 	return c.allocatePeerRelay.CallUnary(ctx, req)
 }
 
+// IssueMeshEnrollment calls codewire.internal.v1.WorkspaceBindingService.IssueMeshEnrollment.
+func (c *workspaceBindingServiceClient) IssueMeshEnrollment(ctx context.Context, req *connect.Request[v1.IssueMeshEnrollmentRequest]) (*connect.Response[v1.IssueMeshEnrollmentResponse], error) {
+	return c.issueMeshEnrollment.CallUnary(ctx, req)
+}
+
+// ReportMeshAttachment calls codewire.internal.v1.WorkspaceBindingService.ReportMeshAttachment.
+func (c *workspaceBindingServiceClient) ReportMeshAttachment(ctx context.Context, req *connect.Request[v1.ReportMeshAttachmentRequest]) (*connect.Response[v1.ReportMeshAttachmentResponse], error) {
+	return c.reportMeshAttachment.CallUnary(ctx, req)
+}
+
 // WorkspaceBindingServiceHandler is an implementation of the
 // codewire.internal.v1.WorkspaceBindingService service.
 type WorkspaceBindingServiceHandler interface {
@@ -157,6 +197,15 @@ type WorkspaceBindingServiceHandler interface {
 	// tailnet node and one peer, with orchestration's own allocator
 	// credential. failed_precondition when the runtime has no peer relay.
 	AllocatePeerRelay(context.Context, *connect.Request[v1.AllocatePeerRelayRequest]) (*connect.Response[v1.AllocatePeerRelayResponse], error)
+	// Issues one enrollment code for the bound environment's Mesh network
+	// node: one use, 60 seconds, bound to this Pod, the binding's operation
+	// generation, and the environment's attachment. The daemon presents it once
+	// to open one Mesh peer coordinate stream, and asks again for every new
+	// stream. failed_precondition when the environment joins no network or
+	// this platform has no hosted Mesh.
+	IssueMeshEnrollment(context.Context, *connect.Request[v1.IssueMeshEnrollmentRequest]) (*connect.Response[v1.IssueMeshEnrollmentResponse], error)
+	// Records how far this Pod's Mesh network membership has come.
+	ReportMeshAttachment(context.Context, *connect.Request[v1.ReportMeshAttachmentRequest]) (*connect.Response[v1.ReportMeshAttachmentResponse], error)
 }
 
 // NewWorkspaceBindingServiceHandler builds an HTTP handler from the service implementation. It
@@ -193,6 +242,19 @@ func NewWorkspaceBindingServiceHandler(svc WorkspaceBindingServiceHandler, opts 
 		connect.WithSchema(workspaceBindingServiceMethods.ByName("AllocatePeerRelay")),
 		connect.WithHandlerOptions(opts...),
 	)
+	workspaceBindingServiceIssueMeshEnrollmentHandler := connect.NewUnaryHandler(
+		WorkspaceBindingServiceIssueMeshEnrollmentProcedure,
+		svc.IssueMeshEnrollment,
+		connect.WithSchema(workspaceBindingServiceMethods.ByName("IssueMeshEnrollment")),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceBindingServiceReportMeshAttachmentHandler := connect.NewUnaryHandler(
+		WorkspaceBindingServiceReportMeshAttachmentProcedure,
+		svc.ReportMeshAttachment,
+		connect.WithSchema(workspaceBindingServiceMethods.ByName("ReportMeshAttachment")),
+		connect.WithIdempotency(connect.IdempotencyIdempotent),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.internal.v1.WorkspaceBindingService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case WorkspaceBindingServiceBindWorkspaceProcedure:
@@ -203,6 +265,10 @@ func NewWorkspaceBindingServiceHandler(svc WorkspaceBindingServiceHandler, opts 
 			workspaceBindingServiceRecordHostKeyHandler.ServeHTTP(w, r)
 		case WorkspaceBindingServiceAllocatePeerRelayProcedure:
 			workspaceBindingServiceAllocatePeerRelayHandler.ServeHTTP(w, r)
+		case WorkspaceBindingServiceIssueMeshEnrollmentProcedure:
+			workspaceBindingServiceIssueMeshEnrollmentHandler.ServeHTTP(w, r)
+		case WorkspaceBindingServiceReportMeshAttachmentProcedure:
+			workspaceBindingServiceReportMeshAttachmentHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -226,4 +292,12 @@ func (UnimplementedWorkspaceBindingServiceHandler) RecordHostKey(context.Context
 
 func (UnimplementedWorkspaceBindingServiceHandler) AllocatePeerRelay(context.Context, *connect.Request[v1.AllocatePeerRelayRequest]) (*connect.Response[v1.AllocatePeerRelayResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.WorkspaceBindingService.AllocatePeerRelay is not implemented"))
+}
+
+func (UnimplementedWorkspaceBindingServiceHandler) IssueMeshEnrollment(context.Context, *connect.Request[v1.IssueMeshEnrollmentRequest]) (*connect.Response[v1.IssueMeshEnrollmentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.WorkspaceBindingService.IssueMeshEnrollment is not implemented"))
+}
+
+func (UnimplementedWorkspaceBindingServiceHandler) ReportMeshAttachment(context.Context, *connect.Request[v1.ReportMeshAttachmentRequest]) (*connect.Response[v1.ReportMeshAttachmentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.WorkspaceBindingService.ReportMeshAttachment is not implemented"))
 }

@@ -30,6 +30,7 @@ use super::limits::RequestLimits;
 use super::service::{BindError, WorkspaceBindingState};
 use super::store::{
     BindingNotifications, BindingStore, BindingStoreUnavailable, HostKeyRecord, LiveBinding,
+    MeshAttachment, MeshAttachmentReport, MeshIssueOutcome,
 };
 use super::{app, workspace_binding_router};
 use crate::runtime_transport::{PeerRelayTransport, RuntimeTransportZone, TRANSPORT_ZONE_LABEL};
@@ -54,6 +55,7 @@ const ENVIRONMENT_GENERATION: i64 = 9;
 const NODE_NAME: &str = "runtime-node-1";
 const ZONE: &str = "dev-hel1";
 const COORDINATOR_URL: &str = "https://dev.codewire.sh";
+const MESH_URL: &str = "https://mesh.example.test";
 const ALLOCATOR_URL: &str =
     "http://codewire-udp-relay.dev.svc.cluster.local:8095/internal/udp-relay/allocations";
 const HOST_KEY: &str =
@@ -405,6 +407,13 @@ struct FakeStore {
     /// The environment's exposed application ports; `None` models an
     /// unavailable lookup.
     app_ports: Mutex<Option<Vec<i32>>>,
+    /// The environment's Mesh attachment; `Err` models an unavailable lookup.
+    mesh: Mutex<Result<Option<MeshAttachment>, BindingStoreUnavailable>>,
+    /// Issued enrollment digests: (environment, Pod, generation, digest).
+    issued: Mutex<Vec<(String, String, i64, String)>>,
+    /// What issuing answers once the attachment is found.
+    issue_outcome: Mutex<MeshIssueOutcome>,
+    reports: Mutex<Vec<(String, String, MeshAttachmentReport)>>,
 }
 
 impl FakeStore {
@@ -416,7 +425,20 @@ impl FakeStore {
             host_keys: Mutex::new(HashMap::new()),
             zones: Mutex::new(HashMap::from([(ZONE.into(), zone())])),
             app_ports: Mutex::new(Some(vec![3000, 5173])),
+            mesh: Mutex::new(Ok(None)),
+            issued: Mutex::new(Vec::new()),
+            issue_outcome: Mutex::new(MeshIssueOutcome::Issued),
+            reports: Mutex::new(Vec::new()),
         })
+    }
+
+    fn attached(self: Arc<Self>) -> Arc<Self> {
+        *self.mesh.lock().unwrap() = Ok(Some(MeshAttachment {
+            org_id: "org-alpha".into(),
+            network_id: "work".into(),
+            node_name: "app-1".into(),
+        }));
+        self
     }
 
     fn bound(scope: WorkspaceCredentialScope) -> Arc<Self> {
@@ -485,6 +507,50 @@ impl BindingStore for FakeStore {
             .unwrap()
             .clone()
             .ok_or(BindingStoreUnavailable)
+    }
+
+    async fn mesh_attachment(
+        &self,
+        environment_id: &str,
+    ) -> Result<Option<MeshAttachment>, BindingStoreUnavailable> {
+        assert_eq!(environment_id, ENVIRONMENT_ID);
+        self.mesh.lock().unwrap().clone()
+    }
+
+    async fn issue_mesh_enrollment(
+        &self,
+        environment_id: &str,
+        pod_uid: &str,
+        generation: i64,
+        code_sha256: &str,
+    ) -> Result<MeshIssueOutcome, BindingStoreUnavailable> {
+        let outcome = *self.issue_outcome.lock().unwrap();
+        if outcome == MeshIssueOutcome::Issued {
+            self.issued.lock().unwrap().push((
+                environment_id.to_owned(),
+                pod_uid.to_owned(),
+                generation,
+                code_sha256.to_owned(),
+            ));
+        }
+        Ok(outcome)
+    }
+
+    async fn report_mesh_attachment(
+        &self,
+        environment_id: &str,
+        pod_uid: &str,
+        report: MeshAttachmentReport,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        let attached = matches!(*self.mesh.lock().unwrap(), Ok(Some(_)));
+        if attached {
+            self.reports.lock().unwrap().push((
+                environment_id.to_owned(),
+                pod_uid.to_owned(),
+                report,
+            ));
+        }
+        Ok(attached)
     }
 }
 
@@ -567,6 +633,7 @@ fn fixture_allocating(
         .with_access(
             AccessSettings {
                 coordinator_url: COORDINATOR_URL.into(),
+                mesh_url: MESH_URL.into(),
             },
             allocator.clone(),
         )
@@ -1003,6 +1070,10 @@ async fn a_token_that_expires_during_the_wait_gets_no_binding() {
         host_keys: Mutex::new(HashMap::new()),
         zones: Mutex::new(HashMap::new()),
         app_ports: Mutex::new(Some(Vec::new())),
+        mesh: Mutex::new(Ok(None)),
+        issued: Mutex::new(Vec::new()),
+        issue_outcome: Mutex::new(MeshIssueOutcome::Issued),
+        reports: Mutex::new(Vec::new()),
     });
     let fixture = fixture_with(FakeCluster::valid(), store, |state| {
         state.with_timing(Duration::from_secs(5), Duration::from_millis(100))
@@ -1560,4 +1631,255 @@ async fn the_listener_serves_http1_over_the_internal_tls_identity_only() {
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+// ------------------------------------------------- Mesh enrollment (#3350)
+
+#[tokio::test]
+async fn an_environment_without_a_network_gets_no_mesh_and_no_enrollment() {
+    let fixture = fixture(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    let response = fixture.bind(0).await.unwrap();
+    assert!(
+        response
+            .access
+            .as_option()
+            .unwrap()
+            .mesh
+            .as_option()
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .state
+            .issue_mesh_enrollment(&valid_bearer(), Some(PEER))
+            .await,
+        Err(BindError::FailedPrecondition)
+    );
+    assert!(fixture.store.issued.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_platform_without_hosted_mesh_names_no_network_and_issues_nothing() {
+    let fixture = fixture_with(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod).attached(),
+        |state| {
+            state.with_access(
+                AccessSettings {
+                    coordinator_url: COORDINATOR_URL.into(),
+                    mesh_url: String::new(),
+                },
+                Arc::new(FakeAllocator::default()),
+            )
+        },
+    );
+    let response = fixture.bind(0).await.unwrap();
+    assert!(
+        response
+            .access
+            .as_option()
+            .unwrap()
+            .mesh
+            .as_option()
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .state
+            .issue_mesh_enrollment(&valid_bearer(), Some(PEER))
+            .await,
+        Err(BindError::FailedPrecondition)
+    );
+    assert!(fixture.store.issued.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_attached_environment_names_its_network_and_gets_one_use_codes_for_its_pod() {
+    let fixture = fixture(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod).attached(),
+    );
+    // The grant names the network, never a credential for it.
+    let response = fixture.bind(0).await.unwrap();
+    let mesh = response
+        .access
+        .as_option()
+        .unwrap()
+        .mesh
+        .as_option()
+        .expect("the attached network")
+        .clone();
+    assert_eq!(
+        (
+            mesh.mesh_url.as_str(),
+            mesh.org_id.as_str(),
+            mesh.network_id.as_str(),
+            mesh.node_name.as_str()
+        ),
+        (MESH_URL, "org-alpha", "work", "app-1")
+    );
+
+    let first = fixture
+        .state
+        .issue_mesh_enrollment(&valid_bearer(), Some(PEER))
+        .await
+        .unwrap();
+    let second = fixture
+        .state
+        .issue_mesh_enrollment(&valid_bearer(), Some(PEER))
+        .await
+        .unwrap();
+    assert_ne!(first.enrollment_code, second.enrollment_code);
+    assert!(crate::environment_mesh::well_formed_enrollment_code(
+        &first.enrollment_code
+    ));
+    let lifetime = first.expires_at - unix_now() as i64;
+    assert!((59..=60).contains(&lifetime), "{lifetime}");
+    assert_eq!(first.attachment.as_option(), Some(&mesh));
+    assert!(!format!("{first:?}").contains(&first.enrollment_code));
+    // Only digests are stored, bound to the reviewed Pod and the
+    // environment's current generation.
+    let issued = fixture.store.issued.lock().unwrap().clone();
+    assert_eq!(
+        issued,
+        vec![
+            (
+                ENVIRONMENT_ID.to_owned(),
+                POD_UID.to_owned(),
+                ENVIRONMENT_GENERATION,
+                crate::environment_mesh::enrollment_code_sha256(&first.enrollment_code),
+            ),
+            (
+                ENVIRONMENT_ID.to_owned(),
+                POD_UID.to_owned(),
+                ENVIRONMENT_GENERATION,
+                crate::environment_mesh::enrollment_code_sha256(&second.enrollment_code),
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn enrollment_fails_closed_for_another_workload_a_full_table_or_an_unknown_attachment() {
+    let fixture = fixture(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod).attached(),
+    );
+    assert_eq!(
+        fixture
+            .state
+            .issue_mesh_enrollment(&valid_bearer(), Some(OTHER_PEER))
+            .await,
+        Err(BindError::PermissionDenied)
+    );
+    *fixture.store.issue_outcome.lock().unwrap() = MeshIssueOutcome::Exhausted;
+    assert_eq!(
+        fixture
+            .state
+            .issue_mesh_enrollment(&valid_bearer(), Some(PEER))
+            .await,
+        Err(BindError::ResourceExhausted)
+    );
+    assert!(fixture.store.issued.lock().unwrap().is_empty());
+
+    // An unreadable attachment fails the grant rather than detaching the
+    // daemon from its network.
+    *fixture.store.mesh.lock().unwrap() = Err(BindingStoreUnavailable);
+    assert_eq!(
+        fixture
+            .state
+            .refresh_access(&valid_bearer(), Some(PEER))
+            .await
+            .map(|_| ()),
+        Err(BindError::Unavailable)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .issue_mesh_enrollment(&valid_bearer(), Some(PEER))
+            .await,
+        Err(BindError::Unavailable)
+    );
+    // A released binding gets nothing.
+    let unbound = self::fixture(
+        FakeCluster::valid(),
+        FakeStore::returning(vec![Ok(None)]).attached(),
+    );
+    assert_eq!(
+        unbound
+            .state
+            .issue_mesh_enrollment(&valid_bearer(), Some(PEER))
+            .await,
+        Err(BindError::NotFound)
+    );
+}
+
+#[tokio::test]
+async fn reports_are_recorded_for_the_bound_pod_only() {
+    use codewire_proto::codewire::internal::v1::MeshAttachmentReport as Report;
+
+    let fixture = fixture(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod).attached(),
+    );
+    let state = &fixture.state;
+    // An unknown report is refused, after authentication like every request.
+    assert_eq!(
+        state
+            .report_mesh_attachment(&valid_bearer(), Some(PEER), Report::Unspecified)
+            .await,
+        Err(BindError::InvalidArgument)
+    );
+    assert_eq!(fixture.reviews(), 1);
+    assert!(fixture.store.reports.lock().unwrap().is_empty());
+    for report in [Report::NotAMember, Report::Attached, Report::Revoked] {
+        state
+            .report_mesh_attachment(&valid_bearer(), Some(PEER), report)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        state
+            .report_mesh_attachment(&valid_bearer(), Some(OTHER_PEER), Report::Attached)
+            .await,
+        Err(BindError::PermissionDenied)
+    );
+    let reports: Vec<_> = fixture
+        .store
+        .reports
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(environment, pod, report)| {
+            assert_eq!(
+                (environment.as_str(), pod.as_str()),
+                (ENVIRONMENT_ID, POD_UID)
+            );
+            *report
+        })
+        .collect();
+    assert_eq!(
+        reports,
+        vec![
+            MeshAttachmentReport::Failed("not_a_member"),
+            MeshAttachmentReport::Attached,
+            MeshAttachmentReport::Revoked,
+        ]
+    );
+
+    // An environment that joins no network has nothing to report.
+    let detached = self::fixture(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    assert_eq!(
+        detached
+            .state
+            .report_mesh_attachment(&valid_bearer(), Some(PEER), Report::Attached)
+            .await,
+        Err(BindError::FailedPrecondition)
+    );
 }

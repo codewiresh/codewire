@@ -85,21 +85,25 @@ type EnvironmentSourceSelection struct {
 
 // EnvironmentData is the SDK-owned public representation of an environment.
 type EnvironmentData struct {
-	Schema              *string                     `json:"$schema,omitempty"`
-	CpuMillicores       int64                       `json:"cpu_millicores"`
-	CreatedAt           string                      `json:"created_at"`
-	CreatedBy           string                      `json:"created_by"`
-	DeletionGraceUntil  *string                     `json:"deletion_grace_until,omitempty"`
-	DeletionRequestedAt *string                     `json:"deletion_requested_at,omitempty"`
-	DesiredState        string                      `json:"desired_state"`
-	DestroyedAt         *string                     `json:"destroyed_at,omitempty"`
-	DiskGb              int64                       `json:"disk_gb"`
-	ErrorReason         *string                     `json:"error_reason,omitempty"`
-	Id                  string                      `json:"id"`
-	IsolationTier       string                      `json:"isolation_tier"`
-	MemoryMb            int64                       `json:"memory_mb"`
-	Name                *string                     `json:"name,omitempty"`
-	Network             *string                     `json:"network,omitempty"`
+	Schema              *string `json:"$schema,omitempty"`
+	CpuMillicores       int64   `json:"cpu_millicores"`
+	CreatedAt           string  `json:"created_at"`
+	CreatedBy           string  `json:"created_by"`
+	DeletionGraceUntil  *string `json:"deletion_grace_until,omitempty"`
+	DeletionRequestedAt *string `json:"deletion_requested_at,omitempty"`
+	DesiredState        string  `json:"desired_state"`
+	DestroyedAt         *string `json:"destroyed_at,omitempty"`
+	DiskGb              int64   `json:"disk_gb"`
+	ErrorReason         *string `json:"error_reason,omitempty"`
+	Id                  string  `json:"id"`
+	IsolationTier       string  `json:"isolation_tier"`
+	MemoryMb            int64   `json:"memory_mb"`
+	Name                *string `json:"name,omitempty"`
+	Network             *string `json:"network,omitempty"`
+	// NetworkState is pending, attached, failed or revoked when Network is set.
+	NetworkState *string `json:"network_state,omitempty"`
+	// NetworkFailure says why joining Network failed when NetworkState is failed.
+	NetworkFailure      *string                     `json:"network_failure,omitempty"`
 	OrgId               string                      `json:"org_id"`
 	OperationGeneration uint64                      `json:"operation_generation"`
 	Ports               *[]EnvironmentPort          `json:"ports,omitempty"`
@@ -185,6 +189,9 @@ type CreateEnvironmentBody struct {
 	ConfirmPersonalSecrets     bool        `json:"confirm_personal_secrets,omitempty"`
 	// OmitApplicationPreviews suppresses inherited creation defaults, not network access.
 	OmitApplicationPreviews bool `json:"omit_application_previews,omitempty"`
+	// Network joins this hosted Codewire Mesh network, by name, in the
+	// organization. The creating user must be a member of it.
+	Network *string `json:"network,omitempty"`
 }
 
 // UpdateEnvironmentSourcesRequest replaces only an environment's complete

@@ -10,11 +10,13 @@ static REQUESTS: OnceLock<IntCounterVec> = OnceLock::new();
 static TOKEN_REVIEWS: OnceLock<IntCounter> = OnceLock::new();
 
 /// The closed set of `WorkspaceBindingService` methods.
-pub(super) const METHODS: [&str; 4] = [
+pub(super) const METHODS: [&str; 6] = [
     "bind_workspace",
     "refresh_access",
     "record_host_key",
     "allocate_peer_relay",
+    "issue_mesh_enrollment",
+    "report_mesh_attachment",
 ];
 
 /// The closed set of outcomes.

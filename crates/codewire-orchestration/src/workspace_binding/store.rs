@@ -113,6 +113,47 @@ pub trait BindingStore: Send + Sync {
     async fn app_ports(&self, _environment_id: &str) -> Result<Vec<i32>, BindingStoreUnavailable> {
         Ok(Vec::new())
     }
+
+    /// The Mesh network the environment joins, if any.
+    async fn mesh_attachment(
+        &self,
+        _environment_id: &str,
+    ) -> Result<Option<MeshAttachment>, BindingStoreUnavailable> {
+        Ok(None)
+    }
+
+    /// Stores the digest of one Mesh enrollment code for the bound
+    /// `pod_uid` at `generation`.
+    async fn issue_mesh_enrollment(
+        &self,
+        _environment_id: &str,
+        _pod_uid: &str,
+        _generation: i64,
+        _code_sha256: &str,
+    ) -> Result<MeshIssueOutcome, BindingStoreUnavailable> {
+        Err(BindingStoreUnavailable)
+    }
+
+    /// Records the bound `pod_uid`'s Mesh membership report. False when the
+    /// environment joins no network.
+    async fn report_mesh_attachment(
+        &self,
+        _environment_id: &str,
+        _pod_uid: &str,
+        _report: MeshAttachmentReport,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        Err(BindingStoreUnavailable)
+    }
+}
+
+pub use crate::environment_mesh::{
+    Attachment as MeshAttachment, AttachmentReport as MeshAttachmentReport,
+    IssueOutcome as MeshIssueOutcome,
+};
+
+fn mesh_store_unavailable(error: sqlx::Error) -> BindingStoreUnavailable {
+    tracing::warn!(error = %error, "workspace Mesh attachment store failed");
+    BindingStoreUnavailable
 }
 
 /// PostgreSQL-backed lookup on the listener's own bounded pool.
@@ -292,6 +333,44 @@ impl BindingStore for PgBindingStore {
                 tracing::warn!(error = %error, "workspace binding app port lookup failed");
                 BindingStoreUnavailable
             })
+    }
+
+    async fn mesh_attachment(
+        &self,
+        environment_id: &str,
+    ) -> Result<Option<MeshAttachment>, BindingStoreUnavailable> {
+        crate::environment_mesh::attachment_for(&self.pool, environment_id)
+            .await
+            .map_err(mesh_store_unavailable)
+    }
+
+    async fn issue_mesh_enrollment(
+        &self,
+        environment_id: &str,
+        pod_uid: &str,
+        generation: i64,
+        code_sha256: &str,
+    ) -> Result<MeshIssueOutcome, BindingStoreUnavailable> {
+        crate::environment_mesh::issue_enrollment(
+            &self.pool,
+            environment_id,
+            pod_uid,
+            generation,
+            code_sha256,
+        )
+        .await
+        .map_err(mesh_store_unavailable)
+    }
+
+    async fn report_mesh_attachment(
+        &self,
+        environment_id: &str,
+        pod_uid: &str,
+        report: MeshAttachmentReport,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        crate::environment_mesh::report_attachment(&self.pool, environment_id, pod_uid, report)
+            .await
+            .map_err(mesh_store_unavailable)
     }
 }
 

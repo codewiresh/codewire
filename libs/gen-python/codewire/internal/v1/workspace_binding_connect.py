@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .workspace_binding_pb2 import AllocatePeerRelayRequest, AllocatePeerRelayResponse, BindWorkspaceRequest, BindWorkspaceResponse, RecordHostKeyRequest, RecordHostKeyResponse, RefreshAccessRequest, RefreshAccessResponse
+from .workspace_binding_pb2 import AllocatePeerRelayRequest, AllocatePeerRelayResponse, BindWorkspaceRequest, BindWorkspaceResponse, IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse, RecordHostKeyRequest, RecordHostKeyResponse, RefreshAccessRequest, RefreshAccessResponse, ReportMeshAttachmentRequest, ReportMeshAttachmentResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -45,6 +45,12 @@ class WorkspaceBindingService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def allocate_peer_relay(self, request: AllocatePeerRelayRequest, ctx: RequestContext[AllocatePeerRelayRequest, AllocatePeerRelayResponse]) -> AllocatePeerRelayResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def issue_mesh_enrollment(self, request: IssueMeshEnrollmentRequest, ctx: RequestContext[IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse]) -> IssueMeshEnrollmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def report_mesh_attachment(self, request: ReportMeshAttachmentRequest, ctx: RequestContext[ReportMeshAttachmentRequest, ReportMeshAttachmentResponse]) -> ReportMeshAttachmentResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -100,6 +106,26 @@ class WorkspaceBindingServiceASGIApplication(ConnectASGIApplication[WorkspaceBin
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.allocate_peer_relay,
+                ),
+                "/codewire.internal.v1.WorkspaceBindingService/IssueMeshEnrollment": Endpoint.unary(
+                    method=MethodInfo(
+                        name="IssueMeshEnrollment",
+                        service_name="codewire.internal.v1.WorkspaceBindingService",
+                        input=IssueMeshEnrollmentRequest,
+                        output=IssueMeshEnrollmentResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.issue_mesh_enrollment,
+                ),
+                "/codewire.internal.v1.WorkspaceBindingService/ReportMeshAttachment": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ReportMeshAttachment",
+                        service_name="codewire.internal.v1.WorkspaceBindingService",
+                        input=ReportMeshAttachmentRequest,
+                        output=ReportMeshAttachmentResponse,
+                        idempotency_level=IdempotencyLevel.IDEMPOTENT,
+                    ),
+                    function=svc.report_mesh_attachment,
                 ),
             },
             interceptors=interceptors,
@@ -221,6 +247,46 @@ class WorkspaceBindingServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def issue_mesh_enrollment(
+        self,
+        request: IssueMeshEnrollmentRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> IssueMeshEnrollmentResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="IssueMeshEnrollment",
+                service_name="codewire.internal.v1.WorkspaceBindingService",
+                input=IssueMeshEnrollmentRequest,
+                output=IssueMeshEnrollmentResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def report_mesh_attachment(
+        self,
+        request: ReportMeshAttachmentRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> ReportMeshAttachmentResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ReportMeshAttachment",
+                service_name="codewire.internal.v1.WorkspaceBindingService",
+                input=ReportMeshAttachmentRequest,
+                output=ReportMeshAttachmentResponse,
+                idempotency_level=IdempotencyLevel.IDEMPOTENT,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class WorkspaceBindingServiceSync(Protocol):
     def bind_workspace(self, request: BindWorkspaceRequest, ctx: RequestContext[BindWorkspaceRequest, BindWorkspaceResponse]) -> BindWorkspaceResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -232,6 +298,12 @@ class WorkspaceBindingServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def allocate_peer_relay(self, request: AllocatePeerRelayRequest, ctx: RequestContext[AllocatePeerRelayRequest, AllocatePeerRelayResponse]) -> AllocatePeerRelayResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def issue_mesh_enrollment(self, request: IssueMeshEnrollmentRequest, ctx: RequestContext[IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse]) -> IssueMeshEnrollmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def report_mesh_attachment(self, request: ReportMeshAttachmentRequest, ctx: RequestContext[ReportMeshAttachmentRequest, ReportMeshAttachmentResponse]) -> ReportMeshAttachmentResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -285,6 +357,26 @@ class WorkspaceBindingServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.allocate_peer_relay,
+                ),
+                "/codewire.internal.v1.WorkspaceBindingService/IssueMeshEnrollment": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="IssueMeshEnrollment",
+                        service_name="codewire.internal.v1.WorkspaceBindingService",
+                        input=IssueMeshEnrollmentRequest,
+                        output=IssueMeshEnrollmentResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.issue_mesh_enrollment,
+                ),
+                "/codewire.internal.v1.WorkspaceBindingService/ReportMeshAttachment": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ReportMeshAttachment",
+                        service_name="codewire.internal.v1.WorkspaceBindingService",
+                        input=ReportMeshAttachmentRequest,
+                        output=ReportMeshAttachmentResponse,
+                        idempotency_level=IdempotencyLevel.IDEMPOTENT,
+                    ),
+                    function=service.report_mesh_attachment,
                 ),
             },
             interceptors=interceptors,
@@ -398,6 +490,44 @@ class WorkspaceBindingServiceClientSync(ConnectClientSync):
                 input=AllocatePeerRelayRequest,
                 output=AllocatePeerRelayResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def issue_mesh_enrollment(
+        self,
+        request: IssueMeshEnrollmentRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> IssueMeshEnrollmentResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="IssueMeshEnrollment",
+                service_name="codewire.internal.v1.WorkspaceBindingService",
+                input=IssueMeshEnrollmentRequest,
+                output=IssueMeshEnrollmentResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def report_mesh_attachment(
+        self,
+        request: ReportMeshAttachmentRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> ReportMeshAttachmentResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ReportMeshAttachment",
+                service_name="codewire.internal.v1.WorkspaceBindingService",
+                input=ReportMeshAttachmentRequest,
+                output=ReportMeshAttachmentResponse,
+                idempotency_level=IdempotencyLevel.IDEMPOTENT,
             ),
             headers=headers,
             timeout_ms=timeout_ms,

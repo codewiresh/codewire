@@ -144,12 +144,49 @@ message Environment {
   google.protobuf.Timestamp deletion_requested_at = 27;
   google.protobuf.Timestamp deletion_grace_until = 28;
   string preset_name = 29;
+  // The hosted Codewire Mesh network this environment joins, by name, in its
+  // organization. Empty when it joins none.
   string network = 30;
   repeated Port ports = 31;
   IsolationTier isolation_tier = 32;
   uint64 operation_generation = 33;
   // Exact canonical source IDs and pinned profile revision, never values.
   EnvironmentSourceSelection source_selection = 34;
+  // How far the running environment has come joining `network`, as its
+  // runtime last reported for its current Pod. Unspecified when it names no
+  // network.
+  NetworkAttachmentState network_state = 35;
+  // Why joining `network` failed; set only with NETWORK_ATTACHMENT_STATE_FAILED.
+  NetworkAttachmentFailure network_failure = 36;
+}
+
+// NetworkAttachmentState is how far an environment's Mesh network
+// membership has come for its current runtime.
+enum NetworkAttachmentState {
+  NETWORK_ATTACHMENT_STATE_UNSPECIFIED = 0;
+  // The environment is not running, or it has not joined yet.
+  NETWORK_ATTACHMENT_STATE_PENDING = 1;
+  // The running environment is a member of the network.
+  NETWORK_ATTACHMENT_STATE_ATTACHED = 2;
+  // Joining failed; network_failure says why.
+  NETWORK_ATTACHMENT_STATE_FAILED = 3;
+  // Mesh refused the node because a network owner revoked it.
+  NETWORK_ATTACHMENT_STATE_REVOKED = 4;
+}
+
+// NetworkAttachmentFailure is why an environment could not join its network.
+enum NetworkAttachmentFailure {
+  NETWORK_ATTACHMENT_FAILURE_UNSPECIFIED = 0;
+  // The Mesh service could not be reached.
+  NETWORK_ATTACHMENT_FAILURE_MESH_UNREACHABLE = 1;
+  // The network does not exist in the environment's organization.
+  NETWORK_ATTACHMENT_FAILURE_NETWORK_NOT_FOUND = 2;
+  // The user who attached the environment is not a member of the network.
+  NETWORK_ATTACHMENT_FAILURE_NOT_A_MEMBER = 3;
+  // Another node in the network already has the environment's name.
+  NETWORK_ATTACHMENT_FAILURE_NODE_NAME_TAKEN = 4;
+  // Mesh refused the enrollment for another reason.
+  NETWORK_ATTACHMENT_FAILURE_REFUSED = 5;
 }
 
 message ListEnvironmentsRequest {
@@ -185,6 +222,10 @@ message CreateEnvironmentRequest {
   // repository defaults. Requires project_spec.application_ports to be empty.
   // False preserves existing default inheritance; this is not network isolation.
   bool omit_application_previews = 29;
+  // Join this hosted Codewire Mesh network, by name, in org_id. Mesh admits
+  // the environment's node only while the creating user is a member of the
+  // network. Empty joins none.
+  string network = 30;
 }
 
 // Complete selection. Empty means no sources and no provider profile.
