@@ -19,14 +19,14 @@ access, locked-down networks, and compatibility. DERP may still bootstrap
 discovery while magicsock selects a better packet path, but it is not the
 preferred local CLI/VS Code SSH path.
 
-1. **Direct UDP** (preferred fast path): STUN discovers each peer's reachable
-   endpoint. magicsock/disco then upgrades WireGuard packet flow from DERP to
-   peer-to-peer UDP when the network allows it. The DERP connection stays up as
-   fallback. External CLI to sandbox direct paths require the daemon to
-   use a public STUN endpoint; in-cluster STUN only reveals private pod
-   addresses and is relay-only evidence. Public STUN is necessary but not
-   sufficient: the endpoint that the daemon advertises must also be routable
-   from the external CLI.
+1. **Direct UDP** (preferred fast path): each peer advertises candidate
+   endpoints. A hosted daemon advertises the direct-UDP endpoint the platform
+   publishes for it; a client, or a daemon with no published endpoint, learns
+   its own from public STUN. magicsock/disco then upgrades WireGuard packet flow
+   from DERP to peer-to-peer UDP when the network allows it. The DERP
+   connection stays up as fallback. In-cluster STUN only reveals private pod
+   addresses and is relay-only evidence. An advertised endpoint must also be
+   routable from the other peer.
 2. **UDP relay** (bounded UDP fallback): If true peer-to-peer UDP cannot
    be validated, the tailnet may allocate a shared UDP relay endpoint for the
    two disco keys. This is not `direct_udp`; new Rust diagnostics should report
@@ -136,16 +136,16 @@ ordinary internet egress.
 
 STUN is intentionally public edge infrastructure, not a cluster-internal
 service. A private network between the cluster's nodes does not prove the
-public UDP path that external clients will use, so the daemon queries STUN
-over the same public UDP internet path used for direct WireGuard candidates.
+public UDP path that external clients will use, so STUN is queried over the
+same public UDP internet path used for direct WireGuard candidates.
 
 **Direct UDP path:** CLI UDP socket <-> network/NAT/provider path <-> the
 environment's `cw-tailnet-udp-<env>` LoadBalancer <-> the daemon's UDP socket
-inside the workspace Pod. STUN helps both peers discover
-candidate endpoints; disco validates peer reachability; WireGuard traffic moves
-directly only after the tailnet confirms that path. Every workspace daemon gets
-the same DERP/STUN capability, and transport selection belongs to the tailnet
-implementation.
+inside the workspace Pod. The daemon advertises that LoadBalancer endpoint
+from its access grant; the client learns its own endpoint from STUN; disco
+validates peer reachability; WireGuard traffic moves directly only after the
+tailnet confirms that path. Every workspace daemon gets the same DERP/STUN
+capability, and transport selection belongs to the tailnet implementation.
 
 The sandbox-side UDP socket binds at `0.0.0.0:31000` in the workspace Pod,
 only once the daemon is bound. That is a pod-local destination port. In Kubernetes/Cilium, a STUN-observed node-side source port
@@ -154,11 +154,15 @@ pod. Codewire therefore creates no per-sandbox UDP NodePort Service; the
 environment's `cw-tailnet-udp-<env>` LoadBalancer and the shared UDP relay
 carry the external paths.
 
-STUN is still required. The CLI uses public STUN to discover its own endpoint,
-the daemon uses public STUN as an additional candidate source, and disco proves
-the advertised tuple before WireGuard data moves directly. Direct UDP proof is
-the combination of an advertised routable endpoint and a path probe reporting
-`transport=direct_udp`.
+STUN is still required, for clients. The CLI uses public STUN to discover its
+own endpoint, and so does any client running inside a Sandbox, such as a nested
+`cw` or a Mesh member that dials another environment. A daemon runs STUN only
+when the platform publishes no direct endpoint for it: behind a published
+endpoint, a STUN answer could name only the node's outbound NAT mapping, which
+admits replies from that STUN server and nothing else, so the daemon advertises
+the published endpoint alone. Disco proves the advertised tuple before
+WireGuard data moves directly. Direct UDP proof is the combination of an
+advertised routable endpoint and a path probe reporting `transport=direct_udp`.
 
 A hosted environment proves its fast path through the shared UDP relay:
 `cw doctor tailnet` reports `transport=udp_relay` through the zone's peer
@@ -181,8 +185,8 @@ overhead.
 
 ## STUN edge
 
-**CLI and workspace daemon:** public STUN host -> DNS -> public edge node ->
-host-network `codewire-stun` pod `:3478/udp`.
+**Clients, and daemons with no published endpoint:** public STUN host -> DNS
+-> public edge node -> host-network `codewire-stun` pod `:3478/udp`.
 
 Your site runs the STUN edge as a `codewire-stun` deployment of the
 `codewire-derp` binary in STUN-only mode (`PORT=-1`, `TLS_PORT=-1`,
@@ -191,6 +195,13 @@ your site's STUN host name. The site's firewall must admit public UDP `3478` to 
 sandbox pods also need the host-network egress policy above. Sandboxes and the
 DERPMap advertise the standard public STUN port `3478/udp`, not a Kubernetes
 NodePort.
+
+A Sandbox on another node must reach the edge node's public address over the
+public path, with its usual outbound NAT. If the site's node mesh (for example
+a WireGuard underlay between nodes) routes that public address, the request
+enters the mesh with the Pod's own source address, which the mesh peer can drop
+without a trace: the Sandbox gets no STUN answer although policy forwarded the
+request. Keep every node's public address out of the mesh's routed networks.
 
 ## DERPMap delivery
 
