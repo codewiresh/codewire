@@ -68,9 +68,11 @@ push and the untrusted one otherwise.
 | Variable | Role | Jobs |
 |---|---|---|
 | `CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT` | Credential-free light work | selection, aggregation, the Dev delivery trigger, source approval, measures |
-| `CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY` | Sized heavy verification, for every run except a main push | `ci.yaml` build and test groups |
+| `CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY` | Heavy metal guests (13 GiB), for every run except a main push | `ci.yaml` Database verification, `test-archive-measure.yaml` |
+| `CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM` | Medium metal guests (6 GiB, Docker, a warm Rust cache, the archive store), for every run except a main push (infra#1534) | `ci.yaml` Policy, Standard, Tooling, the three Rust / transport groups and both service groups |
 | `CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD` | The pull request Rust build runner: one metal guest whose build disk keeps the build folder between jobs (infra#1632). It compiles once per run: it runs the build legs listed in `scripts/ci/setup/build-once.sh` and publishes each leg's test archive for the test jobs | `ci.yaml` Compile every Rust target (every run except a main push), `build-runner-measure.yaml` |
-| `CODEWIRE_CI_RUNNER_TRUSTED_HEAVY` | Sized heavy verification on a main push; the only heavy runner that may write the protected cache | the same groups on a main push |
+| `CODEWIRE_CI_RUNNER_TRUSTED_HEAVY` | Heavy metal guests on a main push | Database verification on a main push |
+| `CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM` | Medium metal guests on a main push | the medium groups on a main push |
 | `CODEWIRE_CI_RUNNER_TRUSTED_BUILD` | The main Rust build runner: the same as the pull request build runner, for a main push only. It builds in its own build folder (`/ci-cache/main`) and publishes to the main archive store, which only main's guests reach (infra#1632) | `ci.yaml` Compile every Rust target on a main push |
 | `CODEWIRE_CI_RUNNER_UNTRUSTED_KIND` | The Kind producers and Edge / Kind, for every run except a main push | `ci.yaml` Kind jobs |
 | `CODEWIRE_CI_RUNNER_TRUSTED_KIND` | The same Kind jobs on a main push | `ci.yaml` Kind jobs on a main push |

@@ -1010,11 +1010,18 @@ class MainPushDeferralContractTests(unittest.TestCase):
                                                  untrusted: "untrusted-kind-label"}
                 del context[missing]
                 self.assertEqual(actions_value(runs_on, context), expected)
-        heavy = self.workflow["jobs"]["rust-packages"]["runs-on"]
+        heavy = self.workflow["jobs"]["database"]["runs-on"]
         self.assertEqual(heavy, runners.HEAVY)
         self.assertEqual(actions_value(heavy, self.context("push") | {
             "vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY": "untrusted-heavy-label"}),
             "unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY")
+        # The medium class (infra#1534): a main push never falls through to
+        # the untrusted medium label.
+        medium = self.workflow["jobs"]["rust-packages"]["runs-on"]
+        self.assertEqual(medium, runners.MEDIUM)
+        self.assertEqual(actions_value(medium, self.context("push") | {
+            "vars.CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM": "untrusted-medium-label"}),
+            "unset-CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM")
         # Compile once (infra#1632): a main push compiles on the main build
         # runner and never on the pull request one or on Heavy; a pull request
         # never on the main build runner.

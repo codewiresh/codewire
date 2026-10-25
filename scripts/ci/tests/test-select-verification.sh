@@ -2918,6 +2918,11 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     runner="$METAL_MAIN_RUNS_ON"
     grep -qxF "$METAL_CARGO_BOUND" "$block"
   fi
+  # The medium metal class (infra#1534): each group on exactly the slot it needs.
+  if [ "$runner" = medium ]; then
+    runner="$RUNS_ON_MEDIUM"
+    grep -qxF "$METAL_CARGO_BOUND" "$block"
+  fi
   # Compile once (infra#1632): the compile job runs on a build runner, which
   # sizes its own Cargo jobs (build-once.sh), so it bounds none by memory.
   if [ "$runner" = build ]; then
@@ -3026,16 +3031,16 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     exit 1
   fi
 done <<'EOF'
-policy|Policy verification|metal-main|policy
-standard|Standard verification|metal-main|standard
-tooling|Tooling / delivery contract verification|metal-main|tooling
+policy|Policy verification|medium|policy
+standard|Standard verification|medium|standard
+tooling|Tooling / delivery contract verification|medium|tooling
 rust-compile|Compile every Rust target|build|rust_compile
-rust-packages|Rust / transport packages|metal-main|rust_shards
-rust-features|Rust / transport feature graphs|metal-main|rust_shards
-rust-transport|Rust / transport verification|metal-main|rust_transport
+rust-packages|Rust / transport packages|medium|rust_shards
+rust-features|Rust / transport feature graphs|medium|rust_shards
+rust-transport|Rust / transport verification|medium|rust_transport
 database|Database verification|metal-main|database
-services-control|Service control-plane verification|metal-main|services_control
-services-runtime|Service runtime-plane verification|metal-main|services_runtime
+services-control|Service control-plane verification|medium|services_control
+services-runtime|Service runtime-plane verification|medium|services_runtime
 edge-kind|Edge / Kind verification|heavy|edge_kind
 EOF
 
@@ -3371,15 +3376,20 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-# Nine heavy groups on the metal labels, and Rust compilation on the build
+# Each group on exactly the slot it needs (infra#1534): eight on the medium
+# metal class, Database on the heavy one, and Rust compilation on the build
 # runners, main's on a main push (compile once, infra#1632). Every metal group
 # bounds its Cargo jobs.
 [[ "$(grep -Fxc "    runs-on: ${RUNS_ON_BUILD}" "$WORKFLOW")" -eq 1 ]] || {
   echo 'Codewire CI requires Rust compilation on the build runners' >&2
   exit 1
 }
-[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 9 ]] || {
-  echo 'Codewire CI requires its nine ordinary heavy groups (policy included) on the metal labels' >&2
+[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_MEDIUM}" "$WORKFLOW")" -eq 8 ]] || {
+  echo 'Codewire CI requires its eight medium groups (policy included) on the medium metal labels' >&2
+  exit 1
+}
+[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 1 ]] || {
+  echo 'Codewire CI requires Database verification alone on the heavy metal labels' >&2
   exit 1
 }
 [[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 9 ]] || {

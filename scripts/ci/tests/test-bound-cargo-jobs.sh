@@ -64,15 +64,17 @@ if env -i PATH="$PATH" GITHUB_ENV="$work/env" CODEWIRE_BOUND_MEMINFO="$work/memi
   fail 'missing MemAvailable did not fail'
 fi
 
-# Every sized Heavy job bounds cargo in a step, after its checkout and before
+# Every sized metal job bounds cargo in a step, after its checkout and before
 # any later step, and none keeps a fixed job-level count.
 python3 -I - "$ROOT/.gitea/workflows/ci.yaml" <<'WIRING'
 import sys
 import yaml
 
 jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
-# The sized Heavy runners are the CODEWIRE_CI_RUNNER_*_HEAVY variables.
-sized = {name for name, job in jobs.items() if "_HEAVY ||" in str(job.get("runs-on", ""))}
+# The sized metal runners are the CODEWIRE_CI_RUNNER_*_HEAVY and *_MEDIUM
+# variables (infra#1534): Database on heavy, eight groups on medium.
+sized = {name for name, job in jobs.items()
+         if "_HEAVY ||" in str(job.get("runs-on", "")) or "_MEDIUM ||" in str(job.get("runs-on", ""))}
 assert len(sized) == 9, sorted(sized)
 for name in sized:
     job = jobs[name]

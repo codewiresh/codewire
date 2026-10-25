@@ -192,12 +192,13 @@ done
 
 # A main push writes the one protected cache, which only main-only builders on
 # fresh metal VMs may write (infra#1544). A job that fetches cache credentials
-# therefore runs main pushes on the trusted Heavy runner variable (the metal-only
-# sized label), or forces its job-local caches on a main push: a job on the
-# trusted Kind runner (an unsized label) can land on a PR-shared cloud pod.
+# therefore runs main pushes on the trusted Heavy or Medium runner variable (a
+# metal-only sized label), or forces its job-local caches on a main push: a job
+# on the trusted Kind runner (an unsized label) can land on a PR-shared cloud pod.
 readonly main_push="github.event_name == 'push' && github.ref == 'refs/heads/main'"
 # Only the main-push branch of the expression matters here; pull requests read.
 readonly sized_runs_on="    runs-on: \${{ $main_push && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || "
+readonly medium_runs_on="    runs-on: \${{ $main_push && (vars.CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM || "
 check_main_cache_runners() {
   local workflow="$1" job block step checked=0
   while IFS= read -r job; do
@@ -209,6 +210,7 @@ check_main_cache_runners() {
     grep -Eq 'scripts/ci/setup/select-untrusted-(rust|workspace)-cache\.sh' <<<"$block" || continue
     checked=$((checked + 1))
     grep -Fq -- "$sized_runs_on" <<<"$block" && continue
+    grep -Fq -- "$medium_runs_on" <<<"$block" && continue
     # Unsized: every selector step must force local caches on a main push.
     while IFS= read -r -d '' step; do
       grep -Eq 'select-untrusted-(rust|workspace)-cache\.sh' <<<"$step" || continue
@@ -225,7 +227,7 @@ check_main_cache_runners() {
 check_main_cache_runners "$WORKFLOW" || fail 'a main cache job may run on a PR-shared Heavy pod'
 # Fixtures: one sized cache job moved to the unsized main runner, and one
 # unsized job that no longer forces local caches on a main push.
-sed '/^  rust-packages:$/,/^  rust-features:$/s/&& (vars\.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY /\&\& (vars.CODEWIRE_CI_RUNNER_TRUSTED_KIND /' \
+sed '/^  rust-packages:$/,/^  rust-features:$/s/&& (vars\.CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM /\&\& (vars.CODEWIRE_CI_RUNNER_TRUSTED_KIND /' \
   "$WORKFLOW" >"$work/unsized-ci.yaml"
 ! cmp -s "$WORKFLOW" "$work/unsized-ci.yaml" || fail 'the unsized fixture changed nothing'
 if check_main_cache_runners "$work/unsized-ci.yaml" 2>"$work/unsized.err"; then

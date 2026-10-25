@@ -51,9 +51,9 @@ sys.path.insert(0, str(pathlib.Path(sys.argv[1]).resolve().parents[1] / "scripts
 import ci_runner_fixtures as runners  # noqa: E402
 
 # The in-cluster runner pools that reach the apt snapshot cache: Kind and the
-# sized metal Heavy guests carry the heavy pool's policy, and the trusted
-# light runner is the protected pool.
-CACHE_RUNNERS = {runners.KIND, runners.HEAVY, runners.TRUSTED_LIGHT}
+# sized metal Heavy and Medium guests carry the heavy pool's policy, and the
+# trusted light runner is the protected pool.
+CACHE_RUNNERS = {runners.KIND, runners.HEAVY, runners.MEDIUM, runners.TRUSTED_LIGHT}
 # Jobs that call an image builder without the cache: the arm64 support legs
 # build on the remote ci-arm64-builder node outside the cluster, and the
 # support join only assembles the two platform digests. A release's own pair
