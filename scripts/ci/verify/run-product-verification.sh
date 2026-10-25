@@ -121,7 +121,12 @@ run_rust_archive_tests() {
     echo "::error::the test archive $RUST_TEST_ARCHIVE is missing" >&2
     return 1
   }
-  local nextest="${RUST_TEST_NEXTEST:-cargo-nextest}" root="$RUST_ARCHIVE_BUILD_ROOT"
+  local nextest="${RUST_TEST_NEXTEST:-cargo-nextest}" root="$RUST_ARCHIVE_BUILD_ROOT" share
+  # A metal guest runs as many tests at once as its share of the host
+  # (cpu-share.sh); elsewhere the CI profile's own count applies.
+  # shellcheck source=scripts/ci/setup/cpu-share.sh
+  source "$ROOT/scripts/ci/setup/cpu-share.sh"
+  share="$(ci_cpu_share)"
   local filter="" part status=0
   for part in "${RUST_ARCHIVE_FILTERS[@]}"; do
     filter="${filter:+$filter | }$part"
@@ -160,6 +165,7 @@ run_rust_archive_tests() {
       --cargo-metadata "$root/targets/archive/nextest/cargo-metadata.json" \
       --target-dir-remap "$root/targets/archive" --workspace-remap "$root/src" \
       --profile ci --no-tests=pass -E "$filter" \
+      ${share:+--test-threads "$share"} \
       ${RUST_TEST_PARTITION:+--partition "$RUST_TEST_PARTITION"}
   ) || status=$?
   rm -rf -- "$root" "$extract"

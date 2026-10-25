@@ -379,7 +379,8 @@ from pathlib import Path
 args = sys.argv[1:]
 work = Path(os.environ['DB_TRACE_ROOT'])
 record = dict(args=args, target=os.environ['CARGO_TARGET_DIR'],
-              test_database=os.environ.get('TEST_DATABASE_URL'), database=os.environ.get('DATABASE_URL'))
+              test_database=os.environ.get('TEST_DATABASE_URL'), database=os.environ.get('DATABASE_URL'),
+              threads=os.environ.get('RUST_TEST_THREADS'))
 with (work / 'trace.jsonl').open('a') as output:
     output.write(json.dumps(record) + '\n')
 if args[0] == 'build':
@@ -393,6 +394,18 @@ if '--no-run' in args:
         sys.exit(42)
     print('Finished compiling synthetic database harnesses')
     sys.exit(0)
+# Count the database executions running at once across lanes.
+import fcntl, time
+def running(delta):
+    with (work / 'running.lock').open('a+') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = work / 'running.json'
+        now, peak = json.loads(state.read_text()) if state.exists() else (0, 0)
+        now += delta
+        state.write_text(json.dumps([now, max(peak, now)]))
+running(1)
+time.sleep(0.02)
+running(-1)
 suites = json.loads((work / 'suites.json').read_text())
 index = next((i for i, item in enumerate(suites) if item['args'] == args), None)
 if index is None:
@@ -416,6 +429,7 @@ lock_dir = temporary / 'lane-locks'
 def run_case(failure='', extra=None):
     trace = trace_root / 'trace.jsonl'
     trace.unlink(missing_ok=True)
+    (trace_root / 'running.json').unlink(missing_ok=True)
     (trace_root / 'docker.log').unlink(missing_ok=True)
     environment = {
         'CODEWIRE_INTEGRATION_LOCK_DIR': str(lock_dir), **(extra or {}),
@@ -487,11 +501,38 @@ def check_lanes(commands, complete=True):
         assert any(line.startswith('rm -f ') and line.endswith('-lane-' + lane) for line in started[started.index(runs[0]):]), started
 lanes, lane_commands, _ = run_case(extra=network)
 assert lanes.returncode == 0 and '[product-integration] green' in lanes.stdout, lanes.stdout + lanes.stderr
-assert 'database lanes run side by side: core credential-service credential-broker orchestration' in lanes.stdout
+# Without a CPU share (a cloud runner, a workstation) all four lanes run at
+# once, longest first, with the test threads their commands name.
+assert 'database lanes: 4 at a time: orchestration credential-broker credential-service core' in lanes.stdout, lanes.stdout
+assert all(command['threads'] is None for command in lane_commands), 'a lane set test threads without a CPU share'
 for lane in lane_order:
     assert f'=== database lane {lane} ===' in lanes.stdout, lane
     assert f'CODEWIRE_CI_PHASE name=database-lane-{lane} seconds=' in lanes.stdout, lane
 check_lanes(lane_commands)
+# On a metal guest with a CPU share of 12, at most two lanes run at once and
+# each lane's tests get half the share; every lane still runs every suite.
+shared, shared_commands, _ = run_case(extra=network | {'CODEWIRE_CI_CPU_SHARE': '12'})
+assert shared.returncode == 0 and '[product-integration] green' in shared.stdout, shared.stdout + shared.stderr
+assert 'database lanes: 2 at a time, 6 test threads each: orchestration credential-broker credential-service core' in shared.stdout, shared.stdout
+check_lanes(shared_commands)
+assert json.loads((trace_root / 'running.json').read_text())[1] <= 2, 'more than two lanes ran at once'
+lane_executions = [command for command in shared_commands
+                   if command['args'][0] == 'test' and '--no-run' not in command['args']]
+assert lane_executions and all(command['threads'] == '6' for command in lane_executions), lane_executions[:2]
+for lane in lane_order:
+    assert f'CODEWIRE_CI_PHASE name=database-lane-{lane} seconds=' in shared.stdout, lane
+# One at a time on request; an invalid count fails before any lane runs.
+serial, serial_commands, _ = run_case(extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': '1'})
+assert serial.returncode == 0 and 'database lanes: 1 at a time, 12 test threads each' in serial.stdout, serial.stdout
+assert json.loads((trace_root / 'running.json').read_text())[1] == 1, 'lanes overlapped at one at a time'
+check_lanes(serial_commands)
+invalid, invalid_commands, _ = run_case(extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': 'two'})
+assert invalid.returncode != 0 and 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to 9' in invalid.stdout + invalid.stderr
+assert not [command for command in invalid_commands if command['args'][0] == 'test' and '--no-run' not in command['args']]
+# A malformed share is ignored with a warning, never read as a smaller one.
+malformed, _, _ = run_case(extra=network | {'CODEWIRE_CI_CPU_SHARE': '12cores'})
+assert malformed.returncode == 0 and 'database lanes: 4 at a time:' in malformed.stdout, malformed.stdout
+assert 'ignoring CODEWIRE_CI_CPU_SHARE' in malformed.stdout + malformed.stderr
 broker_index = next(i for i, suite in enumerate(suites) if suite['label'] == 'platform broker admission matrix')
 failed_lane, failed_commands, _ = run_case('test:' + str(broker_index), extra=network)
 assert failed_lane.returncode != 0 and '[product-integration] green' not in failed_lane.stdout

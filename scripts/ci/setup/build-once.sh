@@ -69,7 +69,7 @@ tool() {
 }
 
 prepare() {
-  local checkout commit entry stamp bin nextest_version nextest_url nextest_sha
+  local checkout commit entry stamp bin nextest_version nextest_url nextest_sha share
   checkout="$(cd "$1" && pwd)"
   [ "$(git -C "$checkout" rev-parse --show-toplevel 2>/dev/null)" = "$checkout" ] ||
     die "$checkout is not a git checkout"
@@ -78,6 +78,10 @@ prepare() {
       die "$cache_root is not the build runner's build disk"
   fi
   : "${GITHUB_ENV:?a Forgejo job environment file is required}"
+  # The build runner's share of the host (cpu-share.sh) sets the Cargo jobs.
+  # shellcheck source=scripts/ci/setup/cpu-share.sh
+  source "$ROOT/scripts/ci/setup/cpu-share.sh"
+  share="$(ci_cpu_share)"
   : "${GITHUB_PATH:?a Forgejo job path file is required}"
 
   mkdir -p "$work"
@@ -137,7 +141,7 @@ prepare() {
     echo "BUILD_ONCE_SRC=$src"
     echo "CARGO_HOME=$work/cargo-home"
     echo 'CARGO_PROFILE_DEV_DEBUG=line-tables-only'
-    echo "CARGO_BUILD_JOBS=${BUILD_ONCE_JOBS:-16}"
+    echo "CARGO_BUILD_JOBS=${BUILD_ONCE_JOBS:-${share:-16}}"
     echo 'CODEWIRE_LOCAL_RUST_CACHE=off'
     echo 'CARGO_TERM_COLOR=never'
     echo "BUILD_ONCE_COLD=$cold"

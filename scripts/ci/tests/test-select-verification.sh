@@ -778,6 +778,15 @@ run_paths_case bound_cargo_jobs pull_request refs/pull/3101/head false \
 run_paths_case bound_cargo_jobs_fixture pull_request refs/pull/3102/head false \
   'policy security security_js' \
   scripts/ci/tests/test-bound-cargo-jobs.sh
+# Compile once's build half selects the Rust families it builds for, and the
+# guest CPU share also the database and service families whose lanes and
+# test threads it sizes (infra#1632).
+run_paths_case build_once_builder pull_request refs/pull/3356/head false \
+  'policy rust rust_workspace security security_js' \
+  scripts/ci/setup/build-once.sh
+run_paths_case guest_cpu_share pull_request refs/pull/3413/head false \
+  'database policy rust rust_workspace security security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  scripts/ci/setup/cpu-share.sh
 run_paths_case workspace_cache_consumers pull_request refs/pull/2047/head false \
   'policy security security_js' \
   scripts/ci/setup/select-untrusted-workspace-cache.sh \

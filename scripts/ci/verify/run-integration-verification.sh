@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+# shellcheck source=scripts/ci/setup/cpu-share.sh
+source "$ROOT/scripts/ci/setup/cpu-share.sh"
 MODE="${1:-}"
 SELECTION="${VERIFICATION_SELECTION:-|valid:v3|complete|}"
 CARGO_TARGET_DIR="$(
@@ -212,6 +214,8 @@ reset_schema() {
 # schema, rows or roles. Against one explicit database they run one after
 # another. Every harness compiles first, so a running lane only starts tests.
 readonly DATABASE_LANES=(core credential-service credential-broker orchestration)
+# The order lanes start in when not all run at once: the longest first.
+readonly DATABASE_LANE_ORDER=(orchestration credential-broker credential-service core)
 
 # Each batch uses one package and feature set, as its lane runs it.
 build_database_suites() {
@@ -609,19 +613,57 @@ run_database() {
       reset_schema
     )
   done
-  log "database lanes run side by side: ${DATABASE_LANES[*]}"
-  for lane in "${DATABASE_LANES[@]}"; do
-    lane_started[$lane]="$SECONDS"
-    (
-      DATABASE_URL="${lane_url[$lane]}"
-      DATABASE_URL_RUST="${lane_rust_url[$lane]}"
-      run_database_lane "$lane"
-    ) >"$RUN_DIR/database-lane-$lane.log" 2>&1 &
-    lane_pid[$lane]=$!
-  done
-  for lane in "${DATABASE_LANES[@]}"; do
+  # On a metal guest, the lanes share the job's part of the host
+  # (CODEWIRE_CI_CPU_SHARE, cpu-share.sh): each lane is a test process and
+  # its own PostgreSQL, so four at once oversubscribed the guest and the same
+  # lane took twice as long from one run to the next. There, at most
+  # CODEWIRE_CI_DATABASE_LANES_AT_ONCE (default 2) run at once, longest first,
+  # each with its part of the share as its test threads. Elsewhere all four
+  # run at once, as before.
+  local share at_once="${#DATABASE_LANES[@]}" lane_threads="" next=0 running=0 done_pid
+  local -A pid_lane=()
+  share="$(ci_cpu_share)"
+  if [ -n "$share" ]; then
+    at_once="${CODEWIRE_CI_DATABASE_LANES_AT_ONCE:-2}"
+    [[ "$at_once" =~ ^[1-9]$ ]] || {
+      echo "::error::CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to 9, not $at_once" >&2
+      return 2
+    }
+    lane_threads=$((share / at_once))
+    ((lane_threads >= 2)) || lane_threads=2
+  fi
+  # wait -n -p, which names the lane that ended, needs bash 5.1.
+  ((BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1))) || {
+    echo "::error::the database lane scheduler needs bash 5.1 or later, not $BASH_VERSION" >&2
+    return 2
+  }
+  [ "$(printf '%s\n' "${DATABASE_LANE_ORDER[@]}" | sort)" = "$(printf '%s\n' "${DATABASE_LANES[@]}" | sort)" ] || {
+    echo '::error::DATABASE_LANE_ORDER must name every database lane once' >&2
+    return 2
+  }
+  log "database lanes: ${at_once} at a time${lane_threads:+, ${lane_threads} test threads each}: ${DATABASE_LANE_ORDER[*]}"
+  while ((next < ${#DATABASE_LANE_ORDER[@]} || running > 0)); do
+    while ((running < at_once && next < ${#DATABASE_LANE_ORDER[@]})); do
+      lane="${DATABASE_LANE_ORDER[$next]}"
+      next=$((next + 1))
+      lane_started[$lane]="$SECONDS"
+      (
+        DATABASE_URL="${lane_url[$lane]}"
+        DATABASE_URL_RUST="${lane_rust_url[$lane]}"
+        if [ -n "$lane_threads" ]; then
+          export RUST_TEST_THREADS="$lane_threads" NEXTEST_TEST_THREADS="$lane_threads"
+        fi
+        run_database_lane "$lane"
+      ) >"$RUN_DIR/database-lane-$lane.log" 2>&1 &
+      lane_pid[$lane]=$!
+      pid_lane[$!]="$lane"
+      running=$((running + 1))
+    done
     status=0
-    wait "${lane_pid[$lane]}" || status=$?
+    wait -n -p done_pid "${lane_pid[@]}" || status=$?
+    lane="${pid_lane[$done_pid]:?a database lane ended that this run did not start}"
+    unset 'lane_pid[$lane]'
+    running=$((running - 1))
     started="${lane_started[$lane]}"
     echo "=== database lane $lane ==="
     cat "$RUN_DIR/database-lane-$lane.log"

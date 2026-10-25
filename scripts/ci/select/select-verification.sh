@@ -1934,10 +1934,21 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/finish-untrusted-rust-cache.sh|\
       scripts/ci/setup/select-warm-rust-cache.sh|\
       scripts/ci/setup/finish-warm-rust-cache.sh|\
-      scripts/ci/setup/bound-cargo-jobs.sh)
+      scripts/ci/setup/bound-cargo-jobs.sh|scripts/ci/setup/build-once.sh)
         select_token policy
         select_token rust
         select_token rust_workspace
+        select_token security
+        recognized=true
+        ;;
+      scripts/ci/setup/cpu-share.sh)
+        # A metal guest's share of the host sizes the Rust builds, the test
+        # threads and the database lanes, so its change qualifies all three.
+        select_token policy
+        select_token rust
+        select_token rust_workspace
+        select_token database
+        select_services
         select_token security
         recognized=true
         ;;

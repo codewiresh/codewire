@@ -26,7 +26,7 @@ bound() {
   fi
   env -i PATH="$PATH" GITHUB_ENV="$work/env" CODEWIRE_BOUND_NPROC="$cpus" \
     CODEWIRE_BOUND_MEMINFO="$work/meminfo" CODEWIRE_BOUND_CGROUP="$work/cgroup" \
-    "$SCRIPT" >/dev/null
+    ${SHARE+CODEWIRE_CI_CPU_SHARE="$SHARE"} "$SCRIPT" >/dev/null 2>"$work/stderr"
   sed -n 's/^CARGO_BUILD_JOBS=//p' "$work/env"
 }
 
@@ -41,6 +41,22 @@ bound() {
 [[ "$(bound 61 16896 max 123)" == 11 ]] || fail 'an unlimited cgroup changed the bound'
 # Never below one.
 [[ "$(bound 4 512)" == 1 ]] || fail 'the bound fell below one'
+# A metal guest's CPU share (CODEWIRE_CI_CPU_SHARE) caps the CPUs and sizes
+# every later step's test threads; without it nothing sets test threads.
+[[ "$(SHARE=12 bound 61 65536)" == 12 ]] || fail 'the CPU share did not cap the CPUs'
+grep -qx 'RUST_TEST_THREADS=12' "$work/env" || fail 'the CPU share did not set RUST_TEST_THREADS'
+grep -qx 'NEXTEST_TEST_THREADS=12' "$work/env" || fail 'the CPU share did not set NEXTEST_TEST_THREADS'
+# Memory still wins when it is the tighter bound.
+[[ "$(SHARE=12 bound 61 6144)" == 4 ]] || fail 'the CPU share overrode the memory bound'
+# A share above the visible CPUs changes nothing.
+[[ "$(SHARE=64 bound 8 13312)" == 8 ]] || fail 'a share above the CPUs raised the bound'
+[[ "$(bound 61 16896)" == 11 ]] || fail 'the bound without a CPU share changed'
+if grep -q 'TEST_THREADS' "$work/env"; then fail 'test threads were set without a CPU share'; fi
+# A malformed share is ignored with a warning, never read as a smaller bound.
+[[ "$(SHARE=12cores bound 61 16896)" == 11 ]] || fail 'a malformed CPU share changed the bound'
+if grep -q 'TEST_THREADS' "$work/env"; then fail 'a malformed CPU share set test threads'; fi
+grep -q 'ignoring CODEWIRE_CI_CPU_SHARE' "$work/stderr" || fail 'a malformed CPU share gave no warning'
+[[ "$(SHARE=0 bound 61 16896)" == 11 ]] || fail 'a zero CPU share changed the bound'
 # A broken input fails the step rather than guessing.
 printf 'MemTotal: 1 kB\n' >"$work/meminfo"
 if env -i PATH="$PATH" GITHUB_ENV="$work/env" CODEWIRE_BOUND_MEMINFO="$work/meminfo" \
