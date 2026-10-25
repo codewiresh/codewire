@@ -2016,21 +2016,97 @@ jobs:
   # job has ended in failure: Forgejo's run cancel stops only unfinished jobs,
   # so the failed one keeps its result and log (#3126, #3119 A17), and
   # Required verification ends cancelled, which still blocks the merge.
+  # Any failed check stops the run (owner, 2026-10-25: "Again, if any of these
+  # things fail, then we just stop everything"). On a pull request the first
+  # failure cancels the run; on a push to main a test job that failed on its
+  # first attempt is rerun once at once, and any other failure cancels it
+  # (scripts/ci/select/fail-fast-watch.py). A light runner stops a task after
+  # 25 minutes, so the watch is a chain of links of 22 minutes each, every
+  # link starting when the one before reaches its deadline: 88 minutes in all.
   fail-fast:
-    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token only reads this run's jobs and cancels this run.
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token only reads this run's jobs, reruns a failed test job on main and cancels this run.
     name: Stop at the first failed job
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     # Below the light runner's 25-minute task limit; the watcher itself ends
     # quietly at 22 minutes (fail-fast-watch.py DEADLINE_SECONDS).
     timeout-minutes: 24
     needs: [verification-selection]
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.verification-selection.result == 'success' }}
+    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed' || github.event_name == 'push' && github.ref == 'refs/heads/main') && needs.verification-selection.result == 'success' }}
+    outputs:
+      continue: ${{ steps.watch.outputs.continue }}
     steps:
       - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
 
-      - name: Cancel this run once a check has failed
+      - name: Stop this run once a check has failed
+        id: watch
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py
+
+  fail-fast-2:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token only reads this run's jobs, reruns a failed test job on main and cancels this run.
+    name: Stop at the first failed job (2)
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    # Below the light runner's 25-minute task limit; the watcher itself ends
+    # quietly at 22 minutes (fail-fast-watch.py DEADLINE_SECONDS).
+    timeout-minutes: 24
+    needs: [verification-selection, fail-fast]
+    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed' || github.event_name == 'push' && github.ref == 'refs/heads/main') && needs.verification-selection.result == 'success' && needs.fail-fast.outputs.continue == 'true' }}
+    outputs:
+      continue: ${{ steps.watch.outputs.continue }}
+    steps:
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
+
+      - name: Stop this run once a check has failed
+        id: watch
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py
+
+  fail-fast-3:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token only reads this run's jobs, reruns a failed test job on main and cancels this run.
+    name: Stop at the first failed job (3)
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    # Below the light runner's 25-minute task limit; the watcher itself ends
+    # quietly at 22 minutes (fail-fast-watch.py DEADLINE_SECONDS).
+    timeout-minutes: 24
+    needs: [verification-selection, fail-fast-2]
+    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed' || github.event_name == 'push' && github.ref == 'refs/heads/main') && needs.verification-selection.result == 'success' && needs.fail-fast-2.outputs.continue == 'true' }}
+    outputs:
+      continue: ${{ steps.watch.outputs.continue }}
+    steps:
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
+
+      - name: Stop this run once a check has failed
+        id: watch
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py
+
+  fail-fast-4:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token only reads this run's jobs, reruns a failed test job on main and cancels this run.
+    name: Stop at the first failed job (4)
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    # Below the light runner's 25-minute task limit; the watcher itself ends
+    # quietly at 22 minutes (fail-fast-watch.py DEADLINE_SECONDS).
+    timeout-minutes: 24
+    needs: [verification-selection, fail-fast-3]
+    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed' || github.event_name == 'push' && github.ref == 'refs/heads/main') && needs.verification-selection.result == 'success' && needs.fail-fast-3.outputs.continue == 'true' }}
+    outputs:
+      continue: ${{ steps.watch.outputs.continue }}
+    steps:
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
+
+      - name: Stop this run once a check has failed
+        id: watch
         env:
           GITEA_TOKEN: ${{ github.token }}
         run: python3 -I -B scripts/ci/select/fail-fast-watch.py
@@ -2056,27 +2132,3 @@ jobs:
         env:
           GITEA_TOKEN: ${{ github.token }}
         run: python3 -I -B scripts/ci/deploy/rerun-dev-publish.py
-
-  # A main push run retries its failed test jobs once (infra#1534). The tip
-  # run alone decides whether Dev moves, and one flaky test used to cost a whole
-  # main cycle (runs 21922 and 22110). After Required verification fails, this
-  # reruns exactly the test jobs that failed on their first attempt; Forgejo then
-  # runs Required verification and Dev delivery again after them. Policy, a job
-  # already retried, a superseded run and a commit that is no longer main's tip
-  # are never retried, so nothing retries twice.
-  retry-failed-once:
-    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token reads this run's jobs and reruns its failed test jobs.
-    name: Retry failed test jobs once
-    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
-    timeout-minutes: 10
-    needs: [verification-selection, required-verification]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.verification-selection.result == 'success' && needs.verification-selection.outputs.superseded == 'false' && needs.required-verification.result == 'failure' }}
-    steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: ${{ needs.verification-selection.outputs.source_sha }}
-
-      - name: Rerun this run's failed test jobs
-        env:
-          GITEA_TOKEN: ${{ github.token }}
-        run: python3 -I -B scripts/ci/select/retry-failed-once.py

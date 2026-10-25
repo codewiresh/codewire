@@ -639,12 +639,8 @@ run_paths_case dev_delivery_trigger push refs/heads/main false \
   'deploy policy security security_js' \
   scripts/ci/deploy/rerun-dev-publish.py \
   scripts/ci/tests/test-rerun-dev-publish.py
-run_paths_case main_retry_failed_once push refs/heads/main false \
-  'deploy policy security security_js' \
-  scripts/ci/select/retry-failed-once.py \
-  scripts/ci/tests/test-retry-failed-once.py
 run_paths_case pull_request_fail_fast pull_request refs/pull/3400/head false \
-  'policy security security_js' \
+  'deploy policy security security_js' \
   scripts/ci/select/fail-fast-watch.py \
   scripts/ci/tests/test-fail-fast-watch.py
 run_paths_case production_signature_reuse pull_request refs/pull/2007/head false \
@@ -3223,11 +3219,10 @@ if grep -Eq '^ *runs-on: [^$]' "$WORKFLOW"; then
   echo 'a Codewire CI job names a literal runner label instead of its repository Actions variable (docs/dev/CI-CONFIGURATION.md)' >&2
   exit 1
 fi
-# Selection, aggregation, the final Dev delivery trigger (#2892), a main push
-# run's single retry of its failed test jobs (infra#1534) and the pull request
-# fail-fast watcher (infra#1632).
-[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$WORKFLOW")" -eq 5 ]] || {
-  echo 'Codewire CI has not assigned selection, aggregation, the Dev delivery trigger, the main retry and the fail-fast watcher to the untrusted light runner' >&2
+# Selection, aggregation, the final Dev delivery trigger (#2892) and the four
+# links of the fail-fast watcher chain (infra#1632; owner, 2026-10-25).
+[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$WORKFLOW")" -eq 7 ]] || {
+  echo 'Codewire CI has not assigned selection, aggregation, the Dev delivery trigger and the four fail-fast watcher links to the untrusted light runner' >&2
   exit 1
 }
 for output in selector_version classification selection required_local_mode \
@@ -3291,8 +3286,6 @@ python3 "$ROOT/scripts/ci/plan/tests/test_plan_main_push.py"
 # Main CI's verdict, and the final job that starts Dev delivery from it (#2892).
 python3 -B "$ROOT/scripts/ci/plan/tests/test_main_ci_verdict.py"
 python3 -B "$ROOT/scripts/ci/tests/test-rerun-dev-publish.py"
-# A main push run retries its failed test jobs once (infra#1534).
-python3 -B "$ROOT/scripts/ci/tests/test-retry-failed-once.py"
 python3 -B "$ROOT/scripts/ci/tests/test-cancel-superseded-deliveries.py"
 # A pull request's run stops at its first failed job (infra#1632).
 python3 -B "$ROOT/scripts/ci/tests/test-fail-fast-watch.py"
@@ -3330,8 +3323,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 20 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, eleven groups, four Kind producers, aggregate, the Dev delivery trigger, the main retry and the fail-fast watcher" >&2
+if [ "$top_level_jobs" != 22 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, eleven groups, four Kind producers, aggregate, the Dev delivery trigger and four fail-fast watcher links" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \

@@ -358,11 +358,12 @@ while IFS= read -r -d '' other_workflow; do
   fi
 done < <(find "$ROOT/.gitea/workflows" -type f -name '*.yaml' -print0)
 # Main-CI rerun calls: this job, from CI's final push-on-main job, and a main
-# push run's single retry of its own failed test jobs (retry-failed-once.py).
+# push run's fail-fast watcher, which reruns a test job's first failure once
+# (fail-fast-watch.py; owner, 2026-10-25).
 rerun_users="$(grep -rlE '/actions/jobs/[^ ]*/rerun|actions/jobs/\{job_id\}/rerun' \
   "$ROOT/.gitea/workflows" "$ROOT/scripts" | grep -v '/tests/' | sed "s|^$ROOT/||" | sort)"
-[[ "$rerun_users" == $'scripts/ci/deploy/rerun-dev-publish.py\nscripts/ci/select/retry-failed-once.py' ]] ||
-  fail "a job rerun is requested outside rerun-dev-publish.py and retry-failed-once.py: $rerun_users"
+[[ "$rerun_users" == $'scripts/ci/deploy/rerun-dev-publish.py\nscripts/ci/select/fail-fast-watch.py' ]] ||
+  fail "a job rerun is requested outside rerun-dev-publish.py and fail-fast-watch.py: $rerun_users"
 
 # Execute the shared descent check in a scratch copy beside a stub resolver,
 # on a real history A-B-C (#2892). Old rule: only main's head delivered, so

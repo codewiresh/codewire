@@ -2033,10 +2033,13 @@ if [ "$event_selected" = false ]; then
         select_token release
         recognized=true
         ;;
-      # A pull request's run stops at its first failed job (infra#1632); its
-      # contract, with the ci.yaml job that runs it, runs in Policy.
+      # A run stops at its first failed job, and main reruns a test job's first
+      # failure once (infra#1632; owner, 2026-10-25). Its contract, with the
+      # ci.yaml jobs that run it, runs in Policy; Deploy's contract admits its
+      # rerun beside Dev delivery's.
       scripts/ci/select/fail-fast-watch.py|\
       scripts/ci/tests/test-fail-fast-watch.py)
+        select_token deploy
         select_token policy
         recognized=true
         ;;
@@ -2046,15 +2049,6 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-rerun-dev-publish.py|\
       scripts/ci/deploy/cancel-superseded-deliveries.py|\
       scripts/ci/tests/test-cancel-superseded-deliveries.py)
-        select_token deploy
-        select_token policy
-        recognized=true
-        ;;
-      # A main push run retries its failed test jobs once (infra#1534); its
-      # contract, with the ci.yaml job that runs it, runs in Policy and Deploy,
-      # beside the Dev delivery it restarts.
-      scripts/ci/select/retry-failed-once.py|\
-      scripts/ci/tests/test-retry-failed-once.py)
         select_token deploy
         select_token policy
         recognized=true
