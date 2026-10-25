@@ -1298,11 +1298,15 @@ run_kind_tools() {
 }
 
 run_release() {
-  # Every step is independent; run_side_by_side runs them side by side.
+  # Every step is independent; run_side_by_side runs them side by side. The
+  # image builder's test runs as its four parts, longest first.
   run_side_by_side <<'STEPS'
+  scripts/ci/tests/test-build-push-image.sh kind
+  scripts/ci/tests/test-build-push-image.sh support
+  scripts/ci/tests/test-build-push-image.sh publish
+  scripts/ci/tests/test-build-push-image.sh builds
   scripts/ci/tests/test-base-image-source.sh
   scripts/ci/tests/test-apt-get-with-retry.sh
-  scripts/ci/tests/test-build-push-image.sh
   scripts/ci/tests/test-build-cw-linux.sh
   scripts/ci/tests/test-run-rust-build.sh
   scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh

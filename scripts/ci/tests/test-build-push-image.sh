@@ -79,6 +79,31 @@ assert len(value['payload_sha256']) == len(value['producer_receipt_sha256']) == 
 PY
 }
 
+# assert_cw_contexts TOTAL CURRENT HISTORICAL: every original-producer context
+# so far has the runtime profile and its own receipt, and TOTAL of them bind
+# CURRENT source_sha and HISTORICAL historical_sha.
+assert_cw_contexts() {
+  python3 -B - "$FAKE_CW_CONTEXTS" "$source_sha" "${historical_sha:-}" "$@" <<'PY'
+from collections import Counter
+import json
+from pathlib import Path
+import sys
+records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
+total, current, historical = map(int, sys.argv[4:7])
+expected = {name: count for name, count in ((sys.argv[2], current), (sys.argv[3], historical)) if count}
+assert len(records) == total and Counter(record['profile'] for record in records) == {'runtime': total}
+assert Counter(record['source_revision'] for record in records) == expected
+assert len({record['producer_receipt_sha256'] for record in records}) == total
+print(f'protected/runtime/Kind CW original-producer contexts: {total} verified')
+PY
+}
+
+# A part run alone checks the contexts its own cases produced; the full run
+# checks all of them together above.
+assert_cw_contexts_for_part() {
+  [[ "$test_part" != "$1" ]] || assert_cw_contexts "${@:2}"
+}
+
 mkdir -p "$ROOT/.tmp"
 
 verify_services_dockerfile_contract() {
@@ -349,7 +374,22 @@ verify_kind_build_cache_contract() {
 
 verify_services_dockerfile_contract
 verify_kind_build_cache_contract
-[[ "$#" -eq 0 ]] || fail "unknown test mode: $1"
+# The cases fall into four parts that share only the fixture built below, so
+# the release family runs them side by side. With no argument every part runs,
+# in order.
+readonly TEST_PARTS=(publish kind builds support)
+[[ "$#" -le 1 ]] || fail "unknown test mode: $*"
+test_part="${1:-all}"
+[[ " all ${TEST_PARTS[*]} " == *" $test_part "* ]] || fail "unknown test part: $test_part"
+runs_part() {
+  [[ "$test_part" == all || "$test_part" == "$1" ]]
+}
+# The release family runs every part; a part it omits would never run in CI.
+for listed_part in "${TEST_PARTS[@]}"; do
+  grep -qxF "  scripts/ci/tests/test-build-push-image.sh $listed_part" \
+    "$ROOT/scripts/ci/verify/run-product-verification.sh" ||
+    fail "the release family does not run the $listed_part part"
+done
 
 work="$(mktemp -d "$ROOT/.tmp/build-push-image.XXXXXX")"
 mkdir -p "$work/bin"
@@ -941,6 +981,7 @@ export GITHUB_OUTPUT="$work/output"
 cd "$source_fixture"
 : >"$FAKE_MANIFESTS"
 
+if runs_part publish; then
 CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_RUST_PROFILE=ci \
   SCCACHE_BUCKET=example-ci-cache-protected \
   SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
@@ -1497,6 +1538,10 @@ if grep -qF 'CODEWIRE_KIND_CW_' "$work/kind-build.out"; then
   fail 'default Kind cleanup emitted an opt-in asset locator'
 fi
 
+assert_cw_contexts_for_part publish 4 4 0
+fi
+
+if runs_part kind; then
 # Every case invokes the unchanged consumer/producer with its real admission
 # leaves. Only existing synthetic Docker effects vary. A locator cannot turn
 # failed produce/solve/image checks or EXIT cleanup into qualification.
@@ -1679,6 +1724,9 @@ grep -Fq 'CODEWIRE_KIND_IMAGE_BUILDER must be transient or persistent' "$work/ki
   fail 'an unknown Kind builder selection has no attributable refusal'
 [[ ! -s "$work/kind-persistent-invalid/docker-calls" ]] || fail 'an unknown Kind builder selection reached Docker'
 
+fi
+
+if runs_part builds; then
 base_source_tag="registry.example.invalid/codewire/base:$source_sha"
 awk -F '\t' -v reference="$base_source_tag" \
   '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
@@ -1927,6 +1975,10 @@ if CODEWIRE_TRUSTED_BUILDKIT=yes "$BUILDER" confidential-probe images/confidenti
   fail 'an ambiguous trusted builder switch was accepted'
 fi
 
+assert_cw_contexts_for_part builds 3 3 0
+fi
+
+if runs_part support; then
 # The support pair publishes one index for amd64 and arm64. Every platform in
 # that index, and no other, must carry its own valid provenance and SBOM.
 remove_source_manifest() {
@@ -2049,21 +2101,11 @@ grep -qF 'Protected image build requires no untracked source files' \
 [[ "$(wc -l <"$FAKE_FETCH_CALLS")" -eq "$fetch_calls_before" ]] ||
   fail 'dirty source rejection reached credential retrieval'
 
-python3 -B - "$FAKE_CW_CONTEXTS" "$source_sha" "$historical_sha" <<'PY'
-from collections import Counter
-import json
-from pathlib import Path
-import sys
-records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
 # The service runtime set binds no CW: the daemon builds alone on its own
 # protected worker, with the runtime profile; the workspace and both Kind
 # daemon builds bind cw with the same runtime profile. The apt snapshot cache
 # case adds one workspace build.
-assert len(records) == 10 and Counter(record['profile'] for record in records) == {'runtime': 10}
-assert Counter(record['source_revision'] for record in records) == {sys.argv[2]: 9, sys.argv[3]: 1}
-assert len({record['producer_receipt_sha256'] for record in records}) == 10
-print('protected/runtime/Kind CW original-producer contexts: 10 verified')
-PY
+[[ "$test_part" != all ]] || assert_cw_contexts 10 9 1
 
 # support-images.yaml builds each platform of the pair in its own job and
 # joins them. A per-platform build pushes one platform by digest, untagged,
@@ -2186,5 +2228,8 @@ refuse 'two distinct exact platform digests' "CODEWIRE_IMAGE_JOIN=$amd64_base $a
   base images/base/Dockerfile images/base
 refuse 'either built for one platform or joined' CODEWIRE_IMAGE_PLATFORM=linux/amd64 \
   "CODEWIRE_IMAGE_JOIN=$amd64_base $join_digest" -- base images/base/Dockerfile images/base
+
+assert_cw_contexts_for_part support 4 3 1
+fi
 
 echo 'build-push immutable source image tests passed'
