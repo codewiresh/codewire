@@ -40,7 +40,7 @@
     "@connectrpc/connect-web": "2.1.2"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "devDependencies": {
     "tsx": "4.21.0",

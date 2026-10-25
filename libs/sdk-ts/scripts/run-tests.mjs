@@ -353,7 +353,7 @@ export async function runTests({ sdkDir = SDK_DIR,
 
 async function main() {
   requireCondition(process.argv.length === 2, "SDK test runner takes no arguments");
-  requireCondition(Number(process.versions.node.split(".")[0]) >= 20, "SDK tests require Node >=20");
+  requireCondition(Number(process.versions.node.split(".")[0]) >= 22, "SDK tests require Node >=22");
   const controller = new AbortController();
   let exitCode;
   const handlers = new Map();
