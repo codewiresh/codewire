@@ -126,6 +126,8 @@ def failure_diagnostic(error):
     """
     exception = "unknown"
     for category, label in ((OSError, "os"), (release.ReleaseError, "release"),
+                            (subprocess.TimeoutExpired, "subprocess-timeout"),
+                            (subprocess.CalledProcessError, "subprocess-exit"),
                             (subprocess.SubprocessError, "subprocess"), (ValueError, "value"),
                             (KeyError, "key"), (TypeError, "type")):
         if isinstance(error, category):
@@ -146,6 +148,9 @@ def failure_diagnostic(error):
     value = {"schema": "codewire.cw.runtime-source-refusal/v1",
              "phase": _DIAGNOSTIC["phase"] if _DIAGNOSTIC["phase"] in DIAGNOSTIC_PHASES else "unknown",
              "exception": exception, "errno": errno_class, "nofile": limits,
+             # A failed command's exit status; its stderr is already in the build log.
+             "returncode": diagnostic_number(error.returncode)
+             if isinstance(error, subprocess.CalledProcessError) else None,
              "source_held_files_at_admit": diagnostic_number(_DIAGNOSTIC["source_held_files_at_admit"]),
              "source_held_fds_at_admit": diagnostic_number(_DIAGNOSTIC["source_held_fds_at_admit"])}
     return DIAGNOSTIC_PREFIX + json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)

@@ -52,6 +52,20 @@ def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+class ProducerToolchain(unittest.TestCase):
+    def test_the_toolchain_stage_holds_every_component_the_toolchain_file_names(self):
+        # Otherwise the rustup proxy downloads them at the producer's first
+        # rustc call, inside its 15 s budget (deploy-dev run 22477).
+        import tomllib
+        toolchain = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]
+        dockerfile = (ROOT / "images/cw-runtime/Dockerfile").read_text()
+        stage = dockerfile.split(" AS cw-toolchain\n", 1)[1].split("\nFROM ", 1)[0]
+        line = next(line for line in stage.splitlines() if "rustup component add" in line)
+        self.assertIn(f"--toolchain {toolchain['channel']} ", line)
+        for component in toolchain.get("components", []):
+            self.assertIn(f" {component}", line, component)
+
+
 class CachedTarget(unittest.TestCase):
     """The producer's cached target folder keeps third-party units only."""
 
@@ -1065,8 +1079,9 @@ class FinalizerDiagnostic(unittest.TestCase):
             (ValueError(canary), "value", "none"),
             (KeyError(canary), "key", "none"),
             (TypeError(canary), "type", "none"),
-            (subprocess.CalledProcessError(53, [canary], output=canary, stderr=canary), "subprocess", "none"),
-            (subprocess.TimeoutExpired([canary], 1, output=canary, stderr=canary), "subprocess", "none"),
+            (subprocess.CalledProcessError(53, [canary], output=canary, stderr=canary), "subprocess-exit", "none"),
+            (subprocess.TimeoutExpired([canary], 1, output=canary, stderr=canary), "subprocess-timeout", "none"),
+            (subprocess.SubprocessError(canary), "subprocess", "none"),
         )
         for error, category, code in cases:
             error.__cause__ = RuntimeError(canary)
@@ -1082,6 +1097,7 @@ class FinalizerDiagnostic(unittest.TestCase):
             value = json.loads(text[len(finalizer.DIAGNOSTIC_PREFIX):])
             self.assertEqual(value, {"schema": "codewire.cw.runtime-source-refusal/v1", "phase": "unknown",
                                     "exception": category, "errno": code,
+                                    "returncode": 53 if category == "subprocess-exit" else None,
                                     "nofile": {"soft": 2048, "hard": "unlimited"},
                                     "source_held_files_at_admit": None, "source_held_fds_at_admit": None})
         with mock.patch.dict(finalizer._DIAGNOSTIC, {"phase": "readonly", "source_held_files_at_admit": 12,

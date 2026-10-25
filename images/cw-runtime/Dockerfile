@@ -14,6 +14,10 @@ ADD --checksum=sha256:67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782
     https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz /tmp/sccache.tar.gz
 ADD --checksum=sha256:02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239 \
     https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz /tmp/zig.tar.xz
+# The toolchain is complete here: rust-toolchain.toml names clippy and
+# rustfmt, and without them the rustup proxy downloads them from the network
+# at the producer's first rustc call, inside its 15 s budget (deploy-dev run
+# 22477 stalled there and was refused).
 # Like every apt-get-with-retry RUN, this mounts the optional CI snapshot-cache
 # secret; this image's builders do not pass it, so it installs canonically.
 RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
@@ -33,6 +37,7 @@ RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     test "$(sccache --version)" = 'sccache 0.17.0' && \
     test "$(/opt/zig/zig version)" = '0.15.2' && \
     rustup target add --toolchain 1.99.0 x86_64-unknown-linux-musl && \
+    rustup component add --toolchain 1.99.0 clippy rustfmt && \
     cargo install --locked cargo-zigbuild --version 0.23.0 && \
     test "$(cargo-zigbuild --version)" = 'cargo-zigbuild 0.23.0'
 COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build
