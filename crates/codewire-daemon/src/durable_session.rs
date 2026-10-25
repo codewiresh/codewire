@@ -85,20 +85,26 @@ pub(crate) struct HostBounds {
     /// after KILL, the leader's reap and the output drain.
     pub(crate) cleanup_step: Duration,
     /// A host-control input's or stop's dispatch: queueing and the
-    /// monitor's write and flush, or its whole cleanup.
+    /// monitor's write and flush, or its whole cleanup. Host control is
+    /// Linux only.
+    #[cfg(target_os = "linux")]
     pub(crate) control_dispatch: Duration,
 }
 
 impl HostBounds {
     pub(crate) const PRODUCT: Self = Self {
         cleanup_step: crate::host_process::JOIN_TIMEOUT,
+        #[cfg(target_os = "linux")]
         control_dispatch: SESSION_INPUT_TIMEOUT,
     };
 
-    /// Every host bound replaced by `bound`.
+    /// Every host bound replaced by `bound`: the Linux host-control
+    /// entrypoint's test seam and the tests' hang guard.
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) const fn all(bound: Duration) -> Self {
         Self {
             cleanup_step: bound,
+            #[cfg(target_os = "linux")]
             control_dispatch: bound,
         }
     }
