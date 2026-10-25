@@ -108,7 +108,7 @@ declare -F kind_tool_test_input >/dev/null || {
 # The same for the artifact planner's suite (#3119 L3) and the repository
 # checks' self-tests (#3119 L1); ci_plan_tests_cases and
 # repo_check_self_tests_cases pin their edges.
-for selector_rule in ci_plan_test_input repo_check_self_test_input; do
+for selector_rule in ci_plan_test_input repo_check_self_test_input static_guest_proof_input; do
   eval "$(awk -v rule="$selector_rule() {" '
     $0 == rule { capture = 1 }
     capture { print }
@@ -159,6 +159,15 @@ with_ci_script_tests() {
       fi
     done
   fi
+  if [[ " $expected " == *' transport_pkg_codewire_vmm_guest_probe '* \
+      && " $expected " != *' static_guest_proof '* ]]; then
+    for path in "$@"; do
+      if static_guest_proof_input "$path"; then
+        expected="$expected static_guest_proof"
+        break
+      fi
+    done
+  fi
   printf '%s\n' "$expected"
 }
 
@@ -183,6 +192,10 @@ assert_tokens() {
   if [[ " $expected " == *' edge_kind '* ]] \
       && [[ " $expected " != *' kind_tools_omittable '* ]]; then
     expected="$expected kind_tools_omittable"
+  fi
+  if [[ " $expected " == *' transport_pkg_codewire_vmm_guest_probe '* ]] \
+      && [[ " $expected " != *' static_guest_proof_omittable '* ]]; then
+    expected="$expected static_guest_proof_omittable"
   fi
   if [ "$(wc -l <<<"$output")" -ne 4 ] \
       || [ "$(sed -n '1p' <<<"$output")" != 'selector_version=v3' ] \
@@ -404,7 +417,8 @@ run_graph_case graph_union \
   "$graph_core rust_pkg_codewire_graph_downstream" '' \
   crates/codewire-graph-core/src/lib.rs crates/codewire-graph-tests/src/lib.rs
 # The workspace-hack keeps its whole-workspace mapping, although every member
-# dev-depends on it.
+# dev-depends on it. Being only a dev-dependency, it builds into no release
+# binary, so it runs no static guest reproducibility proof.
 run_graph_case graph_workspace_hack "policy $graph_workspace" '' \
   crates/codewire-workspace-hack/Cargo.toml
 # A crate the workspace does not list has no workspace dependents.
@@ -434,7 +448,8 @@ for name in graph_ignores_docs graph_ignores_root_manifest graph_ignores_proto; 
   fi
 done
 # Without a graph a crate change fails closed to the whole workspace, whether
-# Cargo fails or prints something that is not metadata, and says why.
+# Cargo fails or prints something that is not metadata, and says why. The
+# static guest's reproducibility proof comes too: nothing bounds it.
 assert_graph_warning() {
   local name="$1" expected
   for expected in "${@:2}" \
@@ -446,14 +461,14 @@ assert_graph_warning() {
     }
   done
 }
-run_graph_case graph_cargo_fails "policy $graph_workspace rust_pkg_codewire_graph_app" \
+run_graph_case graph_cargo_fails "policy $graph_workspace rust_pkg_codewire_graph_app static_guest_proof" \
   "$failing_cargo" crates/codewire-graph-app/src/lib.rs
 assert_graph_warning graph_cargo_fails 'synthetic cargo failure'
 garbled_cargo="$TMP/garbled-cargo"
 mkdir -p "$garbled_cargo"
 printf '#!/usr/bin/env bash\necho "not metadata"\n' > "$garbled_cargo/cargo"
 chmod +x "$garbled_cargo/cargo"
-run_graph_case graph_cargo_garbled "policy $graph_workspace rust_pkg_codewire_graph_app" \
+run_graph_case graph_cargo_garbled "policy $graph_workspace rust_pkg_codewire_graph_app static_guest_proof" \
   "$garbled_cargo" crates/codewire-graph-app/src/lib.rs
 assert_graph_warning graph_cargo_garbled
 
@@ -477,6 +492,102 @@ for token in rust_pkg_codewire_orchestration rust_pkg_codewire_credential_broker
     exit 1
   fi
 done
+# The static guest's reproducibility proof (infra#1534) follows the guest's
+# build inputs on this repository's own graph: a crate that builds into the
+# guest, the workspace manifest, lockfile and toolchain, the proof itself and
+# the protos the guest compiles. A change that selects only the guest's tests
+# (its dev-dependency, local VM fixtures, other protos, kernel and Darwin
+# scripts) runs its tests without the proof on a pull request. Every push to
+# main that selects the guest runs it.
+static_guest_case() {
+  # static_guest_case EVENT run|omit PATH... (EVENT pull_request, ci-full or push)
+  local event="$1" want="$2" ref=refs/pull/1/head output selection path
+  local paths="$TMP/static-guest.$BASHPID.paths" event_path="$TMP/static-guest.$BASHPID.event"
+  shift 2
+  path="$*"
+  [ "$event" != push ] || ref=refs/heads/main
+  printf '%s\n' "$@" > "$paths"
+  printf '{"pull_request":{"labels":[{"name":"%s"}]}}\n' "$event" > "$event_path"
+  output="$(cd "$ROOT" && env -u GITHUB_OUTPUT GITHUB_EVENT_PATH="$event_path" \
+    GITHUB_EVENT_NAME="${event/ci-full/pull_request}" GITHUB_REF="$ref" KIND_E2E_OPT_IN=false \
+    "$SELECTOR" "$paths" 2>/dev/null)"
+  selection="$(selection_value "$output")"
+  [[ "$selection" == *'|transport_pkg_codewire_vmm_guest_probe|'* \
+      && "$selection" == *'|static_guest_proof_omittable|'* ]] || {
+    echo "static guest: a $event change to $path does not select the guest with an authoritative proof decision: $selection" >&2
+    exit 1
+  }
+  if [ "$want" = run ] && [[ "$selection" != *'|static_guest_proof|'* ]]; then
+    echo "static guest: a $event change to $path skips the reproducibility proof" >&2
+    exit 1
+  fi
+  if [ "$want" = omit ] && [[ "$selection" == *'|static_guest_proof|'* ]]; then
+    echo "static guest: a $event change to $path runs the reproducibility proof" >&2
+    exit 1
+  fi
+}
+for static_guest_path in \
+    crates/codewire-vmm-guest-probe/src/main.rs \
+    crates/codewire-daemon/src/lib.rs \
+    crates/codewire-daemon-proto/build.rs \
+    crates/codewire-workload-secrets/src/lib.rs \
+    libs/daemon-proto/proto/daemon/v1/daemon.proto \
+    proto/codewire/bridge/v1/bridge.proto \
+    scripts/ci/verify/build-local-vmm-initramfs.sh \
+    Cargo.toml Cargo.lock rust-toolchain.toml; do
+  static_guest_case pull_request run "$static_guest_path"
+  static_guest_case push run "$static_guest_path"
+done
+for static_guest_path in \
+    crates/codewire-workspace-hack/Cargo.toml \
+    testdata/local-vm-network/README.md \
+    proto/codewire/v1/common.proto \
+    scripts/ci/verify/check-darwin-cross.sh; do
+  static_guest_case pull_request omit "$static_guest_path"
+  static_guest_case push run "$static_guest_path"
+done
+# An unclassified path selects all product verification, the guest's tests
+# included, but it is never one of the guest's build inputs: alone it runs no
+# proof, beside an input it does, and ci-full asks for what main runs.
+static_guest_case pull_request omit unexplained/new-surface.txt
+static_guest_case pull_request run unexplained/new-surface.txt Cargo.lock
+static_guest_case pull_request run unexplained/new-surface.txt crates/codewire-daemon/src/lib.rs
+static_guest_case ci-full run unexplained/new-surface.txt
+static_guest_case ci-full run crates/codewire-workspace-hack/Cargo.toml
+static_guest_case push run unexplained/new-surface.txt
+# The proof never runs without the guest's own token, and its decision is
+# authoritative only from a selector that knows it.
+printf '%s\n' docs/dev/AGENT-WORKFLOW.md > "$TMP/static-guest-none.paths"
+static_guest_none="$(selection_value "$(cd "$ROOT" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main KIND_E2E_OPT_IN=false \
+  "$SELECTOR" "$TMP/static-guest-none.paths")")"
+[[ "$static_guest_none" != *'|static_guest_proof'* ]] || {
+  echo "static guest: a main push without the guest selects its proof: $static_guest_none" >&2
+  exit 1
+}
+for selection_and_runs in \
+    '|valid:v3|transport|transport_pkg_codewire_vmm_guest_probe|complete|=run' \
+    '|valid:v3|static_guest_proof|static_guest_proof_omittable|transport|transport_pkg_codewire_vmm_guest_probe|complete|=run' \
+    '|valid:v3|static_guest_proof_omittable|transport|transport_pkg_codewire_vmm_guest_probe|complete|=omit'; do
+  if (SELECTION="${selection_and_runs%%=*}" bash -c '
+      selected() { [[ "$SELECTION" == *"|$1|"* ]]; }
+      eval "$1"
+      static_guest_proof_runs' static-guest-runs \
+      "$(awk '/^static_guest_proof_runs\(\) \{/,/^}/' "$ROOT/scripts/ci/verify/run-product-verification.sh")"); then
+    static_guest_ran=run
+  else
+    static_guest_ran=omit
+  fi
+  [ "$static_guest_ran" = "${selection_and_runs#*=}" ] || {
+    echo "static guest: the runner decides $static_guest_ran for ${selection_and_runs%%=*}" >&2
+    exit 1
+  }
+done
+grep -Fqx '    if shard_stage checks && static_guest_proof_runs; then' \
+  <(awk '/^run_transport\(\) \{/,/^}/' "$ROOT/scripts/ci/verify/run-product-verification.sh") || {
+  echo 'static guest: the local-vmm checks stage runs the proof without its decision' >&2
+  exit 1
+}
 # --- End crate graph ----------------------------------------------------------
 
 policy=policy
@@ -1885,8 +1996,11 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
 run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release confidential_script_tests' docs/tag-path-is-ignored.md
 
-all_product='ci_script_tests ci_plan_tests repo_check_self_tests kind_tools contracts contracts_proto database deploy docs edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release confidential_script_tests dev_smoke_script_tests rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product='ci_script_tests ci_plan_tests repo_check_self_tests kind_tools contracts contracts_proto database deploy docs edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release confidential_script_tests dev_smoke_script_tests rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal static_guest_proof transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 # A pull request without the Kind opt-in never selects Kind.
+# An unclassified pull request selects all product verification but not the
+# static guest's reproducibility proof: an unclassified path is never one of
+# the guest's build inputs.
 all_product_pr='ci_script_tests ci_plan_tests repo_check_self_tests contracts contracts_proto database deploy docs go_consumer_interop go_support go_tailnet policy policy_shell release confidential_script_tests dev_smoke_script_tests rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy security security_js" scripts/dev/dashboard-watch.py
@@ -2232,7 +2346,7 @@ assert_tokens dispatch_rust \
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=transport "$SELECTOR")"
 assert_tokens dispatch_transport \
-  'transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe' \
+  'static_guest_proof transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe' \
   "$dispatch_output"
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=contracts "$SELECTOR")"

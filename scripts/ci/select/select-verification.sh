@@ -280,6 +280,26 @@ repo_check_self_test_input() {
   return 1
 }
 
+# The static guest's reproducibility proof (build-local-vmm-initramfs.sh
+# --verify: two fresh release musl builds, about two minutes) runs when one of
+# the guest's build inputs changes (infra#1534): a crate that builds into the
+# guest (crate_graph_dependents' "build:" lines), and the non-crate inputs
+# below: the workspace manifest, lockfile and toolchain, Cargo configuration,
+# the proof itself, and the protos codewire-daemon-proto's build script
+# compiles. Its tests still follow the guest's own token. Every push to main
+# runs it whenever the guest is selected, and so does any selection that
+# cannot bound it (all transport, an unreadable crate graph).
+static_guest_proof_input() {
+  case "$1" in
+    Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/*|\
+    scripts/ci/verify/build-local-vmm-initramfs.sh|\
+    libs/daemon-proto/proto/*|proto/codewire/bridge/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 # The Kind tool tests run with Edge static verification only when one of
 # their inputs changes (#3119 R8): the CI and developer scripts, and every
 # product file one of them reads from the tree rather than from a fixture.
@@ -359,6 +379,7 @@ select_all_transport() {
       codewire_vmm_guest_probe; do
     select_token "transport_pkg_${package}"
   done
+  select_token static_guest_proof
 }
 
 select_all_contracts() {
@@ -476,6 +497,9 @@ for name in built:
     tested |= tests_against[name]
 for name in sorted(tested):
     print(name)
+# The crates the changed ones build into, not only test against.
+for name in sorted(built):
+    print(f"build:{name}")
 PY
 }
 
@@ -630,6 +654,9 @@ fi
 
 kind_relevant=false
 saw_path=false
+# Whether a path is one of the static guest's non-crate build inputs; an
+# unclassified path never is (see static_guest_proof_input).
+static_guest_input_seen=false
 
 if [ "$event_selected" = false ]; then
   # Policy is the lightweight invariant for every path-selected PR/main run.
@@ -683,6 +710,10 @@ if [ "$event_selected" = false ]; then
     fi
     if repo_check_self_test_input "$path"; then
       select_token repo_check_self_tests
+    fi
+    if static_guest_proof_input "$path"; then
+      select_token static_guest_proof
+      static_guest_input_seen=true
     fi
 
     # The JavaScript supply-chain audit is grep-only. Run it for any path it
@@ -2358,18 +2389,32 @@ if [ "$event_selected" = false ]; then
     fi
   done < "$tmp"
 
+  # An unclassified path selects all product verification, but it is never
+  # under crates/ and never one of the static guest's other build inputs, which
+  # rustc's dep-info bounds to the crates that build into the guest, the protos
+  # its build script compiles and Cargo's own files. Such a change runs the
+  # guest's tests without its reproducibility proof unless an input selects it.
+  if [ "$classification" = unclassified ] && [ "$static_guest_input_seen" = false ]; then
+    unset 'selected[static_guest_proof]'
+  fi
+
   # A changed crate's reverse dependents run their tests too; see
   # crate_graph_dependents. Runtime families (services, Kind, web) stay with
   # the paths that select them.
   if [ "${#changed_crates[@]}" -gt 0 ]; then
     if dependents="$(crate_graph_dependents "${!changed_crates[@]}")"; then
       while IFS= read -r dependent; do
-        [ -n "$dependent" ] || continue
-        select_crate_tests "$dependent"
+        case "$dependent" in
+          '') ;;
+          build:codewire-vmm-guest-probe) select_token static_guest_proof ;;
+          build:*) ;;
+          *) select_crate_tests "$dependent" ;;
+        esac
       done <<<"$dependents"
     else
       echo "warning: the crate graph is unavailable; selecting the whole Rust workspace" >&2
       select_rust_workspace
+      select_token static_guest_proof
     fi
   fi
 
@@ -2435,6 +2480,22 @@ if token_selected edge_kind; then
   select_token kind_tools_omittable
 else
   unset 'selected[kind_tools]'
+fi
+
+# static_guest_proof picks the guest-probe selections that also run the static
+# guest's reproducibility proof, so it means nothing without the guest's own
+# token. Every push to main runs it, and so does a ci-full pull request, which
+# asks for what main would run. static_guest_proof_omittable says the omission
+# is authoritative; a selection from an older trusted selector lacks it and
+# still runs the proof.
+if token_selected transport_pkg_codewire_vmm_guest_probe; then
+  if { [ "$event" = push ] && [ "${GITHUB_REF:-}" = refs/heads/main ]; } \
+      || { [ "$event" = pull_request ] && [ "$pr_ci_full" = true ]; }; then
+    select_token static_guest_proof
+  fi
+  select_token static_guest_proof_omittable
+else
+  unset 'selected[static_guest_proof]'
 fi
 
 # The local mode says how far scripts/dev/preflight.sh must escalate to run

@@ -1240,6 +1240,14 @@ privileged_mount_namespace_available() {
   fi
 }
 
+# The static guest's reproducibility proof (two fresh release musl builds)
+# runs for the guest's own build inputs and on every push to main, as the
+# selector's static_guest_proof says (infra#1534). A selection without
+# static_guest_proof_omittable, from an older selector, keeps it.
+static_guest_proof_runs() {
+  selected static_guest_proof || ! selected static_guest_proof_omittable
+}
+
 run_transport() {
   if rust_shard packages; then
     run_rust_packages transport_pkg_
@@ -1279,7 +1287,7 @@ run_transport() {
     elif shard_stage tests; then
       echo '::notice::guest-probe kernel fixtures not run: no CAP_SYS_ADMIN here; run this shard on a workstation with sudo'
     fi
-    if shard_stage checks; then
+    if shard_stage checks && static_guest_proof_runs; then
       scripts/ci/verify/build-local-vmm-initramfs.sh --verify
     fi
   fi
