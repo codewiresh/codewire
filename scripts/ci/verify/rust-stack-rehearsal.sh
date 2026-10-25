@@ -606,6 +606,8 @@ set -a
 . "$ROOT/tests/e2e/flip-state.env"
 set +a
 
+# STRIPE_WEBHOOK_URL=off turns off billing's startup check of its Stripe
+# webhook endpoint, so the rehearsal never contacts Stripe with the dummy key.
 start_proc billing "$BILLING_PORT" env \
   DATABASE_URL="$DATABASE_URL_RUST" \
   SESSION_SECRET="$SESSION_SECRET" \
@@ -614,6 +616,7 @@ start_proc billing "$BILLING_PORT" env \
   FRONTEND_URL="http://127.0.0.1:${BILLING_PORT}" \
   STRIPE_SECRET_KEY=sk_test_buildtest_dummy \
   STRIPE_WEBHOOK_SECRET=whsec_test_secret \
+  STRIPE_WEBHOOK_URL=off \
   TEMPORAL_HOST_PORT="$TEMPORAL_HOST_PORT" \
   CONNECT_TESTING_SURFACE=1 \
   "$CARGO_CI_DIR/codewire-billing"
@@ -731,6 +734,7 @@ start_proc billing-webhook "$BILLING_WEBHOOK_PORT" env \
   BILLING_LOOPS=trials \
   STRIPE_SECRET_KEY=sk_test_buildtest_dummy \
   STRIPE_WEBHOOK_SECRET=whsec_test_secret \
+  STRIPE_WEBHOOK_URL=off \
   "$CARGO_CI_DIR/codewire-billing"
 
 log "running Rust billing and orchestration deploy-shaped smokes"

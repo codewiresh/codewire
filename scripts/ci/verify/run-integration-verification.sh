@@ -1085,6 +1085,8 @@ ensure_billing_fixture() {
   BILLING_FIXTURE_LOADED=true
 }
 
+# STRIPE_WEBHOOK_URL=off turns off billing's startup check of its Stripe
+# webhook endpoint, so a test run never contacts Stripe with the dummy key.
 start_billing() {
   ensure_billing_fixture
   start_temporal
@@ -1093,7 +1095,7 @@ start_billing() {
     BILLING_PORT="$BILLING_PORT" BILLING_LOOPS= \
     FRONTEND_URL="http://127.0.0.1:${BILLING_PORT}" \
     STRIPE_SECRET_KEY=sk_test_buildtest_dummy \
-    STRIPE_WEBHOOK_SECRET=whsec_test_secret \
+    STRIPE_WEBHOOK_SECRET=whsec_test_secret STRIPE_WEBHOOK_URL=off \
     TEMPORAL_HOST_PORT="$TEMPORAL_HOST_PORT" CONNECT_TESTING_SURFACE=1 \
     "$CARGO_CI_DIR/codewire-billing"
   probe_connect_surface billing "$BILLING_PORT"
