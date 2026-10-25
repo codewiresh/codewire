@@ -68,7 +68,7 @@ def verify():
     data = root.parent / "data"
     data.mkdir(exist_ok=True)
     return subprocess.run([sys.executable, "-I", "-", str(root), "86400", str(data)], input=verifier,
-                          capture_output=True, text=True, timeout=60), data
+                          capture_output=True, text=True, timeout=300), data
 
 
 bundle(datetime.timedelta(minutes=5))

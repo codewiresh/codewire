@@ -80,7 +80,7 @@ def call(url, method="GET", body=None, bearer=None):
     request = urllib.request.Request(url, data=None if body is None else json.dumps(body).encode(),
                                      headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with urllib.request.urlopen(request, timeout=60) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as error:
         return error.code, error.read()
@@ -200,7 +200,7 @@ def daemon_after_logout(workspace, redeliver_after=None):
     """The daemon's side of a logout: once auth.json is gone, record the
     logout; with redeliver_after, wrongly write the login again later."""
     def run():
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 120
         while workspace.auth.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         workspace.mark_logout()
@@ -314,7 +314,7 @@ class SyntheticBackend(unittest.TestCase):
             headers={"Authorization": f"Bearer {bearer}", "ChatGPT-Account-ID": driver.ACCOUNT,
                      **(headers or {})})
         try:
-            with urllib.request.urlopen(request, timeout=5) as response:
+            with urllib.request.urlopen(request, timeout=60) as response:
                 return response.status, response.read()
         except urllib.error.HTTPError as error:
             with error:

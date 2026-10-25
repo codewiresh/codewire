@@ -53,7 +53,7 @@ log() {{ :; }}
 {body}
 '''
         return subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL, env=os.environ.copy(), timeout=15)
+                              stdin=subprocess.DEVNULL, env=os.environ.copy(), timeout=300)
 
     def test_remote_dind_forwarder_receives_all_saved_host_ports(self):
         fixture = self.directory / "capture-forwarder.py"
@@ -111,7 +111,7 @@ source "$ROOT/scripts/ci/verify/kind/common.sh"
 printf '%s:%s' "${{{canonical}}}" "${{{legacy}}}"
 '''
                     result = subprocess.run(["bash", "-c", script], capture_output=True,
-                                            text=True, env=environment, timeout=15)
+                                            text=True, env=environment, timeout=300)
                     conflict = len(selection) == 2 and len(set(selection.values())) == 2
                     self.assertEqual(result.returncode, 2 if conflict else 0, result.stderr)
                     self.assertEqual(result.stdout, "" if conflict else f"{port}:{port}")
@@ -381,7 +381,7 @@ if flock -n operation.lock true; then exit 90; fi
 '''
         result = subprocess.run(["bash", "-c", script], cwd=self.directory,
                                 env=os.environ.copy(), capture_output=True,
-                                text=True, timeout=15)
+                                text=True, timeout=300)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_nested_publication_reuses_and_preserves_inherited_lock(self):
@@ -661,14 +661,14 @@ validate_retained_cluster
 
     def test_named_make_does_not_inject_legacy_origins(self):
         result = subprocess.run(["make", "-n", "kind-watch", "CLUSTER=synthetic-profile"],
-                                cwd=ROOT, capture_output=True, text=True, timeout=15)
+                                cwd=ROOT, capture_output=True, text=True, timeout=300)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("localhost:4174", result.stdout)
         self.assertNotIn("localhost:8090", result.stdout)
 
     def test_legacy_make_target_rejects_named_selection_before_effects(self):
         result = subprocess.run(["make", "-n", "up", "CLUSTER=synthetic-profile"],
-                                cwd=ROOT, capture_output=True, text=True, timeout=15)
+                                cwd=ROOT, capture_output=True, text=True, timeout=300)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("docker build", result.stdout)
 

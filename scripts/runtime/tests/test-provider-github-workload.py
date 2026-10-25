@@ -86,7 +86,7 @@ esac
         (self.root / "kind").write_text(kind)
         completed = subprocess.run(
             ["/usr/bin/python3", str(self.wrapper), *args], capture_output=True,
-            timeout=20, env={"PATH": "/usr/bin:/bin", "GH_TOKEN": "PRIVATE_CANARY",
+            timeout=300, env={"PATH": "/usr/bin:/bin", "GH_TOKEN": "PRIVATE_CANARY",
                              "GITHUB_TOKEN": "PRIVATE_CANARY", "GH_CONFIG_DIR": "/ambient",
                              "HTTPS_PROXY": "PRIVATE_CANARY", "BASH_ENV": "/ambient"},
         )
@@ -138,7 +138,7 @@ esac
         child = subprocess.Popen(["/usr/bin/python3", str(self.wrapper)],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 60
             while not (self.root / "pid").exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
             self.assertTrue((self.root / "pid").exists())
@@ -150,7 +150,7 @@ esac
             self.assertIsNotNone(parent)
             self.assertEqual(int(parent.group(1)), child.pid)
             child.send_signal(signal.SIGTERM)
-            stdout, stderr = child.communicate(timeout=10)
+            stdout, stderr = child.communicate(timeout=60)
             self.assert_public_failure((child.returncode, stdout, stderr))
             self.assertEqual(list(self.scratch.iterdir()), [])
             with self.assertRaises(ProcessLookupError):
@@ -173,7 +173,7 @@ esac
         )
         (self.root / "kind").write_text("success")
         completed = subprocess.run(["/usr/bin/python3", "-c", script],
-                                   capture_output=True, timeout=15)
+                                   capture_output=True, timeout=300)
         self.assert_public_failure((completed.returncode, completed.stdout, completed.stderr))
 
 

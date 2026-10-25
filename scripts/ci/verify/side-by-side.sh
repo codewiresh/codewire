@@ -52,7 +52,8 @@ stop_side_by_side() {
 
 # Run the commands on standard input, one per line (blank lines are skipped),
 # side by side: at most VERIFICATION_TEST_JOBS at a time (default: the CI CPU
-# share where CODEWIRE_CI_CPU_SHARE is set, else the CPU count). Each command runs in a subshell of this one, so the caller's functions
+# share where CODEWIRE_CI_CPU_SHARE is set, else the CPU count). Each command
+# sees VERIFICATION_TEST_JOBS as its own, smaller share (see nested). Each command runs in a subshell of this one, so the caller's functions
 # and environment apply, and must keep no state outside its own scratch
 # directory. Its output is printed whole, in list order, with its exit status
 # and time.
@@ -67,12 +68,19 @@ run_side_by_side() {
   local share="${CODEWIRE_CI_CPU_SHARE:-}"
   [[ "$share" =~ ^[1-9][0-9]{0,3}$ ]] || share=''
   local limit="${VERIFICATION_TEST_JOBS:-${share:-$(nproc)}}" keep_going="${VERIFICATION_KEEP_GOING:-0}"
-  local logs line command index next=0 running=0 failed=0 first_failure='' status seconds ended
+  local logs line command index next=0 running=0 failed=0 first_failure='' status seconds ended nested
   local -a commands=() pids=() starts=()
   [[ "$limit" =~ ^[1-9][0-9]*$ ]] || {
     echo '::error::VERIFICATION_TEST_JOBS must be a positive integer' >&2
     return 2
   }
+  # A command that runs its own cases side by side shares the CPUs with up to
+  # limit - 1 others, so it gets a quarter of the limit, at least two (one
+  # when the caller asked for one at a time): on an 8-CPU guest, 8 tests each
+  # running 8 cases at once timed out a 120 s hang guard (main run 22887).
+  nested=$((limit / 4))
+  ((nested >= 2)) || nested=2
+  ((limit > 1)) || nested=1
   [[ "$keep_going" == 0 || "$keep_going" == 1 ]] || {
     echo '::error::VERIFICATION_KEEP_GOING must be 0 or 1' >&2
     return 2
@@ -96,6 +104,7 @@ run_side_by_side() {
       command="${commands[$next]}"
       (
         exec {ended}>&-
+        export VERIFICATION_TEST_JOBS="$nested"
         started=$SECONDS
         # Not a condition: the command keeps errexit, as when run in order.
         set +e

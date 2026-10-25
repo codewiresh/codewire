@@ -199,7 +199,7 @@ class Source(unittest.TestCase):
             selected = capsule.path / "source"
             script = selected / "scripts/ci/images/finalize-cw-runtime-source.py"
             result = subprocess.run([sys.executable, str(script), "--help"], cwd=selected,
-                                    env=environment, capture_output=True, timeout=10)
+                                    env=environment, capture_output=True, timeout=600)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             self.assertEqual(list(selected.rglob("__pycache__")), [])
             capsule.revalidate()
@@ -222,7 +222,7 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
 """
             result = subprocess.run([sys.executable, "-c", program, str(ROOT), str(capsule.path),
                                      capsule.outputs["request.json"].sha256], cwd=selected,
-                                    env=environment, capture_output=True, timeout=10)
+                                    env=environment, capture_output=True, timeout=600)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             self.assertEqual(result.stdout, b"normal-default-cli-and-library-source-unchanged/flag-restored\n")
             self.assertTrue(cached(ROOT / "scripts/ci/images"), "the host driver's import wrote no bytecode")

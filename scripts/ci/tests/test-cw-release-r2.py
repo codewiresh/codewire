@@ -429,7 +429,7 @@ class PublisherTest(unittest.TestCase):
                        "CW_TEST_FAKE_R2": str(state), "CW_TEST_KEY": str(self.signer.public),
                        "CW_TEST_FINGERPRINT": self.signer.fingerprint}
                 result = subprocess.run(["bash", "-c", step["run"]], cwd=source, env=env, capture_output=True,
-                                        text=True, timeout=120)
+                                        text=True, timeout=600)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("cw-release-r2: probe", result.stderr)
                 self.assertNotIn(SECRET_KEY, result.stdout + result.stderr)
@@ -615,7 +615,7 @@ class PublisherTest(unittest.TestCase):
                                      0o644)
         result = subprocess.run([sys.executable, str(fx.ROOT / "scripts/ci/release/cw_release_r2.py"), "publish",
                                  "--dist", str(self.deliveries["new"]), "--credentials", str(loose)],
-                                capture_output=True, text=True, env={"PATH": os.environ["PATH"]}, timeout=60)
+                                capture_output=True, text=True, env={"PATH": os.environ["PATH"]}, timeout=600)
         self.assertEqual(result.returncode, 1)
         self.assertIn("REJECT", result.stderr)
         self.assertEqual(result.stdout, "")

@@ -23,7 +23,7 @@ COMMON = ROOT / "scripts/ci/verify/kind/common.sh"
 # Hang guard for the shell fixtures these tests run. They finish in well under
 # a second, but Policy runs many script tests at once on a shared CI guest, and
 # a 10-second bound failed main run 22388 with nothing hung.
-HANG_GUARD_SECONDS = 120
+HANG_GUARD_SECONDS = 600
 CREDENTIALS = ROOT / "scripts/ci/verify/kind/credentials.sh"
 INTEGRATED = ROOT / "scripts/ci/verify/kind/suites/integrated.sh"
 SELECTOR = ROOT / "scripts/ci/select/select-verification.sh"

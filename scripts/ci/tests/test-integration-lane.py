@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 LANE = ROOT / "scripts/ci/verify/integration-lane.py"
 
 
-def wait_for(condition, seconds=20):
+def wait_for(condition, seconds=300):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if condition():

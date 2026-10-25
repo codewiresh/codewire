@@ -181,10 +181,10 @@ class KernelCustody(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.environment = {"PATH": "/usr/bin:/bin", "HOME": str(self.root), "LC_ALL": "C"}
 
-    def run_command(self, script, timeout=5):
+    def run_command(self, script, timeout=60):
         return kernel.run_owned([sys.executable, "-c", script], self.root, self.environment,
                                 self.root / "output.log", time.monotonic() + timeout,
-                                grace=0.1, cleanup_bound=5)
+                                grace=0.1, cleanup_bound=60)
 
     def no_children(self):
         self.assertEqual(kernel.children(), set())
@@ -264,7 +264,7 @@ time.sleep(30)
             nonlocal first
             if first:
                 first = False
-                bound = time.monotonic() + 2
+                bound = time.monotonic() + 60
                 while not ready.exists() and time.monotonic() < bound:
                     time.sleep(0.01)
                 self.assertTrue(ready.exists(), "detached fixture did not become ready")

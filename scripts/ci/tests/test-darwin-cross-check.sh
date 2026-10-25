@@ -73,7 +73,7 @@ else:
         trace.write_text('')
         result = subprocess.run(['bash', str(check), *arguments],
                                 env=dict(environment, **(extra or {})),
-                                capture_output=True, text=True, timeout=10)
+                                capture_output=True, text=True, timeout=600)
         records = [json.loads(line) for line in trace.read_text().splitlines()]
         assert result.returncode == status, (extra, result.returncode, result.stderr)
         if status == 1:
@@ -86,7 +86,7 @@ else:
     # Preserve the old check's exact argv. With no Darwin C compiler, the old
     # bare invocation fails; the wrapper supplies the compiler route, not a skip.
     bare = subprocess.run([str(binary / 'cargo'), *expected_check], env=environment,
-                          capture_output=True, text=True, timeout=10)
+                          capture_output=True, text=True, timeout=600)
     assert bare.returncode == 47 and 'lacks the Darwin C compiler' in bare.stderr
     for extra in ({}, dict(ZIG_VERSION='0.15.2', CARGO_ZIGBUILD_VERSION='0.23.0')):
         records, _ = run(extra)

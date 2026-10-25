@@ -87,7 +87,7 @@ for line in sys.stdin:
         data=json.dumps({"model": "claude-sonnet-4-6", "stream": True,
                          "messages": [value["message"]]}).encode(), headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with urllib.request.urlopen(request, timeout=60) as response:
             body = response.read().decode()
         ok = "CWCLAUDELOGIN kind" in body and mode != "error-result"
     except urllib.error.HTTPError:
@@ -129,7 +129,7 @@ class Workspace:
             patch.object(driver, "NEXT_CHECK", 1.0),
             patch.object(driver, "DELIVERY_TIMEOUT", 1.0),
             patch.object(driver, "RECONNECT_ALLOWANCE", 2.0),
-            patch.object(driver, "TURN_TIMEOUT", 10.0),
+            patch.object(driver, "TURN_TIMEOUT", 120.0),
             patch.dict(os.environ, environ, clear=True),
             patch.object(driver.signal, "signal"),
             contextlib.redirect_stdout(self.output),
@@ -294,7 +294,7 @@ class SyntheticBackend(unittest.TestCase):
             data=None if method == "GET" else json.dumps(body or {"stream": True}).encode(),
             headers={"Content-Type": "application/json", **(headers or {})})
         try:
-            with urllib.request.urlopen(request, timeout=5) as response:
+            with urllib.request.urlopen(request, timeout=60) as response:
                 return response.status, response.read()
         except urllib.error.HTTPError as error:
             with error:
@@ -371,7 +371,7 @@ class NoRouteButLoopback(unittest.TestCase):
                          ("127.0.0.1,localhost", "127.0.0.1,localhost"))
         port = int(url.rsplit(":", 1)[1])
         with self.assertRaises(ConnectionRefusedError):
-            socket.create_connection(("127.0.0.1", port), timeout=2).close()
+            socket.create_connection(("127.0.0.1", port), timeout=60).close()
 
     def test_a_client_that_honours_the_proxy_reaches_only_the_backend(self):
         # A stock HTTP client in Claude Code's environment: the backend
@@ -380,7 +380,7 @@ class NoRouteButLoopback(unittest.TestCase):
             "import sys, urllib.request, urllib.error\n"
             "def get(url):\n"
             "    try:\n"
-            "        urllib.request.urlopen(url, timeout=5)\n"
+            "        urllib.request.urlopen(url, timeout=60)\n"
             "    except urllib.error.HTTPError as error:\n"
             "        return f'http {error.code}'\n"
             "    except urllib.error.URLError as error:\n"
@@ -390,7 +390,7 @@ class NoRouteButLoopback(unittest.TestCase):
             "print(get('https://platform.claude.invalid/v1/oauth/token'))\n")
         environment = driver.claude_environment(self.backend)
         result = subprocess.run([sys.executable, "-I", "-c", probe, self.backend.base_url],
-                                env=environment, capture_output=True, text=True, timeout=30)
+                                env=environment, capture_output=True, text=True, timeout=300)
         self.assertEqual(result.stdout.split(), ["http", "404", "ConnectionRefusedError",
                                                  "ConnectionRefusedError"], result.stderr)
 
@@ -448,7 +448,7 @@ class Modes(unittest.TestCase):
 
     def rotate_when_ready(self, ready, generation, nonce="c" * 32, keep=True):
         def run():
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + 120
             while not os.path.exists(ready) and time.monotonic() < deadline:
                 time.sleep(0.01)
             extra = {driver.UNRELATED_KEY: driver.UNRELATED_VALUE} if keep else {}

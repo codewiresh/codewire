@@ -22,14 +22,14 @@ class ListenerTests(unittest.TestCase):
     @contextlib.contextmanager
     def pair(self):
         client, server = socket.socketpair()
-        client.settimeout(1)
+        client.settimeout(60)
         worker = threading.Thread(target=listener.handle_connection, args=(server,))
         worker.start()
         try:
             yield client
         finally:
             client.close()
-            worker.join(1)
+            worker.join(60)
             self.assertFalse(worker.is_alive(), "owned connection worker did not stop")
 
     def read_all(self, client):
@@ -91,7 +91,7 @@ class ListenerTests(unittest.TestCase):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as accepting:
             accepting.bind(("127.0.0.1", 0))
             accepting.listen(1)
-            accepting.settimeout(1)
+            accepting.settimeout(60)
             failures = []
 
             def serve_once():
@@ -104,12 +104,12 @@ class ListenerTests(unittest.TestCase):
             worker = threading.Thread(target=serve_once)
             worker.start()
             try:
-                with socket.create_connection(accepting.getsockname(), timeout=1) as client:
+                with socket.create_connection(accepting.getsockname(), timeout=60) as client:
                     client.sendall(NONCE + b"\n")
                     client.shutdown(socket.SHUT_WR)
                     self.assertEqual(self.read_all(client), b"codewire-native-mesh:" + NONCE + b"\n")
             finally:
-                worker.join(2)
+                worker.join(60)
                 self.assertFalse(worker.is_alive(), "owned TCP worker did not stop")
             self.assertEqual(failures, [])
 

@@ -213,7 +213,7 @@ def make_producer(source_root, output, profile="release", version="0.0.0-ci", bu
         driver.owner.arm_custody()
         environment = {"PATH": "/usr/bin:/bin", "HOME": str(shim_dir), "TMPDIR": str(shim_dir),
                        "PYTHONDONTWRITEBYTECODE": "1", "LC_ALL": "C", "TZ": "UTC"}
-        result = driver.owner.run_owned(command, source_root, environment, output / "build.log", time.monotonic() + 120)
+        result = driver.owner.run_owned(command, source_root, environment, output / "build.log", time.monotonic() + 600)
         summary = driver.finish(prepared, result, builder)
         return summary
 

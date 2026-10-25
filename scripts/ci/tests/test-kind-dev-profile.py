@@ -393,7 +393,7 @@ class DeveloperProfileTests(unittest.TestCase):
         (directory / "fields.json").write_text(json.dumps(list(values.items())))
         if name == "dev-a": self.values = values
 
-    def run_script(self, script: str, *args: str, timeout: int = 30, **environment: str) -> subprocess.CompletedProcess[str]:
+    def run_script(self, script: str, *args: str, timeout: int = 300, **environment: str) -> subprocess.CompletedProcess[str]:
         env = self.env | environment
         # Started outside the tree, as from another worktree's directory.
         return subprocess.run(["bash", str(self.tree / "scripts/dev/kind" / script), *args],
@@ -402,7 +402,7 @@ class DeveloperProfileTests(unittest.TestCase):
     def run_adapter(self, command: str, **environment: str) -> subprocess.CompletedProcess[str]:
         env = self.env | environment | {"FIXTURE_TREE": str(self.tree)}
         return subprocess.run(["bash", "-c", 'set -euo pipefail; source "$FIXTURE_TREE/scripts/dev/kind/profile.sh"; ' + command],
-                              env=env, text=True, capture_output=True, timeout=8)
+                              env=env, text=True, capture_output=True, timeout=300)
 
     def run_make_up(self, *arguments: str, dotenv: str = "", **environment: str) -> subprocess.CompletedProcess[str]:
         # Exercise the actual Makefile in a synthetic checkout. Never include
@@ -419,7 +419,7 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
 ''')
         return subprocess.run(["make", "--no-print-directory", "kind-up", *arguments],
                               cwd=self.tree, env=self.env | environment,
-                              text=True, capture_output=True, timeout=8)
+                              text=True, capture_output=True, timeout=300)
 
     def calls(self, tool: str | None = None) -> list[dict[str, object]]:
         calls = [json.loads(line) for line in self.calls_path.read_text().splitlines()]
@@ -866,7 +866,7 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         result = subprocess.run(["bash", str(self.tree / "scripts/dev/kind/build-smokes.sh"), str(smokes), str(receipt),
                                  *groups],
                                 env=self.env | {"CLUSTER": "", "KIND_CLUSTER_NAME": "codewire-ux-2099"} | environment,
-                                text=True, capture_output=True, timeout=30, cwd=self.directory)
+                                text=True, capture_output=True, timeout=300, cwd=self.directory)
         return result, smokes, receipt
 
     @staticmethod
@@ -982,7 +982,7 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
 
     def test_smokes_refuse_relative_destinations(self) -> None:
         result = subprocess.run(["bash", str(self.tree / "scripts/dev/kind/build-smokes.sh"), "smokes", "receipt.jsonl"],
-                                env=self.env | {"CLUSTER": ""}, text=True, capture_output=True, timeout=30)
+                                env=self.env | {"CLUSTER": ""}, text=True, capture_output=True, timeout=300)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("usage: build-smokes.sh", result.stderr)
         self.assertFalse(self.calls("docker"))
@@ -1056,7 +1056,7 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
 
     def test_selected_redeploys_a_service_left_on_other_source(self) -> None:
         # Every Deployment records a deploy from other source; none is current.
-        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="edge-contract", timeout=60,
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="edge-contract", timeout=300,
                                  FAKE_RECORDS=json.dumps({"*": "0" * 64 + " sha256:" + "c" * 64}))
         self.assertEqual(result.returncode, 0, result.stderr)
         sources = load_service_sources()
@@ -1103,7 +1103,7 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         # The selector reports the migration as a server-core change; alone it
         # selects the edge contract, which reaches every upgraded service.
         result = self.run_script("test-selected.sh", FAKE_SELECTION="database|rust|rust_pkg_codewire_server_core",
-                                 FAKE_CHANGES=changes, FAKE_RECORDS=stale, timeout=60)
+                                 FAKE_CHANGES=changes, FAKE_RECORDS=stale, timeout=300)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("only the full CI Kind gate", result.stderr)
         self.assertIn("suite edge-contract: 0041_claude_sign_in_credentials.up.sql", result.stderr)
@@ -1118,7 +1118,7 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         # Named suites run beside a migration as they would without one.
         self.calls_path.write_text("")
         result = self.run_script("test-selected.sh", KIND_TEST_SUITES="credentials", FAKE_CHANGES=changes,
-                                 FAKE_RECORDS=stale, timeout=60)
+                                 FAKE_RECORDS=stale, timeout=300)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([call["args"] for call in self.calls("suite")], [["suite", "credentials"]])
 
@@ -1360,7 +1360,7 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
                 # that names none.
                 result = subprocess.run(["make", "--no-print-directory", "kind-test", *arguments],
                                         cwd=self.tree, env=self.env | {"KIND_CREDENTIAL_STAGES": "native"},
-                                        text=True, capture_output=True, timeout=30)
+                                        text=True, capture_output=True, timeout=300)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual([call["credential_stages"] for call in self.calls("suite")], [stages])
 
@@ -1655,7 +1655,7 @@ class ServiceSourcesTests(unittest.TestCase):
 
     def helper(self, *args: str) -> str:
         result = subprocess.run(["python3", "-B", str(self.repo / "scripts/dev/kind/service-sources.py"), *args],
-                                env=self.env, text=True, capture_output=True, timeout=30)
+                                env=self.env, text=True, capture_output=True, timeout=300)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
 
@@ -1820,7 +1820,7 @@ class DatabaseTests(unittest.TestCase):
 
     def run_database(self, *args: str, **environment: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["bash", str(self.tree / "scripts/dev/kind/database.sh"), *args], stdin=subprocess.DEVNULL,
-                              env=self.env | environment, text=True, capture_output=True, timeout=30, cwd=self.directory)
+                              env=self.env | environment, text=True, capture_output=True, timeout=300, cwd=self.directory)
 
     def calls(self) -> list[dict[str, object]]:
         if not self.calls_path.exists():

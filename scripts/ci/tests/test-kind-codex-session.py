@@ -306,7 +306,7 @@ class DiagnosticTests(unittest.TestCase):
                 server = original_server([sys.executable, "-u", "-c", script], directory)
                 children.append(server)
                 if wait_for_exit:
-                    server.process.wait(timeout=2)
+                    server.process.wait(timeout=60)
                 return server
             signals = (driver.signal.SIGTERM, driver.signal.SIGINT)
             original_handlers = {sig: driver.signal.getsignal(sig) for sig in signals}

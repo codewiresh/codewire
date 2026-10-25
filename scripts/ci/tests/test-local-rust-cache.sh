@@ -475,7 +475,7 @@ age_mark "$base" 400 30
 selected="$(env -u GITHUB_ACTIONS -u CI -u CODEWIRE_SCCACHE_MODE -u RUSTC_WRAPPER \
   -u CARGO_BUILD_RUSTC_WRAPPER -u CARGO_INCREMENTAL -u CARGO_BUILD_INCREMENTAL \
   -u CODEWIRE_LOCAL_RUST_CACHE PATH="$hang/fake:$PATH" \
-  CODEWIRE_LOCAL_SCCACHE_BASE="$base" timeout 60 "$HELPER" printenv RUSTC_WRAPPER \
+  CODEWIRE_LOCAL_SCCACHE_BASE="$base" timeout 300 "$HELPER" printenv RUSTC_WRAPPER \
   2>"$hang/stderr")" || fail "selection over a hung server: $(cat "$hang/stderr")"
 [[ "$selected" == "$WRAPPER" ]] || fail 'selection over a hung server did not select the cache'
 ! server_running "$base" || fail 'selection kept the hung server'

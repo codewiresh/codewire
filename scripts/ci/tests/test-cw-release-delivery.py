@@ -453,7 +453,7 @@ class DeliveryTest(unittest.TestCase):
         env = {"PATH": os.environ["PATH"], "HOME": str(self.base), "LC_ALL": "C",
                "CW_RELEASE_GPG_PRIVATE_KEY": self.signer.secret_key(),
                "CW_RELEASE_GPG_KEY_ID": key_id or self.signer.fingerprint}
-        return subprocess.run(["bash", str(script), str(dist)], env=env, capture_output=True, text=True, timeout=120)
+        return subprocess.run(["bash", str(script), str(dist)], env=env, capture_output=True, text=True, timeout=600)
 
     def test_real_signer_refuses_a_synthetic_key_before_signing(self):
         base = self.base / "real-signer"
@@ -985,7 +985,7 @@ if __name__ == "__main__":
             # Every original body/direct wait and Signer.close has finished.
             # Own only this isolated fixture process's adopted helpers; final
             # ECHILD must precede unittest's success summary.
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 60
             while True:
                 if time.monotonic() >= deadline:
                     raise RuntimeError("release delivery fixture cleanup did not reach ECHILD")

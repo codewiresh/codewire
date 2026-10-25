@@ -1771,7 +1771,7 @@ kind_credential_relay_token_lead sandbox-x codewire-orchestration-a
              'validate_sealed_kind_images() { return 1; }\n' + body,
              "kind-credential-fixture", str(HELPERS)],
             env=env,
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=300,
         )
         return result
 
@@ -1936,7 +1936,7 @@ start_kind_credential_fixture
                      "kind-credential-mode", str(ROOT / "scripts/ci/verify/kind/credential-mode.sh")],
                     env={"PATH": "/usr/bin:/bin", "ROOT": str(ROOT), "FAKE_PROFILE": profile,
                          "FAKE_PROMOTABLE": promotable},
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True, text=True, timeout=300,
                 )
                 self.assertEqual(result.returncode, expected, result.stderr)
                 if expected:
@@ -2673,7 +2673,7 @@ if record:
     # Whether the proxy Claude Code would use refuses a connection now.
     proxy = urllib.parse.urlsplit(os.environ.get("HTTPS_PROXY", "http://127.0.0.1:0"))
     try:
-        socket.create_connection((proxy.hostname, proxy.port), timeout=2).close()
+        socket.create_connection((proxy.hostname, proxy.port), timeout=60).close()
         refused = False
     except ConnectionRefusedError:
         refused = True
@@ -2747,7 +2747,7 @@ class ClaudeSessionDriver(unittest.TestCase):
             '"projects": {"/workspace": {"hasTrustDialogAccepted": true}}}')
         for fixture in (
             patch.object(CLAUDE, "CLAUDE_ARGV", (sys.executable, str(fake))),
-            patch.object(CLAUDE, "SESSION_TIMEOUT", 5.0),
+            patch.object(CLAUDE, "SESSION_TIMEOUT", 120.0),
             patch.object(CLAUDE.signal, "signal"),
         ):
             fixture.start()
@@ -3163,7 +3163,7 @@ class ClaudeSessionHarness(unittest.TestCase):
              'validate_sealed_kind_images() { return 1; }\n' + body,
              "kind-credential-fixture", str(HELPERS)],
             env={"PATH": "/usr/bin:/bin", "ROOT": str(ROOT)},
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, timeout=300,
         )
 
     def claude_run(self, output, state="Exited", exit_code=0, form="subscription_token",
@@ -3652,7 +3652,7 @@ kind_credential_claude_rotation env-1 kind-claude 3
 class RotationIdleStages(unittest.TestCase):
     """#2972: the Claude stages run during the native stage's rotation idle."""
 
-    def shell(self, body, timeout=30):
+    def shell(self, body, timeout=300):
         directory = tempfile.TemporaryDirectory(prefix="kind-rotation-stages-")
         self.addCleanup(directory.cleanup)
         self.run_dir = Path(directory.name)

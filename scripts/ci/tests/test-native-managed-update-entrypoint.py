@@ -84,7 +84,7 @@ env() {
         if name == 'admit_native_managed_update_assets':
             script += 'printf "%s\\n" "$MANAGED_AGENT_UPDATE_A_SHA256"\n'
         result = subprocess.run(['bash', '-c', script], text=True, capture_output=True,
-                                env={'PATH': '/usr/bin:/bin', 'HOME': os.environ['HOME']}, timeout=10)
+                                env={'PATH': '/usr/bin:/bin', 'HOME': os.environ['HOME']}, timeout=300)
         args = self.capture.read_bytes().rstrip(b'\0').decode().split('\0') if self.capture.exists() else []
         return result, args
 
@@ -185,7 +185,7 @@ env() {
             with self.subTest(args=args):
                 result = subprocess.run(['bash', str(SOURCE), *base, *args], text=True, capture_output=True,
                     env={'PATH': str(spy) + ':/usr/bin:/bin', 'HOME': os.environ['HOME'],
-                         'EFFECTS': str(effects), 'TMPDIR': str(self.root)}, timeout=10)
+                         'EFFECTS': str(effects), 'TMPDIR': str(self.root)}, timeout=300)
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertFalse(effects.exists(), 'invalid profile reached an effect tool')
 
@@ -218,7 +218,7 @@ env() {
             with self.subTest(args=args):
                 result = subprocess.run(['bash', str(SOURCE), *base, *args], text=True, capture_output=True,
                     env={'PATH': str(spy) + ':/usr/bin:/bin', 'HOME': os.environ['HOME'],
-                         'EFFECTS': str(effects), 'TMPDIR': str(self.root)}, timeout=10)
+                         'EFFECTS': str(effects), 'TMPDIR': str(self.root)}, timeout=300)
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertFalse(effects.exists(), 'invalid profile reached an effect tool')
 

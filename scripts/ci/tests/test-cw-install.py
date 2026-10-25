@@ -211,11 +211,11 @@ class Fixture:
         if stdin_script:
             command = shell + ["-s", "--"] + list(args)
             return subprocess.run(command, input=source, env=environment, capture_output=True,
-                                  timeout=60, cwd=self.base)
+                                  timeout=600, cwd=self.base)
         installer = self.base / "install.sh"
         installer.write_bytes(source)
         return subprocess.run(shell + [str(installer)] + list(args), env=environment,
-                              capture_output=True, timeout=60, stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=600, stdin=subprocess.DEVNULL,
                               cwd=self.base)
 
     def requests(self):

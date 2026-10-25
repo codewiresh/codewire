@@ -77,7 +77,7 @@ def bind_port(port: int):
 def touch_ctime(path: Path) -> None:
     # Rewrite identical timestamps until the kernel records a newer change time.
     info = path.stat()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 60
     while path.stat().st_ctime_ns == info.st_ctime_ns:
         assert time.monotonic() < deadline, "change time did not advance"
         os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
@@ -242,9 +242,9 @@ class ProfileTests(unittest.TestCase):
                     for cluster in ("alpha", "beta", "alpha", "gamma", "delta")]
         for child in children:
             child.start()
-        values = [results.get(timeout=15) for _ in children]
+        values = [results.get(timeout=300) for _ in children]
         for child in children:
-            child.join(timeout=15)
+            child.join(timeout=300)
             if child.is_alive():
                 child.terminate()
                 child.join(timeout=5)

@@ -987,7 +987,7 @@ def route_guard_cases(text):
             if value is not None:
                 env["CW_RELEASE_R2_ROUTE_ADMITTED"] = value
             result = subprocess.run(["/usr/bin/bash", "-c", prefix], cwd=source, env=env,
-                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False)
+                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=600, check=False)
             credential_dir = runner_temp / "codewire-release-r2"
             if value == "true":
                 expected_call = str(credential_dir / "aws-credentials") + "\n"

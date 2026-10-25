@@ -254,7 +254,7 @@ class KernelAndFiles(unittest.TestCase):
         fd = os.pidfd_open(current.pid)
         try:
             if command is None:
-                self.assertTrue(select.select([current.stdout.fileno()], [], [], 3)[0], "child ready bound")
+                self.assertTrue(select.select([current.stdout.fileno()], [], [], 60)[0], "child ready bound")
                 self.assertEqual(current.stdout.readline(64), b"READY\n")
             yield current
         finally:
@@ -262,8 +262,8 @@ class KernelAndFiles(unittest.TestCase):
                 current.stdin.close()
                 if not select.select([fd], [], [], 1)[0]:
                     signal.pidfd_send_signal(fd, signal.SIGKILL)
-                self.assertTrue(select.select([fd], [], [], 3)[0], "owned test child did not terminate")
-                current.wait(timeout=1)
+                self.assertTrue(select.select([fd], [], [], 60)[0], "owned test child did not terminate")
+                current.wait(timeout=60)
             finally:
                 os.close(fd)
                 current.stdout.close()
@@ -282,7 +282,7 @@ else: identities=[]
 print(json.dumps([os.getpid()]+identities),flush=True)
 os.read(0,1)
 if child:
- child.stdin.write(b"E"); child.stdin.flush(); child.stdin.close(); child.wait(timeout=3)
+ child.stdin.write(b"E"); child.stdin.flush(); child.stdin.close(); child.wait(timeout=60)
 '''
         current = probe.Probe(args())
         current.boot = ENVIRONMENT
@@ -326,7 +326,7 @@ if child:
                 self.assertEqual(events[-1]["managed"], original)
                 self.assertTrue(all(actor.terminal() for actor in current.managed.values()))
                 for child in families:
-                    self.assertEqual(child.wait(timeout=3), 0)
+                    self.assertEqual(child.wait(timeout=60), 0)
                 with self.assertRaises(probe.Refused):
                     current.prepare_managed_stop()
 
@@ -341,7 +341,7 @@ if child:
             def exit_before_write(body):
                 self.assertEqual(current.managed_cleanup, "live")
                 families[0].stdin.write(b"E"); families[0].stdin.flush()
-                self.assertEqual(families[0].wait(timeout=3), 0)
+                self.assertEqual(families[0].wait(timeout=60), 0)
                 # Execute the real bounded output/verify path. No ready byte
                 # may be written after one of the original handles is dead.
                 original_output(body)
@@ -355,7 +355,7 @@ if child:
     def test_actual_child_identity_is_held_and_close_leaks_no_descriptors(self):
         before = own_fd_count()
         with self.child() as child:
-            held = probe.Process(child.pid, "shell", time.monotonic() + 5,
+            held = probe.Process(child.pid, "shell", time.monotonic() + 60,
                                  expected_parent=os.getpid(), expected_path=os.path.realpath(sys.executable))
             try:
                 identity = dict(held.identity)
@@ -373,7 +373,7 @@ if child:
             for expected in ({"expected_parent": os.getpid() + 1}, {"expected_argv": b"foreign\0"},
                              {"expected_digest": "0" * 64}, {"expected_size": 0}):
                 with self.subTest(field=next(iter(expected))), self.assertRaises(probe.Refused):
-                    probe.Process(child.pid, "shell", time.monotonic() + 5, **expected)
+                    probe.Process(child.pid, "shell", time.monotonic() + 60, **expected)
                 self.assertEqual(own_fd_count(), before)
                 fd = os.pidfd_open(child.pid)
                 try:
@@ -383,10 +383,10 @@ if child:
 
     def test_actual_process_exit_refuses_even_while_birth_is_still_reserved(self):
         with self.child() as child:
-            held = probe.Process(child.pid, "shell", time.monotonic() + 5)
+            held = probe.Process(child.pid, "shell", time.monotonic() + 60)
             try:
                 child.stdin.write(b"X"); child.stdin.flush()
-                self.assertTrue(select.select([held.pidfd], [], [], 3)[0])
+                self.assertTrue(select.select([held.pidfd], [], [], 60)[0])
                 with self.assertRaises(probe.Refused):
                     held.verify()
             finally:
@@ -394,11 +394,11 @@ if child:
 
     def test_actual_same_birth_exec_change_refuses(self):
         with self.child() as child:
-            held = probe.Process(child.pid, "shell", time.monotonic() + 5)
+            held = probe.Process(child.pid, "shell", time.monotonic() + 60)
             try:
                 original = held.identity["start_ticks"]
                 child.stdin.write(b"E"); child.stdin.flush()
-                deadline = time.monotonic() + 3
+                deadline = time.monotonic() + 60
                 while os.readlink(f"/proc/{child.pid}/exe") == held.identity["executable"]:
                     self.assertLess(time.monotonic(), deadline)
                     time.sleep(0.01)
@@ -410,14 +410,14 @@ if child:
 
     def test_corrupt_birth_and_terminal_ancestor_refuse_without_child_admission(self):
         with self.child() as child:
-            held = probe.Process(child.pid, "shell", time.monotonic() + 5)
+            held = probe.Process(child.pid, "shell", time.monotonic() + 60)
             try:
                 held.identity["start_ticks"] += 1
                 with self.assertRaises(probe.Refused):
                     held.verify()
                 with mock.patch.object(probe.os, "pidfd_open", side_effect=AssertionError("child admitted")):
                     with self.assertRaises(probe.Refused):
-                        probe.Process(child.pid, "session", time.monotonic() + 5, parent=held)
+                        probe.Process(child.pid, "session", time.monotonic() + 60, parent=held)
             finally:
                 held.close()
 
@@ -547,7 +547,7 @@ if child:
         argument.workspace_sha256 = hashlib.sha256(image_bytes).hexdigest()
         argument.workspace_size = len(image_bytes)
         current = probe.Probe(argument)
-        current.deadline = time.monotonic() + 15
+        current.deadline = time.monotonic() + 300
         current.input_fd = input_read
         events = []
         try:
@@ -605,8 +605,8 @@ if child:
                 child.stdin.close()
                 if not select.select([fd], [], [], 1)[0]:
                     signal.pidfd_send_signal(fd, signal.SIGKILL)
-                self.assertTrue(select.select([fd], [], [], 3)[0])
-                child.wait(timeout=1)
+                self.assertTrue(select.select([fd], [], [], 60)[0])
+                child.wait(timeout=60)
             finally:
                 os.close(fd)
                 os.close(input_read)

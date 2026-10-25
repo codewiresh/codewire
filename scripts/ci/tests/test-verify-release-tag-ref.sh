@@ -55,7 +55,7 @@ status = body.wait()  # Preserve the original body's direct-child wait and exit.
 
 # Original traps, nested direct waits and Signer.close have all finished.
 # Reap only this isolated owner's adopted helpers; no cleanup signals are sent.
-deadline = time.monotonic() + 5
+deadline = time.monotonic() + 60
 try:
     while True:
         if time.monotonic() >= deadline:

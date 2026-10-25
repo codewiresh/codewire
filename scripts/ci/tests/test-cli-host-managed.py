@@ -216,7 +216,7 @@ class Admission(unittest.TestCase):
             with os.fdopen(read, "rb", buffering=0) as stream:
                 os.write(write, payload)
                 os.close(write)
-                with self.assertRaises(H.Failure): H.read_private_ready(stream, timeout=0.1)
+                with self.assertRaises(H.Failure): H.read_private_ready(stream, timeout=60)
         read, write = os.pipe()
         with os.fdopen(read, "rb", buffering=0) as stream:
             os.write(write, b"partial")
@@ -580,7 +580,7 @@ class Interruption(unittest.TestCase):
     def bare(self, agent="claude"):
         journey = object.__new__(H.Journey)
         journey.conversations = {"worker": {"driver": "worker-driver", "agent": agent}}
-        journey.deadline, journey.observations = time.monotonic() + 90, []
+        journey.deadline, journey.observations = time.monotonic() + 600, []
         return journey
 
     def held_inbox(self, **changes):
@@ -719,13 +719,13 @@ class Kernel(unittest.TestCase):
         try:
             result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--kernel-case", name],
                                     env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LC_ALL": "C"},
-                                    capture_output=True, text=True, timeout=20)
+                                    capture_output=True, text=True, timeout=600)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(select.select([handle], [], [], 0)[0], "unrelated sibling was signalled")
             return json.loads(result.stdout)
         finally:
             signal.pidfd_send_signal(handle, signal.SIGTERM)
-            sibling.wait(timeout=5)
+            sibling.wait(timeout=60)
             os.close(handle)
 
     def test_actual_subreaper_normal_family_echild_without_salvage(self):
@@ -773,11 +773,11 @@ def kernel_case(name):
             time.sleep(0.001)
         pin = H.Process(child.pid, parent=os.getpid())
         child.stdin.close()
-        child.wait(timeout=5)
+        child.wait(timeout=60)
         if pin:
             assert pin.dead()
             pin.close()
-        proof = H.reap_family(timeout=2)
+        proof = H.reap_family(timeout=60)
     elif name == "detached":
         read, write = os.pipe()
         launcher = os.fork()
@@ -808,7 +808,7 @@ def kernel_case(name):
             pass
         else:
             raise AssertionError("normal shutdown incorrectly proved clean")
-        proof = H.reap_family(timeout=5, salvage=True)
+        proof = H.reap_family(timeout=60, salvage=True)
         proof["product_success"] = False
     elif name == "socket":
         with tempfile.TemporaryDirectory(prefix="cwhmk-") as temporary:
@@ -845,7 +845,7 @@ def kernel_case(name):
                 refused = False
             pin.close()
             proof = {"kernel_socket_pidfd": True, "cloexec": cloexec, "replacement_refused": refused,
-                     **H.reap_family(timeout=2)}
+                     **H.reap_family(timeout=60)}
     elif name == "clone":
         # raw fork-like clone with exit_signal=0: plain waitpid must exclude it.
         # No Python callback/custom stack executes, and __WALL proves cleanup.
@@ -866,7 +866,7 @@ def kernel_case(name):
         else:
             plain = False
         assert plain, "plain waitpid unexpectedly included non-SIGCHLD clone"
-        proof = H.reap_family(timeout=5, salvage=True)
+        proof = H.reap_family(timeout=60, salvage=True)
         proof.update(plain_echild_while_clone_alive=True, product_success=False)
     else:
         raise AssertionError("unknown closed kernel fixture")

@@ -402,7 +402,9 @@ class OwnedFailureDiagnostics(unittest.TestCase):
         process = subprocess.Popen(command, cwd=ROOT, env=self.environment, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            stdout, stderr = process.communicate(timeout=120)
+            # A hang guard, not a speed bound: under a loaded CI guest this
+            # fixture took over 120 s (main run 22887).
+            stdout, stderr = process.communicate(timeout=600)
         except subprocess.TimeoutExpired:
             # Cancel the identified CLI owner so its c0 handler drains children.
             process.terminate()

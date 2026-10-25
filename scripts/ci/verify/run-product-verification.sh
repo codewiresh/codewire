@@ -596,16 +596,18 @@ run_repo_rules() {
   # The steps below read it when run_side_by_side evaluates them.
   # shellcheck disable=SC2034
   repo_check_self_test="$(repo_check_self_test_flag)"
+  # The slowest rules come first, so the runner's bound never queues them.
   run_side_by_side <<'STEPS'
+  python3 scripts/checks/repo_checks.py permanent-raw-surface $repo_check_self_test
+  python3 scripts/checks/repo_checks.py epoch-material-cache-owner $repo_check_self_test
+  scripts/ci/tests/test-openbao-only-secret-authority.sh
   run_verification_shell_syntax
   scripts/ci/tests/test-go-source-ownership.sh
   scripts/ci/verify/check-rust-toolchain.sh
   scripts/ci/tests/test-rust-owned-fixtures.sh
   python3 -B scripts/ci/tests/test-runtime-profile.py
   scripts/ci/tests/test-admin-proto-boundary.sh
-  scripts/ci/tests/test-openbao-only-secret-authority.sh
   python3 scripts/checks/repo_checks.py license-map
-  python3 scripts/checks/repo_checks.py permanent-raw-surface $repo_check_self_test
   python3 scripts/checks/repo_checks.py design-tokens --self-test
   python3 scripts/checks/repo_checks.py identity-free-workspace --self-test
   python3 scripts/checks/repo_checks.py workspace-image-pin --self-test
@@ -614,7 +616,6 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py webpki-roots-floor
   scripts/ci/release/check-mirror-content.sh --tree
   python3 scripts/checks/repo_checks.py mcp-settings --self-test
-  python3 scripts/checks/repo_checks.py epoch-material-cache-owner $repo_check_self_test
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
   python3 scripts/checks/repo_checks.py public-address-literals --self-test
@@ -632,7 +633,18 @@ STEPS
 run_ci_script_tests() {
   (
   isolate_kind_fixture_environment
+  # The slowest tests come first, so the runner's bound never queues them
+  # behind the quick ones.
   run_side_by_side <<'STEPS'
+  scripts/ci/tests/test-workspace-image-verify-workflow.sh
+  scripts/ci/tests/test-integration-postgres.sh
+  scripts/ci/tests/test-select-verification.sh
+  python3 -I -B scripts/ci/tests/test-cw-runtime-source.py
+  scripts/ci/tests/test-local-rust-cache.sh
+  scripts/ci/tests/test-build-local-image.sh
+  python3 -I -B scripts/ci/tests/test-cw-image-consumer.py
+  scripts/ci/tests/test-cargo-target-runner-failures.sh
+  scripts/ci/tests/test-darwin-cross-check.sh
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-run-side-by-side.sh
   scripts/ci/tests/test-warm-rust-cache.sh
@@ -640,7 +652,6 @@ run_ci_script_tests() {
   scripts/ci/tests/test-build-runner-measure.sh
   scripts/ci/tests/test-bound-cargo-jobs.sh
   scripts/ci/tests/test-build-once.sh
-  scripts/ci/tests/test-select-verification.sh
   python3 -B scripts/ci/tests/test-last-scheduled-run.py
   python3 -I -B scripts/ci/tests/test-ci-done-measures.py
   scripts/ci/tests/test-service-ssh-image-verifier.sh
@@ -648,22 +659,17 @@ run_ci_script_tests() {
   scripts/ci/tests/test-require-verification-results.sh
   scripts/ci/tests/test-verify-tested-tree-receipt.sh
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
-  scripts/ci/tests/test-cargo-target-runner-failures.sh
   scripts/ci/tests/test-runner-no-bytecode.sh
-  scripts/ci/tests/test-darwin-cross-check.sh
   scripts/ci/tests/test-package-codewire-desktop.sh
   scripts/ci/tests/test-rust-toolchain.sh
   scripts/ci/tests/test-cargo-cache-capacity.sh
   scripts/ci/tests/test-ci-tool-downloads.sh
   python3 -B scripts/ci/tests/test-linux-vmm-kernel.py
-  scripts/ci/tests/test-build-local-image.sh
   scripts/ci/tests/test-dashboard-image-network-probe.sh
   scripts/ci/tests/test-build-dashboard-image.sh
   scripts/ci/tests/test-workspace-agent-contract.sh
   python3 -I -B scripts/ci/tests/test-cw-image-context.py
-  python3 -I -B scripts/ci/tests/test-cw-runtime-source.py
   python3 -I -B scripts/ci/tests/test-cw-image-source.py
-  python3 -I -B scripts/ci/tests/test-cw-image-consumer.py
   scripts/ci/tests/test-build-kind-smokes.sh
   python3 -B scripts/ci/tests/test-kind-build-artifacts.py
   scripts/ci/tests/test-preflight-openbao-native-secrets.sh
@@ -676,16 +682,13 @@ run_ci_script_tests() {
   scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-credentials.sh
   scripts/ci/tests/test-select-protected-rust-cache.sh
   scripts/ci/tests/test-run-host-rust-build.sh
-  scripts/ci/tests/test-local-rust-cache.sh
   scripts/ci/tests/test-check-workspace-hack.sh
-  scripts/ci/tests/test-integration-postgres.sh
   python3 -B scripts/ci/tests/test-integration-lane.py
   python3 scripts/dev/test-macos-cli.py
   python3 scripts/dev/test-macos-ext4-tool.py
   python3 scripts/dev/test-macos-git-tool.py
   python3 scripts/dev/test-macos-local-runtime.py
   python3 scripts/dev/test-linux-local-runtime.py
-  scripts/ci/tests/test-workspace-image-verify-workflow.sh
 STEPS
   )
 }

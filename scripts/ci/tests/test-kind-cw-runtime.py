@@ -393,7 +393,7 @@ if [ "$SELECT_MANAGED" = 1 ]; then run_retained_cw_managed_agents_suite; else ru
             **overrides}
         result = subprocess.run(["/usr/bin/bash", "-ceu", script, "--",
             str(ROOT / "scripts/ci/verify/kind/suites/cw-runtime.sh")], env=environment,
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, text=True, timeout=300)
         return result, captured
 
     def test_managed_mode_preserves_original_three_producer_intake_and_named_profile_guard(self):

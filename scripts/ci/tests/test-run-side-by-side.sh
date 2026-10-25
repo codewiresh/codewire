@@ -145,6 +145,16 @@ printf 'probe\n%.0s' 1 2 3 4 5 6 | env -u VERIFICATION_TEST_JOBS CODEWIRE_CI_CPU
 [[ "$(sort -n "$work/counts" | tail -1)" -ge 2 ]] || fail 'commands did not run side by side under the CPU share'
 pass
 
+# A command runs its own cases with a quarter of the limit, at least two, or
+# one when the caller asked for one at a time.
+for limit_and_nested in 16:4 8:2 3:2 1:1; do
+  nested_seen="$(VERIFICATION_TEST_JOBS="${limit_and_nested%%:*}" run_side_by_side \
+    <<<'echo "nested=$VERIFICATION_TEST_JOBS"' | sed -n 's/^nested=//p')"
+  [[ "$nested_seen" == "${limit_and_nested#*:}" ]] ||
+    fail "a command under limit ${limit_and_nested%%:*} saw VERIFICATION_TEST_JOBS=$nested_seen"
+done
+pass
+
 # The limit must be a positive integer.
 for limit in 0 -1 two ''; do
   status=0
