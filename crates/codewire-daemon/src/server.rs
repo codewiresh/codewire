@@ -197,28 +197,22 @@ where
     IE: Into<Box<dyn Error + Send + Sync>>,
     F: Future<Output = ()> + Send + 'static,
 {
-    serve_host_control_grpc_within(
-        config,
-        binding,
-        incoming,
-        shutdown,
-        crate::host_process::JOIN_TIMEOUT,
-    )
-    .await
+    serve_host_control_grpc_within(config, binding, incoming, shutdown, None).await
 }
 
-/// [`serve_host_control_grpc_with_incoming`] with `host_cleanup_bound` in
-/// place of each host session cleanup step's one-second bound. A test whose
-/// subject is not that bound lengthens it into a hang guard, so a stalled CI
-/// slot cannot spend it and turn a confirmed stop into an unknown one. The
-/// host lifecycle serves [`serve_host_control_grpc_with_incoming`].
+/// [`serve_host_control_grpc_with_incoming`] with `host_bound`, when given,
+/// in place of every host session bound: each cleanup step's one second and
+/// an input's or stop's five-second dispatch. A test whose subject is none of
+/// them lengthens them into a hang guard, so a stalled CI slot cannot spend
+/// one and turn a confirmed stop into an unknown one. The host lifecycle
+/// serves [`serve_host_control_grpc_with_incoming`].
 #[cfg(target_os = "linux")]
 pub async fn serve_host_control_grpc_within<I, IO, IE, F>(
     config: Config,
     binding: crate::host_control::HostControlBinding,
     incoming: I,
     shutdown: F,
-    host_cleanup_bound: Duration,
+    host_bound: Option<Duration>,
 ) -> Result<()>
 where
     I: Stream<Item = std::result::Result<IO, IE>> + Send + 'static,
@@ -234,7 +228,13 @@ where
         config,
         DaemonRuntimeState::ready(),
         None,
-        Some((binding, host_cleanup_bound)),
+        Some((
+            binding,
+            host_bound.map_or(
+                crate::durable_session::HostBounds::PRODUCT,
+                crate::durable_session::HostBounds::all,
+            ),
+        )),
         None,
         incoming,
         shutdown,
@@ -382,8 +382,8 @@ async fn serve<I, IO, IE, F>(
     runtime_state: DaemonRuntimeState,
     // The hosted entry points' agent logins.
     logins: Option<AgentLogins>,
-    // Host control's binding and its sessions' cleanup step bound.
-    host_control_binding: Option<(HostControlBinding, Duration)>,
+    // Host control's binding and its sessions' bounds.
+    host_control_binding: Option<(HostControlBinding, crate::durable_session::HostBounds)>,
     // A bound daemon's application ports and its own Pod UID.
     bound: Option<(crate::app_ports::AppPortsSender, &str)>,
     incoming: I,
@@ -423,8 +423,8 @@ where
     #[cfg(target_os = "linux")]
     let startup_config = config.clone();
     let mut implementation = DaemonServiceImpl::with_runtime_state(config, runtime_state);
-    if let Some((_, bound)) = &host_control_binding {
-        implementation = implementation.with_host_cleanup_bound(*bound);
+    if let Some((_, bounds)) = &host_control_binding {
+        implementation = implementation.with_host_bounds(*bounds);
     }
     if let Some(app_ports) = app_ports {
         implementation = implementation.with_app_ports(app_ports);

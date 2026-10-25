@@ -424,9 +424,9 @@ mod tests {
         fs::set_permissions(&socket, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         let (closing, closed) = tokio::sync::oneshot::channel();
         let binding = codewire_daemon::host_control::HostControlBinding::new(id.clone()).unwrap();
-        // The host sessions' one-second cleanup step bound ran out on a
-        // loaded CI slot and a confirmed stop read as unknown. This test is
-        // not about that bound, so it is a hang guard here.
+        // The host sessions' cleanup and dispatch bounds ran out on a loaded
+        // CI slot and a confirmed stop read as unknown. This test is about
+        // neither, so they are a hang guard here.
         let server = tokio::spawn(async move {
             codewire_daemon::serve_host_control_grpc_within(
                 config,
@@ -435,7 +435,7 @@ mod tests {
                 async {
                     let _ = closed.await;
                 },
-                HANG,
+                Some(HANG),
             )
             .await
         });

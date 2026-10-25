@@ -110,15 +110,12 @@ impl DaemonServiceImpl {
         self
     }
 
-    /// The same service whose session engine bounds each host cleanup step
-    /// by `bound`; see [`SessionEngine::with_host_cleanup_bound`]. It replaces
-    /// an engine that has not started, so it is called before serving.
-    pub(crate) fn with_host_cleanup_bound(mut self, bound: std::time::Duration) -> Self {
-        self.session_engine = SessionEngine::with_host_cleanup_bound(
-            &self.config,
-            self.credential_bridge.clone(),
-            bound,
-        );
+    /// The same service whose session engine has `bounds` for its host
+    /// sessions; see [`SessionEngine::with_host_bounds`]. It replaces an
+    /// engine that has not started, so it is called before serving.
+    pub(crate) fn with_host_bounds(mut self, bounds: crate::durable_session::HostBounds) -> Self {
+        self.session_engine =
+            SessionEngine::with_host_bounds(&self.config, self.credential_bridge.clone(), bounds);
         self
     }
 

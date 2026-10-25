@@ -18329,8 +18329,19 @@ mod tests {
         drop(writer);
 
         // The writer's end lets the collector task run the wanted collection.
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while blobs.join(stale_content.hex()).exists() {
+        // One collection removes the stale content, then the stale runtime
+        // artifact's manifest and blob, so the wait ends when all three are
+        // gone. The bound only turns a collection that never runs into a
+        // failure; a stalled CI slot can take seconds over it.
+        let artifact_manifests = engine.path().join("runtime-artifacts/generations");
+        let artifact_blobs = engine.path().join("runtime-artifacts/blobs");
+        let stale = [
+            blobs.join(stale_content.hex()),
+            artifact_manifests.join(format!("{stale_artifact}.json")),
+            artifact_blobs.join(format!("r-{stale_kernel}")),
+        ];
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while stale.iter().any(|path| path.exists()) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -18349,8 +18360,6 @@ mod tests {
             assert!(blobs.join(digest.hex()).is_file());
         }
         assert!(!blobs.join(stale_content.hex()).exists());
-        let artifact_manifests = engine.path().join("runtime-artifacts/generations");
-        let artifact_blobs = engine.path().join("runtime-artifacts/blobs");
         assert!(
             artifact_manifests
                 .join(format!("{candidate_artifact}.json"))

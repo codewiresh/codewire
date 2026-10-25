@@ -105,11 +105,15 @@ pub(crate) fn stop(id: u128, scope: &Scope, session: &str, generation: u64) -> M
     .unwrap()
 }
 
-/// A host engine whose cleanup steps are bounded by HANG, not the product's
-/// one second: no test here is about that bound, and a stalled CI slot spent
-/// it, so a confirmed stop read as unknown.
+/// A host engine whose host bounds are all HANG, not the product's one-second
+/// cleanup steps and five-second dispatch: no test here is about them, and a
+/// stalled CI slot spent them, so a confirmed stop read as unknown.
 pub(crate) fn host_engine(config: &crate::Config) -> SessionEngine {
-    SessionEngine::with_host_cleanup_bound(config, CredentialBridge::new(None), HANG)
+    SessionEngine::with_host_bounds(
+        config,
+        CredentialBridge::new(None),
+        crate::durable_session::HostBounds::all(HANG),
+    )
 }
 
 pub(crate) async fn owner(root: &Path) -> (Owner, SessionEngine) {
@@ -238,7 +242,12 @@ async fn host_control_duplicate_launch_input_and_stop_have_one_effect() {
     .unwrap();
     let stopped = stop(5, &scope(), &launched.session_id, 1);
     let first = outcome(&owner, stopped.clone()).await;
-    assert_eq!(first.phase, v1::HostControlRequestPhase::Completed as i32);
+    assert_eq!(
+        first.phase,
+        v1::HostControlRequestPhase::Completed as i32,
+        "{first:?}: {:?}",
+        engine.get(&launched.session_id).await
+    );
     assert!(!first.cleanup_unknown);
     assert_eq!(owner.mutate(stopped).await.unwrap().phase, first.phase);
     let bytes = std::fs::read_to_string(marker).unwrap();
@@ -686,6 +695,11 @@ fn host_control_crash_child() {
             state.store.crash_at_cut = true;
             drop(state);
             let _ = owner.mutate(crash_request(&root)).await;
+            // The mutation answers after its RPC join bound, which a stalled
+            // slot can spend before the owner's launch reaches the cut. The
+            // launch goes on and the cut ends this process; HANG only turns a
+            // cut that never comes into a failure.
+            tokio::time::sleep(HANG).await;
             panic!("cut did not terminate the isolated producer");
         });
 }

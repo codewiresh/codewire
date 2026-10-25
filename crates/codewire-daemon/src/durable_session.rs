@@ -77,6 +77,33 @@ impl std::fmt::Debug for SessionEngine {
     }
 }
 
+/// Host sessions' wall-clock bounds. Each one that runs out leaves its
+/// outcome unknown, never retried.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HostBounds {
+    /// Each step of a host process group's cleanup: descendants settling
+    /// after KILL, the leader's reap and the output drain.
+    pub(crate) cleanup_step: Duration,
+    /// A host-control input's or stop's dispatch: queueing and the
+    /// monitor's write and flush, or its whole cleanup.
+    pub(crate) control_dispatch: Duration,
+}
+
+impl HostBounds {
+    pub(crate) const PRODUCT: Self = Self {
+        cleanup_step: crate::host_process::JOIN_TIMEOUT,
+        control_dispatch: SESSION_INPUT_TIMEOUT,
+    };
+
+    /// Every host bound replaced by `bound`.
+    pub(crate) const fn all(bound: Duration) -> Self {
+        Self {
+            cleanup_step: bound,
+            control_dispatch: bound,
+        }
+    }
+}
+
 struct SessionEngineInner {
     config: Config,
     credential_bridge: CredentialBridge,
@@ -91,9 +118,9 @@ struct SessionEngineInner {
     /// The reason the store last refused to open, logged once and reported
     /// in health diagnostics until the store opens.
     store_refusal: Mutex<Option<String>>,
-    /// Bounds each step of a host process group's cleanup:
-    /// [`crate::host_process::JOIN_TIMEOUT`] in the product.
-    host_cleanup_bound: Duration,
+    /// Host sessions' wall-clock bounds: [`HostBounds::PRODUCT`] in the
+    /// product.
+    host_bounds: HostBounds,
     /// How many stops and restarts asked the record helper about an active
     /// run to interrupt first.
     #[cfg(all(test, target_os = "linux"))]
@@ -497,17 +524,17 @@ impl SessionEngine {
     }
 
     pub(crate) fn new(config: &Config, credential_bridge: CredentialBridge) -> Self {
-        Self::with_host_cleanup_bound(config, credential_bridge, crate::host_process::JOIN_TIMEOUT)
+        Self::with_host_bounds(config, credential_bridge, HostBounds::PRODUCT)
     }
 
-    /// [`Self::new`] with `bound` in place of each host cleanup step's
-    /// one-second bound. A test whose subject is not that bound lengthens it
-    /// into a hang guard, so a stalled CI slot cannot spend it and turn a
-    /// confirmed stop into an unknown one.
-    pub(crate) fn with_host_cleanup_bound(
+    /// [`Self::new`] with `bounds` in place of host sessions' product bounds.
+    /// A test whose subject is none of them lengthens them into a hang guard
+    /// ([`HostBounds::all`]), so a stalled CI slot cannot spend one and turn
+    /// a confirmed stop into an unknown one.
+    pub(crate) fn with_host_bounds(
         config: &Config,
         credential_bridge: CredentialBridge,
-        bound: Duration,
+        bounds: HostBounds,
     ) -> Self {
         Self {
             inner: Arc::new(SessionEngineInner {
@@ -525,7 +552,7 @@ impl SessionEngine {
                 launches: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
                 store_refusal: Mutex::new(None),
-                host_cleanup_bound: bound,
+                host_bounds: bounds,
                 #[cfg(all(test, target_os = "linux"))]
                 stop_interrupt_checks: std::sync::atomic::AtomicUsize::new(0),
                 #[cfg(all(test, target_os = "linux"))]
@@ -1969,7 +1996,7 @@ impl SessionEngine {
             };
             // Queueing and the monitor's write/flush or cleanup share one
             // bound. An issued timeout is retained Unknown, never replayable.
-            tokio::time::timeout(SESSION_INPUT_TIMEOUT, dispatch)
+            tokio::time::timeout(self.inner.host_bounds.control_dispatch, dispatch)
                 .await
                 .map_err(|_| Error::Unavailable)??;
         }
@@ -2539,7 +2566,11 @@ impl SessionEngine {
         #[cfg(unix)]
         let mut host_group = if self.inner.config.host.is_some() {
             match child.id().and_then(|pid| {
-                crate::host_process::OwnedProcessGroup::new(pid, self.inner.host_cleanup_bound).ok()
+                crate::host_process::OwnedProcessGroup::new(
+                    pid,
+                    self.inner.host_bounds.cleanup_step,
+                )
+                .ok()
             }) {
                 Some(group) => Some(group),
                 None => {
@@ -2764,7 +2795,11 @@ impl SessionEngine {
         #[cfg(unix)]
         let mut host_group = if self.inner.config.host.is_some() {
             match child.process_id().and_then(|pid| {
-                crate::host_process::OwnedProcessGroup::new(pid, self.inner.host_cleanup_bound).ok()
+                crate::host_process::OwnedProcessGroup::new(
+                    pid,
+                    self.inner.host_bounds.cleanup_step,
+                )
+                .ok()
             }) {
                 Some(group) => Some(group),
                 None => {
