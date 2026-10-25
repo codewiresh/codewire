@@ -86,6 +86,17 @@ while :; do
 done
 EOF
 chmod +x "$BIN/kubectl"
+# A loaded host can run the forked forward for a while before nohup execs
+# kubectl, and until then its command line is not kubectl's. FAKE_NOHUP_DELAY
+# holds the fork in a shell whose command line names no kubectl argument, as
+# the helper's forked shell's does, before the real nohup runs.
+real_nohup="$(command -v nohup)"
+cat >"$BIN/nohup" <<EOF
+#!/usr/bin/env bash
+FAKE_NOHUP_COMMAND="\$(printf '%q ' "\$@")" exec bash -c \
+  'sleep "\${FAKE_NOHUP_DELAY:-0}"; eval "exec $real_nohup \$FAKE_NOHUP_COMMAND"'
+EOF
+chmod +x "$BIN/nohup"
 
 run_helper() {
   PATH="$BIN:$PATH" \
@@ -120,6 +131,19 @@ process_is_live "$managed_pid" && fail 'helper-owned forward remained live after
 # reaps it. That is not a live forward and must not block a restart.
 FAKE_KUBECTL_MODE=ipv4 run_helper start postgres >"$FIXTURE/restart-after-stop.out"
 run_helper stop postgres >"$FIXTURE/restart-after-stop-stop.out"
+
+# A forward still starting is the helper's own forward, not one that exited:
+# start waits for its command line, becomes ready and stops cleanly.
+FAKE_NOHUP_DELAY=1 FAKE_KUBECTL_MODE=ipv4 run_helper start postgres >"$FIXTURE/slow-exec.out" 2>&1 ||
+  fail "a forward that execs kubectl late was refused: $(cat "$FIXTURE/slow-exec.out")"
+read -r slow_pid _ <"$STATE/postgres.pid"
+run_helper stop postgres >"$FIXTURE/slow-exec-stop.out"
+# The stopped forward exits on its TERM; give a loaded host a moment.
+for _ in $(seq 1 50); do
+  process_is_live "$slow_pid" || break
+  sleep 0.1
+done
+process_is_live "$slow_pid" && fail 'a late-exec forward remained live after stop'
 
 # IPv6-only readiness is not equivalent to the advertised IPv4 endpoint.
 FAKE_KUBECTL_MODE=ipv6 expect_failure ipv6 run_helper start postgres

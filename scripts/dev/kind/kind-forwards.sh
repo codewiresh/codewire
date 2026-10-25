@@ -181,6 +181,24 @@ refuse_unowned_state() {
   return 1
 }
 
+# A forward starts as a fork of this helper's shell and shows the kubectl
+# command line only once nohup has exec'd it; a loaded host can take a while.
+# Exec keeps the PID and its start time, so while the recorded process lives
+# with its recorded start token it is still this helper's starting forward.
+# Wait for its command line, at most ten seconds.
+wait_for_exec() {
+  local service="$1" current_start
+  for _ in $(seq 1 100); do
+    read_state "$service" || return 1
+    process_is_live "$STATE_PID" || return 1
+    current_start="$(process_start_token "$STATE_PID")"
+    [ -n "$current_start" ] && [ "$current_start" = "$STATE_START_TOKEN" ] || return 1
+    managed_command_matches "$service" && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 wait_ready() {
   local service="$1"
   local port log
@@ -235,6 +253,7 @@ start_service() {
     return 1
   fi
   printf '%s %s\n' "$pid" "$start_token" >"$(pid_file "$service")"
+  wait_for_exec "$service" || true
   if ! wait_ready "$service"; then
     stop_service "$service" || true
     return 1
