@@ -247,6 +247,39 @@ ci_script_test_input() {
   return 1
 }
 
+# The artifact planner's suite (scripts/ci/plan/test.sh) runs when one of its
+# inputs changes (#3119 L3): the planner and its tests, the files its graph
+# names as trusted policy (artifact-graph.json "policy_files"), and the Cargo
+# manifests and lockfiles its Cargo oracle reads. test-select-verification.sh
+# proves the policy files are all listed.
+ci_plan_test_input() {
+  case "$1" in
+    scripts/ci/plan/*|\
+    .gitea/workflows/deploy-dev.yaml|.gitea/workflows/support-images.yaml|\
+    scripts/ci/deploy/resolve-deployed-source.sh|\
+    scripts/ci/images/resolve-published-support-pair.sh|\
+    scripts/ci/receipts/emit-verification-receipt.py|\
+    scripts/ci/receipts/verify-release-tag-receipt.sh|\
+    scripts/ci/receipts/verify-tested-tree-receipt.sh|\
+    scripts/ci/select/require-verification-results.sh|\
+    scripts/ci/select/select-verification.sh|\
+    Cargo.toml|Cargo.lock|crates/*/Cargo.toml|crates/*/Cargo.lock|rust-toolchain.toml)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# The repository checks' self-tests, which prove a check catches what it
+# should, run when the checks change (#3119 L1). The checks themselves always
+# run.
+repo_check_self_test_input() {
+  case "$1" in
+    scripts/checks/*) return 0 ;;
+  esac
+  return 1
+}
+
 # The Kind tool tests run with Edge static verification only when one of
 # their inputs changes (#3119 R8): the CI and developer scripts, and every
 # product file one of them reads from the tree rather than from a fixture.
@@ -449,7 +482,8 @@ PY
 select_all_product() {
   local include_ios="${1:-false}" family
   for family in \
-      policy policy_shell ci_script_tests rust go_support web docs sdk_go sdk_ts \
+      policy policy_shell ci_script_tests ci_plan_tests repo_check_self_tests \
+      rust go_support web docs sdk_go sdk_ts \
       sdk_python database \
       service_integration edge_kind kind_tools release deploy security \
       confidential_script_tests dev_smoke_script_tests; do
@@ -515,6 +549,8 @@ select_dispatch_request() {
       select_token policy
       select_token policy_shell
       select_token ci_script_tests
+      select_token ci_plan_tests
+      select_token repo_check_self_tests
       ;;
     web|docs|sdk_go|sdk_ts|sdk_python|database|release|deploy|ios)
       select_token "$request"
@@ -641,6 +677,12 @@ if [ "$event_selected" = false ]; then
     fi
     if kind_tool_test_input "$path"; then
       select_token kind_tools
+    fi
+    if ci_plan_test_input "$path"; then
+      select_token ci_plan_tests
+    fi
+    if repo_check_self_test_input "$path"; then
+      select_token repo_check_self_tests
     fi
 
     # The JavaScript supply-chain audit is grep-only. Run it for any path it
@@ -2366,10 +2408,14 @@ fi
 # This marker means absence of policy_shell is an authoritative decision from
 # a selector that knows the shell-policy domain. Older trusted selectors omit
 # it, so candidate runners must keep executing ShellCheck for legacy output.
-# ci_script_tests_omittable says the same of the CI-script tests.
+# ci_script_tests_omittable says the same of the CI-script tests,
+# ci_plan_tests_omittable of the artifact planner's suite, and
+# repo_check_self_tests_omittable of the repository checks' self-tests.
 if token_selected policy; then
   select_token policy_shell_omittable
   select_token ci_script_tests_omittable
+  select_token ci_plan_tests_omittable
+  select_token repo_check_self_tests_omittable
 fi
 
 # Kind takes over an hour. A pull request runs it only with the ci-full

@@ -29,7 +29,7 @@ grep -Fq 'selected ci_script_tests || ! selected ci_script_tests_omittable' \
   "$policy_dispatch" || fail 'policy runner omits the legacy-safe CI-script test guard'
 grep -Fq 'policy-core) run_policy_core' "$RUNNER" \
   || fail 'hosted policy core has no independent entrypoint'
-grep -Fq 'policy-repo-rules|policy-ci-script-tests) run_policy_part "$FAMILY"' "$RUNNER" \
+grep -Fq 'policy-repo-rules|policy-ci-script-tests|policy-planner-tests) run_policy_part "$FAMILY"' "$RUNNER" \
   || fail 'policy core parts have no independent entrypoints'
 grep -Fq 'policy-parts) policy_parts' "$RUNNER" \
   || fail 'the policy part list has no entrypoint'

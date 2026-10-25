@@ -268,8 +268,10 @@ run_verification_shell_syntax() {
   fi
 }
 
-# A pull request names its base: ShellCheck then covers only the scripts it
-# changes. Without a base (main, dispatch, local) it covers every script.
+# A pull request names its base, and a push to main the newest main commit
+# main CI verified (the base its selection compared with): ShellCheck then
+# covers only the scripts changed since. Without a base (an unverified main
+# base, a dispatch, local) it covers every script.
 run_shell_policy() {
   scripts/ci/verify/check-shell-scripts.sh --self-test
   if [ -n "${CODEWIRE_SHELL_POLICY_BASE:-}" ]; then
@@ -347,9 +349,21 @@ run_policy_core() {
 # private-content tree scan, every repo_checks rule and the guards that read
 # product source (#3119 A6). Every step is independent and keeps no state
 # outside its own scratch directory; run_side_by_side runs them side by side.
+# The two slowest repository-check self-tests (#3119 L1) run when the checks
+# change, as the selector's repo_check_self_tests says; the checks themselves
+# always run. A selection without repo_check_self_tests_omittable keeps them.
+repo_check_self_test_flag() {
+  if selected repo_check_self_tests || ! selected repo_check_self_tests_omittable; then
+    printf '%s\n' --self-test
+  fi
+}
+
 run_repo_rules() {
   (
   isolate_kind_fixture_environment
+  # The steps below read it when run_side_by_side evaluates them.
+  # shellcheck disable=SC2034
+  repo_check_self_test="$(repo_check_self_test_flag)"
   run_side_by_side <<'STEPS'
   run_verification_shell_syntax
   scripts/ci/tests/test-go-source-ownership.sh
@@ -359,7 +373,7 @@ run_repo_rules() {
   scripts/ci/tests/test-admin-proto-boundary.sh
   scripts/ci/tests/test-openbao-only-secret-authority.sh
   python3 scripts/checks/repo_checks.py license-map
-  python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
+  python3 scripts/checks/repo_checks.py permanent-raw-surface $repo_check_self_test
   python3 scripts/checks/repo_checks.py design-tokens --self-test
   python3 scripts/checks/repo_checks.py identity-free-workspace --self-test
   python3 scripts/checks/repo_checks.py workspace-image-pin --self-test
@@ -368,7 +382,7 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py webpki-roots-floor
   scripts/ci/release/check-mirror-content.sh --tree
   python3 scripts/checks/repo_checks.py mcp-settings --self-test
-  python3 scripts/checks/repo_checks.py epoch-material-cache-owner --self-test
+  python3 scripts/checks/repo_checks.py epoch-material-cache-owner $repo_check_self_test
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
   python3 scripts/checks/repo_checks.py public-address-literals --self-test
@@ -459,6 +473,12 @@ policy_parts() {
   if selected ci_script_tests || ! selected ci_script_tests_omittable; then
     printf 'policy-ci-script-tests\n'
   fi
+  # The artifact planner's suite runs when one of its inputs changes (#3119
+  # L3). A selection without ci_plan_tests_omittable runs it with Deploy, as
+  # before.
+  if selected ci_plan_tests; then
+    printf 'policy-planner-tests\n'
+  fi
 }
 
 run_policy_part() {
@@ -466,6 +486,7 @@ run_policy_part() {
     policy-shell) run_shell_policy ;;
     policy-repo-rules) run_repo_rules ;;
     policy-ci-script-tests) run_ci_script_tests ;;
+    policy-planner-tests) scripts/ci/plan/test.sh ;;
     *) return 2 ;;
   esac
 }
@@ -1096,7 +1117,11 @@ install_helm() {
 
 run_deploy() {
   scripts/ci/tests/test-install-temporal.sh
-  scripts/ci/plan/test.sh
+  # Policy runs the planner's suite for its own inputs (policy-planner-tests);
+  # a selection from an older selector runs it here.
+  if ! selected ci_plan_tests_omittable; then
+    scripts/ci/plan/test.sh
+  fi
   scripts/ci/tests/test-deploy-dev.sh
   scripts/ci/tests/test-build-push-runtime-images.sh
   python3 -B scripts/ci/tests/test-rerun-dev-publish.py
@@ -1259,7 +1284,7 @@ esac
 case "$FAMILY" in
   policy) run_policy ;;
   policy-core) run_policy_core ;;
-  policy-repo-rules|policy-ci-script-tests) run_policy_part "$FAMILY" ;;
+  policy-repo-rules|policy-ci-script-tests|policy-planner-tests) run_policy_part "$FAMILY" ;;
   policy-parts) policy_parts ;;
   policy-shell) run_shell_policy ;;
   contracts) run_contracts ;;

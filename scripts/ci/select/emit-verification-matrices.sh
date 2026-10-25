@@ -122,6 +122,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
     case "$token" in
       ''|valid:v3|complete|\
       policy|policy_shell|policy_shell_omittable|ci_script_tests|ci_script_tests_omittable|scheduled|\
+      ci_plan_tests|ci_plan_tests_omittable|repo_check_self_tests|repo_check_self_tests_omittable|\
       contracts|contracts_proto|go_support|go_tailnet|go_consumer_interop|\
       sdk_go|sdk_ts|sdk_python|web|docs|ios|\
       deploy|release|confidential_script_tests|dev_smoke_script_tests|\

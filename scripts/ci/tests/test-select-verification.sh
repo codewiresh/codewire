@@ -101,9 +101,25 @@ declare -F kind_tool_test_input >/dev/null || {
   exit 1
 }
 
+# The same for the artifact planner's suite (#3119 L3) and the repository
+# checks' self-tests (#3119 L1); ci_plan_tests_cases and
+# repo_check_self_tests_cases pin their edges.
+for selector_rule in ci_plan_test_input repo_check_self_test_input; do
+  eval "$(awk -v rule="$selector_rule() {" '
+    $0 == rule { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT/scripts/ci/select/select-verification.sh")"
+  declare -F "$selector_rule" >/dev/null || {
+    echo "the selector has no $selector_rule rule" >&2
+    exit 1
+  }
+done
+
 # A path case selects the CI-script tests when one of its paths is their
 # input, and the Kind tool tests when it selects Edge and one of its paths is
-# theirs.
+# theirs. The planner's suite and the
+# repository checks' self-tests follow their own inputs the same way.
 with_ci_script_tests() {
   local expected="$1" path
   shift
@@ -111,6 +127,22 @@ with_ci_script_tests() {
     for path in "$@"; do
       if ci_script_test_input "$path"; then
         expected="$expected ci_script_tests"
+        break
+      fi
+    done
+  fi
+  if [[ " $expected " == *' policy '* && " $expected " != *' ci_plan_tests '* ]]; then
+    for path in "$@"; do
+      if ci_plan_test_input "$path"; then
+        expected="$expected ci_plan_tests"
+        break
+      fi
+    done
+  fi
+  if [[ " $expected " == *' policy '* && " $expected " != *' repo_check_self_tests '* ]]; then
+    for path in "$@"; do
+      if repo_check_self_test_input "$path"; then
+        expected="$expected repo_check_self_tests"
         break
       fi
     done
@@ -135,6 +167,14 @@ assert_tokens() {
   if [[ " $expected " == *' policy '* ]] \
       && [[ " $expected " != *' ci_script_tests_omittable '* ]]; then
     expected="$expected ci_script_tests_omittable"
+  fi
+  if [[ " $expected " == *' policy '* ]] \
+      && [[ " $expected " != *' ci_plan_tests_omittable '* ]]; then
+    expected="$expected ci_plan_tests_omittable"
+  fi
+  if [[ " $expected " == *' policy '* ]] \
+      && [[ " $expected " != *' repo_check_self_tests_omittable '* ]]; then
+    expected="$expected repo_check_self_tests_omittable"
   fi
   if [[ " $expected " == *' edge_kind '* ]] \
       && [[ " $expected " != *' kind_tools_omittable '* ]]; then
@@ -1784,9 +1824,9 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
 run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release confidential_script_tests' docs/tag-path-is-ignored.md
 
-all_product='ci_script_tests kind_tools contracts contracts_proto database deploy docs edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release confidential_script_tests dev_smoke_script_tests rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product='ci_script_tests ci_plan_tests repo_check_self_tests kind_tools contracts contracts_proto database deploy docs edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release confidential_script_tests dev_smoke_script_tests rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 # A pull request without the Kind opt-in never selects Kind.
-all_product_pr='ci_script_tests contracts contracts_proto database deploy docs go_consumer_interop go_support go_tailnet policy policy_shell release confidential_script_tests dev_smoke_script_tests rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product_pr='ci_script_tests ci_plan_tests repo_check_self_tests contracts contracts_proto database deploy docs go_consumer_interop go_support go_tailnet policy policy_shell release confidential_script_tests dev_smoke_script_tests rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy security security_js" scripts/dev/dashboard-watch.py
 run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head false \
@@ -1918,6 +1958,77 @@ for product_path in \
     scripts/runtime/dev/smoke-dev-candidate.sh \
     Cargo.lock; do
   ci_script_tests_case omit "$product_path"
+done
+
+# The artifact planner's suite (#3119 L3) and the repository checks'
+# self-tests (#3119 L1) run for their own inputs, on a pull request and on a
+# push to main alike, and every policy selection says their omission is
+# authoritative. Before this, the planner's suite ran with Deploy only, so a
+# planner or Cargo manifest change never ran it.
+policy_input_case() {
+  local token="$1" want="$2" path="$3" paths="$TMP/policy-input.paths" selection event ref
+  printf '%s\n' "$path" > "$paths"
+  for event in pull_request push; do
+    ref=refs/pull/3119/head
+    [ "$event" = pull_request ] || ref=refs/heads/main
+    selection="$(selection_value "$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+      PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME="$event" \
+      GITHUB_REF="$ref" KIND_E2E_OPT_IN=false "$SELECTOR" "$paths")")"
+    [[ "$selection" == *'|policy|'* && "$selection" == *"|${token}_omittable|"* ]] || {
+      echo "${token}: a $event policy selection for $path does not mark it omittable: $selection" >&2
+      exit 1
+    }
+    if [ "$want" = run ] && [[ "$selection" != *"|$token|"* ]]; then
+      echo "${token}: $path does not select it on $event" >&2
+      exit 1
+    fi
+    if [ "$want" = omit ] && [[ "$selection" == *"|$token|"* ]]; then
+      echo "${token}: $path selects it on $event" >&2
+      exit 1
+    fi
+  done
+}
+for planner_path in \
+    scripts/ci/plan/planner.py \
+    scripts/ci/plan/tests/test_decision_corpus.py \
+    scripts/ci/plan/artifact-graph.json \
+    scripts/ci/select/select-verification.sh \
+    .gitea/workflows/deploy-dev.yaml \
+    Cargo.toml \
+    Cargo.lock \
+    crates/codewire-desktop/Cargo.toml \
+    crates/codewire-idp/Cargo.toml \
+    rust-toolchain.toml \
+    unexplained/new-surface.txt; do
+  policy_input_case ci_plan_tests run "$planner_path"
+done
+for planner_free_path in \
+    deployments/k8s/coordinator/deployment.yaml \
+    crates/codewire-idp/src/lib.rs \
+    scripts/ci/verify/check-shell-scripts.sh \
+    docs/dev/AGENT-WORKFLOW.md; do
+  policy_input_case ci_plan_tests omit "$planner_free_path"
+done
+# Every file the planner's graph names as trusted policy is a planner input.
+while IFS= read -r planner_policy_file; do
+  ci_plan_test_input "$planner_policy_file" || {
+    echo "the planner's policy file $planner_policy_file does not select its suite" >&2
+    exit 1
+  }
+done < <(python3 -c 'import json, sys; print("\n".join(json.load(open(sys.argv[1]))["policy_files"]))' \
+  "$ROOT/scripts/ci/plan/artifact-graph.json")
+for self_test_path in \
+    scripts/checks/repo_checks.py \
+    scripts/checks/repo_policy/permanent_raw.py \
+    scripts/checks/repo_policy/material_cache.py \
+    unexplained/new-surface.txt; do
+  policy_input_case repo_check_self_tests run "$self_test_path"
+done
+for self_test_free_path in \
+    crates/codewire-orchestration/src/lib.rs \
+    scripts/ci/plan/planner.py \
+    docs/dev/AGENT-WORKFLOW.md; do
+  policy_input_case repo_check_self_tests omit "$self_test_free_path"
 done
 
 # The Kind tool tests (#3119 R8) run with Edge static verification only when
@@ -2078,7 +2189,7 @@ dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
 assert_tokens dispatch_docs 'docs' "$dispatch_output"
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=policy "$SELECTOR")"
-assert_tokens dispatch_policy 'ci_script_tests policy policy_shell' "$dispatch_output"
+assert_tokens dispatch_policy 'ci_plan_tests ci_script_tests policy policy_shell repo_check_self_tests' "$dispatch_output"
 grep -Fq '|policy_shell_omittable|' <<<"$dispatch_output"
 grep -Fq '|ci_script_tests_omittable|' <<<"$dispatch_output"
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
@@ -3981,8 +4092,9 @@ fi
 [ "$(policy_function run_policy_part | grep -E '^    policy-')" = "$(printf '    %s\n' \
     'policy-shell) run_shell_policy ;;' \
     'policy-repo-rules) run_repo_rules ;;' \
-    'policy-ci-script-tests) run_ci_script_tests ;;')" ] || {
-  echo 'policy parts are not exactly ShellCheck, repository rules and CI-script tests' >&2
+    'policy-ci-script-tests) run_ci_script_tests ;;' \
+    'policy-planner-tests) scripts/ci/plan/test.sh ;;')" ] || {
+  echo 'policy parts are not exactly ShellCheck, repository rules, CI-script tests and the planner suite' >&2
   exit 1
 }
 grep -qxF '    [ "$part" = policy-shell ] || parts+=("$part")' <(policy_function run_policy_core) \
@@ -4098,10 +4210,72 @@ for selection_and_parts in \
     '|valid:v3|policy|complete|=policy-shell policy-repo-rules policy-ci-script-tests' \
     '|valid:v3|ci_script_tests_omittable|policy|policy_shell_omittable|complete|=policy-repo-rules' \
     '|valid:v3|ci_script_tests|ci_script_tests_omittable|policy|policy_shell_omittable|complete|=policy-repo-rules policy-ci-script-tests' \
-    '|valid:v3|ci_script_tests_omittable|policy|policy_shell|policy_shell_omittable|complete|=policy-shell policy-repo-rules'; do
+    '|valid:v3|ci_script_tests_omittable|policy|policy_shell|policy_shell_omittable|complete|=policy-shell policy-repo-rules' \
+    '|valid:v3|ci_plan_tests|ci_plan_tests_omittable|ci_script_tests_omittable|policy|policy_shell_omittable|complete|=policy-repo-rules policy-planner-tests' \
+    '|valid:v3|ci_plan_tests_omittable|ci_script_tests_omittable|policy|policy_shell_omittable|complete|=policy-repo-rules'; do
   listed_parts="$(VERIFICATION_SELECTION="${selection_and_parts%%=*}" "$product_runner" policy-parts | paste -sd' ')"
   [ "$listed_parts" = "${selection_and_parts#*=}" ] || {
     echo "policy parts for ${selection_and_parts%%=*} are: ${listed_parts}" >&2
+    exit 1
+  }
+done
+# The artifact planner's suite (#3119 L3) runs as a policy part only when the
+# selector names it; Deploy runs it only for a selection from a selector that
+# cannot say (no ci_plan_tests_omittable), as before, so it never runs twice
+# and is never dropped by an older selector.
+deploy_planner_fixture() {
+  SELECTION="$1" bash -c '
+    set -euo pipefail
+    selected() { [[ "$SELECTION" == *"|$1|"* ]]; }
+    eval "$(cat)"
+    cd "$(mktemp -d)"
+    mkdir -p scripts/ci/tests scripts/ci/plan
+    for stub in scripts/ci/tests/test-install-temporal.sh scripts/ci/plan/test.sh; do
+      printf "#!/usr/bin/env bash\necho %s\n" "${stub##*/}" > "$stub"
+      chmod +x "$stub"
+    done
+    printf "#!/usr/bin/env bash\nexit 1\n" > scripts/ci/tests/test-deploy-dev.sh
+    chmod +x scripts/ci/tests/test-deploy-dev.sh
+    # The failing Dev deploy test stub stops the family after the planner.
+    run_deploy
+  ' <<<"$(policy_function run_deploy)" 2>/dev/null
+}
+[ "$(deploy_planner_fixture '|valid:v3|deploy|complete|' | paste -sd' ')" = 'test-install-temporal.sh test.sh' ] || {
+  echo 'Deploy dropped the planner suite for a selection from an older selector' >&2
+  exit 1
+}
+for planner_selection in \
+    '|valid:v3|ci_plan_tests_omittable|deploy|policy|complete|' \
+    '|valid:v3|ci_plan_tests|ci_plan_tests_omittable|deploy|policy|complete|'; do
+  [ "$(deploy_planner_fixture "$planner_selection" | paste -sd' ')" = 'test-install-temporal.sh' ] || {
+    echo "Deploy ran the planner suite for $planner_selection, whose policy part owns it" >&2
+    exit 1
+  }
+done
+# The repository checks' two slowest self-tests (#3119 L1) run when the
+# selector names them or cannot say; their checks always run.
+for repo_check in permanent-raw-surface epoch-material-cache-owner; do
+  grep -qxF "  python3 scripts/checks/repo_checks.py $repo_check \$repo_check_self_test" \
+    <(policy_function run_repo_rules) || {
+    echo "repository rules do not run $repo_check with its self-test decision" >&2
+    exit 1
+  }
+done
+grep -qxF '  repo_check_self_test="$(repo_check_self_test_flag)"' <(policy_function run_repo_rules) || {
+  echo 'repository rules do not read the self-test decision' >&2
+  exit 1
+}
+for selection_and_flag in \
+    '|valid:v3|policy|complete|=--self-test' \
+    '|valid:v3|policy|repo_check_self_tests|repo_check_self_tests_omittable|complete|=--self-test' \
+    '|valid:v3|policy|repo_check_self_tests_omittable|complete|='; do
+  self_test_flag="$(SELECTION="${selection_and_flag%%=*}" bash -c '
+    selected() { [[ "$SELECTION" == *"|$1|"* ]]; }
+    eval "$(cat)"
+    repo_check_self_test_flag
+  ' <<<"$(policy_function repo_check_self_test_flag)")"
+  [ "$self_test_flag" = "${selection_and_flag#*=}" ] || {
+    echo "repository check self-test flag for ${selection_and_flag%%=*} is '${self_test_flag}'" >&2
     exit 1
   }
 done
@@ -4147,9 +4321,9 @@ for policy_owner in \
     'scripts/ci/tests/test-dashboard-image-network-probe.sh' \
     'scripts/ci/tests/test-admin-proto-boundary.sh' \
     'scripts/checks/repo_checks.py license-map' \
-    'scripts/checks/repo_checks.py permanent-raw-surface --self-test' \
+    'scripts/checks/repo_checks.py permanent-raw-surface $repo_check_self_test' \
     'scripts/checks/repo_checks.py design-tokens --self-test' \
-    'scripts/checks/repo_checks.py epoch-material-cache-owner --self-test' \
+    'scripts/checks/repo_checks.py epoch-material-cache-owner $repo_check_self_test' \
     'scripts/checks/repo_checks.py rust-validation-source' \
     'scripts/checks/repo_checks.py retired-reference-source' \
     'scripts/checks/repo_checks.py go-source-classification'; do
@@ -4618,6 +4792,22 @@ grep -qxF '  scripts/ci/verify/check-shell-scripts.sh --self-test' "$shared_shel
 grep -qxF '    scripts/ci/verify/check-shell-scripts.sh --changed-since "$CODEWIRE_SHELL_POLICY_BASE"' \
   "$shared_shell_policy"
 grep -qxF '    scripts/ci/verify/check-shell-scripts.sh' "$shared_shell_policy"
+# ShellCheck's base (#3119 A7, M1): a pull request's base, or on a push to
+# main the newest main commit main CI verified, the selection's own base. An
+# unverified main base is empty, so every script is checked; no other event
+# names a base.
+# shellcheck disable=SC2016 # Match the workflow's literal expressions.
+grep -qxF "          CODEWIRE_SHELL_POLICY_BASE: \${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.verification-selection.outputs.push_verified_base) || '' }}" \
+  "$ROOT/.gitea/workflows/ci.yaml" || {
+  echo 'Shell policy does not take the pull request base or the verified main base' >&2
+  exit 1
+}
+# shellcheck disable=SC2016
+grep -qxF '      push_verified_base: ${{ steps.select.outputs.push_verified_base }}' \
+  "$ROOT/.gitea/workflows/ci.yaml" || {
+  echo 'the selection job does not publish the verified main base' >&2
+  exit 1
+}
 grep -qF 'scripts/runtime/tests/test-run-sdk-python-e2e.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'Python SDK wheel leaked generated codewire/$forbidden_package' \

@@ -288,8 +288,9 @@ case "${1:-}" in
     exit 0
     ;;
   --changed-since)
-    # A pull request checks only the scripts it changes (#3119 A7); main
-    # checks every script. A base this checkout lacks checks every script.
+    # A pull request checks only the scripts it changes, and a push to main
+    # those changed since the main commit main CI last verified (#3119 A7,
+    # M1). A base this checkout lacks checks every script.
     [[ $# -eq 2 && "$2" =~ ^[0-9a-f]{40}$ ]] || usage
     cd "$ROOT"
     if git cat-file -e "$2^{commit}" 2>/dev/null && base="$(git merge-base "$2" HEAD)"; then

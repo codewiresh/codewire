@@ -142,6 +142,10 @@ Run the focused no-network tests and current-tree Cargo oracle with:
 scripts/ci/plan/test.sh
 ```
 
+CI runs it as a Policy part (`policy-planner-tests`) when one of its inputs
+changes: this folder, the graph's `policy_files`, or a Cargo manifest, lockfile
+or the toolchain file (the selector's `ci_plan_tests`, #3119 L3).
+
 The planner exports Git trees into isolated temporary directories, rejects
 unsafe archive paths, symlinks, and candidate Cargo configuration, and invokes
 only offline `cargo metadata --locked --no-deps`. It never executes candidate

@@ -102,6 +102,7 @@ jobs:
       selection: ${{ steps.select.outputs.selection }}
       required_local_mode: ${{ steps.select.outputs.required_local_mode }}
       ci_head_commit: ${{ steps.select.outputs.ci_head_commit }}
+      push_verified_base: ${{ steps.select.outputs.push_verified_base }}
       ci_head_tree: ${{ steps.select.outputs.ci_head_tree }}
       cw_package_state: ${{ steps.select.outputs.cw_package_state }}
       cw_package_selected: ${{ steps.select.outputs.cw_package_selected }}
@@ -600,12 +601,14 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|deploy|') || contains(needs.verification-selection.outputs.selection, '|release|') || contains(needs.verification-selection.outputs.selection, '|security|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
-      # A pull request ShellChecks only the scripts it changes; main checks
-      # every script (#3119 A7).
+      # A pull request ShellChecks only the scripts it changes, and a push to
+      # main those changed since the newest main commit main CI verified, the
+      # base its selection compared with (#3119 A7, M1). An unverified main
+      # base leaves it empty, and every script is checked.
       - name: Run Shell policy
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|policy_shell|') || (contains(needs.verification-selection.outputs.selection, '|policy|') && !contains(needs.verification-selection.outputs.selection, '|policy_shell_omittable|'))) }}
         env:
-          CODEWIRE_SHELL_POLICY_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+          CODEWIRE_SHELL_POLICY_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.verification-selection.outputs.push_verified_base) || '' }}
         run: scripts/ci/verify/run-product-verification.sh policy-shell
 
       - name: Run confidential script tests

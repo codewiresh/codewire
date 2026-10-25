@@ -152,6 +152,16 @@ for group in standard rust_compile rust_shards rust_transport database \
   assert_output "$agents_output" "$group" false
 done
 
+# The planner's suite and the repository checks' self-tests are Policy parts
+# (#3119 L1, L3): known tokens that dispatch Policy alone, never the
+# all-groups fallback for an unknown token.
+policy_parts_output="$(emit '|valid:v3|ci_plan_tests|ci_plan_tests_omittable|ci_script_tests_omittable|policy|policy_shell_omittable|repo_check_self_tests|repo_check_self_tests_omittable|complete|' fallback false false)"
+assert_output "$policy_parts_output" policy true
+for group in standard tooling rust_compile rust_shards rust_transport database \
+    services_control services_runtime edge_kind; do
+  assert_output "$policy_parts_output" "$group" false
+done
+
 web_output="$(emit '|valid:v3|web|complete|' fallback false false)"
 assert_output "$web_output" standard true
 
