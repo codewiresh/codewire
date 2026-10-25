@@ -185,8 +185,13 @@ class Workspace:
         os.environ.pop("SYNTHETIC_CODEX_MODE", None)
 
     def deliver(self, contents=None, mode=0o600):
-        self.auth.write_bytes(login() if contents is None else contents)
-        self.auth.chmod(mode)
+        # As the daemon does: a new file renamed into place. Written in
+        # place, the driver's poll could read it half-written or before its
+        # mode was set (auth_file_not_codewires under load, main run 22757).
+        temporary = self.home / ".auth.json.new"
+        temporary.write_bytes(login() if contents is None else contents)
+        temporary.chmod(mode)
+        temporary.rename(self.auth)
 
     def mark_logout(self):
         self.state.mkdir(parents=True, exist_ok=True)
@@ -299,6 +304,30 @@ class LoginFile(unittest.TestCase):
             with self.subTest(token=token), self.assertRaises(driver.Failure):
                 driver.jwt_claims(token)
         self.assertEqual(driver.jwt_claims(jwt({"exp": 5}))["exp"], 5)
+
+
+class FixtureDelivery(unittest.TestCase):
+    def setUp(self):
+        self.workspace = Workspace(self)
+
+    def test_a_delivery_is_never_seen_half_written(self):
+        # The driver polls while the daemon replaces the login; the fixture
+        # must replace it whole, as the daemon does, or the poll fails.
+        self.workspace.deliver(login(0))
+        stop = threading.Event()
+
+        def deliver_again():
+            while not stop.is_set():
+                self.workspace.deliver(login(2))
+        thread = threading.Thread(target=deliver_again)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                self.assertIn(driver.delivered_generation(), (0, 2))
+        finally:
+            stop.set()
+            thread.join(60)
 
 
 class SyntheticBackend(unittest.TestCase):

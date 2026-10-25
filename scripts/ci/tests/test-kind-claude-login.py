@@ -138,15 +138,13 @@ class Workspace:
             test.addCleanup(fixture.__exit__, None, None, None)
 
     def deliver(self, contents=None, mode=0o600):
-        if self.credentials.exists():
-            # As the daemon does: a new file renamed into place.
-            temporary = self.claude / ".credentials.json.new"
-            temporary.write_bytes(login() if contents is None else contents)
-            temporary.chmod(mode)
-            temporary.rename(self.credentials)
-            return
-        self.credentials.write_bytes(login() if contents is None else contents)
-        self.credentials.chmod(mode)
+        # As the daemon does: a new file renamed into place, the first one
+        # too. Created in place, the driver's poll could read it empty or
+        # before its mode was set.
+        temporary = self.claude / ".credentials.json.new"
+        temporary.write_bytes(login() if contents is None else contents)
+        temporary.chmod(mode)
+        temporary.rename(self.credentials)
 
     def document(self):
         return json.loads(self.credentials.read_bytes())
