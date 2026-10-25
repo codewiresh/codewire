@@ -278,11 +278,15 @@ grep -Fq -- '--locked --profile ci -p codewire-server-core --bin codewire-db-mig
 # Preserve the accepted execution contracts while adding source-admission proof:
 # compile grouping may change, but no suite, environment or count may disappear.
 python3 - "$ROOT" "$TMP" <<'PYTHON'
+from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import time
 
 root, temporary = map(Path, sys.argv[1:])
 suites = [
@@ -369,85 +373,176 @@ for suite in suites:
     suite['lane'] = next((lane for lane, labels in lane_labels.items() if suite['label'] in labels), 'orchestration')
 assert sum(suite['lane'] != 'orchestration' for suite in suites) == sum(map(len, lane_labels.values()))
 lane_suites = {lane: [suite for suite in suites if suite['lane'] == lane] for lane in lane_order}
-trace_root = temporary / 'database-trace'
-trace_root.mkdir()
-(trace_root / 'suites.json').write_text(json.dumps(suites))
-cargo = trace_root / 'cargo'
-cargo.write_text(r'''#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-args = sys.argv[1:]
-work = Path(os.environ['DB_TRACE_ROOT'])
-record = dict(args=args, target=os.environ['CARGO_TARGET_DIR'],
-              test_database=os.environ.get('TEST_DATABASE_URL'), database=os.environ.get('DATABASE_URL'),
-              threads=os.environ.get('RUST_TEST_THREADS'))
-with (work / 'trace.jsonl').open('a') as output:
-    output.write(json.dumps(record) + '\n')
-if args[0] == 'build':
-    target = Path(record['target']) / 'ci' / 'codewire-db-migrate'
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text('#!/bin/sh\nexit 0\n')
-    target.chmod(0o755)
-    sys.exit(0)
-if '--no-run' in args:
-    if os.environ['DB_TRACE_FAILURE'] == 'compile:' + args[args.index('-p') + 1]:
-        sys.exit(42)
-    print('Finished compiling synthetic database harnesses')
-    sys.exit(0)
-# Count the database executions running at once across lanes.
-import fcntl, time
-def running(delta):
-    with (work / 'running.lock').open('a+') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        state = work / 'running.json'
-        now, peak = json.loads(state.read_text()) if state.exists() else (0, 0)
-        now += delta
-        state.write_text(json.dumps([now, max(peak, now)]))
-running(1)
-time.sleep(0.02)
-running(-1)
-suites = json.loads((work / 'suites.json').read_text())
-index = next((i for i, item in enumerate(suites) if item['args'] == args), None)
-if index is None:
-    sys.exit('Unexpected database execution')
-failure = os.environ['DB_TRACE_FAILURE']
-if failure == 'test:' + str(index):
-    sys.exit(43)
-if failure == 'skip:' + str(index):
-    print('DATABASE_URL unset')
-count = suites[index]['count'] - (failure == 'count:' + str(index))
-print(f'test result: ok. {count} passed; 0 failed; 0 ignored')
+# The fakes are shared; each case traces into its own folder, so the cases
+# below run side by side and are checked in order afterwards.
+tools = temporary / 'database-tools'
+tools.mkdir()
+cases_root = temporary / 'database-cases'
+cases_root.mkdir()
+# The fake Cargo looks a suite up by its arguments, one suite per line:
+# index, count, and the arguments joined by the unit separator.
+assert all(not set(arg) & {'\t', '\n', '\x1f'} for suite in suites for arg in suite['args'])
+(tools / 'suites.tsv').write_text(''.join(
+    f"{index}\t{suite['count']}\t{chr(31).join(suite['args'])}\n" for index, suite in enumerate(suites)))
+# Bash, not Python: the cases start it about two thousand times, and an
+# interpreter start per call was most of this test's time.
+cargo = tools / 'cargo'
+cargo.write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+work="${DB_TRACE_ROOT:?}" failure="${DB_TRACE_FAILURE?}"
+# Appends one JSON string, or null for an unset variable, to the record.
+add() {
+  local value="${1//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  record+="\"$value\""
+}
+add_variable() {
+  if [ -n "${!1+set}" ]; then add "${!1}"; else record+=null; fi
+}
+record='{"args": [' separator=''
+for arg in "$@"; do
+  record+="$separator"
+  add "$arg"
+  separator=', '
+done
+record+='], "target": '
+add "${CARGO_TARGET_DIR:?}"
+record+=', "test_database": '
+add_variable TEST_DATABASE_URL
+record+=', "database": '
+add_variable DATABASE_URL
+record+=', "threads": '
+add_variable RUST_TEST_THREADS
+printf '%s}\n' "$record" >> "$work/trace.jsonl"
+if [ "$1" = build ]; then
+  target="$CARGO_TARGET_DIR/ci/codewire-db-migrate"
+  mkdir -p "${target%/*}"
+  printf '#!/bin/sh\nexit 0\n' > "$target"
+  chmod 755 "$target"
+  exit 0
+fi
+for arg in "$@"; do
+  [ "$arg" = --no-run ] || continue
+  package='' previous=''
+  for arg in "$@"; do
+    if [ "$previous" = -p ]; then package="$arg"; break; fi
+    previous="$arg"
+  done
+  [ "$failure" != "compile:${package:?}" ] || exit 42
+  echo 'Finished compiling synthetic database harnesses'
+  exit 0
+done
+# Count the database executions running at once across lanes: each marks
+# itself active and records how many are, held for DB_TRACE_HOLD seconds.
+: > "$work/active/$$"
+active=("$work/active/"*)
+printf '%s\n' "${#active[@]}" >> "$work/running"
+[ -z "${DB_TRACE_HOLD:-}" ] || sleep "$DB_TRACE_HOLD"
+rm -f -- "$work/active/$$"
+IFS=$'\x1f'
+key="$*"
+IFS=$' \t\n'
+index='' count=''
+while IFS=$'\t' read -r line_index line_count line_args; do
+  if [ "$line_args" = "$key" ]; then index="$line_index" count="$line_count"; break; fi
+done < "${BASH_SOURCE[0]%/*}/suites.tsv"
+[ -n "$index" ] || { echo 'Unexpected database execution' >&2; exit 1; }
+[ "$failure" != "test:$index" ] || exit 43
+if [ "$failure" = "skip:$index" ]; then echo 'DATABASE_URL unset'; fi
+if [ "$failure" = "count:$index" ]; then count=$((count - 1)); fi
+echo "test result: ok. $count passed; 0 failed; 0 ignored"
 ''')
 cargo.chmod(0o755)
-(trace_root / 'psql').write_text('#!/bin/sh\nexit 0\n')
-(trace_root / 'psql').chmod(0o755)
-(trace_root / 'docker').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$DB_TRACE_ROOT/docker.log"\nexit 0\n')
-(trace_root / 'docker').chmod(0o755)
+(tools / 'psql').write_text('#!/bin/sh\nexit 0\n')
+(tools / 'psql').chmod(0o755)
+(tools / 'docker').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$DB_TRACE_ROOT/docker.log"\nexit 0\n')
+(tools / 'docker').chmod(0o755)
 
 lock_dir = temporary / 'lane-locks'
 
-def run_case(failure='', extra=None):
-    trace = trace_root / 'trace.jsonl'
-    trace.unlink(missing_ok=True)
-    (trace_root / 'running.json').unlink(missing_ok=True)
-    (trace_root / 'docker.log').unlink(missing_ok=True)
-    environment = {
+def case_environment(failure='', extra=None):
+    work = Path(tempfile.mkdtemp(dir=cases_root))
+    (work / 'active').mkdir()
+    return {
         'CODEWIRE_INTEGRATION_LOCK_DIR': str(lock_dir), **(extra or {}),
-        'PATH': str(trace_root) + os.pathsep + os.environ['PATH'],
+        'PATH': str(tools) + os.pathsep + os.environ['PATH'],
         'CODEWIRE_LOCAL_RUST_CACHE': 'off',
-        'CARGO_TARGET_DIR': str(trace_root / 'debug-target'),
-        'CODEWIRE_CARGO_CI_TARGET_DIR': str(trace_root / 'ci-target'),
-        'RUN_DIR': str(trace_root / 'run'),
+        'CARGO_TARGET_DIR': str(work / 'debug-target'),
+        'CODEWIRE_CARGO_CI_TARGET_DIR': str(work / 'ci-target'),
+        'RUN_DIR': str(work / 'run'),
         'DATABASE_URL': 'postgres://synthetic:synthetic@127.0.0.1:60003/sql-client',
         'DATABASE_URL_RUST': 'postgres://synthetic:synthetic@127.0.0.1:60003/rust-client',
-        'DB_TRACE_ROOT': str(trace_root), 'DB_TRACE_FAILURE': failure,
+        'DB_TRACE_ROOT': str(work), 'DB_TRACE_FAILURE': failure,
     }
+
+def case_file(environment, name):
+    return Path(environment['DB_TRACE_ROOT']) / name
+
+def peak_running(environment):
+    return max(map(int, case_file(environment, 'running').read_text().split()))
+
+def run_case(failure='', extra=None):
+    environment = case_environment(failure, extra)
     result = subprocess.run(['bash', str(root / 'scripts/ci/verify/run-integration-verification.sh'),
                              'database'], env=environment, cwd=root, capture_output=True, text=True)
-    commands = [json.loads(line) for line in trace.read_text().splitlines()]
+    commands = [json.loads(line) for line in case_file(environment, 'trace.jsonl').read_text().splitlines()]
     return result, commands, environment
 
-result, commands, environment = run_case()
+# The integration lane lock (#2755). Another run holds the 62000 range:
+# this hermetic fixture sets no VERIFICATION_PORT_BASE, so it neither takes
+# the lock nor waits on it; a real lane, which is given the base, waits for it.
+# It mostly waits, so it runs beside the other cases from the start.
+def lane_lock_case():
+    lock_dir.mkdir(mode=0o700, exist_ok=True)
+    held = os.open(lock_dir / 'ports-62000.lock', os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(held, fcntl.LOCK_EX)
+    (lock_dir / 'ports-62000.lock.holder').write_text('database in /worktrees/other pid=1\n')
+    fixture, _, _ = run_case()
+    assert fixture.returncode == 0 and '[product-integration] green' in fixture.stdout, fixture.stdout + fixture.stderr
+    assert 'integration lane lock' not in fixture.stdout
+    lane_environment = case_environment(extra={'VERIFICATION_PORT_BASE': '62000'})
+    lane = subprocess.Popen(['bash', str(root / 'scripts/ci/verify/run-integration-verification.sh'), 'database'],
+                            env=lane_environment, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    waiting = lane.stdout.readline()
+    while waiting and 'integration lane lock' not in waiting:
+        waiting = lane.stdout.readline()
+    assert 'waiting for the integration lane lock' in waiting and 'held by database in /worktrees/other' in waiting, waiting
+    time.sleep(2)
+    assert lane.poll() is None and not case_file(lane_environment, 'trace.jsonl').exists(), 'a real lane ran while another held its range'
+    os.close(held)
+    rest, _ = lane.communicate(timeout=300)
+    assert lane.returncode == 0 and '[product-integration] green' in rest, rest
+    assert 'acquired' in rest
+    assert f'{root} pid=' in (lock_dir / 'ports-62000.lock.holder').read_text()
+
+# Side by side within the job's CPU share (cpu-share.sh), or this host's CPUs.
+share = os.environ.get('CODEWIRE_CI_CPU_SHARE', '')
+width = int(share) if share.isdigit() and int(share) > 0 else len(os.sched_getaffinity(0))
+pool = ThreadPoolExecutor(max_workers=max(1, min(8, width)))
+lane_lock = ThreadPoolExecutor(max_workers=1).submit(lane_lock_case)
+# With CI's job network each lane after the first gets its own PostgreSQL on
+# that network, and the lanes run side by side. A database execution holds
+# its place briefly there, so lanes that run at once overlap in the count.
+network = {'INTEGRATION_DOCKER_NETWORK': 'codewire-fixture-net', 'DB_TRACE_HOLD': '0.02'}
+broker_index = next(i for i, suite in enumerate(suites) if suite['label'] == 'platform broker admission matrix')
+journal_index = next(i for i, item in enumerate(suites)
+                     if item['label'] == 'platform cw runtime journal matrix')
+failures = ['compile:codewire-server-core', 'compile:codewire-platform-credentials',
+            'compile:codewire-orchestration', 'test:0', 'test:22', 'skip:20', 'skip:21', 'skip:24']
+cases = {
+    'explicit': pool.submit(run_case),
+    'lanes': pool.submit(run_case, extra=network),
+    'shared': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12'}),
+    'serial': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': '1'}),
+    'invalid': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': 'two'}),
+    'malformed': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12cores'}),
+    'failed lane': pool.submit(run_case, 'test:' + str(broker_index), extra=network),
+    'journal': pool.submit(run_case, 'test:' + str(journal_index)),
+    **{'count:' + str(index): pool.submit(run_case, 'count:' + str(index)) for index in range(len(suites))},
+    **{failure: pool.submit(run_case, failure) for failure in failures},
+}
+
+result, commands, environment = cases['explicit'].result()
 assert result.returncode == 0, result.stdout + result.stderr
 assert '[product-integration] green' in result.stdout
 assert commands[0]['args'] == ['build', '--locked', '--profile', 'ci', '-p',
@@ -478,11 +573,10 @@ for batch in actual_batches:
 # that network, migrated before the lanes start side by side. Each lane runs
 # its own suites in order against its own database, and every lane container
 # is removed afterwards, also when a lane fails.
-network = {'INTEGRATION_DOCKER_NETWORK': 'codewire-fixture-net'}
 def lane_url(lane):
     return ('postgres://codewire:codewire@codewire-integration-postgres-' + lane + ':5432/codewire'
             if lane != 'core' else environment['DATABASE_URL_RUST'])
-def check_lanes(commands, complete=True):
+def check_lanes(commands, case, complete=True):
     executions = [command for command in commands if command['args'][0] == 'test' and '--no-run' not in command['args']]
     for lane in lane_order:
         expected = [suite for suite in lane_suites[lane]]
@@ -493,13 +587,13 @@ def check_lanes(commands, complete=True):
             assert len(actual) == len(expected), lane
     migrations = [command for command in commands if command['args'][0] == 'build']
     assert len(migrations) == len(lane_order), migrations
-    started = (trace_root / 'docker.log').read_text().splitlines()
+    started = case_file(case, 'docker.log').read_text().splitlines()
     for lane in lane_order[1:]:
         name = 'codewire-product-postgres-local-'
         runs = [line for line in started if line.startswith('run -d --rm --name ' + name) and line.split()[4].endswith('-lane-' + lane)]
         assert len(runs) == 1 and '--network codewire-fixture-net --network-alias codewire-integration-postgres-' + lane in runs[0], started
         assert any(line.startswith('rm -f ') and line.endswith('-lane-' + lane) for line in started[started.index(runs[0]):]), started
-lanes, lane_commands, _ = run_case(extra=network)
+lanes, lane_commands, lanes_environment = cases['lanes'].result()
 assert lanes.returncode == 0 and '[product-integration] green' in lanes.stdout, lanes.stdout + lanes.stderr
 # Without a CPU share (a cloud runner, a workstation) all four lanes run at
 # once, longest first, with the test threads their commands name.
@@ -508,82 +602,53 @@ assert all(command['threads'] is None for command in lane_commands), 'a lane set
 for lane in lane_order:
     assert f'=== database lane {lane} ===' in lanes.stdout, lane
     assert f'CODEWIRE_CI_PHASE name=database-lane-{lane} seconds=' in lanes.stdout, lane
-check_lanes(lane_commands)
+check_lanes(lane_commands, lanes_environment)
 # On a metal guest with a CPU share of 12, at most two lanes run at once and
 # each lane's tests get half the share; every lane still runs every suite.
-shared, shared_commands, _ = run_case(extra=network | {'CODEWIRE_CI_CPU_SHARE': '12'})
+shared, shared_commands, shared_environment = cases['shared'].result()
 assert shared.returncode == 0 and '[product-integration] green' in shared.stdout, shared.stdout + shared.stderr
 assert 'database lanes: 2 at a time, 6 test threads each: orchestration credential-broker credential-service core' in shared.stdout, shared.stdout
-check_lanes(shared_commands)
-assert json.loads((trace_root / 'running.json').read_text())[1] <= 2, 'more than two lanes ran at once'
+check_lanes(shared_commands, shared_environment)
+assert peak_running(shared_environment) <= 2, 'more than two lanes ran at once'
 lane_executions = [command for command in shared_commands
                    if command['args'][0] == 'test' and '--no-run' not in command['args']]
 assert lane_executions and all(command['threads'] == '6' for command in lane_executions), lane_executions[:2]
 for lane in lane_order:
     assert f'CODEWIRE_CI_PHASE name=database-lane-{lane} seconds=' in shared.stdout, lane
 # One at a time on request; an invalid count fails before any lane runs.
-serial, serial_commands, _ = run_case(extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': '1'})
+serial, serial_commands, serial_environment = cases['serial'].result()
 assert serial.returncode == 0 and 'database lanes: 1 at a time, 12 test threads each' in serial.stdout, serial.stdout
-assert json.loads((trace_root / 'running.json').read_text())[1] == 1, 'lanes overlapped at one at a time'
-check_lanes(serial_commands)
-invalid, invalid_commands, _ = run_case(extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': 'two'})
+assert peak_running(serial_environment) == 1, 'lanes overlapped at one at a time'
+check_lanes(serial_commands, serial_environment)
+invalid, invalid_commands, _ = cases['invalid'].result()
 assert invalid.returncode != 0 and 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to 9' in invalid.stdout + invalid.stderr
 assert not [command for command in invalid_commands if command['args'][0] == 'test' and '--no-run' not in command['args']]
 # A malformed share is ignored with a warning, never read as a smaller one.
-malformed, _, _ = run_case(extra=network | {'CODEWIRE_CI_CPU_SHARE': '12cores'})
+malformed, _, _ = cases['malformed'].result()
 assert malformed.returncode == 0 and 'database lanes: 4 at a time:' in malformed.stdout, malformed.stdout
 assert 'ignoring CODEWIRE_CI_CPU_SHARE' in malformed.stdout + malformed.stderr
-broker_index = next(i for i, suite in enumerate(suites) if suite['label'] == 'platform broker admission matrix')
-failed_lane, failed_commands, _ = run_case('test:' + str(broker_index), extra=network)
+failed_lane, failed_commands, failed_environment = cases['failed lane'].result()
 assert failed_lane.returncode != 0 and '[product-integration] green' not in failed_lane.stdout
 assert '::error::database lane credential-broker failed' in failed_lane.stdout, failed_lane.stdout
-check_lanes(failed_commands, complete=False)
+check_lanes(failed_commands, failed_environment, complete=False)
 for lane in ('core', 'credential-service', 'orchestration'):
     assert sum((command['test_database'] or command['database']) == lane_url(lane) for command in failed_commands
                if command['args'][0] == 'test' and '--no-run' not in command['args']) == len(lane_suites[lane]), lane
 # Every retained assertion must fail on an incorrect count. This also catches
 # deleting the assertion while leaving the corresponding test command present.
 for index in range(len(suites)):
-    failed, _, _ = run_case('count:' + str(index))
+    failed, _, _ = cases['count:' + str(index)].result()
     assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, index
-journal_index = next(i for i, item in enumerate(suites)
-                     if item['label'] == 'platform cw runtime journal matrix')
-failed, trace, _ = run_case('test:' + str(journal_index))
+failed, trace, _ = cases['journal'].result()
 assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout
 assert trace[-1]['args'] == suites[journal_index]['args']
-for failure in ['compile:codewire-server-core', 'compile:codewire-platform-credentials',
-                'compile:codewire-orchestration', 'test:0', 'test:22', 'skip:20', 'skip:21', 'skip:24']:
-    failed, trace, _ = run_case(failure)
+for failure in failures:
+    failed, trace, _ = cases[failure].result()
     assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, failure
     if failure.startswith('compile:'):
         assert '--no-run' in trace[-1]['args'], failure
-# The integration lane lock (#2755). Another run holds the 62000 range:
-# this hermetic fixture sets no VERIFICATION_PORT_BASE, so it neither takes
-# the lock nor waits on it; a real lane, which is given the base, waits for it.
-import fcntl
-lock_dir.mkdir(mode=0o700, exist_ok=True)
-held = os.open(lock_dir / 'ports-62000.lock', os.O_RDWR | os.O_CREAT, 0o600)
-fcntl.flock(held, fcntl.LOCK_EX)
-(lock_dir / 'ports-62000.lock.holder').write_text('database in /worktrees/other pid=1\n')
-fixture, _, _ = run_case()
-assert fixture.returncode == 0 and '[product-integration] green' in fixture.stdout, fixture.stdout + fixture.stderr
-assert 'integration lane lock' not in fixture.stdout
-lane_environment = dict(environment, VERIFICATION_PORT_BASE='62000', RUN_DIR=str(trace_root / 'lane-run'))
-(trace_root / 'trace.jsonl').unlink(missing_ok=True)
-lane = subprocess.Popen(['bash', str(root / 'scripts/ci/verify/run-integration-verification.sh'), 'database'],
-                        env=lane_environment, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-waiting = lane.stdout.readline()
-while waiting and 'integration lane lock' not in waiting:
-    waiting = lane.stdout.readline()
-assert 'waiting for the integration lane lock' in waiting and 'held by database in /worktrees/other' in waiting, waiting
-import time
-time.sleep(2)
-assert lane.poll() is None and not (trace_root / 'trace.jsonl').exists(), 'a real lane ran while another held its range'
-os.close(held)
-rest, _ = lane.communicate(timeout=300)
-assert lane.returncode == 0 and '[product-integration] green' in rest, rest
-assert 'acquired' in rest
-assert f'{root} pid=' in (lock_dir / 'ports-62000.lock.holder').read_text()
+lane_lock.result()
+pool.shutdown()
 
 print(f'Database batching: {len(suites) + 10} trace/failure cases; '
       f'all {len(suites)} suite contracts and {sum(suite["count"] for suite in suites)} required tests preserved')
