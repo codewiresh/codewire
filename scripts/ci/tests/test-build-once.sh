@@ -8,9 +8,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly SCRIPT="$ROOT/scripts/ci/setup/build-once.sh"
-# The leg table reads the run's selection and publish its store; a CI job running
+# The leg table reads the run's selection, publish its store, and prepare its
+# event (main or pr build folder); a CI job running
 # this test may have its own in the environment, so each case states its own.
-unset VERIFICATION_SELECTION ARCHIVE_STORE_URL
+unset VERIFICATION_SELECTION ARCHIVE_STORE_URL GITHUB_EVENT_NAME GITHUB_REF
 
 fail() {
   echo "test-build-once: $*" >&2
