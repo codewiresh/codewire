@@ -267,8 +267,8 @@ extract_archives() {
   # a real copy of this checkout there, not a link, since tests check their
   # paths' ancestry and compare canonical paths.
   rm -rf -- "$DATABASE_ARCHIVE_BUILD_ROOT"
-  mkdir -p "$RUN_DIR/archives"
-  cp -a "$ROOT/." "$DATABASE_ARCHIVE_BUILD_ROOT/src"
+  mkdir -p "$RUN_DIR/archives" "$DATABASE_ARCHIVE_BUILD_ROOT"
+  cp -a "$ROOT/." "$DATABASE_ARCHIVE_BUILD_ROOT/src" || return
   for archive in "$dir"/*.tar.zst; do
     key="$(basename "$archive" .tar.zst)"
     # nextest extracts only into an existing, empty folder.

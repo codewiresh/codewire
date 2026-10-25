@@ -787,6 +787,8 @@ extract_case '[{"name":"codewire-credential-service","path":"debug/codewire-cred
   { cat "$TMP/extract-libraries/out.log" >&2; echo 'the extractor refused a library nextest lists' >&2; exit 1; }
 [ -L "$TMP/extract-libraries/build/targets/archive/debug/codewire-credential-service" ] ||
   { echo 'the extractor did not link the archive binary' >&2; exit 1; }
+[ -d "$TMP/extract-libraries/build/src" ] ||
+  { echo 'the extractor did not copy the checkout into the build folder (main run 23164)' >&2; exit 1; }
 [ ! -e "$TMP/extract-libraries/build/targets/archive/debug/deps" ] ||
   { echo 'the extractor linked a library' >&2; exit 1; }
 if extract_case '[{"name":"x","path":"debug/../escape"}]' escape; then
