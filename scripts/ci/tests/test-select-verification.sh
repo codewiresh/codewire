@@ -7,6 +7,10 @@ WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
 # The exact runs-on values: runner labels are repository Actions variables.
 # shellcheck source=scripts/ci/tests/fixtures/ci-runners.sh
 source "$ROOT/scripts/ci/tests/fixtures/ci-runners.sh"
+# shellcheck source=scripts/ci/verify/side-by-side.sh
+source "$ROOT/scripts/ci/verify/side-by-side.sh"
+# shellcheck source=scripts/ci/setup/cpu-share.sh
+source "$ROOT/scripts/ci/setup/cpu-share.sh"
 # A main push's Heavy jobs take the trusted runners; every other run takes the
 # untrusted ones. Kind still runs on its own unsized pool until it runs in a
 # metal guest; every ordinary Heavy group runs on the sized metal pool.
@@ -214,10 +218,51 @@ assert_tokens() {
   fi
 }
 
+# Most cases below read only their own scratch files and fixtures that never
+# change once made, so they are queued where they are declared and run side
+# by side at the end (run_deferred_checks). A check that reads state another
+# step changes runs in place. Slow checks are queued first.
+DEFERRED_SLOW_CHECKS="$TMP/deferred-slow.checks"
+DEFERRED_CHECKS="$TMP/deferred.checks"
+: > "$DEFERRED_SLOW_CHECKS"
+: > "$DEFERRED_CHECKS"
+defer_check() {
+  local command
+  printf -v command '%q ' "$@"
+  printf '%s\n' "$command" >> "$DEFERRED_CHECKS"
+}
+defer_slow_check() {
+  local command
+  printf -v command '%q ' "$@"
+  printf '%s\n' "$command" >> "$DEFERRED_SLOW_CHECKS"
+}
+
+# The queued checks, at most VERIFICATION_TEST_JOBS at once (preflight sets
+# 1: one after another), else the CI guest's share of the host
+# (cpu-share.sh), else one per CPU. The first failure stops the rest and is
+# printed last, with the check that failed.
+DEFERRED_JOBS="${VERIFICATION_TEST_JOBS:-$(ci_cpu_share)}"
+DEFERRED_JOBS="${DEFERRED_JOBS:-$(nproc)}"
+run_deferred_checks() {
+  local log="$TMP/deferred-checks.log" status=0 count
+  count="$(cat "$DEFERRED_SLOW_CHECKS" "$DEFERRED_CHECKS" | wc -l)"
+  cat "$DEFERRED_SLOW_CHECKS" "$DEFERRED_CHECKS" \
+    | VERIFICATION_TEST_JOBS="$DEFERRED_JOBS" run_side_by_side > "$log" 2>&1 || status=$?
+  grep -v -e '^==> .*: passed in [0-9]*s$' -e '^==> .*: not started, because ' "$log" || true
+  [ "$status" -eq 0 ] || exit "$status"
+  echo "${count} queued checks passed, at most ${DEFERRED_JOBS} at once"
+}
+
+# A path case queues itself, with the directory it runs the selector from.
 run_paths_case() {
-  local name="$1" event="$2" ref="$3" opt_in="$4" expected="$5"
-  shift 5
-  local paths="$TMP/${name}.paths" output path
+  # SELECTOR_CASE_ROOT runs the selector where the case's paths exist.
+  defer_check paths_case "${SELECTOR_CASE_ROOT:-$PWD}" "$@"
+}
+
+paths_case() {
+  local case_root="$1" name="$2" event="$3" ref="$4" opt_in="$5" expected="$6"
+  shift 6
+  local paths="$TMP/${name}.${BASHPID}.paths" output path
   for path in "$@"; do
     if [[ "$path" == *.sh ]] && [[ " $expected " != *' policy_shell '* ]]; then
       expected="$expected policy_shell"
@@ -226,17 +271,20 @@ run_paths_case() {
   done
   expected="$(with_ci_script_tests "$expected" "$@")"
   printf '%s\n' "$@" > "$paths"
-  # SELECTOR_CASE_ROOT runs the selector where the case's paths exist.
-  output="$(cd "${SELECTOR_CASE_ROOT:-$PWD}" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  output="$(cd "$case_root" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
     PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" \
     KIND_E2E_OPT_IN="$opt_in" "$SELECTOR" "$paths")"
   assert_tokens "$name" "$expected" "$output"
 }
 
 run_present_paths_case() {
+  defer_check present_paths_case "$@"
+}
+
+present_paths_case() {
   local name="$1" event="$2" ref="$3" opt_in="$4" expected="$5"
   shift 5
-  local fixture_root="$TMP/${name}.repo" paths="$TMP/${name}.paths" output path
+  local fixture_root="$TMP/${name}.${BASHPID}.repo" paths="$TMP/${name}.${BASHPID}.paths" output path
   expected="$(with_ci_script_tests "$expected" "$@")"
   mkdir -p "$fixture_root"
   for path in "$@"; do
@@ -942,7 +990,7 @@ run_paths_case retired_desktop_workflow pull_request refs/pull/405/head false \
   'policy security security_js' .gitea/workflows/desktop-package.yaml
 run_paths_case artifact_plan_policy pull_request refs/pull/406/head false \
   'policy security security_js' scripts/ci/plan/planner.py scripts/ci/plan/artifact-graph.json
-python3 "$ROOT/scripts/ci/plan/tests/test_decision_corpus.py"
+defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_decision_corpus.py"
 run_paths_case rust_root pull_request refs/pull/5/head false \
   'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   Cargo.lock
@@ -1906,7 +1954,7 @@ run_paths_case unknown pull_request refs/pull/18/head false "$all_product_pr" \
 # always-on repository rules, and an unclassified one fails closed. Every
 # policy selection says the omission is authoritative.
 ci_script_tests_case() {
-  local want="$1" path="$2" paths="$TMP/ci-script-tests.paths" selection
+  local want="$1" path="$2" paths="$TMP/ci-script-tests.$BASHPID.paths" selection
   printf '%s\n' "$path" > "$paths"
   selection="$(selection_value "$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
     PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME=pull_request \
@@ -1946,7 +1994,7 @@ for ci_script_path in \
     crates/codewire-cli-bin/Cargo.toml \
     crates/codewire-platform-credentials/Cargo.toml \
     unexplained/new-surface.txt; do
-  ci_script_tests_case run "$ci_script_path"
+  defer_check ci_script_tests_case run "$ci_script_path"
 done
 for product_path in \
     docs/dev/AGENT-WORKFLOW.md \
@@ -1957,7 +2005,7 @@ for product_path in \
     deployments/k8s/coordinator/deployment.yaml \
     scripts/runtime/dev/smoke-dev-candidate.sh \
     Cargo.lock; do
-  ci_script_tests_case omit "$product_path"
+  defer_check ci_script_tests_case omit "$product_path"
 done
 
 # The artifact planner's suite (#3119 L3) and the repository checks'
@@ -1966,7 +2014,7 @@ done
 # authoritative. Before this, the planner's suite ran with Deploy only, so a
 # planner or Cargo manifest change never ran it.
 policy_input_case() {
-  local token="$1" want="$2" path="$3" paths="$TMP/policy-input.paths" selection event ref
+  local token="$1" want="$2" path="$3" paths="$TMP/policy-input.$BASHPID.paths" selection event ref
   printf '%s\n' "$path" > "$paths"
   for event in pull_request push; do
     ref=refs/pull/3119/head
@@ -2000,14 +2048,14 @@ for planner_path in \
     crates/codewire-idp/Cargo.toml \
     rust-toolchain.toml \
     unexplained/new-surface.txt; do
-  policy_input_case ci_plan_tests run "$planner_path"
+  defer_check policy_input_case ci_plan_tests run "$planner_path"
 done
 for planner_free_path in \
     deployments/k8s/coordinator/deployment.yaml \
     crates/codewire-idp/src/lib.rs \
     scripts/ci/verify/check-shell-scripts.sh \
     docs/dev/AGENT-WORKFLOW.md; do
-  policy_input_case ci_plan_tests omit "$planner_free_path"
+  defer_check policy_input_case ci_plan_tests omit "$planner_free_path"
 done
 # Every file the planner's graph names as trusted policy is a planner input.
 while IFS= read -r planner_policy_file; do
@@ -2022,20 +2070,20 @@ for self_test_path in \
     scripts/checks/repo_policy/permanent_raw.py \
     scripts/checks/repo_policy/material_cache.py \
     unexplained/new-surface.txt; do
-  policy_input_case repo_check_self_tests run "$self_test_path"
+  defer_check policy_input_case repo_check_self_tests run "$self_test_path"
 done
 for self_test_free_path in \
     crates/codewire-orchestration/src/lib.rs \
     scripts/ci/plan/planner.py \
     docs/dev/AGENT-WORKFLOW.md; do
-  policy_input_case repo_check_self_tests omit "$self_test_free_path"
+  defer_check policy_input_case repo_check_self_tests omit "$self_test_free_path"
 done
 
 # The Kind tool tests (#3119 R8) run with Edge static verification only when
 # a Kind tool or a product file they read changes. On a push to main, Edge
 # runs for Kind-relevant paths; a pull request without ci-full selects neither.
 kind_tools_case() {
-  local want="$1" path="$2" paths="$TMP/kind-tools.paths" selection
+  local want="$1" path="$2" paths="$TMP/kind-tools.$BASHPID.paths" selection
   printf '%s\n' "$path" > "$paths"
   selection="$(selection_value "$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
     PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
@@ -2064,14 +2112,14 @@ for kind_tool_path in \
     scripts/ci/verify/kind-e2e.sh \
     tests/e2e/kind/kind-config.yaml \
     apps/dashboard/e2e/auth.setup.ts; do
-  kind_tools_case run "$kind_tool_path"
+  defer_check kind_tools_case run "$kind_tool_path"
 done
 for edge_only_path in \
     crates/codewire-dashboard-web/src/lib.rs \
     crates/codewire-dashboard-web/templates/admin-accounts.html \
     Caddyfile \
     proto/codewire/v1/environment.proto; do
-  kind_tools_case omit "$edge_only_path"
+  defer_check kind_tools_case omit "$edge_only_path"
 done
 run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product_pr" \
   scripts/checks/contracts/mesh-final-surface-policy.json \
@@ -2381,17 +2429,21 @@ PY
   echo 'database lane sources: fewer than expected; the runner parse drifted' >&2
   exit 1
 }
-while IFS= read -r source; do
-  printf '%s\n' "$source" > "$TMP/database-lane-source.paths"
+database_lane_source_case() {
+  local source="$1" paths="$TMP/database-lane-source.$BASHPID.paths" event output
+  printf '%s\n' "$source" > "$paths"
   for event in push pull_request; do
     output="$(cd "$ROOT" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
       PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME="$event" GITHUB_REF=refs/heads/main \
-      KIND_E2E_OPT_IN=false "$SELECTOR" "$TMP/database-lane-source.paths")"
+      KIND_E2E_OPT_IN=false "$SELECTOR" "$paths")"
     [[ "$(selection_value "$output")" == *'|database|'* ]] || {
       echo "database lane source ${source} does not select the database family on ${event}" >&2
       exit 1
     }
   done
+}
+while IFS= read -r source; do
+  defer_check database_lane_source_case "$source"
 done <<<"$database_lane_sources"
 # The preview matrix, exactly: the orchestration families and database.
 run_paths_case preview_database_tests_select_database push refs/heads/main false \
@@ -2423,12 +2475,13 @@ if "scripts/ci/verify/integration-postgres.sh" not in sources:
 print("\n".join(sorted(sources)))
 PY
 )"
-while IFS= read -r source; do
-  printf '%s\n' "$source" > "$TMP/integration-harness.paths"
+integration_harness_source_case() {
+  local source="$1" paths="$TMP/integration-harness.$BASHPID.paths" event output token
+  printf '%s\n' "$source" > "$paths"
   for event in push pull_request; do
     output="$(cd "$ROOT" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
       PATH="$EDGELESS_CARGO:$PATH" GITHUB_EVENT_NAME="$event" GITHUB_REF=refs/heads/main \
-      KIND_E2E_OPT_IN=false "$SELECTOR" "$TMP/integration-harness.paths")"
+      KIND_E2E_OPT_IN=false "$SELECTOR" "$paths")"
     for token in database service_integration service_idp service_billing service_orchestration \
         service_coordinator service_temporal service_nats service_connectcore; do
       [[ "$(selection_value "$output")" == *"|${token}|"* ]] || {
@@ -2437,6 +2490,9 @@ while IFS= read -r source; do
       }
     done
   done
+}
+while IFS= read -r source; do
+  defer_check integration_harness_source_case "$source"
 done <<<"$integration_harness_sources"
 
 integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
@@ -2939,7 +2995,7 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     # only selection still runs. The executable workflow fixture also proves
     # every selected Kind producer must succeed before this job can run.
     grep -qF "needs.verification-selection.outputs.edge_kind_expected == 'true'" "$block"
-    python3 -B "$ROOT/scripts/ci/tests/test-kind-build-workflow.py"
+    defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-kind-build-workflow.py"
   elif [ "$job_id" = database ]; then
     # Compile once (infra#1632): it runs the compile job's database archives
     # when that job built them, and compiles itself when it was not dispatched.
@@ -3467,13 +3523,13 @@ grep -qF 'PUSH_VERIFIED_BASE: ${{ steps.select.outputs.push_verified_base }}' "$
 grep -A4 -F 'python3 scripts/ci/plan/apply-verification-plan.py' "$selection_block" \
   | grep -qF -- '--unclassified'
 grep -qF "GITEA_TOKEN: \${{ github.event_name == 'push' && github.token || '' }}" "$selection_block"
-python3 "$ROOT/scripts/ci/plan/tests/test_plan_main_push.py"
+defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_plan_main_push.py"
 # Main CI's verdict, and the final job that starts Dev delivery from it (#2892).
-python3 -B "$ROOT/scripts/ci/plan/tests/test_main_ci_verdict.py"
-python3 -B "$ROOT/scripts/ci/tests/test-rerun-dev-publish.py"
-python3 -B "$ROOT/scripts/ci/tests/test-cancel-superseded-deliveries.py"
+defer_slow_check python3 -B "$ROOT/scripts/ci/plan/tests/test_main_ci_verdict.py"
+defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-rerun-dev-publish.py"
+defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-cancel-superseded-deliveries.py"
 # A pull request's run stops at its first failed job (infra#1632).
-python3 -B "$ROOT/scripts/ci/tests/test-fail-fast-watch.py"
+defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-fail-fast-watch.py"
 grep -qF "grep -Fxq 'selector_version=v3'" "$selection_block"
 if grep -qF 'selector_version=v2' "$selection_block" \
     || grep -qF 'One-time contract bridge' "$selection_block"; then
@@ -3484,7 +3540,7 @@ grep -qF 'name: Run artifact-selected desktop package' "$WORKFLOW"
 grep -qF "VERIFICATION_SELECTION: '|valid:v3|rust_pkg_codewire_desktop|complete|'" \
   "$WORKFLOW"
 
-python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
+defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
   PlannerFixtureTests.test_go_sdk_only_change_emits_unselected_cw_and_desktop_outputs \
   PlannerFixtureTests.test_missing_cargo_fails_closed_with_diagnostic
 
@@ -4431,27 +4487,34 @@ primitive_cargo_command="$(PATH="$primitive_probe/bin:$PATH" bash -c 'command -v
   exit 1
 }
 primitive_guard="$ROOT/scripts/ci/tests/test-openbao-only-secret-authority.sh"
-: > "$primitive_probe/default.log"
-PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$primitive_probe/default.log" \
-  PRIMITIVE_CARGO_FAIL=all "$primitive_guard" > "$primitive_probe/default.out" 2>&1 || {
-  status=$?
-  cat "$primitive_probe/default.out" >&2
-  exit "$status"
+primitive_guard_without_cargo() {
+  local status
+  : > "$primitive_probe/default.log"
+  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$primitive_probe/default.log" \
+    PRIMITIVE_CARGO_FAIL=all "$primitive_guard" > "$primitive_probe/default.out" 2>&1 || {
+    status=$?
+    cat "$primitive_probe/default.out" >&2
+    exit "$status"
+  }
+  [[ ! -s "$primitive_probe/default.log" ]] || {
+    echo 'default authority policy must not invoke Cargo' >&2
+    exit 1
+  }
 }
-[[ ! -s "$primitive_probe/default.log" ]] || {
-  echo 'default authority policy must not invoke Cargo' >&2
-  exit 1
-}
+defer_slow_check primitive_guard_without_cargo
 admin_guard="$ROOT/scripts/ci/tests/test-admin-proto-boundary.sh"
-: > "$primitive_probe/admin-default.log"
-PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$primitive_probe/admin-default.log" \
-  PRIMITIVE_CARGO_FAIL=all "$admin_guard" > "$primitive_probe/admin-default.out" 2>&1
-[[ ! -s "$primitive_probe/admin-default.log" ]] || {
-  echo 'default administrator boundary Policy must not invoke Cargo' >&2
-  exit 1
+admin_guard_without_cargo() {
+  : > "$primitive_probe/admin-default.log"
+  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$primitive_probe/admin-default.log" \
+    PRIMITIVE_CARGO_FAIL=all "$admin_guard" > "$primitive_probe/admin-default.out" 2>&1
+  [[ ! -s "$primitive_probe/admin-default.log" ]] || {
+    echo 'default administrator boundary Policy must not invoke Cargo' >&2
+    exit 1
+  }
+  grep -qF 'static customer and administrator contract boundaries passed' \
+    "$primitive_probe/admin-default.out"
 }
-grep -qF 'static customer and administrator contract boundaries passed' \
-  "$primitive_probe/admin-default.out"
+defer_slow_check admin_guard_without_cargo
 
 # Exercise every existing source/descriptor assertion against isolated copies.
 # The guard is unchanged, and even its failure cases must never invoke Cargo.
@@ -4588,14 +4651,14 @@ run_host_fixture_routing_case() {
     [[ "$(grep -cxF success-receipt "$log" || true)" == 1 ]] || exit 1
   fi
 }
-run_host_fixture_routing_case workspace rust_workspace features 1 0 0
-run_host_fixture_routing_case cli rust_pkg_codewire_cli features 1 0 0
-run_host_fixture_routing_case cli_bin rust_pkg_codewire_cli_bin features 1 0 0
-run_host_fixture_routing_case combined 'rust_pkg_codewire_cli|rust_pkg_codewire_cli_bin' features 1 0 0
-run_host_fixture_routing_case unrelated rust_pkg_codewire_client features 0 0 0
-run_host_fixture_routing_case packages rust_pkg_codewire_cli packages 0 0 0
-run_host_fixture_routing_case local_vmm rust_pkg_codewire_cli local-vmm 0 0 0
-run_host_fixture_routing_case refused rust_pkg_codewire_cli features 1 79 79
+defer_check run_host_fixture_routing_case workspace rust_workspace features 1 0 0
+defer_check run_host_fixture_routing_case cli rust_pkg_codewire_cli features 1 0 0
+defer_check run_host_fixture_routing_case cli_bin rust_pkg_codewire_cli_bin features 1 0 0
+defer_check run_host_fixture_routing_case combined 'rust_pkg_codewire_cli|rust_pkg_codewire_cli_bin' features 1 0 0
+defer_check run_host_fixture_routing_case unrelated rust_pkg_codewire_client features 0 0 0
+defer_check run_host_fixture_routing_case packages rust_pkg_codewire_cli packages 0 0 0
+defer_check run_host_fixture_routing_case local_vmm rust_pkg_codewire_cli local-vmm 0 0 0
+defer_check run_host_fixture_routing_case refused rust_pkg_codewire_cli features 1 79 79
 run_primitive_rust_case() {
   local name="$1" token="$2" graph="$3" platform="$4" fail="${5:-}" features="${6:-platform}"
   local log="$primitive_probe/$name.log" status=0 graph_count cli_count clippy_count test_count
@@ -4636,13 +4699,13 @@ run_primitive_rust_case() {
     [[ "$test_count" == "$platform" ]] || { echo "$name: missing platform tests" >&2; exit 1; }
   fi
 }
-run_primitive_rust_case protected_store rust_pkg_codewire_protected_store 1 1
-run_primitive_rust_case workspace rust_workspace 1 1
-run_primitive_rust_case orchestration rust_pkg_codewire_orchestration 1 0
-run_primitive_rust_case unrelated rust_pkg_codewire_client 0 0
-run_primitive_rust_case graph_failure rust_pkg_codewire_protected_store 1 0 tree
-run_primitive_rust_case forbidden_provider rust_pkg_codewire_protected_store 1 0 '' platform,platform-test-support
-run_primitive_rust_case clippy_failure rust_pkg_codewire_protected_store 1 1 clippy
+defer_check run_primitive_rust_case protected_store rust_pkg_codewire_protected_store 1 1
+defer_check run_primitive_rust_case workspace rust_workspace 1 1
+defer_check run_primitive_rust_case orchestration rust_pkg_codewire_orchestration 1 0
+defer_check run_primitive_rust_case unrelated rust_pkg_codewire_client 0 0
+defer_check run_primitive_rust_case graph_failure rust_pkg_codewire_protected_store 1 0 tree
+defer_check run_primitive_rust_case forbidden_provider rust_pkg_codewire_protected_store 1 0 '' platform,platform-test-support
+defer_check run_primitive_rust_case clippy_failure rust_pkg_codewire_protected_store 1 1 clippy
 
 run_admin_rust_case() {
   local name="$1" tokens="$2" graph="$3" expected_status="$4" fail="${5:-}"
@@ -4682,16 +4745,16 @@ run_admin_rust_case() {
     esac
   fi
 }
-run_admin_rust_case cli rust_pkg_codewire_cli allowed 0
-run_admin_rust_case cli_bin rust_pkg_codewire_cli_bin allowed 0
-run_admin_rust_case admin_proto rust_pkg_codewire_admin_proto allowed 0
-run_admin_rust_case customer_proto rust_pkg_codewire_proto allowed 0
-run_admin_rust_case combined \
+defer_check run_admin_rust_case cli rust_pkg_codewire_cli allowed 0
+defer_check run_admin_rust_case cli_bin rust_pkg_codewire_cli_bin allowed 0
+defer_check run_admin_rust_case admin_proto rust_pkg_codewire_admin_proto allowed 0
+defer_check run_admin_rust_case customer_proto rust_pkg_codewire_proto allowed 0
+defer_check run_admin_rust_case combined \
   'rust_workspace|rust_pkg_codewire_cli|rust_pkg_codewire_cli_bin|rust_pkg_codewire_admin_proto|rust_pkg_codewire_proto' \
   allowed 0
-run_admin_rust_case forbidden rust_workspace forbidden 1
-run_admin_rust_case missing_root rust_workspace missing_root 1
-run_admin_rust_case cargo_failure rust_workspace allowed 86 tree
+defer_check run_admin_rust_case forbidden rust_workspace forbidden 1
+defer_check run_admin_rust_case missing_root rust_workspace missing_root 1
+defer_check run_admin_rust_case cargo_failure rust_workspace allowed 86 tree
 
 # The broker's optional platform adapter must have a production-only graph and
 # warning-denied tests even when the default local feature is not enabled.
@@ -4724,15 +4787,15 @@ run_platform_broker_rust_case() {
     [[ "$clippy_count" == "$expected" && "$test_count" == "$expected" ]] || { echo "$name: missing or duplicate optional broker checks" >&2; exit 1; }
   fi
 }
-run_platform_broker_rust_case broker rust_pkg_codewire_credential_broker 1
-run_platform_broker_rust_case workspace rust_workspace 1
-run_platform_broker_rust_case local_dependency rust_pkg_codewire_local_credentials 0
-run_platform_broker_rust_case unrelated rust_pkg_codewire_client 0
-run_platform_broker_rust_case graph_failure rust_pkg_codewire_credential_broker 1 tree
-run_platform_broker_rust_case missing_platform rust_pkg_codewire_credential_broker 1 '' ''
-run_platform_broker_rust_case forbidden_provider rust_pkg_codewire_credential_broker 1 '' platform,platform-test-support
-run_platform_broker_rust_case clippy_failure rust_pkg_codewire_credential_broker 1 clippy
-run_platform_broker_rust_case test_failure rust_pkg_codewire_credential_broker 1 test
+defer_check run_platform_broker_rust_case broker rust_pkg_codewire_credential_broker 1
+defer_check run_platform_broker_rust_case workspace rust_workspace 1
+defer_check run_platform_broker_rust_case local_dependency rust_pkg_codewire_local_credentials 0
+defer_check run_platform_broker_rust_case unrelated rust_pkg_codewire_client 0
+defer_check run_platform_broker_rust_case graph_failure rust_pkg_codewire_credential_broker 1 tree
+defer_check run_platform_broker_rust_case missing_platform rust_pkg_codewire_credential_broker 1 '' ''
+defer_check run_platform_broker_rust_case forbidden_provider rust_pkg_codewire_credential_broker 1 '' platform,platform-test-support
+defer_check run_platform_broker_rust_case clippy_failure rust_pkg_codewire_credential_broker 1 clippy
+defer_check run_platform_broker_rust_case test_failure rust_pkg_codewire_credential_broker 1 test
 
 # Projected-Pod identity is opt-in and must be qualified when either its shared
 # implementation or the orchestration consumer is selected, without relying on
@@ -4760,12 +4823,12 @@ run_pod_identity_rust_case() {
     [[ "$test_count" == "$expected" ]] || { echo "$name: missing or duplicate Pod identity tests" >&2; exit 1; }
   fi
 }
-run_pod_identity_rust_case shared rust_pkg_codewire_server_core 1
-run_pod_identity_rust_case consumer rust_pkg_codewire_orchestration 1
-run_pod_identity_rust_case workspace rust_workspace 1
-run_pod_identity_rust_case unrelated rust_pkg_codewire_client 0
-run_pod_identity_rust_case clippy_failure rust_pkg_codewire_server_core 1 clippy
-run_pod_identity_rust_case test_failure rust_pkg_codewire_server_core 1 test
+defer_check run_pod_identity_rust_case shared rust_pkg_codewire_server_core 1
+defer_check run_pod_identity_rust_case consumer rust_pkg_codewire_orchestration 1
+defer_check run_pod_identity_rust_case workspace rust_workspace 1
+defer_check run_pod_identity_rust_case unrelated rust_pkg_codewire_client 0
+defer_check run_pod_identity_rust_case clippy_failure rust_pkg_codewire_server_core 1 clippy
+defer_check run_pod_identity_rust_case test_failure rust_pkg_codewire_server_core 1 test
 
 # A dedicated service may not accidentally inherit the broker's local default
 # or enable test-only protected material providers through a transitive edge.
@@ -4790,12 +4853,12 @@ run_credential_service_graph_case() {
     echo "$name: missing or duplicate service graph proof" >&2; exit 1;
   }
 }
-run_credential_service_graph_case service rust_pkg_codewire_credential_service 1
-run_credential_service_graph_case workspace rust_workspace 1
-run_credential_service_graph_case unrelated rust_pkg_codewire_client 0
-run_credential_service_graph_case cargo_failure rust_pkg_codewire_credential_service 1 tree
-run_credential_service_graph_case local_default rust_pkg_codewire_credential_service 1 '' default,local,platform
-run_credential_service_graph_case synthetic_provider rust_pkg_codewire_credential_service 1 '' platform,platform-test-support
+defer_check run_credential_service_graph_case service rust_pkg_codewire_credential_service 1
+defer_check run_credential_service_graph_case workspace rust_workspace 1
+defer_check run_credential_service_graph_case unrelated rust_pkg_codewire_client 0
+defer_check run_credential_service_graph_case cargo_failure rust_pkg_codewire_credential_service 1 tree
+defer_check run_credential_service_graph_case local_default rust_pkg_codewire_credential_service 1 '' default,local,platform
+defer_check run_credential_service_graph_case synthetic_provider rust_pkg_codewire_credential_service 1 '' platform,platform-test-support
 
 awk '
   /^rust_package_args\(\) \{/ { capture = 1 }
@@ -4913,9 +4976,9 @@ bash -n \
   "$ROOT/scripts/dev/preflight.sh" \
   "$ROOT/.githooks/pre-push"
 
-"$ROOT/scripts/ci/tests/test-pre-push-worktree.sh"
-"$ROOT/scripts/ci/tests/test-push-check-shellcheck.sh"
-"$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh"
+defer_slow_check "$ROOT/scripts/ci/tests/test-pre-push-worktree.sh"
+defer_slow_check "$ROOT/scripts/ci/tests/test-push-check-shellcheck.sh"
+defer_slow_check "$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh"
 
 # Main CI runs start at once, one group per commit. A main push whose
 # selection starts after main moved on says which commit superseded it, and
@@ -5030,10 +5093,10 @@ kind_label="$(scope_event kind_label 'feat: change' kind-e2e)"
 kind_marker="$(scope_event kind_marker 'feat: change [kind-e2e]')"
 lookalike="$(scope_event lookalike 'feat: ci-full is not a label' ci ci/r2-cache-canary ci-fuller)"
 
-# NAME|PATHS (space separated)
-while IFS='|' read -r name paths_list; do
-  paths="$TMP/scope-${name}.paths"
-  tr ' ' '\n' <<<"$paths_list" > "$paths"
+# NAME|PATHS (space separated). Each case's checks read only its paths file.
+scope_case() {
+  local name="$1" paths="$TMP/scope-$1.paths" push_output pr_output main_output main_tokens
+  local push_tokens kind_event
   # A push to main as it selects with Kind (the switch true); ci-full
   # compares against it.
   push_output="$(SCOPE_SELECTOR="$SELECTOR_KIND_ON" scope_select push '' "$paths")"
@@ -5080,6 +5143,10 @@ while IFS='|' read -r name paths_list; do
       exit 1
     }
   done
+}
+while IFS='|' read -r name paths_list; do
+  tr ' ' '\n' <<<"$paths_list" > "$TMP/scope-${name}.paths"
+  defer_check scope_case "$name"
 done <<'CASES'
 docs|docs/dev/AGENT-WORKFLOW.md
 rust_cli|crates/codewire-cli/src/main.rs
@@ -5268,8 +5335,10 @@ selection_value "$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
 selection_value "$(schedule_paths "$SELECTOR_KIND_OFF" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)" \
   >> "$job_work_selections"
 selection_value "$(schedule_paths "$SELECTOR_KIND_OFF" docs/dev/AGENT-WORKFLOW.md)" >> "$job_work_selections"
+check_job_work() {
 python3 -B - "$WORKFLOW" "$ROOT/scripts/ci/select/emit-verification-matrices.sh" \
-    "$job_work_selections" <<'PY'
+    "$job_work_selections" "$DEFERRED_JOBS" <<'PY'
+import concurrent.futures
 import itertools
 import os
 import re
@@ -5280,6 +5349,7 @@ import tempfile
 import yaml
 
 workflow_path, emitter, realistic_path = sys.argv[1:4]
+workers = int(sys.argv[4])
 workflow = yaml.safe_load(open(workflow_path, encoding="utf-8"))
 jobs = workflow["jobs"]
 
@@ -5370,7 +5440,13 @@ def tokenize(text):
     return tokens
 
 
-def expression_value(expression, context):
+def truthy(value):
+    return value not in ("", False, None)
+
+
+def compile_expression(expression):
+    """The expression as a function of the context. Each expression is parsed
+    once and evaluated for every combination below."""
     text = expression.strip()
     if text.startswith("${{") and text.endswith("}}"):
         text = text[3:-2]
@@ -5388,9 +5464,6 @@ def expression_value(expression, context):
         position += 1
         return token
 
-    def truthy(value):
-        return value not in ("", False, None)
-
     def primary():
         token = take()
         if token == "(":
@@ -5398,9 +5471,11 @@ def expression_value(expression, context):
             take(")")
             return value
         if token == "!":
-            return not truthy(primary())
+            operand = primary()
+            return lambda context: not truthy(operand(context))
         if token.startswith("'"):
-            return token[1:-1].replace("''", "'")
+            literal = token[1:-1].replace("''", "'")
+            return lambda context: literal
         if peek() == "(":
             take("(")
             arguments = []
@@ -5410,43 +5485,66 @@ def expression_value(expression, context):
                     take(",")
             take(")")
             if token == "contains":
-                return str(arguments[1]) in str(arguments[0])
+                return lambda context: str(arguments[1](context)) in str(arguments[0](context))
             if token in ("always", "success"):
-                return True
+                return lambda context: True
             if token in ("failure", "cancelled"):
-                return False
+                return lambda context: False
             raise SystemExit(f"unsupported function {token}")
-        return context.get(token, "")
+        return lambda context: context.get(token, "")
+
+    def compare(operator, left, right):
+        if operator == "==":
+            return lambda context: str(left(context)) == str(right(context))
+        return lambda context: str(left(context)) != str(right(context))
 
     def comparison():
         left = primary()
         while peek() in ("==", "!="):
             operator = take()
-            right = primary()
-            left = (str(left) == str(right)) if operator == "==" else (str(left) != str(right))
+            left = compare(operator, left, primary())
         return left
 
     # Like Actions, && and || yield an operand, so `a && 'x' || 'y'` is a value.
+    def both(left, right):
+        def value(context):
+            first = left(context)
+            return right(context) if truthy(first) else first
+        return value
+
+    def either(left, right):
+        def value(context):
+            first = left(context)
+            return first if truthy(first) else right(context)
+        return value
+
     def conjunction():
         value = comparison()
         while peek() == "&&":
             take()
-            right = comparison()
-            value = right if truthy(value) else value
+            value = both(value, comparison())
         return value
 
     def disjunction():
         value = conjunction()
         while peek() == "||":
             take()
-            right = conjunction()
-            value = value if truthy(value) else right
+            value = either(value, conjunction())
         return value
 
     result = disjunction()
     if position != len(tokens):
         raise SystemExit(f"trailing tokens in {expression!r}")
     return result
+
+
+compiled_expressions = {}
+
+
+def expression_value(expression, context):
+    if expression not in compiled_expressions:
+        compiled_expressions[expression] = compile_expression(expression)
+    return compiled_expressions[expression](context)
 
 
 def evaluate(expression, context):
@@ -5463,7 +5561,7 @@ def env_value(expression, context):
     return str(result)
 
 
-def dispatch(selection, cw, desktop):
+def run_emitter(selection, cw, desktop):
     with tempfile.NamedTemporaryFile("r") as output:
         environment = dict(
             os.environ, VERIFICATION_SELECTION=selection, VERIFICATION_TESTED_TREE_RECEIPT="fallback",
@@ -5472,6 +5570,24 @@ def dispatch(selection, cw, desktop):
         )
         subprocess.run([emitter], env=environment, check=True, stderr=subprocess.DEVNULL)
         return dict(line.strip().split("=", 1) for line in open(output.name) if line.strip())
+
+
+# The emitter reads only the selection and the two artifact facts, so each
+# combination of them runs it once, and the combinations run side by side.
+emitter_outputs = {}
+
+
+def dispatch_all(keys):
+    keys = sorted(set(keys) - set(emitter_outputs))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for key, outputs in zip(keys, pool.map(lambda key: run_emitter(*key), keys)):
+            emitter_outputs[key] = outputs
+
+
+def dispatch(selection, cw, desktop):
+    if (selection, cw, desktop) not in emitter_outputs:
+        dispatch_all([(selection, cw, desktop)])
+    return emitter_outputs[(selection, cw, desktop)]
 
 
 scope_cache = {}
@@ -5591,6 +5707,8 @@ for job_id, plane in (("services-control", "control-plane"), ("services-runtime"
             raise SystemExit(f"{job_id}: the service run must take the archives only when ready")
 print("service jobs: ready archives run without compiling; a fetch miss builds in place")
 
+dispatch_all((selection, cw, desktop) for selection in set(realistic) | synthetic
+             for cw in ("true", "false") for desktop in ("true", "false"))
 for selection in sorted(set(realistic) | synthetic):
     # A scheduled selection dispatches no artifact group.
     scheduled_only = "|scheduled|" in selection
@@ -5680,7 +5798,10 @@ for selection in scheduled:
         checked += 1
 print(f"dispatched jobs always have work: {checked} event, selection and artifact combinations")
 PY
+}
+defer_slow_check check_job_work
 
+run_deferred_checks
 echo 'select-verification fixtures: OK'
 
 # Preflight runs the fast compile for exactly the selections that make CI run
