@@ -662,7 +662,11 @@ jobs:
     # runner, /ci-cache/pr and the pull request archive store.
     name: Compile every Rust target
     runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_BUILD') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD') }}
-    timeout-minutes: 30
+    # A cold build of every leg, after a lockfile, toolchain or layout change,
+    # took 27 min serially (run 22438), and a timed-out compile leaves its
+    # folder unfinished, so the next run is cold again. Warm builds stay far
+    # below; the bound holds the cold one under the 90-minute task budget.
+    timeout-minutes: 60
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.rust_compile_expected == 'true' }}
     outputs:

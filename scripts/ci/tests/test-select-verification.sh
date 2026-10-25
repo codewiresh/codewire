@@ -3099,7 +3099,7 @@ done
 # gate shards its suites across four parallel per-cluster legs; each shard's
 # 45-minute ceiling holds the longest leg (setup plus dashboard browser) far
 # below the 90-minute heavy budget.
-for job_id in standard tooling rust-compile rust-packages rust-features database services-control services-runtime; do
+for job_id in standard tooling rust-packages rust-features database services-control services-runtime; do
   block="$TMP/${job_id}.yaml"
   if [ ! -s "$block" ]; then
     awk -v wanted="$job_id" '
@@ -3114,6 +3114,13 @@ for job_id in standard tooling rust-compile rust-packages rust-features database
   }
 done
 
+# The compile job builds every leg cold after a lockfile, toolchain or
+# layout change (27 min in run 22438), so it alone has 60 minutes.
+awk '$0 == "  rust-compile:" { capture = 1 } capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  rust-compile:" { exit } capture { print }' "$WORKFLOW" > "$TMP/rust-compile-timeout.yaml"
+grep -qF '    timeout-minutes: 60' "$TMP/rust-compile-timeout.yaml" || {
+  echo 'rust-compile: the build-once job must retain its 60-minute cold-build ceiling' >&2
+  exit 1
+}
 rust_transport_block="$TMP/rust-transport.yaml"
 grep -qF '    timeout-minutes: 55' "$rust_transport_block" || {
   echo 'rust-transport: cold-cache ceiling must remain 55 minutes' >&2
