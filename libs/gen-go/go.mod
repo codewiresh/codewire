@@ -1,6 +1,6 @@
 module github.com/codewiresh/codewire/libs/gen-go
 
-go 1.26.3
+go 1.27.3
 
 require (
 	connectrpc.com/connect v1.18.1
