@@ -747,11 +747,14 @@ for step in steps:
 PYTHON
 
 # The archive extractor links each archive's non-test binaries at their build
-# path, and skips the libraries nextest also lists (main run 22655: boringtun's
-# static library in the credential service's enrollment archive); any other
-# unexpected path still fails.
+# path, in the target folder the archive records (each build-once leg has its
+# own; main run 23071: idp's rewrap_cli started codewire-idp from
+# targets/services_control), and skips the libraries nextest also lists (main
+# run 22655: boringtun's static library in the credential service's
+# enrollment archive); any other unexpected path, or a folder outside the
+# build tree, still fails.
 extract_case() {
-  local entries="$1" case_dir="$TMP/extract-$2"
+  local entries="$1" case_dir="$TMP/extract-$2" target="${3:-targets/archive}"
   mkdir -p "$case_dir/archives-in" "$case_dir/root" "$case_dir/bin"
   : > "$case_dir/archives-in/codewire-credential-service--features-enrollment.tar.zst"
   printf '%s' "$entries" > "$case_dir/entries.json"
@@ -762,8 +765,8 @@ while [ "$#" -gt 0 ]; do
   [ "$1" = --extract-to ] && { mkdir -p "$2/target/nextest"; out="$2"; shift; }
   shift
 done
-printf '{"rust-build-meta":{"non-test-binaries":{"codewire-credential-service":%s}}}' \
-  "$(cat "$EXTRACT_ENTRIES")" > "$out/target/nextest/binaries-metadata.json"
+printf '{"rust-build-meta":{"target-directory":"%s","non-test-binaries":{"codewire-credential-service":%s}}}' \
+  "$EXTRACT_TARGET" "$(cat "$EXTRACT_ENTRIES")" > "$out/target/nextest/binaries-metadata.json"
 NEXTEST
   chmod +x "$case_dir/bin/nextest"
   # The variables and log() are the eval'd extractor's.
@@ -774,7 +777,9 @@ NEXTEST
     eval "$(awk '/^extract_archives\(\) \{/,/^\}/' "$ROOT/scripts/ci/verify/run-integration-verification.sh")"
     ROOT="$case_dir/root" RUN_DIR="$case_dir/run" DATABASE_ARCHIVE_BUILD_ROOT="$case_dir/build" \
       RUST_TEST_NEXTEST="$case_dir/bin/nextest" EXTRACT_ENTRIES="$case_dir/entries.json"
-    export EXTRACT_ENTRIES
+    EXTRACT_TARGET="$case_dir/build/$target"
+    case "$target" in /*) EXTRACT_TARGET="$target" ;; esac
+    export EXTRACT_ENTRIES EXTRACT_TARGET
     extract_archives "$case_dir/archives-in"
   ) > "$case_dir/out.log" 2>&1
 }
@@ -792,5 +797,19 @@ grep -q 'names an unexpected binary path: debug/../escape' "$TMP/extract-escape/
 if extract_case '[{"name":"x","path":"debug/deps/notalib-1.a"}]' nonlib; then
   echo 'the extractor skipped an unexpected non-library path' >&2; exit 1
 fi
+extract_case '[{"name":"codewire-idp","path":"debug/codewire-idp"}]' leg targets/services_control ||
+  { cat "$TMP/extract-leg/out.log" >&2; echo 'the extractor refused a leg target folder' >&2; exit 1; }
+[ "$(readlink "$TMP/extract-leg/build/targets/services_control/debug/codewire-idp")" = \
+  "$TMP/extract-leg/run/archives/codewire-credential-service--features-enrollment/target/debug/codewire-idp" ] ||
+  { echo 'the extractor did not link the binary in its leg target folder' >&2; exit 1; }
+[ -d "$TMP/extract-leg/build/targets/services_control/tmp" ] ||
+  { echo 'the extractor made no CARGO_TARGET_TMPDIR in the leg target folder' >&2; exit 1; }
+[ ! -e "$TMP/extract-leg/build/targets/archive" ] ||
+  { echo 'the extractor linked into a folder the archive was not built in' >&2; exit 1; }
+if extract_case '[{"name":"codewire-idp","path":"debug/codewire-idp"}]' outside /elsewhere/target; then
+  echo 'the extractor accepted a target folder outside the build tree' >&2; exit 1
+fi
+grep -q 'was built in /elsewhere/target, not a target folder of' "$TMP/extract-outside/out.log" ||
+  { echo 'the extractor gave no reason for the refused target folder' >&2; exit 1; }
 
 printf '[test-integration-postgres] hermetic selection, prerequisite, scope, and cleanup cases passed\n'

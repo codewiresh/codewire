@@ -261,13 +261,13 @@ archive_cargo() {
 # extract_archives DIR: extract every archive in DIR once, before the lanes
 # start.
 extract_archives() {
-  local dir="$1" archive key binary link
-  local -A linked=()
+  local dir="$1" archive key binary link target metadata
+  local -A linked=() named=()
   # Test binaries carry the build folder's source paths (CARGO_MANIFEST_DIR):
   # a real copy of this checkout there, not a link, since tests check their
   # paths' ancestry and compare canonical paths.
   rm -rf -- "$DATABASE_ARCHIVE_BUILD_ROOT"
-  mkdir -p "$RUN_DIR/archives" "$DATABASE_ARCHIVE_BUILD_ROOT/targets/archive/tmp"
+  mkdir -p "$RUN_DIR/archives"
   cp -a "$ROOT/." "$DATABASE_ARCHIVE_BUILD_ROOT/src"
   for archive in "$dir"/*.tar.zst; do
     key="$(basename "$archive" .tar.zst)"
@@ -278,9 +278,18 @@ extract_archives() {
       --extract-to "$RUN_DIR/archives/$key" -E 'none()' --no-tests=pass >/dev/null
     # An integration test starts its package's binaries by their build
     # folder path (CARGO_BIN_EXE_*, fixed when it compiled, as idp's
-    # rewrap_cli does): link each archive's binaries there. A binary two
-    # archives carry (one package in two feature sets) is linked to neither,
-    # so a test that starts it fails rather than start the other build.
+    # rewrap_cli does), and may write to its CARGO_TARGET_TMPDIR: link each
+    # archive's binaries into the target folder it was built in, which each
+    # build-once leg has of its own (targets/database, targets/services_control
+    # and so on; main run 23071), and make its tmp folder. A binary two
+    # archives of one folder carry (one package in two feature sets) is linked
+    # to neither, so a test that starts it fails rather than start the other
+    # build.
+    metadata="$RUN_DIR/archives/$key/target/nextest/binaries-metadata.json"
+    target="$(jq -r '."rust-build-meta"."target-directory" // empty' "$metadata")"
+    [[ "$target" =~ ^"$DATABASE_ARCHIVE_BUILD_ROOT"/targets/[A-Za-z0-9_-]+$ ]] ||
+      { echo "::error::archive $key was built in ${target:-no recorded folder}, not a target folder of $DATABASE_ARCHIVE_BUILD_ROOT" >&2; return 2; }
+    mkdir -p "$target/tmp"
     while read -r binary; do
       # nextest also lists the libraries a build produced (a dependency's
       # static library, such as boringtun's .a in the credential service's
@@ -291,25 +300,25 @@ extract_archives() {
       fi
       [[ "$binary" =~ ^[a-z0-9_-]+/[A-Za-z0-9_.-]+$ ]] ||
         { echo "::error::archive $key names an unexpected binary path: $binary" >&2; return 2; }
-      link="$DATABASE_ARCHIVE_BUILD_ROOT/targets/archive/$binary"
-      if [ -n "${linked[$binary]:-}" ]; then
+      link="$target/$binary"
+      if [ -n "${linked[$link]:-}" ]; then
         rm -f -- "$link"
-        linked[$binary]=ambiguous
-        continue
+        linked[$link]=ambiguous
+      else
+        linked[$link]="$key"
+        mkdir -p "$(dirname "$link")"
+        ln -s "$RUN_DIR/archives/$key/target/$binary" "$link"
       fi
-      linked[$binary]="$key"
-      mkdir -p "$(dirname "$link")"
-      ln -s "$RUN_DIR/archives/$key/target/$binary" "$link"
-    done < <(jq -r '."rust-build-meta"."non-test-binaries"[][].path' \
-      "$RUN_DIR/archives/$key/target/nextest/binaries-metadata.json")
+      if [ -n "${named[$binary]:-}" ]; then named[$binary]=ambiguous; else named[$binary]="$key"; fi
+    done < <(jq -r '."rust-build-meta"."non-test-binaries"[][].path' "$metadata")
   done
   # A binary the run starts by name from DIR (CARGO_CI_DIR) that no build
   # kept there comes from the one archive that carries it: the orchestration
   # wire contract's archive carries the orchestration service and its smokes.
-  for binary in "${!linked[@]}"; do
-    [ "${linked[$binary]}" != ambiguous ] || continue
+  for binary in "${!named[@]}"; do
+    [ "${named[$binary]}" != ambiguous ] || continue
     [ -e "$dir/${binary##*/}" ] ||
-      ln -s "$RUN_DIR/archives/${linked[$binary]}/target/$binary" "$dir/${binary##*/}"
+      ln -s "$RUN_DIR/archives/${named[$binary]}/target/$binary" "$dir/${binary##*/}"
   done
   log "archives extracted: $(find "$RUN_DIR/archives" -mindepth 1 -maxdepth 1 | wc -l)"
 }
