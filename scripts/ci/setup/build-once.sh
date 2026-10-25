@@ -183,6 +183,7 @@ in_src() {
 LEGS=(
   "archive tests always"
   "compile checks always"
+  "database tests selected:database"
 )
 
 leg_archive() {
@@ -197,6 +198,19 @@ leg_compile() {
   # target, and the curated image workspaces.
   phase 'compile-all-targets' env CARGO_TARGET_DIR="$work/targets/clippy" \
     scripts/ci/verify/compile-all-targets.sh
+}
+
+leg_database() {
+  # The database suites' archives, one per package and feature set, built by
+  # run-integration-verification.sh from its own suite list, with the
+  # CI-profile migration runner; bundled into one tar.
+  local out="$1" dir
+  dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/database-archives.XXXXXX")"
+  phase 'database archives' env CARGO_TARGET_DIR="$work/targets/archive" \
+    CODEWIRE_CARGO_CI_TARGET_DIR="$work/targets/archive" ARCHIVE_BUILD_DIR="$dir" \
+    scripts/ci/verify/run-integration-verification.sh database-archives
+  tar -cf "$out/database.tar" -C "$dir" .
+  rm -rf -- "$dir"
 }
 
 leg_wanted() {

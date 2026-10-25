@@ -111,6 +111,161 @@ cargo_ci() {
   CARGO_TARGET_DIR="$CARGO_CI_TARGET_DIR" cargo "$@"
 }
 
+# Compile once (infra#1632). Two modes replace Cargo for the database suites,
+# so the lanes below stay the one list of what runs:
+# - database-archives (on the pull request build runner): each `cargo test
+#   ... --no-run` of build_database_suites becomes `cargo nextest archive` of
+#   the same package and feature set into ARCHIVE_BUILD_DIR, one archive per
+#   package and feature set, and the CI-profile migration runner is copied
+#   beside them.
+# - RUST_DATABASE_ARCHIVES (a test job): every `cargo test` of a lane runs the
+#   same tests from those archives with cargo-nextest (RUST_TEST_NEXTEST),
+#   and prints cargo's "test result" line, so assert_passed_count and the
+#   lanes' output checks read it as before. `cargo build` of the migration
+#   runner is a no-op: the archives carry it.
+# The helpers serve any family: archive_cargo builds into ARCHIVE_BUILD_DIR
+# and runs from the folders extract_archives DIR made. A lane's --profile is
+# dropped, so the archives build in the dev profile and share their units
+# with the build runner's other archives; ARCHIVE_CARGO_PROFILE=keep builds
+# them in the lane's profile instead (--cargo-profile), keyed apart.
+# The build runner's build folder, /ci-cache/main on a push to main and
+# /ci-cache/pr otherwise (build-once-tree.sh); the archives' test binaries
+# carry its paths.
+# shellcheck source=scripts/ci/setup/build-once-tree.sh
+source "$ROOT/scripts/ci/setup/build-once-tree.sh"
+DATABASE_ARCHIVE_BUILD_ROOT="$(build_once_tree)"
+readonly DATABASE_ARCHIVE_BUILD_ROOT
+
+archive_key() {
+  # archive_key PACKAGE FEATURES NO_DEFAULT [PROFILE]: one archive per set.
+  local key="$1"
+  [ "$3" = true ] && key+="--no-default"
+  [ -z "$2" ] || key+="--features-${2//,/-}"
+  [ -z "${4:-}" ] || key+="--profile-$4"
+  printf '%s' "$key"
+}
+
+archive_cargo() {
+  local command="${1:-}"
+  shift || true
+  if [ "$command" = build ]; then
+    # The migration runner comes from the archives (CARGO_CI_DIR).
+    return 0
+  fi
+  [ "$command" = test ] || { echo "::error::archive mode cannot run cargo $command" >&2; return 2; }
+  local package="" features="" no_default=false no_run=false name="" exact=false ignored=default
+  local threads="" nocapture=false profile="" arg
+  local -a binaries=() skips=() cargo_args=()
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    shift
+    case "$arg" in
+      --) break ;;
+      --locked) ;;
+      -p|--package) package="$1"; cargo_args+=(-p "$1"); shift ;;
+      --features) features="$1"; cargo_args+=(--features "$1"); shift ;;
+      --no-default-features) no_default=true; cargo_args+=("$arg") ;;
+      --lib) binaries+=("binary_id($package)"); cargo_args+=("$arg") ;;
+      --test) binaries+=("binary_id($package::$1)"); cargo_args+=(--test "$1"); shift ;;
+      --profile)
+        if [ "${ARCHIVE_CARGO_PROFILE:-drop}" = keep ]; then
+          profile="$1"
+          cargo_args+=(--cargo-profile "$1")
+        fi
+        shift
+        ;;
+      --no-run) no_run=true ;;
+      -*) echo "::error::archive mode does not know cargo test $arg" >&2; return 2 ;;
+      *) name="$arg" ;;
+    esac
+  done
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    shift
+    case "$arg" in
+      --ignored) ignored=only ;;
+      --include-ignored) ignored=all ;;
+      --exact) exact=true ;;
+      --nocapture) nocapture=true ;;
+      --test-threads=*) threads="${arg#--test-threads=}" ;;
+      --skip) skips+=("$1"); shift ;;
+      --skip=*) skips+=("${arg#--skip=}") ;;
+      *) echo "::error::archive mode does not know test argument $arg" >&2; return 2 ;;
+    esac
+  done
+  [ -n "$package" ] || { echo '::error::archive mode needs -p' >&2; return 2; }
+  local key
+  key="$(archive_key "$package" "$features" "$no_default" "$profile")"
+  if [ "$no_run" = true ]; then
+    [ -n "${ARCHIVE_BUILD_DIR:-}" ] || { echo '::error::no archive directory' >&2; return 2; }
+    [ ! -e "$ARCHIVE_BUILD_DIR/$key.tar.zst" ] ||
+      { echo "::error::two build batches share the archive $key" >&2; return 2; }
+    command cargo nextest archive --locked "${cargo_args[@]}" \
+      --archive-file "$ARCHIVE_BUILD_DIR/$key.tar.zst"
+    return
+  fi
+  local extracted="$RUN_DIR/archives/$key"
+  [ -f "$extracted/target/nextest/binaries-metadata.json" ] ||
+    { echo "::error::no extracted archive $key; the build runner built none for it" >&2; return 2; }
+  local filter="package($package)" part binary_filter=""
+  for part in "${binaries[@]}"; do
+    binary_filter="${binary_filter:+$binary_filter | }$part"
+  done
+  [ -z "$binary_filter" ] || filter+=" & ($binary_filter)"
+  if [ -n "$name" ]; then
+    if [ "$exact" = true ]; then filter+=" & test(=$name)"; else filter+=" & test($name)"; fi
+  fi
+  for part in "${skips[@]}"; do
+    filter+=" & !test($part)"
+  done
+  local -a run_args=(--run-ignored "$ignored" -E "$filter" --no-tests=fail --no-fail-fast
+    --binaries-metadata "$extracted/target/nextest/binaries-metadata.json"
+    --cargo-metadata "$extracted/target/nextest/cargo-metadata.json"
+    --target-dir-remap "$extracted/target"
+    --workspace-remap "$DATABASE_ARCHIVE_BUILD_ROOT/src")
+  [ -z "$threads" ] || run_args+=(--test-threads "$threads")
+  # cargo's --nocapture let the lanes read a passing test's output; keep it.
+  [ "$nocapture" = false ] || run_args+=(--success-output immediate)
+  local output status=0 passed
+  output="$(mktemp "$RUN_DIR/nextest.XXXXXX")"
+  "${RUST_TEST_NEXTEST:-cargo-nextest}" nextest run "${run_args[@]}" > "$output" 2>&1 || status=$?
+  cat "$output"
+  passed="$(sed -nE 's/^ *Summary \[.*\] +[0-9]+ tests? run: ([0-9]+) passed.*/\1/p' "$output" | tail -n 1)"
+  rm -f -- "$output"
+  if [ "$status" -eq 0 ]; then
+    echo "test result: ok. ${passed:-0} passed; 0 failed (cargo-nextest from the $key archive)"
+  fi
+  return "$status"
+}
+
+# extract_archives DIR: extract every archive in DIR once, before the lanes
+# start.
+extract_archives() {
+  local dir="$1" archive key
+  # Test binaries carry the build folder's source paths (CARGO_MANIFEST_DIR):
+  # a real copy of this checkout there, not a link, since tests check their
+  # paths' ancestry and compare canonical paths.
+  rm -rf -- "$DATABASE_ARCHIVE_BUILD_ROOT"
+  mkdir -p "$RUN_DIR/archives" "$DATABASE_ARCHIVE_BUILD_ROOT/targets/archive/tmp"
+  cp -a "$ROOT/." "$DATABASE_ARCHIVE_BUILD_ROOT/src"
+  for archive in "$dir"/*.tar.zst; do
+    key="$(basename "$archive" .tar.zst)"
+    # nextest extracts only into an existing, empty folder.
+    mkdir -p "$RUN_DIR/archives/$key"
+    "${RUST_TEST_NEXTEST:-cargo-nextest}" nextest run --archive-file "$archive" \
+      --workspace-remap "$DATABASE_ARCHIVE_BUILD_ROOT/src" \
+      --extract-to "$RUN_DIR/archives/$key" -E 'none()' --no-tests=pass >/dev/null
+  done
+  log "archives extracted: $(find "$RUN_DIR/archives" -mindepth 1 -maxdepth 1 | wc -l)"
+}
+
+if [ -n "${RUST_DATABASE_ARCHIVES:-}" ] || [ "$MODE" = database-archives ]; then
+  cargo() { archive_cargo "$@"; }
+fi
+if [ -n "${RUST_DATABASE_ARCHIVES:-}" ]; then
+  CARGO_CI_DIR="$RUST_DATABASE_ARCHIVES"
+fi
+
 dump_logs() {
   local name
   for name in idp coordinator billing orchestration \
@@ -130,6 +285,9 @@ cleanup() {
   done
   docker rm -f "$NATS_CONTAINER" >/dev/null 2>&1 || true
   integration_postgres_cleanup
+  if [ -n "${RUST_DATABASE_ARCHIVES:-}" ]; then
+    rm -rf -- "$DATABASE_ARCHIVE_BUILD_ROOT"
+  fi
   if [ -n "$IDP_SIGNING_KEK_DIR" ]; then
     rm -rf -- "$IDP_SIGNING_KEK_DIR"
   fi
@@ -590,7 +748,11 @@ run_database() {
   local lane started status failed=false
   local -A lane_url=() lane_rust_url=() lane_pid=() lane_started=()
   reset_schema
-  build_database_suites
+  if [ -n "${RUST_DATABASE_ARCHIVES:-}" ]; then
+    extract_archives "$RUST_DATABASE_ARCHIVES"
+  else
+    build_database_suites
+  fi
   if ! integration_postgres_lanes_available; then
     log "database lanes run one after another against the explicit database"
     for lane in "${DATABASE_LANES[@]}"; do
@@ -1473,6 +1635,16 @@ case "$MODE" in
 esac
 
 case "$MODE" in
+  database-archives)
+    # The build runner's half of compile once: no PostgreSQL, no tests.
+    : "${ARCHIVE_BUILD_DIR:?ARCHIVE_BUILD_DIR is required}"
+    mkdir -p "$ARCHIVE_BUILD_DIR"
+    build_database_suites
+    command cargo build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate
+    install -m 0755 "$CARGO_CI_DIR/codewire-db-migrate" "$ARCHIVE_BUILD_DIR/codewire-db-migrate"
+    log "database archives built: $(find "$ARCHIVE_BUILD_DIR" -name '*.tar.zst' | wc -l)"
+    exit 0
+    ;;
   database)
     integration_postgres_configure
     log "PostgreSQL source=${INTEGRATION_POSTGRES_SOURCE}"
@@ -1494,7 +1666,7 @@ case "$MODE" in
     run_services
     ;;
   *)
-    echo "usage: run-integration-verification.sh database|services-control|services-runtime" >&2
+    echo "usage: run-integration-verification.sh database|database-archives|services-control|services-runtime" >&2
     exit 2
     ;;
 esac

@@ -2822,6 +2822,23 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     # every selected Kind producer must succeed before this job can run.
     grep -qF "needs.verification-selection.outputs.edge_kind_expected == 'true'" "$block"
     python3 -B "$ROOT/scripts/ci/tests/test-kind-build-workflow.py"
+  elif [ "$job_id" = database ]; then
+    # Compile once (infra#1632): it runs the compile job's database archives
+    # when that job built them, and compiles itself when it was not dispatched.
+    grep -qF "    needs: [verification-selection, rust-compile]" "$block"
+    grep -qF "needs.verification-selection.outputs.database_expected == 'true'" "$block"
+    grep -qF "needs.rust-compile.result != 'failure' && needs.rust-compile.result != 'cancelled'" "$block"
+    # A fetch miss (no archive built, no store, or evicted) builds in place:
+    # the fetch never fails on a miss, the compile steps run when the archives
+    # are not ready, and the lanes take the archives only when they are.
+    # shellcheck disable=SC2016 # The workflow text holds literal shell variables.
+    grep -qF 'run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/database.tar"' "$block"
+    [ "$(grep -cF "steps.database-archives.outputs.ready != 'true' }}" "$block")" -eq 3 ]
+    grep -qF "RUST_DATABASE_ARCHIVES: \${{ steps.database-archives.outputs.ready == 'true' && format('{0}/database-archives', runner.temp) || '' }}" "$block"
+    if grep -qF 'BUILD_ONCE' "$block"; then
+      echo 'database: the archive path must follow the fetch, not the compile job alone' >&2
+      exit 1
+    fi
   elif [ "$job_id" = rust-packages ]; then
     # Compile once (infra#1632): it runs the compile job's test archive, so it
     # needs that job's success, except on a main push, which compiles here.
@@ -5039,6 +5056,7 @@ SUPPORT = {
     "Declare a metal Kata guest",
     "Bring the warm build folder to this commit", "Publish the test archives",
     "Fetch and verify the test archive", "Install pinned cargo-nextest",
+    "Fetch and verify the database archives", "Unpack the database archives",
     "Select independent workspace caches",
     "Install pinned protoc for Rust builds", "Install pinned protoc for Rust-backed standard checks",
     "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",

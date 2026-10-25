@@ -59,6 +59,38 @@ while read -r name; do
   grep -q "^leg_$name() {" "$SCRIPT" || fail "the $name leg has no function"
 done < <("$SCRIPT" legs)
 
+# A test job's fetch: verified bytes are ready; with --or-build, a missing
+# digest, store or archive is a miss the job builds through (ready=false, a
+# warning, success); without it a missing archive fails; a corrupt archive
+# always fails.
+FETCH="$ROOT/scripts/ci/setup/fetch-test-archive.sh"
+mkdir -p "$work/fetch-store/v1/archives"
+printf 'archive' > "$work/fetch-src"
+good="$(sha256sum "$work/fetch-src" | cut -d' ' -f1)"
+cp "$work/fetch-src" "$work/fetch-store/v1/archives/$good"
+absent="$(printf 'absent' | sha256sum | cut -d' ' -f1)"
+fetch() {
+  : > "$work/fetch-out"
+  GITHUB_OUTPUT="$work/fetch-out" ARCHIVE_STORE_URL="${STORE-file://$work/fetch-store}" \
+    "$FETCH" "$@" > "$work/fetch.log" 2>&1
+}
+fetch --or-build "$good" "$work/fetched/a.tar" || fail 'a stored archive did not fetch'
+grep -qx 'ready=true' "$work/fetch-out" || fail 'a fetched archive is not ready'
+cmp -s "$work/fetch-src" "$work/fetched/a.tar" || fail 'a fetched archive differs'
+fetch --or-build "$absent" "$work/fetched/b.tar" || fail 'an evicted archive failed the job instead of building'
+grep -qx 'ready=false' "$work/fetch-out" || fail 'an evicted archive was not a miss'
+grep -q '::warning::.*no archive .*builds its tests itself' "$work/fetch.log" || fail 'an evicted archive gave no warning'
+[ ! -e "$work/fetched/b.tar" ] && [ ! -e "$work/fetched/b.tar.partial" ] || fail 'a miss left a file behind'
+fetch --or-build '' "$work/fetched/c.tar" || fail 'a run with no archive failed instead of building'
+grep -qx 'ready=false' "$work/fetch-out" || fail 'a run with no archive was not a miss'
+STORE='' fetch --or-build "$good" "$work/fetched/d.tar" || fail 'no store failed the job instead of building'
+grep -qx 'ready=false' "$work/fetch-out" || fail 'no store was not a miss'
+if fetch "$absent" "$work/fetched/e.tar"; then fail 'an evicted archive passed without --or-build'; fi
+printf 'tampered' > "$work/fetch-store/v1/archives/$absent"
+if fetch --or-build "$absent" "$work/fetched/f.tar"; then fail 'a corrupt archive was accepted'; fi
+grep -q 'hashes to' "$work/fetch.log" || fail 'a corrupt archive gave no reason'
+grep -q 'ready=' "$work/fetch-out" && fail 'a corrupt archive reported readiness'
+
 # publish uploads every leg output and names its job output after the leg.
 mkdir -p "$work/out" "$work/store/v1/archives"
 printf 'one' > "$work/out/archive.tar.zst"
@@ -74,4 +106,4 @@ if ARCHIVE_STORE_URL="file://$work/store" "$SCRIPT" publish "$work/out" >/dev/nu
   fail 'publish accepted an invalid leg output name'
 fi
 
-echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table and publish hold; bad input refused'
+echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the archive fetch and its build fallback, and publish hold; bad input refused'
