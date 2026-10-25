@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, mock, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { afterAll, beforeAll, expect, mock, setDefaultTimeout, test } from "bun:test";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as fsPromises from "node:fs/promises";
 import { DevUxError } from "./dev-ux-ownership";
@@ -198,6 +198,13 @@ const LARGE_HISTORY = Array.from({ length: 300 }, (_, index) => ({
   org_id: ORG, created_by: USER, state: "destroyed",
 }));
 const EMAIL = "dedicated-smoke@example.test";
+// Hang guards, not subjects. Every journey here launches prlimit and a fake
+// cw, and a loaded CI guest has stalled one such launch past bun's default
+// 5 s test timeout. Each journey's deadline is far beyond that, and the test
+// timeout leaves room after it for cleanup, so a slow launch still finishes
+// and a real hang still fails. Only the bounded-timeout test passes its own.
+const JOURNEY_DEADLINE_MS = 20_000;
+setDefaultTimeout(60_000);
 const SECRET = "JBSWY3DPEHPK3PXP";
 let root = "";
 let binRoot = "";
@@ -346,7 +353,7 @@ test("identity checks bind user, email, exact owner organization and current org
 
 test("ordinary browser selectors prepare a fresh CLI login and sign out without artifacts", async () => {
   const value = await fixture();
-  await helper.main(value.args, 5_000);
+  await helper.main(value.args, JOURNEY_DEADLINE_MS);
   expect((await readdir(value.config)).sort()).toEqual(["config.json", "credentials.json"]);
   expect(activeContext.signOuts).toBe(1);
   expect(uxInvocations).toBe(0);
@@ -376,20 +383,13 @@ test("UX is opt-in and refuses arbitrary argument values", async () => {
 
 test("wrong identity prevents all UX mutation and revokes the owned login", async () => {
   const value = await fixture("wrong-identity");
-  const failure = await helper.main([...value.args, "--ux-walkthrough", "enabled"], 5000).catch((error) => error);
+  const failure = await helper.main([...value.args, "--ux-walkthrough", "enabled"], JOURNEY_DEADLINE_MS)
+    .catch((error) => error);
   expect(failure.stage).toBe("identity-mismatch");
   expect(failure.failureClass).toBe("assertion");
   expect(uxInvocations).toBe(0);
   expect(await readFile(join(value.directory, "audit"), "utf8")).toBe("logout\n");
 });
-
-// Time budgets only: in ux-timeout the walkthrough never resolves, so the
-// total deadline fires whatever its length; it must merely outlast reaching
-// the walkthrough, which takes longer on a loaded host. Every other mode
-// finishes well inside its deadline, which stays inside the test timeout.
-const UX_TIMEOUT_DEADLINE_MS = 2_000;
-const UX_DEADLINE_MS = 20_000;
-const UX_TEST_TIMEOUT_MS = 30_000;
 
 // The class each failed journey reports beside its fixed stage (#3132).
 const UX_FAILURE_CLASSES: Record<string, string> = {
@@ -400,8 +400,10 @@ const UX_FAILURE_CLASSES: Record<string, string> = {
 for (const mode of ["ux-success", "ux-large-history", "ux-failure", "ux-signal", "ux-timeout", "ux-stage-timeout", "ux-cleanup-failure"]) {
   test(`${mode}: cleanup is independent of browser and precedes OAuth logout`, async () => {
     const value = await fixture(mode);
-    const deadline = mode === "ux-timeout" ? UX_TIMEOUT_DEADLINE_MS : UX_DEADLINE_MS;
-    const result = await helper.main([...value.args, "--ux-walkthrough", "enabled"], deadline)
+    // In ux-timeout the walkthrough never resolves, so it waits out the whole
+    // journey deadline: a shorter one would have to outlast reaching the
+    // walkthrough, which a loaded host can delay by seconds.
+    const result = await helper.main([...value.args, "--ux-walkthrough", "enabled"], JOURNEY_DEADLINE_MS)
       .catch((error) => error);
     expect(uxInvocations).toBe(1);
     const audit = await readFile(join(value.directory, "audit"), "utf8");
@@ -422,7 +424,7 @@ for (const mode of ["ux-success", "ux-large-history", "ux-failure", "ux-signal",
       if (mode === "ux-stage-timeout") expect(result.stage).toBe("terminal-attach");
       expect(result.failureClass).toBe(UX_FAILURE_CLASSES[mode]);
     }
-  }, UX_TEST_TIMEOUT_MS);
+  });
 }
 
 test("the large-history fixture would overflow a whole-history list", () => {
@@ -439,7 +441,7 @@ test("external redirects are rejected before each credential or device action", 
     ["external-device", "browser-device-route", 3],
   ] as const) {
     const value = await fixture(mode);
-    const failure = await helper.main(value.args, 5_000).catch((error) => error);
+    const failure = await helper.main(value.args, JOURNEY_DEADLINE_MS).catch((error) => error);
     expect(failure.stage).toBe(stage);
     expect(failure.failureClass).toBe("navigation");
     expect(credentialFills).toBe(fills);
@@ -449,7 +451,7 @@ test("external redirects are rejected before each credential or device action", 
 
 test("a rejected browser action is reduced to a fixed stage without an unhandled response", async () => {
   const value = await fixture("action-rejection");
-  const failure = await helper.main(value.args, 5_000).catch((error) => error);
+  const failure = await helper.main(value.args, JOURNEY_DEADLINE_MS).catch((error) => error);
   expect(failure.stage).toBe("browser-flow");
   expect(failure.failureClass).toBe("unexpected");
   expect(await readdir(value.config)).toEqual([]);
@@ -458,7 +460,7 @@ test("a rejected browser action is reduced to a fixed stage without an unhandled
 test("signal handling remains active and idempotent through browser cleanup", async () => {
   const listeners = process.listenerCount("SIGTERM");
   const value = await fixture("cleanup-signal");
-  await expect(helper.main(value.args, 5_000)).rejects.toThrow("signal-sigterm");
+  await expect(helper.main(value.args, JOURNEY_DEADLINE_MS)).rejects.toThrow("signal-sigterm");
   expect(cleanupSignalEmitted).toBe(true);
   expect(process.listenerCount("SIGTERM")).toBe(listeners);
   expect(await readdir(value.config)).toEqual([]);
@@ -467,7 +469,7 @@ test("signal handling remains active and idempotent through browser cleanup", as
 test("multiple session revoke controls select only sign out of this browser", async () => {
   expect(settingsSignOutButtons.filter((label) => /sign out/i.test(label))).toHaveLength(3);
   const value = await fixture();
-  await helper.main(value.args, 5_000);
+  await helper.main(value.args, JOURNEY_DEADLINE_MS);
   expect(matchedSignOutButtons).toEqual(["Sign out of this browser"]);
   expect(activeContext.signOuts).toBe(1);
   expect(activeContext.session).toBe(false);
@@ -475,7 +477,7 @@ test("multiple session revoke controls select only sign out of this browser", as
 
 test("browser sign-out failure is reported after remaining local cleanup", async () => {
   const value = await fixture("sign-out-failure");
-  const failure = await helper.main(value.args, 5_000).catch((error) => error);
+  const failure = await helper.main(value.args, JOURNEY_DEADLINE_MS).catch((error) => error);
   expect(failure.stage).toBe("browser-sign-out");
   expect(failure.cleanupFailures).toEqual(["browser-sign-out:failed"]);
   expect(activeContext.session).toBe(true);
@@ -485,7 +487,7 @@ test("browser sign-out failure is reported after remaining local cleanup", async
 
 test("opaque browser errors never enter original or cleanup diagnostics", async () => {
   const value = await fixture("hostile-sign-out");
-  const failure = await helper.main(value.args, 5_000).catch((error) => error);
+  const failure = await helper.main(value.args, JOURNEY_DEADLINE_MS).catch((error) => error);
   expect(failure.stage).toBe("browser-sign-out");
   expect(failure.cleanupFailures).toEqual(["browser-sign-out:failed"]);
   expect(JSON.stringify(failure)).not.toContain("hostile-password-token-body-canary");
@@ -495,7 +497,7 @@ test("opaque browser errors never enter original or cleanup diagnostics", async 
 for (const stage of ["browser-launch", "browser-page", "browser-close"]) {
   test(`opaque ${stage} failure is localized without disclosing payloads`, async () => {
     const value = await fixture(`hostile-${stage}`);
-    const failure = await helper.main(value.args, 5_000).catch((error) => error);
+    const failure = await helper.main(value.args, JOURNEY_DEADLINE_MS).catch((error) => error);
     expect(failure).toBeInstanceOf(helper.FixedStageError);
     expect(failure.stage).toBe(stage);
     expect(failure.message).toBe(stage);
@@ -510,7 +512,7 @@ test("successful body with failed owned-directory cleanup is still nonzero", asy
   const value = await fixture();
   rejectedRemovalPath = join(value.config, ".browser-profile");
   try {
-    const failure = await helper.main(value.args, 5_000).catch((error) => error);
+    const failure = await helper.main(value.args, JOURNEY_DEADLINE_MS).catch((error) => error);
     expect(failure.stage).toBe("cleanup-incomplete");
     expect(failure.cleanupFailures).toContain("browser-profile-remove:failed");
     expect(JSON.stringify(failure)).not.toContain("hostile-owned-remove-error-canary");
@@ -522,7 +524,7 @@ test("successful body with failed owned-directory cleanup is still nonzero", asy
 test("wrong identity and challenge drift revoke the owned login and clear only config contents", async () => {
   for (const mode of ["wrong-identity", "drift"]) {
     const value = await fixture(mode);
-    await expect(helper.main(value.args, 5_000)).rejects.toBeInstanceOf(helper.FixedStageError);
+    await expect(helper.main(value.args, JOURNEY_DEADLINE_MS)).rejects.toBeInstanceOf(helper.FixedStageError);
     expect(await readdir(value.config)).toEqual([]);
     expect(JSON.parse(await readFile(value.credential, "utf8"))).toEqual(document());
   }
@@ -533,9 +535,15 @@ test("timeout and signal are bounded and clear the owned login", async () => {
   await expect(helper.main(timed.args, 30)).rejects.toThrow("total-timeout");
   expect(await readdir(timed.config)).toEqual([]);
 
+  // Signal once main owns a running login: it installs its handlers before
+  // starting the login, and this login saves its credentials before it waits.
+  // A fixed delay instead raced setup on a loaded host and signalled no one.
   const signaled = await fixture("signal");
-  const run = helper.main(signaled.args, 5_000);
-  setTimeout(() => process.emit("SIGTERM", "SIGTERM"), 25);
+  let settled = false;
+  const run = helper.main(signaled.args, JOURNEY_DEADLINE_MS).finally(() => { settled = true; });
+  const saved = join(signaled.config, "credentials.json");
+  while (!settled && !await stat(saved).then(() => true, () => false)) await Bun.sleep(5);
+  process.emit("SIGTERM", "SIGTERM");
   await expect(run).rejects.toThrow("signal-sigterm");
   expect(await readdir(signaled.config)).toEqual([]);
 });
