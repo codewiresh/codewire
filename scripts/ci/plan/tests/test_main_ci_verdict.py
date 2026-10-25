@@ -81,6 +81,25 @@ class VerdictTests(unittest.TestCase):
                 # A red verdict never needs the log.
                 self.assertFalse(any(path.endswith("/logs") for path in forgejo.paths))
 
+    def test_a_green_kind_only_run_never_rescues_a_red_push_run(self) -> None:
+        # 2026-10-25: af09ca1f's push run 22034 failed, and its 4-hourly
+        # scheduled run 22102 then passed running Kind alone. A Kind-only
+        # scheduled run, or a dispatched candidate run, of the same commit is
+        # never main CI's verdict, even with a well-formed marker for itself.
+        for label, kind_only in {
+            "schedule": fx.run(SHA, run_id=50, event="push", trigger_event="schedule"),
+            "dispatch": fx.run(SHA, run_id=50, event="workflow_dispatch", trigger_event="workflow_dispatch"),
+        }.items():
+            with self.subTest(case=label):
+                forgejo = fx.FakeForgejo(
+                    {"ci.yaml": [fx.run(SHA, run_id=41, status="failure"), kind_only]},
+                    {41: fx.ci_jobs(41, required="failure"), 50: fx.ci_jobs(50)},
+                    {fx.required_job_id(50): fx.log_lines(fx.marker(SHA, TREE, run_id=50))},
+                )
+                result = self.judge(forgejo)
+                self.assertEqual((result.state, result.run_id), (verdicts.FAILED, 41))
+                self.assertNotIn(f"/actions/jobs/{fx.required_job_id(50)}/logs", forgejo.paths)
+
     def test_superseded_run_verified_nothing(self) -> None:
         log = fx.log_lines(
             "required verification: every selected capability group succeeded",

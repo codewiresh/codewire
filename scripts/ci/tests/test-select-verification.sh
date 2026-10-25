@@ -639,6 +639,10 @@ run_paths_case dev_delivery_trigger push refs/heads/main false \
   'deploy policy security security_js' \
   scripts/ci/deploy/rerun-dev-publish.py \
   scripts/ci/tests/test-rerun-dev-publish.py
+run_paths_case main_retry_failed_once push refs/heads/main false \
+  'deploy policy security security_js' \
+  scripts/ci/select/retry-failed-once.py \
+  scripts/ci/tests/test-retry-failed-once.py
 run_paths_case production_signature_reuse pull_request refs/pull/2007/head false \
   'deploy go_consumer_interop go_support policy policy_shell release confidential_script_tests security security_js' \
   scripts/ci/images/verify-runtime-image-signatures.sh \
@@ -3198,9 +3202,10 @@ if grep -Eq '^ *runs-on: [^$]' "$WORKFLOW"; then
   echo 'a Codewire CI job names a literal runner label instead of its repository Actions variable (docs/dev/CI-CONFIGURATION.md)' >&2
   exit 1
 fi
-# Selection, aggregation and the final Dev delivery trigger (#2892).
-[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$WORKFLOW")" -eq 3 ]] || {
-  echo 'Codewire CI has not assigned selection, aggregation and the Dev delivery trigger to the untrusted light runner' >&2
+# Selection, aggregation, the final Dev delivery trigger (#2892) and a main
+# push run's single retry of its failed test jobs (infra#1534).
+[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$WORKFLOW")" -eq 4 ]] || {
+  echo 'Codewire CI has not assigned selection, aggregation, the Dev delivery trigger and the main retry to the untrusted light runner' >&2
   exit 1
 }
 for output in selector_version classification selection required_local_mode \
@@ -3264,6 +3269,8 @@ python3 "$ROOT/scripts/ci/plan/tests/test_plan_main_push.py"
 # Main CI's verdict, and the final job that starts Dev delivery from it (#2892).
 python3 -B "$ROOT/scripts/ci/plan/tests/test_main_ci_verdict.py"
 python3 -B "$ROOT/scripts/ci/tests/test-rerun-dev-publish.py"
+# A main push run retries its failed test jobs once (infra#1534).
+python3 -B "$ROOT/scripts/ci/tests/test-retry-failed-once.py"
 python3 -B "$ROOT/scripts/ci/tests/test-cancel-superseded-deliveries.py"
 grep -qF "grep -Fxq 'selector_version=v3'" "$selection_block"
 if grep -qF 'selector_version=v2' "$selection_block" \
@@ -3299,8 +3306,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 18 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, eleven groups, four Kind producers, aggregate and the Dev delivery trigger" >&2
+if [ "$top_level_jobs" != 19 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, eleven groups, four Kind producers, aggregate, the Dev delivery trigger and the main retry" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \

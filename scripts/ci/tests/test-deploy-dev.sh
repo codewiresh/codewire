@@ -356,11 +356,12 @@ while IFS= read -r -d '' other_workflow; do
     fail "${other_workflow#"$ROOT/"} signs a runtime set; only Deploy Dev's publish job may"
   fi
 done < <(find "$ROOT/.gitea/workflows" -type f -name '*.yaml' -print0)
-# The only main-CI rerun call targets this job, from CI's final push-on-main job.
+# Main-CI rerun calls: this job, from CI's final push-on-main job, and a main
+# push run's single retry of its own failed test jobs (retry-failed-once.py).
 rerun_users="$(grep -rlE '/actions/jobs/[^ ]*/rerun|actions/jobs/\{job_id\}/rerun' \
   "$ROOT/.gitea/workflows" "$ROOT/scripts" | grep -v '/tests/' | sed "s|^$ROOT/||" | sort)"
-[[ "$rerun_users" == 'scripts/ci/deploy/rerun-dev-publish.py' ]] ||
-  fail "a job rerun is requested outside rerun-dev-publish.py: $rerun_users"
+[[ "$rerun_users" == $'scripts/ci/deploy/rerun-dev-publish.py\nscripts/ci/select/retry-failed-once.py' ]] ||
+  fail "a job rerun is requested outside rerun-dev-publish.py and retry-failed-once.py: $rerun_users"
 
 # Execute the shared descent check in a scratch copy beside a stub resolver,
 # on a real history A-B-C (#2892). Old rule: only main's head delivered, so

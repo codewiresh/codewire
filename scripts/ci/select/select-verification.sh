@@ -2043,6 +2043,15 @@ if [ "$event_selected" = false ]; then
         select_token policy
         recognized=true
         ;;
+      # A main push run retries its failed test jobs once (infra#1534); its
+      # contract, with the ci.yaml job that runs it, runs in Policy and Deploy,
+      # beside the Dev delivery it restarts.
+      scripts/ci/select/retry-failed-once.py|\
+      scripts/ci/tests/test-retry-failed-once.py)
+        select_token deploy
+        select_token policy
+        recognized=true
+        ;;
       Dockerfile|docker-bake.hcl|apps/*/Dockerfile*|deployments/docker/*|\
       scripts/ci/images/build-kind-images.sh|\
       scripts/ci/images/run-rust-build.sh|scripts/ci/tests/test-run-rust-build.sh)

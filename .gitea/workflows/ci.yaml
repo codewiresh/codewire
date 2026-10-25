@@ -1996,3 +1996,27 @@ jobs:
         env:
           GITEA_TOKEN: ${{ github.token }}
         run: python3 -I -B scripts/ci/deploy/rerun-dev-publish.py
+
+  # A main push run retries its failed test jobs once (infra#1534). The tip
+  # run alone decides whether Dev moves, and one flaky test used to cost a whole
+  # main cycle (runs 21922 and 22110). After Required verification fails, this
+  # reruns exactly the test jobs that failed on their first attempt; Forgejo then
+  # runs Required verification and Dev delivery again after them. Policy, a job
+  # already retried, a superseded run and a commit that is no longer main's tip
+  # are never retried, so nothing retries twice.
+  retry-failed-once:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token reads this run's jobs and reruns its failed test jobs.
+    name: Retry failed test jobs once
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    timeout-minutes: 10
+    needs: [verification-selection, required-verification]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.verification-selection.result == 'success' && needs.verification-selection.outputs.superseded == 'false' && needs.required-verification.result == 'failure' }}
+    steps:
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
+
+      - name: Rerun this run's failed test jobs
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/retry-failed-once.py
