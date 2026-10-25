@@ -28,7 +28,8 @@
 #   rewrites only changed files and Cargo's mtime fingerprints keep every
 #   unchanged workspace crate fresh (a new checkout rebuilds them all); every
 #   build also sees the same absolute workspace path. Hooks never run.
-# - targets/archive and targets/clippy: the two Cargo target folders.
+# - targets: the Cargo target folders, one per kind of build (archive,
+#   clippy, darwin, desktop, desktop-tests).
 # - cargo-home: the registry index and downloaded crates.
 # - tools: downloads of SHA-256-pinned tools, checked on every use.
 # - lock-stamp: the digest of every lockfile and the toolchain file, and of
@@ -219,10 +220,14 @@ in_src() {
 # guest out of memory (codewire run 21939).
 LEGS=(
   "archive tests always"
-  "compile checks always"
+  "local_vmm tests env:BUILD_ONCE_LOCAL_VMM"
+  "features tests selected:rust"
   "database tests selected:database"
   "services_control tests selected:service_idp,service_coordinator,service_billing,service_connectcore"
   "services_runtime tests selected:service_orchestration,service_nats"
+  "compile checks always"
+  "feature_checks checks selected:rust"
+  "local_vmm_checks checks env:BUILD_ONCE_LOCAL_VMM"
 )
 
 leg_archive() {
@@ -237,6 +242,88 @@ leg_compile() {
   # target, and the curated image workspaces.
   phase 'compile-all-targets' env CARGO_TARGET_DIR="$work/targets/clippy" \
     scripts/ci/verify/compile-all-targets.sh
+}
+
+# The feature-graph and local-vmm shards (run-product-verification.sh's
+# RUST_SHARD_STAGE): their own list of steps decides what each leg builds.
+shard_stage() {
+  # shard_stage FAMILY SHARD STAGE OUT_DIR [ENV...]: one stage of one shard.
+  local family="$1" shard="$2" stage="$3" dir="$4"
+  shift 4
+  env RUST_TRANSPORT_SHARD="$shard" RUST_SHARD_STAGE="$stage" RUST_SHARD_ARCHIVES="$dir" "$@" \
+    scripts/ci/verify/run-product-verification.sh "$family"
+}
+
+# The desktop package outside the Rust selection, which Rust / transport
+# verification checks separately (its artifact-selected desktop step).
+artifact_desktop() {
+  [ "${DESKTOP_PACKAGE_SELECTED:-}" = true ] &&
+    [[ "${VERIFICATION_SELECTION:-}" != *'|rust_pkg_codewire_desktop|'* ]]
+}
+readonly ARTIFACT_DESKTOP_SELECTION='|valid:v3|rust_pkg_codewire_desktop|complete|'
+
+leg_features() {
+  # The feature graphs' test archives, one per package and feature set, in
+  # one tar for Rust / transport feature graphs.
+  local out="$1" dir
+  dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/features-archives.XXXXXX")"
+  phase 'feature-graph archives' shard_stage rust-transport features archives "$dir" \
+    CARGO_TARGET_DIR="$work/targets/archive"
+  tar -cf "$out/features.tar" -C "$dir" .
+  rm -rf -- "$dir"
+}
+
+leg_feature_checks() {
+  # The feature graphs' lints, checks and dependency-graph checks.
+  phase 'feature-graph checks' shard_stage rust-transport features checks '' \
+    CARGO_TARGET_DIR="$work/targets/clippy"
+}
+
+leg_local_vmm() {
+  # The local-vmm shard's test archives (guest probe kernel fixtures, the
+  # desktop) and the DERP server it runs the DERP contract against, in one
+  # tar for Rust / transport verification.
+  local out="$1" dir
+  dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/local-vmm-archives.XXXXXX")"
+  if [[ "${VERIFICATION_SELECTION:-}" == *'|rust|'* || "${VERIFICATION_SELECTION:-}" == *'|transport|'* ]]; then
+    phase 'local-vmm archives' shard_stage rust-transport local-vmm archives "$dir" \
+      CARGO_TARGET_DIR="$work/targets/archive" \
+      CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$work/targets/desktop-tests"
+  fi
+  if artifact_desktop; then
+    phase 'desktop archive' shard_stage rust local-vmm archives "$dir" \
+      VERIFICATION_SELECTION="$ARTIFACT_DESKTOP_SELECTION" \
+      CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$work/targets/desktop-tests"
+  fi
+  tar -cf "$out/local_vmm.tar" -C "$dir" .
+  rm -rf -- "$dir"
+}
+
+leg_local_vmm_checks() {
+  # The local-vmm shard's checks: the local VMM's Darwin cross-check, the
+  # static guest's reproducibility proof, the desktop check and package.
+  local zig
+  if [[ "${VERIFICATION_SELECTION:-}" == *'|transport_pkg_codewire_local_vmm|'* ]]; then
+    # The pinned Zig and cargo-zigbuild the workflow pins, kept on the disk.
+    : "${ZIG_VERSION:?ZIG_VERSION is required}" "${ZIG_X86_64_LINUX_SHA256:?}" "${CARGO_ZIGBUILD_VERSION:?}"
+    zig="${RUNNER_TEMP:?RUNNER_TEMP is required}/build-once-zig"
+    rm -rf -- "$zig"
+    mkdir -p "$zig"
+    tar -xf "$(tool "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+      "$ZIG_X86_64_LINUX_SHA256")" -C "$zig" --strip-components=1
+    cargo install --quiet --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
+    export PATH="$zig:$CARGO_HOME/bin:$PATH"
+  fi
+  if [[ "${VERIFICATION_SELECTION:-}" == *'|rust|'* || "${VERIFICATION_SELECTION:-}" == *'|transport|'* ]]; then
+    phase 'local-vmm checks' shard_stage rust-transport local-vmm checks '' \
+      CARGO_TARGET_DIR="$work/targets/darwin" \
+      CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$work/targets/desktop"
+  fi
+  if artifact_desktop; then
+    phase 'desktop checks' shard_stage rust local-vmm checks '' \
+      VERIFICATION_SELECTION="$ARTIFACT_DESKTOP_SELECTION" \
+      CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$work/targets/desktop"
+  fi
 }
 
 leg_database() {

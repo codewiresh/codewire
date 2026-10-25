@@ -183,6 +183,169 @@ rust_shard() {
   [ "${RUST_TRANSPORT_SHARD:-all}" = all ] || [ "${RUST_TRANSPORT_SHARD:-all}" = "$1" ]
 }
 
+# Compile once (infra#1632): the features and local-vmm shards split into
+# stages, so a pull request compiles them on the build runner and its test
+# jobs compile nothing. RUST_SHARD_STAGE:
+# - all (the default, and a main push): every step, with Cargo, as one job.
+# - checks (build runner): what compiles but tests nothing: feature-graph
+#   lints and checks, the Darwin cross-check, the static guest's
+#   reproducibility proof, the desktop check and package dry run.
+# - archives (build runner): each test step's `cargo test` becomes `cargo
+#   nextest archive` of the same package, features and targets, into
+#   RUST_SHARD_ARCHIVES/<key>.tar.zst.
+# - tests (test job): every test step, each Cargo test run from its archive
+#   in RUST_SHARD_ARCHIVES with cargo-nextest (RUST_TEST_NEXTEST); the
+#   script and fixture tests that compile no Rust run here as before.
+# Nextest runs no doctests; a main push still runs them with cargo test.
+RUST_SHARD_STAGE="${RUST_SHARD_STAGE:-all}"
+
+check_shard_stage() {
+  case "$RUST_SHARD_STAGE" in
+    all) return 0 ;;
+    checks|archives|tests) ;;
+    *)
+      echo "::error::unknown RUST_SHARD_STAGE: $RUST_SHARD_STAGE" >&2
+      return 2
+      ;;
+  esac
+  case "${RUST_TRANSPORT_SHARD:-all}" in
+    features|local-vmm) ;;
+    *)
+      echo "::error::RUST_SHARD_STAGE=$RUST_SHARD_STAGE needs RUST_TRANSPORT_SHARD features or local-vmm" >&2
+      return 2
+      ;;
+  esac
+  if [ "$RUST_SHARD_STAGE" != checks ] && [ ! -d "${RUST_SHARD_ARCHIVES:-}" ]; then
+    echo "::error::RUST_SHARD_STAGE=$RUST_SHARD_STAGE needs the RUST_SHARD_ARCHIVES folder" >&2
+    return 2
+  fi
+}
+
+# shard_stage STAGE: whether this run takes STAGE's steps.
+shard_stage() {
+  [ "$RUST_SHARD_STAGE" = all ] || [ "$RUST_SHARD_STAGE" = "$1" ]
+}
+
+# shard_test KEY NEXTEST_SELECTION BUILD_ARGS... [-- CARGO_TEST_ARGS...]
+# One Cargo test step. BUILD_ARGS choose the package, features and targets;
+# CARGO_TEST_ARGS are cargo test's name filter and harness arguments, and
+# NEXTEST_SELECTION is the same choice for cargo-nextest (split on spaces).
+# RUST_SHARD_WORKSPACE names a detached workspace, relative to the root.
+shard_test() {
+  local key="$1" selection="$2" arg
+  local -a build=() filter=() selection_args=()
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    shift
+    if [ "$arg" = -- ]; then
+      filter=("$@")
+      break
+    fi
+    build+=("$arg")
+  done
+  case "$RUST_SHARD_STAGE" in
+    all) cargo test --locked "${build[@]}" "${filter[@]}" ;;
+    archives)
+      [ ! -e "$RUST_SHARD_ARCHIVES/$key.tar.zst" ] || {
+        echo "::error::two test steps share the archive $key" >&2
+        return 2
+      }
+      cargo nextest archive --locked "${build[@]}" \
+        --archive-file "$RUST_SHARD_ARCHIVES/$key.tar.zst"
+      ;;
+    tests)
+      read -r -a selection_args <<< "$selection"
+      run_shard_archive "$key" "${selection_args[@]}"
+      ;;
+    checks) return 0 ;;
+  esac
+}
+
+# The archives' build folder (build-once.sh). As for the packages shard, the
+# test binaries carry its paths (CARGO_MANIFEST_DIR, CARGO_BIN_EXE_*,
+# CARGO_TARGET_TMPDIR): the source is a real copy of this checkout there, and
+# each archive's build target folder links into its extraction.
+SHARD_ARCHIVE_SOURCE_READY=false
+
+# The build folder of this run's kind: /ci-cache/main on a push to main,
+# /ci-cache/pr otherwise (build-once-tree.sh).
+shard_archive_root() {
+  # shellcheck source=scripts/ci/setup/build-once-tree.sh
+  source "$ROOT/scripts/ci/setup/build-once-tree.sh"
+  build_once_tree
+}
+
+shard_archive_cleanup() {
+  [ "$SHARD_ARCHIVE_SOURCE_READY" = true ] || return 0
+  rm -rf -- "$(shard_archive_root)" "${SHARD_ARCHIVE_EXTRACT:-}"
+}
+
+# extract_shard_archive KEY: extract one archive and link its build target
+# folder to the extraction, whose target folder it sets in
+# SHARD_ARCHIVE_TARGET (a variable, not output: the first call also records
+# the source copy for cleanup in this shell).
+extract_shard_archive() {
+  local key="$1" archive="$RUST_SHARD_ARCHIVES/$1.tar.zst" root
+  root="$(shard_archive_root)"
+  local nextest="${RUST_TEST_NEXTEST:-cargo-nextest}" workspace="${RUST_SHARD_WORKSPACE:-.}"
+  local extract target entry
+  [ -f "$archive" ] || {
+    echo "::error::no $key test archive; the build runner built none for this selection" >&2
+    return 1
+  }
+  if [ "$SHARD_ARCHIVE_SOURCE_READY" != true ]; then
+    rm -rf -- "$root"
+    mkdir -p "$root"
+    cp -a "$ROOT/." "$root/src" || return 1
+    SHARD_ARCHIVE_EXTRACT="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/rust-shard-archives.XXXXXX")"
+    SHARD_ARCHIVE_SOURCE_READY=true
+    trap shard_archive_cleanup EXIT
+  fi
+  extract="$SHARD_ARCHIVE_EXTRACT/$key"
+  rm -rf -- "$extract"
+  mkdir -p "$extract"
+  "$nextest" nextest run --archive-file "$archive" \
+    --workspace-remap "$root/src/$workspace" --extract-to "$extract" \
+    -E 'none()' --no-tests=pass >/dev/null || return 1
+  target="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["target_directory"])' \
+    "$extract/target/nextest/cargo-metadata.json")" || return 1
+  [[ "$target" == "$root"/targets/* ]] || {
+    echo "::error::the $key archive was built in $target, not under $root/targets" >&2
+    return 1
+  }
+  rm -rf -- "$target"
+  mkdir -p "$target/tmp" || return 1
+  for entry in "$extract/target"/*; do
+    [ "${entry##*/}" = tmp ] || ln -s "$entry" "$target/${entry##*/}" || return 1
+  done
+  # Write the extraction out before any test runs (see run_rust_archive_tests).
+  sync
+  SHARD_ARCHIVE_TARGET="$extract/target"
+}
+
+# run_shard_archive KEY NEXTEST_ARGS...: run one archive's selected tests.
+run_shard_archive() {
+  local key="$1" root workspace="${RUST_SHARD_WORKSPACE:-.}" target
+  root="$(shard_archive_root)"
+  local -a profile=(--profile ci)
+  shift
+  extract_shard_archive "$key" || return 1
+  target="$SHARD_ARCHIVE_TARGET"
+  # The CI profile (.config/nextest.toml) belongs to the root workspace; a
+  # detached workspace runs with nextest's defaults, like cargo test.
+  [ "$workspace" = . ] || profile=()
+  echo "[rust-shard-archive] $key: $*"
+  (
+    cd "$root/src/$workspace"
+    "${RUST_TEST_NEXTEST:-cargo-nextest}" nextest run \
+      --binaries-metadata "$target/nextest/binaries-metadata.json" \
+      --cargo-metadata "$target/nextest/cargo-metadata.json" \
+      --target-dir-remap "$target" --workspace-remap "$root/src/$workspace" \
+      "${profile[@]}" --no-tests=fail "$@"
+  )
+}
+
 run_rust_transport() {
   if ! selected rust && ! selected transport; then
     echo '::error::Rust/transport composition selected without either capability' >&2
@@ -211,11 +374,19 @@ run_rust_transport() {
 run_detached_desktop() {
   local manifest="crates/codewire-desktop/Cargo.toml"
   local desktop_target_dir="${CODEWIRE_DESKTOP_CARGO_TARGET_DIR:-$CARGO_TARGET_DIR}"
-  CARGO_TARGET_DIR="$desktop_target_dir" cargo fmt --manifest-path "$manifest" --check
-  CARGO_TARGET_DIR="$desktop_target_dir" cargo check --locked --manifest-path "$manifest"
-  CARGO_TARGET_DIR="$desktop_target_dir" cargo test --locked --manifest-path "$manifest"
-  CARGO_TARGET_DIR="$desktop_target_dir" \
-    scripts/ci/release/package-codewire-desktop.sh --dry-run 0.0.0-ci
+  check_shard_stage || return $?
+  if shard_stage tests; then
+    CARGO_TARGET_DIR="$desktop_target_dir" cargo fmt --manifest-path "$manifest" --check
+  fi
+  if shard_stage checks; then
+    CARGO_TARGET_DIR="$desktop_target_dir" cargo check --locked --manifest-path "$manifest"
+  fi
+  CARGO_TARGET_DIR="$desktop_target_dir" RUST_SHARD_WORKSPACE=crates/codewire-desktop \
+    shard_test desktop '' --manifest-path "$manifest"
+  if shard_stage checks; then
+    CARGO_TARGET_DIR="$desktop_target_dir" \
+      scripts/ci/release/package-codewire-desktop.sh --dry-run 0.0.0-ci
+  fi
 }
 
 has_root_rust_selection() {
@@ -776,49 +947,66 @@ run_rust() {
     run_rust_packages rust_pkg_
   fi
   rust_shard features || return 0
-  if selected rust_workspace || selected rust_pkg_codewire_cli || selected rust_pkg_codewire_cli_bin; then
+  check_shard_stage || return $?
+  if shard_stage tests && { selected rust_workspace || selected rust_pkg_codewire_cli || selected rust_pkg_codewire_cli_bin; }; then
     python3 -B scripts/ci/tests/test-cli-host-managed.py || return $?
     python3 -B scripts/ci/tests/test-cli-update-mesh-endpoints.py || return $?
     python3 -B scripts/ci/tests/test-build-cw-release-dir.py
   fi
-  if selected rust_workspace || selected rust_pkg_codewire_cli \
+  if shard_stage checks && { selected rust_workspace || selected rust_pkg_codewire_cli \
       || selected rust_pkg_codewire_cli_bin || selected rust_pkg_codewire_admin_proto \
-      || selected rust_pkg_codewire_proto; then
+      || selected rust_pkg_codewire_proto; }; then
     scripts/ci/tests/test-admin-proto-boundary.sh --cli-dependencies
   fi
-  if selected rust_workspace || selected rust_pkg_codewire_protected_store \
-      || selected rust_pkg_codewire_orchestration; then
+  if shard_stage checks && { selected rust_workspace || selected rust_pkg_codewire_protected_store \
+      || selected rust_pkg_codewire_orchestration; }; then
     scripts/ci/tests/test-openbao-only-secret-authority.sh --production-features
   fi
   if selected rust_workspace || selected rust_pkg_codewire_protected_store; then
     # Platform primitives are optional; default workspace/package tests alone
     # do not promise that their tests or warning-denied targets are exercised.
-    cargo clippy --locked -p codewire-protected-store --features platform --all-targets -- -D warnings
-    cargo test --locked -p codewire-protected-store --features platform --all-targets
+    if shard_stage checks; then
+      cargo clippy --locked -p codewire-protected-store --features platform --all-targets -- -D warnings
+    fi
+    shard_test protected-store-platform '' \
+      -p codewire-protected-store --features platform --all-targets
   fi
   if selected rust_workspace || selected rust_pkg_codewire_credential_broker; then
     # Exercise the isolated platform build explicitly; the default local
     # feature cannot qualify platform admission or its production graph.
-    scripts/ci/tests/test-openbao-only-secret-authority.sh --production-broker-features
-    cargo clippy --locked -p codewire-credential-broker --no-default-features --features platform --all-targets -- -D warnings
-    cargo test --locked -p codewire-credential-broker --no-default-features --features platform --all-targets
+    if shard_stage checks; then
+      scripts/ci/tests/test-openbao-only-secret-authority.sh --production-broker-features
+      cargo clippy --locked -p codewire-credential-broker --no-default-features --features platform --all-targets -- -D warnings
+    fi
+    shard_test credential-broker-platform '' \
+      -p codewire-credential-broker --no-default-features --features platform --all-targets
   fi
   if selected rust_workspace || selected rust_pkg_codewire_server_core \
       || selected rust_pkg_codewire_orchestration; then
     # The shared projected-Pod verifier is opt-in. Exercise its real feature
     # and focused identity tests without depending on workspace unification.
-    cargo clippy --locked -p codewire-server-core --features kubernetes-identity --all-targets -- -D warnings
-    cargo test --locked -p codewire-server-core --features kubernetes-identity --lib pod_identity::
+    if shard_stage checks; then
+      cargo clippy --locked -p codewire-server-core --features kubernetes-identity --all-targets -- -D warnings
+    fi
+    shard_test server-core-kubernetes-identity '-E test(pod_identity::)' \
+      -p codewire-server-core --features kubernetes-identity --lib -- pod_identity::
   fi
   if selected rust_workspace || selected rust_pkg_codewire_credential_service; then
-    scripts/ci/tests/test-openbao-only-secret-authority.sh --production-service-features
-    cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings
-    cargo test --locked -p codewire-credential-service --features enrollment --all-targets
+    if shard_stage checks; then
+      scripts/ci/tests/test-openbao-only-secret-authority.sh --production-service-features
+      cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings
+    fi
+    shard_test credential-service-enrollment '' \
+      -p codewire-credential-service --features enrollment --all-targets
   fi
   if selected rust_pkg_codewire_oidc; then
-    cargo check -p codewire-oidc --no-default-features
-    cargo test -p codewire-oidc --features axum
-    cargo run -p codewire-oidc --example in_memory >/dev/null
+    if shard_stage checks; then
+      cargo check -p codewire-oidc --no-default-features
+    fi
+    shard_test oidc-axum '' -p codewire-oidc --features axum
+    if shard_stage checks; then
+      cargo run -p codewire-oidc --example in_memory >/dev/null
+    fi
   fi
 }
 
@@ -833,13 +1021,31 @@ run_rust_compile() {
 run_derp_contract() {
   # The packages shard builds this binary in its own job. Build it here so the
   # local-vmm shard stands alone; under "all" the graph already built it.
-  cargo build --locked -p codewire-derp --bin codewire-derp || return $?
+  # Compile once: the archives stage builds it into RUST_SHARD_ARCHIVES, and
+  # the tests stage runs the contract against that build.
+  local derp="$CARGO_DEBUG_DIR/codewire-derp"
+  case "$RUST_SHARD_STAGE" in
+    checks) return 0 ;;
+    archives)
+      cargo build --locked -p codewire-derp --bin codewire-derp || return $?
+      install -m 0755 "$derp" "$RUST_SHARD_ARCHIVES/codewire-derp"
+      return
+      ;;
+    tests)
+      derp="$RUST_SHARD_ARCHIVES/codewire-derp"
+      [ -x "$derp" ] || {
+        echo '::error::no codewire-derp in the shard archives; the build runner built none for this selection' >&2
+        return 1
+      }
+      ;;
+    *) cargo build --locked -p codewire-derp --bin codewire-derp || return $? ;;
+  esac
   local port=$((61000 + (${GITHUB_RUN_ID:-$$} % 4000)))
   local log_dir="${RUNNER_TEMP:-$ROOT/.tmp}/codewire-derp-contract-${GITHUB_RUN_ID:-$$}"
   mkdir -p "$log_dir"
   (
     PORT="$port" TLS_PORT='' STUN_PORT=-1 RUST_LOG=info \
-      "$CARGO_DEBUG_DIR/codewire-derp" > "$log_dir/derp.log" 2>&1 &
+      "$derp" > "$log_dir/derp.log" 2>&1 &
     local pid=$!
     trap 'kill "$pid" 2>/dev/null || true' EXIT
     local _
@@ -893,30 +1099,43 @@ run_transport() {
     run_rust_packages transport_pkg_
   fi
   rust_shard local-vmm || return 0
-  if selected transport_pkg_codewire_local_vmm || selected transport_pkg_codewire_vmm_guest_probe; then
+  check_shard_stage || return $?
+  if shard_stage tests && { selected transport_pkg_codewire_local_vmm || selected transport_pkg_codewire_vmm_guest_probe; }; then
     python3 -B scripts/dev/test-cw-runtime-image.py
     python3 -B scripts/dev/test-cli-native-managed.py --self-test
     python3 -B scripts/dev/test-cli-native-update.py --self-test
     python3 -B scripts/ci/tests/test-native-managed-update-entrypoint.py
   fi
   if selected transport_pkg_codewire_local_vmm; then
-    crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh
-    python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py
-    scripts/ci/verify/check-darwin-cross.sh
+    if shard_stage tests; then
+      # A C test of the runner's IPC, compiled with the host's cc in seconds.
+      crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh
+      python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py
+    fi
+    if shard_stage checks; then
+      scripts/ci/verify/check-darwin-cross.sh
+    fi
   fi
   if selected transport_pkg_codewire_vmm_guest_probe; then
     # These kernel fixtures need a private mount namespace, which only root
     # with CAP_SYS_ADMIN (directly or through sudo -n) can create. An
-    # unprivileged CI container cannot; it says so instead of passing.
-    if privileged_mount_namespace_available; then
-      cargo test --locked -p codewire-vmm-guest-probe --lib -- --ignored --exact \
+    # unprivileged CI container cannot; it says so instead of passing. Their
+    # archives are built whatever the test job's privilege turns out to be.
+    if [ "$RUST_SHARD_STAGE" = archives ] || { shard_stage tests && privileged_mount_namespace_available; }; then
+      shard_test guest-probe-live-mount \
+        '--run-ignored only -E test(=cw_runtime_publisher::tests::live_runtime_readonly_mount_exposes_new_members_without_replacing_old_bytes)' \
+        -p codewire-vmm-guest-probe --lib -- --ignored --exact \
         cw_runtime_publisher::tests::live_runtime_readonly_mount_exposes_new_members_without_replacing_old_bytes
-      cargo test --locked -p codewire-vmm-guest-probe --test cw-runtime-live -- --ignored --exact \
+      shard_test guest-probe-live-launcher \
+        '--run-ignored only -E test(=source_launcher_login_shell_selects_a_b_a_on_readonly_mounts)' \
+        -p codewire-vmm-guest-probe --test cw-runtime-live -- --ignored --exact \
         source_launcher_login_shell_selects_a_b_a_on_readonly_mounts
-    else
+    elif shard_stage tests; then
       echo '::notice::guest-probe kernel fixtures not run: no CAP_SYS_ADMIN here; run this shard on a workstation with sudo'
     fi
-    scripts/ci/verify/build-local-vmm-initramfs.sh --verify
+    if shard_stage checks; then
+      scripts/ci/verify/build-local-vmm-initramfs.sh --verify
+    fi
   fi
   if selected transport_derp_contract; then
     run_derp_contract

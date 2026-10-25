@@ -2649,7 +2649,7 @@ grep -qF 'if selected transport_pkg_codewire_vmm_guest_probe; then' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'if selected transport_pkg_codewire_local_vmm; then' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
-[[ "$(grep -cFx '    scripts/ci/verify/check-darwin-cross.sh' \
+[[ "$(grep -cFx '      scripts/ci/verify/check-darwin-cross.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh")" == 1 ]]
 grep -qF 'exec "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
   "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
@@ -2950,6 +2950,26 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     grep -qF "RUST_DATABASE_ARCHIVES: \${{ steps.database-archives.outputs.ready == 'true' && format('{0}/database-archives', runner.temp) || '' }}" "$block"
     if grep -qF 'BUILD_ONCE' "$block"; then
       echo 'database: the archive path must follow the fetch, not the compile job alone' >&2
+      exit 1
+    fi
+  elif [ "$job_id" = rust-features ] || [ "$job_id" = rust-transport ]; then
+    # Compile once (infra#1632): as the database job, it runs the compile
+    # job's archives when that job built them and compiles itself otherwise.
+    # A fetch miss (no archive built, no store, or evicted) builds in place:
+    # the fetch never fails on a miss, the compile steps run when the archives
+    # are not ready, and the shard takes its tests stage only when they are.
+    archive_step=feature-archives archive_tar=features.tar
+    if [ "$job_id" = rust-transport ]; then
+      archive_step=local-vmm-archives archive_tar=local-vmm.tar
+    fi
+    grep -qF "    needs: [verification-selection, rust-compile]" "$block"
+    grep -qF "needs.verification-selection.outputs.${expectation_name}_expected == 'true'" "$block"
+    grep -qF "needs.rust-compile.result != 'failure' && needs.rust-compile.result != 'cancelled'" "$block"
+    grep -qF "run: scripts/ci/setup/fetch-test-archive.sh --or-build \"\$ARCHIVE_SHA256\" \"\$RUNNER_TEMP/$archive_tar\"" "$block"
+    grep -qF "RUST_SHARD_STAGE: \${{ steps.$archive_step.outputs.ready == 'true' && 'tests' || 'all' }}" "$block"
+    grep -qF "steps.$archive_step.outputs.ready != 'true' }}" "$block"
+    if grep -qF 'BUILD_ONCE' "$block"; then
+      echo "$job_id: the archive path must follow the fetch, not the compile job alone" >&2
       exit 1
     fi
   elif [ "$job_id" = services-control ] || [ "$job_id" = services-runtime ]; then
@@ -4480,7 +4500,7 @@ run_admin_static_negative admin_descriptor_billing \
 
 primitive_rust_body="$primitive_probe/run-rust.sh"
 awk '
-  /^(rust_shard|run_rust)\(\) \{/ { capture = 1 }
+  /^(rust_shard|run_rust|check_shard_stage|shard_stage|shard_test)\(\) \{/ { capture = 1 }
   capture { print }
   capture && /^}$/ { capture = 0 }
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$primitive_rust_body"
@@ -4499,6 +4519,7 @@ set -euo pipefail
 }
 selected() { [[ "$SELECTION" == *"|$1|"* ]]; }
 has_root_rust_selection() { return 0; }
+RUST_SHARD_STAGE="${RUST_SHARD_STAGE:-all}"
 run_rust_packages() { printf '%s\n' "$*" > "$PRIMITIVE_PACKAGE_LOG"; }
 python3() {
   if [[ "$*" == '-B scripts/ci/tests/test-cli-host-managed.py' ]]; then
@@ -5290,6 +5311,8 @@ SUPPORT = {
     "Declare a metal Kata guest",
     "Bring the warm build folder to this commit", "Publish the test archives", "Finish the warm build folder",
     "Fetch and verify the test archive", "Install pinned cargo-nextest",
+    "Fetch and verify the feature-graph test archives", "Fetch and verify the local-vmm test archives",
+    "Unpack the feature-graph test archives", "Unpack the local-vmm test archives",
     "Fetch and verify the database archives", "Unpack the database archives",
     "Fetch and verify the service control-plane archives", "Unpack the service control-plane archives",
     "Fetch and verify the service runtime-plane archives", "Unpack the service runtime-plane archives",

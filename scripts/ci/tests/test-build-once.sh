@@ -11,7 +11,7 @@ readonly SCRIPT="$ROOT/scripts/ci/setup/build-once.sh"
 # The leg table reads the run's selection, publish its store, and prepare its
 # event (main or pr build folder); a CI job running
 # this test may have its own in the environment, so each case states its own.
-unset VERIFICATION_SELECTION ARCHIVE_STORE_URL GITHUB_EVENT_NAME GITHUB_REF
+unset VERIFICATION_SELECTION ARCHIVE_STORE_URL GITHUB_EVENT_NAME GITHUB_REF BUILD_ONCE_LOCAL_VMM
 
 fail() {
   echo "test-build-once: $*" >&2
@@ -57,8 +57,22 @@ done
 [ "$("$SCRIPT" legs | tr '\n' ' ')" = 'archive compile ' ] || fail 'unexpected wanted legs'
 [ "$("$SCRIPT" legs tests | tr '\n' ' ')" = 'archive ' ] || fail 'unexpected tests lane'
 [ "$("$SCRIPT" legs checks | tr '\n' ' ')" = 'compile ' ] || fail 'unexpected checks lane'
-[ "$(VERIFICATION_SELECTION='|policy|database|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive compile database ' ] ||
+# The table lists the tests lane's legs first, so a cold build runs every
+# test archive before any check.
+[ "$(VERIFICATION_SELECTION='|policy|database|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive database compile ' ] ||
   fail 'a selected database family did not want the database leg'
+# A Rust selection wants the feature graphs' archives and checks; the
+# local-vmm shard's legs follow the workflow's BUILD_ONCE_LOCAL_VMM.
+[ "$(VERIFICATION_SELECTION='|policy|rust|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive features compile feature_checks ' ] ||
+  fail 'a selected Rust family did not want the feature-graph legs'
+[ "$(VERIFICATION_SELECTION='|transport|' BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs | tr '\n' ' ')" = 'archive local_vmm compile local_vmm_checks ' ] ||
+  fail 'the local-vmm shard did not want its legs'
+[ "$(VERIFICATION_SELECTION='|transport|' BUILD_ONCE_LOCAL_VMM=false "$SCRIPT" legs | tr '\n' ' ')" = 'archive compile ' ] ||
+  fail 'the local-vmm legs ran without BUILD_ONCE_LOCAL_VMM'
+[ "$(VERIFICATION_SELECTION='|rust|database|' BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs tests | tr '\n' ' ')" = 'archive local_vmm features database ' ] ||
+  fail 'unexpected tests lane for every family'
+[ "$(VERIFICATION_SELECTION='|rust|database|' BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs checks | tr '\n' ' ')" = 'compile feature_checks local_vmm_checks ' ] ||
+  fail 'unexpected checks lane for every family'
 grep -Eq '^  "[a-z0-9_]+ (tests|checks) (always|selected:[a-z0-9_,-]+|env:[A-Z0-9_]+)"$' "$SCRIPT" ||
   fail 'the leg table is missing'
 # A selected leg runs when any of its tokens is selected.
@@ -73,7 +87,7 @@ all='|database|service_idp|service_coordinator|service_billing|service_connectco
   fail 'a selected leg matched a token it does not name'
 while read -r name; do
   grep -Eq "^leg_$name\(\) \{" "$SCRIPT" || fail "the $name leg has no function"
-done < <(VERIFICATION_SELECTION="$all" "$SCRIPT" legs)
+done < <(VERIFICATION_SELECTION="${all}rust|transport|" BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs)
 
 # The build folder follows the event: main only for a push to main.
 tree() {
