@@ -2,7 +2,7 @@
 """Focused stdlib-only fixtures for claude_login.py; never runs Claude Code,
 Kubernetes or real auth. A synthetic Claude Code reads its own login from
 ~/.claude/.credentials.json before every turn and sends the Messages request
-stock Claude Code 2.1.288 sends with a claude.ai login."""
+stock Claude Code 2.1.308 sends with a claude.ai login."""
 
 import contextlib
 import importlib.util

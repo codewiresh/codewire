@@ -3,7 +3,7 @@
 
 The caller pipes this file into the actual workspace's python3, as with
 codex_login.py, with a mode and its arguments. Protocol is pinned to Claude
-Code 2.1.288. With a Claude sign-in selected, the hosted daemon keeps the
+Code 2.1.308. With a Claude sign-in selected, the hosted daemon keeps the
 Sandbox creator's login as `claudeAiOauth` in Claude Code's own
 `~/.claude/.credentials.json`, beside a top-level `codewireManaged` marker,
 with a per-delivery placeholder refresh token (codewire-daemon

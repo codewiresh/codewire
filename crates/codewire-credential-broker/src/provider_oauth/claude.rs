@@ -10,7 +10,7 @@
 //! canonical import. The same token endpoint refreshes a stored sign-in
 //! ([`refresh_request`]); that is the broker's job, never the Sandbox's.
 //!
-//! The request shapes follow the pinned Claude Code 2.1.288: JSON bodies, the
+//! The request shapes follow the pinned Claude Code 2.1.308: JSON bodies, the
 //! `state` in the code exchange, the granted `scope` on refresh, and the
 //! previous refresh token kept when a refresh returns none. Codewire asks for
 //! Claude Code's claude.ai scopes without `org:create_api_key`.
@@ -70,7 +70,7 @@ const CLAUDE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const CLAUDE_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 /// The page that shows `code#state` for the person to paste.
 const CLAUDE_MANUAL_REDIRECT_URL: &str = "https://platform.claude.com/oauth/code/callback";
-/// Claude Code's claude.ai scopes in the pinned 2.1.288, never
+/// Claude Code's claude.ai scopes in the pinned 2.1.308, never
 /// `org:create_api_key`. `user:profile` enables `/usage` and the plan.
 pub const CLAUDE_SIGN_IN_SCOPES: [&str; 6] = [
     "user:profile",

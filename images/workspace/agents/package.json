@@ -4,7 +4,7 @@
   "license": "AGPL-3.0-only",
   "description": "Coding agents seeded into the workspace image, installed with npm ci from the lockfile beside this file.",
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.288",
+    "@anthropic-ai/claude-code": "2.1.308",
     "@earendil-works/pi-coding-agent": "1.0.0",
     "@google/gemini-cli": "0.62.0",
     "@moonshot-ai/kimi-code": "2.1.1",
@@ -14,7 +14,7 @@
     "undici": "8.12.2"
   },
   "allowScripts": {
-    "@anthropic-ai/claude-code@2.1.288": true,
+    "@anthropic-ai/claude-code@2.1.308": true,
     "@github/keytar": false,
     "@google/genai": false,
     "@moonshot-ai/kimi-code": false,

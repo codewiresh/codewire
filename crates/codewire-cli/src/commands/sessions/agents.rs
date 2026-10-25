@@ -156,7 +156,7 @@ const CODEX_SANDBOX_POLICY: &str = "Sandbox execution: Codex app-server danger-f
 const CLAUDE_SANDBOX_POLICY: &str = "Sandbox execution: installed Claude CLI in auto mode (--permission-mode auto), as `claude` runs for the user in this Sandbox, with the user's and the repository's Claude settings, MCP configuration and permission rules; by default it uses the selected credential through the broker, and those settings or the declared environment can choose another provider or credential; no Codewire-held credential material enters the Sandbox either way";
 /// Managed Claude's permission mode on a Sandbox placement, a local VM or a
 /// hosted Sandbox: auto mode, so that a headless turn can use tools with no
-/// person to answer a prompt. Claude Code 2.1.288 lists `auto` among
+/// person to answer a prompt. Claude Code 2.1.308 lists `auto` among
 /// `--permission-mode`'s choices and needs no separate opt-in. The
 /// argument outranks the user's own `permissions.defaultMode`; a
 /// `permissions.disableAutoMode` setting still turns auto mode off, and the
@@ -5369,7 +5369,7 @@ mod tests {
 
     #[test]
     fn a_claude_api_error_reads_as_a_failure() {
-        // Claude Code 2.1.288 ends a turn the provider refused with
+        // Claude Code 2.1.308 ends a turn the provider refused with
         // `"subtype":"success","is_error":true`.
         assert_eq!(
             turn_failure::claude_failure(

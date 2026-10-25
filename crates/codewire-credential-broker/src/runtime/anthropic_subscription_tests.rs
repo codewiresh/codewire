@@ -150,7 +150,7 @@ fn request(request_id: Uuid) -> v1::CredentialBridgeRequest {
             header("anthropic-version", "2023-06-01"),
             header("authorization", "Bearer codewire-managed"),
             header("anthropic-beta", "claude-code-20250219"),
-            header("user-agent", "claude-cli/2.1.288 (external, sdk-cli)"),
+            header("user-agent", "claude-cli/2.1.308 (external, sdk-cli)"),
             header("x-app", "cli"),
         ],
         body: br#"{"model":"synthetic","max_tokens":1,"messages":[]}"#.to_vec(),

@@ -203,7 +203,7 @@ permission mode:
 | Trusted host | None passed: the user's own default mode decides | The user's rules on their own machine |
 | Local VM, platform sandbox | `--permission-mode auto` | A headless turn can use tools such as Bash with no person to answer a prompt |
 
-Verified against Claude Code 2.1.288: `auto` is one of
+Verified against Claude Code 2.1.308: `auto` is one of
 `--permission-mode`'s choices and needs no separate opt-in. The argument
 outranks `permissions.defaultMode` in the user's settings. A
 `permissions.disableAutoMode` setting (the user's or an administrator's) still

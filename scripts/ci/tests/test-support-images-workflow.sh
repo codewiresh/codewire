@@ -417,7 +417,7 @@ import sys
 package = json.load(open(sys.argv[1]))
 lock = json.load(open(sys.argv[2]))
 agents = {
-    "@anthropic-ai/claude-code": "2.1.288",
+    "@anthropic-ai/claude-code": "2.1.308",
     "@earendil-works/pi-coding-agent": "1.0.0",
     "@google/gemini-cli": "0.62.0",
     "@moonshot-ai/kimi-code": "2.1.1",
@@ -434,7 +434,7 @@ for path, entry in lock["packages"].items():
 for name, version in agents.items():
     assert lock["packages"]["node_modules/" + name]["version"] == version, name
 allowed = [spec for spec, allow in package["allowScripts"].items() if allow is not False]
-assert allowed == ["@anthropic-ai/claude-code@2.1.288"], allowed
+assert allowed == ["@anthropic-ai/claude-code@2.1.308"], allowed
 PY
   fail 'workspace agents are not one exact, registry-pinned lockfile'
 grep -qF 'npm ci --strict-allow-scripts --no-audit --no-fund' "$WORKSPACE_DOCKERFILE" ||

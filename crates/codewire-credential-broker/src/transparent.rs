@@ -298,7 +298,7 @@ mod tests {
             ("connection", "keep-alive, x-hop"),
             ("x-hop", "1"),
             ("te", "trailers"),
-            ("user-agent", "claude-cli/2.1.288 (external, cli)"),
+            ("user-agent", "claude-cli/2.1.308 (external, sdk-cli)"),
             ("x-app", "cli"),
             (
                 "anthropic-beta",

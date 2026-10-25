@@ -36,10 +36,10 @@ Claude Code with the session's own HOME, where the login lives, instead of a
 fresh harness HOME, and checks only the login's presence and Codewire's marker
 (claude_login.py checks the login itself). It never prints the file.
 
-Pinned to Claude Code 2.1.288, whose probe showed that `claude -p` sends only
+Pinned to Claude Code 2.1.308, whose probe showed that `claude -p` sends only
 POST /v1/messages?beta=true to the base URL, that CLAUDE_CODE_OAUTH_TOKEN
 selects its subscription mode, and that a 401 `authentication_error` prints
-"API Error: 401" and exits 1 at once. Each form projects only its own
+"API Error: 401" and exits 1 after one retried request. Each form projects only its own
 variable; the other Anthropic names are absent, never empty. The fresh HOME and
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC are harness-local: no saved login,
 telemetry or update call. Neither changes authentication. The `sign_in` form
@@ -110,7 +110,7 @@ MANAGED_MARKER = "codewireManaged"
 LOGIN_KEY = "claudeAiOauth"
 PLACEHOLDER_REFRESH_PREFIX = "codewire-managed-no-refresh-token-"
 MAX_CREDENTIALS = 1024 * 1024
-# What Claude Code prints with no login at all (2.1.288: "Not logged in ·
+# What Claude Code prints with no login at all (2.1.308: "Not logged in ·
 # Please run /login").
 NO_LOGIN = b"/login"
 # What the daemon sets in the workspace user's own Claude Code configuration

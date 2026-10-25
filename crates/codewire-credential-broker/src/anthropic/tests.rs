@@ -94,32 +94,50 @@ fn api_key_lease() -> Lease {
     Lease::new(CredentialAuthKind::ApiKey, KEY)
 }
 
-/// What Claude Code 2.1.288 sends, plus guest credentials and framing that
-/// must never pass.
+/// The beta flags Claude Code 2.1.308 sends with the API-key form in auto
+/// mode, the managed agent's mode.
+pub(super) const CLAUDE_BETAS: &str = "claude-code-20250219,interleaved-thinking-2025-05-14,\
+thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,\
+effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,\
+afk-mode-2026-01-31";
+
+/// The headers Claude Code 2.1.308 sent on the managed route's API-key form
+/// (`claude -p` with the managed agent's arguments and auto mode), captured
+/// from a real request in their order. The session id is the one the capture
+/// passed with `--session-id`; `host` is the managed route's own; the
+/// captured `content-length` is left out, since the body here is a fixture
+/// (its removal is tested in `transparent`). Then a workspace header and the
+/// guest credentials that must never pass.
 pub(super) fn claude_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     for (name, value) in [
-        ("content-type", "application/json"),
         ("accept", "application/json"),
-        ("anthropic-version", "2023-06-01"),
-        (
-            "anthropic-beta",
-            "claude-code-20250219,dangerous-tool-use-2026-09-03",
-        ),
-        ("user-agent", "claude-cli/2.1.288 (external, cli)"),
-        ("x-app", "cli"),
+        ("authorization", "Bearer codewire-managed"),
+        ("content-type", "application/json"),
+        ("user-agent", "claude-cli/2.1.308 (external, sdk-cli)"),
         (
             "x-claude-code-session-id",
             "6f2a1f0e-0000-4000-8000-000000000001",
         ),
+        ("x-stainless-arch", "x64"),
         ("x-stainless-lang", "js"),
+        ("x-stainless-os", "Linux"),
+        ("x-stainless-package-version", "0.128.0"),
+        ("x-stainless-retry-count", "0"),
+        ("x-stainless-runtime", "node"),
+        ("x-stainless-runtime-version", "v26.3.0"),
+        ("x-stainless-timeout", "600"),
+        ("anthropic-beta", CLAUDE_BETAS),
+        ("anthropic-dangerous-direct-browser-access", "true"),
+        ("anthropic-version", "2023-06-01"),
+        ("x-app", "cli"),
+        ("connection", "keep-alive"),
+        ("host", "127.0.0.1:38081"),
+        ("accept-encoding", "gzip, deflate, br, zstd"),
         ("anthropic-workspace-id", "wrkspc_synthetic"),
-        ("authorization", "Bearer codewire-managed"),
         ("x-api-key", "guest-supplied-key"),
         ("cookie", "guest=cookie"),
         ("proxy-authorization", "Basic guest"),
-        ("host", "127.0.0.1:38081"),
-        ("accept-encoding", "gzip, br"),
     ] {
         headers.append(
             HeaderName::from_static(name),
@@ -194,15 +212,29 @@ fn any_path_method_query_header_and_body_reach_the_provider_unchanged() {
             "accept",
             "anthropic-version",
             "anthropic-beta",
+            "anthropic-dangerous-direct-browser-access",
             "user-agent",
             "x-app",
             "x-claude-code-session-id",
+            "x-stainless-arch",
             "x-stainless-lang",
+            "x-stainless-os",
+            "x-stainless-package-version",
+            "x-stainless-retry-count",
+            "x-stainless-runtime",
+            "x-stainless-runtime-version",
+            "x-stainless-timeout",
             "anthropic-workspace-id",
         ] {
             assert_eq!(headers.get(kept), guest.get(kept), "{kept}");
         }
-        for gone in ["authorization", "cookie", "proxy-authorization", "host"] {
+        for gone in [
+            "authorization",
+            "cookie",
+            "proxy-authorization",
+            "host",
+            "connection",
+        ] {
             assert!(!headers.contains_key(gone), "{gone}");
         }
         assert_eq!(

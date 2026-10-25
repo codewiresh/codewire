@@ -2,15 +2,20 @@ use codewire_access::{BrokerOperationId, CapabilitySlot, CredentialStatus, Provi
 use http::{HeaderName, Method, header};
 
 use super::super::AnthropicApiKeyAdapter;
-use super::super::tests::{Lease, claude_headers, reflections};
+use super::super::tests::{CLAUDE_BETAS, Lease, claude_headers, reflections};
 use super::*;
 
 /// Synthetic only; shaped like a `claude setup-token` value.
 const TOKEN: &[u8] = b"sk-ant-oat01-CW_TEST_SUBSCRIPTION_token-_~+/=";
 const BODY: &[u8] = br#"{"model":"synthetic-model","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"stream":true,"safeguards":[{"type":"dangerous_tool_use","classifier_context":{"v":1,"permission_mode":"auto"}}]}"#;
-/// What Claude Code 2.1.288 sends in subscription mode.
-const SUBSCRIPTION_BETAS: &str =
-    "claude-code-20250219,oauth-2025-04-20,dangerous-tool-use-2026-09-03";
+/// The beta flags Claude Code 2.1.308 sent in subscription mode
+/// (`CLAUDE_CODE_OAUTH_TOKEN`), captured in a run with the same arguments; its
+/// other headers were those of [`claude_headers`] apart from
+/// `content-length`.
+const SUBSCRIPTION_BETAS: &str = "claude-code-20250219,oauth-2025-04-20,\
+interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,\
+advanced-tool-use-2025-11-20,effort-2025-11-24,dangerous-tool-use-2026-09-03,\
+thinking-display-updates-2026-08-18,afk-mode-2026-01-31,extended-cache-ttl-2025-04-11";
 
 fn token_lease() -> Lease {
     Lease::new(CredentialAuthKind::OAuth, TOKEN)
@@ -87,6 +92,23 @@ fn the_oauth_beta_is_added_once_and_split_beta_lines_are_joined() {
         .into_parts()
         .2;
     assert_eq!(headers["anthropic-beta"], OAUTH_BETA);
+
+    // A client sending the API-key form's flags to a subscription credential
+    // gains the OAuth flag once, at the end.
+    let headers = prepare(
+        token_lease(),
+        &Method::POST,
+        "/v1/messages",
+        claude_headers(),
+    )
+    .unwrap()
+    .into_parts()
+    .2;
+    assert_eq!(headers.get_all("anthropic-beta").iter().count(), 1);
+    assert_eq!(
+        headers["anthropic-beta"],
+        format!("{CLAUDE_BETAS},{OAUTH_BETA}")
+    );
 
     let mut split = claude_headers();
     split.remove("anthropic-beta");
