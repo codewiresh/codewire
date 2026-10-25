@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Compile once per pull request run (infra#1632): the build half, on the pull
-# request build runner, whose guest mounts its persistent build disk at
-# /ci-cache and keeps it between guests and jobs.
+# Compile once per run (infra#1632): the build half, on a build runner, whose
+# guest mounts its persistent build disk at /ci-cache and keeps it between
+# guests and jobs. A push to main runs on the main build runner and builds in
+# /ci-cache/main; every other run, on the pull request build runner, in
+# /ci-cache/pr (build-once-tree.sh). A disk that already holds the other
+# folder is refused, so a job never builds on, or clears, the other kind's
+# runner. That check is advisory, since a pull request can change this
+# script; the runners' labels and the archive stores' admission keep the
+# kinds apart.
 #
 #   build-once.sh prepare CHECKOUT  bring the warm build folder to this job's
 #                                   commit and set up the pinned tools
@@ -14,7 +20,7 @@
 #                                   store and report its SHA-256 as the job
 #                                   output <leg>_sha256
 #
-# The build folder, under /ci-cache/pr:
+# The build folder, /ci-cache/main or /ci-cache/pr:
 # - src: a persistent clone. The job's checkout is fetched into it, so git
 #   rewrites only changed files and Cargo's mtime fingerprints keep every
 #   unchanged workspace crate fresh (a new checkout rebuilds them all); every
@@ -37,7 +43,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly PROTOC_URL='https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip'
 readonly PROTOC_SHA256='6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7'
 readonly cache_root="${BUILD_ONCE_ROOT:-/ci-cache}"
-readonly work="$cache_root/pr"
+# shellcheck source=scripts/ci/setup/build-once-tree.sh
+source "$ROOT/scripts/ci/setup/build-once-tree.sh"
+work="$(build_once_tree "$cache_root")"
+readonly work
+if [ "${work##*/}" = main ]; then other_work="$cache_root/pr"; else other_work="$cache_root/main"; fi
+readonly other_work
 readonly src="$work/src"
 
 die() {
@@ -77,6 +88,11 @@ prepare() {
     [ "$(stat -f -c %T "$cache_root" 2>/dev/null)" = ext2/ext3 ] ||
       die "$cache_root is not the build runner's build disk"
   fi
+  [ ! -e "$other_work" ] ||
+    die "this build disk holds $other_work; a ${work##*/} run does not build here"
+  # The workflow names the same folder for its later steps.
+  [ -z "${BUILD_ONCE_TREE:-}" ] || [ "$BUILD_ONCE_TREE" = "$work" ] ||
+    die "BUILD_ONCE_TREE=$BUILD_ONCE_TREE, but this run builds in $work"
   : "${GITHUB_ENV:?a Forgejo job environment file is required}"
   # The build runner's share of the host (cpu-share.sh) sets the Cargo jobs.
   # shellcheck source=scripts/ci/setup/cpu-share.sh

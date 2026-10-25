@@ -73,7 +73,7 @@ import yaml
 jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
 # The sized Heavy runners are the CODEWIRE_CI_RUNNER_*_HEAVY variables.
 sized = {name for name, job in jobs.items() if "_HEAVY ||" in str(job.get("runs-on", ""))}
-assert len(sized) == 10, sorted(sized)
+assert len(sized) == 9, sorted(sized)
 for name in sized:
     job = jobs[name]
     assert "CARGO_BUILD_JOBS" not in (job.get("env") or {}), name

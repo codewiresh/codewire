@@ -2807,10 +2807,16 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     runner="$METAL_MAIN_RUNS_ON"
     grep -qxF "$METAL_CARGO_BOUND" "$block"
   fi
-  if [ "$runner" = build-main ]; then
+  # Compile once (infra#1632): the compile job runs on a build runner, which
+  # sizes its own Cargo jobs (build-once.sh), so it bounds none by memory.
+  if [ "$runner" = build ]; then
     runner="$RUNS_ON_BUILD"
-    grep -qxF "$METAL_CARGO_BOUND" "$block"
+    if grep -qxF "$METAL_CARGO_BOUND" "$block"; then
+      echo "${job_id}: the build runner job must not bound Cargo jobs by guest memory" >&2
+      exit 1
+    fi
   fi
+
   grep -qxF "    runs-on: ${runner}" "$block"
   if [ "$job_id" = edge-kind ]; then
     # Its optional producer dependencies need an always() condition so edge-
@@ -2837,10 +2843,22 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     fi
   elif [ "$job_id" = rust-packages ]; then
     # Compile once (infra#1632): it runs the compile job's test archive, so it
-    # needs that job's success, except on a main push, which compiles here.
+    # needs that job's success on every run, a main push included.
     grep -qF "    needs: [verification-selection, rust-compile]" "$block"
-    grep -qF "needs.verification-selection.outputs.rust_shards_expected == 'true'" "$block"
-    grep -qF "(needs.rust-compile.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))" "$block"
+    grep -qF "needs.verification-selection.outputs.rust_shards_expected == 'true' && needs.rust-compile.result == 'success' }}" "$block"
+    if grep -qF "github.ref == 'refs/heads/main'))" "$block"; then
+      echo 'rust-packages: a main push must not run without the compile job' >&2
+      exit 1
+    fi
+    # A test-archive miss builds in place, as the database job does.
+    # shellcheck disable=SC2016 # The workflow text holds literal shell variables.
+    grep -qF 'run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/tests.tar.zst"' "$block"
+    [ "$(grep -cF "steps.test-archive.outputs.ready != 'true'" "$block")" -eq 4 ]
+    grep -qF "RUST_TEST_ARCHIVE: \${{ steps.test-archive.outputs.ready == 'true' && format('{0}/tests.tar.zst', runner.temp) || '' }}" "$block"
+    if grep -qF 'BUILD_ONCE' "$block"; then
+      echo 'rust-packages: the archive path must follow the fetch' >&2
+      exit 1
+    fi
   else
     grep -qF \
       "    if: \${{ needs.verification-selection.outputs.${expectation_name}_expected == 'true' }}" \
@@ -2862,7 +2880,7 @@ done <<'EOF'
 policy|Policy verification|metal-main|policy
 standard|Standard verification|metal-main|standard
 tooling|Tooling / delivery contract verification|metal-main|tooling
-rust-compile|Compile every Rust target|build-main|rust_compile
+rust-compile|Compile every Rust target|build|rust_compile
 rust-packages|Rust / transport packages|metal-main|rust_shards
 rust-features|Rust / transport feature graphs|metal-main|rust_shards
 rust-transport|Rust / transport verification|metal-main|rust_transport
@@ -3198,16 +3216,17 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   exit 1
 fi
 # Nine heavy groups on the metal labels, and Rust compilation on the build
-# runner except on a main push (compile once, infra#1632).
+# runners, main's on a main push (compile once, infra#1632). Every metal group
+# bounds its Cargo jobs.
 [[ "$(grep -Fxc "    runs-on: ${RUNS_ON_BUILD}" "$WORKFLOW")" -eq 1 ]] || {
-  echo 'Codewire CI requires Rust compilation on the build runner' >&2
+  echo 'Codewire CI requires Rust compilation on the build runners' >&2
   exit 1
 }
 [[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 9 ]] || {
   echo 'Codewire CI requires its nine ordinary heavy groups (policy included) on the metal labels' >&2
   exit 1
 }
-[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 10 ]] || {
+[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 9 ]] || {
   echo 'each metal group must bound its cargo jobs to its guest memory' >&2
   exit 1
 }
@@ -5019,8 +5038,7 @@ WORK = {
         "Run the workspace agents check",
         "Run Edge static verification and selected Kind tool tests",
     },
-    "rust-compile": {"Compile every Rust target", "Run the build legs",
-                     "Compile the macOS cw for both Mac targets"},
+    "rust-compile": {"Run the build legs", "Compile the macOS cw for both Mac targets"},
     "rust-packages": {"Run the Rust packages shard"},
     "rust-features": {"Run the Rust features shard"},
     "rust-transport": {

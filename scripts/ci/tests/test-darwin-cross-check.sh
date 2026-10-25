@@ -180,9 +180,9 @@ else:
     # job's own Cargo home.
     assert '\n  cw-release-assets:\n' not in ci
     compile_job = ci.split('\n  rust-compile:\n', 1)[1].split('\n  rust-packages:\n', 1)[0]
-    # A main push compiles in the job's own Cargo home; every other run on the
-    # build runner, in its warm one (infra#1632).
-    assert "format('{0}/target/ci-rust-cargo-home', github.workspace) || '/ci-cache/pr/cargo-home'" in compile_job
+    # Every run compiles in its build runner's warm Cargo home, main's or the
+    # pull requests' (infra#1632), and checks cw from the same warm folder.
+    assert "&& '/ci-cache/main/cargo-home' || '/ci-cache/pr/cargo-home'" in compile_job
     cw_selected = "needs.verification-selection.outputs.cw_package_selected == 'true'"
     setup = compile_job.split('      - name: Set up pinned Darwin C cross-check tools\n', 1)[1].split('      - name:', 1)[0]
     assert "tested_tree_receipt != 'accepted'" in setup and cw_selected in setup
@@ -191,6 +191,8 @@ else:
     check = compile_job.split('      - name: Compile the macOS cw for both Mac targets\n', 1)[1].split('      - name:', 1)[0]
     assert "tested_tree_receipt != 'accepted'" in check and cw_selected in check
     assert 'run: scripts/ci/verify/check-darwin-cross.sh --cli' in check
+    assert "working-directory: ${{ format('{0}/src', env.BUILD_ONCE_TREE) }}" in check
+    assert "CARGO_TARGET_DIR: ${{ format('{0}/targets/darwin', env.BUILD_ONCE_TREE) }}" in check
     assert compile_job.index('Set up pinned Darwin C cross-check tools') < compile_job.index('Compile the macOS cw for both Mac targets')
     print(f'Darwin cross-check wrapper: {cases} cases passed; old bare check rejected')
 PY

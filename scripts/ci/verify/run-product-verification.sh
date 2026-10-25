@@ -80,13 +80,9 @@ rust_package_args() {
 
 # Compile once (infra#1632): with RUST_TEST_ARCHIVE set, the packages shard
 # compiles nothing. It runs the selected packages' tests from that verified
-# test archive, built by the pull request build runner, with cargo-nextest:
+# test archive, built by the run kind's build runner, with cargo-nextest:
 # one run for the Rust and transport selections together.
 RUST_ARCHIVE_FILTERS=()
-# The build runner's build folder. Test binaries carry its paths (the
-# compile-time CARGO_MANIFEST_DIR and CARGO_BIN_EXE_*), so a test job links
-# them to its own checkout and its extracted target folder.
-readonly RUST_ARCHIVE_BUILD_ROOT=/ci-cache/pr
 
 run_rust_packages() {
   local prefix="$1" arg
@@ -121,9 +117,16 @@ run_rust_archive_tests() {
     echo "::error::the test archive $RUST_TEST_ARCHIVE is missing" >&2
     return 1
   }
-  local nextest="${RUST_TEST_NEXTEST:-cargo-nextest}" root="$RUST_ARCHIVE_BUILD_ROOT" share
-  # A metal guest runs as many tests at once as its share of the host
-  # (cpu-share.sh); elsewhere the CI profile's own count applies.
+  # The build runner's build folder, /ci-cache/main on a push to main and
+  # /ci-cache/pr otherwise (build-once-tree.sh). Test binaries carry its paths
+  # (the compile-time CARGO_MANIFEST_DIR and CARGO_BIN_EXE_*), so the checkout
+  # and the extracted target folder go there. A metal guest runs as many tests
+  # at once as its share of the host (cpu-share.sh); elsewhere the CI
+  # profile's own count applies.
+  local nextest="${RUST_TEST_NEXTEST:-cargo-nextest}" root share
+  # shellcheck source=scripts/ci/setup/build-once-tree.sh
+  source "$ROOT/scripts/ci/setup/build-once-tree.sh"
+  root="$(build_once_tree)"
   # shellcheck source=scripts/ci/setup/cpu-share.sh
   source "$ROOT/scripts/ci/setup/cpu-share.sh"
   share="$(ci_cpu_share)"

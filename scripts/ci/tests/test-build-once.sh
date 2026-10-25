@@ -64,6 +64,33 @@ while read -r name; do
   grep -q "^leg_$name() {" "$SCRIPT" || fail "the $name leg has no function"
 done < <("$SCRIPT" legs)
 
+# The build folder follows the event: main only for a push to main.
+tree() {
+  # shellcheck source=scripts/ci/setup/build-once-tree.sh
+  ( source "$ROOT/scripts/ci/setup/build-once-tree.sh"; GITHUB_EVENT_NAME="$1" GITHUB_REF="$2" build_once_tree /d )
+}
+[ "$(tree push refs/heads/main)" = /d/main ] || fail 'a push to main must build in main'
+[ "$(tree pull_request refs/pull/1/head)" = /d/pr ] || fail 'a pull request must build in pr'
+[ "$(tree push refs/heads/other)" = /d/pr ] || fail 'a push to another branch must build in pr'
+[ "$(tree workflow_dispatch refs/heads/main)" = /d/pr ] || fail 'a dispatched run must build in pr'
+
+# prepare refuses a disk that holds the other kind's folder, and a workflow
+# that names another folder, before it touches anything.
+mkdir -p "$work/disk/main/src" "$work/env"
+if GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/head BUILD_ONCE_ROOT="$work/disk" \
+    GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
+    "$SCRIPT" prepare "$work/checkout1" > "$work/refused.log" 2>&1; then
+  fail 'a pull request prepared on a disk holding main'
+fi
+grep -q 'holds .*/main; a pr run does not build here' "$work/refused.log" || fail 'no reason for the refusal'
+[ -d "$work/disk/main/src" ] || fail 'the refused prepare touched the main folder'
+if GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main BUILD_ONCE_ROOT="$work/disk" BUILD_ONCE_TREE=/ci-cache/pr \
+    GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
+    "$SCRIPT" prepare "$work/checkout1" > "$work/refused.log" 2>&1; then
+  fail 'prepare accepted a workflow folder that differs from the run kind'
+fi
+grep -q 'BUILD_ONCE_TREE=/ci-cache/pr, but this run builds in' "$work/refused.log" || fail 'no reason for the folder refusal'
+
 # A test job's fetch: verified bytes are ready; with --or-build, a missing
 # digest, store or archive is a miss the job builds through (ready=false, a
 # warning, success); without it a missing archive fails; a corrupt archive
@@ -111,4 +138,4 @@ if ARCHIVE_STORE_URL="file://$work/store" "$SCRIPT" publish "$work/out" >/dev/nu
   fail 'publish accepted an invalid leg output name'
 fi
 
-echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the archive fetch and its build fallback, and publish hold; bad input refused'
+echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, and publish hold; bad input refused'
