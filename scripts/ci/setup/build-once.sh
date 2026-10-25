@@ -19,6 +19,9 @@
 #   build-once.sh publish OUT       upload every OUT/<leg>.* to the archive
 #                                   store and report its SHA-256 as the job
 #                                   output <leg>_sha256
+#   build-once.sh finish            flush the build folder to disk and mark
+#                                   it complete (the job's last step, on
+#                                   success or failure, never on a cancel)
 #
 # The build folder, /ci-cache/main or /ci-cache/pr:
 # - src: a persistent clone. The job's checkout is fetched into it, so git
@@ -28,8 +31,14 @@
 # - targets/archive and targets/clippy: the two Cargo target folders.
 # - cargo-home: the registry index and downloaded crates.
 # - tools: downloads of SHA-256-pinned tools, checked on every use.
-# - lock-stamp: the digest of every lockfile and the toolchain file. When it
-#   changes, both target folders are wiped.
+# - lock-stamp: the digest of every lockfile and the toolchain file, and of
+#   this folder's layout version. When it changes, the target folders are
+#   wiped.
+# - unfinished: written by prepare, removed by finish once the folder is on
+#   disk. A job that was cancelled or whose guest died leaves it, and the next
+#   prepare wipes the target folders: a guest killed mid-build can leave a
+#   truncated rlib that Cargo's fingerprint still calls fresh (main run 22374,
+#   "Archive::children failed: truncated or malformed archive").
 # Anything else under /ci-cache is removed first: a previous job could have
 # left Cargo configuration in a parent directory of src. The guest itself
 # wipes the whole folder weekly (infra dispatcher, metal_build_disk_prelude).
@@ -107,7 +116,7 @@ prepare() {
   done
   for entry in "$work"/*; do
     case "${entry##*/}" in
-      src|targets|cargo-home|tools|lock-stamp) ;;
+      src|targets|cargo-home|tools|lock-stamp|unfinished) ;;
       *) rm -rf -- "$entry" ;;
     esac
   done
@@ -127,12 +136,24 @@ prepare() {
   "${git_src[@]}" clean -q -ffdx
   [ "$("${git_src[@]}" rev-parse HEAD)" = "$commit" ] || die 'the persistent clone is not at the commit'
 
-  stamp="$(cd "$src" && cat Cargo.lock rust-toolchain.toml deployments/docker/*.Cargo.lock | sha256sum | cut -d' ' -f1)"
+  # The layout version: raising it wipes every build runner's target folders
+  # once (2: folders that a cancelled job may have left truncated).
+  stamp="$( (echo 'build-once layout 2'; cd "$src" && cat Cargo.lock rust-toolchain.toml deployments/docker/*.Cargo.lock) | sha256sum | cut -d' ' -f1)"
   if [ "$(cat "$work/lock-stamp" 2>/dev/null || true)" != "$stamp" ]; then
-    echo 'build-once: the lockfiles or toolchain changed; the target folders are wiped'
+    echo 'build-once: the lockfiles, toolchain or folder layout changed; the target folders are wiped'
     rm -rf -- "$work/targets"
     mkdir -p "$work/targets"
     printf '%s\n' "$stamp" > "$work/lock-stamp"
+  elif [ -e "$work/unfinished" ]; then
+    echo 'build-once: the previous build did not finish (cancelled, or its guest died); the target folders are wiped'
+    rm -rf -- "$work/targets"
+    mkdir -p "$work/targets"
+  fi
+  : > "$work/unfinished"
+  sync -f "$work"
+  # Tests stop here, before the pinned tools; never on a build runner's disk.
+  if [ -n "${BUILD_ONCE_ROOT:-}" ] && [ "${BUILD_ONCE_TEST_STOP_AFTER_TARGETS:-}" = 1 ]; then
+    return 0
   fi
   # A cold build (no archive or lint folder yet) builds one folder at a time:
   # two cold builds side by side ran the 17.6 GiB guest out of memory.
@@ -261,13 +282,38 @@ run_leg() {
   "leg_$name" "$out"
 }
 
+# What a corrupt output in a warm target folder looks like: a truncated or
+# malformed archive or metadata file, or the link that reads one (main run
+# 22374). A failed leg showing it wipes the target folders its log names and
+# runs once more in the same job.
+# shellcheck disable=SC2016 # The backticks are literal text in the linker message.
+readonly CORRUPT_OUTPUT='malformed archive|truncated|Archive::children failed|invalid metadata|E0786|failed to mmap|linking with `cc` failed'
+
+rebuild_corrupt_leg() {
+  # rebuild_corrupt_leg NAME OUT LOG: succeeds only when the leg showed a
+  # corrupt output in a target folder it names, and its one rebuild passed.
+  # Only the named folders are wiped: the other lane may be building in its
+  # own folder beside this one.
+  local name="$1" out="$2" log="$3" folders folder
+  grep -Eq "$CORRUPT_OUTPUT" "$log" || return 1
+  folders="$(grep -oE "$work/targets/[A-Za-z0-9_-]+" "$log" | sort -u)"
+  [ -n "$folders" ] || return 1
+  for folder in $folders; do
+    echo "build-once: the $name leg read a corrupt output in $folder; it is wiped and the leg runs once more" | tee -a "$log"
+    rm -rf -- "$folder"
+  done
+  "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" >> "$log" 2>&1
+}
+
 run_lane() {
   # run_lane LANE OUT LOGS: the lane's wanted legs one after another, each
   # with its own log; the lane fails when any leg failed.
   local lane="$1" out="$2" logs="$3" name status=0
   while read -r name; do
     [ -n "$name" ] || continue
-    "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" > "$logs/$name.log" 2>&1 || { status=1; echo "$name" >> "$logs/failed"; }
+    "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" > "$logs/$name.log" 2>&1 ||
+      rebuild_corrupt_leg "$name" "$out" "$logs/$name.log" ||
+      { status=1; echo "$name" >> "$logs/failed"; }
   done < <(wanted_legs "$lane")
   return "$status"
 }
@@ -321,11 +367,20 @@ publish() {
   done
 }
 
+finish() {
+  # Every write of this job reaches the disk before the folder is called
+  # complete; a guest killed before this point leaves the marker.
+  sync -f "$work"
+  rm -f -- "$work/unfinished"
+  sync -f "$work"
+}
+
 case "${1:-}" in
+  finish) [ "$#" -eq 1 ] || die 'usage: build-once.sh finish'; finish ;;
   prepare) [ "$#" -eq 2 ] || die 'usage: build-once.sh prepare CHECKOUT'; prepare "$2" ;;
   build) [ "$#" -eq 2 ] || die 'usage: build-once.sh build OUT'; build "$2" ;;
   legs) [ "$#" -le 2 ] || die 'usage: build-once.sh legs [LANE]'; wanted_legs "${2:-}" ;;
   leg) [ "$#" -eq 3 ] || die 'usage: build-once.sh leg NAME OUT'; run_leg "$2" "$3" ;;
   publish) [ "$#" -eq 2 ] || die 'usage: build-once.sh publish OUT'; publish "$2" ;;
-  *) die 'usage: build-once.sh prepare|build|legs|leg|publish ...' ;;
+  *) die 'usage: build-once.sh prepare|build|legs|leg|publish|finish ...' ;;
 esac

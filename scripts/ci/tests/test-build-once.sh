@@ -123,6 +123,86 @@ if fetch --or-build "$absent" "$work/fetched/f.tar"; then fail 'a corrupt archiv
 grep -q 'hashes to' "$work/fetch.log" || fail 'a corrupt archive gave no reason'
 grep -q 'ready=' "$work/fetch-out" && fail 'a corrupt archive reported readiness'
 
+# A build that never reached finish (a cancel, or its guest died) leaves the
+# unfinished marker, and the next prepare wipes the target folders, which may
+# hold truncated outputs; a finished build keeps them; a lockfile change wipes
+# them too.
+git init -q "$work/lock-origin"
+mkdir -p "$work/lock-origin/deployments/docker"
+printf 'lock one\n' > "$work/lock-origin/Cargo.lock"
+printf '[toolchain]\n' > "$work/lock-origin/rust-toolchain.toml"
+printf 'derp\n' > "$work/lock-origin/deployments/docker/derp.Cargo.lock"
+git -C "$work/lock-origin" add -A
+git -C "$work/lock-origin" -c user.name=t -c user.email=t@example.invalid commit -q -m one
+git clone -q --depth 1 "file://$work/lock-origin" "$work/lock-checkout"
+targets_prepare() {
+  BUILD_ONCE_ROOT="$work/marker-root" BUILD_ONCE_TEST_STOP_AFTER_TARGETS=1 \
+    GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
+    "$SCRIPT" prepare "$work/lock-checkout" > "$work/prepare.log" 2>&1 || fail "prepare failed: $(cat "$work/prepare.log")"
+}
+marker_root="$work/marker-root/pr"
+targets_prepare
+[ -e "$marker_root/unfinished" ] || fail 'prepare did not mark the build folder unfinished'
+mkdir -p "$marker_root/targets/archive"
+printf 'truncated' > "$marker_root/targets/archive/lib.rlib"
+targets_prepare
+[ ! -e "$marker_root/targets/archive/lib.rlib" ] || fail 'an unfinished build folder kept its targets'
+grep -q 'previous build did not finish' "$work/prepare.log" || fail 'the unfinished wipe gave no reason'
+mkdir -p "$marker_root/targets/archive"
+printf 'complete' > "$marker_root/targets/archive/lib.rlib"
+BUILD_ONCE_ROOT="$work/marker-root" "$SCRIPT" finish || fail 'finish failed'
+[ ! -e "$marker_root/unfinished" ] || fail 'finish left the unfinished marker'
+targets_prepare
+[ -f "$marker_root/targets/archive/lib.rlib" ] || fail 'a finished build folder lost its targets'
+BUILD_ONCE_ROOT="$work/marker-root" "$SCRIPT" finish
+printf 'lock two\n' > "$work/lock-origin/Cargo.lock"
+git -C "$work/lock-origin" -c user.name=t -c user.email=t@example.invalid commit -q -am two
+rm -rf "$work/lock-checkout"
+git clone -q --depth 1 "file://$work/lock-origin" "$work/lock-checkout"
+targets_prepare
+[ ! -e "$marker_root/targets/archive/lib.rlib" ] || fail 'a lockfile change kept the targets'
+grep -q 'layout changed; the target folders are wiped' "$work/prepare.log" || fail 'the lockfile wipe gave no reason'
+grep -q "echo 'build-once layout 2'" "$SCRIPT" || fail 'the folder layout version is missing from the stamp'
+if "$SCRIPT" finish extra >/dev/null 2>&1; then fail 'finish accepted an argument'; fi
+
+# A leg that reads a corrupt output from its warm target folder wipes the
+# folder its error names and builds once more in the same job; any other
+# failure fails at once, with no rebuild.
+legs_src="$work/legs-src"
+git init -q "$legs_src"
+mkdir -p "$legs_src/scripts/ci/verify" "$work/legs-bin" "$work/legs-out"
+printf '#!/bin/sh\nexit 0\n' > "$legs_src/scripts/ci/verify/compile-all-targets.sh"
+chmod +x "$legs_src/scripts/ci/verify/compile-all-targets.sh"
+cat > "$work/legs-bin/cargo" <<'CARGO'
+#!/usr/bin/env bash
+# The archive leg's cargo: fails as LEGS_CARGO_MODE says while its marker
+# file exists, then writes the archive.
+calls="$LEGS_STATE/calls"; echo x >> "$calls"
+if [ -e "$CARGO_TARGET_DIR/debug/deps/libbroken.rlib" ]; then
+  case "$LEGS_CARGO_MODE" in
+    corrupt) echo "rust-lld: error: $CARGO_TARGET_DIR/debug/deps/libbroken.rlib: Archive::children failed: truncated or malformed archive"; exit 101 ;;
+    compile) echo "error[E0308]: mismatched types"; exit 101 ;;
+  esac
+fi
+while [ "$#" -gt 0 ]; do [ "$1" = --archive-file ] && { shift; printf 'archive' > "$1"; }; shift; done
+CARGO
+chmod +x "$work/legs-bin/cargo"
+legs_build() {
+  rm -rf "$work/legs-out" "$work/legs-state"; mkdir -p "$work/legs-out" "$work/legs-state"
+  mkdir -p "$work/legs-root/pr/targets/archive/debug/deps"
+  printf 'half' > "$work/legs-root/pr/targets/archive/debug/deps/libbroken.rlib"
+  PATH="$work/legs-bin:$PATH" BUILD_ONCE_ROOT="$work/legs-root" BUILD_ONCE_SRC="$legs_src" \
+    BUILD_ONCE_COLD=true LEGS_STATE="$work/legs-state" LEGS_CARGO_MODE="$1" RUNNER_TEMP="$work/legs-state" \
+    "$SCRIPT" build "$work/legs-out" > "$work/legs.log" 2>&1
+}
+legs_build corrupt || fail "a corrupt archive was not rebuilt: $(cat "$work/legs.log")"
+[ -f "$work/legs-out/archive.tar.zst" ] || fail 'the rebuilt leg wrote no archive'
+[ "$(wc -l < "$work/legs-state/calls")" -eq 2 ] || fail 'the corrupt leg did not build exactly twice'
+grep -q 'it is wiped and the leg runs once more' "$work/legs.log" || fail 'the rebuild gave no reason'
+if legs_build compile; then fail 'a compile error passed'; fi
+[ "$(wc -l < "$work/legs-state/calls")" -eq 1 ] || fail 'a compile error was rebuilt'
+[ -e "$work/legs-root/pr/targets/archive/debug/deps/libbroken.rlib" ] || fail 'a compile error wiped the target folder'
+
 # publish uploads every leg output and names its job output after the leg.
 mkdir -p "$work/out" "$work/store/v1/archives"
 printf 'one' > "$work/out/archive.tar.zst"
@@ -138,4 +218,4 @@ if ARCHIVE_STORE_URL="file://$work/store" "$SCRIPT" publish "$work/out" >/dev/nu
   fail 'publish accepted an invalid leg output name'
 fi
 
-echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, and publish hold; bad input refused'
+echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, the unfinished-build wipe, the corrupt-output rebuild and publish hold; bad input refused'

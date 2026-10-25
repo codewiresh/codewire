@@ -728,6 +728,12 @@ jobs:
           CARGO_TARGET_DIR: ${{ format('{0}/targets/darwin', env.BUILD_ONCE_TREE) }}
         run: scripts/ci/verify/check-darwin-cross.sh --cli
 
+      # The build folder is complete only once its writes are on disk. A
+      # cancelled job skips this, and the next prepare wipes its targets.
+      - name: Finish the warm build folder
+        if: ${{ (success() || failure()) && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/build-once.sh finish
+
   rust-packages:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Rust / transport packages
