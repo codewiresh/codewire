@@ -25,6 +25,7 @@ tracing-subscriber = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 axum = { workspace = true }
+buffa = { workspace = true }
 codewire-client = { workspace = true }
 codewire-derp = { workspace = true }
 codewire-egress-broker = { workspace = true }

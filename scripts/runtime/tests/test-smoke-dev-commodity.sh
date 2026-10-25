@@ -107,13 +107,17 @@ assert_static_contract() {
       'env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' 'user_ssh "printf' \
       'StrictHostKeyChecking=yes' 'GlobalKnownHostsFile=/dev/null' \
       'UserKnownHostsFile=$pinned' 'run_user_ssh_journey' \
-      'user_ssh_as "cw-$ENV_ID"' 'did not run through the managed Host cw-* block' \
       "printf a && printf b | tr b B; exit 7" 'cmp -s "$up" "$down"' \
       'expect_host_key_refused forged' 'expect_host_key_refused previous-generation' \
       'the recorded host key did not rotate across stop and start'; do
     rg -F -- "$binding" <<<"$host_key_smoke" >/dev/null ||
       fail "host-key smoke is missing: $binding"
   done
+  # The bare `cw-<id>` alias is retired (owner, 2026-10-24, #3025): every
+  # SSH target and known-hosts host is the cloud's qualified `cw-cloud-<id>`.
+  if rg -n '(^|[^-])cw-\$\{?ENV_ID|cw-%s' "$SMOKE"; then
+    fail "dev smoke still uses the retired bare cw-<id> SSH alias"
+  fi
   if rg -F 'accept-new' <<<"$host_key_smoke" >/dev/null; then
     fail "host-key smoke trusts a key on first use"
   fi

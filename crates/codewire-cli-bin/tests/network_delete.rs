@@ -3,7 +3,6 @@
 use std::path::Path;
 use std::process::Output;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use codewire_mesh::{Config as MeshConfig, LocalMeshAuthorizationConfig};
@@ -20,7 +19,15 @@ async fn mesh(organization: &str, key: &str) -> (String, tokio::task::JoinHandle
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mesh_url = format!("http://{address}");
-    let app = codewire_mesh::router(MeshConfig {
+    let app = mesh_router(organization, key, address);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (mesh_url, server)
+}
+
+/// The Mesh service's routes at `address`, admitting one organization's key.
+fn mesh_router(organization: &str, key: &str, address: std::net::SocketAddr) -> axum::Router {
+    let mesh_url = format!("http://{address}");
+    codewire_mesh::router(MeshConfig {
         bind_addr: address,
         base_url: mesh_url.clone(),
         derp_url: Some("http://127.0.0.1:9".into()),
@@ -32,9 +39,7 @@ async fn mesh(organization: &str, key: &str) -> (String, tokio::task::JoinHandle
             organization_id: organization.into(),
             api_key_hash: hash_api_key(key),
         }),
-    });
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (mesh_url, server)
+    })
 }
 
 /// `cw` signed in to a platform at `server`: a non-codewire.sh platform's
@@ -267,50 +272,133 @@ async fn network_use_selects_only_an_existing_network_in_the_owner_organization(
     server.abort();
 }
 
-/// An explicit `--network` on a cloud create is refused before the CLI
-/// sends any request, so nothing can be allocated.
+/// A cloud create's `--network`: `local:NAME` is refused before the CLI
+/// sends any request. A cloud network is checked first with the user's own
+/// sign-in, by listing the networks they belong to; one they are not a member
+/// of is refused with nothing created, and only a member's create is sent.
 #[tokio::test]
-async fn cloud_create_refuses_mesh_attachment_before_any_request() {
-    let requests = Arc::new(AtomicUsize::new(0));
-    let counted = requests.clone();
+async fn cloud_create_checks_mesh_membership_before_it_creates() {
+    use buffa::Message as _;
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server_url = format!("http://{}", listener.local_addr().unwrap());
-    let app = axum::Router::new().fallback(move || {
-        let counted = counted.clone();
-        async move {
-            counted.fetch_add(1, Ordering::SeqCst);
-            axum::http::StatusCode::NOT_IMPLEMENTED
-        }
-    });
+    let address = listener.local_addr().unwrap();
+    let server_url = format!("http://{address}");
+    // The platform's organization list; the hosted Mesh is the platform
+    // origin itself; anything else, such as the create, is not implemented.
+    let organizations = codewire_client::ListOrganizationsResponse {
+        organizations: vec![codewire_client::OrganizationMembership {
+            organization: Some(codewire_client::Organization {
+                id: ORG.into(),
+                name: "Network delete".into(),
+                slug: ORG.into(),
+                ..Default::default()
+            })
+            .into(),
+            role: codewire_client::OrgRole::Owner.into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = requests.clone();
+    let mesh = mesh_router(ORG, KEY, address);
+    let app = axum::Router::new()
+        .route(
+            "/codewire.v1.OrganizationService/ListOrganizations",
+            axum::routing::post(move || {
+                let body = organizations.clone();
+                async move { ([("content-type", "application/proto")], body) }
+            }),
+        )
+        .route(
+            "/codewire.v1.EnvironmentService/CreateEnvironment",
+            axum::routing::post(|| async { axum::http::StatusCode::NOT_IMPLEMENTED }),
+        )
+        .fallback_service(mesh)
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(request.uri().path().to_owned());
+                    next.run(request).await
+                }
+            },
+        ));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let root = tempfile::tempdir().unwrap();
-    for (network, expected) in [
-        (
-            "cloud:work",
-            "cannot join Codewire Cloud Mesh network cloud:work",
-        ),
-        ("work", "cannot join Codewire Cloud Mesh network cloud:work"),
-        ("local:work", "cannot join the local Mesh service"),
-    ] {
-        let refused = cw(
-            root.path(),
-            &server_url,
-            &[],
-            &[
+    let run = |args| cw(root.path(), &server_url, &[], args);
+    let create = |network: &'static str| {
+        let (root, server_url) = (root.path().to_owned(), server_url.clone());
+        async move {
+            let args = [
                 "--cloud",
                 "create",
                 "--name",
-                "mesh-refusal",
+                "mesh-membership",
                 "--network",
                 network,
-            ],
-        )
-        .await;
+            ];
+            cw(&root, &server_url, &[], &args).await
+        }
+    };
+    success(
+        run(&[
+            "--cloud", "network", "create", "work", "--org", ORG, "--no-use",
+        ])
+        .await,
+    );
+    let sent = || std::mem::take(&mut *requests.lock().unwrap());
+    sent();
+
+    let local = create("local:work").await;
+    let stderr = String::from_utf8_lossy(&local.stderr);
+    assert!(!local.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("cannot join the local Mesh service"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("No environment was created"), "{stderr}");
+    assert_eq!(sent(), Vec::<String>::new(), "local:NAME sent a request");
+
+    for network in ["cloud:absent", "absent"] {
+        let refused = create(network).await;
         let stderr = String::from_utf8_lossy(&refused.stderr);
         assert!(!refused.status.success(), "{stderr}");
-        assert!(stderr.contains(expected), "{stderr}");
+        assert!(
+            stderr.contains("you are not a member of Codewire Cloud Mesh network cloud:absent"),
+            "{stderr}"
+        );
         assert!(stderr.contains("No environment was created"), "{stderr}");
+        let paths = sent();
+        assert!(
+            paths.iter().any(|path| path.ends_with("/ListMeshNetworks")),
+            "{paths:?}"
+        );
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.ends_with("/CreateEnvironment")),
+            "a non-member's create was sent: {paths:?}"
+        );
     }
-    assert_eq!(requests.load(Ordering::SeqCst), 0);
+
+    // A member's create is sent, after the membership check.
+    let member = create("cloud:work").await;
+    assert!(!member.status.success());
+    let paths = sent();
+    let listed = paths
+        .iter()
+        .position(|path| path.ends_with("/ListMeshNetworks"));
+    let created = paths
+        .iter()
+        .position(|path| path.ends_with("/CreateEnvironment"));
+    assert!(
+        matches!((listed, created), (Some(listed), Some(created)) if listed < created),
+        "{paths:?}"
+    );
     server.abort();
 }

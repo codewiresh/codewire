@@ -4909,7 +4909,7 @@ run_ssh_transport_smoke() {
       -o "LogLevel=$SMOKE_SSH_LOG_LEVEL" \
       -o ConnectTimeout="$SMOKE_SSH_CONNECT_TIMEOUT" \
       -o "ProxyCommand=$CW_BIN --server $CODEWIRE_SERVER_URL shell --stdio %h" \
-      "codewire@cw-$ENV_ID" \
+      "codewire@cw-cloud-$ENV_ID" \
       "printf '${expected_output}\n'" >"$stdout" 2>"$stderr"; then
     sed 's/[[:cntrl:]]//g' "$stderr" >&2 || true
     capture_ssh_failure_evidence "$label"
@@ -5000,7 +5000,7 @@ run_host_key_probe_once() {
       -o "LogLevel=$SMOKE_SSH_LOG_LEVEL" \
       -o ConnectTimeout="$SMOKE_SSH_CONNECT_TIMEOUT" \
       -o "ProxyCommand=$cw_command shell --stdio %h" \
-      "codewire@cw-$ENV_ID" \
+      "codewire@cw-cloud-$ENV_ID" \
       "printf '${expected_output}\n'" >"$stdout" 2>"$stderr" </dev/null; then
     return 1
   fi
@@ -5072,7 +5072,7 @@ expect_host_key_refused() {
 # One known_hosts line: the key the environment's bound Pod recorded with the
 # platform (a public key; nothing secret).
 recorded_host_key_line() {
-  timeout 60 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" ssh known-hosts "cw-$ENV_ID" 2>/dev/null
+  timeout 60 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" ssh known-hosts "cw-cloud-$ENV_ID" 2>/dev/null
 }
 
 env_is_stopped() {
@@ -5089,9 +5089,9 @@ run_host_key_smoke() {
   local before after pinned previous_pin forged
 
   require_cmd ssh-keygen
-  before="$(recorded_host_key_line)" || die "cw ssh known-hosts returned no recorded host key for cw-$ENV_ID"
-  [[ "$before" =~ ^cw-$ENV_ID\ ssh-ed25519\ [A-Za-z0-9+/]+=*$ ]] || \
-    die "recorded host key for cw-$ENV_ID is not one OpenSSH Ed25519 known_hosts line"
+  before="$(recorded_host_key_line)" || die "cw ssh known-hosts returned no recorded host key for cw-cloud-$ENV_ID"
+  [[ "$before" =~ ^cw-cloud-$ENV_ID\ ssh-ed25519\ [A-Za-z0-9+/]+=*$ ]] || \
+    die "recorded host key for cw-cloud-$ENV_ID is not one OpenSSH Ed25519 known_hosts line"
 
   log "verifying the daemon presents the host key the platform recorded"
   wait_for_host_key_probe recorded
@@ -5102,7 +5102,7 @@ run_host_key_smoke() {
 
   forged="$TMPDIR_SMOKE/forged-host-key"
   ssh-keygen -q -t ed25519 -N '' -C '' -f "$forged" >/dev/null
-  printf 'cw-%s %s\n' "$ENV_ID" "$(awk '{print $1, $2}' "$forged.pub")" >"$TMPDIR_SMOKE/known_hosts.forged"
+  printf 'cw-cloud-%s %s\n' "$ENV_ID" "$(awk '{print $1, $2}' "$forged.pub")" >"$TMPDIR_SMOKE/known_hosts.forged"
   expect_host_key_refused forged "$TMPDIR_SMOKE/known_hosts.forged"
   log "a host key other than the recorded one is refused"
 
