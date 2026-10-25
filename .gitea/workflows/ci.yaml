@@ -667,9 +667,9 @@ jobs:
     name: Compile every Rust target
     runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_BUILD') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD') }}
     # A cold build of every leg, after a lockfile, toolchain or layout change,
-    # took 27 min serially (run 22438), and a timed-out compile leaves its
-    # folder unfinished, so the next run is cold again. Warm builds stay far
-    # below; the bound holds the cold one under the 90-minute task budget.
+    # took 27 min with its legs one after another (run 22438); its two lanes
+    # now run side by side. Warm builds stay far below; the bound holds a cold
+    # one under the 90-minute task budget.
     timeout-minutes: 60
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.rust_compile_expected == 'true' }}
@@ -743,12 +743,6 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ format('{0}/targets/darwin', env.BUILD_ONCE_TREE) }}
         run: scripts/ci/verify/check-darwin-cross.sh --cli
-
-      # The build folder is complete only once its writes are on disk. A
-      # cancelled job skips this, and the next prepare wipes its targets.
-      - name: Finish the warm build folder
-        if: ${{ (success() || failure()) && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        run: scripts/ci/setup/build-once.sh finish
 
   rust-packages:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.

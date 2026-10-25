@@ -5396,7 +5396,7 @@ SUPPORT = {
     "Verify Kind runner tools", "Select best-effort shared Rust cache", "Select existing compiler cache",
     "Select the warm Rust cache", "Report the warm Rust cache", "Bound cargo jobs by memory",
     "Declare a metal Kata guest",
-    "Bring the warm build folder to this commit", "Publish the test archives", "Finish the warm build folder",
+    "Bring the warm build folder to this commit", "Publish the test archives",
     "Fetch and verify the test archive", "Install pinned cargo-nextest",
     "Fetch and verify the feature-graph test archives", "Fetch and verify the local-vmm test archives",
     "Unpack the feature-graph test archives", "Unpack the local-vmm test archives",

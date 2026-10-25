@@ -148,10 +148,9 @@ if fetch --or-build "$absent" "$work/fetched/f.tar"; then fail 'a corrupt archiv
 grep -q 'hashes to' "$work/fetch.log" || fail 'a corrupt archive gave no reason'
 grep -q 'ready=' "$work/fetch-out" && fail 'a corrupt archive reported readiness'
 
-# A build that never reached finish (a cancel, or its guest died) leaves the
-# unfinished marker, and the next prepare wipes the target folders, which may
-# hold truncated outputs; a finished build keeps them; a lockfile change wipes
-# them too.
+# A folder left by a cancelled job keeps its targets (a corrupt output is the
+# reading leg's to wipe, below); a stale marker from the earlier layout goes;
+# a lockfile change wipes the targets.
 git init -q "$work/lock-origin"
 mkdir -p "$work/lock-origin/deployments/docker"
 printf 'lock one\n' > "$work/lock-origin/Cargo.lock"
@@ -167,19 +166,12 @@ targets_prepare() {
 }
 marker_root="$work/marker-root/pr"
 targets_prepare
-[ -e "$marker_root/unfinished" ] || fail 'prepare did not mark the build folder unfinished'
 mkdir -p "$marker_root/targets/archive"
-printf 'truncated' > "$marker_root/targets/archive/lib.rlib"
+printf 'kept' > "$marker_root/targets/archive/lib.rlib"
+: > "$marker_root/unfinished"
 targets_prepare
-[ ! -e "$marker_root/targets/archive/lib.rlib" ] || fail 'an unfinished build folder kept its targets'
-grep -q 'previous build did not finish' "$work/prepare.log" || fail 'the unfinished wipe gave no reason'
-mkdir -p "$marker_root/targets/archive"
-printf 'complete' > "$marker_root/targets/archive/lib.rlib"
-BUILD_ONCE_ROOT="$work/marker-root" "$SCRIPT" finish || fail 'finish failed'
-[ ! -e "$marker_root/unfinished" ] || fail 'finish left the unfinished marker'
-targets_prepare
-[ -f "$marker_root/targets/archive/lib.rlib" ] || fail 'a finished build folder lost its targets'
-BUILD_ONCE_ROOT="$work/marker-root" "$SCRIPT" finish
+[ -f "$marker_root/targets/archive/lib.rlib" ] || fail 'a folder left by an interrupted job lost its targets'
+[ ! -e "$marker_root/unfinished" ] || fail 'prepare kept a stale unfinished marker'
 printf 'lock two\n' > "$work/lock-origin/Cargo.lock"
 git -C "$work/lock-origin" -c user.name=t -c user.email=t@example.invalid commit -q -am two
 rm -rf "$work/lock-checkout"
@@ -188,7 +180,7 @@ targets_prepare
 [ ! -e "$marker_root/targets/archive/lib.rlib" ] || fail 'a lockfile change kept the targets'
 grep -q 'layout changed; the target folders are wiped' "$work/prepare.log" || fail 'the lockfile wipe gave no reason'
 grep -q "echo 'build-once layout 2'" "$SCRIPT" || fail 'the folder layout version is missing from the stamp'
-if "$SCRIPT" finish extra >/dev/null 2>&1; then fail 'finish accepted an argument'; fi
+if "$SCRIPT" finish >/dev/null 2>&1; then fail 'the retired finish subcommand was accepted'; fi
 
 # A leg that reads a corrupt output from its warm target folder wipes the
 # folder its error names and builds once more in the same job; any other
@@ -196,7 +188,11 @@ if "$SCRIPT" finish extra >/dev/null 2>&1; then fail 'finish accepted an argumen
 legs_src="$work/legs-src"
 git init -q "$legs_src"
 mkdir -p "$legs_src/scripts/ci/verify" "$work/legs-bin" "$work/legs-out"
-printf '#!/bin/sh\nexit 0\n' > "$legs_src/scripts/ci/verify/compile-all-targets.sh"
+cat > "$legs_src/scripts/ci/verify/compile-all-targets.sh" <<'COMPILE'
+#!/bin/sh
+echo "compile-start $(date +%s%N)" >> "$LEGS_STATE/times"; sleep 1
+echo "compile-end $(date +%s%N)" >> "$LEGS_STATE/times"
+COMPILE
 chmod +x "$legs_src/scripts/ci/verify/compile-all-targets.sh"
 cat > "$work/legs-bin/cargo" <<'CARGO'
 #!/usr/bin/env bash
@@ -209,6 +205,8 @@ if [ -e "$CARGO_TARGET_DIR/debug/deps/libbroken.rlib" ]; then
     compile) echo "error[E0308]: mismatched types"; exit 101 ;;
   esac
 fi
+echo "archive-start $(date +%s%N)" >> "$LEGS_STATE/times"; sleep 1
+echo "archive-end $(date +%s%N)" >> "$LEGS_STATE/times"
 while [ "$#" -gt 0 ]; do [ "$1" = --archive-file ] && { shift; printf 'archive' > "$1"; }; shift; done
 CARGO
 chmod +x "$work/legs-bin/cargo"
@@ -220,6 +218,12 @@ legs_build() {
     BUILD_ONCE_COLD=true LEGS_STATE="$work/legs-state" LEGS_CARGO_MODE="$1" RUNNER_TEMP="$work/legs-state" \
     "$SCRIPT" build "$work/legs-out" > "$work/legs.log" 2>&1
 }
+legs_build ok || fail "a cold build failed: $(cat "$work/legs.log")"
+# Cold, the two lanes still run side by side: the archive and the lint build
+# overlap.
+at() { sed -n "s/^$1 //p" "$work/legs-state/times"; }
+[ "$(at archive-start)" -lt "$(at compile-end)" ] && [ "$(at compile-start)" -lt "$(at archive-end)" ] ||
+  fail 'a cold build ran its lanes one after another'
 legs_build corrupt || fail "a corrupt archive was not rebuilt: $(cat "$work/legs.log")"
 [ -f "$work/legs-out/archive.tar.zst" ] || fail 'the rebuilt leg wrote no archive'
 [ "$(wc -l < "$work/legs-state/calls")" -eq 2 ] || fail 'the corrupt leg did not build exactly twice'
@@ -243,4 +247,4 @@ if ARCHIVE_STORE_URL="file://$work/store" "$SCRIPT" publish "$work/out" >/dev/nu
   fail 'publish accepted an invalid leg output name'
 fi
 
-echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, the unfinished-build wipe, the corrupt-output rebuild and publish hold; bad input refused'
+echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, interrupted folders kept, cold lanes side by side, the corrupt-output rebuild and publish hold; bad input refused'

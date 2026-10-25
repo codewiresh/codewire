@@ -19,9 +19,6 @@
 #   build-once.sh publish OUT       upload every OUT/<leg>.* to the archive
 #                                   store and report its SHA-256 as the job
 #                                   output <leg>_sha256
-#   build-once.sh finish            flush the build folder to disk and mark
-#                                   it complete (the job's last step, on
-#                                   success or failure, never on a cancel)
 #
 # The build folder, /ci-cache/main or /ci-cache/pr:
 # - src: a persistent clone. The job's checkout is fetched into it, so git
@@ -35,11 +32,13 @@
 # - lock-stamp: the digest of every lockfile and the toolchain file, and of
 #   this folder's layout version. When it changes, the target folders are
 #   wiped.
-# - unfinished: written by prepare, removed by finish once the folder is on
-#   disk. A job that was cancelled or whose guest died leaves it, and the next
-#   prepare wipes the target folders: a guest killed mid-build can leave a
-#   truncated rlib that Cargo's fingerprint still calls fresh (main run 22374,
-#   "Archive::children failed: truncated or malformed archive").
+# A job that was cancelled, or whose guest died, keeps its folder: Cargo
+# rebuilds what it did not finish. The one thing it can leave is a truncated
+# output that Cargo's fingerprint still calls fresh (main run 22374,
+# "Archive::children failed: truncated or malformed archive"); the leg that
+# reads one wipes the target folder its error names and rebuilds once
+# (rebuild_corrupt_leg). Wiping every folder after any cancel instead cost a
+# full cold build each time (main run 22574, over 30 min).
 # Anything else under /ci-cache is removed first: a previous job could have
 # left Cargo configuration in a parent directory of src. The guest itself
 # wipes the whole folder weekly (infra dispatcher, metal_build_disk_prelude).
@@ -117,7 +116,7 @@ prepare() {
   done
   for entry in "$work"/*; do
     case "${entry##*/}" in
-      src|targets|cargo-home|tools|lock-stamp|unfinished) ;;
+      src|targets|cargo-home|tools|lock-stamp) ;;
       *) rm -rf -- "$entry" ;;
     esac
   done
@@ -145,19 +144,12 @@ prepare() {
     rm -rf -- "$work/targets"
     mkdir -p "$work/targets"
     printf '%s\n' "$stamp" > "$work/lock-stamp"
-  elif [ -e "$work/unfinished" ]; then
-    echo 'build-once: the previous build did not finish (cancelled, or its guest died); the target folders are wiped'
-    rm -rf -- "$work/targets"
-    mkdir -p "$work/targets"
   fi
-  : > "$work/unfinished"
-  sync -f "$work"
   # Tests stop here, before the pinned tools; never on a build runner's disk.
   if [ -n "${BUILD_ONCE_ROOT:-}" ] && [ "${BUILD_ONCE_TEST_STOP_AFTER_TARGETS:-}" = 1 ]; then
     return 0
   fi
-  # A cold build (no archive or lint folder yet) builds one folder at a time:
-  # two cold builds side by side ran the 17.6 GiB guest out of memory.
+  # Whether the archive or lint folder is new, for the log.
   local cold=false
   [ -d "$work/targets/archive" ] && [ -d "$work/targets/clippy" ] || cold=true
 
@@ -203,7 +195,7 @@ in_src() {
   echo 1000 > /proc/self/oom_score_adj 2>/dev/null || true
 }
 
-# The legs, in the order a cold build runs them. Each line is
+# The legs, in the order each lane runs them. Each line is
 #   NAME LANE WANTED
 # - NAME: the leg runs leg_NAME OUT; a leg whose test jobs fetch its output
 #   writes OUT/NAME.<ext>, published as the job output NAME_sha256.
@@ -213,11 +205,12 @@ in_src() {
 # - WANTED: "always", or "selected:TOKEN[,TOKEN...]", any of those
 #   verification tokens in VERIFICATION_SELECTION, or "env:NAME", an
 #   environment variable that is "true".
-# Warm, the two lanes run side by side and share the job's Cargo jobs, the
-# tests lane taking the larger part, since the test jobs wait for it. Cold
-# (prepare's BUILD_ONCE_COLD), every leg runs one after another at the full
-# Cargo jobs: two cold builds side by side at 16 jobs each ran the 17.6 GiB
-# guest out of memory (codewire run 21939).
+# The two lanes run side by side and share the job's Cargo jobs (its CPU
+# share), the tests lane taking the larger part, since the test jobs wait for
+# it. Cold builds too: running them one after another was for the 17.6 GiB
+# guest, where two at 16 jobs each ran out of memory (codewire run 21939);
+# build runners have 40 GiB, and 16 compilers in all peak well under it (the
+# archive build peaked at 25.4 GiB on its own at 16 jobs, clippy at 8.6 GiB).
 LEGS=(
   "archive tests always"
   "local_vmm tests env:BUILD_ONCE_LOCAL_VMM"
@@ -448,15 +441,10 @@ build() {
   mkdir -p "$out"
   logs="$(mktemp -d "${RUNNER_TEMP:-/tmp}/build-once-logs.XXXXXX")"
   jobs="${CARGO_BUILD_JOBS:-16}"
-  if [ "${BUILD_ONCE_COLD:-true}" = true ]; then
-    echo 'build-once: cold build folders; every leg runs one after another'
-    run_lane tests "$out" "$logs" || status=1
-    run_lane checks "$out" "$logs" || status=1
-  else
-    CARGO_BUILD_JOBS="$(( jobs - jobs * 3 / 8 ))" run_lane tests "$out" "$logs" & pid=$!
-    CARGO_BUILD_JOBS="$(( jobs * 3 / 8 ))" run_lane checks "$out" "$logs" || status=1
-    wait "$pid" || status=1
-  fi
+  [ "${BUILD_ONCE_COLD:-false}" = false ] || echo 'build-once: cold build folders'
+  CARGO_BUILD_JOBS="$(( jobs - jobs * 3 / 8 ))" run_lane tests "$out" "$logs" & pid=$!
+  CARGO_BUILD_JOBS="$(( jobs * 3 / 8 ))" run_lane checks "$out" "$logs" || status=1
+  wait "$pid" || status=1
   while read -r name; do
     [ -f "$logs/$name.log" ] || continue
     echo "::group::$name"; cat "$logs/$name.log"; echo '::endgroup::'
@@ -492,20 +480,11 @@ publish() {
   done
 }
 
-finish() {
-  # Every write of this job reaches the disk before the folder is called
-  # complete; a guest killed before this point leaves the marker.
-  sync -f "$work"
-  rm -f -- "$work/unfinished"
-  sync -f "$work"
-}
-
 case "${1:-}" in
-  finish) [ "$#" -eq 1 ] || die 'usage: build-once.sh finish'; finish ;;
   prepare) [ "$#" -eq 2 ] || die 'usage: build-once.sh prepare CHECKOUT'; prepare "$2" ;;
   build) [ "$#" -eq 2 ] || die 'usage: build-once.sh build OUT'; build "$2" ;;
   legs) [ "$#" -le 2 ] || die 'usage: build-once.sh legs [LANE]'; wanted_legs "${2:-}" ;;
   leg) [ "$#" -eq 3 ] || die 'usage: build-once.sh leg NAME OUT'; run_leg "$2" "$3" ;;
   publish) [ "$#" -eq 2 ] || die 'usage: build-once.sh publish OUT'; publish "$2" ;;
-  *) die 'usage: build-once.sh prepare|build|legs|leg|publish|finish ...' ;;
+  *) die 'usage: build-once.sh prepare|build|legs|leg|publish ...' ;;
 esac
