@@ -353,10 +353,12 @@ install_temporal() {
   )
 }
 
+# Healthy means the default namespace answers from the store, not only that
+# the frontend accepts connections.
 temporal_health() {
-  timeout "${TEMPORAL_HEALTH_TIMEOUT:-3s}" \
-    "$RUN_DIR/bin/temporal" operator cluster health --address "$TEMPORAL_HOST_PORT" \
-    >/dev/null 2>&1
+  timeout "${TEMPORAL_HEALTH_TIMEOUT:-5s}" \
+    "$RUN_DIR/bin/temporal" operator namespace describe default \
+    --address "$TEMPORAL_HOST_PORT" >/dev/null 2>&1
 }
 
 start_temporal() {
@@ -366,9 +368,10 @@ start_temporal() {
     return 0
   fi
   log "starting Temporal dev server"
-  rm -f "$RUN_DIR"/temporal-dev.db*
+  # The store stays in memory: a SQLite file fsyncs every write behind one
+  # connection, and on slow shared storage its calls miss their deadlines.
   "$RUN_DIR/bin/temporal" server start-dev --headless --ip 127.0.0.1 --port "$TEMPORAL_PORT" \
-    --db-filename "$RUN_DIR/temporal-dev.db" > "$RUN_DIR/temporal-server.log" 2>&1 &
+    > "$RUN_DIR/temporal-server.log" 2>&1 &
   echo $! > "$RUN_DIR/temporal-server.pid"
   for _ in $(seq 1 45); do
     if temporal_health; then

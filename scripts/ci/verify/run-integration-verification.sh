@@ -870,17 +870,26 @@ start_temporal() {
     return
   fi
   install_temporal
+  # The store stays in memory. With --db-filename every write fsyncs a SQLite
+  # file behind a single connection, so on a guest with slow shared storage
+  # every store call queues past its deadline ("context deadline exceeded",
+  # then "Namespace default is not found").
   "$RUN_DIR/bin/temporal" server start-dev --headless --ip 127.0.0.1 \
-    --port "$TEMPORAL_PORT" --db-filename "$RUN_DIR/temporal.db" \
-    > "$RUN_DIR/temporal.log" 2>&1 &
+    --port "$TEMPORAL_PORT" > "$RUN_DIR/temporal.log" 2>&1 &
   echo $! > "$RUN_DIR/temporal.pid"
   local _
   for _ in $(seq 1 45); do
-    if "$RUN_DIR/bin/temporal" operator cluster health \
+    # Ready means the namespace the services use answers from the store, not
+    # only that the frontend accepts connections.
+    if timeout 5 "$RUN_DIR/bin/temporal" operator namespace describe default \
         --address "$TEMPORAL_HOST_PORT" >/dev/null 2>&1; then
       log "Temporal ready"
       require_own_listener temporal "$TEMPORAL_PORT"
       return
+    fi
+    if ! kill -0 "$(cat "$RUN_DIR/temporal.pid")" 2>/dev/null; then
+      echo "::error::Temporal dev server exited before becoming ready"
+      return 1
     fi
     sleep 1
   done
