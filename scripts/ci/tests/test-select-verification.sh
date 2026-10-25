@@ -5422,6 +5422,7 @@ SUPPORT = {
     "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",
     "Install locked dashboard browser-test dependencies",
     "Set up Go 1.27.3", "Set up Go 1.27.3 for security checks", "Set up Go 1.27.3 for DERP interop",
+    "Set up Node.js 20.20.2",
     "Set up pinned Darwin C cross-check tools",
     "Clean workspace cache credentials",
     "Clean compiler cache credentials", "Report and clean Rust cache", "Start integration Postgres",

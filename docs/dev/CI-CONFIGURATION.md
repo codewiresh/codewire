@@ -23,7 +23,7 @@ images come from, is in the [configuration reference](../CONFIGURATION.md).
 - **Action mirrors.** Mirror each action the workflows use into a public,
   Actions-disabled repository under the `noel` owner on your instance, keeping
   at least the pinned commit: `actions-checkout`, `actions-upload-artifact`,
-  `actions-download-artifact`, `setup-bun` and `setup-node`. The exact commits
+  `actions-download-artifact` and `setup-bun`. The exact commits
   are the `uses:` lines in `.gitea/workflows/`.
 
 - **Forge URL.** Forgejo gives every job the base URL its runner reaches it

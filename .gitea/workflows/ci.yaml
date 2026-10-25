@@ -505,10 +505,11 @@ jobs:
         with:
           bun-version: '1.3.9'
 
-      - uses: noel/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      # A pinned, checksum-verified Node.js from nodejs.org: the setup-node
+      # action first waited 133 s for github.com, which CI cannot reach.
+      - name: Set up Node.js 20.20.2
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_ts|') }}
-        with:
-          node-version: '20'
+        run: scripts/ci/setup/setup-node.sh 20.20.2
 
       - name: Run Contracts
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}

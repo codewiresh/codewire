@@ -26,7 +26,6 @@ expected=(
   'noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de'
   'noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b'
   'noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6'
-  'noel/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020'
 )
 
 for reference in "${references[@]}"; do
