@@ -52,6 +52,69 @@ def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+class CachedTarget(unittest.TestCase):
+    """The producer's cached target folder keeps third-party units only."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="cw-target-test-", dir=ROOT / ".tmp")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "target"
+        self.source = Path(self.temporary.name) / "source"
+        write(self.source / "Cargo.lock", b"lock one\n")
+        write(self.source / "rust-toolchain.toml", b"[toolchain]\n")
+
+    def stamp(self, rustc="rustc 1.99.0", profile="runtime"):
+        return finalizer.target_stamp(self.source, rustc, profile)
+
+    def populate(self):
+        units = {}
+        for unit_root in (self.root / "runtime", self.root / finalizer.source.TARGET / "runtime"):
+            for name in (".fingerprint/codewire-proto-0123456789abcdef", ".fingerprint/serde-0123456789abcdef",
+                         "build/codewire-proto-0123456789abcdef/out", "build/ring-0123456789abcdef/out",
+                         "deps/libcodewire_cli-0123456789abcdef.rlib", "deps/codewire_cli-0123456789abcdef.d",
+                         "deps/cw-0123456789abcdef", "deps/libserde-0123456789abcdef.rlib", "cw", "cw.d"):
+                write(unit_root / name, b"unit")
+                units[unit_root / name] = not (name.startswith((".fingerprint/codewire", "build/codewire",
+                                                                "deps/libcodewire", "deps/codewire", "deps/cw-"))
+                                               or name in ("cw", "cw.d"))
+        return units
+
+    def test_a_new_folder_is_cold_and_stamped(self):
+        self.assertEqual(finalizer.prepare_target(self.root, self.stamp(), "runtime"), "cold")
+        self.assertEqual((self.root / finalizer.TARGET_STAMP).read_text(encoding="ascii"), self.stamp())
+
+    def test_a_warm_folder_keeps_only_third_party_units(self):
+        finalizer.prepare_target(self.root, self.stamp(), "runtime")
+        units = self.populate()
+        self.assertEqual(finalizer.prepare_target(self.root, self.stamp(), "runtime"), "warm")
+        for path, kept in units.items():
+            self.assertEqual(path.exists(), kept, path)
+
+    def test_a_changed_lockfile_toolchain_or_profile_empties_the_folder(self):
+        for change in ("lock", "rustc", "profile"):
+            with self.subTest(change=change):
+                write(self.source / "Cargo.lock", b"lock one\n")
+                finalizer.prepare_target(self.root, self.stamp(), "runtime")
+                units = self.populate()
+                if change == "lock":
+                    write(self.source / "Cargo.lock", b"lock two\n")
+                    stamp = self.stamp()
+                elif change == "rustc":
+                    stamp = self.stamp(rustc="rustc 1.100.0")
+                else:
+                    stamp = self.stamp(profile="release")
+                self.assertEqual(finalizer.prepare_target(self.root, stamp, "runtime"), "cold")
+                self.assertFalse(any(path.exists() for path in units), change)
+
+    def test_the_producer_pins_more_cargo_jobs_and_mounts_the_cache(self):
+        trusted = (ROOT / "scripts/ci/setup/trusted-buildkit.sh").read_text()
+        self.assertIn("readonly TRUSTED_BUILDKIT_CW_PRODUCER_JOBS=14\n", trusted)
+        dockerfile = (ROOT / "images/cw-runtime/Dockerfile").read_text()
+        self.assertEqual(dockerfile.count(
+            "--mount=type=cache,id=codewire-cw-producer-target-v1,target=/tmp/cargo-target,sharing=locked"), 1)
+        self.assertEqual(str(finalizer.TARGET_ROOT), "/tmp/cargo-target")
+
+
 class Source(unittest.TestCase):
     def setUp(self):
         self.bytecode = mock.patch.dict(os.environ, {"PYTHONDONTWRITEBYTECODE": "1"})

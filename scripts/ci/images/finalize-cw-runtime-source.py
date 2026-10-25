@@ -47,6 +47,8 @@ TARGET_ROOT = Path("/tmp/cargo-target")
 CARGO_HOME = Path("/usr/local/cargo")
 WORK = Path("/out")
 PROFILES = {"ci": ("--profile", "ci"), "release": ("--release",), "runtime": ("--profile", "runtime")}
+# The folder each profile's outputs land in under the target folder.
+PROFILES_DIR = {"ci": "ci", "release": "release", "runtime": "runtime"}
 # Every image producer, Kind's and the workspace verification's included,
 # builds runtime, the one image profile; a cw release producer builds release.
 # Every producer owns its worker and sizes its jobs to it; the chosen count is
@@ -228,6 +230,62 @@ def command(profile):
     return ["/usr/local/cargo/bin/cargo", "zigbuild", "--locked", *PROFILES[profile],
             "-p", "codewire-cli-bin", "--bin", "cw", "--target", source.TARGET,
             "--manifest-path", "/src/Cargo.toml", "--target-dir", str(TARGET_ROOT), "--jobs", cargo_jobs()]
+
+
+# The target folder is a BuildKit cache mount on the trusted builder
+# (images/cw-runtime/Dockerfile), so third-party crates compiled by an earlier
+# build of the same lockfile, toolchain and profile are reused as Cargo's own
+# fingerprints allow, not even fetched from sccache. Codewire's own crates
+# never come from it: their fingerprints and outputs are removed before every
+# build, so they always compile from this capsule's source (sccache may still
+# serve an unchanged one by content). A different lockfile, toolchain, target
+# or profile empties the folder first, which also bounds what it holds.
+TARGET_STAMP = ".codewire-target-stamp"
+
+
+def target_stamp(source_root, rustc, profile):
+    digest = hashlib.sha256()
+    for part in (rustc, profile, source.TARGET):
+        digest.update(part.encode("utf-8") + b"\0")
+    for name in ("Cargo.lock", "rust-toolchain.toml"):
+        digest.update(name.encode("ascii") + b"\0" + (Path(source_root) / name).read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
+def workspace_output(name):
+    """A Cargo output of a Codewire workspace crate, or of cw itself."""
+    return (name.startswith(("codewire-", "codewire_", "libcodewire_", "cw-"))
+            or name in ("cw", "cw.d"))
+
+
+def remove(path):
+    if path.is_dir() and not path.is_symlink():
+        for entry in path.iterdir():
+            remove(entry)
+        path.rmdir()
+    else:
+        path.unlink()
+
+
+def prepare_target(root, stamp, profile):
+    """Ready the cached target folder; return "cold" or "warm"."""
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    marker = root / TARGET_STAMP
+    if not marker.is_file() or marker.read_text(encoding="ascii") != stamp:
+        for entry in root.iterdir():
+            remove(entry)
+        marker.write_text(stamp, encoding="ascii")
+        return "cold"
+    # Host units (build scripts, proc macros) sit under the profile folder and
+    # target units under the target's; each holds .fingerprint, build and deps.
+    for unit_root in (root / profile, root / source.TARGET / profile):
+        for folder in (unit_root, unit_root / ".fingerprint", unit_root / "build", unit_root / "deps"):
+            if not folder.is_dir():
+                continue
+            for entry in folder.iterdir():
+                if workspace_output(entry.name):
+                    remove(entry)
+    return "warm"
 
 
 def cargo_environment(model, directory):
@@ -507,6 +565,10 @@ def main(argv=None):
         rustc = subprocess.check_output(["/usr/local/cargo/bin/rustc", "--version"], cwd=SOURCE_ROOT,
                                        env=environment, text=True, timeout=15).strip()
         admitted.selected.toolchain_rustc(SOURCE_ROOT, rustc)
+        _DIAGNOSTIC["phase"] = "target"
+        warmth = prepare_target(TARGET_ROOT, target_stamp(SOURCE_ROOT, rustc, admitted.model["profile"]),
+                                PROFILES_DIR[admitted.model["profile"]])
+        print(f"finalize-cw-runtime-source: {warmth} target folder", file=sys.stderr)
         _DIAGNOSTIC["phase"] = "compile"
         cpus, gib = machine()
         print(f"finalize-cw-runtime-source: cargo --jobs {cargo_jobs()} (cpus={cpus} memory_gib={gib})",

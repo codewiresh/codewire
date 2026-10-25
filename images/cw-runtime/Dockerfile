@@ -57,6 +57,7 @@ RUN --mount=type=bind,from=cw-source,source=source,target=/src,readonly \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,id=codewire-workspace-sccache-v1,target=/var/cache/sccache,sharing=shared \
+    --mount=type=cache,id=codewire-cw-producer-target-v1,target=/tmp/cargo-target,sharing=locked \
     --mount=type=secret,id=aws_shared_credentials \
     mkdir /out && \
     SCCACHE_BASEDIRS=/src codewire-rust-build python3 /src/scripts/ci/images/finalize-cw-runtime-source.py \

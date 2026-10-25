@@ -20,8 +20,11 @@ readonly TRUSTED_BUILDKIT_CARGO_BUILD_JOBS=14
 # The static CW producer sizes its own Cargo jobs from the machine it runs on
 # (finalize-cw-runtime-source.py, 3 GiB per job), and the job that verifies its
 # receipt recomputes that exact command. On a remote builder those machines
-# differ, so the job pins the count both sides use: 7 for the 24 GiB guest.
-readonly TRUSTED_BUILDKIT_CW_PRODUCER_JOBS=7
+# differ, so the job pins the count both sides use. The builder runs one step
+# at a time, so the producer takes the same 14 as every other build step: at
+# 7, Cargo's jobserver also held each optimized Codewire crate to 7 of its 16
+# codegen units, and the cw compile took 579 s (support-images run 22393).
+readonly TRUSTED_BUILDKIT_CW_PRODUCER_JOBS=14
 # deploy-dev.yaml and support-images.yaml pass no artifacts between jobs, and
 # a failed half cancels its run, so the recovery reruns the whole run.
 readonly TRUSTED_BUILDKIT_RECOVERY='after checking the builder (infra docs/runbooks/ci-buildkit-trusted.md), the owner may build this commit in the job: set the repository variable CODEWIRE_IN_JOB_BUILD_SHA to this commit and rerun all jobs of this run, or dispatch deploy-prod.yaml with in_job_build'
