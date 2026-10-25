@@ -445,15 +445,37 @@ reset_schema() {
   DATABASE_URL="$DATABASE_URL_RUST" "$CARGO_CI_DIR/codewire-db-migrate"
 }
 
-# The database suites run in four lanes. Each lane keeps its suites in their
+# The database suites run in lanes. Each lane keeps its suites in their
 # established order against its own migrated schema; with a database per lane
 # (a managed local container, or a container on CI's job network) the lanes
 # run side by side on separate PostgreSQL servers, so no lane sees another's
 # schema, rows or roles. Against one explicit database they run one after
 # another. Every harness compiles first, so a running lane only starts tests.
-readonly DATABASE_LANES=(core credential-service credential-broker orchestration)
+# Most suites run one test at a time against their server (--test-threads=1),
+# so a lane takes the sum of its tests' times. The slow suites are split by
+# module across lanes, each with its own server, so that no one lane sets the
+# job's time: as one lane, the 50-test broker admission matrix took 246-626 s
+# (infra#1534, CI compute audit row 5). The times below are run 22601's
+# suites; the broker lanes' are scaled from one local run of each module (the
+# whole matrix took 117 s there and 246 s in run 22601).
+readonly DATABASE_LANES=(
+  core                     # server-core, platform credentials, billing, Mesh: 65 s
+  credential-mutations     # credential-service mutations and delegation: 92 s
+  credential-service       # credential-service runtime and identity: 69 s
+  broker-admission         # broker admission itself, Claude sign-in, gRPC rotation: 70 s
+  broker-checked           # broker checked leases: 70 s
+  broker-decisions         # broker decisions and Codex login: 70 s
+  broker-refresh           # broker keepalive, material cache, subscription, SSH: 65 s
+  orchestration            # orchestration preview, access and environments: 66 s
+  orchestration-journals   # orchestration cw runtime and managed agent journals: 78 s
+  orchestration-workspaces # orchestration sources, workspaces and leases: 50 s
+)
 # The order lanes start in when not all run at once: the longest first.
-readonly DATABASE_LANE_ORDER=(orchestration credential-broker credential-service core)
+readonly DATABASE_LANE_ORDER=(
+  credential-mutations orchestration-journals broker-admission broker-checked
+  broker-decisions credential-service orchestration core broker-refresh
+  orchestration-workspaces
+)
 
 # Each batch uses one package and feature set, as its lane runs it.
 build_database_suites() {
@@ -565,7 +587,7 @@ database_lane_core() {
   assert_passed_count "Mesh migration ledger" "$logfile" 16
 }
 
-database_lane_credential_service() {
+database_lane_credential_mutations() {
   local logfile
   logfile="$RUN_DIR/public-credential-mutations.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -573,6 +595,16 @@ database_lane_credential_service() {
       --lib mutation::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "public credential mutation matrix" "$logfile" 28
 
+  logfile="$RUN_DIR/owner-local-delegation-authority.log"
+  TMPDIR="$RUN_DIR" TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-service --features enrollment \
+      --lib delegation::authority::tests:: \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "owner-local delegation authority matrix" "$logfile" 8
+}
+
+database_lane_credential_service() {
+  local logfile
   logfile="$RUN_DIR/isolated-credential-runtime.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service --features enrollment \
@@ -606,22 +638,80 @@ database_lane_credential_service() {
       --lib tests::database::projection:: \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "platform runtime projection matrix" "$logfile" 13
-
-  logfile="$RUN_DIR/owner-local-delegation-authority.log"
-  TMPDIR="$RUN_DIR" TEST_DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test --locked -p codewire-credential-service --features enrollment \
-      --lib delegation::authority::tests:: \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "owner-local delegation authority matrix" "$logfile" 8
 }
 
-database_lane_credential_broker() {
+# The broker admission matrix (platform::tests, 50 tests) runs in four lanes:
+# this one runs the tests of platform::tests itself, and the other broker
+# lanes its modules. A new module runs here until it is given a lane.
+database_lane_broker_admission() {
   local logfile
   logfile="$RUN_DIR/platform-broker-admission.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
-      --lib platform::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker admission matrix" "$logfile" 50
+      --lib platform::tests:: -- --ignored \
+      --skip platform::tests::checked:: --skip platform::tests::claude_sign_in:: \
+      --skip platform::tests::codex_login:: --skip platform::tests::decision:: \
+      --skip platform::tests::keepalive:: --skip platform::tests::material_cache:: \
+      --skip platform::tests::subscription:: \
+      --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker admission matrix" "$logfile" 13
+
+  logfile="$RUN_DIR/platform-broker-claude-sign-in.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::tests::claude_sign_in:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker Claude sign-in matrix" "$logfile" 5
+
+  logfile="$RUN_DIR/platform-broker-grpc-rotation.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 4
+}
+
+database_lane_broker_checked() {
+  local logfile
+  logfile="$RUN_DIR/platform-broker-checked.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::tests::checked:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker checked lease matrix" "$logfile" 8
+}
+
+database_lane_broker_decisions() {
+  local logfile
+  logfile="$RUN_DIR/platform-broker-decision.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::tests::decision:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker decision matrix" "$logfile" 8
+
+  logfile="$RUN_DIR/platform-broker-codex-login.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::tests::codex_login:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker Codex login matrix" "$logfile" 4
+}
+
+database_lane_broker_refresh() {
+  local logfile
+  logfile="$RUN_DIR/platform-broker-keepalive.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::tests::keepalive:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker keepalive matrix" "$logfile" 5
+
+  logfile="$RUN_DIR/platform-broker-material-cache.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::tests::material_cache:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker material cache matrix" "$logfile" 5
+
+  logfile="$RUN_DIR/platform-broker-subscription.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::tests::subscription:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker subscription matrix" "$logfile" 2
 
   logfile="$RUN_DIR/platform-broker-ssh.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -629,12 +719,6 @@ database_lane_credential_broker() {
       --features platform,ssh-agent --lib platform::tests::ssh:: \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "platform broker SSH matrix" "$logfile" 5
-
-  logfile="$RUN_DIR/platform-broker-grpc-rotation.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
-      --lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 4
 }
 
 database_lane_orchestration() {
@@ -715,7 +799,27 @@ database_lane_orchestration() {
       'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek' \
       -- --ignored --exact --nocapture | tee "$logfile"
   assert_passed_count "encrypted tenant secret store matrix" "$logfile" 1
+}
 
+database_lane_orchestration_journals() {
+  local logfile
+  logfile="$RUN_DIR/platform-cw-runtime-journal.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::cw_runtime::owner::database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform cw runtime journal matrix" "$logfile" 31
+
+  logfile="$RUN_DIR/platform-managed-agent-journal.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::platform_agents::journal::database_tests::db_' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform managed agent journal matrix" "$logfile" 40
+}
+
+database_lane_orchestration_workspaces() {
+  local logfile
   logfile="$RUN_DIR/environment-source-admission.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-orchestration --test environment_sources \
@@ -749,20 +853,6 @@ database_lane_orchestration() {
       'environment_mesh::database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "environment Mesh membership matrix" "$logfile" 3
-
-  logfile="$RUN_DIR/platform-cw-runtime-journal.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::cw_runtime::owner::database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform cw runtime journal matrix" "$logfile" 31
-
-  logfile="$RUN_DIR/platform-managed-agent-journal.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test --locked -p codewire-orchestration --lib \
-      'api::platform_agents::journal::database_tests::db_' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform managed agent journal matrix" "$logfile" 40
 
   logfile="$RUN_DIR/environment-resize-admission.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -817,16 +907,29 @@ database_lane_orchestration() {
 run_database_lane() {
   case "$1" in
     core) database_lane_core ;;
+    credential-mutations) database_lane_credential_mutations ;;
     credential-service) database_lane_credential_service ;;
-    credential-broker) database_lane_credential_broker ;;
+    broker-admission) database_lane_broker_admission ;;
+    broker-checked) database_lane_broker_checked ;;
+    broker-decisions) database_lane_broker_decisions ;;
+    broker-refresh) database_lane_broker_refresh ;;
     orchestration) database_lane_orchestration ;;
+    orchestration-journals) database_lane_orchestration_journals ;;
+    orchestration-workspaces) database_lane_orchestration_workspaces ;;
     *) echo "::error::unknown database lane: $1"; return 2 ;;
   esac
 }
 
+# At most this many lanes run at once by default on a metal guest. Six lanes
+# at the 1.5 GiB a lane was estimated to hold (its PostgreSQL and one test
+# process) are 9 GiB of a heavy guest's 13; a broker lane measured locally
+# held 85 MiB in PostgreSQL and 35 MiB in its test process. A finished lane's
+# PostgreSQL is removed, so only running lanes hold memory.
+readonly DATABASE_LANES_MEMORY_BOUND=6
+
 run_database() {
   local lane started status failed=false
-  local -A lane_url=() lane_rust_url=() lane_pid=() lane_started=()
+  local -A lane_url=() lane_rust_url=() lane_pid=() lane_started=() setup_pid=()
   reset_schema
   if [ -n "${RUST_DATABASE_ARCHIVES:-}" ]; then
     extract_archives "$RUST_DATABASE_ARCHIVES"
@@ -847,30 +950,51 @@ run_database() {
     lane_url[$lane]="$INTEGRATION_POSTGRES_LANE_URL"
     lane_rust_url[$lane]="$INTEGRATION_POSTGRES_LANE_URL_RUST"
   done
+  # Every lane's server migrates at once; one after another they took about
+  # 1.5 s each (run 22601).
   for lane in "${DATABASE_LANES[@]:1}"; do
-    integration_postgres_wait_ready "${lane_url[$lane]}" "database lane $lane"
     (
+      integration_postgres_wait_ready "${lane_url[$lane]}" "database lane $lane"
       DATABASE_URL="${lane_url[$lane]}"
       DATABASE_URL_RUST="${lane_rust_url[$lane]}"
       reset_schema
-    )
+    ) >"$RUN_DIR/database-lane-$lane-setup.log" 2>&1 &
+    setup_pid[$lane]=$!
   done
+  for lane in "${DATABASE_LANES[@]:1}"; do
+    status=0
+    wait "${setup_pid[$lane]}" || status=$?
+    cat "$RUN_DIR/database-lane-$lane-setup.log"
+    if [ "$status" -ne 0 ]; then
+      echo "::error::database lane $lane did not migrate its PostgreSQL (status $status)"
+      failed=true
+    fi
+  done
+  [ "$failed" = false ] || return 1
   # On a metal guest, the lanes share the job's part of the host
   # (CODEWIRE_CI_CPU_SHARE, cpu-share.sh): each lane is a test process and
-  # its own PostgreSQL, so four at once oversubscribed the guest and the same
-  # lane took twice as long from one run to the next. There, at most
-  # CODEWIRE_CI_DATABASE_LANES_AT_ONCE (default 2) run at once, longest first,
-  # each with its part of the share as its test threads. Elsewhere all four
-  # run at once, as before.
+  # its own PostgreSQL, which creates and migrates a database for each test.
+  # Unbounded, four lanes at once oversubscribed the guest and the same lane
+  # took twice as long from one run to the next. There, one lane per three
+  # cores of the share runs at once, at most DATABASE_LANES_MEMORY_BOUND,
+  # longest first, each with its part of the share as its test threads;
+  # CODEWIRE_CI_DATABASE_LANES_AT_ONCE sets the count instead. Elsewhere all
+  # lanes run at once.
   local share at_once="${#DATABASE_LANES[@]}" lane_threads="" next=0 running=0 done_pid
   local -A pid_lane=()
   share="$(ci_cpu_share)"
   if [ -n "$share" ]; then
-    at_once="${CODEWIRE_CI_DATABASE_LANES_AT_ONCE:-2}"
-    [[ "$at_once" =~ ^[1-9]$ ]] || {
-      echo "::error::CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to 9, not $at_once" >&2
-      return 2
-    }
+    if [ -n "${CODEWIRE_CI_DATABASE_LANES_AT_ONCE:-}" ]; then
+      at_once="$CODEWIRE_CI_DATABASE_LANES_AT_ONCE"
+      if ! [[ "$at_once" =~ ^[1-9][0-9]?$ ]] || ((at_once > ${#DATABASE_LANES[@]})); then
+        echo "::error::CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to ${#DATABASE_LANES[@]}, not $at_once" >&2
+        return 2
+      fi
+    else
+      at_once=$((share / 3))
+      ((at_once >= 1)) || at_once=1
+      ((at_once <= DATABASE_LANES_MEMORY_BOUND)) || at_once="$DATABASE_LANES_MEMORY_BOUND"
+    fi
     lane_threads=$((share / at_once))
     ((lane_threads >= 2)) || lane_threads=2
   fi
@@ -906,6 +1030,7 @@ run_database() {
     lane="${pid_lane[$done_pid]:?a database lane ended that this run did not start}"
     unset 'lane_pid[$lane]'
     running=$((running - 1))
+    [ "$lane" = core ] || integration_postgres_stop_lane "$lane"
     started="${lane_started[$lane]}"
     echo "=== database lane $lane ==="
     cat "$RUN_DIR/database-lane-$lane.log"

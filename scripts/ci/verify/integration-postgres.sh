@@ -184,6 +184,13 @@ integration_postgres_start_lane() {
   INTEGRATION_POSTGRES_LANE_URL_RUST="postgres://codewire:codewire@${host}:${port}/codewire"
 }
 
+# integration_postgres_stop_lane LANE removes a finished lane's PostgreSQL, so
+# it holds no memory while the other lanes run. The cleanup removes it again,
+# which is harmless.
+integration_postgres_stop_lane() {
+  docker rm -f "${INTEGRATION_POSTGRES_CONTAINER}-lane-$1" >/dev/null 2>&1 || true
+}
+
 integration_postgres_wait_ready() {
   local url="$1" label="$2" _
   for _ in $(seq 1 "${INTEGRATION_POSTGRES_READY_ATTEMPTS:-60}"); do

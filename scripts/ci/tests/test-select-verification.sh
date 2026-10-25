@@ -2528,8 +2528,21 @@ grep -qF 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creatio
 grep -qF -- '-- --ignored --exact --nocapture' <<<"$destroy_hint_block"
 grep -qF 'assert_passed_count "environment destroy template hint matrix" "$logfile" 1' <<<"$destroy_hint_block"
 grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
-grep -qF -- '--lib platform::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 50' "$integration_runner"
+# The broker admission matrix's 50 tests run in four lanes by module.
+grep -qF -- '--lib platform::tests:: -- --ignored \' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 13' "$integration_runner"
+for broker_part in 'checked:: -- --ignored --nocapture --test-threads=1|checked lease|8' \
+    'claude_sign_in:: -- --ignored --nocapture --test-threads=1|Claude sign-in|5' \
+    'decision:: -- --ignored --nocapture --test-threads=1|decision|8' \
+    'codex_login:: -- --ignored --nocapture --test-threads=1|Codex login|4' \
+    'keepalive:: -- --ignored --nocapture --test-threads=1|keepalive|5' \
+    'material_cache:: -- --ignored --nocapture --test-threads=1|material cache|5' \
+    'subscription:: -- --ignored --nocapture --test-threads=1|subscription|2'; do
+  IFS='|' read -r broker_filter broker_label broker_count <<<"$broker_part"
+  grep -qF -- "--lib platform::tests::${broker_filter}" "$integration_runner"
+  grep -qF -- "--skip platform::tests::${broker_filter%%::*}::" "$integration_runner"
+  grep -qF "assert_passed_count \"platform broker ${broker_label} matrix\" \"\$logfile\" ${broker_count}" "$integration_runner"
+done
 grep -qF -- '--features platform,ssh-agent --lib platform::tests::ssh::' "$integration_runner"
 grep -qF 'assert_passed_count "platform broker SSH matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- '--lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
