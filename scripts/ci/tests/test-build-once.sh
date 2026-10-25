@@ -8,6 +8,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly SCRIPT="$ROOT/scripts/ci/setup/build-once.sh"
+# The leg table reads the run's selection and publish its store; a CI job running
+# this test may have its own in the environment, so each case states its own.
+unset VERIFICATION_SELECTION ARCHIVE_STORE_URL
 
 fail() {
   echo "test-build-once: $*" >&2
@@ -53,6 +56,8 @@ done
 [ "$("$SCRIPT" legs | tr '\n' ' ')" = 'archive compile ' ] || fail 'unexpected wanted legs'
 [ "$("$SCRIPT" legs tests | tr '\n' ' ')" = 'archive ' ] || fail 'unexpected tests lane'
 [ "$("$SCRIPT" legs checks | tr '\n' ' ')" = 'compile ' ] || fail 'unexpected checks lane'
+[ "$(VERIFICATION_SELECTION='|policy|database|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive compile database ' ] ||
+  fail 'a selected database family did not want the database leg'
 grep -Eq '^  "[a-z0-9_]+ (tests|checks) (always|selected:[a-z0-9_-]+|env:[A-Z0-9_]+)"$' "$SCRIPT" ||
   fail 'the leg table is missing'
 while read -r name; do
