@@ -23,7 +23,7 @@ ADD --checksum=sha256:02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82
 RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     rm -f /etc/apt/sources.list && \
     apt-get-with-retry update && \
-    grep -RqsF 'snapshot.debian.org/archive/debian/20251208T000000Z/' /etc/apt/sources.list.d && \
+    grep -RqsF 'snapshot.debian.org/archive/debian/20261015T000000Z/' /etc/apt/sources.list.d && \
     ! grep -RqsE '(deb|security)\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d && \
     apt-get-with-retry install -y --no-install-recommends python3 unzip xz-utils && \
     rm -rf /var/lib/apt/lists/* && \

@@ -23,7 +23,7 @@ bash -n "$ENTRYPOINT" "$APT_RETRY"
 
 grep -Eq '^FROM ubuntu:noble@sha256:[0-9a-f]{64}$' "$DOCKERFILE" ||
   fail 'base image is not rooted in a digest-pinned Ubuntu Noble definition'
-grep -qF 'snapshot.ubuntu.com/ubuntu/20260803T000000Z/' "$SOURCES" ||
+grep -qF 'snapshot.ubuntu.com/ubuntu/20261015T000000Z/' "$SOURCES" ||
   fail 'base image does not use the reviewed Ubuntu snapshot'
 grep -qxF 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' "$SOURCES" ||
   fail 'base Ubuntu snapshot does not require archive signature verification'
@@ -79,10 +79,10 @@ grep -qxF 'ENV PROTOC=/opt/protoc/bin/protoc' "$workspace_dockerfile" ||
 # shellcheck disable=SC2016 # Match the literal Dockerfile build argument.
 grep -qxF 'FROM ${BASE_IMAGE_REF} AS stock-ssh-fixture' "$workspace_dockerfile" ||
   fail 'workspace SSH fixture does not inherit the exact verified base'
-grep -qF 'download openssh-server=1:9.6p1-3ubuntu13.18 libwrap0=7.6.q-33' "$workspace_dockerfile" ||
+grep -qF 'download openssh-server=1:9.6p1-3ubuntu13.20 libwrap0=7.6.q-33' "$workspace_dockerfile" ||
   fail 'workspace SSH fixture package versions are not pinned'
 # Codex's Linux sandbox needs the system bubblewrap, from the same snapshot.
-grep -qF '      bubblewrap=0.9.0-1ubuntu0.1 ' "$workspace_dockerfile" ||
+grep -qF '      bubblewrap=0.9.0-1ubuntu0.3 ' "$workspace_dockerfile" ||
   fail 'workspace image does not install the pinned bubblewrap for the Codex sandbox'
 grep -qF 'APT::Update::Error-Mode=any' "$workspace_dockerfile" ||
   fail 'SSH artifact preparation tolerates partial package-index failures'

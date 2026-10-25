@@ -402,9 +402,9 @@ done
 [[ "$(grep -Ec "go_sha=[0-9a-f]{64}" "$WORKSPACE_DOCKERFILE")" -eq 4 \
   && "$(grep -Eo "go_sha=[0-9a-f]{64}" "$WORKSPACE_DOCKERFILE" | sort -u | wc -l)" -eq 2 ]] ||
   fail "workspace image does not use one Go archive checksum per supported architecture"
-grep -qF 'snapshot.ubuntu.com/ubuntu/20260803T000000Z/' "$ROOT/images/base/ubuntu.sources" ||
+grep -qF 'snapshot.ubuntu.com/ubuntu/20261015T000000Z/' "$ROOT/images/base/ubuntu.sources" ||
   fail 'base apt inputs are not bound to the reviewed Ubuntu snapshot'
-grep -qF 'snapshot.debian.org/archive/debian/20251208T000000Z/' \
+grep -qF 'snapshot.debian.org/archive/debian/20261015T000000Z/' \
   "$ROOT/images/workspace/debian.sources" ||
   fail 'workspace builder apt inputs are not bound to the reviewed Debian snapshot'
 # The shipped agents come from one exact lockfile: every package from the

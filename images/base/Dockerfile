@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM ubuntu:noble@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+FROM ubuntu:noble@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 
 SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
@@ -21,7 +21,7 @@ RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     apt-get-with-retry -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get-with-retry update && \
-    grep -RqsF 'snapshot.ubuntu.com/ubuntu/20260803T000000Z/' /etc/apt/sources.list.d && \
+    grep -RqsF 'snapshot.ubuntu.com/ubuntu/20261015T000000Z/' /etc/apt/sources.list.d && \
     ! grep -RqsE '(archive|security|ports)\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d && \
     apt-get-with-retry install -y --no-install-recommends \
       bash build-essential ca-certificates curl file git htop iproute2 iptables jq locales man \

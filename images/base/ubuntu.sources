@@ -1,5 +1,5 @@
 Types: deb
-URIs: https://snapshot.ubuntu.com/ubuntu/20260803T000000Z/
+URIs: https://snapshot.ubuntu.com/ubuntu/20261015T000000Z/
 Suites: noble noble-updates noble-backports noble-security
 Components: main restricted universe multiverse
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg

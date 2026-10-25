@@ -46,7 +46,7 @@ COPY --chmod=0755 images/base/apt-get-with-retry /usr/local/sbin/apt-get-with-re
 RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     rm -f /etc/apt/sources.list && \
     apt-get-with-retry update && \
-    grep -RqsF 'snapshot.debian.org/archive/debian/20251208T000000Z/' /etc/apt/sources.list.d && \
+    grep -RqsF 'snapshot.debian.org/archive/debian/20261015T000000Z/' /etc/apt/sources.list.d && \
     ! grep -RqsE '(deb|security)\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d && \
     apt-get-with-retry install -y --no-install-recommends unzip xz-utils && \
     rm -rf /var/lib/apt/lists/* && \
@@ -151,18 +151,18 @@ ARG TARGETARCH
 RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     set -euo pipefail; \
     test "$(dpkg --print-architecture)" = "$TARGETARCH"; \
-    grep -RqsF 'snapshot.ubuntu.com/ubuntu/20260803T000000Z/' /etc/apt/sources.list.d; \
+    grep -RqsF 'snapshot.ubuntu.com/ubuntu/20261015T000000Z/' /etc/apt/sources.list.d; \
     ! grep -RqsE '(archive|security|ports)\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d; \
     apt-get-with-retry -o APT::Update::Error-Mode=any update; \
     install -d -m 0755 /packages /out; \
     cd /packages; \
-    apt-get-with-retry download openssh-server=1:9.6p1-3ubuntu13.18 libwrap0=7.6.q-33; \
+    apt-get-with-retry download openssh-server=1:9.6p1-3ubuntu13.20 libwrap0=7.6.q-33; \
     rm -rf /var/lib/apt/lists/*; \
     packages=(*.deb); test "${#packages[@]}" = 2; \
     for package in "${packages[@]}"; do \
       identity="$(dpkg-deb --show --showformat='${Package} ${Version} ${Architecture}' "$package")"; \
       case "$identity" in \
-        "openssh-server 1:9.6p1-3ubuntu13.18 $TARGETARCH"|"libwrap0 7.6.q-33 $TARGETARCH") ;; \
+        "openssh-server 1:9.6p1-3ubuntu13.20 $TARGETARCH"|"libwrap0 7.6.q-33 $TARGETARCH") ;; \
         *) echo 'unexpected SSH fixture package identity' >&2; exit 1 ;; \
       esac; \
       dpkg-deb --extract "$package" /out; \
@@ -212,7 +212,7 @@ ENV GOPATH="/home/codewire/go"
 # without it Codex warns at startup and falls back to its bundled copy.
 RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     apt-get-with-retry update && apt-get-with-retry install -y --no-install-recommends \
-      bubblewrap=0.9.0-1ubuntu0.1 \
+      bubblewrap=0.9.0-1ubuntu0.3 \
       file gdb pipx pkg-config python3-full python3-venv strace && \
     rm -rf /var/lib/apt/lists/*
 
