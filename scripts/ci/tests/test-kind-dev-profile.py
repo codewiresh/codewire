@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -1994,5 +1995,28 @@ class DatabaseTests(unittest.TestCase):
             self.assertIn(message, result.stderr)
 
 
+def shard_suite(shard):
+    """Every count-th test of the module, in test-id order, from index."""
+    index, count = (int(part) for part in shard.split("/"))
+    if not 0 <= index < count:
+        raise SystemExit(f"invalid CODEWIRE_TEST_SHARD {shard!r}")
+
+    def flatten(suite):
+        for test in suite:
+            if isinstance(test, unittest.TestSuite):
+                yield from flatten(test)
+            else:
+                yield test
+
+    tests = sorted(flatten(unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])),
+                   key=lambda test: test.id())
+    return unittest.TestSuite(test for position, test in enumerate(tests) if position % count == index)
+
+
 if __name__ == "__main__":
+    # CODEWIRE_TEST_SHARD=INDEX/COUNT runs one of COUNT disjoint shards, so a
+    # caller can run every shard side by side; together they run every test.
+    if shard := os.environ.get("CODEWIRE_TEST_SHARD"):
+        result = unittest.TextTestRunner().run(shard_suite(shard))
+        sys.exit(0 if result.wasSuccessful() and result.testsRun else 1)
     unittest.main()

@@ -519,10 +519,15 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn(
             "Run Edge static verification and selected Kind tool tests", [step.get("name") for step in edge["steps"]],
         )
-        self.assertIn(
-            "contains(needs.verification-selection.outputs.selection, '|edge_kind|')",
-            named_step(self.jobs["tooling"], "Run Edge static verification and selected Kind tool tests")["if"],
-        )
+        tooling = named_step(self.jobs["tooling"], "Run the selected Tooling families side by side")
+        self.assertEqual("scripts/ci/verify/run-product-verification.sh tooling", tooling["run"].strip())
+        self.assertEqual("${{ needs.verification-selection.outputs.selection }}",
+                         tooling["env"]["VERIFICATION_SELECTION"])
+        tooling_parts = subprocess.run(
+            [ROOT / "scripts/ci/verify/run-product-verification.sh", "tooling-parts"],
+            env={**os.environ, "VERIFICATION_SELECTION": "|valid:v3|edge_kind|kind_tools|complete|"},
+            check=True, capture_output=True, text=True).stdout.split()
+        self.assertEqual(["edge"], tooling_parts)
         for step_name in ("Install locked dashboard browser-test dependencies",):
             self.assertIn(
                 "matrix.shard.slug == 'dashboard'", named_step(edge, step_name)["if"],

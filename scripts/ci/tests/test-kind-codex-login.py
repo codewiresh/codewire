@@ -169,7 +169,9 @@ class Workspace:
             patch.object(driver, "POLL", 0.02),
             patch.object(driver, "FULL_CHECK", 0.2),
             patch.object(driver, "NEXT_CHECK", 1.0),
-            patch.object(driver, "DELIVERY_TIMEOUT", 1.0),
+            # Generous: on a loaded CI guest the synthetic delivery thread and
+            # the fake Codex can take over a second; no case tests its length.
+            patch.object(driver, "DELIVERY_TIMEOUT", 10.0),
             patch.object(driver, "CONFIG_REMOVAL_TIMEOUT", 0.3),
             patch.dict(os.environ, {"CODEX_HOME": str(self.home),
                                     "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"},

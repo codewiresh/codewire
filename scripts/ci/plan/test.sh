@@ -51,13 +51,66 @@ hydrate_cargo_oracle_inputs() {
   done
 }
 
+# The Cargo oracle reads the exact lock-pinned Cargo inputs. When they are
+# missing, they are fetched beside the unit tests and the first planner run,
+# which never read them: those run Cargo only offline, with --no-deps (the
+# selector) or in an isolated, empty CARGO_HOME (the planner), so neither
+# reads the registry or Git sources the fetch writes. The oracle waits for
+# the fetch; a fetch that fails or outlasts planner_fetch_seconds fails this
+# script, and an early exit stops it.
+planner_fetch_seconds=900
+fetch_pid=''
+fetch_log=''
+stop_fetch() {
+  if [ -n "$fetch_pid" ]; then
+    # timeout passes the signal on to every process it started.
+    kill "$fetch_pid" 2>/dev/null || true
+    wait "$fetch_pid" 2>/dev/null || true
+  fi
+  if [ -n "$fetch_log" ]; then
+    rm -f "$fetch_log"
+  fi
+}
+trap stop_fetch EXIT
+
 export CARGO_NET_OFFLINE=true
-python3 -m unittest discover -s scripts/ci/plan/tests -p 'test_*.py' -v
+if ! cargo_oracle_inputs_available; then
+  echo 'planner Cargo oracle: populating exact lock-pinned Cargo inputs beside the unit tests'
+  fetch_log="$(mktemp)"
+  timeout "$planner_fetch_seconds" bash -c "set -euo pipefail
+$(declare -p rust_artifacts)
+$(declare -f hydrate_cargo_oracle_inputs)
+hydrate_cargo_oracle_inputs" </dev/null >"$fetch_log" 2>&1 &
+  fetch_pid=$!
+fi
+
+# The unit tests run in parallel workers, one per CPU this job may assume
+# (cpu-share.sh), at most eight; every test runs exactly once.
+# shellcheck source=scripts/ci/setup/cpu-share.sh
+source scripts/ci/setup/cpu-share.sh
+workers="$(ci_cpu_share)"
+if [ -z "$workers" ]; then
+  workers="$(nproc)"
+fi
+if [ "$workers" -gt 8 ]; then
+  workers=8
+fi
+python3 scripts/ci/plan/tests/run_parallel.py "$workers"
 python3 scripts/ci/plan/planner.py --repository . --target-base HEAD --head HEAD >/dev/null
 
-if ! cargo_oracle_inputs_available; then
-  echo 'planner Cargo oracle: populating exact lock-pinned Cargo inputs'
-  hydrate_cargo_oracle_inputs
+if [ -n "$fetch_pid" ]; then
+  fetch_status=0
+  wait "$fetch_pid" || fetch_status=$?
+  fetch_pid=''
+  cat "$fetch_log"
+  if [ "$fetch_status" -ne 0 ]; then
+    if [ "$fetch_status" -eq 124 ]; then
+      echo "planner Cargo oracle: fetching Cargo inputs took over ${planner_fetch_seconds}s" >&2
+    else
+      echo "planner Cargo oracle: fetching Cargo inputs failed (exit $fetch_status)" >&2
+    fi
+    exit "$fetch_status"
+  fi
 fi
 
 python3 scripts/ci/plan/planner.py --repository . --target-base HEAD --head HEAD --check-cargo-oracle >/dev/null

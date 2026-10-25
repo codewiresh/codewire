@@ -705,6 +705,54 @@ run_policy_part() {
   esac
 }
 
+# The Tooling job's families for this selection, one per line, under the
+# conditions its separate workflow steps had: ShellCheck as Policy decides it
+# (policy_parts), each other family on its own token.
+tooling_parts() {
+  local entry
+  if selected policy_shell || { selected policy && ! selected policy_shell_omittable; }; then
+    printf 'policy-shell\n'
+  fi
+  for entry in \
+      confidential-script-tests:confidential_script_tests \
+      dev-smoke-script-tests:dev_smoke_script_tests \
+      release:release \
+      deploy:deploy \
+      workspace-agents:workspace_agents \
+      security:security \
+      edge:edge_kind; do
+    if selected "${entry#*:}"; then
+      printf '%s\n' "${entry%%:*}"
+    fi
+  done
+}
+
+# One Tooling family in its own runner process, with the environment its own
+# workflow step gave it: only Security and Edge read the trusted selection,
+# and only ShellCheck reads the pull request's base.
+run_tooling_family() {
+  local -a environment=(env -u VERIFICATION_SELECTION -u CODEWIRE_SHELL_POLICY_BASE)
+  case "$1" in
+    security|edge) environment+=("VERIFICATION_SELECTION=$SELECTION") ;;
+    policy-shell) environment+=("CODEWIRE_SHELL_POLICY_BASE=${CODEWIRE_SHELL_POLICY_BASE:-}") ;;
+  esac
+  "${environment[@]}" "$ROOT/scripts/ci/verify/run-product-verification.sh" "$1"
+}
+
+# The Tooling job runs its selected families side by side, so its wall time
+# is its slowest family's rather than their sum (infra#1534). The first
+# failure stops the rest (#3013).
+run_tooling() {
+  local parts
+  parts="$(tooling_parts)"
+  if [ -z "$parts" ]; then
+    echo 'Tooling: no family is selected'
+    return 0
+  fi
+  printf 'Tooling families: %s\n' "$(tr '\n' ' ' <<<"$parts")"
+  sed 's/^/run_tooling_family /' <<<"$parts" | run_side_by_side
+}
+
 run_policy() {
   local part
   for part in $(policy_parts); do
@@ -957,8 +1005,11 @@ run_confidential_script_tests() {
   scripts/runtime/tests/test-confidential-snp-smoke-contract.sh
 }
 
+# The Dev smoke script tests are independent once the dashboard's
+# dependencies are installed; run_side_by_side runs them side by side.
 run_dev_smoke_script_tests() {
   install_bun_dependencies
+  run_side_by_side <<'STEPS'
   bun test apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts
   bun test apps/dashboard/scripts/dev-ux-ownership.test.ts
   scripts/runtime/tests/test-provision-dev-smoke-user.sh
@@ -980,6 +1031,7 @@ run_dev_smoke_script_tests() {
   python3 -B scripts/runtime/tests/test-provider-openai-workload.py
   scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh
   python3 -B scripts/runtime/tests/test-native-mesh-listener.py
+STEPS
 }
 
 run_rust() {
@@ -1278,14 +1330,23 @@ run_edge_family() {
   fi
 }
 
+# The Kind tool tests are independent; run_side_by_side runs them side by
+# side. The developer-profile suite, about three minutes of tests in order,
+# runs as six disjoint shards that together run every test, longest first.
 run_kind_tools() {
   (
   isolate_kind_fixture_environment
+  run_side_by_side <<'STEPS'
+  CODEWIRE_TEST_SHARD=0/6 python3 -B scripts/ci/tests/test-kind-dev-profile.py
+  CODEWIRE_TEST_SHARD=1/6 python3 -B scripts/ci/tests/test-kind-dev-profile.py
+  CODEWIRE_TEST_SHARD=2/6 python3 -B scripts/ci/tests/test-kind-dev-profile.py
+  CODEWIRE_TEST_SHARD=3/6 python3 -B scripts/ci/tests/test-kind-dev-profile.py
+  CODEWIRE_TEST_SHARD=4/6 python3 -B scripts/ci/tests/test-kind-dev-profile.py
+  CODEWIRE_TEST_SHARD=5/6 python3 -B scripts/ci/tests/test-kind-dev-profile.py
   scripts/ci/tests/test-kind-e2e-cleanup.sh
   scripts/ci/tests/test-kind-e2e-suites.sh
   run_kind_cw_runtime_probe_fixture
   python3 -B scripts/ci/tests/test-kind-cluster-profiles.py
-  python3 -B scripts/ci/tests/test-kind-dev-profile.py
   python3 -B scripts/ci/tests/test-kind-profile-artifacts.py
   python3 -B scripts/ci/tests/test-kind-profile-gate.py
   scripts/ci/tests/test-kind-forwards.sh
@@ -1294,6 +1355,7 @@ run_kind_tools() {
   python3 -B scripts/ci/tests/test-kind-codex-login.py
   python3 -B scripts/ci/tests/test-kind-claude-login.py
   python3 -B scripts/ci/tests/test-kind-credentials.py
+STEPS
   )
 }
 
@@ -1351,10 +1413,13 @@ download_ci_tool() {
 }
 
 install_kustomize() {
-  local version="${KUSTOMIZE_VERSION:-v5.4.3}"
+  local version="${KUSTOMIZE_VERSION:-v5.4.3}" download
   mkdir -p "$HOME/.local/bin"
+  # Deploy and Security can install it at once (run_tooling): each downloads
+  # into its own directory and replaces the binary in one rename.
+  download="$(mktemp -d "${TMPDIR:-/tmp}/kustomize.XXXXXX")"
   (
-    cd /tmp
+    cd "$download"
     download_ci_tool \
       "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${version}/kustomize_${version}_linux_amd64.tar.gz" \
       "kustomize_${version}_linux_amd64.tar.gz"
@@ -1362,8 +1427,11 @@ install_kustomize() {
       "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${version}/checksums.txt" \
       checksums.txt
     grep "kustomize_${version}_linux_amd64.tar.gz" checksums.txt | sha256sum -c -
-    tar -xzf "kustomize_${version}_linux_amd64.tar.gz" -C "$HOME/.local/bin"
-  )
+    tar -xzf "kustomize_${version}_linux_amd64.tar.gz" kustomize
+    install -m 0755 kustomize "$HOME/.local/bin/.kustomize.$$"
+    mv -f "$HOME/.local/bin/.kustomize.$$" "$HOME/.local/bin/kustomize"
+  ) || { rm -rf -- "$download"; return 1; }
+  rm -rf -- "$download"
   export PATH="$HOME/.local/bin:$PATH"
 }
 
@@ -1552,6 +1620,8 @@ case "$FAMILY" in
   policy-core) run_policy_core ;;
   policy-repo-rules|policy-ci-script-tests|policy-planner-tests) run_policy_part "$FAMILY" ;;
   policy-parts) policy_parts ;;
+  tooling-parts) tooling_parts ;;
+  tooling) run_tooling ;;
   policy-shell) run_shell_policy ;;
   contracts) run_contracts ;;
   go-support) run_go_support ;;
@@ -1577,7 +1647,7 @@ case "$FAMILY" in
   workspace-agents) scripts/ci/verify/workspace-agents.sh ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|policy-parts|policy-core|policy-repo-rules|policy-ci-script-tests|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|confidential-script-tests|dev-smoke-script-tests|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|kind-tools|release|deploy|workspace-agents|security" >&2
+    echo "usage: run-product-verification.sh tooling|tooling-parts|policy|policy-parts|policy-core|policy-repo-rules|policy-ci-script-tests|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|confidential-script-tests|dev-smoke-script-tests|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|kind-tools|release|deploy|workspace-agents|security" >&2
     exit 2
     ;;
 esac

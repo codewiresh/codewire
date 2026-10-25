@@ -606,54 +606,31 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|deploy|') || contains(needs.verification-selection.outputs.selection, '|release|') || contains(needs.verification-selection.outputs.selection, '|security|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
-      # A pull request ShellChecks only the scripts it changes, and a push to
-      # main those changed since the newest main commit main CI verified, the
-      # base its selection compared with (#3119 A7, M1). An unverified main
-      # base leaves it empty, and every script is checked.
-      - name: Run Shell policy
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|policy_shell|') || (contains(needs.verification-selection.outputs.selection, '|policy|') && !contains(needs.verification-selection.outputs.selection, '|policy_shell_omittable|'))) }}
+      # The selected Tooling families run side by side in one step, so the job
+      # takes its slowest family's time rather than their sum (infra#1534),
+      # and the first failure stops the rest (#3013). run-product-verification.sh
+      # tooling owns each family's selection condition and gives each the
+      # environment its own step had:
+      # - ShellCheck: on policy_shell, or policy without policy_shell_omittable;
+      #   a pull request checks only the scripts it changes, and a push to main
+      #   those changed since the newest main commit main CI verified, the base
+      #   its selection compared with (#3119 A7, M1); an unverified main base
+      #   leaves it empty, and every script is checked;
+      # - confidential and Dev smoke script tests, delivery (release), Deploy,
+      #   the workspace agents check (a lockfile-only change to the workspace
+      #   image's agents installs that lockfile and starts each agent; owner,
+      #   2026-10-24), Security and Edge: each on its own token;
+      # - Edge static verification needs no cluster, so it runs here rather
+      #   than in a Kind shard, and an edge-only selection starts no Kind leg;
+      #   the Kind tool tests follow only when the selection names them
+      #   (#3119 R8).
+      - name: Run the selected Tooling families side by side
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
           CODEWIRE_SHELL_POLICY_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.verification-selection.outputs.push_verified_base) || '' }}
-        run: scripts/ci/verify/run-product-verification.sh policy-shell
-
-      - name: Run confidential script tests
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|confidential_script_tests|') }}
-        run: scripts/ci/verify/run-product-verification.sh confidential-script-tests
-
-      - name: Run Dev smoke script tests
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|dev_smoke_script_tests|') }}
-        run: scripts/ci/verify/run-product-verification.sh dev-smoke-script-tests
-
-      - name: Run delivery script tests
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|release|') }}
-        env:
           PYTHONDONTWRITEBYTECODE: '1'
-        run: scripts/ci/verify/run-product-verification.sh release
-
-      - name: Run Deploy
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|deploy|') }}
-        run: scripts/ci/verify/run-product-verification.sh deploy
-
-      # A lockfile-only change to the workspace image's agents installs that
-      # lockfile and starts each agent (owner, 2026-10-24).
-      - name: Run the workspace agents check
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|workspace_agents|') }}
-        run: scripts/ci/verify/run-product-verification.sh workspace-agents
-
-      - name: Run Security
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|security|') }}
-        env:
-          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-        run: scripts/ci/verify/run-product-verification.sh security
-
-      # Static edge checks need no cluster, so they run here rather than in a
-      # Kind shard, and an edge-only selection starts no Kind leg. The Kind
-      # tool tests follow only when the selection names them (#3119 R8).
-      - name: Run Edge static verification and selected Kind tool tests
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|edge_kind|') }}
-        env:
-          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-        run: scripts/ci/verify/run-product-verification.sh edge
+        run: scripts/ci/verify/run-product-verification.sh tooling
 
   rust-compile:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job requests no identity and reads no protected credential: it builds in its build runner's own warm folder, never the shared cache.

@@ -3121,12 +3121,25 @@ grep -Fq 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selec
   echo 'policy core does not see the trusted selection, so it cannot omit CI-script tests' >&2
   exit 1
 }
-grep -Fq 'run-product-verification.sh policy-shell' "$tooling_block" || {
-  echo 'heavy tooling job does not own selected ShellCheck' >&2
+# The heavy tooling job owns selected ShellCheck: its one family step runs
+# the selected Tooling families (tooling_parts, checked below) with the
+# trusted selection and the ShellCheck base.
+tooling_step="$(grep -A6 -F -- '- name: Run the selected Tooling families side by side' "$tooling_block")"
+grep -Fq 'run: scripts/ci/verify/run-product-verification.sh tooling' <<<"$tooling_step" || {
+  echo 'heavy tooling job does not run its families through run-product-verification.sh tooling' >&2
   exit 1
 }
-grep -Fq "contains(needs.verification-selection.outputs.selection, '|policy_shell|')" \
-  "$tooling_block" || {
+# shellcheck disable=SC2016 # Match the workflow's literal expression.
+grep -Fq 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' <<<"$tooling_step" \
+  && grep -Fq 'CODEWIRE_SHELL_POLICY_BASE:' <<<"$tooling_step" || {
+  echo 'heavy tooling step lacks the trusted selection or the ShellCheck base' >&2
+  exit 1
+}
+[ "$(grep -cE '^ +run: .*run-product-verification[.]sh' "$tooling_block")" -eq 1 ] || {
+  echo 'heavy tooling job runs a family outside its one family step' >&2
+  exit 1
+}
+[ "$(VERIFICATION_SELECTION='|valid:v3|policy_shell|complete|' "$ROOT/scripts/ci/verify/run-product-verification.sh" tooling-parts)" = policy-shell ] || {
   echo 'heavy ShellCheck lacks trusted policy_shell dispatch' >&2
   exit 1
 }
@@ -3556,7 +3569,7 @@ defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
 tooling_block="$TMP/tooling.yaml"
 deploy_toolchain_line="$(grep -n -m1 'name: Verify sealed delivery-contract tools' \
   "$tooling_block" | cut -d: -f1)"
-deploy_run_line="$(grep -n -m1 'name: Run Deploy' "$tooling_block" | cut -d: -f1)"
+deploy_run_line="$(grep -n -m1 'name: Run the selected Tooling families side by side' "$tooling_block" | cut -d: -f1)"
 test -n "$deploy_toolchain_line"
 test -n "$deploy_run_line"
 test "$deploy_toolchain_line" -lt "$deploy_run_line"
@@ -3659,23 +3672,21 @@ if ! grep -qF "tested_tree_receipt != 'accepted' && contains(needs.verification-
   exit 1
 fi
 tooling_bun_line="$(grep -n -m1 'uses: noel/setup-bun@' "$tooling_block" | cut -d: -f1)"
-tooling_dev_smoke_line="$(grep -n -m1 'name: Run Dev smoke script tests' "$tooling_block" | cut -d: -f1)"
+tooling_dev_smoke_line="$(grep -n -m1 'name: Run the selected Tooling families side by side' "$tooling_block" | cut -d: -f1)"
 if [ "$tooling_bun_line" -ge "$tooling_dev_smoke_line" ]; then
   echo 'tooling: pinned Bun setup must precede Dev smoke execution' >&2
   exit 1
 fi
 for contract in \
-    'Run confidential script tests|confidential_script_tests' \
-    'Run Dev smoke script tests|dev_smoke_script_tests' \
-    'Run delivery script tests|release' \
-    'Run Deploy|deploy' \
-    'Run Security|security'; do
-  step_name="${contract%%|*}"
+    'confidential-script-tests|confidential_script_tests' \
+    'dev-smoke-script-tests|dev_smoke_script_tests' \
+    'release|release' \
+    'deploy|deploy' \
+    'security|security'; do
+  family="${contract%%|*}"
   token="${contract##*|}"
-  step_condition="$(grep -A1 -F -- "- name: ${step_name}" "$tooling_block")"
-  grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
-    <<<"$step_condition" || {
-    echo "tooling: ${step_name} is not isolated to ${token}" >&2
+  [ "$(VERIFICATION_SELECTION="|valid:v3|${token}|complete|" "$ROOT/scripts/ci/verify/run-product-verification.sh" tooling-parts)" = "$family" ] || {
+    echo "tooling: ${family} is not isolated to ${token}" >&2
     exit 1
   }
 done
@@ -3914,7 +3925,9 @@ fi
 
 edge_kind_block="$TMP/edge-kind.yaml"
 # Static edge checks run in tooling, so an edge-only selection starts no Kind leg.
-grep -qF 'run: scripts/ci/verify/run-product-verification.sh edge' "$TMP/tooling.yaml"
+grep -qF 'run: scripts/ci/verify/run-product-verification.sh tooling' "$TMP/tooling.yaml"
+[ "$(VERIFICATION_SELECTION='|valid:v3|edge_kind|complete|' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh" tooling-parts)" = edge ]
 if grep -qF 'run-product-verification.sh edge' "$edge_kind_block"; then
   echo 'edge-kind: static edge checks moved back into a Kind shard' >&2
   exit 1
@@ -4340,6 +4353,80 @@ for selection_and_parts in \
     exit 1
   }
 done
+# The Tooling job runs its selected families side by side in one step
+# (run-product-verification.sh tooling), each under the condition its own
+# workflow step had: ShellCheck on policy_shell, or policy without
+# policy_shell_omittable; every other family only on its own token.
+for selection_and_parts in \
+    '|valid:v3|complete|=' \
+    '|valid:v3|policy|complete|=policy-shell' \
+    '|valid:v3|policy|policy_shell_omittable|complete|=' \
+    '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|=policy-shell' \
+    '|valid:v3|policy_shell|complete|=policy-shell' \
+    '|valid:v3|confidential_script_tests|complete|=confidential-script-tests' \
+    '|valid:v3|dev_smoke_script_tests|complete|=dev-smoke-script-tests' \
+    '|valid:v3|release|complete|=release' \
+    '|valid:v3|deploy|complete|=deploy' \
+    '|valid:v3|workspace_agents|complete|=workspace-agents' \
+    '|valid:v3|security|security_js|complete|=security' \
+    '|valid:v3|edge_kind|kind_tools|complete|=edge' \
+    '|valid:v3|confidential_script_tests|deploy|dev_smoke_script_tests|edge_kind|policy|policy_shell|policy_shell_omittable|release|security|workspace_agents|complete|=policy-shell confidential-script-tests dev-smoke-script-tests release deploy workspace-agents security edge'; do
+  listed_parts="$(VERIFICATION_SELECTION="${selection_and_parts%%=*}" "$product_runner" tooling-parts | paste -sd' ')"
+  [ "$listed_parts" = "${selection_and_parts#*=}" ] || {
+    echo "tooling families for ${selection_and_parts%%=*} are: ${listed_parts}" >&2
+    exit 1
+  }
+done
+# Each family runs in its own runner process with the environment its step
+# gave it: only Security and Edge read the trusted selection, only ShellCheck
+# the base. The families run side by side, and a failed family fails the job.
+tooling_fixture() {
+  local root="$1" selection="$2"
+  mkdir -p "$root/scripts/ci/verify"
+  cat >"$root/scripts/ci/verify/run-product-verification.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s selection=%s base=%s\n' "$1" "${VERIFICATION_SELECTION-unset}" \
+  "${CODEWIRE_SHELL_POLICY_BASE-unset}" >"$TOOLING_RECORDS/$1"
+touch "$TOOLING_RECORDS/$1.started"
+for _ in $(seq 1 100); do
+  [ "$(find "$TOOLING_RECORDS" -name '*.started' | wc -l)" -ge "$TOOLING_EXPECTED" ] && break
+  sleep 0.05
+done
+[ "$(find "$TOOLING_RECORDS" -name '*.started' | wc -l)" -ge "$TOOLING_EXPECTED" ]
+[ "$1" != "${TOOLING_FAIL:-}" ]
+SH
+  chmod 0755 "$root/scripts/ci/verify/run-product-verification.sh"
+  mkdir "$root/records"
+  local side_by_side="$ROOT/scripts/ci/verify/side-by-side.sh" functions
+  functions="$(policy_function tooling_parts; policy_function run_tooling_family; policy_function run_tooling)"
+  ROOT="$root" SELECTION="$selection" TOOLING_RECORDS="$root/records" bash -c '
+    set -euo pipefail
+    selected() { [[ "$SELECTION" == *"|$1|"* ]]; }
+    source "$1"
+    eval "$2"
+    run_tooling
+  ' tooling-fixture "$side_by_side" "$functions"
+}
+tooling_selection='|valid:v3|deploy|edge_kind|policy|release|security|complete|'
+tooling_root="$(mktemp -d "$TMP/tooling.XXXXXX")"
+tooling_output="$(CODEWIRE_SHELL_POLICY_BASE=0123abcd TOOLING_EXPECTED=5 \
+  tooling_fixture "$tooling_root" "$tooling_selection" 2>&1)" || {
+  echo "tooling families did not all run side by side: $tooling_output" >&2
+  exit 1
+}
+[ "$(cat "$tooling_root/records/policy-shell" "$tooling_root/records/release" \
+    "$tooling_root/records/deploy" "$tooling_root/records/security" "$tooling_root/records/edge")" = \
+  "$(printf '%s\n' 'policy-shell selection=unset base=0123abcd' 'release selection=unset base=unset' \
+    'deploy selection=unset base=unset' "security selection=$tooling_selection base=unset" \
+    "edge selection=$tooling_selection base=unset")" ] || {
+  echo 'a tooling family did not keep its own step environment' >&2
+  exit 1
+}
+tooling_root="$(mktemp -d "$TMP/tooling.XXXXXX")"
+if TOOLING_EXPECTED=5 TOOLING_FAIL=deploy tooling_fixture "$tooling_root" "$tooling_selection" >/dev/null 2>&1; then
+  echo 'a failed tooling family passed the Tooling job' >&2
+  exit 1
+fi
 # The artifact planner's suite (#3119 L3) runs as a policy part only when the
 # selector names it; Deploy runs it only for a selection from a selector that
 # cannot say (no ci_plan_tests_omittable), as before, so it never runs twice
@@ -4959,8 +5046,9 @@ grep -qF 'run_selected_family dev_smoke_script_tests dev-smoke-script-tests' \
   "$ROOT/scripts/dev/preflight.sh"
 grep -qF "contains(needs.verification-selection.outputs.selection, '|dev_smoke_script_tests|')" \
   "$WORKFLOW"
-grep -qF 'run: scripts/ci/verify/run-product-verification.sh dev-smoke-script-tests' \
-  "$WORKFLOW"
+grep -qF 'run: scripts/ci/verify/run-product-verification.sh tooling' "$WORKFLOW"
+[ "$(VERIFICATION_SELECTION='|valid:v3|dev_smoke_script_tests|complete|' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh" tooling-parts)" = dev-smoke-script-tests ]
 if grep -qF 'select-migration-gates' "$WORKFLOW"; then
   echo 'workflow still calls the retired selector' >&2
   exit 1
@@ -5376,12 +5464,10 @@ WORK = {
         "Run SDK TypeScript typecheck and unit suite", "Run SDK Python",
         "Run iOS package tests in the pinned Swift image",
     },
-    "tooling": {
-        "Run Shell policy", "Run confidential script tests",
-        "Run Dev smoke script tests", "Run delivery script tests", "Run Deploy", "Run Security",
-        "Run the workspace agents check",
-        "Run Edge static verification and selected Kind tool tests",
-    },
+    # One step runs the selected Tooling families; the product runner's
+    # tooling-parts owns their selection conditions (checked per selection
+    # below, as these steps' own conditions were).
+    "tooling": {"Run the selected Tooling families side by side"},
     "rust-compile": {"Run the build legs"},
     "rust-checks": {"Run the Rust checks"},
     "rust-packages": {"Run the Rust packages shard"},
@@ -5605,6 +5691,20 @@ def dispatch(selection, cw, desktop):
     return emitter_outputs[(selection, cw, desktop)]
 
 
+tooling_cache = {}
+tooling_runner = os.path.join(os.path.dirname(os.path.abspath(workflow_path)), "..", "..",
+                              "scripts", "ci", "verify", "run-product-verification.sh")
+
+
+def tooling_parts(selection):
+    """The Tooling families the product runner runs for this selection."""
+    if selection not in tooling_cache:
+        tooling_cache[selection] = subprocess.run(
+            [tooling_runner, "tooling-parts"], env=dict(os.environ, VERIFICATION_SELECTION=selection),
+            check=True, capture_output=True, text=True).stdout.split()
+    return tooling_cache[selection]
+
+
 scope_cache = {}
 
 
@@ -5769,6 +5869,10 @@ for selection in sorted(set(realistic) | synthetic):
                 raise SystemExit(
                     f"{job_id} has selected work but is not dispatched for {selection} "
                     f"(cw={cw} desktop={desktop}): {gated}")
+        # The Tooling job starts exactly when a Tooling family is selected.
+        families = tooling_parts(selection)
+        if evaluate(jobs["tooling"]["if"], context) != bool(families):
+            raise SystemExit(f"tooling dispatch disagrees with its selected families {families} for {selection}")
         checked += 1
 
 # A scheduled run dispatches the Kind builds and shards alone, whatever the
