@@ -209,9 +209,9 @@ in_src() {
 # - LANE: "tests" legs build test archives in targets/archive (one Cargo
 #   target folder, so they run one after another anyway); "checks" legs build
 #   in their own folders and produce nothing to publish.
-# - WANTED: "always", or "selected:TOKEN", a verification token in
-#   VERIFICATION_SELECTION, or "env:NAME", an environment variable that is
-#   "true".
+# - WANTED: "always", or "selected:TOKEN[,TOKEN...]", any of those
+#   verification tokens in VERIFICATION_SELECTION, or "env:NAME", an
+#   environment variable that is "true".
 # Warm, the two lanes run side by side and share the job's Cargo jobs, the
 # tests lane taking the larger part, since the test jobs wait for it. Cold
 # (prepare's BUILD_ONCE_COLD), every leg runs one after another at the full
@@ -221,6 +221,8 @@ LEGS=(
   "archive tests always"
   "compile checks always"
   "database tests selected:database"
+  "services_control tests selected:service_idp,service_coordinator,service_billing,service_connectcore"
+  "services_runtime tests selected:service_orchestration,service_nats"
 )
 
 leg_archive() {
@@ -250,10 +252,46 @@ leg_database() {
   rm -rf -- "$dir"
 }
 
+service_plane_leg() {
+  # service_plane_leg PLANE OUT: one service plane's archives, one per
+  # package and feature set, and the binaries the plane starts, built by
+  # run-integration-verification.sh from its own service lists; bundled into
+  # one tar. The leg runs when the plane's service tokens are selected, as
+  # the plane's job does (ci.yaml, its service scope step).
+  local plane="$1" out="$2" dir
+  dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/services-$plane-archives.XXXXXX")"
+  phase "services $plane archives" env CARGO_TARGET_DIR="$work/targets/archive" \
+    CODEWIRE_CARGO_CI_TARGET_DIR="$work/targets/archive" ARCHIVE_BUILD_DIR="$dir" \
+    scripts/ci/verify/run-integration-verification.sh "services-$plane-archives"
+  # The binaries shrink about threefold (the archives are compressed
+  # already), which the archive store's budget needs: the plane's job unpacks
+  # binaries.tar.gz beside the archives.
+  local -a binaries
+  mapfile -t binaries < <(find "$dir" -maxdepth 1 -type f ! -name '*.tar.zst' -printf '%f\n' | sort)
+  [ "${#binaries[@]}" -gt 0 ] || die "the services $plane leg kept no binaries"
+  tar -cf - -C "$dir" -- "${binaries[@]}" | gzip -1 > "$dir.binaries.tar.gz"
+  (cd "$dir" && rm -f -- "${binaries[@]}")
+  mv -- "$dir.binaries.tar.gz" "$dir/binaries.tar.gz"
+  tar -cf "$out/services_$plane.tar" -C "$dir" .
+  rm -rf -- "$dir"
+}
+
+leg_services_control() { service_plane_leg control "$1"; }
+leg_services_runtime() { service_plane_leg runtime "$1"; }
+
 leg_wanted() {
   case "$1" in
     always) return 0 ;;
-    selected:*) [[ "${VERIFICATION_SELECTION:-}" == *"|${1#selected:}|"* ]] ;;
+    selected:*)
+      # selected:A,B: any of the tokens.
+      local token
+      local -a tokens
+      IFS=, read -r -a tokens <<< "${1#selected:}"
+      for token in "${tokens[@]}"; do
+        [[ "${VERIFICATION_SELECTION:-}" != *"|$token|"* ]] || return 0
+      done
+      return 1
+      ;;
     env:*)
       local var="${1#env:}"
       [[ "$var" =~ ^[A-Z_][A-Z0-9_]*$ ]] || die "invalid leg condition: $1"

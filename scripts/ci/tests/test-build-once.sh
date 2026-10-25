@@ -59,11 +59,21 @@ done
 [ "$("$SCRIPT" legs checks | tr '\n' ' ')" = 'compile ' ] || fail 'unexpected checks lane'
 [ "$(VERIFICATION_SELECTION='|policy|database|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive compile database ' ] ||
   fail 'a selected database family did not want the database leg'
-grep -Eq '^  "[a-z0-9_]+ (tests|checks) (always|selected:[a-z0-9_-]+|env:[A-Z0-9_]+)"$' "$SCRIPT" ||
+grep -Eq '^  "[a-z0-9_]+ (tests|checks) (always|selected:[a-z0-9_,-]+|env:[A-Z0-9_]+)"$' "$SCRIPT" ||
   fail 'the leg table is missing'
+# A selected leg runs when any of its tokens is selected.
+all='|database|service_idp|service_coordinator|service_billing|service_connectcore|service_orchestration|service_nats|'
+[ "$(VERIFICATION_SELECTION="$all" "$SCRIPT" legs tests | tr '\n' ' ')" = \
+  'archive database services_control services_runtime ' ] || fail 'unexpected tests lane with every family'
+[ "$(VERIFICATION_SELECTION='|service_nats|' "$SCRIPT" legs tests | tr '\n' ' ')" = 'archive services_runtime ' ] ||
+  fail 'service_nats alone must select the runtime plane leg only'
+[ "$(VERIFICATION_SELECTION='|service_billing|service_temporal|' "$SCRIPT" legs tests | tr '\n' ' ')" = 'archive services_control ' ] ||
+  fail 'service_billing alone must select the control plane leg only'
+[ "$(VERIFICATION_SELECTION='|service_temporal|service_nats_extra|' "$SCRIPT" legs tests | tr '\n' ' ')" = 'archive ' ] ||
+  fail 'a selected leg matched a token it does not name'
 while read -r name; do
-  grep -q "^leg_$name() {" "$SCRIPT" || fail "the $name leg has no function"
-done < <("$SCRIPT" legs)
+  grep -Eq "^leg_$name\(\) \{" "$SCRIPT" || fail "the $name leg has no function"
+done < <(VERIFICATION_SELECTION="$all" "$SCRIPT" legs)
 
 # The build folder follows the event: main only for a push to main.
 tree() {

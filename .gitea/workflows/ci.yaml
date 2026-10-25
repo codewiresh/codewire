@@ -668,6 +668,8 @@ jobs:
     outputs:
       archive_sha256: ${{ steps.publish.outputs.archive_sha256 }}
       database_sha256: ${{ steps.publish.outputs.database_sha256 }}
+      services_control_sha256: ${{ steps.publish.outputs.services_control_sha256 }}
+      services_runtime_sha256: ${{ steps.publish.outputs.services_runtime_sha256 }}
     env:
       # The build runner's warm build folder (build-once.sh prepare).
       BUILD_ONCE_TREE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '/ci-cache/main' || '/ci-cache/pr' }}
@@ -1193,11 +1195,18 @@ jobs:
     runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 30
-    needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.services_control_expected == 'true' }}
+    # Compile once (infra#1632): when the compile job built this plane's
+    # archives (on the pull request or main build runner, with the Rust
+    # compile dispatched), this job compiles nothing. It fetches and verifies
+    # them by the digest that job reported, and runs the same services and
+    # suites from them. When none was built, or the store no longer holds
+    # them, it warns and compiles here, as before.
+    needs: [verification-selection, rust-compile]
+    if: ${{ always() && needs.verification-selection.result == 'success' && needs.verification-selection.outputs.services_control_expected == 'true' && needs.rust-compile.result != 'failure' && needs.rust-compile.result != 'cancelled' }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
+      ARCHIVE_STORE_URL: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'http://ci-archive-main.forgejo-ci-archive.svc:8090' || 'http://ci-archive-pr.forgejo-ci-archive.svc:8090' }}
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -1240,18 +1249,26 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: scripts/ci/setup/bound-cargo-jobs.sh
 
+      # A miss (evicted, or nothing built for this run) builds in place.
+      - name: Fetch and verify the service control-plane archives
+        id: services-archives
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        env:
+          ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.services_control_sha256 }}
+        run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/services.tar"
+
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Select best-effort shared Rust cache
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready != 'true' }}
         env:
           CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Install pinned protoc for Rust compilation
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready != 'true' }}
         run: |
           set -euo pipefail
           scripts/ci/setup/assert-ci-runner-image.sh
@@ -1309,10 +1326,26 @@ jobs:
           docker logs "$POSTGRES_CONTAINER" || true
           exit 1
 
+      - name: Unpack the service control-plane archives
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/service-archives"
+          tar -xf "$RUNNER_TEMP/services.tar" -C "$RUNNER_TEMP/service-archives"
+          rm -f "$RUNNER_TEMP/services.tar"
+          tar -xzf "$RUNNER_TEMP/service-archives/binaries.tar.gz" -C "$RUNNER_TEMP/service-archives"
+          rm -f "$RUNNER_TEMP/service-archives/binaries.tar.gz"
+
+      - name: Install pinned cargo-nextest
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready == 'true' }}
+        run: scripts/ci/setup/install-cargo-nextest.sh "$RUNNER_TEMP/nextest"
+
       - name: Run Service integration
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+          RUST_SERVICE_ARCHIVES: ${{ steps.services-archives.outputs.ready == 'true' && format('{0}/service-archives', runner.temp) || '' }}
+          RUST_TEST_NEXTEST: ${{ runner.temp }}/nextest/cargo-nextest
         run: scripts/ci/verify/run-integration-verification.sh services-control
 
       - name: Stop integration Postgres
@@ -1320,7 +1353,7 @@ jobs:
         run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true
 
       - name: Report and clean Rust cache
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready != 'true' }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Report the warm Rust cache
@@ -1333,11 +1366,18 @@ jobs:
     runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 30
-    needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.services_runtime_expected == 'true' }}
+    # Compile once (infra#1632): when the compile job built this plane's
+    # archives (on the pull request or main build runner, with the Rust
+    # compile dispatched), this job compiles nothing. It fetches and verifies
+    # them by the digest that job reported, and runs the same services and
+    # suites from them. When none was built, or the store no longer holds
+    # them, it warns and compiles here, as before.
+    needs: [verification-selection, rust-compile]
+    if: ${{ always() && needs.verification-selection.result == 'success' && needs.verification-selection.outputs.services_runtime_expected == 'true' && needs.rust-compile.result != 'failure' && needs.rust-compile.result != 'cancelled' }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
       CODEWIRE_CARGO_CI_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-ci
+      ARCHIVE_STORE_URL: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'http://ci-archive-main.forgejo-ci-archive.svc:8090' || 'http://ci-archive-pr.forgejo-ci-archive.svc:8090' }}
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -1380,18 +1420,26 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: scripts/ci/setup/bound-cargo-jobs.sh
 
+      # A miss (evicted, or nothing built for this run) builds in place.
+      - name: Fetch and verify the service runtime-plane archives
+        id: services-archives
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        env:
+          ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.services_runtime_sha256 }}
+        run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/services.tar"
+
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Select best-effort shared Rust cache
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready != 'true' }}
         env:
           CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Install pinned protoc for Rust compilation
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready != 'true' }}
         run: |
           set -euo pipefail
           scripts/ci/setup/assert-ci-runner-image.sh
@@ -1449,10 +1497,26 @@ jobs:
           docker logs "$POSTGRES_CONTAINER" || true
           exit 1
 
+      - name: Unpack the service runtime-plane archives
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/service-archives"
+          tar -xf "$RUNNER_TEMP/services.tar" -C "$RUNNER_TEMP/service-archives"
+          rm -f "$RUNNER_TEMP/services.tar"
+          tar -xzf "$RUNNER_TEMP/service-archives/binaries.tar.gz" -C "$RUNNER_TEMP/service-archives"
+          rm -f "$RUNNER_TEMP/service-archives/binaries.tar.gz"
+
+      - name: Install pinned cargo-nextest
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready == 'true' }}
+        run: scripts/ci/setup/install-cargo-nextest.sh "$RUNNER_TEMP/nextest"
+
       - name: Run Service integration
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+          RUST_SERVICE_ARCHIVES: ${{ steps.services-archives.outputs.ready == 'true' && format('{0}/service-archives', runner.temp) || '' }}
+          RUST_TEST_NEXTEST: ${{ runner.temp }}/nextest/cargo-nextest
         run: scripts/ci/verify/run-integration-verification.sh services-runtime
 
       - name: Stop integration Postgres
@@ -1460,7 +1524,7 @@ jobs:
         run: docker rm -f "${POSTGRES_CONTAINER:-missing}" >/dev/null 2>&1 || true
 
       - name: Report and clean Rust cache
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready != 'true' }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
   # Independent build groups use private workers. Native same-run artifacts

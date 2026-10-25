@@ -111,8 +111,8 @@ cargo_ci() {
   CARGO_TARGET_DIR="$CARGO_CI_TARGET_DIR" cargo "$@"
 }
 
-# Compile once (infra#1632). Two modes replace Cargo for the database suites,
-# so the lanes below stay the one list of what runs:
+# Compile once (infra#1632). Two modes replace Cargo for the database suites
+# and the service planes, so the lanes below stay the one list of what runs:
 # - database-archives (on the pull request build runner): each `cargo test
 #   ... --no-run` of build_database_suites becomes `cargo nextest archive` of
 #   the same package and feature set into ARCHIVE_BUILD_DIR, one archive per
@@ -123,6 +123,11 @@ cargo_ci() {
 #   and prints cargo's "test result" line, so assert_passed_count and the
 #   lanes' output checks read it as before. `cargo build` of the migration
 #   runner is a no-op: the archives carry it.
+# - services-PLANE-archives and RUST_SERVICE_ARCHIVES do the same for one
+#   service plane: build_service_suites lists its tests, and its `cargo
+#   build`s build for real, in the archives' profile, with keep_binaries
+#   copying the binaries the plane starts beside the archives. From archives,
+#   `cargo build` and `cargo test --no-run` are no-ops.
 # The helpers serve any family: archive_cargo builds into ARCHIVE_BUILD_DIR
 # and runs from the folders extract_archives DIR made. A lane's --profile is
 # dropped, so the archives build in the dev profile and share their units
@@ -149,8 +154,22 @@ archive_cargo() {
   local command="${1:-}"
   shift || true
   if [ "$command" = build ]; then
-    # The migration runner comes from the archives (CARGO_CI_DIR).
-    return 0
+    # From archives, the binaries come with them (CARGO_CI_DIR).
+    [ -n "${ARCHIVE_BUILD_DIR:-}" ] || return 0
+    # Building a service plane's archives, its binaries build in the
+    # archives' profile.
+    local -a build_args=()
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --profile)
+          [ "${ARCHIVE_CARGO_PROFILE:-drop}" != keep ] || build_args+=(--profile "$2")
+          shift 2
+          ;;
+        *) build_args+=("$1"); shift ;;
+      esac
+    done
+    command cargo build "${build_args[@]}"
+    return
   fi
   [ "$command" = test ] || { echo "::error::archive mode cannot run cargo $command" >&2; return 2; }
   local package="" features="" no_default=false no_run=false name="" exact=false ignored=default
@@ -197,7 +216,8 @@ archive_cargo() {
   local key
   key="$(archive_key "$package" "$features" "$no_default" "$profile")"
   if [ "$no_run" = true ]; then
-    [ -n "${ARCHIVE_BUILD_DIR:-}" ] || { echo '::error::no archive directory' >&2; return 2; }
+    # From archives, the build is the archive itself.
+    [ -n "${ARCHIVE_BUILD_DIR:-}" ] || return 0
     [ ! -e "$ARCHIVE_BUILD_DIR/$key.tar.zst" ] ||
       { echo "::error::two build batches share the archive $key" >&2; return 2; }
     command cargo nextest archive --locked "${cargo_args[@]}" \
@@ -241,7 +261,8 @@ archive_cargo() {
 # extract_archives DIR: extract every archive in DIR once, before the lanes
 # start.
 extract_archives() {
-  local dir="$1" archive key
+  local dir="$1" archive key binary link
+  local -A linked=()
   # Test binaries carry the build folder's source paths (CARGO_MANIFEST_DIR):
   # a real copy of this checkout there, not a link, since tests check their
   # paths' ancestry and compare canonical paths.
@@ -255,16 +276,68 @@ extract_archives() {
     "${RUST_TEST_NEXTEST:-cargo-nextest}" nextest run --archive-file "$archive" \
       --workspace-remap "$DATABASE_ARCHIVE_BUILD_ROOT/src" \
       --extract-to "$RUN_DIR/archives/$key" -E 'none()' --no-tests=pass >/dev/null
+    # An integration test starts its package's binaries by their build
+    # folder path (CARGO_BIN_EXE_*, fixed when it compiled, as idp's
+    # rewrap_cli does): link each archive's binaries there. A binary two
+    # archives carry (one package in two feature sets) is linked to neither,
+    # so a test that starts it fails rather than start the other build.
+    while read -r binary; do
+      [[ "$binary" =~ ^[a-z0-9_-]+/[A-Za-z0-9_.-]+$ ]] ||
+        { echo "::error::archive $key names an unexpected binary path: $binary" >&2; return 2; }
+      link="$DATABASE_ARCHIVE_BUILD_ROOT/targets/archive/$binary"
+      if [ -n "${linked[$binary]:-}" ]; then
+        rm -f -- "$link"
+        linked[$binary]=ambiguous
+        continue
+      fi
+      linked[$binary]="$key"
+      mkdir -p "$(dirname "$link")"
+      ln -s "$RUN_DIR/archives/$key/target/$binary" "$link"
+    done < <(jq -r '."rust-build-meta"."non-test-binaries"[][].path' \
+      "$RUN_DIR/archives/$key/target/nextest/binaries-metadata.json")
+  done
+  # A binary the run starts by name from DIR (CARGO_CI_DIR) that no build
+  # kept there comes from the one archive that carries it: the orchestration
+  # wire contract's archive carries the orchestration service and its smokes.
+  for binary in "${!linked[@]}"; do
+    [ "${linked[$binary]}" != ambiguous ] || continue
+    [ -e "$dir/${binary##*/}" ] ||
+      ln -s "$RUN_DIR/archives/${linked[$binary]}/target/$binary" "$dir/${binary##*/}"
   done
   log "archives extracted: $(find "$RUN_DIR/archives" -mindepth 1 -maxdepth 1 | wc -l)"
 }
 
-if [ -n "${RUST_DATABASE_ARCHIVES:-}" ] || [ "$MODE" = database-archives ]; then
+# The archives this run tests from: the database job's or a service job's.
+RUST_ARCHIVES="${RUST_DATABASE_ARCHIVES:-${RUST_SERVICE_ARCHIVES:-}}"
+case "$MODE" in
+  *-archives) : "${ARCHIVE_BUILD_DIR:?ARCHIVE_BUILD_DIR is required}" ;;
+  *) unset ARCHIVE_BUILD_DIR ;;
+esac
+if [ -n "$RUST_ARCHIVES" ] || [ -n "${ARCHIVE_BUILD_DIR:-}" ]; then
   cargo() { archive_cargo "$@"; }
 fi
-if [ -n "${RUST_DATABASE_ARCHIVES:-}" ]; then
-  CARGO_CI_DIR="$RUST_DATABASE_ARCHIVES"
+if [ -n "$RUST_ARCHIVES" ]; then
+  CARGO_CI_DIR="$RUST_ARCHIVES"
 fi
+case "$MODE" in
+  services-*-archives)
+    if [ "${ARCHIVE_CARGO_PROFILE:-drop}" = keep ]; then
+      CARGO_CI_DIR="$CARGO_CI_TARGET_DIR/ci"
+    else
+      CARGO_CI_DIR="$CARGO_CI_TARGET_DIR/debug"
+    fi
+    ;;
+esac
+
+# keep_binaries NAME...: building a service plane's archives, copy the named
+# binaries, just built, beside them; otherwise nothing.
+keep_binaries() {
+  case "$MODE" in services-*-archives) ;; *) return 0 ;; esac
+  local binary
+  for binary in "$@"; do
+    install -m 0755 "$CARGO_CI_DIR/$binary" "$ARCHIVE_BUILD_DIR/$binary"
+  done
+}
 
 dump_logs() {
   local name
@@ -285,7 +358,7 @@ cleanup() {
   done
   docker rm -f "$NATS_CONTAINER" >/dev/null 2>&1 || true
   integration_postgres_cleanup
-  if [ -n "${RUST_DATABASE_ARCHIVES:-}" ]; then
+  if [ -n "$RUST_ARCHIVES" ]; then
     rm -rf -- "$DATABASE_ARCHIVE_BUILD_ROOT"
   fi
   if [ -n "$IDP_SIGNING_KEK_DIR" ]; then
@@ -956,9 +1029,15 @@ build_selected_services() {
   log "Cargo target directory: $CARGO_TARGET_DIR"
   if [ "${#packages[@]}" -gt 0 ]; then
     cargo_ci build --locked --profile ci "${packages[@]}"
+    # Before any test build of these packages rebuilds their binaries with
+    # the tests' features.
+    selected service_idp && keep_binaries codewire-idp
+    selected service_coordinator && keep_binaries codewire-coordinator
+    selected service_billing && keep_binaries codewire-billing
   fi
   if selected service_orchestration; then
     cargo_ci build --locked --profile ci -p codewire-cli-bin --bin cw
+    keep_binaries cw
     # One build for the wire contract and the service: an integration test
     # also builds every binary of its package, with the test's features, into
     # the profile directory. A separate `cargo build` of the binaries resolves
@@ -971,6 +1050,33 @@ build_selected_services() {
         return 1
       }
     done
+    # The wire contract's archive carries these binaries (extract_archives).
+  fi
+}
+
+# Building a service plane's archives (compile once, infra#1632): every test
+# the run_* functions below run, one build per package and feature set, as
+# they run it. The orchestration wire contract builds in
+# build_selected_services. A test missing here fails its run, which finds no
+# archive, or no test, for it.
+build_service_suites() {
+  local -a coordinator=(--lib)
+  if selected service_idp; then
+    cargo_ci test --locked --profile ci -p codewire-idp --test db_flow \
+      --test session_inventory --test two_factor_replacement --test rewrap_cli --no-run
+  fi
+  selected service_coordinator && coordinator+=(--test wire_contract)
+  if selected service_coordinator || selected service_nats; then
+    cargo_ci test --locked --profile ci -p codewire-coordinator "${coordinator[@]}" --no-run
+  fi
+  if selected service_billing; then
+    cargo_ci test --locked --profile ci -p codewire-billing --test wire_contract --no-run
+  fi
+  if selected service_connectcore; then
+    cargo_ci test --locked --profile ci -p codewire-server-core --test connect_auth --no-run
+  fi
+  if selected service_orchestration; then
+    cargo_ci test --locked --profile ci -p codewire-orchestration --lib --no-run
   fi
 }
 
@@ -1621,6 +1727,7 @@ run_nats() {
 }
 
 run_services() {
+  [ -z "$RUST_ARCHIVES" ] || extract_archives "$RUST_ARCHIVES"
   reset_schema
   build_selected_services
   selected service_idp && run_idp
@@ -1639,6 +1746,18 @@ filter_service_selection() {
     selected "$token" && filtered+="${token}|"
   done
   printf '%scomplete|\n' "$filtered"
+}
+
+# service_plane_selection PLANE: this run's selection, cut to that plane.
+service_plane_selection() {
+  case "$1" in
+    control)
+      filter_service_selection service_idp service_coordinator service_billing \
+        service_connectcore service_temporal
+      ;;
+    runtime) filter_service_selection service_orchestration service_nats service_temporal ;;
+    *) echo "::error::unknown service plane: $1" >&2; return 2 ;;
+  esac
 }
 
 case "$MODE" in
@@ -1661,23 +1780,28 @@ case "$MODE" in
     log "PostgreSQL source=${INTEGRATION_POSTGRES_SOURCE}"
     run_database
     ;;
-  services-control)
-    integration_postgres_configure
-    log "PostgreSQL source=${INTEGRATION_POSTGRES_SOURCE}"
-    SELECTION="$(filter_service_selection \
-      service_idp service_coordinator service_billing \
-      service_connectcore service_temporal)"
-    run_services
+  services-control-archives|services-runtime-archives)
+    # The build runner's half of compile once for one service plane: no
+    # PostgreSQL, no tests. The binaries the plane starts go beside its
+    # archives, the migration runner first.
+    mkdir -p "$ARCHIVE_BUILD_DIR"
+    plane="${MODE#services-}"
+    SELECTION="$(service_plane_selection "${plane%-archives}")"
+    cargo_ci build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate
+    keep_binaries codewire-db-migrate
+    build_selected_services
+    build_service_suites
+    log "$MODE built: $(find "$ARCHIVE_BUILD_DIR" -name '*.tar.zst' | wc -l) archives, $(find "$ARCHIVE_BUILD_DIR" -maxdepth 1 -type f ! -name '*.tar.zst' | wc -l) binaries"
+    exit 0
     ;;
-  services-runtime)
+  services-control|services-runtime)
     integration_postgres_configure
     log "PostgreSQL source=${INTEGRATION_POSTGRES_SOURCE}"
-    SELECTION="$(filter_service_selection \
-      service_orchestration service_nats service_temporal)"
+    SELECTION="$(service_plane_selection "${MODE#services-}")"
     run_services
     ;;
   *)
-    echo "usage: run-integration-verification.sh database|database-archives|services-control|services-runtime" >&2
+    echo "usage: run-integration-verification.sh database|database-archives|services-control|services-runtime|services-control-archives|services-runtime-archives" >&2
     exit 2
     ;;
 esac

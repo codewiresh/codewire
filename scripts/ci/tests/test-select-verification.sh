@@ -2952,6 +2952,24 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
       echo 'database: the archive path must follow the fetch, not the compile job alone' >&2
       exit 1
     fi
+  elif [ "$job_id" = services-control ] || [ "$job_id" = services-runtime ]; then
+    # Compile once (infra#1632): it runs the compile job's archives for its
+    # plane when that job built them, and compiles itself when it was not
+    # dispatched or the store no longer holds them (a miss builds in place,
+    # as for database).
+    grep -qF "    needs: [verification-selection, rust-compile]" "$block"
+    grep -qF "needs.verification-selection.outputs.${expectation_name}_expected == 'true'" "$block"
+    grep -qF "needs.rust-compile.result != 'failure' && needs.rust-compile.result != 'cancelled'" "$block"
+    grep -qF "ARCHIVE_SHA256: \${{ needs.rust-compile.outputs.${expectation_name}_sha256 }}" "$block"
+    # shellcheck disable=SC2016 # The workflow text holds literal shell variables.
+    grep -qF 'run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/services.tar"' "$block"
+    [ "$(grep -cF "steps.services-archives.outputs.ready != 'true' }}" "$block")" -eq 3 ]
+    [ "$(grep -cF "steps.services-archives.outputs.ready == 'true' }}" "$block")" -eq 2 ]
+    grep -qF "RUST_SERVICE_ARCHIVES: \${{ steps.services-archives.outputs.ready == 'true' && format('{0}/service-archives', runner.temp) || '' }}" "$block"
+    if grep -qF 'BUILD_ONCE' "$block"; then
+      echo "$job_id: the archive path must follow the fetch, not the compile job alone" >&2
+      exit 1
+    fi
   elif [ "$job_id" = rust-packages ]; then
     # Compile once (infra#1632): it runs the compile job's test archive, so it
     # needs that job's success on every run, a main push included.
@@ -3782,9 +3800,10 @@ grep -qF 'NATS_MONITOR_URL="http://${INTEGRATION_NATS_HOST}:8222/healthz"' \
   "$integration_runner"
 grep -qF 'service_idp service_coordinator service_billing' \
   "$integration_runner"
-grep -qF 'service_connectcore service_temporal)' "$integration_runner"
-grep -qF 'service_orchestration service_nats service_temporal)' \
+grep -qF '        service_connectcore service_temporal' "$integration_runner"
+grep -qF 'runtime) filter_service_selection service_orchestration service_nats service_temporal ;;' \
   "$integration_runner"
+grep -qF 'SELECTION="$(service_plane_selection "${MODE#services-}")"' "$integration_runner"
 if rg -n 'run-integration-verification\.sh services([^_-]|$)|"\$INTEGRATION_RUNNER" services([^_-]|$)' \
     "$WORKFLOW" "$ROOT/scripts/dev"; then
   echo 'automatic verification retains the oversized combined service integration mode' >&2
@@ -5272,6 +5291,8 @@ SUPPORT = {
     "Bring the warm build folder to this commit", "Publish the test archives", "Finish the warm build folder",
     "Fetch and verify the test archive", "Install pinned cargo-nextest",
     "Fetch and verify the database archives", "Unpack the database archives",
+    "Fetch and verify the service control-plane archives", "Unpack the service control-plane archives",
+    "Fetch and verify the service runtime-plane archives", "Unpack the service runtime-plane archives",
     "Select independent workspace caches",
     "Install pinned protoc for Rust builds", "Install pinned protoc for Rust-backed standard checks",
     "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",
@@ -5501,6 +5522,35 @@ for token in universe:
         synthetic.add("|valid:v3|" + "|".join(sorted({token, *extra})) + "|complete|")
 synthetic.add("|valid:v3|complete|")
 checked = 0
+# Compile once (infra#1632): a service job whose archives are ready compiles
+# nothing and runs from them; one whose fetch missed (evicted, or nothing was
+# built for the run) builds in place, as before, and never fails for it.
+SERVICE_COMPILE_STEPS = {
+    "Select best-effort shared Rust cache", "Install pinned protoc for Rust compilation",
+    "Report and clean Rust cache",
+}
+for job_id, plane in (("services-control", "control-plane"), ("services-runtime", "runtime-plane")):
+    archive_steps = {f"Unpack the service {plane} archives", "Install pinned cargo-nextest"}
+    for ready in ("true", "false", ""):
+        context = {
+            "needs.verification-selection.outputs.tested_tree_receipt": "fallback",
+            "steps.service-scope.outputs.selected": "true",
+            "steps.services-archives.outputs.ready": ready,
+        }
+        ran = {step["name"] for step in jobs[job_id]["steps"]
+               if "name" in step and ("if" not in step or evaluate(step["if"], context))}
+        took, skipped = ((archive_steps, SERVICE_COMPILE_STEPS) if ready == "true"
+                         else (SERVICE_COMPILE_STEPS, archive_steps))
+        if not took <= ran or ran & skipped:
+            raise SystemExit(f"{job_id} with archives ready={ready!r} ran {sorted(ran)}")
+        # The service run takes the archives only when they are ready (its
+        # RUST_SERVICE_ARCHIVES expression is pinned in the job block check).
+        run_step = next(step for step in jobs[job_id]["steps"] if step.get("name") == "Run Service integration")
+        if not run_step["env"]["RUST_SERVICE_ARCHIVES"].startswith(
+                "${{ steps.services-archives.outputs.ready == 'true' && "):
+            raise SystemExit(f"{job_id}: the service run must take the archives only when ready")
+print("service jobs: ready archives run without compiling; a fetch miss builds in place")
+
 for selection in sorted(set(realistic) | synthetic):
     # A scheduled selection dispatches no artifact group.
     scheduled_only = "|scheduled|" in selection
