@@ -3680,7 +3680,7 @@ tooling_bun_setup="$(grep -A3 -F \
   "$tooling_block" || true)"
 if ! grep -qF "tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|dev_smoke_script_tests|')" \
     <<<"$tooling_bun_setup" ||
-   ! grep -qF "bun-version: '1.3.9'" <<<"$tooling_bun_setup"; then
+   ! grep -qF "bun-version: '1.4.4'" <<<"$tooling_bun_setup"; then
   echo 'tooling: Dev smoke must provision pinned Bun in its own selected job' >&2
   exit 1
 fi
@@ -5550,7 +5550,7 @@ SUPPORT = {
     "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",
     "Install locked dashboard browser-test dependencies",
     "Set up Go 1.27.3", "Set up Go 1.27.3 for security checks", "Set up Go 1.27.3 for DERP interop",
-    "Set up Node.js 20.20.2",
+    "Set up Node.js 22.23.4",
     "Set up pinned Darwin C cross-check tools",
     "Clean workspace cache credentials",
     "Clean compiler cache credentials", "Report and clean Rust cache", "Start integration Postgres",

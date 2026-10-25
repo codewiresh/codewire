@@ -293,7 +293,7 @@ grep -qF 'rm -rf /tmp/cargo-target' <<<"$builder_stage" ||
   fail 'workspace target cleanup must share the compile layer'
 floating_stage="$(sed -n '/^FROM workspace-foundation AS workspace-floating-tools$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
 for tool in 'NPM_CONFIG_PREFIX=/usr/local npm install' 'npm@12.2.0 pnpm@12.9.0 yarn@1.22.22' \
-  'https://bun.sh/install' 'pipx install poetry' 'pipx install uv' 'pipx install aider-chat' \
+  'echo "${bun_sha}  /tmp/bun.zip" | sha256sum -c -' 'pipx install poetry' 'pipx install uv' 'pipx install aider-chat' \
   'COPY --from=workspace-floating-go --chown=codewire:codewire /out/ /home/codewire/go/bin/' \
   'RUN gopls version && hcloud version'; do
   grep -qF "$tool" <<<"$floating_stage" || fail "floating tool omitted from the fresh stage: $tool"

@@ -16,8 +16,8 @@ case "$(uname -s)-$(uname -m)" in
 esac
 
 case "$version-$platform" in
-  20.20.2-linux-x64)
-    official_sha256="19e56f0825510207dd904f087fe52faa0a4eb6b2aab5f0ea7a33830d04888b8b"
+  22.23.4-linux-x64)
+    official_sha256="b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406"
     ;;
   *)
     echo "unsupported Node.js version: ${version} (${platform})" >&2

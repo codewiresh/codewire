@@ -176,7 +176,7 @@ FROM ${BASE_IMAGE_REF} AS workspace-foundation
 SHELL ["/bin/bash", "-c"]
 USER root
 ARG TARGETARCH
-ARG NODE_VERSION=22.23.2
+ARG NODE_VERSION=22.23.4
 ARG GO_VERSION=1.27.3
 
 # Node and Go are direct, checksum-verified upstream archives on both supported
@@ -185,11 +185,11 @@ RUN set -euo pipefail; \
     case "$TARGETARCH" in \
       amd64) \
         node_arch=x64; \
-        node_sha=b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a; \
+        node_sha=b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406; \
         go_sha=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 ;; \
       arm64) \
         node_arch=arm64; \
-        node_sha=013b59cfd2819703a6f4a14ab891fc46fc2a4e3f5bcd92de3fb4929b43e35b30; \
+        node_sha=f7a1e486dbc8b286847815b477d4fb5e9fb963ed4489c3e1588853d685f589f9; \
         go_sha=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 ;; \
       *) echo "unsupported workspace image architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
@@ -256,13 +256,27 @@ USER root
 # Moving convenience channels intentionally resolve at image-build time. Their
 # result remains visible to the SBOM and is identified by the immutable output
 # image digest. The package managers are exact pins: npm also installs the
-# shipped agents below.
-RUN NPM_CONFIG_PREFIX=/usr/local npm install -g --ignore-scripts npm@12.2.0 pnpm@12.9.0 yarn@1.22.22 && \
-    npm cache clean --force && \
-    curl --proto '=https' --tlsv1.2 -fsSL https://bun.sh/install | bash && \
-    install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun && \
-    ln -s bun /usr/local/bin/bunx && \
-    rm -rf /root/.bun
+# shipped agents below. Bun is an exact, checksum-verified release: 1.4.4 fixes
+# the Brotli decoder out-of-bounds write (CVE-2026-111497).
+ARG TARGETARCH
+ARG BUN_VERSION=1.4.4
+RUN set -euo pipefail; \
+    NPM_CONFIG_PREFIX=/usr/local npm install -g --ignore-scripts npm@12.2.0 pnpm@12.9.0 yarn@1.22.22; \
+    npm cache clean --force; \
+    case "$TARGETARCH" in \
+      amd64) bun_arch=x64; bun_sha=bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c ;; \
+      arm64) bun_arch=aarch64; bun_sha=baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e ;; \
+      *) echo "unsupported workspace image architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-${bun_arch}.zip" \
+      -o /tmp/bun.zip; \
+    echo "${bun_sha}  /tmp/bun.zip" | sha256sum -c -; \
+    unzip -q -j /tmp/bun.zip "bun-linux-${bun_arch}/bun" -d /tmp/bun; \
+    install -m 0755 /tmp/bun/bun /usr/local/bin/bun; \
+    ln -s bun /usr/local/bin/bunx; \
+    rm -rf /tmp/bun.zip /tmp/bun; \
+    test "$(bun --version)" = "$BUN_VERSION"
 
 USER codewire
 COPY --from=workspace-floating-go --chown=codewire:codewire /out/ /home/codewire/go/bin/

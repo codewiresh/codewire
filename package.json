@@ -35,7 +35,7 @@
     "kind:billing": "make kind-billing-listen",
     "stripe": "XDG_CONFIG_HOME=/tmp/stripe-config stripe listen --forward-to localhost:8080/api/webhooks/stripe"
   },
-  "packageManager": "bun@1.3.9",
+  "packageManager": "bun@1.4.4",
   "engines": {
     "node": ">=22.0.0"
   },

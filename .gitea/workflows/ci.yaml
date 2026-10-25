@@ -503,13 +503,13 @@ jobs:
       - uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
         with:
-          bun-version: '1.3.9'
+          bun-version: '1.4.4'
 
       # A pinned, checksum-verified Node.js from nodejs.org: the setup-node
       # action first waited 133 s for github.com, which CI cannot reach.
-      - name: Set up Node.js 20.20.2
+      - name: Set up Node.js 22.23.4
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_ts|') }}
-        run: scripts/ci/setup/setup-node.sh 20.20.2
+        run: scripts/ci/setup/setup-node.sh 22.23.4
 
       - name: Run Contracts
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
@@ -600,7 +600,7 @@ jobs:
       - uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|dev_smoke_script_tests|') }}
         with:
-          bun-version: '1.3.9'
+          bun-version: '1.4.4'
 
       - name: Verify sealed delivery-contract tools
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|deploy|') || contains(needs.verification-selection.outputs.selection, '|release|') || contains(needs.verification-selection.outputs.selection, '|security|')) }}
@@ -1961,7 +1961,7 @@ jobs:
       - uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') && matrix.shard.slug == 'dashboard' }}
         with:
-          bun-version: '1.3.9'
+          bun-version: '1.4.4'
 
       - name: Install locked dashboard browser-test dependencies
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') && matrix.shard.slug == 'dashboard' }}
