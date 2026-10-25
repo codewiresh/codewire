@@ -56,7 +56,7 @@ jobs:
       baseline_valid: ${{ steps.select.outputs.baseline_valid }}
       dev_release_tree_state: ${{ steps.select.outputs.dev_release_tree_state }}
     steps:
-      - uses: noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
 
@@ -140,7 +140,7 @@ jobs:
       # then a rerun of all jobs (this run passes no artifacts between jobs).
       CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
     steps:
-      - uses: noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       # The protected R2 compiler cache is best effort: when this job cannot
       # obtain its protected credential, the selector chooses the job-local
@@ -199,7 +199,7 @@ jobs:
       # then a rerun of all jobs (this run passes no artifacts between jobs).
       CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
     steps:
-      - uses: noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       # The protected R2 compiler cache is best effort: when this job cannot
       # obtain its protected credential, the selector chooses the job-local
@@ -251,7 +251,7 @@ jobs:
     steps:
       # The descent checks compare this commit with Dev's source in main's
       # history.
-      - uses: noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
 

@@ -33,15 +33,15 @@ import ci_runner_fixtures as runners  # noqa: E402
 
 CHECKOUT = (
     "noel/actions-checkout@"
-    "34e114876b0b11c390a56381ad16ebd13914f8d5"
+    "3d3c42e5aac5ba805825da76410c181273ba90b1"
 )
 UPLOAD = (
     "noel/actions-upload-artifact@"
-    "c6a3b2bd78b3985e4b2f15397fec357f0fd808de"
+    "c6a366c94c3e0affe28c06c8df20a878f24da3cf"
 )
 DOWNLOAD = (
     "noel/actions-download-artifact@"
-    "ad191675b41f6a5b46da9a048cb6893812da158b"
+    "a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59"
 )
 PRODUCERS = {
     "kind-workspace": "workspace",

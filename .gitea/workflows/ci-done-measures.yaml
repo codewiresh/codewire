@@ -27,7 +27,7 @@ jobs:
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     timeout-minutes: 20
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           # Merge-to-Dev reads ancestry between merges and deployed sources.
           fetch-depth: 0
@@ -74,7 +74,7 @@ jobs:
           echo "::endgroup::"
 
       - name: Upload rows and summary
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: ci-done-measures-${{ github.run_id }}
           path: ${{ runner.temp }}/ci-done-measures/

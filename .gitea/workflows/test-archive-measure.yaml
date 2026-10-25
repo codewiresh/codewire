@@ -31,7 +31,7 @@ jobs:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/test-archive
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Bound cargo jobs by memory
         run: scripts/ci/setup/bound-cargo-jobs.sh

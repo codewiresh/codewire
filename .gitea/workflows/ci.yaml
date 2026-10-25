@@ -130,7 +130,7 @@ jobs:
       kind_workspace_source: ${{ steps.kind-workspace.outputs.kind_workspace_source }}
       source_sha: ${{ steps.source.outputs.source_sha }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
 
@@ -161,7 +161,7 @@ jobs:
           scripts/ci/setup/assert-ci-runner-image.sh
           scripts/ci/tests/test-ci-runner-image-contract.sh
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ github.event_name == 'pull_request' }}
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -169,7 +169,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' }}
         with:
           ref: ${{ github.event.before }}
@@ -417,7 +417,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'policy content verification inherited from the exact tested PR-head tree'
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
@@ -454,7 +454,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'standard content verification inherited from the exact tested PR-head tree'
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
@@ -583,7 +583,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'tooling content verification inherited from the exact tested PR-head tree'
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
@@ -673,7 +673,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'Rust compilation inherited from the exact tested PR-head tree'
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
@@ -723,7 +723,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'Rust checks inherited from the exact tested PR-head tree'
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
@@ -825,7 +825,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'Rust packages shard verification inherited from the exact tested PR-head tree'
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
@@ -935,7 +935,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'Rust features shard verification inherited from the exact tested PR-head tree'
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
@@ -1046,7 +1046,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'Rust and transport content verification inherited from the exact tested PR-head tree'
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
@@ -1200,7 +1200,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'database content verification inherited from the exact tested PR-head tree'
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
@@ -1369,7 +1369,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected != 'true' }}
         run: echo 'service control-plane integration is unaffected'
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
@@ -1540,7 +1540,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected != 'true' }}
         run: echo 'service runtime-plane integration is unaffected'
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
@@ -1696,7 +1696,7 @@ jobs:
       # In-cluster cache of the dated apt snapshots, passed to BuildKit as a secret.
       CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
           persist-credentials: false
@@ -1724,7 +1724,7 @@ jobs:
         run: python3 -B scripts/ci/verify/kind-build-artifacts.py produce workspace "$RUNNER_TEMP/kind-workspace-out"
 
       - name: Upload successful workspace output
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: ${{ steps.export.outputs.artifact_name }}
           path: ${{ runner.temp }}/kind-workspace-out/
@@ -1746,7 +1746,7 @@ jobs:
       CODEWIRE_VERIFICATION_SOURCE_SHA: ${{ needs.verification-selection.outputs.source_sha }}
       CODEWIRE_IMAGE_SOURCE_SHA: ${{ needs.verification-selection.outputs.source_sha }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
           persist-credentials: false
@@ -1771,7 +1771,7 @@ jobs:
         run: python3 -B scripts/ci/verify/kind-build-artifacts.py produce product "$RUNNER_TEMP/kind-product-out"
 
       - name: Upload successful product output
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: ${{ steps.export.outputs.artifact_name }}
           path: ${{ runner.temp }}/kind-product-out/
@@ -1795,7 +1795,7 @@ jobs:
       CODEWIRE_VERIFICATION_SOURCE_SHA: ${{ needs.verification-selection.outputs.source_sha }}
       CODEWIRE_IMAGE_SOURCE_SHA: ${{ needs.verification-selection.outputs.source_sha }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
           persist-credentials: false
@@ -1820,7 +1820,7 @@ jobs:
         run: python3 -B scripts/ci/verify/kind-build-artifacts.py produce daemon "$RUNNER_TEMP/kind-daemon-out"
 
       - name: Upload successful daemon output
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: ${{ steps.export.outputs.artifact_name }}
           path: ${{ runner.temp }}/kind-daemon-out/
@@ -1843,7 +1843,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci
       RUN_DIR: ${{ github.workspace }}/.tmp/kind-smoke-build
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
           persist-credentials: false
@@ -1882,7 +1882,7 @@ jobs:
         run: python3 -B scripts/ci/verify/kind-build-artifacts.py produce smokes "$RUNNER_TEMP/kind-smokes-out"
 
       - name: Upload successful smoke output
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: ${{ steps.export.outputs.artifact_name }}
           path: ${{ runner.temp }}/kind-smokes-out/
@@ -1949,7 +1949,7 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'edge and Kind content verification inherited from the exact tested PR-head tree'
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
@@ -2004,7 +2004,7 @@ jobs:
 
       - name: Download exact workspace producer output
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') && needs.verification-selection.outputs.kind_workspace_source != 'pinned' }}
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: ${{ needs.kind-workspace.outputs.artifact_name }}
           path: ${{ runner.temp }}/kind-inputs/workspace
@@ -2020,21 +2020,21 @@ jobs:
 
       - name: Download exact product producer output
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: ${{ needs.kind-product.outputs.artifact_name }}
           path: ${{ runner.temp }}/kind-inputs/product
 
       - name: Download exact daemon producer output
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: ${{ needs.kind-daemon.outputs.artifact_name }}
           path: ${{ runner.temp }}/kind-inputs/daemon
 
       - name: Download exact smoke producer output
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: ${{ needs.kind-smokes.outputs.artifact_name }}
           path: ${{ runner.temp }}/kind-inputs/smokes
@@ -2063,7 +2063,7 @@ jobs:
         # screenshots, traces) are the only rendered-DOM evidence when a
         # browser spec fails on a shard cluster. Upload them before teardown.
         if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && matrix.shard.slug == 'dashboard' }}
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: kind-dashboard-test-results-${{ github.run_id }}-${{ matrix.shard.slug }}
           path: apps/dashboard/test-results/
@@ -2074,7 +2074,7 @@ jobs:
         # Every test's duration, retries and outcome, from every dashboard
         # run, green or red, so slow and flaky tests are visible (#2974).
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') && matrix.shard.slug == 'dashboard' }}
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: kind-dashboard-json-report-${{ github.run_id }}-${{ matrix.shard.slug }}
           path: apps/dashboard/test-report/
@@ -2112,7 +2112,7 @@ jobs:
       - services-runtime
       - edge-kind
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
 
@@ -2200,7 +2200,7 @@ jobs:
     outputs:
       continue: ${{ steps.watch.outputs.continue }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
 
@@ -2222,7 +2222,7 @@ jobs:
     outputs:
       continue: ${{ steps.watch.outputs.continue }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
 
@@ -2244,7 +2244,7 @@ jobs:
     outputs:
       continue: ${{ steps.watch.outputs.continue }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
 
@@ -2266,7 +2266,7 @@ jobs:
     outputs:
       continue: ${{ steps.watch.outputs.continue }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
 
@@ -2289,7 +2289,7 @@ jobs:
     needs: [verification-selection, required-verification]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.required-verification.result == 'success' && needs.verification-selection.outputs.superseded == 'false' }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
 

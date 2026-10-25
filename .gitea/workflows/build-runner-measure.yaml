@@ -48,7 +48,7 @@ jobs:
     outputs:
       archive_sha256: ${{ steps.build.outputs.archive_sha256 }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.inputs.first_ref }}
 
@@ -72,7 +72,7 @@ jobs:
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD' }}
     timeout-minutes: 60
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.inputs.second_ref }}
 

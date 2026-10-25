@@ -68,7 +68,7 @@ jobs:
       r2_publication: ${{ steps.find.outputs.r2_publication }}
       r2_promote_channel: ${{ steps.find.outputs.r2_promote_channel }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Find the pending release
         id: find
@@ -94,7 +94,7 @@ jobs:
       source_sha: ${{ steps.select.outputs.source_sha }}
       tag_object_sha: ${{ steps.select.outputs.tag_object_sha }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
 
@@ -187,9 +187,9 @@ jobs:
       present: ${{ steps.build.outputs.present }}
       linux_sha256: ${{ steps.build.outputs.linux_sha256 }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -239,7 +239,7 @@ jobs:
 
       - name: Hand the Linux side to the macOS build
         if: steps.build.outputs.present == 'true'
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: cw-release-runtime-linux-${{ github.run_id }}
           path: .local-runtime/runtime-linux.tar
@@ -267,9 +267,9 @@ jobs:
       unsigned_sha256: ${{ steps.build.outputs.unsigned_sha256 }}
       build_runner: ${{ steps.build.outputs.build_runner }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -305,7 +305,7 @@ jobs:
 
       - name: Hand the unsigned helper to signing
         if: steps.build.outputs.unsigned_sha256 != ''
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: cw-release-vz-runner-unsigned-${{ github.run_id }}
           path: .vz-runner-unsigned/codewire-vz-runner
@@ -330,9 +330,9 @@ jobs:
       notary_submission_id: ${{ steps.sign.outputs.notary_submission_id }}
       sign_runner: ${{ steps.sign.outputs.sign_runner }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
@@ -348,7 +348,7 @@ jobs:
 
       - name: Receive the unsigned helper
         if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-vz-runner-unsigned-${{ github.run_id }}
           path: vz-runner-unsigned
@@ -402,7 +402,7 @@ jobs:
 
       - name: Hand the signed helper to the macOS build
         if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: cw-release-vz-runner-signed-${{ github.run_id }}
           path: vz-runner-signed/codewire-vz-runner
@@ -427,9 +427,9 @@ jobs:
       # Every release cw embeds exactly this document; it binds every blob.
       document_sha256: ${{ steps.runtime.outputs.document_sha256 }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -444,14 +444,14 @@ jobs:
 
       - name: Receive the local runtime's Linux side
         if: needs.build-runtime-linux.outputs.present == 'true'
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-runtime-linux-${{ github.run_id }}
           path: .local-runtime-linux
 
       - name: Receive the signed VZ helper
         if: needs.sign-helper.outputs.signed_sha256 != ''
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-vz-runner-signed-${{ github.run_id }}
           path: .vz-runner-signed
@@ -510,7 +510,7 @@ jobs:
 
       - name: Hand the local runtime to the cw builds
         if: steps.runtime.outputs.present == 'true'
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: cw-release-runtime-${{ github.run_id }}
           path: .local-runtime/
@@ -520,7 +520,7 @@ jobs:
 
       - name: Hand the runtime part records to publication
         if: steps.runtime.outputs.records_sha256 != ''
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: cw-release-runtime-records-${{ github.run_id }}
           path: .runtime-records/runtime-records.tar
@@ -544,9 +544,9 @@ jobs:
     outputs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -571,7 +571,7 @@ jobs:
 
       - name: Receive the local runtime
         if: needs.pack-runtime.outputs.present == 'true'
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-runtime-${{ github.run_id }}
           path: .local-runtime
@@ -603,7 +603,7 @@ jobs:
             "$(shasum -a 256 dist/cw-release/SHA256SUMS | cut -c1-64)" >> "$GITHUB_OUTPUT"
 
       - name: Hand the macOS pair to packaging
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: cw-release-darwin-${{ github.run_id }}
           path: .release-source/dist/cw-release/
@@ -623,10 +623,10 @@ jobs:
     outputs:
       darwin_sums_sha256: ${{ steps.sign.outputs.darwin_sums_sha256 }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Receive the macOS pair
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-darwin-${{ github.run_id }}
           path: dist-darwin
@@ -676,7 +676,7 @@ jobs:
             "$(sha256sum dist-darwin-signed/SHA256SUMS | cut -c1-64)" >> "$GITHUB_OUTPUT"
 
       - name: Hand the signed macOS pair to packaging
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: cw-release-darwin-signed-${{ github.run_id }}
           path: dist-darwin-signed/
@@ -707,9 +707,9 @@ jobs:
     outputs:
       cw_sha256: ${{ steps.build.outputs.cw_sha256 }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -724,7 +724,7 @@ jobs:
 
       - name: Receive the local runtime
         if: needs.pack-runtime.outputs.present == 'true'
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-runtime-${{ github.run_id }}
           path: .local-runtime
@@ -749,7 +749,7 @@ jobs:
         run: scripts/ci/release/build-cw-linux.sh .release-source "$RELEASE_TAG" x86_64-unknown-linux-musl .cw-linux
 
       - name: Hand the cw to packaging
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: cw-release-x86_64-unknown-linux-musl-${{ github.run_id }}
           path: .cw-linux/
@@ -781,9 +781,9 @@ jobs:
     outputs:
       cw_sha256: ${{ steps.build.outputs.cw_sha256 }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -798,7 +798,7 @@ jobs:
 
       - name: Receive the local runtime
         if: needs.pack-runtime.outputs.present == 'true'
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-runtime-${{ github.run_id }}
           path: .local-runtime
@@ -823,7 +823,7 @@ jobs:
         run: scripts/ci/release/build-cw-linux.sh .release-source "$RELEASE_TAG" aarch64-unknown-linux-gnu .cw-linux
 
       - name: Hand the cw to packaging
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: cw-release-aarch64-unknown-linux-gnu-${{ github.run_id }}
           path: .cw-linux/
@@ -845,9 +845,9 @@ jobs:
       delivery_sha256: ${{ steps.prepare.outputs.delivery_sha256 }}
       verifier_sha256: ${{ steps.verifier.outputs.verifier_sha256 }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -874,19 +874,19 @@ jobs:
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
       - name: Receive the signed macOS pair
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-darwin-signed-${{ github.run_id }}
           path: .release-source/dist-darwin
 
       - name: Receive the Linux x86_64 cw
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-x86_64-unknown-linux-musl-${{ github.run_id }}
           path: .release-source/dist-linux
 
       - name: Receive the Linux arm64 cw
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-aarch64-unknown-linux-gnu-${{ github.run_id }}
           path: .release-source/dist-linux
@@ -953,7 +953,7 @@ jobs:
             "$(python3 ../scripts/ci/release/cw_release.py digest --dist dist/cw-release)" >> "$GITHUB_OUTPUT"
 
       - name: Hand the unsigned delivery to signing
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: cw-release-delivery-${{ github.run_id }}
           path: .release-source/dist/cw-release/
@@ -976,7 +976,7 @@ jobs:
             "$(sha256sum ../.release-verifier/verify-release-signatures | cut -c1-64)" >> "$GITHUB_OUTPUT"
 
       - name: Hand the signature verifier to signing
-        uses: noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
         with:
           name: cw-release-verifier-${{ github.run_id }}
           path: .release-verifier/
@@ -994,9 +994,9 @@ jobs:
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -1017,7 +1017,7 @@ jobs:
         run: scripts/ci/release/require-current-release.sh "$RELEASE_TAG"
 
       - name: Receive the unsigned delivery
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-delivery-${{ github.run_id }}
           path: .release-source/dist/cw-release
@@ -1033,7 +1033,7 @@ jobs:
           python3 ../scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned
 
       - name: Receive cw's release-signature verifier
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-verifier-${{ github.run_id }}
           path: .release-verifier
@@ -1120,7 +1120,7 @@ jobs:
 
       - name: Receive the runtime part records
         if: ${{ needs.release-selection.outputs.r2_publication == 'immutable' && needs.pack-runtime.outputs.records_sha256 != '' }}
-        uses: noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-release-runtime-records-${{ github.run_id }}
           path: .runtime-records

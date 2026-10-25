@@ -20,11 +20,9 @@ mapfile -t references < <(
 ((${#references[@]} > 0)) || fail "no action references found"
 
 expected=(
-  'noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5'
-  'noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0'
-  'noel/actions-checkout@11bd71901bbe5b1630ceea73d27597364c9af683'
-  'noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de'
-  'noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b'
+  'noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
+  'noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf'
+  'noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59'
   'noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6'
 )
 

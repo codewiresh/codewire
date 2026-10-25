@@ -51,7 +51,7 @@ jobs:
     outputs:
       release_tag: ${{ steps.find.outputs.release_tag }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Find the pending release
         id: find
@@ -71,7 +71,7 @@ jobs:
       source_sha: ${{ steps.select.outputs.source_sha }}
       tag_object_sha: ${{ steps.select.outputs.tag_object_sha }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
 
@@ -163,11 +163,11 @@ jobs:
       base_amd64_digest: ${{ steps.pair.outputs.base_amd64_digest }}
       base_arm64_digest: ${{ steps.pair.outputs.base_arm64_digest }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -308,9 +308,9 @@ jobs:
       # unreachable; only the owner's in_job_build dispatch builds it here.
       CODEWIRE_IN_JOB_BUILD: ${{ (inputs.in_job_build == true || inputs.in_job_build == 'true') && '1' || '0' }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -358,9 +358,9 @@ jobs:
       base_digest: ${{ steps.build.outputs.base_digest }}
       workspace_digest: ${{ steps.build.outputs.workspace_digest }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
@@ -396,9 +396,9 @@ jobs:
     needs: [release-selection, publish-release, build-support-amd64, build-support-arm64]
     if: ${{ always() && needs.release-selection.result == 'success' && needs.publish-release.result == 'success' && needs.publish-release.outputs.build == 'true' && needs.build-support-amd64.result == 'success' && needs.build-support-arm64.result == 'success' }}
     steps:
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
