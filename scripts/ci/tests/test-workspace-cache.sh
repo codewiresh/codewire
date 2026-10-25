@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Execute owned-daemon handling with a fake remote Docker API and synthetic key.
+# shellcheck disable=SC2030,SC2031 # Each case rebinds work and its FAKE_* records in its own subshell.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PRIMARY_ROOT="$ROOT"
@@ -145,90 +146,133 @@ exercise() (
   workspace_cache_build "${EXERCISE_TARGET:-workspace}" "$source_tree" amd64 "$work/build.log" \
     --file "$ROOT/images/workspace/Dockerfile" "$ROOT"
 )
+# Each exercise case runs in its own private work directory, so the cases run
+# side by side (run_side_by_side): a case's docker, build, tee and producer
+# records are its own. The source fixture and credential file are shared and
+# only read.
+# shellcheck source=scripts/ci/verify/side-by-side.sh
+source "$PRIMARY_ROOT/scripts/ci/verify/side-by-side.sh"
+cases="$work/cases"
+mkdir "$cases"
+declare -A case_commands=()
+case_names=()
+# queue_case NAME FUNCTION ARGS...: run FUNCTION ARGS in NAME's own work.
+queue_case() {
+  local name="$1" command
+  shift
+  [[ -z "${case_commands[$name]+set}" ]] || { echo "duplicate case $name" >&2; exit 1; }
+  printf -v command ' %q' "$@"
+  case_commands[$name]="${command# }"
+  case_names+=("$name")
+}
+run_case() (
+  # The builder name comes from the work directory's name, which keeps mixed
+  # case so the fake checks Buildx's lowercased node.
+  work="$(mktemp -d "$cases/workspace-cache-test.MixedCase.XXXXXX")"
+  export FAKE_LOG="$work/docker.log" FAKE_FILE="$work/daemon.aws" FAKE_BUILDS="$work/builds"
+  export FAKE_CW_BUILDS="$work/cw-builds" FAKE_NODE="$work/node-name"
+  export FAKE_BUILD_DIAGNOSTIC="$work/diagnostic.log"
+  export FAKE_TEE_CALLS="$work/tee-calls" FAKE_TEE_FIRST_LOG="$work/build.log"
+  : >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"; : >"$FAKE_TEE_CALLS"
+  eval "${case_commands[$1]}"
+)
+
+mode_pair_case() {
+  local compiler="$1" layers="$2"
+  CODEWIRE_SCCACHE_MODE="$compiler" CODEWIRE_BUILDKIT_CACHE_MODE="$layers" exercise >"$work/out" 2>&1 || {
+    cat "$work/out" >&2; exit 1;
+  }
+  [[ "$(wc -l <"$FAKE_CW_BUILDS")" == 1 && "$(wc -l <"$FAKE_BUILDS")" == 1 ]]
+  [[ -s "$work/cw-image-work/cw-producer-result.json" ]]
+  [[ -f "$credential_work/r2.aws" && ! -e "$FAKE_FILE" ]]
+  grep -Fq -- '--driver-opt image=docker.io/moby/buildkit:v0.29.0@sha256:' "$FAKE_LOG"
+  grep -q '^buildx rm --force codewire-workspace-' "$FAKE_LOG"
+  if [[ "$layers" == r2 ]]; then
+    grep -q '^exec --interactive ' "$FAKE_LOG"
+    grep -q 'prefix=untrusted/codewire/buildkit/v1/' "$work/layer-args"
+    grep -q 'mode=max.*ignore-error=true' "$work/layer-args"
+  else
+    ! grep -q '^exec ' "$FAKE_LOG" || exit 1
+    ! grep -q -- '--cache-' "$work/layer-args" || exit 1
+  fi
+  if [[ "$layers" == disabled ]]; then
+    grep -Fxq -- '--no-cache' "$work/layer-args"
+    ! grep -q -- '--no-cache-filter' "$work/layer-args" || exit 1
+  else
+    grep -Fxq -- workspace-floating-tools "$work/layer-args"
+  fi
+  if [[ "$compiler" == r2 ]]; then grep -q 'id=aws_shared_credentials,src=' "$work/compiler-args"
+  else ! grep -q -- '--secret' "$work/compiler-args" || exit 1; fi
+  ! grep -Eq 'synthetic-workspace-(key|secret)' "$FAKE_LOG" "$work/out" "$work/layer-args" "$work/compiler-args" "$work/buildkitd.toml" || exit 1
+  ! grep -q 'codewire-apt-mirror' "$FAKE_LOG" || exit 1
+}
 for compiler in disabled local r2; do
   for layers in disabled local r2; do
-    : >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"
-    CODEWIRE_SCCACHE_MODE="$compiler" CODEWIRE_BUILDKIT_CACHE_MODE="$layers" exercise >"$work/out" 2>&1 || {
-      cat "$work/out" >&2; exit 1;
-    }
-    [[ "$(wc -l <"$FAKE_CW_BUILDS")" == 1 && "$(wc -l <"$FAKE_BUILDS")" == 1 ]]
-    [[ -s "$work/cw-image-work/cw-producer-result.json" ]]
-    [[ -f "$credential_work/r2.aws" && ! -e "$FAKE_FILE" ]]
-    grep -Fq -- '--driver-opt image=docker.io/moby/buildkit:v0.29.0@sha256:' "$FAKE_LOG"
-    grep -q '^buildx rm --force codewire-workspace-' "$FAKE_LOG"
-    if [[ "$layers" == r2 ]]; then
-      grep -q '^exec --interactive ' "$FAKE_LOG"
-      grep -q 'prefix=untrusted/codewire/buildkit/v1/' "$work/layer-args"
-      grep -q 'mode=max.*ignore-error=true' "$work/layer-args"
-    else
-      ! grep -q '^exec ' "$FAKE_LOG" || exit 1
-      ! grep -q -- '--cache-' "$work/layer-args" || exit 1
-    fi
-    if [[ "$layers" == disabled ]]; then
-      grep -Fxq -- '--no-cache' "$work/layer-args"
-      ! grep -q -- '--no-cache-filter' "$work/layer-args" || exit 1
-    else
-      grep -Fxq -- workspace-floating-tools "$work/layer-args"
-    fi
-    if [[ "$compiler" == r2 ]]; then grep -q 'id=aws_shared_credentials,src=' "$work/compiler-args"
-    else ! grep -q -- '--secret' "$work/compiler-args" || exit 1; fi
-    ! grep -Eq 'synthetic-workspace-(key|secret)' "$FAKE_LOG" "$work/out" "$work/layer-args" "$work/compiler-args" "$work/buildkitd.toml" || exit 1
-    ! grep -q 'codewire-apt-mirror' "$FAKE_LOG" || exit 1
+    queue_case "mode-$compiler-$layers" mode_pair_case "$compiler" "$layers"
   done
 done
 # A canonical-main selection reads and writes only the main bucket and its
 # prefixes; a mixed main bucket and untrusted prefix is refused.
-: >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"
-CODEWIRE_R2_CACHE_TRUST=main SCCACHE_BUCKET=example-ci-cache-protected CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
-  CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 exercise >"$work/out" 2>&1 || {
-  cat "$work/out" >&2; exit 1;
+main_bucket_case() {
+  CODEWIRE_R2_CACHE_TRUST=main SCCACHE_BUCKET=example-ci-cache-protected CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
+    CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 exercise >"$work/out" 2>&1 || {
+    cat "$work/out" >&2; exit 1;
+  }
+  grep -q 'bucket=example-ci-cache-protected,.*prefix=protected/codewire/buildkit/v1/' "$work/layer-args"
+  grep -q -- '--cache-to' "$work/layer-args"
+  grep -Fxq -- 'SCCACHE_BUCKET=example-ci-cache-protected' "$work/compiler-args"
+  grep -Fxq -- 'CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1' "$work/compiler-args"
+  ! grep -q untrusted "$work/layer-args" "$work/compiler-args" || exit 1
+  if CODEWIRE_R2_CACHE_TRUST=main SCCACHE_BUCKET=example-ci-cache-protected CODEWIRE_SCCACHE_MODE=r2 \
+      CODEWIRE_BUILDKIT_CACHE_MODE=r2 exercise >"$work/out" 2>&1; then
+    exit 1
+  fi
+  grep -Fq 'workspace cache requires the reviewed main R2 configuration' "$work/out"
 }
-grep -q 'bucket=example-ci-cache-protected,.*prefix=protected/codewire/buildkit/v1/' "$work/layer-args"
-grep -q -- '--cache-to' "$work/layer-args"
-grep -Fxq -- 'SCCACHE_BUCKET=example-ci-cache-protected' "$work/compiler-args"
-grep -Fxq -- 'CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1' "$work/compiler-args"
-! grep -q untrusted "$work/layer-args" "$work/compiler-args" || exit 1
-if CODEWIRE_R2_CACHE_TRUST=main SCCACHE_BUCKET=example-ci-cache-protected CODEWIRE_SCCACHE_MODE=r2 \
-    CODEWIRE_BUILDKIT_CACHE_MODE=r2 exercise >"$work/out" 2>&1; then
-  exit 1
-fi
-grep -Fq 'workspace cache requires the reviewed main R2 configuration' "$work/out"
+queue_case main-bucket main_bucket_case
 # A pull request imports main's layers read-only and exports nothing remote.
-: >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"
-CODEWIRE_R2_CACHE_TRUST=protected-read SCCACHE_BUCKET=example-ci-cache-protected CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
-  GITHUB_REF=refs/pull/2047/head CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 exercise >"$work/out" 2>&1 || {
-  cat "$work/out" >&2; exit 1;
+protected_read_case() {
+  CODEWIRE_R2_CACHE_TRUST=protected-read SCCACHE_BUCKET=example-ci-cache-protected CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
+    GITHUB_REF=refs/pull/2047/head CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 exercise >"$work/out" 2>&1 || {
+    cat "$work/out" >&2; exit 1;
+  }
+  grep -q -- '--cache-from' "$work/layer-args"
+  grep -q 'bucket=example-ci-cache-protected,.*name=amd64/workspace/main$' "$work/layer-args"
+  ! grep -q -- '--cache-to' "$work/layer-args" || exit 1
+  ! grep -q -- '--cache-to' "$FAKE_BUILDS" "$FAKE_CW_BUILDS" || exit 1
+  ! grep -q 'pr-2047' "$work/layer-args" || exit 1
 }
-grep -q -- '--cache-from' "$work/layer-args"
-grep -q 'bucket=example-ci-cache-protected,.*name=amd64/workspace/main$' "$work/layer-args"
-! grep -q -- '--cache-to' "$work/layer-args" || exit 1
-! grep -q -- '--cache-to' "$FAKE_BUILDS" "$FAKE_CW_BUILDS" || exit 1
-! grep -q 'pr-2047' "$work/layer-args" || exit 1
+queue_case protected-read protected_read_case
 # The CI apt snapshot cache reaches only base and workspace builds, as an
 # optional secret named by environment, and never as an argument value.
 readonly apt_mirror_secret=' --secret id=codewire-apt-mirror\,env=CODEWIRE_APT_SNAPSHOT_MIRROR '
+apt_mirror_case() {
+  local target="$1" mirror="$2" expected
+  CODEWIRE_APT_SNAPSHOT_MIRROR="$mirror" EXERCISE_TARGET="$target" \
+    CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=local exercise >"$work/out"
+  expected=0
+  [[ -z "$mirror" || "$target" == cw-arm64 ]] || expected=1
+  [[ "$(grep '^buildx build ' "$FAKE_LOG" | grep -cF -- "$apt_mirror_secret" || true)" == "$expected" ]] || {
+    echo "apt snapshot secret for target=$target mirror=${mirror:-unset} is not $expected" >&2; exit 1;
+  }
+  ! grep -q 'apt-cache.invalid' "$FAKE_LOG" "$work/out" || exit 1
+}
 for target in base workspace cw-arm64; do
   for mirror in '' http://apt-cache.invalid:8080; do
-    : >"$FAKE_LOG"; : >"$FAKE_BUILDS"
-    CODEWIRE_APT_SNAPSHOT_MIRROR="$mirror" EXERCISE_TARGET="$target" \
-      CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=local exercise >"$work/out"
-    expected=0
-    [[ -z "$mirror" || "$target" == cw-arm64 ]] || expected=1
-    [[ "$(grep '^buildx build ' "$FAKE_LOG" | grep -cF -- "$apt_mirror_secret" || true)" == "$expected" ]] || {
-      echo "apt snapshot secret for target=$target mirror=${mirror:-unset} is not $expected" >&2; exit 1;
-    }
-    ! grep -q 'apt-cache.invalid' "$FAKE_LOG" "$work/out" || exit 1
+    queue_case "apt-$target-${mirror:+mirror}${mirror:-unset}" apt_mirror_case "$target" "$mirror"
   done
 done
 # The no-cache retry after a remote layer read failure keeps the secret.
-: >"$FAKE_LOG"; : >"$FAKE_BUILDS"
-CODEWIRE_APT_SNAPSHOT_MIRROR=http://apt-cache.invalid:8080 \
-  CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=r2 FAKE_FAILURE=cache exercise >"$work/out"
-[[ "$(wc -l <"$FAKE_BUILDS")" == 2 && "$(cat "$work/fallback")" == true ]]
-[[ "$(grep '^buildx build ' "$FAKE_LOG" | grep -cF -- "$apt_mirror_secret")" == 2 ]]
-grep '^buildx build ' "$FAKE_LOG" | tail -n 1 | grep -qF -- "--no-cache$apt_mirror_secret--file "
-for failure in copy pin erase cleanup compile; do
-  : >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"
+apt_retry_case() {
+  CODEWIRE_APT_SNAPSHOT_MIRROR=http://apt-cache.invalid:8080 \
+    CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=r2 FAKE_FAILURE=cache exercise >"$work/out"
+  [[ "$(wc -l <"$FAKE_BUILDS")" == 2 && "$(cat "$work/fallback")" == true ]]
+  [[ "$(grep '^buildx build ' "$FAKE_LOG" | grep -cF -- "$apt_mirror_secret")" == 2 ]]
+  grep '^buildx build ' "$FAKE_LOG" | tail -n 1 | grep -qF -- "--no-cache$apt_mirror_secret--file "
+}
+queue_case apt-retry apt_retry_case
+owned_failure_case() {
+  local failure="$1" status
   set +e
   CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 FAKE_FAILURE="$failure" exercise >"$work/out" 2>&1
   status=$?
@@ -236,21 +280,24 @@ for failure in copy pin erase cleanup compile; do
   [[ "$status" != 0 ]] || { echo "accepted $failure failure" >&2; exit 1; }
   [[ -s "$credential_work/r2.aws" ]]
   [[ "$failure" != compile || ( "$(wc -l <"$FAKE_CW_BUILDS")" == 1 && ! -s "$FAKE_BUILDS" ) ]]
+}
+for failure in copy pin erase cleanup compile; do
+  queue_case "failure-$failure" owned_failure_case "$failure"
 done
-: >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"
-CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=r2 FAKE_FAILURE=cache exercise >"$work/out"
-[[ "$(wc -l <"$FAKE_BUILDS")" == 2 && "$(cat "$work/fallback")" == true ]]
-[[ "$(wc -l <"$FAKE_CW_BUILDS")" == 1 ]]
-grep '^buildx build ' "$FAKE_LOG" | tail -1 | grep -q -- '--progress plain --platform linux/amd64 --no-cache --file '
+cache_fallback_case() {
+  CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=r2 FAKE_FAILURE=cache exercise >"$work/out"
+  [[ "$(wc -l <"$FAKE_BUILDS")" == 2 && "$(cat "$work/fallback")" == true ]]
+  [[ "$(wc -l <"$FAKE_CW_BUILDS")" == 1 ]]
+  grep '^buildx build ' "$FAKE_LOG" | tail -1 | grep -q -- '--progress plain --platform linux/amd64 --no-cache --file '
+}
+queue_case cache-fallback cache_fallback_case
 
 # Exercise the actual command wrapper, not only its diagnostic predicate. A
 # rejected first attempt must retain its status and still erase/remove its
 # owned daemon; an accepted cache read retries exactly once without imports.
-diagnostic_cases=0
 read_failure_case() {
   local name="$1" first_status="$2" expected_status="$3" expected_builds="$4" expected_fallback="$5"
   local diagnostic="$6" retry_status="${7:-0}" tee_failure="${8:-}" status
-  : >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"; : >"$FAKE_TEE_CALLS"
   printf '%s' "$diagnostic" >"$FAKE_BUILD_DIAGNOSTIC"
   set +e
   CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=r2 FAKE_FAILURE=diagnostic \
@@ -294,6 +341,10 @@ read_failure_case() {
   else
     [[ ! -e "$work/build.log.retry" ]]
   fi
+}
+diagnostic_cases=0
+queue_read_failure_case() {
+  queue_case "read-$1" read_failure_case "$@"
   diagnostic_cases=$((diagnostic_cases + 1))
 }
 
@@ -301,31 +352,31 @@ canonical='ERROR: failed to solve: failed to load cache key: S3 GetObject unavai
 # tee's exit 1 must not hide a Docker timeout/signal or ordinary error and
 # turn a failed capture into the accepted cache-read retry status.
 for status in 124 137 143 1; do
-  read_failure_case "first-logger-failure-$status" "$status" 74 1 false "$canonical"$'\n' 0 first
+  queue_read_failure_case "first-logger-failure-$status" "$status" 74 1 false "$canonical"$'\n' 0 first
 done
-read_failure_case retry-logger-failure 1 74 2 true "$canonical"$'\n' 0 retry
-read_failure_case retry-logger-failure-with-docker-signal 1 74 2 true "$canonical"$'\n' 143 retry
+queue_read_failure_case retry-logger-failure 1 74 2 true "$canonical"$'\n' 0 retry
+queue_read_failure_case retry-logger-failure-with-docker-signal 1 74 2 true "$canonical"$'\n' 143 retry
 for status in 124 137 143 43; do
-  read_failure_case "status-$status" "$status" "$status" 1 false "$canonical"
+  queue_read_failure_case "status-$status" "$status" "$status" 1 false "$canonical"
 done
-read_failure_case earlier-warning-cargo 1 1 1 false \
+queue_read_failure_case earlier-warning-cargo 1 1 1 false \
   $'#7 ERROR: failed to load cache key: S3 GetObject unavailable\nerror: could not compile `cw` due to 1 previous error\n'
-read_failure_case earlier-warning-buildx 1 1 1 false \
+queue_read_failure_case earlier-warning-buildx 1 1 1 false \
   $'#7 ERROR: failed to load cache key: S3 GetObject unavailable\nERROR: failed to solve: process "cargo build" did not complete successfully: exit code: 101\n'
-read_failure_case missing-final-diagnostic 1 1 1 false \
+queue_read_failure_case missing-final-diagnostic 1 1 1 false \
   $'#7 ERROR: failed to load cache key: S3 GetObject unavailable\n'
-read_failure_case empty-diagnostic 1 1 1 false ''
-read_failure_case trailing-diagnostic 1 1 1 false \
+queue_read_failure_case empty-diagnostic 1 1 1 false ''
+queue_read_failure_case trailing-diagnostic 1 1 1 false \
   "$canonical"$'\nSee build details: docker-desktop://dashboard/build/example\n'
-read_failure_case multiline-diagnostic 1 1 1 false \
+queue_read_failure_case multiline-diagnostic 1 1 1 false \
   $'ERROR: failed to solve: failed to load cache key:\n  S3 GetObject unavailable\n'
-read_failure_case unknown-final-diagnostic 1 1 1 false \
+queue_read_failure_case unknown-final-diagnostic 1 1 1 false \
   'ERROR: failed to solve: unexpected cache failure: S3 GetObject unavailable'
-read_failure_case split-cache-markers 1 1 1 false \
+queue_read_failure_case split-cache-markers 1 1 1 false \
   $'#7 S3 GetObject unavailable\nERROR: failed to solve: failed to load cache key: descriptor unavailable\n'
-read_failure_case noncanonical-prefix 1 1 1 false \
+queue_read_failure_case noncanonical-prefix 1 1 1 false \
   'ERROR failed to load cache key: S3 GetObject unavailable'
-read_failure_case debug-prefix 1 1 1 false \
+queue_read_failure_case debug-prefix 1 1 1 false \
   "time=2026-09-07T00:00:00Z level=error msg=\"$canonical\""
 for diagnostic in \
   'context canceled' \
@@ -334,22 +385,25 @@ for diagnostic in \
   'process "cargo build" did not complete successfully' \
   'frontend gateway failed' \
   'failed to export cache'; do
-  read_failure_case "excluded-$diagnostic" 1 1 1 false "$canonical: $diagnostic"
+  queue_read_failure_case "excluded-$diagnostic" 1 1 1 false "$canonical: $diagnostic"
 done
-read_failure_case canonical-key 1 0 2 true "$canonical"
-read_failure_case canonical-buildx-wrapper 1 0 2 true \
+queue_read_failure_case canonical-key 1 0 2 true "$canonical"
+queue_read_failure_case canonical-buildx-wrapper 1 0 2 true \
   'ERROR: failed to build: failed to solve: failed to load cache key: S3 GetObject unavailable'
-read_failure_case canonical-cache-without-key 1 0 2 true \
+queue_read_failure_case canonical-cache-without-key 1 0 2 true \
   'ERROR: failed to solve: failed to load cache: S3 GetObject unavailable'
-read_failure_case canonical-configure-importer 1 0 2 true \
+queue_read_failure_case canonical-configure-importer 1 0 2 true \
   'ERROR: failed to solve: failed to configure s3 cache importer: operation error S3: HeadObject denied'
-read_failure_case canonical-import-cache 1 0 2 true \
+queue_read_failure_case canonical-import-cache 1 0 2 true \
   'ERROR: failed to solve: failed to import cache: HeadObject denied'
-read_failure_case canonical-r2-endpoint 1 0 2 true \
+queue_read_failure_case canonical-r2-endpoint 1 0 2 true \
   'ERROR: failed to solve: failed to load cache key: request to https://example.r2.cloudflarestorage.com failed'
-read_failure_case canonical-trailing-whitespace 1 0 2 true "$canonical"$'\n \t\n'
-read_failure_case retry-fails 1 44 2 true "$canonical" 44
-read_failure_case retry-fails-with-status-one 1 1 2 true "$canonical" 1
+queue_read_failure_case canonical-trailing-whitespace 1 0 2 true "$canonical"$'\n \t\n'
+queue_read_failure_case retry-fails 1 44 2 true "$canonical" 44
+queue_read_failure_case retry-fails-with-status-one 1 1 2 true "$canonical" 1
+
+
+run_side_by_side < <(printf 'run_case %q\n' "${case_names[@]}")
 
 for failure in mode scope symlink permissions; do
   if (

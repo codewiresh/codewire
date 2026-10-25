@@ -184,6 +184,7 @@ grep -qF -- '--tmpfs /home/codewire:rw,exec,uid=1000,gid=1000,mode=0700,size=256
 # still runs every case, and any failure fails this test.
 mkdir -p "$ROOT/.tmp"
 work=''
+verifier_root=''
 companions="$(mktemp -d "$ROOT/.tmp/workspace-image-companions.XXXXXX")"
 companion_names=()
 companion_pids=()
@@ -196,7 +197,7 @@ cleanup() {
   for pid in "${companion_pids[@]}"; do
     wait "$pid" 2>/dev/null || true
   done
-  rm -rf "$work" "$companions"
+  rm -rf "$verifier_root" "$companions"
 }
 trap cleanup EXIT
 start_companion_lane() {
@@ -232,8 +233,11 @@ join_companion_lanes() {
   companion_pids=()
   [[ "$failed" == false ]] || exit 1
 }
-start_companion_lane artifact \
-  "$ROOT/scripts/ci/tests/test-workspace-image-artifact.py"
+# The artifact suite, about 60 s of tests, runs as four disjoint shards.
+for artifact_shard in 0 1 2 3; do
+  CODEWIRE_TEST_SHARD="$artifact_shard/4" start_companion_lane "artifact-$artifact_shard" \
+    "$ROOT/scripts/ci/tests/test-workspace-image-artifact.py"
+done
 start_companion_lane selector-and-cache \
   "$ROOT/scripts/ci/tests/test-select-untrusted-workspace-cache.sh" \
   "$ROOT/scripts/ci/tests/test-workspace-cache.sh" \
@@ -241,7 +245,10 @@ start_companion_lane selector-and-cache \
 
 # Execute the verifier against a fake Docker client. This catches command-order,
 # digest-handoff, cleanup, and fail-closed regressions without building an image.
-work="$(mktemp -d "$ROOT/.tmp/workspace-image-verifier-test.XXXXXX")"
+# Each verifier segment below gets its own fixture: work directory, source
+# repository, receipts and fake Docker state.
+prepare_verifier_fixture() {
+work="$(mktemp -d "$verifier_root/segment.XXXXXX")"
 mkdir -p "$work/bin" "$work/tmp"
 # Run the actual verifier and identity helper in a private source fixture. Never
 # write a synthetic acceptance receipt into the developer checkout.
@@ -500,6 +507,7 @@ esac
 EOF
 chmod +x "$work/bin/docker" "$work/bin/git"
 mkdir "$work/runner-temp"
+}
 
 run_mock_verifier() {
   printf '%s\n' "${4:-}" >"$work/current-fixture-mode"
@@ -553,6 +561,7 @@ arm64_cw_build_count() {
   grep '^buildx build ' "$work/docker.log" | { grep -c -- '--target cw-builder-arm64' || true; }
 }
 
+verifier_reuse_segment() {
 # Assert behavior and ordering rather than incidental inspection call counts.
 : >"$work/docker.log"
 run_mock_verifier success >/dev/null
@@ -687,6 +696,9 @@ if MOCK_REUSE=disabled run_mock_verifier invalid missing docker >/dev/null 2>&1;
 grep -q '^buildx rm --force codewire-workspace-' "$work/docker.log" || fail 'failed build retained its builder'
 [[ ! -e "$fixture_receipt" ]] || fail 'failed fresh attempt retained old receipt'
 
+}
+
+verifier_failure_segment() {
 for failure in full mounted cleanup cancel; do
   : >"$work/docker.log"
   if run_mock_verifier "$failure" valid docker "$failure" >"$work/$failure.out" 2>&1; then fail "accepted $failure failure"; fi
@@ -709,6 +721,9 @@ grep -Eq '^workspace cache cleanup: phase=builder-removal status=43 confirmed-ab
 [[ -e "$fixture_receipt" ]] || fail 'confirmed-absent builder removal emitted no receipt'
 rm -f "$work/daemon.aws.removed"
 
+}
+
+verifier_retention_failure_segment() {
 if [[ "$standalone_producers" == 1 ]]; then
   for failure in full mounted cleanup receipt cw-mismatch; do
     : >"$work/docker.log"
@@ -736,6 +751,9 @@ if [[ "$standalone_producers" == 1 ]]; then
   printf 'workspace producer retention: five failure contracts OK\n'
 fi
 
+}
+
+verifier_receipt_segment() {
 : >"$work/docker.log"
 archives_before="$(find "$fixture_root/.tmp" -maxdepth 1 -name 'workspace-image-*.oci.tar' -printf '%f\n' | sort)"
 if run_mock_verifier receipt valid docker receipt >/dev/null 2>&1; then
@@ -764,6 +782,9 @@ contract_line="$(grep -n '^run --rm ' "$work/docker.log" | head -n1 | cut -d: -f
 if run_mock_verifier dirty valid docker-container '' true >/dev/null 2>&1; then fail 'dirty source accepted'; fi
 [[ ! -s "$work/docker.log" ]] || fail 'dirty source reached Docker'
 
+}
+
+verifier_cache_mode_segment() {
 : >"$work/docker.log"
 MOCK_COMPILER=disabled MOCK_LAYERS=disabled run_mock_verifier cold >/dev/null
 [[ "$(grep '^buildx build ' "$work/docker.log" | grep -v -- '--target cw-runtime-export' | grep -v -- '--target cw-builder-arm64' | grep -c -- '--no-cache ')" == 2 ]] || fail 'disabled layer cache did not bypass both builds'
@@ -841,6 +862,9 @@ for pid_file in "$work/contract-process" "$work/contract-child"; do
   [[ -z "$state" || "$state" == Z* ]] || { kill -TERM "$child_pid"; fail 'contract left a live child'; }
 done
 
+}
+
+verifier_copy_policy_segment() {
 # Bind the original policy witness to its actual prior bytes, not a modified
 # success stub. Both policies reuse one real-admission synthetic producer and
 # drive the existing workspace/base/contract/seal route through the CW wrapper.
@@ -1061,6 +1085,48 @@ PY
   [[ "$(sha256sum "$work/copy-policy-producer/assets/cw" | cut -d' ' -f1)" == "$original_cw_sha" ]] || fail 'copy witness changed original producer bytes'
   printf 'workspace copied-CW policy: exact prior accepts / current refuses before contracts; original producer retained\n'
 fi
+}
+
+# A segment that ran after others in one fixture starts from the state they
+# left, reached through the same verifier: a valid receipt and its archive, or
+# a retained archive whose receipt a failed fresh attempt invalidated.
+verifier_prior_receipt() {
+  : >"$work/docker.log"
+  run_mock_verifier prior-success >/dev/null || fail 'prior verification failed'
+  [[ -s "$fixture_receipt" ]] || fail 'prior verification left no receipt'
+}
+verifier_prior_archive() {
+  verifier_prior_receipt
+  : >"$work/docker.log"
+  if MOCK_REUSE=disabled run_mock_verifier prior-invalid missing docker >/dev/null 2>&1; then
+    fail 'prior failed attempt was accepted'
+  fi
+  [[ ! -e "$fixture_receipt" && -n "$(find "$fixture_root/.tmp" -maxdepth 1 -name 'workspace-image-*.oci.tar' -print -quit)" ]] ||
+    fail 'prior failed attempt did not leave only its earlier archive'
+}
+
+# The segments share nothing but the fixture recipe, so they run side by side
+# (run_side_by_side) and the first failure stops the rest. Within a segment
+# the cases keep their order: a later case reads the receipts and archives an
+# earlier one left.
+# shellcheck source=scripts/ci/verify/side-by-side.sh
+source "$ROOT/scripts/ci/verify/side-by-side.sh"
+verifier_root="$(mktemp -d "$ROOT/.tmp/workspace-image-verifier-test.XXXXXX")"
+run_verifier_segment() (
+  local step
+  prepare_verifier_fixture
+  for step; do
+    "$step"
+  done
+)
+run_side_by_side <<'SEGMENTS'
+run_verifier_segment verifier_reuse_segment
+run_verifier_segment verifier_failure_segment
+run_verifier_segment verifier_prior_receipt verifier_retention_failure_segment
+run_verifier_segment verifier_prior_archive verifier_receipt_segment
+run_verifier_segment verifier_prior_receipt verifier_cache_mode_segment
+run_verifier_segment verifier_copy_policy_segment
+SEGMENTS
 
 join_companion_lanes
 echo 'workspace-image verification workflow contract: OK'
