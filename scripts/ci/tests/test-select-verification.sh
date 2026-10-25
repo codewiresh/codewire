@@ -4393,8 +4393,8 @@ for selection_and_parts in \
   }
 done
 # Each family runs in its own runner process with the environment its step
-# gave it: only Security and Edge read the trusted selection, only ShellCheck
-# the base. ShellCheck runs first, alone (its full analysis holds most of a
+# gave it: only Security, Edge and Deploy read the trusted selection, only
+# ShellCheck the base. ShellCheck runs first, alone (its full analysis holds most of a
 # medium guest's memory); the others run side by side, at most half the CPU
 # share at once and each with half the share of its own tests, longest first.
 # A failed family fails the job.
@@ -4435,7 +4435,7 @@ tooling_output="$(unset VERIFICATION_TEST_JOBS; CODEWIRE_SHELL_POLICY_BASE=0123a
 [ "$(cat "$tooling_root/records/policy-shell" "$tooling_root/records/release" \
     "$tooling_root/records/deploy" "$tooling_root/records/security" "$tooling_root/records/edge")" = \
   "$(printf '%s\n' 'policy-shell selection=unset base=0123abcd jobs=2' 'release selection=unset base=unset jobs=2' \
-    'deploy selection=unset base=unset jobs=2' "security selection=$tooling_selection base=unset jobs=2" \
+    "deploy selection=$tooling_selection base=unset jobs=2" "security selection=$tooling_selection base=unset jobs=2" \
     "edge selection=$tooling_selection base=unset jobs=2")" ] || {
   echo 'a tooling family did not keep its own step environment and half the CPU share of jobs' >&2
   exit 1
@@ -4502,6 +4502,80 @@ for planner_selection in \
     exit 1
   }
 done
+# Composed over real selections: the planner's suite runs exactly once
+# wherever one of its inputs changes or a selection without policy runs
+# Deploy, and nowhere else. Policy runs it when the Policy job runs and lists
+# the part; Deploy runs it when Tooling lists Deploy and Deploy, which gets
+# the trusted selection (the tooling fixture above), cannot see that Policy
+# owns it. Before, Deploy never got the selection, so a main push ran the
+# suite in both jobs.
+planner_suite_runs() {
+  local selection="$1" runs=0 policy tooling deploy
+  policy="$(VERIFICATION_SELECTION="$selection" "$product_runner" policy-parts)"
+  tooling="$(VERIFICATION_SELECTION="$selection" "$product_runner" tooling-parts)"
+  # The fixture's Deploy stops at its failing stub after the planner step.
+  deploy="$(deploy_planner_fixture "$selection" || true)"
+  if [[ "$selection" == *'|policy|'* ]] && grep -qx policy-planner-tests <<<"$policy"; then
+    runs=$((runs + 1))
+  fi
+  if grep -qx deploy <<<"$tooling" && grep -qx test.sh <<<"$deploy"; then
+    runs=$((runs + 1))
+  fi
+  printf '%s\n' "$runs"
+}
+planner_once_case() {
+  local name="$1" want="$2" selection="$3" runs
+  [[ "$selection" == '|valid:v3|'*'|complete|' ]] || {
+    echo "planner suite: $name produced no selection: $selection" >&2
+    exit 1
+  }
+  runs="$(planner_suite_runs "$selection")"
+  [ "$runs" = "$want" ] || {
+    echo "planner suite: $name runs it $runs times, not $want: $selection" >&2
+    exit 1
+  }
+}
+planner_paths_selection() {
+  local event="$1" paths="$TMP/planner-once.$BASHPID.paths" ref=refs/heads/main
+  shift
+  [ "$event" = push ] || ref=refs/pull/3119/head
+  printf '%s\n' "$@" > "$paths"
+  selection_value "$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH PATH="$EDGELESS_CARGO:$PATH" \
+    GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" KIND_E2E_OPT_IN=false "$SELECTOR" "$paths")"
+}
+planner_dispatch_selection() {
+  selection_value "$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH GITHUB_EVENT_NAME=workflow_dispatch \
+    VERIFICATION_REQUEST="$1" "$SELECTOR")"
+}
+for planner_event in push pull_request; do
+  for planner_once in \
+      '1 scripts/ci/plan/planner.py' \
+      '1 Cargo.lock' \
+      '1 .gitea/workflows/deploy-dev.yaml' \
+      '1 scripts/ci/plan/planner.py deployments/k8s/coordinator/deployment.yaml' \
+      '1 Cargo.lock deployments/k8s/coordinator/deployment.yaml' \
+      '0 deployments/k8s/coordinator/deployment.yaml' \
+      '0 crates/codewire-idp/src/lib.rs' \
+      '0 docs/dev/AGENT-WORKFLOW.md'; do
+    read -r planner_want planner_paths <<<"$planner_once"
+    # shellcheck disable=SC2086 # One case's paths, split on spaces.
+    planner_once_case "$planner_event $planner_paths" "$planner_want" \
+      "$(planner_paths_selection "$planner_event" $planner_paths)"
+  done
+done
+# The deploy-only case is the saving: it selects Deploy and no planner input.
+[[ "$(planner_paths_selection push deployments/k8s/coordinator/deployment.yaml)" == *'|deploy|'* ]] || {
+  echo 'planner suite: the deploy-only fixture path no longer selects Deploy' >&2
+  exit 1
+}
+for planner_request in policy all deploy; do
+  planner_once_case "dispatch $planner_request" 1 "$(planner_dispatch_selection "$planner_request")"
+done
+for planner_request in release edge_kind rust; do
+  planner_once_case "dispatch $planner_request" 0 "$(planner_dispatch_selection "$planner_request")"
+done
+planner_once_case 'release tag' 1 "$(selection_value "$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=push GITHUB_REF=refs/tags/v0.4.1 "$SELECTOR")")"
 # The repository checks' two slowest self-tests (#3119 L1) run when the
 # selector names them or cannot say; their checks always run.
 for repo_check in permanent-raw-surface epoch-material-cache-owner; do

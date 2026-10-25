@@ -749,13 +749,15 @@ tooling_parts() {
 }
 
 # One Tooling family in its own runner process, with the environment its own
-# workflow step gave it: only Security and Edge read the trusted selection,
-# and only ShellCheck reads the pull request's base.
+# workflow step gave it: only Security, Edge and Deploy read the trusted
+# selection, and only ShellCheck reads the pull request's base. Deploy reads it
+# for one decision: whether Policy owns the planner's suite
+# (ci_plan_tests_omittable), so the suite runs once, not in both jobs.
 run_tooling_family() {
   local -a environment=(env -u VERIFICATION_SELECTION -u CODEWIRE_SHELL_POLICY_BASE
     "VERIFICATION_TEST_JOBS=${TOOLING_FAMILY_JOBS:?}")
   case "$1" in
-    security|edge) environment+=("VERIFICATION_SELECTION=$SELECTION") ;;
+    security|edge|deploy) environment+=("VERIFICATION_SELECTION=$SELECTION") ;;
     policy-shell) environment+=("CODEWIRE_SHELL_POLICY_BASE=${CODEWIRE_SHELL_POLICY_BASE:-}") ;;
   esac
   "${environment[@]}" "$ROOT/scripts/ci/verify/run-product-verification.sh" "$1"
@@ -1500,8 +1502,9 @@ install_helm() {
 
 run_deploy() {
   scripts/ci/tests/test-install-temporal.sh
-  # Policy runs the planner's suite for its own inputs (policy-planner-tests);
-  # a selection from an older selector runs it here.
+  # Policy runs the planner's suite for its own inputs (policy-planner-tests).
+  # A selection without policy (a deploy dispatch, a release tag) cannot say
+  # so, and runs it here.
   if ! selected ci_plan_tests_omittable; then
     scripts/ci/plan/test.sh
   fi
