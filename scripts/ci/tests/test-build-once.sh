@@ -161,7 +161,20 @@ printf 'derp\n' > "$work/lock-origin/deployments/docker/derp.Cargo.lock"
 git -C "$work/lock-origin" add -A
 git -C "$work/lock-origin" -c user.name=t -c user.email=t@example.invalid commit -q -m one
 git clone -q --depth 1 "file://$work/lock-origin" "$work/lock-checkout"
+# A fake df: the build disk is 10 % used, plus 20 % for each leg folder when
+# FAKE_DF_PER_LEG is set.
+cat > "$work/fake-df" <<'DF'
+#!/usr/bin/env bash
+used=10
+if [ -n "${FAKE_DF_PER_LEG:-}" ]; then
+  legs="$(find "$FAKE_DF_TARGETS" -mindepth 1 -maxdepth 1 -type d ! -name '*_desktop' | wc -l)"
+  used=$(( 10 + 20 * legs ))
+fi
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted\nfake 100 %s %s %s%% /x\n' "$used" "$((100 - used))" "$used"
+DF
+chmod +x "$work/fake-df"
 targets_prepare() {
+  BUILD_ONCE_DF="$work/fake-df" FAKE_DF_TARGETS="$work/marker-root/pr/targets" \
   BUILD_ONCE_ROOT="$work/marker-root" BUILD_ONCE_TEST_STOP_AFTER_TARGETS=1 \
     GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
     "$SCRIPT" prepare "$work/lock-checkout" > "$work/prepare.log" 2>&1 || fail "prepare failed: $(cat "$work/prepare.log")"
@@ -193,6 +206,32 @@ printf 'old-stamp\n' > "$marker_root/lock-stamp"
 targets_prepare
 [ -f "$marker_root/targets/archive/lib.rlib" ] || fail 'the move to the layout file wiped the targets'
 grep -q "^    echo 'CARGO_INCREMENTAL=1'$" "$SCRIPT" || fail 'build runner builds are not incremental'
+
+# The disk bound: target files no build read for 3 days go; above 65 % of the
+# disk, whole leg folders go, least recently used first (a folder with no use
+# mark first), and a leg's desktop folder with it.
+rm -rf "$marker_root/targets"
+mkdir -p "$marker_root/targets/archive/debug/deps" "$marker_root/targets/database" \
+  "$marker_root/targets/features" "$marker_root/targets/database_desktop"
+printf 'stale' > "$marker_root/targets/archive/debug/deps/libold.rlib"
+printf 'fresh' > "$marker_root/targets/archive/debug/deps/libnew.rlib"
+touch -a -d '5 days ago' "$marker_root/targets/archive/debug/deps/libold.rlib"
+touch -d '2 hours ago' "$marker_root/targets/database/.build-once-used"
+touch "$marker_root/targets/archive/.build-once-used"
+FAKE_DF_PER_LEG=1 targets_prepare
+[ ! -e "$marker_root/targets/archive/debug/deps/libold.rlib" ] || fail 'a target file unread for 5 days was kept'
+[ -f "$marker_root/targets/archive/debug/deps/libnew.rlib" ] || fail 'a fresh target file was swept'
+grep -q 'removed 1 target files no build read for 3 days' "$work/prepare.log" || fail 'the sweep gave no count'
+[ ! -e "$marker_root/targets/features" ] || fail 'the never-used leg folder was kept over the disk bound'
+[ -d "$marker_root/targets/database" ] && [ -d "$marker_root/targets/archive" ] ||
+  fail 'the bound removed more than it needed'
+grep -q 'disk 70% used (limit 65%); removing the least recently used target folder features' "$work/prepare.log" ||
+  fail 'the bound gave no reason'
+FAKE_DF_PER_LEG=1 BUILD_ONCE_DISK_PERCENT=35 targets_prepare
+[ ! -e "$marker_root/targets/database" ] && [ ! -e "$marker_root/targets/database_desktop" ] ||
+  fail 'the older leg and its desktop folder were kept'
+[ -d "$marker_root/targets/archive" ] || fail 'the most recently used leg was removed'
+grep -q "^  touch \"\$work/targets/\$name/.build-once-used\"$" "$SCRIPT" || fail 'a leg does not mark its folder used'
 if "$SCRIPT" finish >/dev/null 2>&1; then fail 'the retired finish subcommand was accepted'; fi
 
 # A leg that reads a corrupt output from its warm target folder wipes the
@@ -269,4 +308,4 @@ if ARCHIVE_STORE_URL="file://$work/store" "$SCRIPT" publish "$work/out" >/dev/nu
   fail 'publish accepted an invalid leg output name'
 fi
 
-echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, interrupted folders and lockfile changes kept warm, the corrupt-output rebuild and publish hold; bad input refused'
+echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, interrupted folders and lockfile changes kept warm, the disk bound, the corrupt-output rebuild and publish hold; bad input refused'

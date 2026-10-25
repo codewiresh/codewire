@@ -160,6 +160,7 @@ prepare() {
       *) echo "build-once: removing the unused target folder ${entry##*/}"; rm -rf -- "$entry" ;;
     esac
   done
+  bound_targets
   # Tests stop here, before the pinned tools; never on a build runner's disk.
   if [ -n "${BUILD_ONCE_ROOT:-}" ] && [ "${BUILD_ONCE_TEST_STOP_AFTER_TARGETS:-}" = 1 ]; then
     return 0
@@ -197,6 +198,44 @@ prepare() {
     echo "$bin"
   } >> "$GITHUB_PATH"
   echo "build-once: $src is at $commit; targets $(du -sh "$work/targets" | cut -f1); cold=$cold"
+}
+
+disk_used_percent() {
+  # The build disk's use, as df reports it; tests name another df.
+  "${BUILD_ONCE_DF:-df}" -P "$cache_root" | awk 'NR == 2 { sub("%", "", $5); print $5 }'
+}
+
+bound_targets() {
+  # Nothing else bounds the target folders: each leg keeps its own, builds are
+  # incremental, and a lockfile change no longer wipes them. Above
+  # BUILD_ONCE_DISK_PERCENT (65) of the build disk, whole leg folders go,
+  # least recently used first, until the disk is back under it. The guest
+  # wipes the whole folder at 85 % (main run 22737: "build folder wiped: disk
+  # 93% used"), which makes every leg cold; this makes one leg cold at a time.
+  local limit="${BUILD_ONCE_DISK_PERCENT:-65}" used leg folder swept
+  # First the units no build has read for BUILD_ONCE_SWEEP_DAYS (3): stale
+  # artifacts of crates and lockfile versions since replaced, and old
+  # incremental sessions. The disk is mounted relatime, so every build that
+  # reads an artifact keeps it fresh (cargo-sweep's own signal). A swept unit
+  # a later build needs is rebuilt by Cargo.
+  swept="$(find "$work/targets" -xdev -type f -atime +"$(( ${BUILD_ONCE_SWEEP_DAYS:-3} - 1 ))" \
+    -print -delete 2>/dev/null | wc -l)"
+  find "$work/targets" -xdev -mindepth 2 -type d -empty -delete 2>/dev/null || true
+  [ "$swept" -eq 0 ] || echo "build-once: removed $swept target files no build read for ${BUILD_ONCE_SWEEP_DAYS:-3} days"
+  used="$(disk_used_percent)"
+  [[ "$used" =~ ^[0-9]+$ ]] || die "cannot read the build disk's use: ${used:-nothing}"
+  while (( used > limit )); do
+    # The least recently used leg: its folder's use mark, or none at all.
+    leg="$(for folder in "$work/targets"/*; do
+        [ -d "$folder" ] || continue
+        case "${folder##*/}" in *_desktop) continue ;; esac
+        printf '%s %s\n' "$(stat -c %Y "$folder/.build-once-used" 2>/dev/null || echo 0)" "${folder##*/}"
+      done | sort -n | head -n 1 | cut -d' ' -f2)"
+    [ -n "$leg" ] || { echo "build-once: disk ${used}% used with no target folder left to remove"; break; }
+    echo "build-once: disk ${used}% used (limit ${limit}%); removing the least recently used target folder $leg"
+    rm -rf -- "$work/targets/$leg" "$work/targets/${leg}_desktop"
+    used="$(disk_used_percent)"
+  done
 }
 
 in_src() {
@@ -394,8 +433,11 @@ rebuild_corrupt_leg() {
 
 run_one_leg() {
   # run_one_leg NAME OUT LOGS: one leg with its own log, rebuilt once when it
-  # read a corrupt output; a failed leg is listed in LOGS/failed.
+  # read a corrupt output; a failed leg is listed in LOGS/failed. Its folder's
+  # use mark orders bound_targets' removals.
   local name="$1" out="$2" logs="$3"
+  mkdir -p "$work/targets/$name"
+  touch "$work/targets/$name/.build-once-used"
   "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" > "$logs/$name.log" 2>&1 ||
     rebuild_corrupt_leg "$name" "$out" "$logs/$name.log" ||
     { echo "$name" >> "$logs/failed"; return 1; }
