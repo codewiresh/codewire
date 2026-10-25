@@ -11,8 +11,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CARGO_BIN="${CARGO_BIN:-cargo}"
 MANIFEST_DIR="${CURATED_RUST_MANIFEST_DIR:-$ROOT/deployments/docker}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
-STAGING_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/codewire-compile-all-targets.XXXXXX")"
-trap 'rm -rf -- "$STAGING_ROOT"' EXIT
+# Each curated workspace is staged at the same path on every run, beside its
+# target folder: TARGET_DIR/curated/NAME, built in TARGET_DIR/curated-NAME. In
+# CI TARGET_DIR is the job's warm target folder (Rust checks:
+# target/ci-cache/host-debug, select-warm-rust-cache.sh); locally it is the
+# checkout's target folder. A stable path keeps the staged packages' paths,
+# and so Cargo's fingerprints, equal between runs: an unchanged run is fresh
+# and a change rebuilds only what it touches. A fresh mktemp path rebuilt
+# codewire-proto and everything above it every time (34-54 s per CI run).
+STAGING_ROOT="$TARGET_DIR/curated"
 # shellcheck source=scripts/ci/verify/local-rust-cache.sh
 source "$ROOT/scripts/ci/verify/local-rust-cache.sh"
 select_local_rust_cache "$ROOT" || true
@@ -45,6 +52,22 @@ manifests=("$MANIFEST_DIR"/*.Cargo.toml)
   printf 'no curated Rust workspace manifests found under %s\n' "$MANIFEST_DIR" >&2
   exit 1
 }
+# One run at a time stages and checks in this target folder: another run
+# would replace the staged workspace under it. The lock is held until the
+# script exits. Linux hosts and CI images have flock; a host without it (macOS)
+# runs one compile-all-targets.sh per target folder at a time.
+mkdir -p "$TARGET_DIR"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$STAGING_ROOT.lock"
+  flock 9
+else
+  printf '[compile-all-targets] flock is missing: run one at a time in %s\n' "$TARGET_DIR" >&2
+fi
+# Staged afresh at the same path on every run: nothing from an earlier run,
+# such as a curated workspace that no longer exists, stays, and the folder is
+# always a new directory, never a link left in a shared warm cache.
+rm -rf -- "$STAGING_ROOT"
+mkdir "$STAGING_ROOT"
 for manifest in "${manifests[@]}"; do
   filename="${manifest##*/}"
   name="${filename%.Cargo.toml}"
