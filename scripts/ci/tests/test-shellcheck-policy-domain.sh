@@ -488,17 +488,22 @@ grep -Eq '^ShellCheck shard [1-4]/4 \(.*\) wrote no valid json1 report$' \
   <<<"$garbage_output" || fail 'invalid shard report was not diagnosed'
 
 # One deadline bounds every shard and the whole analysis, and the timeout
-# names the shard holding the script that did not finish.
+# names the shard holding the script that did not finish. The stalled shard
+# would sleep two minutes; the analysis must end well before, though the
+# other shards may take a few seconds on a loaded CI guest (main run 22943
+# missed a three-second bound with a five-second stall).
 set +e
 timeout_output="$(run_checker "$fixture_checker" SHELLCHECK_TIMEOUT_SECONDS=1 \
-  FAKE_SHELLCHECK_SLEEP_FILE=z-lib/deep.sh FAKE_SHELLCHECK_SLEEP_SECONDS=5 2>&1)"
+  FAKE_SHELLCHECK_SLEEP_FILE=z-lib/deep.sh FAKE_SHELLCHECK_SLEEP_SECONDS=120 2>&1)"
 timeout_status=$?
 set -e
 [[ "$timeout_status" -eq 124 ]] || fail 'shard timeout status was not propagated'
 grep -Fxq 'ShellCheck shard 1/4 (scripts=3 heaviest=a-consumer.sh) timed out after 1 seconds' \
   <<<"$timeout_output" || fail 'shard timeout did not name its shard'
-grep -Eq 'ShellCheck analysis: finish \(status=124 elapsed_seconds=[0-3]\)' \
-  <<<"$timeout_output" || fail 'the deadline did not bound the whole analysis'
+timeout_elapsed="$(sed -nE 's/^ShellCheck analysis: finish \(status=124 elapsed_seconds=([0-9]+)\)$/\1/p' \
+  <<<"$timeout_output")"
+[[ -n "$timeout_elapsed" && "$timeout_elapsed" -lt 30 ]] ||
+  fail "the deadline did not bound the whole analysis: $timeout_output"
 grep -Fq 'ratchet: OK' <<<"$timeout_output" && fail 'a timed-out shard still passed the ratchet'
 
 for invalid_shards in 0 17 two; do
