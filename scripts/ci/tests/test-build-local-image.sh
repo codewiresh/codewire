@@ -12,12 +12,25 @@ unset PYTHONDONTWRITEBYTECODE
 mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/build-local-image-test.XXXXXX")"
 owned_cw_work=()
+# A failing step names itself, and a failure prints the end of every step's
+# output: CI shows only this test's own output (main run 22975 showed none).
+# The ERR trap records the last failed command, which is the step errexit
+# stopped at; a fail() check names itself instead.
+set -E
+failed_step=''
+trap 'failed_step="line $LINENO: $BASH_COMMAND"' ERR
 cleanup() {
-  local status=$? directory
+  local status=$? directory output
   if [[ "$status" -eq 0 ]]; then
     for directory in "${owned_cw_work[@]}"; do rm -rf -- "$directory"; done
     rm -rf "$work"
   else
+    printf '[test-build-local-image] failed with status %s at %s\n' "$status" "${failed_step:-an unknown step}" >&2
+    for output in "$work"/*.out; do
+      [[ -f "$output" ]] || continue
+      printf '[test-build-local-image] last lines of %s:\n' "${output##*/}" >&2
+      tail -n 40 -- "$output" >&2
+    done
     printf '[test-build-local-image] retained failed fixture at %s\n' "$work" >&2
   fi
 }
@@ -93,6 +106,7 @@ chmod +x "$work/bin/docker"
 
 fail() {
   printf '[test-build-local-image] ERROR: %s\n' "$*" >&2
+  failed_step="the check above"
   exit 1
 }
 
