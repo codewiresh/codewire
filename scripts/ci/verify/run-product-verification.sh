@@ -18,6 +18,49 @@ CARGO_DEBUG_DIR="$CARGO_TARGET_DIR/debug"
 source "$ROOT/scripts/ci/verify/local-rust-cache.sh"
 # shellcheck source=scripts/ci/verify/side-by-side.sh
 source "$ROOT/scripts/ci/verify/side-by-side.sh"
+# The product removes credential files with `shred -u`. Its default removal,
+# wipesync, renames a file once per byte of its name and syncs the directory
+# after every rename, so the script tests' synthetic credentials cost about
+# 60,000 disk syncs per release family. On a CI disk where a sync is slow,
+# those syncs set the release family's wall time: with a 10 ms flush, 464 s
+# instead of 165 s. Every step here runs a shred that removes the same
+# way without a sync per rename (--remove=wipe). It keeps every overwrite pass
+# and its sync, and the name wipe. Tests that fake shred still put their own first.
+use_test_shred() {
+  local tools="$ROOT/.tmp/test-tools" real='' directory
+  local -a directories=()
+  IFS=: read -r -a directories <<<"$PATH"
+  for directory in "${directories[@]}"; do
+    if [ "$directory" != "$tools" ] && [ -x "$directory/shred" ]; then
+      real="$directory/shred"
+      break
+    fi
+  done
+  [ -n "$real" ] || return 0
+  mkdir -p "$tools"
+  {
+    printf '#!/bin/bash\n# Written by run-product-verification.sh (use_test_shred).\nreal=%q\n' "$real"
+    cat <<'SHRED'
+arguments=()
+files=false
+for argument in "$@"; do
+  if [ "$files" = false ]; then
+    case "$argument" in
+      --) files=true ;;
+      -u|--remove|--remove=wipesync) argument=--remove=wipe ;;
+    esac
+  fi
+  arguments+=("$argument")
+done
+exec "$real" "${arguments[@]}"
+SHRED
+  } >"$tools/shred.$$"
+  chmod 0755 "$tools/shred.$$"
+  mv -f "$tools/shred.$$" "$tools/shred"
+  PATH="$tools:$PATH"
+  export PATH
+}
+use_test_shred
 # Composition state is never accepted from a caller's environment.
 RUST_COMPOSE_FORMAT=false
 RUST_COMPOSE_FORMAT_DONE=false
