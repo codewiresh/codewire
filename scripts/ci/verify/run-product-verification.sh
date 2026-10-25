@@ -291,15 +291,18 @@ isolate_kind_fixture_environment() {
 }
 
 # CI runs the parts side by side, as local merge qualification does. The first
-# part streams; the others' output follows it. Any failure fails policy core,
-# and every part always finishes and reports.
+# part streams; the others' output follows as each finishes. The first failed
+# part stops the others and fails policy core (owner, 2026-10-25, #3013);
+# VERIFICATION_KEEP_GOING=1 lets every part finish and report first.
 run_policy_core() {
-  local part index first='' log status=0 failed=''
-  local -a parts=() logs=() pids=()
+  local part index first='' log status=0 failed='' finished
+  local -a parts=() logs=()
+  local -A part_of=()
   while IFS= read -r part; do
     [ "$part" = policy-shell ] || parts+=("$part")
   done < <(policy_parts)
-  for part in "${parts[@]}"; do
+  for index in "${!parts[@]}"; do
+    part="${parts[$index]}"
     if [ -z "$first" ]; then
       first="$part"
       run_policy_part "$part" &
@@ -309,17 +312,30 @@ run_policy_core() {
       run_policy_part "$part" >"$log" 2>&1 &
       logs+=("$log")
     fi
-    pids+=("$!")
+    part_of[$!]="$index"
   done
-  for index in "${!parts[@]}"; do
+  while [ "${#part_of[@]}" -gt 0 ]; do
     status=0
-    wait "${pids[$index]}" || status=$?
+    finished=''
+    wait -n -p finished "${!part_of[@]}" || status=$?
+    [ -n "$finished" ] || break
+    index="${part_of[$finished]}"
+    unset 'part_of[$finished]'
     if [ -n "${logs[$index]}" ]; then
       printf '=== %s (ran beside %s) ===\n' "${parts[$index]}" "$first"
       cat "${logs[$index]}"
       rm -f "${logs[$index]}"
     fi
     [ "$status" -eq 0 ] || failed="${failed} ${parts[$index]} exited ${status};"
+    if [ -n "$failed" ] && [ "${VERIFICATION_KEEP_GOING:-0}" != 1 ]; then
+      stop_side_by_side "${!part_of[@]}"
+      for finished in "${!part_of[@]}"; do
+        index="${part_of[$finished]}"
+        printf '=== %s stopped, when policy core failed ===\n' "${parts[$index]}"
+        [ -z "${logs[$index]}" ] || rm -f "${logs[$index]}"
+      done
+      break
+    fi
   done
   if [ -n "$failed" ]; then
     printf 'policy core failed:%s\n' "$failed" >&2

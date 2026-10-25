@@ -3993,7 +3993,9 @@ grep -qxF '    [ "$part" = policy-shell ] || parts+=("$part")' <(policy_function
 # CI's policy core runs its parts side by side and fails when either fails,
 # including a failure in the middle of a part. The repository rules here pass
 # only if the CI-script tests start while they run, so a serial aggregate fails
-# this fixture. ShellCheck is its own job and never runs in policy core.
+# this fixture. ShellCheck is its own job and never runs in policy core. A
+# failed part stops the other at once (#3013): "slow" repository rules would
+# run for a minute.
 policy_core_fixture() {
   local dir="$1" parts="$2" one="$3" two="$4"
   bash -c '
@@ -4012,7 +4014,8 @@ policy_core_fixture() {
             done
             [ -e "$dir/two-started" ]
           fi
-          [ "$one_mode" = pass ] || false
+          [ "$one_mode" != slow ] || sleep 60
+          [ "$one_mode" != fail ] || false
           echo one-finished
         ) ;;
         policy-ci-script-tests) (
@@ -4023,7 +4026,8 @@ policy_core_fixture() {
       esac
     }
     run_policy_core
-  ' policy-core-fixture "$dir" "$(policy_function run_policy_core)" "$parts" "$one" "$two"
+  ' policy-core-fixture "$dir" "$(cat "$ROOT/scripts/ci/verify/side-by-side.sh"; policy_function run_policy_core)" \
+    "$parts" "$one" "$two"
 }
 for policy_core_case in \
     'policy-shell policy-repo-rules policy-ci-script-tests:pass:pass:0' \
@@ -4031,12 +4035,22 @@ for policy_core_case in \
     'policy-repo-rules policy-ci-script-tests:pass:fail:1' \
     'policy-repo-rules policy-ci-script-tests:fail:fail:1' \
     'policy-shell policy-repo-rules:pass:pass:0' \
-    'policy-repo-rules:fail:pass:1'; do
+    'policy-repo-rules:fail:pass:1' \
+    'policy-repo-rules policy-ci-script-tests:slow:fail:1'; do
   IFS=: read -r policy_listed policy_one policy_two policy_expected <<<"$policy_core_case"
   policy_core_dir="$(mktemp -d "$TMP/policy-core.XXXXXX")"
   policy_core_status=0
+  policy_core_started=$SECONDS
   policy_core_output="$(policy_core_fixture "$policy_core_dir" "$policy_listed" \
     "$policy_one" "$policy_two" 2>&1)" || policy_core_status=$?
+  if [ "$policy_one" = slow ]; then
+    if [ "$((SECONDS - policy_core_started))" -ge 30 ] \
+        || grep -qx one-finished <<<"$policy_core_output" \
+        || ! grep -qx '=== policy-repo-rules stopped, when policy core failed ===' <<<"$policy_core_output"; then
+      echo "a failed policy core part did not stop the other part: $policy_core_output" >&2
+      exit 1
+    fi
+  fi
   if grep -qx shell-ran-in-core <<<"$policy_core_output"; then
     echo 'policy core ran ShellCheck, which is its own job' >&2
     exit 1
