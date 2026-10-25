@@ -390,6 +390,14 @@ for injected in failure_cases:
     else:
         assert any(r['args'] == json.loads(injected['COMPOSITION_FAIL_ARGS']) for r in records), (records, result.stderr[-3000:])
 print(f'Actual selected policy/workload failures fail preflight --all: {len(failure_cases)} cases passed')
+# With every terminal check synthetic, the lanes end almost at once: preflight
+# must hear every end and pass, never wait on a lane the shell already
+# reaped (Bash 5.2's wait -n -p refused that and named no lane).
+trace.write_text('')
+shutil.rmtree(fixture / '.tmp', ignore_errors=True)
+result = subprocess.run([str(preflight), '--all'], cwd=fixture, env=git_env, capture_output=True, text=True)
+assert result.returncode == 0 and 'preflight: OK' in result.stdout, (result.stdout, result.stderr[-3000:])
+assert 'preflight: every selected family passed' in result.stdout, result.stdout
 
 # Exercise the actual shared build_one function with a Cargo sentinel for all
 # four target/independent-tree pairs. This proves the exact default guest probe

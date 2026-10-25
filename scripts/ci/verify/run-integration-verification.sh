@@ -980,8 +980,7 @@ run_database() {
   # longest first, each with its part of the share as its test threads;
   # CODEWIRE_CI_DATABASE_LANES_AT_ONCE sets the count instead. Elsewhere all
   # lanes run at once.
-  local share at_once="${#DATABASE_LANES[@]}" lane_threads="" next=0 running=0 done_pid
-  local -A pid_lane=()
+  local share at_once="${#DATABASE_LANES[@]}" lane_threads="" next=0 running=0 queue ended
   share="$(ci_cpu_share)"
   if [ -n "$share" ]; then
     if [ -n "${CODEWIRE_CI_DATABASE_LANES_AT_ONCE:-}" ]; then
@@ -998,11 +997,12 @@ run_database() {
     lane_threads=$((share / at_once))
     ((lane_threads >= 2)) || lane_threads=2
   fi
-  # wait -n -p, which names the lane that ended, needs bash 5.1.
-  ((BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1))) || {
-    echo "::error::the database lane scheduler needs bash 5.1 or later, not $BASH_VERSION" >&2
-    return 2
-  }
+  # Each lane reports its name and status on this queue when it ends, so the
+  # scheduler never waits on a lane the shell has already reaped: on Bash
+  # 5.2, wait -n -p refused such a lane ("no such job") and named none.
+  queue="$(mktemp -d "$RUN_DIR/database-lanes.XXXXXX")"
+  mkfifo "$queue/ended"
+  exec {ended}<>"$queue/ended"
   [ "$(printf '%s\n' "${DATABASE_LANE_ORDER[@]}" | sort)" = "$(printf '%s\n' "${DATABASE_LANES[@]}" | sort)" ] || {
     echo '::error::DATABASE_LANE_ORDER must name every database lane once' >&2
     return 2
@@ -1014,20 +1014,29 @@ run_database() {
       next=$((next + 1))
       lane_started[$lane]="$SECONDS"
       (
-        DATABASE_URL="${lane_url[$lane]}"
-        DATABASE_URL_RUST="${lane_rust_url[$lane]}"
-        if [ -n "$lane_threads" ]; then
-          export RUST_TEST_THREADS="$lane_threads" NEXTEST_TEST_THREADS="$lane_threads"
-        fi
-        run_database_lane "$lane"
-      ) >"$RUN_DIR/database-lane-$lane.log" 2>&1 &
+        exec {ended}>&-
+        # Not a condition: the lane keeps errexit.
+        set +e
+        (
+          set -e
+          DATABASE_URL="${lane_url[$lane]}"
+          DATABASE_URL_RUST="${lane_rust_url[$lane]}"
+          if [ -n "$lane_threads" ]; then
+            export RUST_TEST_THREADS="$lane_threads" NEXTEST_TEST_THREADS="$lane_threads"
+          fi
+          run_database_lane "$lane"
+        ) >"$RUN_DIR/database-lane-$lane.log" 2>&1
+        printf '%s %s\n' "$lane" "$?" >"$queue/ended"
+      ) &
       lane_pid[$lane]=$!
-      pid_lane[$!]="$lane"
       running=$((running + 1))
     done
-    status=0
-    wait -n -p done_pid "${lane_pid[@]}" || status=$?
-    lane="${pid_lane[$done_pid]:?a database lane ended that this run did not start}"
+    read -r lane status <&"$ended"
+    [ -n "${lane_pid[$lane]:-}" ] || {
+      echo "::error::a database lane ended that this run did not start: $lane" >&2
+      return 2
+    }
+    wait "${lane_pid[$lane]}" 2>/dev/null || true
     unset 'lane_pid[$lane]'
     running=$((running - 1))
     [ "$lane" = core ] || integration_postgres_stop_lane "$lane"
@@ -1041,6 +1050,8 @@ run_database() {
       failed=true
     fi
   done
+  exec {ended}>&-
+  rm -rf -- "$queue"
   [ "$failed" = false ]
 }
 

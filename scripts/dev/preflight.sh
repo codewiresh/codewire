@@ -89,6 +89,7 @@ PREFLIGHT_CHANGED_PATHS="$PREFLIGHT_TMP/changed-files"
 PREFLIGHT_EFFECTIVE_BASE_SHA=""
 # Lanes started and not yet reaped. Each leads its own process group.
 PREFLIGHT_LANE_PIDS=()
+PREFLIGHT_LANE_ENDED=''
 stop_lanes() {
   local pid
   for pid in "${PREFLIGHT_LANE_PIDS[@]}"; do
@@ -592,8 +593,22 @@ start_lane() {
   [ -n "${PREFLIGHT_LANE_STEPS[$lane]:-}" ] || return 0
   # Job control gives the lane its own process group, so a failure elsewhere
   # stops every family process it started.
+  if [ -z "$PREFLIGHT_LANE_ENDED" ]; then
+    # Each lane reports its PID and status on this queue when it ends, so
+    # await_lanes never waits on a lane the shell has already reaped: on Bash
+    # 5.2, wait -n -p refuses such a lane ("no such job") and names none.
+    mkfifo "$PREFLIGHT_TMP/lane-ended"
+    exec {PREFLIGHT_LANE_ENDED}<>"$PREFLIGHT_TMP/lane-ended"
+  fi
   set -m
-  ( trap - EXIT INT TERM; run_lane "$lane" ) &
+  (
+    trap - EXIT INT TERM
+    exec {PREFLIGHT_LANE_ENDED}>&-
+    # Not a condition: the lane keeps errexit.
+    set +e
+    (set -e; run_lane "$lane")
+    printf '%s %s\n' "$BASHPID" "$?" >"$PREFLIGHT_TMP/lane-ended"
+  ) &
   set +m
   PREFLIGHT_LANE_PIDS+=("$!")
   PREFLIGHT_LANE_STARTED["$lane"]="$!"
@@ -604,15 +619,19 @@ start_lane() {
 # failure stops the others.
 await_lanes() {
   local -A waiting=()
-  local pid finished status remaining
+  local pid finished status remaining running
   for pid in "$@"; do
-    waiting["$pid"]=1
+    # A lane that already reported has nothing more to say.
+    for running in "${PREFLIGHT_LANE_PIDS[@]}"; do
+      [ "$running" != "$pid" ] || waiting["$pid"]=1
+    done
   done
   while [ "${#waiting[@]}" -gt 0 ]; do
-    status=0
     finished=""
-    wait -n -p finished "${PREFLIGHT_LANE_PIDS[@]}" || status=$?
-    [ -n "$finished" ] || fail "lane supervision"
+    status=""
+    read -r finished status <&"$PREFLIGHT_LANE_ENDED" || fail "lane supervision"
+    [[ "$finished" =~ ^[0-9]+$ && "$status" =~ ^[0-9]+$ ]] || fail "lane supervision"
+    wait "$finished" 2>/dev/null || true
     remaining=()
     for pid in "${PREFLIGHT_LANE_PIDS[@]}"; do
       [ "$pid" = "$finished" ] || remaining+=("$pid")

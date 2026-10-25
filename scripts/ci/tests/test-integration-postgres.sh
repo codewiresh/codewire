@@ -483,7 +483,10 @@ echo "test result: ok. $count passed; 0 failed; 0 ignored"
 cargo.chmod(0o755)
 (tools / 'psql').write_text('#!/bin/sh\nexit 0\n')
 (tools / 'psql').chmod(0o755)
-(tools / 'docker').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$DB_TRACE_ROOT/docker.log"\nexit 0\n')
+# DB_TRACE_RM_DELAY slows each lane's PostgreSQL removal, which the scheduler
+# runs between lanes, so other lanes end while it is busy.
+(tools / 'docker').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$DB_TRACE_ROOT/docker.log"\n'
+                              '[ "$1" != rm ] || sleep "${DB_TRACE_RM_DELAY:-0}"\nexit 0\n')
 (tools / 'docker').chmod(0o755)
 
 lock_dir = temporary / 'lane-locks'
@@ -566,6 +569,11 @@ failures = ['compile:codewire-server-core', 'compile:codewire-platform-credentia
 cases = {
     'explicit': pool.submit(run_case),
     'lanes': pool.submit(run_case, extra=network),
+    # Every lane ends at once while the scheduler is still removing the first
+    # one's PostgreSQL: the scheduler must hear each end, never wait on a
+    # lane the shell already reaped (Bash 5.2's wait -n -p refused that).
+    'instant': pool.submit(run_case, extra={'INTEGRATION_DOCKER_NETWORK': 'codewire-fixture-net',
+                                            'DB_TRACE_RM_DELAY': '0.3'}),
     'shared': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12'}),
     'heavy': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '16'}),
     'wide': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '40'}),
@@ -649,6 +657,11 @@ for lane in lane_order:
     assert f'=== database lane {lane} ===' in lanes.stdout, lane
     assert f'CODEWIRE_CI_PHASE name=database-lane-{lane} seconds=' in lanes.stdout, lane
 check_lanes(lane_commands, lanes_environment)
+instant, instant_commands, instant_environment = cases['instant'].result()
+assert instant.returncode == 0 and '[product-integration] green' in instant.stdout, instant.stdout + instant.stderr
+for lane in lane_order:
+    assert f'=== database lane {lane} ===' in instant.stdout, lane
+check_lanes(instant_commands, instant_environment)
 # On a metal guest with a CPU share of 12, one lane per three cores runs at
 # once (four) and each lane's tests get its part of the share; every lane
 # still runs every suite.
