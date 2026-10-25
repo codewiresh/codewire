@@ -935,9 +935,10 @@ class MainPushDeferralContractTests(unittest.TestCase):
         return {"github.event_name": event, "github.ref": self.EVENTS[event],
                 "github.workflow": self.workflow["name"], "github.sha": sha}
 
-    def test_kind_is_scheduled_every_four_hours(self) -> None:
+    def test_kind_is_not_scheduled(self) -> None:
+        # Owner, 2026-10-25: the scheduled Kind run is off until revisited.
         triggers = self.workflow.get("on", self.workflow.get(True))
-        self.assertEqual(triggers["schedule"], [{"cron": "15 */4 * * *"}])
+        self.assertNotIn("schedule", triggers)
         self.assertEqual(triggers["push"], {"branches": ["main"]})
         self.assertIn("workflow_dispatch", triggers)
 

@@ -30,12 +30,9 @@ on:
         description: With verification=edge_kind, a main commit to verify instead of main's head (dispatch-source.sh)
         required: false
         default: ''
-  # Every four hours against the latest main: Kind alone, and only when a Kind
-  # input changed since the last successful scheduled run, while
-  # scripts/ci/select/main-push-switch.sh defers Kind on a push to main. While
-  # it does not, the schedule runs nothing.
-  schedule:
-    - cron: '15 */4 * * *'
+  # No schedule: the four-hourly Kind run is off (owner, 2026-10-25: "Stop
+  # running the KIND suite right now. Just disable it. We'll deal with it
+  # later."). Kind runs only on a dispatch or a pull request labelled ci-full.
 
 # A newer push to a pull request supersedes its older run. Runs on main
 # are the post-merge confirmation, so each one finishes, and each main commit
