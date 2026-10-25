@@ -70,7 +70,10 @@ for name in sized:
     checkout = next(i for i, s in enumerate(steps)
                     if str(s.get("uses", "")).startswith("noel/actions-checkout@"))
     assert checkout < index, name
-    assert step.get("if") == steps[checkout].get("if"), name
+    gate = steps[checkout].get("if")
+    if "BUILD_ONCE" in (job.get("env") or {}):
+        gate = gate[:-len(" }}")] + " && env.BUILD_ONCE != 'true' }}"
+    assert step.get("if") == gate, name
     # Only the checkout and the warm cache selection come before it.
     for earlier in steps[checkout + 1:index]:
         assert earlier.get("name") == "Select the warm Rust cache", (name, earlier.get("name"))

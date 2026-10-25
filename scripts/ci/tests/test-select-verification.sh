@@ -2794,6 +2794,10 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     runner="$METAL_MAIN_RUNS_ON"
     grep -qxF "$METAL_CARGO_BOUND" "$block"
   fi
+  if [ "$runner" = build-main ]; then
+    runner="$RUNS_ON_BUILD"
+    grep -qxF "$METAL_CARGO_BOUND" "$block"
+  fi
   grep -qxF "    runs-on: ${runner}" "$block"
   if [ "$job_id" = edge-kind ]; then
     # Its optional producer dependencies need an always() condition so edge-
@@ -2801,6 +2805,12 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     # every selected Kind producer must succeed before this job can run.
     grep -qF "needs.verification-selection.outputs.edge_kind_expected == 'true'" "$block"
     python3 -B "$ROOT/scripts/ci/tests/test-kind-build-workflow.py"
+  elif [ "$job_id" = rust-packages ]; then
+    # Compile once (infra#1632): it runs the compile job's test archive, so it
+    # needs that job's success, except on a main push, which compiles here.
+    grep -qF "    needs: [verification-selection, rust-compile]" "$block"
+    grep -qF "needs.verification-selection.outputs.rust_shards_expected == 'true'" "$block"
+    grep -qF "(needs.rust-compile.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))" "$block"
   else
     grep -qF \
       "    if: \${{ needs.verification-selection.outputs.${expectation_name}_expected == 'true' }}" \
@@ -2822,7 +2832,7 @@ done <<'EOF'
 policy|Policy verification|metal-main|policy
 standard|Standard verification|metal-main|standard
 tooling|Tooling / delivery contract verification|metal-main|tooling
-rust-compile|Compile every Rust target|metal-main|rust_compile
+rust-compile|Compile every Rust target|build-main|rust_compile
 rust-packages|Rust / transport packages|metal-main|rust_shards
 rust-features|Rust / transport feature graphs|metal-main|rust_shards
 rust-transport|Rust / transport verification|metal-main|rust_transport
@@ -3157,8 +3167,14 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 10 ]] || {
-  echo 'Codewire CI requires its ten ordinary heavy groups (policy included) on the metal labels' >&2
+# Nine heavy groups on the metal labels, and Rust compilation on the build
+# runner except on a main push (compile once, infra#1632).
+[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_BUILD}" "$WORKFLOW")" -eq 1 ]] || {
+  echo 'Codewire CI requires Rust compilation on the build runner' >&2
+  exit 1
+}
+[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 9 ]] || {
+  echo 'Codewire CI requires its nine ordinary heavy groups (policy included) on the metal labels' >&2
   exit 1
 }
 [[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 10 ]] || {
@@ -4970,7 +4986,8 @@ WORK = {
         "Run the workspace agents check",
         "Run Edge static verification and selected Kind tool tests",
     },
-    "rust-compile": {"Compile every Rust target", "Compile the macOS cw for both Mac targets"},
+    "rust-compile": {"Compile every Rust target", "Run the build legs",
+                     "Compile the macOS cw for both Mac targets"},
     "rust-packages": {"Run the Rust packages shard"},
     "rust-features": {"Run the Rust features shard"},
     "rust-transport": {
@@ -4997,6 +5014,8 @@ SUPPORT = {
     "Verify Kind runner tools", "Select best-effort shared Rust cache", "Select existing compiler cache",
     "Select the warm Rust cache", "Report the warm Rust cache", "Bound cargo jobs by memory",
     "Declare a metal Kata guest",
+    "Bring the warm build folder to this commit", "Publish the test archives",
+    "Fetch and verify the test archive", "Install pinned cargo-nextest",
     "Select independent workspace caches",
     "Install pinned protoc for Rust builds", "Install pinned protoc for Rust-backed standard checks",
     "Install pinned protoc for Rust and guest builds", "Install pinned protoc for Rust compilation",
@@ -5168,6 +5187,9 @@ def job_work(job_id, base_context):
     result = []
     for leg in legs(job):
         context = dict(base_context, **leg)
+        # Step conditions read the job's BUILD_ONCE (compile once, infra#1632).
+        if "BUILD_ONCE" in (job.get("env") or {}):
+            context["env.BUILD_ONCE"] = env_value(job["env"]["BUILD_ONCE"], context)
         ran = []
         for step in job["steps"]:
             name = step.get("name") or step.get("uses", "")
@@ -5245,6 +5267,9 @@ for selection in sorted(set(realistic) | synthetic):
             "needs.kind-product.result": "success",
             "needs.kind-daemon.result": "success",
             "needs.kind-smokes.result": "success",
+            # The packages shard runs the compile job's test archive; the
+            # compile job is dispatched whenever the shards are.
+            "needs.rust-compile.result": "success",
             "needs.verification-selection.outputs.selection": selection,
             "needs.verification-selection.outputs.tested_tree_receipt": "fallback",
             "needs.verification-selection.outputs.superseded": "false",
@@ -5285,6 +5310,9 @@ for selection in scheduled:
             "needs.kind-product.result": "success",
             "needs.kind-daemon.result": "success",
             "needs.kind-smokes.result": "success",
+            # The packages shard runs the compile job's test archive; the
+            # compile job is dispatched whenever the shards are.
+            "needs.rust-compile.result": "success",
             "needs.verification-selection.outputs.selection": selection,
             "needs.verification-selection.outputs.tested_tree_receipt": "fallback",
             "needs.verification-selection.outputs.superseded": "false",

@@ -6322,6 +6322,11 @@ mod tests {
     use std::task::{Wake, Waker};
     use tempfile::TempDir;
 
+    // The startup deadline these tests pass is not what they test; a busy CI
+    // guest (thousands of tests at once from one archive) took 3.4 s for one
+    // that had 1 s (codewire run 21606). Tests of the deadline itself keep theirs.
+    const TEST_STARTUP_DEADLINE: Duration = Duration::from_secs(30);
+
     #[derive(Default)]
     struct CountingWake(AtomicU64);
 
@@ -7130,7 +7135,7 @@ mod tests {
             complete_workspace_install(
                 &marker,
                 next,
-                Instant::now() + Duration::from_secs(1),
+                Instant::now() + TEST_STARTUP_DEADLINE,
                 &AtomicBool::new(false),
                 |_| panic!("source-only change must not repeat installation sync"),
             )
@@ -7265,7 +7270,7 @@ mod tests {
         complete_workspace_install(
             &marker,
             &plan,
-            Instant::now() + Duration::from_secs(1),
+            Instant::now() + TEST_STARTUP_DEADLINE,
             &AtomicBool::new(false),
             |path| {
                 assert!(workspace_install_required(&marker, &plan)?);
@@ -7282,7 +7287,7 @@ mod tests {
         complete_workspace_install(
             &marker,
             &plan,
-            Instant::now() + Duration::from_secs(1),
+            Instant::now() + TEST_STARTUP_DEADLINE,
             &AtomicBool::new(false),
             |_| panic!("completed root must not reinstall or resync"),
         )
@@ -7300,7 +7305,7 @@ mod tests {
             let result = complete_workspace_install(
                 &marker,
                 &plan,
-                Instant::now() + Duration::from_secs(1),
+                Instant::now() + TEST_STARTUP_DEADLINE,
                 &AtomicBool::new(false),
                 |_| {
                     let current = calls;
@@ -7323,7 +7328,7 @@ mod tests {
             complete_workspace_install(
                 &marker,
                 &plan,
-                Instant::now() + Duration::from_secs(1),
+                Instant::now() + TEST_STARTUP_DEADLINE,
                 &canceled,
                 |_| {
                     calls += 1;
@@ -7357,7 +7362,7 @@ mod tests {
                     &mut parent,
                     &plan,
                     &marker,
-                    Instant::now() + Duration::from_secs(1),
+                    Instant::now() + TEST_STARTUP_DEADLINE,
                     &AtomicBool::new(false)
                 )
                 .is_err()
@@ -7382,7 +7387,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
         let canceled = AtomicBool::new(false);
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + TEST_STARTUP_DEADLINE;
         let completion = install_completion(&plan).unwrap();
         child.write_all(&completion[..10]).unwrap();
         assert_eq!(
@@ -7434,7 +7439,7 @@ mod tests {
                     &mut parent,
                     &plan,
                     &marker,
-                    Instant::now() + Duration::from_secs(1),
+                    Instant::now() + TEST_STARTUP_DEADLINE,
                     &AtomicBool::new(false)
                 )
                 .is_err()
@@ -7503,7 +7508,7 @@ mod tests {
                 &mut parent,
                 &plan,
                 &marker,
-                Instant::now() + Duration::from_secs(1),
+                Instant::now() + TEST_STARTUP_DEADLINE,
                 &AtomicBool::new(false),
             )
             .unwrap();
@@ -7522,7 +7527,7 @@ mod tests {
                     &mut parent,
                     &plan,
                     &marker,
-                    Instant::now() + Duration::from_secs(1),
+                    Instant::now() + TEST_STARTUP_DEADLINE,
                     &AtomicBool::new(false)
                 )
                 .unwrap(),
@@ -7553,7 +7558,7 @@ mod tests {
                     &mut parent,
                     &plan,
                     &marker,
-                    Instant::now() + Duration::from_secs(1),
+                    Instant::now() + TEST_STARTUP_DEADLINE,
                     &AtomicBool::new(false),
                 )
                 .unwrap_err();
@@ -7563,7 +7568,7 @@ mod tests {
         let mut protocol = WorkspaceStartupProtocol::new(&plan, |_| Ok(())).unwrap();
         let (mut parent, mut child) = UnixStream::pair().unwrap();
         parent.set_nonblocking(true).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + TEST_STARTUP_DEADLINE;
         let canceled = AtomicBool::new(false);
         child
             .write_all(&install_completion(&plan).unwrap())
@@ -7600,7 +7605,7 @@ mod tests {
                     &mut parent,
                     &plan,
                     &marker,
-                    Instant::now() + Duration::from_secs(1),
+                    Instant::now() + TEST_STARTUP_DEADLINE,
                     &AtomicBool::new(false)
                 )
                 .is_err()

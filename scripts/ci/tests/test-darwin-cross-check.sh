@@ -180,7 +180,9 @@ else:
     # job's own Cargo home.
     assert '\n  cw-release-assets:\n' not in ci
     compile_job = ci.split('\n  rust-compile:\n', 1)[1].split('\n  rust-packages:\n', 1)[0]
-    assert 'CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home' in compile_job
+    # A main push compiles in the job's own Cargo home; every other run on the
+    # build runner, in its warm one (infra#1632).
+    assert "format('{0}/target/ci-rust-cargo-home', github.workspace) || '/ci-cache/pr/cargo-home'" in compile_job
     cw_selected = "needs.verification-selection.outputs.cw_package_selected == 'true'"
     setup = compile_job.split('      - name: Set up pinned Darwin C cross-check tools\n', 1)[1].split('      - name:', 1)[0]
     assert "tested_tree_receipt != 'accepted'" in setup and cw_selected in setup

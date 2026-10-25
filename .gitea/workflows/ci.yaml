@@ -652,15 +652,26 @@ jobs:
 
   rust-compile:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
+    # Compile once (infra#1632): every run except a main push compiles on the
+    # pull request build runner, whose persistent build disk keeps a warm
+    # build folder. It builds the workspace test archive beside every Rust
+    # target's lint, and publishes the archive to the archive store; the
+    # packages shard runs its tests from it and compiles nothing. A main push
+    # compiles here on the trusted Heavy runner, as before.
     name: Compile every Rust target
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD') }}
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.rust_compile_expected == 'true' }}
+    outputs:
+      archive_sha256: ${{ steps.publish.outputs.archive_sha256 }}
     env:
-      CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
+      # On the build runner, its warm Cargo home (build-once.sh prepare).
+      CARGO_HOME: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('{0}/target/ci-rust-cargo-home', github.workspace) || '/ci-cache/pr/cargo-home' }}
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+      BUILD_ONCE: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+      ARCHIVE_STORE_URL: http://ci-archive-pr.forgejo-ci-archive.svc:8090
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -671,34 +682,47 @@ jobs:
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
 
-      # On a main push or a pull request in a metal guest, start from that
-      # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
+      # On a main push, start from the metal guest's warm Rust cache
+      # (infra#1534); anywhere else this changes nothing.
       - name: Select the warm Rust cache
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE != 'true' }}
         env:
           CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
         run: scripts/ci/setup/select-warm-rust-cache.sh
 
       - name: Bound cargo jobs by memory
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE != 'true' }}
         run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
+      - name: Bring the warm build folder to this commit
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE == 'true' }}
+        run: scripts/ci/setup/build-once.sh prepare "$GITHUB_WORKSPACE"
+
+      - name: Run the build legs
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE == 'true' }}
+        run: scripts/ci/setup/build-once.sh build "$RUNNER_TEMP/build-once-out"
+
+      - name: Publish the test archives
+        id: publish
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE == 'true' }}
+        run: scripts/ci/setup/build-once.sh publish "$RUNNER_TEMP/build-once-out"
+
       - name: Select best-effort shared Rust cache
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE != 'true' }}
         env:
           CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Verify Rust cache capacity
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE != 'true' }}
         run: scripts/ci/setup/assert-cargo-cache-capacity.sh "$CARGO_HOME"
 
       - name: Install pinned protoc for Rust builds
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE != 'true' }}
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/protoc.zip \
@@ -712,7 +736,7 @@ jobs:
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
       - name: Compile every Rust target
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE != 'true' }}
         run: scripts/ci/verify/run-product-verification.sh rust-compile
 
       # The macOS cw links Apple frameworks, so only the protected Mac runner
@@ -733,14 +757,18 @@ jobs:
 
       - name: Compile the macOS cw for both Mac targets
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
+        # On the build runner it compiles from the warm build folder.
+        working-directory: ${{ env.BUILD_ONCE == 'true' && '/ci-cache/pr/src' || github.workspace }}
+        env:
+          CARGO_TARGET_DIR: ${{ env.BUILD_ONCE == 'true' && '/ci-cache/pr/targets/darwin' || format('{0}/target/ci-cache/host-debug', github.workspace) }}
         run: scripts/ci/verify/check-darwin-cross.sh --cli
 
       - name: Report and clean Rust cache
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE != 'true' }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Report the warm Rust cache
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE != 'true' }}
         run: scripts/ci/setup/finish-warm-rust-cache.sh
 
   rust-packages:
@@ -749,11 +777,17 @@ jobs:
     runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 30
-    needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.rust_shards_expected == 'true' }}
+    # Compile once (infra#1632): except on a main push, this shard compiles
+    # nothing. It runs the selected packages' tests from the test archive the
+    # compile job built on the build runner, which it fetches and verifies by
+    # the digest that job reported. A main push builds and tests here.
+    needs: [verification-selection, rust-compile]
+    if: ${{ always() && needs.verification-selection.result == 'success' && needs.verification-selection.outputs.rust_shards_expected == 'true' && (needs.rust-compile.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     env:
       CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+      BUILD_ONCE: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+      ARCHIVE_STORE_URL: http://ci-archive-pr.forgejo-ci-archive.svc:8090
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -767,13 +801,13 @@ jobs:
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
       - name: Select the warm Rust cache
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE != 'true' }}
         env:
           CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
         run: scripts/ci/setup/select-warm-rust-cache.sh
 
       - name: Bound cargo jobs by memory
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE != 'true' }}
         run: scripts/ci/setup/bound-cargo-jobs.sh
 
       # Only a metal Kata guest mounts the ext4 warm cache at /ci-cache
@@ -793,17 +827,17 @@ jobs:
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Select best-effort shared Rust cache
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) && env.BUILD_ONCE != 'true' }}
         env:
           CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Verify Rust cache capacity
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) && env.BUILD_ONCE != 'true' }}
         run: scripts/ci/setup/assert-cargo-cache-capacity.sh "$CARGO_HOME"
 
       - name: Install pinned protoc for Rust builds
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) && env.BUILD_ONCE != 'true' }}
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/protoc.zip \
@@ -816,19 +850,31 @@ jobs:
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
+      - name: Fetch and verify the test archive
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) && env.BUILD_ONCE == 'true' }}
+        env:
+          ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.archive_sha256 }}
+        run: scripts/ci/setup/fetch-test-archive.sh "$ARCHIVE_SHA256" "$RUNNER_TEMP/tests.tar.zst"
+
+      - name: Install pinned cargo-nextest
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) && env.BUILD_ONCE == 'true' }}
+        run: scripts/ci/setup/install-cargo-nextest.sh "$RUNNER_TEMP/nextest"
+
       - name: Run the Rust packages shard
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
           RUST_TRANSPORT_SHARD: packages
+          RUST_TEST_ARCHIVE: ${{ env.BUILD_ONCE == 'true' && format('{0}/tests.tar.zst', runner.temp) || '' }}
+          RUST_TEST_NEXTEST: ${{ runner.temp }}/nextest/cargo-nextest
         run: scripts/ci/verify/run-product-verification.sh rust-transport
 
       - name: Report and clean Rust cache
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
+        if: ${{ always() && env.BUILD_ONCE != 'true' && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Report the warm Rust cache
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && env.BUILD_ONCE != 'true' }}
         run: scripts/ci/setup/finish-warm-rust-cache.sh
 
   rust-features:

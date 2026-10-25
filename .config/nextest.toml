@@ -19,8 +19,22 @@ slow-timeout = { period = "60s" }
 [profile.ci]
 retries = 0
 fail-fast = false
+# One run of the whole archive mixes every binary's tests; cargo test runs one
+# binary at a time. At the guest's 60 threads, I/O- and timing-bound tests
+# (durable writes within a deadline, poll races) missed their marks on a busy
+# metal guest (codewire runs 21672, 21687), so a CI run uses half of them.
+test-threads = 32
 slow-timeout = { period = "60s" }
 failure-output = "immediate-final"
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# A real two-endpoint journey (two cw hosts, direct UDP and TLS DERP) runs for
+# about a minute under cargo test, beside its own binary's tests only. In one
+# nextest run beside every other binary's tests it timed out (codewire runs
+# 21593, with no reservation, and 21646, with 16 of the guest's threads), so
+# it runs alone.
+[[profile.ci.overrides]]
+filter = 'binary_id(codewire-cli-bin::host_member_control) & test(=host_members_two_real_endpoints_direct_and_tls_derp)'
+threads-required = "num-test-threads"

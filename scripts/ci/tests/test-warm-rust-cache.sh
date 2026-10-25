@@ -201,12 +201,17 @@ for name, job in jobs.items():
     index = names.index("Select the warm Rust cache")
     checkout = steps[index - 1]
     assert str(checkout.get("uses", "")).startswith("noel/actions-checkout@"), name
-    assert steps[index]["if"] == checkout["if"], name
+    # A job that compiles once on the build runner (infra#1632) uses the warm
+    # cache only where it still compiles: a main push.
+    gate = checkout["if"]
+    if "BUILD_ONCE" in (job.get("env") or {}):
+        gate = gate[:-len(" }}")] + " && env.BUILD_ONCE != 'true' }}"
+    assert steps[index]["if"] == gate, name
     assert steps[index]["run"] == "scripts/ci/setup/select-warm-rust-cache.sh", name
     # The report is the job's last step.
     report = steps[-1]
     assert report["name"] == "Report the warm Rust cache", name
-    assert report["if"] == checkout["if"].replace("${{ ", "${{ always() && ", 1), name
+    assert report["if"] == gate.replace("${{ ", "${{ always() && ", 1), name
 assert wired == expected, sorted(wired ^ expected)
 WIRING
 

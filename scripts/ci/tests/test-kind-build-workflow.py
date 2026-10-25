@@ -1005,11 +1005,21 @@ class MainPushDeferralContractTests(unittest.TestCase):
                                                  untrusted: "untrusted-kind-label"}
                 del context[missing]
                 self.assertEqual(actions_value(runs_on, context), expected)
-        heavy = self.workflow["jobs"]["rust-compile"]["runs-on"]
+        heavy = self.workflow["jobs"]["rust-packages"]["runs-on"]
         self.assertEqual(heavy, runners.HEAVY)
         self.assertEqual(actions_value(heavy, self.context("push") | {
             "vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY": "untrusted-heavy-label"}),
             "unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY")
+        # Compile once (infra#1632): a main push compiles on trusted Heavy and
+        # never on the pull request build runner; a pull request never on Heavy.
+        build = self.workflow["jobs"]["rust-compile"]["runs-on"]
+        self.assertEqual(build, runners.BUILD)
+        self.assertEqual(actions_value(build, self.context("push") | {
+            "vars.CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD": "build-label"}),
+            "unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY")
+        self.assertEqual(actions_value(build, self.context("pull_request") | {
+            "vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY": "trusted-heavy-label"}),
+            "unset-CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD")
 
     def test_only_a_scheduled_run_reads_its_baseline(self) -> None:
         steps = self.workflow["jobs"]["verification-selection"]["steps"]

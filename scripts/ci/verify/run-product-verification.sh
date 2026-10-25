@@ -78,8 +78,18 @@ rust_package_args() {
   fi
 }
 
+# Compile once (infra#1632): with RUST_TEST_ARCHIVE set, the packages shard
+# compiles nothing. It runs the selected packages' tests from that verified
+# test archive, built by the pull request build runner, with cargo-nextest:
+# one run for the Rust and transport selections together.
+RUST_ARCHIVE_FILTERS=()
+# The build runner's build folder. Test binaries carry its paths (the
+# compile-time CARGO_MANIFEST_DIR and CARGO_BIN_EXE_*), so a test job links
+# them to its own checkout and its extracted target folder.
+readonly RUST_ARCHIVE_BUILD_ROOT=/ci-cache/pr
+
 run_rust_packages() {
-  local prefix="$1"
+  local prefix="$1" arg
   rust_package_args "$prefix"
   # The selector gives Rust and transport distinct package/feature graphs.
   # Preserve every generic invocation; only workspace formatting is shared.
@@ -87,12 +97,73 @@ run_rust_packages() {
     cargo fmt --all --check || return $?
     RUST_COMPOSE_FORMAT_DONE=true
   fi
+  if [ -n "${RUST_TEST_ARCHIVE:-}" ]; then
+    for arg in "${RUST_PACKAGE_ARGS[@]}"; do
+      case "$arg" in
+        --workspace) RUST_ARCHIVE_FILTERS+=('all()') ;;
+        -p) ;;
+        *) RUST_ARCHIVE_FILTERS+=("package($arg)") ;;
+      esac
+    done
+    return 0
+  fi
   # Workspace clippy (default and all features, every target) runs once in the
   # fast compile job, which every Rust or transport selection also runs, and
   # this test build compiles and links each library and test target with the
   # binaries their integration tests run. A separate debug build of the same
   # graph would only repeat that work.
   cargo test --locked "${RUST_PACKAGE_ARGS[@]}" --all-targets || return $?
+}
+
+run_rust_archive_tests() {
+  [ "${#RUST_ARCHIVE_FILTERS[@]}" -gt 0 ] || return 0
+  [ -f "$RUST_TEST_ARCHIVE" ] || {
+    echo "::error::the test archive $RUST_TEST_ARCHIVE is missing" >&2
+    return 1
+  }
+  local nextest="${RUST_TEST_NEXTEST:-cargo-nextest}" root="$RUST_ARCHIVE_BUILD_ROOT"
+  local filter="" part status=0
+  for part in "${RUST_ARCHIVE_FILTERS[@]}"; do
+    filter="${filter:+$filter | }$part"
+  done
+  # The test binaries carry the build folder's paths. The source is a real
+  # copy of this checkout there, not a link: many tests check that their
+  # paths' ancestry is real and owner-private, and compare canonical paths.
+  # The target folder is extracted on the job's disk (a metal guest's
+  # /ci-cache is its full warm cache), and the build path's target folder is
+  # a real directory with a real tmp (CARGO_TARGET_TMPDIR) whose other
+  # entries link into the extraction.
+  local extract entry
+  extract="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/rust-archive-tests.XXXXXX")"
+  rm -rf -- "$root"
+  mkdir -p "$root/targets/archive/tmp"
+  cp -a "$ROOT/." "$root/src"
+  "$nextest" nextest run --archive-file "$RUST_TEST_ARCHIVE" \
+    --workspace-remap "$root/src" --extract-to "$extract" \
+    -E 'none()' --no-tests=pass >/dev/null || {
+      status=$?
+      df -h "$extract" "$root" >&2 || true
+      return "$status"
+    }
+  for entry in "$extract/target"/*; do
+    [ "${entry##*/}" = tmp ] || ln -s "$entry" "$root/targets/archive/${entry##*/}"
+  done
+  # Write the extraction out before any test runs: tests that sync a
+  # filesystem within a deadline (the guest probe's workspace install) would
+  # otherwise wait on gigabytes of fresh pages.
+  sync
+  echo "[rust-archive-tests] filter: $filter${RUST_TEST_PARTITION:+ partition: $RUST_TEST_PARTITION}"
+  (
+    cd "$root/src"
+    "$nextest" nextest run \
+      --binaries-metadata "$root/targets/archive/nextest/binaries-metadata.json" \
+      --cargo-metadata "$root/targets/archive/nextest/cargo-metadata.json" \
+      --target-dir-remap "$root/targets/archive" --workspace-remap "$root/src" \
+      --profile ci --no-tests=pass -E "$filter" \
+      ${RUST_TEST_PARTITION:+--partition "$RUST_TEST_PARTITION"}
+  ) || status=$?
+  rm -rf -- "$root" "$extract"
+  return "$status"
 }
 
 # Rust/transport verification runs as parallel CI shards: packages (the
@@ -122,6 +193,9 @@ run_rust_transport() {
   fi
   if selected transport; then
     run_transport
+  fi
+  if rust_shard packages; then
+    run_rust_archive_tests
   fi
 }
 
