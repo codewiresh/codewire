@@ -12,7 +12,10 @@ fail() {
 }
 
 fixture_root="$TMP/root"
-mkdir -p "$fixture_root/scripts/ci/verify"
+mkdir -p "$fixture_root/scripts/ci/verify" "$fixture_root/scripts/ci/setup"
+# The integration runner sources the guest CPU share helper before it
+# resolves the target directory.
+cp "$ROOT/scripts/ci/setup/cpu-share.sh" "$fixture_root/scripts/ci/setup/cpu-share.sh"
 
 for runner in \
   scripts/ci/verify/run-product-verification.sh \
