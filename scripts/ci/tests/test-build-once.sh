@@ -265,6 +265,7 @@ if [ -e "$CARGO_TARGET_DIR/debug/deps/libbroken.rlib" ]; then
   case "$LEGS_CARGO_MODE" in
     corrupt) echo "rust-lld: error: $CARGO_TARGET_DIR/debug/deps/libbroken.rlib: Archive::children failed: truncated or malformed archive"; exit 101 ;;
     compile) echo "error[E0308]: mismatched types"; exit 101 ;;
+    missing) echo "error[E0463]: can't find crate for \`sqlx\`"; exit 101 ;;
   esac
 fi
 echo "archive-start $(date +%s%N)" >> "$LEGS_STATE/times"; sleep 1
@@ -301,9 +302,13 @@ legs_build corrupt || fail "a corrupt archive was not rebuilt: $(cat "$work/legs
 [ -f "$work/legs-out/archive.tar.zst" ] || fail 'the rebuilt leg wrote no archive'
 [ "$(wc -l < "$work/legs-state/calls")" -eq 2 ] || fail 'the corrupt leg did not build exactly twice'
 grep -q 'it is wiped and the leg runs once more' "$work/legs.log" || fail 'the rebuild gave no reason'
-for signature in 'could not load dep-graph' 'required to be available in rlib format' 'No space left on device'; do
+for signature in 'could not load dep-graph' 'required to be available in rlib format' 'No space left on device' 'E046\[0-4\]' 'can.t find crate for'; do
   grep -q "^readonly CORRUPT_OUTPUT=.*$signature" "$SCRIPT" || fail "the corrupt-output rebuild misses: $signature"
 done
+legs_build missing || fail "a missing crate was not rebuilt: $(cat "$work/legs.log")"
+[ "$(wc -l < "$work/legs-state/calls")" -eq 2 ] || fail 'the missing-crate leg did not build exactly twice'
+grep -q "read a corrupt output in $work/legs-root/pr/targets/archive; it is wiped" "$work/legs.log" ||
+  fail 'a missing crate did not wipe the leg'"'"'s own folder'
 if legs_build compile; then fail 'a compile error passed'; fi
 [ "$(wc -l < "$work/legs-state/calls")" -eq 1 ] || fail 'a compile error was rebuilt'
 [ -e "$work/legs-root/pr/targets/archive/debug/deps/libbroken.rlib" ] || fail 'a compile error wiped the target folder'

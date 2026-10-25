@@ -415,10 +415,13 @@ run_leg() {
 
 # What a corrupt output in a warm target folder looks like: a truncated or
 # malformed archive or metadata file, or the link that reads one (main run
-# 22374). A failed leg showing it wipes the target folders its log names and
-# runs once more in the same job.
+# 22374); a broken incremental session or a full disk (22822); a dependency
+# rustc can no longer find or load (E0460-E0464, E0514; main run 22975:
+# "can't find crate for `sqlx`"). A failed leg showing it wipes the target
+# folders its log names, or its own when the log names none, and runs once
+# more in the same job.
 # shellcheck disable=SC2016 # The backticks are literal text in the linker message.
-readonly CORRUPT_OUTPUT='malformed archive|truncated|Archive::children failed|invalid metadata|E0786|failed to mmap|linking with `cc` failed|corrupt incremental compilation artifact|could not load dep-graph|required to be available in rlib format|memory map must have a non-zero length|No space left on device'
+readonly CORRUPT_OUTPUT='malformed archive|truncated|Archive::children failed|invalid metadata|E0786|failed to mmap|linking with `cc` failed|corrupt incremental compilation artifact|could not load dep-graph|required to be available in rlib format|memory map must have a non-zero length|No space left on device|E046[0-4]|E0514|can.t find crate for|extern location for .* does not exist'
 
 rebuild_corrupt_leg() {
   # rebuild_corrupt_leg NAME OUT LOG: succeeds only when the leg showed a
@@ -428,7 +431,8 @@ rebuild_corrupt_leg() {
   local name="$1" out="$2" log="$3" folders folder
   grep -Eq "$CORRUPT_OUTPUT" "$log" || return 1
   folders="$(grep -oE "$work/targets/[A-Za-z0-9_-]+" "$log" | sort -u)"
-  [ -n "$folders" ] || return 1
+  # A missing crate (E0463 and its kin) names no folder: the leg's own.
+  [ -n "$folders" ] || folders="$work/targets/$name $work/targets/${name}_desktop"
   for folder in $folders; do
     echo "build-once: the $name leg read a corrupt output in $folder; it is wiped and the leg runs once more" | tee -a "$log"
     rm -rf -- "$folder"
