@@ -112,6 +112,14 @@ elif [ "$tested_tree_receipt" = fallback ]; then
     && expected[services_runtime]=true
   # The Kind shards. Edge static verification (edge_kind) runs in tooling.
   selected kind && expected[edge_kind]=true
+  # Compile once (infra#1632): the database and service families run from the
+  # build runner's archives, so selecting one dispatches the compile job too.
+  # Without it they compiled themselves at -j4 on a 6 GiB guest (run 22601:
+  # "no archive was built for this run").
+  if [ "${expected[database]}" = true ] || [ "${expected[services_control]}" = true ] \
+      || [ "${expected[services_runtime]}" = true ]; then
+    expected[rust_compile]=true
+  fi
 
   # A future trusted selector token must never silently create no work merely
   # because this dispatch registry has not learned it yet. Unknown tokens take

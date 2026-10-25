@@ -250,4 +250,26 @@ for invalid in yes 1 TRUE; do
   fi
 done
 
+# Compile once (infra#1632): a family that runs from the build runner's
+# archives dispatches the compile job, even with no Rust change (run 22601
+# selected database and the services without it, and they compiled
+# themselves). Service tokens that dispatch no service job dispatch no compile.
+for case in \
+    '|valid:v3|policy|database|complete|:database' \
+    '|valid:v3|policy|service_idp|complete|:services_control' \
+    '|valid:v3|policy|service_billing|service_connectcore|complete|:services_control' \
+    '|valid:v3|policy|service_nats|complete|:services_runtime' \
+    '|valid:v3|policy|service_orchestration|complete|:services_runtime'; do
+  archive_output="$(emit "${case%:*}" fallback false false)"
+  assert_output "$archive_output" "${case##*:}" true
+  assert_output "$archive_output" rust_compile true
+  assert_output "$archive_output" rust_shards false
+done
+for selection in '|valid:v3|policy|complete|' '|valid:v3|policy|service_temporal|complete|' \
+    '|valid:v3|policy|service_integration|complete|' '|valid:v3|policy|web|docs|complete|'; do
+  assert_output "$(emit "$selection" fallback false false)" rust_compile false
+done
+# A superseded or receipt-accepted run still dispatches nothing.
+assert_output "$(emit '|valid:v3|policy|database|complete|' accepted false false)" rust_compile false
+
 echo '[test-emit-verification-matrices] trusted capability expectation contract passed'
