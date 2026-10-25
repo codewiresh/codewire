@@ -59,7 +59,14 @@ const TRANSIENT_PROBE: &str =
     "printf 'CW_TRANSIENT_RESULT|%s|%s\\n' \"$CW_DEV_PRECEDENCE\" \"$PROJECTION_ROTATING\"";
 
 async fn bounded<F: Future>(future: F) -> F::Output {
-    tokio::time::timeout(BOUND, future)
+    bounded_beyond(Duration::ZERO, future).await
+}
+
+/// Hang guard for a step that includes a wait the test sets itself (a held
+/// projection or a client deadline). That wait extends the guard rather than
+/// consuming the slack every other step keeps for a slow or stalled host.
+async fn bounded_beyond<F: Future>(hold: Duration, future: F) -> F::Output {
+    tokio::time::timeout(BOUND + hold, future)
         .await
         .expect("synthetic projection conformance deadline")
 }
@@ -318,7 +325,9 @@ impl Harness {
                     let gate = gate.take().unwrap();
                     gated_request_id = Some(request.request_id.clone());
                     gate.requested.send(()).unwrap();
-                    bounded(gate.release).await.unwrap();
+                    // The test owns release. Its own bounded steps guard a
+                    // hang; a wall-clock bound here would race its hold.
+                    gate.release.await.unwrap();
                 }
                 let context = ProjectionContext {
                     environment_id: *environment.as_bytes(),
@@ -574,12 +583,24 @@ async fn transient_projection_preserves_override_and_terminal_exit_twice() {
 }
 
 async fn launch_and_restart(pty: bool) {
-    launch_and_restart_with_harness(Harness::start().await, pty, true).await;
+    launch_and_restart_with_harness(Harness::start().await, pty, true, None).await;
 }
 
-async fn launch_and_restart_with_harness(mut harness: Harness, pty: bool, reopen_daemon: bool) {
+/// `held` names the projection (0 launch, 1 restart) the fixture holds open
+/// and for how long, so that step's hang guard excludes the hold.
+async fn launch_and_restart_with_harness(
+    mut harness: Harness,
+    pty: bool,
+    reopen_daemon: bool,
+    held: Option<(usize, Duration)>,
+) {
+    let hold = |index: usize| {
+        held.filter(|(held, _)| *held == index)
+            .map_or(Duration::ZERO, |(_, hold)| hold)
+    };
     let term = if pty { "requested-term" } else { "" };
-    let launched = bounded(
+    let launched = bounded_beyond(
+        hold(0),
         harness
             .client
             .launch_session(authorized(v1::LaunchSessionRequest {
@@ -613,12 +634,15 @@ async fn launch_and_restart_with_harness(mut harness: Harness, pty: bool, reopen
 
     // The live daemon retains the explicitly supplied launch values in RAM;
     // restart obtains a fresh sealed projection without persisting either.
-    let restarted = bounded(harness.client.restart_session(authorized(
-        v1::RestartSessionRequest {
-            session_id: id.clone(),
-            expected_launch_generation: None,
-        },
-    )))
+    let restarted = bounded_beyond(
+        hold(1),
+        harness
+            .client
+            .restart_session(authorized(v1::RestartSessionRequest {
+                session_id: id.clone(),
+                expected_launch_generation: None,
+            })),
+    )
     .await
     .unwrap()
     .into_inner()
@@ -744,9 +768,10 @@ async fn cancelled_launch_reaps_and_settles_without_a_late_launch(pty: bool) {
     };
     // Match the former private unary deadline, not a sleep racing launch.
     // The real bridge gate proves the request reached its exact launcher.
+    let client_deadline = Duration::from_secs(5);
     let channel = Endpoint::from_shared(harness.endpoint.clone())
         .unwrap()
-        .timeout(Duration::from_secs(5))
+        .timeout(client_deadline)
         .connect()
         .await
         .unwrap();
@@ -781,7 +806,13 @@ async fn cancelled_launch_reaps_and_settles_without_a_late_launch(pty: bool) {
         .trim()
         .parse()
         .unwrap();
-    assert!(bounded(pending).await.unwrap().is_err());
+    // The client's own deadline ends this call; it extends the hang guard.
+    assert!(
+        bounded_beyond(client_deadline, pending)
+            .await
+            .unwrap()
+            .is_err()
+    );
     bounded(async {
         while Path::new(&format!("/proc/{pid}")).exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -874,12 +905,15 @@ async fn delayed_projection_fits_launch_budget(index: usize) {
         .await
         .unwrap();
     harness.client = DaemonServiceClient::new(channel);
+    // Hold the gated projection past the five-second connect timeout. The
+    // gated RPC's own guard covers a request that never arrives.
+    let hold = Duration::from_secs(6);
     let delay = tokio::spawn(async move {
-        bounded(received).await.unwrap();
-        tokio::time::sleep(Duration::from_secs(6)).await;
+        received.await.unwrap();
+        tokio::time::sleep(hold).await;
         release.send(()).unwrap();
     });
-    launch_and_restart_with_harness(harness, true, false).await;
+    launch_and_restart_with_harness(harness, true, false, Some((index, hold))).await;
     delay.await.unwrap();
 }
 
