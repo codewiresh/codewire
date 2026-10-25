@@ -2170,7 +2170,7 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/cli-release.yaml|\
       .gitea/workflows/cw-release-dry-run.yaml|\
       .gitea/workflows/mirror-github.yaml|\
-      .gitea/workflows/support-images.yaml|\
+      .gitea/workflows/support-images.yaml|scripts/ci/images/support-superseded.sh|\
       keys/production-release.asc|\
       .gitea/workflows/observe-*.yaml|\
       scripts/ci/images/build-push-image.sh|scripts/ci/images/build-push-runtime-images.sh|\

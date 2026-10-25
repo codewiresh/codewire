@@ -55,26 +55,14 @@ jobs:
       - name: Verify sealed Rust toolchain
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
-      # The same rule as deploy-dev.yaml's step of this name. A run that starts
-      # after main moved on publishes nothing: the newer commit's run is
-      # queued behind this one and plans against the published pair, so it
-      # publishes the cumulative change. The run already building when main
-      # moves on still finishes.
+      # A run that starts after main moved on publishes nothing: the newer
+      # commit's run is queued behind this one and plans against the
+      # published pair, so it publishes the cumulative change. Each build job
+      # asks again when it starts (support-superseded.sh). The run already
+      # building when main moves on still finishes.
       - name: Skip a superseded commit
         id: canonical
-        run: |
-          set -euo pipefail
-          canonical_main_sha="$(
-            git ls-remote origin refs/heads/main |
-              awk '$2 == "refs/heads/main" { print $1 }'
-          )"
-          [[ "$canonical_main_sha" =~ ^[0-9a-f]{40}$ ]]
-          if [[ "$canonical_main_sha" == "$GITHUB_SHA" ]]; then
-            echo 'superseded=false' >> "$GITHUB_OUTPUT"
-          else
-            echo 'superseded=true' >> "$GITHUB_OUTPUT"
-            echo "main is now ${canonical_main_sha}; its queued run publishes this commit's changes"
-          fi
+        run: scripts/ci/images/support-superseded.sh
 
       - name: Resolve untrusted published support pair
         run: |
@@ -124,6 +112,7 @@ jobs:
     needs: [support-selection]
     if: ${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' }}
     outputs:
+      superseded: ${{ steps.canonical.outputs.superseded }}
       base_digest: ${{ steps.build.outputs.base_digest }}
       # Only a passing workspace contract reports the digest the joins consume.
       workspace_digest: ${{ steps.contract.outputs.workspace_digest }}
@@ -141,16 +130,26 @@ jobs:
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
+      # A build job can wait minutes for a protected runner after selection.
+      # When main moved on meanwhile, it builds nothing: six pairs on
+      # 2026-10-23 and 2026-10-24 started both platforms after their commit
+      # was superseded (infra#1534). A build that has started still finishes.
+      - name: Skip a superseded commit
+        id: canonical
+        run: scripts/ci/images/support-superseded.sh
+
       # The one Codewire CI cache, written only by main-only builders
       # (infra#1544). It is best effort: without the credential the selector
       # chooses the job-local cache.
       - name: Select the protected R2 compiler cache
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
         id: compiler-cache
         run: |
           scripts/ci/setup/select-protected-rust-cache.sh \
             "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"
 
       - name: Build the linux/amd64 base and workspace by digest
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
         id: build
         env:
           SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
@@ -171,6 +170,7 @@ jobs:
       # anything publishes it, with no compiler credential left on disk. The
       # pull robot's Docker configuration is gone before the image runs.
       - name: Run the workspace contract on the exact image
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
         id: contract
         env:
           WORKSPACE_DIGEST: ${{ steps.build.outputs.workspace_digest }}
@@ -189,6 +189,7 @@ jobs:
     needs: [support-selection]
     if: ${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' }}
     outputs:
+      superseded: ${{ steps.canonical.outputs.superseded }}
       base_digest: ${{ steps.build.outputs.base_digest }}
       workspace_digest: ${{ steps.build.outputs.workspace_digest }}
     env:
@@ -197,17 +198,25 @@ jobs:
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
+      # As in the amd64 leg: a build job that starts after main moved on
+      # builds nothing.
+      - name: Skip a superseded commit
+        id: canonical
+        run: scripts/ci/images/support-superseded.sh
+
       # The same protected R2 compiler cache as the amd64 leg. The credential
       # reaches the remote arm64 BuildKit node only as a BuildKit secret over
       # the mutual-TLS session; that node already receives the registry publish
       # credentials for this job.
       - name: Select the protected R2 compiler cache
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
         id: compiler-cache
         run: |
           scripts/ci/setup/select-protected-rust-cache.sh \
             "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"
 
       - name: Build the linux/arm64 base and workspace by digest
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
         id: build
         env:
           SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
@@ -235,6 +244,9 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 30
     needs: [build-support-amd64, build-support-arm64]
+    # Only a pair both of whose platforms built joins: a platform job that
+    # found its commit superseded built nothing.
+    if: ${{ needs.build-support-amd64.outputs.superseded == 'false' && needs.build-support-arm64.outputs.superseded == 'false' }}
     outputs:
       workspace_ref: ${{ steps.workspace.outputs.candidate_ref }}
       workspace_mirrored: ${{ steps.mirror.outcome == 'success' }}
@@ -301,11 +313,19 @@ jobs:
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
+      # As in the amd64 leg: a build job that starts after main moved on
+      # builds nothing.
+      - name: Skip a superseded commit
+        id: canonical
+        run: scripts/ci/images/support-superseded.sh
+
       - name: Build confidential bootstrap probe image
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
         id: confidential_probe
         run: scripts/ci/images/build-push-image.sh confidential-probe images/confidential-probe/Dockerfile images/confidential-probe
 
       - name: Publish confidential bootstrap probe to Harbor without rebuilding
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
         run: |
           set -euo pipefail
           [[ "${{ steps.confidential_probe.outputs.source_sha }}" == "$GITHUB_SHA" ]]
@@ -315,6 +335,7 @@ jobs:
             "$GITHUB_SHA"
 
       - name: Mirror confidential bootstrap probe to GHCR without gating delivery
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
         continue-on-error: true
         run: |
           set -euo pipefail

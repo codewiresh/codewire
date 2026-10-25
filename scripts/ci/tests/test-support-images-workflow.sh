@@ -153,7 +153,9 @@ grep -Fq -- '--support-pair' <<<"$publish_job" ||
 # Publication consumes only same-job candidates. The platform digests cross
 # the job boundary only into the two joins, which verify the whole index
 # (both platforms, their provenance and SBOMs) before reporting a candidate.
-[[ "$(grep -Fc 'needs.build-' <<<"$publish_job")" -eq 2 \
+# The job's own condition reads only whether each platform skipped (pinned
+# exactly below).
+[[ "$(grep -v '^    if: ' <<<"$publish_job" | grep -Fc 'needs.build-')" -eq 2 \
   && "$(grep -Fc '          CODEWIRE_IMAGE_JOIN: ${{ needs.build-support-amd64.outputs.base_digest }} ${{ needs.build-support-arm64.outputs.base_digest }}' <<<"$publish_job")" -eq 1 \
   && "$(grep -Fc '          CODEWIRE_IMAGE_JOIN: ${{ needs.build-support-amd64.outputs.workspace_digest }} ${{ needs.build-support-arm64.outputs.workspace_digest }}' <<<"$publish_job")" -eq 1 ]] ||
   fail 'publisher consumes another job'"'"'s output outside the verifying joins'
@@ -548,32 +550,83 @@ done
 
 # Forgejo keeps every queued run, so one that starts after main moved on must
 # publish nothing; the newer commit's run is queued behind it and plans against
-# the published pair. Execute the checked-in step for the current, superseded,
+# the published pair. The selection job asks first, and each build job asks
+# again as its first step after checkout, before it reads a credential or
+# builds: a build job can wait minutes for a protected runner, and six pairs
+# on 2026-10-23 and 2026-10-24 started both platforms after main moved on
+# (infra#1534). Execute the checked-in rule for the current, superseded,
 # unreadable and malformed cases. (Deploy Dev no longer skips itself: a newer
 # run cancels an older delivery once that commit's main CI can no longer
 # verify it, #2892.)
-step_of() {
-  awk '
-    /- name: Skip a superseded commit/ { scope = 1 }
-    scope && /^        run: \|$/ { run = 1; next }
-    run && /^          / { print substr($0, 11); next }
-    run { exit }
-  ' "$1"
-}
-superseded_step="$(mktemp)"
+readonly SUPERSEDED_RULE="$ROOT/scripts/ci/images/support-superseded.sh"
+[[ -x "$SUPERSEDED_RULE" ]] || fail 'the superseded-commit rule is missing'
 superseded_bin="$(mktemp -d)"
-trap 'rm -rf -- "$superseded_step" "$superseded_bin"' EXIT
-step_of "$WORKFLOW" >"$superseded_step"
-[[ -s "$superseded_step" ]] || fail 'support selection has no superseded-commit step'
+trap 'rm -rf -- "$superseded_bin"' EXIT
+recheck_step=$'      - name: Skip a superseded commit\n        id: canonical\n        run: scripts/ci/images/support-superseded.sh'
 # shellcheck disable=SC2016 # Match the literal workflow expression.
 grep -Fq '      superseded: ${{ steps.canonical.outputs.superseded }}' <<<"$selection_job" ||
   fail 'support selection does not expose whether its commit was superseded'
+grep -Fq "$recheck_step" <<<"$selection_job" ||
+  fail 'support selection does not run the superseded-commit rule'
 superseded_line="$(grep -n -m1 'name: Skip a superseded commit' <<<"$selection_job" | cut -d: -f1)"
 resolve_line="$(grep -n -m1 'name: Resolve untrusted published support pair' <<<"$selection_job" | cut -d: -f1)"
 [[ "$superseded_line" -lt "$resolve_line" ]] ||
   fail 'support selection resolves the published pair before it knows whether its commit was superseded'
 [[ "$(grep -Fc "needs.support-selection.outputs.superseded == 'false'" "$WORKFLOW")" -eq 3 ]] ||
   fail 'a superseded commit still reaches a support platform build or the probe publisher'
+# rechecked_job_violation JOB [CLEANUP_STEP]: prints why JOB does not decide
+# again before it builds. Its first step after checkout runs the rule, every
+# later step but the named credential cleanup runs only when its commit is
+# still main's tip, and a platform job reports the answer to the join.
+rechecked_job_violation() {
+  local job="$1" cleanup="${2:-}" steps name
+  steps="$(awk '/^    steps:$/ { s = 1; next } s' <<<"$job")"
+  [[ "$(awk '/^      - /' <<<"$steps" | sed -n '1,2p')" == \
+    $'      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - name: Skip a superseded commit' ]] ||
+    { echo 'it does not decide first after checkout'; return; }
+  grep -Fq "$recheck_step" <<<"$steps" || { echo 'it does not run the rule'; return; }
+  while IFS= read -r name; do
+    [[ "$name" == 'Skip a superseded commit' ]] && continue
+    if [[ -n "$cleanup" && "$name" == "$cleanup" ]]; then
+      awk -v n="      - name: $name" '$0 == n { s = 1; next } s && /^      - / { exit } s' <<<"$steps" |
+        grep -Fqx '        if: ${{ always() }}' || { echo "its cleanup step $name does not always run"; return; }
+      continue
+    fi
+    awk -v n="      - name: $name" '$0 == n { s = 1; next } s && /^      - / { exit } s' <<<"$steps" |
+      grep -Fqx "        if: \${{ steps.canonical.outputs.superseded == 'false' }}" ||
+      { echo "step $name runs for a superseded commit"; return; }
+  done < <(sed -n 's/^      - name: //p' <<<"$steps")
+}
+amd64_job="$(sed -n '/^  build-support-amd64:/,/^  build-support-arm64:/p' "$WORKFLOW")"
+arm64_job="$(sed -n '/^  build-support-arm64:/,/^  publish-support-images:/p' "$WORKFLOW")"
+for platform_job_name in amd64 arm64; do
+  platform_job_text="$amd64_job"
+  [[ "$platform_job_name" == amd64 ]] || platform_job_text="$arm64_job"
+  violation="$(rechecked_job_violation "$platform_job_text" 'Remove the protected R2 compiler-cache credential')"
+  [[ -z "$violation" ]] || fail "the $platform_job_name support build may build a superseded commit: $violation"
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  grep -Fq '      superseded: ${{ steps.canonical.outputs.superseded }}' <<<"$platform_job_text" ||
+    fail "the $platform_job_name support build does not report whether it skipped"
+done
+violation="$(rechecked_job_violation "$probe_job")"
+[[ -z "$violation" ]] || fail "the confidential probe may build a superseded commit: $violation"
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -Fqx "    if: \${{ needs.build-support-amd64.outputs.superseded == 'false' && needs.build-support-arm64.outputs.superseded == 'false' }}" \
+  <<<"$publish_job" || fail 'the join can run when a platform skipped its superseded build'
+# Each mutation of the amd64 build must be refused.
+recheck_mutations=(
+  'no recheck::/^      - name: Skip a superseded commit$/,/^        run: scripts\/ci\/images\/support-superseded.sh$/d'
+  'ungated build::/^      - name: Build the linux\/amd64 base and workspace by digest$/{n;d}'
+  'ungated cache credential::/^      - name: Select the protected R2 compiler cache$/{n;d}'
+  'recheck after the cache::/^      - name: Skip a superseded commit$/,/^        run: scripts\/ci\/images\/support-superseded.sh$/d;/^      - name: Build the linux\/amd64 base/i\      - name: Skip a superseded commit\n        id: canonical\n        run: scripts/ci/images/support-superseded.sh'
+)
+for mutation in "${recheck_mutations[@]}"; do
+  label="${mutation%%::*}"
+  mutated="$(sed -e "${mutation#*::}" <<<"$amd64_job")"
+  [[ "$mutated" != "$amd64_job" ]] || fail "recheck mutation did not apply: $label"
+  [[ -n "$(rechecked_job_violation "$mutated" 'Remove the protected R2 compiler-cache credential')" ]] ||
+    fail "recheck mutation was accepted: $label"
+done
 cat >"$superseded_bin/git" <<'GIT'
 #!/usr/bin/env bash
 [[ "$*" == 'ls-remote origin refs/heads/main' ]] || exit 64
@@ -586,7 +639,7 @@ superseded_case() {
   output="$(mktemp)"
   if env PATH="$superseded_bin:$PATH" FAKE_MAIN_SHA="$main" \
       GITHUB_SHA=1111111111111111111111111111111111111111 GITHUB_OUTPUT="$output" \
-      bash "$superseded_step" >/dev/null 2>&1; then
+      "$SUPERSEDED_RULE" >/dev/null 2>&1; then
     cat "$output"
   else
     printf 'failed\n'
@@ -659,6 +712,7 @@ if len(contract) != 1:
     sys.exit("the amd64 build job has no single workspace contract step")
 expected = {
     "name": "Run the workspace contract on the exact image",
+    "if": "${{ steps.canonical.outputs.superseded == 'false' }}",
     "id": "contract",
     "env": {"WORKSPACE_DIGEST": "${{ steps.build.outputs.workspace_digest }}"},
     "run": "scripts/ci/images/run-workspace-contract-on-image.sh \\\n"
@@ -683,7 +737,7 @@ PY
 violation="$(contract_step_violation "$WORKFLOW" 2>&1)" && [[ -z "$violation" ]] || fail "$violation"
 # Each rule refuses its own regression of the reviewed job.
 contract_tree="$(mktemp -d)"
-trap 'rm -rf -- "$superseded_step" "$superseded_bin" "$contract_tree"' EXIT
+trap 'rm -rf -- "$superseded_bin" "$contract_tree"' EXIT
 move_contract_before() {
   awk -v anchor="$1" '
     /^  [A-Za-z0-9_-]+:$/ { job = $0 }
@@ -737,7 +791,7 @@ fi
 # The platform script, run in a copy of its tree against a recording builder,
 # a recording Docker and a stub for the arm64 node's client certificate.
 platform_tree="$(mktemp -d)"
-trap 'rm -rf -- "$superseded_step" "$superseded_bin" "$contract_tree" "$platform_tree"' EXIT
+trap 'rm -rf -- "$superseded_bin" "$contract_tree" "$platform_tree"' EXIT
 mkdir -p "$platform_tree/scripts/ci/images" "$platform_tree/scripts/ci/setup" "$platform_tree/bin" "$platform_tree/runner"
 cp "$PLATFORM_BUILDER" "$platform_tree/scripts/ci/images/"
 cp "$ROOT/scripts/ci/setup/trusted-buildkit.sh" "$platform_tree/scripts/ci/setup/"

@@ -822,6 +822,11 @@ run_present_paths_case public_installer_test \
   pull_request refs/pull/952/head false \
   'go_consumer_interop go_support policy release confidential_script_tests security security_js' \
   scripts/ci/tests/test-cw-install.py
+# The support-image superseded-commit rule is part of support-images.yaml.
+run_present_paths_case support_superseded_rule \
+  pull_request refs/pull/3013/head false \
+  'go_consumer_interop go_support policy policy_shell release confidential_script_tests security security_js' \
+  scripts/ci/images/support-superseded.sh
 run_paths_case protected_delivery_credentials pull_request refs/pull/31/head false \
   'deploy go_consumer_interop go_support policy release confidential_script_tests security security_js' \
   scripts/ci/setup/curl-transport-retry.sh \
