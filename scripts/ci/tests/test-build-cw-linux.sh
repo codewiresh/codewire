@@ -128,7 +128,7 @@ grep -q 'extraheader\|AUTHORIZATION\|remote\.' "$work/bake-record" && fail "the 
 grep -q '^has_runtime=0 runtime=.*/no-runtime$' "$work/bake-record" || fail "a run without a runtime passed one"
 grep -Fxq 'oidc_request=' "$work/bake-record" || fail "the OIDC request credentials outlived the builder login"
 [ -z "$(find "$work" -maxdepth 1 -name 'codewire-cw-release.*')" ] || fail "the client left its private work directory behind"
-grep -Fxq "version=v1.2.3 source=$sha tag= cache=warm jobs=14 cw_jobs=16" "$work/bake-record" ||
+grep -Fxq "version=v1.2.3 source=$sha tag= cache=warm jobs=14 cw_jobs=8" "$work/bake-record" ||
   fail "the bake variables are not the release's: $(cat "$work/bake-record")"
 grep -Fxq 'zig=0.15.2 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239 zigbuild=0.23.0' "$work/bake-record" ||
   fail "the tool pins are not local-runtime-sources.json's"

@@ -28,9 +28,11 @@ readonly PROTOC_SHA256='6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53
 readonly CW_RELEASE_TARGET_CACHE_DEFAULT='warm'
 # Cargo jobs for one cw compile on the builder. At 8 jobs with thin LTO the two
 # compiles together peaked at 8.47 GiB and averaged 9.4 busy cores of the
-# builder's 60 (dry run 18591), so each takes 16 (#3144). The in-job recovery
-# does not use this: its Cargo takes the runner's own default.
-readonly CW_RELEASE_CARGO_JOBS_DEFAULT=16
+# builder's 60 (dry run 18591). The builder shrinks to 12 GiB with two steps at
+# once (infra#1534, 2026-10-25: a release that fails is worse than a slow one),
+# so each compile takes 8 again: both together then fit with room to spare. The
+# in-job recovery does not use this: its Cargo takes the runner's own default.
+readonly CW_RELEASE_CARGO_JOBS_DEFAULT=8
 
 die() {
   echo "build-cw-linux: $*" >&2
