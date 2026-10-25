@@ -435,12 +435,19 @@ run_one_leg() {
   # run_one_leg NAME OUT LOGS: one leg with its own log, rebuilt once when it
   # read a corrupt output; a failed leg is listed in LOGS/failed. Its folder's
   # use mark orders bound_targets' removals.
-  local name="$1" out="$2" logs="$3"
+  # Each leg's start and finish reach the job log as they happen, so a run
+  # cancelled before the legs all end still shows each finished leg's time.
+  local name="$1" out="$2" logs="$3" started=$SECONDS status=0
   mkdir -p "$work/targets/$name"
   touch "$work/targets/$name/.build-once-used"
+  echo "[build-once] leg $name: start"
   "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" > "$logs/$name.log" 2>&1 ||
-    rebuild_corrupt_leg "$name" "$out" "$logs/$name.log" ||
-    { echo "$name" >> "$logs/failed"; return 1; }
+    rebuild_corrupt_leg "$name" "$out" "$logs/$name.log" || status=1
+  echo "[build-once] leg $name: finish (status=$status elapsed_seconds=$((SECONDS - started)))"
+  if [ "$status" -ne 0 ]; then
+    echo "$name" >> "$logs/failed"
+    return 1
+  fi
 }
 
 run_legs() {

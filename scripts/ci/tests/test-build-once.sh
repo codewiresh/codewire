@@ -285,6 +285,10 @@ for leg in archive features; do
 done
 [ "$(at archive-makeflags)" = "$(at features-makeflags)" ] || fail 'the legs had different jobservers'
 grep -q 'build-once: legs archive features at once, 6 compilers in all' "$work/legs.log" || fail 'the build did not report its legs'
+for leg in archive features; do
+  grep -q "^\[build-once\] leg $leg: finish (status=0 elapsed_seconds=[0-9]*)$" "$work/legs.log" ||
+    fail "the $leg leg's finish did not reach the job log"
+done
 legs_build corrupt || fail "a corrupt archive was not rebuilt: $(cat "$work/legs.log")"
 [ -f "$work/legs-out/archive.tar.zst" ] || fail 'the rebuilt leg wrote no archive'
 [ "$(wc -l < "$work/legs-state/calls")" -eq 2 ] || fail 'the corrupt leg did not build exactly twice'
