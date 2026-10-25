@@ -10,6 +10,8 @@ TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cw-provider-anthropic-tests.XXXXXXXX")"
 TEST_OWNER="$BASHPID"
 trap 'if [[ "$BASHPID" == "$TEST_OWNER" ]]; then find "$TEST_ROOT" -type f -delete; find "$TEST_ROOT" -depth -type d -empty -delete; fi' EXIT
 COUNT=0
+# The smoke passes the version of claude in the workspace image this source pins.
+PINNED_VERSION="$(python3 "$REPO_ROOT/scripts/ci/images/workspace-image-pin.py" show agents | jq -er '.claude')"
 CREDENTIAL_ID=11111111-1111-4111-8111-111111111111
 PROFILE_ID=22222222-2222-4222-8222-222222222222
 ENVIRONMENT_ID=33333333-3333-4333-8333-333333333333
@@ -41,7 +43,7 @@ cw() {
       jq -n --arg id "$id" --arg profile "$profile" --arg reference "$reference" \
         --argjson cpu "$cpu" --arg memory "$memory" '{id:$id,backend:"cloud-hypervisor",state:"running",
         cpu:$cpu,memory:$memory,source_selection:{credentials:{profile:$profile,reference:$reference,revision:1}}}' ;;
-    'run --no-tty -- /bin/bash /workspace/.cw-provider-anthropic/provider-anthropic-workload.sh run')
+    "run --no-tty -- /bin/bash /workspace/.cw-provider-anthropic/provider-anthropic-workload.sh run $PINNED_VERSION")
       [[ "$FAILURE" != run ]] || return 1
       if [[ "$FAILURE" == nul ]]; then printf 'CW_LIVE_CLAUDE_OK\0\n'
       elif [[ "$FAILURE" != empty ]]; then printf 'CW_LIVE_CLAUDE_OK\n'; fi
@@ -65,7 +67,7 @@ fixture
 run_provider_anthropic_smoke
 grep -qxF 'info --local 33333333-3333-4333-8333-333333333333 --output json ' "$TMPDIR_SMOKE/calls" ||
   fail 'local environment binding used an ambiguous command'
-grep -qxF 'run --no-tty -- /bin/bash /workspace/.cw-provider-anthropic/provider-anthropic-workload.sh run ' "$TMPDIR_SMOKE/calls" ||
+grep -qxF "run --no-tty -- /bin/bash /workspace/.cw-provider-anthropic/provider-anthropic-workload.sh run $PINNED_VERSION " "$TMPDIR_SMOKE/calls" ||
   fail 'live workload used a positional platform environment'
 pass
 for failure in info wrong-id wrong-profile wrong-reference wrong-topology run empty nul stderr notice-nul notice-duplicate; do

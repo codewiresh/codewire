@@ -5,7 +5,8 @@ set -euo pipefail
 umask 077
 
 readonly CODEX_BIN=/opt/codewire/agents/npm/bin/codex
-readonly EXPECTED_VERSION='codex-cli 0.160.0'
+# Set by main from the version the caller's workspace image pin names.
+EXPECTED_VERSION=''
 readonly CAPTURE_LIMIT_BYTES=1048576
 readonly EXPECTED_CODEX_HOME=/run/codewire-agent/codex
 readonly SCRATCH_PARENT=/dev/shm
@@ -93,7 +94,9 @@ provider_codex_run() (
 )
 
 main() {
-  [[ "$#" == 1 && "$1" == run ]] || { printf 'CW_LIVE_CODEX_ERROR\n' >&2; return 2; }
+  [[ "$#" == 2 && "$1" == run && "$2" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    { printf 'CW_LIVE_CODEX_ERROR\n' >&2; return 2; }
+  EXPECTED_VERSION="codex-cli $2"
   if provider_codex_run >/dev/null 2>&1; then
     printf 'CW_LIVE_CODEX_OK\n'
   else

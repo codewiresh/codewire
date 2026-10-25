@@ -57,3 +57,4 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 codewire-workspace-hack.workspace = true
+codewire-workspace-image = { workspace = true }

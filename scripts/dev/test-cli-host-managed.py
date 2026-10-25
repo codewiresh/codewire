@@ -35,10 +35,22 @@ MAX_MANIFEST = 1024 * 1024
 MAX_FILES = 4096
 WALL = 0x40000000  # Linux __WALL: include non-SIGCHLD clone children.
 PEERPIDFD = 77  # Linux SO_PEERPIDFD; unsupported kernels refuse.
-VERSIONS = {"codex": "0.160.0", "claude": "2.1.288"}
 SONAMES = sorted(["ld-linux-x86-64.so.2", "libc.so.6", "libdl.so.2", "libm.so.6",
                   "libpthread.so.0", "librt.so.1", "libtinfo.so.6"])
 SOURCE = Path(__file__).resolve().parents[2]
+
+
+def pinned_agent_versions():
+    """The managed agents' versions in the workspace image this source pins."""
+    spec = importlib.util.spec_from_file_location(
+        "workspace_image_pin", SOURCE / "scripts/ci/images/workspace-image-pin.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    agents = module.read_pin(SOURCE, None)["agents"]
+    return {name: agents[name] for name in ("codex", "claude")}
+
+
+VERSIONS = pinned_agent_versions()
 BROKER_INPUTS = [
     "Cargo.lock", "crates/codewire-credential-broker/Cargo.toml",
     "crates/codewire-credential-broker/src/lib.rs",
@@ -253,7 +265,7 @@ def admit_agents(manifest_path, expected_sha256):
     entries = closed(manifest["agents"], VERSIONS, "agents")
     for name, entry in entries.items():
         closed(entry, ["version", "entry"], "agent entry")
-        require(entry["version"] == VERSIONS[name], "agent version differs from pinned protocol fixture")
+        require(entry["version"] == VERSIONS[name], "agent version differs from the pinned workspace image")
         relative(entry["entry"])
     files = manifest["files"]
     require(isinstance(files, list) and 2 <= len(files) <= MAX_FILES, "invalid payload member count")

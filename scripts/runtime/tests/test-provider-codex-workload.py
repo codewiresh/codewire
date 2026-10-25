@@ -15,6 +15,14 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 PARSER_PATH = ROOT / "dev" / "provider-codex-output.py"
 WORKLOAD_PATH = ROOT / "dev" / "provider-codex-workload.sh"
+PIN_TOOL = ROOT.parent / "ci" / "images" / "workspace-image-pin.py"
+PIN_SPEC = importlib.util.spec_from_file_location("workspace_image_pin", PIN_TOOL)
+assert PIN_SPEC and PIN_SPEC.loader
+PIN = importlib.util.module_from_spec(PIN_SPEC)
+PIN_SPEC.loader.exec_module(PIN)
+# The version of codex in the workspace image this source pins; the smoke
+# passes it to the workload.
+PINNED = PIN.read_pin(ROOT.parents[1], None)["agents"]["codex"]
 SPEC = importlib.util.spec_from_file_location("provider_codex_output", PARSER_PATH)
 assert SPEC and SPEC.loader
 PARSER = importlib.util.module_from_spec(SPEC)
@@ -166,7 +174,9 @@ class WorkloadContractTests(unittest.TestCase):
 
     def test_fixed_stock_command_and_prompt(self) -> None:
         self.assertIn("readonly CODEX_BIN=/opt/codewire/agents/npm/bin/codex", self.source)
-        self.assertIn("readonly EXPECTED_VERSION='codex-cli 0.160.0'", self.source)
+        self.assertIn("EXPECTED_VERSION=''", self.source)
+        self.assertIn('EXPECTED_VERSION="codex-cli $2"', self.source)
+        self.assertNotRegex(self.source, r"codex-cli [0-9]")
         self.assertIn("readonly EXPECTED_CODEX_HOME=/run/codewire-agent/codex", self.source)
         self.assertIn("readonly SCRATCH_PARENT=/dev/shm", self.source)
         self.assertIn("exec --strict-config --ephemeral --json", self.source)
@@ -202,9 +212,19 @@ class WorkloadContractTests(unittest.TestCase):
         self.assertNotIn("cat \"$scratch/events.jsonl\"", self.source)
         self.assertNotIn("cat \"$scratch/codex.err\"", self.source)
 
+    def test_version_argument_is_required_and_well_formed(self) -> None:
+        for argv in (["run"], ["run", ""], ["run", "v1.2.3"], ["run", "1.2"],
+                     ["run", "1.2.3 (x)"], ["run", PINNED, "extra"]):
+            completed = subprocess.run(
+                ["bash", str(WORKLOAD_PATH), *argv], check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env={"PATH": "/usr/bin:/bin"})
+            self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                             (2, "", "CW_LIVE_CODEX_ERROR\n"), argv)
+
     def test_precondition_diagnostic_is_suppressed(self) -> None:
         completed = subprocess.run(
-            ["bash", str(WORKLOAD_PATH), "run"],
+            ["bash", str(WORKLOAD_PATH), "run", PINNED],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -257,7 +277,7 @@ class WorkloadContractTests(unittest.TestCase):
                 """#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$#" == 1 && "$1" == --version ]]; then
-  printf 'codex-cli 0.160.0\\n'
+  printf 'codex-cli @PINNED@\\n'
   exit 0
 fi
 expected=(exec --strict-config --ephemeral --json --color never --sandbox read-only
@@ -283,7 +303,7 @@ printf '%s\\n' \\
   '{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"summary"}}' \\
   '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"CW_LIVE_CODEX_OK"}}' \\
   "{\\"type\\":\\"turn.completed\\",\\"usage\\":$usage}"
-""",
+""".replace("@PINNED@", PINNED),
                 encoding="utf-8",
             )
             fake.chmod(0o700)
@@ -308,7 +328,7 @@ printf '%s\\n' \\
                 "EXPECTED_FAKE_CODEX_HOME": str(home),
             }
             completed = subprocess.run(
-                ["bash", str(wrapper), "run"],
+                ["bash", str(wrapper), "run", PINNED],
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -321,7 +341,7 @@ printf '%s\\n' \\
             self.assertEqual(list(scratch.glob(".cw-live-codex.*")), [])
 
             failed = subprocess.run(
-                ["bash", str(wrapper), "run"],
+                ["bash", str(wrapper), "run", PINNED],
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -329,6 +349,18 @@ printf '%s\\n' \\
                 env={**environment, "FAKE_CODEX_FAILURE": "1"},
             )
             self.assertEqual((failed.returncode, failed.stdout, failed.stderr),
+                             (1, "", "CW_LIVE_CODEX_ERROR\n"))
+            self.assertEqual(list(scratch.glob(".cw-live-codex.*")), [])
+
+            other_version = subprocess.run(
+                ["bash", str(wrapper), "run", "9.9.9"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual((other_version.returncode, other_version.stdout, other_version.stderr),
                              (1, "", "CW_LIVE_CODEX_ERROR\n"))
             self.assertEqual(list(scratch.glob(".cw-live-codex.*")), [])
 

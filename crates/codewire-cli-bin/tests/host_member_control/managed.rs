@@ -995,9 +995,11 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
     ] {
         target.extra_environment.insert(key.into(), value);
     }
+    // The staged agents come from the workspace image this source pins.
+    let pinned = |agent| codewire_workspace_image::agent_version(agent).unwrap();
     for (name, expected) in [
-        ("codex", "codex-cli 0.160.0"),
-        ("claude", "2.1.288 (Claude Code)"),
+        ("codex", format!("codex-cli {}", pinned("codex"))),
+        ("claude", format!("{} (Claude Code)", pinned("claude"))),
     ] {
         let mut version = Command::new(Path::new(staged["agent_bin"].as_str().unwrap()).join(name));
         version

@@ -16,6 +16,14 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 PARSER_PATH = ROOT / "dev" / "provider-anthropic-output.py"
 WORKLOAD_PATH = ROOT / "dev" / "provider-anthropic-workload.sh"
+PIN_TOOL = ROOT.parent / "ci" / "images" / "workspace-image-pin.py"
+PIN_SPEC = importlib.util.spec_from_file_location("workspace_image_pin", PIN_TOOL)
+assert PIN_SPEC and PIN_SPEC.loader
+PIN = importlib.util.module_from_spec(PIN_SPEC)
+PIN_SPEC.loader.exec_module(PIN)
+# The version of claude in the workspace image this source pins; the smoke
+# passes it to the workload.
+PINNED = PIN.read_pin(ROOT.parents[1], None)["agents"]["claude"]
 SPEC = importlib.util.spec_from_file_location("provider_anthropic_output", PARSER_PATH)
 assert SPEC and SPEC.loader
 PARSER = importlib.util.module_from_spec(SPEC)
@@ -186,7 +194,9 @@ class WorkloadContractTests(unittest.TestCase):
 
     def test_fixed_stock_command_projection_and_prompt(self) -> None:
         self.assertIn("readonly CLAUDE_BIN=/opt/codewire/agents/npm/bin/claude", self.source)
-        self.assertIn("readonly EXPECTED_VERSION='2.1.288 (Claude Code)'", self.source)
+        self.assertIn("EXPECTED_VERSION=''", self.source)
+        self.assertIn('EXPECTED_VERSION="$2 (Claude Code)"', self.source)
+        self.assertNotRegex(self.source, r"[0-9]+\.[0-9]+\.[0-9]+ \(Claude Code\)")
         self.assertIn("readonly SCRATCH_PARENT=/dev/shm", self.source)
         self.assertIn("--model claude-sonnet-4-6", self.source)
         self.assertIn("--max-turns 1 --tools '' --strict-mcp-config", self.source)
@@ -222,9 +232,19 @@ class WorkloadContractTests(unittest.TestCase):
         self.assertNotIn('cat "$scratch/events.jsonl"', self.source)
         self.assertNotIn('cat "$scratch/claude.err"', self.source)
 
+    def test_version_argument_is_required_and_well_formed(self) -> None:
+        for argv in (["run"], ["run", ""], ["run", "v1.2.3"], ["run", "1.2"],
+                     ["run", "1.2.3 (x)"], ["run", PINNED, "extra"]):
+            completed = subprocess.run(
+                ["bash", str(WORKLOAD_PATH), *argv], check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env={"PATH": "/usr/bin:/bin"})
+            self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                             (2, "", "CW_LIVE_CLAUDE_ERROR\n"), argv)
+
     def test_precondition_diagnostic_is_suppressed(self) -> None:
         completed = subprocess.run(
-            ["bash", str(WORKLOAD_PATH), "run"], check=False,
+            ["bash", str(WORKLOAD_PATH), "run", PINNED], check=False,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env={"PATH": "/usr/bin:/bin", "ANTHROPIC_BASE_URL": "https://wrong.invalid"})
         self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
@@ -256,9 +276,9 @@ class WorkloadContractTests(unittest.TestCase):
 set -euo pipefail
 if [[ "$#" == 1 && "$1" == --version ]]; then
   if [[ "${FAKE_CLAUDE_VERSION_NUL:-0}" == 1 ]]; then
-    printf '2.1.288 (Claude Code)\\0\\n'
+    printf '@PINNED@ (Claude Code)\\0\\n'
   else
-    printf '2.1.288 (Claude Code)\\n'
+    printf '@PINNED@ (Claude Code)\\n'
   fi
   exit 0
 fi
@@ -291,7 +311,7 @@ printf '%s\\n' \\
   '{"type":"stream_event","event":{"type":"message_stop"}}' \\
   '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"CW_LIVE_CLAUDE_OK"}]}}' \\
   '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"CW_LIVE_CLAUDE_OK"}'
-""", encoding="utf-8")
+""".replace("@PINNED@", PINNED), encoding="utf-8")
             fake.chmod(0o700)
             parser = root / "provider-anthropic-output.py"
             parser.write_bytes(PARSER_PATH.read_bytes())
@@ -314,14 +334,14 @@ printf '%s\\n' \\
                 "CLAUDE_CODE_OAUTH_TOKEN": "",
             }
             completed = subprocess.run(
-                ["bash", str(wrapper), "run"], check=False,
+                ["bash", str(wrapper), "run", PINNED], check=False,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
             self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
                              (0, "CW_LIVE_CLAUDE_OK\n", ""))
             self.assertEqual(list(scratch.glob(".cw-live-anthropic.*")), [])
 
             failed = subprocess.run(
-                ["bash", str(wrapper), "run"], check=False,
+                ["bash", str(wrapper), "run", PINNED], check=False,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 env={**environment, "FAKE_CLAUDE_FAILURE": "1"})
             self.assertEqual((failed.returncode, failed.stdout, failed.stderr),
@@ -330,10 +350,17 @@ printf '%s\\n' \\
             self.assertEqual(list(scratch.glob(".cw-live-anthropic.*")), [])
 
             bad_version = subprocess.run(
-                ["bash", str(wrapper), "run"], check=False,
+                ["bash", str(wrapper), "run", PINNED], check=False,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 env={**environment, "FAKE_CLAUDE_VERSION_NUL": "1"})
             self.assertEqual((bad_version.returncode, bad_version.stdout, bad_version.stderr),
+                             (1, "", "CW_LIVE_CLAUDE_ERROR\n"))
+            self.assertEqual(list(scratch.glob(".cw-live-anthropic.*")), [])
+
+            other_version = subprocess.run(
+                ["bash", str(wrapper), "run", "9.9.9"], check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+            self.assertEqual((other_version.returncode, other_version.stdout, other_version.stderr),
                              (1, "", "CW_LIVE_CLAUDE_ERROR\n"))
             self.assertEqual(list(scratch.glob(".cw-live-anthropic.*")), [])
 

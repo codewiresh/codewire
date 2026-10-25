@@ -68,8 +68,32 @@ mod linux {
 
     type SmokeResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
+    /// The version of `agent` in the workspace image this source pins, which
+    /// is the image the smoke's VM runs. The checks move with the pin.
+    fn pinned_agent(agent: &str) -> &'static str {
+        codewire_workspace_image::agent_version(agent)
+            .expect("the workspace image pin names every shipped agent")
+    }
+
+    /// `codex --version` of the pinned image.
+    fn codex_version() -> String {
+        format!("codex-cli {}\n", pinned_agent("codex"))
+    }
+
+    /// Whether `stderr` carries the banner the pinned Codex writes for a run.
+    fn has_codex_banner(stderr: &[u8]) -> bool {
+        let banner = format!("OpenAI Codex v{}", pinned_agent("codex"));
+        stderr
+            .windows(banner.len())
+            .any(|window| window == banner.as_bytes())
+    }
+
+    /// `claude --version` of the pinned image.
+    fn claude_version() -> String {
+        format!("{} (Claude Code)\n", pinned_agent("claude"))
+    }
+
     const CODEX_BIN: &str = "codex";
-    const CODEX_VERSION: &str = "codex-cli 0.160.0\n";
     const CODEX_MODEL: &str = "codewire-synthetic";
     const CODEX_PROMPT: &str = "Return the synthetic marker.";
     const CODEX_MARKER: &str = "CWCODEX149 synthetic";
@@ -78,7 +102,6 @@ mod linux {
     const MANAGED_CLAUDE_MARKER: &str = "CWCLAUDE21238 broker [REDACTED]";
     const SSH_PUBLIC_KEY_PATH: &str = "/workspace/fixtures/native-ssh-public-key.pub";
     const STOCK_SSH_WORKLOAD_PATH: &str = "/workspace/fixtures/stock-ssh-workload.sh";
-    const CLAUDE_VERSION: &str = "2.1.288 (Claude Code)\n";
     const CLAUDE_MODEL: &str = "claude-sonnet-4-6";
     /// The pinned client's one notice for a non-Anthropic base URL, such as
     /// the managed loopback route: auto-mode classifier requests stay billed.
@@ -318,12 +341,7 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         let output = await_codex_completion(&mut bridge, &mut output).await?;
         require(output.exit_code == 0)?;
         require(output.stdout == format!("{CODEX_MARKER}\n").as_bytes())?;
-        require(
-            output
-                .stderr
-                .windows(b"OpenAI Codex v0.160.0".len())
-                .any(|window| window == b"OpenAI Codex v0.160.0"),
-        )?;
+        require(has_codex_banner(&output.stderr))?;
 
         println!("codewire-local-codex-bridge-smoke: PASS");
         Ok(())
@@ -1485,7 +1503,7 @@ function generalEgress(){
         require(
             version.exit_code == 0
                 && version.stderr.is_empty()
-                && version.stdout == CLAUDE_VERSION.as_bytes(),
+                && version.stdout == claude_version().as_bytes(),
         )?;
         let mut environment = smoke_environment();
         environment.extend([
@@ -1648,10 +1666,7 @@ function generalEgress(){
         require(
             output.exit_code == 0
                 && output.stdout == format!("{MANAGED_CODEX_MARKER}\n").as_bytes()
-                && output
-                    .stderr
-                    .windows(b"OpenAI Codex v0.160.0".len())
-                    .any(|window| window == b"OpenAI Codex v0.160.0"),
+                && has_codex_banner(&output.stderr),
         )
     }
 
@@ -2125,7 +2140,7 @@ function generalEgress(){
             stage("version-command-failed");
             return Err(failed());
         }
-        if output.stdout != CODEX_VERSION.as_bytes() {
+        if output.stdout != codex_version().as_bytes() {
             stage("version-output-mismatch");
             // Version text carries no secret; show a bounded copy of it.
             let shown = &output.stdout[..output.stdout.len().min(256)];
@@ -3263,7 +3278,7 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
             .await
             .unwrap();
             assert_eq!(version.exit_code, 0);
-            assert_eq!(version.stdout, CLAUDE_VERSION.as_bytes());
+            assert_eq!(version.stdout, claude_version().as_bytes());
             assert!(version.stderr.is_empty());
 
             let listener = tokio::net::TcpListener::bind("127.0.0.1:38081")

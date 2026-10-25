@@ -5,7 +5,8 @@ set -euo pipefail
 umask 077
 
 readonly CLAUDE_BIN=/opt/codewire/agents/npm/bin/claude
-readonly EXPECTED_VERSION='2.1.288 (Claude Code)'
+# Set by main from the version the caller's workspace image pin names.
+EXPECTED_VERSION=''
 readonly EXPECTED_ANTHROPIC_BASE_URL=http://127.0.0.1:38081/_codewire/anthropic
 readonly EXPECTED_ANTHROPIC_AUTH_TOKEN=codewire-managed
 readonly CAPTURE_LIMIT_BYTES=1048576
@@ -105,7 +106,9 @@ provider_anthropic_run() (
 )
 
 main() {
-  [[ "$#" == 1 && "$1" == run ]] || { printf 'CW_LIVE_CLAUDE_ERROR\n' >&2; return 2; }
+  [[ "$#" == 2 && "$1" == run && "$2" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    { printf 'CW_LIVE_CLAUDE_ERROR\n' >&2; return 2; }
+  EXPECTED_VERSION="$2 (Claude Code)"
   if provider_anthropic_run >/dev/null 2>&1; then
     printf 'CW_LIVE_CLAUDE_OK\n'
   else

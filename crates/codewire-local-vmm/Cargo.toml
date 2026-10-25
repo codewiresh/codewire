@@ -44,6 +44,7 @@ codewire-netstack = { workspace = true }
 codewire-daemon-proto = { workspace = true }
 codewire-vmm-guest-probe = { workspace = true }
 codewire-workspace-access = { workspace = true }
+codewire-workspace-image = { workspace = true }
 connectrpc = { workspace = true, features = ["axum", "client"] }
 futures = { workspace = true }
 hmac = { workspace = true }

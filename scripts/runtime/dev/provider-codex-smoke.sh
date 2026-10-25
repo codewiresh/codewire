@@ -71,6 +71,7 @@ prepare_provider_codex() {
 }
 
 run_provider_codex_smoke() {
+  local version
   cw_with_timeout 30 info --local "$ENV_ID" --output json \
     >"$TMPDIR_SMOKE/provider-codex-environment.json" 2>"$TMPDIR_SMOKE/provider-codex-info.err" ||
     die 'cannot inspect the local Codex environment binding'
@@ -81,7 +82,10 @@ run_provider_codex_smoke() {
     .source_selection.credentials == {profile:$profile,reference:$reference,revision:1}
   ' "$TMPDIR_SMOKE/provider-codex-environment.json" >/dev/null ||
     die 'local Codex environment did not acknowledge the exact profile revision and topology'
-  if ! cw_with_timeout 180 run --no-tty -- /bin/bash "$PROVIDER_CODEX_SCRIPT" run \
+  # The VM runs the workspace image this source pins; its codex is the stock client.
+  version="$(python3 "$ROOT/scripts/ci/images/workspace-image-pin.py" show agents | jq -er '.codex')" ||
+    die 'cannot read the codex version of the pinned workspace image'
+  if ! cw_with_timeout 180 run --no-tty -- /bin/bash "$PROVIDER_CODEX_SCRIPT" run "$version" \
       >"$TMPDIR_SMOKE/provider-codex-proof.out" 2>"$TMPDIR_SMOKE/provider-codex-proof.err"; then
     die 'bounded live Codex workload failed; raw provider output remains private inside the disposable VM'
   fi

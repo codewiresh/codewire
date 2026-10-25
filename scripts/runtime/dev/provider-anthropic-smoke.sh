@@ -70,6 +70,7 @@ prepare_provider_anthropic() {
 }
 
 run_provider_anthropic_smoke() {
+  local version
   cw_with_timeout 30 info --local "$ENV_ID" --output json \
     >"$TMPDIR_SMOKE/provider-anthropic-environment.json" 2>"$TMPDIR_SMOKE/provider-anthropic-info.err" ||
     die 'cannot inspect the local Anthropic environment binding'
@@ -80,7 +81,10 @@ run_provider_anthropic_smoke() {
     .source_selection.credentials == {profile:$profile,reference:$reference,revision:1}
   ' "$TMPDIR_SMOKE/provider-anthropic-environment.json" >/dev/null ||
     die 'local Anthropic environment did not acknowledge the exact profile revision and topology'
-  if ! cw_with_timeout 180 run --no-tty -- /bin/bash "$PROVIDER_ANTHROPIC_SCRIPT" run \
+  # The VM runs the workspace image this source pins; its claude is the stock client.
+  version="$(python3 "$ROOT/scripts/ci/images/workspace-image-pin.py" show agents | jq -er '.claude')" ||
+    die 'cannot read the claude version of the pinned workspace image'
+  if ! cw_with_timeout 180 run --no-tty -- /bin/bash "$PROVIDER_ANTHROPIC_SCRIPT" run "$version" \
       >"$TMPDIR_SMOKE/provider-anthropic-proof.out" 2>"$TMPDIR_SMOKE/provider-anthropic-proof.err"; then
     die 'bounded live Claude workload failed; raw provider output remains private inside the disposable VM'
   fi

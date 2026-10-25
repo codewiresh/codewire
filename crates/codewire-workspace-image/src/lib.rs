@@ -22,6 +22,16 @@ pub fn image_at(repository: &str) -> String {
     format!("{repository}@{DIGEST}")
 }
 
+/// The version of `agent` that the pinned image installs, as its package
+/// names it, such as `2.1.288` for `claude`. Checks of the running image read
+/// it here, so they move with the pin and never ahead of it.
+pub fn agent_version(agent: &str) -> Option<&'static str> {
+    AGENT_VERSIONS
+        .iter()
+        .find(|(name, _)| *name == agent)
+        .map(|(_, version)| *version)
+}
+
 /// Whether `image_ref` names the canonical workspace: the current digest, or
 /// one an older client still sends, at the deployment's `repository` or at
 /// the public mirror.
@@ -63,6 +73,10 @@ mod tests {
         }
         let agents: Vec<&str> = AGENT_VERSIONS.iter().map(|(name, _)| *name).collect();
         assert_eq!(agents, ["claude", "codex", "gemini", "kimi", "pi"]);
+        for (name, version) in AGENT_VERSIONS {
+            assert_eq!(agent_version(name), Some(*version));
+        }
+        assert_eq!(agent_version("aider"), None);
     }
 
     #[test]
