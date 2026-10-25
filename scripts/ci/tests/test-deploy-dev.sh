@@ -147,12 +147,13 @@ cancel_step="$(awk '
 cancel_step_line="$(grep -n -m1 'name: Cancel the older deliveries this push supersedes' <<<"$selection_job" | cut -d: -f1)"
 [[ "$toolchain_line" -lt "$cancel_step_line" && "$cancel_step_line" -lt "$classifier_line" ]] ||
   fail "the cancellation step does not run before planning"
-# The only run cancellation anywhere is that script's: no job cancels its own
-# run (#3119 A17).
+# The only run cancellations anywhere are that script's and the pull request
+# fail-fast watcher's, which cancels only after another job has failed: no job
+# cancels its own run (#3119 A17; infra#1632).
 cancel_users="$(grep -rE '/actions/runs/[^ ]*/cancel' "$ROOT/.gitea/workflows" "$ROOT/scripts" |
   grep -v '/tests/' | cut -d: -f1 | sed "s|^$ROOT/||" | sort -u)"
-[[ "$cancel_users" == 'scripts/ci/deploy/cancel-superseded-deliveries.py' ]] ||
-  fail "a run is cancelled outside cancel-superseded-deliveries.py: $cancel_users"
+[[ "$cancel_users" == $'scripts/ci/deploy/cancel-superseded-deliveries.py\nscripts/ci/select/fail-fast-watch.py' ]] ||
+  fail "a run is cancelled outside cancel-superseded-deliveries.py and fail-fast-watch.py: $cancel_users"
 
 # The runtime set builds in two protected halves on separate workers, joined
 # by one publishing job: exactly these four jobs, no per-image workers.

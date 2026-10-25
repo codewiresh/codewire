@@ -1975,6 +1975,30 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/receipts/emit-verification-receipt.py
 
+  # A pull request's run stops at its first failed job (infra#1632); main runs
+  # every job. This watcher, which nothing needs, cancels the run once another
+  # job has ended in failure: Forgejo's run cancel stops only unfinished jobs,
+  # so the failed one keeps its result and log (#3126, #3119 A17), and
+  # Required verification ends cancelled, which still blocks the merge.
+  fail-fast:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token only reads this run's jobs and cancels this run.
+    name: Stop at the first failed job
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    # Below the light runner's 25-minute task limit; the watcher itself ends
+    # quietly at 22 minutes (fail-fast-watch.py DEADLINE_SECONDS).
+    timeout-minutes: 24
+    needs: [verification-selection]
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.verification-selection.result == 'success' }}
+    steps:
+      - uses: noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
+
+      - name: Cancel this run once a check has failed
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py
+
   # The final job of a push to main (#2892): after a green verdict for this
   # exact commit, start Dev delivery. Deploy Dev's publish job for the same
   # commit signs and dispatches only on that verdict and only while the commit

@@ -2033,6 +2033,13 @@ if [ "$event_selected" = false ]; then
         select_token release
         recognized=true
         ;;
+      # A pull request's run stops at its first failed job (infra#1632); its
+      # contract, with the ci.yaml job that runs it, runs in Policy.
+      scripts/ci/select/fail-fast-watch.py|\
+      scripts/ci/tests/test-fail-fast-watch.py)
+        select_token policy
+        recognized=true
+        ;;
       # Main CI's final job starts Dev delivery (#2892); its contract, with
       # the ci.yaml job that runs it, runs in Policy and Deploy.
       scripts/ci/deploy/rerun-dev-publish.py|\
