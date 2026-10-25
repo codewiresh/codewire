@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-CHECK="$ROOT/scripts/ci/receipts/verify-release-tag-receipt.sh"
+CHECKED_IN="$ROOT/scripts/ci/receipts/verify-release-tag-receipt.sh"
 mkdir -p "$ROOT/.tmp"
 TMP="$(mktemp -d "$ROOT/.tmp/release-tag-receipt.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
@@ -11,6 +11,26 @@ fail() {
   printf '[test-verify-release-tag-receipt] ERROR: %s\n' "$*" >&2
   exit 1
 }
+
+# The one switch, RELEASE_REQUIRES_KIND (owner, 2026-10-25, #3013). The
+# checked-in receipt sets it once, to true or false; each case below runs a
+# copy set to the value it describes, so the cases hold whichever is checked
+# in. CHECK requires Kind; CHECK_KIND_WAIVED does not.
+if [ "$(grep -Ec '^RELEASE_REQUIRES_KIND=' "$CHECKED_IN")" != 1 ] \
+    || ! grep -Eq '^RELEASE_REQUIRES_KIND=(true|false)$' "$CHECKED_IN"; then
+  fail 'the receipt does not set RELEASE_REQUIRES_KIND once, to true or false'
+fi
+switch_copy() { # VALUE FILE
+  sed "s/^RELEASE_REQUIRES_KIND=.*/RELEASE_REQUIRES_KIND=$1/" "$CHECKED_IN" >"$2"
+  chmod +x "$2"
+  grep -Fxq "RELEASE_REQUIRES_KIND=$1" "$2" || fail "could not set RELEASE_REQUIRES_KIND=$1"
+}
+CHECK="$TMP/receipt-kind-required.sh"
+CHECK_KIND_WAIVED="$TMP/receipt-kind-waived.sh"
+CHECK_SWITCH_INVALID="$TMP/receipt-switch-invalid.sh"
+switch_copy true "$CHECK"
+switch_copy false "$CHECK_KIND_WAIVED"
+switch_copy yes "$CHECK_SWITCH_INVALID"
 
 repo="$TMP/repo"
 mock_bin="$TMP/bin"
@@ -420,7 +440,7 @@ run_case() {
     GITEA_TOKEN="${CASE_TOKEN-$token_canary}" \
     FIXTURE_TOKEN="$token_canary" \
     FIXTURE_CURL_ARGV_LOG="$curl_argv_log" \
-    "$CHECK" ${CASE_ARGS:+"$CASE_ARGS"} 2>&1)" || fail "$name checker returned failure"
+    "${CASE_CHECK:-$CHECK}" ${CASE_ARGS:+"$CASE_ARGS"} 2>&1)" || fail "$name checker returned failure"
   case_output="$output"
   if grep -Eq '(tea|fj) must not be used' <<<"$output"; then
     printf '%s\n' "$output" >&2
@@ -474,7 +494,7 @@ run_case not_on_main success v1.2.4 fallback release-tag-not-on-canonical-main
 run_case stale_main stale_main v1.2.2 fallback canonical-main-commit-unavailable
 
 # Kind and the release dry run of the exact commit (owner decision
-# 2026-10-20). A push to main defers both, so a scheduled or dispatched run
+# 2026-10-20), with RELEASE_REQUIRES_KIND true. A push to main defers both, so a scheduled or dispatched run
 # must have run them green. The accepted cases above took Kind from scheduled
 # run 711 and the dry run from dispatched run 902, and name both runs.
 run_case accepted_names_runs success v1.2.3 accepted signed-tag-at-exact-green-deployed-main
@@ -547,6 +567,54 @@ source_case source_dry_line_missing source_dry_line_missing v1.2.2 fallback exac
 # The full receipt still refuses what only the source evidence leaves out.
 run_case full_without_keyring bad_signature v1.2.3 fallback release-tag-signature-invalid
 run_case full_without_dev failed_dev v1.2.3 fallback exact-source-dev-acceptance-not-successful
+
+# Kind waived (RELEASE_REQUIRES_KIND=false; owner, 2026-10-25, #3013): no Kind
+# run is needed or read, and the receipt reports none. Main CI, the dry run
+# and Dev acceptance of the exact commit are still required.
+waived_case() { # NAME MODE TAG EXPECTED REASON
+  : >"$curl_argv_log"
+  CASE_CHECK="$CHECK_KIND_WAIVED" run_case "$@"
+  grep -Fxq release_tag_kind_run= <<<"$case_output" || fail "$1 reported a Kind run"
+  if grep -Fq 'workflow_id=ci.yaml&event=workflow_dispatch' "$curl_argv_log"; then
+    fail "$1 read the dispatched Kind runs"
+  fi
+}
+waived_case waived_no_kind no_kind_run v1.2.3 accepted signed-tag-at-exact-green-deployed-main
+for expected in release_tag_run=701 release_tag_dry_run=902 release_tag_dev_acceptance_run=801; do
+  grep -Fxq "$expected" <<<"$case_output" || fail "the Kind-waived receipt does not report $expected"
+done
+grep -Fq '(CI run 701; Kind waived; dry run 902; Dev acceptance run 801)' <<<"$case_output" \
+  || fail 'the Kind-waived receipt message does not say Kind was waived'
+waived_case waived_kind_failed kind_run_failed v1.2.3 accepted signed-tag-at-exact-green-deployed-main
+waived_case waived_kind_shard_failed kind_shard_failed v1.2.3 accepted signed-tag-at-exact-green-deployed-main
+waived_case waived_ancestor_no_kind no_kind_run v1.2.2 accepted signed-tag-on-main-at-exact-green-deployed-commit
+waived_case waived_no_dry_run no_dry_run v1.2.3 fallback exact-commit-dry-run-not-verified
+waived_case waived_dry_run_superseded dry_run_superseded v1.2.3 fallback exact-commit-dry-run-not-verified
+waived_case waived_dry_runs_unavailable dry_runs_unavailable v1.2.3 fallback exact-commit-dry-runs-unavailable
+waived_case waived_failed_ci failed_ci v1.2.3 fallback exact-main-ci-not-successful
+waived_case waived_failed_required failed_required v1.2.3 fallback required-verification-not-successful
+waived_case waived_superseded superseded v1.2.2 fallback exact-main-ci-superseded
+waived_case waived_failed_dev failed_dev v1.2.3 fallback exact-source-dev-acceptance-not-successful
+waived_case waived_wrong_dev_source wrong_dev_source v1.2.3 fallback exact-source-dev-acceptance-not-successful
+waived_case waived_bad_signature bad_signature v1.2.3 fallback release-tag-signature-invalid
+waived_case waived_not_on_main success v1.2.4 fallback release-tag-not-on-canonical-main
+# Release selection's source evidence, Kind waived.
+CASE_ARGS=--source-evidence waived_case waived_source no_kind_run v1.2.3 \
+  accepted tag-at-exact-green-main-source-evidence
+grep -Fq '(CI run 701; Kind waived; dry run 902)' <<<"$case_output" \
+  || fail 'the Kind-waived source evidence does not say Kind was waived'
+CASE_ARGS=--source-evidence waived_case waived_source_no_dry_run no_dry_run v1.2.3 \
+  fallback exact-commit-dry-run-not-verified
+CASE_ARGS=--source-evidence waived_case waived_source_failed_ci failed_ci v1.2.3 \
+  fallback exact-main-ci-not-successful
+# A dispatched dry run of the tagged commit still binds to it by its source line.
+CASE_ARGS=--source-evidence waived_case waived_source_dispatch source_dispatch v1.2.2 \
+  accepted tag-on-main-at-exact-green-commit-source-evidence
+grep -Fxq release_tag_dry_run=932 <<<"$case_output" || fail 'the Kind-waived dispatch receipt does not report dry run 932'
+CASE_ARGS=--source-evidence waived_case waived_source_dry_line_missing source_dry_line_missing v1.2.2 \
+  fallback exact-commit-dry-run-not-verified
+# Any value but true or false refuses rather than waiving.
+CASE_CHECK="$CHECK_SWITCH_INVALID" run_case switch_invalid success v1.2.3 fallback release-kind-switch-invalid
 # Any other argument is a usage error.
 for argument in --source --full source-evidence; do
   if (cd "$repo" && "$CHECK" "$argument" >/dev/null 2>&1); then

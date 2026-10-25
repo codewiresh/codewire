@@ -1,20 +1,29 @@
 #!/usr/bin/env bash
 # Prove a release tag's commit passed successful exact-commit main CI. The
 # tagged commit is canonical main or an ancestor of it, so main may move on
-# while a release is cut. It also needs a green Kind run and a green release
-# dry run of the exact commit, which a push to main may defer to a dispatch or
-# the schedule. Every uncertainty returns a fallback receipt, which release
-# selection refuses.
+# while a release is cut. It also needs a green release dry run of the exact
+# commit and, while RELEASE_REQUIRES_KIND below is true, a green Kind run of
+# it; a push to main may defer both to a dispatch or the schedule. Every
+# uncertainty returns a fallback receipt, which release selection refuses.
 #
 # The full receipt (no argument) adds the tag's signature in the caller's
 # keyring and Dev acceptance; a release tag push no longer asks for it, since
 # it checks only local facts and release selection reverifies the rest (#2892).
 # --source-evidence proves the source evidence alone: main CI on the exact
-# commit, not superseded, verifying something, and Kind and the dry run of that
-# commit. Release selection composes it with the proofs it has elsewhere
+# commit, not superseded, verifying something, and the dry run (and Kind, while
+# required) of that commit. Release selection composes it with the proofs it has elsewhere
 # (#2892): verify-release-tag-ref.sh proves the signature, and promote-prod
 # proves Dev acceptance.
 set -euo pipefail
+
+# Whether a release needs a green Kind run of the exact commit: the one switch.
+# Temporary waiver while Kind CI is off (owner, 2026-10-25: "Yes, we're waiving
+# KIND for now."; cited on #3013; the scheduled Kind run went off the same day,
+# "Stop running the KIND suite right now... We'll deal with it later."). Main
+# CI, the release dry run and Dev acceptance of the exact commit are still
+# required. Set it back to true when Kind CI runs again; that restores the
+# Kind requirement exactly as before.
+RELEASE_REQUIRES_KIND=false
 
 scope=full
 case "$*" in
@@ -168,8 +177,9 @@ view_run() {
 # push too; its selection log says classification=scheduled, and it is never
 # the push run. While a push to main defers Kind and the release dry run
 # (owner decision 2026-10-20, scripts/ci/select/main-push-switch.sh), the
-# exact commit also needs a green Kind run of ci.yaml and a green four-target
-# dry run, from a push, a dispatch or a schedule. Dev evidence is read from
+# exact commit also needs a green four-target dry run and, while
+# RELEASE_REQUIRES_KIND is true, a green Kind run of ci.yaml, from a push, a
+# dispatch or a schedule. Dev evidence is read from
 # the deploy-owned promotion itself: a green promote-dev run whose release
 # commit job and acceptance job both checked out this exact source.
 readonly source_repo=codewire/codewire deploy_repo=codewire/deploy
@@ -342,30 +352,37 @@ verified_source() {
   esac
 }
 
-# Kind: a successful ci.yaml run that verified the exact commit, in which at
-# least one Edge / Kind verification shard ran and every shard that ran
-# succeeded.
-dispatched_runs ci.yaml "$tmp/ci-dispatches.json" >"$tmp/ci-dispatched" \
-  || fallback 'dispatched-kind-runs-unavailable'
-while read -r candidate; do
-  [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
-  candidate_view="$tmp/ci-view-$candidate.json"
-  view_run "$source_repo" "$candidate" "$candidate_view" || continue
-  jq -e --argjson id "$candidate" '
-      .schema_version == 1
-      and .run.id == $id
-      and .run.workflow == "ci.yaml"
-      and .run.status == "success"
-      and ([.jobs[]
-          | select(.name | startswith("Edge / Kind verification ("))
-          | select(.status != "skipped")]
-        | length > 0 and all(.[]; .status == "success"))
-    ' "$candidate_view" >/dev/null 2>&1 || continue
-  verified_source "$candidate_view" 'Verification selection' || continue
-  kind_run_id="$candidate"
-  break
-done < <(candidates "$runs_json" ci.yaml "$tmp/ci-dispatched")
-[ -n "$kind_run_id" ] || fallback 'exact-commit-kind-not-verified'
+# Kind, while RELEASE_REQUIRES_KIND is true: a successful ci.yaml run that
+# verified the exact commit, in which at least one Edge / Kind verification
+# shard ran and every shard that ran succeeded. While it is false, no Kind run
+# is read and the receipt reports none.
+if [ "$RELEASE_REQUIRES_KIND" = true ]; then
+  dispatched_runs ci.yaml "$tmp/ci-dispatches.json" >"$tmp/ci-dispatched" \
+    || fallback 'dispatched-kind-runs-unavailable'
+  while read -r candidate; do
+    [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
+    candidate_view="$tmp/ci-view-$candidate.json"
+    view_run "$source_repo" "$candidate" "$candidate_view" || continue
+    jq -e --argjson id "$candidate" '
+        .schema_version == 1
+        and .run.id == $id
+        and .run.workflow == "ci.yaml"
+        and .run.status == "success"
+        and ([.jobs[]
+            | select(.name | startswith("Edge / Kind verification ("))
+            | select(.status != "skipped")]
+          | length > 0 and all(.[]; .status == "success"))
+      ' "$candidate_view" >/dev/null 2>&1 || continue
+    verified_source "$candidate_view" 'Verification selection' || continue
+    kind_run_id="$candidate"
+    break
+  done < <(candidates "$runs_json" ci.yaml "$tmp/ci-dispatched")
+  [ -n "$kind_run_id" ] || fallback 'exact-commit-kind-not-verified'
+  kind_evidence="Kind run $kind_run_id"
+else
+  [ "$RELEASE_REQUIRES_KIND" = false ] || fallback 'release-kind-switch-invalid'
+  kind_evidence='Kind waived'
+fi
 
 # The release dry run: a successful cw-release-dry-run.yaml run that verified
 # the exact commit, whose assembly job verified the unsigned four-target
@@ -413,8 +430,8 @@ if [ "$scope" = source-evidence ]; then
   else
     reason='tag-on-main-at-exact-green-commit-source-evidence'
   fi
-  printf 'release-tag source evidence: %s peels to %s on canonical main %s (CI run %s; Kind run %s; dry run %s)\n' \
-    "$tag_ref" "$tag_commit" "$main_sha" "$run_id" "$kind_run_id" "$dry_run_id"
+  printf 'release-tag source evidence: %s peels to %s on canonical main %s (CI run %s; %s; dry run %s)\n' \
+    "$tag_ref" "$tag_commit" "$main_sha" "$run_id" "$kind_evidence" "$dry_run_id"
   emit_outputs
   exit 0
 fi
@@ -465,11 +482,11 @@ done < <(jq -r '
 receipt='accepted'
 if [ "$tag_commit" = "$main_sha" ]; then
   reason='signed-tag-at-exact-green-deployed-main'
-  printf 'release-tag receipt: %s peels to green canonical main %s (CI run %s; Kind run %s; dry run %s; Dev acceptance run %s)\n' \
-    "$tag_ref" "$main_sha" "$run_id" "$kind_run_id" "$dry_run_id" "$dev_run_id"
+  printf 'release-tag receipt: %s peels to green canonical main %s (CI run %s; %s; dry run %s; Dev acceptance run %s)\n' \
+    "$tag_ref" "$main_sha" "$run_id" "$kind_evidence" "$dry_run_id" "$dev_run_id"
 else
   reason='signed-tag-on-main-at-exact-green-deployed-commit'
-  printf 'release-tag receipt: %s peels to %s, green and deployed, on canonical main %s (CI run %s; Kind run %s; dry run %s; Dev acceptance run %s)\n' \
-    "$tag_ref" "$tag_commit" "$main_sha" "$run_id" "$kind_run_id" "$dry_run_id" "$dev_run_id"
+  printf 'release-tag receipt: %s peels to %s, green and deployed, on canonical main %s (CI run %s; %s; dry run %s; Dev acceptance run %s)\n' \
+    "$tag_ref" "$tag_commit" "$main_sha" "$run_id" "$kind_evidence" "$dry_run_id" "$dev_run_id"
 fi
 emit_outputs

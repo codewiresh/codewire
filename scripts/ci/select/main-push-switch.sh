@@ -8,8 +8,9 @@
 # run take too long to run on every push to main. While this is false, a push
 # to main runs neither. Both still run on a dispatched release candidate, on a
 # pull request labelled ci-full, and on each workflow's four-hourly schedule
-# when its inputs changed. The release tag receipt needs both on the exact
-# candidate commit.
+# when its inputs changed. The release tag receipt needs the dry run of the
+# exact candidate commit, and its Kind run while RELEASE_REQUIRES_KIND in
+# scripts/ci/receipts/verify-release-tag-receipt.sh says so.
 #
 # Set it back to true, which restores both on every push to main exactly as
 # before and leaves the schedules with nothing to run, once all three hold:

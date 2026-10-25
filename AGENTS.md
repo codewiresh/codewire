@@ -284,13 +284,18 @@ so a cancelled run never signs or dispatches.
 Temporary rule (owner decision, 2026-10-20): a push to `main` runs no Kind and
 no release dry run. Both still run on a dispatched release candidate, on a pull
 request labelled `ci-full`, and every four hours on a schedule against the
-latest `main` when their inputs changed. A release tag's receipt needs a green
-Kind run and a green dry run of the exact candidate commit. Dispatch both on
+latest `main` when their inputs changed. A release tag's receipt needs green
+`main` CI, a green dry run and Dev acceptance of the exact candidate commit.
+It needs no Kind run while Kind CI is off (owner, 2026-10-25: "Yes, we're
+waiving KIND for now."; cited on #3013). The switch is `RELEASE_REQUIRES_KIND`
+in `scripts/ci/receipts/verify-release-tag-receipt.sh`; set it back to `true`
+when Kind CI runs again, and the receipt again needs a green Kind run of the
+exact candidate. Dispatch the dry run (and, while Kind is required, Kind) on
 `main` naming the candidate, so `main` never stops for a cut:
 
 ```sh
-fj actions dispatch -R origin ci.yaml main -I verification=edge_kind -I source_sha=<candidate>
 fj actions dispatch -R origin cw-release-dry-run.yaml main -I source_sha=<candidate>
+fj actions dispatch -R origin ci.yaml main -I verification=edge_kind -I source_sha=<candidate>  # only while RELEASE_REQUIRES_KIND=true
 ```
 
 The candidate must be on `main`'s first-parent history with the same

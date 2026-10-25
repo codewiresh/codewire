@@ -239,8 +239,9 @@ if [ -n "${PREFLIGHT_RELEASE_TAG_REF:-}" ]; then
   # A release tag push checks only what this checkout can know, so it needs no
   # Forgejo token: just tag and push (owner, 2026-10-23, #2892). deploy-prod's
   # release selection reverifies the tag from main's code before anything is
-  # published: the release tagger's signature, main CI, Kind, the dry run and
-  # Dev acceptance of the exact commit.
+  # published: the release tagger's signature, main CI, the dry run and Dev
+  # acceptance of the exact commit, and Kind while the receipt's
+  # RELEASE_REQUIRES_KIND says so (waived, owner, 2026-10-25, #3013).
   printf '==> release tag signature\n'
   release_tag_object="${PREFLIGHT_RELEASE_TAG_OBJECT_SHA:-}"
   [ "$(git -C "$REPO_ROOT" cat-file -t "$release_tag_object" 2>/dev/null)" = tag ] ||

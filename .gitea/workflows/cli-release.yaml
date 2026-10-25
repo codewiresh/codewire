@@ -145,8 +145,9 @@ jobs:
           # - the tag's own signature, by the release tagger's account:
           #   verify-release-tag-ref.sh, above;
           # - the workspace image the release ships: the pin check;
-          # - main CI, Kind and the dry run of the exact commit: the receipt's
-          #   source evidence;
+          # - main CI and the dry run of the exact commit, and Kind while
+          #   RELEASE_REQUIRES_KIND in the receipt says so (waived, owner,
+          #   2026-10-25, #3013): the receipt's source evidence;
           # - Dev acceptance: promote-prod, which dispatch-deploy-prod.sh waits
           #   for and cli-release requires.
           python3 scripts/ci/images/workspace-image-pin.py check --release --commit "$source_sha"
