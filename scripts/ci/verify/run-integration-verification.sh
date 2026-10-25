@@ -282,6 +282,13 @@ extract_archives() {
     # archives carry (one package in two feature sets) is linked to neither,
     # so a test that starts it fails rather than start the other build.
     while read -r binary; do
+      # nextest also lists the libraries a build produced (a dependency's
+      # static library, such as boringtun's .a in the credential service's
+      # enrollment build, main run 22655). Nothing starts one by its path, so
+      # it gets no link.
+      if [[ "$binary" =~ ^[a-z0-9_-]+(/deps)?/lib[A-Za-z0-9_.-]+\.(a|so|dylib|rlib)$ ]]; then
+        continue
+      fi
       [[ "$binary" =~ ^[a-z0-9_-]+/[A-Za-z0-9_.-]+$ ]] ||
         { echo "::error::archive $key names an unexpected binary path: $binary" >&2; return 2; }
       link="$DATABASE_ARCHIVE_BUILD_ROOT/targets/archive/$binary"

@@ -671,4 +671,51 @@ for step in steps:
     assert " ".join(command.group(0).split()).endswith(f"postgres:17-alpine {server_args}"), command.group(0)
 PYTHON
 
+# The archive extractor links each archive's non-test binaries at their build
+# path, and skips the libraries nextest also lists (main run 22655: boringtun's
+# static library in the credential service's enrollment archive); any other
+# unexpected path still fails.
+extract_case() {
+  local entries="$1" case_dir="$TMP/extract-$2"
+  mkdir -p "$case_dir/archives-in" "$case_dir/root" "$case_dir/bin"
+  : > "$case_dir/archives-in/codewire-credential-service--features-enrollment.tar.zst"
+  printf '%s' "$entries" > "$case_dir/entries.json"
+  cat > "$case_dir/bin/nextest" <<'NEXTEST'
+#!/usr/bin/env bash
+# Writes the binaries metadata the archive would carry into --extract-to.
+while [ "$#" -gt 0 ]; do
+  [ "$1" = --extract-to ] && { mkdir -p "$2/target/nextest"; out="$2"; shift; }
+  shift
+done
+printf '{"rust-build-meta":{"non-test-binaries":{"codewire-credential-service":%s}}}' \
+  "$(cat "$EXTRACT_ENTRIES")" > "$out/target/nextest/binaries-metadata.json"
+NEXTEST
+  chmod +x "$case_dir/bin/nextest"
+  # The variables and log() are the eval'd extractor's.
+  # shellcheck disable=SC2034,SC2329
+  (
+    set -euo pipefail
+    log() { :; }
+    eval "$(awk '/^extract_archives\(\) \{/,/^\}/' "$ROOT/scripts/ci/verify/run-integration-verification.sh")"
+    ROOT="$case_dir/root" RUN_DIR="$case_dir/run" DATABASE_ARCHIVE_BUILD_ROOT="$case_dir/build" \
+      RUST_TEST_NEXTEST="$case_dir/bin/nextest" EXTRACT_ENTRIES="$case_dir/entries.json"
+    export EXTRACT_ENTRIES
+    extract_archives "$case_dir/archives-in"
+  ) > "$case_dir/out.log" 2>&1
+}
+extract_case '[{"name":"codewire-credential-service","path":"debug/codewire-credential-service"},{"name":"boringtun","path":"debug/deps/libboringtun-963df387f682c248.a"},{"name":"boringtun","path":"debug/deps/libboringtun-963df387f682c248.so"}]' libraries ||
+  { cat "$TMP/extract-libraries/out.log" >&2; echo 'the extractor refused a library nextest lists' >&2; exit 1; }
+[ -L "$TMP/extract-libraries/build/targets/archive/debug/codewire-credential-service" ] ||
+  { echo 'the extractor did not link the archive binary' >&2; exit 1; }
+[ ! -e "$TMP/extract-libraries/build/targets/archive/debug/deps" ] ||
+  { echo 'the extractor linked a library' >&2; exit 1; }
+if extract_case '[{"name":"x","path":"debug/../escape"}]' escape; then
+  echo 'the extractor accepted a path outside its folder' >&2; exit 1
+fi
+grep -q 'names an unexpected binary path: debug/../escape' "$TMP/extract-escape/out.log" ||
+  { echo 'the extractor gave no reason for the refused path' >&2; exit 1; }
+if extract_case '[{"name":"x","path":"debug/deps/notalib-1.a"}]' nonlib; then
+  echo 'the extractor skipped an unexpected non-library path' >&2; exit 1
+fi
+
 printf '[test-integration-postgres] hermetic selection, prerequisite, scope, and cleanup cases passed\n'
