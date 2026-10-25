@@ -34,8 +34,10 @@
 #   once. Nothing else does: a lockfile or toolchain change leaves them to
 #   Cargo, whose fingerprints rebuild exactly the units it changed (a wipe
 #   on every lockfile change cost a 27-33 min cold build; CI compute audit,
-#   row 1). Builds are incremental (CARGO_INCREMENTAL=1), so a change to one
-#   large crate rebuilds in seconds, not minutes.
+#   row 1). Builds are not incremental: each leg builds many feature
+#   variants, and their incremental sessions held about 35 GB of slot 61's
+#   120 GB disk and filled it mid-build (main run 22822), so prepare removes
+#   any that remain.
 # A job that was cancelled, or whose guest died, keeps its folder: Cargo
 # rebuilds what it did not finish. The one thing it can leave is a truncated
 # output that Cargo's fingerprint still calls fresh (main run 22374,
@@ -187,7 +189,7 @@ prepare() {
     echo "BUILD_ONCE_SRC=$src"
     echo "CARGO_HOME=$work/cargo-home"
     echo 'CARGO_PROFILE_DEV_DEBUG=line-tables-only'
-    echo 'CARGO_INCREMENTAL=1'
+    echo 'CARGO_INCREMENTAL=0'
     echo "CARGO_BUILD_JOBS=${BUILD_ONCE_JOBS:-${share:-16}}"
     echo 'CODEWIRE_LOCAL_RUST_CACHE=off'
     echo 'CARGO_TERM_COLOR=never'
@@ -206,13 +208,16 @@ disk_used_percent() {
 }
 
 bound_targets() {
-  # Nothing else bounds the target folders: each leg keeps its own, builds are
-  # incremental, and a lockfile change no longer wipes them. Above
+  # Nothing else bounds the target folders: each leg keeps its own, and a
+  # lockfile change no longer wipes them. Above
   # BUILD_ONCE_DISK_PERCENT (65) of the build disk, whole leg folders go,
   # least recently used first, until the disk is back under it. The guest
   # wipes the whole folder at 85 % (main run 22737: "build folder wiped: disk
   # 93% used"), which makes every leg cold; this makes one leg cold at a time.
   local limit="${BUILD_ONCE_DISK_PERCENT:-65}" used leg folder swept
+  # Incremental sessions from the builds that were incremental (#3454).
+  find "$work/targets" -xdev -mindepth 3 -maxdepth 3 -type d -name incremental \
+    -exec rm -rf -- {} + 2>/dev/null || true
   # First the units no build has read for BUILD_ONCE_SWEEP_DAYS (3): stale
   # artifacts of crates and lockfile versions since replaced, and old
   # incremental sessions. The disk is mounted relatime, so every build that
@@ -413,7 +418,7 @@ run_leg() {
 # 22374). A failed leg showing it wipes the target folders its log names and
 # runs once more in the same job.
 # shellcheck disable=SC2016 # The backticks are literal text in the linker message.
-readonly CORRUPT_OUTPUT='malformed archive|truncated|Archive::children failed|invalid metadata|E0786|failed to mmap|linking with `cc` failed'
+readonly CORRUPT_OUTPUT='malformed archive|truncated|Archive::children failed|invalid metadata|E0786|failed to mmap|linking with `cc` failed|corrupt incremental compilation artifact|could not load dep-graph|required to be available in rlib format|memory map must have a non-zero length|No space left on device'
 
 rebuild_corrupt_leg() {
   # rebuild_corrupt_leg NAME OUT LOG: succeeds only when the leg showed a

@@ -205,7 +205,15 @@ rm -f "$marker_root/layout"
 printf 'old-stamp\n' > "$marker_root/lock-stamp"
 targets_prepare
 [ -f "$marker_root/targets/archive/lib.rlib" ] || fail 'the move to the layout file wiped the targets'
-grep -q "^    echo 'CARGO_INCREMENTAL=1'$" "$SCRIPT" || fail 'build runner builds are not incremental'
+# Builds are not incremental (their sessions filled the disk, main run 22822),
+# and prepare removes the sessions earlier builds left.
+grep -q "^    echo 'CARGO_INCREMENTAL=0'$" "$SCRIPT" || fail 'build runner builds are incremental'
+mkdir -p "$marker_root/targets/archive/debug/incremental/codewire_proto-x/s-1" "$marker_root/targets/archive/debug/deps"
+printf 'x' > "$marker_root/targets/archive/debug/incremental/codewire_proto-x/s-1/dep-graph.bin"
+printf 'keep' > "$marker_root/targets/archive/debug/deps/libkeep.rlib"
+targets_prepare
+[ ! -e "$marker_root/targets/archive/debug/incremental" ] || fail 'prepare kept incremental sessions'
+[ -f "$marker_root/targets/archive/debug/deps/libkeep.rlib" ] || fail 'removing incremental sessions removed an artifact'
 
 # The disk bound: target files no build read for 3 days go; above 65 % of the
 # disk, whole leg folders go, least recently used first (a folder with no use
@@ -293,6 +301,9 @@ legs_build corrupt || fail "a corrupt archive was not rebuilt: $(cat "$work/legs
 [ -f "$work/legs-out/archive.tar.zst" ] || fail 'the rebuilt leg wrote no archive'
 [ "$(wc -l < "$work/legs-state/calls")" -eq 2 ] || fail 'the corrupt leg did not build exactly twice'
 grep -q 'it is wiped and the leg runs once more' "$work/legs.log" || fail 'the rebuild gave no reason'
+for signature in 'could not load dep-graph' 'required to be available in rlib format' 'No space left on device'; do
+  grep -q "^readonly CORRUPT_OUTPUT=.*$signature" "$SCRIPT" || fail "the corrupt-output rebuild misses: $signature"
+done
 if legs_build compile; then fail 'a compile error passed'; fi
 [ "$(wc -l < "$work/legs-state/calls")" -eq 1 ] || fail 'a compile error was rebuilt'
 [ -e "$work/legs-root/pr/targets/archive/debug/deps/libbroken.rlib" ] || fail 'a compile error wiped the target folder'
