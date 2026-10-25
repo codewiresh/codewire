@@ -463,9 +463,6 @@ mapfile -t direct_tag_tags < <(
 deploy_workflow="$ROOT/.gitea/workflows/deploy-prod.yaml"
 cli_workflow="$ROOT/.gitea/workflows/cli-release.yaml"
 image_builder="$ROOT/scripts/ci/images/build-push-image.sh"
-signing_key_test="$ROOT/scripts/ci/tests/test-verify-cw-release-signing-key.sh"
-installer_test="$ROOT/scripts/ci/tests/test-cw-install.py"
-publish_release_test="$ROOT/scripts/ci/tests/test-publish-cw-release.sh"
 installer="$ROOT/apps/cli/install.sh"
 cli_readme="$ROOT/apps/cli/README.md"
 release_public_key="$ROOT/apps/cli/GPG_PUBLIC_KEY.asc"
@@ -849,29 +846,19 @@ for name in \
   fi
 done
 
-"$signing_key_test"
-python3 -B "$installer_test" >/dev/null 2>&1 || {
-  echo 'public installer tests failed' >&2
-  exit 1
-}
-"$publish_release_test"
+# The release suites are independent; they run side by side, about 50 s in
+# order. A quiet suite prints only its failure line.
+# shellcheck source=scripts/ci/verify/side-by-side.sh
+source "$ROOT/scripts/ci/verify/side-by-side.sh"
+run_side_by_side <<'SUITES'
+"$ROOT/scripts/ci/tests/test-verify-cw-release-signing-key.sh"
+python3 -B "$ROOT/scripts/ci/tests/test-cw-install.py" >/dev/null 2>&1 || { echo 'public installer tests failed' >&2; exit 1; }
+"$ROOT/scripts/ci/tests/test-publish-cw-release.sh"
 python3 -B "$ROOT/scripts/ci/tests/test-cli-release-workflow.py"
-python3 -B "$ROOT/scripts/ci/tests/test-cw-release-delivery.py" >/dev/null 2>&1 || {
-  echo 'cw release delivery tests failed' >&2
-  exit 1
-}
-python3 -B "$ROOT/scripts/ci/tests/test-cw-release-r2.py" >/dev/null 2>&1 || {
-  echo 'cw release R2 publisher tests failed' >&2
-  exit 1
-}
-python3 -B "$ROOT/scripts/ci/tests/test-package-cw-release.py" >/dev/null 2>&1 || {
-  echo 'cw release packaging tests failed' >&2
-  exit 1
-}
-python3 -B "$ROOT/scripts/ci/tests/test-local-runtime-parts.py" >/dev/null 2>&1 || {
-  echo 'local runtime parts and source pin tests failed' >&2
-  exit 1
-}
+python3 -B "$ROOT/scripts/ci/tests/test-cw-release-delivery.py" >/dev/null 2>&1 || { echo 'cw release delivery tests failed' >&2; exit 1; }
+python3 -B "$ROOT/scripts/ci/tests/test-cw-release-r2.py" >/dev/null 2>&1 || { echo 'cw release R2 publisher tests failed' >&2; exit 1; }
+python3 -B "$ROOT/scripts/ci/tests/test-package-cw-release.py" >/dev/null 2>&1 || { echo 'cw release packaging tests failed' >&2; exit 1; }
+python3 -B "$ROOT/scripts/ci/tests/test-local-runtime-parts.py" >/dev/null 2>&1 || { echo 'local runtime parts and source pin tests failed' >&2; exit 1; }
 "$ROOT/scripts/ci/tests/test-dry-run-superseded.sh" >/dev/null
 "$ROOT/scripts/ci/tests/test-dry-run-deferral.sh" >/dev/null
 "$ROOT/scripts/ci/tests/test-dispatch-source.sh" >/dev/null
@@ -880,6 +867,7 @@ python3 -B "$ROOT/scripts/ci/tests/test-local-runtime-parts.py" >/dev/null 2>&1 
 "$ROOT/scripts/ci/tests/test-fetch-openbao-macos-signing.sh"
 "$ROOT/scripts/ci/tests/test-sign-macos-cw.sh"
 "$ROOT/scripts/ci/tests/test-sign-macos-helper.sh"
+SUITES
 
 compiled_fingerprint="$(
   sed -n 's/^const TRUST_FINGERPRINT: &str = "\([0-9A-F]*\)";$/\1/p' \
