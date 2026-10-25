@@ -184,14 +184,13 @@ grep -Fq 'scripts/runtime/space name.sh' <<<"$runtime_syntax_output" \
   || fail 'runtime syntax failure did not identify its source'
 
 
-# The fake ShellCheck reproduces the behaviour the policy depends on. It reports
-# json1 findings only for the scripts named on its command line, and it applies
-# ShellCheck's sourcing rule: without --external-sources, a sourced tracked
-# script (a directive, a literal path, or "$dir/name" read as "./name") is
-# followed only when it is named in the same invocation. A missing closure
-# member surfaces as an SC2154 finding that no baseline reviews, as an
-# unassigned variable from the unread file would. A fixture script marks each
-# warning with a whole `# fixture-finding SC<code>` line.
+# The fake ShellCheck reproduces the behaviour the policy depends on. Every
+# analysis must pass --external-sources, so it follows each tracked script a
+# named script sources (a directive, a literal path, or "$dir/name" read as
+# "./name"), through any depth. It reports json1 findings for each named script
+# and also, as a report may, for each followed script the invocation does not
+# name; the checker must count only the named scripts' comments. A fixture
+# script marks each warning with a whole `# fixture-finding SC<code>` line.
 fake_shellcheck="$TMP/shellcheck"
 fake_log="$TMP/shellcheck.log"
 cat > "$fake_shellcheck" <<'FAKE_SHELLCHECK'
@@ -212,8 +211,9 @@ for arg in "$@"; do line+=$'\t'"$arg"; done
   printf '%s\n' "$line" >&9
 } 9>> "${FAKE_SHELLCHECK_LOG:?}"
 
-[[ "${1:-}" == --severity=warning && "${2:-}" == --format=json1 ]] || exit 4
-shift 2
+[[ "${1:-}" == --external-sources && "${2:-}" == --severity=warning \
+  && "${3:-}" == --format=json1 ]] || exit 4
+shift 3
 files=("$@")
 named() {
   local file
@@ -241,8 +241,21 @@ lists="$(mktemp -d)"
 trap 'rm -rf -- "$lists"' EXIT
 printf '%s\n' "${files[@]}" > "$lists/named"
 git ls-files -- '*.sh' > "$lists/tracked"
+mapfile -t tracked < "$lists/tracked"
 awk '
-  FILENAME == ARGV[1] { named[$0] = 1; next }
+  function follow(file, root,    position) {
+    if (file in seen) return
+    seen[file] = 1
+    if (file == root || !(file in is_named)) {
+      for (position = 1; position <= findings[file]; position++) {
+        print file "\t" finding[file, position]
+      }
+    }
+    for (position = 1; position <= edges[file]; position++) {
+      follow(edge[file, position], root)
+    }
+  }
+  FILENAME == ARGV[1] { named[++named_count] = $0; is_named[$0] = 1; next }
   FILENAME == ARGV[2] { tracked[$0] = 1; next }
   FNR == 1 {
     directory = FILENAME
@@ -252,7 +265,7 @@ awk '
     code = $0
     sub(/.*fixture-finding SC/, "", code)
     sub(/[^0-9].*/, "", code)
-    print FILENAME "\t" FNR "\t" code
+    finding[FILENAME, ++findings[FILENAME]] = FNR "\t" code
   }
   {
     target = ""
@@ -271,11 +284,17 @@ awk '
       if (target ~ /^\$\{[^}]*\}\//) sub(/^\$\{[^}]*\}\//, "", target)
       if (target ~ /[$`]/) target = ""
     }
-    if (target in tracked && !(target in named)) {
-      print FILENAME "\t" FNR "\t2154"
+    if (target in tracked && target != FILENAME) {
+      edge[FILENAME, ++edges[FILENAME]] = target
     }
   }
-' "$lists/named" "$lists/tracked" "${files[@]}" > "$lists/findings"
+  END {
+    for (position = 1; position <= named_count; position++) {
+      split("", seen)
+      follow(named[position], named[position])
+    }
+  }
+' "$lists/named" "$lists/tracked" "${tracked[@]}" > "$lists/findings"
 
 repository_findings='[]'
 if [[ "${FAKE_SHELLCHECK_REPOSITORY_BASELINE:-0}" == 1 ]]; then
@@ -311,20 +330,20 @@ chmod +x "$fake_shellcheck"
 # Print each invocation's script arguments, one invocation per line.
 invocation_scripts() {
   awk -F '\t' '
-    $1 != "analysis" || $2 != "--severity=warning" || $3 != "--format=json1" {
+    $1 != "analysis" || $2 != "--external-sources" || $3 != "--severity=warning" \
+        || $4 != "--format=json1" {
       print "unexpected invocation: " $0
       next
     }
-    { line = ""; for (i = 4; i <= NF; i++) line = line (i > 4 ? "\t" : "") $i; print line }
+    { line = ""; for (i = 5; i <= NF; i++) line = line (i > 5 ? "\t" : "") $i; print line }
   ' "$fake_log"
 }
 
-# Require every tracked script in exactly one invocation and every named group
-# of scripts in a shared invocation.
+# Require every invocation to pass --external-sources and every tracked script
+# to be named in exactly one invocation.
 assert_partition() {
   local repository="$1" context="$2"
-  shift 2
-  local tracked invoked group invocations
+  local tracked invoked invocations
   invocations="$(invocation_scripts)"
   grep -q '^unexpected invocation: ' <<<"$invocations" \
     && fail "$context: ShellCheck flags changed"
@@ -332,17 +351,19 @@ assert_partition() {
   invoked="$(printf '%s\n' "$invocations" | tr '\t' '\n' | LC_ALL=C sort)"
   [[ "$invoked" == "$tracked" ]] \
     || fail "$context: shards did not analyze each tracked script exactly once"
-  for group in "$@"; do
-    awk -F '\t' -v group="$group" '
-      BEGIN { wanted = split(group, names, " ") }
-      {
-        found = 0
-        for (i = 1; i <= NF; i++) for (j = 1; j <= wanted; j++) if ($i == names[j]) found++
-        if (found == wanted) shared = 1
-      }
-      END { exit shared ? 0 : 1 }
-    ' <<<"$invocations" || fail "$context: source closure split across shards: $group"
-  done
+}
+
+# Require two scripts to be named in different invocations.
+assert_split() {
+  local context="$1" left="$2" right="$3"
+  invocation_scripts | awk -F '\t' -v left="$left" -v right="$right" '
+    {
+      found = 0
+      for (i = 1; i <= NF; i++) if ($i == left || $i == right) found++
+      if (found == 2) shared = 1
+    }
+    END { exit shared ? 1 : 0 }
+  ' || fail "$context: $left and $right shared an invocation"
 }
 
 # Hook environments can carry another repository's Git paths.
@@ -358,7 +379,9 @@ run_checker() {
     "$checker"
 }
 
-# --- Fixture repository: sourced closures, ratchet changes and shard failures.
+# --- Fixture repository: sourced scripts, ratchet changes and shard failures.
+# The fixture runs SHELLCHECK_SHARDS=4 so that its placement does not follow
+# the repository default.
 fixture="$TMP/fixture-repository"
 mkdir -p "$fixture/scripts/ci/verify" "$fixture/scripts/ci/setup" \
   "$fixture/z-lib" "$fixture/tools"
@@ -367,22 +390,24 @@ cp "$ROOT/scripts/ci/setup/setup-shellcheck.sh" "$fixture/scripts/ci/setup/setup
 cat > "$fixture/scripts/ci/verify/shellcheck-baseline.sh" <<'BASELINE'
 #!/usr/bin/env bash
 readonly SHELLCHECK_BASELINE_TSV=$'# path\tcode\tcount\treason\n'\
-$'m-03.sh\tSC2034\t2\tfixture-reviewed'
+$'m-03.sh\tSC2034\t2\tfixture-reviewed\n'\
+$'z-lib/deep.sh\tSC2034\t1\tfixture-reviewed-sourced'
 BASELINE
-# The consumer sorts first and its library last, and padding makes their
-# component the heaviest, so a split by path order or by size would separate
-# them. The library sources a deeper file in turn.
+# The consumer sorts first and its library last, and padding makes the
+# consumer the costliest script, so it starts the first shard alone and its
+# library lands elsewhere. The library sources a deeper file, which holds a
+# reviewed finding that each analysis following it may report again.
 {
   printf '#!/usr/bin/env bash\n'
   printf '# shellcheck source=z-lib/common.sh\nsource "$LIBRARY"\n'
   printf 'printf "%%s\\n" "$common_value"\n'
-  for ((line = 0; line < 1000; line++)); do
+  for ((line = 0; line < 4000; line++)); do
     printf '# consumer padding line %s\n' "$line"
   done
 } > "$fixture/a-consumer.sh"
 printf '#!/usr/bin/env bash\n# shellcheck source=z-lib/deep.sh\nsource "$DEEP"\ncommon_value="$deep_value"\n' \
   > "$fixture/z-lib/common.sh"
-printf '#!/usr/bin/env bash\ndeep_value=1\n' > "$fixture/z-lib/deep.sh"
+printf '#!/usr/bin/env bash\ndeep_value=1\n# fixture-finding SC2034\n' > "$fixture/z-lib/deep.sh"
 printf '#!/usr/bin/env bash\n# shellcheck source=SCRIPTDIR/helper.sh\nsource "$HELPER"\n' \
   > "$fixture/tools/scriptdir.sh"
 printf '#!/usr/bin/env bash\nhelper_value=1\n' > "$fixture/tools/helper.sh"
@@ -397,46 +422,78 @@ printf '# fixture-finding SC2034\n# fixture-finding SC2034\n' >> "$fixture/m-03.
 env "${git_unset[@]}" git -C "$fixture" init -q
 env "${git_unset[@]}" git -C "$fixture" add -A
 fixture_checker="$fixture/scripts/ci/verify/check-shell-scripts.sh"
-fixture_closures=(
-  'a-consumer.sh z-lib/common.sh z-lib/deep.sh'
-  'tools/scriptdir.sh tools/helper.sh'
-  'tools/literal.sh tools/literal-lib.sh'
-  'tools/dynamic.sh tools/dynamic-lib.sh'
-  'scripts/ci/verify/check-shell-scripts.sh scripts/ci/verify/shellcheck-baseline.sh'
-)
 
-# Control: the fake reports an unread closure, so a split closure cannot pass.
-split_output="$(cd "$fixture" && env "${git_unset[@]}" FAKE_SHELLCHECK_LOG="$TMP/control.log" \
-  "$fake_shellcheck" --severity=warning --format=json1 a-consumer.sh z-lib/common.sh)" \
-  && fail 'fake ShellCheck accepted a consumer without its whole closure'
-[[ "$(jq -c '[.comments[] | [.file, .code]]' <<<"$split_output")" \
-    == '[["z-lib/common.sh",2154]]' ]] \
-  || fail 'fake ShellCheck did not report the unread deeper source'
+# Control: the fake requires --external-sources, and it reports a finding in a
+# followed script the invocation does not name, as each consumer's analysis
+# would. A followed script that is also named is reported once.
+(cd "$fixture" && env "${git_unset[@]}" FAKE_SHELLCHECK_LOG="$TMP/control.log" \
+  "$fake_shellcheck" --severity=warning --format=json1 a-consumer.sh >/dev/null) \
+  && fail 'fake ShellCheck accepted an analysis without --external-sources'
+followed_output="$(cd "$fixture" && env "${git_unset[@]}" FAKE_SHELLCHECK_LOG="$TMP/control.log" \
+  "$fake_shellcheck" --external-sources --severity=warning --format=json1 a-consumer.sh)" \
+  && fail 'fake ShellCheck reported no finding in a followed script'
+[[ "$(jq -c '[.comments[] | [.file, .code]]' <<<"$followed_output")" \
+    == '[["z-lib/deep.sh",2034]]' ]] \
+  || fail 'fake ShellCheck did not report the followed deeper source'
+named_output="$(cd "$fixture" && env "${git_unset[@]}" FAKE_SHELLCHECK_LOG="$TMP/control.log" \
+  "$fake_shellcheck" --external-sources --severity=warning --format=json1 \
+  a-consumer.sh z-lib/common.sh z-lib/deep.sh)" \
+  && fail 'fake ShellCheck reported no finding in a named script'
+[[ "$(jq -c '[.comments[] | [.file, .code]]' <<<"$named_output")" \
+    == '[["z-lib/deep.sh",2034]]' ]] \
+  || fail 'fake ShellCheck reported a named, followed script more than once'
 
+# Four shards: the costliest script leads a shard of its own, its sourced
+# library is analyzed in another shard, and the finding inside the deeper
+# sourced file is counted exactly once.
 : > "$fake_log"
-fixture_output="$(run_checker "$fixture_checker" 2>&1)" \
+fixture_output="$(run_checker "$fixture_checker" SHELLCHECK_SHARDS=4 2>&1)" \
   || fail "sharded fixture analysis failed: $fixture_output"
 grep -Fq 'ShellCheck analysis: start (scripts=20 shards=4 timeout_seconds=600)' \
   <<<"$fixture_output" || fail 'fixture analysis did not start four shards'
-grep -Fq 'ShellCheck shard 1/4 (scripts=3 heaviest=a-consumer.sh): start' \
-  <<<"$fixture_output" || fail 'heaviest closure did not lead its own shard'
-grep -Fq 'ShellCheck warning ratchet: OK (20 scripts, 4 shards, 1 reviewed groups)' \
+grep -Fq 'ShellCheck shard 1/4 (scripts=1 heaviest=a-consumer.sh): start' \
+  <<<"$fixture_output" || fail 'costliest script did not lead its own shard'
+grep -Fq 'ShellCheck warning ratchet: OK (20 scripts, 4 shards, 2 reviewed groups)' \
   <<<"$fixture_output" || fail 'reviewed fixture findings did not pass'
 [[ "$(wc -l < "$fake_log")" -eq 4 ]] || fail 'fixture analysis did not run four shards'
-assert_partition "$fixture" 'four shards' "${fixture_closures[@]}"
+assert_partition "$fixture" 'four shards'
+assert_split 'four shards' a-consumer.sh z-lib/common.sh
+assert_split 'four shards' a-consumer.sh z-lib/deep.sh
 
 : > "$fake_log"
 single_output="$(run_checker "$fixture_checker" SHELLCHECK_SHARDS=1 2>&1)" \
   || fail "single-shard fixture analysis failed: $single_output"
-grep -Fq 'ShellCheck warning ratchet: OK (20 scripts, 1 shards, 1 reviewed groups)' \
+grep -Fq 'ShellCheck warning ratchet: OK (20 scripts, 1 shards, 2 reviewed groups)' \
   <<<"$single_output" || fail 'single-shard analysis did not pass'
 [[ "$(wc -l < "$fake_log")" -eq 1 ]] || fail 'SHELLCHECK_SHARDS=1 ran more than one process'
-assert_partition "$fixture" 'one shard' "${fixture_closures[@]}"
+assert_partition "$fixture" 'one shard'
+
+# Old and new behaviour: the same checker without its own-comments filter
+# counts the deeper file's finding again in each shard that only followed it,
+# and the ratchet fails. With the filter (above) the same shards pass.
+unfiltered="$TMP/unfiltered-repository"
+cp -R "$fixture" "$unfiltered"
+unfiltered_checker="$unfiltered/scripts/ci/verify/check-shell-scripts.sh"
+awk '
+  $0 == "own_comments() {" { print; print "  jq -c .comments"; skip = 1; replaced++; next }
+  skip && $0 == "}" { skip = 0 }
+  !skip { print }
+  END { exit replaced == 1 ? 0 : 1 }
+' "$fixture_checker" > "$unfiltered_checker" \
+  || fail 'the checker has no own_comments filter to remove'
+if unfiltered_output="$(run_checker "$unfiltered_checker" SHELLCHECK_SHARDS=4 2>&1)"; then
+  fail 'unfiltered sharded analysis accepted duplicated findings'
+fi
+grep -Fq 'ShellCheck warning set differs from the reviewed baseline' <<<"$unfiltered_output" \
+  || fail 'unfiltered duplicates were not diagnosed'
+grep -Fxq -e $'-z-lib/deep.sh\tSC2034\t1' <<<"$unfiltered_output" \
+  && grep -Eq $'^\\+z-lib/deep\\.sh\tSC2034\t[2-9]$' <<<"$unfiltered_output" \
+  || fail 'unfiltered duplicates did not change the sourced finding count'
 
 # A new warning fails the ratchet even though it appears in one shard only.
 cp "$fixture/m-05.sh" "$TMP/m-05.sh"
 printf '# fixture-finding SC2086\n' >> "$fixture/m-05.sh"
-if new_output="$(run_checker "$fixture_checker" 2>&1)"; then
+if new_output="$(run_checker "$fixture_checker" SHELLCHECK_SHARDS=4 2>&1)"; then
   fail 'sharded analysis accepted a new warning'
 fi
 grep -Fq 'ShellCheck warning set differs from the reviewed baseline' <<<"$new_output" \
@@ -449,7 +506,7 @@ cp "$TMP/m-05.sh" "$fixture/m-05.sh"
 # until the baseline is ratcheted down.
 cp "$fixture/m-03.sh" "$TMP/m-03.sh"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" 03\n# fixture-finding SC2034\n' > "$fixture/m-03.sh"
-if fixed_output="$(run_checker "$fixture_checker" 2>&1)"; then
+if fixed_output="$(run_checker "$fixture_checker" SHELLCHECK_SHARDS=4 2>&1)"; then
   fail 'sharded analysis accepted a stale reviewed count'
 fi
 grep -Fxq -e $'-m-03.sh\tSC2034\t2' <<<"$fixed_output" \
@@ -460,7 +517,7 @@ cp "$TMP/m-03.sh" "$fixture/m-03.sh"
 # Any failing shard fails the analysis; the other shards' findings never pass.
 : > "$fake_log"
 set +e
-failure_output="$(run_checker "$fixture_checker" \
+failure_output="$(run_checker "$fixture_checker" SHELLCHECK_SHARDS=4 \
   FAKE_SHELLCHECK_FAIL_FILE=m-07.sh FAKE_SHELLCHECK_STATUS=7 2>&1)"
 failure_status=$?
 set -e
@@ -471,7 +528,7 @@ grep -Fq 'ratchet: OK' <<<"$failure_output" && fail 'a failed shard still passed
 [[ "$(wc -l < "$fake_log")" -eq 4 ]] || fail 'a failed shard stopped the other shards'
 
 set +e
-killed_output="$(run_checker "$fixture_checker" FAKE_SHELLCHECK_KILL_FILE=m-02.sh 2>&1)"
+killed_output="$(run_checker "$fixture_checker" SHELLCHECK_SHARDS=4 FAKE_SHELLCHECK_KILL_FILE=m-02.sh 2>&1)"
 killed_status=$?
 set -e
 [[ "$killed_status" -eq 137 ]] || fail 'killed shard status was not propagated'
@@ -480,7 +537,7 @@ grep -Eq '^ShellCheck shard [1-4]/4 \(.*\) was killed after [0-9]+ seconds, befo
 grep -Fq 'ratchet: OK' <<<"$killed_output" && fail 'a killed shard still passed the ratchet'
 
 set +e
-garbage_output="$(run_checker "$fixture_checker" FAKE_SHELLCHECK_GARBAGE_FILE=m-04.sh 2>&1)"
+garbage_output="$(run_checker "$fixture_checker" SHELLCHECK_SHARDS=4 FAKE_SHELLCHECK_GARBAGE_FILE=m-04.sh 2>&1)"
 garbage_status=$?
 set -e
 [[ "$garbage_status" -eq 1 ]] || fail 'invalid shard report did not fail'
@@ -493,12 +550,12 @@ grep -Eq '^ShellCheck shard [1-4]/4 \(.*\) wrote no valid json1 report$' \
 # other shards may take a few seconds on a loaded CI guest (main run 22943
 # missed a three-second bound with a five-second stall).
 set +e
-timeout_output="$(run_checker "$fixture_checker" SHELLCHECK_TIMEOUT_SECONDS=1 \
-  FAKE_SHELLCHECK_SLEEP_FILE=z-lib/deep.sh FAKE_SHELLCHECK_SLEEP_SECONDS=120 2>&1)"
+timeout_output="$(run_checker "$fixture_checker" SHELLCHECK_SHARDS=4 SHELLCHECK_TIMEOUT_SECONDS=1 \
+  FAKE_SHELLCHECK_SLEEP_FILE=a-consumer.sh FAKE_SHELLCHECK_SLEEP_SECONDS=120 2>&1)"
 timeout_status=$?
 set -e
 [[ "$timeout_status" -eq 124 ]] || fail 'shard timeout status was not propagated'
-grep -Fxq 'ShellCheck shard 1/4 (scripts=3 heaviest=a-consumer.sh) timed out after 1 seconds' \
+grep -Fxq 'ShellCheck shard 1/4 (scripts=1 heaviest=a-consumer.sh) timed out after 1 seconds' \
   <<<"$timeout_output" || fail 'shard timeout did not name its shard'
 timeout_elapsed="$(sed -nE 's/^ShellCheck analysis: finish \(status=124 elapsed_seconds=([0-9]+)\)$/\1/p' \
   <<<"$timeout_output")"
@@ -517,21 +574,23 @@ for invalid_shards in 0 17 two; do
     <<<"$invalid_shards_output" || fail 'invalid shard count was not diagnosed'
 done
 
-# --- The repository itself: every tracked script, the reviewed baseline, and
-# every sourced tracked script analyzed beside the scripts that source it.
+# --- The repository itself: every tracked script named once, with
+# --external-sources, the measured costliest script leading the first shard,
+# and the reviewed baseline.
 : > "$fake_log"
 baseline_output="$(run_checker "$CHECKER" FAKE_SHELLCHECK_REPOSITORY_BASELINE=1 2>&1)" \
   || fail "matching fake ShellCheck baseline was rejected: $baseline_output"
 grep -Fq 'ShellCheck analysis: start (' <<<"$baseline_output" \
   || fail 'ShellCheck start timing is absent'
-grep -Fq 'shards=4 timeout_seconds=600)' <<<"$baseline_output" \
+grep -Fq 'shards=3 timeout_seconds=600)' <<<"$baseline_output" \
   || fail 'ShellCheck default shards or deadline changed'
+grep -Eq '^ShellCheck shard 1/3 \(scripts=[0-9]+ heaviest=scripts/ci/tests/test-kind-e2e-suites\.sh\): start$' \
+  <<<"$baseline_output" || fail 'the costliest repository script did not lead the first shard'
 grep -Eq 'ShellCheck analysis: finish \(status=1 elapsed_seconds=[0-9]+\)' \
   <<<"$baseline_output" || fail 'ShellCheck finish timing is absent'
 grep -Fq 'ShellCheck warning ratchet: OK' <<<"$baseline_output" \
   || fail 'matching warning baseline did not pass'
-assert_partition "$ROOT" 'repository' \
-  'scripts/ci/verify/check-shell-scripts.sh scripts/ci/verify/shellcheck-baseline.sh'
+assert_partition "$ROOT" 'repository'
 
 set +e
 error_output="$(run_checker "$CHECKER" FAKE_SHELLCHECK_REPOSITORY_BASELINE=1 \
