@@ -684,6 +684,9 @@ jobs:
     env:
       # The build runner's warm build folder (build-once.sh prepare).
       BUILD_ONCE_TREE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '/ci-cache/main' || '/ci-cache/pr' }}
+      # The build runner's folder persists, so its builds are incremental: a
+      # change to one large crate rebuilds in seconds (build-once.sh).
+      CARGO_INCREMENTAL: '1'
       CARGO_HOME: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '/ci-cache/main/cargo-home' || '/ci-cache/pr/cargo-home' }}
       ARCHIVE_STORE_URL: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'http://ci-archive-main.forgejo-ci-archive.svc:8090' || 'http://ci-archive-pr.forgejo-ci-archive.svc:8090' }}
       # The build legs of Rust / transport verification's local-vmm shard and

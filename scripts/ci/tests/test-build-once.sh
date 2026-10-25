@@ -150,7 +150,9 @@ grep -q 'ready=' "$work/fetch-out" && fail 'a corrupt archive reported readiness
 
 # A folder left by a cancelled job keeps its targets (a corrupt output is the
 # reading leg's to wipe, below); a stale marker from the earlier layout goes;
-# a lockfile change wipes the targets.
+# a lockfile change keeps the targets (Cargo's fingerprints rebuild what it
+# changed); only a new layout version wipes them, and a folder from before the
+# layout file keeps them.
 git init -q "$work/lock-origin"
 mkdir -p "$work/lock-origin/deployments/docker"
 printf 'lock one\n' > "$work/lock-origin/Cargo.lock"
@@ -177,9 +179,20 @@ git -C "$work/lock-origin" -c user.name=t -c user.email=t@example.invalid commit
 rm -rf "$work/lock-checkout"
 git clone -q --depth 1 "file://$work/lock-origin" "$work/lock-checkout"
 targets_prepare
-[ ! -e "$marker_root/targets/archive/lib.rlib" ] || fail 'a lockfile change kept the targets'
-grep -q 'layout changed; the target folders are wiped' "$work/prepare.log" || fail 'the lockfile wipe gave no reason'
-grep -q "echo 'build-once layout 2'" "$SCRIPT" || fail 'the folder layout version is missing from the stamp'
+[ -f "$marker_root/targets/archive/lib.rlib" ] || fail 'a lockfile change wiped the targets'
+grep -qx 2 "$marker_root/layout" || fail 'prepare did not record the folder layout'
+[ ! -e "$marker_root/lock-stamp" ] || fail 'prepare kept the retired lock-stamp'
+printf '1\n' > "$marker_root/layout"
+targets_prepare
+[ ! -e "$marker_root/targets/archive/lib.rlib" ] || fail 'a new folder layout kept the targets'
+grep -q 'the folder layout changed; the target folders are wiped' "$work/prepare.log" || fail 'the layout wipe gave no reason'
+mkdir -p "$marker_root/targets/archive"
+printf 'kept' > "$marker_root/targets/archive/lib.rlib"
+rm -f "$marker_root/layout"
+printf 'old-stamp\n' > "$marker_root/lock-stamp"
+targets_prepare
+[ -f "$marker_root/targets/archive/lib.rlib" ] || fail 'the move to the layout file wiped the targets'
+grep -q "^    echo 'CARGO_INCREMENTAL=1'$" "$SCRIPT" || fail 'build runner builds are not incremental'
 if "$SCRIPT" finish >/dev/null 2>&1; then fail 'the retired finish subcommand was accepted'; fi
 
 # A leg that reads a corrupt output from its warm target folder wipes the
@@ -256,4 +269,4 @@ if ARCHIVE_STORE_URL="file://$work/store" "$SCRIPT" publish "$work/out" >/dev/nu
   fail 'publish accepted an invalid leg output name'
 fi
 
-echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, interrupted folders kept, cold lanes side by side, the corrupt-output rebuild and publish hold; bad input refused'
+echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, interrupted folders and lockfile changes kept warm, the corrupt-output rebuild and publish hold; bad input refused'

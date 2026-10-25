@@ -30,9 +30,12 @@
 #   waiting on each other's folder lock; any other folder there is removed.
 # - cargo-home: the registry index and downloaded crates.
 # - tools: downloads of SHA-256-pinned tools, checked on every use.
-# - lock-stamp: the digest of every lockfile and the toolchain file, and of
-#   this folder's layout version. When it changes, the target folders are
-#   wiped.
+# - layout: the folder's layout version. Raising it wipes the target folders
+#   once. Nothing else does: a lockfile or toolchain change leaves them to
+#   Cargo, whose fingerprints rebuild exactly the units it changed (a wipe
+#   on every lockfile change cost a 27-33 min cold build; CI compute audit,
+#   row 1). Builds are incremental (CARGO_INCREMENTAL=1), so a change to one
+#   large crate rebuilds in seconds, not minutes.
 # A job that was cancelled, or whose guest died, keeps its folder: Cargo
 # rebuilds what it did not finish. The one thing it can leave is a truncated
 # output that Cargo's fingerprint still calls fresh (main run 22374,
@@ -90,7 +93,7 @@ tool() {
 }
 
 prepare() {
-  local checkout commit entry stamp bin nextest_version nextest_url nextest_sha share
+  local checkout commit entry bin nextest_version nextest_url nextest_sha share
   checkout="$(cd "$1" && pwd)"
   [ "$(git -C "$checkout" rev-parse --show-toplevel 2>/dev/null)" = "$checkout" ] ||
     die "$checkout is not a git checkout"
@@ -117,7 +120,7 @@ prepare() {
   done
   for entry in "$work"/*; do
     case "${entry##*/}" in
-      src|targets|cargo-home|tools|lock-stamp) ;;
+      src|targets|cargo-home|tools|layout) ;;
       *) rm -rf -- "$entry" ;;
     esac
   done
@@ -138,14 +141,16 @@ prepare() {
   [ "$("${git_src[@]}" rev-parse HEAD)" = "$commit" ] || die 'the persistent clone is not at the commit'
 
   # The layout version: raising it wipes every build runner's target folders
-  # once (2: folders that a cancelled job may have left truncated).
-  stamp="$( (echo 'build-once layout 2'; cd "$src" && cat Cargo.lock rust-toolchain.toml deployments/docker/*.Cargo.lock) | sha256sum | cut -d' ' -f1)"
-  if [ "$(cat "$work/lock-stamp" 2>/dev/null || true)" != "$stamp" ]; then
-    echo 'build-once: the lockfiles, toolchain or folder layout changed; the target folders are wiped'
+  # once (2: folders that a cancelled job may have left truncated). A folder
+  # with no layout file yet (the lock-stamp layout before it) keeps its
+  # targets.
+  local layout=2
+  if [ -f "$work/layout" ] && [ "$(cat "$work/layout")" != "$layout" ]; then
+    echo 'build-once: the folder layout changed; the target folders are wiped'
     rm -rf -- "$work/targets"
     mkdir -p "$work/targets"
-    printf '%s\n' "$stamp" > "$work/lock-stamp"
   fi
+  printf '%s\n' "$layout" > "$work/layout"
   # Only the legs' own target folders stay (the earlier layout's clippy,
   # darwin and desktop folders belong to the Rust checks job now).
   for entry in "$work/targets"/*; do
@@ -181,6 +186,7 @@ prepare() {
     echo "BUILD_ONCE_SRC=$src"
     echo "CARGO_HOME=$work/cargo-home"
     echo 'CARGO_PROFILE_DEV_DEBUG=line-tables-only'
+    echo 'CARGO_INCREMENTAL=1'
     echo "CARGO_BUILD_JOBS=${BUILD_ONCE_JOBS:-${share:-16}}"
     echo 'CODEWIRE_LOCAL_RUST_CACHE=off'
     echo 'CARGO_TERM_COLOR=never'
