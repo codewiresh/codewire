@@ -4254,7 +4254,8 @@ grep -qxF '    [ "$part" = policy-shell ] || parts+=("$part")' <(policy_function
 # only if the CI-script tests start while they run, so a serial aggregate fails
 # this fixture. ShellCheck is its own job and never runs in policy core. A
 # failed part stops the other at once (#3013): "slow" repository rules would
-# run for a minute.
+# run for a minute. "instant" parts both end before policy core waits for
+# either (main run 22806 lost such a part to a reaped job).
 policy_core_fixture() {
   local dir="$1" parts="$2" one="$3" two="$4"
   bash -c '
@@ -4266,7 +4267,7 @@ policy_core_fixture() {
       case "$1" in
         policy-shell) echo shell-ran-in-core ;;
         policy-repo-rules) (
-          if [[ " $listed " == *" policy-ci-script-tests "* ]]; then
+          if [[ " $listed " == *" policy-ci-script-tests "* && "$one_mode" != instant ]]; then
             for _ in $(seq 1 100); do
               [ -e "$dir/two-started" ] && break
               sleep 0.05
@@ -4295,7 +4296,8 @@ for policy_core_case in \
     'policy-repo-rules policy-ci-script-tests:fail:fail:1' \
     'policy-shell policy-repo-rules:pass:pass:0' \
     'policy-repo-rules:fail:pass:1' \
-    'policy-repo-rules policy-ci-script-tests:slow:fail:1'; do
+    'policy-repo-rules policy-ci-script-tests:slow:fail:1' \
+    'policy-repo-rules policy-ci-script-tests:instant:pass:0'; do
   IFS=: read -r policy_listed policy_one policy_two policy_expected <<<"$policy_core_case"
   policy_core_dir="$(mktemp -d "$TMP/policy-core.XXXXXX")"
   policy_core_status=0
@@ -4392,20 +4394,23 @@ for selection_and_parts in \
 done
 # Each family runs in its own runner process with the environment its step
 # gave it: only Security and Edge read the trusted selection, only ShellCheck
-# the base. The families run side by side, and a failed family fails the job.
+# the base. ShellCheck runs first, alone (its full analysis holds most of a
+# medium guest's memory); the others run side by side, at most half the CPU
+# share at once and each with half the share of its own tests, longest first.
+# A failed family fails the job.
 tooling_fixture() {
   local root="$1" selection="$2"
   mkdir -p "$root/scripts/ci/verify"
   cat >"$root/scripts/ci/verify/run-product-verification.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s selection=%s base=%s\n' "$1" "${VERIFICATION_SELECTION-unset}" \
-  "${CODEWIRE_SHELL_POLICY_BASE-unset}" >"$TOOLING_RECORDS/$1"
-touch "$TOOLING_RECORDS/$1.started"
-for _ in $(seq 1 100); do
-  [ "$(find "$TOOLING_RECORDS" -name '*.started' | wc -l)" -ge "$TOOLING_EXPECTED" ] && break
-  sleep 0.05
-done
-[ "$(find "$TOOLING_RECORDS" -name '*.started' | wc -l)" -ge "$TOOLING_EXPECTED" ]
+printf '%s selection=%s base=%s jobs=%s\n' "$1" "${VERIFICATION_SELECTION-unset}" \
+  "${CODEWIRE_SHELL_POLICY_BASE-unset}" "${VERIFICATION_TEST_JOBS-unset}" >"$TOOLING_RECORDS/$1"
+{ flock 9; printf 'start %s %s\n' "$1" "$(find "$TOOLING_RECORDS" -name '*.running' | wc -l)" >&9; } \
+  9>>"$TOOLING_RECORDS/events"
+touch "$TOOLING_RECORDS/$1.running"
+sleep 0.3
+rm -f "$TOOLING_RECORDS/$1.running"
+{ flock 9; printf 'end %s\n' "$1" >&9; } 9>>"$TOOLING_RECORDS/events"
 [ "$1" != "${TOOLING_FAIL:-}" ]
 SH
   chmod 0755 "$root/scripts/ci/verify/run-product-verification.sh"
@@ -4420,24 +4425,48 @@ SH
     run_tooling
   ' tooling-fixture "$side_by_side" "$functions"
 }
-tooling_selection='|valid:v3|deploy|edge_kind|policy|release|security|complete|'
+tooling_selection='|valid:v3|confidential_script_tests|deploy|edge_kind|policy|release|security|complete|'
 tooling_root="$(mktemp -d "$TMP/tooling.XXXXXX")"
-tooling_output="$(CODEWIRE_SHELL_POLICY_BASE=0123abcd TOOLING_EXPECTED=5 \
+tooling_output="$(unset VERIFICATION_TEST_JOBS; CODEWIRE_SHELL_POLICY_BASE=0123abcd CODEWIRE_CI_CPU_SHARE=4 \
   tooling_fixture "$tooling_root" "$tooling_selection" 2>&1)" || {
-  echo "tooling families did not all run side by side: $tooling_output" >&2
+  echo "tooling families failed: $tooling_output" >&2
   exit 1
 }
 [ "$(cat "$tooling_root/records/policy-shell" "$tooling_root/records/release" \
     "$tooling_root/records/deploy" "$tooling_root/records/security" "$tooling_root/records/edge")" = \
-  "$(printf '%s\n' 'policy-shell selection=unset base=0123abcd' 'release selection=unset base=unset' \
-    'deploy selection=unset base=unset' "security selection=$tooling_selection base=unset" \
-    "edge selection=$tooling_selection base=unset")" ] || {
-  echo 'a tooling family did not keep its own step environment' >&2
+  "$(printf '%s\n' 'policy-shell selection=unset base=0123abcd jobs=2' 'release selection=unset base=unset jobs=2' \
+    'deploy selection=unset base=unset jobs=2' "security selection=$tooling_selection base=unset jobs=2" \
+    "edge selection=$tooling_selection base=unset jobs=2")" ] || {
+  echo 'a tooling family did not keep its own step environment and half the CPU share of jobs' >&2
+  exit 1
+}
+# ShellCheck started and ended alone; with a share of 4, at most two others
+# then ran at once and two did; the longest families started first.
+tooling_events="$(cat "$tooling_root/records/events")"
+[ "$(sed -n '1,2p' <<<"$tooling_events")" = "$(printf '%s\n' 'start policy-shell 0' 'end policy-shell')" ] || {
+  echo "ShellCheck did not run alone before the other tooling families: $tooling_events" >&2
+  exit 1
+}
+[ "$(awk '$1 == "start" && $3 > 1' <<<"$tooling_events")" = '' ] \
+  && [ -n "$(awk '$1 == "start" && $3 == 1' <<<"$tooling_events")" ] || {
+  echo "the other tooling families did not run two at a time: $tooling_events" >&2
+  exit 1
+}
+[ "$(awk '$1 == "start" { print $2 }' <<<"$tooling_events" | sed -n '2,3p' | LC_ALL=C sort | paste -sd' ')" = 'deploy edge' ] || {
+  echo "the longest tooling families did not start first: $tooling_events" >&2
   exit 1
 }
 tooling_root="$(mktemp -d "$TMP/tooling.XXXXXX")"
-if TOOLING_EXPECTED=5 TOOLING_FAIL=deploy tooling_fixture "$tooling_root" "$tooling_selection" >/dev/null 2>&1; then
+if (unset VERIFICATION_TEST_JOBS; CODEWIRE_CI_CPU_SHARE=4 TOOLING_FAIL=deploy \
+    tooling_fixture "$tooling_root" "$tooling_selection") >/dev/null 2>&1; then
   echo 'a failed tooling family passed the Tooling job' >&2
+  exit 1
+fi
+tooling_root="$(mktemp -d "$TMP/tooling.XXXXXX")"
+if (unset VERIFICATION_TEST_JOBS; CODEWIRE_CI_CPU_SHARE=4 TOOLING_FAIL=policy-shell \
+    tooling_fixture "$tooling_root" "$tooling_selection") >/dev/null 2>&1 \
+    || [ -e "$tooling_root/records/deploy" ]; then
+  echo 'a failed ShellCheck did not stop the Tooling job before the other families' >&2
   exit 1
 fi
 # The artifact planner's suite (#3119 L3) runs as a policy part only when the

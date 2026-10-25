@@ -51,8 +51,8 @@ stop_side_by_side() {
 }
 
 # Run the commands on standard input, one per line (blank lines are skipped),
-# side by side: at most VERIFICATION_TEST_JOBS (default: the CPU count) at a
-# time. Each command runs in a subshell of this one, so the caller's functions
+# side by side: at most VERIFICATION_TEST_JOBS at a time (default: the CI CPU
+# share where CODEWIRE_CI_CPU_SHARE is set, else the CPU count). Each command runs in a subshell of this one, so the caller's functions
 # and environment apply, and must keep no state outside its own scratch
 # directory. Its output is printed whole, in list order, with its exit status
 # and time.
@@ -62,7 +62,11 @@ stop_side_by_side() {
 # failed command's output is printed last. VERIFICATION_KEEP_GOING=1 runs
 # every command to the end instead and fails after all have reported.
 run_side_by_side() {
-  local limit="${VERIFICATION_TEST_JOBS:-$(nproc)}" keep_going="${VERIFICATION_KEEP_GOING:-0}"
+  # A metal guest sees every host thread (61) but may assume only its share
+  # (CODEWIRE_CI_CPU_SHARE, cpu-share.sh); size from the share where it is set.
+  local share="${CODEWIRE_CI_CPU_SHARE:-}"
+  [[ "$share" =~ ^[1-9][0-9]{0,3}$ ]] || share=''
+  local limit="${VERIFICATION_TEST_JOBS:-${share:-$(nproc)}}" keep_going="${VERIFICATION_KEEP_GOING:-0}"
   local logs line command index next=0 running=0 failed=0 first_failure='' status seconds ended
   local -a commands=() pids=() starts=()
   [[ "$limit" =~ ^[1-9][0-9]*$ ]] || {

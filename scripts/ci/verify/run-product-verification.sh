@@ -511,48 +511,66 @@ isolate_kind_fixture_environment() {
 # part stops the others and fails policy core (owner, 2026-10-25, #3013);
 # VERIFICATION_KEEP_GOING=1 lets every part finish and report first.
 run_policy_core() {
-  local part index first='' log status=0 failed='' finished
-  local -a parts=() logs=()
-  local -A part_of=()
+  local part index first='' status failed='' work ended remaining
+  local -a parts=() logs=() pids=()
+  local -A ended_parts=()
   while IFS= read -r part; do
     [ "$part" = policy-shell ] || parts+=("$part")
   done < <(policy_parts)
+  work="$(mktemp -d)"
+  # Each part reports its end on this queue, as run_side_by_side's commands
+  # do: the family learns of a failure at once and never waits on a job the
+  # shell has already reaped (wait -n -p failed so when a part ended first).
+  mkfifo "$work/ended"
+  exec {ended}<>"$work/ended"
   for index in "${!parts[@]}"; do
     part="${parts[$index]}"
     if [ -z "$first" ]; then
       first="$part"
-      run_policy_part "$part" &
       logs+=('')
     else
-      log="$(mktemp)"
-      run_policy_part "$part" >"$log" 2>&1 &
-      logs+=("$log")
+      logs+=("$work/$index.log")
     fi
-    part_of[$!]="$index"
+    (
+      exec {ended}>&-
+      # Not a condition: the part keeps errexit.
+      set +e
+      if [ -z "${logs[$index]}" ]; then
+        (set -e; run_policy_part "${parts[$index]}")
+      else
+        (set -e; run_policy_part "${parts[$index]}") >"${logs[$index]}" 2>&1
+      fi
+      printf '%s %s\n' "$index" "$?" >"$work/ended"
+    ) &
+    pids[index]=$!
   done
-  while [ "${#part_of[@]}" -gt 0 ]; do
-    status=0
-    finished=''
-    wait -n -p finished "${!part_of[@]}" || status=$?
-    [ -n "$finished" ] || break
-    index="${part_of[$finished]}"
-    unset 'part_of[$finished]'
+  remaining="${#parts[@]}"
+  while [ "$remaining" -gt 0 ]; do
+    read -r index status <&"$ended"
+    remaining=$((remaining - 1))
+    ended_parts[$index]=1
     if [ -n "${logs[$index]}" ]; then
       printf '=== %s (ran beside %s) ===\n' "${parts[$index]}" "$first"
       cat "${logs[$index]}"
-      rm -f "${logs[$index]}"
     fi
     [ "$status" -eq 0 ] || failed="${failed} ${parts[$index]} exited ${status};"
     if [ -n "$failed" ] && [ "${VERIFICATION_KEEP_GOING:-0}" != 1 ]; then
-      stop_side_by_side "${!part_of[@]}"
-      for finished in "${!part_of[@]}"; do
-        index="${part_of[$finished]}"
-        printf '=== %s stopped, when policy core failed ===\n' "${parts[$index]}"
-        [ -z "${logs[$index]}" ] || rm -f "${logs[$index]}"
+      local -a stopping=()
+      for index in "${!parts[@]}"; do
+        [ -n "${ended_parts[$index]:-}" ] || stopping+=("${pids[$index]}")
+      done
+      [ "${#stopping[@]}" -eq 0 ] || stop_side_by_side "${stopping[@]}"
+      for index in "${!parts[@]}"; do
+        [ -n "${ended_parts[$index]:-}" ] || printf '=== %s stopped, when policy core failed ===\n' "${parts[$index]}"
       done
       break
     fi
   done
+  # A part that ended while the others stopped still reports on the queue,
+  # so it stays open until every part has been waited for.
+  wait "${pids[@]}" 2>/dev/null || true
+  exec {ended}>&-
+  rm -rf -- "$work"
   if [ -n "$failed" ]; then
     printf 'policy core failed:%s\n' "$failed" >&2
     return 1
@@ -731,7 +749,8 @@ tooling_parts() {
 # workflow step gave it: only Security and Edge read the trusted selection,
 # and only ShellCheck reads the pull request's base.
 run_tooling_family() {
-  local -a environment=(env -u VERIFICATION_SELECTION -u CODEWIRE_SHELL_POLICY_BASE)
+  local -a environment=(env -u VERIFICATION_SELECTION -u CODEWIRE_SHELL_POLICY_BASE
+    "VERIFICATION_TEST_JOBS=${TOOLING_FAMILY_JOBS:?}")
   case "$1" in
     security|edge) environment+=("VERIFICATION_SELECTION=$SELECTION") ;;
     policy-shell) environment+=("CODEWIRE_SHELL_POLICY_BASE=${CODEWIRE_SHELL_POLICY_BASE:-}") ;;
@@ -740,17 +759,44 @@ run_tooling_family() {
 }
 
 # The Tooling job runs its selected families side by side, so its wall time
-# is its slowest family's rather than their sum (infra#1534). The first
-# failure stops the rest (#3013).
+# is near its slowest family's rather than their sum (infra#1534), and the
+# first failure stops the rest (#3013). Its guest has a share of the host's
+# CPUs and a fixed memory (a medium guest: 8 CPUs, 6 GiB), and every family
+# runs its own tests side by side, so the families are bounded too: on main
+# run 22789, seven families each starting every test at once timed out a
+# deadline-bound Dev smoke test.
+# - ShellCheck runs first, alone: a full analysis holds 4.4-4.8 GB.
+# - The others run at most half the share at once (at most three), longest
+#   first, and each runs half the share of its own tests at once.
+# VERIFICATION_TEST_JOBS, when the caller sets it, bounds both instead.
 run_tooling() {
-  local parts
+  local parts share family_limit ordered family
   parts="$(tooling_parts)"
   if [ -z "$parts" ]; then
     echo 'Tooling: no family is selected'
     return 0
   fi
   printf 'Tooling families: %s\n' "$(tr '\n' ' ' <<<"$parts")"
-  sed 's/^/run_tooling_family /' <<<"$parts" | run_side_by_side
+  # The CPU share as cpu-share.sh reads it, else this host's CPUs.
+  share="${CODEWIRE_CI_CPU_SHARE:-}"
+  [[ "$share" =~ ^[1-9][0-9]{0,3}$ ]] || share="$(nproc)"
+  family_limit=$((share / 2))
+  [ "$family_limit" -ge 1 ] || family_limit=1
+  [ "$family_limit" -le 3 ] || family_limit=3
+  family_limit="${VERIFICATION_TEST_JOBS:-$family_limit}"
+  TOOLING_FAMILY_JOBS="${VERIFICATION_TEST_JOBS:-$(( share / 2 > 0 ? share / 2 : 1 ))}"
+  if grep -qx policy-shell <<<"$parts"; then
+    run_side_by_side <<<'run_tooling_family policy-shell' || return
+  fi
+  ordered=''
+  for family in edge deploy release security dev-smoke-script-tests workspace-agents \
+      confidential-script-tests; do
+    if grep -qx "$family" <<<"$parts"; then
+      ordered+="run_tooling_family $family"$'\n'
+    fi
+  done
+  [ -n "$ordered" ] || return 0
+  VERIFICATION_TEST_JOBS="$family_limit" run_side_by_side <<<"${ordered%$'\n'}"
 }
 
 run_policy() {

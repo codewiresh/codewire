@@ -134,6 +134,17 @@ printf 'probe\n%.0s' 1 2 3 4 5 6 | VERIFICATION_TEST_JOBS=2 run_side_by_side >/d
 [[ "$(sort -n "$work/counts" | tail -1)" -ge 2 ]] || fail 'commands did not run side by side'
 pass
 
+# Without a limit, a guest's CPU share bounds how many run at once, never the
+# host's CPU count a metal guest sees (61).
+: >"$work/counts"
+printf 'probe\n%.0s' 1 2 3 4 5 6 | env -u VERIFICATION_TEST_JOBS CODEWIRE_CI_CPU_SHARE=2 \
+  bash -c 'source "$1"; eval "$2"; run_side_by_side' share-probe \
+  "$ROOT/scripts/ci/verify/side-by-side.sh" "work=$(printf '%q' "$work"); $(declare -f probe)" >/dev/null ||
+  fail 'the share probes failed'
+[[ "$(sort -n "$work/counts" | tail -1)" -le 2 ]] || fail 'more commands ran at once than the CPU share'
+[[ "$(sort -n "$work/counts" | tail -1)" -ge 2 ]] || fail 'commands did not run side by side under the CPU share'
+pass
+
 # The limit must be a positive integer.
 for limit in 0 -1 two ''; do
   status=0
