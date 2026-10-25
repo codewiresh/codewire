@@ -325,7 +325,10 @@ fake_sccache="$hang/fake/sccache"
 
 # Usage: start_server BASE CLIENTS [--ignore-stop] [--ignore-term] [--compiling] [--queued]
 start_server() {
-  local base="$1" tries=100
+  # The start is not under test: the wait is a hang guard. 5 s was too short
+  # for a Python start on a 4-CPU guest running the script tests side by side
+  # (main run 22737).
+  local base="$1" tries=1200
   shift
   mkdir -p "$base/cache"
   rm -f -- "$base/server.sock" "$base/server.sock".* "$base/server-progress"
@@ -503,7 +506,9 @@ holders() {
 [[ -n "$(pgrep -f -- "$watch_mark")" ]] || fail 'the watcher did not start'
 [[ -z "$(holders "$hang/caller-stdout")$(holders "$hang/caller-fd")" ]] ||
   fail 'the watcher kept a caller descriptor open'
-tries=150
+# Hang guards, as in start_server: the watcher's 1-second period is what is
+# under test, not how fast a loaded guest runs it.
+tries=600
 while server_running "$base"; do
   ((tries-- > 0)) || fail 'the watcher did not stop the hung server'
   sleep 0.1
@@ -516,7 +521,7 @@ done
 [[ -n "$(pgrep -f -- "$watch_mark")" ]] || fail 'the watcher stopped while its caller ran'
 kill "$caller"
 wait "$caller" 2>/dev/null || true
-tries=100
+tries=600
 while [[ -n "$(pgrep -f -- "$watch_mark")" ]]; do
   ((tries-- > 0)) || fail 'the watcher outlived its caller'
   sleep 0.1
