@@ -1151,6 +1151,14 @@ impl TemporalTrigger {
     }
 }
 
+/// The Temporal worker thread's stack. Every activity is polled on this one
+/// thread, nested inside the SDK's own futures. In an unoptimised build the
+/// create activity's poll frames alone take about 1.75 MiB (the create loop's
+/// frame is 1.1 MiB), and its first Kubernetes call overflowed a spawned
+/// thread's 2 MiB default (main run 22671); it ran in 3 MiB. A stack is
+/// address space, committed only as it is touched.
+const TEMPORAL_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+
 /// Spawns the Temporal worker on a dedicated thread with its own
 /// runtime — `Worker::run`'s future is !Send, so it cannot ride the
 /// main multi-threaded runtime via `tokio::spawn`. Retries with
@@ -1163,6 +1171,7 @@ pub fn spawn_temporal_worker(
 ) {
     std::thread::Builder::new()
         .name("temporal-worker".into())
+        .stack_size(TEMPORAL_WORKER_STACK_BYTES)
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

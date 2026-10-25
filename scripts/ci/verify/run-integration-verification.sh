@@ -1713,6 +1713,12 @@ start_orchestration() {
   start_orchestration_kube_stub
   start_orchestration_daemon_fixture
   start_orchestration_process configured
+  # /healthz answers once the listener binds; /readyz only after the first
+  # background tenant-secret verification succeeds. The wire contract asserts
+  # /readyz first, so wait for it here (PR run 22418 read 503 1.4 s after
+  # start).
+  wait_http orchestration-readiness "http://127.0.0.1:${ORCHESTRATION_PORT}/readyz" \
+    "$RUN_DIR/orchestration.pid"
   probe_connect_surface orchestration "$ORCHESTRATION_PORT"
 }
 
