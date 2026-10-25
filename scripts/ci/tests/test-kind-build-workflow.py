@@ -20,6 +20,10 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".gitea/workflows/ci.yaml"
 COMMON = ROOT / "scripts/ci/verify/kind/common.sh"
+# Hang guard for the shell fixtures these tests run. They finish in well under
+# a second, but Policy runs many script tests at once on a shared CI guest, and
+# a 10-second bound failed main run 22388 with nothing hung.
+HANG_GUARD_SECONDS = 120
 CREDENTIALS = ROOT / "scripts/ci/verify/kind/credentials.sh"
 INTEGRATED = ROOT / "scripts/ci/verify/kind/suites/integrated.sh"
 SELECTOR = ROOT / "scripts/ci/select/select-verification.sh"
@@ -756,7 +760,7 @@ coordinator_ingress_smoke() {
                 ["bash", "-c", harness + "\ncoordinator_runtime_smokes() {" + body
                  + "\ncoordinator_runtime_smokes\nrecord downstream\n"],
                 env={"PATH": os.environ["PATH"], "FIXTURE": directory, "FAILURE": failure},
-                capture_output=True, text=True, check=False, timeout=10,
+                capture_output=True, text=True, check=False, timeout=HANG_GUARD_SECONDS,
             )
             self.assertTrue((fixture / "events").exists(), result.stderr)
             events = (fixture / "events").read_text().splitlines()
@@ -871,14 +875,14 @@ coordinator_ingress_smoke() {
         result = subprocess.run(
             ["bash", "-c", function + 'peer_token "$@"', "peer-token",
              secret, environment, "7", str(now + 600)],
-            capture_output=True, text=True, check=False, timeout=10,
+            capture_output=True, text=True, check=False, timeout=HANG_GUARD_SECONDS,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, pinned)
         refused = subprocess.run(
             ["bash", "-c", function + 'peer_token "$@"', "peer-token",
              secret, environment, "0", str(now + 600)],
-            capture_output=True, text=True, check=False, timeout=10,
+            capture_output=True, text=True, check=False, timeout=HANG_GUARD_SECONDS,
         )
         self.assertEqual(refused.returncode, 1)
         self.assertEqual(refused.stdout, "")
