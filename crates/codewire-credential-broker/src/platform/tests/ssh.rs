@@ -68,7 +68,7 @@ impl SshFixture {
                 .create_prepared_in(&mut tx, &f.owner, prepared)
                 .await?;
             tx.commit().await?;
-            let manager = PlatformAccessProfileStore::new(f.db.pool.clone(), catalog());
+            let manager = profiles(f.db.pool.clone(), catalog());
             manager
                 .delete_binding(
                     &f.context,
@@ -117,7 +117,7 @@ impl SshFixture {
             let mut adapter = Adapter::connect(
                 f.authority.clone(),
                 f.store.clone(),
-                PlatformAccessProfileStore::new(f.pool.clone(), catalog()),
+                profiles(f.pool.clone(), catalog()),
             )
             .await?;
             adapter.ssh = Some(service.epoch());
@@ -356,7 +356,7 @@ async fn wrong_key_or_flags_and_unconfigured_adapter_fail_before_private_read() 
         let adapter = Adapter::connect(
             f.f.authority.clone(),
             f.f.store.clone(),
-            PlatformAccessProfileStore::new(f.f.pool.clone(), catalog()),
+            profiles(f.f.pool.clone(), catalog()),
         )
         .await?;
         ensure!(matches!(

@@ -592,19 +592,34 @@ pub struct Harness {
 }
 
 impl Harness {
+    /// A served owner whose mutations are bounded by [`HANG_GUARD`]: a test
+    /// here is not about the product's five-second bound unless it says so
+    /// with [`Self::with_product_mutation_timeout`].
     pub async fn new() -> Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
-        Self::build(Some(listener), address).await
+        Self::build(Some(listener), address, HANG_GUARD).await
+    }
+
+    /// A served owner with the product's mutation bound, for a test whose
+    /// subject is that bound.
+    pub async fn with_product_mutation_timeout() -> Result<Self> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        Self::build(Some(listener), address, MUTATION_TIMEOUT).await
     }
 
     /// The runtime tests mount this same owner in the real dual-listener
     /// runtime. Do not also start the mutation-only fixture server there.
     pub async fn unserved(address: SocketAddr) -> Result<Self> {
-        Self::build(None, address).await
+        Self::build(None, address, HANG_GUARD).await
     }
 
-    async fn build(listener: Option<tokio::net::TcpListener>, address: SocketAddr) -> Result<Self> {
+    async fn build(
+        listener: Option<tokio::net::TcpListener>,
+        address: SocketAddr,
+        mutation_timeout: Duration,
+    ) -> Result<Self> {
         let db = TestDatabase::create().await?;
         let setup = async {
             seed(&db.pool).await?;
@@ -629,7 +644,10 @@ impl Harness {
             );
             let provider = Arc::new(SyntheticKek::default());
             let store = Arc::new(PlatformCredentialStore::new(pool.clone(),provider.clone(),builtin_provider_catalog()));
-            let owner = Arc::new(CredentialMutationOwner::new(pool.clone(),store.clone(),codex_login,claude_sign_in,Some(github_login),None));
+            let owner = Arc::new(
+                CredentialMutationOwner::new(pool.clone(),store.clone(),codex_login,claude_sign_in,Some(github_login),None)
+                    .with_mutation_timeout(mutation_timeout),
+            );
             let rpc = Rpc {client:Client::builder().no_proxy().timeout(HANG_GUARD).build()?,url:format!("http://{address}")};
             let server = listener.map(|listener| {
                 let app = connect_router_with_auth(owner.router(),ConnectAuthLayer::credential_mutation(AuthState{pool:pool.clone()},http::HeaderValue::from_static("https://codewire.example")));

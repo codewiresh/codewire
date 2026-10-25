@@ -10,7 +10,7 @@ use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use super::*;
 use crate::codex_oauth::CodexOAuthCredential;
 use crate::platform::tests::{
-    Fixture as DatabaseFixture, SyntheticAuthority, support::TIMEOUT, token,
+    Fixture as DatabaseFixture, SyntheticAuthority, TIMEOUT, profiles, token,
 };
 
 struct DatabaseAuthenticator(Arc<SyntheticAuthority>);
@@ -141,7 +141,7 @@ impl RunningService {
         let service = DatabaseService::new(
             Arc::new(DatabaseAuthenticator(Arc::clone(&fixture.authority))),
             Arc::clone(&fixture.store),
-            PlatformAccessProfileStore::new(fixture.pool.clone(), builtin_provider_catalog()),
+            profiles(fixture.pool.clone(), builtin_provider_catalog()),
             upstream,
         );
         let stop_listener = CancellationToken::new();
@@ -569,7 +569,7 @@ async fn each_admitted_epoch_evaluates_authority_once_and_starts_with_a_cold_mat
     let service = PlatformCredentialBridgeService::new(
         Arc::new(DatabaseAuthenticator(Arc::clone(&fixture.authority))),
         Arc::clone(&fixture.store),
-        PlatformAccessProfileStore::new(fixture.pool.clone(), builtin_provider_catalog()),
+        profiles(fixture.pool.clone(), builtin_provider_catalog()),
         upstream.clone(),
     );
     let result = async {

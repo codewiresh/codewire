@@ -44,7 +44,11 @@ impl CredentialMutationOwner {
                 }
             }
         }
-        let scope = Scope::new(authority, self.stop.child_token(), MUTATION_TIMEOUT)?;
+        let scope = Scope::new(
+            authority,
+            self.stop.child_token(),
+            self.shared.mutation_timeout,
+        )?;
         let deadline = scope.deadline;
         let cancelled = scope.cancel.clone();
         let _guard = cancelled.clone().drop_guard();

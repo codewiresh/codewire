@@ -31,7 +31,22 @@ use tokio::sync::Notify;
 use tokio_util::task::AbortOnDropHandle;
 
 use super::*;
-use support::{SyntheticKek, TIMEOUT, TestDatabase, registration, value};
+use support::{SyntheticKek, TestDatabase, registration, value};
+
+/// Bounds a wait on an event in these tests: a task's end, a gate, a
+/// notification. It only turns a hang into a failure; the database lanes run
+/// for minutes on a loaded CI slot, which spent the shared 10 s bound.
+pub(super) const TIMEOUT: Duration = support::HANG_GUARD;
+
+/// A profile store whose statements are bounded by [`TIMEOUT`], not the
+/// product's five seconds: no test here is about that bound, and a stalled
+/// database on a loaded CI slot spent it, so a lease read as unavailable.
+pub(super) fn profiles(
+    pool: PgPool,
+    catalog: codewire_access::ProviderCatalog,
+) -> PlatformAccessProfileStore {
+    PlatformAccessProfileStore::new(pool, catalog).with_statement_timeout(TIMEOUT)
+}
 
 fn spawn<T: Send + 'static>(
     future: impl Future<Output = T> + Send + 'static,
@@ -299,7 +314,7 @@ impl Fixture {
             let mut context = context();
             context.environment_id = environment_id;
             context.authorized_credentials.insert(record.metadata.id.clone());
-            let manager = PlatformAccessProfileStore::new(db.pool.clone(), builtin_provider_catalog());
+            let manager = profiles(db.pool.clone(), builtin_provider_catalog());
             let profile = manager.create(&owner, AccessProfileName::parse("work")?,
                 BTreeMap::from([(CapabilitySlot::codex(), record.metadata.id.clone())])).await?;
             manager.create_binding(&context, EnvironmentAccessBinding {
@@ -398,7 +413,7 @@ impl Fixture {
         Ok(Adapter::connect(
             authority,
             self.store.clone(),
-            PlatformAccessProfileStore::new(self.pool.clone(), builtin_provider_catalog()),
+            profiles(self.pool.clone(), builtin_provider_catalog()),
         )
         .await
         .map_err(|_| BrokerLeaseError::Denied))
@@ -407,10 +422,9 @@ impl Fixture {
     /// The current binding of this fixture's environment to the creator's
     /// profile, as a local VM's delegation would select it.
     pub(super) async fn current_binding(&self) -> Result<EnvironmentAccessBinding> {
-        let current =
-            PlatformAccessProfileStore::new(self.db.pool.clone(), builtin_provider_catalog())
-                .get(&self.owner, &self.profile.id)
-                .await?;
+        let current = profiles(self.db.pool.clone(), builtin_provider_catalog())
+            .get(&self.owner, &self.profile.id)
+            .await?;
         Ok(EnvironmentAccessBinding {
             environment_id: self.context.environment_id.clone(),
             profile_id: current.id,
@@ -431,7 +445,7 @@ impl Fixture {
         let adapter = Adapter::connect(
             self.authority.clone(),
             store,
-            PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog()),
+            profiles(pool.clone(), builtin_provider_catalog()),
         )
         .await?;
         Ok((pool, adapter))
@@ -447,8 +461,7 @@ impl Fixture {
     }
 
     async fn rebind(&self) -> Result<()> {
-        let manager =
-            PlatformAccessProfileStore::new(self.db.pool.clone(), builtin_provider_catalog());
+        let manager = profiles(self.db.pool.clone(), builtin_provider_catalog());
         let changed = manager
             .update(
                 &self.owner,
@@ -514,7 +527,7 @@ async fn epoch(
         ..Adapter::connect(
             authority.clone(),
             store.clone(),
-            PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog()),
+            profiles(pool.clone(), builtin_provider_catalog()),
         )
         .await?
     };

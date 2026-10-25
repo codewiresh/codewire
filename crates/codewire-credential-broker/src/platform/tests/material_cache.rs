@@ -324,7 +324,7 @@ async fn owner_local_cache_hit_rechecks_grants_and_drops_its_value_when_denied()
             ..PlatformBrokerLeaseProvider::connect(
                 authority.clone(),
                 f.store.clone(),
-                PlatformAccessProfileStore::new(f.pool.clone(), builtin_provider_catalog()),
+                profiles(f.pool.clone(), builtin_provider_catalog()),
             )
             .await?
         });

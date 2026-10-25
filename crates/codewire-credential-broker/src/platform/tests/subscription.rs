@@ -62,7 +62,7 @@ async fn bind_token(f: &Fixture) -> Result<CredentialRecord> {
         .insert(token.metadata.id.clone());
     f.authority
         .change(|session| session.context = context.clone());
-    let manager = PlatformAccessProfileStore::new(f.db.pool.clone(), builtin_provider_catalog());
+    let manager = profiles(f.db.pool.clone(), builtin_provider_catalog());
     let mut entries = f.profile.entries.clone();
     entries.insert(CapabilitySlot::anthropic(), token.metadata.id.clone());
     let changed = manager

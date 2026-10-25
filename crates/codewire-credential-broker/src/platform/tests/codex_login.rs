@@ -23,7 +23,7 @@ async fn login(adapter: &Adapter) -> Result<PlatformCredentialLease, BrokerLease
 /// Bind the creator's profile to `entries` at its next revision, as an edit
 /// in the dashboard would, and authorize exactly those credentials.
 async fn select(f: &Fixture, entries: BTreeMap<CapabilitySlot, CredentialId>) -> Result<()> {
-    let manager = PlatformAccessProfileStore::new(f.db.pool.clone(), builtin_provider_catalog());
+    let manager = profiles(f.db.pool.clone(), builtin_provider_catalog());
     let changed = manager
         .update(&f.owner, &f.profile.id, f.profile.revision, entries.clone())
         .await?;
@@ -61,7 +61,7 @@ async fn connect(
     Adapter::connect(
         authority,
         f.store.clone(),
-        PlatformAccessProfileStore::new(f.pool.clone(), catalog),
+        profiles(f.pool.clone(), catalog),
     )
     .await
 }
@@ -371,12 +371,14 @@ async fn codex_login_admits_only_the_creators_own_active_personal_oauth_login() 
 }
 
 /// Synthetic OpenAI token endpoint and ChatGPT Responses route. Each refresh
-/// pauses so that every concurrent caller reaches the serialized path.
+/// pauses so that every concurrent caller reaches the serialized path; with
+/// `held`, it answers only once the test adds a permit.
 #[derive(Clone)]
 struct Provider {
     exchanges: Arc<AtomicUsize>,
     responses: Arc<AtomicUsize>,
     rotated: String,
+    held: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 #[async_trait]
@@ -392,7 +394,10 @@ impl BrokerUpstreamTransport for Provider {
         let (content_type, body) = match target.as_str() {
             "https://auth.openai.com/oauth/token" => {
                 self.exchanges.fetch_add(1, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                match &self.held {
+                    Some(held) => drop(held.acquire().await),
+                    None => tokio::time::sleep(Duration::from_millis(300)).await,
+                }
                 (
                     "application/json",
                     serde_json::to_vec(&serde_json::json!({
@@ -455,6 +460,7 @@ async fn concurrent_logins_and_proxied_requests_across_epochs_refresh_once() -> 
             exchanges: Arc::new(AtomicUsize::new(0)),
             responses: Arc::new(AtomicUsize::new(0)),
             rotated: rotated.clone(),
+            held: None,
         };
         // Two epochs of the same Sandbox: separate in-process mutexes, one
         // durable refresh journal.
@@ -543,6 +549,7 @@ async fn a_lease_straddling_another_epochs_refresh_commit_evaluates_again() -> R
                 exchanges: Arc::new(AtomicUsize::new(0)),
                 responses: Arc::new(AtomicUsize::new(0)),
                 rotated: rotated.clone(),
+                held: None,
             };
             let first = Arc::new(OpenAiBroker::new(f.second().await?.1, provider.clone())?);
             let second = Arc::new(OpenAiBroker::new(f.second().await?.1, provider.clone())?);
@@ -644,17 +651,22 @@ async fn a_login_selected_by_a_new_profile_revision_is_rechecked_after_refresh()
     let f = Fixture::create_for_bridge().await?;
     let result = async {
         let rotated = token(serde_json::json!({"exp": unix_now()? + 7_200}));
+        // The refresh waits for this test's selection, so the selection is
+        // made while it runs however slowly the database answers.
+        let held = Arc::new(tokio::sync::Semaphore::new(0));
         let provider = Provider {
             exchanges: Arc::new(AtomicUsize::new(0)),
             responses: Arc::new(AtomicUsize::new(0)),
             rotated,
+            held: Some(held.clone()),
         };
         let broker = Arc::new(OpenAiBroker::new(f.second().await?.1, provider.clone())?);
         let recipient = ProjectionRecipient::new();
         let request = codewire_daemon_proto::codewire::bridge::v1::CodexLoginRequest {
             request_id: Uuid::new_v4().to_string(),
             recipient_public_key: recipient.public_key().to_vec(),
-            deadline_unix_ms: unix_now()? * 1_000 + 25_000,
+            deadline_unix_ms: unix_now()? * 1_000
+                + codewire_workload_secrets::MAX_CODEX_LOGIN_LIFETIME_MS,
         };
         let task = spawn({
             let broker = Arc::clone(&broker);
@@ -679,6 +691,7 @@ async fn a_login_selected_by_a_new_profile_revision_is_rechecked_after_refresh()
             BTreeMap::from([(CapabilitySlot::codex(), key.metadata.id)]),
         )
         .await?;
+        held.add_permits(1);
         ensure!(matches!(
             finish_task(task).await?,
             Err(crate::BrokerRequestError::Denied)

@@ -154,7 +154,7 @@ async fn bind_sign_in(f: &Fixture, material: &ProtectedValue) -> Result<Credenti
         .insert(sign_in.metadata.id.clone());
     f.authority
         .change(|session| session.context = context.clone());
-    let manager = PlatformAccessProfileStore::new(f.db.pool.clone(), builtin_provider_catalog());
+    let manager = profiles(f.db.pool.clone(), builtin_provider_catalog());
     let mut entries = f.profile.entries.clone();
     entries.insert(CapabilitySlot::anthropic(), sign_in.metadata.id.clone());
     let changed = manager
@@ -510,10 +510,7 @@ async fn the_claude_login_delivers_only_the_creators_own_active_sign_in() -> Res
                         .insert(other.metadata.id.clone());
                     f.authority
                         .change(|session| session.context = context.clone());
-                    let manager = PlatformAccessProfileStore::new(
-                        f.db.pool.clone(),
-                        builtin_provider_catalog(),
-                    );
+                    let manager = profiles(f.db.pool.clone(), builtin_provider_catalog());
                     let current = manager.get(&f.owner, &f.profile.id).await?;
                     let mut entries = current.entries.clone();
                     entries.insert(CapabilitySlot::anthropic(), other.metadata.id.clone());

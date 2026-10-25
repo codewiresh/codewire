@@ -88,6 +88,9 @@ struct Shared {
     /// Present exactly when the GitHub App is configured.
     github_login: Option<GitHubDeviceLogin>,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
+    /// Bounds a mutation and every publication: [`MUTATION_TIMEOUT`] in the
+    /// product.
+    mutation_timeout: Duration,
 }
 
 /// Bounded owner of request drivers as well as the shared enrollment workers.
@@ -119,12 +122,25 @@ impl CredentialMutationOwner {
                 claude_sign_in,
                 github_login,
                 github_app_authorization,
+                mutation_timeout: MUTATION_TIMEOUT,
             }),
             accepting: Mutex::new(true),
             capacity: Arc::new(Semaphore::new(MAX_OPERATIONS)),
             workers: TaskTracker::new(),
             stop: CancellationToken::new(),
         }
+    }
+
+    /// The same owner with `bound` in place of every mutation's and
+    /// publication's five-second bound. A test whose subject is not that
+    /// bound lengthens it into a hang guard, so a stalled database on a
+    /// loaded CI slot cannot spend it. Call it before serving.
+    #[cfg(test)]
+    pub(crate) fn with_mutation_timeout(mut self, bound: Duration) -> Self {
+        Arc::get_mut(&mut self.shared)
+            .expect("an owner that has not served is not shared")
+            .mutation_timeout = bound;
+        self
     }
 
     /// Generated handlers only. The caller must use the session-or-OAuth
@@ -203,7 +219,11 @@ impl CredentialMutationOwner {
             account_hint: None,
             expires_at_unix,
         };
-        let scope = Scope::new(authority, self.stop.child_token(), MUTATION_TIMEOUT)?;
+        let scope = Scope::new(
+            authority,
+            self.stop.child_token(),
+            self.shared.mutation_timeout,
+        )?;
         let deadline = scope.deadline;
         let cancelled = scope.cancel.clone();
         let _guard = cancelled.clone().drop_guard();
@@ -244,7 +264,11 @@ impl CredentialMutationOwner {
         let expires_at_unix = unix_now()?
             .checked_add(CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS)
             .ok_or(Error::Unavailable)?;
-        let scope = Scope::new(authority, self.stop.child_token(), MUTATION_TIMEOUT)?;
+        let scope = Scope::new(
+            authority,
+            self.stop.child_token(),
+            self.shared.mutation_timeout,
+        )?;
         let deadline = scope.deadline;
         let cancelled = scope.cancel.clone();
         let _guard = cancelled.clone().drop_guard();
@@ -286,7 +310,11 @@ impl CredentialMutationOwner {
         if revision == 0 || i64::try_from(revision).is_err() {
             return Err(Error::InvalidInput);
         }
-        let scope = Scope::new(authority, self.stop.child_token(), MUTATION_TIMEOUT)?;
+        let scope = Scope::new(
+            authority,
+            self.stop.child_token(),
+            self.shared.mutation_timeout,
+        )?;
         let deadline = scope.deadline;
         let cancelled = scope.cancel.clone();
         let _guard = cancelled.clone().drop_guard();

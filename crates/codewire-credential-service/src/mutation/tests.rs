@@ -402,7 +402,7 @@ pub(crate) async fn install_commit_barrier(pool: &PgPool, key: i32) -> Result<()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
 async fn generated_slow_commit_outlives_mutation_deadline_and_publishes() -> Result<()> {
-    let h = Harness::new().await?;
+    let h = Harness::with_product_mutation_timeout().await?;
     let result = async {
         install_commit_barrier(&h.db.pool, 4191904).await?;
         let mut blocker = h.db.pool.begin().await?;

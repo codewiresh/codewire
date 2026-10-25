@@ -22,6 +22,32 @@ async fn age(by: Duration) {
     tokio::time::resume();
 }
 
+/// Real time a lease may spend on a stalled CI slot, reading the database,
+/// before it reads its decision's age. A sample "late inside the window"
+/// leaves this much of it, so the real time spent before and during the
+/// lease cannot carry the decision past the window.
+const STALL_SLACK: Duration = Duration::from_secs(25);
+
+/// Advance the clock until `since + by` has passed on it, counting the real
+/// time already spent since `since`, which a stalled database stretches.
+async fn age_since(since: tokio::time::Instant, by: Duration) {
+    let target = since + by;
+    let now = tokio::time::Instant::now();
+    if target > now {
+        age(target - now).await;
+    }
+}
+
+/// When an epoch's admission decided: no earlier than `.0` and no later
+/// than `.1`.
+async fn admitted(
+    f: &Fixture,
+) -> Result<(Arc<Adapter>, tokio::time::Instant, tokio::time::Instant)> {
+    let before = tokio::time::Instant::now();
+    let adapter = f.epoch().await?;
+    Ok((adapter, before, tokio::time::Instant::now()))
+}
+
 async fn measured<T>(future: impl Future<Output = T>) -> (T, Timings) {
     timing::measure(future).await
 }
@@ -32,7 +58,7 @@ async fn a_lease_within_sixty_seconds_makes_no_resolve_or_grant_call_and_one_rec
 -> Result<()> {
     let f = Fixture::create().await?;
     let result = async {
-        let adapter = f.epoch().await?;
+        let (adapter, decided, _) = admitted(&f).await?;
         let calls = f.authority.calls();
         let (first, timings) = measured(lease(&adapter)).await;
         first?;
@@ -45,9 +71,9 @@ async fn a_lease_within_sixty_seconds_makes_no_resolve_or_grant_call_and_one_rec
         for elapsed in [
             Duration::ZERO,
             Duration::from_secs(30),
-            Duration::from_secs(29),
+            AUTHORITY_DECISION_REUSE - STALL_SLACK,
         ] {
-            age(elapsed).await;
+            age_since(decided, elapsed).await;
             let (leased, timings) = measured(lease(&adapter)).await;
             leased?;
             ensure!(
@@ -284,7 +310,7 @@ async fn an_authority_change_is_served_until_sixty_seconds_then_denied() -> Resu
     ] {
         let f = Fixture::create().await?;
         let result = async {
-            let adapter = f.epoch().await?;
+            let (adapter, decided, by) = admitted(&f).await?;
             lease(&adapter).await?;
             ensure!(retained(&adapter) == 1);
             match change {
@@ -295,14 +321,15 @@ async fn an_authority_change_is_served_until_sixty_seconds_then_denied() -> Resu
                     .change(|session| change_authority(session, change)),
             }
             let calls = f.authority.calls();
-            for elapsed in [Duration::ZERO, Duration::from_secs(59)] {
-                age(elapsed).await;
+            for elapsed in [Duration::ZERO, AUTHORITY_DECISION_REUSE - STALL_SLACK] {
+                age_since(decided, elapsed).await;
                 let (leased, timings) = measured(lease(&adapter)).await;
                 ensure!(leased.is_ok(), "{change}: not served inside the window");
                 ensure!(timings.authority_decision == AuthorityUse::Reused);
             }
             ensure!(f.authority.calls() == calls);
-            age(Duration::from_secs(1)).await;
+            // The window has passed however late admission decided.
+            age_since(by, AUTHORITY_DECISION_REUSE).await;
             let (leased, timings) = measured(lease(&adapter)).await;
             ensure!(
                 matches!(leased, Err(BrokerLeaseError::Denied)),
@@ -515,9 +542,10 @@ async fn a_lease_releases_material_only_under_a_decision_inside_its_window() -> 
     for removed in [false, true] {
         let f = Fixture::create().await?;
         let result = async {
-            let adapter = f.epoch().await?;
-            // Half a second inside the window, a margin for real time spent here.
-            age(AUTHORITY_DECISION_REUSE - Duration::from_millis(500)).await;
+            let (adapter, decided, by) = admitted(&f).await?;
+            // Late inside the window, with a margin for the real time the
+            // lease spends before it takes the decision.
+            age_since(decided, AUTHORITY_DECISION_REUSE - STALL_SLACK).await;
             let calls = f.authority.calls();
             // The epoch's first lease misses its cache and waits at the unwrap.
             f.provider.unwrap_gate.arm();
@@ -530,7 +558,7 @@ async fn a_lease_releases_material_only_under_a_decision_inside_its_window() -> 
                 f.authority.calls() == calls,
                 "the lease did not take the decision inside its window"
             );
-            age(Duration::from_secs(1)).await;
+            age_since(by, AUTHORITY_DECISION_REUSE).await;
             if removed {
                 f.authority.deny.store(true, Ordering::SeqCst);
             }

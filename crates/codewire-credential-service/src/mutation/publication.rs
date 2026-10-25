@@ -11,9 +11,7 @@ use sqlx::{Acquire, PgConnection, Postgres, Transaction};
 use tokio::time::Instant;
 
 use super::enrollment::{Completed, Outcome};
-use super::{
-    EnrollmentTarget, Error, MUTATION_TIMEOUT, Scope, Shared, authority_error, store_error,
-};
+use super::{EnrollmentTarget, Error, Scope, Shared, authority_error, store_error};
 
 pub(super) struct Publication<T> {
     pub outcome: Outcome,
@@ -307,7 +305,7 @@ async fn publish(
     scope: &Scope,
     mutation: Mutation,
 ) -> Publication<Option<CredentialMetadata>> {
-    let deadline = scope.deadline.min(Instant::now() + MUTATION_TIMEOUT);
+    let deadline = scope.deadline.min(Instant::now() + shared.mutation_timeout);
     let acquired = tokio::time::timeout_at(deadline, scope.wait(shared.pool.acquire())).await;
     let mut connection = match acquired {
         Ok(Ok(Ok(connection))) => connection,
