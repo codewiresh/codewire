@@ -159,6 +159,7 @@ fi
 # warm folder and requests no identity, so it is not a cache job.
 cache_jobs=(
   standard
+  rust-checks
   rust-packages
   rust-features
   rust-transport

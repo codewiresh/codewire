@@ -53,40 +53,40 @@ for args in '' 'archive' 'publish x' 'publish x Bad-Name' 'leg nothing x' 'nothi
     fail "build-once.sh accepted: ${args:-no arguments}"
   fi
 done
-# The leg table: both lanes' legs, in build order.
-[ "$("$SCRIPT" legs | tr '\n' ' ')" = 'archive compile ' ] || fail 'unexpected wanted legs'
-[ "$("$SCRIPT" legs tests | tr '\n' ' ')" = 'archive ' ] || fail 'unexpected tests lane'
-[ "$("$SCRIPT" legs checks | tr '\n' ' ')" = 'compile ' ] || fail 'unexpected checks lane'
-# The table lists the tests lane's legs first, so a cold build runs every
-# test archive before any check.
-[ "$(VERIFICATION_SELECTION='|policy|database|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive database compile ' ] ||
+# The leg table: every test archive, in table order; the checks that build
+# no archive are Rust checks' (run-rust-checks.sh), not legs.
+[ "$("$SCRIPT" legs | tr '\n' ' ')" = 'archive ' ] || fail 'unexpected wanted legs'
+[ "$(VERIFICATION_SELECTION='|policy|database|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive database ' ] ||
   fail 'a selected database family did not want the database leg'
-# A Rust selection wants the feature graphs' archives and checks; the
-# local-vmm shard's legs follow the workflow's BUILD_ONCE_LOCAL_VMM.
-[ "$(VERIFICATION_SELECTION='|policy|rust|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive features compile feature_checks ' ] ||
-  fail 'a selected Rust family did not want the feature-graph legs'
-[ "$(VERIFICATION_SELECTION='|transport|' BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs | tr '\n' ' ')" = 'archive local_vmm compile local_vmm_checks ' ] ||
-  fail 'the local-vmm shard did not want its legs'
-[ "$(VERIFICATION_SELECTION='|transport|' BUILD_ONCE_LOCAL_VMM=false "$SCRIPT" legs | tr '\n' ' ')" = 'archive compile ' ] ||
-  fail 'the local-vmm legs ran without BUILD_ONCE_LOCAL_VMM'
-[ "$(VERIFICATION_SELECTION='|rust|database|' BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs tests | tr '\n' ' ')" = 'archive local_vmm features database ' ] ||
-  fail 'unexpected tests lane for every family'
-[ "$(VERIFICATION_SELECTION='|rust|database|' BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs checks | tr '\n' ' ')" = 'compile feature_checks local_vmm_checks ' ] ||
-  fail 'unexpected checks lane for every family'
-grep -Eq '^  "[a-z0-9_]+ (tests|checks) (always|selected:[a-z0-9_,-]+|env:[A-Z0-9_]+)"$' "$SCRIPT" ||
+[ "$(VERIFICATION_SELECTION='|policy|rust|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive features ' ] ||
+  fail 'a selected Rust family did not want the feature-graph leg'
+[ "$(VERIFICATION_SELECTION='|transport|' BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs | tr '\n' ' ')" = 'archive local_vmm ' ] ||
+  fail 'the local-vmm shard did not want its leg'
+[ "$(VERIFICATION_SELECTION='|transport|' BUILD_ONCE_LOCAL_VMM=false "$SCRIPT" legs | tr '\n' ' ')" = 'archive ' ] ||
+  fail 'the local-vmm leg ran without BUILD_ONCE_LOCAL_VMM'
+[ "$(VERIFICATION_SELECTION='|rust|database|' BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs | tr '\n' ' ')" = 'archive local_vmm features database ' ] ||
+  fail 'unexpected legs for every family'
+grep -Eq '^  "[a-z0-9_]+ (always|selected:[a-z0-9_,-]+|env:[A-Z0-9_]+)"$' "$SCRIPT" ||
   fail 'the leg table is missing'
+for retired in compile feature_checks local_vmm_checks; do
+  if grep -Eq "^leg_$retired\(\) \{" "$SCRIPT"; then fail "the $retired check is still a build-runner leg"; fi
+done
+if "$SCRIPT" legs tests >/dev/null 2>&1; then fail 'legs accepted a lane'; fi
 # A selected leg runs when any of its tokens is selected.
 all='|database|service_idp|service_coordinator|service_billing|service_connectcore|service_orchestration|service_nats|'
-[ "$(VERIFICATION_SELECTION="$all" "$SCRIPT" legs tests | tr '\n' ' ')" = \
-  'archive database services_control services_runtime ' ] || fail 'unexpected tests lane with every family'
-[ "$(VERIFICATION_SELECTION='|service_nats|' "$SCRIPT" legs tests | tr '\n' ' ')" = 'archive services_runtime ' ] ||
+[ "$(VERIFICATION_SELECTION="$all" "$SCRIPT" legs | tr '\n' ' ')" = \
+  'archive database services_control services_runtime ' ] || fail 'unexpected legs with every family'
+[ "$(VERIFICATION_SELECTION='|service_nats|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive services_runtime ' ] ||
   fail 'service_nats alone must select the runtime plane leg only'
-[ "$(VERIFICATION_SELECTION='|service_billing|service_temporal|' "$SCRIPT" legs tests | tr '\n' ' ')" = 'archive services_control ' ] ||
+[ "$(VERIFICATION_SELECTION='|service_billing|service_temporal|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive services_control ' ] ||
   fail 'service_billing alone must select the control plane leg only'
-[ "$(VERIFICATION_SELECTION='|service_temporal|service_nats_extra|' "$SCRIPT" legs tests | tr '\n' ' ')" = 'archive ' ] ||
+[ "$(VERIFICATION_SELECTION='|service_temporal|service_nats_extra|' "$SCRIPT" legs | tr '\n' ' ')" = 'archive ' ] ||
   fail 'a selected leg matched a token it does not name'
 while read -r name; do
   grep -Eq "^leg_$name\(\) \{" "$SCRIPT" || fail "the $name leg has no function"
+  # Each leg builds in its own target folder.
+  grep -A12 -E "^leg_$name\(\) \{" "$SCRIPT" | grep -q "targets/$name\b\|service_plane_leg" ||
+    fail "the $name leg does not build in targets/$name"
 done < <(VERIFICATION_SELECTION="${all}rust|transport|" BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs)
 
 # The build folder follows the event: main only for a push to main.
@@ -188,12 +188,14 @@ if "$SCRIPT" finish >/dev/null 2>&1; then fail 'the retired finish subcommand wa
 legs_src="$work/legs-src"
 git init -q "$legs_src"
 mkdir -p "$legs_src/scripts/ci/verify" "$work/legs-bin" "$work/legs-out"
-cat > "$legs_src/scripts/ci/verify/compile-all-targets.sh" <<'COMPILE'
+cat > "$legs_src/scripts/ci/verify/run-product-verification.sh" <<'FEATURES'
 #!/bin/sh
-echo "compile-start $(date +%s%N)" >> "$LEGS_STATE/times"; sleep 1
-echo "compile-end $(date +%s%N)" >> "$LEGS_STATE/times"
-COMPILE
-chmod +x "$legs_src/scripts/ci/verify/compile-all-targets.sh"
+# The feature-graph leg's stage: records its time and the jobserver it sees.
+echo "features-start $(date +%s%N)" >> "$LEGS_STATE/times"; sleep 1
+echo "features-end $(date +%s%N)" >> "$LEGS_STATE/times"
+echo "features-makeflags ${CARGO_MAKEFLAGS:-none}" >> "$LEGS_STATE/times"
+FEATURES
+chmod +x "$legs_src/scripts/ci/verify/run-product-verification.sh"
 cat > "$work/legs-bin/cargo" <<'CARGO'
 #!/usr/bin/env bash
 # The archive leg's cargo: fails as LEGS_CARGO_MODE says while its marker
@@ -207,6 +209,7 @@ if [ -e "$CARGO_TARGET_DIR/debug/deps/libbroken.rlib" ]; then
 fi
 echo "archive-start $(date +%s%N)" >> "$LEGS_STATE/times"; sleep 1
 echo "archive-end $(date +%s%N)" >> "$LEGS_STATE/times"
+echo "archive-makeflags ${CARGO_MAKEFLAGS:-none}" >> "$LEGS_STATE/times"
 while [ "$#" -gt 0 ]; do [ "$1" = --archive-file ] && { shift; printf 'archive' > "$1"; }; shift; done
 CARGO
 chmod +x "$work/legs-bin/cargo"
@@ -216,14 +219,20 @@ legs_build() {
   printf 'half' > "$work/legs-root/pr/targets/archive/debug/deps/libbroken.rlib"
   PATH="$work/legs-bin:$PATH" BUILD_ONCE_ROOT="$work/legs-root" BUILD_ONCE_SRC="$legs_src" \
     BUILD_ONCE_COLD=true LEGS_STATE="$work/legs-state" LEGS_CARGO_MODE="$1" RUNNER_TEMP="$work/legs-state" \
+    VERIFICATION_SELECTION="${LEGS_SELECTION:-}" BUILD_ONCE_JOBSERVER_TOKENS=6 \
     "$SCRIPT" build "$work/legs-out" > "$work/legs.log" 2>&1
 }
-legs_build ok || fail "a cold build failed: $(cat "$work/legs.log")"
-# Cold, the two lanes still run side by side: the archive and the lint build
-# overlap.
+LEGS_SELECTION='|rust|' legs_build ok || fail "a cold build failed: $(cat "$work/legs.log")"
+# Every leg runs at once, the archive and the feature graphs here, and both
+# take their compilers from the one jobserver.
 at() { sed -n "s/^$1 //p" "$work/legs-state/times"; }
-[ "$(at archive-start)" -lt "$(at compile-end)" ] && [ "$(at compile-start)" -lt "$(at archive-end)" ] ||
-  fail 'a cold build ran its lanes one after another'
+[ "$(at archive-start)" -lt "$(at features-end)" ] && [ "$(at features-start)" -lt "$(at archive-end)" ] ||
+  fail 'the legs ran one after another'
+for leg in archive features; do
+  [[ "$(at "$leg-makeflags")" == '-j6 '*'--jobserver-auth='*,* ]] || fail "the $leg leg had no jobserver: $(at "$leg-makeflags")"
+done
+[ "$(at archive-makeflags)" = "$(at features-makeflags)" ] || fail 'the legs had different jobservers'
+grep -q 'build-once: legs archive features at once, 6 compilers in all' "$work/legs.log" || fail 'the build did not report its legs'
 legs_build corrupt || fail "a corrupt archive was not rebuilt: $(cat "$work/legs.log")"
 [ -f "$work/legs-out/archive.tar.zst" ] || fail 'the rebuilt leg wrote no archive'
 [ "$(wc -l < "$work/legs-state/calls")" -eq 2 ] || fail 'the corrupt leg did not build exactly twice'

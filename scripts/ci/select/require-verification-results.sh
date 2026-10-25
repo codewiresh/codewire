@@ -44,6 +44,10 @@ require_group_result tooling \
 require_group_result rust-compile \
   "${VERIFICATION_RUST_COMPILE_EXPECTED:-missing}" \
   "${VERIFICATION_RUST_COMPILE_RESULT:-missing}"
+# Rust checks runs whenever the test archives are built (compile once).
+require_group_result rust-checks \
+  "${VERIFICATION_RUST_COMPILE_EXPECTED:-missing}" \
+  "${VERIFICATION_RUST_CHECKS_RESULT:-missing}"
 require_group_result rust-packages \
   "${VERIFICATION_RUST_SHARDS_EXPECTED:-missing}" \
   "${VERIFICATION_RUST_PACKAGES_RESULT:-missing}"

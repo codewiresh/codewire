@@ -876,6 +876,14 @@ run_paths_case bound_cargo_jobs_fixture pull_request refs/pull/3102/head false \
 run_paths_case build_once_builder pull_request refs/pull/3356/head false \
   'policy rust rust_workspace security security_js' \
   scripts/ci/setup/build-once.sh
+# The build runner's jobserver and the Rust checks job's script select the
+# Rust families they build and check (infra#1632).
+run_paths_case rust_checks_script pull_request refs/pull/3451/head false \
+  'policy rust rust_workspace security security_js' \
+  scripts/ci/verify/run-rust-checks.sh
+run_paths_case build_once_jobserver pull_request refs/pull/3452/head false \
+  'confidential_script_tests deploy go_consumer_interop go_support policy release rust rust_workspace security security_js' \
+  scripts/ci/setup/jobserver.py
 run_paths_case guest_cpu_share pull_request refs/pull/3413/head false \
   'database policy rust rust_workspace security security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   scripts/ci/setup/cpu-share.sh
@@ -1894,7 +1902,7 @@ run_present_paths_case macos_formatter_with_runtime_source pull_request refs/pul
   scripts/dev/macos-ext4-tool.py crates/codewire-local-vmm/src/lib.rs
 run_present_paths_case macos_formatter_unknown pull_request refs/pull/2064/head false \
   "$all_product_pr" scripts/dev/macos-ext4-tool-future.py
-# The --cli mode compile-checks the macOS cw in Compile every Rust target when
+# The --cli mode compile-checks the macOS cw in Rust checks when
 # the cw package changes (#3119 A13); the script still selects the release group.
 run_present_paths_case darwin_cross_check pull_request refs/pull/20655/head false \
   'go_consumer_interop go_support policy policy_shell release confidential_script_tests security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
@@ -3090,7 +3098,8 @@ done <<'EOF'
 policy|Policy verification|medium|policy
 standard|Standard verification|medium|standard
 tooling|Tooling / delivery contract verification|medium|tooling
-rust-compile|Compile every Rust target|build|rust_compile
+rust-compile|Build test archives|build|rust_compile
+rust-checks|Rust checks|medium|rust_compile
 rust-packages|Rust / transport packages|medium|rust_shards
 rust-features|Rust / transport feature graphs|medium|rust_shards
 rust-transport|Rust / transport verification|medium|rust_transport
@@ -3440,15 +3449,15 @@ fi
   echo 'Codewire CI requires Rust compilation on the build runners' >&2
   exit 1
 }
-[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_MEDIUM}" "$WORKFLOW")" -eq 8 ]] || {
-  echo 'Codewire CI requires its eight medium groups (policy included) on the medium metal labels' >&2
+[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_MEDIUM}" "$WORKFLOW")" -eq 9 ]] || {
+  echo 'Codewire CI requires its nine medium groups (policy and Rust checks included) on the medium metal labels' >&2
   exit 1
 }
 [[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 1 ]] || {
   echo 'Codewire CI requires Database verification alone on the heavy metal labels' >&2
   exit 1
 }
-[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 9 ]] || {
+[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 10 ]] || {
   echo 'each metal group must bound its cargo jobs to its guest memory' >&2
   exit 1
 }
@@ -3564,8 +3573,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 22 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, eleven groups, four Kind producers, aggregate, the Dev delivery trigger and four fail-fast watcher links" >&2
+if [ "$top_level_jobs" != 23 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, twelve groups, four Kind producers, aggregate, the Dev delivery trigger and four fail-fast watcher links" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
@@ -5215,6 +5224,10 @@ pr_dispatch_and_require() {
     if [ "$group" = rust_shards ]; then
       jobs=(RUST_PACKAGES RUST_FEATURES)
     fi
+    # Rust checks runs with the test archives' build (compile once).
+    if [ "$group" = rust_compile ]; then
+      jobs=(RUST_COMPILE RUST_CHECKS)
+    fi
     for job in "${jobs[@]}"; do
       if [ "$value" = true ] && [ "$job" != "$missing" ]; then
         results+=("VERIFICATION_${job}_RESULT=success")
@@ -5369,7 +5382,8 @@ WORK = {
         "Run the workspace agents check",
         "Run Edge static verification and selected Kind tool tests",
     },
-    "rust-compile": {"Run the build legs", "Compile the macOS cw for both Mac targets"},
+    "rust-compile": {"Run the build legs"},
+    "rust-checks": {"Run the Rust checks"},
     "rust-packages": {"Run the Rust packages shard"},
     "rust-features": {"Run the Rust features shard"},
     "rust-transport": {

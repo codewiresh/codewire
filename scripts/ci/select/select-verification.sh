@@ -1976,7 +1976,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/finish-untrusted-rust-cache.sh|\
       scripts/ci/setup/select-warm-rust-cache.sh|\
       scripts/ci/setup/finish-warm-rust-cache.sh|\
-      scripts/ci/setup/bound-cargo-jobs.sh|scripts/ci/setup/build-once.sh)
+      scripts/ci/setup/bound-cargo-jobs.sh|scripts/ci/setup/build-once.sh|\
+      scripts/ci/setup/jobserver.py|scripts/ci/verify/run-rust-checks.sh)
         select_token policy
         select_token rust
         select_token rust_workspace

@@ -261,6 +261,7 @@ if ! jq -e '
             "CW release-assets verification", "Container contract verification",
             "Policy verification", "Standard verification",
             "Tooling / delivery contract verification", "Compile every Rust target",
+            "Build test archives", "Rust checks",
             "Rust / transport packages", "Rust / transport feature graphs",
             "Rust / transport verification", "Database verification",
             "Service control-plane verification", "Service runtime-plane verification"))

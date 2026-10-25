@@ -53,6 +53,7 @@ NOT_CHECKS = frozenset({"Verification selection", "Required verification",
 # stay blocking (#3119): a Policy failure always stops the run.
 RETRYABLE_RE = re.compile(
     r"^(Standard verification|Tooling / delivery contract verification|Compile every Rust target"
+    r"|Build test archives|Rust checks"
     r"|Rust / .+|Database verification|Service control-plane verification"
     r"|Service runtime-plane verification)$"
 )

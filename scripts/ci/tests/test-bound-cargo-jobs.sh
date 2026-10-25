@@ -75,7 +75,7 @@ jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
 # variables (infra#1534): Database on heavy, eight groups on medium.
 sized = {name for name, job in jobs.items()
          if "_HEAVY ||" in str(job.get("runs-on", "")) or "_MEDIUM ||" in str(job.get("runs-on", ""))}
-assert len(sized) == 9, sorted(sized)
+assert len(sized) == 10, sorted(sized)
 for name in sized:
     job = jobs[name]
     assert "CARGO_BUILD_JOBS" not in (job.get("env") or {}), name

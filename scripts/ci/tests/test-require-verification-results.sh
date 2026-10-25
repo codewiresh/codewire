@@ -17,6 +17,7 @@ green_results=(
   VERIFICATION_RUST_TRANSPORT_RESULT=success
   VERIFICATION_RUST_COMPILE_EXPECTED=true
   VERIFICATION_RUST_COMPILE_RESULT=success
+  VERIFICATION_RUST_CHECKS_RESULT=success
   VERIFICATION_RUST_SHARDS_EXPECTED=true
   VERIFICATION_RUST_PACKAGES_RESULT=success
   VERIFICATION_RUST_FEATURES_RESULT=success
@@ -41,6 +42,7 @@ unselected_results=(
   VERIFICATION_RUST_TRANSPORT_RESULT=skipped
   VERIFICATION_RUST_COMPILE_EXPECTED=false
   VERIFICATION_RUST_COMPILE_RESULT=skipped
+  VERIFICATION_RUST_CHECKS_RESULT=skipped
   VERIFICATION_RUST_SHARDS_EXPECTED=false
   VERIFICATION_RUST_PACKAGES_RESULT=skipped
   VERIFICATION_RUST_FEATURES_RESULT=skipped
@@ -94,6 +96,7 @@ partial_results=(
   VERIFICATION_TOOLING_RESULT=success
   VERIFICATION_RUST_COMPILE_EXPECTED=true
   VERIFICATION_RUST_COMPILE_RESULT=success
+  VERIFICATION_RUST_CHECKS_RESULT=success
 )
 partial_selection='|valid:v3|policy|policy_shell|policy_shell_omittable|rust|complete|'
 env "${green_results[@]}" "${partial_results[@]}" \
@@ -164,6 +167,11 @@ expect_failure rust_compile_failure \
   'rust-compile selected capability group concluded failure' \
   VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
   VERIFICATION_RUST_COMPILE_RESULT=failure
+
+expect_failure rust_checks_failure \
+  'rust-checks selected capability group concluded failure' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
+  VERIFICATION_RUST_CHECKS_RESULT=failure
 
 expect_failure rust_features_failure \
   'rust-features selected capability group concluded failure' \

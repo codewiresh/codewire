@@ -191,7 +191,7 @@ jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
 # Compile once (infra#1632): the compile job builds in its build runner's own
 # warm folder, so it does not use it; the packages shard does, for the build
 # it falls back to when its test archive is missing.
-expected = {"standard", "rust-packages", "rust-features", "rust-transport",
+expected = {"standard", "rust-checks", "rust-packages", "rust-features", "rust-transport",
             "database", "services-control", "services-runtime"}
 wired = set()
 for name, job in jobs.items():

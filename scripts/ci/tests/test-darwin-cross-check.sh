@@ -175,24 +175,25 @@ else:
     export = 'echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"'
     assert install in setup and export in setup and setup.index(install) < setup.index(export)
     assert '"${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -' in setup
-    # Compile every Rust target runs the --cli check when the cw package
-    # changes (#3119 A13), with the installed cargo-zigbuild on PATH from the
-    # job's own Cargo home.
+    # Rust checks runs the --cli check when the cw package changes (#3119
+    # A13), and the local VMM's Darwin check, with the installed
+    # cargo-zigbuild on PATH from the job's own Cargo home (infra#1632: the
+    # checks moved off the build runner into their own job).
     assert '\n  cw-release-assets:\n' not in ci
-    compile_job = ci.split('\n  rust-compile:\n', 1)[1].split('\n  rust-packages:\n', 1)[0]
-    # Every run compiles in its build runner's warm Cargo home, main's or the
-    # pull requests' (infra#1632), and checks cw from the same warm folder.
-    assert "&& '/ci-cache/main/cargo-home' || '/ci-cache/pr/cargo-home'" in compile_job
+    compile_job = ci.split('\n  rust-compile:\n', 1)[1].split('\n  rust-checks:\n', 1)[0]
+    assert 'check-darwin-cross.sh' not in compile_job and 'Darwin' not in compile_job
+    checks_job = ci.split('\n  rust-checks:\n', 1)[1].split('\n  rust-packages:\n', 1)[0]
     cw_selected = "needs.verification-selection.outputs.cw_package_selected == 'true'"
-    setup = compile_job.split('      - name: Set up pinned Darwin C cross-check tools\n', 1)[1].split('      - name:', 1)[0]
+    setup = checks_job.split('      - name: Set up pinned Darwin C cross-check tools\n', 1)[1].split('      - name:', 1)[0]
     assert "tested_tree_receipt != 'accepted'" in setup and cw_selected in setup
+    assert "contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_local_vmm|')" in setup
     assert install in setup and export in setup and setup.index(install) < setup.index(export)
     assert '"${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -' in setup
-    check = compile_job.split('      - name: Compile the macOS cw for both Mac targets\n', 1)[1].split('      - name:', 1)[0]
-    assert "tested_tree_receipt != 'accepted'" in check and cw_selected in check
-    assert 'run: scripts/ci/verify/check-darwin-cross.sh --cli' in check
-    assert "working-directory: ${{ format('{0}/src', env.BUILD_ONCE_TREE) }}" in check
-    assert "CARGO_TARGET_DIR: ${{ format('{0}/targets/darwin', env.BUILD_ONCE_TREE) }}" in check
-    assert compile_job.index('Set up pinned Darwin C cross-check tools') < compile_job.index('Compile the macOS cw for both Mac targets')
+    run = checks_job.split('      - name: Run the Rust checks\n', 1)[1].split('      - name:', 1)[0]
+    assert "CW_PACKAGE_SELECTED: ${{ needs.verification-selection.outputs.cw_package_selected }}" in run
+    assert 'run: scripts/ci/verify/run-rust-checks.sh' in run
+    assert checks_job.index('Set up pinned Darwin C cross-check tools') < checks_job.index('Run the Rust checks')
+    script = (source / 'scripts/ci/verify/run-rust-checks.sh').read_text()
+    assert "phase 'cw Darwin cross-check' scripts/ci/verify/check-darwin-cross.sh --cli" in script
     print(f'Darwin cross-check wrapper: {cases} cases passed; old bare check rejected')
 PY

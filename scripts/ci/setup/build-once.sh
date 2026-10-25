@@ -11,11 +11,11 @@
 #
 #   build-once.sh prepare CHECKOUT  bring the warm build folder to this job's
 #                                   commit and set up the pinned tools
-#   build-once.sh build OUT         run every wanted leg (LEGS below); a leg
-#                                   that produces something for test jobs
-#                                   writes OUT/<leg>.<ext>
+#   build-once.sh build OUT         run every wanted leg (LEGS below) at once;
+#                                   each writes its test archives to
+#                                   OUT/<leg>.<ext>
 #   build-once.sh leg NAME OUT      run one leg
-#   build-once.sh legs [LANE]       list the wanted legs, in build order
+#   build-once.sh legs              list the wanted legs
 #   build-once.sh publish OUT       upload every OUT/<leg>.* to the archive
 #                                   store and report its SHA-256 as the job
 #                                   output <leg>_sha256
@@ -25,8 +25,9 @@
 #   rewrites only changed files and Cargo's mtime fingerprints keep every
 #   unchanged workspace crate fresh (a new checkout rebuilds them all); every
 #   build also sees the same absolute workspace path. Hooks never run.
-# - targets: the Cargo target folders, one per kind of build (archive,
-#   clippy, darwin, desktop, desktop-tests).
+# - targets: one Cargo target folder per leg (targets/<leg>, and the local
+#   VMM leg's desktop folder), so the legs build side by side without
+#   waiting on each other's folder lock; any other folder there is removed.
 # - cargo-home: the registry index and downloaded crates.
 # - tools: downloads of SHA-256-pinned tools, checked on every use.
 # - lock-stamp: the digest of every lockfile and the toolchain file, and of
@@ -145,13 +146,22 @@ prepare() {
     mkdir -p "$work/targets"
     printf '%s\n' "$stamp" > "$work/lock-stamp"
   fi
+  # Only the legs' own target folders stay (the earlier layout's clippy,
+  # darwin and desktop folders belong to the Rust checks job now).
+  for entry in "$work/targets"/*; do
+    [ -e "$entry" ] || continue
+    case "${entry##*/}" in
+      archive|local_vmm|local_vmm_desktop|features|database|services_control|services_runtime) ;;
+      *) echo "build-once: removing the unused target folder ${entry##*/}"; rm -rf -- "$entry" ;;
+    esac
+  done
   # Tests stop here, before the pinned tools; never on a build runner's disk.
   if [ -n "${BUILD_ONCE_ROOT:-}" ] && [ "${BUILD_ONCE_TEST_STOP_AFTER_TARGETS:-}" = 1 ]; then
     return 0
   fi
-  # Whether the archive or lint folder is new, for the log.
+  # Whether the archive folder is new, for the log.
   local cold=false
-  [ -d "$work/targets/archive" ] && [ -d "$work/targets/clippy" ] || cold=true
+  [ -d "$work/targets/archive" ] || cold=true
 
   bin="${RUNNER_TEMP:?RUNNER_TEMP is required}/build-once-bin"
   rm -rf -- "$bin"
@@ -195,32 +205,25 @@ in_src() {
   echo 1000 > /proc/self/oom_score_adj 2>/dev/null || true
 }
 
-# The legs, in the order each lane runs them. Each line is
-#   NAME LANE WANTED
-# - NAME: the leg runs leg_NAME OUT; a leg whose test jobs fetch its output
-#   writes OUT/NAME.<ext>, published as the job output NAME_sha256.
-# - LANE: "tests" legs build test archives in targets/archive (one Cargo
-#   target folder, so they run one after another anyway); "checks" legs build
-#   in their own folders and produce nothing to publish.
+# The legs: every test archive the test jobs fetch. Each line is
+#   NAME WANTED
+# - NAME: the leg runs leg_NAME OUT in its own target folder, targets/NAME,
+#   and writes OUT/NAME.<ext>, published as the job output NAME_sha256.
 # - WANTED: "always", or "selected:TOKEN[,TOKEN...]", any of those
 #   verification tokens in VERIFICATION_SELECTION, or "env:NAME", an
 #   environment variable that is "true".
-# The two lanes run side by side and share the job's Cargo jobs (its CPU
-# share), the tests lane taking the larger part, since the test jobs wait for
-# it. Cold builds too: running them one after another was for the 17.6 GiB
-# guest, where two at 16 jobs each ran out of memory (codewire run 21939);
-# build runners have 40 GiB, and 16 compilers in all peak well under it (the
-# archive build peaked at 25.4 GiB on its own at 16 jobs, clippy at 8.6 GiB).
+# Every wanted leg runs at once, all taking their compilers from one
+# jobserver sized to the runner (build), so the one still compiling gets the
+# cores the finished ones no longer use. The checks that build no archive
+# (clippy, the feature-graph and local-vmm checks, the Darwin cross-checks)
+# run in their own job, Rust checks (run-rust-checks.sh).
 LEGS=(
-  "archive tests always"
-  "local_vmm tests env:BUILD_ONCE_LOCAL_VMM"
-  "features tests selected:rust"
-  "database tests selected:database"
-  "services_control tests selected:service_idp,service_coordinator,service_billing,service_connectcore"
-  "services_runtime tests selected:service_orchestration,service_nats"
-  "compile checks always"
-  "feature_checks checks selected:rust"
-  "local_vmm_checks checks env:BUILD_ONCE_LOCAL_VMM"
+  "archive always"
+  "local_vmm env:BUILD_ONCE_LOCAL_VMM"
+  "features selected:rust"
+  "database selected:database"
+  "services_control selected:service_idp,service_coordinator,service_billing,service_connectcore"
+  "services_runtime selected:service_orchestration,service_nats"
 )
 
 leg_archive() {
@@ -228,13 +231,6 @@ leg_archive() {
   local out="$1"
   phase 'test archive' env CARGO_TARGET_DIR="$work/targets/archive" \
     cargo nextest archive --locked --workspace --all-targets --archive-file "$out/archive.tar.zst"
-}
-
-leg_compile() {
-  # compile-all-targets.sh: clippy with default and all features, every
-  # target, and the curated image workspaces.
-  phase 'compile-all-targets' env CARGO_TARGET_DIR="$work/targets/clippy" \
-    scripts/ci/verify/compile-all-targets.sh
 }
 
 # The feature-graph and local-vmm shards (run-product-verification.sh's
@@ -261,15 +257,9 @@ leg_features() {
   local out="$1" dir
   dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/features-archives.XXXXXX")"
   phase 'feature-graph archives' shard_stage rust-transport features archives "$dir" \
-    CARGO_TARGET_DIR="$work/targets/archive"
+    CARGO_TARGET_DIR="$work/targets/features"
   tar -cf "$out/features.tar" -C "$dir" .
   rm -rf -- "$dir"
-}
-
-leg_feature_checks() {
-  # The feature graphs' lints, checks and dependency-graph checks.
-  phase 'feature-graph checks' shard_stage rust-transport features checks '' \
-    CARGO_TARGET_DIR="$work/targets/clippy"
 }
 
 leg_local_vmm() {
@@ -280,43 +270,17 @@ leg_local_vmm() {
   dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/local-vmm-archives.XXXXXX")"
   if [[ "${VERIFICATION_SELECTION:-}" == *'|rust|'* || "${VERIFICATION_SELECTION:-}" == *'|transport|'* ]]; then
     phase 'local-vmm archives' shard_stage rust-transport local-vmm archives "$dir" \
-      CARGO_TARGET_DIR="$work/targets/archive" \
-      CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$work/targets/desktop-tests"
+      CARGO_TARGET_DIR="$work/targets/local_vmm" \
+      CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$work/targets/local_vmm_desktop"
   fi
   if artifact_desktop; then
     phase 'desktop archive' shard_stage rust local-vmm archives "$dir" \
       VERIFICATION_SELECTION="$ARTIFACT_DESKTOP_SELECTION" \
-      CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$work/targets/desktop-tests"
+      CARGO_TARGET_DIR="$work/targets/local_vmm" \
+      CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$work/targets/local_vmm_desktop"
   fi
   tar -cf "$out/local_vmm.tar" -C "$dir" .
   rm -rf -- "$dir"
-}
-
-leg_local_vmm_checks() {
-  # The local-vmm shard's checks: the local VMM's Darwin cross-check, the
-  # static guest's reproducibility proof, the desktop check and package.
-  local zig
-  if [[ "${VERIFICATION_SELECTION:-}" == *'|transport_pkg_codewire_local_vmm|'* ]]; then
-    # The pinned Zig and cargo-zigbuild the workflow pins, kept on the disk.
-    : "${ZIG_VERSION:?ZIG_VERSION is required}" "${ZIG_X86_64_LINUX_SHA256:?}" "${CARGO_ZIGBUILD_VERSION:?}"
-    zig="${RUNNER_TEMP:?RUNNER_TEMP is required}/build-once-zig"
-    rm -rf -- "$zig"
-    mkdir -p "$zig"
-    tar -xf "$(tool "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
-      "$ZIG_X86_64_LINUX_SHA256")" -C "$zig" --strip-components=1
-    cargo install --quiet --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
-    export PATH="$zig:$CARGO_HOME/bin:$PATH"
-  fi
-  if [[ "${VERIFICATION_SELECTION:-}" == *'|rust|'* || "${VERIFICATION_SELECTION:-}" == *'|transport|'* ]]; then
-    phase 'local-vmm checks' shard_stage rust-transport local-vmm checks '' \
-      CARGO_TARGET_DIR="$work/targets/darwin" \
-      CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$work/targets/desktop"
-  fi
-  if artifact_desktop; then
-    phase 'desktop checks' shard_stage rust local-vmm checks '' \
-      VERIFICATION_SELECTION="$ARTIFACT_DESKTOP_SELECTION" \
-      CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$work/targets/desktop"
-  fi
 }
 
 leg_database() {
@@ -325,8 +289,8 @@ leg_database() {
   # CI-profile migration runner; bundled into one tar.
   local out="$1" dir
   dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/database-archives.XXXXXX")"
-  phase 'database archives' env CARGO_TARGET_DIR="$work/targets/archive" \
-    CODEWIRE_CARGO_CI_TARGET_DIR="$work/targets/archive" ARCHIVE_BUILD_DIR="$dir" \
+  phase 'database archives' env CARGO_TARGET_DIR="$work/targets/database" \
+    CODEWIRE_CARGO_CI_TARGET_DIR="$work/targets/database" ARCHIVE_BUILD_DIR="$dir" \
     scripts/ci/verify/run-integration-verification.sh database-archives
   tar -cf "$out/database.tar" -C "$dir" .
   rm -rf -- "$dir"
@@ -340,8 +304,8 @@ service_plane_leg() {
   # the plane's job does (ci.yaml, its service scope step).
   local plane="$1" out="$2" dir
   dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/services-$plane-archives.XXXXXX")"
-  phase "services $plane archives" env CARGO_TARGET_DIR="$work/targets/archive" \
-    CODEWIRE_CARGO_CI_TARGET_DIR="$work/targets/archive" ARCHIVE_BUILD_DIR="$dir" \
+  phase "services $plane archives" env CARGO_TARGET_DIR="$work/targets/services_$plane" \
+    CODEWIRE_CARGO_CI_TARGET_DIR="$work/targets/services_$plane" ARCHIVE_BUILD_DIR="$dir" \
     scripts/ci/verify/run-integration-verification.sh "services-$plane-archives"
   # The binaries shrink about threefold (the archives are compressed
   # already), which the archive store's budget needs: the plane's job unpacks
@@ -382,11 +346,10 @@ leg_wanted() {
 }
 
 wanted_legs() {
-  # wanted_legs LANE: the names of that lane's wanted legs, in table order.
-  local entry name lane wanted
+  # wanted_legs: the names of the wanted legs, in table order.
+  local entry name wanted
   for entry in "${LEGS[@]}"; do
-    read -r name lane wanted <<< "$entry"
-    [ -z "${1:-}" ] || [ "$lane" = "$1" ] || continue
+    read -r name wanted <<< "$entry"
     if leg_wanted "$wanted"; then
       printf '%s\n' "$name"
     fi
@@ -410,8 +373,8 @@ readonly CORRUPT_OUTPUT='malformed archive|truncated|Archive::children failed|in
 rebuild_corrupt_leg() {
   # rebuild_corrupt_leg NAME OUT LOG: succeeds only when the leg showed a
   # corrupt output in a target folder it names, and its one rebuild passed.
-  # Only the named folders are wiped: the other lane may be building in its
-  # own folder beside this one.
+  # Only the named folders are wiped: the other legs build in their own
+  # folders beside this one.
   local name="$1" out="$2" log="$3" folders folder
   grep -Eq "$CORRUPT_OUTPUT" "$log" || return 1
   folders="$(grep -oE "$work/targets/[A-Za-z0-9_-]+" "$log" | sort -u)"
@@ -423,28 +386,59 @@ rebuild_corrupt_leg() {
   "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" >> "$log" 2>&1
 }
 
-run_lane() {
-  # run_lane LANE OUT LOGS: the lane's wanted legs one after another, each
-  # with its own log; the lane fails when any leg failed.
-  local lane="$1" out="$2" logs="$3" name status=0
+run_one_leg() {
+  # run_one_leg NAME OUT LOGS: one leg with its own log, rebuilt once when it
+  # read a corrupt output; a failed leg is listed in LOGS/failed.
+  local name="$1" out="$2" logs="$3"
+  "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" > "$logs/$name.log" 2>&1 ||
+    rebuild_corrupt_leg "$name" "$out" "$logs/$name.log" ||
+    { echo "$name" >> "$logs/failed"; return 1; }
+}
+
+run_legs() {
+  # run_legs OUT LOGS: every wanted leg at once, under the jobserver build
+  # started; it fails when any leg failed.
+  local out="$1" logs="$2" name pid status=0
+  local -a pids=()
   while read -r name; do
     [ -n "$name" ] || continue
-    "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" > "$logs/$name.log" 2>&1 ||
-      rebuild_corrupt_leg "$name" "$out" "$logs/$name.log" ||
-      { status=1; echo "$name" >> "$logs/failed"; }
-  done < <(wanted_legs "$lane")
+    run_one_leg "$name" "$out" "$logs" & pids+=("$!")
+  done < <(wanted_legs)
+  for pid in "${pids[@]}"; do
+    wait "$pid" || status=1
+  done
   return "$status"
 }
 
+jobserver_tokens() {
+  # The compilers the runner holds: its cores, and one per 2 GiB of available
+  # memory (the archive build alone peaked at 25.4 GiB with 16 compilers).
+  # BUILD_ONCE_JOBSERVER_TOKENS overrides it.
+  if [ -n "${BUILD_ONCE_JOBSERVER_TOKENS:-}" ]; then
+    printf '%s\n' "$BUILD_ONCE_JOBSERVER_TOKENS"
+    return
+  fi
+  local tokens available_kib by_memory
+  tokens="$(nproc)"
+  available_kib="$(awk '$1 == "MemAvailable:" {print $2}' /proc/meminfo)"
+  by_memory=$(( available_kib / (2 * 1024 * 1024) ))
+  if (( by_memory < tokens )); then tokens="$by_memory"; fi
+  if (( tokens < 2 )); then tokens=2; fi
+  if (( tokens > 64 )); then tokens=64; fi
+  printf '%s\n' "$tokens"
+}
+
 build() {
-  local out="$1" logs jobs pid status=0 name
+  local out="$1" logs tokens status=0 name
   mkdir -p "$out"
   logs="$(mktemp -d "${RUNNER_TEMP:-/tmp}/build-once-logs.XXXXXX")"
-  jobs="${CARGO_BUILD_JOBS:-16}"
+  tokens="$(jobserver_tokens)"
+  [[ "$tokens" =~ ^[1-9][0-9]*$ ]] || die "invalid jobserver size: $tokens"
   [ "${BUILD_ONCE_COLD:-false}" = false ] || echo 'build-once: cold build folders'
-  CARGO_BUILD_JOBS="$(( jobs - jobs * 3 / 8 ))" run_lane tests "$out" "$logs" & pid=$!
-  CARGO_BUILD_JOBS="$(( jobs * 3 / 8 ))" run_lane checks "$out" "$logs" || status=1
-  wait "$pid" || status=1
+  echo "build-once: legs $(wanted_legs | tr '\n' ' ')at once, $tokens compilers in all"
+  # A Cargo that cannot reach the jobserver falls back to these few jobs.
+  CARGO_BUILD_JOBS=4 python3 "$ROOT/scripts/ci/setup/jobserver.py" "$tokens" -- \
+    "$ROOT/scripts/ci/setup/build-once.sh" run-legs "$out" "$logs" || status=1
   while read -r name; do
     [ -f "$logs/$name.log" ] || continue
     echo "::group::$name"; cat "$logs/$name.log"; echo '::endgroup::'
@@ -483,8 +477,9 @@ publish() {
 case "${1:-}" in
   prepare) [ "$#" -eq 2 ] || die 'usage: build-once.sh prepare CHECKOUT'; prepare "$2" ;;
   build) [ "$#" -eq 2 ] || die 'usage: build-once.sh build OUT'; build "$2" ;;
-  legs) [ "$#" -le 2 ] || die 'usage: build-once.sh legs [LANE]'; wanted_legs "${2:-}" ;;
+  legs) [ "$#" -eq 1 ] || die 'usage: build-once.sh legs'; wanted_legs ;;
+  run-legs) [ "$#" -eq 3 ] || die 'usage: build-once.sh run-legs OUT LOGS'; run_legs "$2" "$3" ;;
   leg) [ "$#" -eq 3 ] || die 'usage: build-once.sh leg NAME OUT'; run_leg "$2" "$3" ;;
   publish) [ "$#" -eq 2 ] || die 'usage: build-once.sh publish OUT'; publish "$2" ;;
-  *) die 'usage: build-once.sh prepare|build|legs|leg|publish ...' ;;
+  *) die 'usage: build-once.sh prepare|build|legs|leg|run-legs|publish ...' ;;
 esac
