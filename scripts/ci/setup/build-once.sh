@@ -19,6 +19,9 @@
 #   build-once.sh publish OUT       upload every OUT/<leg>.* to the archive
 #                                   store and report its SHA-256 as the job
 #                                   output <leg>_sha256
+#   build-once.sh checks            run the Rust checks (run-rust-checks.sh)
+#                                   in the checks' own target folders, in the
+#                                   Rust checks job after prepare
 #
 # The build folder, /ci-cache/main or /ci-cache/pr:
 # - src: a persistent clone. The job's checkout is fetched into it, so git
@@ -27,7 +30,8 @@
 #   build also sees the same absolute workspace path. Hooks never run.
 # - targets: one Cargo target folder per leg (targets/<leg>, and the local
 #   VMM leg's desktop folder), so the legs build side by side without
-#   waiting on each other's folder lock; any other folder there is removed.
+#   waiting on each other's folder lock, and the Rust checks' own (clippy,
+#   darwin and desktop); any other folder there is removed.
 # - cargo-home: the registry index and downloaded crates.
 # - tools: downloads of SHA-256-pinned tools, checked on every use.
 # - layout: the folder's layout version. Raising it wipes the target folders
@@ -65,6 +69,10 @@ readonly work
 if [ "${work##*/}" = main ]; then other_work="$cache_root/pr"; else other_work="$cache_root/main"; fi
 readonly other_work
 readonly src="$work/src"
+# The Rust checks' target folders (checks): clippy for compile-all-targets
+# and the feature-graph checks, darwin for the Darwin cross-checks, desktop
+# for the desktop check and package.
+readonly CHECK_FOLDERS=(clippy darwin desktop)
 
 die() {
   echo "build-once: $*" >&2
@@ -153,12 +161,12 @@ prepare() {
     mkdir -p "$work/targets"
   fi
   printf '%s\n' "$layout" > "$work/layout"
-  # Only the legs' own target folders stay (the earlier layout's clippy,
-  # darwin and desktop folders belong to the Rust checks job now).
+  # Only the legs' and the Rust checks' own target folders stay.
   for entry in "$work/targets"/*; do
     [ -e "$entry" ] || continue
     case "${entry##*/}" in
       archive|local_vmm|local_vmm_desktop|features|database|services_control|services_runtime) ;;
+      "${CHECK_FOLDERS[0]}"|"${CHECK_FOLDERS[1]}"|"${CHECK_FOLDERS[2]}") ;;
       *) echo "build-once: removing the unused target folder ${entry##*/}"; rm -rf -- "$entry" ;;
     esac
   done
@@ -538,12 +546,48 @@ publish() {
   done
 }
 
+checks() {
+  # The Rust checks (run-rust-checks.sh) from src, in their own warm target
+  # folders, on the build runner after this run's archives (the Rust checks
+  # job). A check that read a corrupt output in one of them wipes the folders
+  # its log names (clippy when it names none) and runs once more, as a leg
+  # does (rebuild_corrupt_leg).
+  local log folder folders status=0
+  in_src
+  for folder in "${CHECK_FOLDERS[@]}"; do
+    mkdir -p "$work/targets/$folder"
+    touch "$work/targets/$folder/.build-once-used"
+  done
+  log="$(mktemp "${RUNNER_TEMP:-/tmp}/build-once-checks.XXXXXX")"
+  run_checks 2>&1 | tee "$log" || status=$?
+  [ "$status" -ne 0 ] || return 0
+  grep -Eq "$CORRUPT_OUTPUT" "$log" || return "$status"
+  folders="$(grep -oE "$work/targets/($(IFS='|'; echo "${CHECK_FOLDERS[*]}"))" "$log" | sort -u)"
+  # A missing crate (E0463 and its kin) names no folder: the lints' own.
+  [ -n "$folders" ] || folders="$work/targets/clippy"
+  for folder in $folders; do
+    echo "build-once: the Rust checks read a corrupt output in $folder; it is wiped and they run once more"
+    rm -rf -- "$folder"
+    mkdir -p "$folder"
+    touch "$folder/.build-once-used"
+  done
+  run_checks
+}
+
+run_checks() {
+  env CARGO_TARGET_DIR="$work/targets/clippy" \
+    RUST_CHECKS_DARWIN_TARGET_DIR="$work/targets/darwin" \
+    CODEWIRE_DESKTOP_CHECK_TARGET_DIR="$work/targets/desktop" \
+    "$BUILD_ONCE_SRC/scripts/ci/verify/run-rust-checks.sh"
+}
+
 case "${1:-}" in
+  checks) [ "$#" -eq 1 ] || die 'usage: build-once.sh checks'; checks ;;
   prepare) [ "$#" -eq 2 ] || die 'usage: build-once.sh prepare CHECKOUT'; prepare "$2" ;;
   build) [ "$#" -eq 2 ] || die 'usage: build-once.sh build OUT'; build "$2" ;;
   legs) [ "$#" -eq 1 ] || die 'usage: build-once.sh legs'; wanted_legs ;;
   run-legs) [ "$#" -eq 3 ] || die 'usage: build-once.sh run-legs OUT LOGS'; run_legs "$2" "$3" ;;
   leg) [ "$#" -eq 3 ] || die 'usage: build-once.sh leg NAME OUT'; run_leg "$2" "$3" ;;
   publish) [ "$#" -eq 2 ] || die 'usage: build-once.sh publish OUT'; publish "$2" ;;
-  *) die 'usage: build-once.sh prepare|build|legs|leg|run-legs|publish ...' ;;
+  *) die 'usage: build-once.sh prepare|build|legs|leg|run-legs|publish|checks ...' ;;
 esac

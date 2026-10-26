@@ -3237,7 +3237,7 @@ policy|Policy verification|medium|policy
 standard|Standard verification|medium|standard
 tooling|Tooling / delivery contract verification|medium|tooling
 rust-compile|Build test archives|build|rust_compile
-rust-checks|Rust checks|medium|rust_compile
+rust-checks|Rust checks|build|rust_compile
 rust-packages|Rust / transport packages|medium|rust_shards
 rust-features|Rust / transport feature graphs|medium|rust_shards
 rust-transport|Rust / transport verification|medium|rust_transport
@@ -3593,22 +3593,22 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   exit 1
 fi
 # Each group on exactly the slot it needs (infra#1534): eight on the medium
-# metal class, Database on the heavy one, and Rust compilation on the build
-# runners, main's on a main push (compile once, infra#1632). Every metal group
-# bounds its Cargo jobs.
-[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_BUILD}" "$WORKFLOW")" -eq 1 ]] || {
-  echo 'Codewire CI requires Rust compilation on the build runners' >&2
+# metal class, Database on the heavy one, and Rust compilation and Rust checks
+# on the build runners, main's on a main push (compile once, infra#1632).
+# Every metal group bounds its Cargo jobs.
+[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_BUILD}" "$WORKFLOW")" -eq 2 ]] || {
+  echo 'Codewire CI requires Rust compilation and Rust checks on the build runners' >&2
   exit 1
 }
-[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_MEDIUM}" "$WORKFLOW")" -eq 9 ]] || {
-  echo 'Codewire CI requires its nine medium groups (policy and Rust checks included) on the medium metal labels' >&2
+[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_MEDIUM}" "$WORKFLOW")" -eq 8 ]] || {
+  echo 'Codewire CI requires its eight medium groups (policy included) on the medium metal labels' >&2
   exit 1
 }
 [[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 1 ]] || {
   echo 'Codewire CI requires Database verification alone on the heavy metal labels' >&2
   exit 1
 }
-[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 10 ]] || {
+[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 9 ]] || {
   echo 'each metal group must bound its cargo jobs to its guest memory' >&2
   exit 1
 }

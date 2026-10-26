@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Rust checks (compile once, infra#1632): the checks that build no test
-# archive, in their own job on a metal guest with its warm Rust cache and the
-# shared compiler cache, beside the build runner's test archives. Each runs
-# when its inputs are selected, as its build-runner leg did:
+# archive, in their own job on the build runner after its test archives, in
+# the build folder's warm target folders (build-once.sh checks). Each runs
+# when its inputs are selected:
 # - always: compile-all-targets.sh, clippy with default and all features over
 #   every target, and the curated image workspaces;
 # - with |rust|: the feature graphs' lints, checks and dependency-graph
@@ -12,14 +12,16 @@
 #   check and package), and the artifact-selected desktop package;
 # - with CW_PACKAGE_SELECTED: the cw Darwin cross-check (#3119 A13).
 # The job sets up the pinned zig and cargo-zigbuild before this when a Darwin
-# check is selected. CARGO_TARGET_DIR is the job's host-debug folder; the
-# desktop builds use CODEWIRE_DESKTOP_CHECK_TARGET_DIR.
+# check is selected. CARGO_TARGET_DIR holds the lints and checks; the Darwin
+# cross-checks use RUST_CHECKS_DARWIN_TARGET_DIR and the desktop builds
+# CODEWIRE_DESKTOP_CHECK_TARGET_DIR (each defaults under CARGO_TARGET_DIR).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 : "${CARGO_TARGET_DIR:?CARGO_TARGET_DIR is required}"
 desktop_target="${CODEWIRE_DESKTOP_CHECK_TARGET_DIR:-$CARGO_TARGET_DIR/desktop}"
+darwin_target="${RUST_CHECKS_DARWIN_TARGET_DIR:-$CARGO_TARGET_DIR}"
 readonly ARTIFACT_DESKTOP_SELECTION='|valid:v3|rust_pkg_codewire_desktop|complete|'
 status=0
 
@@ -57,7 +59,7 @@ fi
 if [ "${BUILD_ONCE_LOCAL_VMM:-}" = true ]; then
   if selected rust || selected transport; then
     phase 'local-vmm checks' shard_checks rust-transport local-vmm \
-      CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$desktop_target"
+      CARGO_TARGET_DIR="$darwin_target" CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$desktop_target"
   fi
   # The desktop package outside the Rust selection, which Rust / transport
   # verification checks separately (its artifact-selected desktop step).
@@ -69,7 +71,8 @@ if [ "${BUILD_ONCE_LOCAL_VMM:-}" = true ]; then
 fi
 
 if [ "${CW_PACKAGE_SELECTED:-}" = true ]; then
-  phase 'cw Darwin cross-check' scripts/ci/verify/check-darwin-cross.sh --cli
+  phase 'cw Darwin cross-check' env CARGO_TARGET_DIR="$darwin_target" \
+    scripts/ci/verify/check-darwin-cross.sh --cli
 fi
 
 exit "$status"

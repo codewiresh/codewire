@@ -155,11 +155,11 @@ fi
 if grep -q '^enable-openid-connect:' "$WORKFLOW"; then
   fail 'CI exposes Forgejo OIDC to every verification job'
 fi
-# Compile once (infra#1632): the compile job builds in its build runner's own
-# warm folder and requests no identity, so it is not a cache job.
+# Compile once (infra#1632): the compile job and Rust checks build in their
+# build runner's own warm folder and request no identity, so they are not
+# cache jobs.
 cache_jobs=(
   standard
-  rust-checks
   rust-packages
   rust-features
   rust-transport

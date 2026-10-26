@@ -214,6 +214,15 @@ printf 'keep' > "$marker_root/targets/archive/debug/deps/libkeep.rlib"
 targets_prepare
 [ ! -e "$marker_root/targets/archive/debug/incremental" ] || fail 'prepare kept incremental sessions'
 [ -f "$marker_root/targets/archive/debug/deps/libkeep.rlib" ] || fail 'removing incremental sessions removed an artifact'
+# The Rust checks' own folders stay beside the legs'; any other folder goes.
+mkdir -p "$marker_root/targets/clippy" "$marker_root/targets/darwin" "$marker_root/targets/desktop" \
+  "$marker_root/targets/stray"
+targets_prepare
+for folder in clippy darwin desktop; do
+  [ -d "$marker_root/targets/$folder" ] || fail "prepare removed the Rust checks' $folder folder"
+done
+[ ! -e "$marker_root/targets/stray" ] || fail 'prepare kept an unknown target folder'
+grep -q 'removing the unused target folder stray' "$work/prepare.log" || fail 'the stray folder removal gave no reason'
 
 # The disk bound: target files no build read for 3 days go; above 65 % of the
 # disk, whole leg folders go, least recently used first (a folder with no use
@@ -312,6 +321,41 @@ grep -q "read a corrupt output in $work/legs-root/pr/targets/archive; it is wipe
 if legs_build compile; then fail 'a compile error passed'; fi
 [ "$(wc -l < "$work/legs-state/calls")" -eq 1 ] || fail 'a compile error was rebuilt'
 [ -e "$work/legs-root/pr/targets/archive/debug/deps/libbroken.rlib" ] || fail 'a compile error wiped the target folder'
+
+# checks runs the Rust checks from src in their own target folders, marks
+# them used, and reruns once after a corrupt output in a folder it names;
+# a plain check failure fails at once.
+mkdir -p "$legs_src/scripts/ci/verify"
+cat > "$legs_src/scripts/ci/verify/run-rust-checks.sh" <<'CHECKS'
+#!/bin/sh
+echo "checks $PWD $CARGO_TARGET_DIR $RUST_CHECKS_DARWIN_TARGET_DIR $CODEWIRE_DESKTOP_CHECK_TARGET_DIR" >> "$LEGS_STATE/checks"
+if [ -e "$CARGO_TARGET_DIR/broken" ]; then
+  case "$CHECKS_MODE" in
+    corrupt) echo "error: $CARGO_TARGET_DIR/broken: failed to mmap file"; exit 101 ;;
+    lint) echo 'error: this could be written more simply'; exit 101 ;;
+  esac
+fi
+CHECKS
+chmod +x "$legs_src/scripts/ci/verify/run-rust-checks.sh"
+checks_run() {
+  rm -rf "$work/legs-state"; mkdir -p "$work/legs-state" "$work/legs-root/pr/targets/clippy"
+  : > "$work/legs-root/pr/targets/clippy/broken"
+  BUILD_ONCE_ROOT="$work/legs-root" BUILD_ONCE_SRC="$legs_src" LEGS_STATE="$work/legs-state" \
+    RUNNER_TEMP="$work/legs-state" CHECKS_MODE="$1" "$SCRIPT" checks > "$work/checks.log" 2>&1
+}
+checks_root="$work/legs-root/pr/targets"
+checks_run corrupt || fail "a corrupt check output was not rerun: $(cat "$work/checks.log")"
+[ "$(wc -l < "$work/legs-state/checks")" -eq 2 ] || fail 'the corrupt checks did not run exactly twice'
+grep -qx "checks $legs_src $checks_root/clippy $checks_root/darwin $checks_root/desktop" "$work/legs-state/checks" ||
+  fail "the checks ran outside src or their folders: $(cat "$work/legs-state/checks")"
+grep -q "the Rust checks read a corrupt output in $checks_root/clippy; it is wiped" "$work/checks.log" ||
+  fail 'the checks rerun gave no reason'
+for folder in clippy darwin desktop; do
+  [ -f "$checks_root/$folder/.build-once-used" ] || fail "the checks did not mark their $folder folder used"
+done
+if checks_run lint; then fail 'a failed check passed'; fi
+[ "$(wc -l < "$work/legs-state/checks")" -eq 1 ] || fail 'a failed check was rerun'
+[ -e "$checks_root/clippy/broken" ] || fail 'a failed check wiped its folder'
 
 # publish uploads every leg output and names its job output after the leg.
 mkdir -p "$work/out" "$work/store/v1/archives"

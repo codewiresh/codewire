@@ -700,24 +700,28 @@ jobs:
         run: scripts/ci/setup/build-once.sh publish "$RUNNER_TEMP/build-once-out"
 
   rust-checks:
-    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job requests no identity and reads no protected credential: it checks in its build runner's own warm folder, never the shared cache.
     # Compile once (infra#1632): the Rust checks that build no test archive,
-    # on a metal guest with its warm Rust cache and the shared compiler cache,
-    # beside the tests instead of after the build runner's archives:
+    # on the build runner that just built this run's archives (main's for a
+    # main push), in the build folder's own warm target folders
+    # (targets/clippy, darwin and desktop; build-once.sh checks):
     # compile-all-targets (clippy over every target with default and all
     # features, and the curated image workspaces), the feature graphs' lints
     # and dependency checks, the local-vmm shard's checks (its Darwin
     # cross-check, the static guest's reproducibility proof, the desktop check
-    # and package) and the cw Darwin cross-check (run-rust-checks.sh).
+    # and package) and the cw Darwin cross-check (run-rust-checks.sh). It
+    # starts once Build test archives ends; the test jobs do not wait for it,
+    # and Required verification does. On a medium guest with only the shared
+    # compiler cache it took about 12 min, against 52 s warm here.
     name: Rust checks
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM') }}
-    enable-openid-connect: true
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_BUILD') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD') }}
     timeout-minutes: 45
-    needs: [verification-selection]
+    needs: [verification-selection, rust-compile]
     if: ${{ needs.verification-selection.outputs.rust_compile_expected == 'true' }}
     env:
-      CARGO_HOME: ${{ github.workspace }}/target/ci-rust-cargo-home
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+      # The build runner's warm build folder (build-once.sh prepare).
+      BUILD_ONCE_TREE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '/ci-cache/main' || '/ci-cache/pr' }}
+      CARGO_HOME: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '/ci-cache/main/cargo-home' || '/ci-cache/pr/cargo-home' }}
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -728,45 +732,13 @@ jobs:
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
 
-      # On a main push or a pull request in a metal guest, start from that
-      # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
-      - name: Select the warm Rust cache
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        env:
-          CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
-        run: scripts/ci/setup/select-warm-rust-cache.sh
-
-      - name: Bound cargo jobs by memory
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        run: scripts/ci/setup/bound-cargo-jobs.sh
-
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
-      - name: Select best-effort shared Rust cache
+      - name: Bring the warm build folder to this commit
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        env:
-          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
-        run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
-
-      - name: Verify Rust cache capacity
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        run: scripts/ci/setup/assert-cargo-cache-capacity.sh "$CARGO_HOME"
-
-      - name: Install pinned protoc for Rust builds
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip \
-            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
-          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
-            | sha256sum -c -
-          rm -rf "$HOME/.proto-tools/protoc"
-          mkdir -p "$HOME/.proto-tools/protoc"
-          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
-          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
-          "$HOME/.proto-tools/protoc/bin/protoc" --version
+        run: scripts/ci/setup/build-once.sh prepare "$GITHUB_WORKSPACE"
 
       # The macOS cw and the local VMM link Apple frameworks, so only the
       # protected Mac runner links them (cli-release.yaml and
@@ -791,16 +763,7 @@ jobs:
           CW_PACKAGE_SELECTED: ${{ needs.verification-selection.outputs.cw_package_selected }}
           BUILD_ONCE_LOCAL_VMM: ${{ contains(needs.verification-selection.outputs.selection, '|transport|') || contains(needs.verification-selection.outputs.selection, '|rust_pkg_codewire_desktop|') || needs.verification-selection.outputs.desktop_package_selected == 'true' }}
           DESKTOP_PACKAGE_SELECTED: ${{ needs.verification-selection.outputs.desktop_package_selected }}
-          CODEWIRE_DESKTOP_CHECK_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/desktop-release
-        run: scripts/ci/verify/run-rust-checks.sh
-
-      - name: Report and clean Rust cache
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
-
-      - name: Report the warm Rust cache
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        run: scripts/ci/setup/finish-warm-rust-cache.sh
+        run: scripts/ci/setup/build-once.sh checks
 
   rust-packages:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.

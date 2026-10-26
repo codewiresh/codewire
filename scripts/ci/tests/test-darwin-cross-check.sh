@@ -177,8 +177,9 @@ else:
     assert '"${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -' in setup
     # Rust checks runs the --cli check when the cw package changes (#3119
     # A13), and the local VMM's Darwin check, with the installed
-    # cargo-zigbuild on PATH from the job's own Cargo home (infra#1632: the
-    # checks moved off the build runner into their own job).
+    # cargo-zigbuild on PATH from the build folder's Cargo home (infra#1632:
+    # the checks run in their own job on the build runner, after the
+    # archives, in the darwin target folder).
     assert '\n  cw-release-assets:\n' not in ci
     compile_job = ci.split('\n  rust-compile:\n', 1)[1].split('\n  rust-checks:\n', 1)[0]
     assert 'check-darwin-cross.sh' not in compile_job and 'Darwin' not in compile_job
@@ -191,9 +192,12 @@ else:
     assert '"${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -' in setup
     run = checks_job.split('      - name: Run the Rust checks\n', 1)[1].split('      - name:', 1)[0]
     assert "CW_PACKAGE_SELECTED: ${{ needs.verification-selection.outputs.cw_package_selected }}" in run
-    assert 'run: scripts/ci/verify/run-rust-checks.sh' in run
+    assert 'run: scripts/ci/setup/build-once.sh checks' in run
+    assert checks_job.index('Bring the warm build folder to this commit') < checks_job.index('Set up pinned Darwin C cross-check tools')
     assert checks_job.index('Set up pinned Darwin C cross-check tools') < checks_job.index('Run the Rust checks')
     script = (source / 'scripts/ci/verify/run-rust-checks.sh').read_text()
-    assert "phase 'cw Darwin cross-check' scripts/ci/verify/check-darwin-cross.sh --cli" in script
+    assert "phase 'cw Darwin cross-check' env CARGO_TARGET_DIR=\"$darwin_target\" \\\n    scripts/ci/verify/check-darwin-cross.sh --cli" in script
+    once = (source / 'scripts/ci/setup/build-once.sh').read_text()
+    assert 'RUST_CHECKS_DARWIN_TARGET_DIR="$work/targets/darwin"' in once
     print(f'Darwin cross-check wrapper: {cases} cases passed; old bare check rejected')
 PY
