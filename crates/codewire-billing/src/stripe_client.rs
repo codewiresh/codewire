@@ -62,13 +62,17 @@ impl StripeHandle {
         }
     }
 
+    /// A handle on a synthetic Stripe API at `api_base`. The production
+    /// client keeps its 30 s request bound (`from_env`); no test is about it,
+    /// so a test client only guards against a hang. A fixed 1 s bound failed
+    /// a loopback request on a busy CI slot (PR run 24503).
     #[cfg(test)]
     pub(crate) fn for_test(api_base: &str) -> Self {
         Self {
             client: Some(Arc::new(
                 stripe::ClientBuilder::new("sk_test_codewire")
                     .url(api_base)
-                    .timeout(Duration::from_secs(1))
+                    .timeout(Duration::from_secs(60))
                     .build()
                     .expect("valid Stripe test client configuration"),
             )),
