@@ -177,7 +177,11 @@ cat >"$FAKE_ROOT/fake-bin/setsid" <<'EARLY_SETSID'
 #!/usr/bin/env bash
 set -u
 fixtures="$(cd "$(dirname "$0")/../fixtures" && pwd)"
-trap 'printf "early-launcher-cleanup-start\n" >>"$fixtures/signal-events"; sleep 0.3; printf "early-launcher-cleanup-done\n" >>"$fixtures/signal-events"; exit 143' TERM
+# Its cleanup holds until the test releases it, so the runner is still
+# waiting on it when the test sends its repeated signals: a fixed 0.3 s let a
+# stalled test signal a runner that had already exited (PR run 23873). The
+# hold is bounded, so a failed test never leaves it behind.
+trap 'printf "early-launcher-cleanup-start\n" >>"$fixtures/signal-events"; for _ in $(seq 1 3000); do [[ -e "$fixtures/early-launcher-release" ]] && break; sleep 0.01; done; printf "early-launcher-cleanup-done\n" >>"$fixtures/signal-events"; exit 143' TERM
 printf '%s\n' "$$" >"$fixtures/early-launcher-pid"
 printf 'early-launcher-started\n' >>"$fixtures/signal-events"
 while :; do sleep 1; done
@@ -545,7 +549,7 @@ done
 
 : >"$CALLS"
 : >"$SIGNAL_MARKER"
-rm -f "$FAKE_ROOT/fixtures/early-launcher-pid"
+rm -f "$FAKE_ROOT/fixtures/early-launcher-pid" "$FAKE_ROOT/fixtures/early-launcher-release"
 PATH="$FAKE_ROOT/fake-bin:$PATH" env --default-signal=HUP --default-signal=INT \
   --default-signal=TERM "$RUNNER" --only local-platform \
   >"$TEST_ROOT/signal-early.out" 2>&1 </dev/null &
@@ -563,8 +567,13 @@ for _ in $(seq 1 100); do
 done
 grep -Fxq early-launcher-cleanup-start "$SIGNAL_MARKER" ||
   fail 'group-miss fallback did not signal the exact pre-setsid launcher PID'
+# The launcher's cleanup is held, so these signals arrive during the runner's
+# exact cleanup wait, whenever this shell gets to send them.
+! grep -Fxq early-launcher-cleanup-done "$SIGNAL_MARKER" ||
+  fail 'early-start cleanup finished before its release'
 kill -HUP "$runner_pid"
 kill -INT "$runner_pid"
+: >"$FAKE_ROOT/fixtures/early-launcher-release"
 signal_status=0
 wait "$runner_pid" || signal_status=$?
 [[ "$signal_status" == 143 ]] || fail "repeated-signal runner exit $signal_status, expected 143"
