@@ -19,6 +19,15 @@ only after the failure is recorded, never from inside a failing job. Required
 verification then ends cancelled, which is not success, so nothing merges and
 Dev delivers nothing.
 
+Before a rerun the watcher keeps the first attempt's evidence: once a job is
+rerun, Forgejo serves only its newest attempt's log, so a rerun that passes
+would hide the flake (main run 23658, 2026-10-26). It prints the failure lines
+of the failed attempt's log, with a few lines of context and at most
+EVIDENCE_LINES lines, in a group named after the job, plus one warning naming
+the job and its first failing test. Flakes are fixed at their cause, never
+hidden by retries. The fetch is bounded by LOG_FETCH_SECONDS; when it fails the
+watcher says so and reruns anyway.
+
 Only the latest attempt of each job counts. The watcher never fails its run:
 anything unreadable is retried, and it gives up quietly at its deadline,
 asking the next link of its chain to take over (WATCH_LINKS).
@@ -61,6 +70,25 @@ POLL_SECONDS = 20
 LIGHT_TASK_LIMIT_MINUTES = 25
 DEADLINE_SECONDS = 22 * 60
 POSITIVE_RE = re.compile(r"^[1-9][0-9]*$")
+# The failed attempt's evidence, printed before its rerun. Only matching lines
+# and their context are printed, never the whole log: CI masks registered
+# secrets, and this keeps anything else a test printed out of the watcher.
+LOG_FETCH_SECONDS = 8
+EVIDENCE_LINES = 200
+EVIDENCE_LINE_CHARS = 400
+CONTEXT_BEFORE = 2
+CONTEXT_AFTER = 3
+EVIDENCE_RE = re.compile(
+    r"::error|FAIL |FAILED|panicked at|Error:|AssertionError|timed out|TIMEOUT"
+)
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# The first failing test: nextest's FAIL line, libtest's "... FAILED" line,
+# then a panicking test thread.
+FIRST_TEST_RES = (
+    re.compile(r"\bFAIL \[\s*[0-9.]+s\]\s+(?:\([^)]*\)\s+)?(\S.*?)\s*$"),
+    re.compile(r"\btest (\S+) \.\.\. FAILED\b"),
+    re.compile(r"thread '([^']+)' panicked at"),
+)
 
 
 def load_verdicts() -> ModuleType:
@@ -91,6 +119,59 @@ def latest_attempts(jobs: list[dict]) -> dict[str, tuple[int, dict]]:
         if name not in latest or attempt >= latest[name][0]:
             latest[name] = (attempt, job)
     return latest
+
+
+def failure_evidence(log_text: str) -> tuple[list[str], str | None]:
+    """The log's failure lines with context, at most EVIDENCE_LINES, and the
+    first failing test, if the log names one."""
+    lines = [ANSI_RE.sub("", line) for line in log_text.splitlines()]
+    hits = [index for index, line in enumerate(lines) if EVIDENCE_RE.search(line)]
+    first_test = None
+    for pattern in FIRST_TEST_RES:
+        for index in hits:
+            match = pattern.search(lines[index])
+            if match:
+                first_test = match.group(1)[:EVIDENCE_LINE_CHARS]
+                break
+        if first_test:
+            break
+    keep: list[int] = []
+    for index in hits:
+        start = max(index - CONTEXT_BEFORE, keep[-1] + 1 if keep else 0)
+        keep.extend(range(start, min(index + CONTEXT_AFTER + 1, len(lines))))
+    summary: list[str] = []
+    previous = None
+    for index in keep:
+        if previous is not None and index != previous + 1:
+            summary.append("| --")
+        # A leading "| " keeps a quoted line from acting as a workflow command.
+        summary.append("| " + lines[index][:EVIDENCE_LINE_CHARS])
+        previous = index
+    if len(summary) > EVIDENCE_LINES:
+        omitted = len(summary) - (EVIDENCE_LINES - 1)
+        summary = summary[:EVIDENCE_LINES - 1] + [f"| ... {omitted} more lines not shown"]
+    return summary, first_test
+
+
+def keep_evidence(api, name: str, job_id: int, log: Callable[[str], None]) -> None:
+    """Print the failed attempt's evidence before its rerun replaces its log.
+
+    Never raises: a failed fetch is reported and the rerun goes ahead."""
+    try:
+        text = api.get_text(f"/actions/jobs/{job_id}/logs", max_seconds=LOG_FETCH_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - evidence must never block the rerun
+        reason = exc.args[0] if isinstance(exc, verdicts.Unproven) and exc.args else type(exc).__name__
+        log(f"::warning::{name} failed its first attempt; its log could not be fetched ({reason}), "
+            f"so its evidence is lost; rerunning anyway")
+        return
+    summary, first_test = failure_evidence(text)
+    log(f"::group::{name}: first attempt's failure lines")
+    for line in summary or ["| (no failure lines matched in the log)"]:
+        log(line)
+    log("::endgroup::")
+    test = f"first failing test: {first_test}" if first_test else "no failing test named in its log"
+    log(f"::warning::{name} failed its first attempt and is rerun once as a possible flake; {test}; "
+        f"its failure lines are in this watcher's log. Fix a flake at its cause.")
 
 
 def watch(
@@ -134,6 +215,7 @@ def watch(
                 return "refused"
             for name in retry:
                 requested.add(name)
+                keep_evidence(api, name, states[name][1]['id'], log)
                 log(f"rerunning {name} once at once, as a possible flake; a second failure stops the run")
                 status = api.post(f"/actions/jobs/{states[name][1]['id']}/rerun")
                 if status not in (200, 201, 202, 204):

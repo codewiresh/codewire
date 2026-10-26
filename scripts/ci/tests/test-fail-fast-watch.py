@@ -6,8 +6,10 @@ of ci.yaml jobs that run it. It cancels the run only after another job has
 ended in failure (never from inside a failing job, so that job keeps its
 result and log, #3126), counts only each job's latest attempt, and stops
 quietly when every check finished. On a push to main a test job's first
-failure is rerun once at once, and anything else stops the run. Nothing needs
-a watcher, and each link hands over to the next only at its deadline.
+failure is rerun once at once, and anything else stops the run; before the
+rerun the watcher prints the failed attempt's failure lines, bounded, and a
+failed log fetch still reruns. Nothing needs a watcher, and each link hands
+over to the next only at its deadline.
 """
 
 from __future__ import annotations
@@ -51,12 +53,18 @@ def base(policy: str = "running", rust: str = "running", **extra) -> list[dict]:
 
 
 class FakeForgejo:
-    def __init__(self, polls: list, cancel_status: int = 204, rerun_status: int = 204):
+    def __init__(self, polls: list, cancel_status: int = 204, rerun_status: int = 204,
+                 logs: dict | None = None):
         self.polls = polls
         self.served = 0
         self.cancel_status = cancel_status
         self.rerun_status = rerun_status
         self.posts: list[str] = []
+        # Each job's log, or the exception its fetch raises.
+        self.logs = logs or {}
+        # Log fetches, printed lines and posts, in order.
+        self.events: list[tuple[str, str]] = []
+        self.fetch_bounds: list[int] = []
 
     def get_json(self, path: str):
         assert path == f"/actions/runs/{RUN}/jobs?page=1&limit=100", path
@@ -66,7 +74,18 @@ class FakeForgejo:
             raise poll
         return {"total_count": len(poll), "jobs": poll}
 
+    def get_text(self, path: str, max_seconds: int = 30) -> str:
+        self.events.append(("get", path))
+        self.fetch_bounds.append(max_seconds)
+        job_id = int(path.removeprefix("/actions/jobs/").removesuffix("/logs"))
+        assert path == f"/actions/jobs/{job_id}/logs", path
+        found = self.logs.get(job_id, watcher.verdicts.Unproven("verdict-log-unavailable"))
+        if isinstance(found, Exception):
+            raise found
+        return found
+
     def post(self, path: str) -> int:
+        self.events.append(("post", path))
         self.posts.append(path)
         return self.rerun_status if path.endswith("/rerun") else self.cancel_status
 
@@ -86,8 +105,13 @@ class WatchTests(unittest.TestCase):
     def watch(self, api: FakeForgejo, deadline: float = 600, main: bool = False):
         lines: list[str] = []
         clock = Clock()
+
+        def log(line: str) -> None:
+            lines.append(line)
+            api.events.append(("log", line))
+
         result = watcher.watch(api, RUN, main=main, poll_seconds=20, deadline_seconds=deadline,
-                               sleep=clock.sleep, clock=clock, log=lines.append)
+                               sleep=clock.sleep, clock=clock, log=log)
         return result, "\n".join(lines)
 
     def test_the_first_failure_cancels_the_run(self) -> None:
@@ -158,6 +182,101 @@ class WatchTests(unittest.TestCase):
                 self.assertEqual((result, api.posts), ("cancelled", posts))
                 if label == "policy":
                     self.assertIn("stopping this main run at its first failure: Policy verification failed", log)
+
+    def test_on_main_the_failed_attempt_s_evidence_is_printed_before_its_rerun(self) -> None:
+        # Main run 23658 (2026-10-26) reran two jobs whose first attempts'
+        # logs were then gone: the evidence is printed before the rerun.
+        stamp = "2026-10-26T09:42:01.0000000Z "
+        log_text = "\n".join(stamp + line for line in (
+            "secret-looking setup line that matches nothing",
+            *(f"   Compiling codewire-crate-{n} v0.1.0" for n in range(5)),
+            "        PASS [   0.020s] codewire-transport tests::ok",
+            "        FAIL [   1.234s] codewire-transport tests::relay_reconnects",
+            "--- STDERR: codewire-transport tests::relay_reconnects ---",
+            "thread 'tests::relay_reconnects' panicked at crates/transport/src/relay.rs:88:9:",
+            "assertion `left == right` failed",
+            "  left: 1",
+            "  right: 2",
+            *(f"unrelated output {n}" for n in range(50)),
+            "::error::Rust / transport packages failed",
+            "\x1b[31merror\x1b[0m: test run failed",
+        ))
+        rerunning = [j if j["id"] != 3 else job(3, "Rust / transport packages", "waiting", attempt=2)
+                     for j in base()]
+        passed = [j if j["id"] not in (2, 3) else (job(2, "Policy verification", "success") if j["id"] == 2
+                  else job(3, "Rust / transport packages", "success", attempt=2)) for j in base()]
+        api = FakeForgejo([base(rust="failure"), rerunning, passed], logs={3: log_text})
+        result, log = self.watch(api, main=True)
+        self.assertEqual((result, api.posts), ("finished", ["/actions/jobs/3/rerun"]))
+        self.assertEqual(api.fetch_bounds, [watcher.LOG_FETCH_SECONDS])
+        self.assertLessEqual(watcher.LOG_FETCH_SECONDS, 10)
+        rerun_at = api.events.index(("post", "/actions/jobs/3/rerun"))
+        before = [text for kind, text in api.events[:rerun_at] if kind == "log"]
+        self.assertEqual(api.events[0], ("get", "/actions/jobs/3/logs"))
+        group = before.index("::group::Rust / transport packages: first attempt's failure lines")
+        end = before.index("::endgroup::")
+        summary = "\n".join(before[group + 1:end])
+        self.assertIn("FAIL [   1.234s] codewire-transport tests::relay_reconnects", summary)
+        self.assertIn("panicked at crates/transport/src/relay.rs:88:9", summary)
+        self.assertIn("  right: 2", summary)  # context after the panic
+        self.assertIn("::error::Rust / transport packages failed", summary)
+        # Only matching lines and their context, never the whole log; every
+        # quoted line is inert, so none acts as a workflow command.
+        self.assertNotIn("secret-looking setup line", summary)
+        self.assertNotIn("unrelated output 20", summary)
+        self.assertTrue(all(line.startswith("| ") for line in before[group + 1:end]))
+        warnings = [text for text in before if text.startswith("::warning::")]
+        self.assertEqual(warnings, [
+            "::warning::Rust / transport packages failed its first attempt and is rerun once as a possible "
+            "flake; first failing test: codewire-transport tests::relay_reconnects; its failure lines are "
+            "in this watcher's log. Fix a flake at its cause."])
+        self.assertIn("rerunning Rust / transport packages once at once", log)
+
+    def test_the_evidence_is_capped(self) -> None:
+        log_text = "\n".join(f"        FAIL [   0.100s] crate tests::case_{n}" for n in range(1000))
+        summary, first_test = watcher.failure_evidence(log_text)
+        self.assertEqual(len(summary), watcher.EVIDENCE_LINES)
+        self.assertEqual(first_test, "crate tests::case_0")
+        self.assertIn("more lines not shown", summary[-1])
+        long_line = watcher.failure_evidence("Error: " + "x" * 10_000)[0]
+        self.assertEqual(len(long_line), 1)
+        self.assertLessEqual(len(long_line[0]), watcher.EVIDENCE_LINE_CHARS + 2)
+        # libtest and a bare panic also name the first failing test.
+        self.assertEqual(watcher.failure_evidence("test a::b ... FAILED")[1], "a::b")
+        self.assertEqual(watcher.failure_evidence("thread 'c::d' panicked at x.rs:1:1:")[1], "c::d")
+        self.assertEqual(watcher.failure_evidence("all fine\nnothing here"), ([], None))
+
+    def test_on_main_a_failed_log_fetch_still_reruns(self) -> None:
+        for label, failure in (("forgejo", watcher.verdicts.Unproven("forgejo-api-unavailable")),
+                               ("timeout", TimeoutError()), ("anything", RuntimeError("boom"))):
+            with self.subTest(case=label):
+                api = FakeForgejo([base(rust="failure"), base(rust="failure")], logs={3: failure},
+                                  rerun_status=204)
+                result, log = self.watch(api, main=True, deadline=20)
+                self.assertEqual((result, api.posts), ("deadline", ["/actions/jobs/3/rerun"]))
+                kinds = [kind for kind, _ in api.events if kind != "log"]
+                self.assertEqual(kinds, ["get", "post"])
+                self.assertIn("its log could not be fetched", log)
+                self.assertIn("rerunning anyway", log)
+                self.assertNotIn("::group::", log)
+
+    def test_the_real_api_bounds_the_log_fetch(self) -> None:
+        # The bound reaches curl and its backstop; the token never reaches
+        # curl's arguments.
+        seen: list[tuple[list[str], float]] = []
+
+        def run(argv, **kwargs):
+            seen.append((argv, kwargs["timeout"]))
+            Path(argv[argv.index("--output") + 1]).write_text("log")
+            return mock.Mock(returncode=0, stdout="200")
+
+        api = watcher.verdicts.ForgejoAPI("https://forge.invalid", "codewire/codewire", "t0ken")
+        with mock.patch.object(watcher.verdicts.subprocess, "run", run):
+            self.assertEqual(api.get_text("/actions/jobs/3/logs", max_seconds=watcher.LOG_FETCH_SECONDS), "log")
+        argv, backstop = seen[0]
+        self.assertEqual(argv[argv.index("--max-time") + 1], str(watcher.LOG_FETCH_SECONDS))
+        self.assertEqual(backstop, 2 * watcher.LOG_FETCH_SECONDS)
+        self.assertNotIn("t0ken", " ".join(argv))
 
     def test_a_pull_request_never_reruns(self) -> None:
         api = FakeForgejo([base(rust="failure")])

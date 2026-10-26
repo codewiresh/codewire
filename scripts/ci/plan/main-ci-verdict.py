@@ -141,7 +141,7 @@ class ForgejoAPI:
             environ.get("GITEA_TOKEN", ""),
         )
 
-    def _request(self, method: str, path: str) -> tuple[int, bytes]:
+    def _request(self, method: str, path: str, max_seconds: int = 30) -> tuple[int, bytes]:
         with tempfile.TemporaryDirectory(prefix="codewire-main-ci-verdict-") as temporary:
             config = Path(temporary) / "curl-auth"
             descriptor = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -151,7 +151,7 @@ class ForgejoAPI:
             try:
                 completed = subprocess.run(
                     [
-                        "curl", "--silent", "--show-error", "--max-time", "30",
+                        "curl", "--silent", "--show-error", "--max-time", str(max_seconds),
                         "--max-filesize", str(MAX_LOG_BYTES), "--request", method,
                         "--config", str(config), "--output", str(body),
                         "--write-out", "%{http_code}", f"{self._base}{path}",
@@ -160,7 +160,7 @@ class ForgejoAPI:
                     capture_output=True,
                     text=True,
                     check=False,
-                    timeout=60,
+                    timeout=2 * max_seconds,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise Unproven("forgejo-api-unavailable") from exc
@@ -182,8 +182,8 @@ class ForgejoAPI:
         except (UnicodeError, json.JSONDecodeError) as exc:
             raise Unproven("forgejo-api-malformed") from exc
 
-    def get_text(self, path: str) -> str:
-        status, content = self._request("GET", path)
+    def get_text(self, path: str, max_seconds: int = 30) -> str:
+        status, content = self._request("GET", path, max_seconds)
         if status != 200:
             raise Unproven("verdict-log-unavailable")
         return content.decode("utf-8", errors="replace")
