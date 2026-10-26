@@ -4613,9 +4613,11 @@ tooling_fixture() {
 #!/usr/bin/env bash
 printf '%s selection=%s base=%s jobs=%s\n' "$1" "${VERIFICATION_SELECTION-unset}" \
   "${CODEWIRE_SHELL_POLICY_BASE-unset}" "${VERIFICATION_TEST_JOBS-unset}" >"$TOOLING_RECORDS/$1"
-{ flock 9; printf 'start %s %s\n' "$1" "$(find "$TOOLING_RECORDS" -name '*.running' | wc -l)" >&9; } \
+# Mark this family running and count the running ones in one locked step,
+# so two families that start together cannot both count before either marks.
+{ flock 9; touch "$TOOLING_RECORDS/$1.running"
+  printf 'start %s %s\n' "$1" "$(find "$TOOLING_RECORDS" -name '*.running' | wc -l)" >&9; } \
   9>>"$TOOLING_RECORDS/events"
-touch "$TOOLING_RECORDS/$1.running"
 sleep 0.3
 rm -f "$TOOLING_RECORDS/$1.running"
 { flock 9; printf 'end %s\n' "$1" >&9; } 9>>"$TOOLING_RECORDS/events"
@@ -4649,14 +4651,15 @@ tooling_output="$(unset VERIFICATION_TEST_JOBS; CODEWIRE_SHELL_POLICY_BASE=0123a
   exit 1
 }
 # ShellCheck started and ended alone; with a share of 4, at most two others
-# then ran at once and two did; the longest families started first.
+# then ran at once and two did (each start counts itself); the longest
+# families started first.
 tooling_events="$(cat "$tooling_root/records/events")"
-[ "$(sed -n '1,2p' <<<"$tooling_events")" = "$(printf '%s\n' 'start policy-shell 0' 'end policy-shell')" ] || {
+[ "$(sed -n '1,2p' <<<"$tooling_events")" = "$(printf '%s\n' 'start policy-shell 1' 'end policy-shell')" ] || {
   echo "ShellCheck did not run alone before the other tooling families: $tooling_events" >&2
   exit 1
 }
-[ "$(awk '$1 == "start" && $3 > 1' <<<"$tooling_events")" = '' ] \
-  && [ -n "$(awk '$1 == "start" && $3 == 1' <<<"$tooling_events")" ] || {
+[ "$(awk '$1 == "start" && $3 > 2' <<<"$tooling_events")" = '' ] \
+  && [ -n "$(awk '$1 == "start" && $3 == 2' <<<"$tooling_events")" ] || {
   echo "the other tooling families did not run two at a time: $tooling_events" >&2
   exit 1
 }
