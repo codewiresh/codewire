@@ -1262,6 +1262,14 @@ jobs:
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
+      # PostgreSQL from the guest's Docker store or its warm cache; pulled by
+      # digest from Docker Hub only when neither holds it (infra#1534).
+      - name: Make the fixture images present
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
+        env:
+          CODEWIRE_TOOL_CACHE: ${{ github.workspace }}/target/ci-rust-cargo-home/codewire-tools
+        run: scripts/ci/setup/load-fixture-images.sh postgres
+
       - name: Start integration Postgres
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
         run: |
@@ -1283,7 +1291,7 @@ jobs:
           docker run -d --name "$container" --pids-limit 2048 \
             --network "${networks[0]}" --network-alias "$postgres_host" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
-            -e POSTGRES_DB=codewire docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee \
+            -e POSTGRES_DB=codewire "${INTEGRATION_POSTGRES_IMAGE:?}" \
             -c max_locks_per_transaction=1024
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
@@ -1434,6 +1442,14 @@ jobs:
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
+      # PostgreSQL from the guest's Docker store or its warm cache; pulled by
+      # digest from Docker Hub only when neither holds it (infra#1534).
+      - name: Make the fixture images present
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        env:
+          CODEWIRE_TOOL_CACHE: ${{ github.workspace }}/target/ci-rust-cargo-home/codewire-tools
+        run: scripts/ci/setup/load-fixture-images.sh postgres
+
       - name: Start integration Postgres
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: |
@@ -1455,7 +1471,7 @@ jobs:
           docker run -d --name "$container" --pids-limit 2048 \
             --network "${networks[0]}" --network-alias "$postgres_host" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
-            -e POSTGRES_DB=codewire docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee \
+            -e POSTGRES_DB=codewire "${INTEGRATION_POSTGRES_IMAGE:?}" \
             -c max_locks_per_transaction=1024
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
@@ -1491,6 +1507,9 @@ jobs:
 
       - name: Install pinned cargo-nextest
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready == 'true' }}
+        env:
+          # As in the Database job: the warm cache keeps the verified tarball.
+          CODEWIRE_TOOL_CACHE: ${{ github.workspace }}/target/ci-rust-cargo-home/codewire-tools
         run: scripts/ci/setup/install-cargo-nextest.sh "$RUNNER_TEMP/nextest"
 
       - name: Run Service integration
@@ -1605,6 +1624,15 @@ jobs:
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
+      # PostgreSQL and NATS from the guest's Docker store or its warm cache;
+      # pulled by digest from Docker Hub only when neither holds it
+      # (infra#1534).
+      - name: Make the fixture images present
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        env:
+          CODEWIRE_TOOL_CACHE: ${{ github.workspace }}/target/ci-rust-cargo-home/codewire-tools
+        run: scripts/ci/setup/load-fixture-images.sh postgres nats
+
       - name: Start integration Postgres
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: |
@@ -1626,7 +1654,7 @@ jobs:
           docker run -d --name "$container" --pids-limit 2048 \
             --network "${networks[0]}" --network-alias "$postgres_host" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
-            -e POSTGRES_DB=codewire docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee \
+            -e POSTGRES_DB=codewire "${INTEGRATION_POSTGRES_IMAGE:?}" \
             -c max_locks_per_transaction=1024
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
@@ -1662,6 +1690,9 @@ jobs:
 
       - name: Install pinned cargo-nextest
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && steps.services-archives.outputs.ready == 'true' }}
+        env:
+          # As in the Database job: the warm cache keeps the verified tarball.
+          CODEWIRE_TOOL_CACHE: ${{ github.workspace }}/target/ci-rust-cargo-home/codewire-tools
         run: scripts/ci/setup/install-cargo-nextest.sh "$RUNNER_TEMP/nextest"
 
       - name: Run Service integration

@@ -259,10 +259,13 @@ archive_cargo() {
 }
 
 # extract_archives DIR: extract every archive in DIR once, before the lanes
-# start.
+# start. The archives extract side by side: one after another, the nine
+# database archives took 16 s, of which the orchestration archive alone took
+# 8 s (main run 23934). Each extraction is one zstd stream, and the job's CPU
+# share has a core for each.
 extract_archives() {
-  local dir="$1" archive key binary link target metadata
-  local -A linked=() named=()
+  local dir="$1" archive key binary link target metadata status failed=false
+  local -A linked=() named=() extracting=()
   # Test binaries carry the build folder's source paths (CARGO_MANIFEST_DIR):
   # a real copy of this checkout there, not a link, since tests check their
   # paths' ancestry and compare canonical paths.
@@ -275,7 +278,26 @@ extract_archives() {
     mkdir -p "$RUN_DIR/archives/$key"
     "${RUST_TEST_NEXTEST:-cargo-nextest}" nextest run --archive-file "$archive" \
       --workspace-remap "$DATABASE_ARCHIVE_BUILD_ROOT/src" \
-      --extract-to "$RUN_DIR/archives/$key" -E 'none()' --no-tests=pass >/dev/null
+      --extract-to "$RUN_DIR/archives/$key" -E 'none()' --no-tests=pass \
+      >"$RUN_DIR/archives/$key.extract.log" 2>&1 &
+    extracting[$key]=$!
+  done
+  # Every extraction is waited for, so none still writes when this returns;
+  # each one's report follows in archive order.
+  for archive in "$dir"/*.tar.zst; do
+    key="$(basename "$archive" .tar.zst)"
+    status=0
+    wait "${extracting[$key]}" || status=$?
+    cat "$RUN_DIR/archives/$key.extract.log" >&2
+    rm -f -- "$RUN_DIR/archives/$key.extract.log"
+    if [ "$status" -ne 0 ]; then
+      echo "::error::the $key archive did not extract (status $status)" >&2
+      failed=true
+    fi
+  done
+  [ "$failed" = false ] || return 1
+  for archive in "$dir"/*.tar.zst; do
+    key="$(basename "$archive" .tar.zst)"
     # An integration test starts its package's binaries by their build
     # folder path (CARGO_BIN_EXE_*, fixed when it compiled, as idp's
     # rewrap_cli does), and may write to its CARGO_TARGET_TMPDIR: link each
@@ -377,9 +399,9 @@ cleanup() {
   if [ -n "$RUST_ARCHIVES" ]; then
     rm -rf -- "$DATABASE_ARCHIVE_BUILD_ROOT"
   fi
-  if [ -n "$IDP_SIGNING_KEK_DIR" ]; then
-    rm -rf -- "$IDP_SIGNING_KEK_DIR"
-  fi
+  # The idp keyring of this run, also when an idp lane prepared it in its
+  # own process.
+  rm -rf -- "${IDP_SIGNING_KEK_DIR:-$RUN_DIR/idp-signing-keks}"
   # Release the port range only after this run's services have stopped.
   if [ -n "$LANE_LOCK_PID" ]; then
     kill "$LANE_LOCK_PID" 2>/dev/null || true
@@ -929,102 +951,79 @@ run_database_lane() {
   esac
 }
 
-# At most this many lanes run at once by default on a metal guest. Six lanes
-# at the 1.5 GiB a lane was estimated to hold (its PostgreSQL and one test
-# process) are 9 GiB of a heavy guest's 13; a broker lane measured locally
-# held 85 MiB in PostgreSQL and 35 MiB in its test process. A finished lane's
-# PostgreSQL is removed, so only running lanes hold memory.
-readonly DATABASE_LANES_MEMORY_BOUND=6
+# At most this many database lanes run at once on a metal guest: all ten.
+# With all ten running (measured locally, 2026-10-26), their ten PostgreSQL
+# servers held 0.86-0.90 GiB and the runner with its test processes 1.2 GiB,
+# about 2.1 GiB of a heavy guest's 11.7; five at once held 1.1 GiB on CI
+# (main run 23934). A finished lane's PostgreSQL is removed, so only running
+# lanes hold memory.
+readonly DATABASE_LANES_MEMORY_BOUND=10
 
-run_database() {
-  local lane started status failed=false
-  local -A lane_url=() lane_rust_url=() lane_pid=() lane_started=() setup_pid=()
-  reset_schema
-  if [ -n "${RUST_DATABASE_ARCHIVES:-}" ]; then
-    extract_archives "$RUST_DATABASE_ARCHIVES"
-  else
-    build_database_suites
-  fi
-  if ! integration_postgres_lanes_available; then
-    log "database lanes run one after another against the explicit database"
-    for lane in "${DATABASE_LANES[@]}"; do
-      run_database_lane "$lane"
-    done
-    return 0
-  fi
-  # Every lane's PostgreSQL starts at once, after the extraction or build:
-  # one after another, then waiting, the nine took 24 s (main run 23329).
-  # Started before the extraction instead, their initialization slowed it
-  # from 41 to 68 s (PR run 23437).
-  lane_url[core]="$DATABASE_URL"
-  lane_rust_url[core]="$DATABASE_URL_RUST"
-  for lane in "${DATABASE_LANES[@]:1}"; do
+# start_lane_databases LANE...: the first lane uses the job's own database;
+# every other lane gets its own PostgreSQL beside it (on CI's job network, or
+# as another managed container locally), so no lane sees another's schema,
+# rows or roles. Their servers start at once and migrate at once. Sets the
+# caller's lane_url and lane_rust_url for each lane.
+start_lane_databases() {
+  local lane status failed=false
+  local -A setup_pid=()
+  lane_url[$1]="$DATABASE_URL"
+  lane_rust_url[$1]="$DATABASE_URL_RUST"
+  # One after another, then waiting, the database job's nine took 24 s (main
+  # run 23329). Started before the extraction instead, their initialization
+  # slowed it from 41 to 68 s (PR run 23437), so they start after it.
+  for lane in "${@:2}"; do
     integration_postgres_start_lane "$lane" background
     lane_url[$lane]="$INTEGRATION_POSTGRES_LANE_URL"
     lane_rust_url[$lane]="$INTEGRATION_POSTGRES_LANE_URL_RUST"
   done
   integration_postgres_wait_started
-  # Every lane's server migrates at once; one after another they took about
-  # 1.5 s each (run 22601).
-  for lane in "${DATABASE_LANES[@]:1}"; do
+  # One after another, the migrations took about 1.5 s each (run 22601).
+  for lane in "${@:2}"; do
     (
-      integration_postgres_wait_ready "${lane_url[$lane]}" "database lane $lane"
+      integration_postgres_wait_ready "${lane_url[$lane]}" "lane $lane"
       DATABASE_URL="${lane_url[$lane]}"
       DATABASE_URL_RUST="${lane_rust_url[$lane]}"
       reset_schema
-    ) >"$RUN_DIR/database-lane-$lane-setup.log" 2>&1 &
+    ) >"$RUN_DIR/lane-$lane-setup.log" 2>&1 &
     setup_pid[$lane]=$!
   done
-  for lane in "${DATABASE_LANES[@]:1}"; do
+  for lane in "${@:2}"; do
     status=0
     wait "${setup_pid[$lane]}" || status=$?
-    cat "$RUN_DIR/database-lane-$lane-setup.log"
+    cat "$RUN_DIR/lane-$lane-setup.log"
     if [ "$status" -ne 0 ]; then
-      echo "::error::database lane $lane did not migrate its PostgreSQL (status $status)"
+      echo "::error::lane $lane did not migrate its PostgreSQL (status $status)"
       failed=true
     fi
   done
-  [ "$failed" = false ] || return 1
-  # On a metal guest, the lanes share the job's part of the host
-  # (CODEWIRE_CI_CPU_SHARE, cpu-share.sh): each lane is a test process and
-  # its own PostgreSQL, which creates and migrates a database for each test.
-  # Unbounded, four lanes at once oversubscribed the guest and the same lane
-  # took twice as long from one run to the next. There, one lane per three
-  # cores of the share runs at once, at most DATABASE_LANES_MEMORY_BOUND,
-  # longest first, each with its part of the share as its test threads;
-  # CODEWIRE_CI_DATABASE_LANES_AT_ONCE sets the count instead. Elsewhere all
-  # lanes run at once.
-  local share at_once="${#DATABASE_LANES[@]}" lane_threads="" next=0 running=0 queue ended
-  share="$(ci_cpu_share)"
-  if [ -n "$share" ]; then
-    if [ -n "${CODEWIRE_CI_DATABASE_LANES_AT_ONCE:-}" ]; then
-      at_once="$CODEWIRE_CI_DATABASE_LANES_AT_ONCE"
-      if ! [[ "$at_once" =~ ^[1-9][0-9]?$ ]] || ((at_once > ${#DATABASE_LANES[@]})); then
-        echo "::error::CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to ${#DATABASE_LANES[@]}, not $at_once" >&2
-        return 2
-      fi
-    else
-      at_once=$((share / 3))
-      ((at_once >= 1)) || at_once=1
-      ((at_once <= DATABASE_LANES_MEMORY_BOUND)) || at_once="$DATABASE_LANES_MEMORY_BOUND"
-    fi
-    lane_threads=$((share / at_once))
-    ((lane_threads >= 2)) || lane_threads=2
-  fi
+  [ "$failed" = false ]
+}
+
+# run_lanes KIND AT_ONCE THREADS LANE...: runs run_KIND_lane LANE for every
+# lane, each in its own process against its own database (the caller's
+# lane_url and lane_rust_url), at most AT_ONCE at a time in the order given,
+# and with THREADS test threads each when THREADS is set. A lane's output
+# follows its end, under "=== KIND lane LANE ===", with its time as a
+# CODEWIRE_CI_PHASE line, and its own PostgreSQL is removed then, so it holds
+# no memory while the others run. Every lane runs to its end; this fails when
+# any lane failed.
+run_lanes() {
+  local kind="$1" at_once="$2" lane_threads="$3" lane started status failed=false
+  local next=0 running=0 queue ended
+  local -A lane_pid=() lane_started=()
+  shift 3
+  local -a order=("$@")
   # Each lane reports its name and status on this queue when it ends, so the
   # scheduler never waits on a lane the shell has already reaped: on Bash
   # 5.2, wait -n -p refused such a lane ("no such job") and named none.
-  queue="$(mktemp -d "$RUN_DIR/database-lanes.XXXXXX")"
+  queue="$(mktemp -d "$RUN_DIR/$kind-lanes.XXXXXX")"
   mkfifo "$queue/ended"
   exec {ended}<>"$queue/ended"
-  [ "$(printf '%s\n' "${DATABASE_LANE_ORDER[@]}" | sort)" = "$(printf '%s\n' "${DATABASE_LANES[@]}" | sort)" ] || {
-    echo '::error::DATABASE_LANE_ORDER must name every database lane once' >&2
-    return 2
-  }
-  log "database lanes: ${at_once} at a time${lane_threads:+, ${lane_threads} test threads each}: ${DATABASE_LANE_ORDER[*]}"
-  while ((next < ${#DATABASE_LANE_ORDER[@]} || running > 0)); do
-    while ((running < at_once && next < ${#DATABASE_LANE_ORDER[@]})); do
-      lane="${DATABASE_LANE_ORDER[$next]}"
+  log "$kind lanes: ${at_once} at a time${lane_threads:+, ${lane_threads} test threads each}: ${order[*]}"
+  while ((next < ${#order[@]} || running > 0)); do
+    while ((running < at_once && next < ${#order[@]})); do
+      lane="${order[$next]}"
       next=$((next + 1))
       lane_started[$lane]="$SECONDS"
       (
@@ -1038,8 +1037,8 @@ run_database() {
           if [ -n "$lane_threads" ]; then
             export RUST_TEST_THREADS="$lane_threads" NEXTEST_TEST_THREADS="$lane_threads"
           fi
-          run_database_lane "$lane"
-        ) >"$RUN_DIR/database-lane-$lane.log" 2>&1
+          "run_${kind}_lane" "$lane"
+        ) >"$RUN_DIR/$kind-lane-$lane.log" 2>&1
         printf '%s %s\n' "$lane" "$?" >"$queue/ended"
       ) &
       lane_pid[$lane]=$!
@@ -1047,26 +1046,76 @@ run_database() {
     done
     read -r lane status <&"$ended"
     [ -n "${lane_pid[$lane]:-}" ] || {
-      echo "::error::a database lane ended that this run did not start: $lane" >&2
+      echo "::error::a $kind lane ended that this run did not start: $lane" >&2
       return 2
     }
     wait "${lane_pid[$lane]}" 2>/dev/null || true
     unset 'lane_pid[$lane]'
     running=$((running - 1))
-    [ "$lane" = core ] || integration_postgres_stop_lane "$lane"
+    [ "${lane_url[$lane]}" = "$DATABASE_URL" ] || integration_postgres_stop_lane "$lane"
     started="${lane_started[$lane]}"
-    echo "=== database lane $lane ==="
-    cat "$RUN_DIR/database-lane-$lane.log"
-    printf 'CODEWIRE_CI_PHASE name=database-lane-%s seconds=%s status=%s\n' \
-      "$lane" "$((SECONDS - started))" "$status"
+    echo "=== $kind lane $lane ==="
+    cat "$RUN_DIR/$kind-lane-$lane.log"
+    printf 'CODEWIRE_CI_PHASE name=%s-lane-%s seconds=%s status=%s\n' \
+      "$kind" "$lane" "$((SECONDS - started))" "$status"
     if [ "$status" -ne 0 ]; then
-      echo "::error::database lane $lane failed with status $status"
+      echo "::error::$kind lane $lane failed with status $status"
       failed=true
     fi
   done
   exec {ended}>&-
   rm -rf -- "$queue"
   [ "$failed" = false ]
+}
+
+run_database() {
+  local lane
+  local -A lane_url=() lane_rust_url=()
+  reset_schema
+  if [ -n "${RUST_DATABASE_ARCHIVES:-}" ]; then
+    extract_archives "$RUST_DATABASE_ARCHIVES"
+  else
+    build_database_suites
+  fi
+  if ! integration_postgres_lanes_available; then
+    log "database lanes run one after another against the explicit database"
+    for lane in "${DATABASE_LANES[@]}"; do
+      run_database_lane "$lane"
+    done
+    return 0
+  fi
+  start_lane_databases "${DATABASE_LANES[@]}"
+  # On a metal guest, the lanes share the job's part of the host
+  # (CODEWIRE_CI_CPU_SHARE, cpu-share.sh): each lane is a test process and
+  # its own PostgreSQL, which creates and migrates a database for each test.
+  # A lane mostly waits on its server: five at once averaged 2 cores of the
+  # heavy share of 16 and peaked at 5.1 (main runs 23934 and 23971), about
+  # one core per lane at its peak. So one lane per core of the share runs at
+  # once, at most DATABASE_LANES_MEMORY_BOUND, longest first, each with its
+  # part of the share (at least two) as its test threads;
+  # CODEWIRE_CI_DATABASE_LANES_AT_ONCE sets the count instead. Elsewhere all
+  # lanes run at once.
+  local share at_once="${#DATABASE_LANES[@]}" lane_threads=""
+  share="$(ci_cpu_share)"
+  if [ -n "$share" ]; then
+    if [ -n "${CODEWIRE_CI_DATABASE_LANES_AT_ONCE:-}" ]; then
+      at_once="$CODEWIRE_CI_DATABASE_LANES_AT_ONCE"
+      if ! [[ "$at_once" =~ ^[1-9][0-9]?$ ]] || ((at_once > ${#DATABASE_LANES[@]})); then
+        echo "::error::CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to ${#DATABASE_LANES[@]}, not $at_once" >&2
+        return 2
+      fi
+    else
+      ((share >= at_once)) || at_once="$share"
+      ((at_once <= DATABASE_LANES_MEMORY_BOUND)) || at_once="$DATABASE_LANES_MEMORY_BOUND"
+    fi
+    lane_threads=$((share / at_once))
+    ((lane_threads >= 2)) || lane_threads=2
+  fi
+  [ "$(printf '%s\n' "${DATABASE_LANE_ORDER[@]}" | sort)" = "$(printf '%s\n' "${DATABASE_LANES[@]}" | sort)" ] || {
+    echo '::error::DATABASE_LANE_ORDER must name every database lane once' >&2
+    return 2
+  }
+  run_lanes database "$at_once" "$lane_threads" "${DATABASE_LANE_ORDER[@]}"
 }
 
 prepare_idp_keyring() {
@@ -1146,7 +1195,7 @@ start_nats() {
   docker rm -f "$NATS_CONTAINER" >/dev/null 2>&1 || true
   docker run -d --name "$NATS_CONTAINER" --pids-limit 2048 \
     "${docker_network_args[@]}" \
-    nats:2.12-alpine -js -m 8222 > "$RUN_DIR/nats.container"
+    "${INTEGRATION_NATS_IMAGE:-$INTEGRATION_NATS_PINNED_IMAGE}" -js -m 8222 > "$RUN_DIR/nats.container"
   touch "$RUN_DIR/nats.started"
   local _
   for _ in $(seq 1 30); do
@@ -1237,7 +1286,9 @@ build_service_suites() {
   fi
 }
 
-run_idp() {
+# The idp suites, in the order run_idp runs them against one database. In
+# lanes, each of the three idp lanes runs part of them against its own.
+run_idp_flow() {
   local logfile="$RUN_DIR/idp-db-flow.log"
   prepare_idp_keyring
 
@@ -1270,8 +1321,10 @@ run_idp() {
     return 1
   fi
   assert_passed_count "idp db_flow" "$logfile" 13
+}
 
-  logfile="$RUN_DIR/idp-session-inventory.log"
+run_idp_session_inventory() {
+  local logfile="$RUN_DIR/idp-session-inventory.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
     cargo_ci test --profile ci -p codewire-idp --test session_inventory -- --nocapture \
     | tee "$logfile"
@@ -1280,8 +1333,10 @@ run_idp() {
     return 1
   fi
   assert_passed_count "idp session inventory" "$logfile" 7
+}
 
-  logfile="$RUN_DIR/idp-two-factor-replacement.log"
+run_idp_two_factor() {
+  local logfile="$RUN_DIR/idp-two-factor-replacement.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
     cargo_ci test --profile ci -p codewire-idp --test two_factor_replacement -- --nocapture \
     | tee "$logfile"
@@ -1290,8 +1345,10 @@ run_idp() {
     return 1
   fi
   assert_passed_count "idp two-factor replacement" "$logfile" 11
+}
 
-  logfile="$RUN_DIR/idp-rewrap-cli.log"
+run_idp_rewrap_cli() {
+  local logfile="$RUN_DIR/idp-rewrap-cli.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
     cargo_ci test --profile ci -p codewire-idp --test rewrap_cli -- --nocapture \
     | tee "$logfile"
@@ -1300,7 +1357,13 @@ run_idp() {
     return 1
   fi
   assert_passed_count "idp rewrap CLI" "$logfile" 2
+}
 
+run_idp() {
+  run_idp_flow
+  run_idp_session_inventory
+  run_idp_two_factor
+  run_idp_rewrap_cli
 }
 
 run_coordinator() {
@@ -1889,10 +1952,76 @@ run_nats() {
   assert_passed_count "coordinator generated cross-replica smoke" "$logfile" 1
 }
 
+# The control plane's suites run in lanes when each can have its own
+# PostgreSQL, all at once: one after another, the idp suites alone took 85 s
+# of a 147 s job (main run 23934), and the job averaged 2 of its 8 cores.
+# Each lane keeps its suites in their order against its own freshly migrated
+# database, and each service it starts keeps its own port of the job's range
+# (idp, coordinator, billing and Temporal), so no lane shares a schema, a
+# row or a listener with another. The idp suites split three ways: the JWKS
+# check and db_flow (38 s), two_factor_replacement (37 s), and session
+# inventory with the rewrap CLI (8 s). The first lane runs against the job's
+# own database, and every other lane against a PostgreSQL of its own.
+readonly SERVICE_CONTROL_LANES=(
+  idp-two-factor # idp two-factor replacement
+  idp-flow       # idp JWKS readiness and db_flow
+  idp-sessions   # idp session inventory and the signing-key rewrap CLI
+  connect-auth   # the Connect auth matrix
+  billing        # the billing wire contract, then its Temporal workflow
+  coordinator    # the coordinator protocol auth matrix and wire contract
+)
+
+run_service_lane() {
+  case "$1" in
+    idp-flow) run_idp_flow ;;
+    idp-two-factor) run_idp_two_factor ;;
+    idp-sessions)
+      run_idp_session_inventory
+      run_idp_rewrap_cli
+      ;;
+    connect-auth) run_connect_auth_matrix ;;
+    billing)
+      run_billing
+      if selected service_temporal; then
+        run_billing_temporal
+      fi
+      ;;
+    coordinator) run_coordinator ;;
+    *) echo "::error::unknown service lane: $1"; return 2 ;;
+  esac
+}
+
+# The control-plane lanes this run's selection asks for, in lane order.
+service_control_lanes() {
+  local lane
+  for lane in "${SERVICE_CONTROL_LANES[@]}"; do
+    case "$lane" in
+      idp-*) selected service_idp || continue ;;
+      connect-auth) selected service_connectcore || continue ;;
+      billing) selected service_billing || continue ;;
+      coordinator) selected service_coordinator || continue ;;
+    esac
+    printf '%s\n' "$lane"
+  done
+}
+
+run_service_control_lanes() {
+  local -a lanes=()
+  local -A lane_url=() lane_rust_url=()
+  mapfile -t lanes < <(service_control_lanes)
+  [ "${#lanes[@]}" -gt 0 ] || return 0
+  start_lane_databases "${lanes[@]}"
+  run_lanes service "${#lanes[@]}" "" "${lanes[@]}"
+}
+
 run_services() {
   [ -z "$RUST_ARCHIVES" ] || extract_archives "$RUST_ARCHIVES"
   reset_schema
   build_selected_services
+  if [ "$MODE" = services-control ] && integration_postgres_lanes_available; then
+    run_service_control_lanes
+    return
+  fi
   selected service_idp && run_idp
   selected service_coordinator && run_coordinator
   selected service_billing && run_billing

@@ -30,9 +30,14 @@ impl Fixture {
         let mut url = url::Url::parse(&admin_url)?;
         url.set_path(&name);
         codewire_server_core::migrate::ensure_schema(url.as_str()).await?;
+        // The acquire timeout is a hang guard, not a bound under test: a
+        // handler that waited on itself for its last connection still fails
+        // when it ends, but opening a connection on a loaded database host
+        // may take longer than a few seconds. With 3 s, the ten database
+        // lanes at once failed a fixture query here ("pool timed out").
         let pool = PgPoolOptions::new()
             .max_connections(connections)
-            .acquire_timeout(Duration::from_secs(3))
+            .acquire_timeout(Duration::from_secs(60))
             .connect(url.as_str())
             .await?;
         let fixture = Self { admin, name, pool };

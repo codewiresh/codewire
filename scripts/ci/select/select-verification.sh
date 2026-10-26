@@ -946,10 +946,12 @@ if [ "$event_selected" = false ]; then
 
     case "$path" in
       scripts/ci/verify/run-integration-verification.sh|scripts/ci/verify/integration-lane.py|\
-      scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh)
+      scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
+      scripts/ci/setup/load-fixture-images.sh|scripts/ci/tests/test-load-fixture-images.sh)
         # These files own database execution and every service's integration
-        # harness, including the PostgreSQL both run against (#3198). Their
-        # changes must qualify both executable families.
+        # harness, including the PostgreSQL both run against (#3198) and how
+        # its image reaches the job. Their changes must qualify both
+        # executable families.
         select_token policy
         select_token database
         select_services

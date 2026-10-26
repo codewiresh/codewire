@@ -497,6 +497,21 @@ done
 : > "$work/active/$$"
 active=("$work/active/"*)
 printf '%s\n' "${#active[@]}" >> "$work/running"
+# With DB_TRACE_BARRIER=N, each lane's first execution (its database's first)
+# waits until N executions are active, for at most 30 s, so lanes the
+# scheduler runs at once are all seen at once, however slowly they start.
+if [ -n "${DB_TRACE_BARRIER:-}" ]; then
+  url="${TEST_DATABASE_URL:-${DATABASE_URL:-}}"
+  if mkdir "$work/first-$(printf '%s' "$url" | sha256sum | cut -c1-16)" 2>/dev/null; then
+    for _ in $(seq 1 300); do
+      active=("$work/active/"*)
+      [ "${#active[@]}" -lt "$DB_TRACE_BARRIER" ] || break
+      sleep 0.1
+    done
+    active=("$work/active/"*)
+    printf '%s\n' "${#active[@]}" >> "$work/running"
+  fi
+fi
 [ -z "${DB_TRACE_HOLD:-}" ] || sleep "$DB_TRACE_HOLD"
 rm -f -- "$work/active/$$"
 IFS=$'\x1f'
@@ -607,7 +622,7 @@ cases = {
     'instant': pool.submit(run_case, extra={'INTEGRATION_DOCKER_NETWORK': 'codewire-fixture-net',
                                             'DB_TRACE_RM_DELAY': '0.3'}),
     'shared': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12'}),
-    'heavy': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '16'}),
+    'heavy': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '16', 'DB_TRACE_BARRIER': '10'}),
     'wide': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '40'}),
     'small': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '2'}),
     'serial': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': '1'}),
@@ -694,31 +709,34 @@ assert instant.returncode == 0 and '[product-integration] green' in instant.stdo
 for lane in lane_order:
     assert f'=== database lane {lane} ===' in instant.stdout, lane
 check_lanes(instant_commands, instant_environment)
-# On a metal guest with a CPU share of 12, one lane per three cores runs at
-# once (four) and each lane's tests get its part of the share; every lane
-# still runs every suite.
+# On a metal guest, one lane per core of the share runs at once, at most the
+# memory bound of ten, and each lane's tests get its part of the share, at
+# least two threads; every lane still runs every suite. A share of 12 runs all
+# ten at once.
 shared, shared_commands, shared_environment = cases['shared'].result()
 assert shared.returncode == 0 and '[product-integration] green' in shared.stdout, shared.stdout + shared.stderr
-assert 'database lanes: 4 at a time, 3 test threads each: ' + lane_start_order in shared.stdout, shared.stdout
+assert 'database lanes: 10 at a time, 2 test threads each: ' + lane_start_order in shared.stdout, shared.stdout
 check_lanes(shared_commands, shared_environment)
-assert peak_running(shared_environment) <= 4, 'more than four lanes ran at once'
+assert peak_running(shared_environment) <= 10, 'more than ten lanes ran at once'
 lane_executions = [command for command in shared_commands
                    if command['args'][0] == 'test' and '--no-run' not in command['args']]
-assert lane_executions and all(command['threads'] == '3' for command in lane_executions), lane_executions[:2]
+assert lane_executions and all(command['threads'] == '2' for command in lane_executions), lane_executions[:2]
 for lane in lane_order:
     assert f'CODEWIRE_CI_PHASE name=database-lane-{lane} seconds=' in shared.stdout, lane
-# A heavy guest's share of 16 runs five at once; a share of 40 is held to the
-# memory bound of six; a share of 2 still runs one lane, with two threads.
+# A heavy guest's share of 16 runs all ten at once, as does a share of 40,
+# with more threads each; a share of 2 runs two at a time, with two threads.
 heavy, heavy_commands, heavy_environment = cases['heavy'].result()
-assert heavy.returncode == 0 and 'database lanes: 5 at a time, 3 test threads each: ' in heavy.stdout, heavy.stdout
-assert peak_running(heavy_environment) <= 5, 'more than five lanes ran at once'
+assert heavy.returncode == 0 and 'database lanes: 10 at a time, 2 test threads each: ' in heavy.stdout, heavy.stdout
+# Each lane's first suite waits for the others (DB_TRACE_BARRIER): all ten
+# ran at once.
+assert peak_running(heavy_environment) == 10, 'the heavy share did not run all ten lanes at once'
 check_lanes(heavy_commands, heavy_environment)
 wide, _, wide_environment = cases['wide'].result()
-assert wide.returncode == 0 and 'database lanes: 6 at a time, 6 test threads each: ' in wide.stdout, wide.stdout
-assert peak_running(wide_environment) <= 6, 'more lanes ran at once than the memory bound'
+assert wide.returncode == 0 and 'database lanes: 10 at a time, 4 test threads each: ' in wide.stdout, wide.stdout
+assert peak_running(wide_environment) <= 10, 'more lanes ran at once than the memory bound'
 small, _, small_environment = cases['small'].result()
-assert small.returncode == 0 and 'database lanes: 1 at a time, 2 test threads each: ' in small.stdout, small.stdout
-assert peak_running(small_environment) == 1, 'lanes overlapped on a share of two'
+assert small.returncode == 0 and 'database lanes: 2 at a time, 2 test threads each: ' in small.stdout, small.stdout
+assert peak_running(small_environment) <= 2, 'more than two lanes ran on a share of two'
 # One at a time on request; an invalid count fails before any lane runs.
 serial, serial_commands, serial_environment = cases['serial'].result()
 assert serial.returncode == 0 and 'database lanes: 1 at a time, 12 test threads each' in serial.stdout, serial.stdout
@@ -763,13 +781,15 @@ PYTHON
 
 # Every integration PostgreSQL gets the same server settings (#3198) and the
 # same digest-pinned image: the ones this file starts above, ci.yaml's "Start
-# integration Postgres" steps, and the Kind PostgreSQL, so a guest whose
-# Docker disk holds that image pulls nothing.
+# integration Postgres" steps, and the Kind PostgreSQL. In CI each job's
+# "Make the fixture images present" step makes that image present first, from
+# the guest's store, its warm cache or the pin (load-fixture-images.sh), and
+# the job's PostgreSQL runs what it named.
 [ "${INTEGRATION_POSTGRES_SERVER_ARGS[*]}" = '-c max_locks_per_transaction=1024' ]
 [[ "$INTEGRATION_POSTGRES_PINNED_IMAGE" =~ ^docker\.io/library/postgres:17-alpine@sha256:[0-9a-f]{64}$ ]]
 grep -qxF "  KIND_POSTGRES_IMAGE='$INTEGRATION_POSTGRES_PINNED_IMAGE'" "$ROOT/scripts/ci/verify/kind/common.sh" ||
   { echo 'the integration PostgreSQL image is not the Kind PostgreSQL pin' >&2; exit 1; }
-python3 - "$ROOT/.gitea/workflows/ci.yaml" "$INTEGRATION_POSTGRES_PINNED_IMAGE ${INTEGRATION_POSTGRES_SERVER_ARGS[*]}" <<'PYTHON'
+python3 - "$ROOT/.gitea/workflows/ci.yaml" "${INTEGRATION_POSTGRES_SERVER_ARGS[*]}" <<'PYTHON'
 import re
 import sys
 
@@ -780,7 +800,16 @@ for step in steps:
     run = step.replace("\\\n", " ")
     command = re.search(r"docker run -d [^\n]*", run)
     assert command, "a Postgres step has no docker run"
-    assert " ".join(command.group(0).split()).endswith(f" {server_args}"), command.group(0)
+    assert " ".join(command.group(0).split()).endswith(f' "${{INTEGRATION_POSTGRES_IMAGE:?}}" {server_args}'), command.group(0)
+# Each job makes its fixture images present right before its PostgreSQL
+# starts, under the same condition, with the guest's warm cache.
+loads = re.findall(r"      - name: Make the fixture images present\n        if: ([^\n]*)\n"
+                   r"        env:\n          CODEWIRE_TOOL_CACHE: [^\n]*/target/ci-rust-cargo-home/codewire-tools\n"
+                   r"        run: scripts/ci/setup/load-fixture-images.sh ([a-z ]+)\n\n"
+                   r"      - name: Start integration Postgres\n        if: ([^\n]*)\n", workflow)
+assert len(loads) == len(steps), f"{len(steps)} Postgres steps but {len(loads)} fixture image steps before them"
+assert all(load == start for load, _, start in loads), loads
+assert sorted(images for _, images, _ in loads) == ["postgres", "postgres", "postgres nats"], loads
 PYTHON
 
 # The archive extractor links each archive's non-test binaries at their build
@@ -850,5 +879,121 @@ if extract_case '[{"name":"codewire-idp","path":"debug/codewire-idp"}]' outside 
 fi
 grep -q 'was built in /elsewhere/target, not a target folder of' "$TMP/extract-outside/out.log" ||
   { echo 'the extractor gave no reason for the refused target folder' >&2; exit 1; }
+
+# The control plane's suites run in lanes when each can have its own
+# PostgreSQL: the selected lanes all at once, each against its own database
+# (the first against the job's own), each keeping its suites in order, and
+# every lane runs to its end when another fails. The scheduler and the lane
+# databases are the runner's own; the suites are traced stand-ins.
+service_lanes_case() {
+  local name="$1" selection="$2" failing="${3:-}" runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
+  local case_dir="$TMP/service-lanes-$name" fn_name
+  mkdir -p "$case_dir/active"
+  # The variables and functions are the eval'd runner's.
+  # shellcheck disable=SC2034,SC2329
+  (
+    set -euo pipefail
+    eval "$(awk '/^readonly SERVICE_CONTROL_LANES=\(/,/^\)/' "$runner")"
+    for fn_name in log selected start_lane_databases run_lanes run_service_lane \
+        service_control_lanes run_service_control_lanes; do
+      eval "$(awk "/^${fn_name}\\(\\) \\{/,/^\\}/" "$runner")"
+    done
+    reset_case
+    INTEGRATION_POSTGRES_SOURCE=explicit
+    INTEGRATION_DOCKER_NETWORK=codewire-fixture-net
+    RUN_DIR="$case_dir/run"
+    mkdir -p "$RUN_DIR"
+    SELECTION="$selection"
+    DATABASE_URL='postgres://codewire:codewire@codewire-integration-postgres:5432/codewire?sslmode=disable'
+    DATABASE_URL_RUST='postgres://codewire:codewire@codewire-integration-postgres:5432/codewire'
+    lanes_expected="$(service_control_lanes | wc -l)"
+    reset_schema() { printf 'migrate %s\n' "$DATABASE_URL_RUST" >> "$case_dir/trace"; }
+    # A suite records its database; a lane's first suite waits until every
+    # lane is running (at most 30 s), so lanes run at once are seen at once.
+    suite() {
+      local active
+      printf 'start %s %s\n' "$1" "$DATABASE_URL_RUST" >> "$case_dir/trace"
+      : > "$case_dir/active/$1"
+      if mkdir "$case_dir/first-$(printf '%s' "$DATABASE_URL_RUST" | sha256sum | cut -c1-16)" 2>/dev/null; then
+        for _ in $(seq 1 300); do
+          active=("$case_dir/active/"*)
+          [ "${#active[@]}" -lt "$lanes_expected" ] || break
+          sleep 0.1
+        done
+      fi
+      active=("$case_dir/active/"*)
+      printf '%s\n' "${#active[@]}" >> "$case_dir/running"
+      rm -f -- "$case_dir/active/$1"
+      [ "$1" != "$failing" ] || return 1
+      printf 'end %s %s\n' "$1" "$DATABASE_URL_RUST" >> "$case_dir/trace"
+    }
+    run_idp_flow() { suite idp_flow; }
+    run_idp_two_factor() { suite idp_two_factor; }
+    run_idp_session_inventory() { suite idp_session_inventory; }
+    run_idp_rewrap_cli() { suite idp_rewrap_cli; }
+    run_connect_auth_matrix() { suite connect_auth; }
+    run_billing() { suite billing; }
+    run_billing_temporal() { suite billing_temporal; }
+    run_coordinator() { suite coordinator; }
+    : > "$case_dir/trace"
+    run_service_control_lanes
+  ) > "$case_dir/out" 2>&1
+}
+service_lane_url() {
+  printf 'postgres://codewire:codewire@codewire-integration-postgres-%s:5432/codewire' "$1"
+}
+service_lane_check() {
+  local case_dir="$TMP/service-lanes-$1" lane="$2" url="$3" suites="$4" expected actual
+  expected="$(for suite_name in $suites; do printf 'start %s %s\nend %s %s\n' "$suite_name" "$url" "$suite_name" "$url"; done)"
+  actual="$(grep -F " $url" "$case_dir/trace" | grep -v '^migrate ' || true)"
+  [ "$actual" = "$expected" ] ||
+    { printf 'service lane %s ran:\n%s\nnot:\n%s\n' "$lane" "$actual" "$expected" >&2; exit 1; }
+  grep -qxF "=== service lane $lane ===" "$case_dir/out" ||
+    { echo "service lane $lane printed no heading" >&2; exit 1; }
+  grep -q "^CODEWIRE_CI_PHASE name=service-lane-$lane seconds=[0-9]* status=0$" "$case_dir/out" ||
+    { echo "service lane $lane reported no phase" >&2; exit 1; }
+}
+full='|valid:v3|service_idp|service_coordinator|service_billing|service_connectcore|service_temporal|complete|'
+service_lanes_case full "$full" ||
+  { cat "$TMP/service-lanes-full/out" >&2; echo 'the control-plane lanes failed' >&2; exit 1; }
+grep -qF '[product-integration] service lanes: 6 at a time: idp-two-factor idp-flow idp-sessions connect-auth billing coordinator' \
+  "$TMP/service-lanes-full/out" || { cat "$TMP/service-lanes-full/out" >&2; echo 'the control-plane lanes did not all start at once' >&2; exit 1; }
+[ "$(sort -n "$TMP/service-lanes-full/running" | tail -n 1)" = 6 ] ||
+  { echo 'the six control-plane lanes did not run at the same time' >&2; exit 1; }
+service_lane_check full idp-two-factor 'postgres://codewire:codewire@codewire-integration-postgres:5432/codewire' idp_two_factor
+service_lane_check full idp-flow "$(service_lane_url idp-flow)" idp_flow
+service_lane_check full idp-sessions "$(service_lane_url idp-sessions)" 'idp_session_inventory idp_rewrap_cli'
+service_lane_check full connect-auth "$(service_lane_url connect-auth)" connect_auth
+service_lane_check full billing "$(service_lane_url billing)" 'billing billing_temporal'
+service_lane_check full coordinator "$(service_lane_url coordinator)" coordinator
+# Every lane after the first migrated its own PostgreSQL, which was removed
+# when the lane ended.
+for lane in idp-flow idp-sessions connect-auth billing coordinator; do
+  grep -qxF "migrate $(service_lane_url "$lane")" "$TMP/service-lanes-full/trace" ||
+    { echo "service lane $lane did not migrate its database" >&2; exit 1; }
+  grep -q "^run -d --rm --name codewire-product-postgres-[^ ]*-lane-$lane .*--network-alias codewire-integration-postgres-$lane " \
+    "$TMP/docker.log" || { echo "service lane $lane got no PostgreSQL of its own" >&2; exit 1; }
+  grep -q "^rm -f codewire-product-postgres-[^ ]*-lane-$lane$" "$TMP/docker.log" ||
+    { echo "service lane $lane's PostgreSQL was not removed" >&2; exit 1; }
+done
+[ "$(grep -c '^migrate ' "$TMP/service-lanes-full/trace")" -eq 5 ] ||
+  { echo 'the first control-plane lane did not use the job database' >&2; exit 1; }
+# A narrow selection runs only its lanes; billing's Temporal workflow runs
+# only when Temporal is selected.
+service_lanes_case billing '|valid:v3|service_billing|complete|' ||
+  { cat "$TMP/service-lanes-billing/out" >&2; echo 'the billing lane failed' >&2; exit 1; }
+grep -qF '[product-integration] service lanes: 1 at a time: billing' "$TMP/service-lanes-billing/out" ||
+  { echo 'a billing-only selection ran other lanes' >&2; exit 1; }
+service_lane_check billing billing 'postgres://codewire:codewire@codewire-integration-postgres:5432/codewire' billing
+! grep -q '^migrate \|-lane-' "$TMP/service-lanes-billing/trace" "$TMP/docker.log" ||
+  { echo 'a single control-plane lane started a PostgreSQL of its own' >&2; exit 1; }
+# A failing lane fails the plane, and every other lane still runs to its end.
+if service_lanes_case failed "$full" idp_two_factor; then
+  echo 'a failed control-plane lane passed' >&2; exit 1
+fi
+grep -qF '::error::service lane idp-two-factor failed' "$TMP/service-lanes-failed/out" ||
+  { cat "$TMP/service-lanes-failed/out" >&2; echo 'the failed control-plane lane was not reported' >&2; exit 1; }
+[ "$(grep -c '^end ' "$TMP/service-lanes-failed/trace")" -eq 7 ] ||
+  { echo 'the other control-plane lanes did not run to their end' >&2; exit 1; }
 
 printf '[test-integration-postgres] hermetic selection, prerequisite, scope, and cleanup cases passed\n'

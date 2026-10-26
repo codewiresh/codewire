@@ -663,6 +663,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-standard-families.sh
   scripts/ci/tests/test-warm-rust-cache.sh
   scripts/ci/tests/test-install-cargo-nextest.sh
+  scripts/ci/tests/test-load-fixture-images.sh
   scripts/ci/tests/test-build-runner-measure.sh
   scripts/ci/tests/test-bound-cargo-jobs.sh
   scripts/ci/tests/test-build-once.sh

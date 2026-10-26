@@ -315,7 +315,7 @@ start_nats() {
   docker run -d --name "$NATS_CONTAINER" --pids-limit 2048 \
     -p "127.0.0.1::4222" \
     -p "127.0.0.1::8222" \
-    nats:2.12-alpine -js -m 8222 \
+    "$INTEGRATION_NATS_PINNED_IMAGE" -js -m 8222 \
     > "$RUN_DIR/nats.container"
   STARTED_NATS_CONTAINER=1
 

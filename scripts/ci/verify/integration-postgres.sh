@@ -16,9 +16,22 @@ INTEGRATION_POSTGRES_SERVER_ARGS=(-c max_locks_per_transaction=1024)
 # The PostgreSQL image every integration server runs, by digest: the same pin
 # as the Kind PostgreSQL (KIND_POSTGRES_IMAGE in kind/common.sh) and as
 # ci.yaml's "Start integration Postgres" steps (test-integration-postgres.sh
-# keeps the three equal), so a guest whose Docker disk already holds it pulls
-# nothing. INTEGRATION_POSTGRES_IMAGE overrides it.
+# keeps the three equal). The digest is its linux/amd64 manifest.
+# INTEGRATION_POSTGRES_IMAGE overrides it: on CI, the image
+# load-fixture-images.sh made present.
 INTEGRATION_POSTGRES_PINNED_IMAGE='docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee'
+# The NATS server the runtime plane starts: 2.12.15 on Alpine, the release the
+# floating 2.12-alpine tag named when it was pinned (2026-10-26; published
+# 2026-08-12). The digest is its multi-platform index, so a workstation of
+# either architecture runs it. INTEGRATION_NATS_IMAGE overrides it.
+INTEGRATION_NATS_PINNED_IMAGE='docker.io/library/nats:2.12.15-alpine@sha256:b270f5e2428354c0335612694d7dd2fb588148e567a5757fdff325ef9c9332e6'
+# Each pinned image's ID in Docker's overlay2 image store, which a metal
+# guest's daemon runs on: the digest of its linux/amd64 image config.
+# load-fixture-images.sh accepts a kept archive of an image only when it loads
+# to that ID; docker load checks every layer against the config, whose digest
+# the ID is.
+INTEGRATION_POSTGRES_PINNED_ID='sha256:1bea307dfb3ee30541a7acf7de14b58bcd6948da98e5d31a04c627c4d35ec64b'
+INTEGRATION_NATS_PINNED_ID='sha256:138f6ccc9fd034c76ac3cee7faed6c5fdb874fd333f477b91f52b4052f6669ce'
 
 integration_postgres_init() {
   # Each run names its containers for its own job and process: the concurrent
