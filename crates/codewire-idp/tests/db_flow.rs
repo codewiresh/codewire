@@ -83,12 +83,18 @@ fn database_url_with_application_name(database_url: &str, application_name: &str
     url.into()
 }
 
+/// A hang guard for the test's own waits (a worker reaching its lock barrier,
+/// a completion path finishing): 3 s was spent by a loaded CI guest before
+/// the worker reached the lock (PR run 23391, "completion-path worker did not
+/// reach its lock barrier"). A deadlock still fails, after this long.
+const HANG: std::time::Duration = std::time::Duration::from_secs(60);
+
 async fn wait_for_application_lock_blocker(
     pool: &PgPool,
     application_name: &str,
     blocker: i32,
 ) -> i32 {
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    tokio::time::timeout(HANG, async {
         loop {
             let pids: Vec<i32> = sqlx::query_scalar(
                 "SELECT pid FROM pg_catalog.pg_stat_activity WHERE application_name = $1",
@@ -118,7 +124,7 @@ async fn wait_for_application_lock_blocker(
 }
 
 async fn wait_for_pid_lock_blocker(pool: &PgPool, waiter: i32, blocker: i32) {
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    tokio::time::timeout(HANG, async {
         loop {
             let blocked: bool = sqlx::query_scalar(
                 "SELECT $2::integer = ANY(pg_catalog.pg_blocking_pids($1::integer))",
@@ -169,7 +175,7 @@ async fn spawn_account_disable(
 }
 
 async fn finish_completion_path_task(task: tokio::task::JoinHandle<()>, context: &str) {
-    tokio::time::timeout(std::time::Duration::from_secs(3), task)
+    tokio::time::timeout(HANG, task)
         .await
         .expect(context)
         .expect(context);
@@ -2283,11 +2289,10 @@ async fn account_access_completion_paths_serialize_in_both_orders_against_postgr
             wait_for_pid_lock_blocker(&pool, disable_pid, update_pid).await;
 
             row_locker.commit().await.expect("release device row lock");
-            let update_result =
-                tokio::time::timeout(std::time::Duration::from_secs(3), update_task)
-                    .await
-                    .expect("device approval deadlocked")
-                    .expect("device approval task panicked");
+            let update_result = tokio::time::timeout(HANG, update_task)
+                .await
+                .expect("device approval deadlocked")
+                .expect("device approval task panicked");
             assert!(
                 update_result.is_ok(),
                 "approval first should complete before disablement purges it: {update_result:?}"
@@ -2328,11 +2333,10 @@ async fn account_access_completion_paths_serialize_in_both_orders_against_postgr
                 .expect("disable device user");
             disable.commit().await.expect("commit device disablement");
 
-            let update_result =
-                tokio::time::timeout(std::time::Duration::from_secs(3), update_task)
-                    .await
-                    .expect("device approval did not finish after disablement")
-                    .expect("device approval task panicked");
+            let update_result = tokio::time::timeout(HANG, update_task)
+                .await
+                .expect("device approval did not finish after disablement")
+                .expect("device approval task panicked");
             assert!(
                 update_result.is_err(),
                 "disablement first bound a pending device grant"
@@ -2436,11 +2440,10 @@ async fn account_access_completion_paths_serialize_in_both_orders_against_postgr
                 .commit()
                 .await
                 .expect("release authorization row lock");
-            let update_result =
-                tokio::time::timeout(std::time::Duration::from_secs(3), update_task)
-                    .await
-                    .expect("authorization completion deadlocked")
-                    .expect("authorization completion task panicked");
+            let update_result = tokio::time::timeout(HANG, update_task)
+                .await
+                .expect("authorization completion deadlocked")
+                .expect("authorization completion task panicked");
             assert!(
                 update_result.is_ok(),
                 "completion first should finish before disablement purges it: {update_result:?}"
@@ -2484,11 +2487,10 @@ async fn account_access_completion_paths_serialize_in_both_orders_against_postgr
                 .await
                 .expect("commit authorization disablement");
 
-            let update_result =
-                tokio::time::timeout(std::time::Duration::from_secs(3), update_task)
-                    .await
-                    .expect("authorization completion did not finish after disablement")
-                    .expect("authorization completion task panicked");
+            let update_result = tokio::time::timeout(HANG, update_task)
+                .await
+                .expect("authorization completion did not finish after disablement")
+                .expect("authorization completion task panicked");
             assert!(
                 update_result.is_err(),
                 "disablement first bound a pending authorization request"
@@ -2602,11 +2604,10 @@ async fn account_access_completion_paths_serialize_in_both_orders_against_postgr
                 .commit()
                 .await
                 .expect("release two-factor row lock");
-            let (status, _, cookie) =
-                tokio::time::timeout(std::time::Duration::from_secs(3), validate_task)
-                    .await
-                    .expect("two-factor validation deadlocked")
-                    .expect("two-factor validation task panicked");
+            let (status, _, cookie) = tokio::time::timeout(HANG, validate_task)
+                .await
+                .expect("two-factor validation deadlocked")
+                .expect("two-factor validation task panicked");
             assert_eq!(status, 401, "invalid synthetic TOTP should fail normally");
             assert!(
                 cookie.is_none(),
@@ -2652,11 +2653,10 @@ async fn account_access_completion_paths_serialize_in_both_orders_against_postgr
                 .await
                 .expect("commit two-factor disablement");
 
-            let (status, _, cookie) =
-                tokio::time::timeout(std::time::Duration::from_secs(3), validate_task)
-                    .await
-                    .expect("two-factor validation did not finish after disablement")
-                    .expect("two-factor validation task panicked");
+            let (status, _, cookie) = tokio::time::timeout(HANG, validate_task)
+                .await
+                .expect("two-factor validation did not finish after disablement")
+                .expect("two-factor validation task panicked");
             assert_ne!(
                 status, 200,
                 "disablement first completed a two-factor login"

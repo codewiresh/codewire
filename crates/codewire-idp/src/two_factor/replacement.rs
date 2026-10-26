@@ -27,7 +27,7 @@
 //! one for this browser. Nothing can read the pending secret again.
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
 use axum::routing::post;
@@ -46,12 +46,34 @@ use super::{
     record_failed_attempt, record_totp_step, reset_failed_attempts,
 };
 use crate::auth_session::{
-    bounded_transaction, cookie_digest, create_session_in, exact_origin, hex_id,
-    lock_account_actor, log_audit_in, private, request_info, session_cookie_string, unavailable,
-    valid_id, verify_password,
+    STATEMENT_CEILING, bounded_transaction_within, cookie_digest, create_session_in, exact_origin,
+    hex_id, lock_account_actor, log_audit_in, private, request_info, session_cookie_string,
+    unavailable, valid_id, verify_password,
 };
 
 const REQUEST_BUDGET: Duration = Duration::from_secs(5);
+
+/// The replacement routes' time bounds. Production never sets them, so the
+/// routes use [`TwoFactorReplacementBounds::default`]: 5 s per request and the
+/// shared 4 s statement ceiling. A test whose subject is neither bound adds
+/// longer ones as a router `Extension`, a hang guard a stalled CI slot cannot
+/// spend: two concurrent proofs, each checking a password and waiting on the
+/// account lock, answered 503 on a loaded guest (PR runs 23429, 23873), as
+/// session inventory did (#3311). A client cannot set a request extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TwoFactorReplacementBounds {
+    pub request: Duration,
+    pub statement: Duration,
+}
+
+impl Default for TwoFactorReplacementBounds {
+    fn default() -> Self {
+        Self {
+            request: REQUEST_BUDGET,
+            statement: STATEMENT_CEILING,
+        }
+    }
+}
 const BODY_LIMIT_BYTES: usize = 2_048;
 const REPLACEMENT_TTL_SECS: i64 = 10 * 60;
 const MAX_CONFIRM_ATTEMPTS: i32 = 5;
@@ -313,6 +335,7 @@ async fn store_recovery_codes(
 /// the locks and must be the one that was verified.
 async fn fresh_proof(
     state: &ReplacementState,
+    statement: Duration,
     digest: &str,
     request: &ProofRequest,
 ) -> Result<(Transaction<'static, Postgres>, Proof), AppError> {
@@ -350,7 +373,7 @@ async fn fresh_proof(
     };
 
     let mut tx = state.pool.begin().await.map_err(|_| unavailable())?;
-    bounded_transaction(&mut tx).await?;
+    bounded_transaction_within(&mut tx, statement).await?;
     // users FOR UPDATE, then this session FOR UPDATE, then a clock check.
     let (user_id, session) = lock_account_actor(&mut tx, digest, &request.account_id, true).await?;
     let (email, enrolled, locked): (String, bool, bool) = sqlx::query_as(
@@ -468,6 +491,7 @@ fn proof_failure(proof: Proof, operation: &'static str) -> Outcome {
 
 async fn prepare_start(
     state: &ReplacementState,
+    statement: Duration,
     headers: &HeaderMap,
     request: Result<Json<ProofRequest>, JsonRejection>,
 ) -> Result<Prepared, AppError> {
@@ -475,7 +499,7 @@ async fn prepare_start(
     let digest = cookie_digest(headers)?;
     let Json(request) = request.map_err(|_| malformed())?;
     validate_proof_request(&request)?;
-    let (mut tx, proof) = fresh_proof(state, &digest, &request).await?;
+    let (mut tx, proof) = fresh_proof(state, statement, &digest, &request).await?;
     let account = match proof {
         Proof::Accepted(account) => account,
         failure => return Ok((tx, proof_failure(failure, "replace"))),
@@ -523,6 +547,7 @@ async fn prepare_start(
 
 async fn prepare_confirm(
     state: &ReplacementState,
+    statement: Duration,
     headers: &HeaderMap,
     request: Result<Json<ConfirmRequest>, JsonRejection>,
 ) -> Result<Prepared, AppError> {
@@ -539,7 +564,7 @@ async fn prepare_confirm(
     }
 
     let mut tx = state.pool.begin().await.map_err(|_| unavailable())?;
-    bounded_transaction(&mut tx).await?;
+    bounded_transaction_within(&mut tx, statement).await?;
     let (user_id, session) =
         lock_account_actor(&mut tx, &digest, &request.account_id, true).await?;
     let (email, enrolled): (String, bool) = sqlx::query_as(
@@ -670,6 +695,7 @@ async fn retire_replacement(
 
 async fn prepare_regenerate(
     state: &ReplacementState,
+    statement: Duration,
     headers: &HeaderMap,
     request: Result<Json<ProofRequest>, JsonRejection>,
 ) -> Result<Prepared, AppError> {
@@ -677,7 +703,7 @@ async fn prepare_regenerate(
     let digest = cookie_digest(headers)?;
     let Json(request) = request.map_err(|_| malformed())?;
     validate_proof_request(&request)?;
-    let (mut tx, proof) = fresh_proof(state, &digest, &request).await?;
+    let (mut tx, proof) = fresh_proof(state, statement, &digest, &request).await?;
     let account = match proof {
         Proof::Accepted(account) => account,
         failure => return Ok((tx, proof_failure(failure, "regenerate"))),
@@ -697,30 +723,42 @@ async fn prepare_regenerate(
 
 async fn start(
     State(state): State<ReplacementState>,
+    bounds: Option<Extension<TwoFactorReplacementBounds>>,
     headers: HeaderMap,
     request: Result<Json<ProofRequest>, JsonRejection>,
 ) -> Response {
-    let prepared = tokio::time::timeout(REQUEST_BUDGET, prepare_start(&state, &headers, request));
+    let bounds = bounds.map(|Extension(bounds)| bounds).unwrap_or_default();
+    let prepared = tokio::time::timeout(
+        bounds.request,
+        prepare_start(&state, bounds.statement, &headers, request),
+    );
     finish(&state, &headers, prepared.await).await
 }
 
 async fn confirm(
     State(state): State<ReplacementState>,
+    bounds: Option<Extension<TwoFactorReplacementBounds>>,
     headers: HeaderMap,
     request: Result<Json<ConfirmRequest>, JsonRejection>,
 ) -> Response {
-    let prepared = tokio::time::timeout(REQUEST_BUDGET, prepare_confirm(&state, &headers, request));
+    let bounds = bounds.map(|Extension(bounds)| bounds).unwrap_or_default();
+    let prepared = tokio::time::timeout(
+        bounds.request,
+        prepare_confirm(&state, bounds.statement, &headers, request),
+    );
     finish(&state, &headers, prepared.await).await
 }
 
 async fn regenerate(
     State(state): State<ReplacementState>,
+    bounds: Option<Extension<TwoFactorReplacementBounds>>,
     headers: HeaderMap,
     request: Result<Json<ProofRequest>, JsonRejection>,
 ) -> Response {
+    let bounds = bounds.map(|Extension(bounds)| bounds).unwrap_or_default();
     let prepared = tokio::time::timeout(
-        REQUEST_BUDGET,
-        prepare_regenerate(&state, &headers, request),
+        bounds.request,
+        prepare_regenerate(&state, bounds.statement, &headers, request),
     );
     finish(&state, &headers, prepared.await).await
 }
@@ -986,6 +1024,17 @@ mod tests {
         } else {
             r#"{"account_id":"owner","password":"synthetic-password","proof":"123456"}"#
         }
+    }
+
+    #[test]
+    fn production_bounds_are_five_second_requests_and_four_second_statements() {
+        assert_eq!(
+            TwoFactorReplacementBounds::default(),
+            TwoFactorReplacementBounds {
+                request: Duration::from_secs(5),
+                statement: Duration::from_secs(4),
+            }
+        );
     }
 
     #[tokio::test]

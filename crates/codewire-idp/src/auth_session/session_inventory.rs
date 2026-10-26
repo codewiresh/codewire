@@ -18,8 +18,9 @@ use super::{SessionAuthState, clear_cookie_string, format_time};
 
 const PAGE_SIZE: usize = 50;
 const REQUEST_BUDGET: Duration = Duration::from_secs(5);
-/// The server statement and idle-in-transaction ceiling of these routes.
-const STATEMENT_CEILING: Duration = Duration::from_secs(4);
+/// The server statement and idle-in-transaction ceiling of these routes, and
+/// of two-factor replacement, which shares their transaction boundary.
+pub(crate) const STATEMENT_CEILING: Duration = Duration::from_secs(4);
 
 /// The session inventory routes' time bounds. Production never sets them, so
 /// the routes use [`SessionInventoryBounds::default`]: 5 s per request and a
@@ -374,13 +375,7 @@ async fn validate_actor(
     }
 }
 
-pub(crate) async fn bounded_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-) -> Result<(), AppError> {
-    bounded_transaction_within(tx, STATEMENT_CEILING).await
-}
-
-async fn bounded_transaction_within(
+pub(crate) async fn bounded_transaction_within(
     tx: &mut Transaction<'_, Postgres>,
     ceiling: Duration,
 ) -> Result<(), AppError> {

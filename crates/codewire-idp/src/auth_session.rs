@@ -69,8 +69,8 @@ mod session_inventory;
 // private transaction. Two-factor replacement reuses it unchanged.
 pub use session_inventory::SessionInventoryBounds;
 pub(crate) use session_inventory::{
-    actor as lock_account_actor, bounded_transaction, cookie_digest, exact_origin, private,
-    unavailable, valid_id,
+    STATEMENT_CEILING, actor as lock_account_actor, bounded_transaction_within, cookie_digest,
+    exact_origin, private, unavailable, valid_id,
 };
 
 /// Web session lifetime: 8 hours (`auth.SessionDuration`, 28800s).

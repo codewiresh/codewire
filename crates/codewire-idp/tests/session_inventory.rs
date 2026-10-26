@@ -675,10 +675,13 @@ async fn reciprocal_session_revocation_has_no_deadlock_and_only_one_winner() {
 }
 
 /// How long the actor stays valid once the request is parked at the owner
-/// lock. It must outlast only the few statements between that gate and the
-/// row-lock wait; the barrier then holds the request about this long, inside
-/// the route's 4 s server statement ceiling.
-const ACTOR_LIFETIME_AT_GATE: &str = "1 second";
+/// lock. It must outlast the statements and commits between that gate and the
+/// row-lock wait: on a loaded guest whose disk took seconds per commit, 1 s
+/// did not, and the request found the actor expired before its lock wait (PR
+/// run 23391). The barrier then holds the request about this long, which the
+/// test's [`HANG`] bounds allow. PostgreSQL's own clock judges expiry, so this
+/// is a margin, not a seam: no test clock reaches it.
+const ACTOR_LIFETIME_AT_GATE: &str = "5 seconds";
 
 #[tokio::test]
 async fn unchanged_actor_or_target_lock_wait_cannot_extend_expired_authority() {

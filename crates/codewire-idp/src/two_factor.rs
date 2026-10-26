@@ -33,7 +33,7 @@ use crate::auth_session::{
 
 mod replacement;
 
-pub use replacement::replacement_router;
+pub use replacement::{TwoFactorReplacementBounds, replacement_router};
 
 /// TOTP period in seconds. Steps are `unix_time / TOTP_PERIOD_SECS`.
 const TOTP_PERIOD_SECS: u64 = 30;

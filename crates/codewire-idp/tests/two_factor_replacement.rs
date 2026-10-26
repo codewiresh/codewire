@@ -18,6 +18,30 @@ const PASSWORD: &str = "Synthetic!Pass1234";
 const START: &str = "/api/auth/two-factor/replace/start";
 const CONFIRM: &str = "/api/auth/two-factor/replace/confirm";
 const REGENERATE: &str = "/api/auth/two-factor/recovery-codes/regenerate";
+/// A hang guard, not a bound under test: the replacement routes get it in
+/// place of their 5 s request and 4 s statement bounds, and the test's own
+/// waits for a request to reach a lock use it. On a loaded CI guest two
+/// concurrent proofs spent the production bounds and answered 503 (PR runs
+/// 23429, 23873); `production_bounds_are_five_second_requests_and_four_second_statements`
+/// pins those bounds.
+const HANG: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The replacement routes as production mounts them, with [`HANG`] for bounds.
+fn replacement_app(pool: PgPool) -> Router {
+    codewire_idp::two_factor::replacement_router(
+        pool,
+        SESSION_SECRET.into(),
+        true,
+        ORIGIN.into(),
+        codewire_email::EmailClient::disabled(),
+    )
+    .layer(axum::Extension(
+        codewire_idp::two_factor::TwoFactorReplacementBounds {
+            request: HANG,
+            statement: HANG,
+        },
+    ))
+}
 
 async fn pool() -> Option<PgPool> {
     let Ok(url) = std::env::var("DATABASE_URL") else {
@@ -57,13 +81,7 @@ fn apps(pool: &PgPool) -> Apps {
             true,
             AuthState { pool: pool.clone() },
         )
-        .merge(codewire_idp::two_factor::replacement_router(
-            pool.clone(),
-            SESSION_SECRET.into(),
-            true,
-            ORIGIN.into(),
-            codewire_email::EmailClient::disabled(),
-        )),
+        .merge(replacement_app(pool.clone())),
     }
 }
 
@@ -1066,7 +1084,7 @@ async fn named_pool(application_name: &str) -> PgPool {
 
 /// Wait until the named application's backend is blocked by a lock.
 async fn wait_until_blocked(pool: &PgPool, application_name: &str) {
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    tokio::time::timeout(HANG, async {
         loop {
             let blocked: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
@@ -1123,13 +1141,7 @@ async fn a_sign_in_completing_during_a_replacement_cannot_keep_its_session() {
         true,
         AuthState { pool: pool.clone() },
     );
-    let confirm_app = codewire_idp::two_factor::replacement_router(
-        named_pool(&confirm_name).await,
-        SESSION_SECRET.into(),
-        true,
-        ORIGIN.into(),
-        codewire_email::EmailClient::disabled(),
-    );
+    let confirm_app = replacement_app(named_pool(&confirm_name).await);
 
     // Hold the account lock so both requests queue on it in a known order.
     let mut holder = pool.begin().await.unwrap();
