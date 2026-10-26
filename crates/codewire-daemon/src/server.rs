@@ -403,11 +403,24 @@ where
             // A local VM keeps Claude Code's login for the same workload user
             // as Codex's native home; a hosted daemon keeps its own.
             let owner = logins.codex_home.owner();
+            let codex = crate::codex_home::login::login_writer(&config, logins.codex_home.clone());
+            let claude = crate::claude_home::login::login_writer(&config, owner);
+            // A login no writer keeps for this boot and owner is not live
+            // material: clear one left on disk.
+            let mut claude_home =
+                crate::claude_home::ClaudeHome::new(&config.home_root, &config.workspace_root);
+            if let Some(owner) = owner {
+                claude_home = claude_home.for_owner(owner);
+            }
+            crate::login_cleanup::clear_unkept_logins(
+                &logins.codex_home,
+                &claude_home,
+                codex.is_some(),
+                claude.is_some(),
+            );
             (
-                crate::codex_home::login::login_writer(&config, logins.codex_home)
-                    .map(|writer| (writer, logins.check_period)),
-                crate::claude_home::login::login_writer(&config, owner)
-                    .map(|writer| (writer, logins.check_period)),
+                codex.map(|writer| (writer, logins.check_period)),
+                claude.map(|writer| (writer, logins.check_period)),
             )
         }
         None => (None, None),

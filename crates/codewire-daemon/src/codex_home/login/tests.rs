@@ -1261,3 +1261,28 @@ fn a_start_removes_leftover_temporaries_that_could_hold_a_token() {
     assert_eq!(fs::read(fixture.auth()).unwrap(), delivered);
     assert_eq!(fixture.writer().remove_leftovers().unwrap(), 0);
 }
+
+/// A Codewire login that no writer keeps for this boot and owner is cleared
+/// when the daemon starts, as a stopped or carried state disk may still hold
+/// one. A login a writer keeps, and the user's own, stay.
+#[test]
+fn a_login_no_writer_keeps_is_cleared_at_start() {
+    let fixture = NativeFixture::new();
+    let claude = crate::claude_home::ClaudeHome::new(
+        fixture.root.path().join("claude-home"),
+        Path::new("/workspace"),
+    );
+    fixture
+        .writer()
+        .apply(delivery(CREDENTIAL, 1, T0 + 86_400), T0)
+        .unwrap();
+    let auth = fixture.home().auth_path();
+    crate::login_cleanup::clear_unkept_logins(&fixture.home(), &claude, true, true);
+    assert!(auth.exists(), "a login its writer keeps stays");
+    crate::login_cleanup::clear_unkept_logins(&fixture.home(), &claude, false, true);
+    assert!(!auth.exists());
+
+    fs::write(&auth, users_login()).unwrap();
+    crate::login_cleanup::clear_unkept_logins(&fixture.home(), &claude, false, false);
+    assert_eq!(fs::read(&auth).unwrap(), users_login());
+}

@@ -85,6 +85,8 @@ pub const BOOT_STAGE_PATH: &str = "/state/codewire/boot-stage";
 pub const NETWORK_STATUS_PATH: &str = "/state/codewire/network-status";
 pub const NONCE_PATH: &str = "/state/codewire/nonce";
 pub const POWEROFF_MARKER_PATH: &str = "/state/codewire/poweroff.accepted";
+/// The environment whose delivered agent logins this state disk may hold.
+pub const LOGIN_ENVIRONMENT_PATH: &str = "/state/codewire/login-environment";
 pub const IDENTITY_MARKER: &str = "CWIDENTITY1";
 pub const NONCE_MARKER: &str = "CWNONCE1";
 pub const NETWORK_MARKER: &str = "CWNETWORK2 isolated-tun";
@@ -761,14 +763,27 @@ pub async fn run_daemon() -> Result<()> {
     };
     let codex_home =
         codewire_daemon::codex_home::CodexHome::native(PERSISTENT_CODEX_HOME_PATH, workload);
+    let claude_home = codewire_daemon::claude_home::ClaudeHome::new(
+        &plan.identity.home,
+        Path::new(WORKSPACE_PATH),
+    )
+    .for_owner(workload);
+    // A state disk carried into another environment may hold the source's
+    // delivered logins, which an active writer would keep until they lapse.
+    // The first boot as a new environment clears both before any writer or
+    // workload runs.
+    clear_logins_on_environment_change(
+        Path::new(LOGIN_ENVIRONMENT_PATH),
+        seed.vm_id(),
+        &codex_home,
+        &claude_home,
+    );
     // As a hosted daemon does before it listens: while the Anthropic client is
     // selected, Claude Code's onboarding is marked complete and the workspace
     // trusted, so it starts on the managed credential without its login
     // picker; unless the sign-in form is selected, Codewire's Claude login is
     // removed. Here for the workload user.
-    codewire_daemon::claude_home::ClaudeHome::new(&plan.identity.home, Path::new(WORKSPACE_PATH))
-        .for_owner(workload)
-        .prepare(config.managed_credential_clients);
+    claude_home.prepare(config.managed_credential_clients);
     let daemon = codewire_daemon::serve_native_grpc_with_incoming(
         config,
         codex_home,
@@ -6124,6 +6139,47 @@ fn read_nonce(path: &Path) -> Result<String> {
     Ok(validate_nonce(nonce)?.to_owned())
 }
 
+/// Clear both agents' Codewire logins unless this state disk last booted as
+/// `environment_id` (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
+/// exceptions"). A failure is logged and never stops the daemon; it is retried
+/// at the next boot.
+fn clear_logins_on_environment_change(
+    marker: &Path,
+    environment_id: uuid::Uuid,
+    codex: &codewire_daemon::codex_home::CodexHome,
+    claude: &codewire_daemon::claude_home::ClaudeHome,
+) {
+    if let Err(error) = sync_login_environment(marker, environment_id, || {
+        codewire_daemon::login_cleanup::clear_logins(codex, claude)
+    }) {
+        eprintln!(
+            "codewire guest: delivered logins were not cleared for this environment: {error:#}"
+        );
+    }
+}
+
+/// Run `clear` unless `marker` records `environment_id`, then record it. An
+/// absent, unreadable or other marker means the disk last booted as another
+/// environment, or before the marker existed. The marker is written only after
+/// `clear` succeeded. Returns whether `clear` ran.
+fn sync_login_environment(
+    marker: &Path,
+    environment_id: uuid::Uuid,
+    clear: impl FnOnce() -> io::Result<()>,
+) -> Result<bool> {
+    let expected = environment_id.hyphenated().to_string();
+    let recorded = match fs::symlink_metadata(marker) {
+        Ok(metadata) if metadata.file_type().is_file() => fs::read_to_string(marker).ok(),
+        _ => None,
+    };
+    if recorded.as_deref() == Some(expected.as_str()) {
+        return Ok(false);
+    }
+    clear().context("clear delivered agent logins")?;
+    write_durable(marker, expected.as_bytes(), 0o600).context("record the login environment")?;
+    Ok(true)
+}
+
 fn write_durable(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     ensure!(path.is_absolute(), "durable output path must be absolute");
     let parent = path
@@ -6338,6 +6394,59 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn delivered_logins_are_cleared_once_per_environment() {
+        let temporary = TempDir::new().unwrap();
+        let marker = temporary.path().join("login-environment");
+        let source = uuid::Uuid::from_u128(1);
+        let fork = uuid::Uuid::from_u128(2);
+        let clears = std::cell::Cell::new(0);
+        let clear = || {
+            clears.set(clears.get() + 1);
+            Ok(())
+        };
+
+        // A disk from before the marker existed, then the same environment again.
+        assert!(sync_login_environment(&marker, source, clear).unwrap());
+        assert!(!sync_login_environment(&marker, source, clear).unwrap());
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            source.hyphenated().to_string()
+        );
+        // The same disk booted as another environment, such as a fork.
+        assert!(sync_login_environment(&marker, fork, clear).unwrap());
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            fork.hyphenated().to_string()
+        );
+        assert_eq!(clears.get(), 2);
+    }
+
+    #[test]
+    fn a_failed_clear_is_retried_and_an_odd_marker_is_not_trusted() {
+        let temporary = TempDir::new().unwrap();
+        let marker = temporary.path().join("login-environment");
+        let environment = uuid::Uuid::from_u128(3);
+
+        let failed = sync_login_environment(&marker, environment, || {
+            Err(io::Error::other("clear failed"))
+        });
+        assert!(failed.is_err());
+        assert!(
+            !marker.exists(),
+            "the marker is recorded only after a clear"
+        );
+        assert!(sync_login_environment(&marker, environment, || Ok(())).unwrap());
+
+        // A marker that is a symlink to the right text is not trusted.
+        let elsewhere = temporary.path().join("elsewhere");
+        fs::write(&elsewhere, environment.hyphenated().to_string()).unwrap();
+        fs::remove_file(&marker).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &marker).unwrap();
+        assert!(sync_login_environment(&marker, environment, || Ok(())).unwrap());
+        assert!(fs::symlink_metadata(&marker).unwrap().file_type().is_file());
     }
 
     fn test_workspace_plan() -> WorkspacePlan {

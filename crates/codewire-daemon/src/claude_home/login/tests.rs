@@ -1141,3 +1141,24 @@ fn a_start_removes_leftover_temporaries_that_could_hold_a_token() {
     // Without `~/.claude` there is nothing to remove.
     assert_eq!(Fixture::new().writer().remove_leftovers().unwrap(), 0);
 }
+
+/// A Codewire login that no writer keeps for this boot and owner is cleared
+/// when the daemon starts, as a stopped or carried state disk may still hold
+/// one. A login a writer keeps, every other member, and the user's own login
+/// stay.
+#[test]
+fn a_login_no_writer_keeps_is_cleared_at_start() {
+    let fixture = Fixture::new();
+    fixture.store(&unrelated());
+    fixture.writer().apply(first(), T0).unwrap();
+    let home = ClaudeHome::new(fixture.home(), Path::new("/workspace"));
+    let codex = crate::codex_home::CodexHome::at(fixture.root.path().join("codex-home"));
+    crate::login_cleanup::clear_unkept_logins(&codex, &home, true, true);
+    assert_eq!(fixture.json()[CLAUDE_LOGIN_KEY]["accessToken"], ACCESS);
+    crate::login_cleanup::clear_unkept_logins(&codex, &home, true, false);
+    assert_eq!(fixture.json(), unrelated());
+
+    fixture.store(&users_login());
+    crate::login_cleanup::clear_unkept_logins(&codex, &home, false, false);
+    assert_eq!(fixture.json(), users_login());
+}

@@ -26,6 +26,8 @@ pub mod hosted_state;
 mod lifecycle;
 pub mod local_transport;
 #[cfg(target_os = "linux")]
+pub mod login_cleanup;
+#[cfg(target_os = "linux")]
 pub mod platform_managed;
 #[cfg(unix)]
 mod private_files;
