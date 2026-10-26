@@ -18,6 +18,10 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use support::{DaemonHarness, HarnessClient};
 
+/// Bounds a wait for a session's output to reach the daemon's disk, so a hang
+/// fails instead of stalling the run. It is never the expected duration.
+const OUTPUT_HANG: Duration = Duration::from_secs(300);
+
 #[tokio::test]
 async fn generated_session_client_authenticates_and_requires_ready_daemon() {
     let harness = DaemonHarness::spawn_with_auth_token("daemon-test-token").await;
@@ -1479,9 +1483,10 @@ async fn wait_for_output(
     minimum_offset: u64,
 ) -> v1::SessionRecord {
     // Output is persisted as the session writes it, with no deadline of its
-    // own; on a loaded host that can take longer than it does alone. The
-    // bound only catches a hang.
-    tokio::time::timeout(Duration::from_secs(30), async {
+    // own: the daemon syncs each frame to disk, so 8 MiB of output is hundreds
+    // of fsyncs, and on a contended disk each can take a second (main run
+    // 24679 passed 30 s). The bound only catches a hang.
+    tokio::time::timeout(OUTPUT_HANG, async {
         loop {
             let session = get_session(client, session_id).await;
             if session.output_end_offset >= minimum_offset {
