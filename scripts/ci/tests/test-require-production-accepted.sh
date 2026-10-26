@@ -79,6 +79,9 @@ case "$path" in
     elif [ "$mode" = scheduled_run ]; then
       # Forgejo lists a scheduled run with its registering push's event.
       runs="$runs,$(run 500 push "$release_created" main schedule)"
+    elif [ "$mode" = dispatched_run ]; then
+      # Forgejo lists a dispatched run with an empty event (run 24110).
+      runs="$runs,$(run 500 '' "$release_created" main workflow_dispatch)"
     elif [ "$mode" = push_run ]; then
       runs="$runs,$(run 500 push "$release_created" main push)"
     elif [ "$mode" != no_release_run ]; then
@@ -173,6 +176,9 @@ check_case rerun_dispatch rerun_dispatch accepted "in deploy-prod run 500"
 check_case built_pair built_pair accepted "in deploy-prod run 500"
 # A scheduled release counts; a run of any other push does not.
 check_case scheduled_run scheduled_run accepted "in deploy-prod run 500"
+# A dispatched recovery counts as Forgejo lists it: no event, trigger_event
+# workflow_dispatch.
+check_case dispatched_run dispatched_run accepted "in deploy-prod run 500"
 check_case push_run push_run refused
 # The release run is found past a page of later scheduled ticks; a run from
 # before the tag was signed is never its release, and the older release's run

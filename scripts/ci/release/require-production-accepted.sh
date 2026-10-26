@@ -74,7 +74,8 @@ readonly reads_from=$((signed_at - 3600))
 # run_ids: the release's candidate runs, newest first: successful deploy-prod
 # runs on main, dispatched, or scheduled (Forgejo lists a scheduled run with
 # the event of the push that registered its schedule, and trigger_event
-# schedule), created no earlier than reads_from.
+# schedule; a dispatched run as event "" and trigger_event workflow_dispatch),
+# created no earlier than reads_from.
 run_ids() {
   local page
   for ((page = 1; page <= 20; page++)); do
@@ -95,7 +96,8 @@ for run in sorted(runs, key=lambda run: run["id"], reverse=True):
         continue
     if (run.get("workflow_id") == "deploy-prod.yaml" and run.get("status") == "success"
             and run.get("prettyref") == "main"
-            and (run.get("event") == "workflow_dispatch" or run.get("trigger_event") == "schedule")):
+            and (run.get("event") == "workflow_dispatch"
+                 or run.get("trigger_event") in ("workflow_dispatch", "schedule"))):
         print(run["id"])
 # Stop at a page that reaches back before the tag, or the last page.
 sys.exit(1 if older or len(runs) < 50 else 0)
