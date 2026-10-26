@@ -35,6 +35,9 @@ hash -r
 # Fixtures trace the runner with fake tools; never start the workstation's
 # real compiler-cache server from one.
 export CODEWIRE_LOCAL_RUST_CACHE=off
+# The job id names containers (integration-postgres.sh); the cases below set
+# it themselves, never inheriting the CI job's own (Policy runs this test).
+unset GITHUB_JOB
 
 # shellcheck source=scripts/ci/verify/integration-postgres.sh
 source "$ROOT/scripts/ci/verify/integration-postgres.sh"
@@ -176,6 +179,10 @@ first_container="$(bash -c 'GITHUB_RUN_ID=7; source "$1"; integration_postgres_i
 second_container="$(bash -c 'GITHUB_RUN_ID=7; source "$1"; integration_postgres_init; printf %s "$INTEGRATION_POSTGRES_CONTAINER"' _ "$ROOT/scripts/ci/verify/integration-postgres.sh")"
 [[ "$first_container" == codewire-product-postgres-7-* ]]
 [ "$first_container" != "$second_container" ]
+# Two jobs of one run on one Docker daemon (main's warm VM) never share a name,
+# even when their processes have the same PID.
+database_container="$(bash -c 'GITHUB_RUN_ID=7 GITHUB_JOB=database; source "$1"; integration_postgres_init; printf %s "$INTEGRATION_POSTGRES_CONTAINER"' _ "$ROOT/scripts/ci/verify/integration-postgres.sh")"
+[[ "$database_container" == codewire-product-postgres-7-database-* ]]
 
 reset_case
 INTEGRATION_POSTGRES_HOST_PORT=55432

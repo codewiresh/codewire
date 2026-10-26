@@ -54,6 +54,7 @@ secrets; credentials come from OpenBao.
 | `MIRROR_PRIVATE_CONTENT_PATTERNS` | Newline-separated patterns the public-mirror content scan refuses | `source-approval.yml`, `mirror-github.yaml` |
 | `CODEWIRE_WARM_CACHE_EPOCH` | Optional; changing it starts a new warm Rust cache | warm cache selection |
 | `CODEWIRE_IN_JOB_BUILD_SHA` | Optional; a commit whose image builds run in the job instead of trusted BuildKit | image build recovery |
+| `CODEWIRE_CI_ARCHIVE_STORE_TRUSTED` | Optional; where a main push's build publishes its test archives and its test jobs fetch them. Unset, it is main's archive store service; on main's warm VM it is `file:///ci-handoff`, a directory both runners of the VM mount | build once on a main push |
 
 A script that needs one of these and does not get it stops with an error that
 names the variable. It never falls back to a built-in site.
@@ -78,6 +79,21 @@ push and the untrusted one otherwise.
 | `CODEWIRE_CI_RUNNER_TRUSTED_KIND` | The same Kind jobs on a main push | `ci.yaml` Kind jobs on a main push |
 | `CODEWIRE_CI_RUNNER_TRUSTED_LIGHT` | Protected publication, signing and release jobs, which hold OIDC roles and build on the trusted BuildKit builder | Dev and Production delivery, support images, release, mirror |
 | `CODEWIRE_CI_RUNNER_MACOS` | Native macOS builds | the macOS `cw`, the VZ helper and the runtime pack |
+
+Main's warm VM (infra#1534, private-docs `ci-warm-persistent-vms.md`, step 1)
+is one persistent Kata VM reserved for main pushes. It runs two stock Forgejo
+runners: `ci-vm-main-build` takes the build job, one at a time, in its
+persistent build folder, and `ci-vm-main` takes every other job of the run,
+several at once on one Docker daemon. Moving main onto it is a variable flip:
+`CODEWIRE_CI_RUNNER_TRUSTED_BUILD=ci-vm-main-build`,
+`CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM=ci-vm-main`,
+`CODEWIRE_CI_RUNNER_TRUSTED_HEAVY=ci-vm-main` and
+`CODEWIRE_CI_ARCHIVE_STORE_TRUSTED=file:///ci-handoff`. Setting them back to
+`ci-trusted-build`, `ci-trusted-medium`, `ci-trusted-heavy` and unset restores
+the per-job guests, once their capacity is back (infra). On the VM, jobs that
+keep a warm Rust cache take a seat named after the job
+(`select-warm-rust-cache.sh`), and jobs sharing the Docker daemon name their
+containers after their run and job.
 
 A missing variable never selects another runner. The job waits on a label
 named `unset-<variable>` that no runner advertises, so the queue shows which

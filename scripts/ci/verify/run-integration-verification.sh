@@ -61,7 +61,7 @@ else
   NATS_MONITOR_URL="http://127.0.0.1:${NATS_MONITOR_PORT}/healthz"
 fi
 TEMPORAL_CLI_VERSION="${TEMPORAL_CLI_VERSION:-1.5.0}"
-NATS_CONTAINER="codewire-product-nats-${GITHUB_RUN_ID:-local}-$$"
+NATS_CONTAINER="codewire-product-nats-${GITHUB_RUN_ID:-local}-${GITHUB_JOB:+$GITHUB_JOB-}$$"
 IDP_SIGNING_KEK_DIR=""
 BILLING_FIXTURE_LOADED=false
 

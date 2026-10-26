@@ -21,9 +21,11 @@ INTEGRATION_POSTGRES_SERVER_ARGS=(-c max_locks_per_transaction=1024)
 INTEGRATION_POSTGRES_PINNED_IMAGE='docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee'
 
 integration_postgres_init() {
-  # Each run names its containers for its own process: the concurrent lanes of
-  # one merge qualification share a run ID, and on CI also a Docker daemon.
-  INTEGRATION_POSTGRES_CONTAINER="codewire-product-postgres-${GITHUB_RUN_ID:-local}-$$"
+  # Each run names its containers for its own job and process: the concurrent
+  # lanes of one merge qualification share a run ID, and on CI the jobs of one
+  # run share a Docker daemon on main's warm VM (infra#1534), where two jobs'
+  # processes can have the same PID.
+  INTEGRATION_POSTGRES_CONTAINER="codewire-product-postgres-${GITHUB_RUN_ID:-local}-${GITHUB_JOB:+$GITHUB_JOB-}$$"
   INTEGRATION_POSTGRES_MANAGED=false
   INTEGRATION_POSTGRES_SOURCE=""
   INTEGRATION_POSTGRES_LANE_CONTAINERS=()

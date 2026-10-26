@@ -218,4 +218,51 @@ for name, job in jobs.items():
 assert wired == expected, sorted(wired ^ expected)
 WIRING
 
-printf '[test-warm-rust-cache] main and pull requests only, weekly and epoch wipes, LRU and Cargo home caps, free-space floor: OK\n'
+# Main's warm VM: concurrent jobs share one filesystem, each in a seat named
+# after its job and locked for the job's life; the next step finds it through
+# GITHUB_ENV, a second concurrent job of the same name takes the next seat,
+# and a seat comes back free once its holder (the job container) is gone.
+seats="$work/seats"
+mkdir -p "$seats"
+seat_run() {
+  local job="$1"
+  shift
+  rm -rf "$work/workspace"
+  mkdir -p "$work/workspace/target"
+  : > "$work/github-env"
+  env -i PATH="$PATH" HOME="$work" GITHUB_WORKSPACE="$work/workspace" GITHUB_ENV="$work/github-env" \
+    CODEWIRE_CI_WARM_SEATS="$seats" WARM_CACHE_SEATS_ANY_FS=1 \
+    WARM_CACHE_DF="$work/fake/df" FAKE_DF_ROOT="$seats" FAKE_DF_SIZE_KIB=1000000000 FAKE_DF_OTHER_KIB=0 \
+    GITHUB_JOB="$job" GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main "$@" "$SELECT"
+}
+kill_holders() {
+  local holder
+  for holder in "$seats"/*.holder; do
+    [[ -f "$holder" ]] || continue
+    kill "$(cat "$holder")" 2>/dev/null || true
+    rm -f -- "$holder"
+  done
+}
+trap 'kill_holders; rm -rf "$work"' EXIT
+out="$(seat_run rust-checks)"; grep -qF '[warm-rust-cache] seat rust-checks-1' <<<"$out" || fail "the first job did not take seat 1: $out"
+grep -qxF "WARM_CACHE_ROOT=$seats/rust-checks-1" "$work/github-env" || fail 'the seat was not passed to the later steps'
+[[ "$(readlink "$work/workspace/target/ci-cache")" == "$seats/rust-checks-1/v1/ci-cache" ]] || fail 'the target is not linked into the seat'
+out="$(seat_run rust-checks)"; grep -qF '[warm-rust-cache] seat rust-checks-2' <<<"$out" || fail "a concurrent job shared a busy seat: $out"
+out="$(seat_run standard)"; grep -qF '[warm-rust-cache] seat standard-1' <<<"$out" || fail "another job did not take its own seat: $out"
+kill_holders
+sleep 0.2
+out="$(seat_run rust-checks)"; grep -qF '[warm-rust-cache] seat rust-checks-1' <<<"$out" || fail "a seat whose job ended stayed busy: $out"
+kill_holders
+# Seats unused for longer than the idle bound go when free; a held one stays.
+touch -d '5 days ago' "$seats/standard-1" "$seats/rust-checks-2"
+exec 8>"$seats/rust-checks-2.lock"
+flock -n 8 || fail 'could not hold a seat in the test'
+out="$(seat_run tooling)"
+exec 8>&-
+grep -qF 'removed the seat standard-1' <<<"$out" || fail "an idle seat was kept: $out"
+[[ ! -e "$seats/standard-1" && -d "$seats/rust-checks-2" ]] || fail 'the idle sweep removed a held seat or kept a free one'
+kill_holders
+# Without the seats variable (every other runner) nothing changes.
+grep -q 'CODEWIRE_CI_WARM_SEATS' "$FINISH" && fail 'the finish step should read the seat from WARM_CACHE_ROOT only'
+
+printf '[test-warm-rust-cache] main and pull requests only, weekly and epoch wipes, LRU and Cargo home caps, free-space floor, warm-VM seats: OK\n'

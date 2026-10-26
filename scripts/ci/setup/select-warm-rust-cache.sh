@@ -28,7 +28,82 @@
 #   step fail (main run 19967: a week's growth filled a smaller guest cache).
 # CI never runs `cargo login`, so no registry credential is ever written to the
 # persistent Cargo home.
+#
+# Main's warm VM (infra#1534, step 1 of the warm-VM design) runs several jobs
+# at once on one persistent filesystem, which its runner names in
+# CODEWIRE_CI_WARM_SEATS. There each job takes a seat: a cache directory named
+# after the job (GITHUB_JOB-1, then -2 while -1 is busy), so Rust checks always
+# starts from the last Rust checks build. The seat's lock is held for the
+# job's whole life by a detached process in the job container, which dies with
+# it, so no two running jobs ever share a seat. The later steps find the seat
+# through WARM_CACHE_ROOT in GITHUB_ENV. Seats nobody used for
+# WARM_CACHE_SEAT_MAX_IDLE_DAYS (3) are removed when free.
 set -euo pipefail
+
+: "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"
+
+skip() {
+  printf '[warm-rust-cache] not used: %s\n' "$*"
+  exit 0
+}
+
+case "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" in
+  'push|refs/heads/main' | pull_request\|*) ;;
+  *) skip 'not a push to main or a pull request' ;;
+esac
+
+# take_seat SEATS: print the seat this job holds, taking the first free one.
+take_seat() {
+  local seats="$1" job="${GITHUB_JOB:-job}" n seat
+  [[ "$job" =~ ^[A-Za-z0-9_-]{1,100}$ ]] || {
+    printf '[warm-rust-cache] ERROR: invalid job id %q\n' "$job" >&2
+    exit 1
+  }
+  for n in 1 2 3 4; do
+    seat="$seats/$job-$n"
+    mkdir -p "$seat"
+    # fd 9 stays open in a detached child after this script exits, so the
+    # lock lasts until the job container is removed.
+    exec 9>"$seat.lock"
+    if flock -n 9; then
+      setsid sleep infinity </dev/null >/dev/null 2>&1 &
+      echo "$!" > "$seat.holder"
+      exec 9>&-
+      touch "$seat"
+      printf '%s\n' "$seat"
+      return 0
+    fi
+    exec 9>&-
+  done
+  printf '[warm-rust-cache] ERROR: every seat of %s is busy\n' "$job" >&2
+  exit 1
+}
+
+# remove_idle_seats SEATS: seats unused for WARM_CACHE_SEAT_MAX_IDLE_DAYS go,
+# but only when no job holds them.
+remove_idle_seats() {
+  local seats="$1" seat days="${WARM_CACHE_SEAT_MAX_IDLE_DAYS:-3}"
+  [[ "$days" =~ ^[1-9][0-9]*$ ]] || days=3
+  while IFS= read -r seat; do
+    [[ -d "$seat" && ! -L "$seat" ]] || continue
+    if flock -n "$seat.lock" rm -rf -- "$seat"; then
+      rm -f -- "$seat.lock" "$seat.holder"
+      printf '[warm-rust-cache] removed the seat %s, unused for %s days\n' "${seat##*/}" "$days"
+    fi
+  done < <(find "$seats" -mindepth 1 -maxdepth 1 -type d -mtime +"$(( days - 1 ))" 2>/dev/null)
+}
+
+if [[ -n "${CODEWIRE_CI_WARM_SEATS:-}" && -z "${WARM_CACHE_ROOT:-}" ]]; then
+  # Tests hold their seats on a temporary directory.
+  [[ "$(stat -f -c %T "$CODEWIRE_CI_WARM_SEATS" 2>/dev/null)" == ext2/ext3 || -n "${WARM_CACHE_SEATS_ANY_FS:-}" ]] ||
+    skip "the warm VM's seats ($CODEWIRE_CI_WARM_SEATS) are not mounted"
+  remove_idle_seats "$CODEWIRE_CI_WARM_SEATS"
+  WARM_CACHE_ROOT="$(take_seat "$CODEWIRE_CI_WARM_SEATS")"
+  if [[ -n "${GITHUB_ENV:-}" ]]; then
+    echo "WARM_CACHE_ROOT=$WARM_CACHE_ROOT" >> "$GITHUB_ENV"
+  fi
+  printf '[warm-rust-cache] seat %s\n' "${WARM_CACHE_ROOT##*/}"
+fi
 
 readonly root="${WARM_CACHE_ROOT:-/ci-cache}"
 readonly cache="$root/v1"
@@ -43,17 +118,6 @@ readonly hard_minimum_free_kib=2097152
 # Tests point this at a fake df.
 readonly df_bin="${WARM_CACHE_DF:-df}"
 
-: "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"
-
-skip() {
-  printf '[warm-rust-cache] not used: %s\n' "$*"
-  exit 0
-}
-
-case "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" in
-  'push|refs/heads/main' | pull_request\|*) ;;
-  *) skip 'not a push to main or a pull request' ;;
-esac
 if [[ -z "${WARM_CACHE_ROOT:-}" ]]; then
   [[ "$(stat -f -c %T "$root" 2>/dev/null)" == ext2/ext3 ]] || skip 'no warm cache is mounted on this runner'
 fi
