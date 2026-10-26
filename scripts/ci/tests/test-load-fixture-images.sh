@@ -26,6 +26,24 @@ set -euo pipefail
 store="${FAKE_DOCKER_STORE:?}"
 printf '%s\n' "$*" >> "$store/calls"
 key() { printf '%s' "$1" | tr '/:@' '___'; }
+case "$1" in
+  tag)
+    # docker tag SOURCE TARGET: marks the image as tagged, so a prune of
+    # dangling images keeps it.
+    [ -z "${FAKE_TAG_FAIL:-}" ] || exit 1
+    [ -f "$store/id-$(key "$2")" ] || exit 1
+    printf '%s\n' "$3" >> "$store/tags-$(key "$2")"
+    exit 0
+    ;;
+  prune)
+    # The VM janitor's docker image prune -f: every untagged image goes.
+    for image in "$store"/id-*; do
+      [ -e "$image" ] || continue
+      [ -f "$store/tags-${image##*/id-}" ] || rm -f -- "$image"
+    done
+    exit 0
+    ;;
+esac
 case "$1 $2" in
   'image inspect')
     [ "$3" = -f ] || exit 2
@@ -107,6 +125,26 @@ grep -qxF "INTEGRATION_NATS_IMAGE=$nats_id" "$TMP/first/env" || fail 'the job do
 grep -qF 'postgres: pulled by digest and kept' "$TMP/first/out" || fail 'the first job did not report its pull'
 [ -z "$(find "$TMP/cache" -name '*.tmp')" ] || fail 'a temporary archive was left behind'
 
+# Each image the job runs by its ID is tagged as verified, so the warm VM's
+# prune of dangling images between runs keeps it: the next job on that daemon
+# finds it present.
+grep -qxF "tag $pg_id localhost/codewire-ci/postgres:verified-${pg_id#sha256:}" "$TMP/store/calls" ||
+  fail 'the pulled PostgreSQL was not tagged as verified'
+grep -qxF "tag $nats_id localhost/codewire-ci/nats:verified-${nats_id#sha256:}" "$TMP/store/calls" ||
+  fail 'the pulled NATS was not tagged as verified'
+FAKE_DOCKER_STORE="$TMP/store" docker prune
+KEEP_STORE=1 run_case after-prune -- postgres nats
+[ "$status" -eq 0 ] || { cat "$TMP/after-prune/out" >&2; fail 'the job after a prune failed'; }
+[ "$(calls pull)" -eq 0 ] && [ "$(calls load)" -eq 0 ] || fail 'a prune of dangling images deleted a tagged image'
+grep -qF 'postgres: already present' "$TMP/after-prune/out" || fail 'the job after a prune did not find PostgreSQL'
+# Untagged, the janitor deletes it, and the next job pulls it again.
+run_case untagged FAKE_TAG_FAIL=1 CODEWIRE_TOOL_CACHE= -- postgres
+[ "$status" -eq 0 ] || fail 'a failed tag failed the job'
+grep -qF 'could not tag the postgres image' "$TMP/untagged/out" || fail 'the failed tag was not reported'
+FAKE_DOCKER_STORE="$TMP/store" docker prune
+KEEP_STORE=1 run_case untagged-next CODEWIRE_TOOL_CACHE= -- postgres
+[ "$(calls pull)" -eq 1 ] || fail 'the fake janitor kept an untagged image'
+
 # The next job on the guest: a fresh daemon loads the kept archives and pulls
 # nothing.
 run_case kept -- postgres nats
@@ -114,6 +152,8 @@ run_case kept -- postgres nats
 [ "$(calls pull)" -eq 0 ] || fail 'a job with kept archives pulled'
 [ "$(calls load)" -eq 2 ] || fail 'the kept archives were not loaded'
 grep -qF 'postgres: loaded from the kept archive' "$TMP/kept/out" || fail 'the kept job did not report its load'
+grep -qxF "tag $pg_id localhost/codewire-ci/postgres:verified-${pg_id#sha256:}" "$TMP/store/calls" ||
+  fail 'the loaded PostgreSQL was not tagged as verified'
 grep -qxF "INTEGRATION_POSTGRES_IMAGE=$pg_id" "$TMP/kept/env" || fail 'the kept job does not run PostgreSQL by its ID'
 
 # A daemon that already holds the image (a warm daemon, a golden disk) neither
@@ -151,6 +191,7 @@ run_case other-store "FAKE_PULL_ID=$(printf 'sha256:%064d' 9)" -- postgres
 grep -qxF "INTEGRATION_POSTGRES_IMAGE=$INTEGRATION_POSTGRES_PINNED_IMAGE" "$TMP/other-store/env" ||
   fail 'a differently named store does not run the pinned reference'
 [ ! -e "$pg_archive" ] || fail 'an image without the pinned ID was kept'
+[ "$(calls tag)" -eq 0 ] || fail 'an image without the pinned ID was tagged as verified'
 
 # Without a cache (a cloud runner) it pulls and keeps nothing.
 rm -rf "$TMP/cache"
@@ -165,4 +206,4 @@ grep -qF "could not pull $INTEGRATION_POSTGRES_PINNED_IMAGE" "$TMP/pull-fails/ou
 run_case unknown -- redis
 [ "$status" -ne 0 ] && grep -qF 'unknown fixture image: redis' "$TMP/unknown/out" || fail 'an unknown image was accepted'
 
-echo 'test-load-fixture-images: kept, present, changed, unsaved, other-store, no-cache and failure cases passed'
+echo 'test-load-fixture-images: kept, present, tagged, pruned, changed, unsaved, other-store, no-cache and failure cases passed'

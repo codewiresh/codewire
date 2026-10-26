@@ -17,6 +17,11 @@
 # - otherwise it is pulled by its digest, as before, and kept in the cache
 #   when it has the pinned ID. A kept archive that loaded no such image is
 #   replaced. Failing to keep one never fails the job.
+# An image with the pinned ID is then tagged localhost/codewire-ci/NAME:verified-ID.
+# A daemon holds an image pulled or loaded only by digest untagged, as a
+# dangling image, and the warm VM's janitor (docker image prune -f between
+# runs) deletes those, so every main run on the VM pulled again (main run
+# 24496). Failing to tag never fails the job.
 # The pull is the only step that can fail the job, as before. With GITHUB_ENV,
 # INTEGRATION_<NAME>_IMAGE names what the job runs: the pinned ID, or the
 # pinned reference on a daemon whose store names the image otherwise.
@@ -83,6 +88,10 @@ load_image() {
       # reference, which it now holds.
       run_as="$reference"
     fi
+  fi
+  if [ "$run_as" = "$id" ] &&
+      ! docker tag "$id" "localhost/codewire-ci/$name:verified-${id#sha256:}" >/dev/null 2>&1; then
+    log "could not tag the $name image; a prune of dangling images may delete it"
   fi
   log "$name: $how in $((SECONDS - started)) s ($run_as)"
   if [ -n "${GITHUB_ENV:-}" ]; then
