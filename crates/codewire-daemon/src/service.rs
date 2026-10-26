@@ -1400,7 +1400,9 @@ mod tests {
                     truncate: true,
                     ..Default::default()
                 }),
-                perm: 0o644,
+                // Not the 0o644 default, and kept whole by any umask that
+                // leaves the owner's read and write (077 as well as 022).
+                perm: 0o600,
             })
             .await
             .expect("open");
@@ -1437,7 +1439,7 @@ mod tests {
             .entry
             .expect("entry");
         assert_eq!(stat.size, 11);
-        assert_eq!(stat.mode & 0o777, 0o644);
+        assert_eq!(stat.mode & 0o777, 0o600);
 
         let list = client
             .list(v1::ListRequest { path: "".into() })

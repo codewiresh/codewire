@@ -608,7 +608,9 @@ mod tests {
                 truncate: true,
                 ..Default::default()
             }),
-            0o644,
+            // Not the 0o644 default, and kept whole by any umask that leaves
+            // the owner's read and write (077 as well as 022).
+            0o600,
         )
         .expect("open");
         write(&cfg, "hello.txt", 0, b"hello world").expect("write");
@@ -616,7 +618,7 @@ mod tests {
 
         let entry = stat(&cfg, "hello.txt", false).expect("stat");
         assert_eq!(entry.size, 11);
-        assert_eq!(entry.mode & 0o777, 0o644);
+        assert_eq!(entry.mode & 0o777, 0o600);
 
         let entries = list(&cfg, "").expect("list");
         assert_eq!(entries.len(), 1);
