@@ -18,7 +18,7 @@ import sys
 
 
 SOURCE = Path(__file__).resolve().parents[3]
-HOST_FIXTURE_SHA = "90850ca23037a96e249df6c7fbad95cb385482d42c8241aa8aa5ab85992986a6"
+HOST_FIXTURE_SHA = "ec2b7979f243e53f75963570dcca7e9a0c91baaf09148811c78bd0b07c234bd9"
 MAX_JSON = 1024 * 1024
 
 
