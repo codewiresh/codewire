@@ -666,6 +666,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-build-runner-measure.sh
   scripts/ci/tests/test-bound-cargo-jobs.sh
   scripts/ci/tests/test-build-once.sh
+  scripts/ci/tests/test-run-rust-checks.sh
   python3 -B scripts/ci/tests/test-last-scheduled-run.py
   python3 -I -B scripts/ci/tests/test-ci-done-measures.py
   scripts/ci/tests/test-service-ssh-image-verifier.sh

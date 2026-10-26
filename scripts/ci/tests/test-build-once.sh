@@ -9,9 +9,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly SCRIPT="$ROOT/scripts/ci/setup/build-once.sh"
 # The leg table reads the run's selection, publish its store, and prepare its
-# event (main or pr build folder); a CI job running
+# event (main or pr build folder), and the Rust checks their CPU share
+# (CARGO_BUILD_JOBS, set in every CI job); a CI job running
 # this test may have its own in the environment, so each case states its own.
-unset VERIFICATION_SELECTION ARCHIVE_STORE_URL GITHUB_EVENT_NAME GITHUB_REF BUILD_ONCE_LOCAL_VMM
+unset VERIFICATION_SELECTION ARCHIVE_STORE_URL GITHUB_EVENT_NAME GITHUB_REF BUILD_ONCE_LOCAL_VMM CARGO_BUILD_JOBS
 
 fail() {
   echo "test-build-once: $*" >&2
@@ -215,10 +216,10 @@ targets_prepare
 [ ! -e "$marker_root/targets/archive/debug/incremental" ] || fail 'prepare kept incremental sessions'
 [ -f "$marker_root/targets/archive/debug/deps/libkeep.rlib" ] || fail 'removing incremental sessions removed an artifact'
 # The Rust checks' own folders stay beside the legs'; any other folder goes.
-mkdir -p "$marker_root/targets/clippy" "$marker_root/targets/darwin" "$marker_root/targets/desktop" \
-  "$marker_root/targets/stray"
+readonly CHECK_FOLDERS='clippy clippy_features darwin darwin_cw desktop'
+for folder in $CHECK_FOLDERS stray; do mkdir -p "$marker_root/targets/$folder"; done
 targets_prepare
-for folder in clippy darwin desktop; do
+for folder in $CHECK_FOLDERS; do
   [ -d "$marker_root/targets/$folder" ] || fail "prepare removed the Rust checks' $folder folder"
 done
 [ ! -e "$marker_root/targets/stray" ] || fail 'prepare kept an unknown target folder'
@@ -322,37 +323,69 @@ if legs_build compile; then fail 'a compile error passed'; fi
 [ "$(wc -l < "$work/legs-state/calls")" -eq 1 ] || fail 'a compile error was rebuilt'
 [ -e "$work/legs-root/pr/targets/archive/debug/deps/libbroken.rlib" ] || fail 'a compile error wiped the target folder'
 
-# checks runs the Rust checks from src in their own target folders, marks
-# them used, and reruns once after a corrupt output in a folder it names;
-# a plain check failure fails at once.
+# checks runs the Rust checks from src, each in its own target folder, all
+# under one jobserver; marks the folders used; and reruns once after a
+# corrupt output in a folder it names, wiping only that folder (darwin_cw is
+# not darwin); a plain check failure fails at once.
 mkdir -p "$legs_src/scripts/ci/verify"
 cat > "$legs_src/scripts/ci/verify/run-rust-checks.sh" <<'CHECKS'
 #!/bin/sh
-echo "checks $PWD $CARGO_TARGET_DIR $RUST_CHECKS_DARWIN_TARGET_DIR $CODEWIRE_DESKTOP_CHECK_TARGET_DIR" >> "$LEGS_STATE/checks"
-if [ -e "$CARGO_TARGET_DIR/broken" ]; then
+echo "checks $PWD $CARGO_TARGET_DIR $RUST_CHECKS_FEATURES_TARGET_DIR $RUST_CHECKS_DARWIN_TARGET_DIR $RUST_CHECKS_CW_DARWIN_TARGET_DIR $CODEWIRE_DESKTOP_CHECK_TARGET_DIR" >> "$LEGS_STATE/checks"
+echo "jobs ${CARGO_BUILD_JOBS:-} ${CARGO_MAKEFLAGS:-none}" >> "$LEGS_STATE/jobserver"
+case "$CHECKS_MODE" in
+  corrupt) broken="$CARGO_TARGET_DIR/broken" ;;
+  corrupt-cw) broken="$RUST_CHECKS_CW_DARWIN_TARGET_DIR/broken" ;;
+  *) broken="$CARGO_TARGET_DIR/broken" ;;
+esac
+if [ -e "$broken" ]; then
   case "$CHECKS_MODE" in
-    corrupt) echo "error: $CARGO_TARGET_DIR/broken: failed to mmap file"; exit 101 ;;
+    corrupt*) echo "error: $broken: failed to mmap file"; exit 101 ;;
     lint) echo 'error: this could be written more simply'; exit 101 ;;
   esac
 fi
 CHECKS
 chmod +x "$legs_src/scripts/ci/verify/run-rust-checks.sh"
-checks_run() {
-  rm -rf "$work/legs-state"; mkdir -p "$work/legs-state" "$work/legs-root/pr/targets/clippy"
-  : > "$work/legs-root/pr/targets/clippy/broken"
-  BUILD_ONCE_ROOT="$work/legs-root" BUILD_ONCE_SRC="$legs_src" LEGS_STATE="$work/legs-state" \
-    RUNNER_TEMP="$work/legs-state" CHECKS_MODE="$1" "$SCRIPT" checks > "$work/checks.log" 2>&1
-}
 checks_root="$work/legs-root/pr/targets"
+checks_run() {
+  rm -rf "$work/legs-state"; mkdir -p "$work/legs-state" "$checks_root/clippy" "$checks_root/darwin_cw" "$checks_root/darwin"
+  : > "$checks_root/clippy/broken"
+  : > "$checks_root/darwin_cw/broken"
+  : > "$checks_root/darwin/kept"
+  BUILD_ONCE_ROOT="$work/legs-root" BUILD_ONCE_SRC="$legs_src" LEGS_STATE="$work/legs-state" \
+    BUILD_ONCE_JOBSERVER_TOKENS=5 RUNNER_TEMP="$work/legs-state" CHECKS_MODE="$1" \
+    "$SCRIPT" checks > "$work/checks.log" 2>&1
+}
 checks_run corrupt || fail "a corrupt check output was not rerun: $(cat "$work/checks.log")"
 [ "$(wc -l < "$work/legs-state/checks")" -eq 2 ] || fail 'the corrupt checks did not run exactly twice'
-grep -qx "checks $legs_src $checks_root/clippy $checks_root/darwin $checks_root/desktop" "$work/legs-state/checks" ||
-  fail "the checks ran outside src or their folders: $(cat "$work/legs-state/checks")"
+grep -qx "checks $legs_src $checks_root/clippy $checks_root/clippy_features $checks_root/darwin $checks_root/darwin_cw $checks_root/desktop" \
+  "$work/legs-state/checks" || fail "the checks ran outside src or their folders: $(cat "$work/legs-state/checks")"
 grep -q "the Rust checks read a corrupt output in $checks_root/clippy; it is wiped" "$work/checks.log" ||
   fail 'the checks rerun gave no reason'
-for folder in clippy darwin desktop; do
+for folder in $CHECK_FOLDERS; do
   [ -f "$checks_root/$folder/.build-once-used" ] || fail "the checks did not mark their $folder folder used"
 done
+# One jobserver of the runner's compilers for every check; a Cargo that
+# cannot reach it falls back to a few jobs.
+while read -r _ jobs makeflags; do
+  [ "$jobs" = 4 ] && [[ "$makeflags" == '-j5 '*'--jobserver-auth='*,* ]] ||
+    fail "the checks ran without the jobserver: $jobs $makeflags"
+done < "$work/legs-state/jobserver"
+grep -q '^build-once: the Rust checks at once, 5 compilers in all$' "$work/checks.log" ||
+  fail 'the checks did not report their jobserver'
+# The job's CPU share (CARGO_BUILD_JOBS) caps the jobserver.
+rm -rf "$work/legs-state"; mkdir -p "$work/legs-state"
+BUILD_ONCE_ROOT="$work/legs-root" BUILD_ONCE_SRC="$legs_src" LEGS_STATE="$work/legs-state" \
+  BUILD_ONCE_JOBSERVER_TOKENS=5 CARGO_BUILD_JOBS=3 RUNNER_TEMP="$work/legs-state" CHECKS_MODE=ok \
+  "$SCRIPT" checks > "$work/checks.log" 2>&1 || fail "the capped checks failed: $(cat "$work/checks.log")"
+grep -q '^build-once: the Rust checks at once, 3 compilers in all$' "$work/checks.log" ||
+  fail "the CPU share did not cap the jobserver: $(cat "$work/checks.log")"
+[[ "$(cut -d' ' -f3 "$work/legs-state/jobserver")" == -j3 ]] || fail 'the capped jobserver was not the one the checks saw'
+checks_run corrupt-cw || fail "a corrupt cw Darwin output was not rerun: $(cat "$work/checks.log")"
+grep -q "the Rust checks read a corrupt output in $checks_root/darwin_cw; it is wiped" "$work/checks.log" ||
+  fail 'the cw Darwin folder was not wiped'
+[ -e "$checks_root/darwin/kept" ] && [ -e "$checks_root/clippy/broken" ] ||
+  fail 'a corrupt cw Darwin output wiped another check folder'
+[ "$(grep -c 'corrupt output in' "$work/checks.log")" -eq 1 ] || fail 'the rerun wiped more than the named folder'
 if checks_run lint; then fail 'a failed check passed'; fi
 [ "$(wc -l < "$work/legs-state/checks")" -eq 1 ] || fail 'a failed check was rerun'
 [ -e "$checks_root/clippy/broken" ] || fail 'a failed check wiped its folder'

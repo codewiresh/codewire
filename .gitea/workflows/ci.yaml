@@ -670,13 +670,14 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job requests no identity and reads no protected credential: it checks in its build runner's own warm folder, never the shared cache.
     # Compile once (infra#1632): the Rust checks that build no test archive,
     # on the build runner that just built this run's archives (main's for a
-    # main push), in the build folder's own warm target folders
-    # (targets/clippy, darwin and desktop; build-once.sh checks):
+    # main push), all at once under one jobserver, each in its own warm target
+    # folder of the build folder (build-once.sh checks):
     # compile-all-targets (clippy over every target with default and all
     # features, and the curated image workspaces), the feature graphs' lints
     # and dependency checks, the local-vmm shard's checks (its Darwin
     # cross-check, the static guest's reproducibility proof, the desktop check
-    # and package) and the cw Darwin cross-check (run-rust-checks.sh). It
+    # and package) and the cw Darwin cross-check (run-rust-checks.sh). One
+    # after another they used 6.6 of the runner's cores (run 24112, #3494). It
     # starts once Build test archives ends; the test jobs do not wait for it,
     # and Required verification does. On a medium guest with only the shared
     # compiler cache it took about 12 min, against 52 s warm here.

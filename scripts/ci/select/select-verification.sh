@@ -2029,7 +2029,9 @@ if [ "$event_selected" = false ]; then
         ;;
       scripts/ci/tests/test-select-untrusted-rust-cache.sh|\
       scripts/ci/tests/test-warm-rust-cache.sh|\
-      scripts/ci/tests/test-bound-cargo-jobs.sh)
+      scripts/ci/tests/test-bound-cargo-jobs.sh|\
+      scripts/ci/tests/test-build-once.sh|\
+      scripts/ci/tests/test-run-rust-checks.sh)
         select_token policy
         select_token security
         recognized=true

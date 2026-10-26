@@ -179,7 +179,8 @@ else:
     # A13), and the local VMM's Darwin check, with the installed
     # cargo-zigbuild on PATH from the build folder's Cargo home (infra#1632:
     # the checks run in their own job on the build runner, after the
-    # archives, in the darwin target folder).
+    # archives, each Darwin check in its own target folder and cargo-zigbuild
+    # wrapper folder, since the checks run at once (#3494).
     assert '\n  cw-release-assets:\n' not in ci
     compile_job = ci.split('\n  rust-compile:\n', 1)[1].split('\n  rust-checks:\n', 1)[0]
     assert 'check-darwin-cross.sh' not in compile_job and 'Darwin' not in compile_job
@@ -196,8 +197,12 @@ else:
     assert checks_job.index('Bring the warm build folder to this commit') < checks_job.index('Set up pinned Darwin C cross-check tools')
     assert checks_job.index('Set up pinned Darwin C cross-check tools') < checks_job.index('Run the Rust checks')
     script = (source / 'scripts/ci/verify/run-rust-checks.sh').read_text()
-    assert "phase 'cw Darwin cross-check' env CARGO_TARGET_DIR=\"$darwin_target\" \\\n    scripts/ci/verify/check-darwin-cross.sh --cli" in script
+    assert ("phase 'cw Darwin cross-check' env CARGO_TARGET_DIR=\"$cw_darwin_target\" \\\n"
+            "    CARGO_ZIGBUILD_CACHE_DIR=\"$cw_darwin_target\" \\\n"
+            "    scripts/ci/verify/check-darwin-cross.sh --cli") in script
+    assert 'CARGO_TARGET_DIR="$darwin_target" CODEWIRE_DESKTOP_CARGO_TARGET_DIR="$desktop_target" \\\n      CARGO_ZIGBUILD_CACHE_DIR="$darwin_target"' in script
     once = (source / 'scripts/ci/setup/build-once.sh').read_text()
     assert 'RUST_CHECKS_DARWIN_TARGET_DIR="$work/targets/darwin"' in once
+    assert 'RUST_CHECKS_CW_DARWIN_TARGET_DIR="$work/targets/darwin_cw"' in once
     print(f'Darwin cross-check wrapper: {cases} cases passed; old bare check rejected')
 PY

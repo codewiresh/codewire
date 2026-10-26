@@ -992,6 +992,11 @@ run_paths_case bound_cargo_jobs pull_request refs/pull/3101/head false \
 run_paths_case bound_cargo_jobs_fixture pull_request refs/pull/3102/head false \
   'policy security security_js' \
   scripts/ci/tests/test-bound-cargo-jobs.sh
+# The build runner's own fixtures select Policy, which runs them, not the
+# Rust families their scripts build for (#3494).
+run_paths_case build_once_fixtures pull_request refs/pull/3494/head false \
+  'policy security security_js' \
+  scripts/ci/tests/test-build-once.sh scripts/ci/tests/test-run-rust-checks.sh
 # Compile once's build half selects the Rust families it builds for, and the
 # guest CPU share also the database and service families whose lanes and
 # test threads it sizes (infra#1632).
