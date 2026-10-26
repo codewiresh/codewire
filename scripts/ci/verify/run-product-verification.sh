@@ -218,6 +218,19 @@ run_rust_archive_tests() {
   return "$status"
 }
 
+# rust_packages_shard_covers PACKAGE: the Rust / transport packages shard runs
+# PACKAGE's tests in this same run. It runs run_rust whenever rust is
+# selected, and its packages are rust_package_args': the workspace, or each
+# crate whose rust_pkg_ token is selected. A family that would run a package's
+# tests again skips them only then (main run 23329: the shard ran every one of
+# Standard's codewire-proto, codewire-admin-proto and codewire-dashboard-web
+# tests, by name); otherwise it runs them itself.
+rust_packages_shard_covers() {
+  local token="${1//-/_}"
+  selected rust || return 1
+  selected rust_workspace || selected "rust_pkg_${token}"
+}
+
 # Rust/transport verification runs as parallel CI shards: packages (the
 # selected package graphs), features (explicit feature graphs), and local-vmm
 # (VM fixtures, guest probe, DERP contract and desktop, which need the extra
@@ -647,6 +660,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-darwin-cross-check.sh
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-run-side-by-side.sh
+  scripts/ci/tests/test-standard-families.sh
   scripts/ci/tests/test-warm-rust-cache.sh
   scripts/ci/tests/test-install-cargo-nextest.sh
   scripts/ci/tests/test-build-runner-measure.sh
@@ -811,8 +825,29 @@ run_policy() {
   done
 }
 
+# buf, from its pinned release binary: building it with go install took 47 s
+# of every Contracts run (main run 23329). The SHA-256 is the one the release
+# publishes in its sha256.txt. The Makefile's proto-tools target installs the
+# same version (test-select-verification.sh keeps the two equal).
+readonly BUF_VERSION='1.50.0'
+readonly BUF_URL="https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64"
+readonly BUF_SHA256='154ea883ce098eac4fa106ff9ee4e4964bb97f809dd8ec9c34a432b466ce1494'
+
 install_contract_toolchain() {
-  go install github.com/bufbuild/buf/cmd/buf@v1.50.0
+  [ "$(uname -s)/$(uname -m)" = Linux/x86_64 ] || {
+    echo '::error::the pinned buf is the x86_64 Linux build' >&2
+    return 1
+  }
+  mkdir -p "$HOME/.proto-tools/bin"
+  "$ROOT/scripts/ci/release/fetch-pinned.sh" "$BUF_URL" "$BUF_SHA256" "$HOME/.proto-tools/bin/buf.partial"
+  chmod 0755 "$HOME/.proto-tools/bin/buf.partial"
+  mv -f -- "$HOME/.proto-tools/bin/buf.partial" "$HOME/.proto-tools/bin/buf"
+  [ "$("$HOME/.proto-tools/bin/buf" --version)" = "$BUF_VERSION" ] || {
+    echo "::error::the installed buf is not $BUF_VERSION" >&2
+    return 1
+  }
+  # The two plugins publish no checksummed Linux binary (connect-go none at
+  # all); go install checks their module sums against the checksum database.
   go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.5
   go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.18.1
   curl -fsSL -o /tmp/protoc.zip \
@@ -824,7 +859,7 @@ install_contract_toolchain() {
   unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
   local go_bin
   go_bin="$(go env GOPATH)/bin"
-  export PATH="$HOME/.proto-tools/protoc/bin:$go_bin:$PATH"
+  export PATH="$HOME/.proto-tools/protoc/bin:$HOME/.proto-tools/bin:$go_bin:$PATH"
   python3 -m venv .venv-proto
   .venv-proto/bin/python -m pip install --quiet \
     'protobuf==7.35.1' \
@@ -873,7 +908,15 @@ run_contracts_proto() {
   (cd libs/gen-go && GOWORK=off go build ./... && GOWORK=off go vet ./...)
   bun --filter @codewire/proto-ts typecheck
   python3 scripts/checks/repo_checks.py proto-package-boundaries --self-test
-  cargo test --locked -p codewire-proto -p codewire-admin-proto
+  local -a proto_packages=() package
+  for package in codewire-proto codewire-admin-proto; do
+    if rust_packages_shard_covers "$package"; then
+      echo "Contracts: $package's tests run in the Rust / transport packages shard of this run"
+    else
+      proto_packages+=(-p "$package")
+    fi
+  done
+  [ "${#proto_packages[@]}" -eq 0 ] || cargo test --locked "${proto_packages[@]}"
 
   PYTHONPATH=libs/gen-python .venv-proto/bin/python - <<'PY'
 import py_compile
@@ -917,7 +960,11 @@ run_go_support() {
 
 run_web() {
   install_bun_dependencies
-  cargo test --locked -p codewire-dashboard-web --lib
+  if rust_packages_shard_covers codewire-dashboard-web; then
+    echo "Web: codewire-dashboard-web's tests run in the Rust / transport packages shard of this run"
+  else
+    cargo test --locked -p codewire-dashboard-web --lib
+  fi
   bun run --cwd apps/dashboard typecheck
   bun run --cwd apps/dashboard test:fixtures
   ./apps/dashboard/node_modules/.bin/playwright test \
@@ -973,6 +1020,74 @@ PY
 run_ios() {
   run_ios_config
   make ios-test
+}
+
+# The iOS package's Swift tests in the pinned Swift image (Standard's ios
+# family; make ios-test is the local equivalent).
+run_ios_swift_package() {
+  run_ios_config
+  docker build --file - apps/ios <<'DOCKERFILE'
+FROM swift@sha256:0ff707a48519cf1473616c759e019bcff21cfbafa3d2687bf8fd41a2757adc9a
+WORKDIR /workspace
+COPY . .
+RUN swift test --scratch-path /tmp/codewire-ios-build
+DOCKERFILE
+}
+
+# Standard verification's selected families (infra#1534). Contracts runs
+# first, alone: it regenerates the checked-in generated code (libs/gen-go,
+# libs/gen-python, packages/codewire-proto-ts/src/gen) that the SDKs, Go
+# support and the dashboard read. Then Web runs side by side with the others
+# in order, so the job takes Contracts plus the longer of the two (main run
+# 23329: 626 s with every family one after another). The first failure stops
+# the rest (#3013). Each family keeps the selection condition its own step
+# had.
+standard_families() {
+  local family token
+  for family in go-support:go_support docs:docs sdk-go:sdk_go sdk-ts:sdk_ts \
+      sdk-python:sdk_python ios:ios; do
+    token="${family#*:}"
+    if selected "$token"; then printf '%s\n' "${family%%:*}"; fi
+  done
+}
+
+run_standard_family() {
+  case "$1" in
+    contracts) run_contracts ;;
+    go-support) run_go_support ;;
+    web) CODEWIRE_DASHBOARD_IMAGE_DEFERRED=true run_web ;;
+    docs) run_docs ;;
+    sdk-go) run_sdk_go ;;
+    sdk-ts) run_sdk_ts ;;
+    sdk-python) run_sdk_python ;;
+    ios) run_ios_swift_package ;;
+    *) echo "::error::unknown Standard family: $1" >&2; return 2 ;;
+  esac
+}
+
+run_standard_in_order() {
+  local family
+  for family in "$@"; do
+    echo "[standard] $family: start"
+    run_standard_family "$family" || return $?
+    echo "[standard] $family: finish"
+  done
+}
+
+run_standard() {
+  local -a others=() lanes=()
+  mapfile -t others < <(standard_families)
+  if selected contracts; then
+    run_standard_in_order contracts || return $?
+  fi
+  if selected web; then lanes+=('run_standard_in_order web'); fi
+  if [ "${#others[@]}" -gt 0 ]; then lanes+=("run_standard_in_order ${others[*]}"); fi
+  if [ "${#lanes[@]}" -eq 0 ]; then
+    echo 'Standard: no family besides Contracts is selected'
+    return 0
+  fi
+  printf 'Standard families side by side: %s\n' "${lanes[*]}"
+  VERIFICATION_TEST_JOBS="${#lanes[@]}" run_side_by_side < <(printf '%s\n' "${lanes[@]}")
 }
 
 run_sdk_go() {
@@ -1684,6 +1799,7 @@ case "$FAMILY" in
   tooling-parts) tooling_parts ;;
   tooling) run_tooling ;;
   policy-shell) run_shell_policy ;;
+  standard) run_standard ;;
   contracts) run_contracts ;;
   go-support) run_go_support ;;
   web) run_web ;;
@@ -1708,7 +1824,7 @@ case "$FAMILY" in
   workspace-agents) scripts/ci/verify/workspace-agents.sh ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh tooling|tooling-parts|policy|policy-parts|policy-core|policy-repo-rules|policy-ci-script-tests|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|confidential-script-tests|dev-smoke-script-tests|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|kind-tools|release|deploy|workspace-agents|security" >&2
+    echo "usage: run-product-verification.sh standard|tooling|tooling-parts|policy|policy-parts|policy-core|policy-repo-rules|policy-ci-script-tests|policy-shell|contracts|go-support|web|docs|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|confidential-script-tests|dev-smoke-script-tests|rust|rust-transport|rust-curated-locks|rust-compile|transport|edge|kind-tools|release|deploy|workspace-agents|security" >&2
     exit 2
     ;;
 esac

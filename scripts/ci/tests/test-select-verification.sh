@@ -2429,14 +2429,24 @@ grep -qF '../libs/gen-go/codewire' "$contracts_proto_runner"
 grep -qF '../libs/gen-python/codewire' "$contracts_proto_runner"
 grep -qF '../packages/codewire-proto-ts/src/gen/codewire' "$contracts_proto_runner"
 grep -qF 'proto-package-boundaries --self-test' "$contracts_proto_runner"
-grep -qF 'cargo test --locked -p codewire-proto -p codewire-admin-proto' "$contracts_proto_runner"
+grep -qF 'for package in codewire-proto codewire-admin-proto; do' "$contracts_proto_runner"
+grep -qF '[ "${#proto_packages[@]}" -eq 0 ] || cargo test --locked "${proto_packages[@]}"' "$contracts_proto_runner"
 rust_descriptor_builder="$ROOT/scripts/ci/proto/build-rust-descriptors.sh"
 grep -qF -- '--path codewire/admin/v1/admin.proto' "$rust_descriptor_builder"
 grep -qF -- '--path codewire/admin/v1/billing_catalog.proto' "$rust_descriptor_builder"
 grep -qF -- '--path codewire/v1/environment.proto' "$rust_descriptor_builder"
 grep -qF 'codewire-admin-proto/codewire_admin_descriptor.bin' "$rust_descriptor_builder"
 grep -qF 'test-admin-proto-boundary.sh' "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'github.com/bufbuild/buf/cmd/buf@v1.50.0' "$ROOT/Makefile"
+# CI installs buf's pinned release binary; the Makefile's proto-tools and the
+# push check install the same version.
+buf_version="$(sed -nE "s/^readonly BUF_VERSION='([0-9.]+)'$/\\1/p" "$ROOT/scripts/ci/verify/run-product-verification.sh")"
+[[ "$buf_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+grep -qF "github.com/bufbuild/buf/cmd/buf@v$buf_version" "$ROOT/Makefile"
+grep -qxF "readonly BUF_SHA256='154ea883ce098eac4fa106ff9ee4e4964bb97f809dd8ec9c34a432b466ce1494'" "$ROOT/scripts/ci/verify/run-product-verification.sh"
+if grep -qF 'go install github.com/bufbuild/buf/cmd/buf@' "$ROOT/scripts/ci/verify/run-product-verification.sh"; then
+  echo 'CI builds buf from source instead of its pinned release binary' >&2
+  exit 1
+fi
 if rg -n 'tests/contract' "$contracts_proto_runner"; then
   echo 'Proto regeneration runs a general Go service-driver suite' >&2
   exit 1
@@ -3760,13 +3770,26 @@ for token in contracts web; do
   }
 done
 
-web_run_line="$(grep -n -m1 'name: Run Web' "$standard_block" | cut -d: -f1)"
-web_run_block="$(sed -n "${web_run_line},$((web_run_line + 6))p" "$standard_block")"
-grep -qF 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' \
-  <<<"$web_run_block" || {
-  echo 'standard: Web does not receive its exact selection' >&2
+# Standard's families run in one step; run-product-verification.sh standard
+# owns each one's selection condition (test-standard-families.sh proves the
+# order and the Rust coverage rule).
+standard_run_line="$(grep -n -m1 'name: Run the selected Standard families side by side' "$standard_block" | cut -d: -f1)"
+[ -n "$standard_run_line" ] || { echo 'standard: no side-by-side family step' >&2; exit 1; }
+standard_run_block="$(sed -n "${standard_run_line},$((standard_run_line + 7))p" "$standard_block")"
+for wanted in \
+    'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' \
+    'VERIFICATION_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}' \
+    'VERIFICATION_PUSH_BEFORE_SHA: ${{ github.event.before }}' \
+    'run: scripts/ci/verify/run-product-verification.sh standard'; do
+  grep -qF -- "$wanted" <<<"$standard_run_block" || {
+    echo "standard: the family step lacks: $wanted" >&2
+    exit 1
+  }
+done
+if grep -qE -- '- name: Run (Contracts|Go support|Web|Docs|SDK |iOS)' "$standard_block"; then
+  echo 'standard: a family kept its own step beside the side-by-side step' >&2
   exit 1
-}
+fi
 grep -qF 'CODEWIRE_DASHBOARD_IMAGE_DEFERRED:-false' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh" || {
   echo 'standard: Web cannot leave image work to Dev delivery' >&2
@@ -3777,27 +3800,18 @@ grep -qF '    run_dashboard_image' \
   echo 'local Web verification lost its standalone image gate' >&2
   exit 1
 }
-grep -A4 -F 'name: Run Web' "$WORKFLOW" \
-  | grep -qF 'CODEWIRE_DASHBOARD_IMAGE_DEFERRED: "true"'
-
-for contract in \
-    'Run Contracts|contracts' \
-    'Run Go support|go_support' \
-    'Run Web|web' \
-    'Run Docs|docs' \
-    'Run SDK Go|sdk_go' \
-    'Run SDK TypeScript|sdk_ts' \
-    'Run SDK Python|sdk_python' \
-    'Run iOS package tests in the pinned Swift image|ios'; do
-  step_name="${contract%%|*}"
-  token="${contract##*|}"
-  step_condition="$(grep -A1 -F -- "- name: ${step_name}" "$standard_block")"
-  grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
-    <<<"$step_condition" || {
-    echo "standard: ${step_name} is not isolated to ${token}" >&2
-    exit 1
-  }
-done
+grep -qF '    web) CODEWIRE_DASHBOARD_IMAGE_DEFERRED=true run_web ;;' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh" || {
+  echo 'standard: Web no longer leaves image work to Dev delivery' >&2
+  exit 1
+}
+# Each family runs only on its own token, as its step did.
+grep -qF 'for family in go-support:go_support docs:docs sdk-go:sdk_go sdk-ts:sdk_ts \' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF '      sdk-python:sdk_python ios:ios; do' "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF '  if selected contracts; then' "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF "  if selected web; then lanes+=('run_standard_in_order web'); fi" \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh"
 
 tooling_block="$TMP/tooling.yaml"
 tooling_bun_setup="$(grep -A3 -F \
@@ -3829,15 +3843,15 @@ for contract in \
   }
 done
 
-ios_run_line="$(grep -n -m1 'name: Run iOS package tests' \
-  "$standard_block" | cut -d: -f1)"
-ios_run_block="$(sed -n "${ios_run_line},$((ios_run_line + 10))p" "$standard_block")"
-grep -qF "contains(needs.verification-selection.outputs.selection, '|ios|')" \
-  <<<"$ios_run_block" || {
-  echo 'standard: iOS verification is not isolated to the iOS selection' >&2
+# The iOS family (run-product-verification.sh run_ios_swift_package, run only
+# on the ios token through standard_families).
+ios_run_block="$(awk '$0 == "run_ios_swift_package() {" { on = 1 } on { print } on && $0 == "}" { exit }' \
+  "$ROOT/scripts/ci/verify/run-product-verification.sh")"
+grep -qF '    ios) run_ios_swift_package ;;' "$ROOT/scripts/ci/verify/run-product-verification.sh" || {
+  echo 'standard: the iOS family does not run its package tests' >&2
   exit 1
 }
-grep -qF 'scripts/ci/verify/run-product-verification.sh ios-config' \
+grep -qxF '  run_ios_config' \
   <<<"$ios_run_block" || {
   echo 'standard: iOS callback configuration is not verified before package tests' >&2
   exit 1
@@ -3871,7 +3885,7 @@ grep -qF '      - name: Verify sealed Rust toolchain' \
 }
 standard_toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain' \
   "$standard_block" | cut -d: -f1)"
-contracts_run_line="$(grep -n -m1 'name: Run Contracts' \
+contracts_run_line="$(grep -n -m1 'name: Run the selected Standard families side by side' \
   "$standard_block" | cut -d: -f1)"
 if [ "$standard_toolchain_line" -ge "$contracts_run_line" ]; then
   echo 'standard: Rust toolchain must be verified before contract verification' >&2
@@ -3893,7 +3907,7 @@ grep -qF "contains(needs.verification-selection.outputs.selection, '|contracts_p
   echo 'standard: Rust toolchain omits Proto/Connect mode' >&2
   exit 1
 }
-go_support_run_line="$(grep -n -m1 'name: Run Go support' \
+go_support_run_line="$(grep -n -m1 'name: Run the selected Standard families side by side' \
   "$standard_block" | cut -d: -f1)"
 if [ "$standard_toolchain_line" -ge "$go_support_run_line" ]; then
   echo 'go-support: Rust toolchain must be verified before tailnet parity verification' >&2
@@ -5700,11 +5714,7 @@ jobs = workflow["jobs"]
 # before this fixture accepts it.
 WORK = {
     "policy": {"Run Policy"},
-    "standard": {
-        "Run Contracts", "Run Go support", "Run Web", "Run Docs", "Run SDK Go",
-        "Run SDK TypeScript typecheck and unit suite", "Run SDK Python",
-        "Run iOS package tests in the pinned Swift image",
-    },
+    "standard": {"Run the selected Standard families side by side"},
     # One step runs the selected Tooling families; the product runner's
     # tooling-parts owns their selection conditions (checked per selection
     # below, as these steps' own conditions were).

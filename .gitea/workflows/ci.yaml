@@ -511,53 +511,20 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_ts|') }}
         run: scripts/ci/setup/setup-node.sh 22.23.4
 
-      - name: Run Contracts
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
+      # The selected Standard families in one step (run-product-verification.sh
+      # standard owns each family's selection condition, as its own step had):
+      # Contracts first, alone, since it regenerates the checked-in generated
+      # code the others read; then Web side by side with Go support, Docs, the
+      # three SDKs and iOS in order, so the job takes Contracts plus the longer
+      # of the two (main run 23329: 626 s with every family one after
+      # another). The first failure stops the rest (#3013).
+      - name: Run the selected Standard families side by side
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
           VERIFICATION_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           VERIFICATION_PUSH_BEFORE_SHA: ${{ github.event.before }}
-        run: scripts/ci/verify/run-product-verification.sh contracts
-
-      - name: Run Go support
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|go_support|') }}
-        env:
-          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-        run: scripts/ci/verify/run-product-verification.sh go-support
-
-      - name: Run Web
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|web|') }}
-        env:
-          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-          CODEWIRE_DASHBOARD_IMAGE_DEFERRED: "true"
-        run: scripts/ci/verify/run-product-verification.sh web
-
-      - name: Run Docs
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|docs|') }}
-        run: scripts/ci/verify/run-product-verification.sh docs
-
-      - name: Run SDK Go
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_go|') }}
-        run: scripts/ci/verify/run-product-verification.sh sdk-go
-
-      - name: Run SDK TypeScript typecheck and unit suite
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_ts|') }}
-        run: scripts/ci/verify/run-product-verification.sh sdk-ts
-
-      - name: Run SDK Python
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|sdk_python|') }}
-        run: scripts/ci/verify/run-product-verification.sh sdk-python
-
-      - name: Run iOS package tests in the pinned Swift image
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|ios|') }}
-        run: |
-          scripts/ci/verify/run-product-verification.sh ios-config
-          docker build --file - apps/ios <<'DOCKERFILE'
-          FROM swift@sha256:0ff707a48519cf1473616c759e019bcff21cfbafa3d2687bf8fd41a2757adc9a
-          WORKDIR /workspace
-          COPY . .
-          RUN swift test --scratch-path /tmp/codewire-ios-build
-          DOCKERFILE
+        run: scripts/ci/verify/run-product-verification.sh standard
 
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}

@@ -155,7 +155,7 @@ fi
 
 ensure_buf() {
   local version go_bin
-  version="$(sed -nE 's|^[[:space:]]*go install github.com/bufbuild/buf/cmd/buf@(v[0-9.]+)$|\1|p' \
+  version="$(sed -nE "s|^readonly BUF_VERSION='([0-9.]+)'$|v\\1|p" \
     scripts/ci/verify/run-product-verification.sh | head -n 1)"
   [ -n "$version" ] || { echo 'push-check: cannot read the pinned buf version' >&2; return 1; }
   go_bin="$(go env GOPATH)/bin"
