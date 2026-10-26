@@ -952,13 +952,18 @@ run_database() {
     done
     return 0
   fi
+  # Every lane's PostgreSQL starts at once, after the extraction or build:
+  # one after another, then waiting, the nine took 24 s (main run 23329).
+  # Started before the extraction instead, their initialization slowed it
+  # from 41 to 68 s (PR run 23437).
   lane_url[core]="$DATABASE_URL"
   lane_rust_url[core]="$DATABASE_URL_RUST"
   for lane in "${DATABASE_LANES[@]:1}"; do
-    integration_postgres_start_lane "$lane"
+    integration_postgres_start_lane "$lane" background
     lane_url[$lane]="$INTEGRATION_POSTGRES_LANE_URL"
     lane_rust_url[$lane]="$INTEGRATION_POSTGRES_LANE_URL_RUST"
   done
+  integration_postgres_wait_started
   # Every lane's server migrates at once; one after another they took about
   # 1.5 s each (run 22601).
   for lane in "${DATABASE_LANES[@]:1}"; do

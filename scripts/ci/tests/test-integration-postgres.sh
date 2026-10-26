@@ -11,7 +11,12 @@ cat > "$TMP/docker" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
 case "$1" in
-  run) printf '%s\n' fake-container-id ;;
+  run)
+    # A lane started in the background takes a while; one named in
+    # FAKE_DOCKER_FAIL_RUN fails.
+    case "$*" in *"${FAKE_DOCKER_FAIL_RUN:-no-such-container}"*) exit 125 ;; esac
+    case "$*" in *-lane-*) sleep "${FAKE_DOCKER_RUN_SECONDS:-0}" ;; esac
+    printf '%s\n' fake-container-id ;;
   port) printf '127.0.0.1:%s\n' "${FAKE_DOCKER_PORT:-45678}" ;;
   exec|rm) ;;
   *) printf 'unexpected fake docker command: %s\n' "$1" >&2; exit 1 ;;
@@ -56,7 +61,7 @@ integration_postgres_configure
 [ "$INTEGRATION_POSTGRES_SOURCE" = managed ]
 [ "$DATABASE_URL" = "postgres://codewire:codewire@127.0.0.1:45678/codewire?sslmode=disable" ]
 [ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:45678/codewire" ]
-grep -q '^run .*127.0.0.1::5432 postgres:17-alpine -c max_locks_per_transaction=1024$' "$FAKE_DOCKER_LOG"
+grep -q '^run .*127.0.0.1::5432 docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$' "$FAKE_DOCKER_LOG"
 grep -q '127.0.0.1:45678/codewire?sslmode=disable.*SELECT 1' "$FAKE_PSQL_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER$" "$FAKE_DOCKER_LOG"
@@ -70,7 +75,7 @@ integration_postgres_lanes_available
 integration_postgres_start_lane credential-broker
 [ "$INTEGRATION_POSTGRES_LANE_URL" = "postgres://codewire:codewire@127.0.0.1:45678/codewire?sslmode=disable" ]
 [ "$INTEGRATION_POSTGRES_LANE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:45678/codewire" ]
-grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-credential-broker .*127.0.0.1::5432 postgres:17-alpine -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
+grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-credential-broker .*127.0.0.1::5432 docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER$" "$FAKE_DOCKER_LOG"
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER-lane-credential-broker$" "$FAKE_DOCKER_LOG"
@@ -92,9 +97,29 @@ INTEGRATION_DOCKER_NETWORK=codewire-fixture-net
 integration_postgres_lanes_available
 integration_postgres_start_lane orchestration
 [ "$INTEGRATION_POSTGRES_LANE_URL_RUST" = "postgres://codewire:codewire@codewire-integration-postgres-orchestration:5432/codewire" ]
-grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration --pids-limit 2048 --network codewire-fixture-net --network-alias codewire-integration-postgres-orchestration .* postgres:17-alpine -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
+grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration --pids-limit 2048 --network codewire-fixture-net --network-alias codewire-integration-postgres-orchestration .* docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration$" "$FAKE_DOCKER_LOG"
+# Lanes on the job network start at once in the background (their servers
+# initialize while the archives extract); waiting for them reports a lane
+# whose container did not start.
+: > "$FAKE_DOCKER_LOG"
+started=$SECONDS
+FAKE_DOCKER_RUN_SECONDS=2 integration_postgres_start_lane core background
+[ "$INTEGRATION_POSTGRES_LANE_URL_RUST" = "postgres://codewire:codewire@codewire-integration-postgres-core:5432/codewire" ]
+FAKE_DOCKER_RUN_SECONDS=2 integration_postgres_start_lane broker-checked background
+integration_postgres_wait_started
+(( SECONDS - started < 4 )) || { echo 'the background lanes started one after another' >&2; exit 1; }
+[ "$(grep -c "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-" "$FAKE_DOCKER_LOG")" -eq 2 ]
+[ "${#INTEGRATION_POSTGRES_STARTING[@]}" -eq 0 ]
+FAKE_DOCKER_FAIL_RUN=lane-orchestration integration_postgres_start_lane orchestration background
+if integration_postgres_wait_started 2>"$TMP/wait-started.err"; then
+  echo 'a lane whose container did not start was waited for as started' >&2
+  exit 1
+fi
+grep -q 'a database lane PostgreSQL did not start' "$TMP/wait-started.err"
+integration_postgres_cleanup
+grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER-lane-broker-checked$" "$FAKE_DOCKER_LOG"
 unset INTEGRATION_DOCKER_NETWORK
 
 # A CI job's network without an explicit database: the run starts its own
@@ -108,7 +133,7 @@ integration_postgres_configure
 [ "$INTEGRATION_POSTGRES_CONTAINER" = "codewire-product-postgres-fixture-$$-$$" ]
 [ "$DATABASE_URL" = "postgres://codewire:codewire@$INTEGRATION_POSTGRES_CONTAINER:5432/codewire?sslmode=disable" ]
 [ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@$INTEGRATION_POSTGRES_CONTAINER:5432/codewire" ]
-grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER --pids-limit 2048 --network codewire-fixture-net --network-alias $INTEGRATION_POSTGRES_CONTAINER .* postgres:17-alpine -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
+grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER --pids-limit 2048 --network codewire-fixture-net --network-alias $INTEGRATION_POSTGRES_CONTAINER .* docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
 if grep -q -- '127.0.0.1:' "$FAKE_DOCKER_LOG"; then
   echo 'a job-network PostgreSQL published a loopback port' >&2
   exit 1
@@ -159,7 +184,7 @@ integration_postgres_configure
 [ "$INTEGRATION_POSTGRES_SOURCE" = managed ]
 [ "$DATABASE_URL" = "postgres://codewire:codewire@127.0.0.1:55432/codewire?sslmode=disable" ]
 [ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:55432/codewire" ]
-grep -q '^run .*127.0.0.1:55432:5432 postgres:17-alpine -c max_locks_per_transaction=1024$' "$FAKE_DOCKER_LOG"
+grep -q '^run .*127.0.0.1:55432:5432 docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$' "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 
 for invalid_port in invalid 1023 65536; do
@@ -729,10 +754,15 @@ print(f'Database batching: {len(suites) + 10} trace/failure cases; '
       f'all {len(suites)} suite contracts and {sum(suite["count"] for suite in suites)} required tests preserved')
 PYTHON
 
-# Every integration PostgreSQL gets the same server settings (#3198): the ones
-# this file starts above, and ci.yaml's "Start integration Postgres" steps.
+# Every integration PostgreSQL gets the same server settings (#3198) and the
+# same digest-pinned image: the ones this file starts above, ci.yaml's "Start
+# integration Postgres" steps, and the Kind PostgreSQL, so a guest whose
+# Docker disk holds that image pulls nothing.
 [ "${INTEGRATION_POSTGRES_SERVER_ARGS[*]}" = '-c max_locks_per_transaction=1024' ]
-python3 - "$ROOT/.gitea/workflows/ci.yaml" "${INTEGRATION_POSTGRES_SERVER_ARGS[*]}" <<'PYTHON'
+[[ "$INTEGRATION_POSTGRES_PINNED_IMAGE" =~ ^docker\.io/library/postgres:17-alpine@sha256:[0-9a-f]{64}$ ]]
+grep -qxF "  KIND_POSTGRES_IMAGE='$INTEGRATION_POSTGRES_PINNED_IMAGE'" "$ROOT/scripts/ci/verify/kind/common.sh" ||
+  { echo 'the integration PostgreSQL image is not the Kind PostgreSQL pin' >&2; exit 1; }
+python3 - "$ROOT/.gitea/workflows/ci.yaml" "$INTEGRATION_POSTGRES_PINNED_IMAGE ${INTEGRATION_POSTGRES_SERVER_ARGS[*]}" <<'PYTHON'
 import re
 import sys
 
@@ -743,7 +773,7 @@ for step in steps:
     run = step.replace("\\\n", " ")
     command = re.search(r"docker run -d [^\n]*", run)
     assert command, "a Postgres step has no docker run"
-    assert " ".join(command.group(0).split()).endswith(f"postgres:17-alpine {server_args}"), command.group(0)
+    assert " ".join(command.group(0).split()).endswith(f" {server_args}"), command.group(0)
 PYTHON
 
 # The archive extractor links each archive's non-test binaries at their build

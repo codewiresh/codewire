@@ -11,7 +11,11 @@
 # keeps the two equal.
 #
 # Usage: install-cargo-nextest.sh DIR
-# Installs DIR/cargo-nextest and checks its version.
+# Installs DIR/cargo-nextest and checks its version. With
+# CODEWIRE_TOOL_CACHE (a folder of a metal guest's warm cache), the verified
+# tarball is kept there by its SHA-256 and checked again on every use, so a
+# guest downloads it once instead of in every job (10 s in main run 23329's
+# Database job); a kept file that does not match is fetched again.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -30,8 +34,21 @@ dir="$1"
 mkdir -p "$dir"
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/cargo-nextest.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
-"$ROOT/scripts/ci/release/fetch-pinned.sh" "$NEXTEST_URL" "$NEXTEST_SHA256" "$work/nextest.tar.gz"
-tar -xzf "$work/nextest.tar.gz" -C "$work" cargo-nextest
+tarball="$work/nextest.tar.gz"
+if [ -n "${CODEWIRE_TOOL_CACHE:-}" ]; then
+  mkdir -p "$CODEWIRE_TOOL_CACHE"
+  tarball="$CODEWIRE_TOOL_CACHE/$NEXTEST_SHA256.tar.gz"
+  if [ -f "$tarball" ] && [ "$(sha256sum "$tarball" | cut -d' ' -f1)" = "$NEXTEST_SHA256" ]; then
+    echo "install-cargo-nextest: the kept $NEXTEST_VERSION tarball matches its SHA-256"
+  else
+    rm -f -- "$tarball"
+    "$ROOT/scripts/ci/release/fetch-pinned.sh" "$NEXTEST_URL" "$NEXTEST_SHA256" "$work/nextest.tar.gz"
+    mv -f -- "$work/nextest.tar.gz" "$tarball"
+  fi
+else
+  "$ROOT/scripts/ci/release/fetch-pinned.sh" "$NEXTEST_URL" "$NEXTEST_SHA256" "$tarball"
+fi
+tar -xzf "$tarball" -C "$work" cargo-nextest
 install -m 0755 "$work/cargo-nextest" "$dir/cargo-nextest"
 actual="$("$dir/cargo-nextest" nextest --version | head -n 1)"
 [[ "$actual" == "cargo-nextest $NEXTEST_VERSION "* ]] || die "installed '$actual', not $NEXTEST_VERSION"

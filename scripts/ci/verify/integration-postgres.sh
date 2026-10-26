@@ -13,6 +13,12 @@
 # migrations with "out of shared memory" (#3198); 1024 fits every concurrent
 # test the lanes can open within max_connections.
 INTEGRATION_POSTGRES_SERVER_ARGS=(-c max_locks_per_transaction=1024)
+# The PostgreSQL image every integration server runs, by digest: the same pin
+# as the Kind PostgreSQL (KIND_POSTGRES_IMAGE in kind/common.sh) and as
+# ci.yaml's "Start integration Postgres" steps (test-integration-postgres.sh
+# keeps the three equal), so a guest whose Docker disk already holds it pulls
+# nothing. INTEGRATION_POSTGRES_IMAGE overrides it.
+INTEGRATION_POSTGRES_PINNED_IMAGE='docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee'
 
 integration_postgres_init() {
   # Each run names its containers for its own process: the concurrent lanes of
@@ -21,6 +27,7 @@ integration_postgres_init() {
   INTEGRATION_POSTGRES_MANAGED=false
   INTEGRATION_POSTGRES_SOURCE=""
   INTEGRATION_POSTGRES_LANE_CONTAINERS=()
+  INTEGRATION_POSTGRES_STARTING=()
   INTEGRATION_POSTGRES_LANE_URL=""
   INTEGRATION_POSTGRES_LANE_URL_RUST=""
 }
@@ -58,7 +65,7 @@ integration_postgres_configure() {
     return
   fi
 
-  local image="${INTEGRATION_POSTGRES_IMAGE:-postgres:17-alpine}"
+  local image="${INTEGRATION_POSTGRES_IMAGE:-$INTEGRATION_POSTGRES_PINNED_IMAGE}"
 
   # A CI job runs in a container on its own Docker network, which cannot reach
   # a port published on the Docker host's loopback. Without an explicit
@@ -151,10 +158,14 @@ integration_postgres_lanes_available() {
     || { [ "${INTEGRATION_POSTGRES_SOURCE:-}" = explicit ] && [ -n "${INTEGRATION_DOCKER_NETWORK:-}" ]; }
 }
 
-# integration_postgres_start_lane LANE sets INTEGRATION_POSTGRES_LANE_URL and
-# INTEGRATION_POSTGRES_LANE_URL_RUST; the cleanup removes its container.
+# integration_postgres_start_lane LANE [background] sets
+# INTEGRATION_POSTGRES_LANE_URL and INTEGRATION_POSTGRES_LANE_URL_RUST; the
+# cleanup removes its container. With background, a lane on the job's network
+# starts its container without waiting for Docker, and
+# integration_postgres_wait_started waits for every one so started; a managed
+# loopback lane needs its port, so it always starts in the foreground.
 integration_postgres_start_lane() {
-  local lane="$1" name image="${INTEGRATION_POSTGRES_IMAGE:-postgres:17-alpine}" host port
+  local lane="$1" name image="${INTEGRATION_POSTGRES_IMAGE:-$INTEGRATION_POSTGRES_PINNED_IMAGE}" host port
   [[ "$lane" =~ ^[a-z][a-z-]{0,31}$ ]] || {
     echo "::error::invalid database lane name: $lane" >&2
     return 1
@@ -174,14 +185,34 @@ integration_postgres_start_lane() {
     fi
   else
     host="codewire-integration-postgres-${lane}"
-    docker run -d --rm --name "$name" --pids-limit 2048 \
-      --network "$INTEGRATION_DOCKER_NETWORK" --network-alias "$host" \
-      -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire \
-      "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
+    if [ "${2:-}" = background ]; then
+      docker run -d --rm --name "$name" --pids-limit 2048 \
+        --network "$INTEGRATION_DOCKER_NETWORK" --network-alias "$host" \
+        -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire \
+        "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null &
+      INTEGRATION_POSTGRES_STARTING+=("$!")
+    else
+      docker run -d --rm --name "$name" --pids-limit 2048 \
+        --network "$INTEGRATION_DOCKER_NETWORK" --network-alias "$host" \
+        -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire \
+        "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
+    fi
     port=5432
   fi
   INTEGRATION_POSTGRES_LANE_URL="postgres://codewire:codewire@${host}:${port}/codewire?sslmode=disable"
   INTEGRATION_POSTGRES_LANE_URL_RUST="postgres://codewire:codewire@${host}:${port}/codewire"
+}
+
+integration_postgres_wait_started() {
+  local pid failed=false
+  for pid in "${INTEGRATION_POSTGRES_STARTING[@]}"; do
+    wait "$pid" || failed=true
+  done
+  INTEGRATION_POSTGRES_STARTING=()
+  [ "$failed" = false ] || {
+    echo "::error::a database lane PostgreSQL did not start" >&2
+    return 1
+  }
 }
 
 # integration_postgres_stop_lane LANE removes a finished lane's PostgreSQL, so

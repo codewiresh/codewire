@@ -1271,7 +1271,7 @@ jobs:
           docker run -d --name "$container" --pids-limit 2048 \
             --network "${networks[0]}" --network-alias "$postgres_host" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
-            -e POSTGRES_DB=codewire postgres:17-alpine \
+            -e POSTGRES_DB=codewire docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee \
             -c max_locks_per_transaction=1024
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
@@ -1305,6 +1305,10 @@ jobs:
 
       - name: Install pinned cargo-nextest
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') && steps.database-archives.outputs.ready == 'true' }}
+        env:
+          # The warm Rust cache's Cargo home (select-warm-rust-cache.sh) keeps
+          # the verified tarball between jobs on a metal guest.
+          CODEWIRE_TOOL_CACHE: ${{ github.workspace }}/target/ci-rust-cargo-home/codewire-tools
         run: scripts/ci/setup/install-cargo-nextest.sh "$RUNNER_TEMP/nextest"
 
       - name: Run Database
@@ -1439,7 +1443,7 @@ jobs:
           docker run -d --name "$container" --pids-limit 2048 \
             --network "${networks[0]}" --network-alias "$postgres_host" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
-            -e POSTGRES_DB=codewire postgres:17-alpine \
+            -e POSTGRES_DB=codewire docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee \
             -c max_locks_per_transaction=1024
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
@@ -1610,7 +1614,7 @@ jobs:
           docker run -d --name "$container" --pids-limit 2048 \
             --network "${networks[0]}" --network-alias "$postgres_host" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
-            -e POSTGRES_DB=codewire postgres:17-alpine \
+            -e POSTGRES_DB=codewire docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee \
             -c max_locks_per_transaction=1024
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
