@@ -730,9 +730,13 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
+      # The disk bound keeps the legs this job is about to build, which the
+      # selection decides.
       - name: Bring the warm build folder to this commit
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        run: scripts/ci/setup/build-once.sh prepare "$GITHUB_WORKSPACE"
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+        run: scripts/ci/setup/build-once.sh prepare "$GITHUB_WORKSPACE" build
 
       # The legs build-once.sh lists; a leg wanted only for a selected family
       # (selected:TOKEN) reads the selection.
@@ -787,7 +791,7 @@ jobs:
 
       - name: Bring the warm build folder to this commit
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        run: scripts/ci/setup/build-once.sh prepare "$GITHUB_WORKSPACE"
+        run: scripts/ci/setup/build-once.sh prepare "$GITHUB_WORKSPACE" checks
 
       # The macOS cw and the local VMM link Apple frameworks, so only the
       # protected Mac runner links them (cli-release.yaml and

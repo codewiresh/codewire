@@ -9,8 +9,12 @@
 # script; the runners' labels and the archive stores' admission keep the
 # kinds apart.
 #
-#   build-once.sh prepare CHECKOUT  bring the warm build folder to this job's
-#                                   commit and set up the pinned tools
+#   build-once.sh prepare CHECKOUT build|checks
+#                                   bring the warm build folder to this job's
+#                                   commit and set up the pinned tools; build
+#                                   or checks names the target folders the
+#                                   job is about to use, which the disk bound
+#                                   never removes (bound_targets)
 #   build-once.sh build OUT         run every wanted leg (LEGS below) at once;
 #                                   each writes its test archives to
 #                                   OUT/<leg>.<ext>
@@ -32,7 +36,9 @@
 # - targets: one Cargo target folder per leg (targets/<leg>, and the local
 #   VMM leg's desktop folder), so the legs build side by side without
 #   waiting on each other's folder lock, and the Rust checks' own
-#   (CHECK_FOLDERS); any other folder there is removed.
+#   (CHECK_FOLDERS); any other folder there is removed. Each folder's
+#   .build-once-used mark names the last run that used it (GITHUB_RUN_ID),
+#   and its time orders the disk bound's removals (bound_targets).
 # - cargo-home: the registry index and downloaded crates.
 # - tools: downloads of SHA-256-pinned tools, checked on every use.
 # - layout: the folder's layout version. Raising it wipes the target folders
@@ -116,7 +122,8 @@ tool() {
 }
 
 prepare() {
-  local checkout commit entry bin nextest_version nextest_url nextest_sha share
+  local checkout commit entry bin nextest_version nextest_url nextest_sha share job="$2"
+  case "$job" in build|checks) ;; *) die "prepare is for the build or the checks job, not: $job" ;; esac
   checkout="$(cd "$1" && pwd)"
   [ "$(git -C "$checkout" rev-parse --show-toplevel 2>/dev/null)" = "$checkout" ] ||
     die "$checkout is not a git checkout"
@@ -187,7 +194,7 @@ prepare() {
         ;;
     esac
   done
-  bound_targets
+  bound_targets "$job"
   # Tests stop here, before the pinned tools; never on a build runner's disk.
   if [ -n "${BUILD_ONCE_ROOT:-}" ] && [ "${BUILD_ONCE_TEST_STOP_AFTER_TARGETS:-}" = 1 ]; then
     return 0
@@ -227,19 +234,54 @@ prepare() {
   echo "build-once: $src is at $commit; targets $(du -sh "$work/targets" | cut -f1); cold=$cold"
 }
 
-disk_used_percent() {
-  # The build disk's use, as df reports it; tests name another df.
-  "${BUILD_ONCE_DF:-df}" -P "$cache_root" | awk 'NR == 2 { sub("%", "", $5); print $5 }'
+disk_usage() {
+  # The build disk's use in percent, its used KiB and its size in KiB, as df
+  # reports them; tests name another df.
+  "${BUILD_ONCE_DF:-df}" -P "$cache_root" | awk 'NR == 2 { sub("%", "", $5); print $5, $3, $2 }'
+}
+
+mark_used() {
+  # mark_used FOLDER: this run uses FOLDER. The mark's time orders
+  # bound_targets' removals; its content names the run.
+  mkdir -p "$1"
+  printf '%s\n' "${GITHUB_RUN_ID:-}" > "$1/.build-once-used"
+}
+
+job_folders() {
+  # job_folders build|checks: the target folders the job is about to use,
+  # the wanted legs or the Rust checks' folders. A leg's desktop folder goes
+  # and stays with its leg.
+  case "$1" in
+    build) wanted_legs ;;
+    checks) printf '%s\n' "${CHECK_FOLDERS[@]}" ;;
+  esac
 }
 
 bound_targets() {
-  # Nothing else bounds the target folders: each leg keeps its own, and a
-  # lockfile change no longer wipes them. Above
-  # BUILD_ONCE_DISK_PERCENT (65) of the build disk, whole leg folders go,
-  # least recently used first, until the disk is back under it. The guest
-  # wipes the whole folder at 85 % (main run 22737: "build folder wiped: disk
-  # 93% used"), which makes every leg cold; this makes one leg cold at a time.
-  local limit="${BUILD_ONCE_DISK_PERCENT:-65}" used leg folder swept
+  # bound_targets build|checks: nothing else bounds the target folders: each
+  # leg keeps its own, and a lockfile change no longer wipes them. Above
+  # BUILD_ONCE_DISK_PERCENT (65) of the build disk, whole folders go, one at
+  # a time, until the disk is back under it:
+  # 1. Idle folders, least recently used first: those neither this run nor
+  #    the run before it on this disk used (by their marks; a folder with no
+  #    run in its mark is idle).
+  # 2. When only live folders are left and the disk is still over the bound,
+  #    the disk is too small for one run's folders, which is logged with the
+  #    size it needs. Live folders then stay, over the bound, until the disk
+  #    passes BUILD_ONCE_DISK_LIVE_PERCENT (80); past it the least recently
+  #    used live folder goes. Removing a live folder makes the next run build
+  #    it cold (main run 24440 removed the archive folder its own build had
+  #    just filled at 71%, and the next archive leg took 780 s against 165 s
+  #    warm), while a disk over the bound costs nothing until it fills. The
+  #    guest wipes the whole folder at 85% (main run 22737: "build folder
+  #    wiped: disk 93% used"), which makes every leg cold, so live folders go
+  #    before that.
+  # 3. A folder this job is about to use never goes (pull request run 24177
+  #    removed the archive folder its build was about to use).
+  local job="$1" limit="${BUILD_ONCE_DISK_PERCENT:-65}" ceiling="${BUILD_ONCE_DISK_LIVE_PERCENT:-80}"
+  local current="${GITHUB_RUN_ID:-}" previous used used_kib size_kib folder name run swept table warned=false
+  local -a idle=() live=()
+  local -A uses=()
   # Incremental sessions from the builds that were incremental (#3454).
   find "$work/targets" -xdev -mindepth 3 -maxdepth 3 -type d -name incremental \
     -exec rm -rf -- {} + 2>/dev/null || true
@@ -252,19 +294,55 @@ bound_targets() {
     -print -delete 2>/dev/null | wc -l)"
   find "$work/targets" -xdev -mindepth 2 -type d -empty -delete 2>/dev/null || true
   [ "$swept" -eq 0 ] || echo "build-once: removed $swept target files no build read for ${BUILD_ONCE_SWEEP_DAYS:-3} days"
-  used="$(disk_used_percent)"
-  [[ "$used" =~ ^[0-9]+$ ]] || die "cannot read the build disk's use: ${used:-nothing}"
+  read -r used used_kib size_kib < <(disk_usage) || true
+  [[ "$used" =~ ^[0-9]+$ && "$used_kib" =~ ^[0-9]+$ && "$size_kib" =~ ^[0-9]+$ ]] ||
+    die "cannot read the build disk's use: ${used:-nothing}"
+  (( used > limit )) || return 0
+  while read -r name; do
+    [ -z "$name" ] || uses[$name]=1
+  done < <(job_folders "$job")
+  # Each folder's mark time, its run (- for none) and its name, least
+  # recently used first.
+  table="$(for folder in "$work/targets"/*; do
+      [ -d "$folder" ] || continue
+      case "${folder##*/}" in *_desktop) continue ;; esac
+      run="$(head -n 1 "$folder/.build-once-used" 2>/dev/null || true)"
+      [[ "$run" =~ ^[0-9]+$ ]] || run=-
+      printf '%s %s %s\n' "$(stat -c %Y "$folder/.build-once-used" 2>/dev/null || echo 0)" "$run" "${folder##*/}"
+    done | sort -k1,1n -k3,3)"
+  # The run before this one: the latest mark of another run.
+  previous="$(awk -v current="$current" '$2 != "-" && $2 != current { run = $2 } END { print run }' <<< "$table")"
+  while read -r _ run name; do
+    [ -n "$name" ] && [ -z "${uses[$name]:-}" ] || continue
+    if [ "$run" != - ] && { [ "$run" = "$current" ] || [ "$run" = "$previous" ]; }; then
+      live+=("$name")
+    else
+      idle+=("$name")
+    fi
+  done <<< "$table"
   while (( used > limit )); do
-    # The least recently used leg: its folder's use mark, or none at all.
-    leg="$(for folder in "$work/targets"/*; do
-        [ -d "$folder" ] || continue
-        case "${folder##*/}" in *_desktop) continue ;; esac
-        printf '%s %s\n' "$(stat -c %Y "$folder/.build-once-used" 2>/dev/null || echo 0)" "${folder##*/}"
-      done | sort -n | head -n 1 | cut -d' ' -f2)"
-    [ -n "$leg" ] || { echo "build-once: disk ${used}% used with no target folder left to remove"; break; }
-    echo "build-once: disk ${used}% used (limit ${limit}%); removing the least recently used target folder $leg"
-    rm -rf -- "$work/targets/$leg" "$work/targets/${leg}_desktop"
-    used="$(disk_used_percent)"
+    if (( ${#idle[@]} > 0 )); then
+      name="${idle[0]}"
+      idle=("${idle[@]:1}")
+      echo "build-once: disk ${used}% used (limit ${limit}%); removing the least recently used idle target folder $name"
+    else
+      if [ "$warned" = false ]; then
+        warned=true
+        echo "::warning::build-once: disk too small: $(awk -v k="$used_kib" -v l="$limit" \
+          'BEGIN { n = k * 1024 * 100 / l / 1e9; printf "%d", (n > int(n)) ? int(n) + 1 : n }') GB needed to keep this run's and the previous run's target folders under the ${limit}% bound; the $(awk -v k="$size_kib" 'BEGIN { printf "%d", k * 1024 / 1e9 }') GB disk is ${used}% used. They stay over the bound up to ${ceiling}%."
+      fi
+      (( used > ceiling )) || break
+      if (( ${#live[@]} == 0 )); then
+        echo "build-once: disk ${used}% used with no target folder left that this job does not use"
+        break
+      fi
+      name="${live[0]}"
+      live=("${live[@]:1}")
+      echo "build-once: disk ${used}% used, over ${ceiling}%; removing the least recently used live target folder $name, which this job does not use"
+    fi
+    rm -rf -- "$work/targets/$name" "$work/targets/${name}_desktop"
+    read -r used used_kib size_kib < <(disk_usage) || true
+    [[ "$used" =~ ^[0-9]+$ && "$used_kib" =~ ^[0-9]+$ ]] || die "cannot read the build disk's use: ${used:-nothing}"
   done
 }
 
@@ -472,8 +550,7 @@ run_one_leg() {
   # Each leg's start and finish reach the job log as they happen, so a run
   # cancelled before the legs all end still shows each finished leg's time.
   local name="$1" out="$2" logs="$3" started=$SECONDS status=0
-  mkdir -p "$work/targets/$name"
-  touch "$work/targets/$name/.build-once-used"
+  mark_used "$work/targets/$name"
   echo "[build-once] leg $name: start"
   "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" > "$logs/$name.log" 2>&1 ||
     rebuild_corrupt_leg "$name" "$out" "$logs/$name.log" || status=1
@@ -572,8 +649,7 @@ checks() {
   local log folder folders=() status=0
   in_src
   for folder in "${CHECK_FOLDERS[@]}"; do
-    mkdir -p "$work/targets/$folder"
-    touch "$work/targets/$folder/.build-once-used"
+    mark_used "$work/targets/$folder"
   done
   log="$(mktemp "${RUNNER_TEMP:-/tmp}/build-once-checks.XXXXXX")"
   run_checks 2>&1 | tee "$log" || status=$?
@@ -589,8 +665,7 @@ checks() {
   for folder in "${folders[@]}"; do
     echo "build-once: the Rust checks read a corrupt output in $folder; it is wiped and they run once more"
     rm -rf -- "$folder"
-    mkdir -p "$folder"
-    touch "$folder/.build-once-used"
+    mark_used "$folder"
   done
   run_checks
 }
@@ -620,7 +695,7 @@ run_checks() {
 
 case "${1:-}" in
   checks) [ "$#" -eq 1 ] || die 'usage: build-once.sh checks'; checks ;;
-  prepare) [ "$#" -eq 2 ] || die 'usage: build-once.sh prepare CHECKOUT'; prepare "$2" ;;
+  prepare) [ "$#" -eq 3 ] || die 'usage: build-once.sh prepare CHECKOUT build|checks'; prepare "$2" "$3" ;;
   build) [ "$#" -eq 2 ] || die 'usage: build-once.sh build OUT'; build "$2" ;;
   legs) [ "$#" -eq 1 ] || die 'usage: build-once.sh legs'; wanted_legs ;;
   run-legs) [ "$#" -eq 3 ] || die 'usage: build-once.sh run-legs OUT LOGS'; run_legs "$2" "$3" ;;

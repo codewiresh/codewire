@@ -10,9 +10,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly SCRIPT="$ROOT/scripts/ci/setup/build-once.sh"
 # The leg table reads the run's selection, publish its store, and prepare its
 # event (main or pr build folder), and the Rust checks their CPU share
-# (CARGO_BUILD_JOBS, set in every CI job); a CI job running
-# this test may have its own in the environment, so each case states its own.
-unset VERIFICATION_SELECTION ARCHIVE_STORE_URL GITHUB_EVENT_NAME GITHUB_REF BUILD_ONCE_LOCAL_VMM CARGO_BUILD_JOBS
+# (CARGO_BUILD_JOBS, set in every CI job), and the use marks their run
+# (GITHUB_RUN_ID); a CI job running this test may have its own in the
+# environment, so each case states its own.
+unset VERIFICATION_SELECTION ARCHIVE_STORE_URL GITHUB_EVENT_NAME GITHUB_REF BUILD_ONCE_LOCAL_VMM CARGO_BUILD_JOBS GITHUB_RUN_ID
 
 fail() {
   echo "test-build-once: $*" >&2
@@ -105,17 +106,26 @@ tree() {
 mkdir -p "$work/disk/main/src" "$work/env"
 if GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/head BUILD_ONCE_ROOT="$work/disk" \
     GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
-    "$SCRIPT" prepare "$work/checkout1" > "$work/refused.log" 2>&1; then
+    "$SCRIPT" prepare "$work/checkout1" build > "$work/refused.log" 2>&1; then
   fail 'a pull request prepared on a disk holding main'
 fi
 grep -q 'holds .*/main; a pr run does not build here' "$work/refused.log" || fail 'no reason for the refusal'
 [ -d "$work/disk/main/src" ] || fail 'the refused prepare touched the main folder'
 if GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main BUILD_ONCE_ROOT="$work/disk" BUILD_ONCE_TREE=/ci-cache/pr \
     GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
-    "$SCRIPT" prepare "$work/checkout1" > "$work/refused.log" 2>&1; then
+    "$SCRIPT" prepare "$work/checkout1" build > "$work/refused.log" 2>&1; then
   fail 'prepare accepted a workflow folder that differs from the run kind'
 fi
 grep -q 'BUILD_ONCE_TREE=/ci-cache/pr, but this run builds in' "$work/refused.log" || fail 'no reason for the folder refusal'
+# prepare names the job it prepares for, whose folders the disk bound keeps.
+for args in "prepare $work/checkout1" "prepare $work/checkout1 tests"; do
+  # shellcheck disable=SC2086 # Word splitting builds each case's arguments.
+  if BUILD_ONCE_ROOT="$work/other-disk" GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" \
+      RUNNER_TEMP="$work/env" "$SCRIPT" $args > /dev/null 2>&1; then
+    fail "prepare accepted: $args"
+  fi
+done
+[ ! -e "$work/other-disk" ] || fail 'a refused prepare touched the build disk'
 
 # A test job's fetch: verified bytes are ready; with --or-build, a missing
 # digest, store or archive is a miss the job builds through (ready=false, a
@@ -162,23 +172,26 @@ printf 'derp\n' > "$work/lock-origin/deployments/docker/derp.Cargo.lock"
 git -C "$work/lock-origin" add -A
 git -C "$work/lock-origin" -c user.name=t -c user.email=t@example.invalid commit -q -m one
 git clone -q --depth 1 "file://$work/lock-origin" "$work/lock-checkout"
-# A fake df: the build disk is 10 % used, plus 20 % for each leg folder when
-# FAKE_DF_PER_LEG is set.
+# A fake df: a 100 GB build disk, 10 % used, plus FAKE_DF_PER_LEG % for each
+# leg folder when it is set.
 cat > "$work/fake-df" <<'DF'
 #!/usr/bin/env bash
+size=97656250
 used=10
 if [ -n "${FAKE_DF_PER_LEG:-}" ]; then
   legs="$(find "$FAKE_DF_TARGETS" -mindepth 1 -maxdepth 1 -type d ! -name '*_desktop' | wc -l)"
-  used=$(( 10 + 20 * legs ))
+  used=$(( 10 + FAKE_DF_PER_LEG * legs ))
 fi
-printf 'Filesystem 1024-blocks Used Available Capacity Mounted\nfake 100 %s %s %s%% /x\n' "$used" "$((100 - used))" "$used"
+kib=$(( size * used / 100 ))
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted\nfake %s %s %s %s%% /x\n' "$size" "$kib" "$(( size - kib ))" "$used"
 DF
 chmod +x "$work/fake-df"
 targets_prepare() {
   BUILD_ONCE_DF="$work/fake-df" FAKE_DF_TARGETS="$work/marker-root/pr/targets" \
   BUILD_ONCE_ROOT="$work/marker-root" BUILD_ONCE_TEST_STOP_AFTER_TARGETS=1 \
     GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
-    "$SCRIPT" prepare "$work/lock-checkout" > "$work/prepare.log" 2>&1 || fail "prepare failed: $(cat "$work/prepare.log")"
+    "$SCRIPT" prepare "$work/lock-checkout" "${PREPARE_JOB:-build}" > "$work/prepare.log" 2>&1 ||
+    fail "prepare failed: $(cat "$work/prepare.log")"
 }
 marker_root="$work/marker-root/pr"
 targets_prepare
@@ -226,8 +239,9 @@ done
 grep -q 'removing the unused target folder stray' "$work/prepare.log" || fail 'the stray folder removal gave no reason'
 
 # The disk bound: target files no build read for 3 days go; above 65 % of the
-# disk, whole leg folders go, least recently used first (a folder with no use
-# mark first), and a leg's desktop folder with it.
+# disk, whole idle leg folders go, least recently used first (a folder with no
+# use mark first), and a leg's desktop folder with it. A mark that names no
+# run (from before marks named their run) is idle.
 rm -rf "$marker_root/targets"
 mkdir -p "$marker_root/targets/archive/debug/deps" "$marker_root/targets/database" \
   "$marker_root/targets/features" "$marker_root/targets/database_desktop"
@@ -236,20 +250,90 @@ printf 'fresh' > "$marker_root/targets/archive/debug/deps/libnew.rlib"
 touch -a -d '5 days ago' "$marker_root/targets/archive/debug/deps/libold.rlib"
 touch -d '2 hours ago' "$marker_root/targets/database/.build-once-used"
 touch "$marker_root/targets/archive/.build-once-used"
-FAKE_DF_PER_LEG=1 targets_prepare
+FAKE_DF_PER_LEG=20 targets_prepare
 [ ! -e "$marker_root/targets/archive/debug/deps/libold.rlib" ] || fail 'a target file unread for 5 days was kept'
 [ -f "$marker_root/targets/archive/debug/deps/libnew.rlib" ] || fail 'a fresh target file was swept'
 grep -q 'removed 1 target files no build read for 3 days' "$work/prepare.log" || fail 'the sweep gave no count'
 [ ! -e "$marker_root/targets/features" ] || fail 'the never-used leg folder was kept over the disk bound'
 [ -d "$marker_root/targets/database" ] && [ -d "$marker_root/targets/archive" ] ||
   fail 'the bound removed more than it needed'
-grep -q 'disk 70% used (limit 65%); removing the least recently used target folder features' "$work/prepare.log" ||
+grep -q 'disk 70% used (limit 65%); removing the least recently used idle target folder features' "$work/prepare.log" ||
   fail 'the bound gave no reason'
-FAKE_DF_PER_LEG=1 BUILD_ONCE_DISK_PERCENT=35 targets_prepare
+FAKE_DF_PER_LEG=20 BUILD_ONCE_DISK_PERCENT=35 targets_prepare
 [ ! -e "$marker_root/targets/database" ] && [ ! -e "$marker_root/targets/database_desktop" ] ||
   fail 'the older leg and its desktop folder were kept'
 [ -d "$marker_root/targets/archive" ] || fail 'the most recently used leg was removed'
-grep -q "^  touch \"\$work/targets/\$name/.build-once-used\"$" "$SCRIPT" || fail 'a leg does not mark its folder used'
+grep -q '^  mark_used "$work/targets/$name"$' "$SCRIPT" || fail 'a leg does not mark its folder used'
+
+# Live folders stay. A folder is live when this run or the run before it on
+# this disk (the latest mark of another run) used it; idle folders go first,
+# least recently used first. A folder this job is about to use never goes.
+mark() {
+  # mark FOLDER RUN TIME: RUN used FOLDER at TIME.
+  mkdir -p "$marker_root/targets/$1"
+  printf '%s\n' "$2" > "$marker_root/targets/$1/.build-once-used"
+  touch -d "$3" "$marker_root/targets/$1/.build-once-used"
+}
+kept() {
+  local folder
+  for folder in "$@"; do
+    [ -d "$marker_root/targets/$folder" ] || fail "the bound removed $folder: $(cat "$work/prepare.log")"
+  done
+}
+removals() { grep -c 'removing the least recently used' "$work/prepare.log" || true; }
+two_hours_ago="$(date -d '2 hours ago' '+%Y-%m-%d %H:%M:%S')"
+just_now="$(date -d '1 minute ago' '+%Y-%m-%d %H:%M:%S')"
+# Pull request run 24177: the build's prepare at 86 % removed the idle desktop
+# folder, then the archive folder its build was about to use, whose mark tied
+# with the previous run's other legs. Run 300's build wants archive and
+# features: the idle desktop folder of run 250 goes, and at 70 % only live
+# folders are left, which stay.
+rm -rf "$marker_root/targets"
+mark desktop 250 '1 day ago'
+for folder in archive database features; do mark "$folder" 299 "$two_hours_ago"; done
+mark clippy 299 '1 hour ago'
+GITHUB_RUN_ID=300 VERIFICATION_SELECTION='|rust|' FAKE_DF_PER_LEG=15 targets_prepare
+[ ! -e "$marker_root/targets/desktop" ] || fail 'the idle folder was kept over the bound'
+grep -q 'disk 85% used (limit 65%); removing the least recently used idle target folder desktop' "$work/prepare.log" ||
+  fail "the idle folder's removal gave no reason"
+kept archive features database clippy
+[ "$(removals)" -eq 1 ] || fail 'the bound removed a live folder under the live limit'
+grep -q '^::warning::build-once: disk too small: 108 GB needed to keep .* under the 65% bound; the 100 GB disk is 70% used. They stay over the bound up to 80%.$' \
+  "$work/prepare.log" || fail "the bound did not say the disk is too small: $(cat "$work/prepare.log")"
+# Main run 24440, the first on its disk: the Rust checks' prepare at 71 %
+# removed the archive folder the run's build had just filled, and the next
+# archive leg built cold. Run 400's legs are live: they stay.
+rm -rf "$marker_root/targets"
+for folder in archive features database services_control; do mark "$folder" 400 "$just_now"; done
+GITHUB_RUN_ID=400 PREPARE_JOB=checks FAKE_DF_PER_LEG=15 targets_prepare
+kept archive features database services_control
+[ "$(removals)" -eq 0 ] || fail 'the bound removed a folder the run just used'
+grep -q '::warning::build-once: disk too small: 108 GB needed' "$work/prepare.log" || fail 'a too-small disk gave no warning'
+# Only live folders, over 80 %: the least recently used live folder this job
+# does not use goes, until the disk is under 80 %; the Rust checks' folders
+# stay, though older.
+rm -rf "$marker_root/targets"
+mark clippy 499 '1 hour ago'
+mark darwin 499 '1 hour ago'
+mark features 500 '10 minutes ago'
+mark archive 500 '5 minutes ago'
+GITHUB_RUN_ID=500 PREPARE_JOB=checks FAKE_DF_PER_LEG=20 targets_prepare
+[ ! -e "$marker_root/targets/features" ] || fail 'the least recently used live folder was kept over 80 %'
+grep -q 'disk 90% used, over 80%; removing the least recently used live target folder features, which this job does not use' \
+  "$work/prepare.log" || fail "the live folder's removal gave no reason"
+kept clippy darwin archive
+[ "$(removals)" -eq 1 ] || fail 'the bound removed more live folders than it needed'
+grep -q '::warning::build-once: disk too small' "$work/prepare.log" || fail 'a too-small disk gave no warning'
+# Only the folders this job uses, over 80 %: they all stay, and the bound
+# says so.
+rm -rf "$marker_root/targets"
+for folder in $CHECK_FOLDERS; do mark "$folder" 600 "$just_now"; done
+GITHUB_RUN_ID=601 PREPARE_JOB=checks FAKE_DF_PER_LEG=16 targets_prepare
+# shellcheck disable=SC2086 # Each check folder is one argument.
+kept $CHECK_FOLDERS
+[ "$(removals)" -eq 0 ] || fail 'the bound removed a folder this job is about to use'
+grep -q 'disk 90% used with no target folder left that this job does not use' "$work/prepare.log" ||
+  fail 'the bound did not say every folder left is in use'
 if "$SCRIPT" finish >/dev/null 2>&1; then fail 'the retired finish subcommand was accepted'; fi
 
 # A leg that reads a corrupt output from its warm target folder wipes the
@@ -352,7 +436,7 @@ checks_run() {
   : > "$checks_root/darwin_cw/broken"
   : > "$checks_root/darwin/kept"
   BUILD_ONCE_ROOT="$work/legs-root" BUILD_ONCE_SRC="$legs_src" LEGS_STATE="$work/legs-state" \
-    BUILD_ONCE_JOBSERVER_TOKENS=5 RUNNER_TEMP="$work/legs-state" CHECKS_MODE="$1" \
+    BUILD_ONCE_JOBSERVER_TOKENS=5 RUNNER_TEMP="$work/legs-state" CHECKS_MODE="$1" GITHUB_RUN_ID=77 \
     "$SCRIPT" checks > "$work/checks.log" 2>&1
 }
 checks_run corrupt || fail "a corrupt check output was not rerun: $(cat "$work/checks.log")"
@@ -362,7 +446,8 @@ grep -qx "checks $legs_src $checks_root/clippy $checks_root/clippy_features $che
 grep -q "the Rust checks read a corrupt output in $checks_root/clippy; it is wiped" "$work/checks.log" ||
   fail 'the checks rerun gave no reason'
 for folder in $CHECK_FOLDERS; do
-  [ -f "$checks_root/$folder/.build-once-used" ] || fail "the checks did not mark their $folder folder used"
+  [ "$(cat "$checks_root/$folder/.build-once-used" 2>/dev/null)" = 77 ] ||
+    fail "the checks did not mark their $folder folder used by their run"
 done
 # One jobserver of the runner's compilers for every check; a Cargo that
 # cannot reach it falls back to a few jobs.
@@ -405,4 +490,4 @@ if ARCHIVE_STORE_URL="file://$work/store" "$SCRIPT" publish "$work/out" >/dev/nu
   fail 'publish accepted an invalid leg output name'
 fi
 
-echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, interrupted folders and lockfile changes kept warm, the disk bound, the corrupt-output rebuild and publish hold; bad input refused'
+echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, interrupted folders and lockfile changes kept warm, the disk bound (idle folders first, live ones kept, the folders a job uses never removed), the corrupt-output rebuild and publish hold; bad input refused'
