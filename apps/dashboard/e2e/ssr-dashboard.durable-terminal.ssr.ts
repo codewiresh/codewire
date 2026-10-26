@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page, type WebSocketRoute } from "./helpers/fixture-test";
+import { expect, pauseClock, test, type Locator, type Page, type WebSocketRoute } from "./helpers/fixture-test";
 
 // Browser controller proof on the checked-in design server. These explicitly
 // synthetic BFF/WS responses do not qualify real daemon or authentication flows.
@@ -2528,18 +2528,24 @@ test("live detail distinguishes pending desired state and preserves terminal and
 });
 
 test("live detail pauses stale actions and leaves open Resize drafts unchanged", async ({ page }) => {
+  await page.clock.install();
   const state = await transport(page);
   // An attached terminal, so any launch below would come from the status.
   state.sessions = [{ sessionId: sessionId(1), state: "running" }];
   await openFixture(page);
+  await pauseClock(page);
+  await settleReadiness(page);
   await openMenu(page, "More actions");
   const resize = page.locator("[data-sandbox-resize]");
   await resize.getByText("Resize", { exact: true }).click();
   await resize.getByLabel("CPU", { exact: true }).selectOption("4000");
   state.statusAvailable = false;
-  // Let the real periodic poll refresh without a deliberate outside click,
-  // which correctly dismisses the native action menu.
-  await expect(page.locator("[data-sandbox-observation-status]")).toContainText("status is unavailable", { timeout: 7500 });
+  // The periodic poll (every 5 s) refreshes without a deliberate outside
+  // click, which correctly dismisses the native action menu. The page's clock
+  // reaches it, not real time: waiting for a real 5 s poll timed out under
+  // load (PR run 23655).
+  await advance(page, 5000);
+  await expect(page.locator("[data-sandbox-observation-status]")).toContainText("status is unavailable");
   await expect(resize.getByRole("button", { name: "Review resize" })).toBeDisabled();
   await expect(resize).toHaveAttribute("open", "");
   await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("4000");
@@ -2547,7 +2553,8 @@ test("live detail pauses stale actions and leaves open Resize drafts unchanged",
   state.detail = { state: "running", desiredState: "started", tone: "success", lastEvent: "a moment ago",
     resources: "2 vCPU · 4 GiB · 20 GiB", cpuMillicores: 2000, memoryMib: 4096, diskGib: 20,
     startEligible: false, stopEligible: true, deleteEligible: true, deletionState: "unscheduled", shutdownAt: null, actionsAllowed: true, pending: false };
-  await expect(page.locator("[data-sandbox-resources]")).toHaveText([state.detail.resources, state.detail.resources], { timeout: 7500 });
+  await advance(page, 5000);
+  await expect(page.locator("[data-sandbox-resources]")).toHaveText([state.detail.resources, state.detail.resources]);
   await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("4000");
   await expect(resize.getByRole("button", { name: "Review resize" })).toBeEnabled();
   await resize.locator("summary").click();

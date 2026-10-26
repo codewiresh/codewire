@@ -37,10 +37,16 @@ const hostGpuIsolation = ["--disable-accelerated-video-decode", "--disable-accel
 const desktopVariables = new Set(["DISPLAY", "WAYLAND_DISPLAY"]);
 const browserEnvironment = Object.fromEntries(Object.entries(process.env)
   .filter((entry): entry is [string, string] => entry[1] !== undefined && !desktopVariables.has(entry[0])));
+// A fixture test's time limit also covers its page's creation, which took
+// over 30 s on a CI guest whose disk wrote at 0.5-3 s per write
+// (browserContext.newPage, PR #3413). Nothing a fixture test checks is
+// bounded by this limit; its own steps use their own deadlines.
+const designFixtureTimeout = 60_000;
 const designFixtureProjects = [
   {
     name: "design-fixtures-desktop",
     testMatch: designFixtureSpecPattern,
+    timeout: designFixtureTimeout,
     use: {
       ...devices["Desktop Chrome"],
       baseURL: designOrigin,
@@ -52,6 +58,7 @@ const designFixtureProjects = [
   {
     name: "design-fixtures-mobile",
     testMatch: designFixtureSpecPattern,
+    timeout: designFixtureTimeout,
     use: {
       ...devices["Pixel 5"],
       baseURL: designOrigin,

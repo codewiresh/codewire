@@ -146,6 +146,10 @@ test("terminal presentation preserves colors, metrics, selection and strict CSP"
   });
   await page.goto(`${designOrigin}/reference/fixtures/terminal.html`);
   const rows = page.locator(".xterm-rows");
+  // The renderer's first frame is start-up, not what this test checks; on a
+  // loaded host it took longer than an assertion's 5 s (the full fixture gate
+  // under a 20 % CPU quota), so it gets the start-up deadline.
+  await expect(rows.getByText("codewire-terminal-copy-234", { exact: true })).toBeVisible({ timeout: 15_000 });
   // The pinned xterm 6.0.0 default ANSI palette uses Tango red (#cc0000).
   await expect(rows.getByText("ANSI red", { exact: true })).toHaveCSS("color", "rgb(204, 0, 0)");
   await expect(rows.getByText("256 red", { exact: true })).toHaveCSS("color", "rgb(255, 0, 0)");
@@ -158,7 +162,12 @@ test("terminal presentation preserves colors, metrics, selection and strict CSP"
   expect(await page.evaluate(() => (window as Window & { terminalStyleViolations?: string[] }).terminalStyleViolations)).toEqual([]);
 
   const canary = rows.getByText("codewire-terminal-copy-234", { exact: true });
-  const bounds = (await canary.boundingBox())!;
+  // boundingBox does not wait: it reads null while the renderer is still
+  // laying out or replacing the row (the full fixture gate, mobile, under
+  // load). Measure once the row is rendered.
+  let measured: Awaited<ReturnType<typeof canary.boundingBox>> = null;
+  await expect.poll(async () => (measured = await canary.boundingBox())).not.toBeNull();
+  const bounds = measured!;
   await page.mouse.move(bounds.x, bounds.y + bounds.height / 2);
   await page.mouse.down();
   await page.mouse.move(bounds.x + bounds.width, bounds.y + bounds.height / 2, { steps: 12 });

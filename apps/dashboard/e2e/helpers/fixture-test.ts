@@ -1,4 +1,4 @@
-import { test as base } from "@playwright/test";
+import { test as base, type Page } from "@playwright/test";
 
 export * from "@playwright/test";
 
@@ -25,3 +25,19 @@ export const test = base.extend({
     await use(context);
   },
 });
+
+// Pause a page's installed clock a second ahead of where that clock is now.
+// The target is read from the page's own clock, and read again if the page
+// has already passed it: a target taken from the runner's clock can be in
+// the page's past on a loaded host ("Cannot fast-forward to the past").
+export async function pauseClock(page: Page) {
+  for (let attempt = 1; ; attempt += 1) {
+    const now = await page.evaluate(() => Date.now());
+    try {
+      await page.clock.pauseAt(new Date(now + 1_000));
+      return;
+    } catch (error) {
+      if (attempt >= 5 || !String(error).includes("Cannot fast-forward to the past")) throw error;
+    }
+  }
+}

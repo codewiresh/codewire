@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "./helpers/fixture-test";
+import { expect, pauseClock, test, type Page } from "./helpers/fixture-test";
 
 // Presentation and interaction proof on the editable fixture using production
 // scripts. No mocked provider or backend success: account discovery and checkout
@@ -177,7 +177,13 @@ test("closing Create during a repository load restarts it when Create opens agai
 });
 
 // Opens Create at its own URL with repositories served only by `respond`.
+// The picker's timed steps (its retries after 1 s and 3 s, "Still loading"
+// after 5 s) run on the page's paused clock, which each test moves on itself:
+// on real time, a slow host either missed the retry's waiting state or timed
+// out before it ended (PR #3413).
 async function openWithRepositories(page: Page, respond: (attempt: number) => { status: number; body: string } | Promise<{ status: number; body: string }>) {
+  await page.clock.install();
+  await pauseClock(page);
   let attempts = 0;
   await page.route("**/fixture/_fragments/github-repositories", async (route) => {
     attempts += 1;
@@ -199,6 +205,7 @@ test("a transient repository failure retries by itself", async ({ page }) => {
   const browser = page.locator("[data-github-browser]");
   await expect(browser.locator("[data-github-status]")).toHaveText("Repositories did not load. Retrying (1 of 2)…");
   await expect(browser.locator("[data-github-placeholder]")).toBeVisible();
+  await page.clock.fastForward(1_000);
   await expect(browser.getByRole("button", { name: "Add synthetic-user/recovered Public", exact: true })).toBeVisible();
   await expect(browser.locator("[data-github-placeholder]")).toBeHidden();
   await expect(browser.getByRole("button", { name: "Retry", exact: true })).toBeHidden();
@@ -212,8 +219,11 @@ test("repositories that keep failing offer Retry, which loads them again", async
     : { status: 200, body: repositoryPage(["synthetic-user/after-retry"]) });
   const browser = page.locator("[data-github-browser]");
   const retry = browser.getByRole("button", { name: "Retry", exact: true });
+  await expect(browser.locator("[data-github-status]")).toHaveText("Repositories did not load. Retrying (1 of 2)…");
+  await page.clock.fastForward(1_000);
   await expect(browser.locator("[data-github-status]")).toHaveText("Repositories did not load. Retrying (2 of 2)…");
-  await expect(retry).toBeVisible({ timeout: 10_000 });
+  await page.clock.fastForward(3_000);
+  await expect(retry).toBeVisible();
   await expect(browser.locator("[data-github-status]")).toHaveText("The repository service returned an invalid response. Try again later.");
   await expect(browser.locator("[data-github-results]")).not.toHaveAttribute("aria-busy", "true");
   await expect(browser.locator("[data-github-spinner]")).toBeHidden();
@@ -231,7 +241,7 @@ test("a definite repository failure is shown at once without retrying", async ({
   await expect(browser.locator("[data-github-status]")).toHaveText("Reconnect required. Reconnect GitHub in Settings to browse repositories.");
   await expect(browser.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
   // Longer than the first automatic retry would wait.
-  await page.waitForTimeout(1_500);
+  await page.clock.fastForward(1_500);
   expect(attempts()).toBe(1);
 });
 
@@ -248,7 +258,8 @@ test("a slow repository load shows its progress and keeps saying so", async ({ p
   await expect(browser.locator("[data-github-spinner]")).toBeVisible();
   await expect(browser.locator("[data-github-placeholder] li")).toHaveCount(4);
   await expect(browser.locator("[data-github-placeholder]")).toBeVisible();
-  await expect(browser.locator("[data-github-status]")).toHaveText("Still loading repositories from GitHub…", { timeout: 8_000 });
+  await page.clock.fastForward(5_000);
+  await expect(browser.locator("[data-github-status]")).toHaveText("Still loading repositories from GitHub…");
   release();
   await expect(browser.getByRole("button", { name: "Add synthetic-user/slow Public", exact: true })).toBeVisible();
   await expect(browser.locator("[data-github-spinner]")).toBeHidden();
