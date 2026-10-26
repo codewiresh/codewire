@@ -2,20 +2,20 @@
 // the post-publish proposal rewrites this file and policy refuses other edits.
 
 /// Content digest of the published workspace image.
-pub const DIGEST: &str = "sha256:0f2c983137159fba49360212c09b0d2e7e93c0890ebcb480e83ead110e144dda";
+pub const DIGEST: &str = "sha256:b84ce377ef2499206ccecbd367e45efec6e7ec02d14b6d0a23e679b4737a28f7";
 /// The image at the public GHCR mirror, pulled anonymously by local
 /// environments. A deployment pulls the same digest from its configured
 /// repository.
-pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:0f2c983137159fba49360212c09b0d2e7e93c0890ebcb480e83ead110e144dda";
+pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:b84ce377ef2499206ccecbd367e45efec6e7ec02d14b6d0a23e679b4737a28f7";
 /// Platforms the published image index serves.
 pub const PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64"];
 /// Commit the image was built from.
-pub const SOURCE_SHA: &str = "3ec433fd332adcc0401f4f94e272cd5cf901008f";
+pub const SOURCE_SHA: &str = "d0c548f7ef02f25ec8954aedaac3a378f12c3619";
 /// Identity of the image definition at `SOURCE_SHA`; see the generator.
-pub const INPUTS_SHA256: &str = "7807182301fb54af40322907e28418750e04005e45c8663a4c158e50e498e707";
+pub const INPUTS_SHA256: &str = "c63dc87f26a22d6c998ec423edae1557da99b8d2553cf397818ee55fe9725074";
 /// Agent CLI versions the image definition at `SOURCE_SHA` installs.
 pub const AGENT_VERSIONS: &[(&str, &str)] = &[
-    ("claude", "2.1.288"),
+    ("claude", "2.1.308"),
     ("codex", "0.160.0"),
     ("gemini", "0.62.0"),
     ("kimi", "2.1.1"),
@@ -23,6 +23,7 @@ pub const AGENT_VERSIONS: &[(&str, &str)] = &[
 ];
 /// Earlier published digests, newest first, that older clients may send.
 pub const PREVIOUS_DIGESTS: &[&str] = &[
+    "sha256:0f2c983137159fba49360212c09b0d2e7e93c0890ebcb480e83ead110e144dda",
     "sha256:18507516efbc3494aa06ca982a23cc9b37c0fbc139076d3fa33c4116bfc8c021",
     "sha256:351bed9404bc79390c06a02d67a4e348f0cb2cd3d29a3555a9cef1505717b655",
     "sha256:8f73a4ee68b00b4c93e18ce6b5afd0c18f1bcd3c30cc820e488fc7b44c92a027",
