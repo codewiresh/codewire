@@ -1,7 +1,8 @@
 //! Bounded Prometheus telemetry for environment start stages.
 //!
-//! One histogram records how long each measured create stage took, observed
-//! where the matching `environment_logs` stage row is committed. Labels are
+//! One histogram records how long each measured start stage took, for a
+//! create and for the resume of a stopped environment, observed where the
+//! matching `environment_logs` stage row is committed. Labels are
 //! closed operational categories only: the stage name, the start path and
 //! the runtime profile. Environment, organization, Pod and claim identifiers
 //! never become labels; the per-environment record stays in
@@ -95,6 +96,11 @@ pub enum StartPath {
     /// A ready warm-pool member a claim adopted (Program #2238 C3): the
     /// agent-sandbox `launch-type` is `warm`.
     Warm,
+    /// A stopped environment's own suspended Sandbox scaled back to one
+    /// replica with its retained volume (the `starting` state). Restoring
+    /// from a snapshot and forking will get their own values when hosted
+    /// environments gain them.
+    Resume,
 }
 
 impl StartPath {
@@ -102,6 +108,20 @@ impl StartPath {
         match self {
             Self::Cold => "cold",
             Self::Warm => "warm",
+            Self::Resume => "resume",
+        }
+    }
+
+    /// The path of a stage observed while the environment is in `state`,
+    /// for a Sandbox whose own path is `sandbox`. Only an environment that
+    /// ran before enters `starting` (from `stopped` or `error`), so whichever
+    /// activity drives it, the start or a create recovering an interrupted
+    /// start, it resumes that environment's Sandbox rather than creating one.
+    pub fn for_state(state: &str, sandbox: Self) -> Self {
+        if state == "starting" {
+            Self::Resume
+        } else {
+            sandbox
         }
     }
 
@@ -297,6 +317,46 @@ mod tests {
                 .get_sample_count(),
             1
         );
+    }
+
+    #[test]
+    fn starting_is_a_resume_whatever_the_sandbox_path() {
+        assert_eq!(StartPath::Resume.as_str(), "resume");
+        for sandbox in [StartPath::Cold, StartPath::Warm] {
+            assert_eq!(StartPath::for_state("starting", sandbox), StartPath::Resume);
+            assert_eq!(StartPath::for_state("creating", sandbox), sandbox);
+            assert_eq!(StartPath::for_state("pending", sandbox), sandbox);
+        }
+    }
+
+    #[test]
+    fn resume_stages_render_their_own_series_apart_from_create() {
+        let count = |path: &str| {
+            stage_seconds_metric()
+                .get_metric_with_label_values(&["wait_for_ready", path, "runc"])
+                .unwrap()
+                .get_sample_count()
+        };
+        let (cold, warm, resume) = (count("cold"), count("warm"), count("resume"));
+        observe_stage(
+            StartStage::WaitForReady,
+            StartPath::Resume,
+            StartProfile::Runc,
+            Duration::from_millis(4_200),
+        );
+        assert_eq!(
+            (count("cold"), count("warm"), count("resume")),
+            (cold, warm, resume + 1)
+        );
+
+        let mut rendered = Vec::new();
+        TextEncoder::new()
+            .encode(&prometheus::gather(), &mut rendered)
+            .unwrap();
+        let rendered = String::from_utf8(rendered).unwrap();
+        assert!(rendered.contains(
+            "codewire_environment_start_stage_seconds_bucket{path=\"resume\",profile=\"runc\",stage=\"wait_for_ready\",le=\"5\"}"
+        ));
     }
 
     #[test]

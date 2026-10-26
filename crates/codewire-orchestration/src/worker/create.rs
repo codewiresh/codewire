@@ -12,7 +12,9 @@ use super::env_data::{
 };
 use super::env_log::emit_authoritative_environment_log_for_states;
 use super::environment_auth::{WorkspaceCredentialScope, issue_environment_daemon_token};
-use super::start_timing::{POD_STAGE_PHASES, duration_ms, pod_stage_timings, start_profile};
+use super::start_timing::{
+    POD_STAGE_PHASES, bind_stage_path, duration_ms, pod_stage_timings, start_profile,
+};
 use super::workspace_binding::{
     EnvironmentBinding, bind_before_ready, bind_workspace_runtime, binding_bootstrap_current,
     credential_scope, definitive_refusal, live_environment_binding, sandbox_bound_by_any,
@@ -1177,7 +1179,10 @@ async fn run_environment_create(
         }
 
         let setup_complete = backend.as_ref().is_some_and(|b| b.setup_complete);
-        let start_path = StartPath::from_launch_type(Some(probe.launch_type.as_str()));
+        let start_path = StartPath::for_state(
+            &env.state,
+            StartPath::from_launch_type(Some(probe.launch_type.as_str())),
+        );
         let mut action = next_create_action(&env.state, backend.as_ref(), setup_complete, &probe);
         if action == CreateAction::ResumeWorkspace && workspace_resumed {
             // One resume per attempt. A Sandbox suspended again meanwhile must
@@ -1803,7 +1808,7 @@ async fn run_environment_create(
                         .await
                         .map(|probe| StartPath::from_launch_type(Some(probe.launch_type.as_str())))
                         .unwrap_or(StartPath::Cold),
-                    StartPath::Cold => StartPath::Cold,
+                    path => path,
                 };
                 observe_create_stage(
                     StartStage::AccessReady,
@@ -1956,7 +1961,7 @@ fn records_pod_start_marks(action: CreateAction) -> bool {
 /// Rows carry the Pod UID and are written once per Pod, even when an error
 /// retry reaches `mark_running` again for the same Pod. They are not journal
 /// checkpoints.
-async fn record_pod_start_marks(
+pub(super) async fn record_pod_start_marks(
     ctx: &WorkerContext,
     authority: &ActivityAuthority,
     probe: &ProbeResult,
@@ -2354,10 +2359,10 @@ pub(super) async fn wait_with_early_bind<T>(
             result = &mut bind, if binding => {
                 binding = false;
                 if let Some(recorded) = result? {
-                    if matches!(env.state.as_str(), "creating" | "starting") {
+                    if let Some(path) = bind_stage_path(&env.state, recorded.path) {
                         observe_create_stage(
                             StartStage::WorkspaceBind,
-                            recorded.path,
+                            path,
                             start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
                             recorded.elapsed,
                         );
@@ -2479,10 +2484,10 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
     )
     .await?
     {
-        if matches!(env.state.as_str(), "creating" | "starting") {
+        if let Some(path) = bind_stage_path(&env.state, recorded.path) {
             observe_create_stage(
                 StartStage::WorkspaceBind,
-                recorded.path,
+                path,
                 start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
                 recorded.elapsed,
             );

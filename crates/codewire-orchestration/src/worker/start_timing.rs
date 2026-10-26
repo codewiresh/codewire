@@ -1,6 +1,6 @@
-//! Start-stage timing shared by the create activity: the metadata carried by
-//! `environment_logs` stage rows and the bounded labels of their Prometheus
-//! observations.
+//! Start-stage timing shared by the create and start activities: the
+//! metadata carried by `environment_logs` stage rows and the bounded labels
+//! of their Prometheus observations.
 
 use std::time::Duration;
 
@@ -8,7 +8,7 @@ use k8s_openapi::jiff::Timestamp;
 
 use super::create::{SandboxWorkerCfg, runtime_profile_for_isolation_tier};
 use crate::sandbox::client::PodStartTimeline;
-use crate::start_metrics::{StartProfile, StartStage};
+use crate::start_metrics::{StartPath, StartProfile, StartStage};
 
 /// One workspace Pod start stage between two consecutive Kubernetes marks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +92,15 @@ pub(super) fn start_profile(cfg: &SandboxWorkerCfg, isolation_tier: &str) -> Sta
         Ok(None) => StartProfile::from_runtime_profile(&cfg.runtime_profile),
         Err(_) => StartProfile::Other,
     }
+}
+
+/// The path a newly recorded workspace binding is observed under, or `None`
+/// when the binding is not part of a start: a running environment's replaced
+/// Pod or a resize. A bind while `starting` is a resume, including a retried
+/// start's, whose resumed Sandbox the binding check reports as cold because
+/// an environment bound it before.
+pub(super) fn bind_stage_path(state: &str, recorded: StartPath) -> Option<StartPath> {
+    matches!(state, "creating" | "starting").then(|| StartPath::for_state(state, recorded))
 }
 
 pub(super) fn duration_ms(duration: Duration) -> i64 {
@@ -191,6 +200,31 @@ mod tests {
             .find(|stage| stage.stage == StartStage::PodContainersReady)
             .unwrap();
         assert_eq!(ready.duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn a_bind_while_starting_is_a_resume_not_a_cold_create() {
+        // A retried start's bind: the resumed Sandbox was bound before, so
+        // the binding check reports it cold.
+        assert_eq!(
+            bind_stage_path("starting", StartPath::Cold),
+            Some(StartPath::Resume)
+        );
+        assert_eq!(
+            bind_stage_path("starting", StartPath::Warm),
+            Some(StartPath::Resume)
+        );
+        assert_eq!(
+            bind_stage_path("creating", StartPath::Cold),
+            Some(StartPath::Cold)
+        );
+        assert_eq!(
+            bind_stage_path("creating", StartPath::Warm),
+            Some(StartPath::Warm)
+        );
+        for outside_a_start in ["running", "resizing", "pending", "stopped"] {
+            assert_eq!(bind_stage_path(outside_a_start, StartPath::Cold), None);
+        }
     }
 
     #[test]

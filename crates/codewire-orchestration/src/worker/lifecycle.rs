@@ -27,6 +27,7 @@ use super::setup::{
     handle_post_start_configuration, is_setup_activity_cancelled, is_setup_recovery_failed,
     jittered_duration, wait_for_sidecar,
 };
+use super::start_timing::{duration_ms, start_profile};
 use super::workspace_binding::release_workspace_binding;
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{Action, PgLifecycleStore, RuntimeAbsenceProof, Service, Snapshot};
@@ -34,6 +35,7 @@ use crate::sandbox::client::{
     ProbeResult, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
 };
 use crate::sandbox::host_keys::RecordedHostKeys;
+use crate::start_metrics::{self, StartPath, StartProfile, StartStage};
 
 const DELETED_TIMEOUT: Duration = Duration::from_secs(120);
 const POD_IP_POLL_TIMEOUT: Duration = Duration::from_secs(300); // start: 5-minute pod IP poll
@@ -690,7 +692,38 @@ pub(super) async fn restart_workspace_bootstrap(
     .await
 }
 
-/// Mirrors `HandleEnvironmentStart`.
+async fn emit_start_log(
+    authority: &ActivityAuthority,
+    phase: &str,
+    status: &str,
+    message: &str,
+    metadata: Option<serde_json::Value>,
+) -> anyhow::Result<()> {
+    emit_authoritative_environment_log_for_states(
+        authority,
+        START_MUTATION_STATES,
+        phase,
+        status,
+        message,
+        metadata,
+    )
+    .await
+}
+
+fn stage_meta(elapsed: Duration) -> serde_json::Value {
+    serde_json::json!({ "duration_ms": duration_ms(elapsed) })
+}
+
+/// Observe a completed start stage after its durable log row committed, with
+/// the duration that row carries.
+fn observe_resume_stage(stage: StartStage, profile: StartProfile, elapsed: Duration) {
+    start_metrics::observe_stage(stage, StartPath::Resume, profile, elapsed);
+}
+
+/// Mirrors `HandleEnvironmentStart`. A start resumes the environment's own
+/// suspended Sandbox and records its stages under the `resume` start path:
+/// `wait_for_ready`, `workspace_bind` (through the shared waits), the resumed
+/// Pod's `pod_*` marks and `access_ready`.
 pub async fn handle_environment_start(
     ctx: &WorkerContext,
     payload: &JobPayload,
@@ -704,7 +737,7 @@ pub async fn handle_environment_start(
 
     authority.ensure().await?;
 
-    let env = load_environment(&ctx.pool, env_id).await?;
+    let mut env = load_environment(&ctx.pool, env_id).await?;
 
     if env.state != "stopped" && env.state != "error" {
         tracing::info!(
@@ -730,6 +763,10 @@ pub async fn handle_environment_start(
         );
         return Ok(());
     }
+    // Record the transition `prepare_start` just committed, so the shared
+    // waits below observe their stages as this start's (`resume`).
+    env.state = "starting".to_string();
+    let profile = start_profile(&ctx.sandbox_cfg, &env.isolation_tier);
 
     let backend = match load_backend_row(&ctx.pool, env_id).await {
         Ok(b) => b,
@@ -836,8 +873,11 @@ pub async fn handle_environment_start(
     }
 
     // Wait for the sandbox to become ready again, binding an identity-free
-    // Pod as soon as it is bind-ready (design §10, amended).
-    if let Err(e) = await_reconcile_or_cancel(
+    // Pod as soon as it is bind-ready (design §10, amended). The same
+    // `wait_for_ready` stage as create's Claim readiness wait.
+    let ready_started = std::time::Instant::now();
+    emit_start_log(authority, "wait_for_ready", "started", "", None).await?;
+    let ready_result = await_reconcile_or_cancel(
         &activity_ctx,
         super::create::wait_with_early_bind(
             ctx,
@@ -850,14 +890,32 @@ pub async fn handle_environment_start(
             ),
         ),
     )
-    .await
-    {
+    .await;
+    let ready_elapsed = ready_started.elapsed();
+    if let Err(e) = ready_result {
         if is_lifecycle_control_loss(&e) {
             return Err(e);
         }
+        emit_start_log(
+            authority,
+            "wait_for_ready",
+            "failed",
+            &format!("{e:#}"),
+            Some(stage_meta(ready_elapsed)),
+        )
+        .await?;
         record_environment_error(&svc, authority, env_id, &format!("{e:#}")).await?;
         return Err(anyhow::anyhow!("wait for sandbox ready: {e:#}"));
     }
+    emit_start_log(
+        authority,
+        "wait_for_ready",
+        "completed",
+        "",
+        Some(stage_meta(ready_elapsed)),
+    )
+    .await?;
+    observe_resume_stage(StartStage::WaitForReady, profile, ready_elapsed);
 
     // Poll for pod IP — after scaling 0→1 the claim may still show
     // "Ready" (stale status) before the new pod exists.
@@ -944,6 +1002,38 @@ pub async fn handle_environment_start(
         tracing::warn!(environment_id = env_id, error = %e, "environment.start: mark started failed");
     }
 
+    // The resumed Pod is a new incarnation with its own start marks, read
+    // once it runs, as create reads a new Pod's at `mark_running`.
+    match client.probe_environment(env_id).await {
+        Ok(probe) if probe.pod_uid == pod.uid => {
+            // Timing is observational: the rows need `running`, which a
+            // failed `mark_started` above leaves unset, and a failed write
+            // must not fail a start that has already resumed the Pod.
+            if let Err(error) = super::create::record_pod_start_marks(
+                ctx,
+                authority,
+                &probe,
+                StartPath::Resume,
+                profile,
+            )
+            .await
+            {
+                tracing::warn!(
+                    environment_id = env_id,
+                    error = %error,
+                    "environment.start: skip Pod start marks after a failed write"
+                );
+            }
+        }
+        Ok(_) => {}
+        // Timing is observational; a failed read must not fail the start.
+        Err(error) => tracing::warn!(
+            environment_id = env_id,
+            error = %error,
+            "environment.start: skip Pod start marks after a failed probe"
+        ),
+    }
+
     if let Some(ttl) = env.ttl_seconds
         && let Err(e) = svc.schedule_shutdown_after_ttl(env_id, ttl).await
     {
@@ -957,13 +1047,14 @@ pub async fn handle_environment_start(
     // flips the env to `error`). The env is already `running`; a transient
     // gateway hiccup here is a warning, not a lifecycle failure.
     let sidecar_started = std::time::Instant::now();
-    match await_reconcile_or_cancel(
+    let sidecar_result = await_reconcile_or_cancel(
         &activity_ctx,
         authority
             .run_while_authoritative_for_states(&["running"], wait_for_sidecar(ctx, &ns, env_id)),
     )
-    .await
-    {
+    .await;
+    let sidecar_elapsed = sidecar_started.elapsed();
+    match sidecar_result {
         Ok(()) => {
             emit_authoritative_environment_log_for_states(
                 authority,
@@ -972,16 +1063,17 @@ pub async fn handle_environment_start(
                 "completed",
                 "",
                 Some(serde_json::json!({
-                    "duration_ms": sidecar_started.elapsed().as_millis() as i64,
+                    "duration_ms": duration_ms(sidecar_elapsed),
                     "pod_ip": pod_ip,
                     "namespace": ns,
                 })),
             )
             .await?;
+            observe_resume_stage(StartStage::AccessReady, profile, sidecar_elapsed);
             tracing::info!(
                 environment_id = env_id,
                 pod_ip,
-                duration_ms = sidecar_started.elapsed().as_millis() as i64,
+                duration_ms = duration_ms(sidecar_elapsed),
                 "environment sidecar ready"
             );
 
@@ -1005,7 +1097,7 @@ pub async fn handle_environment_start(
                 "failed",
                 &format!("{e:#}"),
                 Some(serde_json::json!({
-                    "duration_ms": sidecar_started.elapsed().as_millis() as i64,
+                    "duration_ms": duration_ms(sidecar_elapsed),
                     "pod_ip": pod_ip,
                     "namespace": ns,
                 })),
@@ -1670,6 +1762,102 @@ mod tests {
             pod_ip: "10.0.0.9".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn start_observes_its_stages_under_the_resume_path_only() {
+        use prometheus::{Encoder, TextEncoder};
+
+        use crate::sandbox::client::PodStartTimeline;
+
+        let count = |stage: StartStage, path: &str| {
+            prometheus::gather()
+                .iter()
+                .filter(|family| family.name() == "codewire_environment_start_stage_seconds")
+                .flat_map(|family| family.get_metric().iter())
+                .find(|metric| {
+                    let labels: Vec<_> = metric
+                        .get_label()
+                        .iter()
+                        .map(|label| (label.name(), label.value()))
+                        .collect();
+                    labels.contains(&("stage", stage.as_str()))
+                        && labels.contains(&("path", path))
+                        && labels.contains(&("profile", "none"))
+                })
+                .map_or(0, |metric| metric.get_histogram().get_sample_count())
+        };
+        let at = |seconds: i64| {
+            Some(k8s_openapi::jiff::Timestamp::from_second(1_790_000_000 + seconds).unwrap())
+        };
+        let resumed_pod = PodStartTimeline {
+            created_at: at(0),
+            scheduled_at: at(1),
+            initialized_at: at(9),
+            running_at: at(10),
+            containers_ready_at: at(14),
+        };
+        let mut observed = vec![
+            (StartStage::WaitForReady, Duration::from_millis(12_400)),
+            (StartStage::AccessReady, Duration::from_millis(800)),
+        ];
+        observed.extend(
+            super::super::start_timing::pod_stage_timings(&resumed_pod)
+                .into_iter()
+                .map(|timing| (timing.stage, timing.duration)),
+        );
+        assert_eq!(observed.len(), 6, "every Pod mark of the resumed Pod");
+
+        let before: Vec<_> = observed
+            .iter()
+            .map(|(stage, _)| {
+                (
+                    count(*stage, "cold"),
+                    count(*stage, "warm"),
+                    count(*stage, "resume"),
+                )
+            })
+            .collect();
+        for (stage, elapsed) in &observed {
+            observe_resume_stage(*stage, StartProfile::None, *elapsed);
+        }
+        for ((stage, _), (cold, warm, resume)) in observed.iter().zip(before) {
+            assert_eq!(
+                (
+                    count(*stage, "cold"),
+                    count(*stage, "warm"),
+                    count(*stage, "resume")
+                ),
+                (cold, warm, resume + 1),
+                "{} is observed once, as a resume",
+                stage.as_str()
+            );
+        }
+
+        let mut rendered = Vec::new();
+        TextEncoder::new()
+            .encode(&prometheus::gather(), &mut rendered)
+            .unwrap();
+        let rendered = String::from_utf8(rendered).unwrap();
+        for stage in [
+            "wait_for_ready",
+            "access_ready",
+            "pod_scheduled",
+            "pod_initialized",
+            "pod_running",
+            "pod_containers_ready",
+        ] {
+            assert!(
+                rendered.contains(&format!(
+                    "codewire_environment_start_stage_seconds_count{{path=\"resume\",profile=\"none\",stage=\"{stage}\"}}"
+                )),
+                "{stage} has no resume series"
+            );
+        }
+        assert_eq!(
+            stage_meta(Duration::from_millis(12_400)),
+            serde_json::json!({"duration_ms": 12_400})
+        );
     }
 
     #[test]
