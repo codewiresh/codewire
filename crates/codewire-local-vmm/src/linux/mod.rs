@@ -51,7 +51,10 @@ fn only_owner_writes(metadata: &std::fs::Metadata, owner: u32) -> bool {
 }
 
 fn e2fsprogs_in(directories: &[&str], program: &str) -> Option<std::path::PathBuf> {
-    if !matches!(program, "mkfs.ext4" | "e2fsck" | "resize2fs" | "debugfs") {
+    if !matches!(
+        program,
+        "mkfs.ext4" | "e2fsck" | "resize2fs" | "debugfs" | "dumpe2fs"
+    ) {
         return None;
     }
     directories

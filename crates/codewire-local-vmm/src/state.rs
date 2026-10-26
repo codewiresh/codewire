@@ -853,7 +853,93 @@ fn path_error_is_not_found(error: &PathError) -> bool {
     }
 }
 
-fn read_ext4_uuid(file: &File, path: &Path) -> Result<Uuid, StateError> {
+/// How an ext4 superblock says its filesystem was left: whether it was
+/// unmounted cleanly, whether its journal still needs replaying, and its
+/// block size.
+// Only Linux takes disk snapshots, which read these.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ext4Superblock {
+    pub(crate) uuid: Uuid,
+    /// The valid-filesystem state bit is set and the error bit is not.
+    pub(crate) valid: bool,
+    /// The journal holds transactions a mount or fsck must replay.
+    pub(crate) needs_recovery: bool,
+    pub(crate) block_size: u64,
+    /// The filesystem may hold fs-verity files, whose Merkle trees lie past
+    /// their end.
+    pub(crate) verity: bool,
+}
+
+impl Ext4Superblock {
+    /// What a cleanly shut-down guest leaves: valid, nothing to replay.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn clean(&self) -> bool {
+        self.valid && !self.needs_recovery
+    }
+}
+
+/// Read `file`'s ext4 superblock.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn read_ext4_superblock(file: &File, path: &Path) -> Result<Ext4Superblock, StateError> {
+    const EXT4_STATE_OFFSET: usize = 0x3a;
+    const EXT4_LOG_BLOCK_SIZE_OFFSET: usize = 0x18;
+    const EXT4_FEATURE_INCOMPAT_OFFSET: usize = 0x60;
+    const EXT4_FEATURE_RO_COMPAT_OFFSET: usize = 0x64;
+    const EXT4_FEATURE_RO_COMPAT_VERITY: u32 = 0x8000;
+    const EXT4_STATE_VALID: u16 = 0x0001;
+    const EXT4_STATE_ERROR: u16 = 0x0002;
+    const EXT4_FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;
+
+    let superblock = read_ext4_superblock_bytes(file, path)?;
+    let state = u16::from_le_bytes([
+        superblock[EXT4_STATE_OFFSET],
+        superblock[EXT4_STATE_OFFSET + 1],
+    ]);
+    let incompat = u32::from_le_bytes(
+        superblock[EXT4_FEATURE_INCOMPAT_OFFSET..EXT4_FEATURE_INCOMPAT_OFFSET + 4]
+            .try_into()
+            .expect("four bytes"),
+    );
+    let ro_compat = u32::from_le_bytes(
+        superblock[EXT4_FEATURE_RO_COMPAT_OFFSET..EXT4_FEATURE_RO_COMPAT_OFFSET + 4]
+            .try_into()
+            .expect("four bytes"),
+    );
+    let log_block_size = u32::from_le_bytes(
+        superblock[EXT4_LOG_BLOCK_SIZE_OFFSET..EXT4_LOG_BLOCK_SIZE_OFFSET + 4]
+            .try_into()
+            .expect("four bytes"),
+    );
+    if log_block_size > 6 {
+        return Err(StateError::InvalidExt4(path.to_owned()));
+    }
+    Ok(Ext4Superblock {
+        uuid: ext4_uuid(&superblock, path)?,
+        valid: state & EXT4_STATE_VALID != 0 && state & EXT4_STATE_ERROR == 0,
+        needs_recovery: incompat & EXT4_FEATURE_INCOMPAT_RECOVER != 0,
+        block_size: 1024 << log_block_size,
+        verity: ro_compat & EXT4_FEATURE_RO_COMPAT_VERITY != 0,
+    })
+}
+
+pub(crate) fn read_ext4_uuid(file: &File, path: &Path) -> Result<Uuid, StateError> {
+    ext4_uuid(&read_ext4_superblock_bytes(file, path)?, path)
+}
+
+fn ext4_uuid(superblock: &[u8; EXT4_SUPERBLOCK_BYTES], path: &Path) -> Result<Uuid, StateError> {
+    let uuid = Uuid::from_slice(&superblock[EXT4_UUID_OFFSET..EXT4_UUID_OFFSET + 16])
+        .map_err(|_| StateError::InvalidExt4(path.to_owned()))?;
+    if uuid.is_nil() {
+        return Err(StateError::InvalidExt4(path.to_owned()));
+    }
+    Ok(uuid)
+}
+
+fn read_ext4_superblock_bytes(
+    file: &File,
+    path: &Path,
+) -> Result<[u8; EXT4_SUPERBLOCK_BYTES], StateError> {
     let mut file = file.try_clone().map_err(|source| StateError::Io {
         path: path.to_owned(),
         source,
@@ -869,12 +955,7 @@ fn read_ext4_uuid(file: &File, path: &Path) -> Result<Uuid, StateError> {
     if superblock[EXT4_MAGIC_OFFSET..EXT4_MAGIC_OFFSET + 2] != [0x53, 0xef] {
         return Err(StateError::InvalidExt4(path.to_owned()));
     }
-    let uuid = Uuid::from_slice(&superblock[EXT4_UUID_OFFSET..EXT4_UUID_OFFSET + 16])
-        .map_err(|_| StateError::InvalidExt4(path.to_owned()))?;
-    if uuid.is_nil() {
-        return Err(StateError::InvalidExt4(path.to_owned()));
-    }
-    Ok(uuid)
+    Ok(superblock)
 }
 
 #[derive(Debug, thiserror::Error)]

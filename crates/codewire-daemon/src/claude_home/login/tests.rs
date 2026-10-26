@@ -1162,3 +1162,62 @@ fn a_login_no_writer_keeps_is_cleared_at_start() {
     crate::login_cleanup::clear_unkept_logins(&codex, &home, false, false);
     assert_eq!(fixture.json(), users_login());
 }
+
+#[test]
+fn a_disk_reader_recognises_a_store_holding_codewires_login() {
+    let nonce = "0123456789abcdef0123456789abcdef";
+    let codewire = json!({
+        "claudeAiOauth": {
+            "accessToken": "sk-ant-oat01-synthetic-delivered",
+            "refreshToken": format!("{CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX}{nonce}"),
+        },
+        "codewireManaged": 1,
+        "mcpOAuth": {},
+    });
+    let bytes = |value: &serde_json::Value| serde_json::to_vec(value).unwrap();
+    assert!(holds_codewire_login(&bytes(&codewire)));
+    // The placeholder alone is Codewire's, as the daemon removes by.
+    let mut unmarked = codewire.clone();
+    unmarked.as_object_mut().unwrap().remove("codewireManaged");
+    assert!(holds_codewire_login(&bytes(&unmarked)));
+    // Claude Code's cleared copy beside the marker is Codewire's too.
+    let mut cleared = codewire.clone();
+    cleared["claudeAiOauth"]["refreshToken"] = json!("");
+    assert!(holds_codewire_login(&bytes(&cleared)));
+    let mut cleared_unmarked = cleared.clone();
+    cleared_unmarked
+        .as_object_mut()
+        .unwrap()
+        .remove("codewireManaged");
+    let mut short = codewire.clone();
+    short["claudeAiOauth"]["refreshToken"] =
+        json!(format!("{CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX}short"));
+    for other in [
+        cleared_unmarked,
+        short,
+        json!({ "claudeAiOauth": users_login(), "codewireManaged": 1 }),
+        json!({ "codewireManaged": 1 }),
+        json!({ "claudeAiOauth": null, "codewireManaged": 1 }),
+    ] {
+        assert!(!holds_codewire_login(&bytes(&other)), "{other}");
+    }
+    assert!(!holds_codewire_login(b"[]"));
+
+    // Leftovers: a write in progress is Codewire's unread; a set-aside file
+    // only when it holds Codewire's login.
+    let users = bytes(&json!({ "claudeAiOauth": users_login() }));
+    assert!(is_codewire_leftover(
+        ".credentials.json.codewire.0123.new",
+        b"anything"
+    ));
+    assert!(is_codewire_leftover(
+        ".credentials.json.codewire.0123.aside",
+        &bytes(&cleared)
+    ));
+    assert!(!is_codewire_leftover(
+        ".credentials.json.codewire.0123.aside",
+        &users
+    ));
+    assert!(!is_codewire_leftover(".credentials.json", b"anything"));
+    assert!(!is_codewire_leftover("other.new", b"anything"));
+}

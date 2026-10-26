@@ -372,6 +372,7 @@ pub(crate) fn validate_host_create(
         || args.no_network
         || args.write_preset
         || args.save_preset.is_some()
+        || args.snapshot.is_some()
     {
         anyhow::bail!(
             "host creation accepts --name and --path; VM, image, project, network and projection options require --type sandbox"

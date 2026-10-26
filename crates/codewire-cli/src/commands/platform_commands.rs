@@ -330,7 +330,7 @@ pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> 
         LoginOrgResolution::NoOrganizations | LoginOrgResolution::SelectionRequired => None,
     };
 
-    save_login_platform_config(&paths, &server_url, &credentials, default_org)?;
+    save_login(&paths, &server_url, &credentials, default_org, &user)?;
     eprintln!("Logged in as {}.", oauth_user_display_name(&user));
     match org_resolution {
         LoginOrgResolution::Selected(org) => {
@@ -374,7 +374,7 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
     let (credentials, user) = login_with_device(&login_client).await?;
     eprintln!("Logged in as {}.", oauth_user_display_name(&user));
 
-    save_login_platform_config(&paths, &server_url, &credentials, None)?;
+    save_login(&paths, &server_url, &credentials, None, &user)?;
 
     let authed_platform = config::ResolvedPlatformConfig::oauth_credentials(
         server_url.clone(),
@@ -633,6 +633,39 @@ pub(crate) async fn login_with_device(
             .context("read OAuth user info")?;
         return Ok((credentials, user));
     }
+}
+
+/// Save a login and the account it verified. The previous account record
+/// goes first, so a failure at any later step leaves no recorded account,
+/// never another user's beside this login.
+pub(crate) fn save_login(
+    paths: &ResolvePaths,
+    server_url: &str,
+    credentials: &OAuthCredentials,
+    default_org: Option<&str>,
+    user: &OAuthUserInfo,
+) -> anyhow::Result<()> {
+    config::delete_account(&paths.platform_config_dir)
+        .context("remove the previous account record")?;
+    save_login_platform_config(paths, server_url, credentials, default_org)?;
+    save_login_account(paths, server_url, user)
+}
+
+/// Keep the verified account beside the login, for local features that
+/// record it without a network call (a local disk snapshot).
+pub(crate) fn save_login_account(
+    paths: &ResolvePaths,
+    server_url: &str,
+    user: &OAuthUserInfo,
+) -> anyhow::Result<()> {
+    config::save_account(
+        &paths.platform_config_dir,
+        &config::SavedAccount {
+            server_url: config::normalize_server_url(server_url),
+            user_id: user.sub.clone(),
+        },
+    )
+    .context("save the signed-in account")
 }
 
 pub(crate) fn save_login_platform_config(

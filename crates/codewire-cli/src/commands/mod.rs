@@ -1232,6 +1232,35 @@ pub(crate) struct EnvCreateArgs {
     write_preset: bool,
     #[arg(long = "save-preset", help = "Save the resolved preset to the server")]
     save_preset: Option<String>,
+    #[arg(
+        long,
+        value_name = "SNAPSHOT",
+        help = "Start from a local disk snapshot (`cw snapshot`) instead of provisioning: its image, workspace and disks, with fresh identity; local VMs on Linux"
+    )]
+    snapshot: Option<String>,
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "snapshot",
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u32).range(1..=16),
+        help = "With --snapshot, how many environments to create (named SNAPSHOT-1, SNAPSHOT-2, ... unless --name-prefix)"
+    )]
+    count: u32,
+    #[arg(
+        long,
+        value_name = "PREFIX",
+        requires = "snapshot",
+        conflicts_with = "name",
+        help = "With --snapshot, name the environments PREFIX-1, PREFIX-2, ..."
+    )]
+    name_prefix: Option<String>,
+    #[arg(
+        long,
+        requires = "snapshot",
+        help = "With --snapshot, mount the snapshot source's direct host folders again, shared live with it"
+    )]
+    share_mounts: bool,
 }
 
 /// How `cw create --local` turns the `--path` directory into the
@@ -2622,6 +2651,7 @@ mod policy;
 pub(crate) mod project_file;
 mod secrets;
 mod sessions;
+mod snapshot;
 mod ssh_trust;
 mod storage_placement;
 
@@ -2640,6 +2670,7 @@ pub(crate) use platform_commands::*;
 pub(crate) use policy::*;
 pub(crate) use secrets::*;
 pub(crate) use sessions::*;
+pub(crate) use snapshot::*;
 pub(crate) use ssh_trust::*;
 
 #[cfg(test)]

@@ -162,7 +162,7 @@ const HELP_SECTIONS: &[HelpSection] = &[
     HelpSection::everyday(
         "Environments",
         &[
-            "ls", "info", "create", "start", "stop", "restart", "rm", "use", "current",
+            "ls", "info", "create", "start", "stop", "restart", "rm", "use", "current", "snapshot",
         ],
     ),
     HelpSection::everyday(
@@ -457,6 +457,11 @@ enum Command {
         long_about = "Manage network policies: which destinations an environment may reach.\n\nA network policy is named and reusable, and every edit makes a new revision. `open` (every public destination on TCP 22, 80 and 443) and `locked` (nothing) are built in. This is not `cw network`, which manages Mesh networks."
     )]
     Policy(PolicyArgs),
+    #[command(
+        about = "Save, list and remove local disk snapshots of stopped VMs",
+        long_about = "Save, list and remove local disk snapshots.\n\nA disk snapshot is a reusable copy of a stopped local VM's disks on this host (Linux), made in about a second where the filesystem shares blocks between files. Start environments from one with `cw create --local --snapshot NAME [--count N]`; each gets fresh identity.\n\n  cw stop app\n  cw snapshot create app --name good-toolchain\n  cw create --local --snapshot good-toolchain --count 3\n  cw snapshot ls\n  cw snapshot rm good-toolchain"
+    )]
+    Snapshot(SnapshotArgs),
     #[command(
         alias = "networks",
         about = "Manage Mesh networks for environments and nodes",
@@ -909,6 +914,7 @@ where
         Command::Secrets(args) => handle_secrets_command(&globals, args).await,
         Command::Credentials(args) => handle_credentials_command(&globals, args).await,
         Command::Policy(args) => handle_policy_command(&globals, args).await,
+        Command::Snapshot(args) => handle_snapshot_command(&globals, args).await,
         Command::Network { command } => handle_network_command(&globals, command).await,
         Command::Mesh { command } => handle_mesh_command(&globals, command).await,
         #[cfg(target_os = "linux")]
@@ -1023,6 +1029,7 @@ fn validate_placement_scope(
             | Command::Use(_)
             | Command::Credentials(_)
             | Command::Policy(_)
+            | Command::Snapshot(_)
             | Command::Secrets(_)
             | Command::Env(_)
             | Command::Run(_)

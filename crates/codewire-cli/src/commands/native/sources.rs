@@ -227,6 +227,23 @@ async fn platform_metadata(
     }))
 }
 
+/// The platform account this cw is signed in to, from local login state only
+/// (no network call), or `None` when that cannot tell: a local disk snapshot
+/// records it, and a create from one signed in to another account is refused
+/// as a guard against mix-ups (#3046).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) fn signed_in_account(
+    globals: &Globals,
+    paths: &ResolvePaths,
+    env: &impl config::Env,
+) -> Option<v1::PlatformAccount> {
+    config::local_account(globals.server.clone(), paths, env).map(|account| v1::PlatformAccount {
+        server_url: account.server_url,
+        organization_id: account.organization_id,
+        user_id: account.user_id,
+    })
+}
+
 fn validate_identity_component(value: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         !value.is_empty()

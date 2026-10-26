@@ -26,6 +26,8 @@ mod diagnostic_log;
 mod direct_share;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod egress_broker;
+#[cfg(target_os = "linux")]
+mod fs_clone;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod generation;
 pub mod host_addresses;
@@ -130,6 +132,8 @@ pub mod runtime_install;
 pub mod setup_pack;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod skill_snapshot;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod snapshot_store;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod socket_dir;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

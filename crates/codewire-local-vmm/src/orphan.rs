@@ -17,6 +17,8 @@ use crate::host::path::{PrivateRoot, SocketIdentity, current_uid};
 use crate::state::{StateDiskIdentity, validate_owned_vm_tree};
 
 const MAX_ACCOUNTING_ENTRIES: usize = 10_000;
+/// `trash/snapshot-delete-<operation>-<id>` (`supervisor::snapshots`).
+const SNAPSHOT_TRASH_PREFIX: &str = "snapshot-delete-";
 const MAX_CONTENT_OBJECTS: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,6 +300,13 @@ fn inventory_trash(
         let name = entry.file_name();
         let reason = if name.to_str().is_some_and(|name| known.contains(name)) {
             "delete_cleanup_pending"
+        } else if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(SNAPSHOT_TRASH_PREFIX))
+        {
+            // A local disk snapshot's delete (#3046) finishes when the
+            // supervisor next opens its snapshot store.
+            "snapshot_delete_cleanup_pending"
         } else {
             "untracked_trash_object"
         };
@@ -438,6 +447,12 @@ mod tests {
         let trash = root.path().join("engine/trash").join(&trash_name);
         fs::create_dir(&trash).unwrap();
         fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
+        let snapshot_trash = root.path().join("engine/trash").join(format!(
+            "snapshot-delete-{}-{}",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        ));
+        fs::create_dir(&snapshot_trash).unwrap();
 
         let entries = inventory(
             &root,
@@ -459,8 +474,12 @@ mod tests {
                 .iter()
                 .any(|entry| entry.path == trash && entry.reason == "delete_cleanup_pending")
         );
+        assert!(entries.iter().any(|entry| {
+            entry.path == snapshot_trash && entry.reason == "snapshot_delete_cleanup_pending"
+        }));
         assert!(unknown.join("data").exists());
         assert!(trash.exists());
+        assert!(snapshot_trash.exists());
         assert!(!root.path().join("engine/runtime-artifacts").exists());
     }
 

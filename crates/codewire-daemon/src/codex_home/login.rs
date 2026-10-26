@@ -345,10 +345,15 @@ fn classify(home: &PrivateDirectory, name: &str) -> io::Result<AuthFile> {
         Entry::Foreign => return Ok(AuthFile::User),
         Entry::Owned(entry) => entry,
     };
-    Ok(match Document::parse(&entry.contents) {
-        Some(document) if document.is_codewire() => AuthFile::Codewire { entry, document },
-        _ => AuthFile::User,
+    Ok(match codewire_document(&entry.contents) {
+        Some(document) => AuthFile::Codewire { entry, document },
+        None => AuthFile::User,
     })
+}
+
+/// `contents` parsed, when it is an `auth.json` Codewire wrote.
+fn codewire_document(contents: &[u8]) -> Option<Document> {
+    Document::parse(contents).filter(Document::is_codewire)
 }
 
 /// Install a new `auth.json` where there was none. A file that appeared since
@@ -449,6 +454,34 @@ impl Document {
                 .and_then(Value::as_str)
                 == Some(CODEX_MANAGED_REFRESH_TOKEN)
     }
+}
+
+/// Whether `contents` is an `auth.json` Codewire wrote: ChatGPT mode with
+/// exactly the placeholder refresh token. The rule the daemon removes by, for a reader
+/// of a disk image that holds such a file, such as a local VM's disk snapshot
+/// capture (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
+/// exceptions").
+pub fn is_codewire_auth_file(contents: &[u8]) -> bool {
+    codewire_document(contents).is_some()
+}
+
+/// Whether `name` in Codex's home is one of Codewire's temporaries beside
+/// `auth.json`.
+pub fn is_codewire_temporary(name: &str) -> bool {
+    name.starts_with(&format!(".{CODEX_AUTH_FILE_NAME}.codewire."))
+}
+
+/// Whether the temporary `name` is a write in progress, which is Codewire's
+/// whatever it holds, so it is removed unread.
+pub fn is_codewire_write_in_progress(name: &str) -> bool {
+    is_codewire_temporary(name) && name.ends_with(".new")
+}
+
+/// Whether the temporary `name` holding `contents` is Codewire's: a write in
+/// progress, or Codewire's login. A user's file set aside stays.
+pub fn is_codewire_leftover(name: &str, contents: &[u8]) -> bool {
+    is_codewire_write_in_progress(name)
+        || (is_codewire_temporary(name) && is_codewire_auth_file(contents))
 }
 
 /// Codex 0.157's standard ChatGPT `auth.json`, keeping every other field of
@@ -621,7 +654,7 @@ impl CodexLoginWriter {
         let prefix = format!(".{CODEX_AUTH_FILE_NAME}.codewire.");
         let mut removed = 0;
         for name in home.names_with_prefix(&prefix, MAX_LEFTOVERS)? {
-            let codewire = name.ends_with(".new")
+            let codewire = is_codewire_write_in_progress(&name)
                 || matches!(classify(&home, &name)?, AuthFile::Codewire { .. });
             if codewire {
                 home.unlink(&name)?;

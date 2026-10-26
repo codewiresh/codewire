@@ -683,6 +683,7 @@ pub(crate) async fn create_native_environment(
         local_mounts,
         implicit_vm_only,
         network_policy: args.policy.clone().unwrap_or_default(),
+        snapshot: None,
     };
     if !request.network_policy.is_empty() {
         client
@@ -733,6 +734,387 @@ pub(crate) async fn create_native_environment(
         secrets: context.secrets,
         configuration: provenance,
     }))
+}
+
+/// The most environments one `cw create --snapshot --count` makes.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) const MAXIMUM_SNAPSHOT_COUNT: u32 = 16;
+/// How many of them are created at once.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const SNAPSHOT_RESTORE_PARALLELISM: usize = 2;
+
+/// One environment made from a snapshot, as `--output json` reports it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Serialize)]
+struct SnapshotRestoreResult {
+    name: String,
+    id: String,
+    snapshot: String,
+    state: String,
+    seconds: f64,
+}
+
+/// `cw create --local --snapshot S [--count N]`: environments started from a
+/// local disk snapshot, each with fresh identity. Each request is built as
+/// `cw create` builds one: its sources, credential profile and platform
+/// account are resolved again here, its Mesh network from this host's
+/// selection and flags, and it publishes no host port. Only the image,
+/// workspace and disks come from the snapshot.
+pub(crate) async fn create_native_environments_from_snapshot(
+    globals: &Globals,
+    args: EnvCreateArgs,
+) -> anyhow::Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (globals, args);
+        anyhow::bail!("local disk snapshots need a Linux host for now")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        create_from_snapshot_on_linux(globals, args).await
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn create_from_snapshot_on_linux(
+    globals: &Globals,
+    args: EnvCreateArgs,
+) -> anyhow::Result<()> {
+    host_support::require_local_vm_host()?;
+    reject_snapshot_create_options(&args)?;
+    let selector = args
+        .snapshot
+        .as_deref()
+        .and_then(trimmed_str)
+        .context("name the snapshot to create from: --snapshot NAME")?
+        .to_owned();
+    let client = native_boot_client().await?;
+    client
+        .require_local_snapshots()
+        .map_err(|status| anyhow::anyhow!("{}", status.message()))?;
+    let snapshot = client
+        .get_snapshot(&selector)
+        .await
+        .map_err(|status| anyhow::anyhow!("{}", status.message()))?;
+    let existing = native_names().await;
+    let names = snapshot_restore_names(
+        &snapshot.name,
+        args.name.as_deref(),
+        args.name_prefix.as_deref(),
+        args.count,
+        &existing,
+    )?;
+    if snapshot.direct_mounts {
+        if !args.share_mounts {
+            anyhow::bail!(
+                "snapshot {} was taken from a VM that mounts host folders directly; an environment made from it mounts the same folders live, shared with every other one that does. Pass --share-mounts to accept that",
+                terminal_text(&snapshot.name)
+            );
+        }
+        eprintln!(
+            "Warning: these environments mount the snapshot source's host folders directly and share them live."
+        );
+    }
+    if snapshot.consistency == "crash" {
+        eprintln!(
+            "Note: snapshot {} holds what a power loss would have left (its VM was not shut down cleanly).",
+            terminal_text(&snapshot.name)
+        );
+    }
+    let env = OsEnv;
+    let paths = ResolvePaths::from_env(&env)?;
+    let mut spec: codewire_project::ProjectSpec =
+        serde_json::from_slice(&snapshot.project_spec_json)
+            .context("read the snapshot's project")?;
+    let spec_resources = (
+        spec.resources
+            .cpu_millicores
+            .map(|millicores| millicores / 1_000)
+            .context("the snapshot's project names no CPU count")?,
+        spec.resources
+            .memory_mib
+            .and_then(|memory| u32::try_from(memory).ok())
+            .context("the snapshot's project names no memory size")?,
+        spec.resources
+            .disk_gib
+            .and_then(|disk| disk.checked_mul(1024 * 1024 * 1024))
+            .context("the snapshot's project names no disk size")?,
+    );
+    // The same source resolution as `cw create`: the snapshot's selectors are
+    // only names, resolved here under this host's current sign-ins.
+    let mut credentials = connect_native_credential_authority_if_required(
+        native_project_requires_credential_authority(&spec),
+        connect_local_credential_authority,
+    )
+    .await?;
+    let selected = sources::resolve_requested_sources(
+        globals,
+        &paths,
+        &env,
+        credentials.as_mut(),
+        &mut spec,
+        sources::SourceChanges::all(),
+    )
+    .await?;
+    if native_project_requires_credential_authority(&spec) {
+        sources::confirm_create_sources(&names[0], &spec, &selected, args.yes, args.output)?;
+    }
+    let account = sources::signed_in_account(globals, &paths, &env);
+    let vcpus = match args.cpu.as_deref() {
+        Some(value) => parse_native_cpu(value)?,
+        None => snapshot.vcpus,
+    };
+    let memory_mib = match args.memory.as_deref() {
+        Some(value) => parse_native_memory(value)?,
+        None => snapshot.memory_mib,
+    };
+    let (project_spec_json, project_spec_sha256) = canonical_native_project_intent(
+        spec.clone(),
+        spec_resources.0,
+        spec_resources.1,
+        spec_resources.2,
+    )?;
+    let network_policy = match args.policy.as_deref() {
+        Some(policy) => policy.to_owned(),
+        None if matches!(snapshot.network_policy.as_str(), "" | "open") => String::new(),
+        None => snapshot.network_policy.clone(),
+    };
+    if !network_policy.is_empty() {
+        client
+            .require_network_policy_selection()
+            .map_err(|status| anyhow::anyhow!("{}", status.message()))?;
+    }
+    let mesh_project = NativeProjectPlan {
+        spec: spec.clone(),
+        host_ports: Vec::new(),
+        local_mounts: Vec::new(),
+        vm_only: Vec::new(),
+        vm_only_notes: Vec::new(),
+        vcpus: None,
+        memory_mib: None,
+        disk_bytes: None,
+        working_directory_explicit: false,
+    };
+    let mut requests = Vec::new();
+    for name in &names {
+        let mesh = resolve_native_mesh_attachment(
+            &paths,
+            &env,
+            name,
+            &mesh_project,
+            args.network.as_deref(),
+            args.no_network,
+            args.yes,
+        )?;
+        requests.push(v1::CreateEnvironmentRequest {
+            name: name.clone(),
+            source_path: snapshot.source_path.clone(),
+            vcpus: spec_resources.0,
+            memory_mib: spec_resources.1,
+            disk_bytes: spec_resources.2,
+            docker_disk_bytes: snapshot.docker_disk_bytes,
+            request_id: Uuid::new_v4().to_string(),
+            project_spec_json: project_spec_json.clone(),
+            project_spec_sha256: project_spec_sha256.clone(),
+            implicit_path_mode: snapshot.implicit_path_mode.clone(),
+            local_mounts: snapshot.local_mounts.clone(),
+            host_ports: Vec::new(),
+            mesh,
+            access_profile_id: selected
+                .profile
+                .as_ref()
+                .map(|profile| profile.id.clone())
+                .unwrap_or_default(),
+            access_profile_revision: selected
+                .profile
+                .as_ref()
+                .map(|profile| profile.revision)
+                .unwrap_or_default(),
+            access_profile_reference: selected
+                .profile
+                .as_ref()
+                .map(|profile| profile.reference.clone())
+                .unwrap_or_default(),
+            platform_source_authority: selected.platform.clone(),
+            implicit_vm_only: snapshot.implicit_vm_only.clone(),
+            network_policy: network_policy.clone(),
+            snapshot: Some(v1::SnapshotRestore {
+                snapshot_id: snapshot.id.clone(),
+                vcpus,
+                memory_mib,
+                share_mounts: args.share_mounts,
+                account: account.clone(),
+            }),
+        });
+    }
+    if matches!(args.output, OutputFormat::Text) {
+        eprintln!(
+            "Creating {} from snapshot {} ({}, {} vCPU, {} MiB)...",
+            names
+                .iter()
+                .map(|name| terminal_text(name))
+                .collect::<Vec<_>>()
+                .join(", "),
+            terminal_text(&snapshot.name),
+            snapshot.mode,
+            vcpus,
+            memory_mib
+        );
+    }
+    let started = std::time::Instant::now();
+    let mut clients = Vec::new();
+    for _ in &requests {
+        clients.push(native_boot_client().await?);
+    }
+    use futures::StreamExt as _;
+    let snapshot_name = snapshot.name.clone();
+    let outcomes = futures::stream::iter(clients.into_iter().zip(requests))
+        .map(|(mut client, request)| async move {
+            let begun = std::time::Instant::now();
+            let result = client.create_observed(request.clone(), &mut |_| {}).await;
+            (request, result, begun.elapsed())
+        })
+        .buffer_unordered(SNAPSHOT_RESTORE_PARALLELISM)
+        .collect::<Vec<_>>()
+        .await;
+    let mut created = Vec::new();
+    let mut failures = Vec::new();
+    for (request, result, elapsed) in outcomes {
+        match result {
+            Ok(environment) => {
+                sources::validate_created_environment(&environment, &request)?;
+                if matches!(args.output, OutputFormat::Text) {
+                    println!(
+                        "Created {} from snapshot {} in {:.1} s",
+                        terminal_text(&environment.name),
+                        terminal_text(&snapshot_name),
+                        elapsed.as_secs_f64()
+                    );
+                }
+                created.push(SnapshotRestoreResult {
+                    name: environment.name,
+                    id: environment.id,
+                    snapshot: snapshot_name.clone(),
+                    state: "running".to_owned(),
+                    seconds: elapsed.as_secs_f64(),
+                });
+            }
+            Err(status) => failures.push(
+                lifecycle::lifecycle_failure(
+                    "create",
+                    &request.name,
+                    None,
+                    native_status(status),
+                    false,
+                )
+                .await,
+            ),
+        }
+    }
+    match args.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&created)?),
+        OutputFormat::Text if created.len() > 1 => println!(
+            "{} environments from snapshot {} in {:.1} s",
+            created.len(),
+            terminal_text(&snapshot_name),
+            started.elapsed().as_secs_f64()
+        ),
+        OutputFormat::Text => {}
+    }
+    if let Some(first) = failures.into_iter().next() {
+        return Err(first);
+    }
+    Ok(())
+}
+
+/// The platform account this cw is signed in to, or `None`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn native_signed_in_account(globals: &Globals) -> Option<v1::PlatformAccount> {
+    let env = OsEnv;
+    let paths = ResolvePaths::from_env(&env).ok()?;
+    sources::signed_in_account(globals, &paths, &env)
+}
+
+/// The new environments' names: `--name` for one, else `PREFIX-k` (the
+/// snapshot's name by default) for the first free `k` from 1.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn snapshot_restore_names(
+    snapshot: &str,
+    name: Option<&str>,
+    prefix: Option<&str>,
+    count: u32,
+    existing: &[String],
+) -> anyhow::Result<Vec<String>> {
+    anyhow::ensure!(
+        (1..=MAXIMUM_SNAPSHOT_COUNT).contains(&count),
+        "--count is 1 to {MAXIMUM_SNAPSHOT_COUNT}"
+    );
+    if let Some(name) = name.and_then(trimmed_str) {
+        anyhow::ensure!(
+            count == 1,
+            "--name names one environment; use --name-prefix with --count"
+        );
+        anyhow::ensure!(
+            codewire_local_vmm::valid_environment_name(name),
+            "invalid environment name {name:?}"
+        );
+        return Ok(vec![name.to_owned()]);
+    }
+    let prefix = prefix.and_then(trimmed_str).unwrap_or(snapshot);
+    let mut names = Vec::new();
+    let mut index = 1_u32;
+    while names.len() < count as usize {
+        let candidate = format!("{prefix}-{index}");
+        anyhow::ensure!(
+            codewire_local_vmm::valid_environment_name(&candidate),
+            "{candidate:?} is not a valid environment name; choose another --name-prefix"
+        );
+        if !existing.iter().any(|existing| existing == &candidate) {
+            names.push(candidate);
+        }
+        index += 1;
+    }
+    Ok(names)
+}
+
+/// What a create from a snapshot cannot change: its image, workspace and
+/// disks are the snapshot's.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn reject_snapshot_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
+    let mut fixed = Vec::new();
+    for (set, flag) in [
+        (
+            !args.repo_urls.is_empty() || !args.repo_flags.is_empty(),
+            "repositories",
+        ),
+        (args.branch.is_some(), "--branch"),
+        (args.path.is_some(), "--path"),
+        (args.path_mode.is_some(), "--path-mode"),
+        (args.file.is_some(), "--file"),
+        (args.no_file, "--no-file"),
+        (args.image.is_some(), "--image"),
+        (args.install.is_some(), "--install"),
+        (args.startup.is_some(), "--startup"),
+        (args.disk.is_some(), "--disk"),
+        (args.docker_disk.is_some(), "--docker-disk"),
+        (args.no_docker, "--no-docker"),
+        (args.profile.is_some(), "--profile"),
+        (args.secrets.is_some(), "--secrets"),
+        (args.user_secrets.is_some(), "--user-secrets"),
+        (args.org_secrets, "--org-secrets"),
+        (args.backend.is_some(), "--backend"),
+    ] {
+        if set {
+            fixed.push(flag);
+        }
+    }
+    if !fixed.is_empty() {
+        anyhow::bail!(
+            "a create from a snapshot keeps the snapshot's image, workspace, disks and source selection, so it does not take: {}",
+            fixed.join(", ")
+        );
+    }
+    reject_unsupported_native_create_options(args)
 }
 
 /// The acknowledgement codewire.yaml direct mounts carry. The default project
@@ -5545,5 +5927,98 @@ working_directory: /workspace/github
             network_policy_text(&policy("locked", 0, 0, true)),
             "locked · enforces an earlier selection until restarted"
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_create_tests {
+    use super::*;
+
+    fn parsed_create(arguments: &[&str]) -> Result<EnvCreateArgs, clap::Error> {
+        let parsed = crate::Cli::try_parse_from(
+            ["cw", "--local", "create"].iter().chain(arguments).copied(),
+        )?;
+        match parsed.command {
+            crate::Command::Create(args) => Ok(*args),
+            _ => panic!("not a create"),
+        }
+    }
+
+    #[test]
+    fn create_from_a_snapshot_takes_its_own_flags() {
+        let args = parsed_create(&["--snapshot", "s1", "--count", "3", "--share-mounts"]).unwrap();
+        assert_eq!(args.snapshot.as_deref(), Some("s1"));
+        assert_eq!(args.count, 3);
+        assert!(args.share_mounts);
+        let args = parsed_create(&["--snapshot", "s1", "--name-prefix", "forks"]).unwrap();
+        assert_eq!(args.name_prefix.as_deref(), Some("forks"));
+        assert_eq!(parsed_create(&["--snapshot", "s1"]).unwrap().count, 1);
+
+        // Each needs --snapshot; --count is bounded; one name or a prefix.
+        for invalid in [
+            &["--count", "2"][..],
+            &["--share-mounts"],
+            &["--name-prefix", "forks"],
+            &["--snapshot", "s1", "--count", "0"],
+            &["--snapshot", "s1", "--count", "17"],
+            &["--snapshot", "s1", "--name", "a", "--name-prefix", "b"],
+        ] {
+            assert!(parsed_create(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn a_create_from_a_snapshot_refuses_what_the_snapshot_fixes() {
+        for fixed in [
+            &["--image", "workspace"][..],
+            &["--path", "/tmp"],
+            &["--disk", "40GB"],
+            &["--no-docker"],
+            &["--profile", "local:work"],
+            &["https://example.invalid/repo.git"],
+        ] {
+            let args = parsed_create(&[&["--snapshot", "s1"][..], fixed].concat()).unwrap();
+            let error = reject_snapshot_create_options(&args).unwrap_err();
+            assert!(
+                error.to_string().contains("keeps the snapshot's image"),
+                "{fixed:?}: {error}"
+            );
+        }
+        let args = parsed_create(&["--snapshot", "s1", "--cpu", "4", "--memory", "8GB"]).unwrap();
+        reject_snapshot_create_options(&args).unwrap();
+    }
+
+    #[test]
+    fn forks_are_named_after_the_snapshot_skipping_taken_names() {
+        assert_eq!(
+            snapshot_restore_names("s1", None, None, 3, &[]).unwrap(),
+            ["s1-1", "s1-2", "s1-3"]
+        );
+        assert_eq!(
+            snapshot_restore_names("s1", None, None, 2, &["s1-1".to_owned()]).unwrap(),
+            ["s1-2", "s1-3"]
+        );
+        assert_eq!(
+            snapshot_restore_names("s1", None, Some("work"), 2, &[]).unwrap(),
+            ["work-1", "work-2"]
+        );
+        assert_eq!(
+            snapshot_restore_names("s1", Some("app2"), None, 1, &[]).unwrap(),
+            ["app2"]
+        );
+        assert!(snapshot_restore_names("s1", Some("app2"), None, 2, &[]).is_err());
+        assert!(snapshot_restore_names("s1", Some("-bad"), None, 1, &[]).is_err());
+        assert!(snapshot_restore_names("s1", None, None, 17, &[]).is_err());
+    }
+
+    #[test]
+    fn the_snapshot_command_parses_under_the_local_placement() {
+        let parsed = crate::Cli::try_parse_from([
+            "cw", "--local", "snapshot", "create", "app", "--name", "s1",
+        ])
+        .unwrap();
+        assert!(matches!(parsed.command, crate::Command::Snapshot(_)));
+        assert!(crate::Cli::try_parse_from(["cw", "snapshot", "ls"]).is_ok());
+        assert!(crate::Cli::try_parse_from(["cw", "snapshot"]).is_err());
     }
 }

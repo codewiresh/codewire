@@ -1180,6 +1180,52 @@ fn save_login_platform_config_persists_only_reconciled_default_org() {
 }
 
 #[test]
+fn a_login_replaces_the_account_record_and_a_failed_one_leaves_none() {
+    let home = tempfile::tempdir().unwrap();
+    let env = config::MapEnv::default();
+    let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
+    let server = "https://offline.invalid";
+    let credentials = codewire_client::OAuthCredentials::new(
+        server,
+        codewire_client::CODEWIRE_CLI_OAUTH_CLIENT_ID,
+        "synthetic-access-canary",
+        "synthetic-refresh-canary",
+        u64::MAX,
+        codewire_client::CODEWIRE_CLI_OAUTH_SCOPES,
+    )
+    .unwrap();
+    let user = |sub: &str| OAuthUserInfo {
+        sub: sub.to_owned(),
+        email: None,
+        email_verified: None,
+        name: None,
+        picture: None,
+    };
+    let recorded_user = || config::local_account(None, &paths, &env).map(|account| account.user_id);
+
+    save_login(&paths, server, &credentials, Some("org-a"), &user("user-a")).unwrap();
+    assert_eq!(recorded_user().as_deref(), Some("user-a"));
+    save_login(&paths, server, &credentials, Some("org-a"), &user("user-b")).unwrap();
+    assert_eq!(recorded_user().as_deref(), Some("user-b"));
+    // Only the record is left in the directory: no temporary file.
+    let mut names = std::fs::read_dir(&paths.platform_config_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["account.json", "config.json", "credentials.json"]);
+
+    // A login that fails after the old record is gone records no account,
+    // never the previous user's.
+    let config_file = paths.platform_config_dir.join("config.json");
+    std::fs::remove_file(&config_file).unwrap();
+    std::fs::create_dir(&config_file).unwrap();
+    assert!(save_login(&paths, server, &credentials, Some("org-a"), &user("user-c")).is_err());
+    assert!(!paths.platform_config_dir.join("account.json").exists());
+    assert_eq!(recorded_user(), None);
+}
+
+#[test]
 fn platform_login_saves_the_owner_organization_and_no_mesh_projection() {
     let home = tempfile::tempdir().unwrap();
     let paths =

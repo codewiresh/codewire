@@ -8,6 +8,7 @@ mod bootstrap;
 mod metadata;
 mod network_policies;
 mod runtime;
+mod snapshots;
 mod sources;
 mod ssh;
 #[cfg(test)]
@@ -2389,10 +2390,10 @@ impl SupervisorCore {
         for (digest, size) in self.download_cache.values().flatten() {
             content.entry(digest.clone()).or_insert(*size);
         }
-        Ok(CollectionRetained {
-            content,
-            artifacts: referenced_artifact_generations(&self.state)?,
-        })
+        let mut artifacts = referenced_artifact_generations(&self.state)?;
+        // Local disk snapshots are retention roots (#3046).
+        snapshots::retain(&self.config, &mut content, &mut artifacts)?;
+        Ok(CollectionRetained { content, artifacts })
     }
 }
 
@@ -2645,6 +2646,12 @@ impl Supervisor {
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
             match effect {
                 LifecycleEffect::RecordEnvironment => {
+                    // A restore records its snapshot's pinned artifact
+                    // generation and disk sizes, and its requested vCPUs and
+                    // memory (#3046).
+                    let restore = snapshots::record_inputs(self, request).await?;
+                    let (vcpus, memory_mib, disk_bytes, docker_disk_bytes) =
+                        snapshots::RestoreRecord::resources(restore.as_ref(), request)?;
                     // The selection is recorded first, so the first boot
                     // enforces it; a failed create's rollback clears it.
                     let selection =
@@ -2661,10 +2668,10 @@ impl Supervisor {
                     let recorded = |environment: &EnvironmentRecord| {
                         Ok::<_, SupervisorError>(
                             environment.id == environment_id
-                                && u32::from(environment.vcpus) == request.vcpus
-                                && environment.memory_mib == request.memory_mib
-                                && environment.disk_bytes == request.disk_bytes
-                                && environment.docker_disk_bytes == request.docker_disk_bytes
+                                && environment.vcpus == vcpus
+                                && environment.memory_mib == memory_mib
+                                && environment.disk_bytes == disk_bytes
+                                && environment.docker_disk_bytes == docker_disk_bytes
                                 && environment.host_ports
                                     == host_ports_from_proto(&request.host_ports)?
                                 && environment.mesh
@@ -2692,7 +2699,10 @@ impl Supervisor {
                     let admitted = if self.environment(&request.name).is_ok() {
                         None
                     } else {
-                        let artifact_generation = self.preflight().await?;
+                        let artifact_generation = match restore.as_ref() {
+                            Some(restore) => restore.artifact_generation.clone(),
+                            None => self.preflight().await?,
+                        };
                         self.require_vm_only_guest_for_plan(&artifact_generation, workspace_plan)
                             .await?;
                         let cw_runtime =
@@ -2704,17 +2714,15 @@ impl Supervisor {
                                     rollback_catalog_generation: None,
                                 }
                             });
-                        let vcpus = u8::try_from(request.vcpus)
-                            .map_err(|_| SupervisorError::InvalidRequest)?;
                         Some(EnvironmentRecord {
                             cw_runtime,
                             id: environment_id,
                             name: request.name.clone(),
                             state: StoredEnvironmentState::Starting,
                             vcpus,
-                            memory_mib: request.memory_mib,
-                            disk_bytes: request.disk_bytes,
-                            docker_disk_bytes: request.docker_disk_bytes,
+                            memory_mib,
+                            disk_bytes,
+                            docker_disk_bytes,
                             generation: 0,
                             host_ports: host_ports_from_proto(&request.host_ports)?,
                             mesh: mesh_attachment_from_proto(request.mesh.as_ref())?,
@@ -2764,6 +2772,12 @@ impl Supervisor {
                     self.bind_environment_access(request, environment_id)
                         .await?;
                     operation = self.core().checkpoint_operation(&operation)?;
+                }
+                LifecycleEffect::ProvisionWorkspace if request.snapshot.is_some() => {
+                    // A restore places its snapshot's disks and records their
+                    // root generation (#3046).
+                    operation =
+                        snapshots::place_disks(self, request, environment_id, &operation).await?;
                 }
                 LifecycleEffect::ProvisionWorkspace => {
                     let environment = self.environment(&request.name)?;
@@ -6026,11 +6040,17 @@ impl LocalSupervisorService for SupervisorRpc {
                 // Preparation writes repository bundles that only the
                 // journaled create will reference: a writer until then.
                 let writer = self.supervisor.content_writer().await;
-                let (workspace_plan, discriminators) = match self
-                    .supervisor
-                    .prepare_create_workspace_plan(&request, environment_id)
-                    .await
-                {
+                // A restore takes its snapshot's plan, after every refusal
+                // checked there (#3046); nothing is prepared.
+                let prepared = match request.snapshot.as_ref() {
+                    Some(_) => snapshots::restore_plan(&self.supervisor, &request).await,
+                    None => self
+                        .supervisor
+                        .prepare_create_workspace_plan(&request, environment_id)
+                        .await
+                        .map_err(Status::from),
+                };
+                let (workspace_plan, discriminators) = match prepared {
                     Ok(prepared) => prepared,
                     Err(error) => {
                         // A multi-repository preparation can admit an earlier
@@ -6038,7 +6058,7 @@ impl LocalSupervisorService for SupervisorRpc {
                         // nothing references, once no writer is in flight.
                         drop(writer);
                         let _ = self.supervisor.collect_if_idle().await;
-                        return Err(Status::from(error));
+                        return Err(error);
                     }
                 };
                 let payload =
@@ -8365,6 +8385,8 @@ fn create_operation_payload(
                 request.network_policy.clone().into(),
             );
     }
+    // Likewise only a restore adds `snapshot` (#3046).
+    snapshots::journal_payload(&mut payload, request)?;
     Ok(payload)
 }
 
@@ -8378,7 +8400,11 @@ fn create_request_from_operation(
         .payload
         .as_object()
         .filter(|fields| {
-            fields.len() == 16 || (fields.len() == 17 && fields.contains_key("network_policy"))
+            let optional = ["network_policy", "snapshot"]
+                .into_iter()
+                .filter(|key| fields.contains_key(*key))
+                .count();
+            fields.len() == 16 + optional
         })
         .ok_or(SupervisorError::InvalidState)?;
     let network_policy = match fields.get("network_policy") {
@@ -8489,6 +8515,7 @@ fn create_request_from_operation(
             .unwrap_or_default()
     };
     let request = v1::CreateEnvironmentRequest {
+        snapshot: snapshots::from_payload(fields)?,
         network_policy,
         name,
         source_path,
@@ -13558,6 +13585,7 @@ mod tests {
             let name = format!("secret-{index}");
             let request_id = Uuid::new_v4();
             let request = v1::CreateEnvironmentRequest {
+                snapshot: None,
                 network_policy: String::new(),
                 implicit_vm_only: Vec::new(),
                 name: name.clone(),
@@ -13913,6 +13941,7 @@ mod tests {
         let project_spec_json = project.canonical_json().unwrap();
         let project_spec_sha256 = format!("{:x}", Sha256::digest(&project_spec_json));
         let request = v1::CreateEnvironmentRequest {
+            snapshot: None,
             network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "dev".to_owned(),
@@ -14221,6 +14250,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            snapshot: None,
             network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "copy".to_owned(),
@@ -14305,6 +14335,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            snapshot: None,
             network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "copy".to_owned(),
@@ -14371,6 +14402,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            snapshot: None,
             network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "direct".to_owned(),
@@ -14495,6 +14527,7 @@ mod tests {
         };
         let project_spec_json = project.canonical_json().unwrap();
         let request = v1::CreateEnvironmentRequest {
+            snapshot: None,
             network_policy: String::new(),
             implicit_vm_only: vec!["node_modules".to_owned(), ".venv".to_owned()],
             name: "copy".to_owned(),
@@ -14595,6 +14628,7 @@ mod tests {
         let workspace_plan = direct_workspace_plan(&source);
         let fixture = project_environment_with_access();
         let request = v1::CreateEnvironmentRequest {
+            snapshot: None,
             network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "new-environment".to_owned(),
@@ -14669,6 +14703,7 @@ mod tests {
         environment.workspace_plan = workspace_plan.clone();
         let environment_id = environment.id;
         let request = v1::CreateEnvironmentRequest {
+            snapshot: None,
             network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "dev".to_owned(),
@@ -16590,6 +16625,7 @@ mod tests {
         let environment_id = environment.id;
         let workspace_plan = environment.workspace_plan.clone();
         let request = v1::CreateEnvironmentRequest {
+            snapshot: None,
             network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: environment.name.clone(),
@@ -18493,6 +18529,7 @@ mod tests {
         let project_spec_json = project.canonical_json().unwrap();
         let request_id = Uuid::new_v4();
         let request = v1::CreateEnvironmentRequest {
+            snapshot: None,
             network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "pending".to_owned(),
@@ -20132,6 +20169,7 @@ mod concurrency_tests {
             ));
         let environment_id = environment.id;
         let request = v1::CreateEnvironmentRequest {
+            snapshot: None,
             network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: name.to_owned(),
@@ -20695,6 +20733,7 @@ mod concurrency_tests {
         let environment = project_environment();
         let request_id = Uuid::new_v4();
         let request = v1::CreateEnvironmentRequest {
+            snapshot: None,
             network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: "new".to_owned(),

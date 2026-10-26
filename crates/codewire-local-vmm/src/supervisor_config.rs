@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 18;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 19;
 /// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
 /// update, a supervisor in [minimum, current] keeps serving its VMs; only an
 /// idle older one is replaced (`supervisor_upgrade`).
@@ -57,6 +57,10 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         18,
         "live network policies (#2537): an edit to a selected policy, or a new selection, applies to a running VM's egress broker at once and ends the flows it refuses; NetworkPolicy.enforced_in and restart_required_in name those VMs; an older supervisor applies it at the next start",
     ),
+    (
+        19,
+        "local disk snapshots (#3046, Linux): LocalSnapshotService (CreateSnapshot, ListSnapshots, GetSnapshot, DeleteSnapshot) and CreateEnvironmentRequest.snapshot; an older supervisor would refuse a create journaled from a snapshot as an invalid replay",
+    ),
 ];
 
 /// A supervisor capability newer than the minimum protocol.
@@ -70,14 +74,17 @@ pub enum SupervisorFeature {
     NetworkPolicies,
     /// Selecting a network policy for an environment.
     NetworkPolicySelection,
+    /// Local disk snapshots and creating environments from them.
+    LocalSnapshots,
 }
 
 impl SupervisorFeature {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Retire,
         Self::Ssh,
         Self::NetworkPolicies,
         Self::NetworkPolicySelection,
+        Self::LocalSnapshots,
     ];
 
     /// The protocol that introduced it.
@@ -87,6 +94,7 @@ impl SupervisorFeature {
             Self::Ssh => 15,
             Self::NetworkPolicies => 16,
             Self::NetworkPolicySelection => 17,
+            Self::LocalSnapshots => 19,
         }
     }
 }
@@ -377,7 +385,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 18);
+        assert_eq!(info.protocol_version, 19);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

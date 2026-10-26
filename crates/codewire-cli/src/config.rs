@@ -399,6 +399,143 @@ pub fn save_platform_config(config_dir: &Path, config: &PlatformConfig) -> Resul
         .map_err(|source| ConfigError::WriteConfig { path, source })
 }
 
+/// The account a `cw login` verified, kept beside the platform config: its
+/// server and user id, nothing secret. A separate file, so a `cw` that
+/// predates it still reads `config.json`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SavedAccount {
+    pub server_url: String,
+    pub user_id: String,
+}
+
+const ACCOUNT_FILE: &str = "account.json";
+
+/// Write `account.json` atomically: a private temporary file, synced, then
+/// renamed over the old one and the directory synced, so a reader sees the
+/// old record or the new one, never part of either.
+pub fn save_account(config_dir: &Path, account: &SavedAccount) -> Result<(), ConfigError> {
+    let path = config_dir.join(ACCOUNT_FILE);
+    fs::create_dir_all(config_dir).map_err(|source| ConfigError::CreateConfigDir {
+        path: config_dir.to_path_buf(),
+        source,
+    })?;
+    harden_dir(config_dir)?;
+    let mut data =
+        serde_json::to_vec_pretty(account).map_err(|source| ConfigError::SerializePlatform {
+            path: path.clone(),
+            source,
+        })?;
+    data.push(b'\n');
+    let temporary = config_dir.join(format!(
+        ".{ACCOUNT_FILE}.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let written = (|| -> std::io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(&data)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, &path)?;
+        sync_directory(config_dir)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written.map_err(|source| ConfigError::WriteConfig { path, source })
+}
+
+pub fn delete_account(config_dir: &Path) -> Result<(), ConfigError> {
+    let path = config_dir.join(ACCOUNT_FILE);
+    match fs::remove_file(&path) {
+        Ok(()) => {
+            sync_directory(config_dir).map_err(|source| ConfigError::WriteConfig { path, source })
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(ConfigError::WriteConfig { path, source }),
+    }
+}
+
+fn sync_directory(directory: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open(directory)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+        Ok(())
+    }
+}
+
+/// A platform account read from local login state alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalAccount {
+    pub server_url: String,
+    pub organization_id: String,
+    pub user_id: String,
+}
+
+/// The platform account this `cw` is signed in to, read from local login
+/// state only, with no network call: the saved OAuth login, its verified
+/// account record and its default organization, for the server in use.
+/// `None` when an API key is in use, the server is overridden to another
+/// one, the saved login is absent, or any part is missing, unreadable or
+/// not a value the supervisor accepts (1 to 256 characters, no control
+/// characters, no surrounding space): never an error, so a capture or
+/// restore carries on with no account.
+pub fn local_account(
+    explicit_server: Option<String>,
+    paths: &ResolvePaths,
+    env: &impl Env,
+) -> Option<LocalAccount> {
+    if trim_opt(env.var(CODEWIRE_API_KEY_ENV)).is_some() {
+        return None;
+    }
+    let config = load_platform_config(&paths.platform_config_dir).ok()?;
+    let server_url = normalize_server_url(&config.server_url);
+    if let Some(overridden) =
+        trim_opt(explicit_server).or_else(|| trim_opt(env.var(CODEWIRE_SERVER_URL_ENV)))
+        && !same_server_url(&overridden, &server_url)
+    {
+        return None;
+    }
+    if !oauth_credentials_path(&paths.platform_config_dir).is_file() {
+        return None;
+    }
+    let data = fs::read(paths.platform_config_dir.join(ACCOUNT_FILE)).ok()?;
+    let account: SavedAccount = serde_json::from_slice(&data).ok()?;
+    let organization_id = config.default_org;
+    let user_id = account.user_id;
+    if !same_server_url(&account.server_url, &server_url)
+        || ![&server_url, &organization_id, &user_id]
+            .into_iter()
+            .all(|value| valid_account_value(value))
+    {
+        return None;
+    }
+    Some(LocalAccount {
+        server_url,
+        organization_id,
+        user_id,
+    })
+}
+
+/// The supervisor's rule for each part of a recorded platform account.
+fn valid_account_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
 pub fn delete_platform_config(config_dir: &Path) -> Result<(), ConfigError> {
     let path = config_dir.join("config.json");
     match fs::remove_file(&path) {
@@ -1281,6 +1418,187 @@ mod tests {
 
     fn paths(home: &Path, env: &impl Env) -> ResolvePaths {
         ResolvePaths::from_home_and_env(home.to_path_buf(), env).unwrap()
+    }
+
+    /// A saved OAuth login for an unreachable server, so any network call
+    /// would fail: the account is read without one.
+    fn signed_in_home() -> (tempfile::TempDir, ResolvePaths) {
+        let home = tempfile::tempdir().unwrap();
+        let env = MapEnv::new([("HOME", home.path().to_str().unwrap())]);
+        let paths = paths(home.path(), &env);
+        save_platform_config(
+            &paths.platform_config_dir,
+            &PlatformConfig {
+                server_url: "https://offline.invalid".to_owned(),
+                default_org: "org-1".to_owned(),
+            },
+        )
+        .unwrap();
+        save_account(
+            &paths.platform_config_dir,
+            &SavedAccount {
+                server_url: "https://offline.invalid".to_owned(),
+                user_id: "user-1".to_owned(),
+            },
+        )
+        .unwrap();
+        fs::write(oauth_credentials_path(&paths.platform_config_dir), b"{}").unwrap();
+        (home, paths)
+    }
+
+    #[test]
+    fn the_local_account_is_read_offline_from_saved_login_state() {
+        let (_home, paths) = signed_in_home();
+        assert_eq!(
+            local_account(None, &paths, &MapEnv::default()),
+            Some(LocalAccount {
+                server_url: "https://offline.invalid".to_owned(),
+                organization_id: "org-1".to_owned(),
+                user_id: "user-1".to_owned(),
+            })
+        );
+        // The same server named explicitly is still that login.
+        assert!(
+            local_account(
+                Some("https://offline.invalid/".to_owned()),
+                &paths,
+                &MapEnv::default()
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn no_local_account_when_signed_out_on_an_api_key_or_another_server() {
+        let (_home, paths) = signed_in_home();
+        // An organization API key.
+        let api_key = MapEnv::new([(CODEWIRE_API_KEY_ENV, "cw_synthetic_key")]);
+        assert_eq!(local_account(None, &paths, &api_key), None);
+        // A server override with no login of its own.
+        let other = MapEnv::new([(CODEWIRE_SERVER_URL_ENV, "https://other.invalid")]);
+        assert_eq!(local_account(None, &paths, &other), None);
+        assert_eq!(
+            local_account(
+                Some("https://other.invalid".to_owned()),
+                &paths,
+                &MapEnv::default()
+            ),
+            None
+        );
+        // Signed out: the saved login is gone.
+        fs::remove_file(oauth_credentials_path(&paths.platform_config_dir)).unwrap();
+        assert_eq!(local_account(None, &paths, &MapEnv::default()), None);
+        // Never signed in.
+        let fresh = tempfile::tempdir().unwrap();
+        let env = MapEnv::new([("HOME", fresh.path().to_str().unwrap())]);
+        let fresh_paths = self::paths(fresh.path(), &env);
+        assert_eq!(local_account(None, &fresh_paths, &env), None);
+    }
+
+    #[test]
+    fn an_account_value_the_supervisor_would_refuse_records_no_account() {
+        let (_home, paths) = signed_in_home();
+        let env = MapEnv::default();
+        for user_id in [
+            " user-1".to_owned(),
+            "user-1\n".to_owned(),
+            "user\u{7f}1".to_owned(),
+            "u".repeat(257),
+        ] {
+            save_account(
+                &paths.platform_config_dir,
+                &SavedAccount {
+                    server_url: "https://offline.invalid".to_owned(),
+                    user_id,
+                },
+            )
+            .unwrap();
+            assert_eq!(local_account(None, &paths, &env), None);
+        }
+        save_account(
+            &paths.platform_config_dir,
+            &SavedAccount {
+                server_url: "https://offline.invalid".to_owned(),
+                user_id: "u".repeat(256),
+            },
+        )
+        .unwrap();
+        assert!(local_account(None, &paths, &env).is_some());
+        for default_org in ["org-1 ".to_owned(), "o".repeat(257), "org\t1".to_owned()] {
+            save_platform_config(
+                &paths.platform_config_dir,
+                &PlatformConfig {
+                    server_url: "https://offline.invalid".to_owned(),
+                    default_org,
+                },
+            )
+            .unwrap();
+            assert_eq!(local_account(None, &paths, &env), None);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_account_record_is_replaced_atomically_and_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_home, paths) = signed_in_home();
+        let path = paths.platform_config_dir.join(ACCOUNT_FILE);
+        save_account(
+            &paths.platform_config_dir,
+            &SavedAccount {
+                server_url: "https://offline.invalid".to_owned(),
+                user_id: "user-2".to_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let saved: SavedAccount = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.user_id, "user-2");
+        assert!(
+            fs::read_dir(&paths.platform_config_dir)
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp"))
+        );
+    }
+
+    #[test]
+    fn an_account_record_of_another_server_or_without_an_organization_is_ignored() {
+        let (_home, paths) = signed_in_home();
+        save_account(
+            &paths.platform_config_dir,
+            &SavedAccount {
+                server_url: "https://earlier.invalid".to_owned(),
+                user_id: "user-1".to_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(local_account(None, &paths, &MapEnv::default()), None);
+        save_account(
+            &paths.platform_config_dir,
+            &SavedAccount {
+                server_url: "https://offline.invalid".to_owned(),
+                user_id: "user-1".to_owned(),
+            },
+        )
+        .unwrap();
+        save_platform_config(
+            &paths.platform_config_dir,
+            &PlatformConfig {
+                server_url: "https://offline.invalid".to_owned(),
+                default_org: String::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(local_account(None, &paths, &MapEnv::default()), None);
+        delete_account(&paths.platform_config_dir).unwrap();
+        assert!(!paths.platform_config_dir.join(ACCOUNT_FILE).exists());
     }
 
     #[test]

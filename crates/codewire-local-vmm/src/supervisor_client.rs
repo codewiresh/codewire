@@ -556,6 +556,82 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    /// Fails with `Unimplemented` before contacting a supervisor older than
+    /// protocol 19, which has no local disk snapshots.
+    pub fn require_local_snapshots(&self) -> Result<(), Status> {
+        if self.supports(SupervisorFeature::LocalSnapshots) {
+            Ok(())
+        } else {
+            Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which has no disk snapshots; `cw upgrade --vms` moves them to this cw once they are idle",
+            ))
+        }
+    }
+
+    async fn snapshot_client(
+        &self,
+    ) -> Result<
+        v1::local_snapshot_service_client::LocalSnapshotServiceClient<tonic::transport::Channel>,
+        Status,
+    > {
+        self.require_local_snapshots()?;
+        // Every connection keeps the original socket-derived peer pin.
+        let channel = connect_supervisor_peer(self.peer_pin.clone())
+            .await
+            .map_err(|_| Status::failed_precondition("retained native supervisor changed"))?;
+        Ok(v1::local_snapshot_service_client::LocalSnapshotServiceClient::new(channel))
+    }
+
+    pub async fn create_snapshot(
+        &self,
+        environment: &str,
+        name: &str,
+        account: Option<v1::PlatformAccount>,
+    ) -> Result<v1::Snapshot, Status> {
+        Ok(self
+            .snapshot_client()
+            .await?
+            .create_snapshot(v1::CreateSnapshotRequest {
+                environment: environment.to_owned(),
+                name: name.to_owned(),
+                account,
+            })
+            .await?
+            .into_inner())
+    }
+
+    pub async fn list_snapshots(&self) -> Result<Vec<v1::Snapshot>, Status> {
+        Ok(self
+            .snapshot_client()
+            .await?
+            .list_snapshots(v1::ListSnapshotsRequest {})
+            .await?
+            .into_inner()
+            .snapshots)
+    }
+
+    pub async fn get_snapshot(&self, snapshot: &str) -> Result<v1::Snapshot, Status> {
+        Ok(self
+            .snapshot_client()
+            .await?
+            .get_snapshot(v1::SnapshotSelector {
+                snapshot: snapshot.to_owned(),
+            })
+            .await?
+            .into_inner())
+    }
+
+    pub async fn delete_snapshot(&self, snapshot: &str) -> Result<v1::Snapshot, Status> {
+        Ok(self
+            .snapshot_client()
+            .await?
+            .delete_snapshot(v1::SnapshotSelector {
+                snapshot: snapshot.to_owned(),
+            })
+            .await?
+            .into_inner())
+    }
+
     async fn runtime_client(
         &self,
     ) -> Result<

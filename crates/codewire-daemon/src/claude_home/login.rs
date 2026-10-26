@@ -191,7 +191,7 @@ impl ClaudeLoginWriter {
         let prefix = format!("{CLAUDE_CREDENTIALS_FILE_NAME}.codewire.");
         let mut removed = 0;
         for name in config.names_with_prefix(&prefix, MAX_LEFTOVERS)? {
-            let codewire = name.ends_with(".new")
+            let codewire = is_codewire_write_in_progress(&name)
                 || matches!(
                     classify(&config, &name)?,
                     Credentials::Owned {
@@ -415,23 +415,30 @@ fn classify(config: &PrivateDirectory, name: &str) -> io::Result<Credentials> {
         Entry::Foreign => return Ok(Credentials::User),
         Entry::Owned(entry) => entry,
     };
-    let Some(document) = Document::parse(&entry.contents) else {
-        return Ok(Credentials::User);
-    };
+    Ok(match classify_contents(&entry.contents) {
+        Some((document, login)) => Credentials::Owned {
+            entry,
+            document,
+            login,
+        },
+        None => Credentials::User,
+    })
+}
+
+/// What a store's `contents` hold: `None` for the user's own login or a file
+/// that is not a JSON object.
+fn classify_contents(contents: &[u8]) -> Option<(Document, OwnLogin)> {
+    let document = Document::parse(contents)?;
     let login = match document.login() {
-        None if document.has_login_key() => return Ok(Credentials::User),
+        None if document.has_login_key() => return None,
         None => OwnLogin::Absent,
         Some(oauth) => match oauth.get("refreshToken").and_then(Value::as_str) {
             Some(token) if is_placeholder(token) => OwnLogin::Codewire,
             Some("") if document.marked() => OwnLogin::Cleared,
-            _ => return Ok(Credentials::User),
+            _ => return None,
         },
     };
-    Ok(Credentials::Owned {
-        entry,
-        document,
-        login,
-    })
+    Some((document, login))
 }
 
 /// Claude Code's credential store.
@@ -464,6 +471,39 @@ fn is_placeholder(token: &str) -> bool {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
+}
+
+/// Whether `contents` is a credential store whose `claudeAiOauth` is
+/// Codewire's: its placeholder refresh token, or the empty one Claude Code
+/// leaves beside the marker once Codewire's login was refused. The rule the
+/// daemon removes by, for a reader of a disk image too, such as a local VM's
+/// disk snapshot capture (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct
+/// delivery exceptions").
+pub fn holds_codewire_login(contents: &[u8]) -> bool {
+    matches!(
+        classify_contents(contents),
+        Some((_, OwnLogin::Codewire | OwnLogin::Cleared))
+    )
+}
+
+/// Whether `name` in `~/.claude` is one of Codewire's temporaries beside the
+/// store.
+pub fn is_codewire_temporary(name: &str) -> bool {
+    name.starts_with(&format!("{CLAUDE_CREDENTIALS_FILE_NAME}.codewire."))
+}
+
+/// Whether the temporary `name` is a write in progress, which is Codewire's
+/// whatever it holds, so it is removed unread.
+pub fn is_codewire_write_in_progress(name: &str) -> bool {
+    is_codewire_temporary(name) && name.ends_with(".new")
+}
+
+/// Whether the temporary `name` holding `contents` is Codewire's: a write in
+/// progress, or a store holding Codewire's login. A user's store set aside
+/// stays.
+pub fn is_codewire_leftover(name: &str, contents: &[u8]) -> bool {
+    is_codewire_write_in_progress(name)
+        || (is_codewire_temporary(name) && holds_codewire_login(contents))
 }
 
 /// A fresh placeholder refresh token.

@@ -1437,6 +1437,18 @@ async fn handle_unified_environment_create(
         #[cfg(not(unix))]
         anyhow::bail!("trusted host environments are currently qualified only on Linux");
     }
+    if args.snapshot.is_some() {
+        // A disk snapshot lives on this host, so its environments do too.
+        if placement == Some(EnvironmentPlacement::Platform) {
+            anyhow::bail!(
+                "--snapshot names a local disk snapshot; a cloud environment cannot start from one yet"
+            );
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return Box::pin(create_native_environments_from_snapshot(globals, *args)).await;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        anyhow::bail!("local disk snapshots need a Linux host for now");
+    }
     match placement {
         Some(EnvironmentPlacement::Local) => {
             let output = args.output;

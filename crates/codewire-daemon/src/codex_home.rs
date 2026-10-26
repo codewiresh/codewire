@@ -49,6 +49,8 @@ pub mod login;
 pub use login::{
     CODEX_AUTH_FILE_NAME, CODEX_LOGIN_CHECK_PERIOD, CODEX_LOGIN_LAPSE, CODEX_LOGIN_STATE_DIRECTORY,
     CODEX_MANAGED_REFRESH_TOKEN, CodexLoginDelivery, CodexLoginSync, CodexLoginWriter,
+    is_codewire_auth_file, is_codewire_leftover, is_codewire_temporary,
+    is_codewire_write_in_progress,
 };
 
 const CODEX_HOME_MODE: u32 = 0o700;

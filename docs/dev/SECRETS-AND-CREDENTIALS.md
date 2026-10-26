@@ -1015,6 +1015,65 @@ it. Each removal recognises only a file Codewire wrote; the user's own logins
 stay. Whoever holds the creator's saved `cw` login on the host
 can obtain the token, as they already can by creating a hosted Sandbox.
 
+A local disk snapshot (`cw snapshot create`, Linux) is a durable copy of a
+stopped VM's disks, so it must never hold a delivered login. It holds copies
+of the VM's state disk (`/workspace`, the workload user's home, Codewire's
+native Codex home), its Docker data disk and its active image root; never the
+seed, the host-side SSH host key or any Mesh state. Capture clears its private
+copy of the state disk, never the source, with the host's e2fsprogs confined
+to that one copy:
+
+- a settling `e2fsck -f -p` first, which also replays a journal a forced stop
+  left, so no later replay can undo a removal;
+- in the native Codex home, `auth.json`, and in the home's `.claude`,
+  `.credentials.json`, each removed when it is Codewire's by the daemon's own
+  rules (the same functions the daemon removes by): Codex's in ChatGPT mode
+  with the refresh token `codewire-managed-no-refresh-token`; Claude Code's
+  with the refresh token `codewire-managed-no-refresh-token-` and its
+  32-character nonce, or an empty refresh token beside the `codewireManaged`
+  marker (Claude Code's copy once Codewire's login was refused);
+- beside each, the daemon's temporaries (`.auth.json.codewire.*` and
+  `.credentials.json.codewire.*`): a write in progress (`.new`) removed
+  unread, any other removed when it holds Codewire's login;
+- each removed file's blocks are zeroed first; every debugfs call fails the
+  capture on any error it reports, and a path is taken as absent only from its
+  parent's own listing;
+- a second settling `e2fsck -f -p`, then every free range in the block bitmaps
+  is punched out of the copy, and so is every unwritten extent and every block
+  past a file's end (the guest reads neither), and samples of each range are
+  read back as zeros, so a token an earlier rewrite or deletion left in a freed
+  block, even one since given to another file without being written, is gone
+  too. Every file is read from one confined debugfs session, which must answer
+  each in-use inode exactly once; a file mapped by indirect blocks is handled
+  as one mapped by extents. A filesystem with the fs-verity feature, which
+  Codewire never enables, is refused: punching past a verity file's end would
+  destroy its Merkle tree.
+
+A recognised Claude Code store is removed whole: any other member Claude Code
+kept in it, such as an MCP sign-in, is not in the snapshot. The user's own
+logins, and anything else the VM wrote (a `.env` file, shell history, the
+command lines of its sessions), stay in the snapshot, which is private to the
+creator on that host. A snapshot that cannot be cleared is not kept. An
+environment created from a snapshot boots as a new environment: the guest
+clears both agents' Codewire logins at its first boot, before any writer or
+workload runs, and the new environment's own selection delivers a fresh login
+under its own authority. Its credential profile and sources are resolved again
+from its own create request. Capture records the platform account the `cw` is
+signed in to (server, organization and user), read from its saved login
+alone, or none when that cannot tell (an API key, a server override, no saved
+login); a create from the snapshot is refused when both it and the snapshot
+record an account and the two differ. This guards against an accidental
+mix-up of accounts on one host; it is not an authorization boundary: the
+supervisor's socket is the owner's alone, and the client supplies the account.
+`cw login` and `cw setup` keep the verified account in `account.json` beside
+the platform config: they remove the old record before saving the new login,
+then write the new one atomically, so a failed login leaves no account rather
+than another user's. A value the supervisor would refuse (empty, over 256
+characters, surrounding space or a control character) records no account. A
+login saved before this record existed records no account until the next
+`cw login`, and a re-login with an older `cw`, which does not know the file,
+can leave a stale one beside the new login; `cw logout` removes it.
+
 The platform broker admits a local VM's login for any delegation
 authenticated by the creator's own OAuth login (`oauth_bearer_only`; never a
 `cw_` API key) that selected the creator's personal profile: the platform

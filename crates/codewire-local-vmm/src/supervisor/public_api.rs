@@ -88,6 +88,11 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
         "/codewire.local.v1.LinuxCwRuntimeService/{*method}",
         v1::linux_cw_runtime_service_server::LinuxCwRuntimeServiceServer::new(supervisor.clone()),
     );
+    // Local disk snapshots (#3046, protocol 19).
+    let router = router.route_service(
+        "/codewire.local.v1.LocalSnapshotService/{*method}",
+        v1::local_snapshot_service_server::LocalSnapshotServiceServer::new(supervisor.clone()),
+    );
     router
         .route_service(
             PRIVATE_SUPERVISOR_ROUTE,

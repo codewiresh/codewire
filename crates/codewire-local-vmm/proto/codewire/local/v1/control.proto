@@ -178,6 +178,95 @@ message ManagedRuntime {
 
 message GetSupervisorInfoRequest {}
 
+// Local disk snapshots (protocol 19, Linux): reusable copy-on-write copies of
+// a stopped environment's disks on this host. A snapshot is an independent
+// set of files; `CreateEnvironment` with `snapshot` starts environments from
+// one, each with fresh identity.
+service LocalSnapshotService {
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (Snapshot);
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+  rpc GetSnapshot(SnapshotSelector) returns (Snapshot);
+  rpc DeleteSnapshot(SnapshotSelector) returns (Snapshot);
+}
+
+message CreateSnapshotRequest {
+  // The stopped source environment, by name.
+  string environment = 1;
+  // The new snapshot's name, unique on this host; never a UUID.
+  string name = 2;
+  // The platform account the capturing cw is signed in to, or absent.
+  PlatformAccount account = 3;
+}
+
+// A snapshot by name or ID.
+message SnapshotSelector {
+  string snapshot = 1;
+}
+
+message ListSnapshotsRequest {}
+
+message ListSnapshotsResponse {
+  repeated Snapshot snapshots = 1;
+}
+
+message SnapshotDisk {
+  // state, docker or root.
+  string role = 1;
+  // Apparent size.
+  uint64 bytes = 2;
+  // reflink (shares blocks until either copy changes) or copy.
+  string mode = 3;
+  // Bytes the file holds on the host filesystem.
+  uint64 allocated_bytes = 4;
+  // Of those, bytes shared with another file, when the filesystem reports it.
+  optional uint64 shared_bytes = 5;
+}
+
+message Snapshot {
+  string id = 1;
+  string name = 2;
+  int64 created_unix_ms = 3;
+  string source_environment_id = 4;
+  string source_name = 5;
+  // clean (the guest shut down) or crash (what a power loss would leave).
+  string consistency = 6;
+  // Where it lives: always ["local"] for now.
+  repeated string locations = 7;
+  string architecture = 8;
+  // reflink when every disk is a reflink, otherwise copy.
+  string mode = 9;
+  repeated SnapshotDisk disks = 10;
+  uint32 vcpus = 11;
+  uint32 memory_mib = 12;
+  uint64 disk_bytes = 13;
+  uint64 docker_disk_bytes = 14;
+  string image = 15;
+  // The source's project and workspace inputs, which a create from the
+  // snapshot names again exactly.
+  bytes project_spec_json = 16;
+  string project_spec_sha256 = 17;
+  string source_path = 18;
+  string implicit_path_mode = 19;
+  repeated LocalMountInput local_mounts = 20;
+  repeated string implicit_vm_only = 21;
+  // Recorded from the source as information only; a create from the
+  // snapshot derives each of these again from its own request.
+  PlatformSourceAuthority platform_source_authority = 22;
+  string access_profile_reference = 23;
+  repeated HostPortBinding host_ports = 24;
+  MeshAttachment mesh = 25;
+  string network_policy = 26;
+  // The source mounts host folders directly.
+  bool direct_mounts = 27;
+  // How many Codewire-delivered sign-ins capture removed from the copy.
+  uint32 removed_logins = 28;
+  uint64 capture_milliseconds = 29;
+  // Space warnings, such as a sparse copy's cost.
+  repeated string warnings = 30;
+  // The platform account the capturing cw was signed in to, if any.
+  PlatformAccount account = 31;
+}
+
 // Linux protocol9 only. Runtime selection never authorizes a lifecycle effect.
 service LinuxCwRuntimeService {
   // Read saved identity only; never replay/reconcile lifecycle operations.
@@ -437,6 +526,35 @@ message CreateEnvironmentRequest {
   // or empty, `locked`, or a policy in this host's store by NAME, local:NAME
   // or local:id:UUID. A platform policy is not available yet.
   string network_policy = 19;
+  // Start from a local disk snapshot (protocol 19, Linux) instead of
+  // provisioning: the environment's disks are copies of the snapshot's, and
+  // the request names the snapshot's recorded project and workspace inputs
+  // exactly. Every source, credential, host port and Mesh choice comes from
+  // this request, never from the snapshot.
+  SnapshotRestore snapshot = 20;
+}
+
+// What a create from a local disk snapshot takes from it.
+message SnapshotRestore {
+  // The snapshot's ID, never its name.
+  string snapshot_id = 1;
+  // The new environment's vCPUs and memory: the source's unless overridden.
+  // Disk sizes are always the snapshot's.
+  uint32 vcpus = 2;
+  uint32 memory_mib = 3;
+  // Mount the source's direct host folders again, shared with every
+  // environment that mounts them. Refused without it.
+  bool share_mounts = 4;
+  // The platform account the restoring cw is signed in to, or absent. A
+  // snapshot captured under another account is refused.
+  PlatformAccount account = 5;
+}
+
+// A signed-in platform account: its server, organization and user.
+message PlatformAccount {
+  string server_url = 1;
+  string organization_id = 2;
+  string user_id = 3;
 }
 
 // Authenticated storage identity pinned at selection time, not mutable CLI

@@ -53,7 +53,8 @@ pub mod login;
 pub use login::{
     CLAUDE_CONFIG_DIR_NAME, CLAUDE_CREDENTIALS_FILE_NAME, CLAUDE_LOGIN_KEY, CLAUDE_LOGIN_LAPSE,
     CLAUDE_LOGIN_STATE_DIRECTORY, CLAUDE_MANAGED_MARKER, CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX,
-    ClaudeLoginDelivery, ClaudeLoginSync, ClaudeLoginWriter,
+    ClaudeLoginDelivery, ClaudeLoginSync, ClaudeLoginWriter, holds_codewire_login,
+    is_codewire_leftover, is_codewire_temporary, is_codewire_write_in_progress,
 };
 
 /// Claude Code's global configuration file in the user's home.

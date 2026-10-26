@@ -206,6 +206,107 @@ its identity and is not refused.
 A share admitted before this check gets its handle recorded at the first
 supervisor start after the upgrade, if it still matches then.
 
+## Disk snapshots
+
+A disk snapshot is a reusable copy of a stopped local VM's disks on this host.
+Take one once a VM has your toolchain, then start as many environments from it
+as you need, each with its own identity:
+
+```sh
+cw stop app
+cw snapshot create app --name good-toolchain   # mode=reflink, about a second
+cw create --local --snapshot good-toolchain --name app2
+cw create --local --snapshot good-toolchain --count 3   # good-toolchain-1, -2, -3
+cw snapshot ls
+cw snapshot inspect good-toolchain
+cw snapshot rm good-toolchain   # environments made from it are unaffected
+```
+
+**What it holds.** The VM's state disk (`/workspace` and the home), its Docker
+data disk (images, containers, volumes) and its image root with everything
+installed into it. Where the state root's filesystem shares blocks between
+files (btrfs, XFS), each disk is a reflink and the snapshot costs almost
+nothing until the VM or a copy changes. Elsewhere it is a sparse copy, which
+holds the disks' allocated bytes at once; `cw snapshot create` checks the free
+space first and names what it needs. The snapshot records `consistency: clean`
+when the guest shut down cleanly, and `crash` (what a power loss would have
+left) after a forced stop. The copy leaves out the guest's selection of the cw
+that runs inside the VM, which is bound to the source environment; an
+environment made from the snapshot starts with the cw its own create binds.
+
+**Only a stopped VM.** A running VM is refused (`cw stop app` first), and so is
+one with an unfinished workspace, runtime or Docker disk change: start it once
+so the change completes, then stop it. A previous root kept for a workspace
+rollback does not block a snapshot: only the active root is copied, and an
+environment made from the snapshot has no rollback root. The snapshot is an independent set of
+files: deleting or changing the source never affects it.
+
+**Sign-ins.** Capture removes Codewire's delivered Codex and Claude Code
+sign-ins from its copy, never from the source, by the daemon's own rules,
+zeroes their blocks, and punches every free block, unwritten extent and block
+past a file's end out of the copy, checking each reads back as zeros. A state
+disk with the fs-verity feature, which Codewire never enables, is refused. The first boot of an
+environment made from a snapshot clears them again before anything runs. A
+Claude Code credentials file that holds Codewire's sign-in is removed whole, so
+another sign-in Claude Code kept in it is not in the snapshot either. Anything
+else the VM wrote, such as a `.env` file or shell history, is kept; a snapshot
+stays on this host and is private to you. See
+[SECRETS-AND-CREDENTIALS.md](SECRETS-AND-CREDENTIALS.md#direct-delivery-exceptions).
+
+**Creating from one.** `cw create --local --snapshot NAME` starts without
+provisioning, image install or setup: the image, workspace and disks are the
+snapshot's, so `--image`, `--path`, repositories, `--disk` and source flags are
+refused. vCPUs and memory are the source's unless `--cpu` or `--memory` says
+otherwise. Everything else is decided by the create, as for any `cw create`:
+
+- a new environment ID, machine-id, SSH host key and Mesh enrollment;
+- the credential profile and secrets, resolved again under your current
+  sign-in. The snapshot records the platform account `cw` was signed in to
+  (server, organization and user) from its saved login, without a network
+  call, or none when that cannot tell; a create signed in to a different one
+  is refused, as a guard against mixing up accounts, not as access control.
+  With either side signed out, nothing is compared, and snapshots work offline.
+  A login from before this build records no account until your next
+  `cw login`, and a re-login with an older `cw` can leave a stale record
+  beside the new login (`cw logout` clears it);
+- the Mesh network from `--network` or your selection;
+- no host ports: publish them with `cw ports ENV --publish PORT`, so several
+  copies can run beside the source;
+- the network policy from `--policy`, else the source's.
+
+`--count N` (up to 16) names them `NAME-1` onwards, skipping names in use, or
+`--name-prefix PREFIX-1` onwards, and creates two at a time.
+
+**Direct mounts.** A VM that mounts host folders directly would share them live
+with every environment made from its snapshot, so that create is refused unless
+you pass `--share-mounts`. The snapshot keeps each folder's identity, and a
+start refuses a folder that was swapped since.
+
+**Space.** A snapshot and the environments made from it share space only until
+they change: each copy that diverges takes its own space, and a full host disk
+can force a running VM's filesystem read-only. `cw snapshot inspect` shows each
+disk's allocated and shared bytes. Snapshots never expire; `cw snapshot rm`
+frees one. A removal marks the snapshot's directory first, so it finishes even
+if the supervisor stops halfway or loses its snapshot index; a lost index is
+otherwise rebuilt from each snapshot's verified manifest.
+
+**Upgrades.** A snapshot keeps the runtime its root was built with, and
+garbage collection keeps that runtime while the snapshot exists, so a snapshot
+still starts after `cw upgrade`, even once its source is deleted, exactly as an
+existing VM does after an upgrade. A disk snapshot holds no VMM state, so it
+does not depend on the Cloud Hypervisor version: running VMs keep the VMM they
+started with until they restart, the next `cw` release carries Cloud
+Hypervisor v54.0, and a snapshot taken from a VM still on the previous one
+starts on it.
+
+Disk snapshots need Linux and this `cw`'s supervisor (protocol 19); an older
+cw's supervisor still serving your VMs refuses them until `cw upgrade --vms`.
+An older supervisor knows nothing of snapshots: after `cw upgrade rollback`, its
+garbage collection can remove the runtime a snapshot's root was built with, and
+a create from that snapshot then fails until that runtime is installed again.
+A snapshot is not a VM checkpoint, which would also keep a running VM's
+memory.
+
 ## After a cw upgrade
 
 `cw upgrade` stops your local VMs only when you choose their restart. The previous cw's local VM supervisor

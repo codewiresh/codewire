@@ -1286,3 +1286,40 @@ fn a_login_no_writer_keeps_is_cleared_at_start() {
     crate::login_cleanup::clear_unkept_logins(&fixture.home(), &claude, false, false);
     assert_eq!(fs::read(&auth).unwrap(), users_login());
 }
+
+#[test]
+fn a_disk_reader_recognises_exactly_codewire_auth_files() {
+    let codewire = serde_json::to_vec(&json!({
+        "auth_mode": "chatgpt",
+        "tokens": { "access_token": "a", "refresh_token": CODEX_MANAGED_REFRESH_TOKEN },
+    }))
+    .unwrap();
+    assert!(is_codewire_auth_file(&codewire));
+    assert!(!is_codewire_auth_file(&users_login()));
+    for other in [
+        json!({ "auth_mode": "apikey", "tokens": { "refresh_token": CODEX_MANAGED_REFRESH_TOKEN } }),
+        json!({ "auth_mode": "chatgpt", "tokens": { "refresh_token": "a-real-refresh-token" } }),
+        json!({ "auth_mode": "chatgpt" }),
+        json!([1, 2]),
+    ] {
+        assert!(!is_codewire_auth_file(&serde_json::to_vec(&other).unwrap()));
+    }
+    assert!(!is_codewire_auth_file(b"not json"));
+
+    // Leftovers: a write in progress is Codewire's unread; a set-aside file
+    // only when it is Codewire's login.
+    assert!(is_codewire_leftover(
+        ".auth.json.codewire.0123.new",
+        b"anything"
+    ));
+    assert!(is_codewire_leftover(
+        ".auth.json.codewire.0123.aside",
+        &codewire
+    ));
+    assert!(!is_codewire_leftover(
+        ".auth.json.codewire.0123.aside",
+        &users_login()
+    ));
+    assert!(!is_codewire_leftover("auth.json", &codewire));
+    assert!(!is_codewire_leftover("history.new", b"anything"));
+}
