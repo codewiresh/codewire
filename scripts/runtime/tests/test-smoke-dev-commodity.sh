@@ -392,6 +392,154 @@ run_doctor_outer_timeout_receipt_case() {
     fail "outer doctor timeout failure was not classified"
 }
 
+# The shared-UDP-relay leg waits for its relay path on its own deadline, not
+# the direct-UDP one, and runs no forced-DERP probe that would compete with the
+# relay client for the environment's relay allocations (promote-dev 23687).
+run_peer_relay_leg_wait_case() {
+  local case_dir="$TEST_TMP/peer-relay-leg-wait"
+  local doctor_args="$case_dir/doctor.args"
+  local receipt="$case_dir/tailnet-doctor-peer-relay-timeout.json"
+
+  mkdir -p "$case_dir"
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    TMPDIR_SMOKE="$case_dir"
+    SMOKE_ARTIFACT_DIR=""
+    SMOKE_DERP_FALLBACK=1
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    SMOKE_TAILNET_DIRECT_WAIT=5s
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    SMOKE_TAILNET_PEER_RELAY_WAIT=30s
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    SMOKE_TAILNET_PEER_TIMEOUT=30s
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    SMOKE_TAILNET_DOCTOR_TIMEOUT=180
+    SMOKE_PACKET_CAPTURE_UNAVAILABLE=0
+    EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay
+    CODEWIRE_SERVER_URL=https://codewire-dev.example.invalid
+    ENV_ID=test-environment
+    CW_BIN=/does/not/run
+    start_peer_relay_packet_diagnostics() { :; }
+    stop_peer_relay_packet_diagnostics() { :; }
+    capture_tailnet_doctor_failure_diagnostics() { :; }
+    timeout() {
+      printf '%s\n' "$@" >"$doctor_args"
+      return 124
+    }
+    run_tailnet_doctor peer-relay-leg
+  ) >/dev/null 2>"$case_dir/doctor.err"; then
+    fail "relay doctor fixture unexpectedly succeeded"
+  fi
+
+  [[ "$(grep -x -A1 -- '--direct-wait' "$doctor_args" | tail -n 1)" == "30s" ]] ||
+    fail "relay doctor probe did not wait SMOKE_TAILNET_PEER_RELAY_WAIT for its path"
+  grep -qx -- '--skip-forced-derp' "$doctor_args" ||
+    fail "relay doctor probe ran its own forced-DERP client"
+  grep -qx -- 'CW_TAILNET_SUPPRESS_PEER_DIRECT_UDP=1' "$doctor_args" ||
+    fail "relay doctor probe did not suppress peer direct UDP"
+  jq -e '
+    .expectedTransport == "peer_relay"
+    and .directWait == "30s"
+    and .forcedDerp == false
+  ' "$receipt" >/dev/null || fail "relay doctor timeout receipt does not name its own wait"
+
+  # A relay doctor probe that is the smoke's first still proves forced DERP,
+  # and only the relay leg's evidence goes without it.
+  (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    TMPDIR_SMOKE="$case_dir"
+    SMOKE_ARTIFACT_DIR=""
+    SMOKE_DERP_FALLBACK=1
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    SMOKE_TAILNET_PEER_RELAY_WAIT=30s
+    SMOKE_PACKET_CAPTURE_UNAVAILABLE=0
+    EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay
+    CODEWIRE_SERVER_URL=https://codewire-dev.example.invalid
+    ENV_ID=test-environment
+    CW_BIN=/does/not/run
+    start_peer_relay_packet_diagnostics() { :; }
+    stop_peer_relay_packet_diagnostics() { :; }
+    capture_tailnet_doctor_failure_diagnostics() { :; }
+    timeout() {
+      printf '%s\n' "$@" >"$doctor_args"
+      return 124
+    }
+    run_tailnet_doctor
+  ) >/dev/null 2>&1 || true
+  [[ "$(grep -x -A1 -- '--direct-wait' "$doctor_args" | tail -n 1)" == "30s" ]] ||
+    fail "first relay doctor probe did not wait SMOKE_TAILNET_PEER_RELAY_WAIT"
+  if grep -qx -- '--skip-forced-derp' "$doctor_args"; then
+    fail "a first relay doctor probe skipped forced DERP"
+  fi
+  jq -n '{
+    direct: {
+      final_path: {transport: "peer_relay", peer_relay: "192.0.2.20:41641"},
+      derp_map: {stun_nodes: 1}
+    }
+  }' >"$case_dir/relay-doctor.json"
+  (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    SMOKE_DERP_FALLBACK=1
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    EXPECTED_TAILNET_PEER_RELAY_ENDPOINT=192.0.2.20:41641
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    EXPECTED_STUN_HOST=""
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    EXPECTED_STUN_PORT=0
+    assert_tailnet_doctor_peer_relay_evidence "$case_dir/relay-doctor.json" 1
+  ) >/dev/null 2>&1 || fail "relay leg evidence still demanded its own forced-DERP probe"
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    SMOKE_DERP_FALLBACK=1
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    EXPECTED_TAILNET_PEER_RELAY_ENDPOINT=192.0.2.20:41641
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    EXPECTED_STUN_HOST=""
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    EXPECTED_STUN_PORT=0
+    assert_tailnet_doctor_peer_relay_evidence "$case_dir/relay-doctor.json" 0
+  ) >/dev/null 2>&1; then
+    fail "relay evidence without a forced-DERP probe passed where one ran"
+  fi
+
+  (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    TMPDIR_SMOKE="$case_dir"
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    SMOKE_TAILNET_DIRECT_WAIT=5s
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    SMOKE_TAILNET_PEER_RELAY_WAIT=30s
+    CODEWIRE_SERVER_URL=https://codewire-dev.example.invalid
+    ENV_ID=test-environment
+    CW_BIN=/does/not/run
+    # Record the SSH leg's environment instead of running OpenSSH. The
+    # calling leg's label and expected_output are in scope.
+    # shellcheck disable=SC2154 # The calling SSH leg defines both.
+    env() {
+      local arg
+      for arg in "$@"; do
+        [[ "$arg" == *=* ]] || break
+        printf '%s\n' "$arg"
+      done >"$case_dir/ssh-$label.env"
+      printf '%s\n' "$expected_output"
+    }
+    run_ssh_transport_smoke tailnet tailnet-peer-relay peer_relay
+    run_ssh_transport_smoke tailnet tailnet direct_udp
+  ) >/dev/null 2>"$case_dir/ssh.err" || fail "SSH leg fixtures failed"
+
+  grep -qx 'CW_TAILNET_DIRECT_WAIT=30s' "$case_dir/ssh-tailnet-peer-relay.env" ||
+    fail "relay SSH leg did not wait SMOKE_TAILNET_PEER_RELAY_WAIT for its path"
+  grep -qx 'CW_TAILNET_SUPPRESS_PEER_DIRECT_UDP=1' "$case_dir/ssh-tailnet-peer-relay.env" ||
+    fail "relay SSH leg did not suppress peer direct UDP"
+  grep -qx 'CW_TAILNET_DIRECT_WAIT=5s' "$case_dir/ssh-tailnet.env" ||
+    fail "direct SSH leg no longer keeps the direct-UDP wait"
+}
+
 run_application_only_boundary_case() {
   local fake_bin="$TEST_TMP/application-only-bin"
   local kubectl_log="$TEST_TMP/application-only-kubectl.log"
@@ -1219,6 +1367,7 @@ run_confidential_preview_response_cases
 run_safe_diagnostic_case
 run_safe_client_diagnostic_case
 run_doctor_outer_timeout_receipt_case
+run_peer_relay_leg_wait_case
 run_environment_artifact_case
 run_kubernetes_failure_artifact_case
 run_packet_header_summary_case

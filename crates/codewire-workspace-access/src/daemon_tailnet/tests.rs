@@ -471,16 +471,14 @@ fn a_relay_allocation_may_answer_in_the_relays_canonical_order() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn relay_allocations_go_through_orchestration_and_are_spaced() {
+async fn relay_allocations_go_through_orchestration() {
     let plane = FakePlane::new(600);
     let requested = [disco(0x22), disco(0x33)];
     *plane.allocation.lock().unwrap() = Some(allocation(0, requested));
     let relay = OrchestratedPeerRelay::new(plane.clone());
-    let started = Instant::now();
-    relay.allocate(requested, 0).await.unwrap();
     relay.allocate(requested, 0).await.unwrap();
     let calls = plane.allocations.lock().unwrap().clone();
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 1);
     assert_eq!(
         calls[0].0,
         [
@@ -489,8 +487,39 @@ async fn relay_allocations_go_through_orchestration_and_are_spaced() {
         ]
     );
     assert_eq!(calls[0].1, 0);
-    assert_eq!(calls[0].2.duration_since(started), Duration::ZERO);
-    assert!(calls[1].2.duration_since(calls[0].2) >= PEER_RELAY_CALL_SPACING);
+}
+
+/// Orchestration's binding listener refuses a Pod's call once its bucket
+/// (one call per second, a burst of five) is empty. Relay allocations admitted
+/// back to back for a minute never leave it with fewer than two calls for
+/// renewal, host-key and Mesh calls, and keep to half its rate.
+#[tokio::test(start_paused = true)]
+async fn relay_admissions_leave_room_in_orchestrations_budget() {
+    const SERVER_PER_SECOND: f64 = 1.0;
+    const SERVER_BURST: f64 = 5.0;
+    let relay = OrchestratedPeerRelay::new(FakePlane::new(600));
+    let started = Instant::now();
+    let mut server_tokens = SERVER_BURST;
+    let mut last = started;
+    let mut fewest = SERVER_BURST;
+    let mut admitted = 0_u32;
+    while started.elapsed() < Duration::from_secs(60) {
+        relay.admit().await;
+        let now = Instant::now();
+        server_tokens = (server_tokens
+            + now.duration_since(last).as_secs_f64() * SERVER_PER_SECOND)
+            .min(SERVER_BURST);
+        last = now;
+        server_tokens -= 1.0;
+        fewest = fewest.min(server_tokens);
+        admitted += 1;
+    }
+    assert!(
+        fewest >= SERVER_BURST - f64::from(PEER_RELAY_CALL_BURST) - 1e-9,
+        "relay calls left {fewest} of orchestration's burst"
+    );
+    // The burst, then one every two seconds.
+    assert_eq!(admitted, PEER_RELAY_CALL_BURST + 30);
 }
 
 #[test]
@@ -719,4 +748,165 @@ mod app_ports {
         assert_eq!(answer(&client, api).await.as_deref(), Some("api"));
         let _ = stop.send(true);
     }
+}
+
+/// Orchestration answering relay allocations the way Dev does, in about
+/// 35 ms, for whichever disco pair it is asked about.
+struct AnsweringRelayPlane {
+    relay_addr: SocketAddr,
+    calls: StdMutex<Vec<(String, Instant)>>,
+}
+
+#[async_trait]
+impl AccessControlPlane for AnsweringRelayPlane {
+    async fn record_host_key(&self, _public_key_openssh: &str) -> Result<(), ControlPlaneError> {
+        Ok(())
+    }
+
+    async fn refresh_access(&self) -> Result<WorkspaceAccessGrant, ControlPlaneError> {
+        Err(ControlPlaneError::Retryable)
+    }
+
+    async fn allocate_peer_relay(
+        &self,
+        disco_keys: [String; 2],
+        relay_generation: u32,
+    ) -> Result<PeerRelayAllocation, ControlPlaneError> {
+        let vni = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((disco_keys[1].clone(), Instant::now()));
+            u32::try_from(calls.len()).unwrap()
+        };
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        Ok(PeerRelayAllocation {
+            relay_generation,
+            server_disco_key: disco_text(&disco(0x11)),
+            disco_keys: disco_keys.to_vec(),
+            lamport_id: 1,
+            vni,
+            bind_lifetime_ns: 60_000_000_000,
+            steady_state_lifetime_ns: 600_000_000_000,
+            addr_ports: vec![self.relay_addr.to_string()],
+        })
+    }
+}
+
+/// A tailnet client as the coordinator announces it to the daemon.
+fn client_node(id: u128) -> Node {
+    let secret = StaticSecret::random_from_rng(OsRng);
+    Node {
+        id: Uuid::from_u128(id),
+        as_of: chrono::Utc::now(),
+        key: NodePublic::from_raw(PublicKey::from(&secret).to_bytes()),
+        disco_key: DiscoPrivate::generate(&mut OsRng).public(),
+        preferred_derp: 1,
+        derp_latency: None,
+        endpoints: Vec::new(),
+        addresses: Vec::new(),
+    }
+}
+
+/// promote-dev 23687: four tailnet clients came and went in the same
+/// Sandbox (two concurrent doctor probes, tailnet SSH, DERP SSH), then the
+/// relay leg's two concurrent doctor probes. Each earlier client queued a
+/// relay allocation behind the previous one, the attempt deadline counted
+/// that queue, and the relay client's own allocation timed out about 0.3 s
+/// before its turn, after the smoke's 5 s wait for a relay path. Its relay
+/// must be offered within that wait however many clients came before it.
+#[tokio::test(start_paused = true)]
+async fn a_relay_client_after_four_other_clients_gets_its_relay_within_its_wait() {
+    let relay_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let plane = Arc::new(AnsweringRelayPlane {
+        relay_addr: relay_socket.local_addr().unwrap(),
+        calls: StdMutex::new(Vec::new()),
+    });
+    let (derp_out, _derp_sent) = mpsc::unbounded_channel();
+    let (_derp_in, derp_received) = mpsc::unbounded_channel();
+    let fallback = codewire_tailnet::conn::Transport {
+        to_transport: derp_out,
+        from_transport: derp_received,
+        peer_updates: None,
+        path_probe: None,
+        local_endpoint_updates: None,
+    };
+    let secret = StaticSecret::random_from_rng(OsRng);
+    let disco_private = DiscoPrivate::generate(&mut OsRng);
+    let (transport, handle) = direct_udp::wrap_transport(
+        fallback,
+        direct_udp::Options::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Vec::new(),
+            NodePublic::from_raw(PublicKey::from(&secret).to_bytes()),
+            disco_private.clone(),
+        ),
+    )
+    .await
+    .unwrap();
+    let adapter_peers = transport.peer_updates.clone().unwrap();
+    let relay = PeerRelayAllocator::new(
+        Arc::new(OrchestratedPeerRelay::new(plane.clone())),
+        LOG_COMPONENT,
+        Vec::new(),
+        disco_private.public(),
+        handle.clone(),
+    )
+    .with_attempt_timeout(PEER_RELAY_ATTEMPT_TIMEOUT);
+    let _reconciler = AbortOnDropHandle::new(relay.spawn_reconciler());
+    let set_peers = |nodes: &[Node]| {
+        adapter_peers.send(nodes.to_vec()).unwrap();
+        relay.observe_peers(nodes);
+    };
+    let started = Instant::now();
+    let at = |offset_ms: u64| tokio::time::sleep_until(started + Duration::from_millis(offset_ms));
+
+    let doctor = client_node(1);
+    let forced_derp = client_node(2);
+    set_peers(std::slice::from_ref(&doctor));
+    at(130).await;
+    set_peers(&[doctor.clone(), forced_derp.clone()]);
+    at(1_300).await;
+    set_peers(&[]);
+    at(1_390).await;
+    let tailnet_ssh = client_node(3);
+    set_peers(std::slice::from_ref(&tailnet_ssh));
+    at(2_000).await;
+    set_peers(&[]);
+    at(2_570).await;
+    let derp_ssh = client_node(4);
+    set_peers(std::slice::from_ref(&derp_ssh));
+    at(4_000).await;
+    set_peers(&[]);
+
+    // The relay leg: its forced-DERP probe registers first, the relay
+    // client a moment later.
+    at(4_800).await;
+    let relay_forced_derp = client_node(5);
+    set_peers(std::slice::from_ref(&relay_forced_derp));
+    at(4_810).await;
+    let relay_client = client_node(6);
+    set_peers(&[relay_forced_derp.clone(), relay_client.clone()]);
+    let arrived = Instant::now();
+    let wait = Duration::from_secs(5);
+    let offered = loop {
+        if handle.peer_relay_endpoint_state(&relay_client.key, &relay_client.disco_key)
+            != direct_udp::PeerRelayEndpointState::Missing
+        {
+            break Some(arrived.elapsed());
+        }
+        if arrived.elapsed() >= wait {
+            break None;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let calls = plane
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, at)| at.duration_since(started).as_millis())
+        .collect::<Vec<_>>();
+    assert!(
+        offered.is_some(),
+        "the relay client had no relay {wait:?} after it arrived; allocations reached orchestration at {calls:?} ms"
+    );
 }

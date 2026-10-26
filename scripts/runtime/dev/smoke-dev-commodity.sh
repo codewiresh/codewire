@@ -21,6 +21,7 @@ SMOKE_TAILNET_DEBUG="${SMOKE_TAILNET_DEBUG:-0}"
 SMOKE_DERP_FALLBACK="${SMOKE_DERP_FALLBACK:-1}"
 SMOKE_PEER_RELAY_MATRIX="${SMOKE_PEER_RELAY_MATRIX:-0}"
 SMOKE_TAILNET_DIRECT_WAIT="${SMOKE_TAILNET_DIRECT_WAIT:-20s}"
+SMOKE_TAILNET_PEER_RELAY_WAIT="${SMOKE_TAILNET_PEER_RELAY_WAIT:-30s}"
 SMOKE_TAILNET_PEER_TIMEOUT="${SMOKE_TAILNET_PEER_TIMEOUT:-30s}"
 SMOKE_TAILNET_DIAL_TIMEOUT="${SMOKE_TAILNET_DIAL_TIMEOUT:-60s}"
 SMOKE_EXEC_TIMEOUT="${SMOKE_EXEC_TIMEOUT:-900}"
@@ -221,12 +222,27 @@ Environment:
   SMOKE_PEER_RELAY_MATRIX  Defaults to 0; when set to 1, the same live
                            environment must also pass a doctor probe and SSH
                            leg with peer direct UDP endpoints suppressed,
-                           proving the shared UDP relay path before cleanup
+                           proving the shared UDP relay path before cleanup.
+                           Each relay-leg client waits for its relay path up
+                           to SMOKE_TAILNET_PEER_RELAY_WAIT, and the leg runs
+                           no forced-DERP probe of its own.
   SMOKE_TAILNET_DIRECT_WAIT
                            Defaults to 20s; passed to cw as
                            CW_TAILNET_DIRECT_WAIT so direct UDP or peer relay
                            can settle before DERP fallback evidence is captured.
                            Set longer values for explicit direct-UDP proof.
+                           The shared-UDP-relay leg uses
+                           SMOKE_TAILNET_PEER_RELAY_WAIT instead.
+  SMOKE_TAILNET_PEER_RELAY_WAIT
+                           Defaults to 30s; how long a client that expects
+                           the shared UDP relay path waits for it. It is
+                           passed as the relay doctor probe's --direct-wait
+                           and the relay SSH leg's CW_TAILNET_DIRECT_WAIT, and
+                           ends as soon as the relay path is up. The environment
+                           offers a relay once a client has not proven a
+                           direct path within its grace, so this wait is the
+                           relay's own deadline, independent of the direct-UDP
+                           promise and of earlier clients.
   SMOKE_TAILNET_PEER_TIMEOUT
                            Defaults to 30s; passed to cw doctor tailnet and
                            cw shell while waiting for coordinator peer and
@@ -4072,17 +4088,30 @@ tailnet_transport_matches() {
   return 1
 }
 
+# With `peer-relay-leg`, this is the shared-UDP-relay leg that follows the
+# first doctor probe in the same environment.
 run_tailnet_doctor() {
+  local leg="${1:-}"
   local expect="${EXPECTED_TAILNET_PATH_TRANSPORT:-any}"
   local evidence_name="tailnet-doctor"
   local stdout stderr
   local -a args
   local -a env_args=()
   local doctor_rc=0 packet_rc=0
+  local path_wait="$SMOKE_TAILNET_DIRECT_WAIT"
+  local skip_forced_derp=0
 
   require_bool01 SMOKE_DERP_FALLBACK "$SMOKE_DERP_FALLBACK"
+  [[ "$SMOKE_DERP_FALLBACK" == "1" ]] || skip_forced_derp=1
   if expect_tailnet_peer_relay; then
     evidence_name="tailnet-doctor-peer-relay"
+    # The relay path has its own deadline, not the direct-UDP one.
+    path_wait="$SMOKE_TAILNET_PEER_RELAY_WAIT"
+  fi
+  if [[ "$leg" == "peer-relay-leg" ]]; then
+    # The first doctor probe proved forced DERP; another DERP-only client here
+    # would only compete with the relay client for relay allocations.
+    skip_forced_derp=1
   fi
   stdout="$TMPDIR_SMOKE/${evidence_name}.json"
   stderr="$TMPDIR_SMOKE/${evidence_name}.err"
@@ -4090,18 +4119,18 @@ run_tailnet_doctor() {
   args=(
     doctor tailnet "$ENV_ID"
     --output json
-    --direct-wait "$SMOKE_TAILNET_DIRECT_WAIT"
+    --direct-wait "$path_wait"
     --peer-timeout "$SMOKE_TAILNET_PEER_TIMEOUT"
     --expect "$expect"
   )
-  if [[ "$SMOKE_DERP_FALLBACK" != "1" ]]; then
+  if [[ "$skip_forced_derp" == "1" ]]; then
     args+=(--skip-forced-derp)
   fi
   if expect_tailnet_peer_relay; then
     env_args+=(CW_TAILNET_SUPPRESS_PEER_DIRECT_UDP=1)
   fi
 
-  log "running tailnet doctor probe (expect=$expect direct_wait=$SMOKE_TAILNET_DIRECT_WAIT peer_timeout=$SMOKE_TAILNET_PEER_TIMEOUT)"
+  log "running tailnet doctor probe (expect=$expect direct_wait=$path_wait peer_timeout=$SMOKE_TAILNET_PEER_TIMEOUT)"
   start_peer_relay_packet_diagnostics
   set +e
   timeout "$SMOKE_TAILNET_DOCTOR_TIMEOUT" env "${env_args[@]}" "$CW_BIN" \
@@ -4113,7 +4142,7 @@ run_tailnet_doctor() {
     packet_rc=1
   fi
   if [[ "$doctor_rc" == "124" ]]; then
-    record_tailnet_doctor_timeout "$evidence_name" "$expect" "$stdout"
+    record_tailnet_doctor_timeout "$evidence_name" "$expect" "$stdout" "$path_wait" "$skip_forced_derp"
     capture_tailnet_doctor_failure_diagnostics
     die "tailnet doctor exceeded its outer timeout; structural receipt recorded"
   fi
@@ -4134,7 +4163,7 @@ run_tailnet_doctor() {
   [[ "$packet_rc" == "0" ]] || \
     die "local peer-relay packet evidence is incomplete; correlate the external exact-tuple observers"
   log "tailnet doctor probe passed; evidence in $stdout"
-  assert_tailnet_doctor_endpoint_evidence "$stdout"
+  assert_tailnet_doctor_endpoint_evidence "$stdout" "$skip_forced_derp"
   if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
     discover_runtime_objects
     assert_daemon_tailnet_log_evidence
@@ -4147,13 +4176,15 @@ record_tailnet_doctor_timeout() {
   local evidence_name="$1"
   local expect="$2"
   local doctor_json="$3"
+  local path_wait="$4"
+  local skip_forced_derp="$5"
   local receipt="$TMPDIR_SMOKE/${evidence_name}-timeout.json"
   local forced_derp=false
 
-  [[ "$SMOKE_DERP_FALLBACK" != "1" ]] || forced_derp=true
+  [[ "$skip_forced_derp" == "1" ]] || forced_derp=true
   jq -n \
     --arg expect "$expect" \
-    --arg direct_wait "$SMOKE_TAILNET_DIRECT_WAIT" \
+    --arg direct_wait "$path_wait" \
     --arg peer_timeout "$SMOKE_TAILNET_PEER_TIMEOUT" \
     --arg outer_timeout "$SMOKE_TAILNET_DOCTOR_TIMEOUT" \
     --argjson forced_derp "$forced_derp" \
@@ -4321,13 +4352,14 @@ capture_tailnet_doctor_failure_diagnostics() {
 
 assert_tailnet_doctor_endpoint_evidence() {
   local doctor_json="$1"
+  local skipped_forced_derp="${2:-0}"
 
   if expect_tailnet_direct_udp; then
     assert_tailnet_doctor_direct_udp_evidence "$doctor_json"
     return
   fi
   if expect_tailnet_peer_relay; then
-    assert_tailnet_doctor_peer_relay_evidence "$doctor_json"
+    assert_tailnet_doctor_peer_relay_evidence "$doctor_json" "$skipped_forced_derp"
     return
   fi
   [[ -z "${EXPECTED_TAILNET_PATH_TRANSPORT:-}" || "$EXPECTED_TAILNET_PATH_TRANSPORT" == "any" ]] || \
@@ -4391,6 +4423,7 @@ assert_tailnet_doctor_forced_derp_evidence() {
 
 assert_tailnet_doctor_peer_relay_evidence() {
   local doctor_json="$1"
+  local skipped_forced_derp="${2:-0}"
 
   jq -e \
     --arg endpoint "$EXPECTED_TAILNET_PEER_RELAY_ENDPOINT" \
@@ -4418,7 +4451,9 @@ assert_tailnet_doctor_peer_relay_evidence() {
     ' "$doctor_json" >/dev/null || \
     die "tailnet doctor did not prove peer_relay via shared endpoint $EXPECTED_TAILNET_PEER_RELAY_ENDPOINT with STUN $EXPECTED_STUN_HOST:$EXPECTED_STUN_PORT"
 
-  [[ "$SMOKE_DERP_FALLBACK" != "1" ]] || assert_tailnet_doctor_forced_derp_evidence "$doctor_json"
+  if [[ "$SMOKE_DERP_FALLBACK" == "1" && "$skipped_forced_derp" != "1" ]]; then
+    assert_tailnet_doctor_forced_derp_evidence "$doctor_json"
+  fi
 
   log "tailnet doctor proved peer_relay via shared relay endpoint $EXPECTED_TAILNET_PEER_RELAY_ENDPOINT and STUN map $EXPECTED_STUN_HOST:$EXPECTED_STUN_PORT"
 }
@@ -4873,9 +4908,14 @@ run_ssh_transport_smoke() {
     debug_tailnet=1
   fi
 
+  local path_wait="$SMOKE_TAILNET_DIRECT_WAIT"
+  if [[ "$transport" == "tailnet" && "$force_derp" != "1" && ( "$expected_transport" == "peer_relay" || "$expected_transport" == "udp_relay" ) ]]; then
+    path_wait="$SMOKE_TAILNET_PEER_RELAY_WAIT"
+  fi
+
   env_args=(
     CW_SSH_TRANSPORT="$transport"
-    CW_TAILNET_DIRECT_WAIT="$SMOKE_TAILNET_DIRECT_WAIT"
+    CW_TAILNET_DIRECT_WAIT="$path_wait"
     CW_TAILNET_PEER_TIMEOUT="$SMOKE_TAILNET_PEER_TIMEOUT"
     CW_TAILNET_DIAL_TIMEOUT="$SMOKE_TAILNET_DIAL_TIMEOUT"
   )
@@ -5155,7 +5195,7 @@ run_ssh_smoke() {
     initial_expected_transport="$EXPECTED_TAILNET_PATH_TRANSPORT"
     EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay
     log "running same-environment shared UDP peer-relay proof"
-    run_tailnet_doctor
+    run_tailnet_doctor peer-relay-leg
     run_ssh_transport_smoke tailnet tailnet-peer-relay peer_relay
     EXPECTED_TAILNET_PATH_TRANSPORT="$initial_expected_transport"
   fi

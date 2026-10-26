@@ -43,7 +43,7 @@ use codewire_tailnet::wg::{PublicKey, StaticSecret};
 use rand::rngs::OsRng;
 use russh::server;
 use tokio::net::lookup_host;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
@@ -52,7 +52,7 @@ use crate::daemon_access::{
     AccessControlPlane, ControlPlaneError, DaemonSshRunners, PeerRelayAllocation,
     record_host_key_until_accepted,
 };
-use crate::peer_relay::{PeerRelayAllocator, PeerRelayBackend};
+use crate::peer_relay::{CallBudget, PeerRelayAllocator, PeerRelayBackend};
 
 /// Wait between coordinator connection attempts.
 pub const COORDINATOR_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -60,9 +60,13 @@ const REFRESH_RETRY_INITIAL: Duration = Duration::from_secs(1);
 const REFRESH_RETRY_MAX: Duration = Duration::from_secs(30);
 const HOST_KEY_RECORD_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const HOST_KEY_RECORD_MAX_BACKOFF: Duration = Duration::from_secs(5);
-/// Orchestration admits at most one call per second per Pod, with a small
-/// burst. Relay allocations leave room for access renewal.
-const PEER_RELAY_CALL_SPACING: Duration = Duration::from_secs(2);
+/// Orchestration's binding listener admits each Pod at one call per second
+/// with a burst of five (`workspace_binding::limits` in orchestration), for
+/// every call the daemon makes. Relay allocations keep to half the rate and
+/// three of the five, so renewal, host-key and Mesh calls always have room.
+const PEER_RELAY_CALLS_PER_SECOND: f64 = 0.5;
+const PEER_RELAY_CALL_BURST: u32 = 3;
+/// One admitted allocation; orchestration answers in tens of milliseconds.
 const PEER_RELAY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 const LOG_COMPONENT: &str = "workspace daemon";
 
@@ -368,33 +372,33 @@ pub async fn record_host_key_per_generation(
 }
 
 /// Allocates UDP relay slots through orchestration (`AllocatePeerRelay`),
-/// never with the allocator's own credential.
+/// never with the allocator's own credential, within the relay share of the
+/// Pod's call budget.
 pub struct OrchestratedPeerRelay {
     plane: Arc<dyn AccessControlPlane>,
-    next_call: Mutex<tokio::time::Instant>,
+    budget: CallBudget,
 }
 
 impl OrchestratedPeerRelay {
     pub fn new(plane: Arc<dyn AccessControlPlane>) -> Self {
         Self {
             plane,
-            next_call: Mutex::new(tokio::time::Instant::now()),
+            budget: CallBudget::new(PEER_RELAY_CALLS_PER_SECOND, PEER_RELAY_CALL_BURST),
         }
     }
 }
 
 #[async_trait]
 impl PeerRelayBackend for OrchestratedPeerRelay {
+    async fn admit(&self) {
+        self.budget.admit().await;
+    }
+
     async fn allocate(
         &self,
         client_disco: [DiscoPublic; 2],
         generation: u32,
     ) -> Result<UDPRelayEndpoint> {
-        {
-            let mut next_call = self.next_call.lock().await;
-            tokio::time::sleep_until(*next_call).await;
-            *next_call = tokio::time::Instant::now() + PEER_RELAY_CALL_SPACING;
-        }
         let allocation = self
             .plane
             .allocate_peer_relay(client_disco.map(|key| disco_text(&key)), generation)
