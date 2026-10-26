@@ -1278,7 +1278,10 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') }}
         run: |
           set -euo pipefail
-          container="codewire-integration-${GITHUB_RUN_ID:?}-${GITHUB_JOB:?}"
+          # The attempt follows the job: a rerun attempt that starts while the
+          # old attempt's task still runs on the shared VM Docker daemon must
+          # not remove that attempt's PostgreSQL below.
+          container="codewire-integration-${GITHUB_RUN_ID:?}-${GITHUB_JOB:?}-a${GITHUB_RUN_ATTEMPT:?}"
           echo "POSTGRES_CONTAINER=$container" >> "$GITHUB_ENV"
           docker rm -f "$container" >/dev/null 2>&1 || true
           mapfile -t networks < <(
@@ -1294,6 +1297,9 @@ jobs:
           # setting matches scripts/ci/verify/integration-postgres.sh.
           docker run -d --name "$container" --pids-limit 2048 \
             --network "${networks[0]}" --network-alias "$postgres_host" \
+            --label "codewire.ci.run=${GITHUB_RUN_ID}" \
+            --label "codewire.ci.attempt=${GITHUB_RUN_ATTEMPT}" \
+            --label "codewire.ci.job=${GITHUB_JOB}" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
             -e POSTGRES_DB=codewire "${INTEGRATION_POSTGRES_IMAGE:?}" \
             -c max_locks_per_transaction=1024
@@ -1458,7 +1464,10 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: |
           set -euo pipefail
-          container="codewire-integration-${GITHUB_RUN_ID:?}-${GITHUB_JOB:?}"
+          # The attempt follows the job: a rerun attempt that starts while the
+          # old attempt's task still runs on the shared VM Docker daemon must
+          # not remove that attempt's PostgreSQL below.
+          container="codewire-integration-${GITHUB_RUN_ID:?}-${GITHUB_JOB:?}-a${GITHUB_RUN_ATTEMPT:?}"
           echo "POSTGRES_CONTAINER=$container" >> "$GITHUB_ENV"
           docker rm -f "$container" >/dev/null 2>&1 || true
           mapfile -t networks < <(
@@ -1474,6 +1483,9 @@ jobs:
           # setting matches scripts/ci/verify/integration-postgres.sh.
           docker run -d --name "$container" --pids-limit 2048 \
             --network "${networks[0]}" --network-alias "$postgres_host" \
+            --label "codewire.ci.run=${GITHUB_RUN_ID}" \
+            --label "codewire.ci.attempt=${GITHUB_RUN_ATTEMPT}" \
+            --label "codewire.ci.job=${GITHUB_JOB}" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
             -e POSTGRES_DB=codewire "${INTEGRATION_POSTGRES_IMAGE:?}" \
             -c max_locks_per_transaction=1024
@@ -1641,7 +1653,10 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         run: |
           set -euo pipefail
-          container="codewire-integration-${GITHUB_RUN_ID:?}-${GITHUB_JOB:?}"
+          # The attempt follows the job: a rerun attempt that starts while the
+          # old attempt's task still runs on the shared VM Docker daemon must
+          # not remove that attempt's PostgreSQL below.
+          container="codewire-integration-${GITHUB_RUN_ID:?}-${GITHUB_JOB:?}-a${GITHUB_RUN_ATTEMPT:?}"
           echo "POSTGRES_CONTAINER=$container" >> "$GITHUB_ENV"
           docker rm -f "$container" >/dev/null 2>&1 || true
           mapfile -t networks < <(
@@ -1657,6 +1672,9 @@ jobs:
           # setting matches scripts/ci/verify/integration-postgres.sh.
           docker run -d --name "$container" --pids-limit 2048 \
             --network "${networks[0]}" --network-alias "$postgres_host" \
+            --label "codewire.ci.run=${GITHUB_RUN_ID}" \
+            --label "codewire.ci.attempt=${GITHUB_RUN_ATTEMPT}" \
+            --label "codewire.ci.job=${GITHUB_JOB}" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
             -e POSTGRES_DB=codewire "${INTEGRATION_POSTGRES_IMAGE:?}" \
             -c max_locks_per_transaction=1024

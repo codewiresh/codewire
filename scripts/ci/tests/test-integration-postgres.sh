@@ -35,9 +35,10 @@ hash -r
 # Fixtures trace the runner with fake tools; never start the workstation's
 # real compiler-cache server from one.
 export CODEWIRE_LOCAL_RUST_CACHE=off
-# The job id names containers (integration-postgres.sh); the cases below set
-# it themselves, never inheriting the CI job's own (Policy runs this test).
-unset GITHUB_JOB
+# The job id and run attempt name containers (integration-postgres.sh); the
+# cases below set them themselves, never inheriting the CI job's own (Policy
+# runs this test).
+unset GITHUB_JOB GITHUB_RUN_ATTEMPT
 
 # shellcheck source=scripts/ci/verify/integration-postgres.sh
 source "$ROOT/scripts/ci/verify/integration-postgres.sh"
@@ -146,6 +147,7 @@ integration_postgres_lanes_available
 integration_postgres_start_lane orchestration
 [ "$INTEGRATION_POSTGRES_LANE_URL_RUST" = "postgres://codewire:codewire@codewire-integration-postgres-orchestration:5432/codewire" ]
 grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration --pids-limit 2048 --network codewire-fixture-net " "$FAKE_DOCKER_LOG"
+grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration .* --label codewire.ci.run=fixture-$$ --label codewire.ci.attempt=0 --label codewire.ci.job=local " "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER$" "$FAKE_DOCKER_LOG"
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration$" "$FAKE_DOCKER_LOG"
@@ -183,6 +185,27 @@ second_container="$(bash -c 'GITHUB_RUN_ID=7; source "$1"; integration_postgres_
 # even when their processes have the same PID.
 database_container="$(bash -c 'GITHUB_RUN_ID=7 GITHUB_JOB=database; source "$1"; integration_postgres_init; printf %s "$INTEGRATION_POSTGRES_CONTAINER"' _ "$ROOT/scripts/ci/verify/integration-postgres.sh")"
 [[ "$database_container" == codewire-product-postgres-7-database-* ]]
+# Two attempts of one job of one run never share a name, even with the same
+# PID: a rerun attempt that starts while the old attempt's task still runs on
+# the VM removes only its own fixtures. The attempt follows the job, so the
+# VM's per-job usage match (codewire-.+-<run>-<job>(-.*)?) still finds them;
+# every fixture carries its run, attempt and job as labels.
+attempt_fixture() {
+  bash -c 'GITHUB_RUN_ID=7 GITHUB_JOB=database GITHUB_RUN_ATTEMPT=$2
+    source "$1"; integration_postgres_init
+    printf "%s %s %s\n" "$(integration_fixture_name postgres)" "$(integration_fixture_name nats)" "${INTEGRATION_FIXTURE_LABELS[*]}"' \
+    _ "$ROOT/scripts/ci/verify/integration-postgres.sh" "$1" |
+    sed "s/-[0-9]* /-PID /g; s/-[0-9]*$/-PID/"
+}
+first_attempt="$(attempt_fixture 1)"
+second_attempt="$(attempt_fixture 2)"
+[ "$first_attempt" = 'codewire-product-postgres-7-database-a1-PID codewire-product-nats-7-database-a1-PID --label codewire.ci.run=7 --label codewire.ci.attempt=1 --label codewire.ci.job=database' ] ||
+  { echo "unexpected attempt-1 fixture names: $first_attempt" >&2; exit 1; }
+[ "$second_attempt" = 'codewire-product-postgres-7-database-a2-PID codewire-product-nats-7-database-a2-PID --label codewire.ci.run=7 --label codewire.ci.attempt=2 --label codewire.ci.job=database' ] ||
+  { echo "unexpected attempt-2 fixture names: $second_attempt" >&2; exit 1; }
+[[ "${first_attempt%% *}" =~ ^codewire-.+-7-database(-.*)?$ ]]
+# A non-numeric attempt never reaches a container name.
+[[ "$(bash -c 'GITHUB_RUN_ID=7 GITHUB_JOB=database GITHUB_RUN_ATTEMPT="1 x"; source "$1"; integration_fixture_name postgres' _ "$ROOT/scripts/ci/verify/integration-postgres.sh")" =~ ^codewire-product-postgres-7-database-[0-9]+$ ]]
 
 reset_case
 INTEGRATION_POSTGRES_HOST_PORT=55432
@@ -801,6 +824,11 @@ for step in steps:
     command = re.search(r"docker run -d [^\n]*", run)
     assert command, "a Postgres step has no docker run"
     assert " ".join(command.group(0).split()).endswith(f' "${{INTEGRATION_POSTGRES_IMAGE:?}}" {server_args}'), command.group(0)
+    # Each job's PostgreSQL is named and labelled for its run, job and
+    # attempt, so a rerun attempt never removes a still-running one's.
+    assert 'container="codewire-integration-${GITHUB_RUN_ID:?}-${GITHUB_JOB:?}-a${GITHUB_RUN_ATTEMPT:?}"' in run, step
+    for label in ('run=${GITHUB_RUN_ID}', 'attempt=${GITHUB_RUN_ATTEMPT}', 'job=${GITHUB_JOB}'):
+        assert f'--label "codewire.ci.{label}"' in command.group(0), (label, command.group(0))
 # Each job makes its fixture images present right before its PostgreSQL
 # starts, under the same condition, with the guest's warm cache.
 loads = re.findall(r"      - name: Make the fixture images present\n        if: ([^\n]*)\n"

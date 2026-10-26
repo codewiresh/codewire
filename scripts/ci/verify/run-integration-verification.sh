@@ -61,13 +61,13 @@ else
   NATS_MONITOR_URL="http://127.0.0.1:${NATS_MONITOR_PORT}/healthz"
 fi
 TEMPORAL_CLI_VERSION="${TEMPORAL_CLI_VERSION:-1.5.0}"
-NATS_CONTAINER="codewire-product-nats-${GITHUB_RUN_ID:-local}-${GITHUB_JOB:+$GITHUB_JOB-}$$"
 IDP_SIGNING_KEK_DIR=""
 BILLING_FIXTURE_LOADED=false
 
 # shellcheck source=scripts/ci/verify/integration-postgres.sh
 source "$ROOT/scripts/ci/verify/integration-postgres.sh"
 integration_postgres_init
+NATS_CONTAINER="$(integration_fixture_name nats)"
 
 mkdir -p "$RUN_DIR/bin"
 export PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-5}" TZ=UTC
@@ -1194,7 +1194,7 @@ start_nats() {
   fi
   docker rm -f "$NATS_CONTAINER" >/dev/null 2>&1 || true
   docker run -d --name "$NATS_CONTAINER" --pids-limit 2048 \
-    "${docker_network_args[@]}" \
+    "${docker_network_args[@]}" "${INTEGRATION_FIXTURE_LABELS[@]}" \
     "${INTEGRATION_NATS_IMAGE:-$INTEGRATION_NATS_PINNED_IMAGE}" -js -m 8222 > "$RUN_DIR/nats.container"
   touch "$RUN_DIR/nats.started"
   local _

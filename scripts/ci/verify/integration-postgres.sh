@@ -33,12 +33,32 @@ INTEGRATION_NATS_PINNED_IMAGE='docker.io/library/nats:2.12.15-alpine@sha256:b270
 INTEGRATION_POSTGRES_PINNED_ID='sha256:1bea307dfb3ee30541a7acf7de14b58bcd6948da98e5d31a04c627c4d35ec64b'
 INTEGRATION_NATS_PINNED_ID='sha256:138f6ccc9fd034c76ac3cee7faed6c5fdb874fd333f477b91f52b4052f6669ce'
 
+# integration_fixture_name KIND prints the container name for one of this
+# process's fixtures: codewire-product-KIND-<run>-[<job>-][a<attempt>-]<pid>.
+# The concurrent lanes of one merge qualification share a run ID, and on CI
+# every job of every main run shares one Docker daemon on main's warm VM
+# (infra#1534), where two jobs' processes can have the same PID and a rerun
+# attempt of a job can start while the old attempt's task still runs. Each
+# fixture removes its own name before it starts, so the name carries the job
+# and the attempt. The attempt follows the job, so the VM's per-job usage
+# match (codewire-.+-<run>-<job>(-.*)?) still finds it.
+integration_fixture_name() {
+  local attempt=""
+  [[ "${GITHUB_RUN_ATTEMPT:-}" =~ ^[0-9]+$ ]] && attempt="a$GITHUB_RUN_ATTEMPT-"
+  printf 'codewire-product-%s-%s-%s%s%s' "$1" "${GITHUB_RUN_ID:-local}" \
+    "${GITHUB_JOB:+$GITHUB_JOB-}" "$attempt" "$$"
+}
+
 integration_postgres_init() {
-  # Each run names its containers for its own job and process: the concurrent
-  # lanes of one merge qualification share a run ID, and on CI the jobs of one
-  # run share a Docker daemon on main's warm VM (infra#1534), where two jobs'
-  # processes can have the same PID.
-  INTEGRATION_POSTGRES_CONTAINER="codewire-product-postgres-${GITHUB_RUN_ID:-local}-${GITHUB_JOB:+$GITHUB_JOB-}$$"
+  INTEGRATION_POSTGRES_CONTAINER="$(integration_fixture_name postgres)"
+  # Every fixture container carries the run, attempt and job that started it,
+  # so a cleanup or an operator can select exactly one job's containers
+  # (docker ps --filter label=codewire.ci.run=...).
+  INTEGRATION_FIXTURE_LABELS=(
+    --label "codewire.ci.run=${GITHUB_RUN_ID:-local}"
+    --label "codewire.ci.attempt=${GITHUB_RUN_ATTEMPT:-0}"
+    --label "codewire.ci.job=${GITHUB_JOB:-local}"
+  )
   INTEGRATION_POSTGRES_MANAGED=false
   INTEGRATION_POSTGRES_SOURCE=""
   INTEGRATION_POSTGRES_LANE_CONTAINERS=()
@@ -96,7 +116,7 @@ integration_postgres_configure() {
     docker run -d --rm --name "$INTEGRATION_POSTGRES_CONTAINER" --pids-limit 2048 \
       --network "$INTEGRATION_DOCKER_NETWORK" \
       --network-alias "$INTEGRATION_POSTGRES_CONTAINER" \
-      -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire \
+      -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire "${INTEGRATION_FIXTURE_LABELS[@]}" \
       "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
     INTEGRATION_POSTGRES_MANAGED=true
     DATABASE_URL="postgres://codewire:codewire@${INTEGRATION_POSTGRES_CONTAINER}:5432/codewire?sslmode=disable"
@@ -131,6 +151,7 @@ integration_postgres_configure() {
     -e POSTGRES_USER=codewire \
     -e POSTGRES_PASSWORD=codewire \
     -e POSTGRES_DB=codewire \
+    "${INTEGRATION_FIXTURE_LABELS[@]}" \
     -p "$publish" "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
   INTEGRATION_POSTGRES_MANAGED=true
 
@@ -190,7 +211,7 @@ integration_postgres_start_lane() {
   INTEGRATION_POSTGRES_LANE_CONTAINERS+=("$name")
   if [ "${INTEGRATION_POSTGRES_SOURCE:-}" = managed ]; then
     docker run -d --rm --name "$name" \
-      -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire \
+      -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire "${INTEGRATION_FIXTURE_LABELS[@]}" \
       -p 127.0.0.1::5432 "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
     host=127.0.0.1
     port="$(docker port "$name" 5432/tcp | sed 's/.*://')"
@@ -203,13 +224,13 @@ integration_postgres_start_lane() {
     if [ "${2:-}" = background ]; then
       docker run -d --rm --name "$name" --pids-limit 2048 \
         --network "$INTEGRATION_DOCKER_NETWORK" --network-alias "$host" \
-        -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire \
+        -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire "${INTEGRATION_FIXTURE_LABELS[@]}" \
         "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null &
       INTEGRATION_POSTGRES_STARTING+=("$!")
     else
       docker run -d --rm --name "$name" --pids-limit 2048 \
         --network "$INTEGRATION_DOCKER_NETWORK" --network-alias "$host" \
-        -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire \
+        -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire "${INTEGRATION_FIXTURE_LABELS[@]}" \
         "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
     fi
     port=5432
