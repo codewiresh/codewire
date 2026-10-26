@@ -225,6 +225,11 @@ fn resize_quantity_and_automation_validation_is_human_safe() {
     assert_eq!(parse_resize_cpu("4").unwrap(), 4000);
     assert!(parse_resize_cpu("0").is_err());
     assert!(parse_resize_cpu("1.2345").is_err());
+    assert_eq!(parse_resize_cpu("256").unwrap(), 256_000);
+    let error = parse_resize_cpu("2000").unwrap_err().to_string();
+    assert!(error.contains("CPU is in cores") && error.contains("use 2,"), "{error}");
+    let error = parse_resize_cpu("1500").unwrap_err().to_string();
+    assert!(error.contains("use 1500m"), "{error}");
     assert_eq!(parse_resize_memory("512Mi").unwrap(), 512);
     assert_eq!(parse_resize_memory("4Gi").unwrap(), 4096);
     assert_eq!(parse_resize_memory("16gi").unwrap(), 16 * 1024);
@@ -639,7 +644,7 @@ fn env_create_parser_accepts_direct_create_flags() {
         "--ttl",
         "1h",
         "--cpu",
-        "2000",
+        "2",
         "--memory",
         "8gb",
         "--disk",
@@ -671,7 +676,7 @@ fn env_create_parser_accepts_direct_create_flags() {
     assert_eq!(args.preset_slug.as_deref(), Some("go"));
     assert_eq!(args.name.as_deref(), Some("builder"));
     assert_eq!(args.ttl.as_deref(), Some("1h"));
-    assert_eq!(args.cpu.as_deref(), Some("2000"));
+    assert_eq!(args.cpu.as_deref(), Some("2"));
     assert_eq!(args.memory.as_deref(), Some("8gb"));
     assert_eq!(args.disk.as_deref(), Some("40gb"));
     assert_eq!(args.image.as_deref(), Some("workspace"));
@@ -733,7 +738,7 @@ fn env_create_request_builds_one_canonical_project_spec() {
         "--ttl",
         "1h30m",
         "--cpu",
-        "2000",
+        "2",
         "--memory",
         "8gb",
         "--disk",
@@ -977,7 +982,7 @@ fn direct_cli_and_codewire_yaml_produce_identical_portable_intent() {
         "--env",
         "RUST_LOG=info",
         "--cpu",
-        "2000",
+        "2",
         "--memory",
         "4096",
         "--disk",
@@ -1104,7 +1109,7 @@ async fn init_command_writes_codewire_yaml_from_direct_flags() {
         "--env".to_string(),
         "FOO=bar".to_string(),
         "--cpu".to_string(),
-        "2000".to_string(),
+        "2".to_string(),
         "--memory".to_string(),
         "4096".to_string(),
         "--disk".to_string(),
@@ -1187,7 +1192,7 @@ fn init_command_builds_prepare_request_for_server_side_modes() {
         "--ttl",
         "1h",
         "--cpu",
-        "2000",
+        "2",
         "--memory",
         "4096",
         "--disk",

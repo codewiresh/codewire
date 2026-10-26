@@ -221,7 +221,7 @@ attachment, says when it no longer exists, or says that none is selected.
 ## cw init
 
 ```sh
-cw init [REPO_URL]... [--image IMAGE] [--install CMD] [--startup CMD] [--cpu MILLICORES] [--memory MB] [--disk GB]
+cw init [REPO_URL]... [--image IMAGE] [--install CMD] [--startup CMD] [--cpu CPU] [--memory MB] [--disk GB]
         [-e KEY=VALUE] [--preset SLUG] [--repo URL] [--branch B] [--file codewire.yaml] [--force] [-y]
 ```
 
@@ -273,7 +273,7 @@ lines is missing or the file is not writable.
 ```sh
 cw preset list                                   # alias: ls
 cw preset create SLUG --image IMAGE [--name N] [--install CMD] [--startup CMD]
-                 [--cpu MILLICORES] [--memory MB] [--disk GB] [--ttl 1h] [--description TEXT]
+                 [--cpu CPU] [--memory MB] [--disk GB] [--ttl 1h] [--description TEXT]
 cw preset info SLUG|slug:SLUG|id:ID
 cw preset rm ID
 ```

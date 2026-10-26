@@ -1020,8 +1020,24 @@ pub(crate) struct PlatformResizePlan {
     pub(crate) warnings: Vec<String>,
 }
 
+/// CPU is given in cores (`2`, `0.5`) or millicores with an `m` suffix
+/// (`500m`). No environment has more than 256 CPUs, so a larger bare number
+/// is a millicore value from before cores were the unit; it is refused with
+/// the spelling that works instead of asking for thousands of CPUs.
 pub(crate) fn parse_resize_cpu(value: &str) -> anyhow::Result<i32> {
     let value = value.trim();
+    if let Ok(whole) = value.parse::<u64>()
+        && whole > MAX_CPU_CORES
+    {
+        let suggestion = if whole % 1000 == 0 {
+            (whole / 1000).to_string()
+        } else {
+            format!("{whole}m")
+        };
+        anyhow::bail!(
+            "CPU is in cores, so {value} means {value} CPUs; use {suggestion}, or add m for millicores"
+        );
+    }
     if let Some(millicores) = value.strip_suffix('m') {
         let millicores: i32 = millicores
             .parse()
@@ -2428,7 +2444,7 @@ pub(crate) fn env_create_request_from_source(
     }
     if args.cpu.is_some() {
         project_spec.resources.cpu_millicores =
-            positive_i32(parse_platform_create_quantity(args.cpu.as_deref(), "CPU")?)
+            positive_i32(args.cpu.as_deref().map(parse_resize_cpu).transpose()?)
                 .map(|value| value as u32);
     }
     if args.memory.is_some() {
@@ -2469,15 +2485,7 @@ pub(crate) fn env_create_request_from_source(
     ))
 }
 
-fn parse_platform_create_quantity(value: Option<&str>, label: &str) -> anyhow::Result<Option<i32>> {
-    value
-        .map(|value| {
-            value
-                .parse::<i32>()
-                .with_context(|| format!("platform {label} must use the existing integer unit"))
-        })
-        .transpose()
-}
+const MAX_CPU_CORES: u64 = 256;
 
 fn parse_create_memory(value: Option<&str>) -> anyhow::Result<Option<i32>> {
     value

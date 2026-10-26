@@ -677,8 +677,12 @@ pub(crate) struct InitArgs {
         help = "Time to live for server-side resolution or saved presets"
     )]
     ttl: Option<String>,
-    #[arg(long, help = "CPU in millicores")]
-    cpu: Option<i32>,
+    #[arg(
+        long,
+        value_name = "CPU",
+        help = "CPU cores (for example 2, 0.5, or 500m)"
+    )]
+    cpu: Option<String>,
     #[arg(long, help = "Memory in MB")]
     memory: Option<i32>,
     #[arg(long, help = "Disk in GB")]
@@ -1129,7 +1133,11 @@ pub(crate) struct EnvCreateArgs {
     spec: Option<String>,
     #[arg(long, help = "Time to live (e.g. 1h, 30m)")]
     ttl: Option<String>,
-    #[arg(long, value_name = "QUANTITY", help = "CPU resource quantity")]
+    #[arg(
+        long,
+        value_name = "CPU",
+        help = "CPU cores (for example 2, 0.5, or 500m)"
+    )]
     cpu: Option<String>,
     #[arg(long, value_name = "QUANTITY", help = "Memory (for example 8GB)")]
     memory: Option<String>,
@@ -1828,8 +1836,12 @@ pub(crate) struct PresetCreateArgs {
     install: Option<String>,
     #[arg(long, help = "Default startup script")]
     startup: Option<String>,
-    #[arg(long, help = "Default CPU in millicores")]
-    cpu: Option<i32>,
+    #[arg(
+        long,
+        value_name = "CPU",
+        help = "Default CPU cores (for example 2, 0.5, or 500m)"
+    )]
+    cpu: Option<String>,
     #[arg(long, help = "Default memory in MB")]
     memory: Option<i32>,
     #[arg(long, help = "Default disk in GB")]

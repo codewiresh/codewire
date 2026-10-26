@@ -940,7 +940,13 @@ pub(crate) async fn handle_preset_command(
                     install_command: trimmed_optional(args.install).unwrap_or_default(),
                     startup_script: trimmed_optional(args.startup).unwrap_or_default(),
                     resources: codewire_project::ResourceSpec {
-                        cpu_millicores: positive_i32(args.cpu).map(|value| value as u32),
+                        cpu_millicores: positive_i32(
+                            args.cpu
+                                .as_deref()
+                                .map(super::environment::parse_resize_cpu)
+                                .transpose()?,
+                        )
+                        .map(|value| value as u32),
                         memory_mib: positive_i32(args.memory).map(|value| value as u64),
                         disk_gib: positive_i32(args.disk).map(|value| value as u64),
                     },
