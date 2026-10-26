@@ -808,6 +808,22 @@ class VerificationProfileTests(unittest.TestCase):
         self.assertNotIn("WORKSPACE_CW_PROFILE", publish)
 
 
+class AdvancingClock:
+    """The verifier's clock, moved forward by hand: slow work without waiting."""
+
+    def __init__(self):
+        self.offset = 0
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def advance(self, seconds):
+        self.offset += seconds
+
+    def monotonic(self):
+        return time.monotonic() + self.offset
+
+
 class CwCopyTests(unittest.TestCase):
     def setUp(self):
         path = Path(__file__).with_name("cw_image_fixtures.py")
@@ -1043,20 +1059,25 @@ class CwCopyTests(unittest.TestCase):
     def test_slow_producer_admission_does_not_spend_the_copy_bound(self):
         # #2990: reopening the producer took 80-128 s under load inside the
         # copy's 180 s deadline. Admission is local work outside the bound.
+        # The verifier's clock passes two whole stall bounds while the
+        # producer reopens; the bound keeps its real length, so only spending
+        # it on admission fails here, never a slow fake Docker start.
         real = artifact.cw_consumer
+        clock = AdvancingClock()
 
         def slow_consumer(root):
             consumer = real(root)
             reopen = consumer.producer.reopen
 
             def slow_reopen(*args, **kwargs):
-                time.sleep(1.0)
+                clock.advance(2 * artifact.CW_STALL_SECONDS)
                 return reopen(*args, **kwargs)
             consumer.producer.reopen = slow_reopen
             return consumer
         with mock.patch.object(artifact, "cw_consumer", slow_consumer), \
-                mock.patch.object(artifact, "CW_STALL_SECONDS", 0.5):
+                mock.patch.object(artifact, "time", clock):
             self.assertEqual(self.verify()["status"], "workspace-cw-verified")
+        self.assertEqual(clock.offset, 2 * artifact.CW_STALL_SECONDS)
         self.assert_closed()
 
     def test_failed_copy_names_its_cause_not_a_missing_image(self):
