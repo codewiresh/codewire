@@ -134,9 +134,14 @@ fi
 # shellcheck disable=SC2016
 reused="$(sed -n '/- name: Publish the reused support pair and deliver the release to Production/,/^$/p' <<<"$publish_job")"
 for expected in "        if: \${{ steps.pair.outputs.build == 'false' }}" "          BUILD_SUPPORT_PAIR: 'false'" \
-    '          CODEWIRE_SOURCE_DIR: .release-source' '        run: scripts/ci/release/finish-prod-release.sh'; do
+    '          CODEWIRE_SOURCE_DIR: .release-source' '        run: scripts/ci/release/finish-prod-release.sh' \
+    "          SUPPORT_PROVENANCE_REVISION: \${{ steps.pair.outputs.provenance_revision }}"; do
   grep -qxF -- "$expected" <<<"$reused" || fail "the reused-pair finish omits: $expected"
 done
+# Only a reused pair may name another commit's provenance: a release that
+# builds its pair verifies it against its own source.
+[[ "$(grep -c 'SUPPORT_PROVENANCE_REVISION' "$WORKFLOW")" -eq 1 ]] ||
+  fail 'a support pair other than the reused one takes another commit'"'"'s provenance'
 grep -q 'DIGEST' <<<"$reused" && fail 'the reused-pair finish takes platform digests'
 [[ "$(grep -n 'run: scripts/ci/release/finish-prod-release.sh' <<<"$publish_job" | cut -d: -f1)" -gt \
    "$(grep -n 'Mirror the runtime release to GHCR' <<<"$publish_job" | cut -d: -f1)" ]] ||
@@ -397,6 +402,15 @@ case "$1" in
   login) exit 0 ;;
   buildx)
     image="${*: -1}"; image="${image#registry.example.invalid/codewire/}"; image="${image%%:*}"
+    if [[ " $* " == *' {{json .Provenance}} '* ]]; then
+      # Each platform's provenance names the commit that built the index.
+      revision_var="STUB_REVISION_${image}"
+      revision="${!revision_var:-$STUB_SOURCE}"
+      arm64_revision="${STUB_ARM64_REVISION:-$revision}"
+      printf '{"linux/amd64":{"SLSA":{"runDetails":{"metadata":{"buildkit_metadata":{"vcs":{"revision":"%s"}}}}}},' "$revision"
+      printf '"linux/arm64":{"SLSA":{"runDetails":{"metadata":{"buildkit_metadata":{"vcs":{"revision":"%s"}}}}}}}\n' "$arm64_revision"
+      exit 0
+    fi
     if [[ " $* " == *' --raw '* ]]; then
       printf '{"manifests":[{"digest":"sha256:%064d","platform":{"os":"linux","architecture":"amd64"}},' 1
       printf '{"digest":"sha256:%064d","platform":{"os":"linux","architecture":"arm64"}},' 2
@@ -404,25 +418,59 @@ case "$1" in
       exit 0
     fi
     case " $STUB_PUBLISHED " in
-      *" $image "*) printf '{"digest":"sha256:%064d"}\n' 1 ;;
+      *" $image "*) [[ "$image" == base ]] && printf '{"digest":"sha256:%064d"}\n' 1 || printf '{"digest":"sha256:%064d"}\n' 4 ;;
       *" error "*) echo 'connection reset by peer' >&2; exit 1 ;;
       *) echo 'ERROR: registry.example.invalid/codewire/x: not found' >&2; exit 1 ;;
     esac ;;
 esac
 STUB
-chmod +x "$stub_tree/fetcher" "$stub_tree/bin/docker"
+# The alias verifier stand-in records its arguments and refuses on request.
+cat >"$stub_tree/alias-verifier" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$STUB_ALIAS_CALLS"
+[[ "${STUB_ALIAS_REFUSES:-0}" == 0 ]] || { echo 'support alias: the support inputs differ' >&2; exit 1; }
+STUB
+chmod +x "$stub_tree/fetcher" "$stub_tree/bin/docker" "$stub_tree/alias-verifier"
+release_source="$(printf '%040d' 7)"
+alias_origin="$(printf '%040d' 5)"
 state_case() {
+  local published="$1"
+  shift
   : >"$stub_tree/output"
-  if env PATH="$stub_tree/bin:$PATH" STUB_PUBLISHED="$1" OPENBAO_HARBOR_CREDENTIAL_FETCHER="$stub_tree/fetcher" \
-      CODEWIRE_IMAGE_REGISTRY=registry.example.invalid \
-      GITHUB_OUTPUT="$stub_tree/output" RUNNER_TEMP="$stub_tree" \
-      "$ROOT/scripts/ci/images/release-support-pair-state.sh" "$(printf '%040d' 7)" >"$stub_tree/out" 2>&1; then
+  : >"$stub_tree/alias-calls"
+  if env PATH="$stub_tree/bin:$PATH" STUB_PUBLISHED="$published" OPENBAO_HARBOR_CREDENTIAL_FETCHER="$stub_tree/fetcher" \
+      CODEWIRE_IMAGE_REGISTRY=registry.example.invalid STUB_SOURCE="$release_source" \
+      RELEASE_SUPPORT_ALIAS_VERIFIER="$stub_tree/alias-verifier" STUB_ALIAS_CALLS="$stub_tree/alias-calls" \
+      GITHUB_OUTPUT="$stub_tree/output" RUNNER_TEMP="$stub_tree" "$@" \
+      "$ROOT/scripts/ci/images/release-support-pair-state.sh" "$release_source" >"$stub_tree/out" 2>&1; then
     cat "$stub_tree/output"
   else
     echo failed
   fi
 }
-[[ "$(state_case 'base workspace')" == build=false ]] || fail "a published release pair is not reused"
+[[ "$(state_case 'base workspace')" == "build=false
+provenance_revision=$release_source" && ! -s "$stub_tree/alias-calls" ]] ||
+  fail "a published release pair built for its own source is not reused as it is"
+# A pair main aliased from an earlier commit (#3504) keeps that commit's
+# provenance. The release reuses it only when the alias verifier derives the
+# same alias from Git, for exactly the published digests, and then verifies
+# the indexes against that commit.
+[[ "$(state_case 'base workspace' STUB_REVISION_base="$alias_origin" STUB_REVISION_workspace="$alias_origin")" == "build=false
+provenance_revision=$alias_origin" ]] || fail "an aliased release pair is not reused: $(cat "$stub_tree/out")"
+[[ "$(cat "$stub_tree/alias-calls")" == "--repository $ROOT --source $release_source --origin $alias_origin --base-digest sha256:$(printf '%064d' 1) --workspace-digest sha256:$(printf '%064d' 4)" ]] ||
+  fail "the alias was not proved for exactly the published pair: $(cat "$stub_tree/alias-calls")"
+if [[ "$(state_case 'base workspace' STUB_REVISION_base="$alias_origin" STUB_REVISION_workspace="$alias_origin" STUB_ALIAS_REFUSES=1)" != failed ]] ||
+    ! grep -qF "was built for $alias_origin, and is not its alias" "$stub_tree/out"; then
+  fail "a pair built for a commit with other support inputs was reused"
+fi
+if [[ "$(state_case 'base workspace' STUB_REVISION_base="$alias_origin")" != failed ]] ||
+    ! grep -qF 'a pair has one source' "$stub_tree/out" || [[ -s "$stub_tree/alias-calls" ]]; then
+  fail "a pair whose base and workspace name different commits was reused"
+fi
+if [[ "$(state_case 'base workspace' STUB_ARM64_REVISION="$alias_origin")" != failed ]] ||
+    ! grep -qF 'does not name one source commit for every platform' "$stub_tree/out"; then
+  fail "an index whose platforms name different commits was reused"
+fi
 [[ "$(state_case '')" == build=true ]] || fail "an unpublished release pair is not built"
 # A base a cancelled release published is reused per platform; only the
 # workspace is built, from exactly those images.

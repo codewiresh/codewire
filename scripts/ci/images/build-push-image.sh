@@ -208,6 +208,34 @@ if [ -n "$image_join" ]; then
       exit 2
     }
 fi
+# Every image's provenance names the commit it was built from, which is its
+# own source. A main commit whose base and workspace inputs did not change gets
+# its support pair as an alias of the pair built for an earlier commit
+# (alias-support-pair.sh, #3504), and the aliased indexes keep that commit's
+# provenance. A release that reuses such a pair names the building commit here,
+# after release-support-pair-state.sh proved the alias from Git
+# (verify-support-alias.py). Only an existing support index may name another
+# commit: anything this script builds or joins names its own source.
+provenance_revision="${CODEWIRE_PROVENANCE_REVISION:-$source_sha}"
+if [ "$provenance_revision" != "$source_sha" ]; then
+  [[ "$provenance_revision" =~ ^[0-9a-f]{40}$ ]] || {
+    echo 'CODEWIRE_PROVENANCE_REVISION must be a full lowercase commit ID' >&2
+    exit 2
+  }
+  case "$image_name" in
+    base|workspace) ;;
+    *)
+      echo 'Only a reused support image may carry the provenance of another commit' >&2
+      exit 2
+      ;;
+  esac
+  [ "$require_existing_source_image" = 1 ] || {
+    echo 'Only an existing support image, never a build, may carry the provenance of another commit' >&2
+    exit 2
+  }
+fi
+readonly provenance_revision
+
 # A per-platform image is verified as the single-platform image it is.
 verify_platforms="$image_platforms"
 [ -z "$image_platform" ] || verify_platforms=''
@@ -658,7 +686,7 @@ verify_build_provenance() {
       >"$provenance_output" 2>"$provenance_error"; then
       if jq -e \
         --arg builder "$provenance_builder_id" \
-        --arg revision "$source_sha" \
+        --arg revision "$provenance_revision" \
         --arg source "$PROVENANCE_SOURCE_URL" \
         --argjson platforms "$(expected_platforms_json)" '
           def valid_slsa:

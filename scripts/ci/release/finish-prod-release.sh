@@ -13,7 +13,11 @@
 # Environment: RELEASE_TAG, SOURCE_SHA, CODEWIRE_SOURCE_DIR (the release
 # checkout), CODEWIRE_IMAGE_REGISTRY, BUILD_SUPPORT_PAIR (true or false), and
 # with true the four platform digests BASE_AMD64_DIGEST, BASE_ARM64_DIGEST,
-# WORKSPACE_AMD64_DIGEST and WORKSPACE_ARM64_DIGEST.
+# WORKSPACE_AMD64_DIGEST and WORKSPACE_ARM64_DIGEST. With false,
+# SUPPORT_PROVENANCE_REVISION names the commit the reused pair was built from
+# (release-support-pair-state.sh): the release's own source, or the earlier
+# commit main aliased it from, whose base and workspace inputs it proved
+# identical.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -33,6 +37,13 @@ case "${BUILD_SUPPORT_PAIR:-}" in
   *) fail 'BUILD_SUPPORT_PAIR must be true or false' ;;
 esac
 
+provenance_revision="${SUPPORT_PROVENANCE_REVISION:-$source_sha}"
+[[ "$provenance_revision" =~ ^[0-9a-f]{40}$ ]] ||
+  fail 'SUPPORT_PROVENANCE_REVISION must be a full lowercase commit ID'
+[[ "$BUILD_SUPPORT_PAIR" == false || "$provenance_revision" == "$source_sha" ]] ||
+  fail 'a support pair the release builds carries its own source in its provenance'
+readonly provenance_revision
+
 work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/codewire-finish-prod-release.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
@@ -45,7 +56,7 @@ join() {
   fi
   : >"$work/$image.output"
   GITHUB_OUTPUT="$work/$image.output" CODEWIRE_RELEASE_TAG="$tag" CODEWIRE_SOURCE_SHA="$source_sha" \
-    AMD64_DIGEST="$amd64" ARM64_DIGEST="$arm64" \
+    AMD64_DIGEST="$amd64" ARM64_DIGEST="$arm64" CODEWIRE_PROVENANCE_REVISION="$provenance_revision" \
     "$ROOT/scripts/ci/images/join-release-support-image.sh" "$image" "$2" "$3" ||
     fail "the $image index did not join or verify"
   ref="$(sed -n 's/^candidate_ref=//p' "$work/$image.output" | tail -1)"

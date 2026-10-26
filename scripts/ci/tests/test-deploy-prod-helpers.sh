@@ -40,13 +40,14 @@ printf "source_sha=%s\ncandidate_ref=registry.example.invalid/codewire/%s@sha256
 # join-release-support-image.sh IMAGE ...: records the digests it was given.
 stub scripts/ci/images/join-release-support-image.sh '
 printf "join %s pair=%s amd64=%s arm64=%s\n" "$1" "$BUILD_SUPPORT_PAIR" "${AMD64_DIGEST:-}" "${ARM64_DIGEST:-}" >>"'"$TMP"'/joins.log"
+printf "provenance %s %s\n" "$1" "${CODEWIRE_PROVENANCE_REVISION:-}" >>"'"$TMP"'/provenance.log"
 printf "source_sha=%s\ncandidate_ref=registry.example.invalid/codewire/%s@sha256:%064d\n" "${FIXTURE_JOIN_SOURCE:-$CODEWIRE_SOURCE_SHA}" "$1" 2 >>"$GITHUB_OUTPUT"'
 stub scripts/ci/images/publish-image-to-harbor.sh '[ "${FIXTURE_HARBOR:-ok}" = ok ]'
 stub scripts/ci/images/publish-image-to-ghcr.sh '[ "${FIXTURE_GHCR:-ok}" = ok ]'
 stub scripts/ci/deploy/dispatch-deploy-prod.sh ''
 
 reset() {
-  rm -f "$log" "$TMP/order.log" "$TMP/joins.log" "$TMP/origins.log"
+  rm -f "$log" "$TMP/order.log" "$TMP/joins.log" "$TMP/origins.log" "$TMP/provenance.log"
   : >"$TMP/output"
 }
 
@@ -117,12 +118,36 @@ grep -Fxq 'join workspace pair=false amd64= arm64=' "$TMP/joins.log" || fail 'a 
 grep -Fxq "publish-image-to-harbor.sh registry.example.invalid/codewire/workspace@sha256:$(printf '%064d' 2) registry.example.invalid/codewire/workspace $SHA v1.2.3" "$log" ||
   fail 'the workspace was published with other arguments'
 grep -Fxq 'dispatch-deploy-prod.sh v1.2.3' "$log" || fail 'the release was not dispatched with its tag alone'
+[ "$(cat "$TMP/provenance.log")" = "provenance base $SHA
+provenance workspace $SHA" ] || fail "a pair built for the release was verified against another commit: $(cat "$TMP/provenance.log")"
+# A pair main aliased from an earlier commit (#3504) is verified against the
+# commit that built it, which the pair step proved has the same support inputs.
+readonly ORIGIN=3333333333333333333333333333333333333333
+reset
+finish BUILD_SUPPORT_PAIR=false SUPPORT_PROVENANCE_REVISION="$ORIGIN" ||
+  fail "an aliased pair did not finish: $(cat "$TMP/finish.out")"
+[ "$(cat "$TMP/provenance.log")" = "provenance base $ORIGIN
+provenance workspace $ORIGIN" ] || fail "an aliased pair was not verified against its building commit: $(cat "$TMP/provenance.log")"
+grep -Fxq "publish-image-to-harbor.sh registry.example.invalid/codewire/base@sha256:$(printf '%064d' 2) registry.example.invalid/codewire/base $SHA v1.2.3" "$log" ||
+  fail 'an aliased base was not published under the release source'
+grep -Fxq 'dispatch-deploy-prod.sh v1.2.3' "$log" || fail 'an aliased pair was not delivered'
 # A built pair: each image joined from exactly its two platform digests.
 reset
 finish BUILD_SUPPORT_PAIR=true BASE_AMD64_DIGEST="$D1" BASE_ARM64_DIGEST="$D2" \
   WORKSPACE_AMD64_DIGEST="$D3" WORKSPACE_ARM64_DIGEST="$D4" || fail "a built pair did not finish: $(cat "$TMP/finish.out")"
 grep -Fxq "join base pair=true amd64=$D1 arm64=$D2" "$TMP/joins.log" || fail 'the base joined other digests'
 grep -Fxq "join workspace pair=true amd64=$D3 arm64=$D4" "$TMP/joins.log" || fail 'the workspace joined other digests'
+# A pair the release builds is its own: it never takes another commit's
+# provenance, and a malformed commit is refused before anything runs.
+for bad in "BUILD_SUPPORT_PAIR=true SUPPORT_PROVENANCE_REVISION=$ORIGIN BASE_AMD64_DIGEST=$D1 BASE_ARM64_DIGEST=$D2 WORKSPACE_AMD64_DIGEST=$D3 WORKSPACE_ARM64_DIGEST=$D4" \
+    'BUILD_SUPPORT_PAIR=false SUPPORT_PROVENANCE_REVISION=3333'; do
+  reset
+  read -r -a bad_env <<<"$bad"
+  if finish "${bad_env[@]}"; then fail "the finish accepted: $bad"; fi
+  [ ! -e "$log" ] || fail "the finish ran something for: $bad"
+done
+grep -Fq 'SUPPORT_PROVENANCE_REVISION must be a full lowercase commit ID' "$TMP/finish.out" ||
+  fail "a malformed provenance commit was not named: $(cat "$TMP/finish.out")"
 # A GHCR mirror failure warns and still delivers; Harbor gates.
 reset
 FIXTURE_GHCR=fail finish BUILD_SUPPORT_PAIR=false || fail "a GHCR failure stopped the release: $(cat "$TMP/finish.out")"

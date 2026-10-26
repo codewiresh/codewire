@@ -2037,6 +2037,68 @@ for attestation_case in missing-arm64 extra-platform invalid-arm64-sbom; do
     fail "support index $attestation_case rejection was not attributable"
 done
 
+# A main commit whose support inputs did not change gets the pair built for an
+# earlier commit as an alias (#3504), so its indexes' provenance names that
+# commit. A release reuses such an index only when it names the building
+# commit (CODEWIRE_PROVENANCE_REVISION, proved by release-support-pair-state.sh);
+# without it the index is refused, as deploy-prod run 24911 refused v0.4.3's.
+remove_source_manifest "$base_source_tag"
+(
+  cd "$source_fixture"
+  "$BUILDER" base images/base/Dockerfile images/base
+) >"$work/alias-base.out" 2>&1 || fail 'the base index for the alias cases did not publish'
+alias_origin_sha=3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a
+alias_reuse() {
+  : >"$GITHUB_OUTPUT"
+  (
+    cd "$source_fixture"
+    env FAKE_SOURCE_SHA="$alias_origin_sha" REQUIRE_EXISTING_SOURCE_IMAGE=1 \
+      CODEWIRE_RELEASE_TAG='v0.3.998' CODEWIRE_SOURCE_SHA="$source_sha" "$@" \
+      "$BUILDER" base images/base/Dockerfile images/base
+  ) >"$work/alias-reuse.out" 2>&1
+}
+build_calls_before="$(build_invocation_count)"
+if alias_reuse; then
+  fail 'a reused support index whose provenance names another commit was accepted unnamed'
+fi
+grep -qF 'Protected image provenance is invalid' "$work/alias-reuse.out" ||
+  fail "the unnamed aliased provenance was not refused attributably: $(cat "$work/alias-reuse.out")"
+alias_reuse CODEWIRE_PROVENANCE_REVISION="$alias_origin_sha" ||
+  fail "a reused support index aliased from its named building commit was refused: $(cat "$work/alias-reuse.out")"
+grep -qF "Reusing immutable source image $base_source_tag@" "$work/alias-reuse.out" ||
+  fail 'the aliased support index was not reused as it is'
+grep -qxF "source_sha=$source_sha" "$GITHUB_OUTPUT" ||
+  fail 'the aliased support index was not reported under the release source'
+grep -qF "registry.example.invalid/codewire/base:v0.3.998" "$FAKE_MANIFESTS" ||
+  fail 'the aliased support index did not get its release tag'
+# The named commit is exact: an index built from any other commit is refused.
+if alias_reuse CODEWIRE_PROVENANCE_REVISION="$(printf '%040d' 9)"; then
+  fail 'a reused support index was accepted against a commit its provenance does not name'
+fi
+grep -qF 'Protected image provenance is invalid' "$work/alias-reuse.out" ||
+  fail 'a wrongly named building commit was not refused attributably'
+[[ "$(build_invocation_count)" -eq "$build_calls_before" ]] ||
+  fail 'reusing an aliased support index built an image'
+# Only an existing support index may name another commit: never a build, a
+# runtime image, or a malformed commit.
+for refused in 'support-build' 'runtime' 'malformed'; do
+  case "$refused" in
+    support-build) refused_args=(base images/base/Dockerfile images/base) refused_env=(REQUIRE_EXISTING_SOURCE_IMAGE=0 "CODEWIRE_PROVENANCE_REVISION=$alias_origin_sha") expected='never a build' ;;
+    runtime) refused_args=(daemon deployments/docker/daemon.Dockerfile .) refused_env=(REQUIRE_EXISTING_SOURCE_IMAGE=1 "CODEWIRE_PROVENANCE_REVISION=$alias_origin_sha") expected='Only a reused support image' ;;
+    malformed) refused_args=(base images/base/Dockerfile images/base) refused_env=(REQUIRE_EXISTING_SOURCE_IMAGE=1 CODEWIRE_PROVENANCE_REVISION=3a3a) expected='must be a full lowercase commit ID' ;;
+  esac
+  if (
+    cd "$source_fixture"
+    env "${refused_env[@]}" CODEWIRE_SOURCE_SHA="$source_sha" "$BUILDER" "${refused_args[@]}"
+  ) >"$work/alias-refused.out" 2>&1; then
+    fail "another commit's provenance was accepted for a $refused"
+  fi
+  grep -qF "$expected" "$work/alias-refused.out" ||
+    fail "the $refused refusal was not attributable: $(cat "$work/alias-refused.out")"
+done
+[[ "$(build_invocation_count)" -eq "$build_calls_before" ]] ||
+  fail 'a refused provenance commit reached a build'
+
 # A historical release recipe compiled its arm64 cw under emulation and cannot
 # build arm64. Its recovered pair keeps the single native platform it shipped with.
 historical_source="$work/historical-source"

@@ -286,6 +286,10 @@ jobs:
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CODEWIRE_SOURCE_DIR: .release-source
           BUILD_SUPPORT_PAIR: 'false'
+          # The commit the reused pair was built from: the source, or the
+          # earlier commit main aliased it from (#3504), which the pair step
+          # proved has the same base and workspace inputs.
+          SUPPORT_PROVENANCE_REVISION: ${{ steps.pair.outputs.provenance_revision }}
         run: scripts/ci/release/finish-prod-release.sh
 
   build-support-amd64:
