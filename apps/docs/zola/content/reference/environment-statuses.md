@@ -1,7 +1,8 @@
 ---
 title: Environment statuses
 description: The states cw info and the dashboard report for an environment.
-weight: 1
+updated: 2026-10-26
+weight: 3
 ---
 
 `cw info ENV` and `cw ls` show the state; the dashboard shows the
@@ -22,7 +23,7 @@ same word in lowercase, with `destroying` as "deleting…" and `destroyed` as
 | `resizing` | Resources are being changed. | Wait; the environment returns to its previous state. |
 | `archiving`, `archived`, `restoring` | Long-term storage states. | `cw start ENV` restores an archived environment. |
 | `destroying`, `destroyed` | Deletion in progress or done. | Protected environments refuse deletion. |
-| `error` | The last operation failed; `cw info` shows the error code. | `cw daemon status ENV` and `repair`, or stop and start; for a local VM see [Troubleshoot local VMs](@/guides/troubleshoot-local-vms.md). |
+| `error` | The last operation failed; `cw info` shows the error code. | `cw daemon status ENV` and `repair`, or stop and start; for a local VM see [Troubleshooting](@/reference/troubleshooting.md). |
 | `unknown` | The state could not be read. | Retry; `cw ls` marks an environment whose sessions it cannot read as unavailable. |
 
 `cw ls --state STATE` filters by state, and `cw prune` removes

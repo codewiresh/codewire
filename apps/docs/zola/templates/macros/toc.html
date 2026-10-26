@@ -1,17 +1,43 @@
+{% macro bend(from, to) %}
+  <li class="docs-toc-bend" aria-hidden="true">
+    <svg viewBox="0 0 1 1" preserveAspectRatio="none" fill="none" overflow="visible"><path d="M {{ from }} 0 C {{ from }} 0.5, {{ to }} 0.5, {{ to }} 1" vector-effect="non-scaling-stroke"/></svg>
+  </li>
+{% endmacro bend %}
+
+{# One flat list, so the guide line can run through every link; a bend joins
+   the line where the depth changes. #}
 {% macro render(items) %}
   {% if items | length > 0 %}
     <h2>On this page</h2>
-    <ol>
+    <ol data-docs-toc>
+      <li><a href="#docs-content">Overview</a></li>
+      {% set_global nested = false %}
       {% for item in items %}
-        <li>
-          <a href="#{{ item.id }}">{{ item.title }}</a>
-          {% if item.children | length > 0 %}
-            <ol>
-              {% for child in item.children %}<li><a href="#{{ child.id }}">{{ child.title }}</a></li>{% endfor %}
-            </ol>
-          {% endif %}
-        </li>
+        {% if nested %}{{ self::bend(from=1, to=0) }}{% endif %}
+        <li><a href="#{{ item.id }}">{{ item.title }}</a></li>
+        {% set_global nested = item.children | length > 0 %}
+        {% if nested %}
+          {{ self::bend(from=0, to=1) }}
+          {% for child in item.children %}<li class="docs-toc-nested"><a href="#{{ child.id }}">{{ child.title }}</a></li>{% endfor %}
+        {% endif %}
       {% endfor %}
     </ol>
   {% endif %}
 {% endmacro render %}
+
+{# Below the wide layout, the same list as a select that sticks under the top
+   bar and follows the section in view. #}
+{% macro jump(items) %}
+  {% if items | length > 0 %}
+    <nav class="docs-toc-jump" aria-label="On this page">
+      <select aria-label="Jump to section" data-docs-toc-jump>
+        <option value="docs-content">Overview</option>
+        {% for item in items %}
+          <option value="{{ item.id }}">{{ item.title }}</option>
+          {% for child in item.children %}<option value="{{ child.id }}">&nbsp;&nbsp;&nbsp;{{ child.title }}</option>{% endfor %}
+        {% endfor %}
+      </select>
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+    </nav>
+  {% endif %}
+{% endmacro jump %}

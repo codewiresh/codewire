@@ -14,7 +14,7 @@ from xml.etree import ElementTree
 
 
 CANONICAL_ORIGIN = "https://codewire.sh"
-EXPECTED_ROUTE_COUNT = 39
+EXPECTED_ROUTE_COUNT = 62
 
 
 def fail(message: str) -> None:
@@ -329,6 +329,30 @@ def verify_supply_chain(site_root: Path) -> None:
             fail(f"prohibited external dependency or dynamic runner in {path.relative_to(site_root)}")
 
 
+def verify_updated_dates(routes: list[dict[str, str]], site_root: Path) -> None:
+    """Every page names when it last changed, and the date is never older than its last commit."""
+    import subprocess
+    from datetime import date
+
+    for route in routes:
+        source = route["source"]
+        if source.endswith("_index.md"):
+            continue
+        updated = str(front_matter(site_root / source).get("updated", ""))
+        try:
+            stated = date.fromisoformat(updated)
+        except ValueError:
+            fail(f"{source} needs `updated: YYYY-MM-DD` in its front matter")
+        # Outside a Git checkout (an image build) there is no history to compare with.
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%cs", "--", source],
+            cwd=site_root, capture_output=True, text=True, check=False,
+        )
+        committed = result.stdout.strip()
+        if result.returncode == 0 and committed and stated < date.fromisoformat(committed):
+            fail(f"{source} says updated {updated} but last changed {committed}; update the date")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--site-root", type=Path, required=True)
@@ -341,6 +365,7 @@ def main() -> int:
     verify_markdown(routes, site_root, output_root)
     verify_search(routes, site_root, output_root)
     verify_sitemap(routes, output_root)
+    verify_updated_dates(routes, site_root)
     verify_supply_chain(site_root)
 
     digest = hashlib.sha256((site_root / "routes.toml").read_bytes()).hexdigest()

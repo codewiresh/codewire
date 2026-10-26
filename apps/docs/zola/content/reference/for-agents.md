@@ -1,7 +1,8 @@
 ---
 title: Documentation for agents
 description: Every page as Markdown, an index in llms.txt and the whole documentation in llms-full.txt, for agents and other tools that read text.
-weight: 5
+updated: 2026-10-26
+weight: 8
 ---
 
 The documentation is published as Markdown as well as HTML, so an agent can
@@ -11,7 +12,7 @@ read it without parsing a web page.
 | --- | --- |
 | [/docs/llms-full.txt](/docs/llms-full.txt) | Every page, in sidebar order, in one Markdown file |
 | [/docs/llms.txt](/docs/llms.txt) | An index: every page's title, Markdown URL and one-line description, grouped by section |
-| A page's URL plus `.md` | That page as Markdown, for example [/docs/guides/previews.md](/docs/guides/previews.md); this overview is [/docs/index.md](/docs/index.md) |
+| A page's URL plus `.md` | That page as Markdown, for example [/docs/access/ports.md](/docs/access/ports.md); this overview is [/docs/index.md](/docs/index.md) |
 
 `/llms.txt` and `/llms-full.txt` at the root of `codewire.sh` serve the same
 two files. Markdown is sent as `text/markdown` and the two text files as
@@ -43,5 +44,5 @@ cw help create             # one command, with every flag
 cw ls --output json        # machine output that never prompts
 ```
 
-See [Conventions](@/cli/_index.md#conventions) for JSON output and how secret
+See [Conventions](@/reference/cli/conventions.md) for JSON output and how secret
 values are read.

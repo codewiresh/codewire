@@ -1,0 +1,23 @@
+{% macro render(title, description, ancestors, current_path, kind, updated) %}
+  {% set docs_root = config.base_url | trim_end_matches(pat="/") %}
+  {% set trimmed = current_path | trim_end_matches(pat="/") %}{% if current_path == "/" %}{% set_global markdown = "/docs/index.md" %}{% else %}{% set_global markdown = "/docs" ~ trimmed ~ ".md" %}{% endif %}
+  <header class="docs-document-header">
+    <nav class="docs-breadcrumbs" aria-label="Breadcrumb">
+      <ol>
+        <li><a href="/docs">Home</a></li>
+        {% for ancestor in ancestors %}{% if ancestor != "_index.md" %}{% set parent = get_section(path=ancestor, metadata_only=true) %}
+        <li><a href="{{ parent.permalink | replace(from=docs_root, to="/docs") | trim_end_matches(pat="/") | safe }}">{{ parent.title }}</a></li>
+        {% endif %}{% endfor %}
+        {% if current_path != "/" %}<li><span aria-current="page">{{ title }}</span></li>{% endif %}
+      </ol>
+    </nav>
+    <h1>{{ title }}</h1>
+    {% if description %}<p class="docs-lede">{{ description }}</p>{% endif %}
+    <ul class="docs-page-actions">
+      {% if updated %}<li><span class="docs-page-meta"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>Last updated <time datetime="{{ updated }}">{{ updated | date(format="%b %-d, %Y") }}</time></span></li>{% endif %}
+      <li><button type="button" class="docs-page-action" hidden data-docs-copy-markdown="{{ markdown | safe }}"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg><span data-docs-copy-label>Copy as Markdown</span></button></li>
+      <li><a class="docs-page-action" href="{{ markdown | safe }}"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 15V9l2.5 3L12 9v6M17 9v6M15 13l2 2 2-2"/></svg>View as Markdown</a></li>
+      <li><a class="docs-page-action" href="/docs/reference/for-agents"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="5" y="8" width="14" height="11" rx="2"/><path d="M12 4v4M9 13h.01M15 13h.01M9 16h6"/></svg>Agent setup</a></li>
+    </ul>
+  </header>
+{% endmacro render %}

@@ -44,33 +44,17 @@ brew install protobuf                    # macOS
 
 ## Quick start
 
-A local VM needs no account. On Linux it runs Cloud Hypervisor on KVM; on an
-Apple Silicon Mac it uses Virtualization.framework.
+A local VM needs no account:
 
 ```sh
-cw setup --local                       # install the pinned VM runtime
-cw create --local --name my-app --path .
-cw shell                               # creation selected my-app
-cw run claude                          # Claude Code in my-app; Ctrl-B, then D detaches
-cw run -- cargo test                   # a durable session; cw ls, cw attach
-cw stop --local my-app
+cw setup --local                            # install the pinned VM runtime
+cw create --local --name my-app --path .    # a VM with this folder mounted live
+cw run claude --in my-app                   # Claude Code in the VM; Ctrl-B, then D detaches
 ```
 
-`--path .` mounts the folder live in the VM; dependency and build folders
-(`node_modules`, `target`, `.venv` by default) stay on the VM disk.
-
-A hosted sandbox:
-
-```sh
-cw setup                               # sign in, pick an organization
-cw create --name my-app --image workspace
-cw shell my-app
-cw run --in my-app --name lead --agent codex --detach --prompt 'Review this repo'
-cw inbox my-app --session lead
-```
-
-`cw --help` groups every command; `cw init` writes a `codewire.yaml` that
-either placement can use.
+The [Quickstart](https://codewire.sh/docs/quickstart) continues from there
+with the output of every step: sessions, a dev server on a published port,
+cleanup, and the same on the hosted platform.
 
 ## How it works
 

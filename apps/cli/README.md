@@ -4,6 +4,10 @@ The Rust `cw` CLI manages Codewire environments and their durable terminal
 and agent sessions. Choose an environment once, then launch and control its
 sessions with the same commands.
 
+This file is for building and developing `cw`. To use it, start with the
+[Quickstart](https://codewire.sh/docs/quickstart) and the
+[CLI reference](https://codewire.sh/docs/cli).
+
 ## Build
 
 ```bash
@@ -245,5 +249,3 @@ Mesh service installation.
 `cw member` pins an enrolled trusted Linux host, and `cw --member NAME`
 routes session commands to it; see
 [docs/dev/CLI-ORCHESTRATION.md](../../docs/dev/CLI-ORCHESTRATION.md).
-
-See [docs/quickstart.md](docs/quickstart.md) for the concise user flow.

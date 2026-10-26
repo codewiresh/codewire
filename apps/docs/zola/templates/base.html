@@ -19,6 +19,7 @@
     <link rel="stylesheet" href="{{ get_url(path="giallo.css", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}">
     <link rel="stylesheet" href="{{ get_url(path="docs.css", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}">
     <script src="{{ get_url(path="search.js", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" defer></script>
+    <script src="{{ get_url(path="docs.js", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" defer></script>
   </head>
   <body class="cw-body docs-body">
     <a class="docs-skip-link" href="#docs-content">Skip to content</a>
@@ -31,94 +32,144 @@
           <img src="{{ get_url(path="codewire-wordmark.svg", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" width="139" height="25" alt="Codewire">
           <span class="docs-brand-suffix">Docs</span>
         </a>
+        <nav class="docs-topnav" aria-label="Sections">
+          <ul>
+          <li><a href="/docs/quickstart"{% if current_path is starting_with("/quickstart") %} aria-current="true"{% endif %}>Quickstart</a></li>
+          <li><a href="/docs/use-cases"{% if current_path is starting_with("/use-cases/") %} aria-current="true"{% endif %}>Use cases</a></li>
+          <li><a href="/docs/environments"{% if current_path is starting_with("/environments/") %} aria-current="true"{% endif %}>Environments</a></li>
+          <li><a href="/docs/agents"{% if current_path is starting_with("/agents/") %} aria-current="true"{% endif %}>Agents</a></li>
+          <li><a href="/docs/reference/cli"{% if current_path is starting_with("/reference/cli/") %} aria-current="true"{% endif %}>CLI</a></li>
+          <li><a href="/docs/reference"{% if current_path is starting_with("/reference/") and not current_path is starting_with("/reference/cli/") %} aria-current="true"{% endif %}>Reference</a></li>
+          </ul>
+        </nav>
         <div class="docs-search" data-docs-search>
           <label class="docs-search-label" for="docs-search-input">Search documentation</label>
           <div class="docs-search-field">
             <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg>
-            <input id="docs-search-input" type="search" placeholder="Search docs" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-controls="docs-search-results" aria-expanded="false" data-docs-search-input>
-            <kbd aria-hidden="true">/</kbd>
+            <input id="docs-search-input" type="search" placeholder="Search" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-controls="docs-search-results" aria-expanded="false" data-docs-search-input>
+            <kbd aria-hidden="true">Ctrl K</kbd>
           </div>
           <div class="docs-search-panel" hidden data-docs-search-panel>
             <p class="docs-search-status" aria-live="polite" data-docs-search-status></p>
             <ul id="docs-search-results" class="docs-search-results" role="listbox" data-docs-search-results></ul>
           </div>
         </div>
-        <a class="cw-button cw-button--outline cw-button--small docs-dashboard-link" href="/dashboard">Dashboard</a>
+        <div class="docs-topbar-actions">
+          <a class="docs-icon-link" href="https://github.com/codewiresh/codewire" aria-label="Codewire on GitHub"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7A5.4 5.4 0 0 0 19.4 4 5 5 0 0 0 19.3.5S18.2.1 15 1.9a13.4 13.4 0 0 0-7 0C4.8.1 3.7.5 3.7.5A5 5 0 0 0 3.6 4a5.4 5.4 0 0 0-1.4 3.7c0 5.3 3.5 6.5 6.8 6.9A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4-2"/></svg></a>
+          <a class="docs-dashboard-link" href="/dashboard">Dashboard</a>
+        </div>
       </header>
 
       <div class="docs-shell">
         <aside id="docs-sidebar" class="docs-sidebar" aria-label="Documentation navigation">
-          <nav class="docs-nav">
-            <section>
-              <h2>Overview</h2>
-              {{ nav::item(path="/docs", label="What is Codewire?", current=current_path) }}
-            </section>
-            <section>
-              {{ nav::heading(path="/docs/getting-started", label="Get started", current=current_path) }}
-              {{ nav::item(path="/docs/getting-started/install", label="Install the CLI", current=current_path) }}
-              {{ nav::item(path="/docs/getting-started/local-vm", label="Your first local VM", current=current_path) }}
-              {{ nav::item(path="/docs/getting-started/hosted-sandbox", label="Your first hosted sandbox", current=current_path) }}
-              {{ nav::item(path="/docs/getting-started/account", label="Account and organization", current=current_path) }}
-            </section>
-            <section>
-              {{ nav::heading(path="/docs/concepts", label="Concepts", current=current_path) }}
-              {{ nav::item(path="/docs/concepts/environments", label="Environments", current=current_path) }}
-              {{ nav::item(path="/docs/concepts/placements", label="Placements", current=current_path) }}
-              {{ nav::item(path="/docs/concepts/sessions-and-agents", label="Sessions and agents", current=current_path) }}
-              {{ nav::item(path="/docs/concepts/secrets-and-credentials", label="Secrets and credentials", current=current_path) }}
-              {{ nav::item(path="/docs/concepts/networking", label="Networking and previews", current=current_path) }}
-              {{ nav::item(path="/docs/concepts/organizations", label="Organizations", current=current_path) }}
-            </section>
-            <section>
-              {{ nav::heading(path="/docs/guides", label="Guides", current=current_path) }}
-              <section>
-                <h3>Agents</h3>
-                {{ nav::item(path="/docs/guides/run-agents", label="Orchestrate agents", current=current_path) }}
-              </section>
-              <section>
-                <h3>Environments</h3>
-                {{ nav::item(path="/docs/guides/project-file", label="The project file", current=current_path) }}
-              </section>
-              <section>
-                <h3>Access and networking</h3>
-                {{ nav::item(path="/docs/guides/ssh-and-vscode", label="SSH, VS Code and files", current=current_path) }}
-                {{ nav::item(path="/docs/guides/previews", label="Ports and previews", current=current_path) }}
-              </section>
-              <section>
-                <h3>Secrets and credentials</h3>
-                {{ nav::item(path="/docs/guides/credentials", label="Provider credentials", current=current_path) }}
-                {{ nav::item(path="/docs/guides/private-repositories", label="Private repositories", current=current_path) }}
-                {{ nav::item(path="/docs/guides/application-secrets", label="Application secrets", current=current_path) }}
-              </section>
-              <section>
-                <h3>Teams</h3>
-                {{ nav::item(path="/docs/guides/members", label="Members and sharing", current=current_path) }}
-              </section>
-              <section>
-                <h3>Operate</h3>
-                {{ nav::item(path="/docs/guides/update", label="Update cw", current=current_path) }}
-                {{ nav::item(path="/docs/guides/troubleshoot-local-vms", label="Troubleshoot local VMs", current=current_path) }}
-              </section>
-            </section>
-            <section>
-              {{ nav::heading(path="/docs/cli", label="CLI reference", current=current_path) }}
-              {{ nav::item(path="/docs/cli/environments", label="Environments", current=current_path) }}
-              {{ nav::item(path="/docs/cli/sessions", label="Sessions", current=current_path) }}
-              {{ nav::item(path="/docs/cli/agents", label="Agents", current=current_path) }}
-              {{ nav::item(path="/docs/cli/secrets-and-credentials", label="Secrets and credentials", current=current_path) }}
-              {{ nav::item(path="/docs/cli/networking", label="Networking", current=current_path) }}
-              {{ nav::item(path="/docs/cli/account", label="Account and organizations", current=current_path) }}
-              {{ nav::item(path="/docs/cli/cw", label="cw itself", current=current_path) }}
-              {{ nav::item(path="/docs/cli/configuration", label="Configuration", current=current_path) }}
-            </section>
-            <section>
-              {{ nav::heading(path="/docs/reference", label="Reference", current=current_path) }}
-              {{ nav::item(path="/docs/reference/environment-statuses", label="Environment statuses", current=current_path) }}
-              {{ nav::item(path="/docs/reference/subscription-plans", label="Plans and billing", current=current_path) }}
-              {{ nav::item(path="/docs/reference/security", label="Security model", current=current_path) }}
-              {{ nav::item(path="/docs/reference/faq", label="FAQ", current=current_path) }}
-              {{ nav::item(path="/docs/reference/for-agents", label="Documentation for agents", current=current_path) }}
-            </section>
+          <div class="docs-sidebar-head">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>
+            <a href="{{ browser_docs_root | safe }}">Codewire documentation</a>
+          </div>
+          <div class="docs-filter">
+            <label class="docs-search-label" for="docs-filter-input">Filter the navigation</label>
+            <input id="docs-filter-input" type="search" placeholder="Filter sidebar" autocomplete="off" spellcheck="false" data-docs-filter>
+          </div>
+          {% set trimmed_path = current_path | trim_end_matches(pat="/") %}{% set here = "/docs" ~ trimmed_path %}
+          <nav class="docs-nav" aria-label="Documentation">
+            {{ nav::item(path="/docs", label="What is Codewire?", current=current_path) }}
+            {{ nav::item(path="/docs/quickstart", label="Quickstart", current=current_path) }}
+            {{ nav::item(path="/docs/install", label="Install and sign in", current=current_path) }}
+            <details class="docs-nav-group" open data-docs-nav-group>
+              <summary>{{ nav::item(path="/docs/use-cases", label="Use cases", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
+              <div class="docs-nav-group-items">
+                {{ nav::item(path="/docs/use-cases/development-sandboxes", label="Development sandboxes", current=current_path) }}
+                {{ nav::item(path="/docs/use-cases/preview-environments", label="Preview environments", current=current_path) }}
+                {{ nav::item(path="/docs/use-cases/coding-agents", label="Coding agents", current=current_path) }}
+                {{ nav::item(path="/docs/use-cases/personal-assistants", label="Personal assistants", current=current_path) }}
+                {{ nav::item(path="/docs/use-cases/sandboxes", label="Sandboxes", current=current_path) }}
+                {{ nav::item(path="/docs/use-cases/agentic-collaboration", label="Agentic collaboration", current=current_path) }}
+              </div>
+            </details>
+            <details class="docs-nav-group" open data-docs-nav-group>
+              <summary>{{ nav::item(path="/docs/environments", label="Environments", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
+              <div class="docs-nav-group-items">
+                {{ nav::item(path="/docs/environments/codewire-yaml", label="codewire.yaml", current=current_path) }}
+                {{ nav::item(path="/docs/environments/resources", label="Resources and limits", current=current_path) }}
+                {{ nav::item(path="/docs/environments/workspace-image", label="The workspace image", current=current_path) }}
+                {{ nav::item(path="/docs/environments/presets", label="Images and presets", current=current_path) }}
+                {{ nav::item(path="/docs/environments/lifecycle", label="Lifecycle", current=current_path) }}
+                {{ nav::item(path="/docs/environments/docker", label="Docker inside", current=current_path) }}
+                {{ nav::item(path="/docs/environments/isolation-evidence", label="Isolation evidence", current=current_path) }}
+              </div>
+            </details>
+            <details class="docs-nav-group" open data-docs-nav-group>
+              <summary>{{ nav::item(path="/docs/access", label="Access", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
+              <div class="docs-nav-group-items">
+                {{ nav::item(path="/docs/access/sessions", label="Terminal sessions", current=current_path) }}
+                {{ nav::item(path="/docs/access/ssh-and-vscode", label="SSH and VS Code", current=current_path) }}
+                {{ nav::item(path="/docs/access/git", label="Git repositories", current=current_path) }}
+                {{ nav::item(path="/docs/access/files", label="Files", current=current_path) }}
+                {{ nav::item(path="/docs/access/ports", label="Ports and preview URLs", current=current_path) }}
+              </div>
+            </details>
+            <details class="docs-nav-group" open data-docs-nav-group>
+              <summary>{{ nav::item(path="/docs/agents", label="Agents", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
+              <div class="docs-nav-group-items">
+                {{ nav::item(path="/docs/agents/supported", label="Supported agents", current=current_path) }}
+                {{ nav::item(path="/docs/agents/run", label="Run and orchestrate", current=current_path) }}
+                {{ nav::item(path="/docs/agents/messages", label="Messages and inbox", current=current_path) }}
+                {{ nav::item(path="/docs/agents/skills", label="Skills", current=current_path) }}
+              </div>
+            </details>
+            <details class="docs-nav-group" open data-docs-nav-group>
+              <summary>{{ nav::item(path="/docs/secrets", label="Secrets and credentials", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
+              <div class="docs-nav-group-items">
+                {{ nav::item(path="/docs/secrets/credentials", label="Credentials", current=current_path) }}
+                {{ nav::item(path="/docs/secrets/application-secrets", label="Application secrets", current=current_path) }}
+              </div>
+            </details>
+            <details class="docs-nav-group" open data-docs-nav-group>
+              <summary>{{ nav::item(path="/docs/networking", label="Networking", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
+              <div class="docs-nav-group-items">
+                {{ nav::item(path="/docs/networking/mesh", label="Mesh networks", current=current_path) }}
+                {{ nav::item(path="/docs/networking/egress", label="Egress policies", current=current_path) }}
+                {{ nav::item(path="/docs/networking/environment-to-environment", label="Environment to environment", current=current_path) }}
+                {{ nav::item(path="/docs/networking/your-own-machines", label="Your own machines", current=current_path) }}
+              </div>
+            </details>
+            <details class="docs-nav-group" open data-docs-nav-group>
+              <summary>{{ nav::item(path="/docs/organizations", label="Organizations", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
+              <div class="docs-nav-group-items">
+                {{ nav::item(path="/docs/organizations/account", label="Account and organization", current=current_path) }}
+                {{ nav::item(path="/docs/organizations/members", label="Members and sharing", current=current_path) }}
+                {{ nav::item(path="/docs/organizations/api-keys", label="API keys", current=current_path) }}
+                {{ nav::item(path="/docs/organizations/usage", label="Usage and costs", current=current_path) }}
+              </div>
+            </details>
+            <details class="docs-nav-group" open data-docs-nav-group>
+              <summary>{{ nav::item(path="/docs/reference", label="Reference", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
+              <div class="docs-nav-group-items">
+                <details class="docs-nav-group docs-nav-subgroup"{% if here in ["/docs/reference/cli", "/docs/reference/cli/conventions", "/docs/reference/cli/environments", "/docs/reference/cli/access", "/docs/reference/cli/agents", "/docs/reference/cli/secrets-and-credentials", "/docs/reference/cli/networking", "/docs/reference/cli/organizations", "/docs/reference/cli/cw", "/docs/reference/cli/configuration", "/docs/reference/cli/environment-variables"] %} open{% endif %} data-docs-nav-group>
+                  <summary>{{ nav::item(path="/docs/reference/cli", label="CLI", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
+                  <div class="docs-nav-group-items">
+                    {{ nav::item(path="/docs/reference/cli/conventions", label="Conventions", current=current_path) }}
+                    {{ nav::item(path="/docs/reference/cli/environments", label="Environments", current=current_path) }}
+                    {{ nav::item(path="/docs/reference/cli/access", label="Access", current=current_path) }}
+                    {{ nav::item(path="/docs/reference/cli/agents", label="Agents", current=current_path) }}
+                    {{ nav::item(path="/docs/reference/cli/secrets-and-credentials", label="Secrets and credentials", current=current_path) }}
+                    {{ nav::item(path="/docs/reference/cli/networking", label="Networking", current=current_path) }}
+                    {{ nav::item(path="/docs/reference/cli/organizations", label="Organizations", current=current_path) }}
+                    {{ nav::item(path="/docs/reference/cli/cw", label="cw itself", current=current_path) }}
+                    {{ nav::item(path="/docs/reference/cli/configuration", label="Configuration", current=current_path) }}
+                    {{ nav::item(path="/docs/reference/cli/environment-variables", label="Environment variables", current=current_path) }}
+                  </div>
+                </details>
+                {{ nav::item(path="/docs/reference/codewire-yaml", label="codewire.yaml keys", current=current_path) }}
+                {{ nav::item(path="/docs/reference/environment-statuses", label="Environment statuses", current=current_path) }}
+                {{ nav::item(path="/docs/reference/security", label="Security model", current=current_path) }}
+                {{ nav::item(path="/docs/reference/troubleshooting", label="Troubleshooting", current=current_path) }}
+                {{ nav::item(path="/docs/reference/troubleshooting-hosted", label="Troubleshooting hosted sandboxes", current=current_path) }}
+                {{ nav::item(path="/docs/reference/faq", label="FAQ", current=current_path) }}
+                {{ nav::item(path="/docs/reference/for-agents", label="Documentation for agents", current=current_path) }}
+                {{ nav::item(path="/docs/reference/errors", label="Errors", current=current_path) }}
+              </div>
+            </details>
           </nav>
         </aside>
 

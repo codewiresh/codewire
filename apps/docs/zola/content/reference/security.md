@@ -1,7 +1,8 @@
 ---
 title: Security model
 description: What isolates an environment, where secrets and credentials live, and what each placement does not protect.
-weight: 3
+updated: 2026-10-26
+weight: 4
 aliases: ["/security"]
 ---
 
@@ -50,12 +51,12 @@ through the platform to the daemon.
 Preview URLs forward HTTPS requests to one application port. A private preview
 requires the viewer's Codewire sign-in; Codewire cookies and headers never
 reach the application, and the proxy strips the credential it authenticated
-with. See [Networking and previews](@/concepts/networking.md).
+with. See [Networking and previews](@/networking/_index.md).
 
 ## Application secrets and provider credentials
 
 These are two different things with two different boundaries. See
-[Secrets and credentials](@/concepts/secrets-and-credentials.md).
+[Secrets and credentials](@/secrets/_index.md).
 
 **Application secrets** (for example `DATABASE_URL`) are delivered to the
 environment's processes as an environment projection under their original
