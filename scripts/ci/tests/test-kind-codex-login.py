@@ -144,6 +144,28 @@ for line in sys.stdin:
 '''
 
 
+class DriverClock:
+    """The driver's clock, with the synthetic daemon's checks in its waits.
+
+    The driver relies on every window it waits out (POLL, FULL_CHECK) holding
+    a daemon check. A timer thread holds that only while the machine is fast:
+    under load its check lands after the window ends, and the thread outlives
+    its test (main run 23394). So each queued check runs at the driver's next
+    sleep, inside the window that sleep waits out.
+    """
+
+    def __init__(self):
+        self.checks = []
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def sleep(self, seconds):
+        if self.checks:
+            self.checks.pop(0)()
+        time.sleep(seconds)
+
+
 class Workspace:
     """A synthetic Codex home and daemon state directory in place of the Pod's."""
 
@@ -159,6 +181,7 @@ class Workspace:
         self.auth = self.home / "auth.json"
         self.config = self.home / "config.toml"
         self.output = io.StringIO()
+        self.clock = DriverClock()
         for fixture in (
             patch.object(driver, "CODEX_HOME", self.home),
             patch.object(driver, "AUTH", self.auth),
@@ -169,9 +192,8 @@ class Workspace:
             patch.object(driver, "POLL", 0.02),
             patch.object(driver, "FULL_CHECK", 0.2),
             patch.object(driver, "NEXT_CHECK", 1.0),
-            # Generous: on a loaded CI guest the synthetic delivery thread and
-            # the fake Codex can take over a second; no case tests its length.
-            patch.object(driver, "DELIVERY_TIMEOUT", 10.0),
+            patch.object(driver, "DELIVERY_TIMEOUT", 1.0),
+            patch.object(driver, "time", self.clock),
             patch.object(driver, "CONFIG_REMOVAL_TIMEOUT", 0.3),
             patch.dict(os.environ, {"CODEX_HOME": str(self.home),
                                     "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"},
@@ -183,6 +205,12 @@ class Workspace:
             test.addCleanup(fixture.__exit__, None, None, None)
         os.environ.pop("CODEX_CA_CERTIFICATE", None)
         os.environ.pop("SYNTHETIC_CODEX_MODE", None)
+        test.addCleanup(lambda: test.assertEqual(self.clock.checks, [],
+                                                 "the driver never waited for a daemon check"))
+
+    def daemon_check(self, action):
+        """The daemon's next check does action, inside the driver's next wait."""
+        self.clock.checks.append(action)
 
     def deliver(self, contents=None, mode=0o600):
         # As the daemon does: a new file renamed into place. Written in
@@ -197,31 +225,13 @@ class Workspace:
         self.state.mkdir(parents=True, exist_ok=True)
         (self.state / "generation-7.logged-out.cred-synthetic").write_bytes(b"")
 
+    def record_logout(self):
+        """The daemon's side of a logout: once auth.json is gone, record it."""
+        if not self.auth.exists():
+            self.mark_logout()
+
     def events(self):
         return [json.loads(line) for line in self.output.getvalue().splitlines()]
-
-
-def daemon_after_logout(workspace, redeliver_after=None):
-    """The daemon's side of a logout: once auth.json is gone, record the
-    logout; with redeliver_after, wrongly write the login again later."""
-    def run():
-        deadline = time.monotonic() + 120
-        while workspace.auth.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        workspace.mark_logout()
-        if redeliver_after is not None:
-            time.sleep(redeliver_after)
-            workspace.deliver(login(1))
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    return thread
-
-
-def later(delay, action):
-    """Run action after delay, as the daemon would between two checks."""
-    thread = threading.Timer(delay, action)
-    thread.start()
-    return thread
 
 
 class CheckPeriod(unittest.TestCase):
@@ -427,7 +437,7 @@ class Modes(unittest.TestCase):
         self.assertEqual(self.run_mode("deliver")[1][-1]["reason"], "proxy_config_kept")
 
     def test_deliver_waits_for_the_daemon_and_fails_without_a_login(self):
-        later(0.2, lambda: self.workspace.deliver(login(2)))
+        self.workspace.daemon_check(lambda: self.workspace.deliver(login(2)))
         self.assertEqual(self.run_mode("deliver")[0], 0)
         self.workspace.auth.unlink()
         self.workspace.output.truncate(0)
@@ -437,7 +447,7 @@ class Modes(unittest.TestCase):
 
     def test_rotation_requires_a_later_generation_in_the_file(self):
         self.workspace.deliver(login(0))
-        later(0.2, lambda: self.workspace.deliver(login(2)))
+        self.workspace.daemon_check(lambda: self.workspace.deliver(login(2)))
         status, events = self.run_mode("rotation", "0")
         self.assertEqual(status, 0)
         self.assertEqual(events[0]["generation"], 2)
@@ -456,14 +466,13 @@ class Modes(unittest.TestCase):
 
     def test_own_login_fails_when_the_daemon_replaces_it(self):
         self.workspace.deliver(login(1))
-        with patch.object(driver, "FULL_CHECK", 0.5):
-            later(0.2, lambda: self.workspace.deliver(login(1)))
-            status, events = self.run_mode("own-login")
+        self.workspace.daemon_check(lambda: self.workspace.deliver(login(1)))
+        status, events = self.run_mode("own-login")
         self.assertEqual((status, events[-1]["reason"]), (1, "own_login_touched"))
 
     def test_logout_revokes_only_the_placeholder_and_stays_logged_out(self):
         self.workspace.deliver(login(1))
-        daemon_after_logout(self.workspace)
+        self.workspace.daemon_check(self.workspace.record_logout)
         status, events = self.run_mode("logout")
         self.assertEqual(status, 0, events)
         self.assertEqual(events[0]["revoked"], "placeholder")
@@ -483,12 +492,11 @@ class Modes(unittest.TestCase):
                     marker.unlink()
                 self.workspace.deliver(login(1))
                 if action == "undo":
-                    # The wrong redelivery must land after the script has seen
-                    # auth.json gone (which can take a while under load) and
-                    # before its full check ends.
-                    daemon_after_logout(self.workspace, redeliver_after=2.0)
-                with patch.object(driver, "FULL_CHECK", 4.0):
-                    self.assertEqual(self.run_mode("logout")[1][-1]["reason"], reason)
+                    # One check records the logout; the next, inside the
+                    # full check, wrongly writes the login back.
+                    self.workspace.daemon_check(self.workspace.record_logout)
+                    self.workspace.daemon_check(lambda: self.workspace.deliver(login(1)))
+                self.assertEqual(self.run_mode("logout")[1][-1]["reason"], reason)
 
     def test_redelivery_requires_a_fresh_container(self):
         self.workspace.deliver(login(2))
@@ -504,7 +512,7 @@ class Modes(unittest.TestCase):
         def daemon_withdraws():
             self.workspace.auth.unlink()
             self.workspace.config.write_bytes(MANAGED_CONFIG)
-        later(0.2, daemon_withdraws)
+        self.workspace.daemon_check(daemon_withdraws)
         self.assertEqual(self.run_mode("revoked")[0], 0)
         self.workspace.deliver(login(2))
         self.workspace.output.truncate(0)

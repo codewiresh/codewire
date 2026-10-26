@@ -98,6 +98,28 @@ for line in sys.stdin:
 '''
 
 
+class DriverClock:
+    """The driver's clock, with the synthetic daemon's checks in its waits.
+
+    The driver relies on every window it waits out (POLL, FULL_CHECK) holding
+    a daemon check. A timer thread holds that only while the machine is fast:
+    under load its check lands after the window ends, and the thread outlives
+    its test (main run 23394). So each queued check runs at the driver's next
+    sleep, inside the window that sleep waits out.
+    """
+
+    def __init__(self):
+        self.checks = []
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def sleep(self, seconds):
+        if self.checks:
+            self.checks.pop(0)()
+        time.sleep(seconds)
+
+
 class Workspace:
     """A synthetic workspace home in place of the Pod's."""
 
@@ -114,6 +136,7 @@ class Workspace:
         self.workdir = self.root / "workspace"
         self.workdir.mkdir()
         self.output = io.StringIO()
+        self.clock = DriverClock()
         environ = {name: value for name, value in os.environ.items()
                    if not name.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "CODEWIRE_",
                                            "SYNTHETIC_CLAUDE"))}
@@ -130,12 +153,19 @@ class Workspace:
             patch.object(driver, "DELIVERY_TIMEOUT", 1.0),
             patch.object(driver, "RECONNECT_ALLOWANCE", 2.0),
             patch.object(driver, "TURN_TIMEOUT", 120.0),
+            patch.object(driver, "time", self.clock),
             patch.dict(os.environ, environ, clear=True),
             patch.object(driver.signal, "signal"),
             contextlib.redirect_stdout(self.output),
         ):
             fixture.__enter__()
             test.addCleanup(fixture.__exit__, None, None, None)
+        test.addCleanup(lambda: test.assertEqual(self.clock.checks, [],
+                                                 "the driver never waited for a daemon check"))
+
+    def daemon_check(self, action):
+        """The daemon's next check does action, inside the driver's next wait."""
+        self.clock.checks.append(action)
 
     def deliver(self, contents=None, mode=0o600):
         # As the daemon does: a new file renamed into place, the first one
@@ -155,13 +185,6 @@ class Workspace:
     def reset(self):
         self.output.truncate(0)
         self.output.seek(0)
-
-
-def later(delay, action):
-    """Run action after delay, as the daemon would between two checks."""
-    thread = threading.Timer(delay, action)
-    thread.start()
-    return thread
 
 
 class CheckPeriod(unittest.TestCase):
@@ -414,7 +437,7 @@ class Modes(unittest.TestCase):
         return status, events
 
     def test_deliver_runs_a_turn_with_the_delivered_token_and_plants_a_key(self):
-        later(0.2, lambda: self.workspace.deliver(login(3)))
+        self.workspace.daemon_check(lambda: self.workspace.deliver(login(3)))
         status, events = self.run_mode("deliver", "2")
         self.assertEqual(status, 0, events)
         self.assertEqual(events[0]["event"], "delivered")
@@ -509,9 +532,8 @@ class Modes(unittest.TestCase):
 
     def test_own_login_fails_when_the_daemon_replaces_it(self):
         self.workspace.deliver(login(3))
-        with patch.object(driver, "FULL_CHECK", 0.5):
-            later(0.2, lambda: self.workspace.deliver(login(3)))
-            status, events = self.run_mode("own-login")
+        self.workspace.daemon_check(lambda: self.workspace.deliver(login(3)))
+        status, events = self.run_mode("own-login")
         self.assertEqual((status, events[-1]["reason"]), (1, "own_login_touched"))
 
     def test_logout_removes_only_the_login_and_stays_logged_out(self):
@@ -522,15 +544,14 @@ class Modes(unittest.TestCase):
         self.assertNotIn("claudeAiOauth", self.workspace.document())
         self.workspace.reset()
         self.workspace.deliver(login(3))
-        with patch.object(driver, "FULL_CHECK", 0.5):
-            later(0.2, lambda: self.workspace.deliver(login(3)))
-            status, events = self.run_mode("logout")
+        self.workspace.daemon_check(lambda: self.workspace.deliver(login(3)))
+        status, events = self.run_mode("logout")
         self.assertEqual((status, events[-1]["reason"]), (1, "logout_undone"))
 
     def test_redelivery_and_revocation(self):
         self.workspace.deliver(json.dumps({"codewireManaged": 1,
                                            driver.UNRELATED_KEY: driver.UNRELATED_VALUE}).encode())
-        later(0.2, lambda: self.workspace.deliver(
+        self.workspace.daemon_check(lambda: self.workspace.deliver(
             login(6, extra={driver.UNRELATED_KEY: driver.UNRELATED_VALUE})))
         status, events = self.run_mode("redelivered")
         self.assertEqual(status, 0, events)
@@ -547,7 +568,7 @@ class Modes(unittest.TestCase):
         self.assertNotIn("anotherToolsKey", self.workspace.output.getvalue())
 
         self.workspace.reset()
-        later(0.2, lambda: self.workspace.deliver(
+        self.workspace.daemon_check(lambda: self.workspace.deliver(
             json.dumps({driver.UNRELATED_KEY: driver.UNRELATED_VALUE}).encode()))
         status, events = self.run_mode("revoked")
         self.assertEqual(status, 0, events)
