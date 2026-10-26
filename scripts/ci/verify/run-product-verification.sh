@@ -124,7 +124,9 @@ rust_package_args() {
 # Compile once (infra#1632): with RUST_TEST_ARCHIVE set, the packages shard
 # compiles nothing. It runs the selected packages' tests from that verified
 # test archive, built by the run kind's build runner, with cargo-nextest:
-# one run for the Rust and transport selections together.
+# one run for the Rust and transport selections together. RUST_TEST_ARCHIVE is
+# the archive file, or the folder fetch-test-archive.sh --extract unpacked it
+# into while it downloaded.
 RUST_ARCHIVE_FILTERS=()
 
 run_rust_packages() {
@@ -156,7 +158,7 @@ run_rust_packages() {
 
 run_rust_archive_tests() {
   [ "${#RUST_ARCHIVE_FILTERS[@]}" -gt 0 ] || return 0
-  [ -f "$RUST_TEST_ARCHIVE" ] || {
+  [ -e "$RUST_TEST_ARCHIVE" ] || {
     echo "::error::the test archive $RUST_TEST_ARCHIVE is missing" >&2
     return 1
   }
@@ -185,17 +187,27 @@ run_rust_archive_tests() {
   # a real directory with a real tmp (CARGO_TARGET_TMPDIR) whose other
   # entries link into the extraction.
   local extract entry
-  extract="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/rust-archive-tests.XXXXXX")"
   rm -rf -- "$root"
   mkdir -p "$root/targets/archive/tmp"
   cp -a "$ROOT/." "$root/src"
-  "$nextest" nextest run --archive-file "$RUST_TEST_ARCHIVE" \
-    --workspace-remap "$root/src" --extract-to "$extract" \
-    -E 'none()' --no-tests=pass >/dev/null || {
-      status=$?
-      df -h "$extract" "$root" >&2 || true
-      return "$status"
+  if [ -d "$RUST_TEST_ARCHIVE" ]; then
+    # fetch-test-archive.sh --extract unpacked it as it downloaded, and
+    # reported it ready only once its bytes hashed to the digest.
+    extract="$RUST_TEST_ARCHIVE"
+    [ -f "$extract/target/nextest/binaries-metadata.json" ] || {
+      echo "::error::$RUST_TEST_ARCHIVE holds no extracted test archive" >&2
+      return 1
     }
+  else
+    extract="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/rust-archive-tests.XXXXXX")"
+    "$nextest" nextest run --archive-file "$RUST_TEST_ARCHIVE" \
+      --workspace-remap "$root/src" --extract-to "$extract" \
+      -E 'none()' --no-tests=pass >/dev/null || {
+        status=$?
+        df -h "$extract" "$root" >&2 || true
+        return "$status"
+      }
+  fi
   for entry in "$extract/target"/*; do
     [ "${entry##*/}" = tmp ] || ln -s "$entry" "$root/targets/archive/${entry##*/}"
   done
@@ -668,6 +680,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-bound-cargo-jobs.sh
   scripts/ci/tests/test-build-once.sh
   scripts/ci/tests/test-run-rust-checks.sh
+  scripts/ci/tests/test-fetch-test-archive-extract.sh
   python3 -B scripts/ci/tests/test-last-scheduled-run.py
   python3 -I -B scripts/ci/tests/test-ci-done-measures.py
   scripts/ci/tests/test-service-ssh-image-verifier.sh

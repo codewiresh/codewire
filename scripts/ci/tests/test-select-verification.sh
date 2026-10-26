@@ -3238,9 +3238,10 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
     fi
     # A test-archive miss builds in place, as the database job does.
     # shellcheck disable=SC2016 # The workflow text holds literal shell variables.
-    grep -qF 'run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/tests.tar.zst"' "$block"
+    # It streams the download into the extraction (infra#1534).
+    grep -qF 'run: scripts/ci/setup/fetch-test-archive.sh --or-build --extract "$ARCHIVE_SHA256" "$RUNNER_TEMP/tests"' "$block"
     [ "$(grep -cF "steps.test-archive.outputs.ready != 'true'" "$block")" -eq 4 ]
-    grep -qF "RUST_TEST_ARCHIVE: \${{ steps.test-archive.outputs.ready == 'true' && format('{0}/tests.tar.zst', runner.temp) || '' }}" "$block"
+    grep -qF "RUST_TEST_ARCHIVE: \${{ steps.test-archive.outputs.ready == 'true' && format('{0}/tests', runner.temp) || '' }}" "$block"
     if grep -qF 'BUILD_ONCE' "$block"; then
       echo 'rust-packages: the archive path must follow the fetch' >&2
       exit 1

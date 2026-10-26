@@ -13,6 +13,7 @@ packages=(
   postgresql-client
   protobuf-compiler
   xz-utils
+  zstd
 )
 
 missing=()

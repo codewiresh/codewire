@@ -19,7 +19,8 @@ for package in \
   libxkbcommon-x11-dev \
   pkg-config \
   postgresql-client \
-  protobuf-compiler; do
+  protobuf-compiler \
+  zstd; do
   grep -Fq "$package" "$ASSERTION"
 done
 
