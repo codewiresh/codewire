@@ -132,6 +132,11 @@ impl LocalBrokerProcessSpawner for RenewalSpawner {
         if self.failing.contains(&attempt) {
             return Err(LocalBrokerSpawnError::Spawn);
         }
+        // The lifecycle counts a child's lifetime from just before it calls
+        // the spawner, so the spawn time is taken before the process starts:
+        // a fork and exec that a slow slot stalls would otherwise move the
+        // lifetime end the test computes past the one the lifecycle keeps.
+        let spawned = self.started.elapsed();
         authority_peer
             .set_nonblocking(true)
             .map_err(|_| LocalBrokerSpawnError::Spawn)?;
@@ -153,7 +158,7 @@ impl LocalBrokerProcessSpawner for RenewalSpawner {
             children.push(ChildRecord {
                 pid: child.id(),
                 config: Some(config.clone()),
-                spawned: Some(self.started.elapsed()),
+                spawned: Some(spawned),
                 predecessors_alive: Some(predecessors_alive),
                 ..Default::default()
             });
@@ -212,7 +217,7 @@ impl LocalBrokerProcessSpawner for RenewalSpawner {
 }
 
 struct Lifecycle {
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     spawner: Arc<RenewalSpawner>,
     shutdown: watch::Sender<bool>,
     /// Every state the lifecycle reported, in order.
@@ -269,13 +274,13 @@ impl Lifecycle {
                 platform: None,
                 local_profile: None,
                 renewal,
-                log: Arc::new(crate::broker_log::BrokerLog::disabled()),
+                log: Arc::new(crate::broker_log::BrokerLog::in_root(directory.path())),
             }),
             shutdown_rx,
             state,
         ));
         Self {
-            _directory: directory,
+            directory,
             spawner,
             shutdown,
             states,
@@ -294,14 +299,36 @@ impl Lifecycle {
         .expect("broker lifecycle progress");
     }
 
-    async fn until_states(&self, count: usize) {
+    /// The first `count` states the lifecycle reported, once it has. The
+    /// lifecycle goes on running until it is stopped, so a later state may
+    /// follow before the test reads them; it is not among these.
+    async fn until_states(&self, count: usize) -> Vec<BrokerProcessState> {
         tokio::time::timeout(Duration::from_secs(20), async {
-            while self.states.lock().unwrap().len() < count {
+            loop {
+                {
+                    let states = self.states.lock().unwrap();
+                    if states.len() >= count {
+                        return states[..count].to_vec();
+                    }
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("broker lifecycle state");
+        .expect("broker lifecycle state")
+    }
+
+    /// The reason the lifecycle recorded for ending the child `pid`.
+    fn end_reason(&self, pid: u32) -> Option<String> {
+        let log = std::fs::read_to_string(self.directory.path().join("logs/brokers.log")).ok()?;
+        let pid = format!(" pid={pid} ");
+        log.lines()
+            .filter(|line| line.contains(" event=broker_ended ") && line.contains(&pid))
+            .find_map(|line| {
+                line.split(' ')
+                    .find_map(|field| field.strip_prefix("reason="))
+                    .map(str::to_owned)
+            })
     }
 
     async fn stop(self) -> (Vec<ChildRecord>, Vec<BrokerProcessState>) {
@@ -392,30 +419,43 @@ async fn a_broker_whose_successor_cannot_start_still_stops_when_its_lifetime_end
     lifecycle
         .until(|spawner| spawner.ready_count() >= 2 && spawner.closed(0))
         .await;
-    lifecycle.until_states(4).await;
-    let (children, states) = lifecycle.stop().await;
+    // The four states up to the replacement's start. The replacement renews
+    // on RENEWAL too: on a slow slot its own successor can miss the lead
+    // before the test stops the lifecycle, and fail closed with a fifth state
+    // (main run 23971). That is the replacement's renewal, not this test's.
+    let states = lifecycle.until_states(4).await;
+    // Why the lifecycle ended the first child, in its own broker log, written
+    // before it stopped the child and before the replacement spawned.
+    let first_pid = lifecycle.spawner.children()[0].pid.unwrap();
+    let first_end = lifecycle.end_reason(first_pid);
+    let (children, reported) = lifecycle.stop().await;
 
     let first = &children[0];
     let lifetime_end = first.spawned.unwrap() + RENEWAL.lifetime;
     // The probe sees the close no earlier than it happened.
     assert!(first.closed.unwrap() + Duration::from_millis(100) >= lifetime_end);
     assert!(process_gone(first.pid.unwrap()));
+    // Its lifetime ending stopped it: the lifecycle ends a child for that
+    // reason only when the child's lifetime timer fires, so it served no
+    // longer than its lifetime. A wall-clock bound on how soon after the
+    // lifetime end the stop came measures the slot instead: a CI slot that
+    // stalls the test process for a second at that moment fails it, the
+    // lifecycle unchanged.
+    assert_eq!(
+        first_end.as_deref(),
+        Some("lifetime_ended"),
+        "the first child ended for another reason: {children:?}"
+    );
     // It failed closed: the replacement started afresh after it stopped. The
     // first child was already killed and reaped when the replacement spawned.
-    // The probe's close time is no witness of that, nor of how soon the
-    // child stopped: it is late by however long the probe waited to run,
-    // which on a slow CI slot exceeded the replacement's spawn by more than
-    // 100 ms (#3239). The lifecycle records the spawn itself, after the
-    // reap, so the spawn time bounds the stop from above.
+    // The probe's close time is no witness of that: it is late by however
+    // long the probe waited to run, which on a slow CI slot exceeded the
+    // replacement's spawn by more than 100 ms (#3239).
     let replacement = &children[1];
     assert_eq!(
         replacement.predecessors_alive,
         Some(0),
         "the replacement spawned while its predecessor ran: {children:?}"
-    );
-    assert!(
-        replacement.spawned.unwrap() <= lifetime_end + Duration::from_secs(1),
-        "the first child outlived its lifetime: {children:?}"
     );
     assert_eq!(
         states,
@@ -424,6 +464,7 @@ async fn a_broker_whose_successor_cannot_start_still_stops_when_its_lifetime_end
             BrokerProcessState::Running,
             BrokerProcessState::Starting,
             BrokerProcessState::Running,
-        ]
+        ],
+        "every state reported: {reported:?}"
     );
 }
