@@ -5,7 +5,8 @@ name: Release an SDK
 # publishing (codewire#3512). Neither registry trusts Forgejo, so this runs on
 # GitHub's mirror of main, which Forgejo ignores: it reads only .gitea/workflows.
 # Each registry trusts exactly this workflow file in its own environment, and
-# each environment admits only main. Only the owner may dispatch it, and the
+# each environment admits only main. npm only stages a version; it goes live
+# when the owner approves it on npm with 2FA. Only the owner may dispatch it, and the
 # build job refuses any other actor. No registry token exists.
 # With publish false the run builds and checks the package and keeps it as the
 # run's sdk-dist artifact.
@@ -87,7 +88,7 @@ jobs:
           retention-days: 14
 
   npm:
-    name: Publish @codewire/sdk to npm
+    name: Stage @codewire/sdk on npm
     needs: build
     if: ${{ inputs.sdk == 'typescript' && inputs.publish }}
     runs-on: ubuntu-24.04
@@ -110,19 +111,20 @@ jobs:
           name: sdk-dist
           path: ${{ runner.temp }}/sdk-dist
 
-      - name: Publish and read the version back
+      # The trusted publisher allows only staged publishing: the version waits
+      # in npm's staging area until the owner approves it with 2FA, which a
+      # private repository's GitHub environments cannot require.
+      - name: Stage for the owner's approval
         env:
           VERSION: ${{ inputs.version }}
         run: |
           tarball="$RUNNER_TEMP/sdk-dist/codewire-sdk-$VERSION.tgz"
           [[ -f "$tarball" ]] || { echo "::error::the build wrote no codewire-sdk-$VERSION.tgz"; exit 1; }
-          npm publish "$tarball" --access public
-          for _ in $(seq 30); do
-            [[ "$(npm view "@codewire/sdk@$VERSION" version 2>/dev/null)" == "$VERSION" ]] && exit 0
-            sleep 10
-          done
-          echo "::error::npm did not serve @codewire/sdk@$VERSION within 300 s"
-          exit 1
+          npm stage publish "$tarball" --access public
+          {
+            echo "@codewire/sdk@$VERSION is staged, not yet published."
+            echo "Approve it with 2FA under Staged Packages on npmjs.com, or with npm stage approve."
+          } >>"$GITHUB_STEP_SUMMARY"
 
   pypi:
     name: Publish codewire to PyPI

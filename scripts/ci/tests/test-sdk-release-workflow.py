@@ -12,6 +12,7 @@ environment, so these properties are the release's whole authorization:
   only when publish is true;
 - every action is pinned to a full commit;
 - each Node.js it installs is one setup-node.sh pins;
+- npm only stages a version, for the owner to approve with 2FA;
 - package.json names the repository npm checks the token against.
 """
 
@@ -82,6 +83,12 @@ def main() -> None:
     for version in re.findall(r"setup-node\.sh (\S+)", text):
         if version not in pinned:
             fail(f"setup-node.sh does not pin Node.js {version}")
+
+    # npm's trusted publisher allows only staged publishing, which refuses a
+    # direct publish, and staging needs npm 11.15.0 (Node.js 24.22.1 has 11.19.1).
+    npm_steps = "\n".join(step.get("run", "") for step in jobs["npm"]["steps"])
+    if "npm stage publish" not in npm_steps or re.search(r"(?<!stage )npm publish", npm_steps):
+        fail("the npm job must stage the version with npm stage publish, never publish it directly")
 
     package = json.loads((ROOT / "libs/sdk-ts/package.json").read_text())
     if package["repository"]["url"] != "git+https://github.com/codewiresh/codewire.git":
