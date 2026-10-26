@@ -1205,7 +1205,7 @@ create_environment() {
       "${source_args[@]}" \
       --image "$SMOKE_IMAGE" \
       --name "$SMOKE_NAME" \
-      --cpu "$SMOKE_CPU" \
+      --cpu "${SMOKE_CPU}m" \
       --memory "$SMOKE_MEMORY" \
       --disk "$SMOKE_DISK" \
       --isolation "$SMOKE_ISOLATION_TIER" \

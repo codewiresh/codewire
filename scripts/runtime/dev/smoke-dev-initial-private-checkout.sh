@@ -169,7 +169,7 @@ checkout_create() {
   CHECKOUT_ATTEMPTED=1
   (
     cd "$CHECKOUT_WORKSPACE"
-    cw_with_timeout 90 create --cloud --name "$SMOKE_NAME" --cpu 2000 --memory 4096 \
+    cw_with_timeout 90 create --cloud --name "$SMOKE_NAME" --cpu 2000m --memory 4096 \
       --ttl 30m --no-network --file "${document##*/}" --no-wait --yes --output json
   ) >"$TMPDIR_SMOKE/checkout-$phase.json" 2>"$TMPDIR_SMOKE/checkout-$phase.err"
 }

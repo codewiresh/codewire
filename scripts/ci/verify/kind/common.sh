@@ -3834,7 +3834,7 @@ workspace_user_ssh_smoke() (
   host="cw-cloud-$name"
   started="$SECONDS"
   environment="$(kind_credential_cli --cloud create --name "$name" --image "$image" \
-    --cpu 500 --memory 1Gi --disk 1Gi --ttl 1h --yes --output json | jq -er '.id')"
+    --cpu 500m --memory 1Gi --disk 1Gi --ttl 1h --yes --output json | jq -er '.id')"
   first=""
   while [ $((SECONDS - started)) -lt "$KIND_USER_SSH_READY_SECONDS" ]; do
     if output="$(kind_user_ssh_tool "$config" ssh "$host" 'echo ready' 2>/dev/null)" &&

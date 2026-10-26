@@ -305,7 +305,7 @@ create_env() { # CPU -> environment id
     # Timings start at the accepted request, not before a rate-limit wait.
     now_ms >"$TMPDIR_PROOF/create-started"
     # --no-file: a codewire.yaml where the proof runs must not change its shape.
-    if cw create --no-file --image "$PROOF_IMAGE" --name "$name" --cpu "$cpu" \
+    if cw create --no-file --image "$PROOF_IMAGE" --name "$name" --cpu "${cpu}m" \
       --memory "$PROOF_MEMORY" --disk "$PROOF_DISK" --isolation standard --ttl "$PROOF_TTL" \
       --no-network --no-wait --yes --output json >"$out" 2>"$out.err"; then
       break

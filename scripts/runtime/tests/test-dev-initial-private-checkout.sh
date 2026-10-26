@@ -145,7 +145,7 @@ cw_with_timeout() {
       printf 'environment\n' >>"$TEST_ROOT/order"; INVENTORY_STATE=destroyed ;;
     'create --cloud '*)
       [[ "$CHECKOUT_ATTEMPTED" == 1 && "$PWD" == "$CHECKOUT_WORKSPACE" &&
-         "$*" == "create --cloud --name $SMOKE_NAME --cpu 2000 --memory 4096 --ttl 30m --no-network --file codewire.yaml --no-wait --yes --output json" ]] ||
+         "$*" == "create --cloud --name $SMOKE_NAME --cpu 2000m --memory 4096 --ttl 30m --no-network --file codewire.yaml --no-wait --yes --output json" ]] ||
         fail 'hosted create scope/resources/document or attempted-state drifted'
       printf '{"id":"%s"}\n' "$ENVIRONMENT_ID" ;;
     *) fail 'unexpected public command' ;;

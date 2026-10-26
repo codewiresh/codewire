@@ -409,7 +409,7 @@ cw_runtime_managed_resume_continues() {
   local launched session first generation before after listed sent message waited resumed
   local back_to_back=20 round
   environment="$(kind_credential_cli --cloud create --name "kind-cw-resume-${RANDOM}-${RANDOM}" \
-    --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
+    --image "$workspace_image" --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
   log "checking that a managed conversation continues across Stop/Start in environment $environment"
@@ -543,7 +543,7 @@ run_retained_managed_agents_journey() {
   # a conversation continues across Stop/Start in its own environment (#2705).
   cw_runtime_managed_resume_continues "$profile_name" "$workspace_image"
   environment="$(kind_credential_cli --cloud create --name "$profile_name" \
-    --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
+    --image "$workspace_image" --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
   wait_kind_credential_environment "$environment" running
@@ -648,7 +648,7 @@ run_admitted_cw_runtime_journey() {
       'length == 1 and .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
   fi
   environment="$(kind_credential_cli --cloud create --name "$profile_name" \
-    --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
+    --image "$workspace_image" --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
   [ "$environment" != 00000000-0000-0000-0000-000000000000 ]

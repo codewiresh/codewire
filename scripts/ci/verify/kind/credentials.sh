@@ -1338,7 +1338,7 @@ kind_credential_native_smoke() (
   # image. preset_contract_1 is an API contract fixture with no template config.
   environment="$(kind_credential_cli --cloud create --name "$profile_name" \
     --image "$workspace_image" \
-    --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
+    --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
   stage_environment="$environment"
   wait_kind_credential_environment "$environment" running
@@ -1757,7 +1757,7 @@ kind_credential_claude_session() (
   kind_credential_cli credentials --cloud --profile "$token_profile" set anthropic "$token_name"
   environment="$(kind_credential_cli --cloud create --name "$key_profile" \
     --image "$workspace_image" \
-    --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
+    --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
   stage_environment="$environment"
   wait_kind_credential_environment "$environment" running
@@ -2067,7 +2067,7 @@ kind_credential_claude_sign_in() (
   kind_credential_cli credentials --cloud --profile "$profile" set anthropic "$name"
   environment="$(kind_credential_cli --cloud create --name "$profile" \
     --image "$workspace_image" \
-    --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
+    --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
   stage_environment="$environment"
   wait_kind_credential_environment "$environment" running
