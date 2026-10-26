@@ -22,11 +22,16 @@ spec = importlib.util.spec_from_file_location("macos_cli", Path(__file__).with_n
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 
+# Bounds a child Python run so a hang fails instead of stalling the run. It is
+# never the expected duration: those runs take well under a second, and a slow
+# CI slot can stall a process for many seconds (main run 24762).
+HANG = 300
+
 
 class HelperTests(unittest.TestCase):
     def test_owned_mount_fixture_synthetic_contract(self):
         contract = Path(__file__).resolve().parents[2] / "crates/codewire-local-vmm/src/darwin/path/test_mount_fixture.py"
-        result = subprocess.run([sys.executable, str(contract), "-v"], capture_output=True, text=True, timeout=15)
+        result = subprocess.run([sys.executable, str(contract), "-v"], capture_output=True, text=True, timeout=HANG)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Ran 8 tests", result.stderr)
 
@@ -435,7 +440,7 @@ print("cooperative cancellation: no adopted children")
 '''
         result = subprocess.run([sys.executable, "-I", "-B", "-c", probe, __file__],
                                 env={"PATH": os.defpath}, capture_output=True, text=True,
-                                timeout=30)
+                                timeout=HANG)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "cooperative cancellation: no adopted children")
 

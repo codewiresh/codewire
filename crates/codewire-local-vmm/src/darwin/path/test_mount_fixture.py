@@ -172,8 +172,10 @@ class FixtureTests(unittest.TestCase):
     def test_output_capture_and_logs_are_bounded(self):
         with tempfile.TemporaryDirectory() as parent, contextlib.redirect_stdout(io.StringIO()):
             proof = fixture.Fixture(Path(parent))
+            # The subject is the output bound; the command's deadline is only
+            # a hang guard, so a slow slot cannot reach it first.
             with self.assertRaisesRegex(RuntimeError, "output bound"):
-                proof.command([sys.executable, "-c", "import os; os.write(1, b'x' * (2 * 1024 * 1024))"], 5)
+                proof.command([sys.executable, "-c", "import os; os.write(1, b'x' * (2 * 1024 * 1024))"], 300)
             self.assertLessEqual((Path(parent) / "command-01.out").stat().st_size, fixture.LIMIT)
 
 
