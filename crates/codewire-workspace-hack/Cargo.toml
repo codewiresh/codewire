@@ -32,7 +32,7 @@ chacha20 = { version = "0.10.0", default-features = false, features = ["legacy",
 chrono = { version = "0.4.44", features = ["serde"] }
 cipher-9fbad63c4bcf4a8f = { package = "cipher", version = "0.4.4", default-features = false, features = ["zeroize"] }
 cipher-d8f496e17d97b5cb = { package = "cipher", version = "0.5.2", default-features = false, features = ["block-padding", "rand_core", "stream-wrapper"] }
-connectrpc = { version = "0.9.1", features = ["axum", "client", "server"] }
+connectrpc = { version = "0.9.1", default-features = false, features = ["axum", "client", "gzip", "json", "server"] }
 crossbeam-utils = { version = "0.8.21" }
 crypto-bigint = { version = "0.7.6", features = ["alloc", "getrandom", "hybrid-array", "subtle", "zeroize"] }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2.2", default-features = false, features = ["getrandom"] }
@@ -162,7 +162,7 @@ chacha20 = { version = "0.10.0", default-features = false, features = ["legacy",
 chrono = { version = "0.4.44", features = ["serde"] }
 cipher-9fbad63c4bcf4a8f = { package = "cipher", version = "0.4.4", default-features = false, features = ["zeroize"] }
 cipher-d8f496e17d97b5cb = { package = "cipher", version = "0.5.2", default-features = false, features = ["block-padding", "rand_core", "stream-wrapper"] }
-connectrpc = { version = "0.9.1", features = ["axum", "client", "server"] }
+connectrpc = { version = "0.9.1", default-features = false, features = ["axum", "client", "gzip", "json", "server"] }
 crossbeam-utils = { version = "0.8.21" }
 crypto-bigint = { version = "0.7.6", features = ["alloc", "getrandom", "hybrid-array", "subtle", "zeroize"] }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2.2", default-features = false, features = ["getrandom"] }

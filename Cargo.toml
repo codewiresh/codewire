@@ -181,7 +181,9 @@ tokio-vsock = "=0.7.2"
 
 # Connect-RPC (client-facing contract; connect-rpc/). Pre-1.0 —
 # pinned exact on purpose; bump deliberately, never via `cargo update`.
-connectrpc = "=0.9.1"
+# Without the default zstd codec: we never negotiate it, and zstd 0.13
+# carries RUSTSEC-2026-0391..0410 with no fix in connectrpc 0.9.1's range.
+connectrpc = { version = "=0.9.1", default-features = false, features = ["gzip", "json"] }
 connectrpc-build = "=0.9.0"
 buffa = { version = "=0.9.1", features = ["json"] }
 buffa-types = { version = "=0.9.1", features = ["json"] }
