@@ -13,6 +13,17 @@ use crate::state::AppState;
 const DOCS_CSP: &str = "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'";
 const INSTALLER: &str = include_str!("../../../apps/cli/install.sh");
 const APPLE_ASSOCIATION: &str = r#"{"webcredentials":{"apps":["PXQZM3GLP5.sh.codewire.ios"]}}"#;
+// `go get codewire.sh/sdk-go` reads this page's go-import tag (#3512). The
+// module lives in libs/sdk-go of the public mirror, so the tag carries Go
+// 1.25's subdirectory field, and its versions are the mirror's
+// libs/sdk-go/vMAJOR.MINOR.PATCH tags.
+const GO_SDK_IMPORT: &str = concat!(
+    "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n",
+    "<meta name=\"go-import\" content=\"codewire.sh/sdk-go git https://github.com/codewiresh/codewire libs/sdk-go\">\n",
+    "<meta name=\"go-source\" content=\"codewire.sh/sdk-go https://github.com/codewiresh/codewire/tree/main/libs/sdk-go https://github.com/codewiresh/codewire/tree/main/libs/sdk-go{/dir} https://github.com/codewiresh/codewire/blob/main/libs/sdk-go{/dir}/{file}#L{line}\">\n",
+    "<title>codewire.sh/sdk-go</title></head>\n",
+    "<body><a href=\"/docs\">The Codewire Go SDK documentation</a></body></html>\n",
+);
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -23,6 +34,8 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/llms.txt", get(llms_index))
         .route("/llms-full.txt", get(llms_full))
         .route("/install.sh", get(installer))
+        .route("/sdk-go", get(go_sdk_import))
+        .route("/sdk-go/{*package}", get(go_sdk_import))
         .route(
             "/.well-known/apple-app-site-association",
             get(apple_association),
@@ -169,6 +182,20 @@ async fn installer() -> Response {
         .into_response()
 }
 
+async fn go_sdk_import() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::CONTENT_SECURITY_POLICY, DOCS_CSP),
+        ],
+        GO_SDK_IMPORT,
+    )
+        .into_response()
+}
+
 async fn apple_association() -> Response {
     (
         StatusCode::OK,
@@ -219,5 +246,18 @@ mod tests {
             APPLE_ASSOCIATION,
             r#"{"webcredentials":{"apps":["PXQZM3GLP5.sh.codewire.ios"]}}"#
         );
+    }
+
+    #[tokio::test]
+    async fn the_go_sdk_import_path_names_the_mirror_subdirectory() {
+        let response = go_sdk_import().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        assert!(GO_SDK_IMPORT.contains(
+            r#"<meta name="go-import" content="codewire.sh/sdk-go git https://github.com/codewiresh/codewire libs/sdk-go">"#
+        ));
     }
 }
