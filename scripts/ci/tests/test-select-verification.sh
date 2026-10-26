@@ -1877,6 +1877,20 @@ run_paths_case workspace_image_pin_proposal pull_request refs/pull/2255/head fal
   scripts/ci/tests/test-propose-workspace-image-pin.sh \
   scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh \
   scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
+# The owner-dispatched SDK releases select the release proofs (#3512); each
+# SDK's packager is proven by that SDK's own family.
+run_paths_case sdk_release_workflows pull_request refs/pull/3512/head false \
+  'confidential_script_tests go_consumer_interop go_support policy release security security_js' \
+  .gitea/workflows/sdk-release-npm.yaml .gitea/workflows/sdk-release-pypi.yaml \
+  scripts/ci/setup/fetch-openbao-sdk-publish-token.sh \
+  scripts/ci/tests/test-fetch-openbao-sdk-publish-token.sh \
+  scripts/ci/release/publish-sdk.py scripts/ci/tests/test-publish-sdk.py
+run_paths_case sdk_ts_packager pull_request refs/pull/3512/head false \
+  'policy sdk_ts security security_js' \
+  scripts/ci/release/package-sdk-ts.sh
+run_paths_case sdk_python_packager pull_request refs/pull/3512/head false \
+  'policy sdk_python security security_js' \
+  scripts/ci/release/package-sdk-python.sh
 # The per-platform support build selects the release proofs, like the build helper.
 run_paths_case support_pair_platform_build pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release confidential_script_tests security security_js' \

@@ -1253,12 +1253,20 @@ if [ "$event_selected" = false ]; then
         select_token go_consumer_interop
         recognized=true
         ;;
-      libs/sdk-ts/*)
+      libs/sdk-ts/*|scripts/ci/release/package-sdk-ts.sh)
         select_token sdk_ts
         recognized=true
         ;;
-      libs/sdk-python/*)
+      libs/sdk-python/*|scripts/ci/release/package-sdk-python.sh)
         select_token sdk_python
+        recognized=true
+        ;;
+      .gitea/workflows/sdk-release-npm.yaml|.gitea/workflows/sdk-release-pypi.yaml|\
+      scripts/ci/setup/fetch-openbao-sdk-publish-token.sh|\
+      scripts/ci/tests/test-fetch-openbao-sdk-publish-token.sh|\
+      scripts/ci/release/publish-sdk.py|scripts/ci/tests/test-publish-sdk.py)
+        # The owner-dispatched npm and PyPI releases of the SDKs (#3512).
+        select_token release
         recognized=true
         ;;
       libs/sdk-examples/run-claude/*)

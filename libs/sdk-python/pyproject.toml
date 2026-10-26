@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "codewire"
 version = "0.1.0"
 description = "Codewire SDK — environment-first cloud development"
+readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE-APACHE"]
 requires-python = ">=3.10"
@@ -26,6 +27,7 @@ build = [
 
 [project.urls]
 Homepage = "https://codewire.sh"
+Documentation = "https://codewire.sh/docs"
 Repository = "https://github.com/codewiresh/codewire"
 
 [tool.hatch.build.targets.wheel]
@@ -38,6 +40,7 @@ include = [
     "LICENSE",
     "LICENSE-APACHE",
     "pyproject.toml",
+    "README.md",
 ]
 
 [tool.hatch.build.hooks.custom]

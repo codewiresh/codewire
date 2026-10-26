@@ -1098,6 +1098,10 @@ run_sdk_go() {
 
 run_sdk_ts() {
   make test-sdk-ts
+  local package_work
+  package_work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-sdk-ts-package.XXXXXX")"
+  scripts/ci/release/package-sdk-ts.sh "$package_work"
+  rm -rf -- "$package_work"
   scripts/runtime/tests/test-run-sdk-ts-e2e.sh
 }
 
@@ -1107,42 +1111,11 @@ run_sdk_python() {
   package_work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-sdk-python-package.XXXXXX")"
   python3 -m venv .venv-sdk
   .venv-sdk/bin/python -m pip install --upgrade pip
-  .venv-sdk/bin/python -m pip install --require-hashes \
-    -r libs/sdk-python/requirements-build.lock
-  .venv-sdk/bin/python -m build --no-isolation \
-    --outdir "$package_work/dist" libs/sdk-python
+  scripts/ci/release/package-sdk-python.sh "$package_work/dist"
   sdist="$(find "$package_work/dist" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
   wheel="$(find "$package_work/dist" -maxdepth 1 -type f -name '*.whl' -print -quit)"
   [ -n "$sdist" ]
   [ -n "$wheel" ]
-  python3 - "$sdist" "$wheel" <<'PY'
-import sys
-import tarfile
-import zipfile
-
-sdist_path, wheel_path = sys.argv[1:]
-forbidden = ("codewire/admin/", "codewire/console/", "codewire/internal/", "codewire/testing/")
-
-with tarfile.open(sdist_path, "r:gz") as archive:
-    sdist_names = [name.split("/", 1)[-1] for name in archive.getnames()]
-if not any(name.startswith("_codewire_generated/codewire/v1/") for name in sdist_names):
-    raise SystemExit("Python SDK sdist is missing generated codewire/v1")
-if not any(name.startswith("_codewire_generated/google/rpc/") for name in sdist_names):
-    raise SystemExit("Python SDK sdist is missing generated google/rpc")
-if any(any(part in name for part in forbidden) for name in sdist_names):
-    raise SystemExit("Python SDK sdist leaked a forbidden generated package")
-
-with zipfile.ZipFile(wheel_path) as archive:
-    wheel_names = archive.namelist()
-if not any(name.startswith("codewire/v1/") for name in wheel_names):
-    raise SystemExit("Python SDK wheel is missing generated codewire/v1")
-if not any(name.startswith("google/rpc/") for name in wheel_names):
-    raise SystemExit("Python SDK wheel is missing generated google/rpc")
-if any(name.startswith("_codewire_generated/") for name in wheel_names):
-    raise SystemExit("Python SDK wheel leaked its sdist-only generated source")
-if any(any(part in name for part in forbidden) for name in wheel_names):
-    raise SystemExit("Python SDK wheel leaked a forbidden generated package")
-PY
   .venv-sdk/bin/python -m pip install --require-hashes \
     -r libs/sdk-python/requirements.lock
   .venv-sdk/bin/python -m pip install --force-reinstall --no-deps "$wheel"
@@ -1575,6 +1548,8 @@ run_release() {
   scripts/ci/tests/test-run-workspace-contract-on-image.sh
   scripts/ci/tests/test-propose-workspace-image-pin.sh
   scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
+  scripts/ci/tests/test-fetch-openbao-sdk-publish-token.sh
+  python3 -B scripts/ci/tests/test-publish-sdk.py
   python3 scripts/ci/tests/test-image-bundle.py
   scripts/ci/tests/test-deploy-prod-workflow.sh
   python3 scripts/checks/repo_checks.py production-source-ownership --self-test

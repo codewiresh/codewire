@@ -1,0 +1,62 @@
+name: Release the Python SDK to PyPI
+
+# The owner dispatches this on main to publish one version of the Python SDK
+# as codewire (codewire#3512). Its own OpenBao role, bound to exactly this
+# workflow on protected main dispatched by noel (infra), is the only reader of
+# the pypi publish token; with publish false the run builds and checks the
+# package and reads no token.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to publish; it must be the package's own version
+        required: true
+        type: string
+      publish:
+        description: Upload to pypi (false builds and checks the package only)
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: sdk-release-pypi
+  cancel-in-progress: false
+
+env:
+  CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+
+jobs:
+  release:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
+    name: Build, check and publish codewire
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    timeout-minutes: 30
+    enable-openid-connect: true
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Refuse anything but the owner's dispatch of main at the package's version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$GITHUB_EVENT_NAME|$GITHUB_REF|$GITHUB_ACTOR|$GITHUB_REPOSITORY" == 'workflow_dispatch|refs/heads/main|noel|codewire/codewire' ]] || {
+            echo '::error::only the owner dispatches an SDK release, from main'
+            exit 1
+          }
+          package_version="$(python3 -c 'import tomllib; print(tomllib.load(open("libs/sdk-python/pyproject.toml", "rb"))["project"]["version"])')"
+          [[ "$REQUESTED_VERSION" == "$package_version" ]] || {
+            echo "::error::the package is $package_version, not $REQUESTED_VERSION; raise its version in a pull request first"
+            exit 1
+          }
+
+      - name: Build and check the sdist and wheel
+        run: |
+          scripts/ci/release/package-sdk-python.sh "$RUNNER_TEMP/sdk-dist"
+
+      - name: Publish
+        if: ${{ inputs.publish == true || inputs.publish == 'true' }}
+        run: |
+          token="$RUNNER_TEMP/pypi-publish-token"
+          trap 'shred -u "$token" 2>/dev/null || true' EXIT
+          scripts/ci/setup/fetch-openbao-sdk-publish-token.sh pypi "$token"
+          scripts/ci/release/publish-sdk.py pypi "$RUNNER_TEMP/sdk-dist" "$token"
