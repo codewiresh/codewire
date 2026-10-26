@@ -745,6 +745,12 @@ mod linux {
     mod tests {
         use super::*;
 
+        /// A hang guard for the synthetic loopback requests. The probe's own
+        /// bound is NETWORK_DEADLINE around the whole probe, and no test here
+        /// is about it; a fixed 2 s guard failed on a busy CI slot, where one
+        /// loopback request took 3.26 s beside 6,140 other tests (PR run 24242).
+        const HANG: Duration = Duration::from_secs(60);
+
         #[test]
         fn rpc_diagnostic_extracts_only_the_closed_status_code() {
             let failure = connectrpc::ConnectError::permission_denied("synthetic-private-body");
@@ -802,11 +808,8 @@ mod linux {
             .unwrap();
             let oauth = OAuthClient::for_server_url(&server_url).unwrap();
             let inputs = Inputs::from_values(&values()).unwrap();
-            let result = tokio::time::timeout(
-                Duration::from_secs(2),
-                verify_oauth_identity(&client, &oauth, &inputs),
-            )
-            .await;
+            let result =
+                tokio::time::timeout(HANG, verify_oauth_identity(&client, &oauth, &inputs)).await;
             server.abort();
             let _ = server.await;
             assert!(result.is_ok(), "synthetic identity request timed out");
