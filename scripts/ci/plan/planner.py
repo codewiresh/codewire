@@ -1501,8 +1501,10 @@ def make_published_support_baseline(
                 }
                 if repository_value != expected_repository:
                     reasons.append(f"published support {name} repository is invalid")
-                if tag != "latest":
-                    reasons.append(f"published support {name} tag is not latest")
+                # The push run reads the moving latest pair; a dispatch for an
+                # earlier commit reads its newest ancestor's pair by commit tag.
+                if tag != "latest" and tag != revision:
+                    reasons.append(f"published support {name} tag is neither latest nor its revision")
                 if not isinstance(digest, str) or not SHA256_DIGEST_RE.fullmatch(digest):
                     reasons.append(f"published support {name} digest is invalid")
                 if not isinstance(revision, str) or not HEX40_RE.fullmatch(revision):

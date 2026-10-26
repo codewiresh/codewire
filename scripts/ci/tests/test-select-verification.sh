@@ -938,6 +938,12 @@ run_present_paths_case support_superseded_rule \
   pull_request refs/pull/3013/head false \
   'go_consumer_interop go_support policy policy_shell release confidential_script_tests security security_js' \
   scripts/ci/images/support-superseded.sh
+# The support-pair alias publisher is part of support-images.yaml too.
+run_present_paths_case support_pair_alias \
+  pull_request refs/pull/3013/head false \
+  'go_consumer_interop go_support policy policy_shell release confidential_script_tests security security_js' \
+  scripts/ci/images/alias-support-pair.sh \
+  scripts/ci/tests/test-alias-support-pair.sh
 run_paths_case protected_delivery_credentials pull_request refs/pull/31/head false \
   'deploy go_consumer_interop go_support policy release confidential_script_tests security security_js' \
   scripts/ci/setup/curl-transport-retry.sh \

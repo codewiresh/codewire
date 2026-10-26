@@ -4,7 +4,8 @@
 # linux/amd64 and linux/arm64. support-images.yaml publishes the pair to
 # Harbor and mirrors the same index to the public GHCR repositories, which this
 # check reads anonymously, so it needs no credential. A commit without its pair
-# is refused: tag one that support-images published.
+# is refused: dispatch support-images.yaml for it (source_sha), or tag one
+# that support-images published.
 #
 # Usage: verify-release-support-pair.sh COMMIT_SHA
 set -euo pipefail
@@ -43,7 +44,7 @@ for image in base workspace; do
     fail "could not read $repository:$commit"
   case "$status" in
     200) ;;
-    404) fail "$repository:$commit is not published; tag a commit whose support pair support-images published (base and workspace, linux/amd64 and linux/arm64)" ;;
+    404) fail "$repository:$commit is not published; publish it with a dispatch of support-images.yaml on main with source_sha=$commit, or tag a commit whose support pair support-images published (base and workspace, linux/amd64 and linux/arm64)" ;;
     *) fail "reading $repository:$commit returned HTTP $status" ;;
   esac
   platforms="$(jq -r '[.manifests[]? | .platform | select(. != null and .os != "unknown")

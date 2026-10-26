@@ -12,6 +12,8 @@ ADAPTER = Path(__file__).parents[1] / "apply-support-plan.py"
 HEAD = "a" * 40
 TREE = "b" * 40
 BASE = "c" * 40
+BASE_DIGEST = "sha256:" + "1" * 64
+WORKSPACE_DIGEST = "sha256:" + "2" * 64
 
 
 def plan_document(
@@ -35,7 +37,13 @@ def plan_document(
             "baseline_commit": BASE if baseline_valid else HEAD,
             "head_commit": HEAD,
             "head_tree": TREE,
-            "provenance": {},
+            "provenance": {
+                "provider": "ghcr",
+                "images": {
+                    "base": {"digest": BASE_DIGEST, "revision": BASE if baseline_valid else None},
+                    "workspace": {"digest": WORKSPACE_DIGEST, "revision": BASE if baseline_valid else None},
+                },
+            },
             "validation": {
                 "valid": baseline_valid,
                 "reasons": [] if baseline_valid else ["candidate unavailable"],
@@ -81,6 +89,61 @@ class SupportPlanAdapterTests(unittest.TestCase):
         self.assertEqual(outputs["build_support_images"], "false")
         self.assertEqual(outputs["reason"], "artifacts_unaffected")
         self.assertEqual(outputs["baseline_sha"], BASE)
+
+    def test_unaffected_pair_is_aliased_from_the_validated_published_pair(self) -> None:
+        outputs, _ = self.apply(plan_document())
+        self.assertEqual(outputs["alias_support_pair"], "true")
+        self.assertEqual(outputs["alias_source_sha"], BASE)
+        self.assertEqual(outputs["alias_base_digest"], BASE_DIGEST)
+        self.assertEqual(outputs["alias_workspace_digest"], WORKSPACE_DIGEST)
+
+        # A probe-only change still leaves the pair to the alias.
+        outputs, _ = self.apply(plan_document(confidential_probe_state="affected"))
+        self.assertEqual(outputs["build_support_images"], "false")
+        self.assertEqual(outputs["alias_support_pair"], "true")
+
+    def test_alias_refuses_when_inputs_differ_so_the_pair_builds(self) -> None:
+        for states in (
+            {"base_state": "affected"},
+            {"workspace_state": "affected"},
+            {"workspace_state": "unclassified"},
+        ):
+            outputs, _ = self.apply(plan_document(**states))
+            self.assertEqual(outputs["build_support_images"], "true", states)
+            self.assertEqual(outputs["alias_support_pair"], "false", states)
+            self.assertEqual(outputs["alias_source_sha"], "", states)
+            self.assertEqual(outputs["alias_base_digest"], "", states)
+            self.assertEqual(outputs["alias_workspace_digest"], "", states)
+
+    def test_alias_refuses_without_a_published_pair_so_the_pair_builds(self) -> None:
+        outputs, _ = self.apply(
+            plan_document("unclassified", "unclassified", "unclassified", baseline_valid=False)
+        )
+        self.assertEqual(outputs["build_support_images"], "true")
+        self.assertEqual(outputs["alias_support_pair"], "false")
+
+    def test_a_head_that_is_its_own_published_pair_needs_no_alias(self) -> None:
+        document = plan_document()
+        document["baseline"]["baseline_commit"] = HEAD
+        for image in document["baseline"]["provenance"]["images"].values():
+            image["revision"] = HEAD
+        outputs, _ = self.apply(document)
+        self.assertEqual(outputs["build_support_images"], "false")
+        self.assertEqual(outputs["alias_support_pair"], "false")
+
+    def test_alias_without_exact_validated_digests_fails_closed_to_a_build(self) -> None:
+        for mutate in (
+            lambda images: images.pop("workspace"),
+            lambda images: images["base"].update(digest="sha256:short"),
+            lambda images: images["workspace"].update(revision="f" * 40),
+        ):
+            document = plan_document()
+            mutate(document["baseline"]["provenance"]["images"])
+            outputs, error = self.apply(document)
+            self.assertEqual(outputs["build_support_images"], "true")
+            self.assertEqual(outputs["alias_support_pair"], "false")
+            self.assertEqual(outputs["reason"], "plan_invalid")
+            self.assertIn("selecting the atomic pair", error)
 
     def test_either_affected_artifact_selects_atomic_pair(self) -> None:
         outputs, _ = self.apply(plan_document(base_state="affected"))

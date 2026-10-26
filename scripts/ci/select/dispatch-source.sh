@@ -16,6 +16,12 @@
 # It then prints "dispatch source: SOURCE on main HEAD", the line the release
 # tag receipt binds the run to (verify-release-tag-receipt.sh). Run it from a
 # full checkout of the dispatched commit, before anything else is checked out.
+#
+# dispatch-source.sh --main-history drops the workflow-file rule, for a
+# workflow whose steps never run the source's own scripts: support-images.yaml
+# plans with main's planner and, for an earlier commit, only tags a published
+# pair. Every run in this mode must be of main, with or without a source,
+# because it publishes for the commit it names.
 set -euo pipefail
 
 fail() {
@@ -24,10 +30,17 @@ fail() {
 }
 
 [[ $# -eq 1 ]] || {
-  echo 'usage: dispatch-source.sh WORKFLOW_FILE' >&2
+  echo 'usage: dispatch-source.sh WORKFLOW_FILE|--main-history' >&2
   exit 2
 }
-readonly workflow="$1"
+workflow="$1"
+main_history_only=false
+if [[ "$workflow" == --main-history ]]; then
+  main_history_only=true
+  workflow=''
+  [[ "${GITHUB_REF:-}" == refs/heads/main ]] || fail 'this workflow runs only on main'
+fi
+readonly workflow main_history_only
 readonly head="${GITHUB_SHA:-}"
 [[ "$head" =~ ^[0-9a-f]{40}$ ]] || fail 'GITHUB_SHA is not a full commit ID'
 output="${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
@@ -50,14 +63,16 @@ trap 'rm -rf "$tmp"' EXIT
 git rev-list --first-parent "$head" >"$tmp/main" || fail "main's history at $head is unreadable"
 grep -Fxq "$source" "$tmp/main" || fail "source $source is not a commit of main's first-parent history at $head"
 
-git cat-file -e "$head:$workflow" 2>/dev/null || fail "$workflow is not in the dispatched commit"
-status=0
-git diff --quiet "$source" "$head" -- "$workflow" || status=$?
-case "$status" in
-  0) ;;
-  1) fail "$workflow changed between $source and $head; dispatch a later candidate" ;;
-  *) fail "cannot compare $workflow between $source and $head" ;;
-esac
+if [[ "$main_history_only" == false ]]; then
+  git cat-file -e "$head:$workflow" 2>/dev/null || fail "$workflow is not in the dispatched commit"
+  status=0
+  git diff --quiet "$source" "$head" -- "$workflow" || status=$?
+  case "$status" in
+    0) ;;
+    1) fail "$workflow changed between $source and $head; dispatch a later candidate" ;;
+    *) fail "cannot compare $workflow between $source and $head" ;;
+  esac
+fi
 
 printf 'dispatch source: %s on main %s\n' "$source" "$head"
 printf 'source_sha=%s\n' "$source" >>"$output"

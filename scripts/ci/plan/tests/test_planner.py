@@ -681,6 +681,7 @@ dependencies = ["core"]
         retrieval_valid: bool = True,
         base_digest: str = "sha256:" + "1" * 64,
         workspace_digest: str = "sha256:" + "2" * 64,
+        tag: str = "latest",
     ) -> Path:
         path = self.root / ".support-candidate.json"
         path.write_text(
@@ -694,13 +695,13 @@ dependencies = ["core"]
                     "images": {
                         "base": {
                             "repository": "ghcr.io/codewiresh/base",
-                            "tag": "latest",
+                            "tag": tag,
                             "digest": base_digest,
                             "revision": base_source or source,
                         },
                         "workspace": {
                             "repository": "ghcr.io/codewiresh/workspace",
-                            "tag": "latest",
+                            "tag": tag,
                             "digest": workspace_digest,
                             "revision": workspace_source or source,
                         },
@@ -1373,6 +1374,24 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(document["baseline"]["mode"], "published_support_pair")
         self.assertEqual(document["baseline"]["baseline_commit"], self.repo.base)
         self.assertEqual(self.workspace_states(document), ("unaffected", "unaffected", "unaffected"))
+
+    def test_commit_tagged_support_pair_is_a_baseline_only_for_its_own_commit(self) -> None:
+        # A dispatch for an earlier commit reads its newest ancestor's pair by
+        # that commit's tag; the tag must name the pair's own revision.
+        head = self.repo.change("apps/dashboard/README.md", "unrelated support baseline change\n")
+        tagged = self.repo.support_candidate(self.repo.base, tag=self.repo.base)
+        document = self.repo.support_plan(tagged, head)
+        self.assertTrue(document["baseline"]["validation"]["valid"])
+        self.assertEqual(document["baseline"]["baseline_commit"], self.repo.base)
+        self.assertEqual(self.workspace_states(document), ("unaffected", "unaffected", "unaffected"))
+
+        other = self.repo.support_candidate(self.repo.base, tag=head)
+        other_document = self.repo.support_plan(other, head)
+        self.assertIn(
+            "published support base tag is neither latest nor its revision",
+            other_document["baseline"]["validation"]["reasons"],
+        )
+        self.assertEqual(self.workspace_states(other_document), ("unclassified", "unclassified", "unclassified"))
 
     def test_published_support_pair_selects_relevant_changes(self) -> None:
         self.repo.write("images/base/entrypoint.sh", "#!/bin/sh\nset -eu\nexec \"$@\"\n", 0o755)

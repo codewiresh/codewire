@@ -58,7 +58,7 @@ run() {
   local name="$1" checkout="$2" event="$3" ref="$4" source="$5" output="$work/$1.out"
   : >"$output"
   if (cd "$checkout" && env GITHUB_OUTPUT="$output" GITHUB_SHA="$head" GITHUB_EVENT_NAME="$event" \
-      GITHUB_REF="$ref" DISPATCH_SOURCE_SHA="$source" "$script" "$workflow") >"$work/$name.log" 2>&1; then
+      GITHUB_REF="$ref" DISPATCH_SOURCE_SHA="$source" "$script" "${MODE:-$workflow}") >"$work/$name.log" 2>&1; then
     cat "$output"
   else
     echo failed
@@ -108,5 +108,26 @@ git -C "$repo" checkout --quiet main
 for name in push-with-source branch-dispatch second-parent workflow-changed; do
   ! grep -q 'dispatch source:' "$work/$name.log" || fail "$name logged a source line"
 done
+
+# --main-history (support-images.yaml) keeps every history rule but the
+# workflow-file one, and runs only on main, with or without a source.
+export MODE=--main-history
+expect history-candidate "source_sha=$candidate" "$repo" workflow_dispatch refs/heads/main "$candidate"
+grep -Fxq "dispatch source: $candidate on main $head" "$work/history-candidate.log" ||
+  fail 'the main-history dispatch did not log its source line'
+expect history-workflow-changed "source_sha=$base" "$repo" workflow_dispatch refs/heads/main "$base"
+expect history-own-push "source_sha=$head" "$repo" push refs/heads/main ''
+expect history-own-dispatch "source_sha=$head" "$repo" workflow_dispatch refs/heads/main ''
+expect history-branch-dispatch failed "$repo" workflow_dispatch refs/heads/feature ''
+grep -Fq 'runs only on main' "$work/history-branch-dispatch.log" ||
+  fail 'history-branch-dispatch was refused for another reason'
+expect history-branch-source failed "$repo" workflow_dispatch refs/heads/feature "$candidate"
+expect history-push-with-source failed "$repo" push refs/heads/main "$candidate"
+expect history-second-parent failed "$repo" workflow_dispatch refs/heads/main "$branch_commit"
+grep -Fq 'not a commit of main' "$work/history-second-parent.log" ||
+  fail 'history-second-parent was refused for another reason'
+expect history-unknown-sha failed "$repo" workflow_dispatch refs/heads/main "$(printf '%040d' 7)"
+expect history-shallow failed "$shallow" workflow_dispatch refs/heads/main "$head"
+unset MODE
 
 echo "test-dispatch-source: PASS cases=$cases"

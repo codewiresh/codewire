@@ -25,9 +25,21 @@ fi
 if [[ -e "$LEGACY_GITHUB_WORKFLOW" || -L "$LEGACY_GITHUB_WORKFLOW" ]]; then
   fail 'legacy GitHub workspace-image builder must remain retired'
 fi
-if grep -q '^  workflow_dispatch:' "$WORKFLOW"; then
-  fail 'support-image publication must be canonical-main push-only'
-fi
+# Publication is for main commits only: a push publishes for its own commit,
+# and a dispatch of main for its head or for an earlier first-parent main
+# commit it names (dispatch-source.sh --main-history refuses anything else).
+python3 - "$WORKFLOW" <<'PY' || fail 'support-image publication accepts events or inputs beyond main pushes and the source_sha dispatch'
+import sys
+
+import yaml
+
+on = yaml.safe_load(open(sys.argv[1]))[True]
+assert set(on) == {"push", "workflow_dispatch"}, on
+assert on["push"] == {"branches": ["main"]}, on["push"]
+inputs = on["workflow_dispatch"]["inputs"]
+assert list(inputs) == ["source_sha"], inputs
+assert inputs["source_sha"]["required"] is False and inputs["source_sha"]["default"] == "", inputs
+PY
 # A running support build finishes when main moves on, and a newer push's run
 # waits behind it in one group rather than building beside it (owner,
 # 2026-10-21). A waiting commit that main has moved past builds nothing.
@@ -67,10 +79,31 @@ if grep -Fq 'GHCR_PUBLISH_USERNAME:' <<<"$selection_job"; then
 fi
 grep -Fq -- '--baseline-candidate "$RUNNER_TEMP/codewire-published-support-candidate.json"' \
   <<<"$selection_job" || fail 'planner does not consume the untrusted registry candidate'
-grep -Fq -- '--target-base "$GITHUB_SHA"' <<<"$selection_job" ||
-  fail 'support planner target is not the exact canonical head'
-grep -Fq -- '--trusted-policy "$GITHUB_SHA"' <<<"$selection_job" ||
-  fail 'support planner policy is not the exact canonical head'
+grep -Fq -- '--target-base "$SOURCE_SHA"' <<<"$selection_job" ||
+  fail 'support planner target is not the exact chosen source'
+grep -Fq -- '--trusted-policy "$SOURCE_SHA"' <<<"$selection_job" ||
+  fail 'support planner policy is not the exact chosen source'
+grep -Fq -- '--head "$SOURCE_SHA"' <<<"$selection_job" ||
+  fail 'support adapter head is not the exact chosen source'
+if grep -Fq '"$GITHUB_SHA' <<<"$(sed -n '/name: Plan atomic support build/,/name: Refuse a build/p' <<<"$selection_job")"; then
+  fail 'support planning still names the dispatched head instead of the chosen source'
+fi
+# The chosen source comes only from dispatch-source.sh, before anything reads
+# the registry: main's first-parent history, and a run of main.
+source_step=$'      - name: Choose the commit this run publishes for\n        id: source\n        env:\n          DISPATCH_SOURCE_SHA: ${{ github.event.inputs.source_sha }}\n        run: scripts/ci/select/dispatch-source.sh --main-history'
+grep -Fq "$source_step" <<<"$selection_job" ||
+  fail 'support selection does not choose its source with dispatch-source.sh --main-history'
+[[ "$(grep -Fc 'SOURCE_SHA: ${{ steps.source.outputs.source_sha }}' <<<"$selection_job")" -eq 3 ]] ||
+  fail 'support resolution, planning and refusal do not all read the chosen source'
+grep -Fq '      source_sha: ${{ steps.source.outputs.source_sha }}' <<<"$selection_job" ||
+  fail 'support selection does not expose the chosen source'
+grep -Fq 'scripts/ci/images/resolve-published-support-pair.sh "$candidate" "$SOURCE_SHA"' <<<"$selection_job" ||
+  fail 'a dispatch does not plan against its source'"'"'s newest published ancestor pair'
+# An earlier commit that needs a build fails the run instead of skipping it.
+grep -Fq "        if: \${{ steps.source.outputs.source_sha != github.sha && steps.select.outputs.build_support_images == 'true' }}" \
+  <<<"$selection_job" || fail 'a dispatch for an earlier commit that needs a build is not refused'
+[[ "$(grep -Fc "needs.support-selection.outputs.source_sha == github.sha }}" "$WORKFLOW")" -eq 3 ]] ||
+  fail 'a build or the probe can run for an earlier commit with main'"'"'s scripts and tags'
 grep -Fq 'scripts/ci/plan/apply-support-plan.py' <<<"$selection_job" ||
   fail 'support event adapter does not consume planner facts'
 grep -Fq 'name: Remove untrusted registry candidate' <<<"$selection_job" ||
@@ -86,16 +119,16 @@ if grep -Fq 'secrets.' <<<"$selection_job"; then
 fi
 for output in build_support_images build_confidential_probe_image reason matched_categories base_image_state \
   workspace_image_state confidential_probe_image_state baseline_sha head_sha head_tree ci_plan_sha256 \
-  ci_policy_sha256 baseline_valid; do
+  ci_policy_sha256 baseline_valid alias_support_pair alias_source_sha alias_base_digest alias_workspace_digest; do
   grep -Fq "      ${output}: \${{ steps.select.outputs.${output} }}" <<<"$selection_job" ||
     fail "support selection omits ${output} planner output"
 done
-[[ "$(grep -Fc "if: \${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' }}" \
+[[ "$(grep -Fc "if: \${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' && needs.support-selection.outputs.source_sha == github.sha }}" \
   "$WORKFLOW")" -eq 2 ]] || fail 'support-pair platform builds are not both independently selected'
-grep -Fq "if: \${{ needs.support-selection.outputs.build_confidential_probe_image == 'true' && needs.support-selection.outputs.superseded == 'false' }}" \
+grep -Fq "if: \${{ needs.support-selection.outputs.build_confidential_probe_image == 'true' && needs.support-selection.outputs.superseded == 'false' && needs.support-selection.outputs.source_sha == github.sha }}" \
   "$WORKFLOW" || fail 'confidential-probe publication is not independently selected'
-[[ "$(grep -Fc 'needs: [support-selection]' "$WORKFLOW")" -eq 3 ]] ||
-  fail 'the platform builds and the probe publisher do not all wait for support selection'
+[[ "$(grep -Fc 'needs: [support-selection]' "$WORKFLOW")" -eq 4 ]] ||
+  fail 'the platform builds, the probe publisher and the alias do not all wait for support selection'
 grep -qF 'scripts/ci/images/build-push-image.sh base images/base/Dockerfile images/base' \
   "$WORKFLOW" || fail 'base is not built by the canonical Gitea helper'
 # shellcheck disable=SC2016
@@ -107,7 +140,8 @@ grep -qF 'scripts/ci/images/build-push-image.sh confidential-probe images/confid
   "$WORKFLOW" || fail 'confidential probe is not built by the canonical Gitea helper'
 publish_job="$(sed -n '/^  publish-support-images:/,/^  publish-confidential-probe:/p' "$WORKFLOW")"
 probe_job="$(sed -n '/^  publish-confidential-probe:/,/^  propose-workspace-image-pin:/p' "$WORKFLOW")"
-pin_job="$(sed -n '/^  propose-workspace-image-pin:/,$p' "$WORKFLOW")"
+pin_job="$(sed -n '/^  propose-workspace-image-pin:/,/^  alias-support-pair:/p' "$WORKFLOW")"
+alias_job="$(sed -n '/^  alias-support-pair:/,$p' "$WORKFLOW")"
 grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$publish_job" ||
   fail 'support-pair publisher does not use the protected CI tier'
 grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$probe_job" ||
@@ -116,13 +150,13 @@ grep -Fq '    enable-openid-connect: true' <<<"$publish_job" ||
   fail 'support-pair publisher lacks job-scoped OIDC'
 grep -Fq '    enable-openid-connect: true' <<<"$probe_job" ||
   fail 'confidential-probe publisher lacks job-scoped OIDC'
-[[ "$(grep -Fc 'enable-openid-connect: true' "$WORKFLOW")" -eq 5 ]] ||
-  fail 'support workflow exposes OIDC outside the platform builds, the two publishers and the pin proposal'
+[[ "$(grep -Fc 'enable-openid-connect: true' "$WORKFLOW")" -eq 6 ]] ||
+  fail 'support workflow exposes OIDC outside the platform builds, the two publishers, the alias and the pin proposal'
 grep -qF '    needs: [build-support-amd64, build-support-arm64]' <<<"$publish_job" ||
   fail 'support-pair publisher does not join both platform builds'
 grep -qF 'needs: [support-selection]' <<<"$probe_job" ||
   fail 'confidential-probe publisher is not bound to selection'
-[[ "$(grep -Fc 'OPENBAO_GHCR_ROLE: codewire-source-support-publisher' "$WORKFLOW")" -eq 2 ]] ||
+[[ "$(grep -Fc 'OPENBAO_GHCR_ROLE: codewire-source-support-publisher' "$WORKFLOW")" -eq 3 ]] ||
   fail 'publisher jobs lack their exact OpenBao GHCR role'
 grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher' \
   <<<"$publish_job" || fail 'support-pair publisher lacks its exact OpenBao GHCR audience'
@@ -546,6 +580,63 @@ for mutation in "${pin_mutations[@]}"; do
   mutated="$(sed -e "${mutation#*::}" <<<"$pin_job")"
   [[ "$mutated" != "$pin_job" ]] || fail "pin job mutation did not apply: $label"
   [[ -n "$(pin_job_violation "$mutated")" ]] || fail "pin job mutation was accepted: $label"
+done
+
+# A commit whose pair inputs equal the validated published pair's gets that
+# pair's exact indexes under its own tag, from a protected job with the join's
+# publisher identity, whatever its supersession; it never builds or moves latest.
+# alias_job_violation JOB prints the first broken alias rule, if any.
+# shellcheck disable=SC2016
+alias_job_violation() {
+  local job="$1"
+  [[ -n "$job" ]] || { echo 'no job aliases an unchanged commit to its identical published pair'; return; }
+  grep -Fqx '    needs: [support-selection]' <<<"$job" || { echo 'the alias does not wait for selection'; return; }
+  grep -Fqx "    if: \${{ needs.support-selection.outputs.alias_support_pair == 'true' }}" <<<"$job" ||
+    { echo 'the alias runs without the planner'"'"'s identical-inputs decision'; return; }
+  grep -Fqx "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$job" || { echo 'the alias leaves the protected tier'; return; }
+  grep -Fqx '    enable-openid-connect: true' <<<"$job" || { echo 'the alias lacks job-scoped OIDC'; return; }
+  local role
+  for role in 'OPENBAO_ROLE: codewire-source-support-publisher' \
+      'OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher' \
+      'OPENBAO_GHCR_ROLE: codewire-source-support-publisher' \
+      'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher'; do
+    grep -Fqx "      $role" <<<"$job" || { echo "the alias does not use the join's publisher identity ($role)"; return; }
+  done
+  if grep -Eq 'secrets\.|github\.token|build-support-platform|build-push-image|--support-pair|latest|continue-on-error' <<<"$job"; then
+    echo 'the alias builds, moves latest, tolerates failure or holds another capability'
+    return
+  fi
+  for binding in \
+      'SOURCE_SHA: ${{ needs.support-selection.outputs.source_sha }}' \
+      'ALIAS_FROM_SHA: ${{ needs.support-selection.outputs.alias_source_sha }}' \
+      'ALIAS_BASE_DIGEST: ${{ needs.support-selection.outputs.alias_base_digest }}' \
+      'ALIAS_WORKSPACE_DIGEST: ${{ needs.support-selection.outputs.alias_workspace_digest }}'; do
+    grep -Fqx "          $binding" <<<"$job" || { echo "the alias does not take the planner's $binding"; return; }
+  done
+  grep -Fq 'scripts/ci/images/alias-support-pair.sh \
+            "$SOURCE_SHA" "$ALIAS_FROM_SHA" "$ALIAS_BASE_DIGEST" "$ALIAS_WORKSPACE_DIGEST"' <<<"$job" ||
+    { echo 'the alias does not run the reviewed alias publisher'; return; }
+}
+violation="$(alias_job_violation "$alias_job")"
+[[ -z "$violation" ]] || fail "$violation"
+# shellcheck disable=SC2016
+alias_mutations=(
+  'no decision::/alias_support_pair == .true./d'
+  'superseded gate::s/alias_support_pair == .true. }}/alias_support_pair == '"'"'true'"'"' \&\& needs.support-selection.outputs.superseded == '"'"'false'"'"' }}/'
+  'drop OIDC::/enable-openid-connect: true/d'
+  'unprotected tier::s|vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT|vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT|'
+  'another identity::s|OPENBAO_GHCR_ROLE: codewire-source-support-publisher|OPENBAO_GHCR_ROLE: codewire-other|'
+  'moves latest::s|"$ALIAS_WORKSPACE_DIGEST"$|"$ALIAS_WORKSPACE_DIGEST" latest|'
+  'tolerated failure::/      - name: Tag the identical/a\        continue-on-error: true'
+  'an unplanned digest::s|alias_base_digest }}|baseline_sha }}|'
+  'a rebuild::/      - name: Tag the identical/i\      - run: scripts/ci/images/build-support-platform.sh linux/amd64'
+  'Actions secret::/ALIAS_FROM_SHA:/i\          TOKEN: ${{ secrets.GHCR_TOKEN }}'
+)
+for mutation in "${alias_mutations[@]}"; do
+  label="${mutation%%::*}"
+  mutated="$(sed -e "${mutation#*::}" <<<"$alias_job")"
+  [[ "$mutated" != "$alias_job" ]] || fail "alias job mutation did not apply: $label"
+  [[ -n "$(alias_job_violation "$mutated")" ]] || fail "alias job mutation was accepted: $label"
 done
 
 # Forgejo keeps every queued run, so one that starts after main moved on must

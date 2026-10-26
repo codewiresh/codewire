@@ -17,6 +17,7 @@ PLAN_SCHEMA = "codewire.ci-plan/v1"
 BASELINE_SCHEMA = "codewire.ci-baseline/v1"
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 STATE_VALUES = {"affected", "unaffected", "unclassified"}
 MAX_PLAN_BYTES = 4 * 1024 * 1024
 ZERO_HASH = "0" * 64
@@ -86,6 +87,26 @@ def trusted_outputs(path: Path, expected_head: str, expected_head_tree: str) -> 
         raise AdapterError("invalid baseline did not fail every support artifact closed")
 
     selected = base_state != "unaffected" or workspace_state != "unaffected"
+    baseline_sha = require_string(baseline, "baseline_commit", HEX40_RE)
+    # A head whose base and workspace fingerprints equal the validated
+    # published pair's is given that pair's exact indexes under its own
+    # commit tag, so every main commit has a releasable pair without a
+    # rebuild. Only a valid baseline can leave both unaffected, and the
+    # aliased digests are the ones the planner validated.
+    alias = valid and not selected and baseline_sha != head
+    alias_digests = {"base": "", "workspace": ""}
+    if alias:
+        images = (baseline.get("provenance") or {}).get("images")
+        if not isinstance(images, dict):
+            raise AdapterError("plan baseline omits the published pair digests")
+        for name in alias_digests:
+            image = images.get(name)
+            digest = image.get("digest") if isinstance(image, dict) else None
+            if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
+                raise AdapterError(f"plan baseline {name} digest is invalid")
+            if image.get("revision") != baseline_sha:
+                raise AdapterError(f"plan baseline {name} revision is not the baseline commit")
+            alias_digests[name] = digest
     confidential_probe_selected = confidential_probe_state != "unaffected"
     if not valid:
         reason = "baseline_invalid"
@@ -107,12 +128,16 @@ def trusted_outputs(path: Path, expected_head: str, expected_head_tree: str) -> 
         "base_image_state": base_state,
         "workspace_image_state": workspace_state,
         "confidential_probe_image_state": confidential_probe_state,
-        "baseline_sha": require_string(baseline, "baseline_commit", HEX40_RE),
+        "baseline_sha": baseline_sha,
         "head_sha": head,
         "head_tree": head_tree,
         "ci_plan_sha256": hashlib.sha256(raw).hexdigest(),
         "ci_policy_sha256": require_string(trusted, "policy_sha256", HEX64_RE),
         "baseline_valid": str(valid).lower(),
+        "alias_support_pair": str(alias).lower(),
+        "alias_source_sha": baseline_sha if alias else "",
+        "alias_base_digest": alias_digests["base"],
+        "alias_workspace_digest": alias_digests["workspace"],
     }
 
 
@@ -136,6 +161,10 @@ def fail_closed_outputs(head: str, head_tree: str) -> dict[str, str]:
         "ci_plan_sha256": ZERO_HASH,
         "ci_policy_sha256": ZERO_HASH,
         "baseline_valid": "false",
+        "alias_support_pair": "false",
+        "alias_source_sha": "",
+        "alias_base_digest": "",
+        "alias_workspace_digest": "",
     }
 
 

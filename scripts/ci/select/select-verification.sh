@@ -2202,6 +2202,7 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/cw-release-dry-run.yaml|\
       .gitea/workflows/mirror-github.yaml|\
       .gitea/workflows/support-images.yaml|scripts/ci/images/support-superseded.sh|\
+      scripts/ci/images/alias-support-pair.sh|\
       keys/production-release.asc|\
       .gitea/workflows/observe-*.yaml|\
       scripts/ci/images/build-push-image.sh|scripts/ci/images/build-push-runtime-images.sh|\
@@ -2270,6 +2271,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-dispatch-deploy-dev.sh|scripts/ci/tests/test-dispatch-deploy-prod.sh|\
       scripts/ci/tests/test-publish-image-to-ghcr.sh|\
       scripts/ci/tests/test-publish-image-to-harbor.sh|\
+      scripts/ci/tests/test-alias-support-pair.sh|\
       scripts/ci/tests/test-resolve-published-support-pair.sh|\
       scripts/ci/tests/test-run-skopeo-container.sh|\
       scripts/ci/tests/test-support-images-workflow.sh|\

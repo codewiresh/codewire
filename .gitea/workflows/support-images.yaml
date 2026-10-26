@@ -1,9 +1,22 @@
 # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; job profile and job-scoped OIDC enforce support-image capabilities.
 name: Build support images
 
+# Every main commit gets the support pair a release tag needs
+# (verify-release-support-pair.sh): a commit whose base and workspace inputs
+# changed builds it, and any other commit publishes its tags as aliases of the
+# published pair with the same inputs ("Alias the published support pair").
+# A dispatch of main with source_sha runs the same selection for an earlier
+# first-parent main commit, to backfill one: it aliases, or refuses when that
+# commit's inputs need a build (dispatch-source.sh --main-history).
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: An earlier main commit to publish the support pair for (dispatch-source.sh --main-history)
+        required: false
+        default: ''
 
 # A support build that is already running finishes when main moves on: main
 # pushes arrive faster than the build, so cancelling it left no pair published
@@ -33,6 +46,7 @@ jobs:
     name: Support image selection
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
       superseded: ${{ steps.canonical.outputs.superseded }}
       build_support_images: ${{ steps.select.outputs.build_support_images }}
       build_confidential_probe_image: ${{ steps.select.outputs.build_confidential_probe_image }}
@@ -47,6 +61,10 @@ jobs:
       ci_plan_sha256: ${{ steps.select.outputs.ci_plan_sha256 }}
       ci_policy_sha256: ${{ steps.select.outputs.ci_policy_sha256 }}
       baseline_valid: ${{ steps.select.outputs.baseline_valid }}
+      alias_support_pair: ${{ steps.select.outputs.alias_support_pair }}
+      alias_source_sha: ${{ steps.select.outputs.alias_source_sha }}
+      alias_base_digest: ${{ steps.select.outputs.alias_base_digest }}
+      alias_workspace_digest: ${{ steps.select.outputs.alias_workspace_digest }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -54,6 +72,15 @@ jobs:
 
       - name: Verify sealed Rust toolchain
         run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      # A push publishes for its own commit. A dispatch of main may name an
+      # earlier first-parent main commit; main's planner and publishers then
+      # serve it, so its workflow file may differ from main's.
+      - name: Choose the commit this run publishes for
+        id: source
+        env:
+          DISPATCH_SOURCE_SHA: ${{ github.event.inputs.source_sha }}
+        run: scripts/ci/select/dispatch-source.sh --main-history
 
       # A run that starts after main moved on publishes nothing: the newer
       # commit's run is queued behind this one and plans against the
@@ -64,23 +91,33 @@ jobs:
         id: canonical
         run: scripts/ci/images/support-superseded.sh
 
+      # A push plans against the latest pair; a dispatch against the pair of
+      # its commit's newest first-parent ancestor.
       - name: Resolve untrusted published support pair
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: |
           set -euo pipefail
           candidate="$RUNNER_TEMP/codewire-published-support-candidate.json"
-          scripts/ci/images/resolve-published-support-pair.sh "$candidate"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            scripts/ci/images/resolve-published-support-pair.sh "$candidate" "$SOURCE_SHA"
+          else
+            scripts/ci/images/resolve-published-support-pair.sh "$candidate"
+          fi
 
       - name: Plan atomic support build from validated baseline
         id: select
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: |
           set -euo pipefail
           plan="$(mktemp)"
           trap 'rm -f "$plan"' EXIT
           python3 scripts/ci/plan/planner.py \
             --repository . \
-            --target-base "$GITHUB_SHA" \
-            --head "$GITHUB_SHA" \
-            --trusted-policy "$GITHUB_SHA" \
+            --target-base "$SOURCE_SHA" \
+            --head "$SOURCE_SHA" \
+            --trusted-policy "$SOURCE_SHA" \
             --baseline-candidate "$RUNNER_TEMP/codewire-published-support-candidate.json" \
             --output "$plan"
           if jq -e '.degraded_reasons | length > 0' "$plan" >/dev/null; then
@@ -89,8 +126,21 @@ jobs:
           fi
           python3 scripts/ci/plan/apply-support-plan.py \
             --plan "$plan" \
-            --head "$GITHUB_SHA" \
-            --head-tree "$(git rev-parse "$GITHUB_SHA^{tree}")"
+            --head "$SOURCE_SHA" \
+            --head-tree "$(git rev-parse "$SOURCE_SHA^{tree}")"
+
+      # The build jobs build only the dispatched commit itself (an earlier
+      # commit's confidential probe is not part of the release pair). An
+      # earlier commit whose pair inputs differ from its newest published
+      # ancestor pair is refused here, not silently skipped: a release builds
+      # that pair natively (deploy-prod.yaml).
+      - name: Refuse a build for an earlier commit
+        if: ${{ steps.source.outputs.source_sha != github.sha && steps.select.outputs.build_support_images == 'true' }}
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          echo "::error::the support inputs of $SOURCE_SHA differ from its newest published ancestor pair, so it needs a build, which this dispatch of $GITHUB_SHA does not run"
+          exit 1
 
       - name: Remove untrusted registry candidate
         if: ${{ always() }}
@@ -110,7 +160,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 120
     needs: [support-selection]
-    if: ${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' }}
+    if: ${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' && needs.support-selection.outputs.source_sha == github.sha }}
     outputs:
       superseded: ${{ steps.canonical.outputs.superseded }}
       base_digest: ${{ steps.build.outputs.base_digest }}
@@ -187,7 +237,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 120
     needs: [support-selection]
-    if: ${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' }}
+    if: ${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' && needs.support-selection.outputs.source_sha == github.sha }}
     outputs:
       superseded: ${{ steps.canonical.outputs.superseded }}
       base_digest: ${{ steps.build.outputs.base_digest }}
@@ -299,7 +349,7 @@ jobs:
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     needs: [support-selection]
-    if: ${{ needs.support-selection.outputs.build_confidential_probe_image == 'true' && needs.support-selection.outputs.superseded == 'false' }}
+    if: ${{ needs.support-selection.outputs.build_confidential_probe_image == 'true' && needs.support-selection.outputs.superseded == 'false' && needs.support-selection.outputs.source_sha == github.sha }}
     env:
       OPENBAO_ROLE: codewire-source-support-publisher
       OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
@@ -371,3 +421,34 @@ jobs:
           scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh "$bot_work/token"
           WORKSPACE_PIN_BOT_TOKEN_FILE="$bot_work/token" \
             scripts/ci/images/propose-workspace-image-pin.sh "$WORKSPACE_REF"
+
+  # A commit whose base and workspace fingerprints equal the published pair's
+  # the planner validated gets that pair's exact indexes under its own commit
+  # tag, in Harbor and the GHCR mirror, with the join's publisher identity: no
+  # rebuild, and never the moving latest. The alias holds for a superseded
+  # commit too, since its inputs are what they are.
+  alias-support-pair:
+    # zizmor: ignore[excessive-permissions] This exact protected job receives the scoped publisher identity to tag the planned pair.
+    name: Alias the published support pair to this commit
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 20
+    needs: [support-selection]
+    if: ${{ needs.support-selection.outputs.alias_support_pair == 'true' }}
+    env:
+      OPENBAO_ROLE: codewire-source-support-publisher
+      OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
+      OPENBAO_GHCR_ROLE: codewire-source-support-publisher
+      OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Tag the identical published pair for this commit and verify it
+        env:
+          SOURCE_SHA: ${{ needs.support-selection.outputs.source_sha }}
+          ALIAS_FROM_SHA: ${{ needs.support-selection.outputs.alias_source_sha }}
+          ALIAS_BASE_DIGEST: ${{ needs.support-selection.outputs.alias_base_digest }}
+          ALIAS_WORKSPACE_DIGEST: ${{ needs.support-selection.outputs.alias_workspace_digest }}
+        run: |
+          scripts/ci/images/alias-support-pair.sh \
+            "$SOURCE_SHA" "$ALIAS_FROM_SHA" "$ALIAS_BASE_DIGEST" "$ALIAS_WORKSPACE_DIGEST"
