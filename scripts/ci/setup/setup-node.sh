@@ -19,6 +19,10 @@ case "$version-$platform" in
   22.23.4-linux-x64)
     official_sha256="b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406"
     ;;
+  # Only the SDK release's npm publish, for npm 11's trusted publishing.
+  24.22.1-linux-x64)
+    official_sha256="eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c"
+    ;;
   *)
     echo "unsupported Node.js version: ${version} (${platform})" >&2
     exit 1

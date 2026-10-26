@@ -1881,10 +1881,11 @@ run_paths_case workspace_image_pin_proposal pull_request refs/pull/2255/head fal
 # SDK's packager is proven by that SDK's own family.
 run_paths_case sdk_release_workflows pull_request refs/pull/3512/head false \
   'confidential_script_tests go_consumer_interop go_support policy release security security_js' \
-  .gitea/workflows/sdk-release-npm.yaml .gitea/workflows/sdk-release-pypi.yaml \
-  scripts/ci/setup/fetch-openbao-sdk-publish-token.sh \
-  scripts/ci/tests/test-fetch-openbao-sdk-publish-token.sh \
-  scripts/ci/release/publish-sdk.py scripts/ci/tests/test-publish-sdk.py
+  .github/workflows/sdk-release.yml scripts/ci/tests/test-sdk-release-workflow.py
+# Removing the token-based releases needs only the release proofs (#3512).
+run_paths_case retired_sdk_token_releases pull_request refs/pull/3512/head false \
+  'confidential_script_tests go_consumer_interop go_support policy release security security_js' \
+  .gitea/workflows/sdk-release-npm.yaml .gitea/workflows/sdk-release-pypi.yaml
 run_paths_case sdk_ts_packager pull_request refs/pull/3512/head false \
   'policy sdk_ts security security_js' \
   scripts/ci/release/package-sdk-ts.sh

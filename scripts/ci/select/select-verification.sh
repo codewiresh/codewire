@@ -785,6 +785,14 @@ if [ "$event_selected" = false ]; then
           recognized=true
           continue
           ;;
+        .gitea/workflows/sdk-release-npm.yaml|.gitea/workflows/sdk-release-pypi.yaml)
+          # The token-based SDK releases, replaced by trusted publishing from
+          # .github/workflows/sdk-release.yml (#3512). A path that reappears
+          # is unclassified again.
+          select_token release
+          recognized=true
+          continue
+          ;;
       esac
     fi
 
@@ -1263,11 +1271,9 @@ if [ "$event_selected" = false ]; then
         select_token sdk_python
         recognized=true
         ;;
-      .gitea/workflows/sdk-release-npm.yaml|.gitea/workflows/sdk-release-pypi.yaml|\
-      scripts/ci/setup/fetch-openbao-sdk-publish-token.sh|\
-      scripts/ci/tests/test-fetch-openbao-sdk-publish-token.sh|\
-      scripts/ci/release/publish-sdk.py|scripts/ci/tests/test-publish-sdk.py)
-        # The owner-dispatched npm and PyPI releases of the SDKs (#3512).
+      .github/workflows/sdk-release.yml|scripts/ci/tests/test-sdk-release-workflow.py)
+        # The owner-dispatched npm and PyPI releases of the SDKs, by trusted
+        # publishing from GitHub (#3512).
         select_token release
         recognized=true
         ;;

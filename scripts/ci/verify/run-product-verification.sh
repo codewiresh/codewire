@@ -1545,8 +1545,7 @@ run_release() {
   scripts/ci/tests/test-run-workspace-contract-on-image.sh
   scripts/ci/tests/test-propose-workspace-image-pin.sh
   scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
-  scripts/ci/tests/test-fetch-openbao-sdk-publish-token.sh
-  python3 -B scripts/ci/tests/test-publish-sdk.py
+  python3 -B scripts/ci/tests/test-sdk-release-workflow.py
   python3 scripts/ci/tests/test-image-bundle.py
   scripts/ci/tests/test-deploy-prod-workflow.sh
   python3 scripts/checks/repo_checks.py production-source-ownership --self-test
