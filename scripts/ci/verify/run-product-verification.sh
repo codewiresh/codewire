@@ -1035,14 +1035,14 @@ RUN swift test --scratch-path /tmp/codewire-ios-build
 DOCKERFILE
 }
 
-# Standard verification's selected families (infra#1534). Contracts runs
-# first, alone: it regenerates the checked-in generated code (libs/gen-go,
-# libs/gen-python, packages/codewire-proto-ts/src/gen) that the SDKs, Go
-# support and the dashboard read. Then Web runs side by side with the others
-# in order, so the job takes Contracts plus the longer of the two (main run
+# Standard verification's selected families (infra#1534): Web side by side
+# with the others in order, so the job takes the longer of the two (main run
 # 23329: 626 s with every family one after another). The first failure stops
 # the rest (#3013). Each family keeps the selection condition its own step
-# had.
+# had. Contracts is not one of them: it runs in its own job beside Standard
+# (run-product-verification.sh contracts), in its own checkout, and fails when
+# the generated code it regenerates differs from the checked-in code these
+# families read (main run 23934: Contracts ran alone first for about 175 s).
 standard_families() {
   local family token
   for family in go-support:go_support docs:docs sdk-go:sdk_go sdk-ts:sdk_ts \
@@ -1054,7 +1054,6 @@ standard_families() {
 
 run_standard_family() {
   case "$1" in
-    contracts) run_contracts ;;
     go-support) run_go_support ;;
     web) CODEWIRE_DASHBOARD_IMAGE_DEFERRED=true run_web ;;
     docs) run_docs ;;
@@ -1078,13 +1077,10 @@ run_standard_in_order() {
 run_standard() {
   local -a others=() lanes=()
   mapfile -t others < <(standard_families)
-  if selected contracts; then
-    run_standard_in_order contracts || return $?
-  fi
   if selected web; then lanes+=('run_standard_in_order web'); fi
   if [ "${#others[@]}" -gt 0 ]; then lanes+=("run_standard_in_order ${others[*]}"); fi
   if [ "${#lanes[@]}" -eq 0 ]; then
-    echo 'Standard: no family besides Contracts is selected'
+    echo 'Standard: no family is selected (Contracts runs in its own job)'
     return 0
   fi
   printf 'Standard families side by side: %s\n' "${lanes[*]}"

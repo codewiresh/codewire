@@ -21,7 +21,7 @@ for dir in "$cache"/ci-cache/*/; do
     touch "$dir/.last-used"
   fi
 done
-for dir in "$cache"/ci-cache/*/ "$cache/cargo-home/"; do
+for dir in "$cache"/ci-cache/*/ "$cache/cargo-home/" "$cache/go/mod/" "$cache/go/build/"; do
   [[ -d "$dir" ]] || continue
   printf '[warm-rust-cache] size %s %s KiB\n' "$(basename "$dir")" "$(du -sk "$dir" 2>/dev/null | awk '{print $1}')"
 done

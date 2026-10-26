@@ -167,6 +167,9 @@ done
 curl -fsS "$origin/reference/fixtures/index.html" >/dev/null
 log "serving fixtures at $origin"
 
+# Eight workers (infra#1534): each spec opens its own page on the static
+# server and shares no state with another, so the fixtures run side by side
+# (main run 23934: 562 tests took 2.1 min on four).
 project_args=()
 for project in "${PROJECTS[@]}"; do
   project_args+=("--project=$project")
@@ -183,7 +186,7 @@ status=0
     PLAYWRIGHT_JSON_OUTPUT_FILE="$work/report.json" \
     "$PLAYWRIGHT" test --config apps/dashboard/playwright.config.ts \
       "${project_args[@]}" --retries=0 --forbid-only --reporter=line,json \
-      --workers="${CODEWIRE_DESIGN_FIXTURE_WORKERS:-4}"
+      --workers="${CODEWIRE_DESIGN_FIXTURE_WORKERS:-8}"
 ) || status=$?
 
 check_report "$work/report.json" || status=1

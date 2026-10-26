@@ -9,6 +9,8 @@ green_results=(
   VERIFICATION_TESTED_TREE_RECEIPT=fallback
   VERIFICATION_POLICY_EXPECTED=true
   VERIFICATION_POLICY_RESULT=success
+  VERIFICATION_CONTRACTS_EXPECTED=true
+  VERIFICATION_CONTRACTS_RESULT=success
   VERIFICATION_STANDARD_EXPECTED=true
   VERIFICATION_STANDARD_RESULT=success
   VERIFICATION_TOOLING_EXPECTED=true
@@ -34,6 +36,8 @@ green_results=(
 unselected_results=(
   VERIFICATION_POLICY_EXPECTED=false
   VERIFICATION_POLICY_RESULT=skipped
+  VERIFICATION_CONTRACTS_EXPECTED=false
+  VERIFICATION_CONTRACTS_RESULT=skipped
   VERIFICATION_STANDARD_EXPECTED=false
   VERIFICATION_STANDARD_RESULT=skipped
   VERIFICATION_TOOLING_EXPECTED=false
@@ -149,6 +153,25 @@ expect_failure missing_compile_expectation \
 expect_failure standard_failure 'standard selected capability group concluded failure' \
   VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
   VERIFICATION_STANDARD_RESULT=failure
+
+# Contracts runs in its own job beside Standard (infra#1534): Required
+# verification waits on it like every other group.
+expect_failure contracts_failure 'contracts selected capability group concluded failure' \
+  VERIFICATION_SELECTION='|valid:v3|contracts|contracts_proto|complete|' \
+  VERIFICATION_CONTRACTS_RESULT=failure
+
+expect_failure contracts_cancelled 'contracts selected capability group concluded cancelled' \
+  VERIFICATION_SELECTION='|valid:v3|contracts|contracts_proto|complete|' \
+  VERIFICATION_CONTRACTS_RESULT=cancelled
+
+expect_failure missing_contracts_expectation \
+  'contracts capability expectation is missing' \
+  VERIFICATION_SELECTION='|valid:v3|contracts|contracts_proto|complete|' \
+  VERIFICATION_CONTRACTS_EXPECTED=
+
+expect_failure unselected_contracts_ran 'contracts unselected capability group concluded success' \
+  VERIFICATION_SELECTION='|valid:v3|policy|complete|' \
+  VERIFICATION_CONTRACTS_EXPECTED=false
 
 expect_failure policy_failure 'policy selected capability group concluded failure' \
   VERIFICATION_SELECTION='|valid:v3|policy|complete|' \

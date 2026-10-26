@@ -35,6 +35,9 @@ require_group_result() {
 require_group_result policy \
   "${VERIFICATION_POLICY_EXPECTED:-missing}" \
   "${VERIFICATION_POLICY_RESULT:-missing}"
+require_group_result contracts \
+  "${VERIFICATION_CONTRACTS_EXPECTED:-missing}" \
+  "${VERIFICATION_CONTRACTS_RESULT:-missing}"
 require_group_result standard \
   "${VERIFICATION_STANDARD_EXPECTED:-missing}" \
   "${VERIFICATION_STANDARD_RESULT:-missing}"

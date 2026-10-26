@@ -159,6 +159,7 @@ fi
 # build runner's own warm folder and request no identity, so they are not
 # cache jobs.
 cache_jobs=(
+  contracts
   standard
   rust-packages
   rust-features

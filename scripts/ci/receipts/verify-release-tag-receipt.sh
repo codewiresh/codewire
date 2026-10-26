@@ -269,7 +269,7 @@ if ! jq -e '
       | select(
           (.name | IN(
             "CW release-assets verification", "Container contract verification",
-            "Policy verification", "Standard verification",
+            "Policy verification", "Contracts verification", "Standard verification",
             "Tooling / delivery contract verification", "Compile every Rust target",
             "Build test archives", "Rust checks",
             "Rust / transport packages", "Rust / transport feature graphs",

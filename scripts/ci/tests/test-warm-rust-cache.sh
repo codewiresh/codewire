@@ -80,6 +80,41 @@ out="$(run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2 WARM_CACHE_
   fail 'an oversized Cargo home was kept'
 [[ ! -e "$work/cache/v1/cargo-home/registry.blob" ]] || fail 'the Cargo home was not wiped'
 
+# Go's module and build caches live in the cache too (infra#1534): the step
+# exports them for the job's later steps, with GOFLAGS that keep every test
+# running (-count=1) and the module cache removable (-modcacherw), after any
+# GOFLAGS the job already had.
+: > "$work/github-env"
+run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2 GITHUB_ENV="$work/github-env" >/dev/null
+[[ "$(cat "$work/github-env")" == "GOMODCACHE=$work/cache/v1/go/mod
+GOCACHE=$work/cache/v1/go/build
+GOFLAGS=-modcacherw -count=1" ]] || fail "the Go caches were not exported: $(cat "$work/github-env")"
+[[ -d "$work/cache/v1/go/mod" && -d "$work/cache/v1/go/build" ]] || fail 'the Go cache directories were not made'
+: > "$work/github-env"
+run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2 GITHUB_ENV="$work/github-env" GOFLAGS=-mod=mod >/dev/null
+grep -qxF 'GOFLAGS=-mod=mod -modcacherw -count=1' "$work/github-env" || fail "the job's own GOFLAGS were dropped: $(cat "$work/github-env")"
+# Kept for the next job; over its cap, wiped whole, even where Go left its
+# module cache read-only.
+go_module_cache() {
+  mkdir -p "$work/cache/v1/go/mod/example.com/module@v1.0.0" "$work/cache/v1/go/build/00"
+  head -c 2000000 /dev/zero > "$work/cache/v1/go/mod/example.com/module@v1.0.0/blob"
+  echo output > "$work/cache/v1/go/build/00/entry-d"
+  chmod -R a-w "$work/cache/v1/go/mod/example.com"
+}
+go_module_cache
+run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2 >/dev/null
+[[ -f "$work/cache/v1/go/mod/example.com/module@v1.0.0/blob" && -f "$work/cache/v1/go/build/00/entry-d" ]] ||
+  fail 'the Go caches were not kept for the next job'
+out="$(run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2 WARM_CACHE_GO_CAP_KIB=1000)"
+grep -qF '[warm-rust-cache] over the Go cache cap: wiping it' <<<"$out" || fail "an oversized Go cache was kept: $out"
+[[ ! -e "$work/cache/v1/go/mod/example.com" && ! -e "$work/cache/v1/go/build/00" && -d "$work/cache/v1/go/mod" ]] ||
+  fail 'the Go caches were not wiped and remade'
+# A new epoch wipes a read-only Go module cache with the rest.
+go_module_cache
+out="$(run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=3)"; grep -qF 'clean build' <<<"$out" || fail 'a new epoch did not wipe'
+[[ ! -e "$work/cache/v1/go/mod/example.com" ]] || fail 'the epoch wipe left the read-only Go module cache'
+run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2 >/dev/null
+
 # Under the free-space floor (a quarter of the filesystem, at least 2 GiB),
 # whole profile directories go, least recently used first and logged, until
 # the floor holds; the step continues (main run 19967).
@@ -105,17 +140,32 @@ grep -qE "^\[warm-rust-cache\] under $floor_kib KiB free: removing host-ci \([0-
 [[ ! -e "$work/cache/v1/ci-cache/host-ci" && -d "$work/cache/v1/ci-cache/desktop-release" && -d "$work/cache/v1/ci-cache/host-debug" ]] ||
   fail 'pruning to the floor removed more or other than the least recently used directory'
 grep -qF '[warm-rust-cache] using ' <<<"$out" || fail 'the step did not continue after pruning'
+# Under the floor, the Go caches go first; when that frees enough, every Rust
+# profile stays.
+fresh_profiles
+go_module_cache
+other=$(( fs_kib - floor_kib + 1000 - $(cache_used_kib) ))
+out="$(FAKE_DF_SIZE_KIB=$fs_kib FAKE_DF_OTHER_KIB=$other run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2)" ||
+  fail "a cache under its floor failed instead of wiping the Go caches: $out"
+grep -qE "^\[warm-rust-cache\] under $floor_kib KiB free: wiping the Go caches \([0-9]+ KiB\) before any Rust profile$" <<<"$out" ||
+  fail "the Go caches did not go first under the floor: $out"
+! grep -qF 'removing' <<<"$out" || fail "a Rust profile went though the Go caches freed enough: $out"
+[[ ! -e "$work/cache/v1/go/mod/example.com" && -d "$work/cache/v1/ci-cache/host-ci" ]] ||
+  fail 'the Go caches survived the floor, or a Rust profile did not'
 # Far under the floor: every profile directory goes in order, then the Cargo
 # home; above the 2 GiB hard minimum the step still continues.
 fresh_profiles
 head -c 1000000 /dev/zero > "$work/cache/v1/cargo-home/registry.blob"
+go_module_cache
 other=$(( fs_kib - 3000000 - $(cache_used_kib) ))
 out="$(FAKE_DF_SIZE_KIB=$fs_kib FAKE_DF_OTHER_KIB=$other run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2)" ||
   fail "a cache that pruning can bring over 2 GiB failed: $out"
 [[ "$(grep -oE 'removing [a-z-]+' <<<"$out" | tr '\n' ' ')" == 'removing host-ci removing desktop-release removing host-debug ' ]] ||
   fail "profile directories were not removed least recently used first: $out"
-grep -qF 'with no target left: wiping the Cargo home' <<<"$out" || fail 'the Cargo home was not wiped under the floor'
+grep -qE 'with no target left: wiping the Cargo home \([0-9]+ KiB\) and the Go caches \([0-9]+ KiB\)$' <<<"$out" ||
+  fail "the Cargo home and Go caches were not wiped under the floor: $out"
 [[ ! -e "$work/cache/v1/cargo-home/registry.blob" ]] || fail 'the Cargo home survived the floor'
+[[ ! -e "$work/cache/v1/go/mod/example.com" && -d "$work/cache/v1/go/mod" ]] || fail 'the Go caches survived the floor'
 # Equal last use: the name decides, so pruning is deterministic.
 fresh_profiles
 touch -d '2 days ago' "$work/cache/v1/ci-cache/host-ci/.last-used" "$work/cache/v1/ci-cache/desktop-release/.last-used"
@@ -161,6 +211,10 @@ touch -d '2 minutes ago' "$work/cache/v1/ci-cache/desktop-release/blob"
 echo new > "$work/cache/v1/ci-cache/host-debug/new.rlib"
 report="$(env -i PATH="$PATH" WARM_CACHE_ROOT="$work/cache" GITHUB_WORKSPACE="$work/workspace" "$FINISH")"
 grep -qF '[warm-rust-cache] size host-debug' <<<"$report" || fail 'the finish step did not report sizes'
+for go_dir in mod build; do
+  grep -qE "^\\[warm-rust-cache\\] size $go_dir [0-9]+ KiB\$" <<<"$report" ||
+    fail "the finish step did not report the Go $go_dir cache: $report"
+done
 [[ "$(find "$work/cache/v1/ci-cache/host-debug/.last-used" -mmin -1)" ]] || fail 'a built directory was not marked used'
 [[ -z "$(find "$work/cache/v1/ci-cache/desktop-release/.last-used" -mmin -1)" ]] || fail 'an untouched directory was marked used'
 grep -qE '^\[warm-rust-cache\] filesystem [0-9]+ KiB used of [0-9]+$' <<<"$report" || fail 'the finish step did not report the cache disk'
@@ -191,7 +245,7 @@ jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
 # Compile once (infra#1632): the compile job and Rust checks build in their
 # build runner's own warm folder, so they do not use it; the packages shard
 # does, for the build it falls back to when its test archive is missing.
-expected = {"standard", "rust-packages", "rust-features", "rust-transport",
+expected = {"contracts", "standard", "rust-packages", "rust-features", "rust-transport",
             "database", "services-control", "services-runtime"}
 wired = set()
 for name, job in jobs.items():
@@ -265,4 +319,4 @@ kill_holders
 # Without the seats variable (every other runner) nothing changes.
 grep -q 'CODEWIRE_CI_WARM_SEATS' "$FINISH" && fail 'the finish step should read the seat from WARM_CACHE_ROOT only'
 
-printf '[test-warm-rust-cache] main and pull requests only, weekly and epoch wipes, LRU and Cargo home caps, free-space floor, warm-VM seats: OK\n'
+printf '[test-warm-rust-cache] main and pull requests only, weekly and epoch wipes, LRU, Cargo home and Go caps, free-space floor, warm-VM seats: OK\n'

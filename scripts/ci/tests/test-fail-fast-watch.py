@@ -350,6 +350,15 @@ class WorkflowTests(unittest.TestCase):
         names = {job_["name"] for job_ in self.jobs.values()}
         self.assertTrue(watcher.NOT_CHECKS <= names, watcher.NOT_CHECKS - names)
 
+    def test_contracts_and_standard_get_main_s_one_rerun_and_policy_does_not(self) -> None:
+        # Contracts left Standard for its own job (infra#1534); as part of
+        # Standard its first failure on main was rerun once, and still is.
+        names = {job_["name"] for job_ in self.jobs.values()}
+        for name in ("Contracts verification", "Standard verification"):
+            self.assertIn(name, names)
+            self.assertRegex(name, watcher.RETRYABLE_RE)
+        self.assertNotRegex("Policy verification", watcher.RETRYABLE_RE)
+
     def test_no_job_cancels_its_own_run(self) -> None:
         # #3126: a failing job that cancels its own run is relabelled cancelled.
         watchers = {"fail-fast", *(f"fail-fast-{link}" for link in range(2, watcher.WATCH_LINKS + 1))}

@@ -42,6 +42,7 @@ selected_any() {
 
 declare -A expected=(
   [policy]=false
+  [contracts]=false
   [standard]=false
   [tooling]=false
   [rust_compile]=false
@@ -79,7 +80,9 @@ elif [ "$tested_tree_receipt" = fallback ]; then
     desktop_package=true
   fi
   selected policy && expected[policy]=true
-  selected_any contracts go_support web docs sdk_go sdk_ts sdk_python ios \
+  # Contracts runs in its own job beside Standard (infra#1534).
+  selected contracts && expected[contracts]=true
+  selected_any go_support web docs sdk_go sdk_ts sdk_python ios \
     && expected[standard]=true
   selected_any \
     deploy release confidential_script_tests dev_smoke_script_tests security \
@@ -158,7 +161,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
 fi
 
 for group in \
-    policy standard tooling rust_compile rust_shards rust_transport database \
+    policy contracts standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind; do
   value="${expected[$group]}"
   printf '%s_expected=%s\n' "$group" "$value"

@@ -114,6 +114,10 @@ jobs:
       tested_tree_head: ${{ steps.receipt.outputs.tested_tree_head }}
       tested_tree_run: ${{ steps.receipt.outputs.tested_tree_run }}
       policy_expected: ${{ steps.dispatch.outputs.policy_expected }}
+      # Contracts left Standard for its own job (infra#1534). A trusted base
+      # that predates the split runs it whenever it runs Standard; the job's
+      # steps then do nothing unless Contracts is selected.
+      contracts_expected: ${{ steps.dispatch.outputs.contracts_expected || steps.dispatch.outputs.standard_expected }}
       standard_expected: ${{ steps.dispatch.outputs.standard_expected }}
       tooling_expected: ${{ steps.dispatch.outputs.tooling_expected }}
       rust_compile_expected: ${{ steps.dispatch.outputs.rust_compile_expected }}
@@ -389,7 +393,7 @@ jobs:
               # Conservative bootstrap for a base predating dynamic dispatch:
               # run every group so candidate code cannot omit required work.
               for group in \
-                  policy standard tooling rust_compile rust_shards rust_transport database \
+                  policy contracts standard tooling rust_compile rust_shards rust_transport database \
                   services_control services_runtime edge_kind; do
                 echo "${group}_expected=true" >> "$GITHUB_OUTPUT"
               done
@@ -437,6 +441,84 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-product-verification.sh policy-core
 
+  contracts:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
+    # Contracts in its own job, beside Standard (infra#1534): it ran alone at
+    # the head of Standard for about 175 s on main (run 23934) before any
+    # other Standard family started. It regenerates the checked-in generated
+    # code (libs/gen-go, libs/gen-python, packages/codewire-proto-ts/src/gen)
+    # in its own checkout and fails when that differs from what is checked
+    # in, so the other families read the checked-in code and the run's
+    # verdict is the same. Medium, as Standard: it needs the warm Rust cache.
+    name: Contracts verification
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM') }}
+    enable-openid-connect: true
+    timeout-minutes: 30
+    needs: [verification-selection]
+    if: ${{ needs.verification-selection.outputs.contracts_expected == 'true' }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/host-debug
+    steps:
+      - name: Reuse exact PR-head content verification
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
+        run: echo 'contracts content verification inherited from the exact tested PR-head tree'
+
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        with:
+          ref: ${{ needs.verification-selection.outputs.source_sha }}
+          fetch-depth: 0
+
+      # On a main push or a pull request in a metal guest, start from that
+      # guest's warm Rust and Go caches (infra#1534); anywhere else this
+      # changes nothing.
+      - name: Select the warm Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          CODEWIRE_WARM_CACHE_EPOCH: ${{ vars.CODEWIRE_WARM_CACHE_EPOCH }}
+        run: scripts/ci/setup/select-warm-rust-cache.sh
+
+      - name: Bound cargo jobs by memory
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/bound-cargo-jobs.sh
+
+      - name: Set up Go 1.27.3
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
+        run: scripts/ci/setup/setup-go.sh 1.27.3
+
+      - name: Verify sealed Rust toolchain
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Select best-effort shared Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
+        env:
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+        run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
+        with:
+          bun-version: '1.4.4'
+
+      # run-product-verification.sh contracts installs its own pinned buf,
+      # protoc and protoc plugins (install_contract_toolchain).
+      - name: Run Contracts
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
+        env:
+          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
+          VERIFICATION_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          VERIFICATION_PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: scripts/ci/verify/run-product-verification.sh contracts
+
+      - name: Report and clean Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Report the warm Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/finish-warm-rust-cache.sh
+
   standard:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     # Medium, not light (infra#1534): it needs Docker (DinD) and the warm Rust
@@ -461,7 +543,8 @@ jobs:
           fetch-depth: 0
 
       # On a main push or a pull request in a metal guest, start from that
-      # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
+      # guest's warm Rust and Go caches (infra#1534); anywhere else this
+      # changes nothing.
       - name: Select the warm Rust cache
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         env:
@@ -473,21 +556,21 @@ jobs:
         run: scripts/ci/setup/bound-cargo-jobs.sh
 
       - name: Set up Go 1.27.3
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|go_support|') || contains(needs.verification-selection.outputs.selection, '|sdk_go|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|go_support|') || contains(needs.verification-selection.outputs.selection, '|sdk_go|')) }}
         run: scripts/ci/setup/setup-go.sh 1.27.3
 
       - name: Verify sealed Rust toolchain
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
       - name: Select best-effort shared Rust cache
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
         env:
           CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
         run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Install pinned protoc for Rust-backed standard checks
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/protoc.zip \
@@ -501,7 +584,7 @@ jobs:
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
       - uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|web|') }}
         with:
           bun-version: '1.4.4'
 
@@ -513,11 +596,9 @@ jobs:
 
       # The selected Standard families in one step (run-product-verification.sh
       # standard owns each family's selection condition, as its own step had):
-      # Contracts first, alone, since it regenerates the checked-in generated
-      # code the others read; then Web side by side with Go support, Docs, the
-      # three SDKs and iOS in order, so the job takes Contracts plus the longer
-      # of the two (main run 23329: 626 s with every family one after
-      # another). The first failure stops the rest (#3013).
+      # Web side by side with Go support, Docs, the three SDKs and iOS in
+      # order, so the job takes the longer of the two. Contracts runs in its
+      # own job beside this one. The first failure stops the rest (#3013).
       - name: Run the selected Standard families side by side
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         env:
@@ -527,7 +608,7 @@ jobs:
         run: scripts/ci/verify/run-product-verification.sh standard
 
       - name: Report and clean Rust cache
-        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|contracts_proto|') || contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Report the warm Rust cache
@@ -2035,6 +2116,7 @@ jobs:
     needs:
       - verification-selection
       - policy
+      - contracts
       - standard
       - tooling
       - rust-compile
@@ -2062,6 +2144,8 @@ jobs:
           VERIFICATION_TESTED_TREE_RUN: ${{ needs.verification-selection.outputs.tested_tree_run }}
           VERIFICATION_POLICY_EXPECTED: ${{ needs.verification-selection.outputs.policy_expected }}
           VERIFICATION_POLICY_RESULT: ${{ needs.policy.result }}
+          VERIFICATION_CONTRACTS_EXPECTED: ${{ needs.verification-selection.outputs.contracts_expected }}
+          VERIFICATION_CONTRACTS_RESULT: ${{ needs.contracts.result }}
           VERIFICATION_STANDARD_EXPECTED: ${{ needs.verification-selection.outputs.standard_expected }}
           VERIFICATION_STANDARD_RESULT: ${{ needs.standard.result }}
           VERIFICATION_TOOLING_EXPECTED: ${{ needs.verification-selection.outputs.tooling_expected }}

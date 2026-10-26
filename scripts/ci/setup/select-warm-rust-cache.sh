@@ -9,10 +9,17 @@
 # profile, shared by every family that builds that profile) and its Cargo home
 # (target/ci-rust-cargo-home: the registry index, downloaded crates and git
 # checkouts) into the cache, so the job starts from the last build on its
-# guest. Main and pull requests share it (owner, 2026-10-21: the cache risk
-# is accepted). Anywhere else (another event, a cloud runner) it changes
-# nothing and the job builds in its own workspace. CI ships no artifact: the
-# release and delivery workflows build those, never from this cache.
+# guest. Go's module and build caches live there too (go/mod and go/build,
+# exported as GOMODCACHE and GOCACHE): without them every job that runs Go
+# downloaded its modules cold (main run 23934: 112 modules, about 70 s, in
+# Contracts alone). Go verifies each module it downloads against go.sum or the
+# checksum database, and keys its build cache by the build's inputs. GOFLAGS
+# adds -count=1, so a warm cache never stands in for a test run, and
+# -modcacherw, so the module cache can be removed. Main and pull requests
+# share the cache (owner, 2026-10-21: the cache risk is accepted). Anywhere
+# else (another event, a cloud runner) it changes nothing and the job builds
+# in its own workspace. CI ships no artifact: the release and delivery
+# workflows build those, never from this cache.
 #
 # Bounds, applied before linking:
 # - a new ISO week, or a new CODEWIRE_WARM_CACHE_EPOCH (a repository variable
@@ -20,6 +27,9 @@
 # - the target directories stay under 70 GB, removing whole profile
 #   directories, least recently used first;
 # - the Cargo home stays under 12 GB, wiped whole when it is over;
+# - the Go caches stay under 3 GiB together, wiped whole when they are over
+#   (about 0.5 GiB after Contracts, Go support and the Go SDK), and first,
+#   before any profile directory, under the free-space floor;
 # - the cache filesystem keeps a free-space floor for the job's own build: a
 #   quarter of the filesystem, and never less than the 2 GiB Cargo's capacity
 #   check requires. Below it, whole profile directories go, least recently
@@ -113,6 +123,7 @@ readonly cache="$root/v1"
 # Tests override them.
 readonly target_cap_kib="${WARM_CACHE_TARGET_CAP_KIB:-68359375}"
 readonly cargo_home_cap_kib="${WARM_CACHE_CARGO_HOME_CAP_KIB:-11718750}"
+readonly go_cap_kib="${WARM_CACHE_GO_CAP_KIB:-3145728}"
 # The free-space floor; the hard minimum is assert-cargo-cache-capacity.sh's.
 readonly hard_minimum_free_kib=2097152
 # Tests point this at a fake df.
@@ -124,11 +135,17 @@ fi
 
 week="$(date -u +%G-W%V)"
 key="$week/${CODEWIRE_WARM_CACHE_EPOCH:-0}"
+# Go makes its module cache read-only; make it removable first.
+remove_tree() {
+  chmod -R u+w -- "$1" 2>/dev/null || true
+  rm -rf -- "$1"
+}
+
 if [[ -d "$cache" && "$(cat "$cache/.key" 2>/dev/null || true)" != "$key" ]]; then
   printf '[warm-rust-cache] clean build: the cache key moved to %s\n' "$key"
-  rm -rf -- "$cache"
+  remove_tree "$cache"
 fi
-mkdir -p "$cache/ci-cache" "$cache/cargo-home"
+mkdir -p "$cache/ci-cache" "$cache/cargo-home" "$cache/go"
 printf '%s\n' "$key" > "$cache/.key"
 
 usage_kib() {
@@ -149,6 +166,16 @@ size_kib="$(filesystem_kib 2)"
 minimum_free_kib="${WARM_CACHE_MIN_FREE_KIB:-$(( size_kib / 4 ))}"
 (( minimum_free_kib >= hard_minimum_free_kib )) || minimum_free_kib="$hard_minimum_free_kib"
 
+# Under the floor, the Go caches go before any Rust profile: refilling them
+# costs about a minute, a Rust profile several. So keeping Go warm never makes
+# a Rust build colder (a medium guest's 19 GB cache held host-debug 70 MB above
+# its floor in PR run 24302).
+if (( $(filesystem_kib 4) < minimum_free_kib )) && [[ -n "$(find "$cache/go" -mindepth 2 -print -quit 2>/dev/null)" ]]; then
+  printf '[warm-rust-cache] under %s KiB free: wiping the Go caches (%s KiB) before any Rust profile\n' \
+    "$minimum_free_kib" "$(usage_kib "$cache/go")"
+  remove_tree "$cache/go"
+  mkdir -p "$cache/go"
+fi
 # Least recently used profile directories go first, whole (ties by name), while
 # the targets are over their cap or the filesystem is under its floor.
 while :; do
@@ -181,10 +208,16 @@ if [[ "$(usage_kib "$cache/cargo-home")" -gt "$cargo_home_cap_kib" ]]; then
   rm -rf -- "$cache/cargo-home"
   mkdir -p "$cache/cargo-home"
 elif (( $(filesystem_kib 4) < minimum_free_kib )); then
-  printf '[warm-rust-cache] under %s KiB free with no target left: wiping the Cargo home (%s KiB)\n' \
-    "$minimum_free_kib" "$(usage_kib "$cache/cargo-home")"
+  printf '[warm-rust-cache] under %s KiB free with no target left: wiping the Cargo home (%s KiB) and the Go caches (%s KiB)\n' \
+    "$minimum_free_kib" "$(usage_kib "$cache/cargo-home")" "$(usage_kib "$cache/go")"
   rm -rf -- "$cache/cargo-home"
-  mkdir -p "$cache/cargo-home"
+  remove_tree "$cache/go"
+  mkdir -p "$cache/cargo-home" "$cache/go"
+fi
+if [[ "$(usage_kib "$cache/go")" -gt "$go_cap_kib" ]]; then
+  printf '[warm-rust-cache] over the Go cache cap: wiping it\n'
+  remove_tree "$cache/go"
+  mkdir -p "$cache/go"
 fi
 free_kib="$(filesystem_kib 4)"
 if (( free_kib < hard_minimum_free_kib )); then
@@ -202,5 +235,13 @@ for link in ci-cache:ci-cache ci-rust-cargo-home:cargo-home; do
   rm -rf -- "$path"
   ln -s "$cache/${link#*:}" "$path"
 done
+mkdir -p "$cache/go/mod" "$cache/go/build"
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  {
+    printf 'GOMODCACHE=%s\n' "$cache/go/mod"
+    printf 'GOCACHE=%s\n' "$cache/go/build"
+    printf 'GOFLAGS=%s\n' "${GOFLAGS:+$GOFLAGS }-modcacherw -count=1"
+  } >> "$GITHUB_ENV"
+fi
 date -u +%s > "$cache/.job-started"
 printf '[warm-rust-cache] using %s (key %s)\n' "$cache" "$key"

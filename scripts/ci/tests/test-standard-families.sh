@@ -7,8 +7,9 @@
 #   Web: codewire-dashboard-web), the selector's own output for pull request
 #   and main push paths decides it, and wherever Standard skips a package,
 #   the shard's own package arguments (rust_package_args) name it.
-# - Contracts runs first, alone, then Web side by side with the other
-#   families in order; the first failure stops the rest.
+# - Web runs side by side with the other families in order; the first
+#   failure stops the rest. Contracts is not a Standard family: it runs in its
+#   own job beside Standard (infra#1534).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -95,10 +96,11 @@ CASES=$((CASES + 1))
 grep -qF 'if rust_packages_shard_covers "$package"; then' "$RUNNER" || fail 'Contracts skips without the predicate'
 grep -qF 'if rust_packages_shard_covers codewire-dashboard-web; then' "$RUNNER" || fail 'Web skips without the predicate'
 
-# Order: Contracts alone first, then Web beside the others in order.
+# Order: Web beside the others, which run in order; Contracts never runs here.
 run_standard_family() {
   echo "$1 start $(date +%s%N)" >> "$work/order"
   sleep "${FAMILY_SECONDS:-0}"
+  [ "$1" != web ] || sleep "${WEB_SECONDS:-0}"
   [ "$1" != "${FAIL_FAMILY:-none}" ] || return 1
   echo "$1 end $(date +%s%N)" >> "$work/order"
 }
@@ -106,12 +108,10 @@ at() { sed -n "s/^$1 $2 //p" "$work/order"; }
 : > "$work/order"
 SELECTION='|valid:v3|contracts|contracts_proto|web|go_support|sdk_go|sdk_python|complete|'
 FAMILY_SECONDS=1 run_standard > "$work/out" 2>&1 || fail "run_standard failed: $(cat "$work/out")"
-for family in contracts web go-support sdk-go sdk-python; do
+for family in web go-support sdk-go sdk-python; do
   [ -n "$(at "$family" end)" ] || fail "$family did not run"
 done
-for family in web go-support; do
-  [ "$(at contracts end)" -le "$(at "$family" start)" ] || fail "$family started before Contracts ended"
-done
+[ -z "$(at contracts start)" ] || fail 'Contracts ran in Standard'
 [ "$(at web start)" -lt "$(at go-support end)" ] || fail 'Web did not run beside the other families'
 [ "$(at go-support end)" -le "$(at sdk-go start)" ] && [ "$(at sdk-go end)" -le "$(at sdk-python start)" ] ||
   fail 'the other families did not run in order'
@@ -123,10 +123,21 @@ run_standard > "$work/out" 2>&1 || fail "run_standard failed: $(cat "$work/out")
 [ "$(cut -d' ' -f1-2 "$work/order" | tr '\n' ' ')" = 'sdk-ts start sdk-ts end ' ] || fail 'an unselected family ran'
 CASES=$((CASES + 1))
 
+# Contracts alone selects no Standard family: Standard does nothing.
 : > "$work/order"
-SELECTION='|valid:v3|contracts|contracts_proto|web|sdk_go|complete|'
-if FAIL_FAMILY=contracts run_standard > "$work/out" 2>&1; then fail 'a failed Contracts passed'; fi
-[ -z "$(at web start)" ] && [ -z "$(at sdk-go start)" ] || fail 'the families ran after Contracts failed'
+SELECTION='|valid:v3|contracts|contracts_proto|complete|'
+run_standard > "$work/out" 2>&1 || fail "run_standard failed: $(cat "$work/out")"
+[ ! -s "$work/order" ] || fail "Standard ran a family for Contracts alone: $(cat "$work/order")"
+grep -qF 'Contracts runs in its own job' "$work/out" || fail 'Standard did not say where Contracts runs'
+CASES=$((CASES + 1))
+
+# The first failure stops the rest: Web, still running beside it, is stopped,
+# and the families after the failed one in order never start.
+: > "$work/order"
+SELECTION='|valid:v3|web|go_support|sdk_go|complete|'
+if FAIL_FAMILY=go-support WEB_SECONDS=5 run_standard > "$work/out" 2>&1; then fail 'a failed family passed'; fi
+[ -n "$(at web start)" ] && [ -z "$(at web end)" ] || fail 'Web was not stopped after the first failure'
+[ -z "$(at sdk-go start)" ] || fail 'a family started after the first failure'
 CASES=$((CASES + 1))
 
 printf '[test-standard-families] %s cases passed\n' "$CASES"

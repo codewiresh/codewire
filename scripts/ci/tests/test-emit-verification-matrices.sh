@@ -30,7 +30,7 @@ assert_output() {
 
 docs_output="$(emit '|valid:v3|policy|policy_shell_omittable|complete|' fallback false false)"
 assert_output "$docs_output" policy true
-for group in standard tooling rust_compile rust_shards rust_transport database \
+for group in contracts standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind; do
   assert_output "$docs_output" "$group" false
 done
@@ -44,7 +44,7 @@ assert_output "$legacy_policy_output" policy true
 assert_output "$legacy_policy_output" tooling true
 
 receipt_output="$(emit '|valid:v3|policy|rust|kind|complete|' accepted true true)"
-for group in policy standard tooling rust_compile rust_shards rust_transport database \
+for group in policy contracts standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind; do
   assert_output "$receipt_output" "$group" false
 done
@@ -52,7 +52,7 @@ done
 selected_output="$(emit \
   '|valid:v3|policy|contracts|security|rust|database|service_idp|service_nats|kind|web|complete|' \
   fallback true false)"
-for group in policy standard tooling rust_compile rust_shards rust_transport database \
+for group in policy contracts standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind; do
   assert_output "$selected_output" "$group" true
 done
@@ -66,7 +66,7 @@ assert_output "$desktop_output" rust_shards false
 # macOS cw for both Mac targets (#3119 A13). No other group starts for it.
 cw_output="$(emit '|valid:v3|complete|' fallback true false)"
 assert_output "$cw_output" rust_compile true
-for group in policy standard tooling rust_shards rust_transport database \
+for group in policy contracts standard tooling rust_shards rust_transport database \
     services_control services_runtime edge_kind; do
   assert_output "$cw_output" "$group" false
 done
@@ -90,7 +90,7 @@ done
 # Tokens that only shape a running step dispatch no job alone.
 for shaping_token in contracts_proto go_tailnet go_consumer_interop security_go; do
   shaping_output="$(emit "|valid:v3|${shaping_token}|complete|" fallback false false)"
-  for group in standard tooling rust_compile rust_shards rust_transport; do
+  for group in contracts standard tooling rust_compile rust_shards rust_transport; do
     assert_output "$shaping_output" "$group" false
   done
 done
@@ -107,7 +107,7 @@ assert_output "$kind_output" edge_kind true
 retired_quick_output="$(emit \
   '|valid:v3|policy|policy_shell_omittable|pr_quick|rust_compile|complete|' \
   fallback true true)"
-for group in policy standard tooling rust_compile rust_shards rust_transport database \
+for group in policy contracts standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime; do
   assert_output "$retired_quick_output" "$group" true
 done
@@ -117,7 +117,7 @@ done
 scheduled_kind_output="$(emit '|valid:v3|kind|scheduled|complete|' fallback true true)"
 assert_output "$scheduled_kind_output" edge_kind true
 scheduled_nothing_output="$(emit '|valid:v3|scheduled|complete|' fallback true true)"
-for group in policy standard tooling rust_compile rust_shards rust_transport database \
+for group in policy contracts standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime; do
   assert_output "$scheduled_kind_output" "$group" false
   assert_output "$scheduled_nothing_output" "$group" false
@@ -134,7 +134,7 @@ done
 # proves the file is the generator's exact output.
 pin_output="$(emit '|valid:v3|change_class_workspace_pin|ci_script_tests|ci_script_tests_omittable|policy|policy_shell_omittable|complete|' fallback true true)"
 assert_output "$pin_output" policy true
-for group in standard tooling rust_compile rust_shards rust_transport database \
+for group in contracts standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind; do
   assert_output "$pin_output" "$group" false
 done
@@ -147,7 +147,7 @@ assert_output "$unclassed_pin_output" rust_transport true
 agents_output="$(emit '|valid:v3|ci_script_tests|ci_script_tests_omittable|policy|policy_shell_omittable|workspace_agents|complete|' fallback false false)"
 assert_output "$agents_output" policy true
 assert_output "$agents_output" tooling true
-for group in standard rust_compile rust_shards rust_transport database \
+for group in contracts standard rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind; do
   assert_output "$agents_output" "$group" false
 done
@@ -157,18 +157,33 @@ done
 # all-groups fallback for an unknown token.
 policy_parts_output="$(emit '|valid:v3|ci_plan_tests|ci_plan_tests_omittable|ci_script_tests_omittable|policy|policy_shell_omittable|repo_check_self_tests|repo_check_self_tests_omittable|complete|' fallback false false)"
 assert_output "$policy_parts_output" policy true
-for group in standard tooling rust_compile rust_shards rust_transport database \
+for group in contracts standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind; do
   assert_output "$policy_parts_output" "$group" false
 done
 
 web_output="$(emit '|valid:v3|web|complete|' fallback false false)"
 assert_output "$web_output" standard true
+assert_output "$web_output" contracts false
+
+# Contracts runs in its own job beside Standard (infra#1534): Contracts alone
+# dispatches only its job, and Standard's families never dispatch it.
+contracts_output="$(emit '|valid:v3|contracts|contracts_proto|complete|' fallback false false)"
+assert_output "$contracts_output" contracts true
+for group in policy standard tooling rust_compile rust_shards rust_transport database \
+    services_control services_runtime edge_kind; do
+  assert_output "$contracts_output" "$group" false
+done
+for token in go_support docs sdk_go sdk_ts sdk_python ios; do
+  family_output="$(emit "|valid:v3|${token}|complete|" fallback false false)"
+  assert_output "$family_output" standard true
+  assert_output "$family_output" contracts false
+done
 
 # The iOS package tests run in the standard group (#3119 A12).
 ios_output="$(emit '|valid:v3|ios|complete|' fallback false false)"
 assert_output "$ios_output" standard true
-for group in policy tooling rust_compile rust_shards rust_transport database \
+for group in policy contracts tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind; do
   assert_output "$ios_output" "$group" false
 done
@@ -177,7 +192,7 @@ done
 # Kind work, and docs is a known token (an unknown one dispatches everything).
 docs_output="$(emit '|valid:v3|docs|complete|' fallback false false)"
 assert_output "$docs_output" standard true
-for group in policy tooling rust_compile rust_shards rust_transport database \
+for group in policy contracts tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind; do
   assert_output "$docs_output" "$group" false
 done
@@ -199,7 +214,7 @@ assert_output "$orchestration_temporal_output" services_control false
 assert_output "$orchestration_temporal_output" services_runtime true
 
 unknown_output="$(emit '|valid:v3|future_capability|complete|' fallback false false)"
-for group in policy standard tooling rust_compile rust_shards rust_transport database \
+for group in policy contracts standard tooling rust_compile rust_shards rust_transport database \
     services_control services_runtime edge_kind; do
   assert_output "$unknown_output" "$group" true
 done
@@ -216,7 +231,7 @@ fi
 
 # A superseded main commit dispatches nothing, whatever it selected; the same
 # selection on main's tip (or with the input unset) dispatches as before.
-all_groups=(policy standard tooling rust_compile rust_shards rust_transport database
+all_groups=(policy contracts standard tooling rust_compile rust_shards rust_transport database
   services_control services_runtime edge_kind)
 everything='|valid:v3|future_capability|complete|'
 superseded_emit() {

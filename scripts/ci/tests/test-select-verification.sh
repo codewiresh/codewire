@@ -3132,7 +3132,7 @@ if switch_push "$invalid_switch_selector" docs/dev/AGENT-WORKFLOW.md >"$TMP/swit
 fi
 [ ! -s "$TMP/switch-invalid.out" ] && grep -Fq 'MAIN_PUSH_RUNS_KIND_AND_DRY_RUN must be true or false' "$TMP/switch.stderr"
 
-# Workflow contract: ten bounded capability groups use trusted server-side job
+# Workflow contract: the bounded capability groups use trusted server-side job
 # conditions. Forgejo therefore gives an omitted group a terminal skipped result
 # without assigning its fixed-profile runner.
 while IFS='|' read -r job_id job_name runner expectation_name; do
@@ -3263,6 +3263,7 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
   fi
 done <<'EOF'
 policy|Policy verification|medium|policy
+contracts|Contracts verification|medium|contracts
 standard|Standard verification|medium|standard
 tooling|Tooling / delivery contract verification|medium|tooling
 rust-compile|Build test archives|build|rust_compile
@@ -3322,7 +3323,7 @@ grep -qF "trusted_dispatch_selector='.trusted-ci-policy/scripts/ci/select/emit-v
   "$selection_block"
 grep -qF 'run every group so candidate code cannot omit required work' \
   "$selection_block"
-grep -qF 'policy standard tooling rust_compile rust_shards rust_transport database' "$selection_block" || {
+grep -qF 'policy contracts standard tooling rust_compile rust_shards rust_transport database' "$selection_block" || {
   echo 'the dispatch bootstrap does not run the compile and shard groups' >&2
   exit 1
 }
@@ -3330,6 +3331,14 @@ grep -qF 'policy standard tooling rust_compile rust_shards rust_transport databa
 grep -qxF '      rust_shards_expected: ${{ steps.dispatch.outputs.rust_shards_expected || steps.dispatch.outputs.rust_transport_expected }}' \
   "$selection_block" || {
   echo 'rust_shards_expected must fall back to the Rust group for an older trusted base' >&2
+  exit 1
+}
+# Contracts left Standard for its own job (infra#1534); a trusted base that
+# predates the split runs it with Standard.
+# shellcheck disable=SC2016 # Match the literal Actions expression.
+grep -qxF '      contracts_expected: ${{ steps.dispatch.outputs.contracts_expected || steps.dispatch.outputs.standard_expected }}' \
+  "$selection_block" || {
+  echo 'contracts_expected must fall back to Standard for an older trusted base' >&2
   exit 1
 }
 for expectation_name in policy standard tooling rust_compile rust_transport database \
@@ -3349,7 +3358,7 @@ done
 # gate shards its suites across four parallel per-cluster legs; each shard's
 # 45-minute ceiling holds the longest leg (setup plus dashboard browser) far
 # below the 90-minute heavy budget.
-for job_id in standard tooling rust-packages rust-features database services-control services-runtime; do
+for job_id in contracts standard tooling rust-packages rust-features database services-control services-runtime; do
   block="$TMP/${job_id}.yaml"
   if [ ! -s "$block" ]; then
     awk -v wanted="$job_id" '
@@ -3423,7 +3432,7 @@ grep -qF '    timeout-minutes: 30' "$TMP/policy.yaml" || {
   exit 1
 }
 
-for job_id in policy standard tooling rust-compile rust-packages rust-features rust-transport database services-control services-runtime edge-kind; do
+for job_id in policy contracts standard tooling rust-compile rust-packages rust-features rust-transport database services-control services-runtime edge-kind; do
   block="$TMP/${job_id}.yaml"
   grep -qF 'name: Reuse exact PR-head content verification' "$block"
   grep -qF "if: \${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}" \
@@ -3621,7 +3630,7 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-# Each group on exactly the slot it needs (infra#1534): eight on the medium
+# Each group on exactly the slot it needs (infra#1534): nine on the medium
 # metal class, Database on the heavy one, and Rust compilation and Rust checks
 # on the build runners, main's on a main push (compile once, infra#1632).
 # Every metal group bounds its Cargo jobs.
@@ -3629,15 +3638,15 @@ fi
   echo 'Codewire CI requires Rust compilation and Rust checks on the build runners' >&2
   exit 1
 }
-[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_MEDIUM}" "$WORKFLOW")" -eq 8 ]] || {
-  echo 'Codewire CI requires its eight medium groups (policy included) on the medium metal labels' >&2
+[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_MEDIUM}" "$WORKFLOW")" -eq 9 ]] || {
+  echo 'Codewire CI requires its nine medium groups (policy included) on the medium metal labels' >&2
   exit 1
 }
 [[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 1 ]] || {
   echo 'Codewire CI requires Database verification alone on the heavy metal labels' >&2
   exit 1
 }
-[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 9 ]] || {
+[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 10 ]] || {
   echo 'each metal group must bound its cargo jobs to its guest memory' >&2
   exit 1
 }
@@ -3753,11 +3762,11 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 23 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, twelve groups, four Kind producers, aggregate, the Dev delivery trigger and four fail-fast watcher links" >&2
+if [ "$top_level_jobs" != 24 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, thirteen groups, four Kind producers, aggregate, the Dev delivery trigger and four fail-fast watcher links" >&2
   exit 1
 fi
-for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
+for legacy_job in rust go-support web sdk-go sdk-ts sdk-python \
     service-integration transport release deploy security; do
   if grep -qF "  ${legacy_job}:" "$WORKFLOW"; then
     echo "legacy per-family runner job remains: ${legacy_job}" >&2
@@ -3781,13 +3790,38 @@ if grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|'
   echo 'standard: policy-only verification still installs Bun' >&2
   exit 1
 fi
-for token in contracts web; do
-  grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
-    <<<"$bun_setup_condition" || {
-    echo "standard: Bun setup omits ${token}" >&2
+grep -qF "contains(needs.verification-selection.outputs.selection, '|web|')" \
+  <<<"$bun_setup_condition" || {
+  echo 'standard: Bun setup omits web' >&2
+  exit 1
+}
+# Contracts runs in its own job (infra#1534): Standard sets up nothing for it,
+# and the Contracts job sets up Go and Bun and runs it, all on its token.
+if grep -qE "'\|contracts(_proto)?\|'" "$standard_block"; then
+  echo 'standard: a step still runs for Contracts, which has its own job' >&2
+  exit 1
+fi
+contracts_block="$TMP/contracts.yaml"
+for wanted in \
+    'run: scripts/ci/setup/setup-go.sh 1.27.3' \
+    'uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
+    'run: scripts/ci/setup/select-warm-rust-cache.sh' \
+    'VERIFICATION_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}' \
+    'VERIFICATION_PUSH_BEFORE_SHA: ${{ github.event.before }}' \
+    'run: scripts/ci/verify/run-product-verification.sh contracts'; do
+  grep -qF -- "$wanted" "$contracts_block" || {
+    echo "contracts: the job lacks: $wanted" >&2
     exit 1
   }
 done
+[ "$(grep -cF "contains(needs.verification-selection.outputs.selection, '|contracts|')" "$contracts_block")" -eq 6 ] || {
+  echo 'contracts: its setup and run steps must each run only when Contracts is selected' >&2
+  exit 1
+}
+[ "$(grep -cE '^ +run: .*run-product-verification[.]sh' "$contracts_block")" -eq 1 ] || {
+  echo 'contracts: the job runs a family besides Contracts' >&2
+  exit 1
+}
 
 # Standard's families run in one step; run-product-verification.sh standard
 # owns each one's selection condition (test-standard-families.sh proves the
@@ -3828,7 +3862,13 @@ grep -qF '    web) CODEWIRE_DASHBOARD_IMAGE_DEFERRED=true run_web ;;' \
 grep -qF 'for family in go-support:go_support docs:docs sdk-go:sdk_go sdk-ts:sdk_ts \' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF '      sdk-python:sdk_python ios:ios; do' "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF '  if selected contracts; then' "$ROOT/scripts/ci/verify/run-product-verification.sh"
+# Contracts runs in its own job (infra#1534), never inside Standard.
+if awk '/^(run_standard|run_standard_family)\(\) \{$/ { on = 1 } on { print } on && /^}$/ { on = 0 }' \
+    "$ROOT/scripts/ci/verify/run-product-verification.sh" | grep -qE 'run_contracts|selected contracts'; then
+  echo 'standard: Contracts still runs inside Standard' >&2
+  exit 1
+fi
+grep -qxF '  contracts) run_contracts ;;' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF "  if selected web; then lanes+=('run_standard_in_order web'); fi" \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 
@@ -3921,9 +3961,18 @@ grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" 
 standard_toolchain_condition="$(grep -A1 -F \
   'name: Verify sealed Rust toolchain' \
   "$standard_block")"
-grep -qF "contains(needs.verification-selection.outputs.selection, '|contracts_proto|')" \
-  <<<"$standard_toolchain_condition" || {
-  echo 'standard: Rust toolchain omits Proto/Connect mode' >&2
+# Proto/Connect mode (Contracts) verifies the sealed toolchain in its own job,
+# before it runs (infra#1534).
+contracts_toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain' "$contracts_block" | cut -d: -f1)"
+contracts_family_line="$(grep -n -m1 'name: Run Contracts' "$contracts_block" | cut -d: -f1)"
+if [ -z "$contracts_toolchain_line" ] || [ -z "$contracts_family_line" ] \
+    || [ "$contracts_toolchain_line" -ge "$contracts_family_line" ]; then
+  echo 'contracts: Rust toolchain must be verified before contract verification' >&2
+  exit 1
+fi
+grep -A1 -F 'name: Verify sealed Rust toolchain' "$contracts_block" \
+  | grep -qF "contains(needs.verification-selection.outputs.selection, '|contracts|')" || {
+  echo 'contracts: Rust toolchain omits Proto/Connect mode' >&2
   exit 1
 }
 go_support_run_line="$(grep -n -m1 'name: Run the selected Standard families side by side' \
@@ -3953,7 +4002,7 @@ fi
 standard_protoc_condition="$(grep -A1 -F \
   'name: Install pinned protoc for Rust-backed standard checks' \
   "$standard_block")"
-for token in contracts_proto go_tailnet go_consumer_interop; do
+for token in go_tailnet go_consumer_interop; do
   grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
     <<<"$standard_protoc_condition" || {
     echo "standard: pinned protoc omits ${token}" >&2
@@ -5733,6 +5782,7 @@ jobs = workflow["jobs"]
 # before this fixture accepts it.
 WORK = {
     "policy": {"Run Policy"},
+    "contracts": {"Run Contracts"},
     "standard": {"Run the selected Standard families side by side"},
     # One step runs the selected Tooling families; the product runner's
     # tooling-parts owns their selection conditions (checked per selection

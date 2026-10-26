@@ -72,12 +72,12 @@ import yaml
 
 jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
 # The sized metal runners are the CODEWIRE_CI_RUNNER_*_HEAVY and *_MEDIUM
-# variables (infra#1534): Database on heavy, eight groups on medium. The build
+# variables (infra#1534): Database on heavy, nine groups on medium. The build
 # runners' jobs (Build test archives, Rust checks) size their own Cargo jobs
 # (build-once.sh prepare).
 sized = {name for name, job in jobs.items()
          if "_HEAVY ||" in str(job.get("runs-on", "")) or "_MEDIUM ||" in str(job.get("runs-on", ""))}
-assert len(sized) == 9, sorted(sized)
+assert len(sized) == 10, sorted(sized)
 for name in sized:
     job = jobs[name]
     assert "CARGO_BUILD_JOBS" not in (job.get("env") or {}), name
