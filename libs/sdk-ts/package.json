@@ -1,6 +1,6 @@
 {
   "name": "@codewire/sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Codewire SDK — environment-first cloud development",
   "type": "module",
   "main": "dist/index.js",
