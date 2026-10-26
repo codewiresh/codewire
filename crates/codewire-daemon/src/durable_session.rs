@@ -54,6 +54,10 @@ pub(crate) fn launch_failure_status(committed: bool) -> &'static str {
 }
 const LAUNCH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const LAUNCH_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a host-control RPC waits for its request's outcome
+/// ([`HostBounds::rpc_join`]). Host control is Linux only.
+#[cfg(target_os = "linux")]
+const HOST_CONTROL_RPC_JOIN: Duration = Duration::from_secs(3);
 // Compact at twice the retained byte/frame budget, amortizing disk rewrites.
 const RETAINED_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 const RETAINED_OUTPUT_FRAMES: usize = 2048;
@@ -89,6 +93,13 @@ pub(crate) struct HostBounds {
     /// Linux only.
     #[cfg(target_os = "linux")]
     pub(crate) control_dispatch: Duration,
+    /// The daemon's whole shutdown: its launches' cleanup, then every host
+    /// session's pause and stop, together.
+    pub(crate) shutdown: Duration,
+    /// How long a host-control RPC waits for its request's outcome before it
+    /// answers with the receipt it has. The request goes on either way.
+    #[cfg(target_os = "linux")]
+    pub(crate) rpc_join: Duration,
 }
 
 impl HostBounds {
@@ -96,6 +107,9 @@ impl HostBounds {
         cleanup_step: crate::host_process::JOIN_TIMEOUT,
         #[cfg(target_os = "linux")]
         control_dispatch: SESSION_INPUT_TIMEOUT,
+        shutdown: LAUNCH_SHUTDOWN_TIMEOUT,
+        #[cfg(target_os = "linux")]
+        rpc_join: HOST_CONTROL_RPC_JOIN,
     };
 
     /// Every host bound replaced by `bound`: the Linux host-control
@@ -106,6 +120,23 @@ impl HostBounds {
             cleanup_step: bound,
             #[cfg(target_os = "linux")]
             control_dispatch: bound,
+            shutdown: bound,
+            #[cfg(target_os = "linux")]
+            rpc_join: bound,
+        }
+    }
+
+    /// The product's bounds, except the two that only bound how long a
+    /// caller waits for an outcome, the daemon's whole shutdown and a
+    /// host-control RPC's join, which become `bound`. For a test whose
+    /// subject may be a host session's own bounds but is never those waits.
+    #[cfg(test)]
+    pub(crate) const fn waits_within(bound: Duration) -> Self {
+        Self {
+            shutdown: bound,
+            #[cfg(target_os = "linux")]
+            rpc_join: bound,
+            ..Self::PRODUCT
         }
     }
 }
@@ -529,6 +560,12 @@ impl SessionEngine {
         Ok(())
     }
 
+    /// This engine's host bounds ([`HostBounds::PRODUCT`] in the product).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn host_bounds(&self) -> HostBounds {
+        self.inner.host_bounds
+    }
+
     pub(crate) fn new(config: &Config, credential_bridge: CredentialBridge) -> Self {
         Self::with_host_bounds(config, credential_bridge, HostBounds::PRODUCT)
     }
@@ -602,7 +639,7 @@ impl SessionEngine {
 
     pub(crate) async fn shutdown(&self) -> Result<(), SessionError> {
         self.cancel_launches();
-        let deadline = tokio::time::Instant::now() + LAUNCH_SHUTDOWN_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + self.inner.host_bounds.shutdown;
         tokio::time::timeout_at(deadline, self.inner.launches.wait())
             .await
             .map_err(|_| SessionError::Internal("session launch cleanup did not settle".into()))?;

@@ -30,7 +30,6 @@ pub const HOST_CONTROL_PROTOCOL: u32 = 1;
 pub const HOST_CONTROL_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 pub const HOST_CONTROL_MAX_OUTPUT_BYTES: u64 = 256 * 1024;
 const MAX_IN_FLIGHT: usize = 16;
-const RPC_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 const OWNER_DRAIN_TIMEOUT: Duration = Duration::from_secs(50);
 
 /// Canonical saved host identity supplied by its owning lifecycle, not inferred
@@ -596,7 +595,7 @@ impl Owner {
                 }
             }
         };
-        match tokio::time::timeout(RPC_JOIN_TIMEOUT, joined).await {
+        match tokio::time::timeout(self.0.engine.host_bounds().rpc_join, joined).await {
             Ok(receipt) => Ok(receipt),
             Err(_) => Ok(receiver.borrow().clone()),
         }

@@ -170,7 +170,7 @@ async fn host_control_directory_missing_workspace_refuses_before_session_publica
 #[cfg(target_os = "linux")]
 async fn managed_test_owner(root: &Path) -> (crate::host_control::Owner, SessionEngine) {
     let config = control_fixture::config(root);
-    let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+    let engine = host_test_engine(&config);
     let owner = crate::host_control::Owner::new(
         &config,
         crate::host_control::HostControlBinding::new(control_fixture::scope().environment_id)
@@ -607,7 +607,18 @@ async fn host_control_stale_generation_never_signals_or_inputs_replacement() {
 #[tokio::test]
 async fn host_control_issued_input_timeout_is_retained_ambiguous_without_replay() {
     let temp = tempfile::tempdir().unwrap();
-    let (owner, engine) = control_fixture::owner(temp.path()).await;
+    // The subject: an RPC that stops waiting while its input is still issued
+    // answers with the unsettled receipt. Its join is short and the input's
+    // dispatch a hang guard, so the input is always still blocked on the full
+    // pipe when the RPC answers, however slow the slot.
+    let (owner, engine) = control_fixture::owner_with(
+        temp.path(),
+        HostBounds {
+            rpc_join: Duration::from_millis(200),
+            ..HostBounds::all(HANG)
+        },
+    )
+    .await;
     let ready = temp.path().join("pipe-ready");
     // Exercise actual kernel backpressure, independent of the host's default
     // pipe capacity. Only the owned child's anonymous stdin pipe is resized.
@@ -615,14 +626,9 @@ async fn host_control_issued_input_timeout_is_retained_ambiguous_without_replay(
         "exec /usr/bin/python3 -c 'import fcntl,time; fcntl.fcntl(0,fcntl.F_SETPIPE_SZ,4096); open(\"{}\",\"w\").write(\"ready\"); time.sleep(60)'",
         ready.display()
     );
-    let launched = owner
-        .mutate(control_fixture::launch(
-            3,
-            &control_fixture::scope(),
-            &script,
-        ))
-        .await
-        .unwrap();
+    let launch = control_fixture::launch(3, &control_fixture::scope(), &script);
+    owner.mutate(launch.clone()).await.unwrap();
+    let launched = control_fixture::settled(&owner, &launch).await;
     assert_eq!(wait_file(&ready).await, "ready");
     let request = control_fixture::input(
         4,
@@ -704,10 +710,7 @@ fn environment_engine(root: &Path) -> (SessionEngine, String) {
     config.host = Some(crate::HostConfig {
         state_root: root.join("hosts").join(&environment),
     });
-    (
-        SessionEngine::new(&config, CredentialBridge::new(None)),
-        environment,
-    )
+    (host_test_engine(&config), environment)
 }
 
 /// A running session with a managed driver's command line. `sh` reads the
@@ -917,10 +920,9 @@ async fn explicit_stop_and_restart_check_for_a_run_to_interrupt_and_shutdown_nev
 
     // This test image is no cw-bearing host daemon, so the record helper is
     // refused: the explicit stop still checks once and then stops at once.
-    let started = Instant::now();
+    // The helper is refused before it starts, so nothing waits out its bound.
+    assert!(crate::host_control::managed::retained_executable().is_err());
     let stopped = engine.stop(&driver).await.unwrap();
-    // Refused at once, not after waiting out the helper's own bound.
-    assert!(started.elapsed() < crate::host_control::managed::HELPER_TIMEOUT);
     assert_eq!(stopped.state, stopped_state);
     assert!(!stopped.cleanup_unknown);
     assert_eq!(stop_interrupt_checks(&engine), 1);
@@ -1017,10 +1019,9 @@ async fn shutdown_checks_each_running_conversation_for_a_run_to_pause_and_an_exp
     // Shutdown checks the one running managed driver before it signals it,
     // and no other session. This test image is no cw-bearing host daemon, so
     // the record helper is refused and the stop goes on at once.
-    let started = Instant::now();
+    // The helper is refused before it starts, so nothing waits out its bound.
+    assert!(crate::host_control::managed::retained_executable().is_err());
     engine.shutdown().await.unwrap();
-    // Refused at once, not after waiting out the helper's own bound.
-    assert!(started.elapsed() < crate::host_control::managed::HELPER_TIMEOUT);
     assert_eq!(shutdown_pause_checks(&engine), 1);
     assert_eq!(stop_interrupt_checks(&engine), interrupts);
     for id in [&driver, &ordinary.session_id] {
@@ -1056,10 +1057,9 @@ async fn an_explicit_stop_of_a_stopped_conversation_checks_for_a_paused_message_
     // Stopped already, it may hold a message its environment's takedown
     // paused, which this stop must keep from resuming. The refused helper is
     // logged and the stop answers as before.
-    let started = Instant::now();
+    // The helper is refused before it starts, so nothing waits out its bound.
+    assert!(crate::host_control::managed::retained_executable().is_err());
     let again = engine.stop(&driver).await.unwrap();
-    // Refused at once, not after waiting out the helper's own bound.
-    assert!(started.elapsed() < crate::host_control::managed::HELPER_TIMEOUT);
     assert_eq!(again.state, stopped_state);
     assert_eq!(stopped_pause_checks(&engine), 1);
     // Only a host owner's managed conversation is asked.
@@ -1087,11 +1087,10 @@ async fn retention_asks_a_stopped_conversation_what_can_never_resume_before_remo
     // Only the managed conversation is asked. The refused helper is logged
     // and its record is removed all the same.
     let admission = engine.inner.retention_admission.lock().await;
-    let started = Instant::now();
+    // The helper is refused before it starts, so nothing waits out its bound.
+    assert!(crate::host_control::managed::retained_executable().is_err());
     prune_session_records(&engine.inner, 0, true).await.unwrap();
     drop(admission);
-    // Refused at once, not after waiting out the helper's own bound.
-    assert!(started.elapsed() < crate::host_control::managed::HELPER_TIMEOUT);
     assert_eq!(prune_retire_checks(&engine), 1);
     for id in [&driver, &ordinary.session_id] {
         assert!(matches!(
@@ -1121,13 +1120,26 @@ async fn refused_session_store_is_admitted_once_corrected() {
     engine.shutdown().await.unwrap();
 }
 
+/// An engine with the product's host bounds, except the daemon's whole
+/// shutdown and a host-control RPC's join, which no test here is about: hang
+/// guards, so a stalled CI slot cannot spend the product's 10 s on a
+/// shutdown that is settling, or 3 s on a launch that is (PR runs 24506 and
+/// 24619).
+fn host_test_engine(config: &Config) -> SessionEngine {
+    SessionEngine::with_host_bounds(
+        config,
+        CredentialBridge::new(None),
+        HostBounds::waits_within(HANG),
+    )
+}
+
 fn host_engine(root: &Path) -> SessionEngine {
     std::fs::create_dir_all(root.join("home")).unwrap();
     let mut config = tests::test_engine(root).inner.config.clone();
     config.host = Some(crate::HostConfig {
         state_root: root.join("state"),
     });
-    SessionEngine::new(&config, CredentialBridge::new(None))
+    host_test_engine(&config)
 }
 
 fn request(command: &str, pty: bool) -> v1::LaunchSessionRequest {

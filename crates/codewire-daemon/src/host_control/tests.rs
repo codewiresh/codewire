@@ -106,8 +106,9 @@ pub(crate) fn stop(id: u128, scope: &Scope, session: &str, generation: u64) -> M
 }
 
 /// A host engine whose host bounds are all HANG, not the product's one-second
-/// cleanup steps and five-second dispatch: no test here is about them, and a
-/// stalled CI slot spent them, so a confirmed stop read as unknown.
+/// cleanup steps, five-second dispatch, ten-second shutdown and three-second
+/// RPC join: no test here is about them, and a stalled CI slot spent them, so
+/// a confirmed stop read as unknown.
 pub(crate) fn host_engine(config: &crate::Config) -> SessionEngine {
     SessionEngine::with_host_bounds(
         config,
@@ -117,8 +118,17 @@ pub(crate) fn host_engine(config: &crate::Config) -> SessionEngine {
 }
 
 pub(crate) async fn owner(root: &Path) -> (Owner, SessionEngine) {
+    owner_with(root, crate::durable_session::HostBounds::all(HANG)).await
+}
+
+/// [`owner`] with `bounds` in place of the all-HANG host bounds, for a test
+/// whose subject is one of them.
+pub(crate) async fn owner_with(
+    root: &Path,
+    bounds: crate::durable_session::HostBounds,
+) -> (Owner, SessionEngine) {
     let config = config(root);
-    let engine = host_engine(&config);
+    let engine = SessionEngine::with_host_bounds(&config, CredentialBridge::new(None), bounds);
     let owner = Owner::new(
         &config,
         HostControlBinding::new(scope().environment_id).unwrap(),
@@ -153,7 +163,7 @@ pub(crate) async fn settled(owner: &Owner, request: &Mutation) -> Receipt {
 }
 
 /// Mutates and returns the request's outcome. The RPC answers with the
-/// receipt it has after RPC_JOIN_TIMEOUT, which on a stalled slot can still be
+/// receipt it has after its RPC join bound, which on a stalled slot can still be
 /// unsettled; the outcome is then the settled receipt (#3309).
 async fn outcome(owner: &Owner, request: Mutation) -> Receipt {
     let receipt = owner.mutate(request.clone()).await.unwrap();
