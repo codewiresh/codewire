@@ -173,14 +173,16 @@ other=$(( fs_kib - floor_kib + 1000 - $(cache_used_kib) ))
 out="$(FAKE_DF_SIZE_KIB=$fs_kib FAKE_DF_OTHER_KIB=$other run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2)"
 grep -qE 'removing desktop-release ' <<<"$out" && [[ -d "$work/cache/v1/ci-cache/host-ci" ]] ||
   fail "a tie in last use was not broken by name: $out"
-# Nothing left to remove and under 2 GiB free: the step fails and says why.
+# Nothing left to remove and under 2 GiB free: the job runs cold in its own
+# workspace, says why, and never fails (infra#1534).
 fresh_profiles
 other=$(( fs_kib - 1000000 - $(cache_used_kib) ))
-if out="$(FAKE_DF_SIZE_KIB=$fs_kib FAKE_DF_OTHER_KIB=$other run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2 2>&1)"; then
-  fail 'a cache filesystem pruning cannot free was accepted'
-fi
-grep -qE 'ERROR: the cache filesystem has [0-9]+ KiB free with nothing left to remove; at least 2097152 KiB is required' <<<"$out" ||
-  fail "the hard minimum failure did not say why: $out"
+out="$(FAKE_DF_SIZE_KIB=$fs_kib FAKE_DF_OTHER_KIB=$other run standard push refs/heads/main CODEWIRE_WARM_CACHE_EPOCH=2 2>&1)" ||
+  fail "a full cache filesystem failed the job: $out"
+grep -qE '::warning::the warm Rust cache has [0-9]+ KiB free with nothing left to remove \(at least 2097152 KiB needed\); this job runs cold' <<<"$out" ||
+  fail "the cold fallback did not say why: $out"
+[[ ! -L "$work/workspace/target/ci-cache" && ! -L "$work/workspace/target/ci-rust-cargo-home" ]] ||
+  fail 'a job running cold still linked the full cache'
 # The floor is a quarter of the filesystem but never under 2 GiB.
 fresh_profiles
 other=$(( 6000000 - 2097152 + 1000 - $(cache_used_kib) ))
@@ -316,7 +318,68 @@ exec 8>&-
 grep -qF 'removed the seat standard-1' <<<"$out" || fail "an idle seat was kept: $out"
 [[ ! -e "$seats/standard-1" && -d "$seats/rust-checks-2" ]] || fail 'the idle sweep removed a held seat or kept a free one'
 kill_holders
+# Shared seats (infra#1534: 45.5 GB filled at 100 %): under the floor, idle
+# seats go whole before the job's own profiles, a second seat of a job that
+# has another first, then the least recently taken; a held seat never goes.
+rm -rf "$seats"
+mkdir -p "$seats"
+for seat in database-1 database-2 services-runtime-1 rust-packages-1; do
+  mkdir -p "$seats/$seat/v1/ci-cache/host-debug"
+  head -c 400000 /dev/zero > "$seats/$seat/v1/ci-cache/host-debug/blob"
+  : > "$seats/$seat.lock"
+done
+touch -d '3 hours ago' "$seats/services-runtime-1"
+touch -d '2 hours ago' "$seats/rust-packages-1"
+touch -d '1 hour ago' "$seats/database-1"
+touch -d '90 minutes ago' "$seats/database-2"
+# rust-packages-1 is held by a running job.
+exec 8>"$seats/rust-packages-1.lock"
+flock -n 8 || fail 'could not hold a seat in the test'
+seats_kib() { du -sk "$seats" | awk '{print $1}'; }
+# 8 GB in all with a 2.5 GB floor (over the 2 GiB hard minimum); OVER KiB
+# under the floor, so one 400 KB seat brings it back.
+shared_run() {
+  local job="$1" over="$2"
+  rm -rf "$work/workspace"
+  mkdir -p "$work/workspace/target"
+  : > "$work/github-env"
+  env -i PATH="$PATH" HOME="$work" GITHUB_WORKSPACE="$work/workspace" GITHUB_ENV="$work/github-env" \
+    CODEWIRE_CI_WARM_SEATS="$seats" WARM_CACHE_SEATS_ANY_FS=1 WARM_CACHE_MIN_FREE_KIB=2500000 \
+    WARM_CACHE_DF="$work/fake/df" FAKE_DF_ROOT="$seats" FAKE_DF_SIZE_KIB=8000000 \
+    FAKE_DF_OTHER_KIB="$(( 8000000 - 2500000 - $(seats_kib) + over ))" \
+    GITHUB_JOB="$job" GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main "$SELECT"
+}
+out="$(shared_run standard 300)" || fail "the shared floor failed a job: $out"
+grep -qF 'removed the idle seat database-2' <<<"$out" || fail "a duplicate seat did not go first: $out"
+[[ ! -e "$seats/database-2" && -d "$seats/database-1" && -d "$seats/services-runtime-1" ]] ||
+  fail "the shared floor removed more than one seat or the wrong one: $out; $(ls "$seats")"
+grep -qF 'removing host-debug' <<<"$out" && fail "the job's own profile went before an idle seat: $out"
+# Further under the floor: the least recently taken idle seat goes next; the
+# held seat, though older, stays.
+out="$(shared_run standard 300)" || fail "the shared floor failed a job: $out"
+grep -qF 'removed the idle seat services-runtime-1' <<<"$out" || fail "the least recently taken seat did not go: $out"
+[[ -d "$seats/rust-packages-1" ]] || fail 'the shared floor removed a held seat'
+exec 8>&-
+kill_holders
+# A seat's targets stay under a quarter of the shared filesystem: a 4000 KiB
+# filesystem (the fake df reports plenty free) caps a seat at 1000 KiB.
+rm -rf "$seats"
+mkdir -p "$seats/rust-packages-1/v1/ci-cache/host-debug" "$seats/rust-packages-1/v1/ci-cache/host-ci"
+head -c 700000 /dev/zero > "$seats/rust-packages-1/v1/ci-cache/host-debug/blob"
+head -c 700000 /dev/zero > "$seats/rust-packages-1/v1/ci-cache/host-ci/blob"
+touch -d '1 hour ago' "$seats/rust-packages-1/v1/ci-cache/host-debug/.last-used"
+touch "$seats/rust-packages-1/v1/ci-cache/host-ci/.last-used"
+week_key="$(date -u +%G-W%V)/0"
+echo "$week_key" > "$seats/rust-packages-1/v1/.key"
+out="$(env -i PATH="$PATH" HOME="$work" GITHUB_WORKSPACE="$work/workspace" GITHUB_ENV="$work/github-env" \
+  CODEWIRE_CI_WARM_SEATS="$seats" WARM_CACHE_SEATS_ANY_FS=1 \
+  WARM_CACHE_DF="$work/fake/df" FAKE_DF_ROOT="$seats" FAKE_DF_SIZE_KIB=4000 FAKE_DF_OTHER_KIB=-3000000 \
+  GITHUB_JOB=rust-packages GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main "$SELECT")" ||
+  fail "the seat cap failed a job: $out"
+kill_holders
+grep -qF 'over the target cap: removing host-debug' <<<"$out" || fail "a seat over a quarter of the filesystem kept its targets: $out"
+[[ -d "$seats/rust-packages-1/v1/ci-cache/host-ci" ]] || fail 'the seat cap removed more than it needed'
 # Without the seats variable (every other runner) nothing changes.
 grep -q 'CODEWIRE_CI_WARM_SEATS' "$FINISH" && fail 'the finish step should read the seat from WARM_CACHE_ROOT only'
 
-printf '[test-warm-rust-cache] main and pull requests only, weekly and epoch wipes, LRU, Cargo home and Go caps, free-space floor, warm-VM seats: OK\n'
+printf '[test-warm-rust-cache] main and pull requests only, weekly and epoch wipes, LRU, Cargo home and Go caps, free-space floor, warm-VM seats, shared floor, cold fallback: OK\n'

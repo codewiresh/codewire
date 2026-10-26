@@ -48,6 +48,14 @@
 # it, so no two running jobs ever share a seat. The later steps find the seat
 # through WARM_CACHE_ROOT in GITHUB_ENV. Seats nobody used for
 # WARM_CACHE_SEAT_MAX_IDLE_DAYS (3) are removed when free.
+# The seats share one filesystem (45.5 GB on 2026-10-26, when it filled), so
+# there the bounds are shared too (infra#1534):
+# - a seat's target directories stay under a quarter of the filesystem;
+# - under the free-space floor, whole idle seats go before this job's own
+#   profiles: first a second (or later) seat of a job that has another, then
+#   any idle seat, least recently taken first. A held seat is never touched.
+# Wherever the cache is, a job that still cannot get its floor runs cold
+# (its target and Cargo home stay in its workspace) instead of failing.
 set -euo pipefail
 
 : "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"
@@ -165,6 +173,50 @@ filesystem_kib() {
 size_kib="$(filesystem_kib 2)"
 minimum_free_kib="${WARM_CACHE_MIN_FREE_KIB:-$(( size_kib / 4 ))}"
 (( minimum_free_kib >= hard_minimum_free_kib )) || minimum_free_kib="$hard_minimum_free_kib"
+# On shared seats one seat's targets may hold at most a quarter of the
+# filesystem (rust-packages-1 held 16.7 GB of 45.5 GB when it filled).
+seat_target_cap_kib="$target_cap_kib"
+if [[ -n "${CODEWIRE_CI_WARM_SEATS:-}" ]] && (( size_kib / 4 < seat_target_cap_kib )); then
+  seat_target_cap_kib=$(( size_kib / 4 ))
+fi
+readonly seat_target_cap_kib
+
+# Under the floor on shared seats, idle seats go whole before this job's own
+# profiles: a later seat of a job with another seat first (database-2 and -3
+# held nearly what database-1 did), then any idle seat, least recently taken
+# first. A seat is removed only under its own lock, so a held one stays.
+if [[ -n "${CODEWIRE_CI_WARM_SEATS:-}" ]]; then
+  seats_dir="$CODEWIRE_CI_WARM_SEATS"
+  # One line per other seat: whether it is its job's only seat (0 = no),
+  # when it was last taken, and its path; the best victim sorts first.
+  idle_seats() {
+    local seat name job others
+    for seat in "$seats_dir"/*/; do
+      seat="${seat%/}"
+      [[ -d "$seat" && ! -L "$seat" && "$seat" != "$root" && -e "$seat.lock" ]] || continue
+      name="${seat##*/}"
+      job="${name%-*}"
+      others="$(find "$seats_dir" -mindepth 1 -maxdepth 1 -type d -name "$job-[0-9]*" | wc -l)"
+      printf '%d %s %s\n' "$(( others > 1 ? 0 : 1 ))" "$(stat -c %Y "$seat" 2>/dev/null || echo 0)" "$seat"
+    done | sort -k1,1n -k2,2n
+  }
+  removed=1
+  while (( removed )) && (( $(filesystem_kib 4) < minimum_free_kib )); do
+    removed=0
+    mapfile -t candidates < <(idle_seats)
+    for line in "${candidates[@]}"; do
+      victim="${line#* * }"
+      kib="$(usage_kib "$victim")"
+      if flock -n "$victim.lock" rm -rf -- "$victim"; then
+        rm -f -- "$victim.holder"
+        printf '[warm-rust-cache] under %s KiB free: removed the idle seat %s (%s KiB)\n' \
+          "$minimum_free_kib" "${victim##*/}" "$kib"
+        removed=1
+        break
+      fi
+    done
+  done
+fi
 
 # Under the floor, the Go caches go before any Rust profile: refilling them
 # costs about a minute, a Rust profile several. So keeping Go warm never makes
@@ -193,7 +245,7 @@ while :; do
     fi
   done
   [[ -n "$oldest" ]] || break
-  if (( total > target_cap_kib )); then
+  if (( total > seat_target_cap_kib )); then
     reason='over the target cap'
   elif (( $(filesystem_kib 4) < minimum_free_kib )); then
     reason="under ${minimum_free_kib} KiB free"
@@ -221,9 +273,11 @@ if [[ "$(usage_kib "$cache/go")" -gt "$go_cap_kib" ]]; then
 fi
 free_kib="$(filesystem_kib 4)"
 if (( free_kib < hard_minimum_free_kib )); then
-  printf '[warm-rust-cache] ERROR: the cache filesystem has %s KiB free with nothing left to remove; at least %s KiB is required\n' \
-    "$free_kib" "$hard_minimum_free_kib" >&2
-  exit 1
+  # Nothing is left to remove: this job runs cold in its own workspace rather
+  # than fail (a full warm disk costs time, never a red run).
+  printf '::warning::the warm Rust cache has %s KiB free with nothing left to remove (at least %s KiB needed); this job runs cold\n' \
+    "$free_kib" "$hard_minimum_free_kib"
+  exit 0
 fi
 printf '[warm-rust-cache] %s KiB free of %s (floor %s)\n' "$free_kib" "$size_kib" "$minimum_free_kib"
 
