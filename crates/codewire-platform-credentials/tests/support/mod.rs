@@ -422,6 +422,13 @@ impl StatementCounter {
     /// A pool with `pool`'s exact login and database whose connections all
     /// pass through this counter. Plaintext keeps the protocol readable; the
     /// disposable synthetic database never carries a real credential.
+    ///
+    /// Its sessions start with `synchronous_commit` off, a startup parameter
+    /// that sends no statement. The counted paths take `FOR SHARE` row locks,
+    /// so their COMMIT waits for a WAL flush. On the Database lane's shared
+    /// PostgreSQL that flush has stalled past the runtime authority's 5 s
+    /// deadline (PR run 23943). These tests count round trips; durability is
+    /// not what they test.
     pub async fn pool(pool: &PgPool, max_connections: u32) -> Result<(Self, PgPool)> {
         let options = pool.connect_options().as_ref().clone();
         let upstream = format!("{}:{}", options.get_host(), options.get_port());
@@ -452,7 +459,8 @@ impl StatementCounter {
                 options
                     .host("127.0.0.1")
                     .port(port)
-                    .ssl_mode(PgSslMode::Disable),
+                    .ssl_mode(PgSslMode::Disable)
+                    .options([("synchronous_commit", "off")]),
             )
             .await?;
         Ok((counter, counted_pool))
