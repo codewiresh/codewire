@@ -460,6 +460,17 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             runtime_spec.runtime_class_name.clone().into(),
         );
     }
+    // Docker never decides workspace readiness: a DinD workspace renders the
+    // same probes as one without Docker. Usable means the user can SSH in
+    // (owner, 2026-10-06), so the Pod, its Sandbox and Claim turn Ready
+    // without waiting for dockerd, which comes up beside the workspace; the
+    // DinD container has no probe and still counts only while it runs, so a
+    // bootstrap that exits keeps the Pod unready. A `docker` command run
+    // before dockerd listens waits for its socket (owner, 2026-10-27; setup's
+    // `DOCKER_SOCKET_WAIT`, the workspace image's `docker`). Program #2238.
+    if opts.identity_free() {
+        apply_daemon_ready_probes(ws, &runtime_spec);
+    }
     let mut containers: Vec<Value> = Vec::new();
     if runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT
         || runtime_spec.docker_mode == DOCKER_MODE_GUEST_DIND
@@ -483,7 +494,6 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             .as_array_mut()
             .expect("ws mounts array")
             .push(json!({ "name": "docker-sock", "mountPath": "/var/run/docker" }));
-        apply_docker_socket_probes(ws, opts, &runtime_spec);
 
         containers.push(ws.clone());
         let mut dind = dind_container(opts, &runtime_spec, false);
@@ -500,7 +510,6 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             .as_array_mut()
             .expect("ws mounts array")
             .push(json!({ "name": "docker-sock", "mountPath": "/var/run/docker" }));
-        apply_docker_socket_probes(ws, opts, &runtime_spec);
 
         containers.push(ws.clone());
         let mut dind = dind_container(opts, &runtime_spec, true);
@@ -509,9 +518,6 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         }
         containers.push(dind);
     } else {
-        if opts.identity_free() {
-            apply_daemon_ready_probes(ws, &runtime_spec);
-        }
         containers.push(ws.clone());
     }
 
@@ -541,33 +547,15 @@ fn configure_confidential_workspace_device(container: &mut Value) {
     }]);
 }
 
-/// Workspace readiness proves the cross-container Docker socket, and create
-/// and start wait for that readiness. The kubelet runs readiness only after
-/// the startup probe succeeds, and then at once, so the 1-second startup probe
-/// bounds how late a start notices Docker while the steady-state readiness
-/// probe keeps its 2-second period. The startup budget is the tier's ready
-/// timeout: create or start has already failed before the kubelet would stop
-/// a slow Docker start.
-fn apply_docker_socket_probes(
-    ws: &mut Value,
-    opts: &TemplateOpts,
-    runtime_spec: &RuntimeProfileSpec,
-) {
-    let ready_timeout = ready_timeout(runtime_spec);
-    // An identity-free daemon writes its local readiness marker before it
-    // binds; Pod readiness never depends on the binding, because
-    // orchestration binds only after the Pod is Ready (design §8, §10).
-    let command = if opts.identity_free() {
-        DAEMON_READY_AND_DOCKER_PROBE
-    } else {
-        DOCKER_PROBE
-    };
-    ws["startupProbe"] = exec_probe(command, 1, ready_timeout.as_secs());
-    ws["readinessProbe"] = exec_probe(command, 2, 3);
-}
-
-/// Without DinD an identity-free workspace is Ready once its daemon process
-/// is up, signalled by the marker; before B2 it had no readiness probe.
+/// An identity-free workspace is Ready once its daemon process is up,
+/// signalled by the marker it writes before it binds; Pod readiness never
+/// depends on the binding (design §8, §10) or on Docker. The kubelet runs
+/// readiness only after the startup probe succeeds, and then at once, so the
+/// 1-second startup probe bounds how late a start notices the marker while
+/// the steady-state readiness probe keeps its 2-second period. The startup
+/// budget is the tier's ready timeout: create or start has already failed
+/// before the kubelet would stop a slow start. An environment-token workspace
+/// has no probe, with or without Docker.
 fn apply_daemon_ready_probes(ws: &mut Value, runtime_spec: &RuntimeProfileSpec) {
     let ready_timeout = ready_timeout(runtime_spec);
     ws["startupProbe"] = exec_probe(DAEMON_READY_PROBE, 1, ready_timeout.as_secs());
@@ -582,9 +570,7 @@ fn ready_timeout(runtime_spec: &RuntimeProfileSpec) -> std::time::Duration {
     }
 }
 
-const DOCKER_PROBE: &str = "docker version --format '{{.Server.Version}}' >/dev/null";
 const DAEMON_READY_PROBE: &str = "test -f /codewire/run/daemon/ready";
-const DAEMON_READY_AND_DOCKER_PROBE: &str = "test -f /codewire/run/daemon/ready && docker version --format '{{.Server.Version}}' >/dev/null";
 
 fn exec_probe(command: &str, period_seconds: u64, failure_threshold: u64) -> Value {
     json!({
@@ -761,6 +747,18 @@ elif [ "$mount_mode" != "none" ]; then
 fi
 exec dockerd --host "unix:///var/run/docker/docker.sock" --group 1000 --data-root "$data_root" --storage-driver vfs"#;
 
+/// The DinD bootstrap rendered from 531fc0f7e until Program #2238 made its
+/// `mkfs.ext4` lazy. It differs from [`dind_bootstrap_script`] only there;
+/// a Sandbox that carries it formatted its image on its first start, so it
+/// is current in every other respect and is never re-rendered.
+pub(crate) fn eager_mkfs_dind_bootstrap_script() -> String {
+    dind_bootstrap_script().replace(LAZY_MKFS, r#"    mkfs.ext4 -q -F "$data_image""#)
+}
+
+const LAZY_MKFS: &str = r#"    # A fresh sparse image reads as zeros, so mke2fs skips zeroing its
+    # inode tables and journal: a few MiB of writes at any size.
+    mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$data_image""#;
+
 pub(crate) fn dind_bootstrap_script() -> String {
     format!(
         r#"data_image="${{CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}}"
@@ -776,7 +774,7 @@ chmod 0755 "$codewire_dir"
 if [ "$mount_mode" = "loop" ]; then
   if [ ! -s "$data_image" ]; then
     truncate -s "$data_size" "$data_image"
-    mkfs.ext4 -q -F "$data_image"
+{LAZY_MKFS}
   fi
   if ! awk -v target="$data_root" '$2 == target && $3 == "ext4" {{ found = 1 }} END {{ exit found ? 0 : 1 }}' /proc/mounts; then
     mount -o loop "$data_image" "$data_root"
@@ -897,12 +895,11 @@ fn shell_quote(value: &str) -> String {
 }
 
 /// The gateway and orchestration reach the workspace daemon through this
-/// Service. The daemon listens as soon as the workspace container starts, but
-/// the Pod turns Ready only after its Docker socket probe. A commodity Service
-/// therefore publishes the Pod before it is Ready, so the gateway connects
-/// while Docker starts instead of after it. Create and start still wait for
-/// the Pod to be Ready through the SandboxClaim. Confidential keeps Ready-only
-/// endpoints; its start path is not part of this change.
+/// Service. A commodity Service publishes the Pod before it is Ready, so the
+/// gateway connects as soon as the daemon listens instead of after the
+/// kubelet's next readiness probe. Create and start still wait for the Pod to
+/// be Ready through the SandboxClaim. Confidential keeps Ready-only endpoints;
+/// its start path is not part of this change.
 pub fn render_workspace_daemon_service(namespace: &str, opts: &TemplateOpts) -> Value {
     let publish_not_ready = opts.runtime_profile_spec().profile != RUNTIME_PROFILE_CONFIDENTIAL;
     json!({

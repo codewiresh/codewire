@@ -1,0 +1,8 @@
+socket='/var/run/docker/docker.sock'
+if [ "${DOCKER_HOST:-}" = "unix://$socket" ]; then
+  steps=0
+  while [ ! -S "$socket" ] && [ "$steps" -lt 300 ]; do
+    if sleep 0.2 2>/dev/null; then steps=$((steps + 1)); else sleep 1; steps=$((steps + 5)); fi
+  done
+fi
+exec sh -c "$1"

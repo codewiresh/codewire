@@ -377,7 +377,10 @@ if [ "$mount_mode" = "loop" ]; then
   if [ ! -s "$data_image" ]; then
     log "creating ext4 image"
     truncate -s "$data_size" "$data_image"
-    mkfs.ext4 -q -F "$data_image"
+    # As the workspace renders it: a fresh sparse image needs no zeroing.
+    started="$(date +%s)"
+    mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$data_image"
+    log "formatted $data_size in $(( $(date +%s) - started ))s, $(du -m "$data_image" | cut -f1) MiB allocated"
   fi
 
   log "mounting ext4 image"

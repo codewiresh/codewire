@@ -320,6 +320,13 @@ RUN printf '\n%s\nset +h\n' \
 # wrapper installs its native, self-updating build in the home on first use.
 COPY --chmod=0755 images/workspace/agent-upgrade/ /opt/codewire/agents/upgrade/
 RUN chown -R -h root:root /opt/codewire/agents && chmod -R go-w /opt/codewire/agents
+# A hosted Sandbox is Ready before its pod-local Docker daemon listens, so
+# `docker` waits, bounded, for that socket and then runs the real CLI
+# unchanged (Program #2238). Plugins are found in their usual directories.
+RUN install -d -m 0755 /usr/local/libexec/codewire && \
+    mv /usr/local/bin/docker /usr/local/libexec/codewire/docker
+COPY --chown=0:0 --chmod=0755 images/workspace/docker-cli/docker /usr/local/bin/docker
+RUN docker --version
 
 # Keep the source-built CLI after the moving developer tools. The final image proves
 # and exposes the exact binary built from this source tree.

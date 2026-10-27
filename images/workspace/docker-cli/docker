@@ -1,0 +1,17 @@
+#!/bin/sh
+# The Docker CLI, after a bounded wait for a Sandbox's pod-local Docker.
+#
+# A hosted Sandbox is usable once its user can SSH in; its Docker daemon
+# starts beside the workspace and may listen a moment later. Until its socket
+# exists, a docker command waits for it, up to 60 seconds, then runs anyway
+# and reports Docker's own error. Anywhere else (another DOCKER_HOST, a local
+# VM, a socket already present) the CLI runs at once, unchanged.
+socket=/var/run/docker/docker.sock
+if [ "${DOCKER_HOST:-}" = "unix://$socket" ] && [ ! -S "$socket" ]; then
+  [ -t 2 ] && printf 'Waiting for Docker to start...\n' >&2
+  steps=0
+  while [ ! -S "$socket" ] && [ "$steps" -lt 300 ]; do
+    if sleep 0.2 2>/dev/null; then steps=$((steps + 1)); else sleep 1; steps=$((steps + 5)); fi
+  done
+fi
+exec /usr/local/libexec/codewire/docker "$@"

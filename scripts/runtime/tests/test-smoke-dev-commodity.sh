@@ -606,6 +606,8 @@ run_docker_socket_contract_cases() {
   local accepted="$case_dir/accepted.json"
   local disk_backed="$case_dir/disk-backed.json"
   local missing_probe="$case_dir/missing-probe.json"
+  local docker_gated="$case_dir/docker-gated.json"
+  local dind_probe="$case_dir/dind-probe.json"
   local disabled="$case_dir/disabled.json"
 
   mkdir -p "$case_dir"
@@ -620,7 +622,7 @@ run_docker_socket_contract_cases() {
           name: "workspace",
           volumeMounts: [{name: "docker-sock", mountPath: "/var/run/docker"}],
           readinessProbe: {
-            exec: {command: ["sh", "-ec", "test -f /codewire/run/daemon/ready && docker version --format '\''{{.Server.Version}}'\'' >/dev/null"]},
+            exec: {command: ["sh", "-ec", "test -f /codewire/run/daemon/ready"]},
             periodSeconds: 2,
             timeoutSeconds: 2,
             failureThreshold: 3,
@@ -638,6 +640,12 @@ run_docker_socket_contract_cases() {
     "$accepted" >"$disk_backed"
   jq 'del(.spec.containers[] | select(.name == "workspace") | .readinessProbe)' \
     "$accepted" >"$missing_probe"
+  jq '(.spec.containers[] | select(.name == "workspace") | .readinessProbe.exec.command[2]) =
+        "test -f /codewire/run/daemon/ready && docker version >/dev/null"' \
+    "$accepted" >"$docker_gated"
+  jq '(.spec.containers[] | select(.name == "dind") | .startupProbe) =
+        {exec: {command: ["docker", "version"]}}' \
+    "$accepted" >"$dind_probe"
   jq -n '{
     spec: {
       volumes: [{name: "workspace", emptyDir: {}}],
@@ -667,7 +675,25 @@ run_docker_socket_contract_cases() {
     export EXPECTED_DOCKER_MODE=guest-dind
     assert_docker_socket_contract "$missing_probe"
   ) >/dev/null 2>&1; then
-    fail "Docker socket contract without a workspace connection probe was accepted"
+    fail "Docker socket contract without the workspace marker probe was accepted"
+  fi
+
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    export EXPECTED_DOCKER_MODE=guest-dind
+    assert_docker_socket_contract "$docker_gated"
+  ) >/dev/null 2>&1; then
+    fail "workspace readiness gated on Docker was accepted"
+  fi
+
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    export EXPECTED_DOCKER_MODE=guest-dind
+    assert_docker_socket_contract "$dind_probe"
+  ) >/dev/null 2>&1; then
+    fail "a DinD probe gating Pod readiness was accepted"
   fi
 
   (

@@ -1125,14 +1125,30 @@ mod tests {
         assert!(bootstrap.contains("chown 1000:1000 \"$codewire_dir\""));
         assert!(bootstrap.contains("chmod 0755 \"$codewire_dir\""));
         assert!(!bootstrap.contains("0775"));
+        // A fresh sparse image is formatted without zeroing its inode tables
+        // or journal (Program #2238).
+        assert!(bootstrap.contains(
+            "mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 \"$data_image\""
+        ));
         // The bootstrap stored Sandboxes carry from before 531fc0f7e differs
         // only in that mode; Start and Pod replacement re-render it (#2639).
+        // The one rendered until #2238 differs only in its eager mkfs.
         assert_eq!(
             LEGACY_DIND_BOOTSTRAP_SCRIPT.replace(
                 "chmod 0775 \"$codewire_dir\"",
                 "# Owner-writable only: the workspace daemon refuses a group- or\n\
                  # world-writable ancestor of its platform session store.\n\
                  chmod 0755 \"$codewire_dir\""
+            ),
+            eager_mkfs_dind_bootstrap_script()
+        );
+        assert_ne!(eager_mkfs_dind_bootstrap_script(), bootstrap);
+        assert_eq!(
+            eager_mkfs_dind_bootstrap_script().replace(
+                "    mkfs.ext4 -q -F \"$data_image\"",
+                "    # A fresh sparse image reads as zeros, so mke2fs skips zeroing its\n    \
+                 # inode tables and journal: a few MiB of writes at any size.\n    \
+                 mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 \"$data_image\""
             ),
             bootstrap
         );
@@ -1180,35 +1196,17 @@ mod tests {
             json!({ "medium": "Memory" }),
             "Kata cross-container Unix sockets must use guest tmpfs"
         );
-        assert_eq!(
-            workspace["readinessProbe"],
-            json!({
-                "exec": {
-                    "command": [
-                        "sh",
-                        "-ec",
-                        "docker version --format '{{.Server.Version}}' >/dev/null",
-                    ],
-                },
-                "periodSeconds": 2,
-                "timeoutSeconds": 2,
-                "failureThreshold": 3,
-                "successThreshold": 1,
-            }),
-            "workspace readiness must prove the cross-container Docker socket"
-        );
-        assert_eq!(
-            workspace["startupProbe"],
-            json!({
-                "exec": workspace["readinessProbe"]["exec"],
-                "periodSeconds": 1,
-                "timeoutSeconds": 2,
-                "failureThreshold": WORKSPACE_READY_TIMEOUT.as_secs(),
-                "successThreshold": 1,
-            }),
-            "a start notices Docker within a second and is never stopped before \
-             the commodity ready wait gives up"
-        );
+        // Docker never gates readiness: an environment-token workspace has
+        // no probe with or without DinD, and DinD has none (Program #2238).
+        for container in containers {
+            for probe in ["readinessProbe", "startupProbe", "livenessProbe"] {
+                assert!(
+                    container.get(probe).is_none(),
+                    "{} must not render {probe}",
+                    container["name"]
+                );
+            }
+        }
         assert!(
             volumes
                 .iter()
@@ -1242,24 +1240,11 @@ mod tests {
         assert_eq!(docker_socket["emptyDir"], json!({ "medium": "Memory" }));
 
         let containers = pod_spec["containers"].as_array().unwrap();
-        let workspace = containers
-            .iter()
-            .find(|container| container["name"].as_str() == Some("workspace"))
-            .unwrap();
-        assert_eq!(
-            workspace["readinessProbe"]["exec"]["command"][2].as_str(),
-            Some("docker version --format '{{.Server.Version}}' >/dev/null")
-        );
-        assert_eq!(
-            workspace["startupProbe"]["exec"],
-            workspace["readinessProbe"]["exec"]
-        );
-        assert_eq!(
-            workspace["startupProbe"]["failureThreshold"].as_u64().unwrap()
-                * workspace["startupProbe"]["periodSeconds"].as_u64().unwrap(),
-            CONFIDENTIAL_WORKSPACE_READY_TIMEOUT.as_secs(),
-            "confidential Docker startup keeps the tier's cold-start budget"
-        );
+        // Confidential, like commodity, never waits for Docker to be Ready.
+        for container in containers {
+            assert!(container.get("readinessProbe").is_none());
+            assert!(container.get("startupProbe").is_none());
+        }
         let dind = containers
             .iter()
             .find(|container| container["name"].as_str() == Some("dind"))
@@ -3010,6 +2995,49 @@ mod tests {
             render_sandbox_template("dev-sandboxes", &runc),
             load_golden("identity-free-sandboxtemplate-runc.golden.json"),
         );
+    }
+
+    /// Usable means the user can SSH in (owner, 2026-10-06), and Docker comes
+    /// up after (owner, 2026-10-27): with DinD the workspace is Ready on its
+    /// daemon's marker exactly as without Docker, and nothing in the Pod
+    /// waits for dockerd (Program #2238).
+    #[test]
+    fn identity_free_readiness_never_waits_for_docker() {
+        let containers = |opts: &TemplateOpts| {
+            render_sandbox_template("dev-sandboxes", opts)["spec"]["podTemplate"]["spec"]
+                ["containers"]
+                .as_array()
+                .unwrap()
+                .clone()
+        };
+        let probes = |container: &Value| {
+            ["readinessProbe", "startupProbe", "livenessProbe"]
+                .map(|probe| container.get(probe).cloned())
+        };
+        let runc = containers(&TemplateOpts {
+            runtime_profile: RUNTIME_PROFILE_RUNC.into(),
+            ..identity_free_opts()
+        });
+        assert_eq!(runc.len(), 1);
+        for docker_mode in [DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT] {
+            let dind = containers(&TemplateOpts {
+                docker_mode: docker_mode.into(),
+                ..identity_free_opts()
+            });
+            let names: Vec<_> = dind.iter().map(|c| c["name"].as_str().unwrap()).collect();
+            assert_eq!(names, ["workspace", "dind"], "{docker_mode}");
+            assert_eq!(probes(&dind[0]), probes(&runc[0]), "{docker_mode}");
+            assert_eq!(
+                dind[0]["readinessProbe"]["exec"]["command"][2],
+                "test -f /codewire/run/daemon/ready",
+                "{docker_mode}"
+            );
+            assert_eq!(probes(&dind[1]), [None, None, None], "{docker_mode}");
+            assert!(
+                !Value::Array(dind.clone()).to_string().contains("docker version"),
+                "{docker_mode}: a probe runs Docker"
+            );
+        }
     }
 
 }

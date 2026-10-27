@@ -41,7 +41,7 @@ pub use runtime_policy::{
 use workspace::custom_workspace_supervisor_command;
 pub(crate) use workspace::{
     CLIENT_BOOTSTRAP_CONTAINER, DAEMON_INIT_CONTAINER, DAEMON_VOLUME, LEGACY_DIND_BOOTSTRAP_SCRIPT,
-    dind_bootstrap_script, render_workspace_client_bootstrap,
+    dind_bootstrap_script, eager_mkfs_dind_bootstrap_script, render_workspace_client_bootstrap,
 };
 pub use workspace::{
     ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,
@@ -68,8 +68,8 @@ pub(crate) fn confidential_init_data(opts: &TemplateOpts) -> anyhow::Result<Stri
 }
 
 /// How long one create or start waits for a workspace to become ready. The
-/// workspace's Docker startup probe uses the same budget, so Kubernetes never
-/// restarts it during a start that can still succeed.
+/// workspace's daemon-ready startup probe uses the same budget, so Kubernetes
+/// never restarts it during a start that can still succeed.
 pub const WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(600);
 /// Confidential guests initialize encrypted storage before the daemon listens.
 pub const CONFIDENTIAL_WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(1_800);

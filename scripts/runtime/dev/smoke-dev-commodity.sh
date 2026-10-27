@@ -2494,8 +2494,13 @@ assert_docker_socket_contract() {
     die "docker-sock emptyDir medium=${medium:-<default>}, want Memory for Kata cross-container Unix sockets"
   [[ "$workspace_mount_count" == "1" && "$dind_mount_count" == "1" ]] || \
     die "docker-sock mount counts workspace=$workspace_mount_count dind=$dind_mount_count, want 1/1"
-  [[ "$readiness_command" == "test -f /codewire/run/daemon/ready && docker version --format '{{.Server.Version}}' >/dev/null" ]] || \
-    die "workspace Docker readiness probe does not prove the cross-container daemon connection"
+  # Docker never gates readiness (Program #2238): the workspace is Ready on
+  # its daemon's marker, and the Docker phases below prove the socket.
+  [[ "$readiness_command" == "test -f /codewire/run/daemon/ready" ]] || \
+    die "workspace readiness probe is not exactly the daemon's marker: ${readiness_command:-<none>}"
+  jq -e '[.spec.containers[]? | select(.name == "dind") | (.readinessProbe, .startupProbe) | select(. != null)] | length == 0' \
+    "$pod_json" >/dev/null || \
+    die "the DinD container declares a probe that would gate Pod readiness on Docker"
   jq -e '
     .spec.containers[]
     | select(.name == "workspace")
@@ -2505,7 +2510,7 @@ assert_docker_socket_contract() {
       and .failureThreshold == 3
       and .successThreshold == 1
   ' "$pod_json" >/dev/null || \
-    die "workspace Docker readiness probe timing contract drifted"
+    die "workspace readiness probe timing contract drifted"
 }
 
 assert_pod_shape() {

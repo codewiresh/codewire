@@ -2,6 +2,9 @@
 //! checked-in fixtures under `tests/fixtures/setup_scripts`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
+
+use crate::sandbox::template::DIND_SOCKET_PATH;
 
 /// Mirrors `shellQuoteLiteral` / sandbox.`shellQuote` (same impl).
 pub fn shell_quote(value: &str) -> String {
@@ -84,6 +87,47 @@ fn configure_environment_command_at(
         "codewire-configure-environment".to_string(),
         email.to_string(),
         name.to_string(),
+    ]
+}
+
+/// How long a setup command waits for the pod-local Docker socket.
+pub const DOCKER_SOCKET_WAIT: Duration = Duration::from_secs(60);
+
+/// Run a user's setup command (install command or startup script) as
+/// `sh -c <script>`, after a bounded wait for the pod-local Docker socket.
+/// Docker no longer gates workspace readiness, so setup can reach a user
+/// command while dockerd is still starting (owner, 2026-10-27: "a docker
+/// command run before then waits for it"; Program #2238). The wait applies
+/// only while the workspace's `DOCKER_HOST` names that socket and it does not
+/// exist yet; it never fails, so after [`DOCKER_SOCKET_WAIT`] the command runs
+/// and Docker reports its own error. The script then replaces the waiting
+/// shell, with the same argv, `$0`, process and exit status as before.
+pub fn build_user_setup_command(script: &str) -> Vec<String> {
+    user_setup_command_at(script, DIND_SOCKET_PATH, DOCKER_SOCKET_WAIT)
+}
+
+fn user_setup_command_at(script: &str, socket: &str, wait: Duration) -> Vec<String> {
+    // Fifth-of-a-second steps; a `sleep` without fractions counts five.
+    let steps = wait.as_secs() * 5;
+    vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!(
+            concat!(
+                "socket={socket}\n",
+                "if [ \"${{DOCKER_HOST:-}}\" = \"unix://$socket\" ]; then\n",
+                "  steps=0\n",
+                "  while [ ! -S \"$socket\" ] && [ \"$steps\" -lt {steps} ]; do\n",
+                "    if sleep 0.2 2>/dev/null; then steps=$((steps + 1)); else sleep 1; steps=$((steps + 5)); fi\n",
+                "  done\n",
+                "fi\n",
+                "exec sh -c \"$1\"\n",
+            ),
+            socket = shell_quote(socket),
+            steps = steps,
+        ),
+        "sh".to_string(),
+        script.to_string(),
     ]
 }
 
@@ -422,5 +466,97 @@ mod tests {
             .unwrap();
         assert!(!output.status.success());
         assert_eq!(fs::read(directory).unwrap(), b"synthetic existing object");
+    }
+
+    #[test]
+    fn user_setup_command_matches_golden() {
+        let command = build_user_setup_command("npm ci && docker compose up -d");
+        assert_eq!(command[..2], ["sh", "-c"]);
+        assert_eq!(command[2], golden("user_setup_command.golden.txt"));
+        assert_eq!(command[3..], ["sh", "npm ci && docker compose up -d"]);
+    }
+
+    /// Run a user setup command that waits up to `wait` for `socket`, with
+    /// `docker_host` as the workspace's `DOCKER_HOST`. Returns its output and
+    /// how long it took.
+    fn run_user_setup_command(
+        script: &str,
+        socket: &std::path::Path,
+        docker_host: Option<String>,
+        wait: Duration,
+    ) -> (std::process::Output, Duration) {
+        let command = user_setup_command_at(script, socket.to_str().unwrap(), wait);
+        let mut process = Command::new(&command[0]);
+        process
+            .args(&command[1..])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin");
+        if let Some(docker_host) = docker_host {
+            process.env("DOCKER_HOST", docker_host);
+        }
+        let started = std::time::Instant::now();
+        let output = process.output().unwrap();
+        (output, started.elapsed())
+    }
+
+    #[test]
+    fn user_setup_command_runs_the_script_unchanged_without_pod_docker() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("docker.sock");
+        let script = "printf '%s|%s|%s' \"$0\" \"$#\" \"$socket\"; exit 7";
+        for docker_host in [None, Some("unix:///elsewhere/docker.sock".to_string())] {
+            let (output, elapsed) =
+                run_user_setup_command(script, &socket, docker_host.clone(), DOCKER_SOCKET_WAIT);
+            assert_eq!(output.status.code(), Some(7), "{docker_host:?}");
+            // `$0` is `sh` and no wait variable reaches the script.
+            assert_eq!(output.stdout, b"sh|0|", "{docker_host:?}");
+            assert!(elapsed < Duration::from_secs(5), "{docker_host:?} waited");
+        }
+    }
+
+    #[test]
+    fn user_setup_command_waits_for_the_pod_docker_socket() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("docker.sock");
+        let late = socket.clone();
+        let listener = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            std::os::unix::net::UnixListener::bind(late).unwrap()
+        });
+        let (output, elapsed) = run_user_setup_command(
+            "printf ok",
+            &socket,
+            Some(format!("unix://{}", socket.display())),
+            DOCKER_SOCKET_WAIT,
+        );
+        let _listener = listener.join().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ok");
+        assert!(socket.exists());
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "ran before the socket"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "kept waiting after the socket"
+        );
+    }
+
+    #[test]
+    fn user_setup_command_stops_waiting_after_its_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("docker.sock");
+        let (output, elapsed) = run_user_setup_command(
+            "printf ran; exit 3",
+            &socket,
+            Some(format!("unix://{}", socket.display())),
+            Duration::from_secs(1),
+        );
+        // The wait never fails the command: it runs and keeps its status.
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.stdout, b"ran");
+        assert!(elapsed >= Duration::from_secs(1), "gave up early");
+        assert!(elapsed < Duration::from_secs(10), "did not stop waiting");
     }
 }

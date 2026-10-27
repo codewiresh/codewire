@@ -2947,14 +2947,20 @@ async fn start_re_renders_a_legacy_dind_bootstrap_and_nothing_else() {
     assert_eq!(state.sandbox, expected);
 }
 
-/// Only the exact legacy script is re-rendered: a current, unknown or direct
-/// dockerd command, and a confidential runtime, are left as they are.
+/// Only the exact legacy script is re-rendered: a current, eager-mkfs,
+/// unknown or direct dockerd command, and a confidential runtime, are left
+/// as they are.
 #[tokio::test]
 async fn start_keeps_any_other_dind_bootstrap() {
     let cases = [
         (
             "current",
             json!(["sh", "-ec", dind_bootstrap_script()]),
+            None,
+        ),
+        (
+            "eager mkfs",
+            json!(["sh", "-ec", eager_mkfs_dind_bootstrap_script()]),
             None,
         ),
         ("unknown", json!(["sh", "-ec", "exec dockerd"]), None),

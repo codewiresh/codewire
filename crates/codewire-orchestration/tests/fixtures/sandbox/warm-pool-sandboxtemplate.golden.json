@@ -3,7 +3,7 @@
   "kind": "SandboxTemplate",
   "metadata": {
     "annotations": {
-      "codewire.sh/pool-revision": "6d392da40498936d4b69977023d3ccc64257a0c869594519683f29b62f38b294"
+      "codewire.sh/pool-revision": "9b88d23073168436b3156b3f9093e30ad87a37eaab0873ac0d07c91da1944174"
     },
     "labels": {
       "app.kubernetes.io/managed-by": "codewire",
@@ -185,7 +185,7 @@
               },
               {
                 "name": "CODEWIRE_WORKSPACE_POOL_REVISION",
-                "value": "6d392da40498936d4b69977023d3ccc64257a0c869594519683f29b62f38b294"
+                "value": "9b88d23073168436b3156b3f9093e30ad87a37eaab0873ac0d07c91da1944174"
               }
             ],
             "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -202,7 +202,7 @@
                 "command": [
                   "sh",
                   "-ec",
-                  "test -f /codewire/run/daemon/ready && docker version --format '{{.Server.Version}}' >/dev/null"
+                  "test -f /codewire/run/daemon/ready"
                 ]
               },
               "failureThreshold": 3,
@@ -237,7 +237,7 @@
                 "command": [
                   "sh",
                   "-ec",
-                  "test -f /codewire/run/daemon/ready && docker version --format '{{.Server.Version}}' >/dev/null"
+                  "test -f /codewire/run/daemon/ready"
                 ]
               },
               "failureThreshold": 600,
@@ -289,7 +289,7 @@
             "command": [
               "sh",
               "-ec",
-              "data_image=\"${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}\"\ndata_root=\"${CODEWIRE_DOCKER_DATA_ROOT:-/var/lib/docker}\"\ndata_size=\"${CODEWIRE_DOCKER_DATA_SIZE:-8G}\"\nmount_mode=\"${CODEWIRE_DOCKER_MOUNT_MODE:-loop}\"\ncodewire_dir=\"$(dirname \"$data_image\")\"\nmkdir -p \"$codewire_dir\" \"$data_root\"\nchown 1000:1000 \"$codewire_dir\"\n# Owner-writable only: the workspace daemon refuses a group- or\n# world-writable ancestor of its platform session store.\nchmod 0755 \"$codewire_dir\"\nif [ \"$mount_mode\" = \"loop\" ]; then\n  if [ ! -s \"$data_image\" ]; then\n    truncate -s \"$data_size\" \"$data_image\"\n    mkfs.ext4 -q -F \"$data_image\"\n  fi\n  if ! awk -v target=\"$data_root\" '$2 == target && $3 == \"ext4\" { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts; then\n    mount -o loop \"$data_image\" \"$data_root\"\n  fi\nelif [ \"$mount_mode\" != \"none\" ]; then\n  echo \"unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode\" >&2\n  exit 1\nfi\nexec dockerd --host \"unix:///var/run/docker/docker.sock\" --group 1000 --data-root \"$data_root\" --storage-driver vfs"
+              "data_image=\"${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}\"\ndata_root=\"${CODEWIRE_DOCKER_DATA_ROOT:-/var/lib/docker}\"\ndata_size=\"${CODEWIRE_DOCKER_DATA_SIZE:-8G}\"\nmount_mode=\"${CODEWIRE_DOCKER_MOUNT_MODE:-loop}\"\ncodewire_dir=\"$(dirname \"$data_image\")\"\nmkdir -p \"$codewire_dir\" \"$data_root\"\nchown 1000:1000 \"$codewire_dir\"\n# Owner-writable only: the workspace daemon refuses a group- or\n# world-writable ancestor of its platform session store.\nchmod 0755 \"$codewire_dir\"\nif [ \"$mount_mode\" = \"loop\" ]; then\n  if [ ! -s \"$data_image\" ]; then\n    truncate -s \"$data_size\" \"$data_image\"\n    # A fresh sparse image reads as zeros, so mke2fs skips zeroing its\n    # inode tables and journal: a few MiB of writes at any size.\n    mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 \"$data_image\"\n  fi\n  if ! awk -v target=\"$data_root\" '$2 == target && $3 == \"ext4\" { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts; then\n    mount -o loop \"$data_image\" \"$data_root\"\n  fi\nelif [ \"$mount_mode\" != \"none\" ]; then\n  echo \"unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode\" >&2\n  exit 1\nfi\nexec dockerd --host \"unix:///var/run/docker/docker.sock\" --group 1000 --data-root \"$data_root\" --storage-driver vfs"
             ],
             "env": [
               {

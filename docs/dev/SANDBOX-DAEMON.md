@@ -221,7 +221,11 @@ not isolate orchestration from a Mesh that holds that secret.
 What bounds a daemon that never comes up is the tier's workspace ready
 timeout: 10 minutes for commodity and 30 minutes for confidential, whose guest
 initializes encrypted storage before the daemon listens. The workspace's
-Docker startup probe uses the same budget.
+daemon-ready startup probe uses the same budget.
+
+Docker is not on this path (Program #2238; owner, 2026-10-27: "Gate on the
+daemon/SSH ... Docker comes up shortly after; a docker command run before then
+waits for it"). See "Docker readiness" below.
 
 ## Daemon API Surface
 
@@ -315,6 +319,15 @@ ext4 image at `/workspace/.codewire/docker-data.ext4`, mounts it at
 rejects `overlay2` for this path. The commodity smoke checks for the ext4
 over-mount specifically, not just any mountpoint.
 
+The image is created once, on the Pod's first start, as a sparse file of
+`CODEWIRE_DOCKER_DATA_SIZE`, and formatted with `-E
+lazy_itable_init=1,lazy_journal_init=1`. A freshly truncated file reads as
+zeros, so skipping the inode-table and journal zeroing is safe, and the
+format writes a few MiB at any size instead of the journal (512 MiB at
+78 GiB, 1 GiB at 198 GiB). Where the storage cannot discard, the kernel
+zeroes the inode tables in the background after the mount. A later start
+reuses the image as it is: the bootstrap never resizes it.
+
 Confidential QEMU-SNP is different: the confidential guest has ext4 support
 but no loop devices, so `mount -o loop` fails even when the target directory exists. For
 confidential, the renderer starts dockerd with `--data-root
@@ -330,6 +343,34 @@ KUBECONFIG=/path/to/the-dev-cluster-kubeconfig.yaml \
     --mount-mode none \
     --run-docker
 ```
+
+### Docker readiness
+
+Docker never decides whether a workspace is Ready. The workspace container's
+probes are the same with or without DinD: an identity-free workspace's
+startup and readiness probes test only the daemon's marker, and an
+environment-token workspace has none. The `dind` container has no probe, so a
+running `dind` counts as ready while its bootstrap creates and mounts the
+ext4 data image and dockerd starts; a bootstrap that exits still leaves the
+Pod unready until the kubelet restarts it, and a dockerd that exits is
+restarted the same way. So the Claim turns Ready, and MarkRunning, setup and
+SSH proceed, without waiting for dockerd; nothing that waits for the Claim
+changed.
+
+A Docker client that runs before dockerd listens waits for its socket:
+
+- setup's install command and startup script run after a wait of up to 60
+  seconds for `/var/run/docker/docker.sock` whenever `DOCKER_HOST` names it,
+  in any image. The wait never fails the command; it then runs as before and
+  any Docker error is Docker's own;
+- the managed workspace image's `docker` waits the same way, then runs the
+  real CLI (`/usr/local/libexec/codewire/docker`) unchanged. A custom image's
+  own `docker`, and clients that open the socket directly, do not wait
+  outside setup.
+
+The wait ends once the socket exists. A socket left by a `dind` container
+that is restarting exists but refuses connections, so a client then fails at
+once, as before this change.
 
 ## Security Invariants
 
@@ -377,7 +418,7 @@ Hosted commodity workspaces bind at claim time:
   the downward API). A golden fixture and the `identity-free-workspace`
   policy guard enforce this.
 - **Bind, then listen.** The daemon writes `/codewire/run/daemon/ready`,
-  which the readiness probe tests (with the Docker check in DinD modes), and
+  which the readiness probe tests (never Docker, in any mode), and
   long-polls `WorkspaceBindingService.BindWorkspace` on orchestration's
   dedicated listener (TCP 8087). After a valid response for its own Pod UID
   it writes its credential to `/codewire/run/daemon/credential` (0400),
@@ -392,8 +433,8 @@ Hosted commodity workspaces bind at claim time:
   - the Sandbox status reporting its current generation;
   - the Pod `Running` with every container started from a resolved image.
 
-  Docker in DinD may still be starting, and Claim Ready still gates
-  MarkRunning and setup. Create, start, a Pod replaced while running, resize,
+  Claim Ready still gates MarkRunning and setup; Docker in DinD may still be
+  starting after both. Create, start, a Pod replaced while running, resize,
   daemon repair and setup recovery all bind this way. Stop and destroy release the binding
   only after the Pod is gone. The `workspace_bind` stage measures it.
 - **Rotating the session secret** changes every daemon credential. Bound

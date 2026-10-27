@@ -29,11 +29,11 @@ use serde_json::Value;
 use super::template::{
     CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
     LEGACY_DIND_BOOTSTRAP_SCRIPT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts,
-    dind_bootstrap_script, direct_udp_service_name, render_direct_udp_service,
-    render_sandbox_shadow_pool, render_sandbox_template, render_warm_member_bridge,
-    render_workspace_daemon_network_policy, render_workspace_daemon_service,
-    warm_member_daemon_bridge_name, workspace_daemon_network_policy_name,
-    workspace_daemon_service_name,
+    dind_bootstrap_script, direct_udp_service_name, eager_mkfs_dind_bootstrap_script,
+    render_direct_udp_service, render_sandbox_shadow_pool, render_sandbox_template,
+    render_warm_member_bridge, render_workspace_daemon_network_policy,
+    render_workspace_daemon_service, warm_member_daemon_bridge_name,
+    workspace_daemon_network_policy_name, workspace_daemon_service_name,
 };
 use super::{
     CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_ORG_ID, LABEL_TYPE,
@@ -1184,7 +1184,11 @@ fn dind_bootstrap_refresh(sandbox: &DynamicObject) -> anyhow::Result<Option<[Val
         .filter(|command| command.len() == 3 && command[0] == "sh" && command[1] == "-ec")
         .and_then(|command| command[2].as_str());
     let legacy = script == Some(LEGACY_DIND_BOOTSTRAP_SCRIPT);
-    if script.is_some_and(|script| !legacy && script != dind_bootstrap_script()) {
+    // A bootstrap that differs from the current one only in its eager
+    // `mkfs.ext4` already formatted its image, so it is current enough.
+    if script.is_some_and(|script| {
+        !legacy && script != dind_bootstrap_script() && script != eager_mkfs_dind_bootstrap_script()
+    }) {
         tracing::warn!(
             sandbox = sandbox.metadata.name.as_deref().unwrap_or_default(),
             "Sandbox DinD bootstrap is neither current nor the known legacy one; it is not re-rendered"

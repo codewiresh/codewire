@@ -21,6 +21,7 @@ use super::env_data::{BackendRow, EnvironmentRow, load_backend_row, load_environ
 use super::fencing_evidence::{FencingEvidence as SetupFencingEvidence, emit};
 use super::scripts::{
     GIT_IDENTITY_FAILED_EXIT, build_configure_environment_command, build_git_identity_command,
+    build_user_setup_command,
 };
 use super::setup_lease::{
     PhaseAcquire, PhasePreparation, SetupActivityIdentity, SetupLeaseRecord, SetupPhaseAuthority,
@@ -1924,11 +1925,8 @@ impl SetupOps for WorkerSetupOps<'_> {
         self.phase_authority
             .ensure_active(self.active_phase)
             .await?;
-        let cmd = vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            input.install_command.clone(),
-        ];
+        // Docker may still be starting: the command waits for it, bounded.
+        let cmd = build_user_setup_command(&input.install_command);
         self.workspace_exec(
             &input.namespace,
             &input.environment_id,
@@ -1943,11 +1941,8 @@ impl SetupOps for WorkerSetupOps<'_> {
         self.phase_authority
             .ensure_active(self.active_phase)
             .await?;
-        let cmd = vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            input.startup_script.clone(),
-        ];
+        // Docker may still be starting: the command waits for it, bounded.
+        let cmd = build_user_setup_command(&input.startup_script);
         self.workspace_exec(
             &input.namespace,
             &input.environment_id,

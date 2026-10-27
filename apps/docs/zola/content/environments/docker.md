@@ -1,7 +1,7 @@
 ---
 title: Docker inside an environment
 description: Every hosted sandbox and local VM runs its own Docker daemon, so agents and builds can use containers without touching your machine's Docker.
-updated: 2026-10-26
+updated: 2026-10-27
 weight: 6
 aliases: ["/guides/docker"]
 ---
@@ -32,6 +32,11 @@ This message shows that your installation appears to be working correctly.
 
 Use Docker as you would on any Linux machine: `docker compose up` in a
 session, `docker build` in your project folder, databases for tests.
+
+A hosted sandbox is ready as soon as you can connect to it, and its Docker
+daemon finishes starting a moment later. A `docker` command run before then,
+or an install command or startup script, waits up to a minute for Docker
+instead of failing.
 
 ## Disk and opting out
 
