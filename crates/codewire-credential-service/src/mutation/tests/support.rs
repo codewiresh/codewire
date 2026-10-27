@@ -303,7 +303,10 @@ impl ConnectStream {
 
     pub async fn challenge(&mut self) -> Result<Value> {
         let value = self.next().await?.context("missing challenge")?;
-        ensure!(value["challenge"]["verificationUrl"] == "https://auth.openai.com/codex/device");
+        ensure!(
+            value["challenge"]["verificationUrl"] == "https://auth.openai.com/codex/device",
+            "expected a challenge, got: {value}"
+        );
         ensure!(value["challenge"]["userCode"] == "ABCD-EFGH");
         ensure!(value.get("credential").is_none());
         Ok(value["challenge"].clone())

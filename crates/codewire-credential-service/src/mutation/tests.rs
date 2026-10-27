@@ -214,13 +214,22 @@ async fn login_cannot_outlive_original_oauth_revocation_or_expiry() -> Result<()
 
         h.reset_login().await?;
         // The original token's lifetime is the request's whole lifetime, so
-        // it must outlast authentication and the challenge on a stalled CI
-        // slot: 3 s expired before the challenge there (run 20586). The
-        // expiry is the subject and is still waited out; only its slack grew.
+        // it must outlast authentication and the challenge. Its clock starts
+        // when the INSERT runs, before its COMMIT, and a synchronous COMMIT
+        // waits for the WAL flush, behind every other database's writes on
+        // the shared server. A flush stalled for the whole lifetime expired
+        // the token before authentication (PR run 23779: `unauthenticated`
+        // where the challenge was due). Durability of this disposable row is
+        // not the subject, so its COMMIT does not wait for the flush; the row
+        // is visible to authentication as soon as COMMIT returns. The expiry
+        // is the subject and is still waited out.
+        let mut insert = h.db.pool.begin().await?;
+        sqlx::query("SET LOCAL synchronous_commit TO off").execute(&mut *insert).await?;
         sqlx::query("INSERT INTO oidc_access_tokens(token_hash,client_id,user_id,scopes,expires_at) \
             VALUES ($1,$2,$3,ARRAY['codewire.api'],clock_timestamp()+make_interval(secs => $4))")
             .bind(hash_oauth_token(&oauth(ALICE))).bind(CLIENT).bind(ALICE)
-            .bind(ORIGINAL_LOGIN_LIFETIME.as_secs_f64()).execute(&h.db.pool).await?;
+            .bind(ORIGINAL_LOGIN_LIFETIME.as_secs_f64()).execute(&mut *insert).await?;
+        insert.commit().await?;
         let mut response=h.rpc.enroll(Auth::Alice,"original-expiry").await?;
         let challenge=response.challenge().await?;
         let original:i64=sqlx::query_scalar("SELECT floor(extract(epoch from expires_at))::bigint FROM oidc_access_tokens WHERE token_hash=$1")
