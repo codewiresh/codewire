@@ -164,7 +164,7 @@ async fn the_organization_page_renders_its_shell_before_any_inventory() {
         );
         assert!(
             html.contains(
-                r#"hx-get="/synthetic/_fragments/sandbox-rail" hx-trigger="load, every 10s""#
+                r#"hx-get="/synthetic/_fragments/sandbox-rail" hx-trigger="sandbox-rail-refresh""#
             ),
             "{path} loads the rail"
         );
