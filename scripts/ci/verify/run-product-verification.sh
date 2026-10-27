@@ -683,6 +683,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-fetch-test-archive-extract.sh
   python3 -B scripts/ci/tests/test-last-scheduled-run.py
   python3 -I -B scripts/ci/tests/test-ci-done-measures.py
+  python3 -I -B scripts/ci/tests/test-ci-job-plan.py
   scripts/ci/tests/test-service-ssh-image-verifier.sh
   scripts/ci/tests/test-shellcheck-policy-domain.sh
   scripts/ci/tests/test-require-verification-results.sh

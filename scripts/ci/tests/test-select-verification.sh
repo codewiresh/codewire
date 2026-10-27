@@ -1063,6 +1063,12 @@ run_paths_case ci_start_latency pull_request refs/pull/3030/head false \
   scripts/ci/measure/README.md \
   scripts/ci/measure/forgejo-ci-start-latency \
   scripts/ci/measure/forgejo-ci-start-latency.sha256
+run_paths_case local_job_runner pull_request refs/pull/3542/head false \
+  'policy security security_js' \
+  scripts/ci/local/run-family.sh \
+  scripts/ci/local/run-job-steps.sh \
+  scripts/ci/local/ci-job-plan.py \
+  scripts/ci/tests/test-ci-job-plan.py
 run_paths_case ci_done_measures pull_request refs/pull/3144/head false \
   'policy security security_js' \
   .gitea/workflows/ci-done-measures.yaml \
