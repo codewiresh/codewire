@@ -1787,6 +1787,7 @@ mod tests {
         github_accept: Vec<GithubAcceptView>,
     ) -> String {
         let view = DashboardView {
+            account_id: "synthetic-account".to_owned(),
             user_name: "Dashboard User".into(),
             csrf_token: Default::default(),
             is_admin: false,

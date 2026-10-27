@@ -686,6 +686,9 @@ impl fmt::Debug for PageCsrfToken {
 
 #[derive(Debug, Default)]
 pub(crate) struct DashboardView {
+    /// The IdP's immutable account ID from this request's session check.
+    /// Routes reuse it within the request instead of asking the IdP again.
+    pub(crate) account_id: String,
     pub(crate) user_name: String,
     pub(crate) csrf_token: PageCsrfToken,
     pub(crate) is_admin: bool,

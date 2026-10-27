@@ -420,6 +420,7 @@ mod tests {
 
     fn dashboard_view() -> DashboardView {
         DashboardView {
+            account_id: "synthetic-account".to_owned(),
             user_name: "Dashboard User".into(),
             csrf_token: Default::default(),
             is_admin: false,

@@ -54,10 +54,10 @@ pub(super) async fn dashboard_view(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<DashboardView, WebError> {
-    let identity = authenticated_identity(state, headers).await?;
-    enforce_two_factor(&identity)?;
     let cookie = canonical_cookie(headers).map_err(|()| WebError::Unauthorized)?;
-    let organizations = organizations(state, cookie).await;
+    let (identity, organizations) = identity_and_organizations(state, headers, cookie).await;
+    let identity = identity?;
+    enforce_two_factor(&identity)?;
     let organizations = match resolve_web(PageDependency::DashboardOrganizations, organizations)? {
         DependencyResult::Available(organizations) => organizations,
         DependencyResult::Unavailable => {
@@ -67,6 +67,7 @@ pub(super) async fn dashboard_view(
     let has_organizations = !organizations.is_empty();
 
     Ok(DashboardView {
+        account_id: identity.id.clone(),
         user_name: identity.display_name().to_owned(),
         csrf_token: PageCsrfToken::from_headers(headers),
         is_admin: identity.is_admin,
@@ -101,10 +102,36 @@ pub(super) async fn dashboard_shell_view(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<DashboardView, WebError> {
-    let identity = authenticated_identity(state, headers).await?;
-    enforce_two_factor(&identity)?;
     let cookie = canonical_cookie(headers).map_err(|()| WebError::Unauthorized)?;
-    dashboard_shell_view_from_identity(state, headers, &identity, cookie).await
+    let (identity, organizations) = identity_and_organizations(state, headers, cookie).await;
+    let identity = identity?;
+    enforce_two_factor(&identity)?;
+    Ok(shell_from_organizations(
+        headers,
+        &identity,
+        organizations?,
+        false,
+    ))
+}
+
+/// The session check and the caller's organizations, requested together.
+///
+/// The organization read is the caller's own, authorized by the same cookie
+/// at orchestration, and it changes nothing; its result is used only after
+/// the session check has succeeded and two-factor is enforced. Sending both
+/// at once saves one service round trip on every organization page.
+async fn identity_and_organizations(
+    state: &AppState,
+    headers: &HeaderMap,
+    cookie: axum::http::HeaderValue,
+) -> (
+    Result<IdentityUser, WebError>,
+    Result<Vec<OrganizationRow>, WebError>,
+) {
+    tokio::join!(
+        authenticated_identity(state, headers),
+        organizations(state, cookie)
+    )
 }
 
 /// Build the shared dashboard shell after a route has completed its own
@@ -133,6 +160,7 @@ fn shell_from_organizations(
 ) -> DashboardView {
     let has_organizations = !organizations.is_empty();
     DashboardView {
+        account_id: identity.id.clone(),
         user_name: identity.display_name().to_owned(),
         csrf_token: PageCsrfToken::from_headers(headers),
         is_admin: identity.is_admin,

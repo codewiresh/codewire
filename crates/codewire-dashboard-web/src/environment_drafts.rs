@@ -1,14 +1,11 @@
 //! Closed, metadata-only selections for explicit per-tab Create recovery.
 //! Drafts are navigation conveniences, never source grants or saved secrets.
 
-use axum::http::{HeaderMap, HeaderValue, header};
-use connectrpc::{ConnectError, ErrorCode};
+use connectrpc::ConnectError;
 use serde::Deserialize;
 
 use crate::{
-    auth::{authenticated_identity, enforce_two_factor},
     environment_source_forms::SourceSubmission,
-    state::AppState,
     view::{EnvironmentAppPortFormRow, EnvironmentCreateFormView},
 };
 
@@ -139,28 +136,16 @@ pub(crate) fn organization_id(value: &str) -> bool {
     opaque_id(value)
 }
 
-/// Reuse canonical cookie identity/2FA; only immutable public identity escapes.
-pub(crate) async fn actor(state: &AppState, cookie: HeaderValue) -> Result<String, ConnectError> {
-    let mut headers = HeaderMap::new();
-    headers.insert(header::COOKIE, cookie);
-    let identity = authenticated_identity(state, &headers)
-        .await
-        .map_err(|error| {
-            let code = if matches!(error, crate::error::WebError::Unauthorized) {
-                ErrorCode::Unauthenticated
-            } else {
-                ErrorCode::Unavailable
-            };
-            ConnectError::new(code, "draft identity is unavailable")
-        })?;
-    enforce_two_factor(&identity)
-        .map_err(|_| ConnectError::permission_denied("draft identity requires two-factor setup"))?;
-    if !actor_id(&identity.id) {
-        return Err(ConnectError::unavailable(
+/// The draft actor of a page whose shell already checked this request's
+/// session and two-factor state, without asking the IdP a second time.
+pub(crate) fn view_actor(view: &crate::view::DashboardView) -> Result<String, ConnectError> {
+    if actor_id(&view.account_id) {
+        Ok(view.account_id.clone())
+    } else {
+        Err(ConnectError::unavailable(
             "draft identity metadata is invalid",
-        ));
+        ))
     }
-    Ok(identity.id)
 }
 
 impl SelectionDraft {

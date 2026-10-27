@@ -722,7 +722,12 @@ async fn render_page(
     } else {
         environments_path(&slug)
     };
-    let (dashboard, organization, cookie) = match if create_open && !query.has_detail_selector() {
+    // The page shell renders without waiting for inventory: the rail, the
+    // Sandbox list and the Create choices load as fragments after it. Only a
+    // page that opens one Sandbox's panel, or reports a deletion, reads
+    // inventory before it renders.
+    let shell_first = !query.has_detail_selector() && query.message != "environment-destroying";
+    let (dashboard, organization, cookie) = match if shell_first {
         get_context_without_rail(&state, &headers, &slug, &continuation).await
     } else {
         get_context(&state, &headers, &slug, &continuation).await
@@ -742,8 +747,8 @@ async fn render_page(
         form.draft_id.clone_from(id);
     }
     form.draft_return = draft_return;
-    let page = if create_open && !query.has_detail_selector() {
-        form.draft_actor = match crate::environment_drafts::actor(&state, cookie).await {
+    let page = if shell_first {
+        form.draft_actor = match crate::environment_drafts::view_actor(&dashboard) {
             Ok(actor) => actor,
             Err(error) => return connect_page_error(error, &continuation, &headers),
         };
@@ -766,16 +771,7 @@ async fn render_page(
             error: page_error(&query.error).to_owned(),
         }
     } else {
-        match build_page(
-            &state,
-            cookie,
-            &organization,
-            &query,
-            form,
-            dashboard.is_admin,
-        )
-        .await
-        {
+        match build_page(&state, cookie, &organization, &query, form, &dashboard).await {
             Ok(page) => page,
             Err(error) => return connect_page_error(error, &continuation, &headers),
         }
@@ -1025,11 +1021,9 @@ pub(super) async fn create(
             &headers,
             dashboard,
             organization,
-            cookie,
             form,
             StatusCode::UNPROCESSABLE_ENTITY,
-        )
-        .await;
+        );
     };
 
     let create = match with_dashboard_draft(draft, &form.presets, |draft| {
@@ -1043,11 +1037,9 @@ pub(super) async fn create(
                 &headers,
                 dashboard,
                 organization,
-                cookie,
                 form,
                 StatusCode::UNPROCESSABLE_ENTITY,
-            )
-            .await;
+            );
         }
     };
     match create.await {
@@ -1069,11 +1061,9 @@ pub(super) async fn create(
                 &headers,
                 dashboard,
                 organization,
-                cookie,
                 form,
                 StatusCode::UNPROCESSABLE_ENTITY,
             )
-            .await
         }
     }
 }
@@ -1274,16 +1264,7 @@ pub(super) async fn resize_plan(
     let (plan, environment) = response;
     let form = default_create_form(submission.csrf, false);
     let query = EnvironmentsQuery::default();
-    let mut page = match build_page(
-        &state,
-        cookie,
-        &organization,
-        &query,
-        form,
-        dashboard.is_admin,
-    )
-    .await
-    {
+    let mut page = match build_page(&state, cookie, &organization, &query, form, &dashboard).await {
         Ok(page) => page,
         Err(error) => return connect_page_error(error, &environments_path(&slug), &headers),
     };
@@ -1850,9 +1831,10 @@ async fn build_page(
     organization: &OrganizationContext,
     query: &EnvironmentsQuery,
     mut form: EnvironmentCreateFormView,
-    is_admin: bool,
+    dashboard: &crate::view::DashboardView,
 ) -> Result<EnvironmentsPageView, ConnectError> {
-    form.draft_actor = crate::environment_drafts::actor(state, cookie.clone()).await?;
+    let is_admin = dashboard.is_admin;
+    form.draft_actor = crate::environment_drafts::view_actor(dashboard)?;
     form.draft_organization.clone_from(&organization.id);
     let mut environments =
         filtered_environments(state, cookie.clone(), &organization.id, query).await?;
@@ -2038,16 +2020,15 @@ async fn filtered_environments(
     Ok(environments)
 }
 
-async fn render_create_action_page(
+fn render_create_action_page(
     state: &AppState,
     headers: &HeaderMap,
     dashboard: crate::view::DashboardView,
     organization: OrganizationContext,
-    cookie: HeaderValue,
     mut form: EnvironmentCreateFormView,
     status: StatusCode,
 ) -> Response {
-    form.draft_actor = match crate::environment_drafts::actor(state, cookie).await {
+    form.draft_actor = match crate::environment_drafts::view_actor(&dashboard) {
         Ok(actor) => actor,
         Err(error) => {
             return connect_page_error(error, &environments_path(&organization.slug), headers);
@@ -3368,6 +3349,7 @@ mod tests {
         environment: crate::view::EnvironmentRow,
     ) -> String {
         let view = crate::view::DashboardView {
+            account_id: "synthetic-account".to_owned(),
             user_name: "Resize".into(),
             csrf_token: Default::default(),
             is_admin: false,
@@ -4864,3 +4846,7 @@ mod tests {
 #[cfg(test)]
 #[path = "sandbox_credential_attention_tests.rs"]
 mod sandbox_credential_attention_tests;
+
+#[cfg(test)]
+#[path = "shell_first_tests.rs"]
+mod shell_first_tests;

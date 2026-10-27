@@ -56,6 +56,7 @@ fn two_factor_recovery_template_reveals_codes_only_after_verification() {
 #[test]
 fn admin_audit_template_escapes_sensitive_upstream_fields() {
     let view = DashboardView {
+        account_id: "synthetic-account".to_owned(),
         user_name: "<unsafe admin>".into(),
         csrf_token: Default::default(),
         is_admin: true,
@@ -142,6 +143,7 @@ fn the_shell_renders_the_collapsed_sidebar_and_both_sidebar_buttons() {
 #[test]
 fn admin_accounts_template_escapes_access_request_fields() {
     let view = DashboardView {
+        account_id: "synthetic-account".to_owned(),
         user_name: "Admin".into(),
         csrf_token: Default::default(),
         is_admin: true,
