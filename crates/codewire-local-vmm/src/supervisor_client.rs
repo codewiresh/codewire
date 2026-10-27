@@ -16,7 +16,7 @@ use crate::control::v1::local_supervisor_service_client::LocalSupervisorServiceC
 use crate::host::supervisor_peer::SupervisorPeerPin;
 use crate::supervisor_config::NativeRuntimeConfig;
 use crate::supervisor_config::{SupervisorConfigError, SupervisorFeature, admit_supervisor_info};
-pub use crate::uds::UdsError;
+pub use crate::uds::{SupervisorRefusal, UdsError};
 use crate::uds::{capture_supervisor_peer, connect_supervisor_peer};
 use std::sync::Arc;
 
@@ -1001,6 +1001,34 @@ pub enum SupervisorClientError {
     SupervisorProtocolUnavailable,
     #[error("query running native supervisor compatibility failed")]
     SupervisorInfoUnavailable,
+}
+
+/// The refusal of the supervisor serving the state root, when `error` is one
+/// (directly, or through a supervisor, client or takeover error). Callers
+/// walk an error chain with it to replace a retry with the steps that
+/// recover (#3548).
+pub fn supervisor_refusal<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a SupervisorRefusal> {
+    use crate::supervisor::SupervisorError;
+    use crate::supervisor_upgrade::TakeoverError;
+    let uds = if let Some(error) = error.downcast_ref::<UdsError>() {
+        error
+    } else if let Some(SupervisorClientError::Uds(error)) = error.downcast_ref() {
+        error
+    } else if let Some(SupervisorError::Uds(error)) = error.downcast_ref() {
+        error
+    } else if let Some(TakeoverError::Supervisor(SupervisorError::Uds(error))) =
+        error.downcast_ref()
+    {
+        error
+    } else {
+        return None;
+    };
+    match uds {
+        UdsError::SupervisorPeerAdmission(refusal) => Some(refusal),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -992,3 +992,56 @@ fn a_create_cleanup_outcome_keeps_the_error_code() {
     assert!(status.message().ends_with(" No environment was kept."));
     assert_eq!(status.code(), failure.code());
 }
+
+/// Every error that carries a supervisor refusal names it, however it is
+/// wrapped, so a caller can show its recovery instead of a retry (#3548).
+#[test]
+fn a_supervisor_refusal_is_found_through_each_wrapping_error() {
+    use crate::supervisor::SupervisorError;
+    use crate::supervisor_upgrade::TakeoverError;
+    let refusal = SupervisorRefusal::Unverified {
+        pid: 7,
+        executable: PathBuf::from("/src/target/debug/cw"),
+    };
+    let uds = || UdsError::SupervisorPeerAdmission(refusal.clone());
+    let client = SupervisorClientError::Uds(uds());
+    let supervisor = SupervisorError::Uds(uds());
+    let takeover = TakeoverError::Supervisor(SupervisorError::Uds(uds()));
+    for error in [
+        &uds() as &(dyn std::error::Error + 'static),
+        &client,
+        &supervisor,
+        &takeover,
+    ] {
+        assert_eq!(supervisor_refusal(error), Some(&refusal), "{error}");
+    }
+    assert_eq!(supervisor_refusal(&UdsError::Connect), None);
+    assert_eq!(
+        supervisor_refusal(&SupervisorClientError::SupervisorInfoUnavailable),
+        None
+    );
+    // A check failure has no recovery beyond a retry; an unverified
+    // supervisor names its own.
+    assert_eq!(
+        SupervisorRefusal::Check("role or configuration arguments do not match").recovery(),
+        None
+    );
+    assert_eq!(
+        refusal.recovery().unwrap(),
+        "List its VMs with `/src/target/debug/cw --local ls` and stop any with `/src/target/debug/cw --local stop NAME`, then end it with `kill 7`; the next cw command starts this cw's own"
+    );
+    assert_eq!(
+        uds().to_string(),
+        format!(
+            "your local VMs are served by a cw this one cannot verify (process 7, /src/target/debug/cw), not an installed cw version. {}",
+            refusal.recovery().unwrap()
+        )
+    );
+    assert_eq!(
+        UdsError::SupervisorPeerAdmission(SupervisorRefusal::Check(
+            "role or configuration arguments do not match"
+        ))
+        .to_string(),
+        "native supervisor admission refused: role or configuration arguments do not match"
+    );
+}

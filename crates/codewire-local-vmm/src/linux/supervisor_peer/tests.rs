@@ -274,14 +274,33 @@ async fn configured_peer_refuses_every_other_path_and_role_extension() {
 #[tokio::test]
 async fn retained_peer_refuses_unmanaged_missing_and_rewritten_versions() {
     let unmanaged = Fixture::start(false, &[]);
-    assert!(
-        capture_supervisor_peer(
-            &unmanaged.config.supervisor_socket(),
-            Some(&unmanaged.request())
-        )
-        .await
-        .is_err()
+    // A supervisor of this root's role whose executable no store holds (a
+    // development build) is named, with its recovery, before its executable
+    // is read (#3548).
+    let refusal = match capture_supervisor_peer(
+        &unmanaged.config.supervisor_socket(),
+        Some(&unmanaged.request()),
+    )
+    .await
+    {
+        Err(crate::uds::UdsError::SupervisorPeerAdmission(refusal)) => refusal,
+        other => panic!("an unmanaged peer was not refused as unverified: {other:?}"),
+    };
+    assert_eq!(
+        refusal,
+        crate::uds::SupervisorRefusal::Unverified {
+            pid: unmanaged.child.id(),
+            executable: unmanaged.config.executable.clone(),
+        }
     );
+    let recovery = refusal.recovery().unwrap();
+    assert!(recovery.contains(&format!("kill {}", unmanaged.child.id())));
+    assert!(recovery.contains(&format!(
+        "`{} --local ls`",
+        unmanaged.config.executable.display()
+    )));
+    assert!(refusal.to_string().contains(&recovery));
+    assert!(!refusal.to_string().contains("identity changed"));
     let mut fixture = Fixture::start(true, &[]);
     let pin = pin(&fixture).await;
     let socket = fixture.config.supervisor_socket();

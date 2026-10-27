@@ -343,6 +343,19 @@ updater's VM hand-off (v0.3.389 and earlier) hands the state root to it
 while no local VM runs. While one does, it names them: select the newer cw
 again (`cw upgrade rollback`), stop them, then roll back.
 
+A supervisor started by a `cw` that is not an installed version, such as a
+development build run with your own home directory, is one this cw cannot
+verify, so it never uses or ends it. Every local VM command, `cw --local ls`
+included, names it and its recovery instead of a retry:
+
+```text
+! Local VMs could not be listed: they are served by a cw this one cannot verify (process 4242, /src/codewire/target/debug/cw), not an installed cw version
+→ List its VMs with `/src/codewire/target/debug/cw --local ls` and stop any with `/src/codewire/target/debug/cw --local stop NAME`, then end it with `kill 4242`; the next cw command starts this cw's own
+```
+
+`cw upgrade` still upgrades the CLI while it runs, and says the VMs were not
+checked.
+
 ## Troubleshooting
 
 **`this host cannot run local VMs yet`**: fix each listed item, then rerun the

@@ -72,6 +72,14 @@ pub(crate) enum AdmissionError {
     Provenance,
 }
 
+/// Whether `peer` runs an executable a managed cw store holds. Only such a
+/// peer can be admitted as another cw version; any other (a development
+/// build, a copied binary) is refused before its executable is read, so
+/// the refusal names it rather than a hashing limit (#3548).
+pub(crate) fn in_a_store(peer: &ProcessBirth) -> bool {
+    Store::locate(peer.executable()).is_some()
+}
+
 /// Admit a peer that runs another cw version. `identity` carries the digest of
 /// its executable, read once. It must describe this birth's file, the file
 /// must not have changed while it was read, and the managed store must retain

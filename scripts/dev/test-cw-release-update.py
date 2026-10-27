@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import subprocess
@@ -53,6 +54,12 @@ class JourneyError(Exception):
 def require(condition, reason):
     if not condition:
         raise JourneyError(reason)
+
+
+def selects(output, tag):
+    """Whether a selection's report names release `tag`: "Selected cw TAG"
+    before #3548, "Upgraded cw to TAG" or "Rolled back cw to TAG" after."""
+    return re.search(rf"\bcw (?:to )?{re.escape(tag)}\b", output) is not None
 
 
 def digest(path):
@@ -189,17 +196,17 @@ def main(argv=None):
         updater = journey.updater()
         update = [updater] if args.channel else [updater, "--version", args.to]
         output = journey.cw(*update)
-        require(f"Selected cw {args.to}" in output, f"the update did not select {args.to}:\n{output}")
+        require(selects(output, args.to), f"the update did not select {args.to}:\n{output}")
         target_sha = journey.selected(args.to, previous=args.source)
         report["to_sha256"] = target_sha
         # A saved path to FROM's bytes keeps running FROM.
         require(args.source.lstrip("v") in journey.version(source_bytes), "FROM's stored bytes changed")
 
         output = journey.cw(journey.updater(), "rollback")
-        require(f"cw {args.source}" in output, f"rollback did not select {args.source}:\n{output}")
+        require(selects(output, args.source), f"rollback did not select {args.source}:\n{output}")
         journey.selected(args.source, previous=args.to)
         output = journey.cw(journey.updater(), "rollback", "--to", args.to)
-        require(f"cw {args.to}" in output, f"rollback --to did not select {args.to}:\n{output}")
+        require(selects(output, args.to), f"rollback --to did not select {args.to}:\n{output}")
         journey.selected(args.to, previous=args.source)
 
         require(real_install() == before, "the real user's managed cw changed")

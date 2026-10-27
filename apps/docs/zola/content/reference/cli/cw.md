@@ -1,7 +1,7 @@
 ---
 title: cw itself
 description: install, upgrade, doctor, config and completion.
-updated: 2026-10-26
+updated: 2026-10-27
 weight: 8
 aliases: ["/cli/cw"]
 ---
@@ -9,7 +9,7 @@ aliases: ["/cli/cw"]
 ## cw install
 
 ```sh
-cw install --managed [--bin-dir DIR] [--store DIR] [--json]
+cw install --managed [--bin-dir DIR] [--store DIR] [--verbose] [--json]
 ```
 
 Installs the running `cw` into the managed version store and selects it. The
@@ -22,9 +22,9 @@ does the same. A `cw` built without source provenance (a plain
 ```sh
 cw upgrade                       # at a terminal: choose what to upgrade
 cw upgrade [--cli] [--vms] [--channel stable | --version vX.Y.Z | --from DIR --sha256 HEX]
-           [--expect-generation N] [--store DIR] [--json]
+           [--expect-generation N] [--store DIR] [--verbose] [--json]
 cw upgrade status [--json]
-cw upgrade rollback [--to VERSION] [--expect-generation N] [--vms]
+cw upgrade rollback [--to VERSION] [--expect-generation N] [--vms] [--verbose]
 ```
 
 At a terminal, bare `cw upgrade` checks the stable channel for a newer `cw`
@@ -35,6 +35,20 @@ toggles an item, Enter applies the checked ones, and Escape or Ctrl-C changes
 nothing. Without a terminal, or with `--json`, it upgrades the CLI only and
 names any VMs left on an older `cw` with the `cw upgrade --vms` repair.
 
+The CLI upgrade never depends on the local VM supervisor: when the local VMs
+cannot be checked, it says why and how to recover, and upgrades the CLI
+anyway.
+
+```text
+Checking for a newer cw…
+› [x] Codewire CLI v0.4.1 → v0.4.3
+Upgraded cw to v0.4.3.
+Running cw processes keep v0.4.1 until they exit. To go back: cw upgrade rollback
+```
+
+`--verbose` adds the selected version's SHA-256, entry, store, selection
+generation and build identity; `--json` reports every field.
+
 | Flag | Meaning |
 | --- | --- |
 | `--cli` | Select the newer CLI without asking; a source flag implies it |
@@ -43,6 +57,7 @@ names any VMs left on an older `cw` with the `cw upgrade --vms` repair.
 | `--version vX.Y.Z` | An explicit signed release; a downgrade is permitted |
 | `--from DIR --sha256 HEX` | A pinned local release directory (`cw` and `cw-runtime.json`) |
 | `--expect-generation N` | Refuse unless the selection generation is still `N` |
+| `--verbose` | Also show the digest, entry, store, generation and build identity |
 | `rollback --to` | A retained version by SHA-256, a unique 8+ digit prefix, or package version; default the previous one |
 
 `cw upgrade` changes the CLI; `cw update ENV` changes an environment. See

@@ -80,6 +80,10 @@ struct SelectionArgs {
     /// Refuse unless the selection generation is still N.
     #[arg(long, value_name = "N")]
     expect_generation: Option<u64>,
+    /// Also show the selected version's digest, entry, store, generation and
+    /// build identity.
+    #[arg(short, long)]
+    verbose: bool,
     /// Restart the local VMs still running on an older cw onto the selected
     /// cw; the flag is the consent, and a restart ends the work running in
     /// them. Alone, it restarts them without selecting a CLI version.
@@ -193,10 +197,25 @@ pub(crate) struct InstallArgs {
     store: Option<PathBuf>,
     #[arg(long, help = "Print JSON")]
     json: bool,
+    /// Also show the installed version's digest, entry, store, generation
+    /// and build identity.
+    #[arg(short, long)]
+    verbose: bool,
+}
+
+/// What a selection did, for its one-line summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionKind {
+    Install,
+    Upgrade,
+    Rollback,
 }
 
 #[derive(Debug, Serialize)]
 struct SelectionReport<'a> {
+    /// Words only: the JSON report keeps its fields unchanged.
+    #[serde(skip)]
+    kind: SelectionKind,
     entry: &'a Path,
     store: &'a Path,
     sha256: &'a str,
@@ -239,6 +258,7 @@ pub(crate) async fn run(args: UpgradeArgs) -> anyhow::Result<()> {
     print_selection(
         &store,
         &SelectionReport {
+            kind: SelectionKind::Rollback,
             entry: store.entry(),
             store: store.root(),
             sha256: &selected.current,
@@ -250,6 +270,7 @@ pub(crate) async fn run(args: UpgradeArgs) -> anyhow::Result<()> {
             identity: None,
         },
         rollback.selection.store.json,
+        rollback.selection.verbose,
     )?;
     hand_off_local_vms(
         &store,
@@ -281,6 +302,7 @@ async fn select_cli(source: CliSource, options: SelectionArgs, vms: bool) -> any
             print_selection(
                 &store,
                 &SelectionReport {
+                    kind: SelectionKind::Upgrade,
                     entry: store.entry(),
                     store: store.root(),
                     sha256: &published.sha256,
@@ -292,6 +314,7 @@ async fn select_cli(source: CliSource, options: SelectionArgs, vms: bool) -> any
                     identity: None,
                 },
                 options.store.json,
+                options.verbose,
             )?;
             hand_off_local_vms(&store, &published.sha256, &options, vms).await;
             Ok(())
@@ -323,7 +346,7 @@ async fn ask_and_upgrade(options: SelectionArgs) -> anyhow::Result<()> {
         .as_ref()
         .map_or(crate::CLI_VERSION, |record| record.package_version.as_str())
         .to_owned();
-    eprintln!("Checking the stable channel for a newer cw...");
+    eprintln!("Checking for a newer cw…");
     let fetched = public_fetch::fetch(public_fetch::Selection::Stable, host).await?;
     let newer = current
         .as_ref()
@@ -337,11 +360,12 @@ async fn ask_and_upgrade(options: SelectionArgs) -> anyhow::Result<()> {
         .is_ok();
     let offered = fetched.identity.package_version.clone();
     let decided = ask_upgrade_items(&installed, newer.then_some(offered.as_str()), &options).await;
-    let (select, restart, stale) = match decided {
-        Ok((Items::Decided { select, restart }, stale)) => (select, restart, stale),
-        Ok((Items::Nothing, _)) => {
+    let (select, restart, vms) = match decided {
+        Ok((Items::Decided { select, restart }, vms)) => (select, restart, vms),
+        Ok((Items::Nothing, vms)) => {
             fetched.cleanup()?;
-            eprintln!("The CLI (v{installed}) and local VMs are current.");
+            eprintln!("cw {} is current.", release_name(&installed));
+            vms.report_unchecked();
             return Ok(());
         }
         Ok((Items::Canceled, _)) => {
@@ -363,11 +387,13 @@ async fn ask_and_upgrade(options: SelectionArgs) -> anyhow::Result<()> {
         }
         // With the CLI unchanged, only VMs on an older cw than this one are
         // stale.
-        let stale = if newer && !stale.is_empty() {
-            stale_local_vms(false).await?
+        let vms = if newer && !vms.stale.is_empty() {
+            stale_local_vms(false).await
         } else {
-            stale
+            vms
         };
+        vms.report_unchecked();
+        let stale = vms.stale;
         if !stale.is_empty() {
             eprintln!(
                 "cw: local VMs {} run on an older cw; restart them with `cw upgrade --vms`",
@@ -397,6 +423,7 @@ async fn ask_and_upgrade(options: SelectionArgs) -> anyhow::Result<()> {
     print_selection(
         &store,
         &SelectionReport {
+            kind: SelectionKind::Upgrade,
             entry: store.entry(),
             store: store.root(),
             sha256: &published.sha256,
@@ -408,6 +435,7 @@ async fn ask_and_upgrade(options: SelectionArgs) -> anyhow::Result<()> {
             identity: Some(&identity),
         },
         options.store.json,
+        options.verbose,
     )?;
     hand_off_local_vms(&store, &published.sha256, &options, restart).await;
     Ok(())
@@ -434,18 +462,23 @@ async fn ask_upgrade_items(
     installed: &str,
     offered: Option<&str>,
     options: &SelectionArgs,
-) -> anyhow::Result<(Items, Vec<String>)> {
+) -> anyhow::Result<(Items, LocalVms)> {
     use crate::output::{Capabilities, Checklist, ChecklistItem, OutputMode, run_checklist};
     // The hand-off cannot follow an explicit --store, so neither can this.
-    let stale = if options.store.store.is_none() {
-        stale_local_vms(offered.is_some()).await?
+    let local = if options.store.store.is_none() {
+        stale_local_vms(offered.is_some()).await
     } else {
-        Vec::new()
+        LocalVms::default()
     };
+    let stale = &local.stale;
     let mut items = Vec::new();
     let cli = offered.map(|offered| {
         items.push(ChecklistItem::new(
-            format!("Codewire CLI v{installed} → v{offered}"),
+            format!(
+                "Codewire CLI {} → {}",
+                release_name(installed),
+                release_name(offered)
+            ),
             true,
         ));
         items.len() - 1
@@ -455,7 +488,11 @@ async fn ask_upgrade_items(
         let target = offered.unwrap_or(installed);
         items.push(
             ChecklistItem::new(
-                format!("Restart {} local {noun} onto v{target}", stale.len()),
+                format!(
+                    "Restart {} local {noun} onto {}",
+                    stale.len(),
+                    release_name(target)
+                ),
                 false,
             )
             .with_detail(format!(
@@ -466,14 +503,14 @@ async fn ask_upgrade_items(
         items.len() - 1
     });
     if items.is_empty() {
-        return Ok((Items::Nothing, stale));
+        return Ok((Items::Nothing, local));
     }
     let checklist = Checklist::new("Upgrade Codewire", items);
     let caps = Capabilities::from_process(OutputMode::Text);
     let outcome = tokio::task::spawn_blocking(move || run_checklist(checklist, &caps))
         .await
         .context("ask what to upgrade")??;
-    Ok((decide_items(outcome, cli, vms), stale))
+    Ok((decide_items(outcome, cli, vms), local))
 }
 
 /// The checklist's answer as the items to apply.
@@ -496,17 +533,46 @@ fn decide_items(
     }
 }
 
+/// What `cw upgrade` found of the local VMs.
+#[derive(Debug, Default)]
+struct LocalVms {
+    /// Those on an older cw than the one the upgrade leaves selected.
+    stale: Vec<String>,
+    /// Why they could not be checked. The CLI upgrade goes on regardless
+    /// (#3548); the selected cw's hand-off reports it after a selection.
+    unchecked: Option<String>,
+}
+
+impl LocalVms {
+    /// Say why the local VMs were not checked, where no hand-off will.
+    fn report_unchecked(&self) {
+        if let Some(reason) = &self.unchecked {
+            eprintln!("cw: local VMs were not checked: {reason}");
+        }
+    }
+}
+
 /// The local VMs that run on an older cw than the one this upgrade leaves
-/// selected. Starts nothing.
-async fn stale_local_vms(cli_changes: bool) -> anyhow::Result<Vec<String>> {
+/// selected. Starts nothing, and never fails the CLI upgrade: the local VM
+/// supervisor may be one this cw cannot use (#3548).
+async fn stale_local_vms(cli_changes: bool) -> LocalVms {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        crate::commands::local_vms_on_an_older_cw(cli_changes).await
+        match crate::commands::local_vms_on_an_older_cw(cli_changes).await {
+            Ok(stale) => LocalVms {
+                stale,
+                unchecked: None,
+            },
+            Err(error) => LocalVms {
+                stale: Vec::new(),
+                unchecked: Some(format!("{error:#}")),
+            },
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = cli_changes;
-        Ok(Vec::new())
+        LocalVms::default()
     }
 }
 
@@ -548,6 +614,7 @@ async fn public_release(
     print_selection(
         &store,
         &SelectionReport {
+            kind: SelectionKind::Upgrade,
             entry: store.entry(),
             store: store.root(),
             sha256: &published.sha256,
@@ -559,6 +626,7 @@ async fn public_release(
             identity: Some(&identity),
         },
         options.store.json,
+        options.verbose,
     )?;
     hand_off_local_vms(&store, &published.sha256, &options, vms).await;
     Ok(())
@@ -755,6 +823,7 @@ fn install_identified(
     print_selection(
         &installed.store,
         &SelectionReport {
+            kind: SelectionKind::Install,
             entry: installed.store.entry(),
             store: installed.store.root(),
             sha256: &installed.published.sha256,
@@ -766,6 +835,7 @@ fn install_identified(
             identity: Some(identity),
         },
         args.json,
+        args.verbose,
     )
 }
 
@@ -878,40 +948,97 @@ fn render_status(status: &Status) -> String {
     text
 }
 
-fn print_selection(store: &Store, report: &SelectionReport<'_>, json: bool) -> anyhow::Result<()> {
+fn print_selection(
+    store: &Store,
+    report: &SelectionReport<'_>,
+    json: bool,
+    verbose: bool,
+) -> anyhow::Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(report)?);
         return Ok(());
     }
-    let action = if report.changed {
-        "Selected"
-    } else {
-        "Already selected"
-    };
-    println!(
-        "{action} cw {} ({}) for new invocations of {} at generation {}.",
-        report.package_version,
-        report.sha256,
-        store.entry().display(),
-        report.generation
+    // The version the selection replaced, by its release name.
+    let previous = report.previous.map(|sha256| {
+        store
+            .verify(sha256)
+            .ok()
+            .map(|record| release_name(&record.package_version))
+    });
+    print!(
+        "{}",
+        render_selection(report, previous.as_ref().map(Option::as_deref))
     );
+    if verbose {
+        print!("{}", render_selection_details(report));
+    }
+    Ok(())
+}
+
+/// The default report of a selection: what changed, by release name, and how
+/// to go back. Digests, paths and build identity are `--verbose` details.
+fn render_selection(report: &SelectionReport<'_>, previous: Option<Option<&str>>) -> String {
+    let version = release_name(report.package_version);
+    if !report.changed {
+        return format!("cw {version} is current.\n");
+    }
+    let mut text = match report.kind {
+        SelectionKind::Install => format!("Installed cw {version}.\n"),
+        SelectionKind::Rollback => format!("Rolled back cw to {version}.\n"),
+        SelectionKind::Upgrade => {
+            let older = previous.flatten().is_some_and(|previous| {
+                codewire_cw_release::release::compare_versions(&version, previous)
+                    == Some(std::cmp::Ordering::Less)
+            });
+            if older {
+                format!("Downgraded cw to {version}.\n")
+            } else {
+                format!("Upgraded cw to {version}.\n")
+            }
+        }
+    };
+    if let Some(previous) = previous {
+        // The selected cw runs the next command, in its own grammar.
+        let rollback = rollback_command(report.package_version);
+        let _ = match previous {
+            Some(previous) => writeln!(
+                text,
+                "Running cw processes keep {previous} until they exit. To go back: {rollback}"
+            ),
+            None => writeln!(
+                text,
+                "Running cw processes keep their version until they exit. To go back: {rollback}"
+            ),
+        };
+    }
+    text
+}
+
+/// `--verbose`: the selection's exact digest, entry, store and generation,
+/// and the build identity of a cw fetched or installed by this command.
+fn render_selection_details(report: &SelectionReport<'_>) -> String {
+    let mut text = String::new();
+    let _ = writeln!(text, "  sha256:     {}", report.sha256);
+    let _ = writeln!(text, "  entry:      {}", report.entry.display());
+    let _ = writeln!(text, "  store:      {}", report.store.display());
+    let _ = writeln!(text, "  generation: {}", report.generation);
     if let Some(identity) = report.identity {
-        println!(
-            "Identity: {} source {} (tree {}), {}.",
+        let _ = writeln!(
+            text,
+            "  build:      {}, source {} (tree {}), {}",
             identity.target, identity.source_revision, identity.source_tree_sha256, identity.rustc
         );
     }
-    if report.changed && report.previous.is_some() {
-        println!("Running cw processes keep their current version.");
-    }
     if let Some(previous) = report.previous {
-        // The selected cw runs the next command, in its own grammar.
-        println!(
-            "Previous version {previous} is retained; `{}` selects it.",
-            rollback_command(report.package_version)
-        );
+        let _ = writeln!(text, "  previous:   {previous} (retained)");
     }
-    Ok(())
+    text
+}
+
+/// A version as a release name, with exactly one leading "v": store records
+/// and release identities carry it, a development build's version may not.
+pub(crate) fn release_name(version: &str) -> String {
+    format!("v{}", version.strip_prefix('v').unwrap_or(version))
 }
 
 /// The rollback command as cw `version` spells it: a release before the flat
@@ -1502,6 +1629,7 @@ mod tests {
             cli: false,
             selection: SelectionArgs {
                 expect_generation: None,
+                verbose: false,
                 vms: false,
                 store: StoreArgs {
                     store: Some(store.clone()),
@@ -1604,6 +1732,7 @@ mod tests {
             bin_dir: Some(directory.join("bin")),
             store: Some(directory.join("store")),
             json: false,
+            verbose: false,
         }
     }
 
@@ -1772,6 +1901,87 @@ mod tests {
         assert!(text.contains(&format!("current:    v0.3.0 ({sha256})")));
         assert!(text.contains("warning:    the entry is a link to /usr/bin/true"));
         assert!(text.contains(&format!("* {sha256} v0.3.0 (self-install)")));
+    }
+
+    #[test]
+    fn a_version_reads_as_a_release_name_with_one_v() {
+        // Store records and release identities carry the "v"; a development
+        // build's version may not. Either reads the same (#3548).
+        assert_eq!(release_name("v0.4.1"), "v0.4.1");
+        assert_eq!(release_name("0.4.1"), "v0.4.1");
+        assert_eq!(
+            format!(
+                "Codewire CLI {} → {}",
+                release_name("v0.4.1"),
+                release_name("v0.4.3")
+            ),
+            "Codewire CLI v0.4.1 → v0.4.3"
+        );
+    }
+
+    fn report<'a>(
+        kind: SelectionKind,
+        version: &'a str,
+        changed: bool,
+        previous: Option<&'a str>,
+        identity: Option<&'a CwPayloadIdentity>,
+    ) -> SelectionReport<'a> {
+        SelectionReport {
+            kind,
+            entry: Path::new("/u/.local/bin/cw"),
+            store: Path::new("/u/.local/share/codewire/cli"),
+            sha256: "b22d",
+            package_version: version,
+            published: changed,
+            changed,
+            generation: 3,
+            previous,
+            identity,
+        }
+    }
+
+    #[test]
+    fn a_selection_reads_as_release_names_and_keeps_details_for_verbose() {
+        let upgraded = report(SelectionKind::Upgrade, "v0.4.3", true, Some("b3b4"), None);
+        assert_eq!(
+            render_selection(&upgraded, Some(Some("v0.4.1"))),
+            "Upgraded cw to v0.4.3.\nRunning cw processes keep v0.4.1 until they exit. To go back: cw upgrade rollback\n"
+        );
+        let downgraded = report(SelectionKind::Upgrade, "v0.4.1", true, Some("b22d"), None);
+        assert!(
+            render_selection(&downgraded, Some(Some("v0.4.3")))
+                .starts_with("Downgraded cw to v0.4.1.\n")
+        );
+        let rolled_back = report(SelectionKind::Rollback, "v0.4.1", true, Some("b22d"), None);
+        assert!(
+            render_selection(&rolled_back, Some(Some("v0.4.3")))
+                .starts_with("Rolled back cw to v0.4.1.\nRunning cw processes keep v0.4.3")
+        );
+        // A first install has nothing to go back to.
+        assert_eq!(
+            render_selection(
+                &report(SelectionKind::Install, "v0.4.3", true, None, None),
+                None
+            ),
+            "Installed cw v0.4.3.\n"
+        );
+        // Already current is one line.
+        assert_eq!(
+            render_selection(
+                &report(SelectionKind::Upgrade, "v0.4.3", false, Some("b3b4"), None),
+                Some(Some("v0.4.1"))
+            ),
+            "cw v0.4.3 is current.\n"
+        );
+        // The default report names no digest, path, generation or build.
+        let default = render_selection(&upgraded, Some(Some("v0.4.1")));
+        for detail in ["b22d", "b3b4", "/u/", "generation", "rustc"] {
+            assert!(!default.contains(detail), "{detail} in {default}");
+        }
+        assert_eq!(
+            render_selection_details(&upgraded),
+            "  sha256:     b22d\n  entry:      /u/.local/bin/cw\n  store:      /u/.local/share/codewire/cli\n  generation: 3\n  previous:   b3b4 (retained)\n"
+        );
     }
 
     #[test]

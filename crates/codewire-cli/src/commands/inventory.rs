@@ -143,6 +143,9 @@ pub(crate) struct LocationReport {
 pub(crate) struct EnvironmentInventory {
     pub(crate) entries: Vec<InventoryEntry>,
     pub(crate) locations: Vec<LocationReport>,
+    /// The steps that recover a location a retry alone cannot list, shown
+    /// in place of the retry (#3548).
+    pub(crate) recoveries: Vec<(Location, String)>,
 }
 
 impl EnvironmentInventory {
@@ -252,10 +255,21 @@ pub(crate) async fn environment_inventory(
                 Location::Local,
                 LocationStatus::NotConfigured("the local VM runtime is not set up".to_owned()),
             ),
-            Err(error) => inventory.report(
-                Location::Local,
-                LocationStatus::Unavailable(format!("{error:#}")),
-            ),
+            Err(error) => {
+                let refusal = error
+                    .chain()
+                    .find_map(codewire_local_vmm::supervisor_client::supervisor_refusal);
+                match refusal.and_then(|refusal| Some((refusal.summary(), refusal.recovery()?))) {
+                    Some((summary, recovery)) => {
+                        inventory.report(Location::Local, LocationStatus::Unavailable(summary));
+                        inventory.recoveries.push((Location::Local, recovery));
+                    }
+                    None => inventory.report(
+                        Location::Local,
+                        LocationStatus::Unavailable(format!("{error:#}")),
+                    ),
+                }
+            }
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         inventory.report(
@@ -814,7 +828,7 @@ pub(crate) async fn handle_environment_inventory(
     if !unavailable.is_empty() {
         eprint!(
             "{}",
-            format_unavailable(&unavailable, !rows.is_empty(), style)
+            format_unavailable(&unavailable, &inventory.recoveries, !rows.is_empty(), style)
         );
     }
     inventory_outcome(&unavailable)
@@ -853,8 +867,15 @@ fn inventory_target(entry: &UnifiedEnvironmentListEntry) -> config::CurrentTarge
     }
 }
 
-/// The location failures after the rows, on stderr.
-fn format_unavailable(unavailable: &[(Location, &str)], listed: bool, style: Style) -> String {
+/// The location failures after the rows, on stderr. A location with its
+/// own recovery shows those steps instead of a retry, which would fail the
+/// same way.
+fn format_unavailable(
+    unavailable: &[(Location, &str)],
+    recoveries: &[(Location, String)],
+    listed: bool,
+    style: Style,
+) -> String {
     let mut out = String::new();
     for (location, reason) in unavailable {
         let listing = location.listing();
@@ -877,7 +898,13 @@ fn format_unavailable(unavailable: &[(Location, &str)], listed: bool, style: Sty
     }
     for (location, _) in unavailable {
         let prefix = location.command_prefix();
-        if *location != Location::Host {
+        if let Some((_, recovery)) = recoveries.iter().find(|(with, _)| with == location) {
+            out.push_str(&format!(
+                "{} {}\n",
+                style.status(Status::Next),
+                terminal_text(recovery)
+            ));
+        } else if *location != Location::Host {
             out.push_str(&format!(
                 "{} Retry: {prefix} ls\n",
                 style.status(Status::Next)
@@ -1083,6 +1110,7 @@ mod tests {
                     status: status.clone(),
                 })
                 .collect(),
+            recoveries: Vec::new(),
         }
         .finish(None)
     }
@@ -1718,8 +1746,25 @@ mod tests {
             "environment inventory is partial: local VMs and cloud environments could not be listed"
         );
         assert_eq!(
-            format_unavailable(&[(Location::Cloud, "connection closed")], true, PLAIN),
+            format_unavailable(&[(Location::Cloud, "connection closed")], &[], true, PLAIN),
             "! Cloud environments could not be listed: connection closed\n  The results above are complete for the other locations.\n→ Retry: cw --cloud ls\n"
+        );
+        // A supervisor this cw cannot verify refuses every retry the same
+        // way: its recovery replaces the retry (#3548).
+        assert_eq!(
+            format_unavailable(
+                &[
+                    (
+                        Location::Local,
+                        "they are served by a cw this one cannot verify"
+                    ),
+                    (Location::Cloud, "connection closed")
+                ],
+                &[(Location::Local, "End it with `kill 7`".to_owned())],
+                false,
+                PLAIN
+            ),
+            "! Local VMs could not be listed: they are served by a cw this one cannot verify\n! Cloud environments could not be listed: connection closed\n→ End it with `kill 7`\n→ Retry: cw --cloud ls\n"
         );
         assert_eq!(inventory_target(&app.list).target_ref, "app");
         assert_eq!(
@@ -1741,6 +1786,7 @@ mod tests {
                 entry("b", Location::Local, "Running"),
             ],
             locations: Vec::new(),
+            recoveries: Vec::new(),
         }
         .finish(Some("running"));
         let order: Vec<(&str, Location)> = inventory

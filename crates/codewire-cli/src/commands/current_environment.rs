@@ -631,6 +631,7 @@ mod tests {
                     ),
                 },
             ],
+            recoveries: Vec::new(),
         };
         assert_eq!(
             nothing_to_choose(&logged_out, None),
@@ -642,6 +643,7 @@ mod tests {
                 location: Location::Local,
                 status: inventory::LocationStatus::Unavailable("supervisor refused".into()),
             }],
+            recoveries: Vec::new(),
         };
         assert_eq!(
             nothing_to_choose(&down, Some(EnvironmentPlacement::Local)),

@@ -23,7 +23,7 @@ use tokio::net::UnixStream;
 
 use super::path::{SocketIdentity, current_uid};
 use super::process::{ProcessIdentity, WatchedProcess};
-use crate::process_birth::{AdmissionError, ProcessBirth, admit_retained_version};
+use crate::process_birth::{AdmissionError, ProcessBirth, admit_retained_version, in_a_store};
 use crate::supervisor_config::NativeRuntimeConfig;
 
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +36,8 @@ pub(crate) enum PeerError {
     Role,
     #[error("retained native supervisor executable provenance is unavailable or changed")]
     Provenance,
+    #[error("native supervisor runs an executable no managed cw store holds")]
+    Unverified { pid: u32, executable: PathBuf },
 }
 
 impl From<AdmissionError> for PeerError {
@@ -79,6 +81,12 @@ impl SupervisorPeerPin {
                 let config = if peer.executable() == requested.executable {
                     requested.clone()
                 } else {
+                    if !in_a_store(&peer) {
+                        return Err(PeerError::Unverified {
+                            pid: peer.pid(),
+                            executable: peer.executable().to_owned(),
+                        });
+                    }
                     let identity =
                         ProcessIdentity::capture(peer.pid()).map_err(|_| PeerError::Identity)?;
                     admit_retained_version(&peer, &identity)?;

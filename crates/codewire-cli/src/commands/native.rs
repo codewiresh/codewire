@@ -2667,7 +2667,21 @@ pub(crate) async fn upgrade_native_environments(
         return Ok(());
     }
     let config = native_runtime_config()?;
-    let Some(previous) = codewire_local_vmm::supervisor_upgrade::previous_cw(&config).await? else {
+    let previous = match codewire_local_vmm::supervisor_upgrade::previous_cw(&config).await {
+        Ok(previous) => previous,
+        // The hand-off after an update never fails it: a supervisor this cw
+        // cannot verify is named with its recovery, and nothing moves.
+        Err(error)
+            if after_update
+                && codewire_local_vmm::supervisor_client::supervisor_refusal(&error)
+                    .is_some_and(|refusal| refusal.recovery().is_some()) =>
+        {
+            eprintln!("cw: local VMs were not checked: {error}");
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let Some(previous) = previous else {
         if !after_update {
             println!("No local VMs run on a previous cw.");
         }
@@ -2741,7 +2755,7 @@ fn restart_consent(
         "Restart {} local {noun} ({}) now to use cw {}? [y/N] ",
         names.len(),
         names.join(", "),
-        crate::CLI_VERSION
+        crate::update::release_name(crate::CLI_VERSION)
     );
     let mut response = String::new();
     if std::io::stderr().flush().is_err() || std::io::stdin().read_line(&mut response).is_err() {
@@ -2776,7 +2790,7 @@ async fn move_previous_environments(
     eprintln!(
         "Stopping {} to restart on cw {}.",
         names.join(", "),
-        crate::CLI_VERSION
+        crate::update::release_name(crate::CLI_VERSION)
     );
     codewire_local_vmm::supervisor_upgrade::stop_and_retire(config, previous, |name| {
         eprintln!("Stopped {name}.");

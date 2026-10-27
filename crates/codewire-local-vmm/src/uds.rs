@@ -162,10 +162,19 @@ pub(crate) async fn capture_supervisor_peer(
 fn supervisor_peer_error(error: crate::host::supervisor_peer::PeerError) -> UdsError {
     use crate::host::supervisor_peer::PeerError;
     UdsError::SupervisorPeerAdmission(match error {
-        PeerError::Kernel => "kernel socket-derived process identity is unavailable",
-        PeerError::Identity => "process, socket or executable identity changed",
-        PeerError::Role => "role or configuration arguments do not match",
-        PeerError::Provenance => "retained executable provenance is unavailable or changed",
+        PeerError::Kernel => {
+            SupervisorRefusal::Check("kernel socket-derived process identity is unavailable")
+        }
+        PeerError::Identity => {
+            SupervisorRefusal::Check("process, socket or executable identity changed")
+        }
+        PeerError::Role => SupervisorRefusal::Check("role or configuration arguments do not match"),
+        PeerError::Provenance => {
+            SupervisorRefusal::Check("retained executable provenance is unavailable or changed")
+        }
+        PeerError::Unverified { pid, executable } => {
+            SupervisorRefusal::Unverified { pid, executable }
+        }
     })
 }
 
@@ -298,10 +307,61 @@ pub(crate) fn remove_bound_socket(
     Ok(())
 }
 
+/// Why this cw does not use the supervisor serving its state root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorRefusal {
+    /// A check of the peer's process, socket, role or provenance failed.
+    Check(&'static str),
+    /// The peer serves this root with this root's arguments, but runs an
+    /// executable that no managed cw store holds, such as a development
+    /// build. This cw cannot verify it, so it never uses it, and it ends no
+    /// process it cannot verify: the person who started it does (#3548).
+    Unverified { pid: u32, executable: PathBuf },
+}
+
+impl SupervisorRefusal {
+    /// What refused, without the recovery.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Check(reason) => format!("native supervisor admission refused: {reason}"),
+            Self::Unverified { pid, executable } => format!(
+                "they are served by a cw this one cannot verify (process {pid}, {}), not an installed cw version",
+                executable.display()
+            ),
+        }
+    }
+
+    /// The steps that recover, when a retry alone cannot.
+    pub fn recovery(&self) -> Option<String> {
+        match self {
+            Self::Check(_) => None,
+            Self::Unverified { pid, executable } => {
+                let executable = executable.display();
+                Some(format!(
+                    "List its VMs with `{executable} --local ls` and stop any with `{executable} --local stop NAME`, then end it with `kill {pid}`; the next cw command starts this cw's own"
+                ))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for SupervisorRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self, self.recovery()) {
+            (Self::Unverified { pid, executable }, Some(recovery)) => write!(
+                formatter,
+                "your local VMs are served by a cw this one cannot verify (process {pid}, {}), not an installed cw version. {recovery}",
+                executable.display()
+            ),
+            _ => formatter.write_str(&self.summary()),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum UdsError {
-    #[error("native supervisor admission refused: {0}")]
-    SupervisorPeerAdmission(&'static str),
+    #[error("{0}")]
+    SupervisorPeerAdmission(SupervisorRefusal),
     #[error("invalid private Unix socket path: {0}")]
     InvalidPath(PathBuf),
     #[error("connect to private Unix socket failed")]
