@@ -280,7 +280,12 @@ pub(crate) fn scoped_secret_cookie(
     ))
 }
 
-fn lax_scoped_secret_cookie(
+/// A short-lived, path-scoped secret that must survive a top-level
+/// navigation entered from another site, such as a link in an email or a
+/// provider callback. `SameSite=Strict` would withhold it from the request
+/// that follows the entry redirect, because that redirect chain started
+/// cross-site. Lax still withholds it from cross-site POSTs and subresources.
+pub(crate) fn lax_scoped_secret_cookie(
     public_origin: &str,
     name: &str,
     value: &str,

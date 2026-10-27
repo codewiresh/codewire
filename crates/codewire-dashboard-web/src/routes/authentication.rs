@@ -16,8 +16,9 @@ use crate::{
     response::{error_page, redirect, render_page, render_template, safe_auth_continuation},
     security::{
         PASSWORD_RESET_COOKIE, TWO_FACTOR_CHALLENGE_COOKIE, canonical_cookie, clear_scoped_cookie,
-        cookie_value, csrf_cookie, new_csrf_token, request_has_same_origin, scoped_secret_cookie,
-        valid_csrf_token, with_csrf_cookie, with_response_cookie,
+        cookie_value, csrf_cookie, lax_scoped_secret_cookie, new_csrf_token,
+        request_has_same_origin, scoped_secret_cookie, valid_csrf_token, with_csrf_cookie,
+        with_response_cookie,
     },
     state::AppState,
     templates::{
@@ -384,7 +385,10 @@ pub(super) async fn reset_password(
     Query(query): Query<AuthQuery>,
 ) -> Response {
     if !query.token.is_empty() {
-        let Some(cookie) = scoped_secret_cookie(
+        // The reset link is opened from an email, a cross-site navigation, so
+        // the cookie must be Lax to reach the GET this redirect leads to. The
+        // reset POST stays guarded by the same-origin and CSRF checks.
+        let Some(cookie) = lax_scoped_secret_cookie(
             &state.public_origin,
             PASSWORD_RESET_COOKIE,
             &query.token,
@@ -1121,8 +1125,9 @@ mod tests {
         response.text().await.expect("login body")
     }
 
-    #[tokio::test]
-    async fn only_a_validated_preview_handoff_continuation_shows_preview_sign_in() {
+    /// Serve the dashboard on a loopback port, as `https://app.example.test`
+    /// with every backend unreachable.
+    async fn serve_dashboard() -> (String, tokio::task::JoinHandle<()>) {
         let app = crate::app(crate::Config {
             listen_addr: "127.0.0.1:0".parse().unwrap(),
             runtime_mode: crate::RuntimeMode::CurrentThread,
@@ -1144,6 +1149,12 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
+        (origin, server)
+    }
+
+    #[tokio::test]
+    async fn only_a_validated_preview_handoff_continuation_shows_preview_sign_in() {
+        let (origin, server) = serve_dashboard().await;
 
         let continuation = preview_continuation();
         let body = login_page(&origin, &[("return_to", &continuation)]).await;
@@ -1211,6 +1222,112 @@ mod tests {
         .await;
         assert!(body.contains(LOGIN_HEADING));
         assert!(!body.contains(PREVIEW_CONTEXT));
+        server.abort();
+    }
+
+    /// Whether a browser sends a cookie on a top-level GET navigation whose
+    /// redirect chain began on another site, such as a link opened from an
+    /// email client. RFC 6265bis sends Lax (and unmarked, defaulting to Lax)
+    /// and None cookies there, and withholds Strict ones.
+    fn sent_on_cross_site_navigation(set_cookie: &str) -> bool {
+        !set_cookie
+            .split(';')
+            .filter_map(|attribute| attribute.trim().strip_prefix("SameSite="))
+            .any(|value| value.eq_ignore_ascii_case("Strict"))
+    }
+
+    #[tokio::test]
+    async fn a_reset_link_opened_from_an_email_reaches_the_reset_form() {
+        let (origin, server) = serve_dashboard().await;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client");
+
+        // The link in the email: a cross-site, top-level navigation.
+        let entry = client
+            .get(format!("{origin}/reset-password?token=reset-token-marker"))
+            .header("sec-fetch-site", "cross-site")
+            .header("sec-fetch-mode", "navigate")
+            .send()
+            .await
+            .expect("reset link");
+        assert_eq!(entry.status(), StatusCode::SEE_OTHER);
+        assert_eq!(entry.headers()[header::LOCATION], "/reset-password");
+        let cookies: Vec<_> = entry
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().expect("cookie").to_owned())
+            .collect();
+        assert_eq!(
+            cookies,
+            [
+                "codewire_password_reset=reset-token-marker; Path=/reset-password; HttpOnly; SameSite=Lax; Max-Age=600; Secure"
+            ]
+        );
+        assert!(
+            sent_on_cross_site_navigation(&cookies[0]),
+            "the browser withholds the reset cookie from the redirected GET"
+        );
+        assert!(!sent_on_cross_site_navigation(
+            "codewire_password_reset=x; Path=/reset-password; HttpOnly; SameSite=Strict"
+        ));
+
+        // The redirected GET, carrying what the browser sends with it.
+        let pair = cookies[0].split(';').next().unwrap().to_owned();
+        let form = client
+            .get(format!("{origin}/reset-password"))
+            .header(header::COOKIE, &pair)
+            .header("sec-fetch-site", "cross-site")
+            .header("sec-fetch-mode", "navigate")
+            .send()
+            .await
+            .expect("reset form");
+        assert_eq!(form.status(), StatusCode::OK);
+        let body = form.text().await.expect("form body");
+        assert!(body.contains("action=\"/reset-password/_actions/reset\""));
+        assert!(body.contains("name=\"_csrf\""));
+        assert!(!body.contains("invalid or has expired"));
+
+        // Without the cookie, the page reports the link as invalid: what a
+        // Strict cookie produced.
+        let missing = client
+            .get(format!("{origin}/reset-password"))
+            .send()
+            .await
+            .expect("bare reset page");
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            missing
+                .text()
+                .await
+                .unwrap()
+                .contains("invalid or has expired")
+        );
+
+        // The reset POST still needs the same origin and the Strict CSRF
+        // cookie matching the form token; the reset cookie alone is refused.
+        let csrf = new_csrf_token();
+        let password = "password=CorrectHorse9%23xy&confirm_password=CorrectHorse9%23xy";
+        for (origin_header, cookie) in [
+            (
+                "https://evil.example",
+                format!("{pair}; codewire_ssr_csrf={csrf}"),
+            ),
+            ("https://app.example.test", pair.clone()),
+        ] {
+            let refused = client
+                .post(format!("{origin}/reset-password/_actions/reset"))
+                .header(header::ORIGIN, origin_header)
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(format!("_csrf={csrf}&{password}"))
+                .send()
+                .await
+                .expect("reset submission");
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{origin_header}");
+        }
         server.abort();
     }
 
