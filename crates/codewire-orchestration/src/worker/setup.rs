@@ -1720,6 +1720,7 @@ impl SetupOps for WorkerSetupOps<'_> {
         self.authority.ensure_for_states(&["running"]).await
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %input.environment_id))]
     async fn health_check(&mut self, input: &Inputs) -> anyhow::Result<()> {
         await_setup_or_cancel(
             &self.activity_ctx,
@@ -1732,6 +1733,7 @@ impl SetupOps for WorkerSetupOps<'_> {
         .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %input.environment_id))]
     async fn configure_environment(&mut self, input: &Inputs) -> anyhow::Result<()> {
         self.phase_authority
             .ensure_active(self.active_phase)
@@ -1740,6 +1742,7 @@ impl SetupOps for WorkerSetupOps<'_> {
             .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %input.environment_id))]
     async fn clone_repos(&mut self, input: &Inputs) -> anyhow::Result<()> {
         self.phase_authority
             .ensure_active(self.active_phase)
@@ -1931,6 +1934,7 @@ impl SetupOps for WorkerSetupOps<'_> {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %input.environment_id))]
     async fn run_install(&mut self, input: &Inputs, work_dir: &str) -> anyhow::Result<()> {
         self.phase_authority
             .ensure_active(self.active_phase)
@@ -1947,6 +1951,7 @@ impl SetupOps for WorkerSetupOps<'_> {
         .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %input.environment_id))]
     async fn run_startup_script(&mut self, input: &Inputs, work_dir: &str) -> anyhow::Result<()> {
         self.phase_authority
             .ensure_active(self.active_phase)
@@ -1963,6 +1968,7 @@ impl SetupOps for WorkerSetupOps<'_> {
         .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %input.environment_id))]
     async fn validate_agents(&mut self, input: &Inputs) -> anyhow::Result<()> {
         self.phase_authority
             .ensure_active(self.active_phase)
@@ -1999,6 +2005,7 @@ impl SetupOps for WorkerSetupOps<'_> {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %input.environment_id))]
     async fn register_ports(&mut self, input: &Inputs) -> anyhow::Result<()> {
         self.phase_authority
             .ensure_active(self.active_phase)
@@ -2062,6 +2069,7 @@ fn resolve_git_field(git_name: Option<&str>, account_name: Option<&str>, email: 
 
 /// Mirrors `waitForSidecar`: no backend → pass; otherwise poll the
 /// SSH/SFTP readiness check with ~2s jittered intervals.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
 pub(crate) async fn wait_for_sidecar(
     ctx: &WorkerContext,
     namespace: &str,
@@ -2138,6 +2146,7 @@ pub(crate) fn jittered_duration(base: Duration) -> Duration {
 
 // ── Handler (port of HandleEnvironmentSetup) ────────────────────────────
 
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %payload.environment_id))]
 pub async fn handle_environment_setup(
     ctx: &WorkerContext,
     payload: &JobPayload,

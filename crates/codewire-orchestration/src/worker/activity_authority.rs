@@ -100,6 +100,7 @@ impl ActivityAuthority {
 
     /// Capture authority only when the command still matches its required
     /// lifecycle intent. A mismatched command is stale before it starts.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
     pub async fn capture_required(
         pool: &PgPool,
         environment_id: &str,
@@ -131,6 +132,7 @@ impl ActivityAuthority {
 
     /// Claim the next workflow-execution generation before any environment
     /// activity is dispatched for the run.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
     pub async fn claim(
         pool: &PgPool,
         environment_id: &str,

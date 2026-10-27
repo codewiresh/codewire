@@ -487,6 +487,7 @@ mod enabled {
                         action: "create".into(),
                         environment_id: env_id.into(),
                         requested_by: "temporal-fencing-smoke".into(),
+                        ..Default::default()
                     },
                     WorkflowStartOptions::new(queue, environment_workflow_id(env_id)).build(),
                 )
@@ -510,6 +511,7 @@ mod enabled {
                         action: "destroy".into(),
                         environment_id: env_id.into(),
                         requested_by: "temporal-fencing-smoke".into(),
+                        ..Default::default()
                     },
                     WorkflowSignalOptions::default(),
                 )
@@ -836,6 +838,7 @@ mod enabled {
                         action: "destroy".into(),
                         environment_id: env_id.clone(),
                         requested_by: "temporal-fencing-smoke".into(),
+                        ..Default::default()
                     },
                     WorkflowStartOptions::new(&queue, environment_workflow_id(&env_id)).build(),
                 )
@@ -1221,6 +1224,7 @@ mod enabled {
                         action: "destroy".into(),
                         environment_id: env_id.clone(),
                         requested_by: "temporal-fencing-smoke".into(),
+                        ..Default::default()
                     },
                     WorkflowSignalOptions::default(),
                 )

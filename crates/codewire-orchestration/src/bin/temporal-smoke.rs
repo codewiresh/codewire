@@ -239,6 +239,7 @@ async fn main() -> anyhow::Result<()> {
                 action: "create".into(),
                 environment_id: env_id.clone(),
                 requested_by: "temporal-smoke".into(),
+                ..Default::default()
             },
             WorkflowSignalOptions::default(),
         )

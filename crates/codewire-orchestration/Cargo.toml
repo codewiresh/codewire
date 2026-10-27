@@ -63,7 +63,9 @@ codewire-project = { workspace = true }
 codewire-project-proto = { workspace = true }
 codewire-protected-store = { workspace = true, features = ["platform"] }
 codewire-proto = { workspace = true }
-codewire-server-core = { workspace = true, features = ["kubernetes-identity"] }
+# `otel`: the create path exports OpenTelemetry spans when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set (codewire-server-core/src/obs.rs).
+codewire-server-core = { workspace = true, features = ["kubernetes-identity", "otel"] }
 codewire-tls = { workspace = true }
 codewire-workload-secrets = { workspace = true }
 anyhow = { workspace = true }

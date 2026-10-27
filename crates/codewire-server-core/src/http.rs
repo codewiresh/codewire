@@ -278,7 +278,7 @@ impl AppBuilder {
 
         let middleware = ServiceBuilder::new()
             .layer(SetRequestIdLayer::new(header.clone(), MakeRequestUuid))
-            .layer(TraceLayer::new_for_http())
+            .layer(request_trace_layer())
             .layer(PropagateRequestIdLayer::new(header))
             .option_layer(cors_layer(self.cors_allowed_origins))
             .layer(CatchPanicLayer::new());
@@ -298,6 +298,44 @@ impl AppBuilder {
                 let service = self.service_name.clone();
                 set_service_header(req, next, service)
             }))
+    }
+}
+
+/// The standard request [`TraceLayer`] with [`RequestSpan`], for a server
+/// that does not use [`AppBuilder`].
+pub fn request_trace_layer() -> TraceLayer<
+    tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
+    RequestSpan,
+> {
+    TraceLayer::new_for_http().make_span_with(RequestSpan)
+}
+
+/// The per-request span: tower-http's default `request` span at the same
+/// `DEBUG` level (so the default `info` logs are unchanged), plus the
+/// OpenTelemetry name (method and path, never the query) and kind. While
+/// trace export is on it continues an incoming W3C `traceparent`, and probes
+/// and scrapes get no span at all.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RequestSpan;
+
+impl<B> tower_http::trace::MakeSpan<B> for RequestSpan {
+    fn make_span(&mut self, request: &http::Request<B>) -> tracing::Span {
+        let exporting = crate::obs::export_active();
+        if exporting && crate::obs::untraced_path(request.uri().path()) {
+            return tracing::Span::none();
+        }
+        let span = tracing::debug_span!(
+            "request",
+            method = %request.method(),
+            uri = %request.uri(),
+            version = ?request.version(),
+            otel.name = %format_args!("{} {}", request.method(), request.uri().path()),
+            otel.kind = "server",
+        );
+        if exporting {
+            crate::obs::attach_http_parent(&span, request.headers());
+        }
+        span
     }
 }
 

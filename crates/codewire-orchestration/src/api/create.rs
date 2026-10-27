@@ -620,6 +620,7 @@ struct InsertEnvironmentParams<'a> {
     body: &'a CreateEnvironmentBody,
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 async fn insert_environment(
     pool: &PgPool,
     p: InsertEnvironmentParams<'_>,
@@ -924,6 +925,13 @@ async fn resolve_project_preset(
     })
 }
 
+/// The create API's span: the environment id is recorded once the row exists.
+#[tracing::instrument(
+    level = "debug",
+    name = "create_environment",
+    skip_all,
+    fields(environment_id = tracing::field::Empty)
+)]
 pub(crate) async fn create_environment_core(
     state: &ApiState,
     user: &AuthUser,
@@ -1095,6 +1103,7 @@ pub(crate) async fn create_environment_core(
                 },
             )
             .await?;
+            tracing::Span::current().record("environment_id", env.id.as_str());
 
             if trigger_environment(state, &env.id, "create").await.is_err() {
                 dispatch_ambiguous.store(true, Ordering::Release);

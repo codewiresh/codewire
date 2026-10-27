@@ -243,6 +243,7 @@ impl SandboxClient {
     /// bound Pod has recorded a host key, and that Pod's SSH port completes a
     /// key exchange presenting exactly that key. The daemon records its key
     /// only once bound, so this proves the bound daemon serves SSH.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
     pub async fn wait_for_workspace_access_ready(
         &self,
         env_id: &str,

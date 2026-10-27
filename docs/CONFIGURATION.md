@@ -125,3 +125,39 @@ Every Codewire service the browser calls is served from the dashboard's own orig
 |---|---|---|---|
 | `SANDBOX_EGRESS_BANDWIDTH` | No | The egress rate cap on every workspace Pod, rendered as its `kubernetes.io/egress-bandwidth` annotation: a positive whole number of bits per second with an optional `K`, `M` or `G` suffix. Unset or empty means `100M`. Any other form stops orchestration at startup. The cap holds only where the CNI enforces the annotation, such as Cilium with its bandwidth manager enabled; elsewhere the annotation is ignored. | `100M` |
 | `CODEWIRE_SANDBOX_PUBLIC_MESH_URL` | No | The public `https` origin of the hosted Codewire Mesh service that cloud environments join networks on, with no path, query or credentials. Orchestration names it to each workspace daemon whose environment joins a network. Unset or empty means this deployment offers no hosted Mesh to environments, and a create that names a network is refused with `mesh_unavailable`. Any other form stops orchestration at startup. | `https://mesh.example.com` |
+
+## Tracing
+
+Orchestration (its API and its Temporal worker) and the dashboard server export
+OpenTelemetry traces over OTLP/gRPC when an endpoint is set. One environment
+create is then one trace: the dashboard request, the orchestration
+`CreateEnvironment` handler, the Temporal signal, and the claim-authority,
+create and setup activities, with the claim, bind, access-ready and setup-phase
+functions, each Kubernetes API request and each Postgres statement as child
+spans. The trace context crosses HTTP and gRPC as the W3C `traceparent` header
+and crosses Temporal inside the signal and activity inputs. No other service
+exports traces, whatever its environment says; billing, idp, coordinator and
+the other services only log.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | The OTLP/gRPC endpoint (a collector or Tempo's OTLP receiver) that orchestration and the dashboard send spans to. Unset or empty means no exporter is installed and tracing costs nothing beyond the compiled-in code. Orchestration logs one line at startup saying whether export is on, naming the endpoint's scheme, host and port only. | `http://tempo.observability.svc:4317` |
+| `OTEL_TRACES_SAMPLER` | No | The standard OpenTelemetry sampler: `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off` or `parentbased_traceidratio`. Unset means `parentbased_always_on`, every trace. | `parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | No | The ratio, from `0.0` to `1.0`, for the two `traceidratio` samplers. Unset means `1.0`. | `0.1` |
+| `OTEL_SERVICE_NAME` | No | Overrides the service name, which is otherwise `codewire-orchestration` or `codewire-dashboard`. | `codewire-orchestration` |
+| `OTEL_RESOURCE_ATTRIBUTES` | No | Extra resource attributes. Set `deployment.environment.name` here; without it the `ENVIRONMENT` variable is used when set. `service.version` is the build's version. | `deployment.environment.name=dev` |
+
+What is exported is fixed in code (`crates/codewire-server-core/src/obs.rs`).
+Span attributes carry identifiers such as `environment_id`, request methods
+and paths, Kubernetes API paths, sqlx's four-word statement summary and row
+counts, and timings. They never carry a secret, a token, a credential, an
+environment variable's value or user content: a URL's query string is removed
+before export (a Kubernetes exec URL carries its command line there), no log
+event is exported, and a statement's text and bound values are never recorded.
+Health probes and metrics scrapes start no trace, and a Kubernetes request or
+statement outside a traced operation (a background reconciler's) is not
+exported. A request's `traceparent` is honoured from any caller, so with a
+ratio sampler a client can ask for its own request to be sampled.
+
+Codewire's spans are at `DEBUG` level, so at the default `RUST_LOG=info` they
+do not appear in the JSON logs, which are the same whether or not export is on.

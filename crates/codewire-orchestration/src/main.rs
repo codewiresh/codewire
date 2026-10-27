@@ -305,7 +305,7 @@ fn require_runtime_images() -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = ServiceConfig::from_env("orchestration")?;
-    codewire_server_core::obs::init(&cfg)?;
+    let tracing_guard = codewire_server_core::obs::init_with_traces(&cfg)?;
     require_runtime_images()?;
     let workspace_binding_bind_addr = workspace_binding_bind_addr(
         cfg.bind_addr,
@@ -691,7 +691,7 @@ async fn main() -> anyhow::Result<()> {
         )),
         _ => None,
     };
-    tokio::try_join!(
+    let served = tokio::try_join!(
         codewire_server_core::serve_with_listener(app, listeners.public),
         async {
             match internal_tls {
@@ -715,7 +715,10 @@ async fn main() -> anyhow::Result<()> {
                 None => Ok(()),
             }
         },
-    )?;
+    );
+    // Flush queued spans before the process exits.
+    tracing_guard.shutdown().await;
+    served?;
     Ok(())
 }
 

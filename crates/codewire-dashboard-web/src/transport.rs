@@ -27,6 +27,8 @@ impl ClientTransport for BrowserTransport {
         Box::pin(async move {
             let (mut parts, body) = request.into_parts();
             parts.headers = browser_headers(parts.headers, cookie, origin);
+            // Continue this page request's trace in the API (W3C traceparent).
+            codewire_server_core::obs::inject_http_headers(&mut parts.headers);
             let body = reqwest::Body::wrap_stream(body.into_data_stream());
             let response = client
                 .request(parts.method, parts.uri.to_string())

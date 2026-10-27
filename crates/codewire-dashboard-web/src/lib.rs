@@ -59,6 +59,7 @@ pub fn app(config: Config) -> Router {
         .merge(assets::router())
         .merge(docs::router())
         .with_state(state)
+        .layer(codewire_server_core::http::request_trace_layer())
 }
 
 #[cfg(test)]

@@ -1280,6 +1280,7 @@ pub(crate) struct RecordedBind {
 /// and its closed-category counter. A repeat for an already-bound Pod is
 /// silent. Returns the elapsed time and start path of a newly recorded
 /// binding.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env.id))]
 pub(crate) async fn bind_workspace_runtime(
     kube: &kube::Client,
     cfg: Option<&SandboxWorkerCfg>,
@@ -1407,6 +1408,7 @@ fn early_bind_poll(waited: Duration) -> Duration {
 /// converged, a replaced Pod, an unreadable chain) is retried; any other
 /// refusal fails exactly as the post-ready bind does. The caller drops this
 /// future once its own wait ends.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %authority.environment_id()))]
 pub(crate) async fn bind_before_ready(
     kube: &kube::Client,
     cfg: Option<&SandboxWorkerCfg>,
@@ -1483,6 +1485,7 @@ pub(crate) async fn bind_before_ready(
 /// the replacement, wait for it to converge, then record its binding before
 /// any daemon or gateway wait. A legacy replacement records its environment
 /// scope; an identity-free one gets the binding its daemon long-polls for.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %authority.environment_id()))]
 pub(crate) async fn bind_replacement_runtime(
     kube: &kube::Client,
     authority: &ActivityAuthority,

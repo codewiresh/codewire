@@ -11,7 +11,7 @@
 //! | `NATS_TOKEN` | no | unset → unauthenticated NATS |
 //! | `SESSION_SECRET` | yes | — |
 //! | `<SERVICE>_PORT` (e.g. `BILLING_PORT`) | no | derived per service |
-//! | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | unset → stdout only |
+//! | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | unset → no trace export (read only by services that call `obs::init_with_traces`) |
 //! | `RUST_LOG` | no | `info` |
 //!
 //! Each binary calls [`ServiceConfig::from_env`] once at startup; missing
@@ -57,7 +57,8 @@ pub struct ServiceConfig {
     /// `auth::authenticate`).
     pub session_secret: String,
     /// OTLP endpoint, e.g. `http://otel-collector:4317`. `None` disables
-    /// the OpenTelemetry exporter.
+    /// the OpenTelemetry exporter; only [`crate::obs::init_with_traces`]
+    /// reads it.
     pub otlp_endpoint: Option<String>,
 }
 

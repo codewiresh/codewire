@@ -1713,6 +1713,7 @@ impl SandboxClient {
     /// the cluster provisions it, and a namespace patch is exactly the
     /// authority that would let a compromised orchestration switch those
     /// policies off.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn ensure_namespace(&self) -> anyhow::Result<()> {
         let namespaces: Api<Namespace> = Api::all(self.client.clone());
         let name = &self.namespace;
@@ -2564,6 +2565,7 @@ impl SandboxClient {
     /// Publish only the existing operation's association labels onto the exact
     /// DB-bound Claim. The worker holds its ActivityAuthority row fence while
     /// this short mutation runs. Controller propagation is a separate wait.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %opts.environment_id))]
     pub async fn reconcile_claim_runtime_identity(
         &self,
         opts: &ClaimOpts,
@@ -2885,6 +2887,7 @@ impl SandboxClient {
     /// and its allocated Sandbox. Works while suspended without a Pod. The
     /// caller holds the existing environment-row publication fence, and owns
     /// suspension/replacement; this never mutates a live Pod's environment.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %opts.environment_id))]
     pub async fn reconcile_workspace_bootstrap(
         &self,
         opts: &TemplateOpts,
@@ -3240,6 +3243,7 @@ impl SandboxClient {
     /// Observe propagation through the exact Claim -> Sandbox -> Pod chain.
     /// This must run outside the SQL mutation lock. Replacing any pinned UID
     /// requires a fresh lifecycle observation, never relabeling another Pod.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %opts.environment_id))]
     pub async fn wait_for_claim_runtime_identity(
         &self,
         opts: &ClaimOpts,
@@ -3274,6 +3278,7 @@ impl SandboxClient {
 
     /// Mirrors `createSandboxClaimDynamic`: create, or reuse on
     /// AlreadyExists. Returns (name, uid).
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %opts.environment_id))]
     pub async fn create_sandbox_claim(
         &self,
         namespace: &str,
@@ -3967,6 +3972,7 @@ impl SandboxClient {
     }
 
     /// Mirrors `GetPodIP`.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
     pub async fn get_pod_ip(&self, env_id: &str) -> anyhow::Result<String> {
         let name = self
             .get_pod_name(env_id)
@@ -4008,6 +4014,7 @@ impl SandboxClient {
     /// API and the credential relay dial, the direct-UDP LoadBalancer to the
     /// workspace's tailnet peer, and the workspace's NetworkPolicy. The
     /// daemon hosts SSH and the tailnet.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %opts.environment_id))]
     pub async fn ensure_access_stack(&self, opts: &TemplateOpts) -> anyhow::Result<()> {
         if opts.environment_id.trim().is_empty() {
             anyhow::bail!("ensure access stack: environment_id is required");
@@ -4598,6 +4605,7 @@ impl SandboxClient {
     /// Create and start block on this wait, so it wakes on the claim's next
     /// change rather than a fixed poll. Every wake re-reads the claim, and a
     /// missed or failed watch only falls back to the old 2-second re-read.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
     pub async fn wait_for_ready(&self, env_id: &str, timeout: Duration) -> anyhow::Result<()> {
         self.wait_for_ready_with_fallback(env_id, timeout, CLAIM_READY_FALLBACK_POLL)
             .await
@@ -4869,6 +4877,7 @@ async fn environment_owned_objects(
 impl SandboxClient {
     /// Mirrors `ensureSandboxTemplateDynamic`: create when absent,
     /// otherwise update (3 retries on resource-version conflicts).
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %opts.environment_id))]
     pub async fn ensure_sandbox_template(&self, opts: &TemplateOpts) -> anyhow::Result<()> {
         opts.validate_confidential_storage_manifest()?;
         let name = &opts.name;
@@ -4917,6 +4926,7 @@ impl SandboxClient {
     }
 
     /// Ensure the zero-replica shadow pool required by SandboxClaim.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
     pub async fn ensure_shadow_pool(
         &self,
         name: &str,
@@ -5133,6 +5143,7 @@ impl SandboxClient {
     }
 
     /// Mirrors `ClientBackend.ProbeEnvironment`.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
     pub async fn probe_environment(&self, env_id: &str) -> anyhow::Result<ProbeResult> {
         let (exists, ready, reason) = self
             .get_sandbox_claim_ready_status(env_id)

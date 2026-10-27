@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+use codewire_server_core::obs::TraceContext;
 use serde::{Deserialize, Serialize};
 use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions};
 use temporalio_common::protos::coresdk::workflow_commands::ActivityCancellationType;
@@ -28,6 +29,7 @@ use temporalio_sdk::{
     WorkflowContextView, WorkflowResult,
 };
 use temporalio_sdk_core::{CoreRuntime, RuntimeOptions};
+use tracing::Instrument as _;
 
 use crate::worker::activity_authority::{ActivityAuthority, AuthorityLost, is_authority_lost};
 use crate::worker::lifecycle::ReconcileOutcome;
@@ -63,18 +65,27 @@ pub fn organization_deletion_workflow_id(organization_id: &str, generation: i64)
 }
 
 /// Rust-owned signal payload. Activity authority never comes from a signal.
+///
+/// `trace_context` is the sender's W3C trace context, so the activities the
+/// command runs join the sender's trace. It is never authority, it is absent
+/// from the payload unless trace export is on, and the workflow copies it
+/// only into the activity inputs below.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentCommand {
     pub action: String,
     pub environment_id: String,
     pub requested_by: String,
+    #[serde(default, skip_serializing_if = "TraceContext::is_empty")]
+    pub trace_context: TraceContext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentClaimInput {
     pub environment_id: String,
+    #[serde(default, skip_serializing_if = "TraceContext::is_empty")]
+    pub trace_context: TraceContext,
 }
 
 /// Internal activity payload created only after the workflow claims authority.
@@ -84,6 +95,8 @@ pub struct EnvironmentActivityCommand {
     pub environment_id: String,
     pub requested_by: String,
     pub operation_generation: i64,
+    #[serde(default, skip_serializing_if = "TraceContext::is_empty")]
+    pub trace_context: TraceContext,
 }
 
 impl EnvironmentActivityCommand {
@@ -95,8 +108,29 @@ impl EnvironmentActivityCommand {
             environment_id: cmd.environment_id.clone(),
             requested_by: cmd.requested_by.clone(),
             operation_generation,
+            trace_context: cmd.trace_context.clone(),
         })
     }
+}
+
+/// The span an environment activity runs in: a child of the trace that sent
+/// its command (see [`EnvironmentCommand::trace_context`]). It records the
+/// environment id and attempt only.
+fn activity_span(
+    activity: &'static str,
+    environment_id: &str,
+    trace_context: &TraceContext,
+    ctx: &ActivityContext,
+) -> tracing::Span {
+    let span = tracing::debug_span!(
+        "temporal.activity",
+        otel.name = activity,
+        otel.kind = "consumer",
+        environment_id = %environment_id,
+        temporal.attempt = ctx.info().attempt,
+    );
+    trace_context.attach_to(&span);
+    span
 }
 
 fn job_payload(cmd: &EnvironmentActivityCommand, action: &str) -> JobPayload {
@@ -256,16 +290,26 @@ impl EnvironmentActivities {
         ctx: ActivityContext,
         input: EnvironmentClaimInput,
     ) -> Result<i64, ActivityError> {
-        let (workflow_run_id, scheduled_at_unix_nanos) = claim_authority_metadata(&ctx)?;
-        run_claim_activity(
-            ctx,
-            ActivityAuthority::claim(
-                &self.wctx.pool,
-                &input.environment_id,
-                &workflow_run_id,
-                scheduled_at_unix_nanos,
-            ),
-        )
+        let span = activity_span(
+            "EnvironmentClaimAuthorityActivity",
+            &input.environment_id,
+            &input.trace_context,
+            &ctx,
+        );
+        async move {
+            let (workflow_run_id, scheduled_at_unix_nanos) = claim_authority_metadata(&ctx)?;
+            run_claim_activity(
+                ctx,
+                ActivityAuthority::claim(
+                    &self.wctx.pool,
+                    &input.environment_id,
+                    &workflow_run_id,
+                    scheduled_at_unix_nanos,
+                ),
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -275,17 +319,27 @@ impl EnvironmentActivities {
         ctx: ActivityContext,
         cmd: EnvironmentActivityCommand,
     ) -> Result<(), ActivityError> {
-        let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
-            return Ok(());
-        };
-        run_environment_activity(
-            ctx,
-            create::handle_environment_create_without_setup_publish(
-                &self.wctx,
-                &job_payload(&cmd, "environment.create"),
-                &authority,
-            ),
-        )
+        let span = activity_span(
+            "EnvironmentCreateActivity",
+            &cmd.environment_id,
+            &cmd.trace_context,
+            &ctx,
+        );
+        async move {
+            let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
+                return Ok(());
+            };
+            run_environment_activity(
+                ctx,
+                create::handle_environment_create_without_setup_publish(
+                    &self.wctx,
+                    &job_payload(&cmd, "environment.create"),
+                    &authority,
+                ),
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -295,20 +349,30 @@ impl EnvironmentActivities {
         ctx: ActivityContext,
         cmd: EnvironmentActivityCommand,
     ) -> Result<(), ActivityError> {
-        let setup_identity = setup_activity_identity(&ctx, &cmd)?;
-        let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
-            return Ok(());
-        };
-        run_cleanup_aware_environment_activity(
-            ctx.clone(),
-            setup::handle_environment_setup(
-                &self.wctx,
-                &job_payload(&cmd, "environment.setup"),
-                &authority,
-                setup_identity,
-                ctx,
-            ),
-        )
+        let span = activity_span(
+            "EnvironmentSetupActivity",
+            &cmd.environment_id,
+            &cmd.trace_context,
+            &ctx,
+        );
+        async move {
+            let setup_identity = setup_activity_identity(&ctx, &cmd)?;
+            let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
+                return Ok(());
+            };
+            run_cleanup_aware_environment_activity(
+                ctx.clone(),
+                setup::handle_environment_setup(
+                    &self.wctx,
+                    &job_payload(&cmd, "environment.setup"),
+                    &authority,
+                    setup_identity,
+                    ctx,
+                ),
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -318,20 +382,30 @@ impl EnvironmentActivities {
         ctx: ActivityContext,
         cmd: EnvironmentActivityCommand,
     ) -> Result<(), ActivityError> {
-        let setup_identity = setup_activity_identity(&ctx, &cmd)?;
-        let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
-            return Ok(());
-        };
-        run_cleanup_aware_environment_activity(
-            ctx.clone(),
-            lifecycle::handle_environment_start(
-                &self.wctx,
-                &job_payload(&cmd, "environment.start"),
-                &authority,
-                setup_identity,
-                ctx,
-            ),
-        )
+        let span = activity_span(
+            "EnvironmentStartActivity",
+            &cmd.environment_id,
+            &cmd.trace_context,
+            &ctx,
+        );
+        async move {
+            let setup_identity = setup_activity_identity(&ctx, &cmd)?;
+            let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
+                return Ok(());
+            };
+            run_cleanup_aware_environment_activity(
+                ctx.clone(),
+                lifecycle::handle_environment_start(
+                    &self.wctx,
+                    &job_payload(&cmd, "environment.start"),
+                    &authority,
+                    setup_identity,
+                    ctx,
+                ),
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -341,17 +415,27 @@ impl EnvironmentActivities {
         ctx: ActivityContext,
         cmd: EnvironmentActivityCommand,
     ) -> Result<(), ActivityError> {
-        let Some(authority) = required_authority(&self.wctx, &cmd, "stopped").await? else {
-            return Ok(());
-        };
-        run_environment_activity(
-            ctx,
-            lifecycle::handle_environment_stop(
-                &self.wctx,
-                &job_payload(&cmd, "environment.stop"),
-                &authority,
-            ),
-        )
+        let span = activity_span(
+            "EnvironmentStopActivity",
+            &cmd.environment_id,
+            &cmd.trace_context,
+            &ctx,
+        );
+        async move {
+            let Some(authority) = required_authority(&self.wctx, &cmd, "stopped").await? else {
+                return Ok(());
+            };
+            run_environment_activity(
+                ctx,
+                lifecycle::handle_environment_stop(
+                    &self.wctx,
+                    &job_payload(&cmd, "environment.stop"),
+                    &authority,
+                ),
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -361,20 +445,30 @@ impl EnvironmentActivities {
         ctx: ActivityContext,
         cmd: EnvironmentActivityCommand,
     ) -> Result<(), ActivityError> {
-        let setup_identity = setup_activity_identity(&ctx, &cmd)?;
-        let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
-            return Ok(());
-        };
-        run_cleanup_aware_environment_activity(
-            ctx.clone(),
-            lifecycle::handle_environment_restart_sources(
-                &self.wctx,
-                &job_payload(&cmd, "environment.restart_sources"),
-                &authority,
-                setup_identity,
-                ctx,
-            ),
-        )
+        let span = activity_span(
+            "EnvironmentRestartSourcesActivity",
+            &cmd.environment_id,
+            &cmd.trace_context,
+            &ctx,
+        );
+        async move {
+            let setup_identity = setup_activity_identity(&ctx, &cmd)?;
+            let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
+                return Ok(());
+            };
+            run_cleanup_aware_environment_activity(
+                ctx.clone(),
+                lifecycle::handle_environment_restart_sources(
+                    &self.wctx,
+                    &job_payload(&cmd, "environment.restart_sources"),
+                    &authority,
+                    setup_identity,
+                    ctx,
+                ),
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -384,17 +478,27 @@ impl EnvironmentActivities {
         ctx: ActivityContext,
         cmd: EnvironmentActivityCommand,
     ) -> Result<(), ActivityError> {
-        let Some(authority) = required_authority(&self.wctx, &cmd, "destroyed").await? else {
-            return Ok(());
-        };
-        run_environment_activity(
-            ctx,
-            lifecycle::handle_environment_destroy(
-                &self.wctx,
-                &job_payload(&cmd, "environment.destroy"),
-                &authority,
-            ),
-        )
+        let span = activity_span(
+            "EnvironmentDestroyActivity",
+            &cmd.environment_id,
+            &cmd.trace_context,
+            &ctx,
+        );
+        async move {
+            let Some(authority) = required_authority(&self.wctx, &cmd, "destroyed").await? else {
+                return Ok(());
+            };
+            run_environment_activity(
+                ctx,
+                lifecycle::handle_environment_destroy(
+                    &self.wctx,
+                    &job_payload(&cmd, "environment.destroy"),
+                    &authority,
+                ),
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -404,19 +508,29 @@ impl EnvironmentActivities {
         ctx: ActivityContext,
         cmd: EnvironmentActivityCommand,
     ) -> Result<(), ActivityError> {
-        let attempt = ctx.info().attempt;
-        let Some(authority) = required_authority(&self.wctx, &cmd, "resized").await? else {
-            return Ok(());
-        };
-        run_environment_activity(
-            ctx,
-            resize::run_environment_resize(
-                &self.wctx,
-                &cmd.environment_id,
-                &authority,
-                attempt >= 3,
-            ),
-        )
+        let span = activity_span(
+            "EnvironmentResizeActivity",
+            &cmd.environment_id,
+            &cmd.trace_context,
+            &ctx,
+        );
+        async move {
+            let attempt = ctx.info().attempt;
+            let Some(authority) = required_authority(&self.wctx, &cmd, "resized").await? else {
+                return Ok(());
+            };
+            run_environment_activity(
+                ctx,
+                resize::run_environment_resize(
+                    &self.wctx,
+                    &cmd.environment_id,
+                    &authority,
+                    attempt >= 3,
+                ),
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -426,28 +540,38 @@ impl EnvironmentActivities {
         ctx: ActivityContext,
         cmd: EnvironmentActivityCommand,
     ) -> Result<ReconcileOutcome, ActivityError> {
-        let authority = match ActivityAuthority::capture(
-            &self.wctx.pool,
+        let span = activity_span(
+            "EnvironmentReconcileActivity",
             &cmd.environment_id,
-            cmd.operation_generation,
-        )
-        .await
-        {
-            Ok(authority) => authority,
-            Err(error) if is_authority_lost(&error) => return Ok(ReconcileOutcome::Continue),
-            Err(error) => return Err(error.into()),
-        };
-        let setup_identity = setup_activity_identity(&ctx, &cmd)?;
-        run_cleanup_aware_environment_activity(ctx.clone(), async {
-            lifecycle::handle_environment_reconcile(
-                &self.wctx,
-                &job_payload(&cmd, "environment.reconcile"),
-                &authority,
-                setup_identity,
-                ctx,
+            &cmd.trace_context,
+            &ctx,
+        );
+        async move {
+            let authority = match ActivityAuthority::capture(
+                &self.wctx.pool,
+                &cmd.environment_id,
+                cmd.operation_generation,
             )
             .await
-        })
+            {
+                Ok(authority) => authority,
+                Err(error) if is_authority_lost(&error) => return Ok(ReconcileOutcome::Continue),
+                Err(error) => return Err(error.into()),
+            };
+            let setup_identity = setup_activity_identity(&ctx, &cmd)?;
+            run_cleanup_aware_environment_activity(ctx.clone(), async {
+                lifecycle::handle_environment_reconcile(
+                    &self.wctx,
+                    &job_payload(&cmd, "environment.reconcile"),
+                    &authority,
+                    setup_identity,
+                    ctx,
+                )
+                .await
+            })
+            .await
+        }
+        .instrument(span)
         .await
     }
 }
@@ -550,6 +674,7 @@ impl EnvironmentWorkflow {
                             EnvironmentActivities::claim_authority,
                             EnvironmentClaimInput {
                                 environment_id: cmd.environment_id.clone(),
+                                trace_context: cmd.trace_context.clone(),
                             },
                             environment_activity_opts(),
                         )
@@ -1058,7 +1183,19 @@ impl TemporalTrigger {
     }
 
     /// Mirrors `TriggerEnvironment`: SignalWithStart with an empty
-    /// initial command and the real command as the signal.
+    /// initial command and the real command as the signal. The signal carries
+    /// the caller's trace context, so the command's activities join its trace.
+    #[tracing::instrument(
+        level = "debug",
+        name = "temporal.signal_with_start",
+        skip_all,
+        fields(
+            environment_id = %env_id,
+            action = %action,
+            otel.kind = "producer",
+            otel.name = "SignalWithStartWorkflow:EnvironmentWorkflow",
+        )
+    )]
     pub async fn trigger_environment(&self, env_id: &str, action: &str) -> anyhow::Result<()> {
         use temporalio_client::{WorkflowStartOptions, WorkflowStartSignal};
         let workflow_id = environment_workflow_id(env_id);
@@ -1066,6 +1203,7 @@ impl TemporalTrigger {
             action: action.to_string(),
             environment_id: env_id.to_string(),
             requested_by: String::new(),
+            trace_context: TraceContext::current(),
         };
         let signal_input = temporalio_common::data_converters::DataConverter::default()
             .to_payloads(
@@ -1331,6 +1469,7 @@ mod tests {
             action: "setup".into(),
             environment_id: "env-1".into(),
             requested_by: String::new(),
+            ..Default::default()
         };
         assert!(EnvironmentActivityCommand::from_signal(&signal, 0).is_err());
     }
@@ -1362,6 +1501,91 @@ mod tests {
         assert_ne!(json, "null");
     }
 
+    /// A create's trace context rides the signal through the Temporal data
+    /// converter into the claim and activity inputs, and a command sent while
+    /// trace export is off keeps its exact pre-tracing payload.
+    #[tokio::test]
+    async fn trace_context_rides_from_the_signal_into_activity_inputs() {
+        use temporalio_common::data_converters::{DataConverter, SerializationContextData};
+
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let converter = DataConverter::default();
+        let signal = EnvironmentCommand {
+            action: "create".into(),
+            environment_id: "env-1".into(),
+            requested_by: String::new(),
+            trace_context: TraceContext {
+                traceparent: Some(traceparent.into()),
+                tracestate: Some("codewire=dev".into()),
+            },
+        };
+        let payloads = converter
+            .to_payloads(&SerializationContextData::Workflow, &signal)
+            .await
+            .unwrap();
+        let received: EnvironmentCommand = converter
+            .from_payloads(&SerializationContextData::Workflow, payloads)
+            .await
+            .unwrap();
+        assert_eq!(received.trace_context, signal.trace_context);
+
+        let claim = EnvironmentClaimInput {
+            environment_id: received.environment_id.clone(),
+            trace_context: received.trace_context.clone(),
+        };
+        let claim_payloads = converter
+            .to_payloads(&SerializationContextData::Activity, &claim)
+            .await
+            .unwrap();
+        let claim: EnvironmentClaimInput = converter
+            .from_payloads(&SerializationContextData::Activity, claim_payloads)
+            .await
+            .unwrap();
+        assert_eq!(
+            claim.trace_context.traceparent.as_deref(),
+            Some(traceparent)
+        );
+
+        let activity = EnvironmentActivityCommand::from_signal(&received, 7).unwrap();
+        let activity_payloads = converter
+            .to_payloads(&SerializationContextData::Activity, &activity)
+            .await
+            .unwrap();
+        let activity: EnvironmentActivityCommand = converter
+            .from_payloads(&SerializationContextData::Activity, activity_payloads)
+            .await
+            .unwrap();
+        assert_eq!(activity.operation_generation, 7);
+        assert_eq!(
+            activity.trace_context.traceparent.as_deref(),
+            Some(traceparent)
+        );
+        assert_eq!(
+            activity.trace_context.tracestate.as_deref(),
+            Some("codewire=dev")
+        );
+
+        let untraced = EnvironmentActivityCommand::from_signal(
+            &EnvironmentCommand {
+                action: "create".into(),
+                environment_id: "env-1".into(),
+                ..Default::default()
+            },
+            7,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&untraced).unwrap(),
+            r#"{"environment_id":"env-1","requested_by":"","operation_generation":7}"#
+        );
+        assert!(
+            serde_json::from_str::<EnvironmentActivityCommand>(
+                r#"{"environment_id":"env-1","requested_by":"","operation_generation":7,"trace_context":{"traceparent":"x","authority":"y"}}"#
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn workflow_rejects_cross_environment_signals() {
         let mut expected = None;
@@ -1369,11 +1593,13 @@ mod tests {
             action: "create".into(),
             environment_id: "env-1".into(),
             requested_by: String::new(),
+            ..Default::default()
         };
         let other = EnvironmentCommand {
             action: "destroy".into(),
             environment_id: "env-2".into(),
             requested_by: String::new(),
+            ..Default::default()
         };
         ensure_workflow_environment(&mut expected, &first).unwrap();
         assert!(ensure_workflow_environment(&mut expected, &other).is_err());

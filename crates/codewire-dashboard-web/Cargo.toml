@@ -20,7 +20,9 @@ codewire-oidc = { workspace = true }
 codewire-project = { workspace = true }
 codewire-project-proto = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
-codewire-server-core = { workspace = true }
+# `otel`: the SSR server continues its API calls' traces when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set (codewire-server-core/src/obs.rs).
+codewire-server-core = { workspace = true, features = ["otel"] }
 codewire-workload-secrets = { workspace = true }
 connectrpc = { workspace = true, features = ["client"] }
 http = { workspace = true }

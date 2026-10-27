@@ -1116,6 +1116,7 @@ pub async fn handle_environment_create_without_setup_publish(
     run_environment_create(ctx, payload, authority).await
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %payload.environment_id))]
 async fn run_environment_create(
     ctx: &WorkerContext,
     payload: &JobPayload,
@@ -2241,6 +2242,7 @@ async fn resume_suspended_workspace(
     }
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
 async fn ensure_access_stack_for_environment(
     ctx: &WorkerContext,
     cfg: &SandboxWorkerCfg,
@@ -2287,6 +2289,7 @@ async fn ensure_access_stack_for_environment(
 /// Recover one exactly owned, stale-bootstrap runtime through the same cold
 /// start path. A second mismatch, any ownership error or authority loss fails
 /// this attempt; no relabel-only fallback and no unbounded retry loop.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env.id))]
 pub(super) async fn reconcile_or_refresh_runtime_identity(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
@@ -2393,6 +2396,7 @@ pub(super) async fn reconcile_runtime_identity(
 /// recorded warm bind gets its warm-member bridge (#2434) at once, after the
 /// binding committed, so the gateway's connects need not wait for the
 /// relabelled member's new Cilium identity.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env.id))]
 pub(super) async fn wait_with_early_bind<T>(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
