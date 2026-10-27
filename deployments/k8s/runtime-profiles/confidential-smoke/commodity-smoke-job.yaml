@@ -4,7 +4,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: codewire-commodity-runtime-smoke-v74
+  name: codewire-commodity-runtime-smoke-v75
   namespace: codewire-runtime-probes
   labels:
     app.kubernetes.io/name: codewire-commodity-runtime-smoke

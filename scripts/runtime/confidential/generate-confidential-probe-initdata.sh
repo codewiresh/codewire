@@ -6,7 +6,7 @@ SMOKE_DIR="$ROOT/deployments/k8s/runtime-profiles/confidential-smoke"
 KUSTOMIZATION="$SMOKE_DIR/kustomization.confidential-snp.yaml"
 RUNTIME_CONTRACT="$ROOT/deployments/k8s/runtime-profiles/policy/genpolicy-runtime-contract.json"
 ANNOTATION='io.katacontainers.config.hypervisor.cc_init_data'
-EXPECTED_KATA_COMMIT='c3774d4a0b57bf16c550d6f698024f07589ee07b'
+EXPECTED_KATA_COMMIT='6078fea77c84cb18563cdc6bafff9fd5fda09ab3'
 POD_NAME_SUFFIX='[bcdfghjklmnpqrstvwxz2456789]+'
 
 die() {

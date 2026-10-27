@@ -3,9 +3,9 @@ set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
 
-KATA_GENPOLICY_SOURCE_REPO="${KATA_GENPOLICY_SOURCE_REPO:-https://github.com/kata-containers/kata-containers.git}"
-KATA_GENPOLICY_SOURCE_REF="${KATA_GENPOLICY_SOURCE_REF:-337b6002681479fb6a605ca8a7a1138e81b6098c}"
-KATA_GENPOLICY_EXPECTED_COMMIT="${KATA_GENPOLICY_EXPECTED_COMMIT:-337b6002681479fb6a605ca8a7a1138e81b6098c}"
+KATA_GENPOLICY_SOURCE_REPO="${KATA_GENPOLICY_SOURCE_REPO:-https://github.com/noeljackson/kata-containers.git}"
+KATA_GENPOLICY_SOURCE_REF="${KATA_GENPOLICY_SOURCE_REF:-6078fea77c84cb18563cdc6bafff9fd5fda09ab3}"
+KATA_GENPOLICY_EXPECTED_COMMIT="${KATA_GENPOLICY_EXPECTED_COMMIT:-6078fea77c84cb18563cdc6bafff9fd5fda09ab3}"
 KATA_GENPOLICY_WORKDIR="${KATA_GENPOLICY_WORKDIR:-$ROOT/.tmp/kata-genpolicy}"
 KATA_GENPOLICY_TRIPLE="${KATA_GENPOLICY_TRIPLE:-x86_64-unknown-linux-gnu}"
 KATA_GENPOLICY_BUILD_TYPE="${KATA_GENPOLICY_BUILD_TYPE:-release}"
@@ -31,8 +31,8 @@ Usage:
 Builds and runs Kata Containers genpolicy from the Codewire-pinned Kata source.
 
 Environment:
-  KATA_GENPOLICY_SOURCE_REPO       Source repo (default: upstream kata-containers)
-  KATA_GENPOLICY_SOURCE_REF        Git ref to fetch (default: Kata 3.32.0 commit)
+  KATA_GENPOLICY_SOURCE_REPO       Source repo (default: the Codewire Kata fork)
+  KATA_GENPOLICY_SOURCE_REF        Git ref to fetch (default: the Kata 4.3.1 deployment commit)
   KATA_GENPOLICY_EXPECTED_COMMIT   Commit guard; empty disables guard
   KATA_GENPOLICY_WORKDIR           Build/cache dir (default: .tmp/kata-genpolicy)
   KATA_GENPOLICY_TRIPLE            Cargo target triple (default: x86_64-unknown-linux-gnu)
