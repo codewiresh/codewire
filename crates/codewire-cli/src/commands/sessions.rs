@@ -1,5 +1,5 @@
 use super::*;
-use crate::terminal_attach::RawModeGuard;
+use crate::terminal_attach::{RawModeGuard, SessionScreen};
 use tokio::io::AsyncReadExt as _;
 #[cfg(unix)]
 pub(crate) mod agents;
@@ -1261,6 +1261,7 @@ async fn attach_host_environment_session(
     interactive: bool,
     raw_output: bool,
     ansi: &mut LogsAnsiFilter,
+    screen: &mut SessionScreen,
 ) -> anyhow::Result<AttachExit> {
     use codewire_daemon_proto::daemon::v1::session_attach_message::Payload;
     let client = host_session_client(environment).await?;
@@ -1295,6 +1296,7 @@ async fn attach_host_environment_session(
                 match event.payload {
                     Some(Payload::Output(chunk))=>{
                         if raw_output {
+                            screen.observe(&chunk.data);
                             write_session_output(&mut std::io::stdout(), &chunk.data, true)?;
                         } else {
                             write_session_output(&mut std::io::stdout(), &ansi.strip(&chunk.data), true)?;
@@ -2031,6 +2033,9 @@ async fn attach_environment_session(
 ) -> anyhow::Result<Option<EnvironmentSessionView>> {
     let mut output_offset = 0;
     let mut reconnect_budget = AttachmentReconnectBudget::default();
+    // Survives reconnects, which resume the same output, so the program's
+    // screen is given back only when this terminal leaves it.
+    let mut screen = SessionScreen::new(std::io::stdout().is_terminal());
     loop {
         let exit = match &target {
             #[cfg(unix)]
@@ -2042,6 +2047,7 @@ async fn attach_environment_session(
                     session.pty,
                     true,
                     &mut LogsAnsiFilter::default(),
+                    &mut screen,
                 )
                 .await?
             }
@@ -2049,7 +2055,8 @@ async fn attach_environment_session(
             EnvironmentSessionTarget::NativeLocal { environment_id, .. } => {
                 let client = native_environment_session_client(environment_id).await?;
                 let attachment = client.attach(&session.session_id, output_offset).await?;
-                attach_platform_environment_session(attachment, session.pty, true).await?
+                attach_platform_environment_session(attachment, session.pty, true, &mut screen)
+                    .await?
             }
             EnvironmentSessionTarget::Platform {
                 org_id,
@@ -2067,9 +2074,16 @@ async fn attach_environment_session(
                     })
                     .await
                     .map_err(display_client_error)?;
-                attach_platform_environment_session(attachment, session.pty, true).await?
+                attach_platform_environment_session(attachment, session.pty, true, &mut screen)
+                    .await?
             }
         };
+        if !matches!(
+            exit,
+            AttachExit::StreamEnded { .. } | AttachExit::StreamInterrupted { .. }
+        ) {
+            screen.release();
+        }
         match exit {
             AttachExit::Detached => {
                 // The terminal is out of raw mode again: say where the
@@ -2144,6 +2158,7 @@ async fn attach_platform_environment_session(
     mut attachment: codewire_client::EnvironmentSessionAttachment,
     interactive: bool,
     raw_output: bool,
+    screen: &mut SessionScreen,
 ) -> anyhow::Result<AttachExit> {
     let input = attachment.input_handle();
     let mut stdin = tokio::io::stdin();
@@ -2211,6 +2226,9 @@ async fn attach_platform_environment_session(
                         output_offset = gap.retained_start_offset;
                     }
                     Some(codewire_client::attach_session_response::Event::Output(output)) => {
+                        if raw_output {
+                            screen.observe(&output.data);
+                        }
                         write_session_output(&mut stdout, &output.data, raw_output)?;
                         output_offset = output.next_offset;
                     }
@@ -2220,7 +2238,8 @@ async fn attach_platform_environment_session(
                         if !interactive {
                             return Ok(AttachExit::Terminal);
                         }
-                        eprintln!("\r\n[cw] session exited; Ctrl+B r restarts, Ctrl+B d detaches");
+                        screen.release();
+                        eprint!("[cw] session exited; Ctrl+B r restarts, Ctrl+C leaves\r\n");
                     }
                     Some(codewire_client::attach_session_response::Event::Status(_)) => {}
                     None => {}
@@ -2240,6 +2259,20 @@ async fn attach_platform_environment_session(
                     continue;
                 }
                 let (action, forward) = decoder.feed(&stdin_buf[..read]);
+                if terminal {
+                    // The program is gone and its attachment closed, so
+                    // keystrokes have nowhere to go. Ctrl-C, Ctrl-D and
+                    // Ctrl+B d leave; the session no longer runs.
+                    if forward.iter().any(|byte| matches!(byte, 0x03 | 0x04))
+                        || action == Some(AttachExit::Detached)
+                    {
+                        return Ok(AttachExit::Terminal);
+                    }
+                    if let Some(action) = action {
+                        return Ok(action);
+                    }
+                    continue;
+                }
                 if !forward.is_empty() {
                     input.send(codewire_client::AttachSessionRequest {
                         input: Some(codewire_client::attach_session_request::Input::Stdin(forward)),
@@ -2248,10 +2281,12 @@ async fn attach_platform_environment_session(
                 }
                 if let Some(action) = action {
                     if matches!(action, AttachExit::Detached) && output_open {
-                        input.send(codewire_client::AttachSessionRequest {
+                        // Detaching is local: an attachment that closed
+                        // meanwhile needs no notice.
+                        let _ = input.send(codewire_client::AttachSessionRequest {
                             input: Some(codewire_client::attach_session_request::Input::Detach(Box::default())),
                             ..Default::default()
-                        }).await.map_err(display_client_error)?;
+                        }).await;
                     }
                     return Ok(action);
                 }
@@ -2829,6 +2864,7 @@ async fn follow_session_output(
                     false,
                     raw_output,
                     &mut ansi,
+                    &mut SessionScreen::new(false),
                 )
                 .await?
             }
@@ -2839,6 +2875,7 @@ async fn follow_session_output(
                     client.attach(&session.session_id, output_offset).await?,
                     false,
                     raw_output,
+                    &mut SessionScreen::new(false),
                 )
                 .await?
             }
@@ -2858,7 +2895,13 @@ async fn follow_session_output(
                     })
                     .await
                     .map_err(display_client_error)?;
-                attach_platform_environment_session(attachment, false, raw_output).await?
+                attach_platform_environment_session(
+                    attachment,
+                    false,
+                    raw_output,
+                    &mut SessionScreen::new(false),
+                )
+                .await?
             }
         };
         match exit {

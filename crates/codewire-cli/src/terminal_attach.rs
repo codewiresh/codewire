@@ -111,6 +111,103 @@ impl WindowSizeWatch {
     }
 }
 
+/// Modes a session's program may leave set when it exits or is detached
+/// mid-frame: attributes, a hidden cursor, autowrap, cursor and keypad
+/// application modes, mouse and focus reporting, bracketed paste, and the
+/// kitty and modifyOtherKeys keyboard protocols. Each resets to the default.
+const SESSION_MODE_RESET: &[u8] = b"\x1b[0m\x1b[?25h\x1b[?7h\x1b[?1l\x1b>\
+\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[<u\x1b[>4m";
+const ALTERNATE_SCREEN_ENTER: [&[u8]; 3] = [b"\x1b[?1049h", b"\x1b[?1047h", b"\x1b[?47h"];
+const ALTERNATE_SCREEN_LEAVE: [&[u8]; 3] = [b"\x1b[?1049l", b"\x1b[?1047l", b"\x1b[?47l"];
+
+/// Gives the terminal back from an attached session's program, as tmux does
+/// on detach: leaves its alternate screen, resets the modes it set, erases
+/// its last frame below the cursor and starts a fresh line. It acts once per
+/// stretch of output, so a reconnect that resumes the same output keeps the
+/// program's screen.
+pub(crate) struct SessionScreen {
+    enabled: bool,
+    drawn: bool,
+    alternate: bool,
+    tail: Vec<u8>,
+}
+
+impl SessionScreen {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            drawn: false,
+            alternate: false,
+            tail: Vec::new(),
+        }
+    }
+
+    /// Records output written to the terminal.
+    pub(crate) fn observe(&mut self, data: &[u8]) {
+        if !self.enabled || data.is_empty() {
+            return;
+        }
+        self.drawn = true;
+        // A sequence may span two chunks, so the end of the last one is
+        // scanned again; the last switch seen decides the screen.
+        let mut window = std::mem::take(&mut self.tail);
+        window.extend_from_slice(data);
+        let last = |patterns: &[&[u8]]| {
+            patterns
+                .iter()
+                .filter_map(|pattern| {
+                    window
+                        .windows(pattern.len())
+                        .rposition(|candidate| candidate == *pattern)
+                })
+                .max()
+        };
+        match (last(&ALTERNATE_SCREEN_ENTER), last(&ALTERNATE_SCREEN_LEAVE)) {
+            (Some(enter), Some(leave)) => self.alternate = enter > leave,
+            (Some(_), None) => self.alternate = true,
+            (None, Some(_)) => self.alternate = false,
+            (None, None) => {}
+        }
+        let keep = window.len().min(ALTERNATE_SCREEN_ENTER[0].len() - 1);
+        self.tail = window.split_off(window.len() - keep);
+    }
+
+    /// The bytes that give the terminal back, or none when nothing was drawn
+    /// since the last release.
+    fn release_bytes(&mut self) -> Vec<u8> {
+        if !self.drawn {
+            return Vec::new();
+        }
+        let mut bytes = Vec::new();
+        if self.alternate {
+            bytes.extend_from_slice(b"\x1b[?1049l");
+        }
+        bytes.extend_from_slice(SESSION_MODE_RESET);
+        bytes.extend_from_slice(b"\x1b[J\r\n");
+        self.drawn = false;
+        self.alternate = false;
+        self.tail.clear();
+        bytes
+    }
+
+    pub(crate) fn release(&mut self) {
+        use std::io::Write as _;
+        let bytes = self.release_bytes();
+        if bytes.is_empty() {
+            return;
+        }
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(&bytes);
+        let _ = stdout.flush();
+    }
+}
+
+impl Drop for SessionScreen {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 pub(crate) struct RawModeGuard {
     state: String,
     restore: fn(&str),
@@ -191,6 +288,34 @@ mod tests {
         assert_eq!(watch.report((80, 24)), None);
         assert_eq!(watch.report((120, 40)), Some((120, 40)));
         assert_eq!(watch.report((80, 24)), Some((80, 24)));
+    }
+
+    #[test]
+    fn a_session_screen_gives_the_terminal_back_once() {
+        let mut screen = SessionScreen::new(true);
+        assert!(screen.release_bytes().is_empty(), "nothing drawn yet");
+        screen.observe(b"\x1b[?25lmenu");
+        let bytes = screen.release_bytes();
+        assert!(!bytes.starts_with(b"\x1b[?1049l"), "{bytes:?}");
+        assert!(bytes.starts_with(SESSION_MODE_RESET), "{bytes:?}");
+        assert!(bytes.ends_with(b"\x1b[J\r\n"), "{bytes:?}");
+        assert!(screen.release_bytes().is_empty(), "released once");
+        assert!(SessionScreen::new(false).release_bytes().is_empty());
+    }
+
+    #[test]
+    fn a_session_screen_leaves_the_alternate_screen_its_program_entered() {
+        let mut screen = SessionScreen::new(true);
+        // The switch is split across two chunks.
+        screen.observe(b"vim\x1b[?10");
+        screen.observe(b"49hframe");
+        assert!(screen.release_bytes().starts_with(b"\x1b[?1049l"));
+
+        screen.observe(b"\x1b[?1049hframe\x1b[?1049lbye");
+        assert!(!screen.release_bytes().starts_with(b"\x1b[?1049l"));
+
+        screen.observe(b"\x1b[?1049l\x1b[?47h");
+        assert!(screen.release_bytes().starts_with(b"\x1b[?1049l"));
     }
 
     #[test]
