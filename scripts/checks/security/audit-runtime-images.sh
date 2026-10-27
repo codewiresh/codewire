@@ -54,8 +54,8 @@ fi
 readonly rust_channel
 readonly rust_build_digest='114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6'
 readonly rust_build_image="rust:${rust_channel}-bookworm@sha256:${rust_build_digest}"
-readonly debian_runtime_image='debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818'
-readonly dashboard_runtime='gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a547c14e23fcf4ce8ad62ca5d43b4faae8d22cd292f490fef9946c96e'
+readonly debian_runtime_image='debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587'
+readonly dashboard_runtime='gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f'
 readonly dashboard_dockerfile='apps/dashboard/Dockerfile'
 readonly rust_base_dockerfile='deployments/docker/rust-base.Dockerfile'
 readonly -a runtime_dockerfiles=(

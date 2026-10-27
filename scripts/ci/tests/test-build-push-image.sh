@@ -137,7 +137,7 @@ verify_services_dockerfile_contract() {
     fail 'services image must compile every shipped binary in one Cargo build'
   grep -qF 'FROM codewire-rust-base AS builder' "$SERVICES_DOCKERFILE" ||
     fail 'services does not consume the shared Rust build base'
-  grep -qF 'ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818' \
+  grep -qF 'ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587' \
     "$SERVICES_DOCKERFILE" || fail 'services runtime base changed'
   grep -qF "FROM \${DEBIAN_IMAGE}" "$SERVICES_DOCKERFILE" ||
     fail 'services runtime does not consume the reviewed Debian image'

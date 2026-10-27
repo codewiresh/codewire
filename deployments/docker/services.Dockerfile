@@ -24,7 +24,7 @@
 # family (prost-wkt-types). It comes from one checksum-pinned upstream archive;
 # the image never consults an operating-system package repository.
 
-ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 ARG TARGETARCH
 
 # Only the two selected-agent tools and their missing crypto library are
