@@ -757,6 +757,9 @@ async fn profile_command(
             print_profile_revisions(&revisions, args.output)
         }
         CredentialProfileCommand::Delete(args) => delete_profile(client, args).await,
+        CredentialProfileCommand::Default(_) => anyhow::bail!(
+            "local credential profiles have no default; the default is a cloud credential profile (use --cloud)"
+        ),
     }
 }
 

@@ -732,6 +732,9 @@ run_explicit_isolation_tier_case() {
   # Without its own document the smoke reads no codewire.yaml.
   [[ "$(sed -n '1,2p' "$args_file" | paste -sd ' ')" == "create --no-file" ]] ||
     fail "environment create without a document may read a codewire.yaml"
+  # Nor does it bind the user's default credential profile (#3550).
+  [[ "$(sed -n '3p' "$args_file")" == "--no-profile" ]] ||
+    fail "environment create without a document may select the default credential profile"
 }
 
 run_resize_guest_case() {

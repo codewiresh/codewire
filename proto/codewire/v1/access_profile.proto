@@ -17,6 +17,7 @@ service AccessProfileService {
   rpc UpdateAccessProfile(UpdateAccessProfileRequest) returns (UpdateAccessProfileResponse);
   rpc RenameAccessProfile(RenameAccessProfileRequest) returns (RenameAccessProfileResponse);
   rpc DeleteAccessProfile(DeleteAccessProfileRequest) returns (DeleteAccessProfileResponse);
+  rpc SetDefaultAccessProfile(SetDefaultAccessProfileRequest) returns (SetDefaultAccessProfileResponse);
 
   rpc GetEnvironmentAccessProfile(GetEnvironmentAccessProfileRequest) returns (GetEnvironmentAccessProfileResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -40,6 +41,13 @@ message AccessProfile {
   string name = 2;
   uint64 revision = 3;
   repeated AccessProfileEntry entries = 4;
+  // Whether this is the owner's default profile, a mutable mark on the
+  // profile like its name, not part of a revision. An owner with any profile
+  // has exactly one default: their first profile becomes it, it changes only
+  // through SetDefaultAccessProfile, and it cannot be deleted. Clients select
+  // it when the user names no profile and list it first. Environment creation
+  // never applies it implicitly; a selection is always explicit.
+  bool is_default = 5;
 }
 
 message ListAccessProfilesRequest {
@@ -105,12 +113,25 @@ message RenameAccessProfileResponse {
   AccessProfile access_profile = 1;
 }
 
+// Refused with FAILED_PRECONDITION for the owner's default profile: make
+// another profile the default first. Nothing changes.
 message DeleteAccessProfileRequest {
   string access_profile_id = 1;
   uint64 expected_revision = 2;
 }
 
 message DeleteAccessProfileResponse {}
+
+// Make one of the owner's profiles their default, replacing the previous
+// default. Setting the current default again is a no-op. There is no way to
+// clear the default while the owner has profiles.
+message SetDefaultAccessProfileRequest {
+  string access_profile_id = 1;
+}
+
+message SetDefaultAccessProfileResponse {
+  AccessProfile access_profile = 1;
+}
 
 // Exact selection, not an access grant or proof that a runtime is ready.
 message EnvironmentAccessProfileBinding {

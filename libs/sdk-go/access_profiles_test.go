@@ -71,7 +71,9 @@ func (f *accessProfileFixture) GetAccessProfile(_ context.Context, request *conn
 	if request.Msg.GetAccessProfileId() == "missing-response" {
 		return connect.NewResponse(&codewirev1.GetAccessProfileResponse{}), nil
 	}
-	return connect.NewResponse(&codewirev1.GetAccessProfileResponse{AccessProfile: accessProfileProto()}), nil
+	profile := accessProfileProto()
+	profile.IsDefault = request.Msg.GetAccessProfileId() == "default-profile"
+	return connect.NewResponse(&codewirev1.GetAccessProfileResponse{AccessProfile: profile}), nil
 }
 func (f *accessProfileFixture) CreateAccessProfile(_ context.Context, request *connect.Request[codewirev1.CreateAccessProfileRequest]) (*connect.Response[codewirev1.CreateAccessProfileResponse], error) {
 	f.record("CreateAccessProfile", request.Msg)
@@ -92,7 +94,17 @@ func (f *accessProfileFixture) RenameAccessProfile(_ context.Context, request *c
 }
 func (f *accessProfileFixture) DeleteAccessProfile(_ context.Context, request *connect.Request[codewirev1.DeleteAccessProfileRequest]) (*connect.Response[codewirev1.DeleteAccessProfileResponse], error) {
 	f.record("DeleteAccessProfile", request.Msg)
+	if request.Msg.AccessProfileId == "default-profile" {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("the default profile cannot be deleted"))
+	}
 	return connect.NewResponse(&codewirev1.DeleteAccessProfileResponse{}), nil
+}
+func (f *accessProfileFixture) SetDefaultAccessProfile(_ context.Context, request *connect.Request[codewirev1.SetDefaultAccessProfileRequest]) (*connect.Response[codewirev1.SetDefaultAccessProfileResponse], error) {
+	f.record("SetDefaultAccessProfile", request.Msg)
+	profile := accessProfileProto()
+	profile.Id = request.Msg.AccessProfileId
+	profile.IsDefault = true
+	return connect.NewResponse(&codewirev1.SetDefaultAccessProfileResponse{AccessProfile: profile}), nil
 }
 func (f *accessProfileFixture) GetEnvironmentAccessProfile(_ context.Context, request *connect.Request[codewirev1.GetEnvironmentAccessProfileRequest]) (*connect.Response[codewirev1.GetEnvironmentAccessProfileResponse], error) {
 	f.record("GetEnvironmentAccessProfile", request.Msg)
@@ -253,5 +265,31 @@ func TestAccessProfilesErrorMappingAndNoStaleCASRetry(t *testing.T) {
 	_, err = client.AccessProfiles.Get(ctx, "missing-response", nil)
 	if err == nil || !strings.Contains(err.Error(), "omitted access_profile") {
 		t.Fatalf("missing profile accepted: %v", err)
+	}
+}
+
+func TestAccessProfilesDefaultMarkAndSetDefault(t *testing.T) {
+	client, fixture := testAccessProfileServer(t)
+	ctx := context.Background()
+	plain, err := client.AccessProfiles.Get(ctx, "profile-one", nil)
+	if err != nil || plain.IsDefault {
+		t.Fatalf("non-default profile read as default: %v %v", plain, err)
+	}
+	marked, err := client.AccessProfiles.Get(ctx, "default-profile", nil)
+	if err != nil || !marked.IsDefault {
+		t.Fatalf("is_default did not round-trip: %v %v", marked, err)
+	}
+	profile, err := client.AccessProfiles.SetDefault(ctx, "profile-two")
+	if err != nil || profile.ID != "profile-two" || !profile.IsDefault || profile.Revision != accessExact {
+		t.Fatalf("set default result: %v %v", profile, err)
+	}
+	request := fixture.last().(*codewirev1.SetDefaultAccessProfileRequest)
+	if request.AccessProfileId != "profile-two" {
+		t.Fatal("set default request changed")
+	}
+	err = client.AccessProfiles.Delete(ctx, "default-profile", accessExact)
+	var sdkError *codewire.Error
+	if !errors.As(err, &sdkError) || sdkError.StatusCode != 400 || fixture.count() != 4 {
+		t.Fatalf("default delete precondition mapping: %v", err)
 	}
 }

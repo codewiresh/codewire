@@ -87,8 +87,8 @@ cw_with_timeout() { shift; cw "$@"; }
 cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
-    '--cloud ls --output json'|'credentials --cloud list --output json'|\
-    'credentials --cloud profiles list --output json') printf '[]\n' ;;
+    '--cloud ls --output json'|'credentials --cloud list --output json') printf '[]\n' ;;
+    'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
     'credentials --cloud generate ssh --name '*) [[ "$6" == "$PROVIDER_SSH_CREDENTIAL_NAME" ]] ;;
     'credentials --cloud get '*" --output json")
       jq -n --arg id "$KEY_ID" --arg name "$PROVIDER_SSH_CREDENTIAL_NAME" --arg key "$PUBLIC_KEY" \

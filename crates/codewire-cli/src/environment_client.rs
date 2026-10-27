@@ -21,6 +21,11 @@ pub struct EnvironmentClient {
 }
 
 impl EnvironmentClient {
+    #[cfg(test)]
+    pub(crate) fn for_test(inner: CodewireClient) -> Self {
+        Self { inner }
+    }
+
     pub fn new(config: &ResolvedPlatformConfig) -> anyhow::Result<Self> {
         Ok(Self {
             inner: connect_client(config)?,
@@ -184,6 +189,53 @@ impl EnvironmentClient {
             "platform returned a different profile or invalid revision"
         );
         Ok(profile)
+    }
+
+    /// Whether this client authenticates with an organization API key, which
+    /// has no personal credential profiles.
+    pub async fn uses_organization_api_key(&self) -> anyhow::Result<bool> {
+        let token = self
+            .inner
+            .bearer_token()
+            .await
+            .map_err(display_client_error)?;
+        Ok(token.expose_secret().starts_with("cw_"))
+    }
+
+    /// The user's default credential profile, from a complete listing, or
+    /// none when they have no profiles. A failed listing is an error, never
+    /// "no default".
+    pub async fn default_credential_profile(&self) -> anyhow::Result<Option<rpc::AccessProfile>> {
+        let mut default = None;
+        let mut page_token = String::new();
+        let mut cursors = std::collections::BTreeSet::new();
+        loop {
+            let page = self
+                .inner
+                .list_access_profiles(rpc::ListAccessProfilesRequest {
+                    page_size: 100,
+                    page_token,
+                    ..Default::default()
+                })
+                .await
+                .map_err(display_client_error)?;
+            for profile in page.access_profiles.into_iter().filter(|p| p.is_default) {
+                anyhow::ensure!(
+                    default.is_none(),
+                    "platform returned more than one default credential profile"
+                );
+                canonical_selection_id(&profile.id)?;
+                default = Some(profile);
+            }
+            if page.next_page_token.is_empty() {
+                return Ok(default);
+            }
+            anyhow::ensure!(
+                cursors.insert(page.next_page_token.clone()),
+                "platform returned a repeated profile cursor"
+            );
+            page_token = page.next_page_token;
+        }
     }
 
     pub async fn prepare_environment_create(

@@ -151,6 +151,9 @@ cw() {
       jq -e --arg id "$2" 'any(.[]; .id == $id)' "$TMPDIR_SMOKE/environments.db" >/dev/null || return 1
       jq --arg id "$2" '{environment: (.[] | select(.id == $id))}' "$TMPDIR_SMOKE/environments.db" ;;
     'create --cloud --file '*)
+      # The application environment selects no credential profile, not even
+      # the user's default (#3550).
+      [[ " $* " == *' --no-profile '* ]] || return 3
       local project
       project="$(jq -r .secrets.project "$APP_SECRET_DOCUMENT")"
       local user organization

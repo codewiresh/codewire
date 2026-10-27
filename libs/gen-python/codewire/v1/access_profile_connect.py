@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .access_profile_pb2 import CreateAccessProfileRequest, CreateAccessProfileResponse, DeleteAccessProfileRequest, DeleteAccessProfileResponse, GetAccessProfileRequest, GetAccessProfileResponse, GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse, ListAccessProfilesRequest, ListAccessProfilesResponse, RenameAccessProfileRequest, RenameAccessProfileResponse, UpdateAccessProfileRequest, UpdateAccessProfileResponse
+from .access_profile_pb2 import CreateAccessProfileRequest, CreateAccessProfileResponse, DeleteAccessProfileRequest, DeleteAccessProfileResponse, GetAccessProfileRequest, GetAccessProfileResponse, GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse, ListAccessProfilesRequest, ListAccessProfilesResponse, RenameAccessProfileRequest, RenameAccessProfileResponse, SetDefaultAccessProfileRequest, SetDefaultAccessProfileResponse, UpdateAccessProfileRequest, UpdateAccessProfileResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -51,6 +51,9 @@ class AccessProfileService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def delete_access_profile(self, request: DeleteAccessProfileRequest, ctx: RequestContext[DeleteAccessProfileRequest, DeleteAccessProfileResponse]) -> DeleteAccessProfileResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def set_default_access_profile(self, request: SetDefaultAccessProfileRequest, ctx: RequestContext[SetDefaultAccessProfileRequest, SetDefaultAccessProfileResponse]) -> SetDefaultAccessProfileResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_environment_access_profile(self, request: GetEnvironmentAccessProfileRequest, ctx: RequestContext[GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse]) -> GetEnvironmentAccessProfileResponse:
@@ -129,6 +132,16 @@ class AccessProfileServiceASGIApplication(ConnectASGIApplication[AccessProfileSe
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.delete_access_profile,
+                ),
+                "/codewire.v1.AccessProfileService/SetDefaultAccessProfile": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SetDefaultAccessProfile",
+                        service_name="codewire.v1.AccessProfileService",
+                        input=SetDefaultAccessProfileRequest,
+                        output=SetDefaultAccessProfileResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.set_default_access_profile,
                 ),
                 "/codewire.v1.AccessProfileService/GetEnvironmentAccessProfile": Endpoint.unary(
                     method=MethodInfo(
@@ -302,6 +315,26 @@ class AccessProfileServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def set_default_access_profile(
+        self,
+        request: SetDefaultAccessProfileRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetDefaultAccessProfileResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetDefaultAccessProfile",
+                service_name="codewire.v1.AccessProfileService",
+                input=SetDefaultAccessProfileRequest,
+                output=SetDefaultAccessProfileResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def get_environment_access_profile(
         self,
         request: GetEnvironmentAccessProfileRequest,
@@ -341,6 +374,9 @@ class AccessProfileServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def delete_access_profile(self, request: DeleteAccessProfileRequest, ctx: RequestContext[DeleteAccessProfileRequest, DeleteAccessProfileResponse]) -> DeleteAccessProfileResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def set_default_access_profile(self, request: SetDefaultAccessProfileRequest, ctx: RequestContext[SetDefaultAccessProfileRequest, SetDefaultAccessProfileResponse]) -> SetDefaultAccessProfileResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def get_environment_access_profile(self, request: GetEnvironmentAccessProfileRequest, ctx: RequestContext[GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse]) -> GetEnvironmentAccessProfileResponse:
@@ -417,6 +453,16 @@ class AccessProfileServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.delete_access_profile,
+                ),
+                "/codewire.v1.AccessProfileService/SetDefaultAccessProfile": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SetDefaultAccessProfile",
+                        service_name="codewire.v1.AccessProfileService",
+                        input=SetDefaultAccessProfileRequest,
+                        output=SetDefaultAccessProfileResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.set_default_access_profile,
                 ),
                 "/codewire.v1.AccessProfileService/GetEnvironmentAccessProfile": EndpointSync.unary(
                     method=MethodInfo(
@@ -579,6 +625,25 @@ class AccessProfileServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.AccessProfileService",
                 input=DeleteAccessProfileRequest,
                 output=DeleteAccessProfileResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def set_default_access_profile(
+        self,
+        request: SetDefaultAccessProfileRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetDefaultAccessProfileResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetDefaultAccessProfile",
+                service_name="codewire.v1.AccessProfileService",
+                input=SetDefaultAccessProfileRequest,
+                output=SetDefaultAccessProfileResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

@@ -204,6 +204,7 @@ cw_runtime_add_managed_credentials() {
     --arg name "$anthropic_name" 'length == 1 and .[0].name == $name
       and .[0].provider == "anthropic" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"
       and .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
+  ensure_kind_credential_default_profile openai "$credential_name"
   kind_credential_cli credentials --cloud --profile "$profile_name" set openai "$credential_name"
   kind_credential_cli credentials --cloud --profile "$profile_name" set anthropic "$anthropic_name"
 }
@@ -408,7 +409,7 @@ cw_runtime_managed_resume_continues() {
   local profile="$1" workspace_image="$2" environment update operation pod
   local launched session first generation before after listed sent message waited resumed
   local back_to_back=20 round
-  environment="$(kind_credential_cli --cloud create --name "kind-cw-resume-${RANDOM}-${RANDOM}" \
+  environment="$(kind_credential_cli --cloud create --name "kind-cw-resume-${RANDOM}-${RANDOM}" --no-profile \
     --image "$workspace_image" --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
@@ -542,7 +543,7 @@ run_retained_managed_agents_journey() {
   # First, while the synthetic providers the smoke later revokes are valid,
   # a conversation continues across Stop/Start in its own environment (#2705).
   cw_runtime_managed_resume_continues "$profile_name" "$workspace_image"
-  environment="$(kind_credential_cli --cloud create --name "$profile_name" \
+  environment="$(kind_credential_cli --cloud create --name "$profile_name" --no-profile \
     --image "$workspace_image" --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
@@ -638,6 +639,7 @@ run_admitted_cw_runtime_journey() {
     cw_runtime_add_managed_credentials "$credential_name" "$anthropic_name" "$profile_name"
   else
     kind_credential_cli credentials --cloud connect codex --name "$credential_name"
+    ensure_kind_credential_default_profile codex "$credential_name"
     kind_credential_cli credentials --cloud --profile "$profile_name" set codex "$credential_name"
   fi
   kind_credential_cli credentials --cloud get "$credential_name" --output json | jq -e \
@@ -647,7 +649,7 @@ run_admitted_cw_runtime_journey() {
     kind_credential_cli credentials --cloud get "$credential_name" --output json | jq -e \
       'length == 1 and .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
   fi
-  environment="$(kind_credential_cli --cloud create --name "$profile_name" \
+  environment="$(kind_credential_cli --cloud create --name "$profile_name" --no-profile \
     --image "$workspace_image" --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]

@@ -347,6 +347,15 @@ async fn generated_lifecycle_requires_owner_current_revision_and_revoked_unrefer
         let manager =
             PlatformAccessProfileStore::new(h.db.pool.clone(), builtin_provider_catalog());
         let owner = Owner::User(OwnerId::parse(ALICE)?);
+        // Alice's first profile is her default, which is never deleted; the
+        // profile under test is an ordinary one.
+        manager
+            .create(
+                &owner,
+                AccessProfileName::parse("default")?,
+                BTreeMap::new(),
+            )
+            .await?;
         let profile = manager
             .create(
                 &owner,

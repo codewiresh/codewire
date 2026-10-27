@@ -159,6 +159,9 @@ pub(super) fn resolve_credential_operation(
             CredentialsCommand::Profiles {
                 command: CredentialProfilesCommand::List(args),
             } => CredentialOperation::Profile(CredentialProfileCommand::List(args)),
+            CredentialsCommand::Profiles {
+                command: CredentialProfilesCommand::Default(args),
+            } => CredentialOperation::Profile(CredentialProfileCommand::Default(args)),
             command => CredentialOperation::Credential(command),
         });
     };

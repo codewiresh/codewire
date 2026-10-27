@@ -10,8 +10,8 @@ use codewire_proto::codewire::v1::{
     EnvironmentAccessProfileBinding, GetAccessProfileRequest, GetAccessProfileResponse,
     GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse,
     ListAccessProfilesRequest, ListAccessProfilesResponse, RenameAccessProfileRequest,
-    RenameAccessProfileResponse, UpdateAccessProfileRequest, UpdateAccessProfileResponse,
-    get_access_profile_request,
+    RenameAccessProfileResponse, SetDefaultAccessProfileRequest, SetDefaultAccessProfileResponse,
+    UpdateAccessProfileRequest, UpdateAccessProfileResponse, get_access_profile_request,
 };
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::connect::{auth_user, rpc_app_error};
@@ -68,7 +68,10 @@ impl AccessProfileService for ProfileConnectService {
         )
         .await?;
         connectrpc::Response::ok(ListAccessProfilesResponse {
-            access_profiles: profiles.into_iter().map(proto_profile).collect(),
+            access_profiles: profiles
+                .into_iter()
+                .map(|(profile, is_default)| proto_profile(profile, is_default))
+                .collect(),
             next_page_token,
             ..Default::default()
         })
@@ -100,7 +103,7 @@ impl AccessProfileService for ProfileConnectService {
         )
         .await?;
         connectrpc::Response::ok(GetAccessProfileResponse {
-            access_profile: Some(proto_profile(profile)).into(),
+            access_profile: Some(proto_profile(profile.0, profile.1)).into(),
             ..Default::default()
         })
     }
@@ -126,7 +129,7 @@ impl AccessProfileService for ProfileConnectService {
         )
         .await?;
         connectrpc::Response::ok(CreateAccessProfileResponse {
-            access_profile: Some(proto_profile(profile)).into(),
+            access_profile: Some(proto_profile(profile.0, profile.1)).into(),
             ..Default::default()
         })
     }
@@ -157,7 +160,7 @@ impl AccessProfileService for ProfileConnectService {
         )
         .await?;
         connectrpc::Response::ok(UpdateAccessProfileResponse {
-            access_profile: Some(proto_profile(profile)).into(),
+            access_profile: Some(proto_profile(profile.0, profile.1)).into(),
             ..Default::default()
         })
     }
@@ -182,7 +185,7 @@ impl AccessProfileService for ProfileConnectService {
         )
         .await?;
         connectrpc::Response::ok(RenameAccessProfileResponse {
-            access_profile: Some(proto_profile(profile)).into(),
+            access_profile: Some(proto_profile(profile.0, profile.1)).into(),
             ..Default::default()
         })
     }
@@ -202,6 +205,25 @@ impl AccessProfileService for ProfileConnectService {
         )
         .await?;
         connectrpc::Response::ok(DeleteAccessProfileResponse::default())
+    }
+
+    async fn set_default_access_profile(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetDefaultAccessProfileRequest>,
+    ) -> ServiceResult<SetDefaultAccessProfileResponse> {
+        let user = account_user(&ctx)?;
+        let request = request.view();
+        let profile = bounded(
+            &ctx,
+            self.request_bound,
+            self.profiles.set_default(&user, request.access_profile_id),
+        )
+        .await?;
+        connectrpc::Response::ok(SetDefaultAccessProfileResponse {
+            access_profile: Some(proto_profile(profile, true)).into(),
+            ..Default::default()
+        })
     }
 
     async fn get_environment_access_profile(
@@ -258,7 +280,7 @@ async fn bounded<T>(
         .map_err(|error| rpc_app_error(&error, ctx))
 }
 
-fn proto_profile(profile: codewire_access::AccessProfile) -> AccessProfile {
+fn proto_profile(profile: codewire_access::AccessProfile, is_default: bool) -> AccessProfile {
     AccessProfile {
         id: profile.id.as_str().to_owned(),
         name: profile.name.as_str().to_owned(),
@@ -272,6 +294,7 @@ fn proto_profile(profile: codewire_access::AccessProfile) -> AccessProfile {
                 ..Default::default()
             })
             .collect(),
+        is_default,
         ..Default::default()
     }
 }

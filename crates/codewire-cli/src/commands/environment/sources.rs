@@ -242,11 +242,23 @@ pub(super) async fn prepare_create_sources(
         credentials: request.project_spec.credentials.clone(),
         profile_revision: None,
     };
+    // With no profile named and no --no-profile, the user's default profile.
+    let from_default = select_default_profile(client, args.no_profile, &mut selection).await?;
     if selection.secrets.is_empty() && selection.credentials.is_none() {
         return Ok(Default::default());
     }
     let names =
         resolve_platform_sources(platform, client, org_id, &mut selection, true, true).await?;
+    if from_default && selection.secrets.is_empty() {
+        // The user's own standing choice: no further confirmation.
+        if matches!(args.output, OutputFormat::Text) {
+            eprintln!(
+                "Credential profile: {} (your default; --no-profile creates without one)",
+                names.profile.as_deref().unwrap_or("default")
+            );
+        }
+        return Ok(apply_create_selection(request, selection, names));
+    }
     eprintln!(
         "Create environment {:?} on platform {:?}, organization {:?}.\n{}Application secrets are visible to the managed workload; provider credentials remain behind their supported handlers.",
         request.name.as_deref().unwrap_or("(server assigned)"),
@@ -255,12 +267,47 @@ pub(super) async fn prepare_create_sources(
         selection_preview(&selection)
     );
     confirm_sources(args.yes, args.output)?;
+    Ok(apply_create_selection(request, selection, names))
+}
+
+/// A cloud create's profile, in order: `--profile`, then codewire.yaml (both
+/// already in `selection`), then the user's default; `--no-profile` selects
+/// none. Returns whether the default was selected. A failure to read the
+/// default fails the create; it never becomes "no profile". An organization
+/// API key has no personal profiles, so it has no default.
+async fn select_default_profile(
+    client: &EnvironmentClient,
+    no_profile: bool,
+    selection: &mut EnvironmentSourceSelection,
+) -> anyhow::Result<bool> {
+    if no_profile || selection.credentials.is_some() || client.uses_organization_api_key().await? {
+        return Ok(false);
+    }
+    let Some(default) = client
+        .default_credential_profile()
+        .await
+        .context("read your default credential profile; --no-profile creates without one")?
+    else {
+        return Ok(false);
+    };
+    selection.credentials = Some(codewire_project::CredentialBinding {
+        profile: format!("platform:id:{}", default.id),
+    });
+    Ok(true)
+}
+
+/// The exact previewed selection, with consent to exactly what it names.
+fn apply_create_selection(
+    request: &mut CreateEnvironmentRequest,
+    selection: EnvironmentSourceSelection,
+    names: super::lifecycle::SourceNames,
+) -> super::lifecycle::SourceNames {
     request.confirm_personal_secrets = selection.secrets.user.is_some();
     request.confirm_personal_credentials = selection.credentials.is_some();
     request.expected_profile_revision = selection.profile_revision;
     request.project_spec.secrets = selection.secrets;
     request.project_spec.credentials = selection.credentials;
-    Ok(names)
+    names
 }
 
 pub(super) async fn update_platform_sources(
@@ -350,6 +397,168 @@ pub(super) async fn update_platform_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buffa::Message as _;
+    use codewire_client as rpc;
+    use wiremock::matchers::{body_bytes, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const DEFAULT: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn profile_client(server: &MockServer) -> EnvironmentClient {
+        client_with_token(server, "synthetic-default-profile-token")
+    }
+
+    fn client_with_token(server: &MockServer, token: &str) -> EnvironmentClient {
+        EnvironmentClient::for_test(
+            rpc::CodewireClient::with_http(
+                rpc::ClientConfig::new(server.uri()).unwrap(),
+                rpc::StaticTokenProvider::new(token).unwrap(),
+                reqwest::Client::new(),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_organization_api_key_has_no_default_and_reads_none() {
+        let server = MockServer::start().await;
+        let mut selection = EnvironmentSourceSelection::default();
+        assert!(
+            !select_default_profile(
+                &client_with_token(&server, "cw_synthetic_organization_key"),
+                false,
+                &mut selection
+            )
+            .await
+            .unwrap()
+        );
+        assert!(selection.credentials.is_none());
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    async fn list_page(server: &MockServer, token: &str, profiles: &[(&str, bool)], next: &str) {
+        Mock::given(method("POST"))
+            .and(path("/codewire.v1.AccessProfileService/ListAccessProfiles"))
+            .and(body_bytes(
+                rpc::ListAccessProfilesRequest {
+                    page_size: 100,
+                    page_token: token.into(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(
+                        rpc::ListAccessProfilesResponse {
+                            access_profiles: profiles
+                                .iter()
+                                .map(|(id, is_default)| rpc::AccessProfile {
+                                    id: (*id).into(),
+                                    name: "synthetic".into(),
+                                    revision: 1,
+                                    is_default: *is_default,
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            next_page_token: next.into(),
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    ),
+            )
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_named_profile_or_no_profile_never_reads_the_default() {
+        let server = MockServer::start().await;
+        let client = profile_client(&server);
+        let named = Some(codewire_project::CredentialBinding {
+            profile: "platform:work".into(),
+        });
+        for (no_profile, credentials) in [(false, named.clone()), (true, None)] {
+            let mut selection = EnvironmentSourceSelection {
+                credentials: credentials.clone(),
+                ..Default::default()
+            };
+            assert!(
+                !select_default_profile(&client, no_profile, &mut selection)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(selection.credentials, credentials);
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unnamed_profile_is_the_default_from_any_page() {
+        let server = MockServer::start().await;
+        list_page(
+            &server,
+            "",
+            &[("11111111-1111-4111-8111-111111111111", false)],
+            "next",
+        )
+        .await;
+        list_page(&server, "next", &[(DEFAULT, true)], "").await;
+        let mut selection = EnvironmentSourceSelection::default();
+        assert!(
+            select_default_profile(&profile_client(&server), false, &mut selection)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            selection.credentials.unwrap().profile,
+            format!("platform:id:{DEFAULT}")
+        );
+    }
+
+    #[tokio::test]
+    async fn no_default_selects_none_and_a_failed_read_fails_the_create() {
+        let server = MockServer::start().await;
+        list_page(&server, "", &[], "").await;
+        let mut selection = EnvironmentSourceSelection::default();
+        assert!(
+            !select_default_profile(&profile_client(&server), false, &mut selection)
+                .await
+                .unwrap()
+        );
+        assert!(selection.credentials.is_none());
+
+        let failing = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&failing)
+            .await;
+        assert!(
+            select_default_profile(&profile_client(&failing), false, &mut selection)
+                .await
+                .is_err()
+        );
+        assert!(selection.credentials.is_none());
+
+        let twice = MockServer::start().await;
+        list_page(
+            &twice,
+            "",
+            &[
+                (DEFAULT, true),
+                ("11111111-1111-4111-8111-111111111111", true),
+            ],
+            "",
+        )
+        .await;
+        assert!(
+            select_default_profile(&profile_client(&twice), false, &mut selection)
+                .await
+                .is_err()
+        );
+    }
 
     fn update_args(flags: &[&str]) -> EnvUpdateArgs {
         let mut argv = vec!["cw", "update", "exact-environment"];

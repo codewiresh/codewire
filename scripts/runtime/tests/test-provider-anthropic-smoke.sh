@@ -84,7 +84,7 @@ identity_journey() (
     printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
     case "$*" in
       'credentials --cloud list --output json') printf '[]\n' ;;
-      'credentials --cloud profiles list --output json') printf '[]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
       'credentials --cloud add anthropic --name dev-anthropic-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
         printf 'owner-visible-hidden-prompt\n' ;;
       'credentials --cloud get dev-anthropic-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output json')
@@ -119,7 +119,8 @@ enrollment_cancelled() (
   cw() {
     printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
     case "$*" in
-      'credentials --cloud list --output json'|'credentials --cloud profiles list --output json') printf '[]\n' ;;
+      'credentials --cloud list --output json') printf '[]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
       'credentials --cloud add anthropic --name dev-anthropic-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') return 130 ;;
       *) fail "command continued after cancelled enrollment: $*" ;;
     esac
@@ -137,7 +138,7 @@ name_collision() (
     case "$*" in
       'credentials --cloud list --output json')
         printf '[{"name":"dev-anthropic-cccccccccccccccccccccccccccccccc"}]\n' ;;
-      'credentials --cloud profiles list --output json') printf '[]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
       *) fail "collision permitted a mutation: $*" ;;
     esac
   }
@@ -147,6 +148,29 @@ if name_collision >"$TEST_ROOT/collision.out" 2>"$TEST_ROOT/collision.err"; then
   fail 'preexisting credential name was accepted'
 fi
 [[ "$(wc -l <"$TEST_ROOT/collision.calls")" == 2 ]] || fail 'name collision reached a mutation'
+pass
+
+# A disposable profile in an account without a default would become it and
+# could not be deleted (#3550): refuse before any enrollment.
+no_default_profile() (
+  fixture
+  PROVIDER_ANTHROPIC_CREDENTIAL_NAME=''; PROVIDER_ANTHROPIC_PROFILE_NAME=''
+  tr() { printf 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n'; }
+  cw() {
+    printf '%q ' "$@" >>"$TEST_ROOT/no-default.calls"; printf '\n' >>"$TEST_ROOT/no-default.calls"
+    case "$*" in
+      'credentials --cloud list --output json'|'credentials --cloud profiles list --output json') printf '[]\n' ;;
+      *) fail "an account without a default profile permitted a mutation: $*" ;;
+    esac
+  }
+  prepare_provider_anthropic_identity
+)
+if no_default_profile >"$TEST_ROOT/no-default.out" 2>"$TEST_ROOT/no-default.err"; then
+  fail 'an account without a default profile was accepted'
+fi
+[[ "$(wc -l <"$TEST_ROOT/no-default.calls")" == 2 ]] || fail 'an account without a default profile reached a mutation'
+grep -qF 'this account has no default credential profile' "$TEST_ROOT/no-default.err" ||
+  fail 'the missing default profile was not named'
 pass
 
 cleanup_cw() {

@@ -19,6 +19,8 @@ export interface AccessProfile {
   /** Lossless uint64; never convert this CAS coordinate to number. */
   revision: bigint;
   entries: AccessProfileEntry[];
+  /** The owner's one default profile; like the name, not part of the revision. */
+  is_default: boolean;
 }
 
 /** Exact selection, not an access grant or proof of runtime readiness. */
@@ -64,6 +66,7 @@ function fromProfile(profile: ProtoAccessProfile | undefined): AccessProfile {
       capability_slot: entry.capabilitySlot,
       credential_id: entry.credentialId,
     })),
+    is_default: profile.isDefault,
   };
 }
 
@@ -145,9 +148,21 @@ export class AccessProfiles {
     } catch (error) { throw mapConnectError(error); }
   }
 
+  /** The owner's default profile cannot be deleted; the server rejects it with
+   * FAILED_PRECONDITION, thrown as the normal CodewireError. */
   async delete(id: string, expectedRevision: bigint): Promise<void> {
     try {
       await this.client.deleteAccessProfile({ accessProfileId: id, expectedRevision: revision(expectedRevision) });
+    } catch (error) { throw mapConnectError(error); }
+  }
+
+  /** Make one of the owner's profiles their default, replacing the previous
+   * default, and return it. Setting the current default again is a no-op.
+   * There is no way to clear the default. */
+  async setDefault(id: string): Promise<AccessProfile> {
+    try {
+      const response = await this.client.setDefaultAccessProfile({ accessProfileId: id });
+      return fromProfile(response.accessProfile);
     } catch (error) { throw mapConnectError(error); }
   }
 

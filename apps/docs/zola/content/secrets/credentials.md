@@ -115,6 +115,11 @@ cw update app --profile platform:work      # a confirmed restart; workspace data
 cw update app --clear-profile
 ```
 
+Your first cloud profile is your default: a cloud `cw create` that names no
+profile uses it, and `cw create --no-profile` uses none. Change it with
+`cw credentials --cloud profiles default NAME`. The default can't be deleted
+while it is the default; make another profile the default first.
+
 In the dashboard, **Create Sandbox** has a credential profile picker, and a
 Sandbox's **Edit secrets and credentials** changes it later. The credentials
 page shows **Needs attention** when an identity needs reconnecting.

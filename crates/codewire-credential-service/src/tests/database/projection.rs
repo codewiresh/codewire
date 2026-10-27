@@ -265,7 +265,7 @@ async fn organization_profile_does_not_change_the_personal_application_source_ow
     let f = Fixture::create().await?;
     let result=async {
         grant_projection(&f).await?;
-        sqlx::query("UPDATE platform_access_profiles SET user_id=NULL,organization_id=$1")
+        sqlx::query("UPDATE platform_access_profiles SET user_id=NULL,organization_id=$1 WHERE name='synthetic'")
             .bind(&f.scope.organization).execute(&f.db.pool).await?;
         // Organizations hold API keys, never an OAuth login.
         sqlx::query("UPDATE platform_credentials SET user_id=NULL,organization_id=$1,authentication_kind='api_key'")

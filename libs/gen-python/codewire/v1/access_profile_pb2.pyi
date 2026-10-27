@@ -15,16 +15,18 @@ class AccessProfileEntry(_message.Message):
     def __init__(self, capability_slot: _Optional[str] = ..., credential_id: _Optional[str] = ...) -> None: ...
 
 class AccessProfile(_message.Message):
-    __slots__ = ("id", "name", "revision", "entries")
+    __slots__ = ("id", "name", "revision", "entries", "is_default")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     REVISION_FIELD_NUMBER: _ClassVar[int]
     ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    IS_DEFAULT_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
     revision: int
     entries: _containers.RepeatedCompositeFieldContainer[AccessProfileEntry]
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., revision: _Optional[int] = ..., entries: _Optional[_Iterable[_Union[AccessProfileEntry, _Mapping]]] = ...) -> None: ...
+    is_default: bool
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., revision: _Optional[int] = ..., entries: _Optional[_Iterable[_Union[AccessProfileEntry, _Mapping]]] = ..., is_default: _Optional[bool] = ...) -> None: ...
 
 class ListAccessProfilesRequest(_message.Message):
     __slots__ = ("page_size", "page_token")
@@ -117,6 +119,18 @@ class DeleteAccessProfileRequest(_message.Message):
 class DeleteAccessProfileResponse(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class SetDefaultAccessProfileRequest(_message.Message):
+    __slots__ = ("access_profile_id",)
+    ACCESS_PROFILE_ID_FIELD_NUMBER: _ClassVar[int]
+    access_profile_id: str
+    def __init__(self, access_profile_id: _Optional[str] = ...) -> None: ...
+
+class SetDefaultAccessProfileResponse(_message.Message):
+    __slots__ = ("access_profile",)
+    ACCESS_PROFILE_FIELD_NUMBER: _ClassVar[int]
+    access_profile: AccessProfile
+    def __init__(self, access_profile: _Optional[_Union[AccessProfile, _Mapping]] = ...) -> None: ...
 
 class EnvironmentAccessProfileBinding(_message.Message):
     __slots__ = ("environment_id", "access_profile_id", "access_profile_revision")

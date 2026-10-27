@@ -24,6 +24,8 @@ prepare_provider_openai_identity() {
     "$TMPDIR_SMOKE/provider-openai-credentials-before.json" >/dev/null || die 'disposable OpenAI credential name collision'
   jq -e --arg name "$profile_name" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/provider-openai-profiles-before.json" >/dev/null || die 'disposable OpenAI profile name collision'
+  provider_account_has_default_profile "$TMPDIR_SMOKE/provider-openai-profiles-before.json" ||
+    die 'this account has no default credential profile: the disposable OpenAI profile would become it and could not be deleted; create a lasting profile first'
 
   PROVIDER_OPENAI_CREDENTIAL_NAME="$credential_name"
   PROVIDER_OPENAI_PROFILE_NAME="$profile_name"

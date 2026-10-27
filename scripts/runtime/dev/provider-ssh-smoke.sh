@@ -49,6 +49,14 @@ provider_ssh_metadata_id() {
   ' "$file"
 }
 
+# A user's first cloud profile becomes their default, and the default cannot
+# be deleted (#3550). A disposable profile is made only for an account that
+# already has a default, so it never becomes the default and cleanup can delete
+# it and then its credential. FILE is the account's profile list.
+provider_account_has_default_profile() {
+  jq -e 'type == "array" and any(.[]; .isDefault == true)' "$1" >/dev/null
+}
+
 prepare_provider_ssh_identity() {
   local nonce credential_name profile_name public_key
   nonce="$(tr -d '-' </proc/sys/kernel/random/uuid)"
@@ -68,6 +76,8 @@ prepare_provider_ssh_identity() {
     "$TMPDIR_SMOKE/provider-ssh-credentials-before.json" >/dev/null || die 'disposable SSH credential name collision'
   jq -e --arg name "$profile_name" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/provider-ssh-profiles-before.json" >/dev/null || die 'disposable SSH profile name collision'
+  provider_account_has_default_profile "$TMPDIR_SMOKE/provider-ssh-profiles-before.json" ||
+    die 'this account has no default credential profile: the disposable SSH profile would become it and could not be deleted; create a lasting profile first'
 
   # Cleanup authority starts only after both names have been proven unused.
   PROVIDER_SSH_CREDENTIAL_NAME="$credential_name"

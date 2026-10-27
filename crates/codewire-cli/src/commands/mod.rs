@@ -608,12 +608,24 @@ pub(crate) enum CredentialProfileCommand {
     Unset(CredentialProfileSlotArgs),
     Revisions(CredentialProfileSelectorArgs),
     Delete(CredentialProfileDeleteArgs),
+    Default(CredentialProfileDefaultArgs),
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CredentialProfilesCommand {
     #[command(visible_alias = "ls", about = "List credential profile metadata")]
     List(CredentialListArgs),
+    #[command(
+        about = "Make a cloud credential profile your default",
+        long_about = "Make a cloud credential profile your default. A cloud `cw env create` uses it when you name no profile, the dashboard preselects it, and lists show it first. Your first profile becomes your default, and the default cannot be deleted: make another profile the default first."
+    )]
+    Default(CredentialProfileDefaultArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileDefaultArgs {
+    #[arg(value_name = "PROFILE", help = "Profile name or id:<canonical-uuid>")]
+    pub(crate) profile: String,
 }
 
 #[derive(Debug)]
@@ -1184,9 +1196,15 @@ pub(crate) struct EnvCreateArgs {
     #[arg(
         long,
         value_name = "PROFILE",
-        help = "Credential profile, for example local:work or platform:work"
+        help = "Credential profile, for example local:work or platform:work; a cloud environment otherwise uses codewire.yaml's profile, then your default profile"
     )]
     profile: Option<String>,
+    #[arg(
+        long,
+        conflicts_with = "profile",
+        help = "Create without a credential profile, even when codewire.yaml names one or you have a default"
+    )]
+    no_profile: bool,
     #[arg(long, value_name = "PROJECT", help = "Application-secret project")]
     secrets: Option<String>,
     #[arg(

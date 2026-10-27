@@ -59,6 +59,10 @@ impl Fixture {
                 allow_personal_credentials:true,authorized_credentials:[credential.clone()].into_iter().collect(),
             };
             let manager=PlatformAccessProfileStore::new(db.pool.clone(),builtin_provider_catalog());
+            // The creator's first profile is their default, whose owner never
+            // changes; the bound profile is an ordinary one, so the authority
+            // cases below can move it to another owner.
+            manager.create(&owner,AccessProfileName::parse("default")?,BTreeMap::new()).await?;
             let profile=manager.create(&owner,AccessProfileName::parse("synthetic")?,
                 BTreeMap::from([(CapabilitySlot::codex(),credential)])).await?;
             manager.create_binding(&context,EnvironmentAccessBinding {
@@ -312,8 +316,8 @@ async fn live_revalidation_denies_membership_consent_backend_lifecycle_and_pod_c
              "UPDATE platform_environment_access_bindings SET personal_owner_confirmed_by='synthetic-creator'"),
             ("UPDATE organizations SET deletion_state='deleting',deletion_generation=1,deletion_operation_id='synthetic-delete',deletion_workflow_id='synthetic-delete',deletion_requested_at=now(),deletion_phase='queued' WHERE id='synthetic-org'",
              "UPDATE organizations SET deletion_state='active',deletion_operation_id=NULL,deletion_workflow_id=NULL,deletion_requested_at=NULL,deletion_phase=NULL WHERE id='synthetic-org'"),
-            ("UPDATE platform_access_profiles SET user_id=NULL,organization_id='synthetic-org'",
-             "UPDATE platform_access_profiles SET user_id='synthetic-creator',organization_id=NULL"),
+            ("UPDATE platform_access_profiles SET user_id=NULL,organization_id='synthetic-org' WHERE name='synthetic'",
+             "UPDATE platform_access_profiles SET user_id='synthetic-creator',organization_id=NULL WHERE name='synthetic'"),
         ] {
             sqlx::query(change).execute(&fixture.db.pool).await?;
             ensure!(matches!(authority.current_session().await,Err(PlatformRuntimeError::Denied)));

@@ -7,6 +7,9 @@
 //! Only same-owner entries are supported. Profile edits publish a new immutable
 //! revision; an existing environment keeps its explicitly selected revision.
 //! A rename relabels the profile row and publishes no revision.
+//! A user with any personal profile has exactly one default: their first
+//! profile becomes it, it moves only to another of their own profiles, and it
+//! cannot be deleted. Organization profiles have no default.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -45,6 +48,8 @@ pub enum PlatformProfileError {
     ExpiredCredential,
     #[error("profile is bound to an environment")]
     ProfileInUse,
+    #[error("profile is the default credential profile; make another profile the default first")]
+    DefaultProfile,
     #[error("stored profile or credential metadata is corrupt")]
     CorruptRecord,
     #[error("profile database is unavailable")]
@@ -160,6 +165,56 @@ impl PlatformAccessProfileStore {
         .await
         .map_err(database_error)?;
         insert_revision(&mut tx, &profile).await?;
+        if let Owner::User(user) = owner {
+            // The first profile becomes the default; a user who has one keeps it.
+            sqlx::query(
+                "INSERT INTO platform_access_profile_defaults (user_id,profile_id) VALUES ($1,$2) \
+                 ON CONFLICT (user_id) DO NOTHING",
+            )
+            .bind(user.as_str())
+            .bind(profile.id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        }
+        tx.commit().await.map_err(database_error)?;
+        Ok(profile)
+    }
+
+    /// The owner's default profile. Every user with a personal profile has
+    /// one; a user without profiles and an organization have none.
+    pub async fn default_profile(&self, owner: &Owner) -> Result<Option<AccessProfileId>, Error> {
+        let mut tx = self.begin_transaction().await?;
+        lock_owner(&mut tx, owner).await?;
+        let default = load_default(&mut tx, owner, false).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(default)
+    }
+
+    /// Make one of the user's own profiles their default, replacing the
+    /// previous one. Setting the current default again is a no-op. There is
+    /// no clear: a user with profiles always has a default.
+    pub async fn set_default(
+        &self,
+        owner: &Owner,
+        id: &AccessProfileId,
+    ) -> Result<AccessProfile, Error> {
+        let Owner::User(user) = owner else {
+            return Err(Error::InvalidInput);
+        };
+        let mut tx = self.begin_transaction().await?;
+        lock_owner(&mut tx, owner).await?;
+        let profile = load_profile(&mut tx, owner, id, None, false).await?;
+        sqlx::query(
+            "INSERT INTO platform_access_profile_defaults (user_id,profile_id) VALUES ($1,$2) \
+             ON CONFLICT (user_id) DO UPDATE SET profile_id=EXCLUDED.profile_id,updated_at=now() \
+             WHERE platform_access_profile_defaults.profile_id IS DISTINCT FROM EXCLUDED.profile_id",
+        )
+        .bind(user.as_str())
+        .bind(id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
         Ok(profile)
     }
@@ -264,6 +319,17 @@ impl PlatformAccessProfileStore {
         after: Option<&AccessProfileId>,
         limit: u32,
     ) -> Result<Vec<AccessProfile>, Error> {
+        Ok(self.list_with_default(owner, after, limit).await?.0)
+    }
+
+    /// [`Self::list`] and the owner's default, read in one transaction. The
+    /// page keeps its ID order; callers that show a list put the default first.
+    pub async fn list_with_default(
+        &self,
+        owner: &Owner,
+        after: Option<&AccessProfileId>,
+        limit: u32,
+    ) -> Result<(Vec<AccessProfile>, Option<AccessProfileId>), Error> {
         if limit == 0 || limit > 1000 {
             return Err(Error::InvalidInput);
         }
@@ -287,8 +353,9 @@ impl PlatformAccessProfileStore {
             let id = AccessProfileId::parse(id).map_err(|_| Error::CorruptRecord)?;
             profiles.push(load_profile(&mut tx, owner, &id, None, false).await?);
         }
+        let default = load_default(&mut tx, owner, false).await?;
         tx.commit().await.map_err(database_error)?;
-        Ok(profiles)
+        Ok((profiles, default))
     }
 
     /// CAS advances the current pointer without editing any existing revision
@@ -389,6 +456,11 @@ impl PlatformAccessProfileStore {
         let current = load_profile(&mut tx, owner, id, None, true).await?;
         if current.revision != expected_revision {
             return Err(Error::StaleRevision);
+        }
+        // Locking the default row serializes a delete with a concurrent
+        // default change; the default's foreign key refuses it regardless.
+        if load_default(&mut tx, owner, true).await?.as_ref() == Some(id) {
+            return Err(Error::DefaultProfile);
         }
         let bound: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM platform_environment_access_bindings WHERE profile_id=$1)",
@@ -1060,6 +1132,28 @@ fn credential_metadata(
     };
     metadata.validate().map_err(|_| Error::CorruptRecord)?;
     Ok(metadata)
+}
+
+async fn load_default(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: &Owner,
+    for_update: bool,
+) -> Result<Option<AccessProfileId>, Error> {
+    let Owner::User(user) = owner else {
+        return Ok(None);
+    };
+    let sql = if for_update {
+        "SELECT profile_id FROM platform_access_profile_defaults WHERE user_id=$1 FOR UPDATE"
+    } else {
+        "SELECT profile_id FROM platform_access_profile_defaults WHERE user_id=$1"
+    };
+    sqlx::query_scalar::<_, String>(sql)
+        .bind(user.as_str())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?
+        .map(|id| AccessProfileId::parse(id).map_err(|_| Error::CorruptRecord))
+        .transpose()
 }
 
 async fn lock_owner(tx: &mut Transaction<'_, Postgres>, owner: &Owner) -> Result<(), Error> {

@@ -1203,6 +1203,36 @@ cleanup_kind_credential_stage() {
   done
 }
 
+# A user's first cloud profile becomes their default, and the default cannot
+# be deleted (#3550). Every profile a stage makes is its own and is deleted
+# when the stage ends, so the Kind user keeps one lasting default instead:
+# KIND_CREDENTIAL_DEFAULT_PROFILE, made once per cluster with the calling
+# stage's SLOT and CREDENTIAL and then emptied, so it selects nothing and pins
+# no credential. A user who already has a default keeps it. A stage calls this
+# before it makes its first profile, and creates an environment that means no
+# profile with --no-profile.
+KIND_CREDENTIAL_DEFAULT_PROFILE=kind-default
+ensure_kind_credential_default_profile() {
+  local slot="$1" credential="$2" profiles status=0
+  profiles="$(kind_credential_cli credentials --cloud profiles list --output json)" || return $?
+  jq -e 'if type == "array" then any(.[]; .isDefault == true) else error("expected a profile list") end' \
+    <<<"$profiles" >/dev/null || status=$?
+  case "$status" in
+    0) return 0 ;;
+    1) ;;
+    *)
+      echo '::error::the Kind user profile list is not a JSON array' >&2
+      return 1
+      ;;
+  esac
+  log "the Kind user has no default credential profile; making ${KIND_CREDENTIAL_DEFAULT_PROFILE} its lasting, empty default"
+  kind_credential_cli credentials --cloud --profile "$KIND_CREDENTIAL_DEFAULT_PROFILE" \
+    set "$slot" "$credential" >/dev/null || return $?
+  kind_credential_cli credentials --cloud profiles default "$KIND_CREDENTIAL_DEFAULT_PROFILE" || return $?
+  kind_credential_cli credentials --cloud --profile "$KIND_CREDENTIAL_DEFAULT_PROFILE" \
+    unset "$slot" >/dev/null
+}
+
 # The Claude stages run while the native stage idles for its projected-token
 # rotation (#2972): about eight of its minutes only wait. They run one after
 # another in the background of the native stage, each with its own
@@ -1331,12 +1361,13 @@ kind_credential_native_smoke() (
   kind_credential_cli credentials --cloud get "$credential_name" --output json | jq -e \
     --arg name "$credential_name" 'length == 1 and .[0].name == $name
       and .[0].provider == "openai" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"' >/dev/null
+  ensure_kind_credential_default_profile codex "$credential_name"
   # The first explicit identity selection creates the named profile atomically.
   stage_profiles="$profile_name"
   kind_credential_cli credentials --cloud --profile "$profile_name" set codex "$credential_name"
   # Let the public create path resolve a runnable preset for the exact runtime
   # image. preset_contract_1 is an API contract fixture with no template config.
-  environment="$(kind_credential_cli --cloud create --name "$profile_name" \
+  environment="$(kind_credential_cli --cloud create --name "$profile_name" --no-profile \
     --image "$workspace_image" \
     --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
@@ -1752,10 +1783,11 @@ kind_credential_claude_session() (
   # The subscription token is the provider's OAuth kind with a hard expiry one
   # year after it was added.
   assert_kind_credential_claude_token "$token_name" 1
+  ensure_kind_credential_default_profile anthropic "$key_name"
   stage_profiles="$key_profile $token_profile"
   kind_credential_cli credentials --cloud --profile "$key_profile" set anthropic "$key_name"
   kind_credential_cli credentials --cloud --profile "$token_profile" set anthropic "$token_name"
-  environment="$(kind_credential_cli --cloud create --name "$key_profile" \
+  environment="$(kind_credential_cli --cloud create --name "$key_profile" --no-profile \
     --image "$workspace_image" \
     --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
@@ -2063,9 +2095,10 @@ kind_credential_claude_sign_in() (
   }
   exchanged="${BASH_REMATCH[1]}"
 
+  ensure_kind_credential_default_profile anthropic "$name"
   stage_profiles="$profile"
   kind_credential_cli credentials --cloud --profile "$profile" set anthropic "$name"
-  environment="$(kind_credential_cli --cloud create --name "$profile" \
+  environment="$(kind_credential_cli --cloud create --name "$profile" --no-profile \
     --image "$workspace_image" \
     --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1

@@ -345,9 +345,9 @@ import time
 
 root, temporary = map(Path, sys.argv[1:])
 suites = [
-    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'migrate::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core migration matrix', 'count': 22},
+    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'migrate::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core migration matrix', 'count': 23},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'storage', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform credential storage matrix', 'count': 24},
-    {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'profiles', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform access profile matrix', 'count': 15},
+    {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'profiles', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform access profile matrix', 'count': 16},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'owner_sources', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform owner-source authority matrix', 'count': 5},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::preview::authorization::database_tests::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'preview browser authorization matrix', 'count': 9},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--test', 'access_profiles', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'public access profile restricted API matrix', 'count': 8},
@@ -675,11 +675,11 @@ assert not any(suite['ci'] for suite in suites)
 executions = [command for command in commands if command['args'][0] == 'test'
               and '--no-run' not in command['args']]
 # 45 suite contracts before the broker admission matrix ran in four lanes by
-# module (one suite became eight); 438 required tests (437, plus #3402's
-# ListOrganizations statement test). The server-core pool health matrix
-# adds one suite of 2.
+# module (one suite became eight); 442 required tests (437, plus #3402's
+# ListOrganizations statement test and #3550's default-profile migration and
+# store tests). The server-core pool health matrix adds one suite of 2.
 assert len(executions) == len(suites) == 53
-assert sum(suite['count'] for suite in suites) == 440
+assert sum(suite['count'] for suite in suites) == 442
 assert commands.index(actual_batches[-1]) < commands.index(executions[0]), 'a lane started before every harness compiled'
 # Against one explicit database the lanes run one after another, in lane order.
 for expected, actual in zip([suite for lane in lane_order for suite in lane_suites[lane]], executions):

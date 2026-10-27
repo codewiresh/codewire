@@ -568,6 +568,10 @@ async fn credential_deletion_fences_current_and_bound_revisions_but_not_unused_h
         )
         .await?;
         let profiles = profiles(&db);
+        // The user's first profile is their default, which is never deleted.
+        profiles
+            .create(&user, name("default"), BTreeMap::new())
+            .await?;
         let profile = profiles
             .create(&user, name("work"), entries(&credential.metadata.id))
             .await?;
@@ -623,7 +627,8 @@ async fn credential_deletion_fences_current_and_bound_revisions_but_not_unused_h
         )
         .fetch_one(&db.pool)
         .await?;
-        ensure!(counts == (0, 0));
+        // Only the default's one empty revision remains.
+        ensure!(counts == (1, 0));
         Ok(())
     }
     .await;
@@ -694,7 +699,7 @@ async fn profile_authority_role_cannot_read_material_or_call_a_provider() -> Res
         let context = environment(&db, &user, &org, "material-blind-env", std::slice::from_ref(&credential.metadata.id)).await?;
         let (pool, role) = db.metadata_pool().await?;
         for statement in [
-            format!("GRANT SELECT,INSERT,UPDATE,DELETE ON platform_access_profiles,platform_access_profile_revisions,platform_access_profile_entries,platform_environment_access_bindings TO {}", quote_ident(&role)),
+            format!("GRANT SELECT,INSERT,UPDATE,DELETE ON platform_access_profiles,platform_access_profile_revisions,platform_access_profile_entries,platform_environment_access_bindings,platform_access_profile_defaults TO {}", quote_ident(&role)),
             format!("GRANT SELECT(id,created_by,org_id,environment_operation_generation,desired_state,state),UPDATE(id) ON environments TO {}", quote_ident(&role)),
             format!("GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_owner(text,text) TO {}", quote_ident(&role)),
             format!("GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_environment(text,text,text) TO {}", quote_ident(&role)),
@@ -710,7 +715,9 @@ async fn profile_authority_role_cannot_read_material_or_call_a_provider() -> Res
              OR pg_catalog.has_any_column_privilege(current_user,'public.platform_credentials','UPDATE')",
         ).fetch_one(&pool).await?;
         ensure!(!can_edit_owners);
+        let default = authority.create(&user, name("default"), BTreeMap::new()).await?;
         let original = authority.create(&user, name("work"), entries(&credential.metadata.id)).await?;
+        ensure!(authority.default_profile(&user).await? == Some(default.id.clone()));
         let selected = authority.create_binding(&context, binding(&context, &original), Some(&context.user_id)).await?;
         ensure!(authority.evaluate_grants(&context).await?.grants.len() == 1);
         ensure!(authority.get(&user, &original.id).await? == original);
@@ -1284,6 +1291,66 @@ async fn no_organization_profile_selects_binds_or_admits_an_organization_oauth_c
                 .fetch_one(&db.pool)
                 .await?;
         ensure!(bindings == 0);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn each_user_has_one_default_that_moves_explicitly_and_is_never_deleted() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("default-user").await?;
+        let other = db.user("default-other").await?;
+        let org = db.organization("default-org").await?;
+        let profiles = profiles(&db);
+        ensure!(profiles.default_profile(&user).await? == None);
+
+        // The first profile becomes the default; a later one does not.
+        let first = profiles
+            .create(&user, name("first"), BTreeMap::new())
+            .await?;
+        let second = profiles
+            .create(&user, name("second"), BTreeMap::new())
+            .await?;
+        ensure!(profiles.default_profile(&user).await? == Some(first.id.clone()));
+        let (listed, default) = profiles.list_with_default(&user, None, 10).await?;
+        ensure!(listed.len() == 2 && default == Some(first.id.clone()));
+        // Pages carry the default too, whichever page holds it.
+        let (page, default) = profiles.list_with_default(&user, None, 1).await?;
+        ensure!(page.len() == 1 && default == Some(first.id.clone()));
+
+        // Deleting the default is refused and changes nothing.
+        ensure!(profiles.delete(&user, &first.id, 1).await == Err(Error::DefaultProfile));
+        ensure!(profiles.get(&user, &first.id).await? == first);
+        ensure!(profiles.default_profile(&user).await? == Some(first.id.clone()));
+
+        // The default moves only to the user's own profile; again is a no-op.
+        let elsewhere = profiles
+            .create(&other, name("theirs"), BTreeMap::new())
+            .await?;
+        ensure!(profiles.set_default(&user, &elsewhere.id).await == Err(Error::NotFound));
+        ensure!(profiles.set_default(&org, &first.id).await == Err(Error::InvalidInput));
+        ensure!(profiles.set_default(&user, &second.id).await? == second);
+        ensure!(profiles.set_default(&user, &second.id).await? == second);
+        ensure!(profiles.default_profile(&user).await? == Some(second.id.clone()));
+        ensure!(profiles.default_profile(&other).await? == Some(elsewhere.id.clone()));
+
+        // The former default is an ordinary profile again.
+        profiles.delete(&user, &first.id, 1).await?;
+        ensure!(profiles.delete(&user, &second.id, 1).await == Err(Error::DefaultProfile));
+
+        // Organization profiles have no default.
+        profiles
+            .create(&org, name("shared"), BTreeMap::new())
+            .await?;
+        ensure!(profiles.default_profile(&org).await? == None);
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM platform_access_profile_defaults")
+            .fetch_one(&db.pool)
+            .await?;
+        ensure!(rows == 2);
         Ok(())
     }
     .await;

@@ -196,6 +196,17 @@ async fn terminal_cleanup_unbinds_only_target_and_releases_public_profile_deleti
                     .await?
             );
             ensure!(snapshot(&h, ENV).await? == after);
+            // The target, Alice's first profile, is her default; move it so
+            // the released profile can be deleted.
+            let moved = h
+                .rpc
+                .ok(
+                    "SetDefaultAccessProfile",
+                    Auth::Alice,
+                    json!({"accessProfileId":id(&unrelated)?}),
+                )
+                .await?;
+            ensure!(moved["accessProfile"]["isDefault"] == true);
             h.rpc
                 .ok(
                     "DeleteAccessProfile",

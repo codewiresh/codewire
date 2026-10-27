@@ -45,7 +45,9 @@ class AccessProfileFixture:
             raise ConnectError(Code.NOT_FOUND, "not found")
         if request.access_profile_id == "missing-response":
             return pb.GetAccessProfileResponse()
-        return pb.GetAccessProfileResponse(access_profile=self.profile())
+        profile = self.profile()
+        profile.is_default = request.access_profile_id == "default-profile"
+        return pb.GetAccessProfileResponse(access_profile=profile)
 
     def create_access_profile(self, request, ctx):
         self.record("CreateAccessProfile", request, ctx)
@@ -65,7 +67,16 @@ class AccessProfileFixture:
 
     def delete_access_profile(self, request, ctx):
         self.record("DeleteAccessProfile", request, ctx)
+        if request.access_profile_id == "default-profile":
+            raise ConnectError(Code.FAILED_PRECONDITION, "the default profile cannot be deleted")
         return pb.DeleteAccessProfileResponse()
+
+    def set_default_access_profile(self, request, ctx):
+        self.record("SetDefaultAccessProfile", request, ctx)
+        profile = self.profile()
+        profile.id = request.access_profile_id
+        profile.is_default = True
+        return pb.SetDefaultAccessProfileResponse(access_profile=profile)
 
     def get_environment_access_profile(self, request, ctx):
         self.record("GetEnvironmentAccessProfile", request, ctx)
@@ -173,3 +184,18 @@ class AccessProfilesTestCase(unittest.TestCase):
     def test_missing_profile_response_is_not_an_empty_success(self):
         with self.assertRaisesRegex(RuntimeError, "omitted access_profile"):
             self.cw.access_profiles.get("missing-response")
+
+    def test_default_mark_round_trips_and_set_default_sends_exact_id(self):
+        self.assertIs(self.cw.access_profiles.get("profile-one")["is_default"], False)
+        self.assertIs(self.cw.access_profiles.get("default-profile")["is_default"], True)
+        profile = self.cw.access_profiles.set_default("profile-two")
+        self.assertEqual((profile["id"], profile["is_default"], profile["revision"]),
+                         ("profile-two", True, EXACT))
+        self.assertEqual(self.fixture.calls[-1][1].access_profile_id, "profile-two")
+        self.assertEqual(self.paths[-1], "/codewire.v1.AccessProfileService/SetDefaultAccessProfile")
+
+    def test_default_delete_precondition_maps_to_sdk_error(self):
+        with self.assertRaises(CodewireError) as rejected:
+            self.cw.access_profiles.delete("default-profile", EXACT)
+        self.assertEqual(rejected.exception.status, 400)
+        self.assertEqual(len(self.fixture.calls), 1)

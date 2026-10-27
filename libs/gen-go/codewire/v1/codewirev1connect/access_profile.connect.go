@@ -51,6 +51,9 @@ const (
 	// AccessProfileServiceDeleteAccessProfileProcedure is the fully-qualified name of the
 	// AccessProfileService's DeleteAccessProfile RPC.
 	AccessProfileServiceDeleteAccessProfileProcedure = "/codewire.v1.AccessProfileService/DeleteAccessProfile"
+	// AccessProfileServiceSetDefaultAccessProfileProcedure is the fully-qualified name of the
+	// AccessProfileService's SetDefaultAccessProfile RPC.
+	AccessProfileServiceSetDefaultAccessProfileProcedure = "/codewire.v1.AccessProfileService/SetDefaultAccessProfile"
 	// AccessProfileServiceGetEnvironmentAccessProfileProcedure is the fully-qualified name of the
 	// AccessProfileService's GetEnvironmentAccessProfile RPC.
 	AccessProfileServiceGetEnvironmentAccessProfileProcedure = "/codewire.v1.AccessProfileService/GetEnvironmentAccessProfile"
@@ -64,6 +67,7 @@ type AccessProfileServiceClient interface {
 	UpdateAccessProfile(context.Context, *connect.Request[v1.UpdateAccessProfileRequest]) (*connect.Response[v1.UpdateAccessProfileResponse], error)
 	RenameAccessProfile(context.Context, *connect.Request[v1.RenameAccessProfileRequest]) (*connect.Response[v1.RenameAccessProfileResponse], error)
 	DeleteAccessProfile(context.Context, *connect.Request[v1.DeleteAccessProfileRequest]) (*connect.Response[v1.DeleteAccessProfileResponse], error)
+	SetDefaultAccessProfile(context.Context, *connect.Request[v1.SetDefaultAccessProfileRequest]) (*connect.Response[v1.SetDefaultAccessProfileResponse], error)
 	GetEnvironmentAccessProfile(context.Context, *connect.Request[v1.GetEnvironmentAccessProfileRequest]) (*connect.Response[v1.GetEnvironmentAccessProfileResponse], error)
 }
 
@@ -116,6 +120,12 @@ func NewAccessProfileServiceClient(httpClient connect.HTTPClient, baseURL string
 			connect.WithSchema(accessProfileServiceMethods.ByName("DeleteAccessProfile")),
 			connect.WithClientOptions(opts...),
 		),
+		setDefaultAccessProfile: connect.NewClient[v1.SetDefaultAccessProfileRequest, v1.SetDefaultAccessProfileResponse](
+			httpClient,
+			baseURL+AccessProfileServiceSetDefaultAccessProfileProcedure,
+			connect.WithSchema(accessProfileServiceMethods.ByName("SetDefaultAccessProfile")),
+			connect.WithClientOptions(opts...),
+		),
 		getEnvironmentAccessProfile: connect.NewClient[v1.GetEnvironmentAccessProfileRequest, v1.GetEnvironmentAccessProfileResponse](
 			httpClient,
 			baseURL+AccessProfileServiceGetEnvironmentAccessProfileProcedure,
@@ -134,6 +144,7 @@ type accessProfileServiceClient struct {
 	updateAccessProfile         *connect.Client[v1.UpdateAccessProfileRequest, v1.UpdateAccessProfileResponse]
 	renameAccessProfile         *connect.Client[v1.RenameAccessProfileRequest, v1.RenameAccessProfileResponse]
 	deleteAccessProfile         *connect.Client[v1.DeleteAccessProfileRequest, v1.DeleteAccessProfileResponse]
+	setDefaultAccessProfile     *connect.Client[v1.SetDefaultAccessProfileRequest, v1.SetDefaultAccessProfileResponse]
 	getEnvironmentAccessProfile *connect.Client[v1.GetEnvironmentAccessProfileRequest, v1.GetEnvironmentAccessProfileResponse]
 }
 
@@ -167,6 +178,11 @@ func (c *accessProfileServiceClient) DeleteAccessProfile(ctx context.Context, re
 	return c.deleteAccessProfile.CallUnary(ctx, req)
 }
 
+// SetDefaultAccessProfile calls codewire.v1.AccessProfileService.SetDefaultAccessProfile.
+func (c *accessProfileServiceClient) SetDefaultAccessProfile(ctx context.Context, req *connect.Request[v1.SetDefaultAccessProfileRequest]) (*connect.Response[v1.SetDefaultAccessProfileResponse], error) {
+	return c.setDefaultAccessProfile.CallUnary(ctx, req)
+}
+
 // GetEnvironmentAccessProfile calls codewire.v1.AccessProfileService.GetEnvironmentAccessProfile.
 func (c *accessProfileServiceClient) GetEnvironmentAccessProfile(ctx context.Context, req *connect.Request[v1.GetEnvironmentAccessProfileRequest]) (*connect.Response[v1.GetEnvironmentAccessProfileResponse], error) {
 	return c.getEnvironmentAccessProfile.CallUnary(ctx, req)
@@ -180,6 +196,7 @@ type AccessProfileServiceHandler interface {
 	UpdateAccessProfile(context.Context, *connect.Request[v1.UpdateAccessProfileRequest]) (*connect.Response[v1.UpdateAccessProfileResponse], error)
 	RenameAccessProfile(context.Context, *connect.Request[v1.RenameAccessProfileRequest]) (*connect.Response[v1.RenameAccessProfileResponse], error)
 	DeleteAccessProfile(context.Context, *connect.Request[v1.DeleteAccessProfileRequest]) (*connect.Response[v1.DeleteAccessProfileResponse], error)
+	SetDefaultAccessProfile(context.Context, *connect.Request[v1.SetDefaultAccessProfileRequest]) (*connect.Response[v1.SetDefaultAccessProfileResponse], error)
 	GetEnvironmentAccessProfile(context.Context, *connect.Request[v1.GetEnvironmentAccessProfileRequest]) (*connect.Response[v1.GetEnvironmentAccessProfileResponse], error)
 }
 
@@ -228,6 +245,12 @@ func NewAccessProfileServiceHandler(svc AccessProfileServiceHandler, opts ...con
 		connect.WithSchema(accessProfileServiceMethods.ByName("DeleteAccessProfile")),
 		connect.WithHandlerOptions(opts...),
 	)
+	accessProfileServiceSetDefaultAccessProfileHandler := connect.NewUnaryHandler(
+		AccessProfileServiceSetDefaultAccessProfileProcedure,
+		svc.SetDefaultAccessProfile,
+		connect.WithSchema(accessProfileServiceMethods.ByName("SetDefaultAccessProfile")),
+		connect.WithHandlerOptions(opts...),
+	)
 	accessProfileServiceGetEnvironmentAccessProfileHandler := connect.NewUnaryHandler(
 		AccessProfileServiceGetEnvironmentAccessProfileProcedure,
 		svc.GetEnvironmentAccessProfile,
@@ -249,6 +272,8 @@ func NewAccessProfileServiceHandler(svc AccessProfileServiceHandler, opts ...con
 			accessProfileServiceRenameAccessProfileHandler.ServeHTTP(w, r)
 		case AccessProfileServiceDeleteAccessProfileProcedure:
 			accessProfileServiceDeleteAccessProfileHandler.ServeHTTP(w, r)
+		case AccessProfileServiceSetDefaultAccessProfileProcedure:
+			accessProfileServiceSetDefaultAccessProfileHandler.ServeHTTP(w, r)
 		case AccessProfileServiceGetEnvironmentAccessProfileProcedure:
 			accessProfileServiceGetEnvironmentAccessProfileHandler.ServeHTTP(w, r)
 		default:
@@ -282,6 +307,10 @@ func (UnimplementedAccessProfileServiceHandler) RenameAccessProfile(context.Cont
 
 func (UnimplementedAccessProfileServiceHandler) DeleteAccessProfile(context.Context, *connect.Request[v1.DeleteAccessProfileRequest]) (*connect.Response[v1.DeleteAccessProfileResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.AccessProfileService.DeleteAccessProfile is not implemented"))
+}
+
+func (UnimplementedAccessProfileServiceHandler) SetDefaultAccessProfile(context.Context, *connect.Request[v1.SetDefaultAccessProfileRequest]) (*connect.Response[v1.SetDefaultAccessProfileResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.AccessProfileService.SetDefaultAccessProfile is not implemented"))
 }
 
 func (UnimplementedAccessProfileServiceHandler) GetEnvironmentAccessProfile(context.Context, *connect.Request[v1.GetEnvironmentAccessProfileRequest]) (*connect.Response[v1.GetEnvironmentAccessProfileResponse], error) {

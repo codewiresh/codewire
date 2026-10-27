@@ -17,11 +17,14 @@ type AccessProfileEntry struct {
 
 // AccessProfile is one immutable revision of a personal platform profile. Every
 // profile includes the account's one GitHub connection; GitHub is never an entry.
+// IsDefault marks the owner's one default profile; like the name, it is not
+// part of the revision.
 type AccessProfile struct {
-	ID       string               `json:"id"`
-	Name     string               `json:"name"`
-	Revision uint64               `json:"revision"`
-	Entries  []AccessProfileEntry `json:"entries"`
+	ID        string               `json:"id"`
+	Name      string               `json:"name"`
+	Revision  uint64               `json:"revision"`
+	Entries   []AccessProfileEntry `json:"entries"`
+	IsDefault bool                 `json:"is_default"`
 }
 
 // EnvironmentAccessProfileBinding is an exact selection, not an access grant
@@ -74,7 +77,7 @@ func fromProtoAccessProfile(profile *codewirev1.AccessProfile) (*AccessProfile, 
 	if err := accessProfileRevision(profile.GetRevision()); err != nil {
 		return nil, err
 	}
-	result := &AccessProfile{ID: profile.GetId(), Name: profile.GetName(), Revision: profile.GetRevision(), Entries: make([]AccessProfileEntry, 0, len(profile.GetEntries()))}
+	result := &AccessProfile{ID: profile.GetId(), Name: profile.GetName(), Revision: profile.GetRevision(), IsDefault: profile.GetIsDefault(), Entries: make([]AccessProfileEntry, 0, len(profile.GetEntries()))}
 	for _, entry := range profile.GetEntries() {
 		if entry == nil {
 			return nil, fmt.Errorf("codewire: access profile response omitted entry")
@@ -185,13 +188,26 @@ func (s *AccessProfileService) Rename(ctx context.Context, id string, expectedRe
 	return fromProtoAccessProfile(response.Msg.GetAccessProfile())
 }
 
-// Delete removes a profile only at the exact expected current revision.
+// Delete removes a profile only at the exact expected current revision. The
+// owner's default profile cannot be deleted; the server rejects it with
+// FAILED_PRECONDITION, returned as the normal SDK error.
 func (s *AccessProfileService) Delete(ctx context.Context, id string, expectedRevision uint64) error {
 	if err := accessProfileRevision(expectedRevision); err != nil {
 		return err
 	}
 	_, err := s.client.accessProfiles.DeleteAccessProfile(ctx, connect.NewRequest(&codewirev1.DeleteAccessProfileRequest{AccessProfileId: id, ExpectedRevision: expectedRevision}))
 	return connectSDKError(err)
+}
+
+// SetDefault makes one of the owner's profiles their default, replacing the
+// previous default, and returns that profile. Setting the current default again
+// is a no-op. There is no way to clear the default.
+func (s *AccessProfileService) SetDefault(ctx context.Context, id string) (*AccessProfile, error) {
+	response, err := s.client.accessProfiles.SetDefaultAccessProfile(ctx, connect.NewRequest(&codewirev1.SetDefaultAccessProfileRequest{AccessProfileId: id}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	return fromProtoAccessProfile(response.Msg.GetAccessProfile())
 }
 
 // GetEnvironmentBinding returns an optional exact binding and stored consent.

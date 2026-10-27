@@ -1615,6 +1615,8 @@ kind_credential_cli() {
     'org current') printf 'ID: org_contract_1\\n' ;;
     'credentials --cloud get'*)
       printf '[{"name":"%%s","provider":"openai","status":"CREDENTIAL_STATUS_ACTIVE"}]\\n' "$4" ;;
+    'credentials --cloud profiles list --output json')
+      printf '[{"name":"kind-default","isDefault":true}]\\n' ;;
     '--cloud create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
     '--cloud update'*) printf '{"operation_generation":1}\\n' ;;
     *) return 0 ;;
@@ -1639,6 +1641,83 @@ kind_credential_native_smoke
         self.assertIn('::error::the delivered Codex login event is missing its generation',
                       result.stderr)
 
+    def default_profile(self, listing, fail=""):
+        return self.shell('''
+log() { printf '[kind-e2e] %%s\\n' "$*"; }
+kind_credential_cli() {
+  printf '%%s\\n' "$*" >&2
+  case "$*" in
+    'credentials --cloud profiles list --output json') printf '%%s\\n' '%(listing)s' ;;
+    *'%(fail)s'*) [ -z '%(fail)s' ] || return 7 ;;
+  esac
+}
+ensure_kind_credential_default_profile codex kind-codex-1
+''' % {"listing": listing, "fail": fail})
+
+    def test_the_kind_user_keeps_one_lasting_empty_default_profile(self):
+        # #3550: a user's first profile becomes the default, which cannot be
+        # deleted, so no stage's own profile may become it.
+        listed = ["credentials --cloud profiles list --output json"]
+        result = self.default_profile('[{"name":"other","isDefault":true},{"name":"kind-x"}]')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.splitlines(), listed)
+        self.assertEqual(result.stdout, "")
+        made = listed + [
+            "credentials --cloud --profile kind-default set codex kind-codex-1",
+            "credentials --cloud profiles default kind-default",
+            "credentials --cloud --profile kind-default unset codex",
+        ]
+        for listing in ("[]", '[{"name":"kind-x","isDefault":false}]'):
+            with self.subTest(listing=listing):
+                result = self.default_profile(listing)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr.splitlines(), made)
+                self.assertIn("making kind-default its lasting, empty default", result.stdout)
+        for listing in ("", "{}", "null"):
+            with self.subTest(listing=listing):
+                result = self.default_profile(listing)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("::error::the Kind user profile list is not a JSON array", result.stderr)
+                self.assertNotIn("kind-default", result.stderr)
+        for step in ("set codex", "profiles default", "unset codex"):
+            with self.subTest(step=step):
+                result = self.default_profile("[]", fail=step)
+                self.assertEqual(result.returncode, 7, result.stderr)
+                self.assertEqual(result.stderr.splitlines(),
+                                 made[:next(i for i, call in enumerate(made) if step in call) + 1])
+
+    def test_every_stage_keeps_a_default_and_creates_without_one(self):
+        helpers = HELPERS.read_text()
+        runtime = (ROOT / "scripts/ci/verify/kind/suites/cw-runtime.sh").read_text()
+        for name, flow, ensure, first in (
+            ("native", helpers.split("kind_credential_native_smoke() (", 1)[1].split("\n)\n", 1)[0],
+             'ensure_kind_credential_default_profile codex "$credential_name"',
+             'stage_profiles="$profile_name"'),
+            ("claude-session", helpers.split("kind_credential_claude_session() (", 1)[1].split("\n)\n", 1)[0],
+             'ensure_kind_credential_default_profile anthropic "$key_name"',
+             'stage_profiles="$key_profile $token_profile"'),
+            ("claude-sign-in", helpers.split("kind_credential_claude_sign_in() (", 1)[1].split("\n)\n", 1)[0],
+             'ensure_kind_credential_default_profile anthropic "$name"',
+             'stage_profiles="$profile"'),
+        ):
+            with self.subTest(stage=name):
+                self.assertEqual(flow.count(ensure), 1)
+                self.assertLess(flow.index(ensure), flow.index(first))
+                creates = [line for line in flow.splitlines()
+                           if "kind_credential_cli --cloud create " in line]
+                self.assertEqual(len(creates), 1)
+                self.assertTrue(creates[0].endswith(" --no-profile \\"), creates[0])
+        self.assertEqual(runtime.count("kind_credential_cli --cloud create "), 3)
+        self.assertEqual(runtime.count("kind_credential_cli --cloud create --name "), 3)
+        for line in runtime.splitlines():
+            if "kind_credential_cli --cloud create " in line:
+                self.assertIn(" --no-profile ", line)
+        self.assertEqual(runtime.count('ensure_kind_credential_default_profile openai "$credential_name"'), 1)
+        self.assertEqual(runtime.count('ensure_kind_credential_default_profile codex "$credential_name"'), 1)
+        common = (ROOT / "scripts/ci/verify/kind/common.sh").read_text()
+        self.assertIn('kind_credential_cli --cloud create --name "$name" --no-profile --image "$image"', common)
+        self.assertEqual(common.count("kind_credential_cli --cloud create "), 1)
+
     def relay_band(self, lead):
         return self.shell('''
 log() { printf '[kind-e2e] %%s\\n' "$*"; }
@@ -1652,6 +1731,8 @@ kind_credential_cli() {
     'org current') printf 'ID: org_contract_1\\n' ;;
     'credentials --cloud get'*)
       printf '[{"name":"%%s","provider":"openai","status":"CREDENTIAL_STATUS_ACTIVE"}]\\n' "$4" ;;
+    'credentials --cloud profiles list --output json')
+      printf '[{"name":"kind-default","isDefault":true}]\\n' ;;
     '--cloud create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
     '--cloud update'*) printf '{"operation_generation":1}\\n' ;;
     *) return 0 ;;

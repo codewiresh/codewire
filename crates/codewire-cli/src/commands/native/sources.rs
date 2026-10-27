@@ -97,6 +97,9 @@ pub(super) fn apply_create_source_flags(
             profile: profile.clone(),
         });
     }
+    if args.no_profile {
+        spec.credentials = None;
+    }
     spec.validate()?;
     Ok(())
 }

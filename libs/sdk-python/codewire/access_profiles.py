@@ -17,12 +17,14 @@ class AccessProfileEntry(TypedDict):
 
 class AccessProfile(TypedDict):
     """One immutable revision. Every profile includes the account's one GitHub
-    connection; GitHub is never an entry."""
+    connection; GitHub is never an entry. ``is_default`` marks the owner's one
+    default profile; like the name, it is not part of the revision."""
 
     id: str
     name: str
     revision: int
     entries: list[AccessProfileEntry]
+    is_default: bool
 
 
 class EnvironmentAccessProfileBinding(TypedDict):
@@ -68,6 +70,7 @@ def _profile(value: pb.AccessProfile) -> AccessProfile:
         "revision": _revision(value.revision),
         "entries": [{"capability_slot": entry.capability_slot,
                      "credential_id": entry.credential_id} for entry in value.entries],
+        "is_default": value.is_default,
     }
 
 
@@ -161,10 +164,24 @@ class AccessProfiles:
         return _profile(response.access_profile)
 
     def delete(self, profile_id: str, expected_revision: int) -> None:
+        """The owner's default profile cannot be deleted; the server rejects it
+        with FAILED_PRECONDITION, raised as the normal CodewireError."""
         self._context.unary(self._client.delete_access_profile,
                             pb.DeleteAccessProfileRequest(
                                 access_profile_id=profile_id,
                                 expected_revision=_revision(expected_revision)))
+
+    def set_default(self, profile_id: str) -> AccessProfile:
+        """Make one of the owner's profiles their default, replacing the previous
+        default, and return it. Setting the current default again is a no-op.
+        There is no way to clear the default."""
+        response = self._context.unary(
+            self._client.set_default_access_profile,
+            pb.SetDefaultAccessProfileRequest(access_profile_id=profile_id),
+        )
+        if not response.HasField("access_profile"):
+            raise RuntimeError("access profile response omitted access_profile")
+        return _profile(response.access_profile)
 
     def get_environment_binding(self, environment_id: str) -> EnvironmentAccessProfile:
         response = self._context.unary(

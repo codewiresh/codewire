@@ -2483,6 +2483,9 @@ pub(crate) fn env_create_request_from_source(
             profile: profile.clone(),
         });
     }
+    if args.no_profile {
+        project_spec.credentials = None;
+    }
     project_spec.validate()?;
     Ok((
         CreateEnvironmentRequest {

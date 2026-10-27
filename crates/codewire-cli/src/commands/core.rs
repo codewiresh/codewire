@@ -368,6 +368,7 @@ pub(crate) fn env_create_request_from_init_args(
         coding_agent: args.coding_agent.clone(),
         env: args.env.clone(),
         profile: None,
+        no_profile: false,
         secrets: None,
         user_secrets: None,
         org_secrets: false,

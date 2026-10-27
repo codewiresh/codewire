@@ -23,6 +23,8 @@ prepare_provider_codex_identity() {
     "$TMPDIR_SMOKE/provider-codex-credentials-before.json" >/dev/null || die 'disposable Codex credential name collision'
   jq -e --arg name "$profile_name" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/provider-codex-profiles-before.json" >/dev/null || die 'disposable Codex profile name collision'
+  provider_account_has_default_profile "$TMPDIR_SMOKE/provider-codex-profiles-before.json" ||
+    die 'this account has no default credential profile: the disposable Codex profile would become it and could not be deleted; create a lasting profile first'
 
   # Cleanup authority begins only after both unique names were confirmed absent.
   PROVIDER_CODEX_CREDENTIAL_NAME="$credential_name"

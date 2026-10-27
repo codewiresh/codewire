@@ -131,6 +131,20 @@ a name another of the owner's profiles uses is rejected; renaming to the
 current name changes nothing. A project spec that selects a profile by name
 resolves that name at its next admission, so update it after a rename.
 
+Each user with a platform profile has exactly one default profile (#3550), a
+mark on the profile row (`platform_access_profile_defaults`), not part of a
+revision. The first profile becomes it; `SetDefaultAccessProfile` (or
+`cw credentials --cloud profiles default NAME`) moves it to another of the
+user's own profiles, and there is no clear. Deleting the default is refused
+(`FAILED_PRECONDITION`, and the database's foreign key), so a user's only
+profile stays until another one is made the default. The default is a standing
+selection the user's clients apply, never the API: a cloud `cw create` that
+names no profile (no `--profile`, no `credentials.profile` in `codewire.yaml`)
+sends the default as its explicit selection with personal-credential
+confirmation, and `--no-profile` sends none; the dashboard create form
+preselects it. `CreateEnvironment` without a selection still means no
+provider access. Lists show the default first.
+
 No ambient Codex, GitHub, Claude, SSH or keyring import is allowed. Explicit SSH
 file import is owner-selected; passphrases and API keys use protected input.
 Local connect runs the same native device logins as the platform, from the

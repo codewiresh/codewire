@@ -40,19 +40,20 @@ impl AccessProfiles {
         }
     }
 
+    /// One page in ID order, each profile with whether it is the default.
     pub async fn list(
         &self,
         user: &AuthUser,
         page_size: i32,
         page_token: &str,
-    ) -> AppResult<(Vec<AccessProfile>, String)> {
+    ) -> AppResult<(Vec<(AccessProfile, bool)>, String)> {
         let owner = personal_owner(user)?;
         let (limit, after) = pagination(page_size, page_token)?;
         // One extra row determines whether another page really exists. There
         // is no total-count query or hidden all-pages fetch in the server.
-        let mut profiles = self
+        let (mut profiles, default) = self
             .profiles
-            .list(&owner, after.as_ref(), limit + 1)
+            .list_with_default(&owner, after.as_ref(), limit + 1)
             .await
             .map_err(profile_error)?;
         let next = if profiles.len() > limit as usize {
@@ -66,7 +67,40 @@ impl AccessProfiles {
         } else {
             String::new()
         };
+        let profiles = profiles
+            .into_iter()
+            .map(|profile| {
+                let is_default = default.as_ref() == Some(&profile.id);
+                (profile, is_default)
+            })
+            .collect();
         Ok((profiles, next))
+    }
+
+    /// Whether `profile` is the user's default, read after the operation that
+    /// returned it.
+    async fn with_default(
+        &self,
+        owner: &Owner,
+        profile: AccessProfile,
+    ) -> AppResult<(AccessProfile, bool)> {
+        let default = self
+            .profiles
+            .default_profile(owner)
+            .await
+            .map_err(profile_error)?;
+        let is_default = default.as_ref() == Some(&profile.id);
+        Ok((profile, is_default))
+    }
+
+    /// Make one of the user's profiles their default; see
+    /// [`PlatformAccessProfileStore::set_default`].
+    pub async fn set_default(&self, user: &AuthUser, id: &str) -> AppResult<AccessProfile> {
+        let owner = personal_owner(user)?;
+        self.profiles
+            .set_default(&owner, &profile_id(id)?)
+            .await
+            .map_err(profile_error)
     }
 
     pub async fn get(
@@ -74,7 +108,7 @@ impl AccessProfiles {
         user: &AuthUser,
         selector: ProfileSelector<'_>,
         revision: Option<u64>,
-    ) -> AppResult<AccessProfile> {
+    ) -> AppResult<(AccessProfile, bool)> {
         let owner = personal_owner(user)?;
         if let Some(revision) = revision {
             positive_revision(revision)?;
@@ -86,14 +120,15 @@ impl AccessProfiles {
             }
         }
         .map_err(profile_error)?;
-        match revision {
-            None => Ok(profile),
+        let profile = match revision {
+            None => profile,
             Some(revision) => self
                 .profiles
                 .get_revision(&owner, &profile.id, revision)
                 .await
-                .map_err(profile_error),
-        }
+                .map_err(profile_error)?,
+        };
+        self.with_default(&owner, profile).await
     }
 
     pub async fn create(
@@ -101,12 +136,14 @@ impl AccessProfiles {
         user: &AuthUser,
         name: &str,
         entries: BTreeMap<CapabilitySlot, CredentialId>,
-    ) -> AppResult<AccessProfile> {
+    ) -> AppResult<(AccessProfile, bool)> {
         let owner = personal_owner(user)?;
-        self.profiles
+        let profile = self
+            .profiles
             .create(&owner, profile_name(name)?, entries)
             .await
-            .map_err(profile_error)
+            .map_err(profile_error)?;
+        self.with_default(&owner, profile).await
     }
 
     pub async fn update(
@@ -115,13 +152,15 @@ impl AccessProfiles {
         id: &str,
         expected_revision: u64,
         entries: BTreeMap<CapabilitySlot, CredentialId>,
-    ) -> AppResult<AccessProfile> {
+    ) -> AppResult<(AccessProfile, bool)> {
         let owner = personal_owner(user)?;
         positive_revision(expected_revision)?;
-        self.profiles
+        let profile = self
+            .profiles
             .update(&owner, &profile_id(id)?, expected_revision, entries)
             .await
-            .map_err(profile_error)
+            .map_err(profile_error)?;
+        self.with_default(&owner, profile).await
     }
 
     /// Relabel only: the current revision, entries and bindings are unchanged.
@@ -134,10 +173,11 @@ impl AccessProfiles {
         expected_revision: u64,
         expected_name: &str,
         name: &str,
-    ) -> AppResult<AccessProfile> {
+    ) -> AppResult<(AccessProfile, bool)> {
         let owner = personal_owner(user)?;
         positive_revision(expected_revision)?;
-        self.profiles
+        let profile = self
+            .profiles
             .rename(
                 &owner,
                 &profile_id(id)?,
@@ -146,7 +186,8 @@ impl AccessProfiles {
                 profile_name(name)?,
             )
             .await
-            .map_err(profile_error)
+            .map_err(profile_error)?;
+        self.with_default(&owner, profile).await
     }
 
     pub async fn delete(&self, user: &AuthUser, id: &str, expected_revision: u64) -> AppResult<()> {
@@ -375,7 +416,8 @@ pub(crate) fn profile_error(error: PlatformProfileError) -> AppError {
         | E::UnsupportedEntry
         | E::InactiveCredential
         | E::ExpiredCredential
-        | E::ProfileInUse => AppError::Precondition(error.to_string().into()),
+        | E::ProfileInUse
+        | E::DefaultProfile => AppError::Precondition(error.to_string().into()),
         E::CorruptRecord | E::DatabaseUnavailable | E::ClockUnavailable => unavailable(),
     }
 }

@@ -544,7 +544,7 @@ database_lane_core() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 22
+  assert_passed_count "server-core migration matrix" "$logfile" 23
 
   logfile="$RUN_DIR/platform-credential-storage.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -556,7 +556,7 @@ database_lane_core() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test profiles \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform access profile matrix" "$logfile" 15
+  assert_passed_count "platform access profile matrix" "$logfile" 16
 
   logfile="$RUN_DIR/platform-owner-source-authority.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

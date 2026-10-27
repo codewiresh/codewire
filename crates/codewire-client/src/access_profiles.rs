@@ -71,6 +71,19 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
+    /// Make one of the caller's profiles their default. The default cannot
+    /// be cleared or deleted; the previous default becomes ordinary.
+    pub async fn set_default_access_profile(
+        &self,
+        request: SetDefaultAccessProfileRequest,
+    ) -> Result<SetDefaultAccessProfileResponse, ClientError> {
+        self.access_profiles
+            .set_default_access_profile_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     pub async fn get_environment_access_profile(
         &self,
         request: GetEnvironmentAccessProfileRequest,
@@ -223,6 +236,25 @@ mod tests {
             .mount(&server)
             .await;
         client.delete_access_profile(request).await.unwrap();
+        let request = SetDefaultAccessProfileRequest {
+            access_profile_id: "profile".into(),
+            ..Default::default()
+        };
+        Mock::given(method("POST"))
+            .and(path(
+                "/codewire.v1.AccessProfileService/SetDefaultAccessProfile",
+            ))
+            .and(header("authorization", "Bearer synthetic-profile-token"))
+            .and(body_bytes(request.encode_to_vec()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(SetDefaultAccessProfileResponse::default().encode_to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        client.set_default_access_profile(request).await.unwrap();
         let request = GetEnvironmentAccessProfileRequest {
             environment_id: "environment".into(),
             ..Default::default()

@@ -1099,6 +1099,7 @@ fn reject_snapshot_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
         (args.docker_disk.is_some(), "--docker-disk"),
         (args.no_docker, "--no-docker"),
         (args.profile.is_some(), "--profile"),
+        (args.no_profile, "--no-profile"),
         (args.secrets.is_some(), "--secrets"),
         (args.user_secrets.is_some(), "--user-secrets"),
         (args.org_secrets, "--org-secrets"),

@@ -27,6 +27,7 @@ export async function runAccessProfileTests(): Promise<void> {
       if (method === "GetAccessProfile") {
         if (body.accessProfileId === "missing-response") return response({});
         if (body.accessProfileId === "missing") return response({ code: "not_found", message: "not found" }, 404);
+        if (body.accessProfileId === "default-profile") return response({ accessProfile: { ...profile, isDefault: true } });
         return response({ accessProfile: profile });
       }
       if (method === "UpdateAccessProfile" && body.accessProfileId === "stale") {
@@ -35,6 +36,10 @@ export async function runAccessProfileTests(): Promise<void> {
       if (method === "CreateAccessProfile" || method === "UpdateAccessProfile") return response({ accessProfile: profile });
       if (method === "RenameAccessProfile") return response({ accessProfile: { ...profile, name: body.name } });
       if (method === "GetEnvironmentAccessProfile") return response(body.environmentId === "unbound" ? {} : { binding: wireBinding, personalCredentialsConfirmed: true });
+      if (method === "SetDefaultAccessProfile") return response({ accessProfile: { ...profile, id: body.accessProfileId, isDefault: true } });
+      if (method === "DeleteAccessProfile" && body.accessProfileId === "default-profile") {
+        return response({ code: "failed_precondition", message: "the default profile cannot be deleted" }, 400);
+      }
       if (method === "DeleteAccessProfile") return response({});
       throw new Error("unexpected access profile method");
     },
@@ -44,7 +49,9 @@ export async function runAccessProfileTests(): Promise<void> {
   assert.equal(profiles[0].revision, exact);
   assert.deepEqual(profiles[0].entries, [{ capability_slot: "codex", credential_id: "credential-one" }]);
   assert.equal(calls[1].body.pageToken, "page-two");
-  assert.equal((await cw.accessProfiles.get("profile-one")).revision, exact);
+  const current = await cw.accessProfiles.get("profile-one");
+  assert.equal(current.revision, exact);
+  assert.equal(current.is_default, false);
   assert.equal(calls.at(-1)!.body.accessProfileId, "profile-one");
   assert.ok(!("name" in calls.at(-1)!.body));
   assert.ok(!("revision" in calls.at(-1)!.body));
@@ -88,10 +95,20 @@ export async function runAccessProfileTests(): Promise<void> {
   await assert.rejects(cw.accessProfiles.get("missing"), (error: unknown) => error instanceof CodewireError && error.status === 404);
   await cw.accessProfiles.delete("profile-one", maximum);
   assert.equal(calls.at(-1)!.body.expectedRevision, maximum.toString());
-  assert.equal(calls.length, 14);
+  assert.equal((await cw.accessProfiles.get("default-profile")).is_default, true);
+  const madeDefault = await cw.accessProfiles.setDefault("profile-two");
+  assert.deepEqual(calls.at(-1)!.body, { accessProfileId: "profile-two" });
+  assert.equal(madeDefault.id, "profile-two");
+  assert.equal(madeDefault.is_default, true);
+  assert.equal(madeDefault.revision, exact);
+  await assert.rejects(
+    cw.accessProfiles.delete("default-profile", exact),
+    (error: unknown) => error instanceof CodewireError && error.status === 400,
+  );
+  assert.equal(calls.length, 17);
   assert.deepEqual(new Set(calls.map((call) => call.method)), new Set([
     "ListAccessProfiles", "GetAccessProfile", "CreateAccessProfile", "UpdateAccessProfile", "RenameAccessProfile",
-    "DeleteAccessProfile", "GetEnvironmentAccessProfile",
+    "DeleteAccessProfile", "SetDefaultAccessProfile", "GetEnvironmentAccessProfile",
   ]));
-  console.log("Access profiles: all 7 generated methods, exact uint64/CAS, pagination and errors passed");
+  console.log("Access profiles: all 8 generated methods, exact uint64/CAS, default mark, pagination and errors passed");
 }

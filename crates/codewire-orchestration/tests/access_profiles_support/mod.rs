@@ -249,7 +249,7 @@ impl Harness {
             for grant in [
                 format!("CONNECT ON DATABASE {}", quote(&name)),
                 "USAGE ON SCHEMA public".into(),
-                "SELECT,INSERT,UPDATE,DELETE ON public.platform_access_profiles, public.platform_access_profile_revisions, public.platform_access_profile_entries, public.platform_environment_access_bindings".into(),
+                "SELECT,INSERT,UPDATE,DELETE ON public.platform_access_profiles, public.platform_access_profile_revisions, public.platform_access_profile_entries, public.platform_environment_access_bindings, public.platform_access_profile_defaults".into(),
                 "SELECT ON public.platform_credentials".into(),
                 "SELECT (id,is_admin,enabled) ON public.users".into(),
                 "SELECT (id,deletion_state) ON public.organizations".into(),

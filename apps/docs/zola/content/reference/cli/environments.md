@@ -40,7 +40,7 @@ as positionals or with `--repo`; they replace the file's repositories.
 | `--docker-disk SIZE`, `--no-docker` | Local: the guest Docker data disk (default 8 GiB), or no Docker daemon |
 | `--install CMD`, `--startup CMD` | Install command and startup script |
 | `--env KEY=VALUE` | Cloud: plain environment variables (repeatable) |
-| `--profile NAME` | Credential profile: `local:NAME` or `platform:NAME` |
+| `--profile NAME`, `--no-profile` | Credential profile: `local:NAME` or `platform:NAME`, or none. A cloud create with neither uses the `codewire.yaml` profile, then your default profile |
 | `--secrets NAME`, `--user-secrets local\|platform`, `--org-secrets` | Application-secret sources |
 | `--ttl 8h` | Cloud: delete after a lifetime |
 | `--isolation standard\|confidential` | Cloud: isolation tier |

@@ -137,6 +137,20 @@ if grep -E 'credentials --cloud --profile .* list --output json' <<<"$profile_ca
   fail 'selected-profile Get used as collection enumeration'
 fi
 pass
+# A disposable profile is made only beside an existing default, which it can
+# never become (#3550); every provider smoke shares this check.
+printf '[{"name":"lasting","isDefault":true},{"name":"other"}]\n' >"$TEST_ROOT/profiles.json"
+provider_account_has_default_profile "$TEST_ROOT/profiles.json" || fail 'an existing default profile was not found'
+for listing in '[]' '[{"name":"other","isDefault":false}]' '[{"name":"other"}]' '{}' ''; do
+  printf '%s\n' "$listing" >"$TEST_ROOT/profiles.json"
+  if provider_account_has_default_profile "$TEST_ROOT/profiles.json" 2>/dev/null; then
+    fail "a profile list without a default was accepted: $listing"
+  fi
+done
+# shellcheck disable=SC2016 # The literal source text of the check.
+grep -qF 'provider_account_has_default_profile "$TMPDIR_SMOKE/provider-ssh-profiles-before.json"' \
+  <<<"$(declare -f prepare_provider_ssh_identity)" || fail 'SSH identity skipped the default-profile check'
+pass
 
 # Failure on one cleanup surface still retires the other owned surface; an
 # identity mismatch never authorizes a mutation of the replacement object.

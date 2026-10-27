@@ -1185,13 +1185,14 @@ assert_admin_oauth_principal() {
 create_environment() {
   local create_out="$TMPDIR_SMOKE/create.out"
   # Only the smoke's own document or flags configure it, never a codewire.yaml
-  # in the directory it runs from.
-  local -a source_args=(--no-file)
+  # in the directory it runs from, nor the user's default credential profile
+  # (#3550): only the provider-ssh document selects a profile.
+  local -a source_args=(--no-file --no-profile)
   if [[ -n "$APP_SECRET_DOCUMENT" ]]; then
     if [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
       verify_application_all_scope_metadata
     fi
-    source_args=(--cloud --file "$APP_SECRET_DOCUMENT")
+    source_args=(--cloud --file "$APP_SECRET_DOCUMENT" --no-profile)
     APP_SECRET_CREATE_ATTEMPTED=1
   elif [[ -n "$PROVIDER_SSH_DOCUMENT" ]]; then
     source_args=(--cloud --file "$PROVIDER_SSH_DOCUMENT")

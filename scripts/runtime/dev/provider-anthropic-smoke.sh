@@ -23,6 +23,8 @@ prepare_provider_anthropic_identity() {
     "$TMPDIR_SMOKE/provider-anthropic-credentials-before.json" >/dev/null || die 'disposable Anthropic credential name collision'
   jq -e --arg name "$profile_name" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/provider-anthropic-profiles-before.json" >/dev/null || die 'disposable Anthropic profile name collision'
+  provider_account_has_default_profile "$TMPDIR_SMOKE/provider-anthropic-profiles-before.json" ||
+    die 'this account has no default credential profile: the disposable Anthropic profile would become it and could not be deleted; create a lasting profile first'
 
   PROVIDER_ANTHROPIC_CREDENTIAL_NAME="$credential_name"
   PROVIDER_ANTHROPIC_PROFILE_NAME="$profile_name"

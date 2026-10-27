@@ -103,7 +103,8 @@ cw credentials --cloud --profile NAME list
 cw credentials --cloud --profile NAME generate ssh --name NAME    # generate and set in one step
 cw credentials --cloud --profile NAME delete [--yes]
 cw credentials --local --profile NAME revisions                   # local storage
-cw credentials --cloud profiles list                               # alias: ls
+cw credentials --cloud profiles list                               # alias: ls; the default first
+cw credentials --cloud profiles default NAME                       # make NAME your default
 ```
 
 A profile names one identity per slot. The `codex` slot takes a Codex sign-in
@@ -114,3 +115,8 @@ makes a new revision; environments keep the revision they selected.
 
 Profiles are referenced from environments as `local:NAME` or `platform:NAME`
 (`cw create --profile`, `cw update ENV --profile`).
+
+Your first cloud profile becomes your default. A cloud `cw create` that names
+no profile, in a flag or in `codewire.yaml`, uses it; `--no-profile` creates
+without one. The default cannot be deleted: make another profile the default
+first.

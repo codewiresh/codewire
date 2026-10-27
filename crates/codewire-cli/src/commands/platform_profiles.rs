@@ -49,7 +49,7 @@ async fn handle_profile(
 ) -> anyhow::Result<()> {
     match command {
         CredentialProfileCommand::List(args) => {
-            print_profiles(&list_profiles(client).await?, args.output)
+            print_profiles(&default_first(list_profiles(client).await?), args.output)
         }
         CredentialProfileCommand::Get(args) => print_profiles(
             &[resolve_profile(client, &args.profile, args.revision).await?],
@@ -111,6 +111,7 @@ async fn handle_profile(
         }
         CredentialProfileCommand::Delete(args) => {
             let profile = resolve_profile(client, &args.profile, None).await?;
+            anyhow::ensure!(!profile.is_default, default_delete_refusal(&profile.name));
             if !args.yes
                 && !prompt_confirm_default_no(&format!(
                     "Delete platform user profile {:?} ({}) at revision {}?",
@@ -128,6 +129,27 @@ async fn handle_profile(
                 })
                 .await?;
             eprintln!("Platform access profile deleted.");
+            Ok(())
+        }
+        CredentialProfileCommand::Default(args) => {
+            let profile = resolve_profile(client, &args.profile, None).await?;
+            let selected = client
+                .set_default_access_profile(rpc::SetDefaultAccessProfileRequest {
+                    access_profile_id: profile.id.clone(),
+                    ..Default::default()
+                })
+                .await?
+                .access_profile
+                .into_option()
+                .context("platform returned no profile")?;
+            anyhow::ensure!(
+                selected.id == profile.id && selected.is_default,
+                "platform returned a different default profile"
+            );
+            eprintln!(
+                "Default credential profile: {:?}. A cloud `cw env create` uses it when you name no profile.",
+                selected.name
+            );
             Ok(())
         }
         CredentialProfileCommand::Revisions(args) => {
@@ -304,14 +326,29 @@ async fn update_profile(
     )
 }
 
+/// The default profile first; the rest keep the platform's order.
+pub(super) fn default_first(mut profiles: Vec<rpc::AccessProfile>) -> Vec<rpc::AccessProfile> {
+    profiles.sort_by_key(|profile| !profile.is_default);
+    profiles
+}
+
+fn default_delete_refusal(name: &str) -> String {
+    format!(
+        "{name:?} is your default credential profile and cannot be deleted; make another profile the default first: cw credentials --cloud profiles default NAME"
+    )
+}
+
 fn print_profiles(profiles: &[rpc::AccessProfile], output: OutputFormat) -> anyhow::Result<()> {
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(profiles)?),
         OutputFormat::Text => {
             for profile in profiles {
                 println!(
-                    "{}\tplatform:user/{}\trevision {}",
-                    profile.id, profile.name, profile.revision
+                    "{}\tplatform:user/{}\trevision {}{}",
+                    profile.id,
+                    profile.name,
+                    profile.revision,
+                    if profile.is_default { "\tdefault" } else { "" }
                 );
                 for entry in &profile.entries {
                     println!("  {}\t{}", entry.capability_slot, entry.credential_id);
@@ -691,5 +728,103 @@ mod tests {
         assert!(profile_selector("organization/work").is_err());
         assert!(profile_selector("id:not-a-uuid").is_err());
         assert!(profile_selector("name:work").is_err());
+    }
+
+    #[tokio::test]
+    async fn default_command_sets_exactly_the_named_profile() {
+        let server = MockServer::start().await;
+        expect_list(&server, vec![profile()]).await;
+        expect_exact(&server, None, profile()).await;
+        unary(
+            &server,
+            "AccessProfileService",
+            "SetDefaultAccessProfile",
+            rpc::SetDefaultAccessProfileRequest {
+                access_profile_id: PROFILE.into(),
+                ..Default::default()
+            },
+            rpc::SetDefaultAccessProfileResponse {
+                access_profile: Some(rpc::AccessProfile {
+                    is_default: true,
+                    ..profile()
+                })
+                .into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        handle_profile(
+            &client(&server),
+            CredentialProfileCommand::Default(CredentialProfileDefaultArgs {
+                profile: "work".into(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_default_is_refused_before_any_delete_request() {
+        let server = MockServer::start().await;
+        let default = rpc::AccessProfile {
+            is_default: true,
+            ..profile()
+        };
+        expect_list(&server, vec![default.clone()]).await;
+        expect_exact(&server, None, default).await;
+        let error = handle_profile(
+            &client(&server),
+            CredentialProfileCommand::Delete(CredentialProfileDeleteArgs {
+                profile: "work".into(),
+                yes: true,
+            }),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("make another profile the default first"),
+            "{error}"
+        );
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path().ends_with("/DeleteAccessProfile"))
+        );
+    }
+
+    #[test]
+    fn json_output_names_the_default_as_scripts_read_it() {
+        let value = serde_json::to_value(rpc::AccessProfile {
+            is_default: true,
+            ..profile()
+        })
+        .unwrap();
+        assert_eq!(value["isDefault"], true, "{value}");
+    }
+
+    #[test]
+    fn lists_put_the_default_first_and_keep_the_rest_in_order() {
+        let named = |id: &str, is_default| rpc::AccessProfile {
+            id: id.into(),
+            is_default,
+            ..profile()
+        };
+        let ordered = default_first(vec![
+            named("a", false),
+            named("b", false),
+            named("c", true),
+            named("d", false),
+        ]);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|profile| profile.id.as_str())
+                .collect::<Vec<_>>(),
+            ["c", "a", "b", "d"]
+        );
     }
 }

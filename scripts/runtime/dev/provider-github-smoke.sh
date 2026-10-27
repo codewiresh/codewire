@@ -23,6 +23,8 @@ prepare_provider_github_identity() {
     "$TMPDIR_SMOKE/provider-github-credentials-before.json" >/dev/null || die 'disposable GitHub credential name collision'
   jq -e --arg name "$profile_name" 'type == "array" and all(.[]; .name != $name)' \
     "$TMPDIR_SMOKE/provider-github-profiles-before.json" >/dev/null || die 'disposable GitHub profile name collision'
+  provider_account_has_default_profile "$TMPDIR_SMOKE/provider-github-profiles-before.json" ||
+    die 'this account has no default credential profile: the disposable GitHub profile would become it and could not be deleted; create a lasting profile first'
 
   # Cleanup authority begins only after both unique names were confirmed absent.
   PROVIDER_GITHUB_CREDENTIAL_NAME="$credential_name"

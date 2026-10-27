@@ -2871,3 +2871,44 @@ async fn cloud_create_sends_the_discovered_spec_to_the_platform() {
     .spec;
     assert_eq!(spec, expected);
 }
+
+#[test]
+fn cloud_create_profile_precedence_is_flag_then_no_profile_then_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("selected.yaml");
+    fs::write(
+        &file,
+        "image: ghcr.io/example/workspace:1\ncredentials: {profile: platform:user/work}\n",
+    )
+    .unwrap();
+    let file = file.to_str().unwrap();
+    let request = |flags: &[&str]| {
+        let mut argv = vec!["cw", "--cloud", "create", "--file", file];
+        argv.extend_from_slice(flags);
+        let (_, _, EnvCommand::Create(args)) = env_operation(Cli::try_parse_from(argv).unwrap())
+        else {
+            panic!("create");
+        };
+        prepare_platform_env_create_request(&args).unwrap()
+    };
+    // The file's profile; with none named the default applies at the platform.
+    assert_eq!(
+        request(&[]).project_spec.credentials.unwrap().profile,
+        "platform:user/work"
+    );
+    assert_eq!(
+        request(&["--profile", "platform:user/other"])
+            .project_spec
+            .credentials
+            .unwrap()
+            .profile,
+        "platform:user/other"
+    );
+    // --no-profile overrides the file, and so also the default.
+    let none = request(&["--no-profile"]);
+    assert!(none.project_spec.credentials.is_none() && !none.confirm_personal_credentials);
+    assert!(
+        Cli::try_parse_from(["cw", "create", "--profile", "platform:work", "--no-profile"])
+            .is_err()
+    );
+}

@@ -1265,6 +1265,10 @@ async fn bound_profile_and_credential_reads_decide_each_condition_alone() -> Res
         let mut context = environment(&db, &user, &org, "bound-env", &codex.metadata.id).await?;
         context.authorized_credentials.insert(api_key.metadata.id.clone());
         let manager = profiles(&db.pool);
+        // The user's first profile is their default, whose owner never
+        // changes; the bound profile is an ordinary one, so a case below can
+        // move it to another owner.
+        manager.create(&user, name("default"), BTreeMap::new()).await?;
         let profile = manager
             .create(
                 &user,
