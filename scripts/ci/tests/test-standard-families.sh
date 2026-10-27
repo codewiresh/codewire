@@ -97,11 +97,28 @@ grep -qF 'if rust_packages_shard_covers "$package"; then' "$RUNNER" || fail 'Con
 grep -qF 'if rust_packages_shard_covers codewire-dashboard-web; then' "$RUNNER" || fail 'Web skips without the predicate'
 
 # Order: Web beside the others, which run in order; Contracts never runs here.
+# wait_for TEST: poll until TEST holds, bounded so a broken runner fails the
+# case instead of hanging it.
+wait_for() {
+  local deadline=$((SECONDS + 120))
+  until eval "$1"; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.05
+  done
+}
 run_standard_family() {
   echo "$1 start $(date +%s%N)" >> "$work/order"
   sleep "${FAMILY_SECONDS:-0}"
-  [ "$1" != web ] || sleep "${WEB_SECONDS:-0}"
-  [ "$1" != "${FAIL_FAMILY:-none}" ] || return 1
+  # WEB_HOLD: Web runs until it is stopped, so whether it was stopped is an
+  # ordering fact, not a race against a timer.
+  if [ "$1" = web ] && [ -n "${WEB_HOLD:-}" ]; then
+    wait_for '[ -e "$work/release-web" ]' || true
+  fi
+  if [ "$1" = "${FAIL_FAMILY:-none}" ]; then
+    # Fail only once Web is running beside this family.
+    [ -z "${WEB_HOLD:-}" ] || wait_for 'grep -q "^web start " "$work/order"' || true
+    return 1
+  fi
   echo "$1 end $(date +%s%N)" >> "$work/order"
 }
 at() { sed -n "s/^$1 $2 //p" "$work/order"; }
@@ -135,7 +152,8 @@ CASES=$((CASES + 1))
 # and the families after the failed one in order never start.
 : > "$work/order"
 SELECTION='|valid:v3|web|go_support|sdk_go|complete|'
-if FAIL_FAMILY=go-support WEB_SECONDS=5 run_standard > "$work/out" 2>&1; then fail 'a failed family passed'; fi
+rm -f "$work/release-web"
+if FAIL_FAMILY=go-support WEB_HOLD=1 run_standard > "$work/out" 2>&1; then fail 'a failed family passed'; fi
 [ -n "$(at web start)" ] && [ -z "$(at web end)" ] || fail 'Web was not stopped after the first failure'
 [ -z "$(at sdk-go start)" ] || fail 'a family started after the first failure'
 CASES=$((CASES + 1))
