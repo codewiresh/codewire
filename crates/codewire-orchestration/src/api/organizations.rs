@@ -946,10 +946,19 @@ pub(crate) async fn list_organizations_core(
     state: ApiState,
     user: AuthUser,
 ) -> AppResult<Vec<OrgWithRole>> {
+    list_memberships(&state.pool, &user).await
+}
+
+/// The caller's organizations with their role and assignments in each, read
+/// in one statement: one database round trip whatever the number of
+/// organizations.
+async fn list_memberships(pool: &sqlx::PgPool, user: &AuthUser) -> AppResult<Vec<OrgWithRole>> {
     let scoped = user.via_api_key && user.org_id.as_deref().is_some_and(|o| !o.is_empty());
 
     let base = r#"SELECT o.id, o.name, o.slug, o.created_by, o.created_at, o.updated_at,
-                         m.role, o.billing_plan, o.billing_status, o.trial_ends_at
+                         m.role, o.billing_plan, o.billing_status, o.trial_ends_at,
+                         ARRAY(SELECT a.assignment FROM org_member_assignments a
+                                WHERE a.org_member_id = m.id) AS assignments
                   FROM organizations o
                   INNER JOIN org_members m ON m.org_id = o.id
                   WHERE m.user_id = $1"#;
@@ -962,31 +971,26 @@ pub(crate) async fn list_organizations_core(
     if scoped {
         query = query.bind(user.org_id.as_deref().unwrap());
     }
-    let rows = query.fetch_all(&state.pool).await.map_err(|e| {
+    let rows = query.fetch_all(pool).await.map_err(|e| {
         tracing::error!(error = %e, "organizations: list failed");
         AppError::InternalMsg("failed to list organizations".into())
     })?;
 
     let mut result = Vec::with_capacity(rows.len());
     for r in &rows {
-        let id: String = r.try_get("id").map_err(AppError::from)?;
         let created_at: chrono::NaiveDateTime = r.try_get("created_at").map_err(AppError::from)?;
         let updated_at: chrono::NaiveDateTime = r.try_get("updated_at").map_err(AppError::from)?;
         let trial_ends_at: Option<chrono::NaiveDateTime> =
             r.try_get("trial_ends_at").map_err(AppError::from)?;
-        // Per-org assignments (Go ignores the error → empty on failure).
-        let assignments = user_assignments(&state.pool, &id, &user.user_id)
-            .await
-            .unwrap_or_default();
         result.push(OrgWithRole {
-            id,
+            id: r.try_get("id").map_err(AppError::from)?,
             name: r.try_get("name").map_err(AppError::from)?,
             slug: r.try_get("slug").map_err(AppError::from)?,
             created_by: r.try_get("created_by").map_err(AppError::from)?,
             created_at: format_time(created_at),
             updated_at: format_time(updated_at),
             role: r.try_get("role").map_err(AppError::from)?,
-            assignments,
+            assignments: r.try_get("assignments").map_err(AppError::from)?,
             billing_plan: r.try_get("billing_plan").map_err(AppError::from)?,
             billing_status: r.try_get("billing_status").map_err(AppError::from)?,
             trial_ends_at: trial_ends_at.map(format_time),

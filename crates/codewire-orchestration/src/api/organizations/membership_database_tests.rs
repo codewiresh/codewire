@@ -114,3 +114,87 @@ async fn db_removed_member_keys_stop_working_and_stay_disabled() {
     }
     fixture.cleanup().await;
 }
+
+/// Listing returns each organization with the caller's role and only the
+/// caller's own assignments there, from one statement, and an
+/// organization-scoped API key sees only its organization.
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_listing_reads_every_membership_and_its_assignments_at_once() {
+    let fixture = LeaseFixture::seed("synthetic-membership-listing").await;
+    let org = fixture.id.clone();
+    let member = format!("{org}-member");
+    let other_org = format!("{org}-other");
+    let (org, member, other_org) = (org.as_str(), member.as_str(), other_org.as_str());
+    execute(
+        &fixture,
+        "INSERT INTO users (id, email, name, email_verified) \
+         VALUES ($1, $1 || '@example.test', 'Membership listing member', true)",
+        &[member],
+    )
+    .await;
+    execute(
+        &fixture,
+        "INSERT INTO organizations (id, name, slug, created_by, created_at) \
+         VALUES ($1, $1, $1, $2, NOW() + interval '1 minute')",
+        &[other_org, org],
+    )
+    .await;
+    let join =
+        "INSERT INTO org_members (id, org_id, user_id, role) VALUES ($1 || '-' || $2, $1, $2, $3)";
+    execute(&fixture, join, &[org, member, "member"]).await;
+    execute(&fixture, join, &[other_org, member, "admin"]).await;
+    let assign = "INSERT INTO org_member_assignments (org_member_id, assignment) \
+                  VALUES ($1 || '-' || $2, $3)";
+    execute(&fixture, assign, &[org, member, "super_admin"]).await;
+    execute(&fixture, assign, &[org, member, "auditor"]).await;
+    // Another member's assignment in the same organization is not the caller's.
+    execute(&fixture, "INSERT INTO org_member_assignments (org_member_id, assignment) VALUES ($1, 'billing_admin')", &[org]).await;
+
+    let user = |org_id: Option<&str>| AuthUser {
+        user_id: member.to_owned(),
+        org_id: org_id.map(str::to_owned),
+        is_admin: false,
+        via_api_key: org_id.is_some(),
+    };
+    let listed = list_memberships(&fixture.pool, &user(None)).await.unwrap();
+    let rows: Vec<_> = listed
+        .iter()
+        .map(|row| {
+            let mut assignments = row.assignments.clone();
+            assignments.sort();
+            (row.id.as_str(), row.role.as_str(), assignments)
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (other_org, "admin", Vec::<String>::new()),
+            (
+                org,
+                "member",
+                vec!["auditor".to_owned(), "super_admin".to_owned()]
+            ),
+        ]
+    );
+    let scoped = list_memberships(&fixture.pool, &user(Some(other_org)))
+        .await
+        .unwrap();
+    assert_eq!(
+        scoped.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        [other_org]
+    );
+
+    for (sql, binds) in [
+        (
+            "DELETE FROM org_member_assignments WHERE org_member_id LIKE $1 || '%'",
+            &[org][..],
+        ),
+        ("DELETE FROM org_members WHERE user_id = $1", &[member]),
+        ("DELETE FROM organizations WHERE id = $1", &[other_org]),
+        ("DELETE FROM users WHERE id = $1", &[member]),
+    ] {
+        execute(&fixture, sql, binds).await;
+    }
+    fixture.cleanup().await;
+}
