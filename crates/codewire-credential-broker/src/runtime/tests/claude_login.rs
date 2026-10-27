@@ -10,7 +10,9 @@ fn login_request(recipient: &ProjectionRecipient) -> v1::ClaudeLoginRequest {
     v1::ClaudeLoginRequest {
         request_id: Uuid::new_v4().to_string(),
         recipient_public_key: recipient.public_key().to_vec(),
-        deadline_unix_ms: current_unix_time_ms().unwrap() + 10_000,
+        // The broker's whole window: no test here is about the deadline, and
+        // a stalled CI slot spent a 10 s one before the seal (PR run 24711).
+        deadline_unix_ms: current_unix_time_ms().unwrap() + MAX_CODEX_LOGIN_LIFETIME_MS,
     }
 }
 
@@ -19,7 +21,7 @@ async fn claude_deadline_refusals_name_their_cause_without_secrets() {
     let (broker, state) = oauth_broker(StatusCode::OK, Vec::new(), String::new(), Duration::ZERO);
     let (log, _capture) = crate::timing::tests::TimingLog::install();
     let recipient = ProjectionRecipient::new();
-    for (offset, reason) in [(-1_i64, "deadline_passed"), (45_000, "deadline_too_far")] {
+    for (offset, reason) in [(-1_i64, "deadline_passed"), (3_600_000, "deadline_too_far")] {
         let mut request = login_request(&recipient);
         request.deadline_unix_ms = current_unix_time_ms()
             .unwrap()
@@ -67,7 +69,10 @@ async fn malformed_claude_requests_never_lease_and_other_placements_deny() {
     // This placement implements the Codex login predicate only: a Claude
     // login is denied through the trait default, before any lease.
     assert_eq!(
-        broker.claude_login(valid).await.unwrap_err(),
+        broker
+            .claude_login(login_request(&recipient))
+            .await
+            .unwrap_err(),
         BrokerRequestError::Denied
     );
     assert_eq!(state.lease_count.load(Ordering::Relaxed), 0);

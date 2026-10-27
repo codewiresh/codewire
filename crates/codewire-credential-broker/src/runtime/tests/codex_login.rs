@@ -10,9 +10,16 @@ fn login_request(recipient: &ProjectionRecipient) -> v1::CodexLoginRequest {
     v1::CodexLoginRequest {
         request_id: Uuid::new_v4().to_string(),
         recipient_public_key: recipient.public_key().to_vec(),
-        deadline_unix_ms: current_unix_time_ms().unwrap() + 10_000,
+        // The broker's whole window: no test here is about the deadline, and
+        // a stalled CI slot spent a 10 s one before the seal (PR run 24711).
+        deadline_unix_ms: current_unix_time_ms().unwrap() + MAX_CODEX_LOGIN_LIFETIME_MS,
     }
 }
+
+/// Bounds a wait on a login or proxied request, so a hang fails instead of
+/// stalling the run. It is never the expected duration, and it outlasts the
+/// login's own window.
+const HANG: Duration = Duration::from_secs(60);
 
 fn open(
     state: &OAuthTestState,
@@ -106,7 +113,7 @@ async fn concurrent_logins_and_proxied_requests_share_exactly_one_refresh() {
         })
         .collect::<Vec<_>>();
     for (recipient, request, task) in logins {
-        let sealed = tokio::time::timeout(Duration::from_secs(5), task)
+        let sealed = tokio::time::timeout(HANG, task)
             .await
             .unwrap()
             .unwrap()
@@ -116,7 +123,7 @@ async fn concurrent_logins_and_proxied_requests_share_exactly_one_refresh() {
         assert_eq!(opened.binding.material_generation, 2);
     }
     for task in proxied {
-        let response = tokio::time::timeout(Duration::from_secs(5), task)
+        let response = tokio::time::timeout(HANG, task)
             .await
             .unwrap()
             .unwrap()
@@ -174,7 +181,7 @@ async fn deadline_window_refusals_name_their_cause_without_secrets() {
     let (broker, state) = oauth_broker(StatusCode::OK, Vec::new(), String::new(), Duration::ZERO);
     let (log, _capture) = crate::timing::tests::TimingLog::install();
     let recipient = ProjectionRecipient::new();
-    for (offset, reason) in [(-1_i64, "deadline_passed"), (45_000, "deadline_too_far")] {
+    for (offset, reason) in [(-1_i64, "deadline_passed"), (3_600_000, "deadline_too_far")] {
         let mut request = login_request(&recipient);
         request.deadline_unix_ms = current_unix_time_ms()
             .unwrap()
@@ -216,9 +223,10 @@ async fn denied_or_malformed_requests_neither_lease_nor_refresh() {
             "low-order recipient" => request.recipient_public_key = vec![0; 32],
             "expired" => request.deadline_unix_ms = current_unix_time_ms().unwrap() - 1,
             "too long" => {
+                // Far past the window, however long the cases before it take.
                 request.deadline_unix_ms = current_unix_time_ms().unwrap()
                     + codewire_workload_secrets::MAX_CODEX_LOGIN_LIFETIME_MS
-                    + 5_000
+                    + 3_600_000
             }
             _ => unreachable!(),
         }
@@ -232,8 +240,12 @@ async fn denied_or_malformed_requests_neither_lease_nor_refresh() {
         );
     }
     broker.leases.deny_login.store(true, Ordering::Release);
+    // A request made now, so only the denial can refuse it.
     assert_eq!(
-        broker.codex_login(valid).await.unwrap_err(),
+        broker
+            .codex_login(login_request(&recipient))
+            .await
+            .unwrap_err(),
         BrokerRequestError::Denied
     );
     assert_eq!(state.lease_count.load(Ordering::Relaxed), 0);
