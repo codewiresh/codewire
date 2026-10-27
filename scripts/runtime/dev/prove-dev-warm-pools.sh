@@ -172,7 +172,10 @@ kubectl_ro() {
   kubectl --context "$KUBE_CONTEXT" "$@"
 }
 
-cw() { timeout 120 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"; }
+# Every environment this proof makes is a Dev cloud one. --cloud keeps cw from
+# also asking a local VM supervisor on the proof machine, whose refusal would
+# otherwise fail an id lookup (run, rm) for a cloud environment.
+cw() { timeout 120 "$CW_BIN" --cloud --server "$CODEWIRE_SERVER_URL" "$@"; }
 
 sql() {
   [[ -n "$SQL_CMD" ]] || return 2
@@ -277,7 +280,7 @@ percentile() { # P: sorted numbers on stdin -> nearest-rank percentile
 
 # ------------------------------------------------------------ environment
 
-env_info() { cw --cloud info "$1" --output json 2>/dev/null; }
+env_info() { cw info "$1" --output json 2>/dev/null; }
 
 env_state() { env_info "$1" | jq -r '.state // ""'; }
 
@@ -333,7 +336,7 @@ remove_env() {
 
 in_workspace() {
   local id="$1" script="$2"
-  timeout 180 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --no-tty --in "$id" -- bash -c "$script"
+  timeout 180 "$CW_BIN" --cloud --server "$CODEWIRE_SERVER_URL" run --no-tty --in "$id" -- bash -c "$script"
 }
 
 daemon_reachable() { in_workspace "$1" 'true' >/dev/null 2>&1; }
