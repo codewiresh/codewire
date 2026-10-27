@@ -257,6 +257,9 @@ pub(crate) struct StartProgress<W: Write> {
     began: Instant,
     idle_label: &'static str,
     open: Vec<OpenStage>,
+    /// The Pod whose start timing rows are on screen, so their header is
+    /// drawn once per Pod.
+    pod_breakdown: Option<String>,
 }
 
 impl<W: Write> StartProgress<W> {
@@ -282,6 +285,7 @@ impl<W: Write> StartProgress<W> {
             began,
             idle_label,
             open: Vec::new(),
+            pod_breakdown: None,
         }
     }
 
@@ -300,9 +304,24 @@ impl<W: Write> StartProgress<W> {
         self.set_now(received);
         let repo = repository_scope(event.metadata.as_ref());
         let key = stage_key(&event.phase, repo);
-        let depth = usize::from(repo.is_some());
+        let pod_timing = pod_timing_uid(event);
+        let depth = if pod_timing.is_some() {
+            pod_timing_depth(&event.phase)
+        } else {
+            usize::from(repo.is_some())
+        };
         let label = display_label(event);
         let mut failure = None;
+        // Pod start timing is measured after access is ready, and its time
+        // is part of "SSH access ready", so it sits under a header of its
+        // own instead of reading as further stages.
+        if let Some(pod_uid) = pod_timing
+            && self.pod_breakdown.as_deref() != Some(pod_uid)
+        {
+            self.pod_breakdown = Some(pod_uid.to_owned());
+            self.status
+                .record(0, None, pod_breakdown_header(event), None)?;
+        }
         match event.status.as_str() {
             "started" => {
                 if !self.live {
@@ -923,6 +942,52 @@ fn repository_scope(metadata: Option<&Value>) -> Option<u64> {
     metadata
         .and_then(|metadata| metadata.get("repo_index"))
         .and_then(metadata_count)
+}
+
+/// Heads the Pod start timing rows (`pod_scheduled` and the rest).
+/// Heads the Pod start timing rows (`pod_scheduled` and the rest). A warm
+/// pool member booted before this create claimed it, so its start is not
+/// part of this create's time.
+fn pod_breakdown_header(event: &EnvironmentLog) -> &'static str {
+    let warm = event
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("start_path"))
+        .and_then(Value::as_str)
+        == Some("warm");
+    if warm {
+        "Warm pool member, started before this create:"
+    } else {
+        "SSH access ready included:"
+    }
+}
+
+/// The Pod a completed Pod start timing row describes. The server writes
+/// these rows after the fact with the Pod's UID in their metadata; no other
+/// row carries one.
+fn pod_timing_uid(event: &EnvironmentLog) -> Option<&str> {
+    if event.status != "completed" || !event.phase.starts_with("pod_") {
+        return None;
+    }
+    event
+        .metadata
+        .as_ref()?
+        .get("pod_uid")?
+        .as_str()
+        .filter(|uid| !uid.is_empty())
+}
+
+/// Where a Pod start timing row sits under the header. The server writes
+/// each condition stage before the finer stages that split it, so those
+/// parts go one level further in, under their whole.
+fn pod_timing_depth(phase: &str) -> usize {
+    match phase {
+        // Parts of `pod_scheduled`.
+        "pod_volume_provisioned" | "pod_volume_bound"
+        // Parts of `pod_running`.
+        | "pod_sandbox_ready" | "pod_workspace_started" | "pod_dind_started" => 2,
+        _ => 1,
+    }
 }
 
 fn stage_key(phase: &str, repository: Option<u64>) -> String {

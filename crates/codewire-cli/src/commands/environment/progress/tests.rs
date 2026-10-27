@@ -1117,3 +1117,215 @@ fn start_cursor_is_the_newest_stored_row() {
     assert_eq!(last_log_id(&[]), None);
     assert_eq!(last_log_id(&fixture_rows()).as_deref(), Some("log-17"));
 }
+
+/// A hosted create's rows as the server writes them: the Pod start timing
+/// rows arrive after `mark_running`, though their time is part of
+/// `access_ready`.
+fn pod_timing_rows() -> Vec<EnvironmentLog> {
+    let pod = |id: &str, phase: &str, message: &str, millis: u64| {
+        row(
+            id,
+            phase,
+            "completed",
+            message,
+            "2026-10-27T10:00:12Z",
+            Some(json!({"duration_ms": millis, "pod_uid": "pod-1"})),
+        )
+    };
+    vec![
+        row(
+            "log-1",
+            "access_ready",
+            "started",
+            "SSH access ready",
+            "2026-10-27T10:00:00Z",
+            None,
+        ),
+        row(
+            "log-2",
+            "access_ready",
+            "completed",
+            "SSH access ready",
+            "2026-10-27T10:00:10Z",
+            Some(json!({"duration_ms": 10_000})),
+        ),
+        row(
+            "log-3",
+            "wait_for_ready",
+            "completed",
+            "Waiting for sandbox ready",
+            "2026-10-27T10:00:11Z",
+            Some(json!({"duration_ms": 600})),
+        ),
+        pod("log-4", "pod_scheduled", "Workspace pod scheduled", 4_000),
+        pod(
+            "log-5",
+            "pod_running",
+            "Workspace containers started",
+            5_000,
+        ),
+        pod(
+            "log-6",
+            "pod_containers_ready",
+            "Workspace containers ready",
+            2_000,
+        ),
+        row(
+            "log-7",
+            "mark_running",
+            "completed",
+            "Marking running",
+            "2026-10-27T10:00:12Z",
+            None,
+        ),
+    ]
+}
+
+#[test]
+fn pod_start_timing_renders_inside_access_ready() {
+    assert_eq!(
+        stored(&pod_timing_rows()),
+        "  ◐ SSH access ready\n\
+         \x20 ✓ SSH access ready  10s\n\
+         \x20 ✓ Waiting for sandbox ready  0.6s\n\
+         \x20 · SSH access ready included:\n\
+         \x20   ✓ Workspace pod scheduled  4.0s\n\
+         \x20   ✓ Workspace containers started  5.0s\n\
+         \x20   ✓ Workspace containers ready  2.0s\n\
+         \x20 ✓ Marking running\n"
+    );
+}
+
+#[test]
+fn pod_start_timing_header_is_drawn_once_per_pod_on_a_terminal() {
+    let t0 = Instant::now();
+    let mut view = live_view(t0);
+    let mut rows = pod_timing_rows();
+    // A replaced Pod reports its own timing under a fresh header.
+    rows.push(row(
+        "log-8",
+        "pod_scheduled",
+        "completed",
+        "Workspace pod scheduled",
+        "2026-10-27T10:00:20Z",
+        Some(json!({"duration_ms": 1_000, "pod_uid": "pod-2"})),
+    ));
+    for (offset, log) in rows.iter().enumerate() {
+        view.apply(log, t0 + Duration::from_secs(offset as u64))
+            .unwrap();
+    }
+    view.finish().unwrap();
+
+    assert_eq!(
+        permanent_lines(&output(view)),
+        [
+            "  ✓ SSH access ready  10s",
+            "  ✓ Waiting for sandbox ready  0.6s",
+            "  · SSH access ready included:",
+            "    ✓ Workspace pod scheduled  4.0s",
+            "    ✓ Workspace containers started  5.0s",
+            "    ✓ Workspace containers ready  2.0s",
+            "  ✓ Marking running",
+            "  · SSH access ready included:",
+            "    ✓ Workspace pod scheduled  1.0s",
+        ]
+    );
+}
+
+#[test]
+fn finer_pod_stages_render_under_the_stage_they_split() {
+    let pod = |id: &str, phase: &str, message: &str, millis: u64| {
+        row(
+            id,
+            phase,
+            "completed",
+            message,
+            "2026-10-27T10:00:12Z",
+            Some(json!({"duration_ms": millis, "pod_uid": "pod-1"})),
+        )
+    };
+    let rows = [
+        pod("log-1", "pod_created", "Workspace pod created", 1_000),
+        pod("log-2", "pod_scheduled", "Workspace pod scheduled", 4_000),
+        pod(
+            "log-3",
+            "pod_volume_provisioned",
+            "Workspace volume provisioned",
+            3_000,
+        ),
+        pod("log-4", "pod_volume_bound", "Workspace volume bound", 1_000),
+        pod(
+            "log-5",
+            "pod_running",
+            "Workspace containers started",
+            5_000,
+        ),
+        pod(
+            "log-6",
+            "pod_sandbox_ready",
+            "Workspace sandbox started",
+            3_000,
+        ),
+        pod(
+            "log-7",
+            "pod_workspace_started",
+            "Workspace container started",
+            1_000,
+        ),
+        pod(
+            "log-8",
+            "pod_dind_started",
+            "Docker container started",
+            1_000,
+        ),
+        pod(
+            "log-9",
+            "pod_containers_ready",
+            "Workspace containers ready",
+            3_000,
+        ),
+    ];
+    assert_eq!(
+        stored(&rows),
+        "  · SSH access ready included:\n\
+         \x20   ✓ Workspace pod created  1.0s\n\
+         \x20   ✓ Workspace pod scheduled  4.0s\n\
+         \x20     ✓ Workspace volume provisioned  3.0s\n\
+         \x20     ✓ Workspace volume bound  1.0s\n\
+         \x20   ✓ Workspace containers started  5.0s\n\
+         \x20     ✓ Workspace sandbox started  3.0s\n\
+         \x20     ✓ Workspace container started  1.0s\n\
+         \x20     ✓ Docker container started  1.0s\n\
+         \x20   ✓ Workspace containers ready  3.0s\n"
+    );
+}
+
+#[test]
+fn a_warm_members_start_is_not_counted_in_this_create() {
+    let rows = [row(
+        "log-1",
+        "pod_scheduled",
+        "completed",
+        "Workspace pod scheduled",
+        "2026-10-27T10:00:12Z",
+        Some(json!({"duration_ms": 7_000, "pod_uid": "pod-1", "start_path": "warm"})),
+    )];
+    assert_eq!(
+        stored(&rows),
+        "  · Warm pool member, started before this create:\n\
+         \x20   ✓ Workspace pod scheduled  7.0s\n"
+    );
+}
+
+#[test]
+fn a_pod_phase_without_a_pod_uid_is_an_ordinary_stage() {
+    let rows = [row(
+        "log-1",
+        "pod_scheduled",
+        "completed",
+        "Workspace pod scheduled",
+        "2026-10-27T10:00:12Z",
+        Some(json!({"duration_ms": 4_000})),
+    )];
+    assert_eq!(stored(&rows), "  ✓ Workspace pod scheduled  4.0s\n");
+}
