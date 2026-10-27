@@ -1,9 +1,12 @@
 //! Durable setup phase/process authority for Temporal environment activities.
 
+use std::time::Duration;
+
 use sqlx::{PgPool, Postgres, Transaction};
 
 use super::activity_authority::{ActivityAuthority, AuthorityLost};
 use super::env_log::emit_environment_log_in_transaction;
+use super::start_timing::{since_accepted, with_since_accepted};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupActivityIdentity {
@@ -683,7 +686,17 @@ impl SetupPhaseAuthority {
         Ok(())
     }
 
-    pub async fn complete_setup(&self, phase: i32, ttl_seconds: Option<i32>) -> anyhow::Result<()> {
+    /// Commit setup and its `complete` row. Returns how long after the API
+    /// accepted the create setup completed (Program #2238's `setup_complete`
+    /// milestone), the time the row carries as `since_accepted_ms`, when it
+    /// was read. It is read just before this transaction, on its own
+    /// connection, so a failed read cannot abort the commit.
+    pub async fn complete_setup(
+        &self,
+        phase: i32,
+        ttl_seconds: Option<i32>,
+    ) -> anyhow::Result<Option<Duration>> {
+        let accepted = since_accepted(&self.pool, &self.environment_id).await;
         let mut tx = self.pool.begin().await?;
         let row = lock_setup_rows(&mut tx, &self.environment_id).await?;
         require_current(&row, &self.identity)?;
@@ -694,7 +707,7 @@ impl SetupPhaseAuthority {
             "complete",
             "completed",
             "Setup complete",
-            None,
+            with_since_accepted(None, accepted),
         )
         .await?;
         let result = sqlx::query(
@@ -755,7 +768,7 @@ impl SetupPhaseAuthority {
             .await?;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(accepted)
     }
 
     pub async fn insert_port(
@@ -1118,7 +1131,7 @@ mod tests {
             first
                 .complete_phase(0, 1, "stale", "completed", "", None)
                 .await,
-            first.complete_setup(0, None).await,
+            first.complete_setup(0, None).await.map(|_| ()),
         ] {
             assert!(
                 stale_result.is_err_and(|error| {
@@ -1210,6 +1223,50 @@ mod tests {
             .complete_phase(1, 2, "configure_environment", "completed", "", None)
             .await
             .unwrap();
+
+        // Program #2238: setup's `complete` row carries how long after the
+        // API accepted the create it landed, by the database clock.
+        sqlx::query(
+            "UPDATE environments SET created_at = created_at - interval '2500 milliseconds'
+              WHERE id = $1",
+        )
+        .bind(&environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            replacement.prepare_phase(2).await.unwrap(),
+            PhasePreparation::Ready(PhaseAcquire::Acquired)
+        );
+        let since_accepted = replacement
+            .complete_setup(2, None)
+            .await
+            .unwrap()
+            .expect("the accepted time is read for an existing environment");
+        assert!(
+            since_accepted >= Duration::from_millis(2_500)
+                && since_accepted < Duration::from_secs(60),
+            "since accepted {since_accepted:?}"
+        );
+        let (complete_ms, setup_complete): (Option<i64>, bool) = sqlx::query_as(
+            "SELECT (l.metadata->>'since_accepted_ms')::bigint, b.setup_complete
+               FROM environment_logs l
+               JOIN sandbox_environment_backend b ON b.environment_id = l.environment_id
+              WHERE l.environment_id = $1 AND l.phase = 'complete' AND l.status = 'completed'",
+        )
+        .bind(&environment_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(setup_complete);
+        assert_eq!(
+            complete_ms,
+            Some(i64::try_from(since_accepted.as_millis()).unwrap())
+        );
+        assert_eq!(
+            super::super::start_timing::since_accepted(&pool, "env_setup_lease_missing").await,
+            None
+        );
 
         let (phase, setup_error, stale_ports, stale_logs, owner_generation): (
             i32,

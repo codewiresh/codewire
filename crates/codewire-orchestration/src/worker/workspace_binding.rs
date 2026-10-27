@@ -38,6 +38,10 @@ use super::create::SandboxWorkerCfg;
 use super::env_data::{BackendRow, EnvironmentRow, load_environment, load_environment_in};
 use super::env_log::emit_authoritative_environment_log_for_states;
 use super::environment_auth::{WorkspaceCredentialScope, daemon_credential_for};
+use super::start_timing::{
+    create_milestone_path, record_create_milestone, since_accepted, start_profile,
+    with_since_accepted,
+};
 use crate::sandbox::client::{
     RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity, WorkspacePvc,
 };
@@ -46,7 +50,7 @@ use crate::sandbox::warm_pool::{
     sandbox_matches_rendering,
 };
 use crate::sandbox::{ClaimOpts, LABEL_OPERATION_GENERATION};
-use crate::start_metrics::StartPath;
+use crate::start_metrics::{CreateMilestone, StartPath, StartProfile};
 
 /// Environments examined per pass.
 const BACKFILL_BATCH: i64 = 16;
@@ -1295,15 +1299,29 @@ pub(crate) async fn bind_workspace_runtime(
     match result {
         Ok((WriteOutcome::Recorded, path)) => {
             observe_record(RecordResult::Recorded);
+            // Program #2238: a create's `bound` milestone, timed from the
+            // accepted request.
+            let milestone = match create_milestone_path(&env.state, path) {
+                Some(path) => since_accepted(authority.pool(), &env.id)
+                    .await
+                    .map(|since| (path, since)),
+                None => None,
+            };
             emit_authoritative_environment_log_for_states(
                 authority,
                 states,
                 "workspace_bind",
                 "completed",
                 "",
-                metadata,
+                with_since_accepted(metadata, milestone.map(|(_, since)| since)),
             )
             .await?;
+            if let Some((path, since)) = milestone {
+                let profile = cfg.map_or(StartProfile::Other, |cfg| {
+                    start_profile(cfg, &env.isolation_tier)
+                });
+                record_create_milestone(&env.id, CreateMilestone::Bound, path, profile, since);
+            }
             // The recorder refuses anything but the observed chain, so the
             // recorded Sandbox is the observed one.
             Ok(Some(RecordedBind {

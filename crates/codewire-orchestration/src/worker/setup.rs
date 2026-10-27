@@ -26,6 +26,7 @@ use super::scripts::{
 use super::setup_lease::{
     PhaseAcquire, PhasePreparation, SetupActivityIdentity, SetupLeaseRecord, SetupPhaseAuthority,
 };
+use super::start_timing::{record_create_milestone, start_profile};
 use super::workspace_binding::{BindRefused, bind_replacement_runtime};
 use super::{JobPayload, WorkerContext};
 use crate::repository_mount::{canonical_repository_mount, validate_repository_mounts};
@@ -33,6 +34,7 @@ use crate::sandbox::client::{ProbeResult, SandboxClient, WorkspacePodIdentity};
 use crate::sandbox::exec::{StderrTap, WorkspaceExecResult};
 use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::sandbox::sidecar::WORKSPACE_SSH_PORT;
+use crate::start_metrics::{CreateMilestone, StartPath};
 
 const DEFAULT_SIDECAR_READY_TIMEOUT: Duration = Duration::from_secs(180);
 const SIDECAR_READY_TIMEOUT_ENV: &str = "SIDECAR_READY_TIMEOUT_SECS";
@@ -540,6 +542,9 @@ impl<S: SetupStore, O: SetupOps> Runner<S, O> {
 
 pub struct PgSetupStore {
     pub phase_authority: SetupPhaseAuthority,
+    /// Set when this store committed setup: how long after the API accepted
+    /// the create that was (Program #2238's `setup_complete` milestone).
+    pub completed_since_accepted: std::sync::OnceLock<Duration>,
 }
 
 impl SetupStore for PgSetupStore {
@@ -566,9 +571,14 @@ impl SetupStore for PgSetupStore {
         phase: i32,
         ttl_seconds: Option<i32>,
     ) -> anyhow::Result<()> {
-        self.phase_authority
+        if let Some(since) = self
+            .phase_authority
             .complete_setup(phase, ttl_seconds)
-            .await
+            .await?
+        {
+            let _ = self.completed_since_accepted.set(since);
+        }
+        Ok(())
     }
 
     async fn set_error(&self, _env_id: &str, phase: i32, err_msg: &str) -> anyhow::Result<()> {
@@ -2170,6 +2180,7 @@ pub async fn handle_environment_setup(
     let mut runner = Runner {
         store: PgSetupStore {
             phase_authority: phase_authority.clone(),
+            completed_since_accepted: std::sync::OnceLock::new(),
         },
         ops: WorkerSetupOps {
             ctx,
@@ -2199,6 +2210,9 @@ pub async fn handle_environment_setup(
         tracing::error!(env = env_id, error = %err, "setup failed");
         return Ok(()); // environment is still usable — don't retry
     }
+    if let Some(since) = runner.store.completed_since_accepted.get().copied() {
+        record_setup_complete(ctx, &runner.ops.env, &input.namespace, since).await;
+    }
 
     let environment = load_environment(&ctx.pool, env_id).await?;
     let backend = load_backend_row(&ctx.pool, env_id).await?;
@@ -2206,6 +2220,40 @@ pub async fn handle_environment_setup(
         .await?;
     tracing::info!(environment_id = env_id, "environment.setup completed");
     Ok(())
+}
+
+/// Observe the `setup_complete` create milestone after its row committed.
+/// Setup completes once per environment, as the last step of its create. It
+/// does not know the start path, so it reads the Sandbox's launch type as
+/// `access_ready` does; without it the observation is skipped rather than
+/// guessed.
+async fn record_setup_complete(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    namespace: &str,
+    since_accepted: Duration,
+) {
+    let Some(kube) = ctx.kube.as_ref() else {
+        return;
+    };
+    match SandboxClient::new(kube.clone(), namespace)
+        .probe_environment(&env.id)
+        .await
+    {
+        Ok(probe) => record_create_milestone(
+            &env.id,
+            CreateMilestone::SetupComplete,
+            StartPath::from_launch_type(Some(probe.launch_type.as_str())),
+            start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+            since_accepted,
+        ),
+        // Timing is observational; the row still carries the time.
+        Err(error) => tracing::warn!(
+            environment_id = env.id,
+            error = %error,
+            "setup: skip the setup_complete milestone after a failed Sandbox read"
+        ),
+    }
 }
 
 /// Reapply Git author metadata and run the current startup script after a

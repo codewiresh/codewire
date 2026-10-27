@@ -13,7 +13,8 @@ use super::env_data::{
 use super::env_log::emit_authoritative_environment_log_for_states;
 use super::environment_auth::{WorkspaceCredentialScope, issue_environment_daemon_token};
 use super::start_timing::{
-    POD_STAGE_PHASES, bind_stage_path, duration_ms, pod_stage_timings, start_profile,
+    POD_STAGE_PHASES, bind_stage_path, create_milestone_path, duration_ms, pod_stage_timings,
+    record_create_milestone, since_accepted, start_profile, with_since_accepted,
 };
 use super::workspace_binding::{
     EnvironmentBinding, bind_before_ready, bind_workspace_runtime, binding_bootstrap_current,
@@ -36,7 +37,7 @@ use crate::sandbox::{
     ClaimOpts, canonical_workspace_runtime_image, claim_name, environment_template_name,
     is_canonical_workspace_runtime_image, shadow_warm_pool_name,
 };
-use crate::start_metrics::{self, StartPath, StartProfile, StartStage};
+use crate::start_metrics::{self, CreateMilestone, StartPath, StartProfile, StartStage};
 
 mod pool_route;
 mod warm_bridge;
@@ -1799,7 +1800,21 @@ async fn run_environment_create(
                     record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
                     return Err(e);
                 }
-                emit_create_log(authority, "access_ready", "completed", "", gateway_meta).await?;
+                // Program #2238: a create's `access_ready` milestone, timed
+                // from the accepted request. A resume that re-creates its
+                // Claim is not a create.
+                let accepted = match create_milestone_path(&env.state, claim_path) {
+                    Some(_) => since_accepted(&ctx.pool, env_id).await,
+                    None => None,
+                };
+                emit_create_log(
+                    authority,
+                    "access_ready",
+                    "completed",
+                    "",
+                    with_since_accepted(gateway_meta, accepted),
+                )
+                .await?;
                 // A pool Claim's Sandbox is warm only when the controller
                 // adopted a member; with none ready it was created cold.
                 let gateway_path = match claim_path {
@@ -1816,6 +1831,15 @@ async fn run_environment_create(
                     profile,
                     gateway_elapsed,
                 );
+                if let Some(since) = accepted {
+                    record_create_milestone(
+                        env_id,
+                        CreateMilestone::AccessReady,
+                        gateway_path,
+                        profile,
+                        since,
+                    );
+                }
             }
 
             CreateAction::StoreBackend => {

@@ -8,7 +8,7 @@ use k8s_openapi::jiff::Timestamp;
 
 use super::create::{SandboxWorkerCfg, runtime_profile_for_isolation_tier};
 use crate::sandbox::client::PodStartTimeline;
-use crate::start_metrics::{StartPath, StartProfile, StartStage};
+use crate::start_metrics::{self, CreateMilestone, StartPath, StartProfile, StartStage};
 
 /// One workspace Pod start stage between two consecutive Kubernetes marks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +194,85 @@ pub(super) fn start_profile(cfg: &SandboxWorkerCfg, isolation_tier: &str) -> Sta
 /// an environment bound it before.
 pub(super) fn bind_stage_path(state: &str, recorded: StartPath) -> Option<StartPath> {
     matches!(state, "creating" | "starting").then(|| StartPath::for_state(state, recorded))
+}
+
+/// How long ago the API accepted this environment's create, by the database
+/// clock. `environments.created_at` is the `now()` of the API transaction
+/// that inserted the row, so both instants come from one clock and no worker
+/// clock skew enters. The column has no time zone: Postgres reads it back in
+/// the session time zone it was written in, which no session here changes.
+///
+/// `None` on a failed read or a missing row. Timing is observational, so it
+/// never fails the create.
+pub(super) async fn since_accepted<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    environment_id: &str,
+) -> Option<Duration> {
+    let read = sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT EXTRACT(EPOCH FROM (clock_timestamp() - created_at))::float8
+           FROM environments WHERE id = $1",
+    )
+    .bind(environment_id)
+    .fetch_optional(executor)
+    .await;
+    match read {
+        Ok(seconds) => seconds
+            .flatten()
+            .and_then(|seconds| Duration::try_from_secs_f64(seconds.max(0.0)).ok()),
+        Err(error) => {
+            tracing::warn!(
+                environment_id,
+                error = %error,
+                "create: skip a milestone time after a failed accepted-time read"
+            );
+            None
+        }
+    }
+}
+
+/// The path a create milestone is observed under, or `None` when the
+/// environment is not being created: a resume (`starting`) or a running
+/// environment's replaced Pod.
+pub(super) fn create_milestone_path(state: &str, path: StartPath) -> Option<StartPath> {
+    matches!(state, "pending" | "creating").then_some(path)
+}
+
+/// `metadata` with the milestone's `since_accepted_ms`, when it was read.
+pub(super) fn with_since_accepted(
+    metadata: Option<serde_json::Value>,
+    since_accepted: Option<Duration>,
+) -> Option<serde_json::Value> {
+    let Some(since_accepted) = since_accepted else {
+        return metadata;
+    };
+    let mut metadata = metadata.unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "since_accepted_ms".to_owned(),
+            duration_ms(since_accepted).into(),
+        );
+    }
+    Some(metadata)
+}
+
+/// Observe a create milestone after its durable row committed, and emit it
+/// as a tracing event, which the opt-in `otel` export carries with its span.
+pub(super) fn record_create_milestone(
+    environment_id: &str,
+    milestone: CreateMilestone,
+    path: StartPath,
+    profile: StartProfile,
+    since_accepted: Duration,
+) {
+    start_metrics::observe_create_milestone(milestone, path, profile, since_accepted);
+    tracing::info!(
+        environment_id,
+        milestone = milestone.as_str(),
+        path = path.as_str(),
+        profile = profile.as_str(),
+        since_accepted_ms = duration_ms(since_accepted),
+        "environment create milestone"
+    );
 }
 
 pub(super) fn duration_ms(duration: Duration) -> i64 {
@@ -498,5 +577,29 @@ mod tests {
             StartProfile::Confidential
         );
         assert_eq!(start_profile(&cfg, "unsupported"), StartProfile::Other);
+    }
+
+    #[test]
+    fn only_a_create_records_milestones() {
+        for path in [StartPath::Cold, StartPath::Warm] {
+            assert_eq!(create_milestone_path("pending", path), Some(path));
+            assert_eq!(create_milestone_path("creating", path), Some(path));
+            assert_eq!(create_milestone_path("starting", path), None);
+            assert_eq!(create_milestone_path("running", path), None);
+        }
+    }
+
+    #[test]
+    fn since_accepted_joins_the_row_metadata_only_when_read() {
+        let metadata = Some(serde_json::json!({ "duration_ms": 7 }));
+        assert_eq!(with_since_accepted(metadata.clone(), None), metadata);
+        assert_eq!(
+            with_since_accepted(metadata, Some(Duration::from_micros(41_600))),
+            Some(serde_json::json!({ "duration_ms": 7, "since_accepted_ms": 41 }))
+        );
+        assert_eq!(
+            with_since_accepted(None, Some(Duration::from_millis(9))),
+            Some(serde_json::json!({ "since_accepted_ms": 9 }))
+        );
     }
 }

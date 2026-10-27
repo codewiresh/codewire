@@ -11,6 +11,12 @@
 //! Only completed stages are observed. A failed stage's elapsed time measures
 //! how long the failure took to surface, not how long the stage takes, so it
 //! is left to the durable `failed` log row.
+//!
+//! A second histogram (Program #2238, the < 50 ms warm create goal) records,
+//! for a create only, how long after the API accepted the request each create
+//! milestone landed. Its buckets start at 5 ms, where the stage histogram's
+//! start at half a second, and it carries the same closed labels with the
+//! milestone in place of the stage.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -23,6 +29,7 @@ use crate::sandbox::template::{
 };
 
 static STAGE_SECONDS: OnceLock<HistogramVec> = OnceLock::new();
+static CREATE_MILESTONE_SECONDS: OnceLock<HistogramVec> = OnceLock::new();
 
 /// Sub-second API stages through multi-minute image pulls. The top bucket is
 /// the commodity create readiness timeout; slower confidential starts fall in
@@ -30,6 +37,39 @@ static STAGE_SECONDS: OnceLock<HistogramVec> = OnceLock::new();
 const STAGE_BUCKETS: [f64; 16] = [
     0.5, 1.0, 2.0, 3.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0, 300.0, 600.0,
 ];
+
+/// Tens of milliseconds, the warm create goal, through a minute, past a cold
+/// create's usual setup completion; slower creates fall in `+Inf`.
+const CREATE_MILESTONE_BUCKETS: [f64; 16] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 20.0, 30.0, 60.0,
+];
+
+/// A create milestone, timed from the instant the API accepted the create.
+/// The milestone's `completed` `environment_logs` row (named on each value)
+/// carries the same time as `since_accepted_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateMilestone {
+    /// The workspace binding committed (`workspace_bind`): an identity-free
+    /// daemon listens from here.
+    Bound,
+    /// The credential gateway served readiness (`access_ready`): SSH access
+    /// is ready.
+    AccessReady,
+    /// Setup committed (`complete`).
+    SetupComplete,
+}
+
+impl CreateMilestone {
+    pub const ALL: [Self; 3] = [Self::Bound, Self::AccessReady, Self::SetupComplete];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bound => "bound",
+            Self::AccessReady => "access_ready",
+            Self::SetupComplete => "setup_complete",
+        }
+    }
+}
 
 /// A measured start stage. Each value is also the `environment_logs` phase
 /// that records the same stage for one environment.
@@ -218,6 +258,36 @@ fn stage_seconds_metric() -> &'static HistogramVec {
     })
 }
 
+fn create_milestone_seconds_metric() -> &'static HistogramVec {
+    CREATE_MILESTONE_SECONDS.get_or_init(|| {
+        register_histogram_vec!(
+            HistogramOpts::new(
+                "codewire_environment_create_milestone_seconds",
+                "Time from the API accepting an environment create until each create milestone."
+            )
+            .buckets(CREATE_MILESTONE_BUCKETS.to_vec()),
+            &["milestone", "path", "profile"]
+        )
+        .expect("environment create milestone metric registration must be unique")
+    })
+}
+
+/// Record one create milestone, `since_accepted` after the API accepted the
+/// create. Call only after the milestone's durable log row committed, with
+/// the time the row carries. `path` is `cold` or `warm`: a resume is not a
+/// create.
+pub fn observe_create_milestone(
+    milestone: CreateMilestone,
+    path: StartPath,
+    profile: StartProfile,
+    since_accepted: Duration,
+) {
+    debug_assert_ne!(path, StartPath::Resume, "a resume has no create milestones");
+    create_milestone_seconds_metric()
+        .with_label_values(&[milestone.as_str(), path.as_str(), profile.as_str()])
+        .observe(since_accepted.as_secs_f64());
+}
+
 /// Record one completed stage. Call only after the stage's durable log row
 /// committed, with the same duration the row carries.
 pub fn observe_stage(
@@ -393,6 +463,133 @@ mod tests {
         assert!(rendered.contains(
             "codewire_environment_start_stage_seconds_bucket{path=\"resume\",profile=\"runc\",stage=\"wait_for_ready\",le=\"5\"}"
         ));
+    }
+
+    fn rendered() -> String {
+        let mut rendered = Vec::new();
+        TextEncoder::new()
+            .encode(&prometheus::gather(), &mut rendered)
+            .unwrap();
+        String::from_utf8(rendered).unwrap()
+    }
+
+    fn milestone_count(milestone: CreateMilestone, path: StartPath, profile: StartProfile) -> u64 {
+        create_milestone_seconds_metric()
+            .get_metric_with_label_values(&[milestone.as_str(), path.as_str(), profile.as_str()])
+            .unwrap()
+            .get_sample_count()
+    }
+
+    #[test]
+    fn renders_the_create_milestone_histogram_with_closed_labels_and_millisecond_buckets() {
+        observe_create_milestone(
+            CreateMilestone::AccessReady,
+            StartPath::Warm,
+            StartProfile::Commodity,
+            Duration::from_millis(42),
+        );
+
+        let rendered = rendered();
+        assert!(
+            rendered.contains("# TYPE codewire_environment_create_milestone_seconds histogram")
+        );
+        for bound in ["0.005", "0.05", "60"] {
+            assert!(
+                rendered.contains(&format!(
+                    "codewire_environment_create_milestone_seconds_bucket{{milestone=\"access_ready\",path=\"warm\",profile=\"commodity\",le=\"{bound}\"}}"
+                )),
+                "missing bucket {bound}"
+            );
+        }
+        let series: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.starts_with("codewire_environment_create_milestone_seconds"))
+            .collect();
+        assert!(!series.is_empty());
+        for line in series {
+            let labels = line
+                .split_once('{')
+                .and_then(|(_, rest)| rest.split_once('}'))
+                .map(|(labels, _)| labels)
+                .unwrap_or_default();
+            for pair in labels.split(',') {
+                let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+                let value = value.trim_matches('"');
+                match name {
+                    "milestone" => assert!(
+                        CreateMilestone::ALL.iter().any(|m| m.as_str() == value),
+                        "unexpected milestone {value:?} in {line}"
+                    ),
+                    "path" => assert!(
+                        matches!(value, "cold" | "warm"),
+                        "unexpected path {value:?} in {line}"
+                    ),
+                    "profile" | "le" => {}
+                    _ => panic!("unexpected label {name:?} in {line}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_milestone_lands_in_its_own_series_and_millisecond_bucket() {
+        let before = milestone_count(CreateMilestone::Bound, StartPath::Cold, StartProfile::Runc);
+        let others: Vec<u64> = [CreateMilestone::AccessReady, CreateMilestone::SetupComplete]
+            .into_iter()
+            .map(|m| milestone_count(m, StartPath::Cold, StartProfile::Runc))
+            .collect();
+        observe_create_milestone(
+            CreateMilestone::Bound,
+            StartPath::Cold,
+            StartProfile::Runc,
+            Duration::from_millis(30),
+        );
+        assert_eq!(
+            milestone_count(CreateMilestone::Bound, StartPath::Cold, StartProfile::Runc),
+            before + 1
+        );
+        let after: Vec<u64> = [CreateMilestone::AccessReady, CreateMilestone::SetupComplete]
+            .into_iter()
+            .map(|m| milestone_count(m, StartPath::Cold, StartProfile::Runc))
+            .collect();
+        assert_eq!(after, others);
+
+        // 30 ms is above the 25 ms bucket and within the 50 ms one.
+        let rendered = rendered();
+        let cumulative = |bound: &str| -> u64 {
+            let series = format!(
+                "codewire_environment_create_milestone_seconds_bucket{{milestone=\"bound\",path=\"cold\",profile=\"runc\",le=\"{bound}\"}} "
+            );
+            rendered
+                .lines()
+                .find_map(|line| line.strip_prefix(series.as_str()))
+                .and_then(|count| count.parse().ok())
+                .unwrap_or_else(|| panic!("missing bucket {bound}"))
+        };
+        assert_eq!(cumulative("0.05") - cumulative("0.025"), 1);
+    }
+
+    #[test]
+    fn milestone_buckets_cover_five_milliseconds_to_a_minute_in_order() {
+        assert_eq!(CREATE_MILESTONE_BUCKETS.first(), Some(&0.005));
+        assert_eq!(CREATE_MILESTONE_BUCKETS.last(), Some(&60.0));
+        assert!(
+            CREATE_MILESTONE_BUCKETS
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        assert!(
+            CREATE_MILESTONE_BUCKETS.contains(&0.05),
+            "the warm create goal is a bound"
+        );
+    }
+
+    #[test]
+    fn milestone_names_are_unique() {
+        let mut names: Vec<_> = CreateMilestone::ALL.iter().map(|m| m.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), CreateMilestone::ALL.len());
     }
 
     #[test]
