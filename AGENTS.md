@@ -220,10 +220,22 @@ the changed file types. Do not bypass the hook.
 
 Each pull request merges alone. Never bundle pull requests into a train or an
 integration branch: one failure then hides in several changes. A pull request
-that merges cleanly merges without a rebase, even when it is behind `main`;
-rebase only on a conflict (owner, 2026-10-21: "if pr doesnt need rebase dont
-force rebase"). Pull-request CI is the merge gate (#3119 step 2). A pull
-request merges on:
+that merges cleanly merges without a rebase, even when it is behind `main`
+(owner, 2026-10-21: "if pr doesnt need rebase dont force rebase"). On a
+conflict, bring it up to date in whichever way suits that branch; this is
+judgment, not a fixed rule (owner, 2026-10-27, cited on #3013). Squash-merging
+means the branch's own history never reaches `main`, so judge by who else
+relies on the branch:
+
+- merge `main` in when another session or agent works on the branch, or
+  someone has already reviewed it: a rebase rewrites the commits they read or
+  built on;
+- rebase when the branch is yours alone and a short linear history helps you
+  read the conflict;
+- never force-push a branch another session drives.
+
+A coordinator may hold its own agents to a stricter rule. Pull-request CI is
+the merge gate (#3119 step 2). A pull request merges on:
 
 - its required statuses, green on its exact head: `CI / Required verification
   (pull_request)` and `Supply-chain scan / Supply-chain scan
