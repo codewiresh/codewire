@@ -23,12 +23,16 @@ pub(super) struct PodStageTiming {
 impl PodStageTiming {
     /// `pod_uid` identifies the Pod incarnation, so its marks are recorded
     /// once however many times create reaches it.
-    pub fn metadata(&self, pod_uid: &str) -> serde_json::Value {
+    /// The row's metadata. `start_path` tells a reader whether this Pod
+    /// booted for the create (cold, resume) or earlier as a warm pool member,
+    /// whose start is not part of the create's time.
+    pub fn metadata(&self, pod_uid: &str, path: StartPath) -> serde_json::Value {
         serde_json::json!({
             "duration_ms": duration_ms(self.duration),
             "at": self.completed_at.to_string(),
             "since_pod_created_ms": duration_ms(self.since_pod_created),
             "pod_uid": pod_uid,
+            "start_path": path.as_str(),
         })
     }
 }
@@ -243,13 +247,20 @@ mod tests {
             ]
         );
         assert_eq!(
-            stages[1].metadata("pod-uid-1"),
+            stages[1].metadata("pod-uid-1", StartPath::Cold),
             serde_json::json!({
                 "duration_ms": 33_000,
                 "at": at(36).unwrap().to_string(),
                 "since_pod_created_ms": 36_000,
                 "pod_uid": "pod-uid-1",
+                "start_path": "cold",
             })
+        );
+        // A warm member's rows say so, so a reader does not count its boot
+        // in the create that claimed it.
+        assert_eq!(
+            stages[1].metadata("pod-uid-1", StartPath::Warm)["start_path"],
+            "warm"
         );
     }
 
@@ -360,7 +371,7 @@ mod tests {
         for stage in &stages {
             assert!(POD_STAGE_PHASES.contains(&stage.stage.as_str()));
             assert!(stage.stage.as_str().starts_with("pod_"));
-            assert_eq!(stage.metadata("uid")["pod_uid"], "uid");
+            assert_eq!(stage.metadata("uid", StartPath::Cold)["pod_uid"], "uid");
         }
         let created = &stages[0];
         assert_eq!(created.completed_at, at(0).unwrap());

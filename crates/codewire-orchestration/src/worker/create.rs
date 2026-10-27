@@ -2033,7 +2033,7 @@ pub(super) async fn record_pod_start_marks(
             timing.stage.as_str(),
             "completed",
             "",
-            Some(timing.metadata(&probe.pod_uid)),
+            Some(timing.metadata(&probe.pod_uid, path)),
         )
         .await?;
         observe_create_stage(timing.stage, path, profile, timing.duration);
