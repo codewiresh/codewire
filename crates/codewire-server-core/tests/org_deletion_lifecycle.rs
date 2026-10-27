@@ -29,6 +29,11 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
+/// Bounds a wait on an event, so a hang fails instead of stalling the run. It
+/// is never the expected duration: a slow CI slot can stall the test process
+/// or the database for many seconds.
+const HANG: Duration = Duration::from_secs(60);
+
 struct Fixture {
     owner: AuthUser,
     alternate_owner: AuthUser,
@@ -551,7 +556,7 @@ async fn pre_fence_lease_admission_serializes_the_deletion_fence_across_pools() 
     .await
     .unwrap();
     admission.commit().await.unwrap();
-    let operation = tokio::time::timeout(Duration::from_secs(2), task)
+    let operation = tokio::time::timeout(HANG, task)
         .await
         .expect("deletion resumes after admission commit")
         .unwrap()
@@ -583,8 +588,10 @@ async fn database_mutation_lease_releases_connections_between_phases() {
     let fixture = seed(&pool).await;
 
     let organization_id = fixture.org_id.clone();
+    // A self-deadlock would hang: the bound is a hang guard, never the
+    // expected duration, which a slow CI slot exceeded at 2 s (main run 24679).
     let result = tokio::time::timeout(
-        Duration::from_secs(2),
+        HANG,
         run_organization_database_mutation(&pool, &fixture.org_id, async {
             let observed: String = sqlx::query_scalar("SELECT id FROM organizations WHERE id = $1")
                 .bind(&organization_id)
@@ -599,14 +606,25 @@ async fn database_mutation_lease_releases_connections_between_phases() {
     .unwrap();
     assert_eq!(result, fixture.org_id);
 
-    let cancelled = tokio::time::timeout(
-        Duration::from_millis(25),
-        run_organization_database_mutation(&pool, &fixture.org_id, async {
+    // Cancelled once its own mutation runs, so its lease is held: a fixed
+    // 25 ms could pass before the lease was written on a slow CI slot.
+    {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mutation = run_organization_database_mutation(&pool, &fixture.org_id, async move {
+            let _ = started_tx.send(());
             std::future::pending::<Result<(), AppError>>().await
-        }),
-    )
-    .await;
-    assert!(cancelled.is_err(), "test mutation should be cancelled");
+        });
+        tokio::pin!(mutation);
+        tokio::time::timeout(HANG, async {
+            tokio::select! {
+                _ = &mut mutation => panic!("the pending test mutation finished"),
+                started = started_rx => started.expect("the test mutation started"),
+            }
+        })
+        .await
+        .expect("the test mutation starts");
+        // Dropping it here cancels it.
+    }
 
     let active_ids: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM organization_mutation_leases WHERE organization_id = $1 AND state = 'active'",
@@ -860,7 +878,7 @@ async fn operation_chosen_runtime_outcome_settles_after_the_caller_is_dropped() 
     let settled = settled_runtime_lease(&pool, &lease_id).await;
     assert_eq!(settled.state, "released");
     assert_eq!(settled.recovery_code, None);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG, async {
         while !dropped.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -1038,7 +1056,7 @@ async fn only_unresolved_lease(pool: &PgPool, organization_id: &str, state: &str
 /// Wait for the admitted operation, not its dropped caller, to settle the
 /// lease. A lease that stays active here is the stranded-barrier defect.
 async fn settled_runtime_lease(pool: &PgPool, lease_id: &str) -> OrganizationMutationLease {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + HANG;
     loop {
         let lease = sqlx::query_as::<_, OrganizationMutationLease>(
             "SELECT * FROM organization_mutation_leases WHERE id = $1",
