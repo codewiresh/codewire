@@ -19,7 +19,9 @@ use super::agents::agent_definition;
 use super::env_data::{BackendRow, EnvironmentRow, load_backend_row, load_environment};
 #[cfg(feature = "kind-e2e")]
 use super::fencing_evidence::{FencingEvidence as SetupFencingEvidence, emit};
-use super::scripts::{build_git_identity_command, build_workspace_env_script};
+use super::scripts::{
+    GIT_IDENTITY_FAILED_EXIT, build_configure_environment_command, build_git_identity_command,
+};
 use super::setup_lease::{
     PhaseAcquire, PhasePreparation, SetupActivityIdentity, SetupLeaseRecord, SetupPhaseAuthority,
 };
@@ -1524,23 +1526,44 @@ impl WorkerSetupOps<'_> {
     }
 
     /// Publish the complete ordinary defaults before clone/install, including an
-    /// empty map after clearing values. Resolved application secrets never enter
-    /// this file; the first write gets canonical defaults as explicit overrides.
-    async fn sync_workspace_env(&self, namespace: &str) -> anyhow::Result<()> {
-        let script = build_workspace_env_script(&self.env.project_spec.environment);
-        let cmd = vec!["/bin/sh".to_string(), "-c".to_string(), script];
-        self.workspace_exec(
-            namespace,
-            &self.env.id,
-            &cmd,
-            "",
+    /// empty map after clearing values, then set the creator's Git author, in
+    /// one workspace exec: each exec costs about 0.2 s of attachment on the
+    /// create critical path. Resolved application secrets never enter the
+    /// defaults file; the first write gets canonical defaults as explicit
+    /// overrides. A failed publication fails the phase; a failed author is a
+    /// warning, as when it was its own exec.
+    async fn publish_defaults_and_git_identity(&self, namespace: &str) -> anyhow::Result<()> {
+        let identity = self.resolve_git_identity().await;
+        let cmd = build_configure_environment_command(
             &self.env.project_spec.environment,
-        )
-        .await
+            identity
+                .as_ref()
+                .map(|(email, name)| (email.as_str(), name.as_str())),
+        );
+        let result = self
+            .workspace_exec(
+                namespace,
+                &self.env.id,
+                &cmd,
+                "",
+                &self.env.project_spec.environment,
+            )
+            .await;
+        match configure_environment_outcome(result, identity.is_some())? {
+            GitIdentityOutcome::Unresolved => {}
+            GitIdentityOutcome::Configured => {
+                if let Some((email, name)) = &identity {
+                    log_git_identity_configured(&self.env.id, email, name);
+                }
+            }
+            GitIdentityOutcome::Failed(error) => log_git_identity_failed(&self.env.id, &error),
+        }
+        Ok(())
     }
 
-    /// Applies non-secret Git author metadata through the fenced setup executor.
-    async fn configure_git_identity(&self, namespace: &str) -> anyhow::Result<()> {
+    /// The creator's Git author as (email, name), or `None` with a warning
+    /// when the creator or their user row cannot be read.
+    async fn resolve_git_identity(&self) -> Option<(String, String)> {
         let env_id = &self.env.id;
         let created_by: Option<(String,)> =
             sqlx::query_as("SELECT created_by FROM environments WHERE id = $1")
@@ -1553,7 +1576,7 @@ impl WorkerSetupOps<'_> {
                 environment_id = env_id,
                 "git-identity: could not resolve creator"
             );
-            return Ok(());
+            return None;
         };
 
         let user_row: Option<GitIdentityRow> =
@@ -1564,13 +1587,23 @@ impl WorkerSetupOps<'_> {
                 .unwrap_or(None);
         let Some((git_name, git_email, name, email)) = user_row else {
             tracing::warn!(user_id = created_by, "git-identity: could not load user");
-            return Ok(());
+            return None;
         };
 
         let resolved_name = resolve_git_field(git_name.as_deref(), name.as_deref(), &email);
         let resolved_email = match git_email.as_deref() {
             Some(email) if !email.is_empty() => email.to_string(),
             _ => email,
+        };
+        Some((resolved_email, resolved_name))
+    }
+
+    /// Applies non-secret Git author metadata through the fenced setup
+    /// executor: restart's post-start configuration, after a Pod replacement.
+    async fn configure_git_identity(&self, namespace: &str) -> anyhow::Result<()> {
+        let env_id = &self.env.id;
+        let Some((resolved_email, resolved_name)) = self.resolve_git_identity().await else {
+            return Ok(());
         };
         // One workspace exec sets both fields: each exec costs about 0.2 s of
         // attachment on the create and restart critical paths.
@@ -1587,21 +1620,55 @@ impl WorkerSetupOps<'_> {
             Err(error) if is_setup_control_flow(&error) => {
                 return Err(error);
             }
-            Err(error) => tracing::warn!(
-                environment_id = env_id,
-                error = %error,
-                "git-identity: failed to set Git identity"
-            ),
-            Ok(()) => tracing::info!(
-                environment_id = env_id,
-                name = resolved_name,
-                email = resolved_email,
-                "git-identity: configured"
-            ),
+            Err(error) => log_git_identity_failed(env_id, &error),
+            Ok(()) => log_git_identity_configured(env_id, &resolved_email, &resolved_name),
         }
 
         Ok(())
     }
+}
+
+/// What the configure-environment exec did with the Git author.
+#[derive(Debug)]
+enum GitIdentityOutcome {
+    /// No author was resolved, so the exec only published the defaults.
+    Unresolved,
+    Configured,
+    /// The defaults were published; only the author failed.
+    Failed(anyhow::Error),
+}
+
+/// Attribute the configure-environment exec's result: any failure but the
+/// author's own status is the defaults publication's (or control flow) and
+/// fails the phase; the author's status is a warning.
+fn configure_environment_outcome(
+    result: anyhow::Result<()>,
+    identity_resolved: bool,
+) -> anyhow::Result<GitIdentityOutcome> {
+    match result {
+        Ok(()) if identity_resolved => Ok(GitIdentityOutcome::Configured),
+        Ok(()) => Ok(GitIdentityOutcome::Unresolved),
+        Err(error)
+            if identity_resolved
+                && !is_setup_control_flow(&error)
+                && exited_with(&error, GIT_IDENTITY_FAILED_EXIT) =>
+        {
+            Ok(GitIdentityOutcome::Failed(error))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn log_git_identity_failed(environment_id: &str, error: &anyhow::Error) {
+    tracing::warn!(
+        environment_id,
+        error = %error,
+        "git-identity: failed to set Git identity"
+    );
+}
+
+fn log_git_identity_configured(environment_id: &str, email: &str, name: &str) {
+    tracing::info!(environment_id, name, email, "git-identity: configured");
 }
 
 /// Row shape for the git-identity lookup: (git_name, git_email, name, email).
@@ -1658,9 +1725,8 @@ impl SetupOps for WorkerSetupOps<'_> {
         self.phase_authority
             .ensure_active(self.active_phase)
             .await?;
-        self.sync_workspace_env(&input.namespace).await?;
-        self.configure_git_identity(&input.namespace).await?;
-        Ok(())
+        self.publish_defaults_and_git_identity(&input.namespace)
+            .await
     }
 
     async fn clone_repos(&mut self, input: &Inputs) -> anyhow::Result<()> {
@@ -2971,6 +3037,45 @@ mod tests {
             &anyhow::anyhow!("workspace exec exited 77"),
             ssh_checkout::SSH_REFUSED_EXIT
         ));
+    }
+
+    fn exited(code: i32) -> anyhow::Error {
+        require_workspace_exec_success(&WorkspaceExecResult {
+            exit_code: code,
+            ..Default::default()
+        })
+        .unwrap_err()
+    }
+
+    #[test]
+    fn configure_environment_fails_only_for_the_defaults_and_warns_for_the_author() {
+        assert!(matches!(
+            configure_environment_outcome(Ok(()), true).unwrap(),
+            GitIdentityOutcome::Configured
+        ));
+        assert!(matches!(
+            configure_environment_outcome(Ok(()), false).unwrap(),
+            GitIdentityOutcome::Unresolved
+        ));
+        // Only the author's own status, with an author resolved, is a warning.
+        assert!(matches!(
+            configure_environment_outcome(Err(exited(GIT_IDENTITY_FAILED_EXIT)), true).unwrap(),
+            GitIdentityOutcome::Failed(_)
+        ));
+        for (error, resolved) in [
+            (exited(1), true),
+            (exited(GIT_IDENTITY_FAILED_EXIT), false),
+            (anyhow::anyhow!("workspace exec exited 78"), true),
+            (SetupActivityCancelled.into(), true),
+            (
+                anyhow::Error::new(super::super::activity_authority::AuthorityLost),
+                true,
+            ),
+        ] {
+            let message = format!("{error:#}");
+            let failed = configure_environment_outcome(Err(error), resolved).unwrap_err();
+            assert_eq!(format!("{failed:#}"), message);
+        }
     }
 
     const GITHUB_HTTPS: &str = "https://github.com/org/app.git";

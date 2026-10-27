@@ -1,4 +1,5 @@
-//! The SandboxClaim readiness wait that create and start block on.
+//! The SandboxClaim readiness wait that create and start block on, and the
+//! workspace Pod revision wait between the early bind's chain reads.
 
 use super::*;
 use axum::Router;
@@ -143,4 +144,115 @@ async fn claim_readiness_fails_once_the_deadline_passes() {
         "{error:#}"
     );
     assert_eq!(requests.lock().unwrap().len(), 3);
+}
+
+fn workspace_pod(uid: &str, resource_version: &str) -> Value {
+    json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": claim_name(ENV),
+            "namespace": NS,
+            "uid": uid,
+            "resourceVersion": resource_version,
+        },
+        "status": { "phase": "Pending" },
+    })
+}
+
+const POD_UID: &str = "5f0f9a52-8d3c-4b7e-9a61-0c2d4e6f8a10";
+
+fn observed_pod() -> Pod {
+    serde_json::from_value(workspace_pod(POD_UID, "30")).unwrap()
+}
+
+#[tokio::test]
+async fn early_bind_rereads_the_chain_once_the_pod_changes() {
+    let not_found = json!({
+        "apiVersion": "v1", "kind": "Status", "status": "Failure",
+        "reason": "NotFound", "code": 404,
+    })
+    .to_string();
+    for (changed, reads) in [
+        // Unchanged, then a new revision: its status landed.
+        (
+            (StatusCode::OK, workspace_pod(POD_UID, "31").to_string()),
+            2,
+        ),
+        // A replacement Pod under the same name.
+        (
+            (
+                StatusCode::OK,
+                workspace_pod("6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "30").to_string(),
+            ),
+            2,
+        ),
+        // The Pod is gone.
+        ((StatusCode::NOT_FOUND, not_found.clone()), 2),
+    ] {
+        let (client, requests) = raw_client(vec![
+            (StatusCode::OK, workspace_pod(POD_UID, "30").to_string()),
+            changed,
+        ]);
+        // The fallback outlasts the test, so only the change can end it.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            client.wait_for_workspace_pod_revision(
+                &observed_pod(),
+                Duration::from_millis(10),
+                Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("the Pod's change ends the wait");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), reads, "{requests:#?}");
+        for request in requests.iter() {
+            assert_eq!(
+                request,
+                &format!("GET /api/v1/namespaces/{NS}/pods/{}", claim_name(ENV))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn early_bind_waits_out_the_fallback_while_the_pod_is_unchanged_or_unreadable() {
+    let forbidden = json!({
+        "apiVersion": "v1", "kind": "Status", "status": "Failure",
+        "reason": "Forbidden", "code": 403,
+    });
+    let unchanged = workspace_pod(POD_UID, "30").to_string();
+    let (client, requests) = raw_client(vec![
+        (StatusCode::OK, unchanged.clone()),
+        // A failed read is not a change, so it never speeds up the full reads.
+        (StatusCode::FORBIDDEN, forbidden.to_string()),
+        (StatusCode::OK, unchanged.clone()),
+        (StatusCode::OK, unchanged.clone()),
+        (StatusCode::OK, unchanged),
+    ]);
+    let fallback = Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    client
+        .wait_for_workspace_pod_revision(&observed_pod(), Duration::from_millis(100), fallback)
+        .await;
+    assert!(started.elapsed() >= fallback);
+    // Reads at about 100 and 200 ms; the next would land on the deadline.
+    // A slow read only leaves fewer.
+    let reads = requests.lock().unwrap().len();
+    assert!((1..=2).contains(&reads), "{reads} reads");
+}
+
+#[tokio::test]
+async fn early_bind_waits_out_the_fallback_for_a_pod_without_a_revision() {
+    let (client, requests) = raw_client(Vec::new());
+    let mut pod = observed_pod();
+    pod.metadata.resource_version = None;
+    let fallback = Duration::from_millis(100);
+    let started = std::time::Instant::now();
+    client
+        .wait_for_workspace_pod_revision(&pod, Duration::from_millis(10), fallback)
+        .await;
+    assert!(started.elapsed() >= fallback);
+    assert!(requests.lock().unwrap().is_empty());
 }

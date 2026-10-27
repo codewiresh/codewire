@@ -33,6 +33,60 @@ pub fn build_git_identity_command(email: &str, name: &str) -> Vec<String> {
     ]
 }
 
+/// The configure-environment exec's status when the ordinary defaults were
+/// published and only the Git author could not be set: setup keeps that a
+/// warning. A failed publication keeps its own status, and is never this one.
+pub const GIT_IDENTITY_FAILED_EXIT: i32 = 78;
+
+/// `configure_environment` in one workspace exec: publish the ordinary
+/// defaults ([`build_workspace_env_script`]), then, only once they are
+/// published, set the Git author exactly as [`build_git_identity_command`]
+/// does. Without an author it is the defaults script alone.
+///
+/// The defaults run in a subshell, so their `set -eu` and traps are their own
+/// and the author never runs after a failed publication. That failure keeps
+/// its status, except that [`GIT_IDENTITY_FAILED_EXIT`] reads as 1. The Git
+/// values travel as positional arguments, never as shell source.
+pub fn build_configure_environment_command(
+    env_vars: &BTreeMap<String, String>,
+    git_identity: Option<(&str, &str)>,
+) -> Vec<String> {
+    configure_environment_command_at(env_vars, "/home/codewire/.codewire", git_identity)
+}
+
+fn configure_environment_command_at(
+    env_vars: &BTreeMap<String, String>,
+    directory: &str,
+    git_identity: Option<(&str, &str)>,
+) -> Vec<String> {
+    let defaults = workspace_env_script_at(env_vars, directory);
+    let Some((email, name)) = git_identity else {
+        return vec!["/bin/sh".to_string(), "-c".to_string(), defaults];
+    };
+    let script = format!(
+        concat!(
+            "(\n{defaults})\n",
+            "cw_status=$?\n",
+            "if [ \"$cw_status\" -ne 0 ]; then\n",
+            "  [ \"$cw_status\" -ne {git_failed} ] || cw_status=1\n",
+            "  exit \"$cw_status\"\n",
+            "fi\n",
+            "git config --global user.email \"$1\" && git config --global user.name \"$2\" ",
+            "|| exit {git_failed}\n",
+        ),
+        defaults = defaults,
+        git_failed = GIT_IDENTITY_FAILED_EXIT,
+    );
+    vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        script,
+        "codewire-configure-environment".to_string(),
+        email.to_string(),
+        name.to_string(),
+    ]
+}
+
 /// Publish ordinary defaults for the daemon, never resolved application values.
 /// The daemon home is fixed, independent of a projected or overridden HOME.
 /// Shell startup files must not reapply defaults above a launch projection.
@@ -237,6 +291,120 @@ mod tests {
         let (status, calls, _) = run_git_identity("a@example.test", "A", "user.name");
         assert!(!status.success());
         assert_eq!(calls.len(), 2);
+    }
+
+    /// Run the configure-environment command against a recording `git` that
+    /// fails only for `fail_key`, publishing into `directory` unless
+    /// `block_defaults` makes that path a file. Returns the exit code, the
+    /// recorded Git calls, and the published defaults, if any.
+    fn run_configure_environment(
+        vars: &BTreeMap<String, String>,
+        identity: (&str, &str),
+        fail_key: &str,
+        block_defaults: bool,
+    ) -> (i32, Vec<String>, Option<BTreeMap<String, String>>, bool) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let git = root.path().join("git");
+        fs::write(
+            &git,
+            concat!(
+                "#!/bin/sh\n",
+                "printf '[%s]' \"$@\" >> \"$GIT_LOG\"\n",
+                "printf '\\n' >> \"$GIT_LOG\"\n",
+                "[ \"$3\" != \"$FAIL_KEY\" ]\n",
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+        let directory = root.path().join("defaults");
+        if block_defaults {
+            fs::write(&directory, b"synthetic existing object").unwrap();
+        }
+        let log = root.path().join("calls");
+        let command =
+            configure_environment_command_at(vars, directory.to_str().unwrap(), Some(identity));
+        let status = Command::new(&command[0])
+            .args(&command[1..])
+            .current_dir(root.path())
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", root.path().display()))
+            .env("HOME", root.path())
+            .env("GIT_LOG", &log)
+            .env("FAIL_KEY", fail_key)
+            .status()
+            .unwrap();
+        let calls = fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let published = (!block_defaults)
+            .then(|| fs::read(directory.join("environment.json")).ok())
+            .flatten()
+            .map(|bytes| serde_json::from_slice(&bytes).unwrap());
+        (
+            status.code().expect("exit status"),
+            calls,
+            published,
+            root.path().join("injected").exists(),
+        )
+    }
+
+    #[test]
+    fn configure_environment_without_identity_is_the_defaults_script() {
+        let vars = BTreeMap::from([("ALPHA_KEY".to_owned(), "plain-value".to_owned())]);
+        assert_eq!(
+            build_configure_environment_command(&vars, None),
+            [
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                build_workspace_env_script(&vars)
+            ]
+        );
+    }
+
+    #[test]
+    fn configure_environment_publishes_defaults_then_sets_the_author() {
+        let vars = BTreeMap::from([(
+            "PAYLOAD".to_owned(),
+            "CW_ENVIRONMENT_JSON_0\n$(touch injected)\n'quoted'".to_owned(),
+        )]);
+        let email = "o'brien+$(touch injected)@example.test";
+        let name = "Ann `touch injected` \"Q\" O'Brien";
+        let (code, calls, published, injected) =
+            run_configure_environment(&vars, (email, name), "", false);
+        assert_eq!(code, 0);
+        assert!(!injected);
+        assert_eq!(published, Some(vars));
+        assert_eq!(
+            calls,
+            [
+                format!("[config][--global][user.email][{email}]"),
+                format!("[config][--global][user.name][{name}]"),
+            ]
+        );
+    }
+
+    #[test]
+    fn configure_environment_author_failure_is_its_own_status() {
+        let vars = BTreeMap::from([("ALPHA_KEY".to_owned(), "plain-value".to_owned())]);
+        for (fail_key, expected_calls) in [("user.email", 1), ("user.name", 2)] {
+            let (code, calls, published, _) =
+                run_configure_environment(&vars, ("a@example.test", "A"), fail_key, false);
+            assert_eq!(code, GIT_IDENTITY_FAILED_EXIT);
+            assert_eq!(calls.len(), expected_calls);
+            assert_eq!(published.as_ref(), Some(&vars));
+        }
+    }
+
+    #[test]
+    fn configure_environment_defaults_failure_skips_the_author() {
+        let (code, calls, _, _) =
+            run_configure_environment(&BTreeMap::new(), ("a@example.test", "A"), "", true);
+        assert_ne!(code, 0);
+        assert_ne!(code, GIT_IDENTITY_FAILED_EXIT);
+        assert!(calls.is_empty());
     }
 
     #[test]

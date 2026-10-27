@@ -1352,13 +1352,19 @@ pub(crate) async fn bind_workspace_runtime(
     }
 }
 
-/// How often [`bind_before_ready`] re-reads the chain while the caller waits.
+/// How often [`bind_before_ready`] re-reads the whole chain past the fast
+/// window while the caller waits. In between it re-reads only the observed
+/// Pod every [`EARLY_BIND_FAST_POLL`]
+/// ([`SandboxClient::wait_for_workspace_pod_revision`]) and re-reads the
+/// chain as soon as that Pod changes, so a cold Pod's bind readiness is seen
+/// within that cadence; this bounds a change elsewhere in the chain.
 const EARLY_BIND_POLL: Duration = Duration::from_millis(500);
 
 /// A warm member's adoption converges within a few hundred milliseconds of
 /// its claim, and its daemon serves SSH only once the binding is recorded, so
 /// for this long after the wait begins the chain is re-read every
-/// [`EARLY_BIND_FAST_POLL`] instead; a cold Pod still takes seconds to start.
+/// [`EARLY_BIND_FAST_POLL`] instead; a cold Pod still takes seconds to start,
+/// and its bind readiness then lands as a change to its own status.
 const EARLY_BIND_FAST_WINDOW: Duration = Duration::from_secs(2);
 const EARLY_BIND_FAST_POLL: Duration = Duration::from_millis(100);
 
@@ -1392,6 +1398,8 @@ pub(crate) async fn bind_before_ready(
     let pool = authority.pool();
     let started = tokio::time::Instant::now();
     loop {
+        // The chain's Pod, when this pass read the chain and did not bind.
+        let mut observed_pod = None;
         let env = load_environment(pool, authority.environment_id()).await?;
         let backend = super::env_data::load_backend_row(pool, authority.environment_id())
             .await
@@ -1405,9 +1413,10 @@ pub(crate) async fn bind_before_ready(
                 operation_generation: authority.operation_generation(),
                 ..Default::default()
             };
-            if let Ok(runtime) = client
+            let read = client
                 .read_bindable_runtime(&opts, &backend.claim_name, &backend.claim_uid)
-                .await
+                .await;
+            if let Ok(runtime) = &read
                 && runtime.bind_ready
             {
                 if credential_scope(&runtime.pod) != Some(WorkspaceCredentialScope::Pod) {
@@ -1437,8 +1446,17 @@ pub(crate) async fn bind_before_ready(
                     Err(error) => return Err(error),
                 }
             }
+            observed_pod = read.ok().map(|runtime| (client, runtime.pod));
         }
-        tokio::time::sleep(early_bind_poll(started.elapsed())).await;
+        let waited = started.elapsed();
+        match observed_pod {
+            Some((client, pod)) if waited >= EARLY_BIND_FAST_WINDOW => {
+                client
+                    .wait_for_workspace_pod_revision(&pod, EARLY_BIND_FAST_POLL, EARLY_BIND_POLL)
+                    .await;
+            }
+            _ => tokio::time::sleep(early_bind_poll(waited)).await,
+        }
     }
 }
 

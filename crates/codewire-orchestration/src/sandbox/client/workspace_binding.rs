@@ -113,6 +113,45 @@ impl SandboxClient {
         })
     }
 
+    /// Returns once the observed workspace Pod changed (another revision or
+    /// UID, or gone), re-reading only that Pod every `poll`, or once
+    /// `fallback` elapses. A cold Pod's bind readiness turns on its own status
+    /// (Running, every container started), so the early bind re-reads the
+    /// whole chain as that status lands instead of on its slower cadence. A
+    /// failed read counts as unchanged, so an unavailable API never turns this
+    /// into a faster full re-read. Orchestration may not watch Pods.
+    pub async fn wait_for_workspace_pod_revision(
+        &self,
+        observed: &Pod,
+        poll: Duration,
+        fallback: Duration,
+    ) {
+        let deadline = tokio::time::Instant::now() + fallback;
+        let (Some(name), Some(revision)) = (
+            observed.metadata.name.as_deref(),
+            observed.metadata.resource_version.as_deref(),
+        ) else {
+            tokio::time::sleep_until(deadline).await;
+            return;
+        };
+        loop {
+            let next = tokio::time::Instant::now() + poll;
+            if next >= deadline {
+                // The caller re-reads the whole chain at the deadline.
+                tokio::time::sleep_until(deadline).await;
+                return;
+            }
+            tokio::time::sleep_until(next).await;
+            match self.pods().get_opt(name).await {
+                Ok(Some(pod))
+                    if pod.metadata.uid == observed.metadata.uid
+                        && pod.metadata.resource_version.as_deref() == Some(revision) => {}
+                Ok(_) => return,
+                Err(_) => {}
+            }
+        }
+    }
+
     /// The workspace Pod by name, or `None` when it is gone.
     pub async fn get_workspace_pod(&self, name: &str) -> anyhow::Result<Option<Pod>> {
         self.pods()
