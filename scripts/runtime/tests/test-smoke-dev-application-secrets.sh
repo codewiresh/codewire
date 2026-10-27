@@ -1199,7 +1199,13 @@ for case in '124||timeout' '137||timeout' '1|HTTP error 502|http_502' \
     '1|dns error: failed to lookup address information|dns' \
     '1|invalid peer certificate: UnknownIssuer|tls' \
     '1|send request: error sending request for url (https://synthetic.invalid/x)|connect' \
-    '1|operation timed out|timeout' '7|synthetic private refusal|exit_7'; do
+    '1|operation timed out|timeout' '7|synthetic private refusal|exit_7' \
+    '1|list orgs: send request: error sending request for url (https://synthetic.invalid/x); caused by: client error (Connect): dns error: failed to lookup address information: Name or service not known|dns' \
+    '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (Connect): tcp connect error: Connection refused (os error 111)|refused' \
+    '1|list orgs: send request: error sending request for url (https://127.0.0.1:9/x); caused by: client error (Connect): tls error: received corrupt message of type InvalidContentType|tls' \
+    '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: operation timed out|timeout' \
+    '1|list orgs: client-side deadline exceeded|timeout' \
+    '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (SendRequest): connection error: Connection reset by peer (os error 104)|connect'; do
   IFS='|' read -r status text expected <<<"$case"
   printf '%s\n' "$text" >"$TMPDIR_SMOKE/class.err"
   [[ "$(cw_failure_class "$status" "$TMPDIR_SMOKE/class.err")" == "$expected" ]] ||

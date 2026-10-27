@@ -17,6 +17,7 @@ pub mod member_tailnet;
 mod mesh;
 pub mod platform_agents;
 mod tailnet;
+mod transport_error;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -1692,7 +1693,7 @@ impl ClientTransport for ReqwestConnectTransport {
                 .body(body)
                 .send()
                 .await
-                .map_err(|error| ConnectError::unavailable(format!("send request: {error}")))?;
+                .map_err(transport_error::send_failure)?;
             // Use reqwest's lossless HTTP conversion. Rebuilding the response
             // from `bytes_stream()` discards HTTP/2 trailer frames, including
             // the mandatory `grpc-status` used by native gRPC.

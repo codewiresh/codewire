@@ -828,11 +828,13 @@ cw_with_timeout() {
   timeout "$duration" "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"
 }
 
-# Value-blind class of one failed cw command: dns, connect, tls, timeout,
-# http_<status> or exit_<code>. It reads only the exit status and fixed
-# patterns in the captured stderr, and never prints the stderr. cw reports any
-# failure before a response as "error sending request" without its cause, so
-# connect also covers DNS and TLS failures that cw does not name.
+# Value-blind class of one failed cw command: dns, tls, timeout, refused,
+# connect, http_<status> or exit_<code>. It reads only the exit status and
+# fixed patterns in the captured stderr, and never prints the stderr. cw
+# reports a failure before any response as "error sending request for url
+# (...); caused by: <cause>", where the cause names a "dns error", a
+# "tls error", a timeout or a refused "tcp connect error"; connect is what
+# remains, such as a reset connection.
 cw_failure_class() {
   local status="$1" error="$2" code=''
   if [[ "$status" == 124 || "$status" == 137 ]]; then printf timeout; return; fi
@@ -843,9 +845,10 @@ cw_failure_class() {
     if grep -Eqi -- 'dns error|failed to lookup address|name or service not known|temporary failure in name resolution' "$error"; then
       printf dns; return
     fi
-    if grep -Eqi -- 'certificate|tls handshake' "$error"; then printf tls; return; fi
+    if grep -Eqi -- 'tls error|certificate|tls handshake' "$error"; then printf tls; return; fi
     if grep -Eqi -- 'timed out|deadline exceeded|deadline_exceeded' "$error"; then printf timeout; return; fi
-    if grep -Eqi -- 'error sending request|connection refused|connection reset|tcp connect error|broken pipe' "$error"; then
+    if grep -Eqi -- 'connection refused' "$error"; then printf refused; return; fi
+    if grep -Eqi -- 'error sending request|connection reset|tcp connect error|broken pipe' "$error"; then
       printf connect; return
     fi
   fi
