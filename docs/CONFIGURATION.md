@@ -105,7 +105,8 @@ its last value.
 
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
-| `SANDBOX_WORKSPACE_STORAGE_CLASS` | Required by orchestration, except under the `confidential` runtime profile | The StorageClass of every `commodity` workspace volume. There is no default: empty, orchestration refuses to start. A disk resize expands the volume only when this class allows volume expansion. The `confidential` profile always uses `longhorn-confidential`. | `standard` |
+| `SANDBOX_WORKSPACE_STORAGE_CLASS` | Required by orchestration, except under the `confidential` runtime profile | The StorageClass of every `commodity` workspace volume. There is no default: empty, orchestration refuses to start. A disk resize expands the volume only when this class allows volume expansion. | `standard` |
+| `SANDBOX_CONFIDENTIAL_WORKSPACE_STORAGE_CLASS` | Only where confidential environments are enabled | The StorageClass of every confidential workspace volume, claimed as a raw `volumeMode: Block`, `ReadWriteOncePod` device that the guest encrypts. There is no default: empty, every confidential environment is refused before any workload is created. The class must give a fresh, all-zero device of exactly the requested size with no host encryption layer, and a confidential volume never grows. | `linstor-confidential` |
 
 Base `config.env` leaves it empty, so every overlay sets it. The Kind
 overlays (`deployments/k8s/overlays/local-kind*` and `tests/e2e/kind`) use

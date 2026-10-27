@@ -114,7 +114,8 @@ POOL_FORBIDDEN_TEXT = (
     "codewire.sh/isolation-tier",
     "io.katacontainers.volume.confidential",
     "io.katacontainers.config.hypervisor.kernel_params",
-    "longhorn-confidential",
+    # The confidential claim shape (codewire#2321), whatever its class.
+    '"volumeMode": "Block"',
     "ReadWriteOncePod",
 )
 # Environment-bound confidential init-data (KBS key IDs and storage contract).

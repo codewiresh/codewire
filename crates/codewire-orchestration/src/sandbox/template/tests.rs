@@ -1786,6 +1786,33 @@ mod tests {
     }
 
     #[test]
+    fn commodity_agent_policy_init_data_never_names_trustee() {
+        let rendered = render_sandbox_template(
+            "codewire-runtime",
+            &TemplateOpts {
+                name: "tmpl-commodity".into(),
+                image: "ghcr.io/codewiresh/workspace:golden".into(),
+                runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
+                daemon_auth_token: "test-daemon-token".into(),
+                kata_agent_policy_enabled: true,
+                kata_coco_init_data_enabled: true,
+                kata_coco_kbs_url: "https://kbs.codewire-dev.sh".into(),
+                ..Default::default()
+            },
+        );
+        let decoded = decode_gzip_base64(
+            rendered["spec"]["podTemplate"]["metadata"]["annotations"]
+                [KATA_COCO_INIT_DATA_ANNOTATION_KEY]
+                .as_str()
+                .unwrap(),
+        );
+        assert!(decoded.contains("package agent_policy"));
+        for absent in ["aa.toml", "cdh.toml", "kbs.codewire-dev.sh"] {
+            assert!(!decoded.contains(absent), "{absent:?} in {decoded}");
+        }
+    }
+
+    #[test]
     fn commodity_template_ignores_coco_only_init_data_flag() {
         let rendered = render_sandbox_template(
             "codewire-runtime",
@@ -2412,6 +2439,21 @@ mod tests {
     }
 
     #[test]
+    fn confidential_workspace_storage_class_is_one_name_or_unset() {
+        assert_eq!(confidential_workspace_storage_class("").unwrap(), "");
+        assert_eq!(confidential_workspace_storage_class("  ").unwrap(), "");
+        assert_eq!(
+            confidential_workspace_storage_class(" linstor-confidential ").unwrap(),
+            "linstor-confidential"
+        );
+        let error = confidential_workspace_storage_class("two words").unwrap_err();
+        assert!(
+            error.contains(CONFIDENTIAL_WORKSPACE_STORAGE_CLASS_ENV),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn workspace_storage_class_is_the_configured_class() {
         let rendered = render_sandbox_template(
             "codewire-runtime",
@@ -2465,14 +2507,14 @@ mod tests {
                 confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
                 disk_gib: 20,
-                workspace_storage_class: "must-not-be-used".into(),
+                workspace_storage_class: "example-confidential-class".into(),
                 ..Default::default()
             },
         );
         let claim = &rendered["spec"]["volumeClaimTemplates"][0];
         assert_eq!(
             claim["spec"]["storageClassName"].as_str(),
-            Some(CONFIDENTIAL_WORKSPACE_STORAGE_CLASS)
+            Some("example-confidential-class")
         );
         assert_eq!(
             claim["spec"]["accessModes"][0].as_str(),

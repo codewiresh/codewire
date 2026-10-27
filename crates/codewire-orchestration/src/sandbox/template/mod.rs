@@ -36,7 +36,8 @@ pub use runtime_policy::{
     DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_CONFIDENTIAL,
     RUNTIME_CLASS_RUNC, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL,
     RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC, RuntimeProfileSpec,
-    required_workspace_storage_class, runtime_profile_spec, validate_managed_runtime_profile,
+    confidential_workspace_storage_class, required_workspace_storage_class, runtime_profile_spec,
+    validate_managed_runtime_profile,
 };
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
@@ -96,7 +97,11 @@ pub const DEFAULT_KATA_COCO_TEST_RESOURCE_PATH: &str =
 /// The StorageClass commodity workspace volumes use. It has no default; see
 /// [`required_workspace_storage_class`].
 pub const WORKSPACE_STORAGE_CLASS_ENV: &str = "SANDBOX_WORKSPACE_STORAGE_CLASS";
-pub const CONFIDENTIAL_WORKSPACE_STORAGE_CLASS: &str = "longhorn-confidential";
+/// The StorageClass confidential workspaces claim as a raw Block,
+/// ReadWriteOncePod volume. It has no default; a confidential environment is
+/// refused without one (see [`confidential_workspace_storage_class`]).
+pub const CONFIDENTIAL_WORKSPACE_STORAGE_CLASS_ENV: &str =
+    "SANDBOX_CONFIDENTIAL_WORKSPACE_STORAGE_CLASS";
 pub const KATA_CONFIDENTIAL_VOLUME_ANNOTATION: &str = "io.katacontainers.volume.confidential";
 pub const KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH: &str = "/dev/codewire-workspace";
 const WORKSPACE_EPHEMERAL_STORAGE_GI: i64 = 8;

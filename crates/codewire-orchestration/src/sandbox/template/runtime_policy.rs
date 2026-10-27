@@ -1,7 +1,7 @@
 //! Pure sandbox runtime-profile and resource policy.
 
 use super::{
-    CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, DEFAULT_DIND_IMAGE, TemplateOpts,
+    CONFIDENTIAL_WORKSPACE_STORAGE_CLASS_ENV, DEFAULT_DIND_IMAGE, TemplateOpts,
     WORKSPACE_STORAGE_CLASS_ENV,
 };
 
@@ -144,16 +144,30 @@ fn kernel_param_value(raw: &str) -> Option<&str> {
     }
 }
 
+/// The StorageClass of this workspace's claim. The create path chooses it
+/// per environment: the confidential class for a confidential environment,
+/// otherwise the commodity class.
 pub(super) fn workspace_storage_class(opts: &TemplateOpts) -> &str {
-    if opts.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL {
-        return CONFIDENTIAL_WORKSPACE_STORAGE_CLASS;
-    }
     opts.workspace_storage_class.trim()
 }
 
+/// Validates the configured confidential workspace StorageClass at startup.
+/// It may be empty, because only a cluster that serves confidential
+/// environments needs one; a confidential environment is then refused before
+/// any workload mutation. When set it must be exactly one name.
+pub fn confidential_workspace_storage_class(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "{CONFIDENTIAL_WORKSPACE_STORAGE_CLASS_ENV} must be one StorageClass name"
+        ));
+    }
+    Ok(value.to_owned())
+}
+
 /// Validates the configured commodity workspace StorageClass at startup. There
-/// is no built-in class: every profile except confidential, which always uses
-/// [`CONFIDENTIAL_WORKSPACE_STORAGE_CLASS`], must name one.
+/// is no built-in class: every profile except confidential, which uses
+/// [`CONFIDENTIAL_WORKSPACE_STORAGE_CLASS_ENV`] instead, must name one.
 pub fn required_workspace_storage_class(profile: &str, value: &str) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() {

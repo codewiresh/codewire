@@ -251,8 +251,9 @@ spec:
         !has(object.spec.podTemplate.metadata.annotations) ||
         !('io.katacontainers.config.hypervisor.kernel_params' in object.spec.podTemplate.metadata.annotations)) &&
         (!has(object.spec.volumeClaimTemplates) ||
-        object.spec.volumeClaimTemplates.all(t, !has(t.spec) || !has(t.spec.storageClassName) ||
-        t.spec.storageClassName != 'longhorn-confidential'))
+        object.spec.volumeClaimTemplates.all(t, !has(t.spec) ||
+        ((!has(t.spec.volumeMode) || t.spec.volumeMode != 'Block') &&
+        (!has(t.spec.accessModes) || !('ReadWriteOncePod' in t.spec.accessModes)))))
       message: confidential workspaces are never pooled
     - expression: >-
         (!has(object.spec.networkPolicyManagement) || object.spec.networkPolicyManagement == 'Managed') &&

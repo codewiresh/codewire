@@ -524,6 +524,10 @@ fn the_admission_policy_pins_the_renderer() {
             "variables.pod.runtimeClassName != '{}'",
             crate::sandbox::template::RUNTIME_CLASS_CONFIDENTIAL
         ),
+        // Confidential claims, whatever their class, are never pooled
+        // (codewire#2321).
+        "(!has(t.spec.volumeMode) || t.spec.volumeMode != 'Block')".to_owned(),
+        "(!has(t.spec.accessModes) || !('ReadWriteOncePod' in t.spec.accessModes))".to_owned(),
     ] {
         assert!(policy.contains(&fragment), "policy lost {fragment}");
     }
@@ -538,6 +542,18 @@ fn the_admission_policy_pins_the_renderer() {
     }
     let rendered = render(&pool_opts());
     assert_eq!(rendered.pool["spec"]["updateStrategy"]["type"], "Recreate");
+    // A pool claim is never the confidential shape the policy refuses.
+    let claims = rendered.template["spec"]["volumeClaimTemplates"]
+        .as_array()
+        .expect("pool workspace claim");
+    assert!(!claims.is_empty());
+    for claim in claims {
+        assert!(claim["spec"]["volumeMode"].is_null());
+        assert_eq!(
+            claim["spec"]["accessModes"],
+            serde_json::json!(["ReadWriteOnce"])
+        );
+    }
     assert_eq!(
         rendered.template["spec"]["podTemplate"]["spec"]["serviceAccountName"],
         "codewire-sandbox"

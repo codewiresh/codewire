@@ -27,14 +27,13 @@ use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 use serde_json::Value;
 
 use super::template::{
-    CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    LEGACY_DIND_BOOTSTRAP_SCRIPT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts,
-    dind_bootstrap_script, direct_udp_service_name, docker_data_size_gib,
-    eager_mkfs_dind_bootstrap_script, pre_growth_dind_bootstrap_script, render_direct_udp_service,
-    render_sandbox_shadow_pool, render_sandbox_template, render_warm_member_bridge,
-    render_workspace_daemon_network_policy, render_workspace_daemon_service,
-    warm_member_daemon_bridge_name, workspace_daemon_network_policy_name,
-    workspace_daemon_service_name,
+    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, LEGACY_DIND_BOOTSTRAP_SCRIPT,
+    RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts, dind_bootstrap_script,
+    direct_udp_service_name, docker_data_size_gib, eager_mkfs_dind_bootstrap_script,
+    pre_growth_dind_bootstrap_script, render_direct_udp_service, render_sandbox_shadow_pool,
+    render_sandbox_template, render_warm_member_bridge, render_workspace_daemon_network_policy,
+    render_workspace_daemon_service, warm_member_daemon_bridge_name,
+    workspace_daemon_network_policy_name, workspace_daemon_service_name,
 };
 use super::{
     CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_ORG_ID, LABEL_TYPE,
@@ -294,6 +293,10 @@ pub struct WorkspaceStorage {
     pub applied_disk_gb: Option<i32>,
     pub filesystem_resize_pending: bool,
     pub expansion_allowed: bool,
+    /// The claim is a raw `volumeMode: Block` device. Only confidential
+    /// workspaces claim one, and their guest-owned LUKS2/dm-integrity volume
+    /// has no grow path (#860), whatever the StorageClass allows.
+    pub raw_block: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3438,6 +3441,7 @@ impl SandboxClient {
         let spec = pvc
             .spec
             .ok_or_else(|| anyhow::anyhow!("workspace PVC {pvc_name} has no spec"))?;
+        let raw_block = spec.volume_mode.as_deref() == Some("Block");
         let storage_class_name = spec.storage_class_name.unwrap_or_default();
         if storage_class_name.trim().is_empty() {
             anyhow::bail!("workspace PVC {pvc_name} has no explicit StorageClass");
@@ -3480,6 +3484,7 @@ impl SandboxClient {
             applied_disk_gb,
             filesystem_resize_pending,
             expansion_allowed: storage_class.allow_volume_expansion == Some(true),
+            raw_block,
         })
     }
 
@@ -3500,9 +3505,7 @@ impl SandboxClient {
         // The guest-encrypted confidential raw-block profile cannot expand in
         // place. Reject here so Kubernetes never persists a larger PVC request
         // before the downstream CSI/CDH refusal.
-        if desired_disk_gb > storage.requested_disk_gb
-            && storage.storage_class_name == CONFIDENTIAL_WORKSPACE_STORAGE_CLASS
-        {
+        if desired_disk_gb > storage.requested_disk_gb && storage.raw_block {
             anyhow::bail!("confidential workspace storage expansion is not supported");
         }
         if desired_disk_gb > storage.requested_disk_gb && !storage.expansion_allowed {
@@ -4424,9 +4427,12 @@ impl SandboxClient {
 
     /// Prove that Kubernetes has forgotten the workspace volume before
     /// orchestration is allowed to delete either key copy: no PersistentVolume
-    /// still claims the workspace PVC. Longhorn is retired on every cluster,
-    /// so its backend volume proof is gone with it (codewire#2282); the
-    /// storage backend's own absence proof belongs with its re-home (#2321).
+    /// still claims the workspace PVC. With a `Delete` reclaim policy the CSI
+    /// external-provisioner removes the PV only after the driver's
+    /// `DeleteVolume` succeeded, and the LINSTOR driver returns success only
+    /// after its server-side truncate removed the resource (#2321). This stays
+    /// backend-neutral; no confidential volume is ever snapshotted, which is
+    /// the one case that keeps a LINSTOR resource definition alive.
     async fn confidential_storage_residue(
         &self,
         sandbox_names: &BTreeSet<String>,
@@ -6885,22 +6891,19 @@ mod tests {
 
     #[tokio::test]
     async fn confidential_workspace_storage_growth_is_rejected_before_mutation() {
-        let (client, _) = sandbox_client_with_secret_responses(storage_lookup_responses_for_class(
-            CONFIDENTIAL_WORKSPACE_STORAGE_CLASS,
-            true,
-        ));
+        // The StorageClass allows expansion: the raw Block claim alone refuses
+        // growth, whatever the class is called.
+        let block =
+            || storage_lookup_responses_for_claim("linstor-confidential", true, Some("Block"));
+        let (client, _) = sandbox_client_with_secret_responses(block());
         let unchanged = client
             .require_workspace_storage_resize(&storage_anchor(Some(STORAGE_PVC_UID)), 10)
             .await
             .unwrap();
-        assert_eq!(
-            unchanged.storage_class_name,
-            CONFIDENTIAL_WORKSPACE_STORAGE_CLASS
-        );
+        assert!(unchanged.raw_block);
+        assert_eq!(unchanged.storage_class_name, "linstor-confidential");
 
-        let (client, requests) = sandbox_client_with_secret_responses(
-            storage_lookup_responses_for_class(CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, true),
-        );
+        let (client, requests) = sandbox_client_with_secret_responses(block());
 
         let error = client
             .require_workspace_storage_resize(&storage_anchor(Some(STORAGE_PVC_UID)), 20)
@@ -6920,6 +6923,16 @@ mod tests {
                 .all(|(method, _)| *method == Method::GET),
             "confidential resize admission must not mutate Kubernetes objects"
         );
+    }
+
+    #[tokio::test]
+    async fn filesystem_workspace_storage_is_not_raw_block() {
+        let (client, _) = sandbox_client_with_secret_responses(storage_lookup_responses(true));
+        let storage = client
+            .require_workspace_storage_resize(&storage_anchor(Some(STORAGE_PVC_UID)), 20)
+            .await
+            .unwrap();
+        assert!(!storage.raw_block);
     }
 
     #[tokio::test]
@@ -7368,6 +7381,23 @@ mod tests {
         storage_class_name: &str,
         expansion_allowed: bool,
     ) -> Vec<(StatusCode, Value)> {
+        storage_lookup_responses_for_claim(storage_class_name, expansion_allowed, None)
+    }
+
+    fn storage_lookup_responses_for_claim(
+        storage_class_name: &str,
+        expansion_allowed: bool,
+        volume_mode: Option<&str>,
+    ) -> Vec<(StatusCode, Value)> {
+        let mut claim_spec = json!({
+            "storageClassName": storage_class_name,
+            "accessModes": ["ReadWriteOnce"],
+            "resources": {"requests": {"storage": "10Gi"}}
+        });
+        if let Some(volume_mode) = volume_mode {
+            claim_spec["volumeMode"] = volume_mode.into();
+            claim_spec["accessModes"] = json!(["ReadWriteOncePod"]);
+        }
         vec![
             (
                 StatusCode::OK,
@@ -7402,11 +7432,7 @@ mod tests {
                         "ownerReferences": [{"apiVersion": "agents.x-k8s.io/v1beta1",
                             "kind": "Sandbox", "name": "workspace-env-test",
                             "uid": STORAGE_SANDBOX_UID, "controller": true}]},
-                    "spec": {
-                        "storageClassName": storage_class_name,
-                        "accessModes": ["ReadWriteOnce"],
-                        "resources": {"requests": {"storage": "10Gi"}}
-                    },
+                    "spec": claim_spec,
                     "status": {"phase": "Bound", "capacity": {"storage": "10Gi"}}
                 }),
             ),

@@ -193,8 +193,14 @@ Record the generated `summary.md` evidence before changing runtime defaults.
 
 Workspace PVC storage is separate from the runtime profile.
 `SANDBOX_WORKSPACE_STORAGE_CLASS` has no default: orchestration refuses to
-start while it is empty, unless the runtime profile is `confidential`, whose
-workspaces always use `longhorn-confidential`.
+start while it is empty, unless the runtime profile is `confidential`.
+Confidential workspaces claim a raw `volumeMode: Block`, `ReadWriteOncePod`
+volume from `SANDBOX_CONFIDENTIAL_WORKSPACE_STORAGE_CLASS`, which also has no
+default: a confidential environment is refused while it is empty. Its class
+must expose an all-zero, exactly sized raw device with no host encryption
+layer, because the guest formats it as LUKS2 with dm-integrity using a key
+Trustee releases after attestation; on Dev that is LINSTOR
+`linstor-confidential` (codewire#2321). Confidential volumes never grow (#860).
 
 A site sets `SANDBOX_WORKSPACE_STORAGE_CLASS` to its own StorageClass for
 `commodity` workspaces; the Kind overlays use Kind's built-in `standard`. A disk resize expands the workspace PVC only when that

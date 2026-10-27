@@ -94,9 +94,15 @@ pub(super) fn build_codewire_kata_policy_init_data(
         payload.push('\n');
     }
 
+    // Only a confidential guest runs the attestation agent and CDH. A
+    // commodity rendering never names Trustee, so enabling the confidential
+    // tier beside it leaves commodity environments and warm pools unchanged
+    // (codewire#2321).
     let kbs_url = opts.kata_coco_kbs_url.trim();
     let kbs_ca_pem = opts.kata_coco_kbs_ca_pem.trim();
-    if kbs_url.is_empty() {
+    if kbs_url.is_empty()
+        || opts.runtime_profile_spec().profile != super::RUNTIME_PROFILE_CONFIDENTIAL
+    {
         return payload;
     }
 

@@ -310,7 +310,8 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             "!has(variables.pod.hostAliases) && !has(variables.pod.nodeName)",
             "variables.pod.runtimeClassName != 'confidential'",
             "'io.katacontainers.config.hypervisor.kernel_params' in object.spec.podTemplate.metadata.annotations",
-            "t.spec.storageClassName != 'longhorn-confidential'",
+            "(!has(t.spec.volumeMode) || t.spec.volumeMode != 'Block')",
+            "(!has(t.spec.accessModes) || !('ReadWriteOncePod' in t.spec.accessModes))",
             "object.spec.networkPolicyManagement == 'Managed'",
             "size(object.spec.networkPolicy.ingress) == 0",
             # codewire#3318: egress is the renderer's allowlist.

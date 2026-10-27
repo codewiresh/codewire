@@ -242,6 +242,10 @@ pub struct SandboxWorkerCfg {
     pub docker_mode: String,
     pub allow_diagnostic_runtime: bool,
     pub workspace_storage_class: String,
+    /// The class a confidential environment's raw Block claim uses
+    /// (`SANDBOX_CONFIDENTIAL_WORKSPACE_STORAGE_CLASS`). Empty refuses
+    /// confidential templates.
+    pub confidential_workspace_storage_class: String,
     pub network_policy_management: String,
     pub dind_enabled: bool,
     pub kata_agent_policy_enabled: bool,
@@ -386,6 +390,12 @@ impl SandboxWorkerCfg {
                 .unwrap_or_default(),
         )
         .unwrap_or_else(|error| panic!("{error}"));
+        let confidential_workspace_storage_class =
+            crate::sandbox::template::confidential_workspace_storage_class(
+                &std::env::var(crate::sandbox::template::CONFIDENTIAL_WORKSPACE_STORAGE_CLASS_ENV)
+                    .unwrap_or_default(),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
         let egress_bandwidth = crate::sandbox::template::sandbox_egress_bandwidth(
             std::env::var(crate::sandbox::template::EGRESS_BANDWIDTH_ENV)
                 .ok()
@@ -402,6 +412,7 @@ impl SandboxWorkerCfg {
             docker_mode: getenv("SANDBOX_DOCKER_MODE", "profile-default"),
             allow_diagnostic_runtime: getenv("SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME", "false") == "true",
             workspace_storage_class,
+            confidential_workspace_storage_class,
             network_policy_management: getenv("SANDBOX_NETWORK_POLICY_MANAGEMENT", "Managed"),
             dind_enabled: getenv("SANDBOX_DIND_ENABLED", "false") == "true",
             kata_agent_policy_enabled: getenv("SANDBOX_KATA_AGENT_POLICY_ENABLED", "false")
@@ -542,6 +553,15 @@ pub fn environment_template_opts(
         Some(profile) => runtime_profile_spec(profile, &cfg.docker_mode, cfg.dind_enabled),
         None => standard_runtime_profile_spec(cfg),
     };
+    // A confidential claim is the guest-encrypted raw Block volume of its own
+    // class; without one the environment is refused, never given the
+    // commodity class.
+    anyhow::ensure!(
+        runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL
+            || !cfg.confidential_workspace_storage_class.is_empty(),
+        "confidential workspace storage has no StorageClass: set {}",
+        crate::sandbox::template::CONFIDENTIAL_WORKSPACE_STORAGE_CLASS_ENV
+    );
     let template_base = if is_canonical_workspace_runtime_image(image_ref) {
         CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME
     } else {
@@ -669,7 +689,11 @@ pub fn shape_template_opts(
         cpu_millicores: shape.cpu_millicores,
         memory_mib: shape.memory_mib,
         disk_gib: shape.disk_gib,
-        workspace_storage_class: cfg.workspace_storage_class.clone(),
+        workspace_storage_class: if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
+            cfg.confidential_workspace_storage_class.clone()
+        } else {
+            cfg.workspace_storage_class.clone()
+        },
         network_policy_management: cfg.network_policy_management.clone(),
         dind_enabled: runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT,
         kata_agent_policy_enabled: cfg.kata_agent_policy_enabled,
@@ -2914,6 +2938,7 @@ mod tests {
             runtime_profile: "commodity".into(),
             pod_namespace: "dev".into(),
             api_base_url: "https://codewire-dev.sh".into(),
+            confidential_workspace_storage_class: "linstor-confidential".into(),
             ..Default::default()
         };
         let render = |cfg: &SandboxWorkerCfg, env: &EnvironmentRow| {
@@ -3604,7 +3629,8 @@ mod tests {
         let cfg = SandboxWorkerCfg {
             runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
             docker_mode: crate::sandbox::template::DOCKER_MODE_PROFILE_DEFAULT.into(),
-            workspace_storage_class: "longhorn".into(),
+            workspace_storage_class: "linstor-local".into(),
+            confidential_workspace_storage_class: "linstor-confidential".into(),
             kata_agent_policy_enabled: true,
             kata_coco_init_data_enabled: true,
             kata_coco_kbs_url: "https://kbs.codewire-dev.sh".into(),
@@ -3656,7 +3682,7 @@ mod tests {
         assert_eq!(
             standard_rendered["spec"]["volumeClaimTemplates"][0]["spec"]["storageClassName"]
                 .as_str(),
-            Some("longhorn")
+            Some("linstor-local")
         );
         assert!(
             standard_rendered["spec"]["podTemplate"]["metadata"]["annotations"]
@@ -3695,13 +3721,46 @@ mod tests {
         assert_eq!(
             confidential_rendered["spec"]["volumeClaimTemplates"][0]["spec"]["storageClassName"]
                 .as_str(),
-            Some(crate::sandbox::template::CONFIDENTIAL_WORKSPACE_STORAGE_CLASS)
+            Some("linstor-confidential")
         );
         assert!(
             confidential_rendered["spec"]["podTemplate"]["metadata"]["annotations"]
                 .get(crate::sandbox::template::KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY)
                 .is_some(),
             "confidential environments must receive CoCo KBS kernel parameters"
+        );
+
+        // Without a confidential class the confidential template is refused,
+        // and the commodity class is never used in its place.
+        let unconfigured = SandboxWorkerCfg {
+            confidential_workspace_storage_class: String::new(),
+            ..cfg.clone()
+        };
+        let error = environment_template_opts(
+            &unconfigured,
+            "ghcr.io/codewiresh/workspace:golden",
+            "workspace",
+            &confidential,
+            7,
+            "daemon-tok",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::sandbox::template::CONFIDENTIAL_WORKSPACE_STORAGE_CLASS_ENV),
+            "{error}"
+        );
+        assert!(
+            environment_template_opts(
+                &unconfigured,
+                "ghcr.io/codewiresh/workspace:golden",
+                "workspace",
+                &standard,
+                7,
+                "daemon-tok",
+            )
+            .is_ok()
         );
     }
 

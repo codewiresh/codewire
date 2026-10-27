@@ -363,11 +363,12 @@ resolve_active_release() {
     '.data.SANDBOX_RUNTIME_PROFILE == "commodity"' "$EVIDENCE_DIR/active-runtime-config.json"
   assert_jq "active Docker mode is not profile-default" \
     '.data.SANDBOX_DOCKER_MODE == "profile-default"' "$EVIDENCE_DIR/active-runtime-config.json"
-  # The confidential activation profile still pins ordinary Longhorn for
-  # commodity workspaces; the Dev commodity profile uses local-path while Dev's
-  # Longhorn is retired (Program #2238).
-  assert_jq "active default workspace storage class is not ordinary Longhorn" \
-    '.data.SANDBOX_WORKSPACE_STORAGE_CLASS == "longhorn"' "$EVIDENCE_DIR/active-runtime-config.json"
+  # Commodity workspaces stay on linstor-local; confidential ones claim the
+  # guest-LUKS raw Block class (codewire#2321).
+  assert_jq "active default workspace storage class is not linstor-local" \
+    '.data.SANDBOX_WORKSPACE_STORAGE_CLASS == "linstor-local"' "$EVIDENCE_DIR/active-runtime-config.json"
+  assert_jq "active confidential workspace storage class is not linstor-confidential" \
+    '.data.SANDBOX_CONFIDENTIAL_WORKSPACE_STORAGE_CLASS == "linstor-confidential"' "$EVIDENCE_DIR/active-runtime-config.json"
   assert_jq "confidential creation is not enabled" \
     '.data.SANDBOX_CONFIDENTIAL_STORAGE_ENABLED == "true"' "$EVIDENCE_DIR/active-runtime-config.json"
   assert_jq "confidential creation is not admin-only" \
@@ -482,7 +483,7 @@ run_raw_jobs() {
     return 0
   }
   commodity_job="$(resolve_job_name commodity "$COMMODITY_JOB_SELECTOR")"
-  record_job "$commodity_job" commodity "$NODE" longhorn
+  record_job "$commodity_job" commodity "$NODE" linstor-local
   confidential_job="$(resolve_job_name confidential "$CONFIDENTIAL_JOB_SELECTOR")"
   record_job "$confidential_job" confidential "$NODE"
 }

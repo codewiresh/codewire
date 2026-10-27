@@ -77,7 +77,7 @@ if rg -q 'check-node1|node1-codewire-dev|node1\.codewire-dev\.sh|ssh_host\(' "$S
   exit 1
 fi
 rg -F 'COMMODITY_JOB_SELECTOR="app.kubernetes.io/name=codewire-commodity-runtime-smoke"' "$SMOKE" >/dev/null
-rg -F 'record_job "$commodity_job" commodity "$NODE" longhorn' "$SMOKE" >/dev/null
+rg -F 'record_job "$commodity_job" commodity "$NODE" linstor-local' "$SMOKE" >/dev/null
 rg -F 'CONFIDENTIAL_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-runtime-smoke"' "$SMOKE" >/dev/null
 rg -F 'ATTESTATION_JOB_SELECTOR="app.kubernetes.io/name=codewire-confidential-snp-attestation"' "$SMOKE" >/dev/null
 rg -F 'umask 077' "$SMOKE" >/dev/null
@@ -267,8 +267,9 @@ done
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 rg -F 'kubernetes.io/hostname: example-node-1' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
-rg -F 'storageClassName: longhorn' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
-rg -F 'longhorn-workspace-ok' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'storageClassName: linstor-local' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'linstor-workspace-ok' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F '.data.SANDBOX_CONFIDENTIAL_WORKSPACE_STORAGE_CLASS == "linstor-confidential"' "$SMOKE" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 [[ "$(yq -er '.spec.template.spec.securityContext.supplementalGroups' "$SMOKE_DIR/confidential-smoke-job.yaml" -o=json -I=0)" == '[0]' ]] || {
   printf 'confidential runtime probe does not declare its measured guest-pull groups\n' >&2

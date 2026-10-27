@@ -109,6 +109,38 @@ fn load_golden(name: &str) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).expect("golden file missing")).unwrap()
 }
 
+/// Enabling the confidential tier alongside commodity (the Dev confidential
+/// activation profile: CoCo init-data, the KBS contract and the confidential
+/// StorageClass) leaves every commodity warm pool byte-identical, so
+/// activating it neither drains nor recreates the pools (codewire#2321).
+#[test]
+fn confidential_tier_settings_leave_commodity_pools_unchanged() {
+    let confidential_enabled = SandboxWorkerCfg {
+        kata_coco_init_data_enabled: true,
+        kata_coco_kbs_url: "https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080"
+            .into(),
+        kata_coco_image_registry_auth_uri: "kbs:///default/containers/auth".into(),
+        kata_coco_test_resource_uri: "kbs:///default/codewire/runtime-test-resource".into(),
+        confidential_workspace_storage_class: "linstor-confidential".into(),
+        ..dev_cfg()
+    };
+    // Dev's configured shapes, plus the 80 GiB hosted default (#3571).
+    let hosted_default = WorkspaceShape {
+        cpu_millicores: 2000,
+        memory_mib: 8192,
+        disk_gib: 80,
+    };
+    for shape in shapes().into_iter().chain([hosted_default]) {
+        let commodity_only = render_configured_warm_pool(&dev_cfg(), shape, 2).unwrap();
+        let with_confidential =
+            render_configured_warm_pool(&confidential_enabled, shape, 2).unwrap();
+        // The revision is what the reconciler compares: equal, no Recreate.
+        assert_eq!(with_confidential.revision, commodity_only.revision);
+        assert_eq!(with_confidential.name, commodity_only.name);
+        assert_eq!(with_confidential, commodity_only);
+    }
+}
+
 #[test]
 fn pool_template_equals_the_environment_rendering_of_its_shape() {
     let cfg = dev_cfg();
