@@ -29,11 +29,12 @@ use serde_json::Value;
 use super::template::{
     CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
     LEGACY_DIND_BOOTSTRAP_SCRIPT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts,
-    dind_bootstrap_script, direct_udp_service_name, eager_mkfs_dind_bootstrap_script,
-    render_direct_udp_service, render_sandbox_shadow_pool, render_sandbox_template,
-    render_warm_member_bridge, render_workspace_daemon_network_policy,
-    render_workspace_daemon_service, warm_member_daemon_bridge_name,
-    workspace_daemon_network_policy_name, workspace_daemon_service_name,
+    dind_bootstrap_script, direct_udp_service_name, docker_data_size_gib,
+    eager_mkfs_dind_bootstrap_script, pre_growth_dind_bootstrap_script, render_direct_udp_service,
+    render_sandbox_shadow_pool, render_sandbox_template, render_warm_member_bridge,
+    render_workspace_daemon_network_policy, render_workspace_daemon_service,
+    warm_member_daemon_bridge_name, workspace_daemon_network_policy_name,
+    workspace_daemon_service_name,
 };
 use super::{
     CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_ORG_ID, LABEL_TYPE,
@@ -1148,13 +1149,17 @@ fn log_daemon_image_repin(
     }
 }
 
-/// The operations that re-render a Sandbox's legacy DinD bootstrap
-/// ([`LEGACY_DIND_BOOTSTRAP_SCRIPT`]) to the current one, which keeps the
-/// workspace home's `.codewire` 0755 so the workspace daemon opens its
-/// platform session store (#2639). Every resume and Pod replacement that
+/// The operations that re-render a Sandbox's prior DinD bootstrap to the
+/// current one: the legacy one ([`LEGACY_DIND_BOOTSTRAP_SCRIPT`]), so the
+/// workspace home's `.codewire` stays 0755 and the workspace daemon opens its
+/// platform session store (#2639), and the eager- and lazy-`mkfs` ones that
+/// never grew the Docker data image
+/// ([`eager_mkfs_dind_bootstrap_script`], [`pre_growth_dind_bootstrap_script`]),
+/// so a grown workspace disk grows that image too (#3554). Every resume and
+/// Pod replacement that
 /// re-pins the daemon image carries them, as the controller builds each new
 /// Pod from the Sandbox's own spec. They `test` the container's index, name
-/// and exact legacy script and `replace` only that script: the DinD image and
+/// and exact prior script and `replace` only that script: the DinD image and
 /// environment, the workspace image, volumes and workspace contents are
 /// untouched. Any other script is left alone, and so is a confidential
 /// runtime, whose measured policy admits exactly the rendered containers.
@@ -1183,15 +1188,17 @@ fn dind_bootstrap_refresh(sandbox: &DynamicObject) -> anyhow::Result<Option<[Val
         .and_then(Value::as_array)
         .filter(|command| command.len() == 3 && command[0] == "sh" && command[1] == "-ec")
         .and_then(|command| command[2].as_str());
-    let legacy = script == Some(LEGACY_DIND_BOOTSTRAP_SCRIPT);
-    // A bootstrap that differs from the current one only in its eager
-    // `mkfs.ext4` already formatted its image, so it is current enough.
-    if script.is_some_and(|script| {
-        !legacy && script != dind_bootstrap_script() && script != eager_mkfs_dind_bootstrap_script()
-    }) {
+    // Re-rendering an eager-`mkfs` bootstrap is harmless: it formats only a
+    // missing image, and the one it formatted is kept.
+    let prior = script.filter(|script| {
+        *script == LEGACY_DIND_BOOTSTRAP_SCRIPT
+            || *script == eager_mkfs_dind_bootstrap_script()
+            || *script == pre_growth_dind_bootstrap_script()
+    });
+    if script.is_some_and(|script| prior.is_none() && script != dind_bootstrap_script()) {
         tracing::warn!(
             sandbox = sandbox.metadata.name.as_deref().unwrap_or_default(),
-            "Sandbox DinD bootstrap is neither current nor the known legacy one; it is not re-rendered"
+            "Sandbox DinD bootstrap is neither current nor a known prior one; it is not re-rendered"
         );
     }
     let runtime_class = match pod_spec.get("runtimeClassName") {
@@ -1200,13 +1207,16 @@ fn dind_bootstrap_refresh(sandbox: &DynamicObject) -> anyhow::Result<Option<[Val
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("workspace runtime class is malformed"))?,
     };
-    if !legacy || !["", RUNTIME_CLASS_RUNC, RUNTIME_CLASS_COMMODITY].contains(&runtime_class) {
+    let Some(prior) = prior else {
+        return Ok(None);
+    };
+    if !["", RUNTIME_CLASS_RUNC, RUNTIME_CLASS_COMMODITY].contains(&runtime_class) {
         return Ok(None);
     }
     let path = format!("{spec_path}/containers/{index}");
     Ok(Some([
         serde_json::json!({"op":"test","path":format!("{path}/name"),"value":"dind"}),
-        serde_json::json!({"op":"test","path":format!("{path}/command/2"),"value":LEGACY_DIND_BOOTSTRAP_SCRIPT}),
+        serde_json::json!({"op":"test","path":format!("{path}/command/2"),"value":prior}),
         serde_json::json!({"op":"replace","path":format!("{path}/command/2"),"value":dind_bootstrap_script()}),
     ]))
 }
@@ -1215,7 +1225,7 @@ fn dind_bootstrap_refresh(sandbox: &DynamicObject) -> anyhow::Result<Option<[Val
 fn log_dind_bootstrap_refresh(name: &str) {
     tracing::info!(
         name,
-        "re-rendered the Sandbox's legacy DinD bootstrap; its next Pod keeps ~/.codewire private"
+        "re-rendered the Sandbox's prior DinD bootstrap; its next Pod keeps ~/.codewire private and grows the Docker data image with the disk"
     );
 }
 
@@ -3548,6 +3558,7 @@ impl SandboxClient {
             .await
             .map_err(|error| anyhow::anyhow!("get Sandbox {sandbox_name}: {error}"))?;
         set_workspace_resources(&mut sandbox.data, &cpu, &memory)?;
+        set_docker_data_size(&mut sandbox.data, disk_gb)?;
         sandboxes
             .replace(&sandbox_name, &PostParams::default(), &sandbox)
             .await
@@ -3567,6 +3578,7 @@ impl SandboxClient {
                 .map_err(|error| anyhow::anyhow!("get SandboxTemplate {template_name}: {error}"))?;
             set_workspace_resources(&mut template.data, &cpu, &memory)?;
             set_workspace_volume_request(&mut template.data, &storage)?;
+            set_docker_data_size(&mut template.data, disk_gb)?;
             templates
                 .replace(&template_name, &PostParams::default(), &template)
                 .await
@@ -5722,6 +5734,59 @@ fn set_workspace_resources(data: &mut Value, cpu: &str, memory: &str) -> anyhow:
     Ok(())
 }
 
+/// Size a loop-mounted DinD data image for `disk_gb`, so the next Pod's
+/// bootstrap grows the image with the workspace disk (#3554). It only ever
+/// grows: a smaller rendering than the image already carries is left alone,
+/// and so is a runtime without a loop-mounted image (no DinD, or the
+/// confidential profile, whose measured policy admits exactly what it was
+/// rendered with and whose volume never expands).
+fn set_docker_data_size(data: &mut Value, disk_gb: i32) -> anyhow::Result<()> {
+    let Some(containers) = data
+        .pointer_mut("/spec/podTemplate/spec/containers")
+        .and_then(Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    let Some(dind) = containers
+        .iter_mut()
+        .find(|container| container.get("name").and_then(Value::as_str) == Some("dind"))
+    else {
+        return Ok(());
+    };
+    let Some(env) = dind.get_mut("env").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    let value_of = |env: &[Value], name: &str| {
+        env.iter()
+            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+            .and_then(|entry| entry.get("value"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    if value_of(env, "CODEWIRE_DOCKER_MOUNT_MODE").as_deref() != Some("loop") {
+        return Ok(());
+    }
+    let desired = docker_data_size_gib(i64::from(disk_gb));
+    let current = value_of(env, "CODEWIRE_DOCKER_DATA_SIZE")
+        .and_then(|size| size.strip_suffix('G')?.parse::<i64>().ok());
+    if current.is_some_and(|current| current >= desired) {
+        return Ok(());
+    }
+    let size = Value::String(format!("{desired}G"));
+    match env.iter_mut().find(|entry| {
+        entry.get("name").and_then(Value::as_str) == Some("CODEWIRE_DOCKER_DATA_SIZE")
+    }) {
+        Some(entry) => {
+            entry
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("DinD environment entry is not an object"))?
+                .insert("value".into(), size);
+        }
+        None => env.push(serde_json::json!({ "name": "CODEWIRE_DOCKER_DATA_SIZE", "value": size })),
+    }
+    Ok(())
+}
+
 fn set_workspace_volume_request(data: &mut Value, storage: &str) -> anyhow::Result<()> {
     let templates = data
         .pointer_mut("/spec/volumeClaimTemplates")
@@ -6649,6 +6714,45 @@ mod tests {
             observed.incompatibility_reason.as_deref(),
             Some("memory uses restartPolicy RestartContainer")
         );
+    }
+
+    #[test]
+    fn a_grown_disk_sizes_only_a_loop_mounted_docker_data_image_and_never_down() {
+        let dind = |mode: &str, size: &str| {
+            json!({"spec": {"podTemplate": {"spec": {"containers": [
+                {"name": "workspace", "env": [{"name": "HOME", "value": "/workspace"}]},
+                {"name": "dind", "env": [
+                    {"name": "DOCKER_TLS_CERTDIR", "value": ""},
+                    {"name": "CODEWIRE_DOCKER_DATA_SIZE", "value": size},
+                    {"name": "CODEWIRE_DOCKER_MOUNT_MODE", "value": mode}
+                ]}
+            ]}}}})
+        };
+        let size = |runtime: &Value| {
+            runtime
+                .pointer("/spec/podTemplate/spec/containers/1/env/1/value")
+                .cloned()
+        };
+
+        let mut grown = dind("loop", "78G");
+        set_docker_data_size(&mut grown, 120).unwrap();
+        assert_eq!(size(&grown), Some(json!("118G")));
+        let mut expected = dind("loop", "118G");
+        assert_eq!(grown, expected);
+        // Never smaller than the image already is.
+        set_docker_data_size(&mut expected, 80).unwrap();
+        assert_eq!(size(&expected), Some(json!("118G")));
+        // The confidential profile's root is not a loop-mounted image.
+        let mut confidential = dind("none", "48G");
+        set_docker_data_size(&mut confidential, 120).unwrap();
+        assert_eq!(confidential, dind("none", "48G"));
+        // No DinD container: nothing to size.
+        let mut no_docker = json!({"spec": {"podTemplate": {"spec": {"containers": [
+            {"name": "workspace"}
+        ]}}}});
+        let before = no_docker.clone();
+        set_docker_data_size(&mut no_docker, 120).unwrap();
+        assert_eq!(no_docker, before);
     }
 
     #[test]

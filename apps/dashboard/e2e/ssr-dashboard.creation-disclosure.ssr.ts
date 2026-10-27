@@ -723,7 +723,9 @@ for (const unavailable of ["missing", "future timestamp", "foreign actor", "fore
     await exactReturnFixture(page, unavailable === "unavailable marker" ? "00000000-0000-4000-8000-000000000006" : draftId);
     await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeHidden();
     await expect(page.locator("[data-create-draft-status]")).toContainText("requested draft is unavailable");
-    await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
+    // The platform defaults, not the requested draft's 4096 MiB (#3554).
+    await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
+    await expect(page.locator('[name="memory"]')).toHaveValue("8192");
     await page.getByLabel("Name", { exact: true }).fill("still-editable");
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue("still-editable");
     expect(mutations).toBe(0);

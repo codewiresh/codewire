@@ -1132,7 +1132,9 @@ mod tests {
         ));
         // The bootstrap stored Sandboxes carry from before 531fc0f7e differs
         // only in that mode; Start and Pod replacement re-render it (#2639).
-        // The one rendered until #2238 differs only in its eager mkfs.
+        // The one rendered until #2238 differs only in its eager mkfs, and
+        // the one rendered until #3554 only in not growing the Docker data
+        // image; Start and Pod replacement re-render both.
         assert_eq!(
             LEGACY_DIND_BOOTSTRAP_SCRIPT.replace(
                 "chmod 0775 \"$codewire_dir\"",
@@ -1150,8 +1152,21 @@ mod tests {
                  # inode tables and journal: a few MiB of writes at any size.\n    \
                  mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 \"$data_image\""
             ),
-            bootstrap
+            pre_growth_dind_bootstrap_script()
         );
+        let growth_start = bootstrap.find("  # A grown workspace disk").unwrap();
+        let growth_end = bootstrap.find("elif [ \"$mount_mode\" != \"none\" ]").unwrap();
+        assert_eq!(
+            format!("{}{}", &bootstrap[..growth_start], &bootstrap[growth_end..]),
+            pre_growth_dind_bootstrap_script()
+        );
+        let growth = &bootstrap[growth_start..growth_end];
+        assert!(growth.contains("truncate -s \"$data_size\" \"$data_image\" || true"));
+        assert!(growth.contains("losetup -c \"$data_device\" && resize2fs \"$data_device\""));
+        assert!(!growth.contains("mkfs"));
+        // Growth follows the mount and never touches the mkfs that formats a
+        // missing image.
+        assert!(bootstrap.find("mount -o loop").unwrap() < growth_start);
         assert!(bootstrap.contains("--data-root \"$data_root\""));
         assert!(bootstrap.contains("--storage-driver vfs"));
         assert!(dind["env"].as_array().unwrap().iter().any(|env| {

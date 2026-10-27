@@ -30,6 +30,7 @@ pub use naming::{
 pub use network::{
     render_direct_udp_service, render_warm_member_bridge, render_workspace_daemon_network_policy,
 };
+pub(crate) use runtime_policy::docker_data_size_gib;
 pub use runtime_policy::{
     DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, DOCKER_MODE_NONE,
     DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_CONFIDENTIAL,
@@ -41,7 +42,8 @@ pub use runtime_policy::{
 use workspace::custom_workspace_supervisor_command;
 pub(crate) use workspace::{
     CLIENT_BOOTSTRAP_CONTAINER, DAEMON_INIT_CONTAINER, DAEMON_VOLUME, LEGACY_DIND_BOOTSTRAP_SCRIPT,
-    dind_bootstrap_script, eager_mkfs_dind_bootstrap_script, render_workspace_client_bootstrap,
+    dind_bootstrap_script, eager_mkfs_dind_bootstrap_script, pre_growth_dind_bootstrap_script,
+    render_workspace_client_bootstrap,
 };
 pub use workspace::{
     ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,

@@ -949,6 +949,12 @@ impl EnvironmentRow {
         current_resource_choices(MEMORY_CHOICES, self.memory_mb, "MiB")
     }
 
+    /// The disk field's upper bound: the hosted limit, or a larger disk's own
+    /// size, so a CPU or memory resize can still submit it unchanged.
+    pub(crate) fn disk_resize_max(&self) -> i64 {
+        i64::from(DISK_MAX_GIB).max(i64::from(self.disk_gb))
+    }
+
     /// Field ids for this Sandbox's row Resize form; unique within the list.
     pub(crate) fn row_resize_fields_id(&self) -> String {
         format!("resize-{}", self.id)
@@ -1397,12 +1403,21 @@ pub(crate) const MEMORY_CHOICES: &[(u32, &str)] = &[
     (8_192, "8 GiB"),
     (16_384, "16 GiB"),
 ];
+/// Disk choices run up to the hosted limit of 200 GiB (#3554); 80 GiB is the
+/// default.
 pub(crate) const DISK_CHOICES: &[(u32, &str)] = &[
     (10, "10 GiB"),
     (20, "20 GiB"),
     (40, "40 GiB"),
     (80, "80 GiB"),
+    (120, "120 GiB"),
+    (160, "160 GiB"),
+    (200, "200 GiB"),
 ];
+
+/// The largest disk a hosted create or resize accepts (orchestration's
+/// `HOSTED_DISK_MAX_GIB`, #3554). The resize form's number field stops here.
+pub(crate) const DISK_MAX_GIB: u32 = 200;
 
 /// One native `<option>` of a resource select.
 #[derive(Clone, Debug, Eq, PartialEq)]

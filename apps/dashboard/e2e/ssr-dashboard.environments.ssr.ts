@@ -86,7 +86,7 @@ async function assertExplicitCreateRecovery(page: Page) {
       await expect(form).toHaveAttribute("data-create-draft-exact", "true");
       await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeHidden();
       await expect(page.locator("[data-create-draft-status]")).toContainText("The requested draft is unavailable in this tab.");
-      await expect(page.locator('[name="cpu"]')).toHaveValue("1000");
+      await expect(page.locator('[name="cpu"]')).toHaveValue("2000");
     }
     await page.goto(`/${slug}/new/?destroyed=bogus&sources=first&sources=second&creation_draft=${requestedDraft}`);
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/?creation_draft=${requestedDraft}`);
@@ -423,9 +423,9 @@ test.describe.serial("server-rendered environments", () => {
     ].join(","))).toHaveCount(0);
     await expect(page.getByLabel("Install Command")).toHaveValue("bun install");
     await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev");
-    await expect(page.locator("#environment-create-card").getByLabel("CPU", { exact: true })).toHaveValue("1000");
-    await expect(page.locator("#environment-create-card").getByLabel("Memory", { exact: true })).toHaveValue("2048");
-    await expect(page.locator("#environment-create-card").getByLabel("Disk", { exact: true })).toHaveValue("10");
+    await expect(page.locator("#environment-create-card").getByLabel("CPU", { exact: true })).toHaveValue("2000");
+    await expect(page.locator("#environment-create-card").getByLabel("Memory", { exact: true })).toHaveValue("8192");
+    await expect(page.locator("#environment-create-card").getByLabel("Disk", { exact: true })).toHaveValue("80");
     await expect(page.getByLabel("Delete after")).toHaveValue("");
     await expect(page.getByLabel("Workspace image")).toHaveValue(
       "registry.example.test/team/workspace:v1",

@@ -23,7 +23,7 @@ cw create --name pr-42 --image workspace \
 
 ```text
 pr-42 · cloud VM
-  2 vCPU · 8 GiB RAM · 10 GiB disk
+  2 vCPU · 8 GiB RAM · 80 GiB disk
   ✓ Cloning repositories  2s
   ✓ scheduled shutdown after ttl 7200s
   ✓ Setup complete

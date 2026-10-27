@@ -697,7 +697,7 @@ pub(crate) struct InitArgs {
     cpu: Option<String>,
     #[arg(long, help = "Memory in MB")]
     memory: Option<i32>,
-    #[arg(long, help = "Disk in GB")]
+    #[arg(long, help = "Disk in GB (cloud default 80, at most 200)")]
     disk: Option<i32>,
     #[arg(long, value_parser = ["standard", "confidential"], help = "Product isolation tier")]
     isolation: Option<String>,
@@ -1153,7 +1153,11 @@ pub(crate) struct EnvCreateArgs {
     cpu: Option<String>,
     #[arg(long, value_name = "QUANTITY", help = "Memory (for example 8GB)")]
     memory: Option<String>,
-    #[arg(long, value_name = "QUANTITY", help = "Disk size (for example 40GB)")]
+    #[arg(
+        long,
+        value_name = "QUANTITY",
+        help = "Disk size (for example 120GB); cloud default 80GB, at most 200GB"
+    )]
     disk: Option<String>,
     #[arg(
         long,
@@ -1452,7 +1456,11 @@ pub(crate) struct EnvResizeArgs {
         help = "Memory (for example 512MB or 8GB)"
     )]
     pub(crate) memory: Option<String>,
-    #[arg(long, value_name = "DISK", help = "Disk size (for example 40GB)")]
+    #[arg(
+        long,
+        value_name = "DISK",
+        help = "Disk size to grow to (for example 120GB); disks never shrink, and a cloud disk grows up to 200GB"
+    )]
     pub(crate) disk: Option<String>,
     #[arg(
         long,

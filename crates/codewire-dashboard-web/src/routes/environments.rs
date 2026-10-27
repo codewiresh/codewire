@@ -2138,9 +2138,12 @@ pub(super) fn default_create_form(token: String, expanded: bool) -> EnvironmentC
         }],
         install_command: String::new(),
         startup_script: String::new(),
-        cpu: "1000".to_owned(),
-        memory: "2048".to_owned(),
-        disk: "10".to_owned(),
+        // The platform default size (owner, 2026-10-27: "2 vcpu 8gib 80gib
+        // should be default size"; #3554), which is also the default
+        // warm-pool shape, so a dashboard create can start warm.
+        cpu: "2000".to_owned(),
+        memory: "8192".to_owned(),
+        disk: "80".to_owned(),
         ttl: String::new(),
         isolation_tier: "standard".to_owned(),
         confidential_available: false,
@@ -3217,10 +3220,10 @@ mod tests {
         }
         .render()
         .expect("environment create form");
-        assert!(html.contains("name=\"cpu\" aria-describedby=\"environment-cpu-help\"><option value=\"1000\" selected>1 vCPU</option><option value=\"2000\">2 vCPU</option>"));
-        assert!(html.contains("<option value=\"2048\" selected>2 GiB</option><option value=\"4096\">4 GiB</option><option value=\"8192\">8 GiB</option><option value=\"16384\">16 GiB</option></select>"));
+        assert!(html.contains("name=\"cpu\" aria-describedby=\"environment-cpu-help\"><option value=\"1000\">1 vCPU</option><option value=\"2000\" selected>2 vCPU</option>"));
+        assert!(html.contains("<option value=\"2048\">2 GiB</option><option value=\"4096\">4 GiB</option><option value=\"8192\" selected>8 GiB</option><option value=\"16384\">16 GiB</option></select>"));
         assert!(html.contains(
-            "<option value=\"10\" selected>10 GiB</option><option value=\"20\">20 GiB</option>"
+            "<option value=\"10\">10 GiB</option><option value=\"20\">20 GiB</option><option value=\"40\">40 GiB</option><option value=\"80\" selected>80 GiB</option><option value=\"120\">120 GiB</option><option value=\"160\">160 GiB</option><option value=\"200\">200 GiB</option></select>"
         ));
         assert!(!html.contains("Platform default"));
     }
@@ -3444,7 +3447,7 @@ mod tests {
             "id=\"resize-{ON}-memory\" name=\"memory_mb\" required><option value=\"2048\">2 GiB</option><option value=\"4096\" selected>4 GiB</option>"
         )));
         assert!(list.contains(&format!(
-            "<label class=\"cw-label\" for=\"resize-{ON}-disk\">Disk (GiB)</label><input class=\"cw-input\" id=\"resize-{ON}-disk\" name=\"disk_gb\" type=\"number\" min=\"1\" max=\"16384\" value=\"10\" required>"
+            "<label class=\"cw-label\" for=\"resize-{ON}-disk\">Disk (GiB)</label><input class=\"cw-input\" id=\"resize-{ON}-disk\" name=\"disk_gb\" type=\"number\" min=\"1\" max=\"200\" value=\"10\" required>"
         )));
         assert_eq!(list.matches("data-resize-current").count(), 2);
         assert!(!list.contains("millicores)"));

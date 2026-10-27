@@ -72,7 +72,7 @@ cw run --in ana-web --name check --no-tty -- redis-cli --version
 
 ```text
 ana-web · cloud VM
-  2 vCPU · 16 GiB RAM · 10 GiB disk
+  2 vCPU · 16 GiB RAM · 80 GiB disk
 ✓ Started session ana-web/check · cloud
 redis-cli 7.0.15
 ```

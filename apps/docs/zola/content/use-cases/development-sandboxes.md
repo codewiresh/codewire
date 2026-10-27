@@ -145,7 +145,7 @@ cw create --name ana-web --preset team-web --repo https://github.com/octocat/Hel
 
 ```text
 ana-web · cloud VM
-  2 vCPU · 8 GiB RAM · 10 GiB disk
+  2 vCPU · 8 GiB RAM · 80 GiB disk
   ✓ Cloning repositories  2s
   ✓ Running install command  0s
   ✓ scheduled shutdown after ttl 7200s

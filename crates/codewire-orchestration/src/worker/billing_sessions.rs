@@ -257,9 +257,37 @@ fn replace_workspace_billing_resources(
     }
 }
 
+/// The declared resources with the workspace disk at the environment's
+/// applied size, never below the size its volume claim template declares
+/// (a PVC never shrinks below it).
+fn bill_applied_workspace_disk(
+    sandbox: &Value,
+    declared: Resources,
+    applied_disk_gb: Option<i32>,
+) -> Resources {
+    let workspace = workspace_declared_resources(sandbox);
+    let disk_gib = applied_disk_gb.map_or(workspace.disk_gib, |applied| {
+        applied.max(workspace.disk_gib)
+    });
+    replace_workspace_billing_resources(
+        sandbox,
+        declared,
+        workspace.cpu_millicores,
+        workspace.memory_mib,
+        disk_gib,
+    )
+}
+
 /// Freeze an open billing session while a resize is active. Once a failed
 /// operation is terminal, charge the durable last-applied workspace resources
-/// even if Kubernetes desired-state rollback is still converging.
+/// even if Kubernetes desired-state rollback is still converging. Only the
+/// latest operation counts: a later completed resize supersedes an earlier
+/// failure.
+///
+/// Otherwise the workspace disk is the environment's applied size, the one
+/// the dashboard and CLI show. A Sandbox's volume claim template is immutable,
+/// so after a disk grows it still names the size the environment was created
+/// with, while the PVC has the grown size (#3554).
 async fn resize_billing_resources(
     pool: &PgPool,
     environment_id: &str,
@@ -271,15 +299,28 @@ async fn resize_billing_resources(
                 last_applied_disk_gb
            FROM environment_resize_operations
           WHERE environment_id = $1
-            AND state IN ('pending', 'applying', 'restarting', 'failed')
           ORDER BY created_at DESC
           LIMIT 1",
     )
     .bind(environment_id)
     .fetch_optional(pool)
     .await?;
-    let Some((state, cpu, memory, disk)) = operation else {
-        return Ok(declared);
+    let Some((state, cpu, memory, disk)) = operation.filter(|(state, ..)| {
+        matches!(
+            state.as_str(),
+            "pending" | "applying" | "restarting" | "failed"
+        )
+    }) else {
+        let applied_disk_gb: Option<i32> =
+            sqlx::query_scalar("SELECT disk_gb FROM environments WHERE id = $1")
+                .bind(environment_id)
+                .fetch_optional(pool)
+                .await?;
+        return Ok(bill_applied_workspace_disk(
+            sandbox,
+            declared,
+            applied_disk_gb,
+        ));
     };
 
     if state != "failed" {
@@ -962,6 +1003,40 @@ mod tests {
         assert_eq!(applied.memory_mib, 4608);
         assert_eq!(applied.disk_gib, 30);
         assert_eq!(applied.runtime_class.as_deref(), Some("commodity"));
+    }
+
+    #[test]
+    fn a_grown_disk_is_billed_at_its_applied_size() {
+        let sandbox = json!({
+            "spec": {
+                "podTemplate": { "spec": {
+                    "containers": [
+                        { "name": "workspace", "resources": { "requests": {
+                            "cpu": "2", "memory": "8Gi" } } },
+                        { "name": "dind", "resources": { "requests": {
+                            "cpu": "500m", "memory": "1Gi" } } }
+                    ]
+                } },
+                "volumeClaimTemplates": [{
+                    "metadata": { "name": "workspace" },
+                    "spec": { "resources": { "requests": { "storage": "80Gi" } } }
+                }]
+            }
+        });
+        let declared = declared_resources(&sandbox);
+
+        // The Sandbox still declares 80 Gi after the PVC grew to 120 Gi.
+        let grown = bill_applied_workspace_disk(&sandbox, declared.clone(), Some(120));
+        assert_eq!(grown.disk_gib, 120);
+        assert_eq!(grown.cpu_millicores, 2500);
+        assert_eq!(grown.memory_mib, 9216);
+
+        let unchanged = bill_applied_workspace_disk(&sandbox, declared.clone(), Some(80));
+        assert_eq!(unchanged.disk_gib, 80);
+        let unknown = bill_applied_workspace_disk(&sandbox, declared.clone(), None);
+        assert_eq!(unknown.disk_gib, 80);
+        let below = bill_applied_workspace_disk(&sandbox, declared, Some(10));
+        assert_eq!(below.disk_gib, 80);
     }
 
     // Mirrors `TestClassify`.

@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, update, ports, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh and preset.
-updated: 2026-10-26
+updated: 2026-10-27
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -36,7 +36,7 @@ as positionals or with `--repo`; they replace the file's repositories.
 | `--no-file` | Use only the flags; read no `codewire.yaml` |
 | `--path PATH` | Local: the project directory, where the `codewire.yaml` search starts (default `.`) |
 | `--path-mode mount\|copy\|clone\|empty` | Local: mount the directory live (default), copy it once as it is now, clone the Git repository's committed state once, or start empty |
-| `--cpu`, `--memory`, `--disk` | Resources, for example `--cpu 2 --memory 8GB --disk 40GB`; CPU is in cores (`0.5` or `500m` for half a core on a hosted sandbox) |
+| `--cpu`, `--memory`, `--disk` | Resources, for example `--cpu 2 --memory 8GB --disk 40GB`; CPU is in cores (`0.5` or `500m` for half a core on a hosted sandbox). A hosted sandbox defaults to 2 vCPU, 8 GiB and an 80 GiB disk, and its disk is at most 200 GiB |
 | `--docker-disk SIZE`, `--no-docker` | Local: the guest Docker data disk (default 8 GiB), or no Docker daemon |
 | `--install CMD`, `--startup CMD` | Install command and startup script |
 | `--env KEY=VALUE` | Cloud: plain environment variables (repeatable) |
@@ -158,7 +158,8 @@ cw refresh-skills ENV   # local VM: re-snapshot user and repository skills
 application-secret sources and credential profile, with a confirmed restart
 that keeps workspace data; without `ENV` it is refused. It never upgrades
 `cw` itself: that is `cw upgrade`. `resize` runs a wizard at a terminal when
-no quantity is given; disks never shrink; a local VM restarts, and `--force`
+no quantity is given; disks never shrink, and a cloud disk grows up to
+200 GiB; a local VM restarts, and `--force`
 ends active cloud sessions when a restart is required.
 
 Example:

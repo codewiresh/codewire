@@ -43,7 +43,7 @@ cw create --name app --image workspace --secrets docs-demo
   Credential profile: none
 Application secrets are visible to the managed workload; provider credentials remain behind their supported handlers.
 app · cloud VM
-  2 vCPU · 8 GiB RAM · 10 GiB disk
+  2 vCPU · 8 GiB RAM · 80 GiB disk
   Credentials: none
   Secrets:     platform:docs-demo
 ```

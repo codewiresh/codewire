@@ -22,7 +22,7 @@ cw create --name assistant --image workspace \
 
 ```text
 assistant · cloud VM
-  2 vCPU · 8 GiB RAM · 10 GiB disk
+  2 vCPU · 8 GiB RAM · 80 GiB disk
   Credentials: platform:agents-dev
   ✓ Cloning repositories  1s
   ✓ Setup complete

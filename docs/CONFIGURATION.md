@@ -111,6 +111,21 @@ Base `config.env` leaves it empty, so every overlay sets it. The Kind
 overlays (`deployments/k8s/overlays/local-kind*` and `tests/e2e/kind`) use
 Kind's built-in `standard` class.
 
+A hosted create that names no disk gets 80 GiB, with 2 vCPU and 8 GiB of
+memory (owner, 2026-10-27; #3554); a confidential one gets 50 GiB, its own
+limit. Create and resize accept a disk up to 200 GiB and refuse more with
+`disk_limit_exceeded`; a disk never shrinks. These limits are in the code
+(`crates/codewire-orchestration/src/api/create.rs`), not configuration. The
+class's thin capacity must hold every pool member and live workspace at its
+size. A grown disk is expanded by the StorageClass's CSI driver, online when
+it can be and otherwise at the Pod replacement `cw resize` asks for; the DinD
+bootstrap then grows the Docker data image (`CODEWIRE_DOCKER_DATA_SIZE`, the
+disk less 2 GiB) online with `resize2fs` at the next Pod start.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `SANDBOX_WARM_POOL_SHAPES` | No | Comma-separated warm pools, `<cpu>m/<memory>Mi/<disk>Gi=<members>` with 0 to 16 members each. A create of exactly a pool's shape adopts a prestarted member. The default create shape is `2000m/8192Mi/80Gi`, so a pool of that shape serves default creates. Empty means no pools. | `2000m/8192Mi/80Gi=2` |
+
 ## Browser origins
 
 Every Codewire service the browser calls is served from the dashboard's own origin, so by default no service answers cross-origin (CORS) requests at all.

@@ -26,7 +26,28 @@ use super::environments::{
 use crate::confidential_storage::require_interactive_access;
 use crate::repository_mount::validate_repository_mounts;
 
-const CONFIDENTIAL_PERSISTENT_VOLUME_MAX_GIB: i32 = 50;
+/// Confidential volumes keep their own, smaller limit: the guest-encrypted
+/// raw-block profile is sized at create and never expands (#3554 leaves it
+/// unchanged). A confidential create that names no disk gets exactly this.
+const CONFIDENTIAL_PERSISTENT_VOLUME_MAX_GIB: u64 = 50;
+
+/// The largest workspace disk a hosted create or resize accepts (owner,
+/// 2026-10-27: "lets do default disks at 80gib and allow users to bump to
+/// 200gib"; #3554). The canonical project format admits more, so a local VM
+/// or a saved document is not limited by it; only a hosted environment is.
+pub(crate) const HOSTED_DISK_MAX_GIB: u64 = 200;
+
+/// The refusal of a hosted disk over [`HOSTED_DISK_MAX_GIB`], shared by
+/// create and resize so both name the same code and limit.
+pub(crate) fn hosted_disk_limit_exceeded(field: &str, disk_gib: u64) -> AppError {
+    super::environments::coded_owned(
+        StatusCode::BAD_REQUEST,
+        "disk_limit_exceeded",
+        format!(
+            "{field} is {disk_gib} GiB; a hosted workspace disk is at most {HOSTED_DISK_MAX_GIB} GiB"
+        ),
+    )
+}
 
 // ── Shared body types (environment_types.go) ────────────────────────────
 
@@ -378,6 +399,12 @@ fn validate_environment_resources(
             "project_spec.resources.disk_gib must be greater than zero",
         ));
     }
+    if let Some(disk_gib) = disk_gib.filter(|disk_gib| *disk_gib > HOSTED_DISK_MAX_GIB) {
+        return Err(hosted_disk_limit_exceeded(
+            "project_spec.resources.disk_gib",
+            disk_gib,
+        ));
+    }
     if ttl_seconds.is_some_and(|value| value <= 0) {
         return Err(coded(
             StatusCode::BAD_REQUEST,
@@ -389,9 +416,7 @@ fn validate_environment_resources(
 }
 
 fn validate_confidential_storage_size(isolation_tier: &str, disk_gib: u64) -> AppResult<()> {
-    if isolation_tier == "confidential"
-        && disk_gib > u64::try_from(CONFIDENTIAL_PERSISTENT_VOLUME_MAX_GIB).unwrap_or_default()
-    {
+    if isolation_tier == "confidential" && disk_gib > CONFIDENTIAL_PERSISTENT_VOLUME_MAX_GIB {
         return Err(coded(
             StatusCode::BAD_REQUEST,
             "confidential_disk_limit_exceeded",
@@ -844,18 +869,37 @@ async fn reserve_confidential_capacity(
     Ok(())
 }
 
-// A create that names no resources gets 2 vCPU, 8 GiB and 10 GiB (owner,
-// 2026-10-04): the same shape as a Dev warm pool, so it can start warm.
+// A create that names no resources gets 2 vCPU, 8 GiB and 80 GiB (owner,
+// 2026-10-04 for CPU and memory; 2026-10-27: "2 vcpu 8gib 80gib should be
+// default size", #3554). It is the default warm-pool shape
+// 2000m/8192Mi/80Gi, so a default create can start warm. A create that sets
+// CPU or memory but no disk also gets 80 GiB.
 const DEFAULT_CPU_MILLICORES: u32 = 2_000;
 const DEFAULT_MEMORY_MIB: u64 = 8_192;
-const DEFAULT_DISK_GIB: u64 = 10;
+const DEFAULT_DISK_GIB: u64 = 80;
 
-fn apply_environment_resource_defaults(spec: &mut codewire_project::ProjectSpec) {
+/// The disk a create gets when nothing names one: [`DEFAULT_DISK_GIB`], or
+/// for a confidential create its own limit, so the default never exceeds
+/// what a confidential volume supports.
+fn default_disk_gib(isolation_tier: &str) -> u64 {
+    if isolation_tier == "confidential" {
+        CONFIDENTIAL_PERSISTENT_VOLUME_MAX_GIB.min(DEFAULT_DISK_GIB)
+    } else {
+        DEFAULT_DISK_GIB
+    }
+}
+
+fn apply_environment_resource_defaults(
+    spec: &mut codewire_project::ProjectSpec,
+    isolation_tier: &str,
+) {
     spec.resources
         .cpu_millicores
         .get_or_insert(DEFAULT_CPU_MILLICORES);
     spec.resources.memory_mib.get_or_insert(DEFAULT_MEMORY_MIB);
-    spec.resources.disk_gib.get_or_insert(DEFAULT_DISK_GIB);
+    spec.resources
+        .disk_gib
+        .get_or_insert(default_disk_gib(isolation_tier));
 }
 
 fn resource_i32(value: u64, field: &'static str) -> AppResult<i32> {
@@ -1056,7 +1100,7 @@ pub(crate) async fn create_environment_core(
 
             ensure_no_preset_secret_delivery(&preset)?;
             merge_environment_defaults(&mut body, &preset.project_spec)?;
-            apply_environment_resource_defaults(&mut body.project_spec);
+            apply_environment_resource_defaults(&mut body.project_spec, isolation_tier);
             body.project_spec.validate().map_err(invalid_project_spec)?;
             ensure_current_platform_runtime_support(&body)?;
             validate_environment_repository_mounts(&body.project_spec.repositories)?;
@@ -1157,7 +1201,7 @@ mod tests {
         preset: &Preset,
     ) -> codewire_project::ProjectSpec {
         merge_project_spec_defaults(&mut caller, &preset.project_spec).unwrap();
-        apply_environment_resource_defaults(&mut caller);
+        apply_environment_resource_defaults(&mut caller, "standard");
         caller
     }
 
@@ -2336,6 +2380,64 @@ credentials: {profile: user/work}
     fn environment_resource_validation_accepts_positive_values_and_absent_ttl() {
         validate_environment_resources(Some(1), Some(1), Some(1), Some(1)).unwrap();
         validate_environment_resources(Some(2000), Some(4096), Some(10), None).unwrap();
+    }
+
+    #[test]
+    fn hosted_disk_is_at_most_200_gib() {
+        validate_environment_resources(Some(2000), Some(8192), Some(200), None).unwrap();
+        let Err(AppError::Coded {
+            status,
+            code,
+            detail,
+        }) = validate_environment_resources(Some(2000), Some(8192), Some(201), None)
+        else {
+            panic!("a 201 GiB disk must be refused");
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(code, "disk_limit_exceeded");
+        assert_eq!(
+            detail,
+            "project_spec.resources.disk_gib is 201 GiB; a hosted workspace disk is at most 200 GiB"
+        );
+    }
+
+    #[test]
+    fn a_create_without_a_disk_gets_80_gib_and_a_confidential_one_its_own_limit() {
+        let mut nothing = codewire_project::ProjectSpec::default();
+        apply_environment_resource_defaults(&mut nothing, "standard");
+        assert_eq!(
+            nothing.resources,
+            codewire_project::ResourceSpec {
+                cpu_millicores: Some(2_000),
+                memory_mib: Some(8_192),
+                disk_gib: Some(80),
+            }
+        );
+
+        let mut compute_only = image_project_spec("workspace", Some(4_000), Some(16_384), None);
+        apply_environment_resource_defaults(&mut compute_only, "standard");
+        assert_eq!(compute_only.resources.disk_gib, Some(80));
+
+        let mut explicit = image_project_spec("workspace", None, None, Some(120));
+        apply_environment_resource_defaults(&mut explicit, "standard");
+        assert_eq!(explicit.resources.disk_gib, Some(120));
+
+        // A confidential volume supports at most 50 GiB, so its default is 50
+        // and never trips the limit the caller did not ask for.
+        let mut confidential = codewire_project::ProjectSpec::default();
+        apply_environment_resource_defaults(&mut confidential, "confidential");
+        assert_eq!(confidential.resources.disk_gib, Some(50));
+        validate_confidential_storage_size("confidential", 50).unwrap();
+        let mut confidential_explicit = image_project_spec("workspace", None, None, Some(80));
+        apply_environment_resource_defaults(&mut confidential_explicit, "confidential");
+        assert_eq!(confidential_explicit.resources.disk_gib, Some(80));
+        assert!(matches!(
+            validate_confidential_storage_size("confidential", 80),
+            Err(AppError::Coded {
+                code: "confidential_disk_limit_exceeded",
+                ..
+            })
+        ));
     }
 
     #[test]

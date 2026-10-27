@@ -264,6 +264,19 @@ fn validate_resources(desired: EnvironmentResources) -> AppResult<()> {
     Ok(())
 }
 
+/// Growth stops at the hosted limit; a disk already over it (created before
+/// the limit) may keep its size while its CPU or memory changes, but never
+/// grows further. Shrinking is refused separately.
+fn refuse_disk_growth_over_limit(previous_disk_gb: i32, desired_disk_gb: i32) -> AppResult<()> {
+    let desired = u64::try_from(desired_disk_gb).unwrap_or_default();
+    if desired_disk_gb > previous_disk_gb && desired > super::create::HOSTED_DISK_MAX_GIB {
+        return Err(super::create::hosted_disk_limit_exceeded(
+            "disk_gb", desired,
+        ));
+    }
+    Ok(())
+}
+
 fn active_daemon_session(state: i32) -> bool {
     matches!(
         SessionLifecycleState::try_from(state).unwrap_or(SessionLifecycleState::Unspecified),
@@ -446,6 +459,7 @@ async fn build_resize_plan(
             ),
         ));
     }
+    refuse_disk_growth_over_limit(previous.disk_gb, params.desired_resources.disk_gb)?;
 
     let compute_changed = params.desired_resources.cpu_millicores != previous.cpu_millicores
         || params.desired_resources.memory_mb != previous.memory_mb;
@@ -959,6 +973,7 @@ async fn begin_resize_operation(
             "persistent storage cannot shrink",
         ));
     }
+    refuse_disk_growth_over_limit(previous.disk_gb, desired.disk_gb)?;
     let reserved_cpu = (desired.cpu_millicores - previous.cpu_millicores).max(0);
     let reserved_memory = (desired.memory_mb - previous.memory_mb).max(0);
     let (used_cpu, used_memory): (i64, i64) = sqlx::query_as(
@@ -1228,6 +1243,32 @@ mod tests {
         invalid = params();
         invalid.desired_resources.memory_mb = 0;
         assert!(validate_request(&invalid).is_err());
+    }
+
+    #[test]
+    fn disk_grows_up_to_200_gib_and_never_past_it() {
+        refuse_disk_growth_over_limit(80, 120).unwrap();
+        refuse_disk_growth_over_limit(80, 200).unwrap();
+        refuse_disk_growth_over_limit(200, 200).unwrap();
+        // A disk created before the limit keeps its size through a compute
+        // resize, but cannot grow.
+        refuse_disk_growth_over_limit(300, 300).unwrap();
+        for (previous, desired) in [(80, 201), (200, 201), (300, 301)] {
+            let Err(AppError::Coded {
+                status,
+                code,
+                detail,
+            }) = refuse_disk_growth_over_limit(previous, desired)
+            else {
+                panic!("growth from {previous} to {desired} GiB must be refused");
+            };
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(code, "disk_limit_exceeded");
+            assert_eq!(
+                detail,
+                format!("disk_gb is {desired} GiB; a hosted workspace disk is at most 200 GiB")
+            );
+        }
     }
 
     #[test]

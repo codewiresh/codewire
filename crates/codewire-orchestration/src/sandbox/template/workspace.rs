@@ -748,12 +748,42 @@ fi
 exec dockerd --host "unix:///var/run/docker/docker.sock" --group 1000 --data-root "$data_root" --storage-driver vfs"#;
 
 /// The DinD bootstrap rendered from 531fc0f7e until Program #2238 made its
-/// `mkfs.ext4` lazy. It differs from [`dind_bootstrap_script`] only there;
-/// a Sandbox that carries it formatted its image on its first start, so it
-/// is current in every other respect and is never re-rendered.
+/// `mkfs.ext4` lazy. It differs from [`pre_growth_dind_bootstrap_script`]
+/// only there; a Sandbox that carries it formatted its image on its first
+/// start. It never grew the image either, so Start and Pod replacement
+/// re-render it (#3554).
 pub(crate) fn eager_mkfs_dind_bootstrap_script() -> String {
-    dind_bootstrap_script().replace(LAZY_MKFS, r#"    mkfs.ext4 -q -F "$data_image""#)
+    pre_growth_dind_bootstrap_script().replace(LAZY_MKFS, r#"    mkfs.ext4 -q -F "$data_image""#)
 }
+
+/// The DinD bootstrap rendered from Program #2238's lazy `mkfs.ext4` until
+/// #3554. It differs from [`dind_bootstrap_script`] only in growing the
+/// Docker data image: it created the image once and never grew it, so a
+/// grown workspace disk left Docker at its first size. Start and Pod
+/// replacement re-render it.
+pub(crate) fn pre_growth_dind_bootstrap_script() -> String {
+    dind_bootstrap_script().replace(&format!("\n{DATA_IMAGE_GROWTH}"), "")
+}
+
+/// After the mount, a grown workspace disk renders a larger data size:
+/// extend the image to it (never shrinking it) and grow its mounted
+/// filesystem online to fill the image. An interrupted grow finishes at the
+/// next start.
+const DATA_IMAGE_GROWTH: &str = r#"  # A grown workspace disk renders a larger data size: extend the image to
+  # it, never shrinking it, and grow its mounted filesystem online to fill
+  # the image. Growth keeps every byte, and a failed grow still starts
+  # Docker at its previous size (#3554).
+  data_gib="${data_size%G}"
+  case "$data_gib" in ''|*[!0-9]*) data_gib=0 ;; esac
+  if [ "$(stat -c %s "$data_image")" -lt "$((data_gib * 1073741824))" ]; then
+    truncate -s "$data_size" "$data_image" || true
+  fi
+  data_device="$(awk -v target="$data_root" '$2 == target && $3 == "ext4" { print $1; exit }' /proc/mounts)"
+  data_fs_bytes="$(dumpe2fs -h "$data_device" 2>/dev/null | awk -F: '$1 == "Block count" { count = $2 } $1 == "Block size" { size = $2 } END { printf "%.0f", count * size }')"
+  if [ "$(stat -c %s "$data_image")" -gt "${data_fs_bytes:-0}" ]; then
+    { losetup -c "$data_device" && resize2fs "$data_device"; } ||
+      echo "the Docker data filesystem did not grow to $data_size; Docker keeps its previous size" >&2
+  fi"#;
 
 const LAZY_MKFS: &str = r#"    # A fresh sparse image reads as zeros, so mke2fs skips zeroing its
     # inode tables and journal: a few MiB of writes at any size.
@@ -779,6 +809,7 @@ if [ "$mount_mode" = "loop" ]; then
   if ! awk -v target="$data_root" '$2 == target && $3 == "ext4" {{ found = 1 }} END {{ exit found ? 0 : 1 }}' /proc/mounts; then
     mount -o loop "$data_image" "$data_root"
   fi
+{DATA_IMAGE_GROWTH}
 elif [ "$mount_mode" != "none" ]; then
   echo "unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode" >&2
   exit 1

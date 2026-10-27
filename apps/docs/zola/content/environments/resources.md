@@ -1,7 +1,7 @@
 ---
 title: Resources and limits
 description: What every environment gets, the sizes you can choose, what an organization can run at once, and what each state keeps and costs.
-updated: 2026-10-26
+updated: 2026-10-27
 weight: 2
 ---
 
@@ -15,8 +15,8 @@ machine; hosted sandboxes also count against their organization's limits.
 | --- | --- | --- |
 | vCPU | 2 | 2 |
 | Memory | 4 GiB | 8 GiB |
-| Disk | 20 GiB | 10 GiB |
-| Docker data disk | 8 GiB, separate | — |
+| Disk | 20 GiB | 80 GiB (50 GiB confidential) |
+| Docker data disk | 8 GiB, separate | inside the disk; all of it but 2 GiB |
 | Address | none; ports you publish on `127.0.0.1` | HTTPS preview URLs and SSH from anywhere you are signed in |
 | Runs until | you stop it | you stop it, or its `--ttl` ends |
 
@@ -39,15 +39,20 @@ are quoted strings; see [codewire.yaml keys](@/reference/codewire-yaml.md).
 | --- | --- | --- |
 | vCPU | 1 to 32, whole cores | 0.1 to 256 |
 | Memory | 128 MiB to 64 GiB | 128 MiB to 1 TiB |
-| Disk | 1 GiB to 1 TiB | 1 GiB to 16 TiB, whole GiB |
+| Disk | 1 GiB to 1 TiB | 1 GiB to 200 GiB, whole GiB (confidential: up to 50 GiB) |
 
 A size outside these ranges is refused, never quietly reduced.
 
 - **Disks only grow.** Asking for a smaller disk fails, locally and hosted.
+  A hosted disk grows up to 200 GiB (`disk_limit_exceeded` beyond it); a
+  confidential one cannot grow.
 - **Resizing a local VM** stops it, grows the disk offline and starts it
   again; its sessions end.
 - **Resizing a hosted sandbox** applies at its next start if it is stopped. A
-  running one grows its disk in place, but needs a restart to take less
+  running one grows its disk in place (on hosts whose storage cannot grow a
+  mounted disk, `cw resize` asks for a restart instead); `df /workspace`
+  shows the new size, and Docker's data grows with it at the next start.
+  A running one needs a restart to take less
   memory, and on some hosts to take more CPU or memory; `cw resize` asks
   first (`--allow-restart` agrees in advance).
 
@@ -76,7 +81,7 @@ Up to 256 application secrets reach one environment, each value up to
 
 | State | Keeps | Counts toward limits | Billed |
 | --- | --- | --- | --- |
-| Running | everything | yes | per second, for vCPU, memory and disk |
+| Running | everything | yes | per second, for vCPU, memory and disk (the disk at the size the dashboard and `cw info` show, grown or not) |
 | Stopped | its disk, settings and agent conversations | no | nothing |
 | Removed | nothing | no | nothing |
 

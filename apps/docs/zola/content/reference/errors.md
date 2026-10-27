@@ -1,7 +1,7 @@
 ---
 title: Errors
 description: The error codes the Codewire platform returns, what each one means, and what to do next.
-updated: 2026-10-26
+updated: 2026-10-27
 weight: 9
 ---
 
@@ -58,6 +58,8 @@ the message text, which can change.
 | --- | --- | --- |
 | `quota_exceeded` | The organization already has as many active sandboxes as its plan allows | Stop or remove one (`cw stop`, `cw rm`), or upgrade the plan |
 | `resource_limit_exceeded` | The new sandbox's CPU or memory would take the organization past its total | Stop a sandbox or make one smaller |
+| `disk_limit_exceeded` | A hosted sandbox's disk is at most 200 GiB, at create and when it grows | Choose 200 GiB or less |
+| `confidential_disk_limit_exceeded` | A confidential sandbox's disk is at most 50 GiB | Choose 50 GiB or less |
 | `rate_limited` | More than 10 creates, or 10 starts, in a minute | Wait a moment and retry |
 
 Stopped sandboxes do not count toward either limit. See

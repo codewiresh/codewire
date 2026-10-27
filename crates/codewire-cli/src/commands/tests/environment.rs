@@ -2712,7 +2712,12 @@ fn cloud_create_no_file_uses_only_the_flags() {
         project_file::select_from(&root.join("web"), args.file.as_deref(), args.no_file).unwrap();
     assert_eq!(source, project_file::ConfigSource::NoFile);
     let (request, provenance) = prepare_platform_env_create(&args, &source).unwrap();
-    assert_eq!(request.project_spec.resources.cpu_millicores, None);
+    // No size flag sends no size, so the platform default applies: 2 vCPU,
+    // 8 GiB and an 80 GiB disk (#3554), the same as the dashboard's default.
+    assert_eq!(
+        request.project_spec.resources,
+        codewire_project::ResourceSpec::default()
+    );
     assert!(request.project_spec.agents.tools.is_empty());
     assert_eq!(provenance.text(), "flags only (--no-file)");
     assert!(

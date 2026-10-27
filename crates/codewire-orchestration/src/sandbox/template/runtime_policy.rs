@@ -173,7 +173,9 @@ pub fn required_workspace_storage_class(profile: &str, value: &str) -> Result<St
     Ok(value.to_owned())
 }
 
-pub(super) fn docker_data_size_gib(disk_gib: i64) -> i64 {
+/// The DinD data image for a workspace disk: all of it but 2 GiB. A resize
+/// re-renders it for the grown disk, and the bootstrap grows the image to it.
+pub(crate) fn docker_data_size_gib(disk_gib: i64) -> i64 {
     if disk_gib <= 0 {
         return 8;
     }

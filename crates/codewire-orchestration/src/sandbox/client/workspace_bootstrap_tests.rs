@@ -2947,9 +2947,39 @@ async fn start_re_renders_a_legacy_dind_bootstrap_and_nothing_else() {
     assert_eq!(state.sandbox, expected);
 }
 
-/// Only the exact legacy script is re-rendered: a current, eager-mkfs,
-/// unknown or direct dockerd command, and a confidential runtime, are left
-/// as they are.
+/// #3554: a Sandbox rendered before the bootstrap grew the Docker data image,
+/// with the lazy or the eager mkfs, is re-rendered exactly like a legacy one,
+/// so its next Pod grows the image with a grown workspace disk.
+#[tokio::test]
+async fn start_re_renders_a_pre_growth_dind_bootstrap() {
+    for prior in [
+        pre_growth_dind_bootstrap_script(),
+        eager_mkfs_dind_bootstrap_script(),
+    ] {
+        let before = with_dind(fixture(), json!(["sh", "-ec", prior.clone()]), None);
+        let (template, sandbox, pod) = (
+            before.template.clone(),
+            before.sandbox.clone(),
+            before.pod.clone(),
+        );
+        let (result, state) = resume_through(before, false, DAEMON_IMAGE).await;
+        result.unwrap();
+        let state = state.lock().unwrap();
+        let mut operations = dind_operations();
+        operations[1] = json!({"op":"test","path":"/spec/podTemplate/spec/containers/0/command/2","value":prior});
+        assert_eq!(patches(&state), [&resume_patch(false, &operations)]);
+        assert_eq!(state.sandbox, re_rendered(sandbox, "Running"));
+        assert_eq!(state.template, template);
+        assert_eq!(state.pod, pod);
+        let script = state.sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["command"][2]
+            .as_str()
+            .unwrap();
+        assert!(script.contains("resize2fs") && script.contains("lazy_itable_init=1"));
+    }
+}
+
+/// Only an exact prior script is re-rendered: a current, unknown or direct
+/// dockerd command, and a confidential runtime, are left as they are.
 #[tokio::test]
 async fn start_keeps_any_other_dind_bootstrap() {
     let cases = [
@@ -2959,9 +2989,14 @@ async fn start_keeps_any_other_dind_bootstrap() {
             None,
         ),
         (
-            "eager mkfs",
-            json!(["sh", "-ec", eager_mkfs_dind_bootstrap_script()]),
+            "pre-growth as an argument",
+            json!(["sh", "-ec", pre_growth_dind_bootstrap_script(), "extra"]),
             None,
+        ),
+        (
+            "confidential pre-growth",
+            json!(["sh", "-ec", pre_growth_dind_bootstrap_script()]),
+            Some("confidential"),
         ),
         ("unknown", json!(["sh", "-ec", "exec dockerd"]), None),
         (
