@@ -59,10 +59,34 @@ pub enum StartStage {
     PodRunning,
     /// Every container running until every container is ready.
     PodContainersReady,
+    // Finer Pod start stages (Program #2238, "Measure first"). They split the
+    // Pod marks above where the time goes, so each lies inside one or two of
+    // them rather than adding to them.
+    /// SandboxClaim created until its workspace Pod is created: the
+    /// agent-sandbox controller's Sandbox and Pod creation. Cold starts only.
+    PodCreated,
+    /// Pod created until its workspace PersistentVolume is created: node
+    /// selection under `WaitForFirstConsumer` and the storage provisioner
+    /// creating the volume (LINSTOR resource, DRBD, LUKS). Only when the
+    /// volume was provisioned for this Pod. The first part of `PodScheduled`.
+    PodVolumeProvisioned,
+    /// PersistentVolume created until the Pod is scheduled: the PVC bind and
+    /// the scheduler's Pod binding. The rest of `PodScheduled`.
+    PodVolumeBound,
+    /// Pod scheduled until `PodReadyToStartContainers`: kubelet admission,
+    /// volume attach and mount, and the Pod sandbox (the Kata VM) with its
+    /// network.
+    PodSandboxReady,
+    /// The sandbox ready (and init containers complete) until the `workspace`
+    /// container's first start: its image pull, create and start.
+    PodWorkspaceStarted,
+    /// The previous container's start until the `dind` container's first
+    /// start: its image pull, create and start.
+    PodDindStarted,
 }
 
 impl StartStage {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 14] = [
         Self::CreateClaim,
         Self::AccessReady,
         Self::WaitForReady,
@@ -71,6 +95,12 @@ impl StartStage {
         Self::PodInitialized,
         Self::PodRunning,
         Self::PodContainersReady,
+        Self::PodCreated,
+        Self::PodVolumeProvisioned,
+        Self::PodVolumeBound,
+        Self::PodSandboxReady,
+        Self::PodWorkspaceStarted,
+        Self::PodDindStarted,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -83,6 +113,12 @@ impl StartStage {
             Self::PodInitialized => "pod_initialized",
             Self::PodRunning => "pod_running",
             Self::PodContainersReady => "pod_containers_ready",
+            Self::PodCreated => "pod_created",
+            Self::PodVolumeProvisioned => "pod_volume_provisioned",
+            Self::PodVolumeBound => "pod_volume_bound",
+            Self::PodSandboxReady => "pod_sandbox_ready",
+            Self::PodWorkspaceStarted => "pod_workspace_started",
+            Self::PodDindStarted => "pod_dind_started",
         }
     }
 }

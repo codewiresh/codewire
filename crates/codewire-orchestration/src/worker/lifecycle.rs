@@ -1012,6 +1012,7 @@ pub async fn handle_environment_start(
             if let Err(error) = super::create::record_pod_start_marks(
                 ctx,
                 authority,
+                Some(&client),
                 &probe,
                 StartPath::Resume,
                 profile,
@@ -1796,13 +1797,14 @@ mod tests {
             initialized_at: at(9),
             running_at: at(10),
             containers_ready_at: at(14),
+            ..Default::default()
         };
         let mut observed = vec![
             (StartStage::WaitForReady, Duration::from_millis(12_400)),
             (StartStage::AccessReady, Duration::from_millis(800)),
         ];
         observed.extend(
-            super::super::start_timing::pod_stage_timings(&resumed_pod)
+            super::super::start_timing::pod_stage_timings(&resumed_pod, StartPath::Resume)
                 .into_iter()
                 .map(|timing| (timing.stage, timing.duration)),
         );

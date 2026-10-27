@@ -34,25 +34,71 @@ impl PodStageTiming {
 }
 
 /// The `environment_logs` phases that carry Pod start marks.
-pub(super) const POD_STAGE_PHASES: [&str; 4] = [
+pub(super) const POD_STAGE_PHASES: [&str; 10] = [
     StartStage::PodScheduled.as_str(),
     StartStage::PodInitialized.as_str(),
     StartStage::PodRunning.as_str(),
     StartStage::PodContainersReady.as_str(),
+    StartStage::PodCreated.as_str(),
+    StartStage::PodVolumeProvisioned.as_str(),
+    StartStage::PodVolumeBound.as_str(),
+    StartStage::PodSandboxReady.as_str(),
+    StartStage::PodWorkspaceStarted.as_str(),
+    StartStage::PodDindStarted.as_str(),
 ];
 
-/// Consecutive Pod start stages. A stage is reported only when both of its
-/// bounding marks are known, so a missing mark never folds two stages into
-/// one name. Marks have one-second resolution; an inverted pair (for example
-/// a later readiness flap) clamps to zero.
-pub(super) fn pod_stage_timings(timeline: &PodStartTimeline) -> Vec<PodStageTiming> {
+/// Pod start stages, in the order their rows are written: each condition
+/// stage before the finer stages that split it. A stage is
+/// reported only when both of its bounding marks are known, so a missing
+/// mark never folds two stages into one name. Marks have one-second
+/// resolution; an inverted pair (for example a later readiness flap) clamps
+/// to zero.
+///
+/// The four condition stages (`pod_scheduled` through
+/// `pod_containers_ready`) partition the Pod's start. The finer stages split
+/// them where the time goes (Program #2238, "Measure first"):
+///
+/// - `pod_created` precedes the Pod: Claim created to Pod created, on a cold
+///   start only, since a warm member's or a resumed Pod's Claim predates it.
+/// - `pod_volume_provisioned` + `pod_volume_bound` = `pod_scheduled`, split
+///   at the workspace volume's creation, when that volume was provisioned for
+///   this Pod.
+/// - `pod_sandbox_ready`, then one stage per container in start order
+///   (`pod_workspace_started`, `pod_dind_started`), run from scheduled to
+///   every container running: `pod_initialized` + `pod_running` on a Pod
+///   without init containers. The first container stage starts at the later
+///   of the sandbox and init completion, and container stages need every
+///   container on its first start.
+pub(super) fn pod_stage_timings(
+    timeline: &PodStartTimeline,
+    path: StartPath,
+) -> Vec<PodStageTiming> {
     let Some(created_at) = timeline.created_at else {
         return Vec::new();
     };
-    [
+    let claim_created_at = timeline
+        .claim_created_at
+        .filter(|claimed| path == StartPath::Cold && *claimed <= created_at);
+    let volume_created_at = timeline
+        .volume_created_at
+        .filter(|provisioned| *provisioned >= created_at);
+    // Each condition stage is written before the finer stages that split
+    // it, so a reader can show the parts under their whole.
+    let mut stages = vec![
+        (StartStage::PodCreated, claim_created_at, Some(created_at)),
         (
             StartStage::PodScheduled,
             timeline.created_at,
+            timeline.scheduled_at,
+        ),
+        (
+            StartStage::PodVolumeProvisioned,
+            Some(created_at),
+            volume_created_at,
+        ),
+        (
+            StartStage::PodVolumeBound,
+            volume_created_at,
             timeline.scheduled_at,
         ),
         (
@@ -66,22 +112,65 @@ pub(super) fn pod_stage_timings(timeline: &PodStartTimeline) -> Vec<PodStageTimi
             timeline.running_at,
         ),
         (
-            StartStage::PodContainersReady,
-            timeline.running_at,
-            timeline.containers_ready_at,
+            StartStage::PodSandboxReady,
+            timeline.scheduled_at,
+            timeline.ready_to_start_containers_at,
         ),
+    ];
+    stages.extend(container_stages(timeline));
+    stages.push((
+        StartStage::PodContainersReady,
+        timeline.running_at,
+        timeline.containers_ready_at,
+    ));
+    stages
+        .into_iter()
+        .filter_map(|(stage, from, to)| {
+            let (from, to) = (from?, to?);
+            Some(PodStageTiming {
+                stage,
+                duration: elapsed(from, to),
+                completed_at: to,
+                since_pod_created: elapsed(created_at, to),
+            })
+        })
+        .collect()
+}
+
+type StageMarks = (StartStage, Option<Timestamp>, Option<Timestamp>);
+
+/// The kubelet starts a Pod's containers one after another, so each
+/// container's stage runs from the previous start (the first from the later
+/// of sandbox ready and init completion) to its own first start.
+fn container_stages(timeline: &PodStartTimeline) -> Vec<StageMarks> {
+    let (Some(_), Some(sandbox), Some(initialized)) = (
+        timeline.running_at,
+        timeline.ready_to_start_containers_at,
+        timeline.initialized_at,
+    ) else {
+        return Vec::new();
+    };
+    let mut started: Vec<_> = [
+        (
+            StartStage::PodWorkspaceStarted,
+            timeline.workspace_started_at,
+        ),
+        (StartStage::PodDindStarted, timeline.dind_started_at),
     ]
     .into_iter()
-    .filter_map(|(stage, from, to)| {
-        let (from, to) = (from?, to?);
-        Some(PodStageTiming {
-            stage,
-            duration: elapsed(from, to),
-            completed_at: to,
-            since_pod_created: elapsed(created_at, to),
+    .filter_map(|(stage, at)| Some((stage, at?)))
+    .collect();
+    // Stable: a same-second tie keeps the rendered container order.
+    started.sort_by_key(|(_, at)| *at);
+    let mut previous = sandbox.max(initialized);
+    started
+        .into_iter()
+        .map(|(stage, at)| {
+            let from = previous;
+            previous = at;
+            (stage, Some(from), Some(at))
         })
-    })
-    .collect()
+        .collect()
 }
 
 /// The runtime profile label for an environment's isolation tier, resolved
@@ -131,8 +220,9 @@ mod tests {
             initialized_at: at(36),
             running_at: at(38),
             containers_ready_at: at(40),
+            ..Default::default()
         };
-        let stages = pod_stage_timings(&timeline);
+        let stages = pod_stage_timings(&timeline, StartPath::Cold);
         let summary: Vec<_> = stages
             .iter()
             .map(|stage| {
@@ -172,8 +262,9 @@ mod tests {
             // A restarted container leaves the running mark unknown.
             running_at: None,
             containers_ready_at: at(40),
+            ..Default::default()
         };
-        let stages: Vec<_> = pod_stage_timings(&timeline)
+        let stages: Vec<_> = pod_stage_timings(&timeline, StartPath::Cold)
             .into_iter()
             .map(|stage| stage.stage)
             .collect();
@@ -181,7 +272,7 @@ mod tests {
             stages,
             [StartStage::PodScheduled, StartStage::PodInitialized]
         );
-        assert!(pod_stage_timings(&PodStartTimeline::default()).is_empty());
+        assert!(pod_stage_timings(&PodStartTimeline::default(), StartPath::Cold).is_empty());
     }
 
     #[test]
@@ -194,12 +285,169 @@ mod tests {
             // A readiness flap can leave ContainersReady's latest transition
             // earlier than a later mark only after clock skew; never negative.
             containers_ready_at: at(8),
+            ..Default::default()
         };
-        let ready = pod_stage_timings(&timeline)
+        let ready = pod_stage_timings(&timeline, StartPath::Cold)
             .into_iter()
             .find(|stage| stage.stage == StartStage::PodContainersReady)
             .unwrap();
         assert_eq!(ready.duration, Duration::ZERO);
+    }
+
+    /// A cold commodity start as Dev reports it: no init containers, so
+    /// `Initialized` follows kubelet admission and precedes the sandbox.
+    fn cold_commodity_pod() -> PodStartTimeline {
+        PodStartTimeline {
+            claim_created_at: at(-1),
+            created_at: at(0),
+            volume_created_at: at(3),
+            scheduled_at: at(4),
+            initialized_at: at(4),
+            ready_to_start_containers_at: at(7),
+            workspace_started_at: at(8),
+            dind_started_at: at(9),
+            running_at: at(9),
+            containers_ready_at: at(12),
+        }
+    }
+
+    fn durations(stages: &[PodStageTiming]) -> Vec<(&'static str, u64)> {
+        stages
+            .iter()
+            .map(|stage| (stage.stage.as_str(), stage.duration.as_secs()))
+            .collect()
+    }
+
+    #[test]
+    fn finer_stages_split_scheduling_and_container_start_where_the_time_goes() {
+        let stages = pod_stage_timings(&cold_commodity_pod(), StartPath::Cold);
+        assert_eq!(
+            durations(&stages),
+            [
+                ("pod_created", 1),
+                ("pod_scheduled", 4),
+                ("pod_volume_provisioned", 3),
+                ("pod_volume_bound", 1),
+                ("pod_initialized", 0),
+                ("pod_running", 5),
+                ("pod_sandbox_ready", 3),
+                ("pod_workspace_started", 1),
+                ("pod_dind_started", 1),
+                ("pod_containers_ready", 3),
+            ]
+        );
+        let total = |names: &[&str]| -> u64 {
+            durations(&stages)
+                .iter()
+                .filter(|(name, _)| names.contains(name))
+                .map(|(_, seconds)| seconds)
+                .sum()
+        };
+        assert_eq!(
+            total(&["pod_volume_provisioned", "pod_volume_bound"]),
+            total(&["pod_scheduled"])
+        );
+        assert_eq!(
+            total(&[
+                "pod_sandbox_ready",
+                "pod_workspace_started",
+                "pod_dind_started"
+            ]),
+            total(&["pod_initialized", "pod_running"])
+        );
+        // Every row is a Pod row: its phase starts with `pod_` and it carries
+        // the Pod UID.
+        for stage in &stages {
+            assert!(POD_STAGE_PHASES.contains(&stage.stage.as_str()));
+            assert!(stage.stage.as_str().starts_with("pod_"));
+            assert_eq!(stage.metadata("uid")["pod_uid"], "uid");
+        }
+        let created = &stages[0];
+        assert_eq!(created.completed_at, at(0).unwrap());
+        assert_eq!(created.since_pod_created, Duration::ZERO);
+    }
+
+    #[test]
+    fn claim_and_volume_stages_need_marks_from_this_start() {
+        // A warm member and a resumed Pod were created under an older Claim.
+        for path in [StartPath::Warm, StartPath::Resume] {
+            let stages = pod_stage_timings(&cold_commodity_pod(), path);
+            assert!(
+                stages
+                    .iter()
+                    .all(|stage| stage.stage != StartStage::PodCreated),
+                "{path:?}"
+            );
+        }
+        // A pool member created before the Claim is no controller latency.
+        let early_member = PodStartTimeline {
+            claim_created_at: at(2),
+            ..cold_commodity_pod()
+        };
+        assert!(
+            pod_stage_timings(&early_member, StartPath::Cold)
+                .iter()
+                .all(|stage| stage.stage != StartStage::PodCreated)
+        );
+        // A resumed Pod mounts a volume provisioned for an earlier Pod, and
+        // an ephemeral or unread volume has no mark: neither volume stage.
+        for volume_created_at in [at(-600), None] {
+            let timeline = PodStartTimeline {
+                volume_created_at,
+                ..cold_commodity_pod()
+            };
+            let names: Vec<_> = pod_stage_timings(&timeline, StartPath::Resume)
+                .into_iter()
+                .map(|stage| stage.stage)
+                .collect();
+            assert!(!names.contains(&StartStage::PodVolumeProvisioned));
+            assert!(!names.contains(&StartStage::PodVolumeBound));
+            assert!(names.contains(&StartStage::PodScheduled));
+        }
+    }
+
+    #[test]
+    fn container_stages_follow_start_order_after_the_sandbox_and_init() {
+        // Confidential: an init container runs inside the sandbox, so the
+        // first container stage starts at init completion.
+        let confidential = PodStartTimeline {
+            ready_to_start_containers_at: at(6),
+            initialized_at: at(20),
+            workspace_started_at: at(22),
+            dind_started_at: at(25),
+            running_at: at(25),
+            ..cold_commodity_pod()
+        };
+        let stages = durations(&pod_stage_timings(&confidential, StartPath::Cold));
+        assert!(stages.contains(&("pod_sandbox_ready", 2)), "{stages:?}");
+        assert!(stages.contains(&("pod_workspace_started", 2)), "{stages:?}");
+        assert!(stages.contains(&("pod_dind_started", 3)), "{stages:?}");
+
+        // A workspace-only Pod has one container stage.
+        let workspace_only = PodStartTimeline {
+            dind_started_at: None,
+            running_at: at(8),
+            ..cold_commodity_pod()
+        };
+        let stages = durations(&pod_stage_timings(&workspace_only, StartPath::Cold));
+        assert!(stages.contains(&("pod_workspace_started", 1)), "{stages:?}");
+        assert!(!stages.iter().any(|(name, _)| *name == "pod_dind_started"));
+
+        // A restarted container leaves the Pod's running mark unknown: no
+        // container stage, rather than one that absorbs another's time.
+        let restarted = PodStartTimeline {
+            workspace_started_at: None,
+            running_at: None,
+            ..cold_commodity_pod()
+        };
+        let stages = durations(&pod_stage_timings(&restarted, StartPath::Cold));
+        assert!(
+            !stages
+                .iter()
+                .any(|(name, _)| matches!(*name, "pod_workspace_started" | "pod_dind_started")),
+            "{stages:?}"
+        );
+        assert!(stages.contains(&("pod_sandbox_ready", 3)), "{stages:?}");
     }
 
     #[test]

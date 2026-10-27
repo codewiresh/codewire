@@ -56,8 +56,12 @@ pub struct ProbeResult {
     pub pod_name: String,
     pub pod_uid: String,
     pub pod_ip: String,
-    /// Start marks of the probed Pod, read from the same Pod object.
+    /// Start marks of the probed Pod, read from the same Pod object, plus
+    /// the Claim's creation.
     pub pod_timeline: PodStartTimeline,
+    /// The PVC the probed Pod mounts as its `workspace` volume; empty for an
+    /// ephemeral workspace.
+    pub workspace_pvc_name: String,
     /// The bound Sandbox's agent-sandbox launch type: `warm` for an adopted
     /// warm-pool member (Program #2238 C3).
     pub launch_type: String,
@@ -67,13 +71,30 @@ pub struct ProbeResult {
 /// from the Pod's own metadata and status. Kubernetes records these times at
 /// one-second resolution. A condition's mark is its latest transition to
 /// `True`.
+///
+/// `from_pod` reads only the Pod. The Claim's and the workspace volume's
+/// creation come from their own objects: the probe sets `claim_created_at`
+/// from the Claim it already reads, and the Pod start record sets
+/// `volume_created_at` with one PVC and one PersistentVolume read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PodStartTimeline {
+    /// The SandboxClaim's creation.
+    pub claim_created_at: Option<Timestamp>,
     pub created_at: Option<Timestamp>,
+    /// The creation of the PersistentVolume bound to the workspace PVC: the
+    /// provisioner creates it once the volume exists.
+    pub volume_created_at: Option<Timestamp>,
     /// `PodScheduled=True`.
     pub scheduled_at: Option<Timestamp>,
+    /// `PodReadyToStartContainers=True`: the kubelet mounted the volumes and
+    /// the runtime created the Pod sandbox (the Kata VM) with its network.
+    pub ready_to_start_containers_at: Option<Timestamp>,
     /// `Initialized=True`: every init container completed.
     pub initialized_at: Option<Timestamp>,
+    /// The `workspace` container's first `state.running.startedAt`.
+    pub workspace_started_at: Option<Timestamp>,
+    /// The `dind` container's first `state.running.startedAt`.
+    pub dind_started_at: Option<Timestamp>,
     /// The latest `state.running.startedAt`, set only when every container is
     /// running on its first start. A restarted container's start time
     /// describes the restart rather than the Pod start, so it leaves this
@@ -103,14 +124,38 @@ impl PodStartTimeline {
             .map(first_start_running_at)
             .collect::<Option<Vec<_>>>()
             .and_then(|started| started.into_iter().max());
+        let container_started_at = |name: &str| {
+            containers
+                .iter()
+                .find(|container| container.name == name)
+                .and_then(first_start_running_at)
+        };
         Self {
             created_at: pod.metadata.creation_timestamp.as_ref().map(|time| time.0),
             scheduled_at: condition_true_at("PodScheduled"),
+            ready_to_start_containers_at: condition_true_at("PodReadyToStartContainers"),
             initialized_at: condition_true_at("Initialized"),
+            workspace_started_at: container_started_at("workspace"),
+            dind_started_at: container_started_at("dind"),
             running_at,
             containers_ready_at: condition_true_at("ContainersReady"),
+            ..Self::default()
         }
     }
+}
+
+/// The PVC a Pod mounts as its `workspace` volume.
+fn workspace_pvc_claim_name(pod: &Pod) -> Option<String> {
+    pod.spec
+        .as_ref()?
+        .volumes
+        .as_deref()?
+        .iter()
+        .find(|volume| volume.name == "workspace")?
+        .persistent_volume_claim
+        .as_ref()
+        .map(|claim| claim.claim_name.clone())
+        .filter(|name| !name.is_empty())
 }
 
 fn first_start_running_at(container: &ContainerStatus) -> Option<Timestamp> {
@@ -5033,6 +5078,56 @@ impl SandboxClient {
         }
     }
 
+    /// The creation of the PersistentVolume bound to the workspace PVC
+    /// `pvc_name`, for start timing: one PVC read and one PersistentVolume
+    /// list narrowed to the bound volume's name (orchestration may list, not
+    /// get, PersistentVolumes). `None` while the PVC is absent or unbound, or
+    /// when the volume does not claim this exact PVC.
+    pub async fn workspace_volume_created_at(
+        &self,
+        pvc_name: &str,
+    ) -> anyhow::Result<Option<Timestamp>> {
+        let Some(pvc) = self
+            .persistent_volume_claims()
+            .get_opt(pvc_name)
+            .await
+            .map_err(|error| anyhow::anyhow!("get workspace PVC {pvc_name}: {error}"))?
+        else {
+            return Ok(None);
+        };
+        let Some(volume_name) = pvc
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.volume_name.clone())
+            .filter(|name| !name.is_empty())
+        else {
+            return Ok(None);
+        };
+        let volumes = self
+            .persistent_volumes()
+            .list(&ListParams::default().fields(&format!("metadata.name={volume_name}")))
+            .await
+            .map_err(|error| anyhow::anyhow!("list PersistentVolume {volume_name}: {error}"))?;
+        Ok(volumes
+            .items
+            .into_iter()
+            .find(|volume| {
+                volume.metadata.name.as_deref() == Some(volume_name.as_str())
+                    && volume
+                        .spec
+                        .as_ref()
+                        .and_then(|spec| spec.claim_ref.as_ref())
+                        .is_some_and(|claim| {
+                            claim.namespace.as_deref() == Some(self.namespace.as_str())
+                                && claim.name.as_deref() == Some(pvc_name)
+                                && claim.uid.is_some()
+                                && claim.uid == pvc.metadata.uid
+                        })
+            })
+            .and_then(|volume| volume.metadata.creation_timestamp)
+            .map(|time| time.0))
+    }
+
     /// Mirrors `ClientBackend.ProbeEnvironment`.
     pub async fn probe_environment(&self, env_id: &str) -> anyhow::Result<ProbeResult> {
         let (exists, ready, reason) = self
@@ -5051,8 +5146,12 @@ impl SandboxClient {
         };
 
         let claim = claim_name(env_id);
+        let mut claim_created_at = None;
         let sandbox_name = match self.claims.get(&claim).await {
-            Ok(c) => claim_bound_sandbox_name(&c).unwrap_or_default().to_string(),
+            Ok(c) => {
+                claim_created_at = c.metadata.creation_timestamp.as_ref().map(|time| time.0);
+                claim_bound_sandbox_name(&c).unwrap_or_default().to_string()
+            }
             Err(_) => String::new(),
         };
         // No Claim-name fallback: a Claim that names no Sandbox has no Pod.
@@ -5082,7 +5181,11 @@ impl SandboxClient {
             && let Ok(pod) = self.pods().get(&pod_lookup).await
         {
             result.pod_exists = true;
-            result.pod_timeline = PodStartTimeline::from_pod(&pod);
+            result.pod_timeline = PodStartTimeline {
+                claim_created_at,
+                ..PodStartTimeline::from_pod(&pod)
+            };
+            result.workspace_pvc_name = workspace_pvc_claim_name(&pod).unwrap_or_default();
             result.pod_uid = pod.metadata.uid.clone().unwrap_or_default();
             if let Some(status) = &pod.status {
                 result.pod_phase = status.phase.clone().unwrap_or_default();
@@ -6261,10 +6364,16 @@ mod tests {
             PodStartTimeline {
                 created_at: at("2026-09-29T10:00:00Z"),
                 scheduled_at: at("2026-09-29T10:00:03Z"),
+                ready_to_start_containers_at: at("2026-09-29T10:00:14Z"),
                 initialized_at: at("2026-09-29T10:00:36Z"),
+                workspace_started_at: at("2026-09-29T10:00:37Z"),
+                dind_started_at: at("2026-09-29T10:00:38Z"),
                 // The last container to start marks the Pod fully running.
                 running_at: at("2026-09-29T10:00:38Z"),
                 containers_ready_at: at("2026-09-29T10:00:40Z"),
+                // The Claim and the volume are read from their own objects.
+                claim_created_at: None,
+                volume_created_at: None,
             }
         );
 
@@ -6272,12 +6381,16 @@ mod tests {
         // rather than reporting a restart time as the Pod start.
         let restarted = PodStartTimeline::from_pod(&timeline_pod(1, started));
         assert_eq!(restarted.running_at, None);
+        assert_eq!(restarted.workspace_started_at, None);
+        assert_eq!(restarted.dind_started_at, at("2026-09-29T10:00:38Z"));
         assert_eq!(restarted.initialized_at, at("2026-09-29T10:00:36Z"));
         let waiting = PodStartTimeline::from_pod(&timeline_pod(
             0,
             json!({"waiting": {"reason": "ContainerCreating"}}),
         ));
         assert_eq!(waiting.running_at, None);
+        assert_eq!(waiting.dind_started_at, None);
+        assert_eq!(waiting.workspace_started_at, at("2026-09-29T10:00:37Z"));
 
         let mut unscheduled = timeline_pod(0, json!({}));
         let status = unscheduled.status.as_mut().unwrap();
@@ -6292,6 +6405,100 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(PodStartTimeline::from_pod(&unscheduled).scheduled_at, None);
+    }
+
+    #[test]
+    fn the_workspace_pvc_is_the_one_the_pod_mounts_as_its_workspace_volume() {
+        let mut pod = timeline_pod(0, json!({}));
+        assert_eq!(workspace_pvc_claim_name(&pod), None);
+        pod.spec.as_mut().unwrap().volumes = Some(
+            serde_json::from_value(json!([
+                {"name": "codewire-run", "emptyDir": {}},
+                {"name": "workspace", "persistentVolumeClaim": {"claimName": "workspace-sb-1"}}
+            ]))
+            .unwrap(),
+        );
+        assert_eq!(
+            workspace_pvc_claim_name(&pod).as_deref(),
+            Some("workspace-sb-1")
+        );
+        // An ephemeral workspace has no claim to time.
+        pod.spec.as_mut().unwrap().volumes =
+            Some(serde_json::from_value(json!([{"name": "workspace", "emptyDir": {}}])).unwrap());
+        assert_eq!(workspace_pvc_claim_name(&pod), None);
+    }
+
+    fn workspace_pvc(volume_name: Option<&str>) -> Value {
+        json!({
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": {"name": "workspace-sb-1", "namespace": "dev-sandboxes", "uid": STORAGE_PVC_UID},
+            "spec": {"volumeName": volume_name},
+        })
+    }
+
+    fn persistent_volume_list(claim_uid: &str) -> Value {
+        json!({
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeList",
+            "metadata": {"resourceVersion": "1"},
+            "items": [{
+                "metadata": {"name": "pvc-1", "creationTimestamp": "2026-09-29T10:00:02Z"},
+                "spec": {"claimRef": {
+                    "namespace": "dev-sandboxes", "name": "workspace-sb-1", "uid": claim_uid,
+                }},
+            }],
+        })
+    }
+
+    #[tokio::test]
+    async fn workspace_volume_creation_comes_from_the_volume_bound_to_this_pvc() {
+        let (client, requests) = sandbox_client_with_secret_responses(vec![
+            (StatusCode::OK, workspace_pvc(Some("pvc-1"))),
+            (StatusCode::OK, persistent_volume_list(STORAGE_PVC_UID)),
+        ]);
+        assert_eq!(
+            client
+                .workspace_volume_created_at("workspace-sb-1")
+                .await
+                .unwrap(),
+            Some("2026-09-29T10:00:02Z".parse::<Timestamp>().unwrap())
+        );
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [
+                (
+                    Method::GET,
+                    "/api/v1/namespaces/dev-sandboxes/persistentvolumeclaims/workspace-sb-1".into()
+                ),
+                (Method::GET, "/api/v1/persistentvolumes".into()),
+            ]
+        );
+
+        // A volume that claims another PVC incarnation is not this one's.
+        let (client, _) = sandbox_client_with_secret_responses(vec![
+            (StatusCode::OK, workspace_pvc(Some("pvc-1"))),
+            (StatusCode::OK, persistent_volume_list("another-uid")),
+        ]);
+        assert_eq!(
+            client
+                .workspace_volume_created_at("workspace-sb-1")
+                .await
+                .unwrap(),
+            None
+        );
+
+        // An unbound PVC is read once; there is no volume to list.
+        let (client, requests) =
+            sandbox_client_with_secret_responses(vec![(StatusCode::OK, workspace_pvc(None))]);
+        assert_eq!(
+            client
+                .workspace_volume_created_at("workspace-sb-1")
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
     }
 
     #[test]

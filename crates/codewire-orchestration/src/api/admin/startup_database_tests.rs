@@ -222,6 +222,15 @@ async fn db_startup_phase_summary_and_timings_include_pod_stages_only() -> Resul
             170,
         )
         .await?;
+        log(
+            pool,
+            "timed",
+            "pod_volume_provisioned",
+            "completed",
+            Some(2_000),
+            170,
+        )
+        .await?;
         log(pool, "timed", "pod_running", "completed", Some(2_000), 170).await?;
         log(
             pool,
@@ -276,8 +285,14 @@ async fn db_startup_phase_summary_and_timings_include_pod_stages_only() -> Resul
                     ("wait_for_ready", 0, None, None),
                     ("workspace_bind", 1, Some(150), Some(150)),
                     ("access_ready", 1, Some(20_000), Some(20_000)),
+                    ("pod_created", 0, None, None),
+                    ("pod_volume_provisioned", 1, Some(2_000), Some(2_000)),
+                    ("pod_volume_bound", 0, None, None),
                     ("pod_scheduled", 2, Some(4_000), Some(4_900)),
+                    ("pod_sandbox_ready", 0, None, None),
                     ("pod_initialized", 1, Some(33_000), Some(33_000)),
+                    ("pod_workspace_started", 0, None, None),
+                    ("pod_dind_started", 0, None, None),
                     ("pod_running", 1, Some(2_000), Some(2_000)),
                     ("pod_containers_ready", 1, Some(2_000), Some(2_000)),
                     ("file_ready", 0, None, None),
@@ -299,6 +314,7 @@ async fn db_startup_phase_summary_and_timings_include_pod_stages_only() -> Resul
                     ("create_claim", Some(1_000)),
                     ("workspace_bind", Some(150)),
                     ("access_ready", Some(20_000)),
+                    ("pod_volume_provisioned", Some(2_000)),
                     ("pod_scheduled", Some(3_000)),
                     ("pod_initialized", Some(33_000)),
                     ("pod_running", Some(2_000)),

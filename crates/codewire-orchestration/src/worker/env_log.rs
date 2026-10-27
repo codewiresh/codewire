@@ -18,6 +18,12 @@ pub fn env_phase_label(phase: &str) -> &str {
         "pod_initialized" => "Workspace pod initialized",
         "pod_running" => "Workspace containers started",
         "pod_containers_ready" => "Workspace containers ready",
+        "pod_created" => "Workspace pod created",
+        "pod_volume_provisioned" => "Workspace volume provisioned",
+        "pod_volume_bound" => "Workspace volume bound",
+        "pod_sandbox_ready" => "Workspace sandbox started",
+        "pod_workspace_started" => "Workspace container started",
+        "pod_dind_started" => "Docker container started",
         "mark_running" => "Marking running",
         "publish_setup" => "Starting setup",
         "health_check" => "Checking sidecar readiness",
@@ -344,6 +350,12 @@ mod tests {
             "pod_initialized",
             "pod_running",
             "pod_containers_ready",
+            "pod_created",
+            "pod_volume_provisioned",
+            "pod_volume_bound",
+            "pod_sandbox_ready",
+            "pod_workspace_started",
+            "pod_dind_started",
         ] {
             assert!(!should_record_worker_checkpoint(phase, "completed"));
         }

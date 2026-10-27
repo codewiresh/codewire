@@ -1841,7 +1841,18 @@ async fn run_environment_create(
                         reconciled.entered_running();
                     }
                     if records_pod_start_marks(action) {
-                        record_pod_start_marks(ctx, authority, &probe, start_path, profile).await?;
+                        let client = backend
+                            .as_ref()
+                            .and_then(|backend| require_client(ctx, &backend.namespace).ok());
+                        record_pod_start_marks(
+                            ctx,
+                            authority,
+                            client.as_ref(),
+                            &probe,
+                            start_path,
+                            profile,
+                        )
+                        .await?;
                     }
                 }
                 emit_running_log(authority, "mark_running", "completed", "", None).await?;
@@ -1960,10 +1971,12 @@ fn records_pod_start_marks(action: CreateAction) -> bool {
 
 /// Rows carry the Pod UID and are written once per Pod, even when an error
 /// retry reaches `mark_running` again for the same Pod. They are not journal
-/// checkpoints.
+/// checkpoints. Only an unrecorded Pod reads its workspace volume's creation
+/// (`client`), so a Pod costs that read once.
 pub(super) async fn record_pod_start_marks(
     ctx: &WorkerContext,
     authority: &ActivityAuthority,
+    client: Option<&SandboxClient>,
     probe: &ProbeResult,
     path: StartPath,
     profile: StartProfile,
@@ -1997,7 +2010,24 @@ pub(super) async fn record_pod_start_marks(
             return Ok(());
         }
     }
-    for timing in pod_stage_timings(&probe.pod_timeline) {
+    let mut timeline = probe.pod_timeline.clone();
+    if let Some(client) = client
+        && !probe.workspace_pvc_name.is_empty()
+    {
+        match client
+            .workspace_volume_created_at(&probe.workspace_pvc_name)
+            .await
+        {
+            Ok(created_at) => timeline.volume_created_at = created_at,
+            // Timing is observational; the volume stages are left out.
+            Err(error) => tracing::warn!(
+                environment_id = authority.environment_id(),
+                error = %error,
+                "create: skip workspace volume start marks after a failed read"
+            ),
+        }
+    }
+    for timing in pod_stage_timings(&timeline, path) {
         emit_running_log(
             authority,
             timing.stage.as_str(),
