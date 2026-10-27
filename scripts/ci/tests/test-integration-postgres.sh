@@ -673,9 +673,10 @@ assert not any(suite['ci'] for suite in suites)
 executions = [command for command in commands if command['args'][0] == 'test'
               and '--no-run' not in command['args']]
 # 45 suite contracts before the broker admission matrix ran in four lanes by
-# module (one suite became eight); 437 required tests either way.
+# module (one suite became eight); 438 required tests (437, plus #3402's
+# ListOrganizations statement test).
 assert len(executions) == len(suites) == 52
-assert sum(suite['count'] for suite in suites) == 437
+assert sum(suite['count'] for suite in suites) == 438
 assert commands.index(actual_batches[-1]) < commands.index(executions[0]), 'a lane started before every harness compiled'
 # Against one explicit database the lanes run one after another, in lane order.
 for expected, actual in zip([suite for lane in lane_order for suite in lane_suites[lane]], executions):
