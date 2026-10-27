@@ -45,8 +45,14 @@ dev_sha="$(jq -er 'select(.retrieval.valid == true) | .source.sha' "$candidate" 
 # Main's full history is present: a Dev source missing from it is not on main.
 main_sha="$(git ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" { print $1 }')" || true
 [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]] || fail "cannot read main's head; ${purpose} nothing"
-git cat-file -e "${main_sha}^{commit}" 2>/dev/null ||
-  fail "main's head ${main_sha} is not in this checkout; ${purpose} nothing"
+# Main can move after the job's checkout (Deploy Dev run 25510): fetch it, so
+# descent is judged against the head just read, not the checkout's older one.
+if ! git cat-file -e "${main_sha}^{commit}" 2>/dev/null; then
+  git fetch --quiet --no-tags origin '+refs/heads/main:refs/remotes/origin/main' ||
+    fail "main's head ${main_sha} is not in this checkout and fetching main failed; ${purpose} nothing"
+  git cat-file -e "${main_sha}^{commit}" 2>/dev/null ||
+    fail "main's head ${main_sha} is still not in this checkout after fetching main; ${purpose} nothing"
+fi
 [ "$(git rev-parse --is-shallow-repository)" = false ] ||
   fail "this checkout is shallow, so main's history is incomplete; ${purpose} nothing"
 dev_present=true

@@ -411,7 +411,7 @@ descent_case() {
   local purpose="$1" dev="$2" output log
   output="$(mktemp)"
   log="$(mktemp)"
-  if (cd "$descent_root/repo" && env FAKE_DEV_SHA="$dev" GITHUB_SHA="$sha_b" GITHUB_OUTPUT="$output" \
+  if (cd "${DESCENT_REPO:-$descent_root/repo}" && env FAKE_DEV_SHA="$dev" GITHUB_SHA="$sha_b" GITHUB_OUTPUT="$output" \
       "$descent_root/bin/scripts/ci/deploy/require-dev-descent.sh" "$purpose") >"$log" 2>&1; then
     printf '%s|%s\n' "$(cat "$output")" "$(cat "$log")"
   else
@@ -452,6 +452,66 @@ if (cd "$descent_root/repo" && FAKE_DEV_SHA="$sha_a" GITHUB_SHA="$sha_b" GITHUB_
     "$descent_root/bin/scripts/ci/deploy/require-dev-descent.sh" publishing) >/dev/null 2>&1; then
   fail "the descent check accepted an unknown purpose"
 fi
+
+# Main moves after the job's checkout (Deploy Dev run 25510): the check
+# fetches main and judges descent against the head it just read. Old
+# behaviour: "main's head D is not in this checkout", and the delivery failed.
+# Each case runs in its own checkout, cloned while main was C; main is then D.
+stale_checkouts=()
+for _ in 1 2 3 4 5 6; do
+  checkout="$(mktemp -d "$descent_root/checkout.XXXXXX")"
+  git clone -q --no-local -b main "$descent_root/origin.git" "$checkout"
+  stale_checkouts+=("$checkout")
+done
+git clone -q --no-local -b main "$descent_root/origin.git" "$descent_root/ahead"
+git -C "$descent_root/ahead" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false \
+  commit -q --allow-empty -m D
+git -C "$descent_root/ahead" push -q origin HEAD:refs/heads/main
+sha_d="$(git -C "$descent_root/ahead" rev-parse HEAD)"
+[[ "$(git -C "$descent_root/ahead" rev-parse HEAD^)" == "$sha_c" ]] ||
+  fail "main's new head does not follow C"
+git -C "${stale_checkouts[0]}" cat-file -e "${sha_d}^{commit}" 2>/dev/null &&
+  fail "the stale checkout already has main's new head"
+next=0
+for purpose in signing dispatching; do
+  checkout="${stale_checkouts[next]}"
+  next=$((next + 1))
+  result="$(DESCENT_REPO="$checkout" descent_case "$purpose" "$sha_a")"
+  [[ "$result" == "deliver=true|descent check before $purpose: $sha_b descends from Dev's source $sha_a" ]] ||
+    fail "main moving after the checkout blocked a verified commit before $purpose: $result"
+  git -C "$checkout" cat-file -e "${sha_d}^{commit}" 2>/dev/null ||
+    fail "the check did not fetch main's new head before $purpose"
+  # Dev already runs the new head: only the fetched history shows that B is
+  # behind it, not stranded.
+  checkout="${stale_checkouts[next]}"
+  next=$((next + 1))
+  result="$(DESCENT_REPO="$checkout" descent_case "$purpose" "$sha_d")"
+  [[ "$result" == "deliver=false|descent check before $purpose: Dev runs $sha_d, which $sha_b does not move forward; $purpose nothing, Dev never moves backwards" ]] ||
+    fail "a commit behind main's new head on Dev was delivered before $purpose: $result"
+done
+# A fetch that fails, or that still leaves main's head absent (main rewritten
+# between reading and fetching it), fails closed and says which.
+real_git="$(command -v git)"
+mkdir -p "$descent_root/shim"
+cat >"$descent_root/shim/git" <<SHIM
+#!/usr/bin/env bash
+# Stub: a fetch that fails, or one that succeeds and brings nothing.
+if [[ "\${1:-}" == fetch ]]; then
+  [[ "\${FAKE_GIT_FETCH:-}" == noop ]] && exit 0
+  echo 'fatal: unable to access origin' >&2
+  exit 128
+fi
+exec "$real_git" "\$@"
+SHIM
+chmod +x "$descent_root/shim/git"
+result="$(PATH="$descent_root/shim:$PATH" FAKE_GIT_FETCH=fail DESCENT_REPO="${stale_checkouts[4]}" \
+  descent_case signing "$sha_a")"
+[[ "$result" == failed* && "$result" == *"::error::main's head $sha_d is not in this checkout and fetching main failed; signing nothing"* ]] ||
+  fail "a failed fetch of main did not fail closed with its reason: $result"
+result="$(PATH="$descent_root/shim:$PATH" FAKE_GIT_FETCH=noop DESCENT_REPO="${stale_checkouts[5]}" \
+  descent_case signing "$sha_a")"
+[[ "$result" == "failed|::error::main's head $sha_d is still not in this checkout after fetching main; signing nothing" ]] ||
+  fail "main's head missing after a fetch did not fail closed with its reason: $result"
 
 [[ "$(grep -Fc 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$publish_job")" -eq 2 ]] ||
   fail "runtime workflow does not sign the Harbor set and GHCR mirror exactly once each"
