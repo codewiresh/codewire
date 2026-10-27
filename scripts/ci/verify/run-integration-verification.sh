@@ -616,6 +616,12 @@ database_lane_core() {
     cargo test -p codewire-mesh --lib 'store::migration_tests::' \
       -- --ignored --nocapture | tee "$logfile"
   assert_passed_count "Mesh migration ledger" "$logfile" 16
+
+  logfile="$RUN_DIR/server-core-pool-health.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test -p codewire-server-core --lib db:: -- --ignored --nocapture --test-threads=1 \
+      | tee "$logfile"
+  assert_passed_count "server-core pool health matrix" "$logfile" 2
 }
 
 database_lane_credential_mutations() {

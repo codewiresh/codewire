@@ -1692,6 +1692,7 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       crates/codewire-server-core/src/migrate.rs|\
+      crates/codewire-server-core/src/db.rs|\
       crates/codewire-server-core/src/bin/codewire-db-migrate.rs|\
       crates/codewire-server-core/tests/data/application_schema_fingerprint.sql|\
       crates/codewire-server-core/tests/session_auth.rs|\

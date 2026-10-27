@@ -397,6 +397,7 @@ suites = [
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::organizations::membership_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'organization membership credential matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::billing_sessions::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'billing session bind matrix', 'count': 4},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::credential_relay::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'credential relay target matrix', 'count': 1},
+    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'db::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core pool health matrix', 'count': 2},
 ]
 batches = [
     ['test', '-p', 'codewire-server-core', '--lib', '--test', 'session_auth',
@@ -420,7 +421,8 @@ lane_order = ['core', 'credential-mutations', 'credential-service', 'broker-admi
               'broker-decisions', 'broker-refresh', 'orchestration', 'orchestration-journals',
               'orchestration-workspaces']
 lane_labels = {
-    'core': {'server-core migration matrix', 'platform credential storage matrix',
+    'core': {'server-core migration matrix', 'server-core pool health matrix',
+             'platform credential storage matrix',
              'platform access profile matrix', 'platform owner-source authority matrix',
              'platform credential refresh matrix', 'platform credential restricted-role matrix',
              'OAuth-only restricted identity matrix', 'session hash-only matrix',
@@ -674,9 +676,10 @@ executions = [command for command in commands if command['args'][0] == 'test'
               and '--no-run' not in command['args']]
 # 45 suite contracts before the broker admission matrix ran in four lanes by
 # module (one suite became eight); 438 required tests (437, plus #3402's
-# ListOrganizations statement test).
-assert len(executions) == len(suites) == 52
-assert sum(suite['count'] for suite in suites) == 438
+# ListOrganizations statement test). The server-core pool health matrix
+# adds one suite of 2.
+assert len(executions) == len(suites) == 53
+assert sum(suite['count'] for suite in suites) == 440
 assert commands.index(actual_batches[-1]) < commands.index(executions[0]), 'a lane started before every harness compiled'
 # Against one explicit database the lanes run one after another, in lane order.
 for expected, actual in zip([suite for lane in lane_order for suite in lane_suites[lane]], executions):
