@@ -33,7 +33,7 @@
     <header class="cw-console-rail-heading">
       <h2><a href="{{ view.selected_organization_url }}">View all sandboxes <span aria-hidden="true">→</span></a></h2>
     </header>
-    <div class="cw-console-rail" hx-get="/{{ view.selected_organization_slug }}/_fragments/sandbox-rail" hx-trigger="{% if view.sandbox_rail_loading %}load, {% endif %}every 10s" hx-swap="innerHTML">
+    <div class="cw-console-rail" hx-get="/{{ view.selected_organization_slug }}/_fragments/sandbox-rail" hx-trigger="sandbox-rail-refresh" hx-swap="innerHTML" data-sandbox-rail data-rail-loading="{{ view.sandbox_rail_loading }}">
       {% include "sandbox-rail.html" %}
     </div>
   </section>

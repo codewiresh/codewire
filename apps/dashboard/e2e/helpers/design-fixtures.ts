@@ -17,6 +17,7 @@ export const designFixtureSpecs = [
   "ssr-dashboard.repository-picker.ssr.ts",
   "ssr-dashboard.resize.ssr.ts",
   "ssr-dashboard.sandbox-inventory.ssr.ts",
+  "ssr-dashboard.sandbox-rail.ssr.ts",
   "ssr-dashboard.setup-progress.ssr.ts",
   "ssr-dashboard.source-recovery.ssr.ts",
   "ssr-dashboard.terminal-renderer.ssr.ts",

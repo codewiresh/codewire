@@ -551,6 +551,40 @@ document.addEventListener("htmx:afterSwap", (event) => {
   initializeSlugSuggestion(target);
 });
 
+// The Sandbox rail is rendered twice, in the desktop sidebar and in the
+// mobile drawer, and CSS shows at most one. Only the copy on screen refreshes,
+// every 10 seconds while the tab is visible, so a page makes one rail request
+// per interval instead of one per copy. A copy that is still loading, or out
+// of date when the drawer opens or the tab returns, refreshes at once.
+(() => {
+  "use strict";
+  const RAIL_INTERVAL_MS = 10000;
+  const rails = () => Array.from(document.querySelectorAll("[data-sandbox-rail]"));
+  // A copy rendered loading has no refresh time, so it is due at once.
+  const due = (rail) => Date.now() - Number(rail.dataset.railRefreshedAt || 0) >= RAIL_INTERVAL_MS - 250;
+  const refreshShown = () => {
+    if (document.hidden) return;
+    for (const rail of rails()) {
+      if (rail.getClientRects().length === 0 || !due(rail)) continue;
+      rail.dataset.railRefreshedAt = String(Date.now());
+      rail.dispatchEvent(new CustomEvent("sandbox-rail-refresh"));
+    }
+  };
+  // htmx binds the rail's trigger on DOMContentLoaded before this listener runs.
+  document.addEventListener("DOMContentLoaded", () => {
+    const now = String(Date.now());
+    for (const rail of rails()) {
+      if (rail.dataset.railLoading !== "true") rail.dataset.railRefreshedAt = now;
+    }
+    refreshShown();
+    window.setInterval(refreshShown, RAIL_INTERVAL_MS);
+  });
+  document.addEventListener("visibilitychange", refreshShown);
+  if (app) {
+    new MutationObserver(refreshShown).observe(app, { attributes: true, attributeFilter: ["data-mobile-open", "data-sidebar-collapsed"] });
+  }
+})();
+
 if (app) {
   const closeSidebar = () => app.setAttribute("data-mobile-open", "false");
   // The desktop sidebar collapses to a rail and expands again. The choice is

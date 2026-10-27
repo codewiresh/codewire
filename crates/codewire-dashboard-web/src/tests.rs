@@ -113,6 +113,42 @@ fn admin_audit_template_escapes_sensitive_upstream_fields() {
     assert!(body.contains("&lt;script&gt;") || body.contains("&#60;script&#62;"));
 }
 
+/// Both copies of the Sandbox rail (desktop sidebar and mobile drawer) wait
+/// for dashboard.js to refresh the one on screen; htmx itself never loads or
+/// polls either, so a page makes one rail request, not two (#3395).
+#[test]
+fn both_rail_copies_refresh_only_when_the_dashboard_script_asks() {
+    for loading in [false, true] {
+        let view = DashboardView {
+            has_selected_organization: true,
+            selected_organization_slug: "acme".to_owned(),
+            selected_organization_url: "/acme/".to_owned(),
+            sandbox_rail_loading: loading,
+            ..Default::default()
+        };
+        let body = AdminAuditTemplate {
+            view: &view,
+            logs: &Vec::new(),
+            action: "",
+            info_selected: false,
+            warn_selected: false,
+            error_selected: false,
+            has_previous: false,
+            has_next: false,
+            previous_url: "/admin/audit",
+            next_url: "/admin/audit",
+        }
+        .render()
+        .expect("render admin audit page");
+        let rail = format!(
+            "hx-get=\"/acme/_fragments/sandbox-rail\" hx-trigger=\"sandbox-rail-refresh\" hx-swap=\"innerHTML\" data-sandbox-rail data-rail-loading=\"{loading}\""
+        );
+        assert_eq!(body.matches(&rail).count(), 2, "{loading}");
+        assert_eq!(body.matches("_fragments/sandbox-rail").count(), 2);
+        assert!(!body.contains("every 10s"));
+    }
+}
+
 #[test]
 fn the_shell_renders_the_collapsed_sidebar_and_both_sidebar_buttons() {
     for collapsed in [false, true] {
