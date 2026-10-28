@@ -6,8 +6,9 @@ import "google/protobuf/duration.proto";
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
-// AdminService exposes global operator reads. Every method requires a browser
-// session or OAuth-issued user bearer belonging to a global administrator;
+// AdminService exposes global operator reads and the audited organization
+// environment-quota writes. Every method requires a browser session or
+// OAuth-issued user bearer belonging to a global administrator;
 // organization-scoped API keys cannot call this service.
 service AdminService {
   // GetStats returns global environment counts and current-month usage totals.
@@ -45,6 +46,25 @@ service AdminService {
       returns (GetEnvironmentStartupTimingsResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+
+  // GetOrganizationEnvironmentQuota returns one organization's explicit
+  // environment quota, when it has one, and the quota creates are checked
+  // against: the explicit quota, or the plan fallback without one.
+  rpc GetOrganizationEnvironmentQuota(GetOrganizationEnvironmentQuotaRequest)
+      returns (GetOrganizationEnvironmentQuotaResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // SetOrganizationEnvironmentQuota creates or replaces one organization's
+  // explicit environment quota and writes an audit entry.
+  rpc SetOrganizationEnvironmentQuota(SetOrganizationEnvironmentQuotaRequest)
+      returns (SetOrganizationEnvironmentQuotaResponse);
+
+  // ClearOrganizationEnvironmentQuota removes one organization's explicit
+  // environment quota, so its plan fallback applies again, and writes an
+  // audit entry. Clearing an organization without one changes nothing.
+  rpc ClearOrganizationEnvironmentQuota(ClearOrganizationEnvironmentQuotaRequest)
+      returns (ClearOrganizationEnvironmentQuotaResponse);
 }
 
 message GetStatsRequest {}
@@ -167,4 +187,44 @@ message GetEnvironmentStartupTimingsResponse {
   string environment_id = 1;
   google.protobuf.Timestamp created_at = 2;
   repeated EnvironmentStartupTiming timings = 3;
+}
+
+// EnvironmentQuota bounds one organization's live environments. Each limit is
+// -1 for unlimited or a positive value.
+message EnvironmentQuota {
+  int32 max_concurrent_environments = 1;
+  int32 max_concurrent_sandbox = 2;
+  int32 max_cpu_millicores = 3;
+  int32 max_memory_mb = 4;
+}
+
+message GetOrganizationEnvironmentQuotaRequest {
+  string organization_id = 1;
+}
+
+message GetOrganizationEnvironmentQuotaResponse {
+  string organization_id = 1;
+  // Unset when the organization has no explicit quota.
+  EnvironmentQuota explicit = 2;
+  EnvironmentQuota effective = 3;
+}
+
+message SetOrganizationEnvironmentQuotaRequest {
+  string organization_id = 1;
+  EnvironmentQuota quota = 2;
+}
+
+message SetOrganizationEnvironmentQuotaResponse {
+  string organization_id = 1;
+  EnvironmentQuota quota = 2;
+}
+
+message ClearOrganizationEnvironmentQuotaRequest {
+  string organization_id = 1;
+}
+
+message ClearOrganizationEnvironmentQuotaResponse {
+  string organization_id = 1;
+  // True when an explicit quota existed and was removed.
+  bool cleared = 2;
 }

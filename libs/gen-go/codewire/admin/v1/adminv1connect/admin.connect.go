@@ -50,6 +50,15 @@ const (
 	// AdminServiceGetEnvironmentStartupTimingsProcedure is the fully-qualified name of the
 	// AdminService's GetEnvironmentStartupTimings RPC.
 	AdminServiceGetEnvironmentStartupTimingsProcedure = "/codewire.admin.v1.AdminService/GetEnvironmentStartupTimings"
+	// AdminServiceGetOrganizationEnvironmentQuotaProcedure is the fully-qualified name of the
+	// AdminService's GetOrganizationEnvironmentQuota RPC.
+	AdminServiceGetOrganizationEnvironmentQuotaProcedure = "/codewire.admin.v1.AdminService/GetOrganizationEnvironmentQuota"
+	// AdminServiceSetOrganizationEnvironmentQuotaProcedure is the fully-qualified name of the
+	// AdminService's SetOrganizationEnvironmentQuota RPC.
+	AdminServiceSetOrganizationEnvironmentQuotaProcedure = "/codewire.admin.v1.AdminService/SetOrganizationEnvironmentQuota"
+	// AdminServiceClearOrganizationEnvironmentQuotaProcedure is the fully-qualified name of the
+	// AdminService's ClearOrganizationEnvironmentQuota RPC.
+	AdminServiceClearOrganizationEnvironmentQuotaProcedure = "/codewire.admin.v1.AdminService/ClearOrganizationEnvironmentQuota"
 )
 
 // AdminServiceClient is a client for the codewire.admin.v1.AdminService service.
@@ -69,6 +78,17 @@ type AdminServiceClient interface {
 	// GetEnvironmentStartupTimings returns the latest startup timing for every
 	// known phase of one environment.
 	GetEnvironmentStartupTimings(context.Context, *connect.Request[v1.GetEnvironmentStartupTimingsRequest]) (*connect.Response[v1.GetEnvironmentStartupTimingsResponse], error)
+	// GetOrganizationEnvironmentQuota returns one organization's explicit
+	// environment quota, when it has one, and the quota creates are checked
+	// against: the explicit quota, or the plan fallback without one.
+	GetOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.GetOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.GetOrganizationEnvironmentQuotaResponse], error)
+	// SetOrganizationEnvironmentQuota creates or replaces one organization's
+	// explicit environment quota and writes an audit entry.
+	SetOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.SetOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.SetOrganizationEnvironmentQuotaResponse], error)
+	// ClearOrganizationEnvironmentQuota removes one organization's explicit
+	// environment quota, so its plan fallback applies again, and writes an
+	// audit entry. Clearing an organization without one changes nothing.
+	ClearOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.ClearOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.ClearOrganizationEnvironmentQuotaResponse], error)
 }
 
 // NewAdminServiceClient constructs a client for the codewire.admin.v1.AdminService service. By
@@ -124,17 +144,39 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
+		getOrganizationEnvironmentQuota: connect.NewClient[v1.GetOrganizationEnvironmentQuotaRequest, v1.GetOrganizationEnvironmentQuotaResponse](
+			httpClient,
+			baseURL+AdminServiceGetOrganizationEnvironmentQuotaProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("GetOrganizationEnvironmentQuota")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		setOrganizationEnvironmentQuota: connect.NewClient[v1.SetOrganizationEnvironmentQuotaRequest, v1.SetOrganizationEnvironmentQuotaResponse](
+			httpClient,
+			baseURL+AdminServiceSetOrganizationEnvironmentQuotaProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("SetOrganizationEnvironmentQuota")),
+			connect.WithClientOptions(opts...),
+		),
+		clearOrganizationEnvironmentQuota: connect.NewClient[v1.ClearOrganizationEnvironmentQuotaRequest, v1.ClearOrganizationEnvironmentQuotaResponse](
+			httpClient,
+			baseURL+AdminServiceClearOrganizationEnvironmentQuotaProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("ClearOrganizationEnvironmentQuota")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // adminServiceClient implements AdminServiceClient.
 type adminServiceClient struct {
-	getStats                        *connect.Client[v1.GetStatsRequest, v1.GetStatsResponse]
-	listOrganizations               *connect.Client[v1.ListOrganizationsRequest, v1.ListOrganizationsResponse]
-	listAuditLogs                   *connect.Client[v1.ListAuditLogsRequest, v1.ListAuditLogsResponse]
-	listEnvironmentLifecycleJournal *connect.Client[v1.ListEnvironmentLifecycleJournalRequest, v1.ListEnvironmentLifecycleJournalResponse]
-	getEnvironmentStartupSummary    *connect.Client[v1.GetEnvironmentStartupSummaryRequest, v1.GetEnvironmentStartupSummaryResponse]
-	getEnvironmentStartupTimings    *connect.Client[v1.GetEnvironmentStartupTimingsRequest, v1.GetEnvironmentStartupTimingsResponse]
+	getStats                          *connect.Client[v1.GetStatsRequest, v1.GetStatsResponse]
+	listOrganizations                 *connect.Client[v1.ListOrganizationsRequest, v1.ListOrganizationsResponse]
+	listAuditLogs                     *connect.Client[v1.ListAuditLogsRequest, v1.ListAuditLogsResponse]
+	listEnvironmentLifecycleJournal   *connect.Client[v1.ListEnvironmentLifecycleJournalRequest, v1.ListEnvironmentLifecycleJournalResponse]
+	getEnvironmentStartupSummary      *connect.Client[v1.GetEnvironmentStartupSummaryRequest, v1.GetEnvironmentStartupSummaryResponse]
+	getEnvironmentStartupTimings      *connect.Client[v1.GetEnvironmentStartupTimingsRequest, v1.GetEnvironmentStartupTimingsResponse]
+	getOrganizationEnvironmentQuota   *connect.Client[v1.GetOrganizationEnvironmentQuotaRequest, v1.GetOrganizationEnvironmentQuotaResponse]
+	setOrganizationEnvironmentQuota   *connect.Client[v1.SetOrganizationEnvironmentQuotaRequest, v1.SetOrganizationEnvironmentQuotaResponse]
+	clearOrganizationEnvironmentQuota *connect.Client[v1.ClearOrganizationEnvironmentQuotaRequest, v1.ClearOrganizationEnvironmentQuotaResponse]
 }
 
 // GetStats calls codewire.admin.v1.AdminService.GetStats.
@@ -168,6 +210,24 @@ func (c *adminServiceClient) GetEnvironmentStartupTimings(ctx context.Context, r
 	return c.getEnvironmentStartupTimings.CallUnary(ctx, req)
 }
 
+// GetOrganizationEnvironmentQuota calls
+// codewire.admin.v1.AdminService.GetOrganizationEnvironmentQuota.
+func (c *adminServiceClient) GetOrganizationEnvironmentQuota(ctx context.Context, req *connect.Request[v1.GetOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.GetOrganizationEnvironmentQuotaResponse], error) {
+	return c.getOrganizationEnvironmentQuota.CallUnary(ctx, req)
+}
+
+// SetOrganizationEnvironmentQuota calls
+// codewire.admin.v1.AdminService.SetOrganizationEnvironmentQuota.
+func (c *adminServiceClient) SetOrganizationEnvironmentQuota(ctx context.Context, req *connect.Request[v1.SetOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.SetOrganizationEnvironmentQuotaResponse], error) {
+	return c.setOrganizationEnvironmentQuota.CallUnary(ctx, req)
+}
+
+// ClearOrganizationEnvironmentQuota calls
+// codewire.admin.v1.AdminService.ClearOrganizationEnvironmentQuota.
+func (c *adminServiceClient) ClearOrganizationEnvironmentQuota(ctx context.Context, req *connect.Request[v1.ClearOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.ClearOrganizationEnvironmentQuotaResponse], error) {
+	return c.clearOrganizationEnvironmentQuota.CallUnary(ctx, req)
+}
+
 // AdminServiceHandler is an implementation of the codewire.admin.v1.AdminService service.
 type AdminServiceHandler interface {
 	// GetStats returns global environment counts and current-month usage totals.
@@ -185,6 +245,17 @@ type AdminServiceHandler interface {
 	// GetEnvironmentStartupTimings returns the latest startup timing for every
 	// known phase of one environment.
 	GetEnvironmentStartupTimings(context.Context, *connect.Request[v1.GetEnvironmentStartupTimingsRequest]) (*connect.Response[v1.GetEnvironmentStartupTimingsResponse], error)
+	// GetOrganizationEnvironmentQuota returns one organization's explicit
+	// environment quota, when it has one, and the quota creates are checked
+	// against: the explicit quota, or the plan fallback without one.
+	GetOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.GetOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.GetOrganizationEnvironmentQuotaResponse], error)
+	// SetOrganizationEnvironmentQuota creates or replaces one organization's
+	// explicit environment quota and writes an audit entry.
+	SetOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.SetOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.SetOrganizationEnvironmentQuotaResponse], error)
+	// ClearOrganizationEnvironmentQuota removes one organization's explicit
+	// environment quota, so its plan fallback applies again, and writes an
+	// audit entry. Clearing an organization without one changes nothing.
+	ClearOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.ClearOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.ClearOrganizationEnvironmentQuotaResponse], error)
 }
 
 // NewAdminServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -236,6 +307,25 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
+	adminServiceGetOrganizationEnvironmentQuotaHandler := connect.NewUnaryHandler(
+		AdminServiceGetOrganizationEnvironmentQuotaProcedure,
+		svc.GetOrganizationEnvironmentQuota,
+		connect.WithSchema(adminServiceMethods.ByName("GetOrganizationEnvironmentQuota")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	adminServiceSetOrganizationEnvironmentQuotaHandler := connect.NewUnaryHandler(
+		AdminServiceSetOrganizationEnvironmentQuotaProcedure,
+		svc.SetOrganizationEnvironmentQuota,
+		connect.WithSchema(adminServiceMethods.ByName("SetOrganizationEnvironmentQuota")),
+		connect.WithHandlerOptions(opts...),
+	)
+	adminServiceClearOrganizationEnvironmentQuotaHandler := connect.NewUnaryHandler(
+		AdminServiceClearOrganizationEnvironmentQuotaProcedure,
+		svc.ClearOrganizationEnvironmentQuota,
+		connect.WithSchema(adminServiceMethods.ByName("ClearOrganizationEnvironmentQuota")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.admin.v1.AdminService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case AdminServiceGetStatsProcedure:
@@ -250,6 +340,12 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 			adminServiceGetEnvironmentStartupSummaryHandler.ServeHTTP(w, r)
 		case AdminServiceGetEnvironmentStartupTimingsProcedure:
 			adminServiceGetEnvironmentStartupTimingsHandler.ServeHTTP(w, r)
+		case AdminServiceGetOrganizationEnvironmentQuotaProcedure:
+			adminServiceGetOrganizationEnvironmentQuotaHandler.ServeHTTP(w, r)
+		case AdminServiceSetOrganizationEnvironmentQuotaProcedure:
+			adminServiceSetOrganizationEnvironmentQuotaHandler.ServeHTTP(w, r)
+		case AdminServiceClearOrganizationEnvironmentQuotaProcedure:
+			adminServiceClearOrganizationEnvironmentQuotaHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -281,4 +377,16 @@ func (UnimplementedAdminServiceHandler) GetEnvironmentStartupSummary(context.Con
 
 func (UnimplementedAdminServiceHandler) GetEnvironmentStartupTimings(context.Context, *connect.Request[v1.GetEnvironmentStartupTimingsRequest]) (*connect.Response[v1.GetEnvironmentStartupTimingsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.GetEnvironmentStartupTimings is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) GetOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.GetOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.GetOrganizationEnvironmentQuotaResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.GetOrganizationEnvironmentQuota is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) SetOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.SetOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.SetOrganizationEnvironmentQuotaResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.SetOrganizationEnvironmentQuota is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) ClearOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.ClearOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.ClearOrganizationEnvironmentQuotaResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.ClearOrganizationEnvironmentQuota is not implemented"))
 }

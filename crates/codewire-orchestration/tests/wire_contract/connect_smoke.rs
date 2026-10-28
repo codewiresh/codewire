@@ -62,6 +62,13 @@ async fn assert_json_connect_routes(harness: &Harness) {
             Some("totalEnvironments"),
         ),
         (
+            ADMIN_SERVICE,
+            "GetOrganizationEnvironmentQuota",
+            json!({"organizationId": PRIMARY_ORG}),
+            Auth::GlobalAdmin,
+            Some("effective"),
+        ),
+        (
             API_KEY_SERVICE,
             "ListApiKeys",
             json!({"orgId": PRIMARY_ORG}),
@@ -178,6 +185,26 @@ async fn assert_auth_boundary(harness: &Harness) {
         "unauthenticated",
         "unauthorized",
     );
+
+    // An organization administrator is not a global administrator: the
+    // quota write is refused before it reaches the database.
+    let denied = harness
+        .connect_json(
+            ADMIN_SERVICE,
+            "SetOrganizationEnvironmentQuota",
+            json!({
+                "organizationId": PRIMARY_ORG,
+                "quota": {
+                    "maxConcurrentEnvironments": -1,
+                    "maxConcurrentSandbox": -1,
+                    "maxCpuMillicores": -1,
+                    "maxMemoryMb": -1,
+                },
+            }),
+            Auth::Admin,
+        )
+        .await;
+    assert_connect_error(&denied, StatusCode::FORBIDDEN, "permission_denied", "");
 }
 
 async fn assert_resize_contract(harness: &Harness) {

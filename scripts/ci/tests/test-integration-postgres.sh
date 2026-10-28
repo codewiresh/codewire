@@ -385,6 +385,7 @@ suites = [
     {'args': ['test', '-p', 'codewire-mesh', '--lib', 'store::migration_tests::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'Mesh migration ledger', 'count': 16},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--test', 'environment_sources', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment source admission matrix', 'count': 6},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::admin::startup_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'admin startup summary matrix', 'count': 2},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::admin::quota_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'admin environment quota matrix', 'count': 3},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::workspace_binding::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'workspace binding recorder matrix', 'count': 20},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'workspace_binding::store::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'workspace binding access store matrix', 'count': 4},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'environment_mesh::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment Mesh membership matrix', 'count': 3},
@@ -441,6 +442,7 @@ lane_labels = {
                        'platform broker subscription matrix', 'platform broker SSH matrix'},
     'orchestration-journals': {'platform cw runtime journal matrix', 'platform managed agent journal matrix'},
     'orchestration-workspaces': {'environment source admission matrix', 'admin startup summary matrix',
+                                 'admin environment quota matrix',
                                  'workspace binding recorder matrix', 'workspace binding access store matrix',
                                  'environment Mesh membership matrix', 'environment resize admission matrix',
                                  'environment create capacity matrix',
@@ -679,10 +681,11 @@ executions = [command for command in commands if command['args'][0] == 'test'
 # 45 suite contracts before the broker admission matrix ran in four lanes by
 # module (one suite became eight); 442 required tests (437, plus #3402's
 # ListOrganizations statement test and #3550's default-profile migration and
-# store tests). The server-core pool health matrix adds one suite of 2, and
-# #3256's environment create capacity matrix one suite of 4.
-assert len(executions) == len(suites) == 54
-assert sum(suite['count'] for suite in suites) == 446
+# store tests). The server-core pool health matrix adds one suite of 2,
+# #3256's environment create capacity matrix one of 4, and the admin
+# environment quota matrix (#3583) one of 3.
+assert len(executions) == len(suites) == 55
+assert sum(suite['count'] for suite in suites) == 449
 assert commands.index(actual_batches[-1]) < commands.index(executions[0]), 'a lane started before every harness compiled'
 # Against one explicit database the lanes run one after another, in lane order.
 for expected, actual in zip([suite for lane in lane_order for suite in lane_suites[lane]], executions):

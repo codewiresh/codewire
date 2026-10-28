@@ -2746,6 +2746,8 @@ grep -qF -- "'worker::create::projection_database_tests::'" "$integration_runner
 grep -qF 'assert_passed_count "environment projection capture matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- "'api::admin::startup_database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "admin startup summary matrix" "$logfile" 2' "$integration_runner"
+grep -qF -- "'api::admin::quota_database_tests::'" "$integration_runner"
+grep -qF 'assert_passed_count "admin environment quota matrix" "$logfile" 3' "$integration_runner"
 grep -qF -- "'worker::workspace_binding::database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "workspace binding recorder matrix" "$logfile" 20' "$integration_runner"
 grep -qF -- "'workspace_binding::store::database_tests::'" "$integration_runner"

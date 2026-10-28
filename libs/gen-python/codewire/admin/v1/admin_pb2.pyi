@@ -200,3 +200,61 @@ class GetEnvironmentStartupTimingsResponse(_message.Message):
     created_at: _timestamp_pb2.Timestamp
     timings: _containers.RepeatedCompositeFieldContainer[EnvironmentStartupTiming]
     def __init__(self, environment_id: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., timings: _Optional[_Iterable[_Union[EnvironmentStartupTiming, _Mapping]]] = ...) -> None: ...
+
+class EnvironmentQuota(_message.Message):
+    __slots__ = ("max_concurrent_environments", "max_concurrent_sandbox", "max_cpu_millicores", "max_memory_mb")
+    MAX_CONCURRENT_ENVIRONMENTS_FIELD_NUMBER: _ClassVar[int]
+    MAX_CONCURRENT_SANDBOX_FIELD_NUMBER: _ClassVar[int]
+    MAX_CPU_MILLICORES_FIELD_NUMBER: _ClassVar[int]
+    MAX_MEMORY_MB_FIELD_NUMBER: _ClassVar[int]
+    max_concurrent_environments: int
+    max_concurrent_sandbox: int
+    max_cpu_millicores: int
+    max_memory_mb: int
+    def __init__(self, max_concurrent_environments: _Optional[int] = ..., max_concurrent_sandbox: _Optional[int] = ..., max_cpu_millicores: _Optional[int] = ..., max_memory_mb: _Optional[int] = ...) -> None: ...
+
+class GetOrganizationEnvironmentQuotaRequest(_message.Message):
+    __slots__ = ("organization_id",)
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    def __init__(self, organization_id: _Optional[str] = ...) -> None: ...
+
+class GetOrganizationEnvironmentQuotaResponse(_message.Message):
+    __slots__ = ("organization_id", "explicit", "effective")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    EXPLICIT_FIELD_NUMBER: _ClassVar[int]
+    EFFECTIVE_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    explicit: EnvironmentQuota
+    effective: EnvironmentQuota
+    def __init__(self, organization_id: _Optional[str] = ..., explicit: _Optional[_Union[EnvironmentQuota, _Mapping]] = ..., effective: _Optional[_Union[EnvironmentQuota, _Mapping]] = ...) -> None: ...
+
+class SetOrganizationEnvironmentQuotaRequest(_message.Message):
+    __slots__ = ("organization_id", "quota")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    QUOTA_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    quota: EnvironmentQuota
+    def __init__(self, organization_id: _Optional[str] = ..., quota: _Optional[_Union[EnvironmentQuota, _Mapping]] = ...) -> None: ...
+
+class SetOrganizationEnvironmentQuotaResponse(_message.Message):
+    __slots__ = ("organization_id", "quota")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    QUOTA_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    quota: EnvironmentQuota
+    def __init__(self, organization_id: _Optional[str] = ..., quota: _Optional[_Union[EnvironmentQuota, _Mapping]] = ...) -> None: ...
+
+class ClearOrganizationEnvironmentQuotaRequest(_message.Message):
+    __slots__ = ("organization_id",)
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    def __init__(self, organization_id: _Optional[str] = ...) -> None: ...
+
+class ClearOrganizationEnvironmentQuotaResponse(_message.Message):
+    __slots__ = ("organization_id", "cleared")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    CLEARED_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    cleared: bool
+    def __init__(self, organization_id: _Optional[str] = ..., cleared: _Optional[bool] = ...) -> None: ...

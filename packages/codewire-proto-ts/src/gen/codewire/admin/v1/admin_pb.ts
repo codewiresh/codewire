@@ -12,7 +12,7 @@ import type { JsonObject, Message } from "@bufbuild/protobuf";
  * Describes the file codewire/admin/v1/admin.proto.
  */
 export const file_codewire_admin_v1_admin: GenFile = /*@__PURE__*/
-  fileDesc("Ch1jb2Rld2lyZS9hZG1pbi92MS9hZG1pbi5wcm90bxIRY29kZXdpcmUuYWRtaW4udjEiEQoPR2V0U3RhdHNSZXF1ZXN0IqMBChBHZXRTdGF0c1Jlc3BvbnNlEhoKEnRvdGFsX2Vudmlyb25tZW50cxgBIAEoAxIbChNhY3RpdmVfZW52aXJvbm1lbnRzGAIgASgDEhkKEW1vbnRobHlfY3B1X2hvdXJzGAMgASgBEh8KF21vbnRobHlfbWVtb3J5X2diX2hvdXJzGAQgASgBEhoKEm1vbnRobHlfY29zdF9jZW50cxgFIAEoAyJmCgxPcmdhbml6YXRpb24SCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRzbHVnGAMgASgJEi4KCmNyZWF0ZWRfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIhoKGExpc3RPcmdhbml6YXRpb25zUmVxdWVzdCJTChlMaXN0T3JnYW5pemF0aW9uc1Jlc3BvbnNlEjYKDW9yZ2FuaXphdGlvbnMYASADKAsyHy5jb2Rld2lyZS5hZG1pbi52MS5Pcmdhbml6YXRpb24iVwoUTGlzdEF1ZGl0TG9nc1JlcXVlc3QSDQoFbGltaXQYASABKAUSDgoGb2Zmc2V0GAIgASgFEg4KBmFjdGlvbhgDIAEoCRIQCghzZXZlcml0eRgEIAEoCSKxAgoNQXVkaXRMb2dFbnRyeRIKCgJpZBgBIAEoCRItCgl0aW1lc3RhbXAYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg4KBmFjdGlvbhgDIAEoCRIUCgd1c2VyX2lkGAQgASgJSACIAQESFwoKdXNlcl9lbWFpbBgFIAEoCUgBiAEBEhcKCmlwX2FkZHJlc3MYBiABKAlIAogBARIXCgp1c2VyX2FnZW50GAcgASgJSAOIAQESKQoIbWV0YWRhdGEYCCABKAsyFy5nb29nbGUucHJvdG9idWYuU3RydWN0EhAKCHNldmVyaXR5GAkgASgJQgoKCF91c2VyX2lkQg0KC191c2VyX2VtYWlsQg0KC19pcF9hZGRyZXNzQg0KC191c2VyX2FnZW50Ik0KFUxpc3RBdWRpdExvZ3NSZXNwb25zZRI0CgphdWRpdF9sb2dzGAEgAygLMiAuY29kZXdpcmUuYWRtaW4udjEuQXVkaXRMb2dFbnRyeSJPCiZMaXN0RW52aXJvbm1lbnRMaWZlY3ljbGVKb3VybmFsUmVxdWVzdBIWCg5lbnZpcm9ubWVudF9pZBgBIAEoCRINCgVsaW1pdBgCIAEoBSKmAgogRW52aXJvbm1lbnRMaWZlY3ljbGVKb3VybmFsRW50cnkSCgoCaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSDAoEa2luZBgDIAEoCRINCgVhY3RvchgEIAEoCRINCgVwaGFzZRgFIAEoCRIOCgZzdGF0dXMYBiABKAkSEgoKZnJvbV9zdGF0ZRgHIAEoCRIQCgh0b19zdGF0ZRgIIAEoCRISCgpjaGVja3BvaW50GAkgASgJEg4KBnJlYXNvbhgKIAEoCRIoCghtZXRhZGF0YRgLIAEoCzIWLmdvb2dsZS5wcm90b2J1Zi5WYWx1ZRIuCgpjcmVhdGVkX2F0GAwgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJvCidMaXN0RW52aXJvbm1lbnRMaWZlY3ljbGVKb3VybmFsUmVzcG9uc2USRAoHZW50cmllcxgBIAMoCzIzLmNvZGV3aXJlLmFkbWluLnYxLkVudmlyb25tZW50TGlmZWN5Y2xlSm91cm5hbEVudHJ5IlAKI0dldEVudmlyb25tZW50U3RhcnR1cFN1bW1hcnlSZXF1ZXN0EikKBndpbmRvdxgBIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbiKKAQoTU3RhcnR1cFBoYXNlU3VtbWFyeRINCgVwaGFzZRgBIAEoCRIUCgxzYW1wbGVfY291bnQYAiABKAUSJgoDcDUwGAMgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEiYKA3A5NRgEIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbiLhAgokR2V0RW52aXJvbm1lbnRTdGFydHVwU3VtbWFyeVJlc3BvbnNlEjAKDGdlbmVyYXRlZF9hdBgBIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASKQoGd2luZG93GAIgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEh4KFnN0YXJ0aW5nX2JhY2tsb2dfY291bnQYAyABKAUSJgoec3RhcnRpbmdfYmFja2xvZ19vdmVyXzVtX2NvdW50GAQgASgFEicKH3N0YXJ0aW5nX2JhY2tsb2dfb3Zlcl8xMG1fY291bnQYBSABKAUSKgoicnVubmluZ193aXRob3V0X2FjY2Vzc19yZWFkeV9jb3VudBgGIAEoBRI/Cg9waGFzZV9kdXJhdGlvbnMYByADKAsyJi5jb2Rld2lyZS5hZG1pbi52MS5TdGFydHVwUGhhc2VTdW1tYXJ5Ij0KI0dldEVudmlyb25tZW50U3RhcnR1cFRpbWluZ3NSZXF1ZXN0EhYKDmVudmlyb25tZW50X2lkGAEgASgJItEBChhFbnZpcm9ubWVudFN0YXJ0dXBUaW1pbmcSDQoFcGhhc2UYASABKAkSDgoGc3RhdHVzGAIgASgJEg8KB21lc3NhZ2UYAyABKAkSKwoIZHVyYXRpb24YBCABKAsyGS5nb29nbGUucHJvdG9idWYuRHVyYXRpb24SKAoIbWV0YWRhdGEYBSABKAsyFi5nb29nbGUucHJvdG9idWYuVmFsdWUSLgoKY3JlYXRlZF9hdBgGIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAirAEKJEdldEVudmlyb25tZW50U3RhcnR1cFRpbWluZ3NSZXNwb25zZRIWCg5lbnZpcm9ubWVudF9pZBgBIAEoCRIuCgpjcmVhdGVkX2F0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBI8Cgd0aW1pbmdzGAMgAygLMisuY29kZXdpcmUuYWRtaW4udjEuRW52aXJvbm1lbnRTdGFydHVwVGltaW5nMpQGCgxBZG1pblNlcnZpY2USWAoIR2V0U3RhdHMSIi5jb2Rld2lyZS5hZG1pbi52MS5HZXRTdGF0c1JlcXVlc3QaIy5jb2Rld2lyZS5hZG1pbi52MS5HZXRTdGF0c1Jlc3BvbnNlIgOQAgEScwoRTGlzdE9yZ2FuaXphdGlvbnMSKy5jb2Rld2lyZS5hZG1pbi52MS5MaXN0T3JnYW5pemF0aW9uc1JlcXVlc3QaLC5jb2Rld2lyZS5hZG1pbi52MS5MaXN0T3JnYW5pemF0aW9uc1Jlc3BvbnNlIgOQAgESZwoNTGlzdEF1ZGl0TG9ncxInLmNvZGV3aXJlLmFkbWluLnYxLkxpc3RBdWRpdExvZ3NSZXF1ZXN0GiguY29kZXdpcmUuYWRtaW4udjEuTGlzdEF1ZGl0TG9nc1Jlc3BvbnNlIgOQAgESnQEKH0xpc3RFbnZpcm9ubWVudExpZmVjeWNsZUpvdXJuYWwSOS5jb2Rld2lyZS5hZG1pbi52MS5MaXN0RW52aXJvbm1lbnRMaWZlY3ljbGVKb3VybmFsUmVxdWVzdBo6LmNvZGV3aXJlLmFkbWluLnYxLkxpc3RFbnZpcm9ubWVudExpZmVjeWNsZUpvdXJuYWxSZXNwb25zZSIDkAIBEpQBChxHZXRFbnZpcm9ubWVudFN0YXJ0dXBTdW1tYXJ5EjYuY29kZXdpcmUuYWRtaW4udjEuR2V0RW52aXJvbm1lbnRTdGFydHVwU3VtbWFyeVJlcXVlc3QaNy5jb2Rld2lyZS5hZG1pbi52MS5HZXRFbnZpcm9ubWVudFN0YXJ0dXBTdW1tYXJ5UmVzcG9uc2UiA5ACARKUAQocR2V0RW52aXJvbm1lbnRTdGFydHVwVGltaW5ncxI2LmNvZGV3aXJlLmFkbWluLnYxLkdldEVudmlyb25tZW50U3RhcnR1cFRpbWluZ3NSZXF1ZXN0GjcuY29kZXdpcmUuYWRtaW4udjEuR2V0RW52aXJvbm1lbnRTdGFydHVwVGltaW5nc1Jlc3BvbnNlIgOQAgFCzwEKFWNvbS5jb2Rld2lyZS5hZG1pbi52MUIKQWRtaW5Qcm90b1ABWkRnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvYWRtaW4vdjE7YWRtaW52MaICA0NBWKoCEUNvZGV3aXJlLkFkbWluLlYxygIRQ29kZXdpcmVcQWRtaW5cVjHiAh1Db2Rld2lyZVxBZG1pblxWMVxHUEJNZXRhZGF0YeoCE0NvZGV3aXJlOjpBZG1pbjo6VjFiBnByb3RvMw", [file_google_protobuf_duration, file_google_protobuf_struct, file_google_protobuf_timestamp]);
+  fileDesc("Ch1jb2Rld2lyZS9hZG1pbi92MS9hZG1pbi5wcm90bxIRY29kZXdpcmUuYWRtaW4udjEiEQoPR2V0U3RhdHNSZXF1ZXN0IqMBChBHZXRTdGF0c1Jlc3BvbnNlEhoKEnRvdGFsX2Vudmlyb25tZW50cxgBIAEoAxIbChNhY3RpdmVfZW52aXJvbm1lbnRzGAIgASgDEhkKEW1vbnRobHlfY3B1X2hvdXJzGAMgASgBEh8KF21vbnRobHlfbWVtb3J5X2diX2hvdXJzGAQgASgBEhoKEm1vbnRobHlfY29zdF9jZW50cxgFIAEoAyJmCgxPcmdhbml6YXRpb24SCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRzbHVnGAMgASgJEi4KCmNyZWF0ZWRfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIhoKGExpc3RPcmdhbml6YXRpb25zUmVxdWVzdCJTChlMaXN0T3JnYW5pemF0aW9uc1Jlc3BvbnNlEjYKDW9yZ2FuaXphdGlvbnMYASADKAsyHy5jb2Rld2lyZS5hZG1pbi52MS5Pcmdhbml6YXRpb24iVwoUTGlzdEF1ZGl0TG9nc1JlcXVlc3QSDQoFbGltaXQYASABKAUSDgoGb2Zmc2V0GAIgASgFEg4KBmFjdGlvbhgDIAEoCRIQCghzZXZlcml0eRgEIAEoCSKxAgoNQXVkaXRMb2dFbnRyeRIKCgJpZBgBIAEoCRItCgl0aW1lc3RhbXAYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg4KBmFjdGlvbhgDIAEoCRIUCgd1c2VyX2lkGAQgASgJSACIAQESFwoKdXNlcl9lbWFpbBgFIAEoCUgBiAEBEhcKCmlwX2FkZHJlc3MYBiABKAlIAogBARIXCgp1c2VyX2FnZW50GAcgASgJSAOIAQESKQoIbWV0YWRhdGEYCCABKAsyFy5nb29nbGUucHJvdG9idWYuU3RydWN0EhAKCHNldmVyaXR5GAkgASgJQgoKCF91c2VyX2lkQg0KC191c2VyX2VtYWlsQg0KC19pcF9hZGRyZXNzQg0KC191c2VyX2FnZW50Ik0KFUxpc3RBdWRpdExvZ3NSZXNwb25zZRI0CgphdWRpdF9sb2dzGAEgAygLMiAuY29kZXdpcmUuYWRtaW4udjEuQXVkaXRMb2dFbnRyeSJPCiZMaXN0RW52aXJvbm1lbnRMaWZlY3ljbGVKb3VybmFsUmVxdWVzdBIWCg5lbnZpcm9ubWVudF9pZBgBIAEoCRINCgVsaW1pdBgCIAEoBSKmAgogRW52aXJvbm1lbnRMaWZlY3ljbGVKb3VybmFsRW50cnkSCgoCaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSDAoEa2luZBgDIAEoCRINCgVhY3RvchgEIAEoCRINCgVwaGFzZRgFIAEoCRIOCgZzdGF0dXMYBiABKAkSEgoKZnJvbV9zdGF0ZRgHIAEoCRIQCgh0b19zdGF0ZRgIIAEoCRISCgpjaGVja3BvaW50GAkgASgJEg4KBnJlYXNvbhgKIAEoCRIoCghtZXRhZGF0YRgLIAEoCzIWLmdvb2dsZS5wcm90b2J1Zi5WYWx1ZRIuCgpjcmVhdGVkX2F0GAwgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJvCidMaXN0RW52aXJvbm1lbnRMaWZlY3ljbGVKb3VybmFsUmVzcG9uc2USRAoHZW50cmllcxgBIAMoCzIzLmNvZGV3aXJlLmFkbWluLnYxLkVudmlyb25tZW50TGlmZWN5Y2xlSm91cm5hbEVudHJ5IlAKI0dldEVudmlyb25tZW50U3RhcnR1cFN1bW1hcnlSZXF1ZXN0EikKBndpbmRvdxgBIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbiKKAQoTU3RhcnR1cFBoYXNlU3VtbWFyeRINCgVwaGFzZRgBIAEoCRIUCgxzYW1wbGVfY291bnQYAiABKAUSJgoDcDUwGAMgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEiYKA3A5NRgEIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbiLhAgokR2V0RW52aXJvbm1lbnRTdGFydHVwU3VtbWFyeVJlc3BvbnNlEjAKDGdlbmVyYXRlZF9hdBgBIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASKQoGd2luZG93GAIgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEh4KFnN0YXJ0aW5nX2JhY2tsb2dfY291bnQYAyABKAUSJgoec3RhcnRpbmdfYmFja2xvZ19vdmVyXzVtX2NvdW50GAQgASgFEicKH3N0YXJ0aW5nX2JhY2tsb2dfb3Zlcl8xMG1fY291bnQYBSABKAUSKgoicnVubmluZ193aXRob3V0X2FjY2Vzc19yZWFkeV9jb3VudBgGIAEoBRI/Cg9waGFzZV9kdXJhdGlvbnMYByADKAsyJi5jb2Rld2lyZS5hZG1pbi52MS5TdGFydHVwUGhhc2VTdW1tYXJ5Ij0KI0dldEVudmlyb25tZW50U3RhcnR1cFRpbWluZ3NSZXF1ZXN0EhYKDmVudmlyb25tZW50X2lkGAEgASgJItEBChhFbnZpcm9ubWVudFN0YXJ0dXBUaW1pbmcSDQoFcGhhc2UYASABKAkSDgoGc3RhdHVzGAIgASgJEg8KB21lc3NhZ2UYAyABKAkSKwoIZHVyYXRpb24YBCABKAsyGS5nb29nbGUucHJvdG9idWYuRHVyYXRpb24SKAoIbWV0YWRhdGEYBSABKAsyFi5nb29nbGUucHJvdG9idWYuVmFsdWUSLgoKY3JlYXRlZF9hdBgGIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAirAEKJEdldEVudmlyb25tZW50U3RhcnR1cFRpbWluZ3NSZXNwb25zZRIWCg5lbnZpcm9ubWVudF9pZBgBIAEoCRIuCgpjcmVhdGVkX2F0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBI8Cgd0aW1pbmdzGAMgAygLMisuY29kZXdpcmUuYWRtaW4udjEuRW52aXJvbm1lbnRTdGFydHVwVGltaW5nIooBChBFbnZpcm9ubWVudFF1b3RhEiMKG21heF9jb25jdXJyZW50X2Vudmlyb25tZW50cxgBIAEoBRIeChZtYXhfY29uY3VycmVudF9zYW5kYm94GAIgASgFEhoKEm1heF9jcHVfbWlsbGljb3JlcxgDIAEoBRIVCg1tYXhfbWVtb3J5X21iGAQgASgFIkEKJkdldE9yZ2FuaXphdGlvbkVudmlyb25tZW50UXVvdGFSZXF1ZXN0EhcKD29yZ2FuaXphdGlvbl9pZBgBIAEoCSKxAQonR2V0T3JnYW5pemF0aW9uRW52aXJvbm1lbnRRdW90YVJlc3BvbnNlEhcKD29yZ2FuaXphdGlvbl9pZBgBIAEoCRI1CghleHBsaWNpdBgCIAEoCzIjLmNvZGV3aXJlLmFkbWluLnYxLkVudmlyb25tZW50UXVvdGESNgoJZWZmZWN0aXZlGAMgASgLMiMuY29kZXdpcmUuYWRtaW4udjEuRW52aXJvbm1lbnRRdW90YSJ1CiZTZXRPcmdhbml6YXRpb25FbnZpcm9ubWVudFF1b3RhUmVxdWVzdBIXCg9vcmdhbml6YXRpb25faWQYASABKAkSMgoFcXVvdGEYAiABKAsyIy5jb2Rld2lyZS5hZG1pbi52MS5FbnZpcm9ubWVudFF1b3RhInYKJ1NldE9yZ2FuaXphdGlvbkVudmlyb25tZW50UXVvdGFSZXNwb25zZRIXCg9vcmdhbml6YXRpb25faWQYASABKAkSMgoFcXVvdGEYAiABKAsyIy5jb2Rld2lyZS5hZG1pbi52MS5FbnZpcm9ubWVudFF1b3RhIkMKKENsZWFyT3JnYW5pemF0aW9uRW52aXJvbm1lbnRRdW90YVJlcXVlc3QSFwoPb3JnYW5pemF0aW9uX2lkGAEgASgJIlUKKUNsZWFyT3JnYW5pemF0aW9uRW52aXJvbm1lbnRRdW90YVJlc3BvbnNlEhcKD29yZ2FuaXphdGlvbl9pZBgBIAEoCRIPCgdjbGVhcmVkGAIgASgIMvAJCgxBZG1pblNlcnZpY2USWAoIR2V0U3RhdHMSIi5jb2Rld2lyZS5hZG1pbi52MS5HZXRTdGF0c1JlcXVlc3QaIy5jb2Rld2lyZS5hZG1pbi52MS5HZXRTdGF0c1Jlc3BvbnNlIgOQAgEScwoRTGlzdE9yZ2FuaXphdGlvbnMSKy5jb2Rld2lyZS5hZG1pbi52MS5MaXN0T3JnYW5pemF0aW9uc1JlcXVlc3QaLC5jb2Rld2lyZS5hZG1pbi52MS5MaXN0T3JnYW5pemF0aW9uc1Jlc3BvbnNlIgOQAgESZwoNTGlzdEF1ZGl0TG9ncxInLmNvZGV3aXJlLmFkbWluLnYxLkxpc3RBdWRpdExvZ3NSZXF1ZXN0GiguY29kZXdpcmUuYWRtaW4udjEuTGlzdEF1ZGl0TG9nc1Jlc3BvbnNlIgOQAgESnQEKH0xpc3RFbnZpcm9ubWVudExpZmVjeWNsZUpvdXJuYWwSOS5jb2Rld2lyZS5hZG1pbi52MS5MaXN0RW52aXJvbm1lbnRMaWZlY3ljbGVKb3VybmFsUmVxdWVzdBo6LmNvZGV3aXJlLmFkbWluLnYxLkxpc3RFbnZpcm9ubWVudExpZmVjeWNsZUpvdXJuYWxSZXNwb25zZSIDkAIBEpQBChxHZXRFbnZpcm9ubWVudFN0YXJ0dXBTdW1tYXJ5EjYuY29kZXdpcmUuYWRtaW4udjEuR2V0RW52aXJvbm1lbnRTdGFydHVwU3VtbWFyeVJlcXVlc3QaNy5jb2Rld2lyZS5hZG1pbi52MS5HZXRFbnZpcm9ubWVudFN0YXJ0dXBTdW1tYXJ5UmVzcG9uc2UiA5ACARKUAQocR2V0RW52aXJvbm1lbnRTdGFydHVwVGltaW5ncxI2LmNvZGV3aXJlLmFkbWluLnYxLkdldEVudmlyb25tZW50U3RhcnR1cFRpbWluZ3NSZXF1ZXN0GjcuY29kZXdpcmUuYWRtaW4udjEuR2V0RW52aXJvbm1lbnRTdGFydHVwVGltaW5nc1Jlc3BvbnNlIgOQAgESnQEKH0dldE9yZ2FuaXphdGlvbkVudmlyb25tZW50UXVvdGESOS5jb2Rld2lyZS5hZG1pbi52MS5HZXRPcmdhbml6YXRpb25FbnZpcm9ubWVudFF1b3RhUmVxdWVzdBo6LmNvZGV3aXJlLmFkbWluLnYxLkdldE9yZ2FuaXphdGlvbkVudmlyb25tZW50UXVvdGFSZXNwb25zZSIDkAIBEpgBCh9TZXRPcmdhbml6YXRpb25FbnZpcm9ubWVudFF1b3RhEjkuY29kZXdpcmUuYWRtaW4udjEuU2V0T3JnYW5pemF0aW9uRW52aXJvbm1lbnRRdW90YVJlcXVlc3QaOi5jb2Rld2lyZS5hZG1pbi52MS5TZXRPcmdhbml6YXRpb25FbnZpcm9ubWVudFF1b3RhUmVzcG9uc2USngEKIUNsZWFyT3JnYW5pemF0aW9uRW52aXJvbm1lbnRRdW90YRI7LmNvZGV3aXJlLmFkbWluLnYxLkNsZWFyT3JnYW5pemF0aW9uRW52aXJvbm1lbnRRdW90YVJlcXVlc3QaPC5jb2Rld2lyZS5hZG1pbi52MS5DbGVhck9yZ2FuaXphdGlvbkVudmlyb25tZW50UXVvdGFSZXNwb25zZULPAQoVY29tLmNvZGV3aXJlLmFkbWluLnYxQgpBZG1pblByb3RvUAFaRGdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS9hZG1pbi92MTthZG1pbnYxogIDQ0FYqgIRQ29kZXdpcmUuQWRtaW4uVjHKAhFDb2Rld2lyZVxBZG1pblxWMeICHUNvZGV3aXJlXEFkbWluXFYxXEdQQk1ldGFkYXRh6gITQ29kZXdpcmU6OkFkbWluOjpWMWIGcHJvdG8z", [file_google_protobuf_duration, file_google_protobuf_struct, file_google_protobuf_timestamp]);
 
 /**
  * @generated from message codewire.admin.v1.GetStatsRequest
@@ -549,8 +549,175 @@ export const GetEnvironmentStartupTimingsResponseSchema: GenMessage<GetEnvironme
   messageDesc(file_codewire_admin_v1_admin, 16);
 
 /**
- * AdminService exposes global operator reads. Every method requires a browser
- * session or OAuth-issued user bearer belonging to a global administrator;
+ * EnvironmentQuota bounds one organization's live environments. Each limit is
+ * -1 for unlimited or a positive value.
+ *
+ * @generated from message codewire.admin.v1.EnvironmentQuota
+ */
+export type EnvironmentQuota = Message<"codewire.admin.v1.EnvironmentQuota"> & {
+  /**
+   * @generated from field: int32 max_concurrent_environments = 1;
+   */
+  maxConcurrentEnvironments: number;
+
+  /**
+   * @generated from field: int32 max_concurrent_sandbox = 2;
+   */
+  maxConcurrentSandbox: number;
+
+  /**
+   * @generated from field: int32 max_cpu_millicores = 3;
+   */
+  maxCpuMillicores: number;
+
+  /**
+   * @generated from field: int32 max_memory_mb = 4;
+   */
+  maxMemoryMb: number;
+};
+
+/**
+ * Describes the message codewire.admin.v1.EnvironmentQuota.
+ * Use `create(EnvironmentQuotaSchema)` to create a new message.
+ */
+export const EnvironmentQuotaSchema: GenMessage<EnvironmentQuota> = /*@__PURE__*/
+  messageDesc(file_codewire_admin_v1_admin, 17);
+
+/**
+ * @generated from message codewire.admin.v1.GetOrganizationEnvironmentQuotaRequest
+ */
+export type GetOrganizationEnvironmentQuotaRequest = Message<"codewire.admin.v1.GetOrganizationEnvironmentQuotaRequest"> & {
+  /**
+   * @generated from field: string organization_id = 1;
+   */
+  organizationId: string;
+};
+
+/**
+ * Describes the message codewire.admin.v1.GetOrganizationEnvironmentQuotaRequest.
+ * Use `create(GetOrganizationEnvironmentQuotaRequestSchema)` to create a new message.
+ */
+export const GetOrganizationEnvironmentQuotaRequestSchema: GenMessage<GetOrganizationEnvironmentQuotaRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_admin_v1_admin, 18);
+
+/**
+ * @generated from message codewire.admin.v1.GetOrganizationEnvironmentQuotaResponse
+ */
+export type GetOrganizationEnvironmentQuotaResponse = Message<"codewire.admin.v1.GetOrganizationEnvironmentQuotaResponse"> & {
+  /**
+   * @generated from field: string organization_id = 1;
+   */
+  organizationId: string;
+
+  /**
+   * Unset when the organization has no explicit quota.
+   *
+   * @generated from field: codewire.admin.v1.EnvironmentQuota explicit = 2;
+   */
+  explicit?: EnvironmentQuota | undefined;
+
+  /**
+   * @generated from field: codewire.admin.v1.EnvironmentQuota effective = 3;
+   */
+  effective?: EnvironmentQuota | undefined;
+};
+
+/**
+ * Describes the message codewire.admin.v1.GetOrganizationEnvironmentQuotaResponse.
+ * Use `create(GetOrganizationEnvironmentQuotaResponseSchema)` to create a new message.
+ */
+export const GetOrganizationEnvironmentQuotaResponseSchema: GenMessage<GetOrganizationEnvironmentQuotaResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_admin_v1_admin, 19);
+
+/**
+ * @generated from message codewire.admin.v1.SetOrganizationEnvironmentQuotaRequest
+ */
+export type SetOrganizationEnvironmentQuotaRequest = Message<"codewire.admin.v1.SetOrganizationEnvironmentQuotaRequest"> & {
+  /**
+   * @generated from field: string organization_id = 1;
+   */
+  organizationId: string;
+
+  /**
+   * @generated from field: codewire.admin.v1.EnvironmentQuota quota = 2;
+   */
+  quota?: EnvironmentQuota | undefined;
+};
+
+/**
+ * Describes the message codewire.admin.v1.SetOrganizationEnvironmentQuotaRequest.
+ * Use `create(SetOrganizationEnvironmentQuotaRequestSchema)` to create a new message.
+ */
+export const SetOrganizationEnvironmentQuotaRequestSchema: GenMessage<SetOrganizationEnvironmentQuotaRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_admin_v1_admin, 20);
+
+/**
+ * @generated from message codewire.admin.v1.SetOrganizationEnvironmentQuotaResponse
+ */
+export type SetOrganizationEnvironmentQuotaResponse = Message<"codewire.admin.v1.SetOrganizationEnvironmentQuotaResponse"> & {
+  /**
+   * @generated from field: string organization_id = 1;
+   */
+  organizationId: string;
+
+  /**
+   * @generated from field: codewire.admin.v1.EnvironmentQuota quota = 2;
+   */
+  quota?: EnvironmentQuota | undefined;
+};
+
+/**
+ * Describes the message codewire.admin.v1.SetOrganizationEnvironmentQuotaResponse.
+ * Use `create(SetOrganizationEnvironmentQuotaResponseSchema)` to create a new message.
+ */
+export const SetOrganizationEnvironmentQuotaResponseSchema: GenMessage<SetOrganizationEnvironmentQuotaResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_admin_v1_admin, 21);
+
+/**
+ * @generated from message codewire.admin.v1.ClearOrganizationEnvironmentQuotaRequest
+ */
+export type ClearOrganizationEnvironmentQuotaRequest = Message<"codewire.admin.v1.ClearOrganizationEnvironmentQuotaRequest"> & {
+  /**
+   * @generated from field: string organization_id = 1;
+   */
+  organizationId: string;
+};
+
+/**
+ * Describes the message codewire.admin.v1.ClearOrganizationEnvironmentQuotaRequest.
+ * Use `create(ClearOrganizationEnvironmentQuotaRequestSchema)` to create a new message.
+ */
+export const ClearOrganizationEnvironmentQuotaRequestSchema: GenMessage<ClearOrganizationEnvironmentQuotaRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_admin_v1_admin, 22);
+
+/**
+ * @generated from message codewire.admin.v1.ClearOrganizationEnvironmentQuotaResponse
+ */
+export type ClearOrganizationEnvironmentQuotaResponse = Message<"codewire.admin.v1.ClearOrganizationEnvironmentQuotaResponse"> & {
+  /**
+   * @generated from field: string organization_id = 1;
+   */
+  organizationId: string;
+
+  /**
+   * True when an explicit quota existed and was removed.
+   *
+   * @generated from field: bool cleared = 2;
+   */
+  cleared: boolean;
+};
+
+/**
+ * Describes the message codewire.admin.v1.ClearOrganizationEnvironmentQuotaResponse.
+ * Use `create(ClearOrganizationEnvironmentQuotaResponseSchema)` to create a new message.
+ */
+export const ClearOrganizationEnvironmentQuotaResponseSchema: GenMessage<ClearOrganizationEnvironmentQuotaResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_admin_v1_admin, 23);
+
+/**
+ * AdminService exposes global operator reads and the audited organization
+ * environment-quota writes. Every method requires a browser session or
+ * OAuth-issued user bearer belonging to a global administrator;
  * organization-scoped API keys cannot call this service.
  *
  * @generated from service codewire.admin.v1.AdminService
@@ -618,6 +785,41 @@ export const AdminService: GenService<{
     methodKind: "unary";
     input: typeof GetEnvironmentStartupTimingsRequestSchema;
     output: typeof GetEnvironmentStartupTimingsResponseSchema;
+  },
+  /**
+   * GetOrganizationEnvironmentQuota returns one organization's explicit
+   * environment quota, when it has one, and the quota creates are checked
+   * against: the explicit quota, or the plan fallback without one.
+   *
+   * @generated from rpc codewire.admin.v1.AdminService.GetOrganizationEnvironmentQuota
+   */
+  getOrganizationEnvironmentQuota: {
+    methodKind: "unary";
+    input: typeof GetOrganizationEnvironmentQuotaRequestSchema;
+    output: typeof GetOrganizationEnvironmentQuotaResponseSchema;
+  },
+  /**
+   * SetOrganizationEnvironmentQuota creates or replaces one organization's
+   * explicit environment quota and writes an audit entry.
+   *
+   * @generated from rpc codewire.admin.v1.AdminService.SetOrganizationEnvironmentQuota
+   */
+  setOrganizationEnvironmentQuota: {
+    methodKind: "unary";
+    input: typeof SetOrganizationEnvironmentQuotaRequestSchema;
+    output: typeof SetOrganizationEnvironmentQuotaResponseSchema;
+  },
+  /**
+   * ClearOrganizationEnvironmentQuota removes one organization's explicit
+   * environment quota, so its plan fallback applies again, and writes an
+   * audit entry. Clearing an organization without one changes nothing.
+   *
+   * @generated from rpc codewire.admin.v1.AdminService.ClearOrganizationEnvironmentQuota
+   */
+  clearOrganizationEnvironmentQuota: {
+    methodKind: "unary";
+    input: typeof ClearOrganizationEnvironmentQuotaRequestSchema;
+    output: typeof ClearOrganizationEnvironmentQuotaResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_codewire_admin_v1_admin, 0);

@@ -1,4 +1,5 @@
-//! Connect-RPC adapter for global administrator reads.
+//! Connect-RPC adapter for global administrator reads and the audited
+//! organization environment-quota writes.
 //!
 //! This module maps [`crate::api::admin`] core functions to protobuf and
 //! renders Connect errors.
@@ -7,26 +8,31 @@ use std::sync::Arc;
 
 use buffa_types::{Duration, Struct, Timestamp, Value};
 use codewire_admin_proto::codewire::admin::v1::{
-    AdminService, AuditLogEntry as ProtoAuditLogEntry, EnvironmentLifecycleJournalEntry,
-    EnvironmentStartupTiming, GetEnvironmentStartupSummaryRequest,
-    GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest,
-    GetEnvironmentStartupTimingsResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest,
-    ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest,
-    ListEnvironmentLifecycleJournalResponse, ListOrganizationsRequest, ListOrganizationsResponse,
-    Organization as ProtoOrganization, StartupPhaseSummary,
+    AdminService, AuditLogEntry as ProtoAuditLogEntry, ClearOrganizationEnvironmentQuotaRequest,
+    ClearOrganizationEnvironmentQuotaResponse, EnvironmentLifecycleJournalEntry,
+    EnvironmentQuota as ProtoEnvironmentQuota, EnvironmentStartupTiming,
+    GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse,
+    GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse,
+    GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse,
+    GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse,
+    ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse,
+    ListOrganizationsRequest, ListOrganizationsResponse, Organization as ProtoOrganization,
+    SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse,
+    StartupPhaseSummary,
 };
-use codewire_server_core::connect::rpc_app_error;
-use codewire_server_core::{AppError, AppResult};
+use codewire_server_core::connect::{auth_user, rpc_app_error};
+use codewire_server_core::{AppError, AppResult, ValidationIssue};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 
 use crate::api::ApiState;
 use crate::api::admin::{
-    self, AdminEnvironmentLifecycleJournalEntry, AdminEnvironmentStartupPhaseSummary,
-    AdminEnvironmentStartupTiming, AdminEnvironmentStartupTimings, AdminOrg, AuditLogEntry,
-    ListAuditLogsParams,
+    self, AdminEnvironmentLifecycleJournalEntry, AdminEnvironmentQuota,
+    AdminEnvironmentStartupPhaseSummary, AdminEnvironmentStartupTiming,
+    AdminEnvironmentStartupTimings, AdminOrg, AuditLogEntry, ListAuditLogsParams,
 };
 
-/// Registers the six AdminService reads on their generated Connect routes.
+/// Registers the seven AdminService reads and the two audited quota writes on
+/// their generated Connect routes.
 pub fn router(state: ApiState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(AdminConnectService { state }))
 }
@@ -171,6 +177,113 @@ impl AdminService for AdminConnectService {
         .and_then(proto_startup_timings)
         .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(timings)
+    }
+    async fn get_organization_environment_quota(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, GetOrganizationEnvironmentQuotaRequest>,
+    ) -> ServiceResult<GetOrganizationEnvironmentQuotaResponse> {
+        let organization_id = required_organization_id(request.view().organization_id)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let quota =
+            admin::get_organization_environment_quota_core(&self.state.pool, organization_id)
+                .await
+                .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(GetOrganizationEnvironmentQuotaResponse {
+            organization_id: quota.organization_id,
+            explicit: quota.explicit.map(proto_environment_quota).into(),
+            effective: Some(proto_environment_quota(quota.effective)).into(),
+            ..Default::default()
+        })
+    }
+
+    async fn set_organization_environment_quota(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetOrganizationEnvironmentQuotaRequest>,
+    ) -> ServiceResult<SetOrganizationEnvironmentQuotaResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let organization_id = required_organization_id(request.organization_id)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let quota = request
+            .quota
+            .as_option()
+            .map(|quota| AdminEnvironmentQuota {
+                max_concurrent_environments: quota.max_concurrent_environments,
+                max_concurrent_sandbox: quota.max_concurrent_sandbox,
+                max_cpu_millicores: quota.max_cpu_millicores,
+                max_memory_mb: quota.max_memory_mb,
+            })
+            .ok_or_else(|| {
+                rpc_app_error(
+                    &AppError::Validation {
+                        errors: vec![ValidationIssue {
+                            path: "/quota".into(),
+                            message: "must be set".into(),
+                        }],
+                    },
+                    &ctx,
+                )
+            })?;
+        let quota = admin::set_organization_environment_quota_core(
+            &self.state.pool,
+            &actor.user_id,
+            organization_id,
+            quota,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(SetOrganizationEnvironmentQuotaResponse {
+            organization_id: organization_id.to_owned(),
+            quota: Some(proto_environment_quota(quota)).into(),
+            ..Default::default()
+        })
+    }
+
+    async fn clear_organization_environment_quota(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, ClearOrganizationEnvironmentQuotaRequest>,
+    ) -> ServiceResult<ClearOrganizationEnvironmentQuotaResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let organization_id = required_organization_id(request.view().organization_id)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let cleared = admin::clear_organization_environment_quota_core(
+            &self.state.pool,
+            &actor.user_id,
+            organization_id,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(ClearOrganizationEnvironmentQuotaResponse {
+            organization_id: organization_id.to_owned(),
+            cleared,
+            ..Default::default()
+        })
+    }
+}
+
+fn required_organization_id(value: &str) -> AppResult<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::Validation {
+            errors: vec![ValidationIssue {
+                path: "/organization_id".into(),
+                message: "must not be empty".into(),
+            }],
+        });
+    }
+    Ok(value)
+}
+
+fn proto_environment_quota(value: AdminEnvironmentQuota) -> ProtoEnvironmentQuota {
+    ProtoEnvironmentQuota {
+        max_concurrent_environments: value.max_concurrent_environments,
+        max_concurrent_sandbox: value.max_concurrent_sandbox,
+        max_cpu_millicores: value.max_cpu_millicores,
+        max_memory_mb: value.max_memory_mb,
+        ..Default::default()
     }
 }
 

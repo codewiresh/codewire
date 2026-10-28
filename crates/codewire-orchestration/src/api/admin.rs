@@ -4,18 +4,24 @@
 //! `require_auth`.
 //!
 //! `getAdminStats`, `listAdminOrganizations`, `listAuditLogs`,
-//! lifecycle journal, and environment startup timing/summary port here.
+//! lifecycle journal, and environment startup timing/summary port here, with
+//! the audited writes of one organization's environment quota.
 
 use chrono::{Datelike, TimeZone, Utc};
+use std::borrow::Cow;
+
 use codewire_server_core::AppError;
 use codewire_server_core::AppResult;
+use codewire_server_core::ValidationIssue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, Serializer};
 use sqlx::Row;
 
 use super::ApiState;
-use super::environments::format_time;
+use super::environments::{OrgQuota, format_time, get_org_quota};
 
+#[cfg(test)]
+mod quota_database_tests;
 #[cfg(test)]
 mod startup_database_tests;
 
@@ -662,6 +668,264 @@ async fn startup_timings(
         created_at: format_time(created_at),
         timings,
     })
+}
+
+/// One organization's environment limits, as `environment_quotas` stores them.
+/// Each is -1 for unlimited or a positive value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AdminEnvironmentQuota {
+    pub max_concurrent_environments: i32,
+    pub max_concurrent_sandbox: i32,
+    pub max_cpu_millicores: i32,
+    pub max_memory_mb: i32,
+}
+
+impl From<OrgQuota> for AdminEnvironmentQuota {
+    fn from(quota: OrgQuota) -> Self {
+        Self {
+            max_concurrent_environments: quota.max_concurrent_environments,
+            max_concurrent_sandbox: quota.max_concurrent_sandbox,
+            max_cpu_millicores: quota.max_cpu_millicores,
+            max_memory_mb: quota.max_memory_mb,
+        }
+    }
+}
+
+/// One organization's explicit quota, when it has one, and the quota creates
+/// are checked against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminOrganizationEnvironmentQuota {
+    pub organization_id: String,
+    pub explicit: Option<AdminEnvironmentQuota>,
+    pub effective: AdminEnvironmentQuota,
+}
+
+/// Refuses a limit that is neither -1 (unlimited) nor positive: zero would
+/// silently fall back to a default, and other negatives mean nothing.
+pub(crate) fn validate_environment_quota(quota: &AdminEnvironmentQuota) -> AppResult<()> {
+    let fields = [
+        (
+            quota.max_concurrent_environments,
+            "/quota/max_concurrent_environments",
+        ),
+        (
+            quota.max_concurrent_sandbox,
+            "/quota/max_concurrent_sandbox",
+        ),
+        (quota.max_cpu_millicores, "/quota/max_cpu_millicores"),
+        (quota.max_memory_mb, "/quota/max_memory_mb"),
+    ];
+    let errors: Vec<_> = fields
+        .into_iter()
+        .filter(|(value, _)| *value != -1 && *value <= 0)
+        .map(|(_, path)| ValidationIssue {
+            path: Cow::Borrowed(path),
+            message: Cow::Borrowed("must be -1 (unlimited) or positive"),
+        })
+        .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::Validation { errors })
+    }
+}
+
+fn quota_failure(action: &'static str, error: sqlx::Error) -> AppError {
+    tracing::error!(error = %error, action, "admin: environment quota query failed");
+    AppError::InternalMsg(format!("failed to {action}").into())
+}
+
+async fn explicit_environment_quota<'e, E>(
+    executor: E,
+    organization_id: &str,
+    lock: bool,
+) -> Result<Option<AdminEnvironmentQuota>, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let query = if lock {
+        r#"SELECT max_concurrent_environments, max_concurrent_sandbox,
+                  max_cpu_millicores, max_memory_mb
+           FROM environment_quotas WHERE org_id = $1 FOR UPDATE"#
+    } else {
+        r#"SELECT max_concurrent_environments, max_concurrent_sandbox,
+                  max_cpu_millicores, max_memory_mb
+           FROM environment_quotas WHERE org_id = $1"#
+    };
+    let row: Option<(i32, i32, i32, i32)> = sqlx::query_as(query)
+        .bind(organization_id)
+        .fetch_optional(executor)
+        .await?;
+    Ok(row.map(
+        |(environments, sandbox, cpu, memory)| AdminEnvironmentQuota {
+            max_concurrent_environments: environments,
+            max_concurrent_sandbox: sandbox,
+            max_cpu_millicores: cpu,
+            max_memory_mb: memory,
+        },
+    ))
+}
+
+/// Locks the organization row, so concurrent quota writes for one
+/// organization apply one at a time, and refuses an unknown organization.
+async fn lock_organization(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: &str,
+) -> AppResult<()> {
+    sqlx::query_scalar::<_, String>("SELECT id FROM organizations WHERE id = $1 FOR UPDATE")
+        .bind(organization_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|error| quota_failure("read organization", error))?
+        .map(|_| ())
+        .ok_or_else(|| AppError::NotFound("organization not found".into()))
+}
+
+async fn audit_quota_change(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    action: &str,
+    actor_user_id: &str,
+    metadata: serde_json::Value,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"INSERT INTO audit_logs (id, timestamp, action, user_id, metadata, severity)
+           VALUES (gen_random_uuid()::text, NOW(), $1, $2, $3, 'warn')"#,
+    )
+    .bind(action)
+    .bind(actor_user_id)
+    .bind(metadata)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| quota_failure("record environment quota audit", error))?;
+    Ok(())
+}
+
+/// Shared quota read used by AdminService.
+pub(crate) async fn get_organization_environment_quota_core(
+    pool: &sqlx::PgPool,
+    organization_id: &str,
+) -> AppResult<AdminOrganizationEnvironmentQuota> {
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM organizations WHERE id = $1")
+        .bind(organization_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| quota_failure("read organization", error))?;
+    if exists.is_none() {
+        return Err(AppError::NotFound("organization not found".into()));
+    }
+    let explicit = explicit_environment_quota(pool, organization_id, false)
+        .await
+        .map_err(|error| quota_failure("read environment quota", error))?;
+    let effective = get_org_quota(pool, organization_id).await.into();
+    Ok(AdminOrganizationEnvironmentQuota {
+        organization_id: organization_id.to_owned(),
+        explicit,
+        effective,
+    })
+}
+
+/// Creates or replaces one organization's explicit quota and records the
+/// previous and new values in the audit log, in one transaction.
+pub(crate) async fn set_organization_environment_quota_core(
+    pool: &sqlx::PgPool,
+    actor_user_id: &str,
+    organization_id: &str,
+    quota: AdminEnvironmentQuota,
+) -> AppResult<AdminEnvironmentQuota> {
+    validate_environment_quota(&quota)?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| quota_failure("start environment quota update", error))?;
+    lock_organization(&mut transaction, organization_id).await?;
+    let previous = explicit_environment_quota(&mut *transaction, organization_id, true)
+        .await
+        .map_err(|error| quota_failure("read environment quota", error))?;
+    sqlx::query(
+        r#"INSERT INTO environment_quotas
+               (org_id, max_concurrent_environments, max_concurrent_sandbox,
+                max_cpu_millicores, max_memory_mb)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (org_id) DO UPDATE SET
+               max_concurrent_environments = EXCLUDED.max_concurrent_environments,
+               max_concurrent_sandbox = EXCLUDED.max_concurrent_sandbox,
+               max_cpu_millicores = EXCLUDED.max_cpu_millicores,
+               max_memory_mb = EXCLUDED.max_memory_mb"#,
+    )
+    .bind(organization_id)
+    .bind(quota.max_concurrent_environments)
+    .bind(quota.max_concurrent_sandbox)
+    .bind(quota.max_cpu_millicores)
+    .bind(quota.max_memory_mb)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| quota_failure("update environment quota", error))?;
+    audit_quota_change(
+        &mut transaction,
+        "admin.organization.environment_quota_set",
+        actor_user_id,
+        serde_json::json!({
+            "organization_id": organization_id,
+            "previous": previous,
+            "quota": quota,
+        }),
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| quota_failure("commit environment quota update", error))?;
+    Ok(quota)
+}
+
+/// Removes one organization's explicit quota, so its plan fallback applies
+/// again. Returns whether one existed; only a removal is audited.
+pub(crate) async fn clear_organization_environment_quota_core(
+    pool: &sqlx::PgPool,
+    actor_user_id: &str,
+    organization_id: &str,
+) -> AppResult<bool> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| quota_failure("start environment quota clear", error))?;
+    lock_organization(&mut transaction, organization_id).await?;
+    let previous: Option<(i32, i32, i32, i32)> = sqlx::query_as(
+        r#"DELETE FROM environment_quotas WHERE org_id = $1
+           RETURNING max_concurrent_environments, max_concurrent_sandbox,
+                     max_cpu_millicores, max_memory_mb"#,
+    )
+    .bind(organization_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|error| quota_failure("clear environment quota", error))?;
+    let Some((environments, sandbox, cpu, memory)) = previous else {
+        transaction
+            .rollback()
+            .await
+            .map_err(|error| quota_failure("end environment quota clear", error))?;
+        return Ok(false);
+    };
+    audit_quota_change(
+        &mut transaction,
+        "admin.organization.environment_quota_clear",
+        actor_user_id,
+        serde_json::json!({
+            "organization_id": organization_id,
+            "previous": AdminEnvironmentQuota {
+                max_concurrent_environments: environments,
+                max_concurrent_sandbox: sandbox,
+                max_cpu_millicores: cpu,
+                max_memory_mb: memory,
+            },
+        }),
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| quota_failure("commit environment quota clear", error))?;
+    Ok(true)
 }
 
 #[cfg(test)]
