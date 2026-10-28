@@ -824,6 +824,32 @@ class AdvancingClock:
         return time.monotonic() + self.offset
 
 
+class StallEventClock:
+    """The verifier's clock, held still until the fake Docker reports its stall.
+
+    The fake Docker writes the marker once it has recorded its container and
+    begun its stalled copy. Only then does the clock pass the stall bound, so
+    the bound is crossed by that event and never by how quickly a loaded host
+    starts the fake. Before the event, no Docker command can time out; after
+    it, time runs again for cleanup.
+    """
+
+    def __init__(self, marker):
+        self.marker = marker
+        self.base = time.monotonic()
+        self.jumped = None
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def monotonic(self):
+        if self.jumped is None:
+            if not self.marker.exists():
+                return self.base
+            self.jumped = time.monotonic()
+        return self.base + artifact.CW_STALL_SECONDS + 1 + (time.monotonic() - self.jumped)
+
+
 class CwCopyTests(unittest.TestCase):
     def setUp(self):
         path = Path(__file__).with_name("cw_image_fixtures.py")
@@ -842,6 +868,7 @@ class CwCopyTests(unittest.TestCase):
         self.reference = self.work / "cw-producer-result.json"
         self.fixture.write(self.reference, self.fixture.release.canonical(self.original), 0o400)
         self.settings = self.base / "settings.json"
+        self.stalled = self.base / "stalled"
         self.log = self.base / "docker.jsonl"
         self.fake = self.base / "docker"
         self.image = {"Id": IMAGE_ID, "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {
@@ -857,6 +884,7 @@ class CwCopyTests(unittest.TestCase):
             "SETTINGS_PATH", repr(str(self.settings))).replace("LOG_PATH", repr(str(self.log))).replace(
             "PAYLOAD_PATH", repr(str(self.work / "build/assets/cw"))).replace(
             "REFERENCE_PATH", repr(str(self.reference))).replace(
+            "STALL_MARKER_PATH", repr(str(self.stalled))).replace(
             "STALLED_DOCKER_SECONDS", repr(STALLED_DOCKER_SECONDS)), encoding="utf-8")
         self.fake.chmod(0o700)
         environment = {"PATH": "/usr/bin:/bin", "HOME": str(self.base), "LC_ALL": "C", "TZ": "UTC",
@@ -1040,8 +1068,8 @@ class CwCopyTests(unittest.TestCase):
     def test_stall_bound_kills_only_owned_command_and_proves_cleanup(self):
         self.configure(mode="stall")
         started = time.monotonic()
-        with mock.patch.object(artifact, "CW_STALL_SECONDS", 0.5), \
-                self.assertRaisesRegex(ValueError, "docker run made no progress for 0.5 s"):
+        with mock.patch.object(artifact, "time", StallEventClock(self.stalled)), \
+                self.assertRaisesRegex(ValueError, f"docker run made no progress for {artifact.CW_STALL_SECONDS} s"):
             self.verify()
         self.assertLess(time.monotonic() - started, STALLED_DOCKER_SECONDS / 2)
         self.assert_closed()
@@ -1083,11 +1111,12 @@ class CwCopyTests(unittest.TestCase):
     def test_failed_copy_names_its_cause_not_a_missing_image(self):
         self.configure(mode="stall")
         error = io.StringIO()
-        with mock.patch.object(artifact, "CW_STALL_SECONDS", 0.5), contextlib.redirect_stderr(error):
+        with mock.patch.object(artifact, "time", StallEventClock(self.stalled)), \
+                contextlib.redirect_stderr(error):
             status = artifact.cli(["verify-cw", str(self.root), IMAGE_ID, str(self.reference)])
         self.assertEqual(status, 1)
         self.assertEqual(error.getvalue(), "workspace image artifact: verify-cw failed: "
-                         "workspace CW docker run made no progress for 0.5 s\n")
+                         f"workspace CW docker run made no progress for {artifact.CW_STALL_SECONDS} s\n")
         self.assert_closed()
 
     def test_cancelled_copy_cannot_publish_positive_outcome(self):
@@ -1180,7 +1209,9 @@ elif arguments[:1]==['run']:
         print('CW_SYNTHETIC_SECRET_MUST_NOT_RENDER',file=sys.stderr);sys.exit(47)
     if mode=='stderr-oversize':
         sys.stderr.buffer.write(b'e'*(64*1024+1));sys.stderr.buffer.flush()
-    if mode=='stall': time.sleep(STALLED_DOCKER_SECONDS)
+    if mode=='stall':
+        # The container is recorded; tell the test's clock the copy has stalled.
+        Path(STALL_MARKER_PATH).write_text('stalled');time.sleep(STALLED_DOCKER_SECONDS)
     if mode=='trickle':
         step=len(data)//6+1
         for offset in range(0,len(data),step):
