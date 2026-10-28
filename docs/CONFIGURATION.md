@@ -108,9 +108,20 @@ its last value.
 | `SANDBOX_WORKSPACE_STORAGE_CLASS` | Required by orchestration, except under the `confidential` runtime profile | The StorageClass of every `commodity` workspace volume. There is no default: empty, orchestration refuses to start. A disk resize expands the volume only when this class allows volume expansion. | `standard` |
 | `SANDBOX_CONFIDENTIAL_WORKSPACE_STORAGE_CLASS` | Only where confidential environments are enabled | The StorageClass of every confidential workspace volume, claimed as a raw `volumeMode: Block`, `ReadWriteOncePod` device that the guest encrypts. There is no default: empty, every confidential environment is refused before any workload is created. The class must give a fresh, all-zero device of exactly the requested size with no host encryption layer, and a confidential volume never grows. | `linstor-confidential` |
 
-Base `config.env` leaves it empty, so every overlay sets it. The Kind
+| `SANDBOX_CONFIDENTIAL_STORAGE_ENABLED` | No | `true` lets the deployment create, start, resize and reach confidential environments. Base `config.env` sets `false`, and Production keeps it off. | `true` |
+
+Base `config.env` leaves the storage classes empty, so every overlay sets them. The Kind
 overlays (`deployments/k8s/overlays/local-kind*` and `tests/e2e/kind`) use
 Kind's built-in `standard` class.
+
+With the switch on, a confidential environment is still refused until a global
+admin opts its organization in, under Confidential environments on the admin
+billing page (`/admin/billing`); each change is written to the audit log. Then
+any active member of that organization, or an API key scoped to it, may create,
+start, resize and reach its confidential environments. Every other caller is
+refused with `CONFIDENTIAL_NOT_ENABLED` or `CONFIDENTIAL_MEMBERSHIP_REQUIRED`.
+Stop, delete and reconciliation never consult the opt-in, so withdrawing it
+never strands an environment.
 
 A hosted create that names no disk gets 80 GiB, with 2 vCPU and 8 GiB of
 memory (owner, 2026-10-27; #3554); a confidential one gets 50 GiB, its own

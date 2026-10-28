@@ -61,8 +61,16 @@ async fn default_access_profile_upgrade_backfills_the_oldest_and_refuses_deletin
         let previous = fingerprint(&pool).await?;
         anyhow::ensure!(previous != ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
 
-        ensure_schema(&db.url).await?;
-        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
+        // Exactly 0003, so its rollback can be compared with the 0002 shape;
+        // later migrations have their own tests.
+        let through_0003 = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(MIGRATOR.iter().take(3).cloned().collect()),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        let mut connection = PgConnection::connect(&db.url).await?;
+        through_0003.run(&mut connection).await?;
+        connection.close().await?;
+        anyhow::ensure!(fingerprint(&pool).await? != previous);
         anyhow::ensure!(
             defaults(&pool).await?
                 == [("credential-user-a".to_owned(), "profile-a-older".to_owned())],
@@ -136,12 +144,9 @@ async fn default_access_profile_upgrade_backfills_the_oldest_and_refuses_deletin
             .await?;
         anyhow::ensure!(profiles == 0);
 
-        // Rollback: dropping what 0003 added restores the 0002 schema, once
-        // the later migrations ensure_schema also applied are rolled back
-        // first (0004's table).
+        // Rollback: dropping what 0003 added restores the 0002 schema.
         sqlx::raw_sql(
-            "DROP TABLE environment_quota_defaults; \
-             DROP TABLE platform_access_profile_defaults; \
+            "DROP TABLE platform_access_profile_defaults; \
              ALTER TABLE platform_access_profiles DROP CONSTRAINT platform_access_profiles_id_user_id_key;",
         )
         .execute(&pool)

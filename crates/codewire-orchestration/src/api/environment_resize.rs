@@ -21,7 +21,7 @@ use super::environments::{
     Environment, fetch_env_summary, get_environment_core, get_org_quota,
     require_environment_access, require_org_member, trigger_environment,
 };
-use crate::confidential_storage::require_interactive_access;
+use crate::confidential_storage::require_confidential_access;
 use crate::resize_metrics::{self, RequestOutcome};
 use crate::sandbox::client::WorkspacePodResizeState;
 use crate::sandbox::client::{SandboxClient, WorkspacePvcAnchor};
@@ -632,11 +632,14 @@ pub async fn plan_environment_resize_core(
     .await?;
     let environment =
         fetch_env_summary(&state.pool, &params.org_id, &params.environment_id).await?;
-    require_interactive_access(
+    require_confidential_access(
+        &state.pool,
         state.confidential_storage_flags,
         user,
+        &params.org_id,
         &environment.isolation_tier,
-    )?;
+    )
+    .await?;
     let plan = build_resize_plan(state, user, &params).await?;
     let environment =
         get_environment_core(state, user, &params.org_id, &params.environment_id).await?;
@@ -693,11 +696,14 @@ async fn resize_environment_core_inner(
     .await?;
     let environment =
         fetch_env_summary(&state.pool, &params.org_id, &params.environment_id).await?;
-    require_interactive_access(
+    require_confidential_access(
+        &state.pool,
         state.confidential_storage_flags,
         user,
+        &params.org_id,
         &environment.isolation_tier,
-    )?;
+    )
+    .await?;
 
     if let Some(operation) = find_existing_operation(state, &params).await? {
         if operation.desired_resources != params.desired_resources

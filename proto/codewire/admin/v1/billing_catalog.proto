@@ -56,6 +56,20 @@ service BillingCatalogService {
   // owner account.
   rpc SetOrganizationBillingExemption(SetOrganizationBillingExemptionRequest)
       returns (SetOrganizationBillingExemptionResponse);
+
+  // ListConfidentialOrganizations lists the organizations opted in to
+  // confidential environments. It is global-admin only.
+  rpc ListConfidentialOrganizations(ListConfidentialOrganizationsRequest)
+      returns (ListConfidentialOrganizationsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // SetOrganizationConfidentialEnvironments opts one organization in to, or
+  // out of, confidential environments. It is global-admin only and audited.
+  // An opted-in organization still needs a confidential catalog entry for its
+  // plan and a deployment that enables confidential storage.
+  rpc SetOrganizationConfidentialEnvironments(SetOrganizationConfidentialEnvironmentsRequest)
+      returns (SetOrganizationConfidentialEnvironmentsResponse);
 }
 
 message GetCatalogRequest {}
@@ -238,4 +252,26 @@ message SetOrganizationBillingExemptionRequest {
 message SetOrganizationBillingExemptionResponse {
   string organization_id = 1;
   bool billing_exempt = 2;
+}
+
+message ListConfidentialOrganizationsRequest {}
+
+message ConfidentialOrganization {
+  string organization_id = 1;
+  string slug = 2;
+  string name = 3;
+}
+
+message ListConfidentialOrganizationsResponse {
+  repeated ConfidentialOrganization organizations = 1;
+}
+
+message SetOrganizationConfidentialEnvironmentsRequest {
+  string organization_slug = 1;
+  bool enabled = 2;
+}
+
+message SetOrganizationConfidentialEnvironmentsResponse {
+  ConfidentialOrganization organization = 1;
+  bool enabled = 2;
 }

@@ -323,3 +323,39 @@ class SetOrganizationBillingExemptionResponse(_message.Message):
     organization_id: str
     billing_exempt: bool
     def __init__(self, organization_id: _Optional[str] = ..., billing_exempt: _Optional[bool] = ...) -> None: ...
+
+class ListConfidentialOrganizationsRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class ConfidentialOrganization(_message.Message):
+    __slots__ = ("organization_id", "slug", "name")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    SLUG_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    slug: str
+    name: str
+    def __init__(self, organization_id: _Optional[str] = ..., slug: _Optional[str] = ..., name: _Optional[str] = ...) -> None: ...
+
+class ListConfidentialOrganizationsResponse(_message.Message):
+    __slots__ = ("organizations",)
+    ORGANIZATIONS_FIELD_NUMBER: _ClassVar[int]
+    organizations: _containers.RepeatedCompositeFieldContainer[ConfidentialOrganization]
+    def __init__(self, organizations: _Optional[_Iterable[_Union[ConfidentialOrganization, _Mapping]]] = ...) -> None: ...
+
+class SetOrganizationConfidentialEnvironmentsRequest(_message.Message):
+    __slots__ = ("organization_slug", "enabled")
+    ORGANIZATION_SLUG_FIELD_NUMBER: _ClassVar[int]
+    ENABLED_FIELD_NUMBER: _ClassVar[int]
+    organization_slug: str
+    enabled: bool
+    def __init__(self, organization_slug: _Optional[str] = ..., enabled: _Optional[bool] = ...) -> None: ...
+
+class SetOrganizationConfidentialEnvironmentsResponse(_message.Message):
+    __slots__ = ("organization", "enabled")
+    ORGANIZATION_FIELD_NUMBER: _ClassVar[int]
+    ENABLED_FIELD_NUMBER: _ClassVar[int]
+    organization: ConfidentialOrganization
+    enabled: bool
+    def __init__(self, organization: _Optional[_Union[ConfidentialOrganization, _Mapping]] = ..., enabled: _Optional[bool] = ...) -> None: ...

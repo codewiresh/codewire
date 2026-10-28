@@ -16,11 +16,13 @@
 #     tailnet survives past one binding-token lifetime;
 #   - a stop and start replaces the Pod, rotates its host key and binds again.
 #
-# Kubernetes access is read-only (get only). The run uses the native CLI's
-# saved user login: confidential creates are admin-only and refuse API keys.
-# Log in first with the browser flow (`cw --server URL login`). No credential,
-# token or key material is printed, logged or kept beyond the run's private
-# temporary directory, which is removed at exit.
+# Kubernetes access is read-only (get only). The run acts as the dedicated Dev
+# smoke identity, whose organization a global admin has opted in to
+# confidential environments. Run it under scripts/runtime/dev/with-dev-smoke-auth.sh,
+# which loads the identity's API key from OpenBao into the environment; this
+# script hands it to cw through the environment only. No credential, token or
+# key material is printed, logged or kept beyond the run's private temporary
+# directory, which is removed at exit.
 set -euo pipefail
 umask 077
 
@@ -66,7 +68,10 @@ Usage:
 
 Prerequisites on Dev (outside this script):
   - a confidential storage class and the active confidential SNP profile;
-  - a global-admin user logged in with `cw --server URL login`;
+  - the smoke organization opted in to confidential environments on the
+    admin billing page (Confidential environments);
+  - a human OpenBao session, so with-dev-smoke-auth.sh can load the smoke
+    identity;
   - read-only kubectl access to the Dev cluster (KUBE_CONTEXT).
 
 Options:
@@ -83,7 +88,14 @@ Options:
   --keep                      Keep the environment
   -h, --help                  Show this help
 
+Run it as the smoke identity:
+  scripts/runtime/dev/with-dev-smoke-auth.sh -- \
+    scripts/runtime/confidential/prove-dev-confidential-binding.sh [options]
+
 Environment:
+  CODEWIRE_DEV_SMOKE_API_KEY          Set by with-dev-smoke-auth.sh; required
+  EXPECTED_CODEWIRE_SMOKE_USER_EMAIL  Set by with-dev-smoke-auth.sh; checked
+                                      against `cw whoami`
   CODEWIRE_SERVER_URL   Defaults to https://codewire-dev.sh
   KUBECONFIG            Read-only access to the Dev cluster
   KUBE_CONTEXT          Defaults to codewire-dev
@@ -162,6 +174,22 @@ build_cw() {
   (cd "$ROOT" && cargo build -q -p codewire-cli-bin --bin cw) || die "cw build failed"
   CW_BIN="$(cd "$ROOT" && cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')/debug/cw"
   [[ -x "$CW_BIN" ]] || die "built cw not found at $CW_BIN"
+}
+
+# Act as the smoke identity: its key reaches cw through the environment only,
+# and a private cw config directory keeps any saved login out of the run.
+use_smoke_identity() {
+  [[ -n "${CODEWIRE_DEV_SMOKE_API_KEY:-}" ]] ||
+    die "CODEWIRE_DEV_SMOKE_API_KEY is not set; run under scripts/runtime/dev/with-dev-smoke-auth.sh"
+  export CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY"
+  export CW_CONFIG_DIR="$TMPDIR_PROOF/cw-config"
+  mkdir -p "$CW_CONFIG_DIR"
+  local whoami="$TMPDIR_PROOF/whoami.out"
+  cw whoami >"$whoami" 2>/dev/null || die "the smoke identity cannot sign in to $CODEWIRE_SERVER_URL"
+  if [[ -n "${EXPECTED_CODEWIRE_SMOKE_USER_EMAIL:-}" ]]; then
+    grep -Fq -- "$EXPECTED_CODEWIRE_SMOKE_USER_EMAIL" "$whoami" ||
+      die "cw is not signed in as the smoke identity"
+  fi
 }
 
 # --------------------------------------------------------------- lifecycle
@@ -504,7 +532,7 @@ main() {
   TMPDIR_PROOF="$(mktemp -d "$PROOF_TMP_PARENT/confidential-binding.XXXXXX")"
   trap cleanup EXIT
   build_cw
-  cw whoami >/dev/null 2>&1 || die "the cw CLI is not logged in to $CODEWIRE_SERVER_URL"
+  use_smoke_identity
   kubectl_ro get nodes -l "$SNP_NODE_LABEL" -o name | grep -q . ||
     die "no node is labelled $SNP_NODE_LABEL"
 

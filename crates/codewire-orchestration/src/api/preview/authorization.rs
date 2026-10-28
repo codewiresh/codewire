@@ -328,19 +328,19 @@ pub(super) async fn authorize_proxy_user(
         ));
     }
 
-    if let Err(error) = crate::confidential_storage::require_interactive_access(
+    if let Err(error) = crate::confidential_storage::require_confidential_access(
+        state.pool,
         state.confidential_storage_flags,
         user,
+        &matched.org_id,
         &target.isolation_tier,
-    ) {
+    )
+    .await
+    {
         return Err(match error {
-            codewire_server_core::AppError::Coded { status, .. } => preview_error(
+            codewire_server_core::AppError::Coded { status, code, .. } => preview_error(
                 status,
-                if status == StatusCode::SERVICE_UNAVAILABLE {
-                    "confidential persistent storage is disabled"
-                } else {
-                    "global administrator user credential required"
-                },
+                crate::confidential_storage::confidential_refusal_reason(code),
             ),
             _ => forbidden("forbidden"),
         });
@@ -388,11 +388,14 @@ pub(super) async fn check_access(
     if !user.permits_organization(&matched.org_id) {
         return Err(denied());
     }
-    crate::confidential_storage::require_interactive_access(
+    crate::confidential_storage::require_confidential_access(
+        state.pool,
         state.confidential_storage_flags,
         user,
+        &matched.org_id,
         &target.isolation_tier,
     )
+    .await
     .map_err(|_| denied())?;
     match target.access.as_str() {
         // The creator must still be a member: removal deletes only the
@@ -864,7 +867,6 @@ mod tests {
             session_secret: "synthetic-key",
             confidential_storage_flags: crate::confidential_storage::FeatureFlags {
                 enabled: false,
-                admin_only: true,
             },
             org_slugs: zero_ttl_org_slugs(),
         };
@@ -892,7 +894,6 @@ mod tests {
             session_secret: "synthetic-key",
             confidential_storage_flags: crate::confidential_storage::FeatureFlags {
                 enabled: false,
-                admin_only: true,
             },
             org_slugs: zero_ttl_org_slugs(),
         };

@@ -9,7 +9,8 @@ use std::env;
 use std::time::Duration;
 
 use codewire_admin_proto::codewire::admin::v1::{
-    BillingCatalogServiceClient, GetCatalogRequest, ListSubscriptionMigrationsRequest,
+    BillingCatalogServiceClient, GetCatalogRequest, ListConfidentialOrganizationsRequest,
+    ListSubscriptionMigrationsRequest, SetOrganizationConfidentialEnvironmentsRequest,
 };
 use codewire_proto::codewire::console::v1::{
     BillingServiceClient, GetBillingOverviewRequest, GetEnvironmentUsageRequest,
@@ -22,6 +23,7 @@ use reqwest::{Client, StatusCode};
 
 const SESSION_COOKIE: &str = "codewire.session_token";
 const FIXTURE_ORG: &str = "org_contract_1";
+const FIXTURE_ORG_SLUG: &str = "contract-org";
 
 struct Harness {
     base_url: String,
@@ -212,5 +214,74 @@ async fn configured_billing_wire_contract() {
             .await
             .expect_err("oversized migration page must be invalid_argument");
         assert_eq!(error.code, ErrorCode::InvalidArgument);
+
+        // Confidential environments opt-in (#2497): global-admin only, by
+        // slug, and the list shows exactly the opted-in organizations.
+        let error = catalog_as_user
+            .set_organization_confidential_environments(
+                SetOrganizationConfidentialEnvironmentsRequest {
+                    organization_slug: FIXTURE_ORG_SLUG.into(),
+                    enabled: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("a non-admin cannot opt an organization in");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        let error = catalog
+            .set_organization_confidential_environments(
+                SetOrganizationConfidentialEnvironmentsRequest {
+                    organization_slug: "no-such-organization".into(),
+                    enabled: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("an unknown organization is not found");
+        assert_eq!(error.code, ErrorCode::NotFound);
+        let listed = |enabled: bool| {
+            let catalog = &catalog;
+            async move {
+                let organizations =
+                    catalog
+                        .list_confidential_organizations(
+                            ListConfidentialOrganizationsRequest::default(),
+                        )
+                        .await
+                        .expect("ListConfidentialOrganizations Connect round trip")
+                        .into_owned()
+                        .organizations;
+                assert_eq!(
+                    organizations.iter().any(|organization| {
+                        organization.organization_id == FIXTURE_ORG
+                            && organization.slug == FIXTURE_ORG_SLUG
+                    }),
+                    enabled
+                );
+            }
+        };
+        listed(false).await;
+        for enabled in [true, false] {
+            let response = catalog
+                .set_organization_confidential_environments(
+                    SetOrganizationConfidentialEnvironmentsRequest {
+                        organization_slug: FIXTURE_ORG_SLUG.into(),
+                        enabled,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("SetOrganizationConfidentialEnvironments Connect round trip")
+                .into_owned();
+            assert_eq!(response.enabled, enabled);
+            assert_eq!(
+                response
+                    .organization
+                    .as_option()
+                    .map(|organization| organization.organization_id.as_str()),
+                Some(FIXTURE_ORG)
+            );
+            listed(enabled).await;
+        }
     }
 }

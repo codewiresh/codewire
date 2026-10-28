@@ -8,7 +8,7 @@ use sqlx::Row;
 
 use super::ApiState;
 use super::environments::require_environment_access;
-use crate::confidential_storage::require_interactive_access;
+use crate::confidential_storage::{confidential_refusal_reason, require_confidential_access};
 use crate::sandbox::client::{ProbeResult, SandboxClient};
 
 /// Mirrors `sandboxTarget`.
@@ -94,18 +94,19 @@ async fn resolve_running_sandbox_target_inner(
     let desired_state: String = row.get("desired_state");
     let environment_type: String = row.get("type");
     let isolation_tier: String = row.get("isolation_tier");
-    if let Err(error) =
-        require_interactive_access(state.confidential_storage_flags, user, &isolation_tier)
+    if let Err(error) = require_confidential_access(
+        &state.pool,
+        state.confidential_storage_flags,
+        user,
+        org_id,
+        &isolation_tier,
+    )
+    .await
     {
         return match error {
-            AppError::Coded { status, .. } => Err((
-                status,
-                if status == StatusCode::SERVICE_UNAVAILABLE {
-                    "confidential persistent storage is disabled"
-                } else {
-                    "global administrator user credential required"
-                },
-            )),
+            AppError::Coded { status, code, .. } => {
+                Err((status, confidential_refusal_reason(code)))
+            }
             _ => Err((StatusCode::FORBIDDEN, "access denied")),
         };
     }

@@ -169,7 +169,7 @@ pub(super) async fn get(
         return unavailable(StatusCode::BAD_REQUEST);
     };
     let continuation = super::terminal::terminal_path(&slug, &environment_id);
-    let (dashboard, organization, cookie) =
+    let (_, organization, cookie) =
         match super::organization_governance::get_context(&state, &headers, &slug, &continuation)
             .await
         {
@@ -206,7 +206,7 @@ pub(super) async fn get(
     let setup_complete = source.setup_complete;
     let desired_state = source.desired_state.to_i32();
     let mut row = environment_connect::environment_row(source);
-    super::environments::apply_confidential_visibility(&state, dashboard.is_admin, &mut row);
+    super::environments::apply_confidential_visibility(&state, &mut row);
     json(
         StatusCode::OK,
         Readiness::new(row, setup_complete, desired_state, query.fields),

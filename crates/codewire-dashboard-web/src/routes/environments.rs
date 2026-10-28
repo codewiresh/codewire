@@ -755,8 +755,7 @@ async fn render_page(
         };
         form.draft_organization.clone_from(&organization.id);
         form.options_loading = true;
-        form.show_confidential_controls = state.confidential_storage_enabled
-            && (!state.confidential_admin_only || dashboard.is_admin);
+        form.show_confidential_controls = state.confidential_storage_enabled;
         EnvironmentsPageView {
             environments: Vec::new(),
             environments_loading: true,
@@ -804,7 +803,7 @@ pub(super) async fn list_fragment(
     headers: HeaderMap,
 ) -> Response {
     let continuation = environments_path(&slug);
-    let (dashboard, organization, cookie) =
+    let (_, organization, cookie) =
         match get_context_without_rail(&state, &headers, &slug, &continuation).await {
             Ok(context) => context,
             Err(response) => return response,
@@ -815,7 +814,7 @@ pub(super) async fn list_fragment(
             Err(error) => return connect_page_error(error, &continuation, &headers),
         };
     for environment in &mut environments {
-        apply_confidential_visibility(&state, dashboard.is_admin, environment);
+        apply_confidential_visibility(&state, environment);
     }
     environment_connect::mark_credential_attention(&state, cookie, &mut environments).await;
     let token = csrf_cookie_value(&headers).unwrap_or_default().to_owned();
@@ -969,8 +968,7 @@ pub(super) async fn create_options_fragment(
     form.draft_organization.clone_from(&organization.id);
     form.draft_id = request.draft_id;
     form.draft_return = request.draft_return;
-    form.show_confidential_controls =
-        state.confidential_storage_enabled && (!state.confidential_admin_only || identity.is_admin);
+    form.show_confidential_controls = state.confidential_storage_enabled;
     hydrate_options(&mut form, options);
     form.confidential_available &= form.show_confidential_controls;
     let mut response = render_template(
@@ -1402,7 +1400,7 @@ pub(super) async fn create_port(
     headers: HeaderMap,
     Form(submission): Form<PortCreateSubmission>,
 ) -> Response {
-    let (dashboard, organization, cookie) = match action_context(
+    let (_, organization, cookie) = match action_context(
         &state,
         &headers,
         &slug,
@@ -1465,7 +1463,6 @@ pub(super) async fn create_port(
         &headers,
         &organization,
         cookie,
-        dashboard.is_admin,
         PortActionView {
             environment_id: &submission.environment_id,
             modal: submission.dialog,
@@ -1482,7 +1479,7 @@ pub(super) async fn delete_port(
     headers: HeaderMap,
     Form(submission): Form<PortDeleteSubmission>,
 ) -> Response {
-    let (dashboard, organization, cookie) = match action_context(
+    let (_, organization, cookie) = match action_context(
         &state,
         &headers,
         &slug,
@@ -1524,7 +1521,6 @@ pub(super) async fn delete_port(
         &headers,
         &organization,
         cookie,
-        dashboard.is_admin,
         PortActionView {
             environment_id: &submission.environment_id,
             modal: submission.dialog,
@@ -1546,17 +1542,16 @@ pub(super) async fn port_fragment(
         return error_page(WebError::NotFound);
     }
     let continuation = super::terminal::terminal_path(&slug, &environment_id);
-    let (dashboard, organization, cookie) =
-        match get_context(&state, &headers, &slug, &continuation).await {
-            Ok(context) => context,
-            Err(response) => return response,
-        };
+    let (_, organization, cookie) = match get_context(&state, &headers, &slug, &continuation).await
+    {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
     render_port_dialog(
         &state,
         &headers,
         &organization,
         cookie,
-        dashboard.is_admin,
         PortActionView {
             environment_id: &environment_id,
             modal: true,
@@ -1579,11 +1574,10 @@ async fn port_response(
     headers: &HeaderMap,
     organization: &OrganizationContext,
     cookie: HeaderValue,
-    is_admin: bool,
     action: PortActionView<'_>,
 ) -> Response {
     if action.modal && headers.contains_key(HTMX_REQUEST) {
-        render_port_dialog(state, headers, organization, cookie, is_admin, action).await
+        render_port_dialog(state, headers, organization, cookie, action).await
     } else {
         ports_redirect(
             state,
@@ -1600,7 +1594,6 @@ async fn render_port_dialog(
     headers: &HeaderMap,
     organization: &OrganizationContext,
     cookie: HeaderValue,
-    is_admin: bool,
     action: PortActionView<'_>,
 ) -> Response {
     if !super::terminal::canonical_environment_id(action.environment_id) {
@@ -1618,7 +1611,7 @@ async fn render_port_dialog(
         Ok(environment) => environment,
         Err(error) => return connect_page_error(error, &continuation, headers),
     };
-    apply_confidential_visibility(state, is_admin, &mut environment);
+    apply_confidential_visibility(state, &mut environment);
     if !environment.confidential_actions_allowed {
         return error_page(WebError::Forbidden);
     }
@@ -1804,26 +1797,21 @@ fn lifecycle_feedback_path(path: &str, message: &str, error: &str) -> String {
     result
 }
 
+/// Confidential actions follow the deployment's switch. Whether the
+/// organization has opted in, and the caller is its member, is the server's
+/// decision; it refuses with its reason.
 pub(super) fn apply_confidential_visibility(
     state: &AppState,
-    is_admin: bool,
     environment: &mut crate::view::EnvironmentRow,
 ) {
     environment.confidential_actions_allowed = confidential_interaction_visible(
         environment.isolation_tier,
         state.confidential_storage_enabled,
-        state.confidential_admin_only,
-        is_admin,
     );
 }
 
-fn confidential_interaction_visible(
-    tier: &str,
-    enabled: bool,
-    admin_only: bool,
-    is_admin: bool,
-) -> bool {
-    tier != "confidential" || (enabled && (!admin_only || is_admin))
+fn confidential_interaction_visible(tier: &str, enabled: bool) -> bool {
+    tier != "confidential" || enabled
 }
 
 async fn build_page(
@@ -1834,7 +1822,6 @@ async fn build_page(
     mut form: EnvironmentCreateFormView,
     dashboard: &crate::view::DashboardView,
 ) -> Result<EnvironmentsPageView, ConnectError> {
-    let is_admin = dashboard.is_admin;
     form.draft_actor = crate::environment_drafts::view_actor(dashboard)?;
     form.draft_organization.clone_from(&organization.id);
     let mut environments =
@@ -1844,10 +1831,9 @@ async fn build_page(
     } else {
         page_message(&query.message).to_owned()
     };
-    let confidential_actions_allowed =
-        state.confidential_storage_enabled && (!state.confidential_admin_only || is_admin);
+    let confidential_actions_allowed = state.confidential_storage_enabled;
     for environment in &mut environments {
-        apply_confidential_visibility(state, is_admin, environment);
+        apply_confidential_visibility(state, environment);
     }
     let (options, ()) = tokio::join!(
         environment_connect::create_options(state, cookie.clone(), &organization.id),
@@ -2036,8 +2022,7 @@ fn render_create_action_page(
         }
     };
     form.draft_organization.clone_from(&organization.id);
-    form.show_confidential_controls = state.confidential_storage_enabled
-        && (!state.confidential_admin_only || dashboard.is_admin);
+    form.show_confidential_controls = state.confidential_storage_enabled;
     form.confidential_available &= form.show_confidential_controls;
     let page = EnvironmentsPageView {
         environments: Vec::new(),
@@ -3092,22 +3077,11 @@ mod tests {
     #[test]
     fn confidential_visibility_is_identical_for_pages_and_fragments() {
         for enabled in [false, true] {
-            for admin_only in [false, true] {
-                for is_admin in [false, true] {
-                    assert!(confidential_interaction_visible(
-                        "standard", enabled, admin_only, is_admin
-                    ));
-                    assert_eq!(
-                        confidential_interaction_visible(
-                            "confidential",
-                            enabled,
-                            admin_only,
-                            is_admin
-                        ),
-                        enabled && (!admin_only || is_admin),
-                    );
-                }
-            }
+            assert!(confidential_interaction_visible("standard", enabled));
+            assert_eq!(
+                confidential_interaction_visible("confidential", enabled),
+                enabled
+            );
         }
     }
 

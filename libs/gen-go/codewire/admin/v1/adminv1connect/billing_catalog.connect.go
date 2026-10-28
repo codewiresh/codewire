@@ -69,6 +69,12 @@ const (
 	// BillingCatalogServiceSetOrganizationBillingExemptionProcedure is the fully-qualified name of the
 	// BillingCatalogService's SetOrganizationBillingExemption RPC.
 	BillingCatalogServiceSetOrganizationBillingExemptionProcedure = "/codewire.admin.v1.BillingCatalogService/SetOrganizationBillingExemption"
+	// BillingCatalogServiceListConfidentialOrganizationsProcedure is the fully-qualified name of the
+	// BillingCatalogService's ListConfidentialOrganizations RPC.
+	BillingCatalogServiceListConfidentialOrganizationsProcedure = "/codewire.admin.v1.BillingCatalogService/ListConfidentialOrganizations"
+	// BillingCatalogServiceSetOrganizationConfidentialEnvironmentsProcedure is the fully-qualified name
+	// of the BillingCatalogService's SetOrganizationConfidentialEnvironments RPC.
+	BillingCatalogServiceSetOrganizationConfidentialEnvironmentsProcedure = "/codewire.admin.v1.BillingCatalogService/SetOrganizationConfidentialEnvironments"
 )
 
 // BillingCatalogServiceClient is a client for the codewire.admin.v1.BillingCatalogService service.
@@ -100,6 +106,14 @@ type BillingCatalogServiceClient interface {
 	// exemption. It is global-admin only and never infers exemption from the
 	// owner account.
 	SetOrganizationBillingExemption(context.Context, *connect.Request[v1.SetOrganizationBillingExemptionRequest]) (*connect.Response[v1.SetOrganizationBillingExemptionResponse], error)
+	// ListConfidentialOrganizations lists the organizations opted in to
+	// confidential environments. It is global-admin only.
+	ListConfidentialOrganizations(context.Context, *connect.Request[v1.ListConfidentialOrganizationsRequest]) (*connect.Response[v1.ListConfidentialOrganizationsResponse], error)
+	// SetOrganizationConfidentialEnvironments opts one organization in to, or
+	// out of, confidential environments. It is global-admin only and audited.
+	// An opted-in organization still needs a confidential catalog entry for its
+	// plan and a deployment that enables confidential storage.
+	SetOrganizationConfidentialEnvironments(context.Context, *connect.Request[v1.SetOrganizationConfidentialEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationConfidentialEnvironmentsResponse], error)
 }
 
 // NewBillingCatalogServiceClient constructs a client for the
@@ -187,23 +201,38 @@ func NewBillingCatalogServiceClient(httpClient connect.HTTPClient, baseURL strin
 			connect.WithSchema(billingCatalogServiceMethods.ByName("SetOrganizationBillingExemption")),
 			connect.WithClientOptions(opts...),
 		),
+		listConfidentialOrganizations: connect.NewClient[v1.ListConfidentialOrganizationsRequest, v1.ListConfidentialOrganizationsResponse](
+			httpClient,
+			baseURL+BillingCatalogServiceListConfidentialOrganizationsProcedure,
+			connect.WithSchema(billingCatalogServiceMethods.ByName("ListConfidentialOrganizations")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		setOrganizationConfidentialEnvironments: connect.NewClient[v1.SetOrganizationConfidentialEnvironmentsRequest, v1.SetOrganizationConfidentialEnvironmentsResponse](
+			httpClient,
+			baseURL+BillingCatalogServiceSetOrganizationConfidentialEnvironmentsProcedure,
+			connect.WithSchema(billingCatalogServiceMethods.ByName("SetOrganizationConfidentialEnvironments")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // billingCatalogServiceClient implements BillingCatalogServiceClient.
 type billingCatalogServiceClient struct {
-	getCatalog                      *connect.Client[v1.GetCatalogRequest, v1.GetCatalogResponse]
-	createPlan                      *connect.Client[v1.CreatePlanRequest, v1.CreatePlanResponse]
-	updatePlan                      *connect.Client[v1.UpdatePlanRequest, v1.UpdatePlanResponse]
-	setPlanArchived                 *connect.Client[v1.SetPlanArchivedRequest, v1.SetPlanArchivedResponse]
-	createPrice                     *connect.Client[v1.CreatePriceRequest, v1.CreatePriceResponse]
-	updatePrice                     *connect.Client[v1.UpdatePriceRequest, v1.UpdatePriceResponse]
-	setPriceArchived                *connect.Client[v1.SetPriceArchivedRequest, v1.SetPriceArchivedResponse]
-	updateSetting                   *connect.Client[v1.UpdateSettingRequest, v1.UpdateSettingResponse]
-	previewSubscriptionMigration    *connect.Client[v1.PreviewSubscriptionMigrationRequest, v1.PreviewSubscriptionMigrationResponse]
-	runSubscriptionMigration        *connect.Client[v1.RunSubscriptionMigrationRequest, v1.RunSubscriptionMigrationResponse]
-	listSubscriptionMigrations      *connect.Client[v1.ListSubscriptionMigrationsRequest, v1.ListSubscriptionMigrationsResponse]
-	setOrganizationBillingExemption *connect.Client[v1.SetOrganizationBillingExemptionRequest, v1.SetOrganizationBillingExemptionResponse]
+	getCatalog                              *connect.Client[v1.GetCatalogRequest, v1.GetCatalogResponse]
+	createPlan                              *connect.Client[v1.CreatePlanRequest, v1.CreatePlanResponse]
+	updatePlan                              *connect.Client[v1.UpdatePlanRequest, v1.UpdatePlanResponse]
+	setPlanArchived                         *connect.Client[v1.SetPlanArchivedRequest, v1.SetPlanArchivedResponse]
+	createPrice                             *connect.Client[v1.CreatePriceRequest, v1.CreatePriceResponse]
+	updatePrice                             *connect.Client[v1.UpdatePriceRequest, v1.UpdatePriceResponse]
+	setPriceArchived                        *connect.Client[v1.SetPriceArchivedRequest, v1.SetPriceArchivedResponse]
+	updateSetting                           *connect.Client[v1.UpdateSettingRequest, v1.UpdateSettingResponse]
+	previewSubscriptionMigration            *connect.Client[v1.PreviewSubscriptionMigrationRequest, v1.PreviewSubscriptionMigrationResponse]
+	runSubscriptionMigration                *connect.Client[v1.RunSubscriptionMigrationRequest, v1.RunSubscriptionMigrationResponse]
+	listSubscriptionMigrations              *connect.Client[v1.ListSubscriptionMigrationsRequest, v1.ListSubscriptionMigrationsResponse]
+	setOrganizationBillingExemption         *connect.Client[v1.SetOrganizationBillingExemptionRequest, v1.SetOrganizationBillingExemptionResponse]
+	listConfidentialOrganizations           *connect.Client[v1.ListConfidentialOrganizationsRequest, v1.ListConfidentialOrganizationsResponse]
+	setOrganizationConfidentialEnvironments *connect.Client[v1.SetOrganizationConfidentialEnvironmentsRequest, v1.SetOrganizationConfidentialEnvironmentsResponse]
 }
 
 // GetCatalog calls codewire.admin.v1.BillingCatalogService.GetCatalog.
@@ -269,6 +298,18 @@ func (c *billingCatalogServiceClient) SetOrganizationBillingExemption(ctx contex
 	return c.setOrganizationBillingExemption.CallUnary(ctx, req)
 }
 
+// ListConfidentialOrganizations calls
+// codewire.admin.v1.BillingCatalogService.ListConfidentialOrganizations.
+func (c *billingCatalogServiceClient) ListConfidentialOrganizations(ctx context.Context, req *connect.Request[v1.ListConfidentialOrganizationsRequest]) (*connect.Response[v1.ListConfidentialOrganizationsResponse], error) {
+	return c.listConfidentialOrganizations.CallUnary(ctx, req)
+}
+
+// SetOrganizationConfidentialEnvironments calls
+// codewire.admin.v1.BillingCatalogService.SetOrganizationConfidentialEnvironments.
+func (c *billingCatalogServiceClient) SetOrganizationConfidentialEnvironments(ctx context.Context, req *connect.Request[v1.SetOrganizationConfidentialEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationConfidentialEnvironmentsResponse], error) {
+	return c.setOrganizationConfidentialEnvironments.CallUnary(ctx, req)
+}
+
 // BillingCatalogServiceHandler is an implementation of the codewire.admin.v1.BillingCatalogService
 // service.
 type BillingCatalogServiceHandler interface {
@@ -299,6 +340,14 @@ type BillingCatalogServiceHandler interface {
 	// exemption. It is global-admin only and never infers exemption from the
 	// owner account.
 	SetOrganizationBillingExemption(context.Context, *connect.Request[v1.SetOrganizationBillingExemptionRequest]) (*connect.Response[v1.SetOrganizationBillingExemptionResponse], error)
+	// ListConfidentialOrganizations lists the organizations opted in to
+	// confidential environments. It is global-admin only.
+	ListConfidentialOrganizations(context.Context, *connect.Request[v1.ListConfidentialOrganizationsRequest]) (*connect.Response[v1.ListConfidentialOrganizationsResponse], error)
+	// SetOrganizationConfidentialEnvironments opts one organization in to, or
+	// out of, confidential environments. It is global-admin only and audited.
+	// An opted-in organization still needs a confidential catalog entry for its
+	// plan and a deployment that enables confidential storage.
+	SetOrganizationConfidentialEnvironments(context.Context, *connect.Request[v1.SetOrganizationConfidentialEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationConfidentialEnvironmentsResponse], error)
 }
 
 // NewBillingCatalogServiceHandler builds an HTTP handler from the service implementation. It
@@ -382,6 +431,19 @@ func NewBillingCatalogServiceHandler(svc BillingCatalogServiceHandler, opts ...c
 		connect.WithSchema(billingCatalogServiceMethods.ByName("SetOrganizationBillingExemption")),
 		connect.WithHandlerOptions(opts...),
 	)
+	billingCatalogServiceListConfidentialOrganizationsHandler := connect.NewUnaryHandler(
+		BillingCatalogServiceListConfidentialOrganizationsProcedure,
+		svc.ListConfidentialOrganizations,
+		connect.WithSchema(billingCatalogServiceMethods.ByName("ListConfidentialOrganizations")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	billingCatalogServiceSetOrganizationConfidentialEnvironmentsHandler := connect.NewUnaryHandler(
+		BillingCatalogServiceSetOrganizationConfidentialEnvironmentsProcedure,
+		svc.SetOrganizationConfidentialEnvironments,
+		connect.WithSchema(billingCatalogServiceMethods.ByName("SetOrganizationConfidentialEnvironments")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.admin.v1.BillingCatalogService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case BillingCatalogServiceGetCatalogProcedure:
@@ -408,6 +470,10 @@ func NewBillingCatalogServiceHandler(svc BillingCatalogServiceHandler, opts ...c
 			billingCatalogServiceListSubscriptionMigrationsHandler.ServeHTTP(w, r)
 		case BillingCatalogServiceSetOrganizationBillingExemptionProcedure:
 			billingCatalogServiceSetOrganizationBillingExemptionHandler.ServeHTTP(w, r)
+		case BillingCatalogServiceListConfidentialOrganizationsProcedure:
+			billingCatalogServiceListConfidentialOrganizationsHandler.ServeHTTP(w, r)
+		case BillingCatalogServiceSetOrganizationConfidentialEnvironmentsProcedure:
+			billingCatalogServiceSetOrganizationConfidentialEnvironmentsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -463,4 +529,12 @@ func (UnimplementedBillingCatalogServiceHandler) ListSubscriptionMigrations(cont
 
 func (UnimplementedBillingCatalogServiceHandler) SetOrganizationBillingExemption(context.Context, *connect.Request[v1.SetOrganizationBillingExemptionRequest]) (*connect.Response[v1.SetOrganizationBillingExemptionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.SetOrganizationBillingExemption is not implemented"))
+}
+
+func (UnimplementedBillingCatalogServiceHandler) ListConfidentialOrganizations(context.Context, *connect.Request[v1.ListConfidentialOrganizationsRequest]) (*connect.Response[v1.ListConfidentialOrganizationsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.ListConfidentialOrganizations is not implemented"))
+}
+
+func (UnimplementedBillingCatalogServiceHandler) SetOrganizationConfidentialEnvironments(context.Context, *connect.Request[v1.SetOrganizationConfidentialEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationConfidentialEnvironmentsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.SetOrganizationConfidentialEnvironments is not implemented"))
 }

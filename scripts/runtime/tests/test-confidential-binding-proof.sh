@@ -36,7 +36,8 @@ fi
   fi
   [[ ! -e "$work/kubectl-called" ]] || fail "the read-only wrapper reached kubectl for a delete"
 )
-# Creates use the user's login, never an API key, and the confidential tier.
+# Creates run as the smoke identity, through the environment only, on the
+# confidential tier.
 grep -F -- '--isolation confidential' "$PROOF" >/dev/null || fail "the proof does not create a confidential environment"
 # The proof drives the current CLI: `cw env *` and `cw config-ssh` were
 # removed, and the cw binary lives in codewire-cli-bin.
@@ -45,8 +46,13 @@ if grep -nE '\bcw (env|config-ssh)\b|[^-](env (create|info|stop|start|rm)) ' "$P
 fi
 grep -F -- '-p codewire-cli-bin --bin cw' "$PROOF" >/dev/null || fail "the proof builds cw from the wrong package"
 grep -F -- 'setup ssh --ssh-config-file' "$PROOF" >/dev/null || fail "the proof does not write its SSH config with cw setup ssh"
-if grep -nE 'API_KEY|--api-key' "$PROOF" >/dev/null; then
-  fail "the proof uses an API key; confidential creates are admin-only user logins"
+grep -F 'export CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY"' "$PROOF" >/dev/null ||
+  fail "the proof does not act as the smoke identity"
+grep -F 'export CW_CONFIG_DIR="$TMPDIR_PROOF/cw-config"' "$PROOF" >/dev/null ||
+  fail "the proof could reuse a saved login instead of the smoke identity"
+# The key reaches cw through the environment, never an argument or a file.
+if grep -nE -- '--api-key|API_KEY[^"]*"? *>' "$PROOF" >/dev/null; then
+  fail "the proof passes the API key as an argument or writes it to a file"
 fi
 
 # The Pod the controller creates from the golden rendering, and its Sandbox.

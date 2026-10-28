@@ -23,7 +23,7 @@ use super::environments::{
     ENV_SELECT_COLS, ENV_SELECT_JOINS, Environment, OrgQuota, check_quota_in, check_rate_limit,
     coded, get_org_quota, require_org_member, scan_environment, trigger_environment,
 };
-use crate::confidential_storage::require_interactive_access;
+use crate::confidential_storage::require_confidential_access;
 use crate::repository_mount::validate_repository_mounts;
 
 /// Confidential volumes keep their own, smaller limit: the guest-encrypted
@@ -1059,7 +1059,14 @@ pub(crate) async fn create_environment_core(
             ));
         }
     };
-    require_interactive_access(state.confidential_storage_flags, user, isolation_tier)?;
+    require_confidential_access(
+        pool,
+        state.confidential_storage_flags,
+        user,
+        org_id,
+        isolation_tier,
+    )
+    .await?;
     apply_project_spec_defaults(&mut body)?;
     if !body.project_spec.image.is_empty() {
         body.project_spec.image = normalize_image_ref(&body.project_spec.image);

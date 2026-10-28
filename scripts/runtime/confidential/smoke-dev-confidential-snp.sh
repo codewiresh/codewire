@@ -77,6 +77,12 @@ Options:
   --evidence-dir DIR       Store evidence in DIR instead of repo .tmp
   -h, --help               Show this help
 
+The product phase runs as the dedicated Dev smoke identity through
+scripts/runtime/dev/with-dev-smoke-auth.sh, which needs the normal human
+OpenBao OIDC session; its organization must be opted in to confidential
+environments (the admin billing page) and its plan needs a confidential
+catalog entry.
+
 Activation spans two repositories and transitions together. The Dev runtime
 profile lives in codewire/deploy hosted/, whose README owns the procedure; the
 confidential-smoke Kustomization template stays in Codewire. Merge both
@@ -371,8 +377,6 @@ resolve_active_release() {
     '.data.SANDBOX_CONFIDENTIAL_WORKSPACE_STORAGE_CLASS == "linstor-confidential"' "$EVIDENCE_DIR/active-runtime-config.json"
   assert_jq "confidential creation is not enabled" \
     '.data.SANDBOX_CONFIDENTIAL_STORAGE_ENABLED == "true"' "$EVIDENCE_DIR/active-runtime-config.json"
-  assert_jq "confidential creation is not admin-only" \
-    '.data.SANDBOX_CONFIDENTIAL_ADMIN_ONLY == "true"' "$EVIDENCE_DIR/active-runtime-config.json"
   assert_jq "active CoCo init-data is not enabled" \
     '.data.SANDBOX_KATA_COCO_INIT_DATA_ENABLED == "true"' "$EVIDENCE_DIR/active-runtime-config.json"
   assert_jq "active KBS URL differs from the confidential smoke contract" \
@@ -573,8 +577,8 @@ run_product_command() {
     EXPECTED_KATA_COCO_TEST_RESOURCE_URI="$COCO_TEST_RESOURCE_URI" \
     EXPECTED_KATA_COCO_TEST_RESOURCE_PATH="$COCO_TEST_RESOURCE_PATH" \
     EXPECTED_KATA_COCO_TEST_RESOURCE_CONTENT="$COCO_TEST_RESOURCE_CONTENT" \
-    "$ROOT/scripts/runtime/dev/smoke-dev-commodity.sh" \
-      --admin-oidc "${smoke_args[@]}"
+    "$ROOT/scripts/runtime/dev/with-dev-smoke-auth.sh" -- \
+      "$ROOT/scripts/runtime/dev/smoke-dev-commodity.sh" "${smoke_args[@]}"
 }
 
 run_coco_product() {

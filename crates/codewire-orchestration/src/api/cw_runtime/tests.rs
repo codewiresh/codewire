@@ -161,7 +161,7 @@ impl CaptureBackend for FixtureBackend {
         Ok(state.probe.clone())
     }
 
-    fn confidential_access(&self, tier: &str) -> AppResult<()> {
+    async fn confidential_access(&self, _org: &str, tier: &str) -> AppResult<()> {
         let mut state = self.0.lock().unwrap();
         state.events.push("confidential");
         if tier == "confidential" && !state.confidential_allowed {

@@ -123,10 +123,7 @@ impl Fixture {
 }
 
 fn flags() -> FeatureFlags {
-    FeatureFlags {
-        enabled: true,
-        admin_only: true,
-    }
+    FeatureFlags { enabled: true }
 }
 
 fn identity(sha: char) -> CwPayloadIdentity {
@@ -408,61 +405,60 @@ database_case!(
     }
 );
 
-database_case!(
-    db_confidential_policy_uses_current_admin_and_not_api_key_admin,
-    f,
-    {
-        sqlx::query("UPDATE environments SET isolation_tier='confidential' WHERE id=$1")
-            .bind(ENV)
-            .execute(&f.pool)
-            .await?;
-        let facts = read_facts(&f.pool).await?;
-        let stale = AuthUser {
-            is_admin: true,
-            ..f.user.clone()
-        };
-        ensure!(
-            f.journal
-                .admit_facts(facts.clone(), stale, mutation())
-                .await
-                .is_err()
-        );
-        sqlx::query("UPDATE users SET is_admin=true WHERE id=$1")
-            .bind(ACTOR)
-            .execute(&f.pool)
-            .await?;
-        let key = AuthUser {
-            org_id: Some(ORG.into()),
-            is_admin: true,
-            via_api_key: true,
-            ..f.user.clone()
-        };
-        ensure!(
-            f.journal
-                .admit_facts(facts.clone(), key, mutation())
-                .await
-                .is_err()
-        );
-        let disabled = RuntimeJournal::new(
-            f.pool.clone(),
-            FeatureFlags {
-                enabled: false,
-                admin_only: true,
-            },
-        );
-        ensure!(
-            disabled
-                .admit_facts(facts.clone(), f.user.clone(), mutation())
-                .await
-                .is_err()
-        );
-        owned_admission(
-            f.journal
-                .admit_facts(facts, f.user.clone(), mutation())
-                .await?,
-        )?;
-    }
-);
+database_case!(db_confidential_policy_follows_the_organization_opt_in, f, {
+    sqlx::query("UPDATE environments SET isolation_tier='confidential' WHERE id=$1")
+        .bind(ENV)
+        .execute(&f.pool)
+        .await?;
+    let facts = read_facts(&f.pool).await?;
+    // Not opted in: even a global administrator member is refused.
+    sqlx::query("UPDATE users SET is_admin=true WHERE id=$1")
+        .bind(ACTOR)
+        .execute(&f.pool)
+        .await?;
+    let admin = AuthUser {
+        is_admin: true,
+        ..f.user.clone()
+    };
+    ensure!(
+        f.journal
+            .admit_facts(facts.clone(), admin, mutation())
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE organizations SET confidential_environments_enabled=true WHERE id=$1")
+        .bind(ORG)
+        .execute(&f.pool)
+        .await?;
+    // Opted in, but the deployment's switch is off.
+    let disabled = RuntimeJournal::new(f.pool.clone(), FeatureFlags { enabled: false });
+    ensure!(
+        disabled
+            .admit_facts(facts.clone(), f.user.clone(), mutation())
+            .await
+            .is_err()
+    );
+    // An API key bound to another organization.
+    let other_key = AuthUser {
+        org_id: Some("another-organization".into()),
+        via_api_key: true,
+        ..f.user.clone()
+    };
+    ensure!(
+        f.journal
+            .admit_facts(facts.clone(), other_key, mutation())
+            .await
+            .is_err()
+    );
+    // A member's API key for this opted-in organization is admitted.
+    let key = AuthUser {
+        org_id: Some(ORG.into()),
+        is_admin: false,
+        via_api_key: true,
+        ..f.user.clone()
+    };
+    owned_admission(f.journal.admit_facts(facts, key, mutation()).await?)?;
+});
 
 async fn finish_update(f: &Fixture, owner: &RequestOwner) -> Result<()> {
     let stage = f

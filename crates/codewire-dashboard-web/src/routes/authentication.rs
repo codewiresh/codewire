@@ -1139,7 +1139,6 @@ mod tests {
             billing_origin: "http://127.0.0.1:9".parse().unwrap(),
             docs_root: Default::default(),
             confidential_storage_enabled: false,
-            confidential_admin_only: true,
             turnstile_site_key: String::new(),
             github_app_slug: String::new(),
             github_app_client_id: String::new(),

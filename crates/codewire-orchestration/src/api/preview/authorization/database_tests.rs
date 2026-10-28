@@ -71,7 +71,6 @@ impl Fixture {
             session_secret: SECRET,
             confidential_storage_flags: crate::confidential_storage::FeatureFlags {
                 enabled: false,
-                admin_only: true,
             },
             // Tests must observe database writes immediately, so the
             // context carries a zero-TTL cache: every lookup is one query,

@@ -53,7 +53,6 @@ fn config(upstream: &str) -> crate::Config {
         billing_origin: upstream.parse().unwrap(),
         docs_root: std::path::PathBuf::new(),
         confidential_storage_enabled: false,
-        confidential_admin_only: true,
         turnstile_site_key: String::new(),
         github_app_slug: String::new(),
         github_app_client_id: String::new(),

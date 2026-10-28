@@ -25,7 +25,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use super::ApiState;
-use crate::confidential_storage::require_interactive_access;
+use crate::confidential_storage::require_confidential_access;
 
 /// Mirrors `api.Environment` field-for-field (JSON tags included).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -381,12 +381,12 @@ pub(crate) async fn lock_cw_runtime_operator_in(
 ) -> AppResult<()> {
     codewire_server_core::org_deletion::bound_environment_runtime_transaction(tx).await?;
     let denied = || coded(StatusCode::FORBIDDEN, "access_denied", "access denied");
-    let current: Option<(bool, bool)> =
-        sqlx::query_as("SELECT enabled,COALESCE(is_admin,false) FROM users WHERE id=$1 FOR SHARE")
+    let current: Option<bool> =
+        sqlx::query_scalar("SELECT enabled FROM users WHERE id=$1 FOR SHARE")
             .bind(&user.user_id)
             .fetch_optional(&mut **tx)
             .await?;
-    let Some((true, is_admin)) = current else {
+    let Some(true) = current else {
         return Err(denied());
     };
     if !user.permits_organization(org_id) {
@@ -435,11 +435,7 @@ pub(crate) async fn lock_cw_runtime_operator_in(
     {
         return Err(denied());
     }
-    let fresh = AuthUser {
-        is_admin,
-        ..user.clone()
-    };
-    require_interactive_access(flags, &fresh, &tier)
+    require_confidential_access(&mut **tx, flags, user, org_id, &tier).await
 }
 
 /// Mirrors `auth.LogAuditEvent` (warn-only, severity "warning").
@@ -1260,7 +1256,14 @@ pub(crate) async fn start_environment_core(
     )
     .await?;
     let env = fetch_env_summary(&state.pool, org_id, env_id).await?;
-    require_interactive_access(state.confidential_storage_flags, user, &env.isolation_tier)?;
+    require_confidential_access(
+        &state.pool,
+        state.confidential_storage_flags,
+        user,
+        org_id,
+        &env.isolation_tier,
+    )
+    .await?;
 
     let dispatch_ambiguous = AtomicBool::new(false);
     // The admitted operation outlives a dropped request, so it owns its inputs.
@@ -1466,7 +1469,14 @@ pub(crate) async fn cancel_environment_deletion_core(
     require_org_member(&state.pool, user, org_id).await?;
     require_environment_access(&state.pool, user, env_id, org_id, "owner", "access denied").await?;
     let env = fetch_env_summary(&state.pool, org_id, env_id).await?;
-    require_interactive_access(state.confidential_storage_flags, user, &env.isolation_tier)?;
+    require_confidential_access(
+        &state.pool,
+        state.confidential_storage_flags,
+        user,
+        org_id,
+        &env.isolation_tier,
+    )
+    .await?;
 
     run_organization_database_mutation(&state.pool, org_id, async {
         let lifecycle = crate::lifecycle::Service::for_pool(state.pool.clone());

@@ -67,11 +67,7 @@ pub(super) async fn page(
         Ok(environment) => environment,
         Err(error) => return connect_page_error(error, &continuation, &headers),
     };
-    super::environments::apply_confidential_visibility(
-        &state,
-        dashboard.is_admin,
-        &mut environment,
-    );
+    super::environments::apply_confidential_visibility(&state, &mut environment);
     environment_connect::mark_bound_credential_attention(&state, cookie, &mut environment).await;
     let websocket_origin =
         match browser_websocket_origin(&state.public_origin, &state.browser_api_origin) {

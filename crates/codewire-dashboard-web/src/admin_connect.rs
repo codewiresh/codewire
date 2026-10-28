@@ -5,9 +5,10 @@ use codewire_admin_proto::codewire::admin::v1::{
     AdminServiceClient, BillingCatalogServiceClient, ClearOrganizationEnvironmentQuotaRequest,
     CreatePlanRequest, CreatePriceRequest, EnvironmentQuota, GetCatalogRequest,
     GetDefaultEnvironmentQuotaRequest, GetOrganizationOverviewRequest, GetStatsRequest,
-    ListAuditLogsRequest, ListOrganizationsRequest, ListSubscriptionMigrationsRequest, PlanSpec,
-    PreviewSubscriptionMigrationRequest, RunSubscriptionMigrationRequest,
-    SetDefaultEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaRequest,
+    ListAuditLogsRequest, ListConfidentialOrganizationsRequest, ListOrganizationsRequest,
+    ListSubscriptionMigrationsRequest, PlanSpec, PreviewSubscriptionMigrationRequest,
+    RunSubscriptionMigrationRequest, SetDefaultEnvironmentQuotaRequest,
+    SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationEnvironmentQuotaRequest,
     SetPlanArchivedRequest, SetPriceArchivedRequest, UpdatePlanRequest, UpdatePriceRequest,
     UpdateSettingRequest,
 };
@@ -127,12 +128,20 @@ impl Default for MigrationPreviewView {
     }
 }
 
+/// An organization opted in to confidential environments.
+#[derive(Clone, Debug)]
+pub(crate) struct ConfidentialOrganizationView {
+    pub(crate) slug: String,
+    pub(crate) name: String,
+}
+
 #[derive(Debug)]
 pub(crate) struct AdminCatalogView {
     pub(crate) plans: Vec<CatalogPlanView>,
     pub(crate) prices: Vec<CatalogPriceView>,
     pub(crate) settings: Vec<CatalogSettingView>,
     pub(crate) migrations: Vec<MigrationRunView>,
+    pub(crate) confidential_organizations: Vec<ConfidentialOrganizationView>,
     pub(crate) preview: MigrationPreviewView,
     pub(crate) csrf_token: String,
     pub(crate) message: String,
@@ -329,16 +338,20 @@ pub(crate) async fn catalog(
     error: String,
 ) -> Result<AdminCatalogView, ConnectError> {
     let catalog_rpc = catalog_client(state, cookie.clone());
-    let migrations_rpc = catalog_client(state, cookie);
-    let (catalog, migrations) = tokio::join!(
+    let migrations_rpc = catalog_client(state, cookie.clone());
+    let confidential_rpc = catalog_client(state, cookie);
+    let (catalog, migrations, confidential) = tokio::join!(
         catalog_rpc.get_catalog(GetCatalogRequest::default()),
         migrations_rpc.list_subscription_migrations(ListSubscriptionMigrationsRequest {
             limit: 25,
             ..Default::default()
         }),
+        confidential_rpc
+            .list_confidential_organizations(ListConfidentialOrganizationsRequest::default()),
     );
     let catalog = catalog?.into_owned();
     let migrations = migrations?.into_owned();
+    let confidential = confidential?.into_owned();
     Ok(AdminCatalogView {
         plans: catalog.plans.into_iter().map(plan_view).collect(),
         prices: catalog
@@ -365,6 +378,14 @@ pub(crate) async fn catalog(
             .migrations
             .into_iter()
             .map(migration_view)
+            .collect(),
+        confidential_organizations: confidential
+            .organizations
+            .into_iter()
+            .map(|organization| ConfidentialOrganizationView {
+                slug: organization.slug,
+                name: organization.name,
+            })
             .collect(),
         preview: MigrationPreviewView::default(),
         csrf_token,
@@ -490,6 +511,27 @@ pub(crate) async fn update_setting(
             int_value,
             ..Default::default()
         })
+        .await?;
+    Ok(())
+}
+
+/// Opt an organization in to, or out of, confidential environments. The
+/// billing service checks the global administrator and writes the audit
+/// event.
+pub(crate) async fn set_confidential_environments(
+    state: &AppState,
+    cookie: HeaderValue,
+    organization_slug: String,
+    enabled: bool,
+) -> Result<(), ConnectError> {
+    catalog_client(state, cookie)
+        .set_organization_confidential_environments(
+            SetOrganizationConfidentialEnvironmentsRequest {
+                organization_slug,
+                enabled,
+                ..Default::default()
+            },
+        )
         .await?;
     Ok(())
 }

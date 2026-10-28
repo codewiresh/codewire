@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use super::ApiState;
 use super::proxy::{SandboxTarget, huma_error, resolve_running_sandbox_target};
-use crate::confidential_storage::require_interactive_access;
+use crate::confidential_storage::require_confidential_access;
 use crate::sandbox::client::{ProbeResult, SandboxClient};
 use crate::worker::environment_auth::{WorkspaceCredentialScope, daemon_credential_for};
 use crate::worker::workspace_binding::{CwRuntimeLiveBinding, live_cw_runtime_binding};
@@ -153,7 +153,7 @@ trait CaptureBackend: Sync {
     async fn authorize(&self, org: &str, env: &str) -> AppResult<SandboxTarget>;
     async fn binding(&self, org: &str, env: &str) -> AppResult<Option<CwRuntimeLiveBinding>>;
     async fn probe(&self, namespace: &str, env: &str) -> AppResult<ProbeResult>;
-    fn confidential_access(&self, isolation_tier: &str) -> AppResult<()>;
+    async fn confidential_access(&self, org: &str, isolation_tier: &str) -> AppResult<()>;
     fn endpoint(&self, namespace: &str, env: &str) -> String;
     async fn connect(&self, endpoint: String, credential: String) -> AppResult<Self::Client>;
 }
@@ -189,14 +189,17 @@ impl CaptureBackend for PlatformBackend<'_> {
             .map_err(|_| binding_unavailable())
     }
 
-    fn confidential_access(&self, isolation_tier: &str) -> AppResult<()> {
+    async fn confidential_access(&self, org: &str, isolation_tier: &str) -> AppResult<()> {
         // Check the freshly joined tier too; a prior proxy read cannot
         // authorize a later change to confidential placement.
-        require_interactive_access(
+        require_confidential_access(
+            &self.state.pool,
             self.state.confidential_storage_flags,
             self.user,
+            org,
             isolation_tier,
         )
+        .await
     }
 
     fn endpoint(&self, namespace: &str, env: &str) -> String {
@@ -255,7 +258,7 @@ async fn admitted_row<B: CaptureBackend>(
     let original = bounded(backend.binding(org, env), READ_TIMEOUT)
         .await?
         .ok_or_else(incarnation_changed)?;
-    admit_row(backend, expected, &target, &original)?;
+    admit_row(backend, expected, &target, &original).await?;
     let probe = bounded(backend.probe(&original.namespace, env), READ_TIMEOUT).await?;
     admit_probe(&original, &probe)?;
     // Re-read the complete tuple after the probe, including setup and mutable
@@ -266,7 +269,7 @@ async fn admitted_row<B: CaptureBackend>(
     if current != original {
         return Err(incarnation_changed());
     }
-    admit_row(backend, expected, &target, &current)?;
+    admit_row(backend, expected, &target, &current).await?;
     Ok(current)
 }
 
@@ -282,7 +285,7 @@ async fn recheck_capture<B: CaptureBackend>(
     Ok(())
 }
 
-fn admit_row<B: CaptureBackend>(
+async fn admit_row<B: CaptureBackend>(
     backend: &B,
     expected: &PlatformCwRuntimeIncarnation,
     target: &SandboxTarget,
@@ -300,7 +303,9 @@ fn admit_row<B: CaptureBackend>(
             "environment runtime or setup is not ready".into(),
         ));
     }
-    backend.confidential_access(&row.isolation_tier)?;
+    backend
+        .confidential_access(&expected.organization_id, &row.isolation_tier)
+        .await?;
     if row.credential_scope != WorkspaceCredentialScope::Pod.as_str() {
         return Err(AppError::Precondition(
             "cw runtime capture requires a bound Pod-scoped daemon".into(),

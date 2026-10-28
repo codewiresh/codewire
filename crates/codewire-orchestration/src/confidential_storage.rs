@@ -50,35 +50,37 @@ const BACKING_CLAIM_NAME: &str = "workspace";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeatureFlags {
     pub enabled: bool,
-    pub admin_only: bool,
 }
 
 impl FeatureFlags {
     pub fn from_env() -> anyhow::Result<Self> {
-        Self::from_settings(
-            env_setting("SANDBOX_CONFIDENTIAL_STORAGE_ENABLED")?.as_deref(),
-            env_setting("SANDBOX_CONFIDENTIAL_ADMIN_ONLY")?.as_deref(),
-        )
+        Self::from_settings(env_setting("SANDBOX_CONFIDENTIAL_STORAGE_ENABLED")?.as_deref())
     }
 
-    /// The flags a deployment's settings select. Confidential storage is off
-    /// unless a deployment turns it on, and admin-only unless one turns that
-    /// off: a deployment that names neither, as Production does, refuses
-    /// every confidential create and start.
-    fn from_settings(enabled: Option<&str>, admin_only: Option<&str>) -> anyhow::Result<Self> {
+    /// The deployment's confidential-storage switch. It is off unless a
+    /// deployment turns it on: one that names nothing, as Production does,
+    /// refuses every confidential create and start.
+    fn from_settings(enabled: Option<&str>) -> anyhow::Result<Self> {
         Ok(Self {
             enabled: parse_bool("SANDBOX_CONFIDENTIAL_STORAGE_ENABLED", enabled, false)?,
-            admin_only: parse_bool("SANDBOX_CONFIDENTIAL_ADMIN_ONLY", admin_only, true)?,
         })
     }
 }
 
 /// Authoritative product gate for confidential create and interactive
-/// operations. Stop, destroy, and system reconciliation deliberately do not
-/// call this helper, so disabling the feature cannot orphan resources.
-pub fn require_interactive_access(
+/// operations (#2497). A confidential environment is served only when:
+/// - the deployment's confidential-storage switch is on;
+/// - its organization has opted in, which only a global administrator sets;
+/// - the caller is a member of that active organization, by user session or
+///   by an API key bound to it.
+///
+/// Stop, destroy, and system reconciliation deliberately do not call this
+/// gate, so turning confidential off never orphans resources.
+pub async fn require_confidential_access<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     flags: FeatureFlags,
     user: &AuthUser,
+    org_id: &str,
     isolation_tier: &str,
 ) -> AppResult<()> {
     if isolation_tier != "confidential" {
@@ -91,14 +93,46 @@ pub fn require_interactive_access(
             detail: "confidential persistent storage is disabled".into(),
         });
     }
-    if flags.admin_only && user.require_global_admin().is_err() {
-        return Err(AppError::Coded {
+    let organization: Option<(bool, bool)> = if user.permits_organization(org_id) {
+        sqlx::query_as(
+            r#"SELECT o.confidential_environments_enabled,
+                      EXISTS (SELECT 1 FROM org_members m
+                               WHERE m.org_id = o.id AND m.user_id = $2)
+                 FROM organizations o
+                WHERE o.id = $1 AND o.deletion_state = 'active'"#,
+        )
+        .bind(org_id)
+        .bind(&user.user_id)
+        .fetch_optional(executor)
+        .await?
+    } else {
+        None
+    };
+    match organization {
+        Some((true, true)) => Ok(()),
+        Some((false, true)) => Err(AppError::Coded {
             status: StatusCode::FORBIDDEN,
-            code: "CONFIDENTIAL_ADMIN_REQUIRED",
-            detail: "a global administrator user credential is required".into(),
-        });
+            code: "CONFIDENTIAL_NOT_ENABLED",
+            detail: "confidential environments are not enabled for this organization".into(),
+        }),
+        _ => Err(AppError::Coded {
+            status: StatusCode::FORBIDDEN,
+            code: "CONFIDENTIAL_MEMBERSHIP_REQUIRED",
+            detail: "confidential environments need a member of the organization".into(),
+        }),
     }
-    Ok(())
+}
+
+/// The fixed, user-facing reason for a refusal from
+/// [`require_confidential_access`], by its code.
+pub fn confidential_refusal_reason(code: &str) -> &'static str {
+    match code {
+        "CONFIDENTIAL_STORAGE_DISABLED" => "confidential persistent storage is disabled",
+        "CONFIDENTIAL_NOT_ENABLED" => {
+            "confidential environments are not enabled for this organization"
+        }
+        _ => "confidential environments need a member of the organization",
+    }
 }
 
 fn env_setting(name: &str) -> anyhow::Result<Option<String>> {
@@ -2260,51 +2294,136 @@ mod tests {
         assert!(device_size_bytes(0).is_err());
     }
 
-    #[test]
-    fn admin_only_gate_rejects_non_admins_and_api_keys() {
-        let flags = FeatureFlags {
-            enabled: true,
-            admin_only: true,
-        };
-        assert!(require_interactive_access(flags, &user(true, false), "confidential").is_ok());
-        assert!(require_interactive_access(flags, &user(false, false), "confidential").is_err());
-        assert!(require_interactive_access(flags, &user(true, true), "confidential").is_err());
-        assert!(require_interactive_access(flags, &user(false, true), "standard").is_ok());
-        assert!(
-            require_interactive_access(
-                FeatureFlags {
-                    enabled: false,
-                    admin_only: true,
-                },
-                &user(true, false),
-                "confidential",
-            )
-            .is_err()
-        );
+    /// Production sets no confidential-storage switch and opts no
+    /// organization in, so it refuses every confidential create and start, to
+    /// administrators and API keys alike, before reading any organization.
+    #[tokio::test]
+    async fn a_deployment_without_the_switch_refuses_confidential_to_everyone() {
+        let production = FeatureFlags::from_settings(None).unwrap();
+        assert!(!production.enabled);
+        // Never connected: the refusal comes before any database read.
+        let pool = PgPool::connect_lazy("postgres://unreachable.invalid/none").unwrap();
+        for user in [
+            user(true, false),
+            user(false, false),
+            user(true, true),
+            user(false, true),
+        ] {
+            let refusal =
+                require_confidential_access(&pool, production, &user, "test-org", "confidential")
+                    .await
+                    .unwrap_err();
+            assert!(
+                matches!(
+                    refusal,
+                    AppError::Coded {
+                        code: "CONFIDENTIAL_STORAGE_DISABLED",
+                        ..
+                    }
+                ),
+                "{refusal:?}"
+            );
+            require_confidential_access(&pool, production, &user, "test-org", "standard")
+                .await
+                .unwrap();
+        }
+        assert!(FeatureFlags::from_settings(Some("true")).unwrap().enabled);
+        assert!(FeatureFlags::from_settings(Some("yes")).is_err());
     }
 
-    /// With the refusal lifted (B2c), only the deployment's settings expose
-    /// confidential environments. Production sets neither flag, so even an
-    /// administrator is refused there; Dev's activated profile enables it for
-    /// administrators only.
-    #[test]
-    fn a_deployment_without_the_flag_refuses_confidential_even_for_admins() {
-        let production = FeatureFlags::from_settings(None, None).unwrap();
-        assert_eq!(
-            production,
-            FeatureFlags {
-                enabled: false,
-                admin_only: true,
+    /// With the switch on, only a member of an opted-in, active organization
+    /// is served, by user session or by an API key bound to that organization;
+    /// global administration grants nothing by itself.
+    #[tokio::test]
+    #[ignore = "requires checked-in disposable TEST_DATABASE_URL"]
+    async fn only_members_of_an_opted_in_organization_reach_confidential() -> anyhow::Result<()> {
+        use crate::test_database_support::TestDatabase;
+        let database = TestDatabase::create().await?;
+        let result = async {
+            let pool = &database.pool;
+            database.user("confidential-member").await?;
+            database.user("confidential-outsider").await?;
+            database.organization("confidential-in").await?;
+            database.organization("confidential-out").await?;
+            sqlx::query(
+                "INSERT INTO org_members (id,org_id,user_id,role) VALUES \
+                 ('m-in','confidential-in','confidential-member','member'), \
+                 ('m-out','confidential-out','confidential-member','member')",
+            )
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                "UPDATE organizations SET confidential_environments_enabled=true \
+                 WHERE id='confidential-in'",
+            )
+            .execute(pool)
+            .await?;
+            let on = FeatureFlags { enabled: true };
+            let caller = |user_id: &str, org: &str, is_admin: bool, via_api_key: bool| AuthUser {
+                user_id: user_id.into(),
+                org_id: Some(org.into()),
+                is_admin,
+                via_api_key,
+            };
+            let code = |result: AppResult<()>| match result {
+                Ok(()) => "ok",
+                Err(AppError::Coded { code, .. }) => code,
+                Err(_) => "other",
+            };
+            let cases = [
+                // A member, by session or by an API key for this organization.
+                (
+                    caller("confidential-member", "confidential-in", false, false),
+                    "confidential-in",
+                    "ok",
+                ),
+                (
+                    caller("confidential-member", "confidential-in", false, true),
+                    "confidential-in",
+                    "ok",
+                ),
+                // The same member's organization that has not opted in.
+                (
+                    caller("confidential-member", "confidential-out", false, false),
+                    "confidential-out",
+                    "CONFIDENTIAL_NOT_ENABLED",
+                ),
+                // A non-member, even a global administrator.
+                (
+                    caller("confidential-outsider", "confidential-in", true, false),
+                    "confidential-in",
+                    "CONFIDENTIAL_MEMBERSHIP_REQUIRED",
+                ),
+                // An API key bound to another organization.
+                (
+                    caller("confidential-member", "confidential-out", false, true),
+                    "confidential-in",
+                    "CONFIDENTIAL_MEMBERSHIP_REQUIRED",
+                ),
+            ];
+            for (user, org, want) in cases {
+                let got =
+                    code(require_confidential_access(pool, on, &user, org, "confidential").await);
+                anyhow::ensure!(got == want, "{user:?} in {org}: {got}, want {want}");
             }
-        );
-        for user in [user(true, false), user(false, false)] {
-            assert!(require_interactive_access(production, &user, "confidential").is_err());
-            assert!(require_interactive_access(production, &user, "standard").is_ok());
+            // An organization being deleted serves no one.
+            sqlx::query(
+                "UPDATE organizations SET deletion_state='deleting', deletion_generation=1, \
+                 deletion_operation_id='op', deletion_workflow_id='wf', \
+                 deletion_requested_at=now(), deletion_phase='start' WHERE id='confidential-in'",
+            )
+            .execute(pool)
+            .await?;
+            let member = caller("confidential-member", "confidential-in", false, false);
+            let got = code(
+                require_confidential_access(pool, on, &member, "confidential-in", "confidential")
+                    .await,
+            );
+            anyhow::ensure!(got == "CONFIDENTIAL_MEMBERSHIP_REQUIRED", "{got}");
+            Ok(())
         }
-        let dev = FeatureFlags::from_settings(Some("true"), Some("true")).unwrap();
-        assert!(require_interactive_access(dev, &user(true, false), "confidential").is_ok());
-        assert!(require_interactive_access(dev, &user(false, false), "confidential").is_err());
-        assert!(FeatureFlags::from_settings(Some("yes"), None).is_err());
+        .await;
+        database.finish(result).await
     }
 
     #[tokio::test]

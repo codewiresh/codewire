@@ -44,7 +44,6 @@ pub struct Config {
     pub(crate) billing_origin: http::Uri,
     pub(crate) docs_root: PathBuf,
     pub(crate) confidential_storage_enabled: bool,
-    pub(crate) confidential_admin_only: bool,
     pub(crate) turnstile_site_key: String,
     /// Public GitHub App identifiers. The client secret is held solely by
     /// credential-service, never the dashboard or browser.
@@ -91,7 +90,6 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("apps/docs/zola/public"));
         let confidential_storage_enabled =
             parse_bool_env("SANDBOX_CONFIDENTIAL_STORAGE_ENABLED", false)?;
-        let confidential_admin_only = parse_bool_env("SANDBOX_CONFIDENTIAL_ADMIN_ONLY", true)?;
         let turnstile_site_key = env::var("TURNSTILE_SITE_KEY")
             .unwrap_or_default()
             .trim()
@@ -118,7 +116,6 @@ impl Config {
             billing_origin,
             docs_root,
             confidential_storage_enabled,
-            confidential_admin_only,
             turnstile_site_key,
             github_app_slug,
             github_app_client_id,

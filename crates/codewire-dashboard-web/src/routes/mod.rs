@@ -156,6 +156,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(admin::update_setting),
         )
         .route(
+            "/admin/billing/_actions/confidential-organizations",
+            post(admin::set_confidential_organization),
+        )
+        .route(
             "/admin/billing/_actions/migrations/preview",
             post(admin::preview_migration),
         )

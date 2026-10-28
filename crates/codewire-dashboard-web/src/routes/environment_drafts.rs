@@ -151,8 +151,7 @@ pub(super) async fn restore(
             Err(_) => return unavailable(StatusCode::SERVICE_UNAVAILABLE),
         };
     super::environments::hydrate_options(&mut fields, options);
-    let confidential_allowed =
-        state.confidential_storage_enabled && (!state.confidential_admin_only || identity.is_admin);
+    let confidential_allowed = state.confidential_storage_enabled;
     fields.show_confidential_controls = confidential_allowed;
     fields.confidential_available &= confidential_allowed;
     fields.draft_actor = identity.id;
@@ -426,7 +425,6 @@ mod tests {
             billing_origin: upstream.parse().unwrap(),
             docs_root: std::path::PathBuf::new(),
             confidential_storage_enabled: false,
-            confidential_admin_only: true,
             turnstile_site_key: String::new(),
             github_app_slug: String::new(),
             github_app_client_id: String::new(),

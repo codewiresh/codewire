@@ -179,10 +179,7 @@ fn resume(m: &ManagedMutation, predecessor: &str, generation: u64) -> ManagedMut
     .expect("closed synthetic resume")
 }
 fn flags() -> FeatureFlags {
-    FeatureFlags {
-        enabled: true,
-        admin_only: true,
-    }
+    FeatureFlags { enabled: true }
 }
 async fn read_facts(pool: &PgPool) -> Result<CapturedBindingFacts> {
     Ok(CapturedBindingFacts::from(

@@ -9,16 +9,20 @@ use std::sync::Arc;
 use buffa_types::{Struct, Timestamp};
 use codewire_admin_proto::codewire::admin::v1::{
     BillingCatalogService, CatalogPlan as ProtoCatalogPlan, CatalogPrice as ProtoCatalogPrice,
-    CatalogSetting as ProtoCatalogSetting, CreatePlanRequest, CreatePlanResponse,
-    CreatePriceRequest, CreatePriceResponse, GetCatalogRequest, GetCatalogResponse,
-    ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse,
-    MigrationRun as ProtoMigrationRun, MigrationSample as ProtoMigrationSample,
-    PlanSpec as ProtoPlanSpec, PreviewSubscriptionMigrationRequest,
-    PreviewSubscriptionMigrationResponse, RunSubscriptionMigrationRequest,
-    RunSubscriptionMigrationResponse, SetOrganizationBillingExemptionRequest,
-    SetOrganizationBillingExemptionResponse, SetPlanArchivedRequest, SetPlanArchivedResponse,
-    SetPriceArchivedRequest, SetPriceArchivedResponse, UpdatePlanRequest, UpdatePlanResponse,
-    UpdatePriceRequest, UpdatePriceResponse, UpdateSettingRequest, UpdateSettingResponse,
+    CatalogSetting as ProtoCatalogSetting, ConfidentialOrganization, CreatePlanRequest,
+    CreatePlanResponse, CreatePriceRequest, CreatePriceResponse, GetCatalogRequest,
+    GetCatalogResponse, ListConfidentialOrganizationsRequest,
+    ListConfidentialOrganizationsResponse, ListSubscriptionMigrationsRequest,
+    ListSubscriptionMigrationsResponse, MigrationRun as ProtoMigrationRun,
+    MigrationSample as ProtoMigrationSample, PlanSpec as ProtoPlanSpec,
+    PreviewSubscriptionMigrationRequest, PreviewSubscriptionMigrationResponse,
+    RunSubscriptionMigrationRequest, RunSubscriptionMigrationResponse,
+    SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse,
+    SetOrganizationConfidentialEnvironmentsRequest,
+    SetOrganizationConfidentialEnvironmentsResponse, SetPlanArchivedRequest,
+    SetPlanArchivedResponse, SetPriceArchivedRequest, SetPriceArchivedResponse, UpdatePlanRequest,
+    UpdatePlanResponse, UpdatePriceRequest, UpdatePriceResponse, UpdateSettingRequest,
+    UpdateSettingResponse,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
@@ -31,7 +35,7 @@ use crate::catalog_admin::{
 };
 use crate::routes::BillingState;
 
-/// Registers all eleven BillingCatalogService RPCs on their generated Connect
+/// Registers all thirteen BillingCatalogService RPCs on their generated Connect
 /// routes. The billing binary mounts this router behind the global-admin auth
 /// layer.
 pub fn router(state: BillingState) -> connectrpc::Router {
@@ -374,6 +378,106 @@ impl BillingCatalogService for BillingCatalogConnectService {
         connectrpc::Response::ok(SetOrganizationBillingExemptionResponse {
             organization_id,
             billing_exempt: request.billing_exempt,
+            ..Default::default()
+        })
+    }
+
+    async fn list_confidential_organizations(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, ListConfidentialOrganizationsRequest>,
+    ) -> ServiceResult<ListConfidentialOrganizationsResponse> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            r#"SELECT id, slug, name FROM organizations
+                WHERE confidential_environments_enabled
+                ORDER BY slug"#,
+        )
+        .fetch_all(&self.state.pool)
+        .await
+        .map_err(|_| {
+            rpc_app_error(
+                &AppError::InternalMsg("failed to list confidential organizations".into()),
+                &ctx,
+            )
+        })?;
+        connectrpc::Response::ok(ListConfidentialOrganizationsResponse {
+            organizations: rows
+                .into_iter()
+                .map(|(organization_id, slug, name)| ConfidentialOrganization {
+                    organization_id,
+                    slug,
+                    name,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    /// Opt one organization in to or out of confidential environments. The
+    /// change and its audit event commit together.
+    async fn set_organization_confidential_environments(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetOrganizationConfidentialEnvironmentsRequest>,
+    ) -> ServiceResult<SetOrganizationConfidentialEnvironmentsResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let slug = request.organization_slug.trim();
+        validate_required(&[(slug, "/organization_slug")])
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let failed =
+            |message: &'static str| rpc_app_error(&AppError::InternalMsg(message.into()), &ctx);
+
+        let mut tx = self
+            .state
+            .pool
+            .begin()
+            .await
+            .map_err(|_| failed("failed to start the confidential opt-in update"))?;
+        let updated: Option<(String, String, String)> = sqlx::query_as(
+            r#"UPDATE organizations
+                  SET confidential_environments_enabled = $2, updated_at = NOW()
+                WHERE slug = $1
+              RETURNING id, slug, name"#,
+        )
+        .bind(slug)
+        .bind(request.enabled)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| failed("failed to update the confidential opt-in"))?;
+        let (organization_id, slug, name) = updated.ok_or_else(|| {
+            rpc_app_error(&AppError::NotFound("organization not found".into()), &ctx)
+        })?;
+        sqlx::query(
+            r#"INSERT INTO audit_logs
+                   (id, timestamp, action, user_id, metadata, severity)
+               VALUES
+                   (gen_random_uuid()::text, NOW(),
+                    'admin.organization.confidential_environments', $1,
+                    jsonb_build_object('organization_id', $2,
+                                       'confidential_environments_enabled', $3),
+                    'warn')"#,
+        )
+        .bind(&actor.user_id)
+        .bind(&organization_id)
+        .bind(request.enabled)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| failed("failed to audit the confidential opt-in update"))?;
+        tx.commit()
+            .await
+            .map_err(|_| failed("failed to commit the confidential opt-in update"))?;
+
+        connectrpc::Response::ok(SetOrganizationConfidentialEnvironmentsResponse {
+            organization: ConfidentialOrganization {
+                organization_id,
+                slug,
+                name,
+                ..Default::default()
+            }
+            .into(),
+            enabled: request.enabled,
             ..Default::default()
         })
     }

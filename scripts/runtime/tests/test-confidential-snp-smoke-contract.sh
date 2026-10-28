@@ -91,7 +91,15 @@ rg -F 'if [[ "$RUN_COCO_PRODUCT" == "1" ]]; then' "$SMOKE" >/dev/null
 rg -F '[[ "$image" =~ ^"$CODEWIRE_IMAGE_REGISTRY"/codewire/daemon@sha256:[0-9a-f]{64}$ ]]' "$SMOKE" >/dev/null
 rg -F '[[ "$DAEMON_IMAGE" =~ ^"$registry"/codewire/daemon@sha256:[0-9a-f]{64}$ ]]' "$RESOLVER" >/dev/null
 rg -F 'restore the commodity Dev profile in codewire/deploy' "$SMOKE" >/dev/null
-rg -F -- '--admin-oidc "${smoke_args[@]}"' "$SMOKE" >/dev/null
+rg -F '"$ROOT/scripts/runtime/dev/with-dev-smoke-auth.sh" -- \' "$SMOKE" >/dev/null
+if rg -F -- '--admin-oidc' "$SMOKE"; then
+  printf 'the confidential product smoke runs as the smoke identity, not an admin login\n' >&2
+  exit 1
+fi
+if rg -F 'SANDBOX_CONFIDENTIAL_ADMIN_ONLY' "$SMOKE"; then
+  printf 'the confidential smoke still asserts the removed admin-only setting\n' >&2
+  exit 1
+fi
 rg -F 'CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' "$SMOKE" >/dev/null
 rg -F 'EXPECTED_CODEWIRE_DEV_SERVER_URL="$EXPECTED_CODEWIRE_DEV_SERVER_URL"' "$SMOKE" >/dev/null
 rg -F 'CODEWIRE_SERVER_NAMESPACE="$CODEWIRE_SERVER_NAMESPACE"' "$SMOKE" >/dev/null
@@ -109,10 +117,6 @@ if rg -F 'smoke_args=(--image ' "$SMOKE"; then
   exit 1
 fi
 rg -F 'SMOKE_ISOLATION_TIER=confidential' "$SMOKE" >/dev/null
-if rg -F 'with-dev-smoke-auth.sh' "$SMOKE"; then
-  printf 'admin-only confidential smoke must not use the API-key auth wrapper\n' >&2
-  exit 1
-fi
 rg -F -- '--daemon-image' "$RESOLVER" >/dev/null
 rg -F -- '--source-sha' "$RESOLVER" >/dev/null
 
@@ -129,10 +133,20 @@ set -euo pipefail
   printf 'direct_udp_ip=%s\n' "${EXPECTED_TAILNET_DIRECT_UDP_LB_IP:-}"
   printf 'transport_zone=%s\n' "${EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE:-}"
   printf 'artifact_dir=%s\n' "$(basename "${SMOKE_ARTIFACT_DIR:-}")"
+  printf 'wrapped=%s\n' "${FORWARD_WRAPPED:-}"
   printf 'args=%s\n' "$*"
 } >"${FORWARD_CAPTURE:?}"
 EOF
 chmod 0755 "$forward_dir/root/scripts/runtime/dev/smoke-dev-commodity.sh"
+# The smoke identity wrapper: records that it ran, then execs its command.
+cat >"$forward_dir/root/scripts/runtime/dev/with-dev-smoke-auth.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "--" ]] && shift
+export FORWARD_WRAPPED=smoke-identity
+exec "$@"
+EOF
+chmod 0755 "$forward_dir/root/scripts/runtime/dev/with-dev-smoke-auth.sh"
 mkdir -p "$forward_dir/evidence"
 (
   export EVIDENCE_DIR="$forward_dir/evidence"
@@ -165,7 +179,8 @@ stun_port=3478
 direct_udp_ip=192.0.2.20
 transport_zone=contract-zone
 artifact_dir=product
-args=--admin-oidc --existing-env 11111111-2222-4333-8444-555555555555 --keep
+wrapped=smoke-identity
+args=--existing-env 11111111-2222-4333-8444-555555555555 --keep
 EOF
 cmp "$forward_dir/expected" "$forward_dir/capture"
 rm -rf "$forward_dir"

@@ -34,8 +34,13 @@ async fn environment_quota_defaults_upgrade_seeds_todays_constants_in_one_row() 
         let previous = fingerprint(&pool).await?;
         anyhow::ensure!(previous != ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
 
-        ensure_schema(&db.url).await?;
-        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
+        // Through 0004 only, so its rollback restores the 0003 shape; later
+        // migrations prove their own upgrade and rollback.
+        let through_0004 = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(MIGRATOR.iter().take(4).cloned().collect()),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        through_0004.run(&pool).await?;
         let seeded: Vec<(i32, i32, i32, i32)> = sqlx::query_as(
             "SELECT max_concurrent_environments, max_concurrent_sandbox, \
              max_cpu_millicores, max_memory_mb FROM environment_quota_defaults",
