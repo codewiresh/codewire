@@ -59,7 +59,7 @@ fn environment(cpu: i32, memory: i32, disk: i32) -> EnvironmentRow {
 }
 
 fn opts(cfg: &SandboxWorkerCfg, env: &EnvironmentRow, image: &str) -> TemplateOpts {
-    environment_template_opts(cfg, image, "workspace", env, 7, "synthetic-daemon").unwrap()
+    environment_template_opts(cfg, image, "workspace", env, 7).unwrap()
 }
 
 fn candidate(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> Result<WarmPoolObjects, ColdReason> {

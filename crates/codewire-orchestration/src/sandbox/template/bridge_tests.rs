@@ -26,12 +26,9 @@ fn bridge_opts() -> TemplateOpts {
         environment_id: ENV.into(),
         organization_id: "org-golden-bridge".into(),
         operation_generation: 7,
-        daemon_auth_token: "daemon-token-golden-bridge".into(),
         server_namespace: "dev".into(),
         stun_host: "stun.codewire-dev.sh".into(),
-        workspace_identity: WorkspaceIdentity::Binding {
-            binding_url: "https://codewire-orchestration.dev.svc.cluster.local:8087".into(),
-        },
+        workspace_binding_url: "https://codewire-orchestration.dev.svc.cluster.local:8087".into(),
         credential_runtime: Some(CredentialRuntimeTemplateConfig::synthetic(NAMESPACE)),
         ..Default::default()
     }

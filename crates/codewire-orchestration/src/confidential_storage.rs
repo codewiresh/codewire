@@ -450,6 +450,23 @@ impl ConfidentialStorageManager {
         Ok(init_data_sha256)
     }
 
+    /// Withdraw the environment's init-data authorization once its Pod is
+    /// gone (Program #2238 B2c). A stopped confidential environment then
+    /// authorizes no guest, so no VM booted from its last init-data receives
+    /// its key until the next start authorizes again. Idempotent.
+    pub async fn revoke_init_data(&self, environment_id: &str) -> anyhow::Result<()> {
+        validate_environment_id(environment_id)?;
+        if let Err(error) = self
+            .kbs
+            .revoke_init_data_authorization(environment_id)
+            .await
+        {
+            self.record_provider_error(environment_id, &error).await;
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     /// Delete both key copies after the caller has proved that Sandbox, PVC
     /// and PV resources are absent. Every provider operation
     /// is idempotent, so Temporal retries resume safely.
@@ -1990,6 +2007,33 @@ mod tests {
                 .is_err()
         );
         assert_eq!(kbs.authorizations.lock().await.len(), count);
+    }
+
+    #[tokio::test]
+    async fn a_stop_withdraws_the_init_data_authorization() {
+        let MemoryHarness {
+            manager,
+            kbs,
+            events,
+            ..
+        } = manager(false);
+        let manifest_uri = manager.ensure_ready(ENVIRONMENT_ID, 20).await.unwrap();
+        manager
+            .authorize_init_data(ENVIRONMENT_ID, &manifest_uri, b"init-data\n")
+            .await
+            .unwrap();
+        events.lock().await.clear();
+
+        manager.revoke_init_data(ENVIRONMENT_ID).await.unwrap();
+        assert_eq!(events.lock().await.as_slice(), ["kbs.authorization-revoke"]);
+        assert!(kbs.authorizations.lock().await.is_empty());
+        // Idempotent, and only for a canonical environment UUID.
+        manager.revoke_init_data(ENVIRONMENT_ID).await.unwrap();
+        assert!(manager.revoke_init_data("env-1").await.is_err());
+        assert_eq!(
+            events.lock().await.as_slice(),
+            ["kbs.authorization-revoke", "kbs.authorization-revoke"]
+        );
     }
 
     #[tokio::test]

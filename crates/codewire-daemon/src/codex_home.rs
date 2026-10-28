@@ -657,9 +657,9 @@ mod tests {
         assert_eq!(other_entries(&home), ["history.jsonl", "sessions"]);
     }
 
-    /// The `SANDBOX_WORKSPACE_IDENTITY_MODE=environment-token` rollback
-    /// renders the selection into the container; a bound daemon gets it from
-    /// its binding. Both serve the same clients, so both prepare the same home
+    /// A daemon started with an environment token (the CI harnesses) reads
+    /// the selection from its environment; a bound daemon gets it from its
+    /// binding. Both serve the same clients, so both prepare the same home
     /// from the same writer, and both remove Codewire's file once Codex is
     /// cleared.
     #[test]

@@ -5,7 +5,7 @@ use serde_json::{Map, Value, json};
 use super::credentials;
 use super::encoding::kata_policy_init_data_annotation;
 use super::naming::{workspace_daemon_service_name, workspace_selector, workspace_template_labels};
-use super::network::{identity_free_workspace_egress_rules, workspace_egress_rules};
+use super::network::identity_free_workspace_egress_rules;
 use super::runtime_policy::{
     DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, RUNTIME_PROFILE_COMMODITY,
     RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec, dind_image, dind_memory_limit_gib,
@@ -21,21 +21,17 @@ use codewire_daemon_proto::{
 use crate::worker::workspace_binding::WORKSPACE_BINDING_VOLUME;
 
 use super::{
-    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DAEMON_AUTH_TOKEN_ENV, DIND_SOCKET_PATH,
-    EXTENSIONS_API_VERSION, HOME_ROOT, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
-    KATA_CONFIDENTIAL_VOLUME_ANNOTATION, KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
-    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, SANDBOX_SERVICE_ACCOUNT, TemplateOpts,
-    WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR, WORKSPACE_DAEMON_PORT,
-    WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI, WORKSPACE_READY_TIMEOUT,
+    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DIND_SOCKET_PATH, EXTENSIONS_API_VERSION, HOME_ROOT,
+    KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
+    KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
+    SANDBOX_SERVICE_ACCOUNT, TemplateOpts, WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR,
+    WORKSPACE_DAEMON_PORT, WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI,
+    WORKSPACE_READY_TIMEOUT,
 };
 
 /// Copies the daemon from the support image into `codewire-bin` where the
 /// daemon cannot be mounted from the image itself.
 pub(crate) const DAEMON_INIT_CONTAINER: &str = "codewire-daemon-init";
-/// The init container that once copied Codex's ConfigMap into a memory home
-/// for an image-volume Pod. It is no longer rendered: the daemon writes
-/// `~/.codex` itself. The name stays so a start removes it from older objects.
-pub(crate) const CLIENT_BOOTSTRAP_CONTAINER: &str = "codewire-client-bootstrap";
 /// The volume that holds `/codewire/bin/cw` in the workspace container.
 pub(crate) const DAEMON_VOLUME: &str = "codewire-bin";
 /// The directory of the support image that holds `cw`.
@@ -61,13 +57,9 @@ pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
     if let Some(config) = &opts.credential_runtime {
         config.assert_namespace(namespace);
     }
-    // An identity-free template carries no environment label (design §13);
-    // its environment-owned shadow pool names it.
-    let labels = if opts.identity_free() {
-        json!({})
-    } else {
-        json!({ super::LABEL_ENV_ID: opts.environment_id })
-    };
+    // A workspace template carries no environment label (design §13); its
+    // environment-owned shadow pool names it.
+    let labels = json!({});
     json!({
         "apiVersion": EXTENSIONS_API_VERSION,
         "kind": "SandboxTemplate",
@@ -102,7 +94,6 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
                 WAIT_DAEMON_CMD,
                 HOSTED_DAEMON_CMD,
                 &entrypoint,
-                !opts.identity_free(),
             )
             .into(),
         ]
@@ -191,15 +182,9 @@ pub(super) fn custom_workspace_supervisor_command(
     wait_daemon: &str,
     daemon_command: &str,
     entrypoint: &str,
-    unset_environment_token: bool,
 ) -> String {
-    // A legacy workload starts without the rendered environment token; an
-    // identity-free container has none to remove.
-    let workload = if unset_environment_token {
-        format!("(unset {DAEMON_AUTH_TOKEN_ENV}; exec {entrypoint})")
-    } else {
-        format!("(exec {entrypoint})")
-    };
+    // The container carries no environment token to remove from the workload.
+    let workload = format!("(exec {entrypoint})");
     // Traps first, as for the managed supervisor; a restarted daemon clears
     // its old pid before the fork so a trap in between takes it from `$!`.
     format!(
@@ -347,12 +332,10 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
         );
     }
 
-    let egress = if opts.identity_free() {
-        identity_free_workspace_egress_rules(opts)
-    } else {
-        workspace_egress_rules(opts)
-    };
-    spec.insert("networkPolicy".into(), json!({ "egress": egress }));
+    spec.insert(
+        "networkPolicy".into(),
+        json!({ "egress": identity_free_workspace_egress_rules(opts) }),
+    );
 
     Value::Object(spec)
 }
@@ -376,10 +359,14 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     } else {
         json!({ "name": DAEMON_VOLUME, "emptyDir": {} })
     };
-    let mut volumes = vec![
-        daemon_volume,
-        json!({ "name": "codewire-run", "emptyDir": {} }),
-    ];
+    // A confidential daemon keeps its credential and SSH host key here: guest
+    // memory, whatever emptyDir backing the runtime would choose (B2c).
+    let run_volume = if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        json!({ "name": "codewire-run", "emptyDir": { "medium": "Memory" } })
+    } else {
+        json!({ "name": "codewire-run", "emptyDir": {} })
+    };
+    let mut volumes = vec![daemon_volume, run_volume];
     if opts.disk_gib == 0 {
         volumes.insert(0, json!({ "name": "workspace", "emptyDir": {} }));
     }
@@ -389,27 +376,24 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             .as_array_mut()
             .expect("workspace mounts")
             .extend(credentials::workspace_mounts());
-        // An identity-free daemon expands its managed clients into child
+        // The bound daemon expands its managed clients into child
         // environments from the bind response; nothing is rendered here.
-        if !opts.identity_free() {
-            ws["env"]
-                .as_array_mut()
-                .expect("workspace env")
-                .extend(credentials::workspace_environment(opts));
-        }
     }
-    if opts.identity_free() {
-        // Workspace container only; never DinD or an init container.
-        volumes.push(workspace_binding_token_volume());
-        ws["volumeMounts"]
-            .as_array_mut()
-            .expect("workspace mounts")
-            .push(json!({
-                "name": WORKSPACE_BINDING_VOLUME,
-                "mountPath": WORKSPACE_BINDING_TOKEN_MOUNT_PATH,
-                "readOnly": true,
-            }));
-        // The public roots that verify the binding listener's TLS identity.
+    // Workspace container only; never DinD or an init container.
+    volumes.push(workspace_binding_token_volume());
+    ws["volumeMounts"]
+        .as_array_mut()
+        .expect("workspace mounts")
+        .push(json!({
+            "name": WORKSPACE_BINDING_VOLUME,
+            "mountPath": WORKSPACE_BINDING_TOKEN_MOUNT_PATH,
+            "readOnly": true,
+        }));
+    // The public roots that verify the binding listener's TLS identity. A
+    // confidential workspace mounts none: the host supplies every file there,
+    // so its daemon trusts only its measured roots (B2c).
+    let confidential = runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL;
+    if !confidential {
         volumes.push(workspace_binding_roots_volume());
         ws["volumeMounts"]
             .as_array_mut()
@@ -419,20 +403,21 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
                 "mountPath": WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH,
                 "readOnly": true,
             }));
-        // A local cluster's coordinator is not WebPKI-signed: only there does
-        // orchestration mount the public bundle the daemon trusts beside the
-        // WebPKI roots for its coordinator. Dev and Production never do.
-        if opts.coordinator_extra_roots {
-            volumes.push(coordinator_extra_roots_volume());
-            ws["volumeMounts"]
-                .as_array_mut()
-                .expect("workspace mounts")
-                .push(json!({
-                    "name": COORDINATOR_EXTRA_ROOTS_VOLUME,
-                    "mountPath": codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_MOUNT_PATH,
-                    "readOnly": true,
-                }));
-        }
+    }
+    // A local cluster's coordinator is not WebPKI-signed: only there does
+    // orchestration mount the public bundle the daemon trusts beside the
+    // WebPKI roots for its coordinator. Dev and Production never do, and a
+    // confidential daemon never trusts one.
+    if opts.coordinator_extra_roots && !confidential {
+        volumes.push(coordinator_extra_roots_volume());
+        ws["volumeMounts"]
+            .as_array_mut()
+            .expect("workspace mounts")
+            .push(json!({
+                "name": COORDINATOR_EXTRA_ROOTS_VOLUME,
+                "mountPath": codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_MOUNT_PATH,
+                "readOnly": true,
+            }));
     }
 
     let mut spec = Map::new();
@@ -468,9 +453,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     // bootstrap that exits keeps the Pod unready. A `docker` command run
     // before dockerd listens waits for its socket (owner, 2026-10-27; setup's
     // `DOCKER_SOCKET_WAIT`, the workspace image's `docker`). Program #2238.
-    if opts.identity_free() {
-        apply_daemon_ready_probes(ws, &runtime_spec);
-    }
+    apply_daemon_ready_probes(ws, &runtime_spec);
     let mut containers: Vec<Value> = Vec::new();
     if runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT
         || runtime_spec.docker_mode == DOCKER_MODE_GUEST_DIND
@@ -522,7 +505,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     }
 
     // The daemon in the workspace container writes Codex's `~/.codex` on the
-    // persistent home itself, in both identity modes, so no init container
+    // persistent home itself, so no init container
     // copies client configuration. On confidential, no init container can
     // reach that protected disk at all.
     if !daemon_image_volume {
@@ -547,15 +530,14 @@ fn configure_confidential_workspace_device(container: &mut Value) {
     }]);
 }
 
-/// An identity-free workspace is Ready once its daemon process is up,
-/// signalled by the marker it writes before it binds; Pod readiness never
-/// depends on the binding (design §8, §10) or on Docker. The kubelet runs
-/// readiness only after the startup probe succeeds, and then at once, so the
-/// 1-second startup probe bounds how late a start notices the marker while
-/// the steady-state readiness probe keeps its 2-second period. The startup
-/// budget is the tier's ready timeout: create or start has already failed
-/// before the kubelet would stop a slow start. An environment-token workspace
-/// has no probe, with or without Docker.
+/// A workspace is Ready once its daemon process is up, signalled by the
+/// marker it writes before it binds; Pod readiness never depends on the
+/// binding (design §8, §10) or on Docker. The kubelet runs readiness only
+/// after the startup probe succeeds, and then at once, so the 1-second startup
+/// probe bounds how late a start notices the marker while the steady-state
+/// readiness probe keeps its 2-second period. The startup budget is the tier's
+/// ready timeout: create or start has already failed before the kubelet would
+/// stop a slow start.
 fn apply_daemon_ready_probes(ws: &mut Value, runtime_spec: &RuntimeProfileSpec) {
     let ready_timeout = ready_timeout(runtime_spec);
     ws["startupProbe"] = exec_probe(DAEMON_READY_PROBE, 1, ready_timeout.as_secs());
@@ -698,25 +680,6 @@ fn daemon_init_container(support_image: &str, profile: &str) -> Value {
         ],
         "volumeMounts": mounts,
         "resources": bootstrap_resources(),
-    })
-}
-
-/// Only machine-owned stock-client fields, without rendering confidential
-/// init-data or resolving public trust. Used by suspended recipe refresh and
-/// exact immutable Pod verification; it contains no provider material.
-///
-/// `init` is the daemon-copy init of a Pod whose `codewire-bin` is an
-/// emptyDir. `clientInit` is the client bootstrap of an image-volume Pod. No
-/// client volume, mount or init copy is rendered any more: the daemon writes
-/// Codex's `~/.codex` itself. Reconciling against this removes the ones an
-/// older object still carries.
-pub(crate) fn render_workspace_client_bootstrap(opts: &TemplateOpts) -> Value {
-    json!({
-        "environment": credentials::workspace_environment(opts),
-        "volumes": [],
-        "volumeMounts": [],
-        "init": daemon_init_container("", &opts.runtime_profile_spec().profile),
-        "clientInit": null,
     })
 }
 
@@ -871,52 +834,38 @@ fn dind_container(
 }
 
 fn build_workspace_env(opts: &TemplateOpts) -> Vec<Value> {
-    let mut environment = workspace_identity_env(opts);
+    // Design §13: no daemon token, environment ID, generation, projection
+    // digest, managed clients or derived client variables. The daemon gets all
+    // of them from its binding.
+    let mut environment = vec![
+        json!({ "name": "CODEWIRE_WORKSPACE_SHIM_ADDR", "value": WORKSPACE_DAEMON_LISTEN_ADDR }),
+        json!({ "name": "HOME", "value": HOME_ROOT }),
+        json!({ "name": "USER", "value": "codewire" }),
+        json!({ "name": WORKSPACE_BINDING_URL_ENV, "value": opts.workspace_binding_url }),
+        json!({
+            "name": WORKSPACE_POD_UID_ENV,
+            "valueFrom": { "fieldRef": { "fieldPath": "metadata.uid" } },
+        }),
+    ];
+    // A confidential workspace's measured anchors (B2c), pinned exactly by
+    // its measured Kata policy. The binding URL above is one of them.
+    if opts.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        let measured = opts
+            .measured_workspace_environment()
+            .expect("a confidential workspace renders only with measured binding roots");
+        environment.extend(
+            measured
+                .into_iter()
+                .filter(|(name, _)| *name != WORKSPACE_BINDING_URL_ENV)
+                .map(|(name, value)| json!({ "name": name, "value": value })),
+        );
+    }
     // Kind's test deployment only; production renders no such variable.
     if let Some(seconds) = opts.codex_login_check_period_seconds {
         environment.push(json!({
             "name": codewire_daemon::CODEX_LOGIN_CHECK_PERIOD_ENV,
             "value": seconds.to_string(),
         }));
-    }
-    environment
-}
-
-fn workspace_identity_env(opts: &TemplateOpts) -> Vec<Value> {
-    if let Some(binding_url) = opts.workspace_binding_url() {
-        // Design §13: no daemon token, environment ID, generation, projection
-        // digest, managed clients or derived client variables. The daemon
-        // gets all of them from its binding.
-        return vec![
-            json!({ "name": "CODEWIRE_WORKSPACE_SHIM_ADDR", "value": WORKSPACE_DAEMON_LISTEN_ADDR }),
-            json!({ "name": "HOME", "value": HOME_ROOT }),
-            json!({ "name": "USER", "value": "codewire" }),
-            json!({ "name": WORKSPACE_BINDING_URL_ENV, "value": binding_url }),
-            json!({
-                "name": WORKSPACE_POD_UID_ENV,
-                "valueFrom": { "fieldRef": { "fieldPath": "metadata.uid" } },
-            }),
-        ];
-    }
-    codewire_daemon_proto::DaemonAuthToken::new(opts.daemon_auth_token.clone())
-        .expect("hosted workspace requires a canonical daemon auth token");
-    let mut environment = vec![
-        json!({ "name": "CODEWIRE_WORKSPACE_SHIM_ADDR", "value": WORKSPACE_DAEMON_LISTEN_ADDR }),
-        json!({ "name": "HOME", "value": HOME_ROOT }),
-        json!({ "name": "USER", "value": "codewire" }),
-        json!({ "name": DAEMON_AUTH_TOKEN_ENV, "value": opts.daemon_auth_token }),
-    ];
-    if let Some(projection) = credentials::projection_environment(opts) {
-        assert!(
-            opts.operation_generation > 0,
-            "projection requires operation identity"
-        );
-        environment.extend([
-            json!({"name":"CODEWIRE_ENVIRONMENT_ID","value":opts.environment_id}),
-            json!({"name":"CODEWIRE_ENVIRONMENT_OPERATION_GENERATION","value":opts.operation_generation.to_string()}),
-            json!({"name":credentials::MANAGED_CREDENTIAL_CLIENTS_ENV,"value":opts.managed_credential_clients.encode()}),
-            projection,
-        ]);
     }
     environment
 }

@@ -44,8 +44,8 @@ pub use config::{
     CODEX_LOGIN_CHECK_PERIOD_MIN, Config, ConfigError, CredentialBridgeConfig,
     CredentialBridgeTransport, DEFAULT_HOME_ROOT, DEFAULT_LISTEN_ADDR, DEFAULT_WORKSPACE_ROOT,
     HOME_ROOT_ENV, HostConfig, HostedDaemonMode, InvalidWorkspaceBinding, LaunchProjectionConfig,
-    NativeLaunchProjectionConfig, SHIM_ADDR_ENV, WORKSPACE_ROOT_ENV, WorkspaceBinding,
-    WorkspaceBindingConfig, codex_login_check_period,
+    MeasuredAnchors, NativeLaunchProjectionConfig, SHIM_ADDR_ENV, WORKSPACE_ROOT_ENV,
+    WorkspaceBinding, WorkspaceBindingConfig, codex_login_check_period,
 };
 pub use durable_session::NeverRestarts;
 pub use server::serve_grpc_with_incoming;

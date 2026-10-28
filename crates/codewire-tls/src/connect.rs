@@ -1,8 +1,9 @@
 //! Connect client transport for one exact cluster-local HTTPS origin.
 //!
-//! Every call rereads the origin's purpose-specific mounted public roots and
-//! opens a verified connection with them. There is no plaintext form, and a
-//! request for any other scheme or authority is refused.
+//! Every call opens a verified connection with the origin's purpose-specific
+//! public roots: mounted roots are reread on every call, and fixed roots (a
+//! confidential workspace's measured ones) never change. There is no
+//! plaintext form, and a request for any other scheme or authority is refused.
 //!
 //! The origin's host is looked up as an absolute DNS name (#2701). A Pod
 //! resolves with `ndots:5`, so a cluster name such as
@@ -47,7 +48,22 @@ impl ConnectOriginTransport {
     /// Validates without reading or contacting anything: the origin must be an
     /// exact `https` DNS origin and the roots an absolute file path.
     pub fn for_origin(origin: &str, roots: &Path) -> Result<Self, TlsError> {
-        let endpoint = ClientTlsEndpoint::new(origin.to_owned(), roots.to_path_buf())?;
+        Self::with_endpoint(
+            origin,
+            ClientTlsEndpoint::new(origin.to_owned(), roots.to_path_buf())?,
+        )
+    }
+
+    /// The same origin rules, trusting exactly `pem`: parsed in full now and
+    /// never reread from any file.
+    pub fn for_origin_with_fixed_roots(origin: &str, pem: &[u8]) -> Result<Self, TlsError> {
+        Self::with_endpoint(
+            origin,
+            ClientTlsEndpoint::with_fixed_roots(origin.to_owned(), pem)?,
+        )
+    }
+
+    fn with_endpoint(origin: &str, endpoint: ClientTlsEndpoint) -> Result<Self, TlsError> {
         let authority = origin
             .parse::<http::Uri>()
             .map_err(|_| TlsError::Configuration)?

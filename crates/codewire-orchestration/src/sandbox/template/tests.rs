@@ -10,13 +10,16 @@ mod tests {
     const CONTENT_ADDRESSED_MANIFEST_URI: &str = "kbs:///default/codewire-storage-manifests/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
-    fn environment_template_has_top_level_cleanup_identity() {
+    fn the_environment_shadow_pool_names_its_label_free_template() {
         let opts = TemplateOpts {
             environment_id: "env-test".into(),
             ..commodity_opts()
         };
         let rendered = render_sandbox_template("dev-sandboxes", &opts);
-        assert_eq!(rendered["metadata"]["labels"][LABEL_ENV_ID], "env-test");
+        assert!(rendered["metadata"]["labels"].as_object().unwrap().is_empty());
+        let shadow = render_sandbox_shadow_pool("dev-sandboxes", "shadow", &opts.name, "env-test");
+        assert_eq!(shadow["metadata"]["labels"][LABEL_ENV_ID], "env-test");
+        assert_eq!(shadow["spec"]["sandboxTemplateRef"]["name"], opts.name);
     }
 
     fn decode_gzip_base64(encoded: &str) -> String {
@@ -97,6 +100,31 @@ mod tests {
                 },
             }],
         })
+    }
+
+    /// The OCI process the runtime presents for a rendered container: its
+    /// command, and its literal env entries among the ones the kubelet and
+    /// image add. Downward-API entries carry a per-Pod value.
+    fn runtime_process(pod_spec: &Value, container: &str) -> Value {
+        let container = pod_spec["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate["name"] == container)
+            .unwrap();
+        let mut env = vec![
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned(),
+            "HOSTNAME=workspace-0".to_owned(),
+            "KUBERNETES_SERVICE_HOST=10.43.0.1".to_owned(),
+        ];
+        for entry in container["env"].as_array().into_iter().flatten() {
+            let name = entry["name"].as_str().unwrap();
+            match entry["value"].as_str() {
+                Some(value) => env.push(format!("{name}={value}")),
+                None => env.push(format!("{name}=7e7b20f6-0bd2-4f11-8b16-9c239851eb52")),
+            }
+        }
+        json!({ "Args": container["command"].clone(), "Env": env })
     }
 
     fn kata_cri_sandbox_create_input() -> Value {
@@ -188,6 +216,27 @@ mod tests {
         );
     }
 
+    /// A synthetic, public roots bundle: only its shape matters to rendering.
+    const MEASURED_BINDING_ROOTS: &str =
+        "-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n";
+    const MEASURED_BINDING_URL: &str =
+        "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087";
+
+    /// The environment token a pre-binding rendering carried. No rendering
+    /// carries it any more.
+    const LEGACY_DAEMON_AUTH_TOKEN_ENV: &str = "CODEWIRE_DAEMON_AUTH_TOKEN";
+
+    /// A confidential rendering as orchestration builds it (B2c): bound,
+    /// with measured binding roots.
+    fn measured(opts: TemplateOpts) -> TemplateOpts {
+        TemplateOpts {
+            runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
+            workspace_binding_url: MEASURED_BINDING_URL.into(),
+            measured_binding_roots: MEASURED_BINDING_ROOTS.into(),
+            ..opts
+        }
+    }
+
     fn commodity_opts() -> TemplateOpts {
         TemplateOpts {
             name: "tmpl-golden-commodity".into(),
@@ -197,7 +246,6 @@ mod tests {
             environment_id: "env-golden-commodity".into(),
             organization_id: "org-golden-commodity".into(),
             operation_generation: 7,
-            daemon_auth_token: "daemon-token-golden-commodity".into(),
             api_base_url: "https://codewire-dev.sh".into(),
             server_namespace: "dev".into(),
             derp_host: "derp.codewire-dev.sh".into(),
@@ -244,18 +292,21 @@ mod tests {
     fn credential_runtime_renders_no_codex_object() {
         // Selected Codex renders no ConfigMap, memory home or init copy in any
         // tier or identity mode: the daemon writes `~/.codex` itself.
-        for profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_RUNC] {
+        for profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_RUNC] {
             for identity_free in [false, true] {
                 let mut variant = credential_opts();
                 variant.runtime_profile = profile.into();
                 if identity_free {
-                    variant.workspace_identity = WorkspaceIdentity::Binding {
-                        binding_url: "http://binding.dev.svc.cluster.local:8087".into(),
-                    };
+                    variant.workspace_binding_url = "http://binding.dev.svc.cluster.local:8087".into();
                 }
                 assert_no_legacy_codex(&render_sandbox_template("dev-sandboxes", &variant));
             }
         }
+        // A confidential workspace always binds (B2c).
+        assert_no_legacy_codex(&render_sandbox_template(
+            "dev-sandboxes",
+            &measured(credential_opts()),
+        ));
     }
 
     #[test]
@@ -263,6 +314,9 @@ mod tests {
         for profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL] {
             let mut opts = credential_opts();
             opts.runtime_profile = profile.into();
+            if profile == RUNTIME_PROFILE_CONFIDENTIAL {
+                opts = measured(opts);
+            }
             let template = render_sandbox_template("dev-sandboxes", &opts);
             let spec = &template["spec"]["podTemplate"]["spec"];
             assert!(!spec["hostNetwork"].as_bool().unwrap_or(false));
@@ -289,32 +343,20 @@ mod tests {
             let mut opts = credential_opts();
             opts.runtime_profile = profile.into();
             opts.projection_selection_sha256 = Some([0xab; 32]);
+            if profile == RUNTIME_PROFILE_CONFIDENTIAL {
+                opts = measured(opts);
+            }
             let template = render_sandbox_template("dev-sandboxes", &opts);
             let workspace = &template["spec"]["podTemplate"]["spec"];
-            {
-                let env = &workspace["containers"][0]["env"];
-                for (name, value) in [
-                    (
-                        codewire_daemon::config::HOSTED_PROJECTION_SHA256_ENV,
-                        "ab".repeat(32),
-                    ),
-                    (
-                        codewire_daemon::config::ENVIRONMENT_ID_ENV,
-                        opts.environment_id.clone(),
-                    ),
-                    (
-                        codewire_daemon::config::ENVIRONMENT_GENERATION_ENV,
-                        "7".into(),
-                    ),
-                ] {
-                    let matching: Vec<_> = env
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .filter(|entry| entry["name"] == name)
-                        .collect();
-                    assert_eq!(matching, vec![&json!({"name":name,"value":value})]);
-                }
+            // Every workspace binds: its projection arrives in the bind
+            // response, never as rendered env.
+            let env = workspace["containers"][0]["env"].to_string();
+            for name in [
+                codewire_daemon::config::HOSTED_PROJECTION_SHA256_ENV,
+                codewire_daemon::config::ENVIRONMENT_ID_ENV,
+                codewire_daemon::config::ENVIRONMENT_GENERATION_ENV,
+            ] {
+                assert!(!env.contains(&format!("\"{name}\"")), "{name}");
             }
             assert_eq!(workspace["securityContext"]["runAsUser"], 1000);
             assert_eq!(workspace["securityContext"]["runAsGroup"], 1000);
@@ -347,38 +389,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hosted_projection_generation_and_selection_change_the_bootstrap() {
-        let mut opts = credential_opts();
-        opts.projection_selection_sha256 = Some([0xab; 32]);
-        let rendered = |opts: &TemplateOpts| render_sandbox_template("dev-sandboxes", opts);
-        let original = rendered(&opts);
-        opts.operation_generation += 1;
-        let generation = rendered(&opts);
-        assert_ne!(original, generation);
-        opts.projection_selection_sha256 = Some([0xcd; 32]);
-        let selection = rendered(&opts);
-        assert_ne!(generation, selection);
-        opts.projection_selection_sha256 = None;
-        opts.managed_credential_clients = Default::default();
-        let cleared = rendered(&opts);
-        assert!(
-            !cleared
-                .to_string()
-                .contains(codewire_daemon::config::HOSTED_PROJECTION_SHA256_ENV)
-        );
-    }
 
-    #[test]
-    fn hosted_projection_cannot_render_without_runtime_trust() {
-        let opts = TemplateOpts {
-            projection_selection_sha256: Some([0xab; 32]),
-            ..commodity_opts()
-        };
-        assert!(
-            std::panic::catch_unwind(|| render_sandbox_template("dev-sandboxes", &opts)).is_err()
-        );
-    }
 
     #[test]
     fn credential_mounts_and_identities_are_separate_for_workspace_and_init() {
@@ -428,8 +439,7 @@ mod tests {
         // Codex needs no init container; confidential keeps only the daemon
         // copy, which never reaches the home.
         assert!(workspace.get("initContainers").is_none());
-        let mut confidential = opts.clone();
-        confidential.runtime_profile = RUNTIME_PROFILE_CONFIDENTIAL.into();
+        let confidential = measured(opts.clone());
         let confidential = render_sandbox_template("dev-sandboxes", &confidential);
         let confidential_inits = confidential["spec"]["podTemplate"]["spec"]["initContainers"]
             .as_array()
@@ -460,12 +470,14 @@ mod tests {
                 .any(|mount| mount == &json!({"name":"workspace","mountPath":"/home/codewire"}))
         );
         assert!(CODEX_PLATFORM_HOME.starts_with("/home/codewire/"));
+        // The bound daemon sets `CODEX_HOME` for the sessions it launches; the
+        // container itself never carries a selected client's environment.
         assert!(
-            ws["env"]
+            !ws["env"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|entry| entry == &json!({"name":"CODEX_HOME","value":CODEX_PLATFORM_HOME}))
+                .any(|entry| entry["name"] == "CODEX_HOME")
         );
         assert!(
             ws["volumeMounts"]
@@ -523,7 +535,7 @@ mod tests {
     #[test]
     fn only_exact_selected_clients_render_environment_and_no_codex_objects() {
         use codewire_access::{
-            ManagedCredentialClient, ManagedCredentialClientPlacement, ManagedCredentialClients,
+            ManagedCredentialClientPlacement, ManagedCredentialClients,
         };
         for slots in [
             vec![],
@@ -540,12 +552,8 @@ mod tests {
             let rendered = render_sandbox_template("dev-sandboxes", &opts);
             let spec = &rendered["spec"]["podTemplate"]["spec"];
             let environment = spec["containers"][0]["env"].as_array().unwrap();
-            let expected = opts
-                .managed_credential_clients
-                .for_placement(ManagedCredentialClientPlacement::Platform);
-            for (name, value) in &expected.environment {
-                assert!(environment.contains(&json!({"name":name,"value":value})));
-            }
+            // The bound daemon expands its selected clients into the sessions
+            // it launches, from the bind response: the Pod renders none.
             let all_keys = ManagedCredentialClients::from_profile_slots([
                 "codex",
                 "openai",
@@ -555,26 +563,26 @@ mod tests {
             .unwrap()
             .for_placement(ManagedCredentialClientPlacement::Platform)
             .environment;
-            for name in all_keys
-                .keys()
-                .filter(|name| !expected.environment.contains_key(*name))
-            {
+            for name in all_keys.keys() {
                 assert!(!environment.iter().any(|entry| entry["name"] == *name));
             }
-            assert!(environment.contains(
-                &json!({"name":MANAGED_CREDENTIAL_CLIENTS_ENV,"value":opts.managed_credential_clients.encode()})
-            ));
-            let codex = opts
-                .managed_credential_clients
-                .contains(ManagedCredentialClient::Codex);
-            assert_eq!(
-                environment.contains(
-                    &json!({"name":"CODEX_HOME","value":codewire_access::CODEX_PLATFORM_HOME})
-                ),
-                codex
+            assert!(
+                !environment
+                    .iter()
+                    .any(|entry| entry["name"] == MANAGED_CREDENTIAL_CLIENTS_ENV)
             );
-            // The selection changes only the environment: no Codex volume,
-            // mount or init container in any case.
+            // The selection changes nothing in the Pod: no environment, Codex
+            // volume, mount or init container in any case.
+            assert_eq!(
+                rendered["spec"],
+                render_sandbox_template(
+                    "dev-sandboxes",
+                    &TemplateOpts {
+                        managed_credential_clients: Default::default(),
+                        ..opts.clone()
+                    }
+                )["spec"]
+            );
             assert_no_legacy_codex(&rendered);
             assert!(spec.get("initContainers").is_none());
         }
@@ -592,8 +600,7 @@ mod tests {
 
     #[test]
     fn credential_mounts_preserve_the_measured_confidential_storage_boundary() {
-        let mut opts = credential_opts();
-        opts.runtime_profile = RUNTIME_PROFILE_CONFIDENTIAL.into();
+        let mut opts = measured(credential_opts());
         opts.kata_coco_init_data_enabled = true;
         opts.confidential_storage_manifest_uri = CONTENT_ADDRESSED_MANIFEST_URI.into();
         let authorized = confidential_init_data(&opts).unwrap();
@@ -611,6 +618,8 @@ mod tests {
         let policy = parsed["data"]["policy.rego"].as_str().unwrap();
         let mut workspace =
             confidential_create_input("workspace", &opts.image, &["/home/codewire", "/workspace"]);
+        workspace["OCI"]["Process"] =
+            runtime_process(&rendered["spec"]["podTemplate"]["spec"], "workspace");
         workspace["OCI"]["Mounts"].as_array_mut().unwrap().push(json!({"destination":"/run/codewire-credentials/workspace","source":"/synthetic/public-bootstrap","type_":"bind","options":["rbind","ro"]}));
         assert!(kata_policy_allows(policy, &workspace));
         let mut substituted = workspace.clone();
@@ -663,39 +672,17 @@ mod tests {
         let rendered = format!(
             "{:?}",
             TemplateOpts {
-                daemon_auth_token: "daemon-secret-value".into(),
                 udp_relay_allocator_token: "relay-secret-value".into(),
                 kata_coco_kbs_ca_pem: "embedded-public-ca".into(),
                 ..Default::default()
             }
         );
 
-        assert!(rendered.contains("daemon_auth_token: \"<redacted>\""));
         assert!(rendered.contains("udp_relay_allocator_token: \"<redacted>\""));
         assert!(rendered.contains("kata_coco_kbs_ca_pem: \"<configured>\""));
         assert!(!rendered.contains("daemon-secret-value"));
         assert!(!rendered.contains("relay-secret-value"));
         assert!(!rendered.contains("embedded-public-ca"));
-    }
-
-    #[test]
-    fn environment_token_workspace_renders_only_the_daemon_capability() {
-        let opts = commodity_opts();
-        let workspace = render_sandbox_template("codewire-runtime", &opts);
-        let workspace_env = workspace["spec"]["podTemplate"]["spec"]["containers"][0]["env"]
-            .as_array()
-            .unwrap();
-        let value = |name: &str| {
-            workspace_env.iter().find_map(|entry| {
-                (entry["name"].as_str() == Some(name))
-                    .then(|| entry["value"].as_str().unwrap().to_owned())
-            })
-        };
-        assert_eq!(
-            value(DAEMON_AUTH_TOKEN_ENV),
-            Some("daemon-token-golden-commodity".into())
-        );
-        assert_eq!(value("CODEWIRE_GATEWAY_TOKEN"), None);
     }
 
     /// Every variable the workspace container is given is in the workspace
@@ -709,10 +696,11 @@ mod tests {
         use std::collections::BTreeSet;
 
         use codewire_access::{ManagedCredentialClientPlacement, ManagedCredentialClients};
-        const CHILD_VISIBLE: [&str; 9] = [
-            "CODEWIRE_ENVIRONMENT_ID",
-            "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
-            "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256",
+        // The measured anchors (B2c) are public: orchestration's issuing CA
+        // and the environment's own ID, pinned by its measured Kata policy.
+        const CHILD_VISIBLE: [&str; 8] = [
+            "CODEWIRE_MEASURED_BINDING_ROOTS",
+            "CODEWIRE_MEASURED_ENVIRONMENT_ID",
             "CODEWIRE_POD_UID",
             "CODEWIRE_WORKSPACE_BINDING_URL",
             "CODEWIRE_WORKSPACE_SHIM_ADDR",
@@ -720,10 +708,9 @@ mod tests {
             "HOME",
             "USER",
         ];
-        const DAEMON_ONLY: [&str; 2] = [
-            "CODEWIRE_DAEMON_AUTH_TOKEN",
-            "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS",
-        ];
+        // No workspace renders a daemon token or a client selection (B2c):
+        // the bound daemon receives both from its binding.
+        const DAEMON_ONLY: [&str; 0] = [];
         let all = ManagedCredentialClients::from_profile_slots([
             "codex",
             "openai",
@@ -757,9 +744,13 @@ mod tests {
                 RUNTIME_PROFILE_CONFIDENTIAL,
                 RUNTIME_PROFILE_RUNC,
             ] {
-                let opts = TemplateOpts {
-                    runtime_profile: profile.into(),
-                    ..opts.clone()
+                let opts = if profile == RUNTIME_PROFILE_CONFIDENTIAL {
+                    measured(opts.clone())
+                } else {
+                    TemplateOpts {
+                        runtime_profile: profile.into(),
+                        ..opts.clone()
+                    }
                 };
                 let rendered = render_sandbox_template("dev-sandboxes", &opts);
                 let workspace = &rendered["spec"]["podTemplate"]["spec"]["containers"][0];
@@ -914,11 +905,14 @@ mod tests {
             RUNTIME_PROFILE_RUNC,
             RUNTIME_PROFILE_NONE,
         ] {
-            let opts = TemplateOpts {
+            let mut opts = TemplateOpts {
                 runtime_profile: profile.into(),
                 support_image: support.into(),
                 ..commodity_opts()
             };
+            if profile == RUNTIME_PROFILE_CONFIDENTIAL {
+                opts = measured(opts);
+            }
             let template = render_sandbox_template("dev-sandboxes", &opts);
             let spec = &template["spec"]["podTemplate"]["spec"];
             let volume = spec["volumes"]
@@ -966,15 +960,13 @@ mod tests {
 
     #[test]
     fn workspace_pod_carries_the_configured_egress_bandwidth_cap() {
-        for profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL] {
-            let capped = render_sandbox_template(
-                "dev-sandboxes",
-                &TemplateOpts {
-                    runtime_profile: profile.into(),
-                    egress_bandwidth: "100M".into(),
-                    ..commodity_opts()
-                },
-            );
+        let commodity = TemplateOpts {
+            egress_bandwidth: "100M".into(),
+            ..commodity_opts()
+        };
+        for opts in [commodity.clone(), measured(commodity)] {
+            let profile = opts.runtime_profile_spec().profile;
+            let capped = render_sandbox_template("dev-sandboxes", &opts);
             assert_eq!(
                 capped["spec"]["podTemplate"]["metadata"]["annotations"]
                     [EGRESS_BANDWIDTH_ANNOTATION_KEY]
@@ -1025,7 +1017,6 @@ mod tests {
                 name: "tmpl-commodity".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-                daemon_auth_token: "commodity-template-daemon-token".into(),
                 disk_gib: 40,
                 support_image: TEST_SUPPORT_IMAGE.into(),
                 ..Default::default()
@@ -1211,16 +1202,34 @@ mod tests {
             json!({ "medium": "Memory" }),
             "Kata cross-container Unix sockets must use guest tmpfs"
         );
-        // Docker never gates readiness: an environment-token workspace has
-        // no probe with or without DinD, and DinD has none (Program #2238).
-        for container in containers {
-            for probe in ["readinessProbe", "startupProbe", "livenessProbe"] {
-                assert!(
-                    container.get(probe).is_none(),
-                    "{} must not render {probe}",
-                    container["name"]
-                );
-            }
+        // Every hosted workspace binds (B2c): readiness is the daemon's
+        // local marker alone, never Docker (#3559), and DinD has no probe.
+        assert_eq!(
+            workspace["readinessProbe"],
+            json!({
+                "exec": {
+                    "command": ["sh", "-ec", "test -f /codewire/run/daemon/ready"],
+                },
+                "periodSeconds": 2,
+                "timeoutSeconds": 2,
+                "failureThreshold": 3,
+                "successThreshold": 1,
+            })
+        );
+        assert_eq!(
+            workspace["startupProbe"],
+            json!({
+                "exec": workspace["readinessProbe"]["exec"],
+                "periodSeconds": 1,
+                "timeoutSeconds": 2,
+                "failureThreshold": WORKSPACE_READY_TIMEOUT.as_secs(),
+                "successThreshold": 1,
+            }),
+            "a start notices the marker within a second and is never stopped \
+             before the commodity ready wait gives up"
+        );
+        for probe in ["readinessProbe", "startupProbe", "livenessProbe"] {
+            assert!(dind.get(probe).is_none(), "DinD must not render {probe}");
         }
         assert!(
             volumes
@@ -1239,7 +1248,8 @@ mod tests {
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
                 environment_id: "8ce0bf4b-bdeb-4fde-95cf-97e27b44c90d".into(),
-                daemon_auth_token: "confidential-daemon-token".into(),
+                workspace_binding_url: MEASURED_BINDING_URL.into(),
+                measured_binding_roots: MEASURED_BINDING_ROOTS.into(),
                 disk_gib: 40,
                 ..Default::default()
             },
@@ -1255,8 +1265,30 @@ mod tests {
         assert_eq!(docker_socket["emptyDir"], json!({ "medium": "Memory" }));
 
         let containers = pod_spec["containers"].as_array().unwrap();
-        // Confidential, like commodity, never waits for Docker to be Ready.
-        for container in containers {
+        let workspace = containers
+            .iter()
+            .find(|container| container["name"].as_str() == Some("workspace"))
+            .unwrap();
+        // A bound daemon's readiness marker (B2c), as on commodity: Pod
+        // readiness depends on neither the binding nor Docker (#3559).
+        assert_eq!(
+            workspace["readinessProbe"]["exec"]["command"][2].as_str(),
+            Some("test -f /codewire/run/daemon/ready")
+        );
+        assert_eq!(
+            workspace["startupProbe"]["exec"],
+            workspace["readinessProbe"]["exec"]
+        );
+        assert_eq!(
+            workspace["startupProbe"]["failureThreshold"].as_u64().unwrap()
+                * workspace["startupProbe"]["periodSeconds"].as_u64().unwrap(),
+            CONFIDENTIAL_WORKSPACE_READY_TIMEOUT.as_secs(),
+            "a confidential start keeps the tier's cold-start budget"
+        );
+        for container in containers
+            .iter()
+            .filter(|container| container["name"].as_str() != Some("workspace"))
+        {
             assert!(container.get("readinessProbe").is_none());
             assert!(container.get("startupProbe").is_none());
         }
@@ -1279,7 +1311,6 @@ mod tests {
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 support_image: "registry.example.invalid/codewire/daemon:test".into(),
                 environment_id: "env-managed-daemon".into(),
-                daemon_auth_token: "managed-daemon-token".into(),
                 ..Default::default()
             },
         );
@@ -1292,12 +1323,11 @@ mod tests {
         assert!(managed_command.contains("wait \"$daemon_pid\"; status=$?;"));
         assert!(!managed_command.contains("nohup cw node"));
         assert!(
-            managed_workspace["env"]
+            !managed_workspace["env"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|env| env["name"].as_str() == Some(DAEMON_AUTH_TOKEN_ENV)
-                    && env["value"].as_str() == Some("managed-daemon-token"))
+                .any(|env| env["name"].as_str() == Some(LEGACY_DAEMON_AUTH_TOKEN_ENV))
         );
         let init_command = managed_spec["initContainers"][0]["command"][2]
             .as_str()
@@ -1313,7 +1343,6 @@ mod tests {
                 image_command: vec!["/bin/custom-entrypoint".into(), "--serve".into()],
                 support_image: "registry.example.invalid/codewire/daemon:test".into(),
                 environment_id: "env-custom-daemon".into(),
-                daemon_auth_token: "custom-daemon-token".into(),
                 ..Default::default()
             },
         );
@@ -1321,7 +1350,7 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(custom_command.contains(
-            "(unset CODEWIRE_DAEMON_AUTH_TOKEN; exec '/bin/custom-entrypoint' '--serve') & workload_pid=$!"
+            "(exec '/bin/custom-entrypoint' '--serve') & workload_pid=$!"
         ));
         assert!(custom_command.contains("/codewire/bin/cw __hosted-daemon & daemon_pid=$!"));
         assert!(custom_command.contains("if ! kill -0 \"$daemon_pid\""));
@@ -1335,18 +1364,6 @@ mod tests {
         assert!(!custom_command.contains("nohup cw node"));
     }
 
-    #[test]
-    #[should_panic(expected = "hosted workspace requires a canonical daemon auth token")]
-    fn hosted_workspace_rejects_a_missing_daemon_token() {
-        let _ = render_sandbox_template(
-            "codewire-runtime",
-            &TemplateOpts {
-                name: "missing-daemon-token".into(),
-                image: "example.invalid/workspace:test".into(),
-                ..Default::default()
-            },
-        );
-    }
 
     #[test]
     fn custom_entrypoint_arguments_are_shell_quoted() {
@@ -1360,7 +1377,6 @@ mod tests {
                     "literal $(touch /tmp/not-run) 'quote'".into(),
                 ],
                 environment_id: "env-custom-quoted".into(),
-                daemon_auth_token: "custom-quoted-daemon-token".into(),
                 ..Default::default()
             },
         );
@@ -1632,19 +1648,17 @@ mod tests {
             "",
             &format!("sh {}", daemon.display()),
             &format!("sh {}", workload.display()),
-            true,
         );
         let mut supervisor = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(command)
-            .env(DAEMON_AUTH_TOKEN_ENV, "synthetic-daemon-supervisor-token")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
 
         wait_for_file_value(&count, "1").await;
-        wait_for_file_value(&daemon_env, "synthetic-daemon-supervisor-token").await;
+        wait_for_file_value(&daemon_env, "unset").await;
         wait_for_file_value(&workload_env, "unset").await;
         let daemon_pid = std::fs::read_to_string(&pid).unwrap();
         assert!(
@@ -1698,7 +1712,6 @@ mod tests {
                     name: format!("tmpl-dind-memory-{name}"),
                     image: crate::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE.into(),
                     runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-            daemon_auth_token: "test-daemon-token".into(),
                     memory_mib,
                     disk_gib: 50,
                     ..Default::default()
@@ -1728,7 +1741,6 @@ mod tests {
                 image: crate::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE.into(),
                 dind_image: image.into(),
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-                daemon_auth_token: "test-daemon-token".into(),
                 disk_gib: 50,
                 ..Default::default()
             },
@@ -1756,7 +1768,6 @@ mod tests {
                 name: "tmpl-commodity".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-                daemon_auth_token: "test-daemon-token".into(),
                 kata_agent_policy_enabled: true,
                 ..Default::default()
             },
@@ -1793,7 +1804,6 @@ mod tests {
                 name: "tmpl-commodity".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-                daemon_auth_token: "test-daemon-token".into(),
                 kata_agent_policy_enabled: true,
                 kata_coco_init_data_enabled: true,
                 kata_coco_kbs_url: "https://kbs.codewire-dev.sh".into(),
@@ -1820,7 +1830,6 @@ mod tests {
                 name: "tmpl-commodity".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-                daemon_auth_token: "test-daemon-token".into(),
                 kata_coco_init_data_enabled: true,
                 ..Default::default()
             },
@@ -1843,7 +1852,8 @@ mod tests {
                 name: "tmpl-confidential".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-                daemon_auth_token: "test-daemon-token".into(),
+                workspace_binding_url: MEASURED_BINDING_URL.into(),
+                measured_binding_roots: MEASURED_BINDING_ROOTS.into(),
                 environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
                 confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
                 disk_gib: 20,
@@ -1899,12 +1909,106 @@ mod tests {
             "the retired parallel storage registry must remain absent"
         );
         let policy = data["policy.rego"].as_str().unwrap();
-        let workspace = confidential_create_input(
+        let mut workspace = confidential_create_input(
             "workspace",
             "ghcr.io/codewiresh/workspace:golden",
             &["/home/codewire", "/workspace"],
         );
+        workspace["OCI"]["Process"] = runtime_process(&pod_template["spec"], "workspace");
         assert!(kata_policy_allows(policy, &workspace));
+
+        // The measured anchors the daemon trusts (B2c): each appears exactly
+        // once, with its measured value, or the workspace never starts.
+        let env_of = |request: &Value| -> Vec<String> {
+            request["OCI"]["Process"]["Env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.as_str().unwrap().to_owned())
+                .collect()
+        };
+        let with_env = |env: Vec<String>| {
+            let mut request = workspace.clone();
+            request["OCI"]["Process"]["Env"] = json!(env);
+            request
+        };
+        for (name, substitute) in [
+            (
+                codewire_daemon_proto::WORKSPACE_MEASURED_BINDING_ROOTS_ENV,
+                "-----BEGIN CERTIFICATE-----\nATTACKER\n-----END CERTIFICATE-----\n",
+            ),
+            (
+                codewire_daemon_proto::WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV,
+                "b3a9c6f2-1d4e-4f5a-8b7c-6d5e4f3a2b1c",
+            ),
+            (
+                codewire_daemon_proto::WORKSPACE_BINDING_URL_ENV,
+                "https://attacker.example:8087",
+            ),
+        ] {
+            let prefix = format!("{name}=");
+            let original = env_of(&workspace);
+            assert_eq!(
+                original
+                    .iter()
+                    .filter(|entry| entry.starts_with(&prefix))
+                    .count(),
+                1,
+                "{name} is rendered exactly once"
+            );
+            let substituted = original
+                .iter()
+                .map(|entry| {
+                    if entry.starts_with(&prefix) {
+                        format!("{prefix}{substitute}")
+                    } else {
+                        entry.clone()
+                    }
+                })
+                .collect();
+            assert!(
+                !kata_policy_allows(policy, &with_env(substituted)),
+                "{name} substituted"
+            );
+            let missing = original
+                .iter()
+                .filter(|entry| !entry.starts_with(&prefix))
+                .cloned()
+                .collect();
+            assert!(!kata_policy_allows(policy, &with_env(missing)), "{name} missing");
+            let mut shadowed = original.clone();
+            shadowed.push(format!("{prefix}{substitute}"));
+            assert!(
+                !kata_policy_allows(policy, &with_env(shadowed)),
+                "{name} shadowed by a second entry"
+            );
+            let mut repeated = original.clone();
+            repeated.push(
+                original
+                    .iter()
+                    .find(|entry| entry.starts_with(&prefix))
+                    .unwrap()
+                    .clone(),
+            );
+            assert!(
+                !kata_policy_allows(policy, &with_env(repeated)),
+                "{name} repeated"
+            );
+        }
+        let mut no_process = workspace.clone();
+        no_process["OCI"].as_object_mut().unwrap().remove("Process");
+        assert!(!kata_policy_allows(policy, &no_process));
+        // The measured init-data carries the anchors themselves and never a
+        // daemon token.
+        for want in [
+            MEASURED_BINDING_URL,
+            "MIIBsynthetic",
+            "be31063a-8ec8-46d5-aa17-75cda1729370",
+        ] {
+            assert!(policy.contains(want), "policy lacks {want}");
+        }
+        assert!(!decoded.contains("CODEWIRE_DAEMON_AUTH_TOKEN"));
+        assert!(!decoded.contains("test-daemon-token"));
         let dind_image = pod_template["spec"]["containers"]
             .as_array()
             .unwrap()
@@ -2119,7 +2223,8 @@ mod tests {
                 name: "tmpl-confidential-policy-conformance".into(),
                 image: image.into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-                daemon_auth_token: "test-daemon-token".into(),
+                workspace_binding_url: MEASURED_BINDING_URL.into(),
+                measured_binding_roots: MEASURED_BINDING_ROOTS.into(),
                 docker_mode: DOCKER_MODE_NONE.into(),
                 environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
                 confidential_storage_manifest_uri: manifest_uri.into(),
@@ -2150,9 +2255,16 @@ mod tests {
         let init_data: toml::Value = toml::from_str(&init_data).unwrap();
         let policy = init_data["data"]["policy.rego"].as_str().unwrap();
 
+        // The shared corpus covers storage. The workspace process carries the
+        // measured binding anchors (B2c), which the corpus leaves out: give
+        // each workload request the rendered process, keeping the corpus
+        // byte-identical with the Kata fork's copy.
+        let mut workload_request = fixture["workload_request"].clone();
+        workload_request["OCI"]["Process"] =
+            runtime_process(&rendered["spec"]["podTemplate"]["spec"], "workspace");
         for case in fixture["cases"].as_array().unwrap() {
             let mut request = match case["base"].as_str().unwrap() {
-                "workload" => fixture["workload_request"].clone(),
+                "workload" => workload_request.clone(),
                 "sandbox" => fixture["sandbox_request"].clone(),
                 base => panic!("unknown conformance base {base:?}"),
             };
@@ -2170,7 +2282,8 @@ mod tests {
     fn confidential_template_requires_content_addressed_manifest_before_mutation() {
         let mut opts = TemplateOpts {
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-            daemon_auth_token: "test-daemon-token".into(),
+            workspace_binding_url: MEASURED_BINDING_URL.into(),
+            measured_binding_roots: MEASURED_BINDING_ROOTS.into(),
             disk_gib: 20,
             ..Default::default()
         };
@@ -2188,7 +2301,8 @@ mod tests {
             name: "tmpl-confidential-owner-authorization".into(),
             image: "ghcr.io/codewiresh/workspace-base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-            daemon_auth_token: "test-daemon-token".into(),
+            workspace_binding_url: MEASURED_BINDING_URL.into(),
+            measured_binding_roots: MEASURED_BINDING_ROOTS.into(),
             environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
             confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
             disk_gib: 20,
@@ -2216,7 +2330,8 @@ mod tests {
     fn measured_key_release_claim_requires_the_exact_protected_contract() {
         let mut opts = TemplateOpts {
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-            daemon_auth_token: "test-daemon-token".into(),
+            workspace_binding_url: MEASURED_BINDING_URL.into(),
+            measured_binding_roots: MEASURED_BINDING_ROOTS.into(),
             environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
             confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
             disk_gib: 20,
@@ -2257,7 +2372,8 @@ mod tests {
             image: "ghcr.io/codewiresh/workspace:golden".into(),
             support_image: "registry.example.invalid/codewire/daemon:test".into(),
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-            daemon_auth_token: "test-daemon-token".into(),
+            workspace_binding_url: MEASURED_BINDING_URL.into(),
+            measured_binding_roots: MEASURED_BINDING_ROOTS.into(),
             kata_coco_init_data_enabled: true,
             kata_coco_kbs_url:
                 "http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080".into(),
@@ -2288,7 +2404,8 @@ mod tests {
             name: "tmpl-confidential-resource".into(),
             image: "ghcr.io/codewiresh/workspace:golden".into(),
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-            daemon_auth_token: "test-daemon-token".into(),
+            workspace_binding_url: MEASURED_BINDING_URL.into(),
+            measured_binding_roots: MEASURED_BINDING_ROOTS.into(),
             kata_coco_init_data_enabled: true,
             kata_coco_kbs_url:
                 "http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080".into(),
@@ -2314,7 +2431,6 @@ mod tests {
             name: "tmpl-commodity-auth".into(),
             image: "ghcr.io/codewiresh/workspace:golden".into(),
             runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-            daemon_auth_token: "test-daemon-token".into(),
             kata_coco_init_data_enabled: true,
             kata_coco_kbs_url: "https://kbs.codewire-dev.sh".into(),
             kata_coco_image_registry_auth_uri: "kbs:///default/containers/auth".into(),
@@ -2344,7 +2460,8 @@ mod tests {
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 support_image: "registry.example.invalid/codewire/daemon:test".into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-                daemon_auth_token: "test-daemon-token".into(),
+                workspace_binding_url: MEASURED_BINDING_URL.into(),
+                measured_binding_roots: MEASURED_BINDING_ROOTS.into(),
                 kata_coco_init_data_enabled: true,
                 kata_coco_kbs_url:
                     "http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080".into(),
@@ -2399,7 +2516,6 @@ mod tests {
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 support_image: "registry.example.invalid/codewire/daemon:test".into(),
                 runtime_profile: profile.into(),
-                daemon_auth_token: "test-daemon-token".into(),
                 kata_coco_kbs_url:
                     "http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080".into(),
                 api_base_url: "https://codewire-dev.sh".into(),
@@ -2459,7 +2575,6 @@ mod tests {
             "codewire-runtime",
             &TemplateOpts {
                 name: "tmpl-storage-configured".into(),
-                daemon_auth_token: "test-daemon-token".into(),
                 disk_gib: 20,
                 workspace_storage_class: "example-workspace-class".into(),
                 ..Default::default()
@@ -2487,7 +2602,6 @@ mod tests {
             "codewire-runtime",
             &TemplateOpts {
                 name: "tmpl-storage-local".into(),
-                daemon_auth_token: "test-daemon-token".into(),
                 disk_gib: 20,
                 workspace_storage_class: "local-path".into(),
                 ..Default::default()
@@ -2503,7 +2617,8 @@ mod tests {
             &TemplateOpts {
                 name: "tmpl-storage-confidential".into(),
                 environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
-                daemon_auth_token: "test-daemon-token".into(),
+                workspace_binding_url: MEASURED_BINDING_URL.into(),
+                measured_binding_roots: MEASURED_BINDING_ROOTS.into(),
                 confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
                 disk_gib: 20,
@@ -2528,7 +2643,6 @@ mod tests {
     fn direct_udp_load_balancer_service_uses_cilium_lb_ipam_without_nodeports() {
         let opts = TemplateOpts {
             direct_udp_lb_enabled: true,
-            daemon_auth_token: "test-daemon-token".into(),
             direct_udp_lb_ip: "203.0.113.36".into(),
             direct_udp_lb_port: 33123,
             direct_udp_lb_class: "io.cilium/l2-announcer".into(),
@@ -2621,8 +2735,7 @@ mod tests {
             service["spec"]["publishNotReadyAddresses"].as_bool(),
             Some(true)
         );
-        let mut confidential = opts.clone();
-        confidential.runtime_profile = RUNTIME_PROFILE_CONFIDENTIAL.into();
+        let confidential = measured(opts.clone());
         assert_eq!(
             render_workspace_daemon_service("codewire-runtime", &confidential)["spec"]
                 ["publishNotReadyAddresses"]
@@ -2715,9 +2828,7 @@ mod tests {
 
     fn identity_free_opts() -> TemplateOpts {
         TemplateOpts {
-            workspace_identity: WorkspaceIdentity::Binding {
-                binding_url: IDENTITY_FREE_BINDING_URL.into(),
-            },
+            workspace_binding_url: IDENTITY_FREE_BINDING_URL.into(),
             ..credential_opts()
         }
     }
@@ -2847,7 +2958,6 @@ mod tests {
         for value in [
             opts.environment_id.as_str(),
             opts.organization_id.as_str(),
-            opts.daemon_auth_token.as_str(),
         ] {
             assert!(!text.contains(value), "environment value in an identity-free template");
         }
@@ -2953,12 +3063,7 @@ mod tests {
             }
             found
         };
-        let token = TemplateOpts {
-            workspace_identity: WorkspaceIdentity::EnvironmentToken,
-            daemon_auth_token: "synthetic-daemon-token".into(),
-            ..credential_opts()
-        };
-        for opts in [identity_free_opts(), token] {
+        for opts in [identity_free_opts(), credential_opts()] {
             assert!(period(&opts).is_empty());
             let selected = TemplateOpts {
                 codex_login_check_period_seconds: Some(30),
@@ -3027,7 +3132,6 @@ mod tests {
             environment_id: "1d2e3f4a-5b6c-4d7e-8f90-a1b2c3d4e5f6".into(),
             organization_id: "org-other".into(),
             operation_generation: 12,
-            daemon_auth_token: "daemon-token-other".into(),
             managed_credential_clients:
                 codewire_access::ManagedCredentialClients::from_profile_slots(["github"]).unwrap(),
             projection_selection_sha256: Some([0x11; 32]),
@@ -3035,6 +3139,145 @@ mod tests {
         };
         let render = |opts: &TemplateOpts| render_sandbox_template("dev-sandboxes", opts)["spec"].clone();
         assert_eq!(render(&first), render(&second));
+    }
+
+    /// A confidential workspace as orchestration renders it on Dev (B2c).
+    fn confidential_golden_opts() -> TemplateOpts {
+        TemplateOpts {
+            name: "tmpl-golden-confidential".into(),
+            environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
+            support_image: "registry.example.invalid/codewire/daemon@sha256:48549d19114407c712d043af3ba2136d97052a2c30c82935190f75a3a61f13ab".into(),
+            confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
+            disk_gib: 20,
+            workspace_storage_class: "linstor-confidential".into(),
+            kata_coco_init_data_enabled: true,
+            kata_coco_kbs_url:
+                "https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080".into(),
+            kata_coco_image_registry_auth_uri: "kbs:///default/containers/auth".into(),
+            // A local-cluster knob never reaches a confidential daemon.
+            coordinator_extra_roots: true,
+            ..measured(identity_free_opts())
+        }
+    }
+
+    #[test]
+    fn confidential_workspace_binds_with_only_its_measured_anchors() {
+        let opts = confidential_golden_opts();
+        let template = render_sandbox_template("dev-sandboxes", &opts);
+        let pod_spec = &template["spec"]["podTemplate"]["spec"];
+        let workspace = pod_spec["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|container| container["name"] == "workspace")
+            .unwrap();
+        let env = workspace["env"].as_array().unwrap();
+        let named = |name: &str| -> Vec<&Value> {
+            env.iter().filter(|entry| entry["name"] == name).collect()
+        };
+        for (name, value) in opts.measured_workspace_environment().unwrap() {
+            assert_eq!(named(name), vec![&json!({ "name": name, "value": value })]);
+        }
+        assert_eq!(
+            named(codewire_daemon_proto::WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV)[0]["value"],
+            "be31063a-8ec8-46d5-aa17-75cda1729370"
+        );
+        assert_eq!(
+            named(codewire_daemon_proto::WORKSPACE_POD_UID_ENV),
+            vec![&json!({
+                "name": codewire_daemon_proto::WORKSPACE_POD_UID_ENV,
+                "valueFrom": { "fieldRef": { "fieldPath": "metadata.uid" } },
+            })]
+        );
+        for forbidden in [
+            LEGACY_DAEMON_AUTH_TOKEN_ENV,
+            codewire_daemon::config::ENVIRONMENT_ID_ENV,
+            codewire_daemon::config::ENVIRONMENT_GENERATION_ENV,
+            codewire_daemon::config::HOSTED_PROJECTION_SHA256_ENV,
+        ] {
+            assert!(named(forbidden).is_empty(), "{forbidden}");
+        }
+        assert!(!template.to_string().contains("daemon-token"));
+        // The host supplies every mounted file under SEV-SNP: no roots
+        // ConfigMap at all, and the daemon's state lives in guest memory.
+        assert!(workspace_volume(&template, "orchestration-internal-roots").is_none());
+        assert!(workspace_volume(&template, "coordinator-extra-roots").is_none());
+        assert!(!template.to_string().contains("codewire-orchestration-internal-roots"));
+        assert_eq!(
+            workspace_volume(&template, "codewire-run").unwrap()["emptyDir"],
+            json!({ "medium": "Memory" })
+        );
+        assert!(
+            workspace_volume(
+                &template,
+                crate::worker::workspace_binding::WORKSPACE_BINDING_VOLUME
+            )
+            .is_some()
+        );
+        // It binds like a standard workspace, and stays cold: its template
+        // carries no environment label, only its measured claim and volume do.
+        assert!(
+            template["metadata"]["labels"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(pod_spec["runtimeClassName"], "confidential");
+        let init_data = confidential_init_data(&opts).unwrap();
+        assert_eq!(
+            init_data,
+            decode_gzip_base64(
+                template["spec"]["podTemplate"]["metadata"]["annotations"]
+                    [KATA_COCO_INIT_DATA_ANNOTATION_KEY]
+                    .as_str()
+                    .unwrap()
+            )
+        );
+        for want in [
+            MEASURED_BINDING_URL,
+            "MIIBsynthetic",
+            codewire_daemon_proto::WORKSPACE_MEASURED_BINDING_ROOTS_ENV,
+            codewire_daemon_proto::WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV,
+        ] {
+            assert!(init_data.contains(want), "init-data lacks {want}");
+        }
+        // Without measured roots, or without a binding, there is no
+        // confidential init-data to authorize.
+        assert!(
+            confidential_init_data(&TemplateOpts {
+                measured_binding_roots: String::new(),
+                ..opts.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            confidential_init_data(&TemplateOpts {
+                workspace_binding_url: String::new(),
+                ..opts.clone()
+            })
+            .is_err()
+        );
+        // Changing any anchor changes the measurement.
+        for changed in [
+            TemplateOpts {
+                measured_binding_roots: "-----BEGIN CERTIFICATE-----\nOTHER\n-----END CERTIFICATE-----\n".into(),
+                ..opts.clone()
+            },
+            TemplateOpts {
+                workspace_binding_url: "https://codewire-orchestration-workspace-binding.prod.svc.cluster.local:8087".into(),
+                ..opts.clone()
+            },
+        ] {
+            assert_ne!(confidential_init_data(&changed).unwrap(), init_data);
+        }
+    }
+
+    #[test]
+    fn confidential_template_matches_golden_file() {
+        assert_eq!(
+            render_sandbox_template("dev-sandboxes", &confidential_golden_opts()),
+            load_golden("confidential-sandboxtemplate.golden.json"),
+        );
     }
 
     #[test]

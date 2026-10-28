@@ -127,6 +127,9 @@ pub(crate) struct BoundAccess {
     pub daemon_port: Option<u16>,
     /// The workspace's default shell, which runs SSH exec command lines.
     pub exec_shell: String,
+    /// A confidential workspace (B2c): trust only the coordinator's WebPKI
+    /// roots compiled into the measured daemon, never a mounted bundle.
+    pub measured: bool,
 }
 
 /// Serve workspace access for the accepted binding until `shutdown`.
@@ -232,7 +235,11 @@ pub(crate) async fn serve(
                 },
                 grants.clone(),
                 plane.clone(),
-                Arc::new(PublicCoordinator::new()),
+                Arc::new(if bound.measured {
+                    PublicCoordinator::webpki_only()
+                } else {
+                    PublicCoordinator::new()
+                }),
                 TailnetSsh {
                     config: ssh_config,
                     runners,

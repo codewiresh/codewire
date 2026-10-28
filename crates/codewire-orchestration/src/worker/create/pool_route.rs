@@ -1,7 +1,7 @@
 //! Routing a create to a shared warm pool (Program #2238 C3).
 //!
 //! A create claims from a pool only when every condition holds: the standard
-//! tier, exactly the canonical workspace image, identity mode `binding`, an
+//! tier, exactly the canonical workspace image, a binding listener, an
 //! exact configured shape with members, an own identity-free rendering equal
 //! to the pool's (design invariant 10, which covers CPU, memory, disk,
 //! storage class, runtime and images), a controller that shows C0's claim
@@ -51,7 +51,7 @@ pub(crate) enum ColdReason {
     Tier,
     /// Not exactly the canonical workspace image.
     Image,
-    /// Not identity mode `binding`, or a legacy rendering.
+    /// No binding listener to render the workspace against.
     Identity,
     /// No configured shape with members equals this environment's shape.
     Shape,
@@ -109,7 +109,7 @@ pub(crate) fn pool_candidate(
     if image_ref.trim() != canonical_workspace_runtime_image() {
         return Err(ColdReason::Image);
     }
-    if !opts.identity_free() {
+    if opts.workspace_binding_url.trim().is_empty() {
         return Err(ColdReason::Identity);
     }
     let shape = WorkspaceShape::of(opts);

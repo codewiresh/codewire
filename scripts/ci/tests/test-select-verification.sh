@@ -1733,6 +1733,14 @@ run_paths_case confidential_script_tests pull_request refs/pull/1518/head false 
   'policy confidential_script_tests security security_js' \
   scripts/runtime/confidential/resolve-coco-support-lock.sh \
   scripts/runtime/tests/test-resolve-coco-support-lock.sh
+run_paths_case runtime_confidential_binding_proof pull_request refs/pull/1519/head false \
+  'policy confidential_script_tests security security_js' \
+  scripts/runtime/confidential/prove-dev-confidential-binding.sh \
+  scripts/runtime/tests/test-confidential-binding-proof.sh
+# The proof's contract test alone still runs its own capability.
+run_paths_case runtime_confidential_binding_proof_test pull_request refs/pull/1519/head false \
+  'policy confidential_script_tests security security_js' \
+  scripts/runtime/tests/test-confidential-binding-proof.sh
 run_paths_case makefile_only pull_request refs/pull/152/head false \
   'policy security security_js' Makefile
 run_paths_case buildx_two_file_replay pull_request refs/pull/1520/head false \

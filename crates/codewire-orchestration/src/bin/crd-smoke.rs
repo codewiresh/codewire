@@ -22,9 +22,8 @@ use codewire_daemon_proto::{WORKSPACE_SSH_PORT, WORKSPACE_TAILNET_UDP_PORT};
 use codewire_orchestration::sandbox::client::SandboxClient;
 use codewire_orchestration::sandbox::template::{
     CredentialRuntimeTemplateConfig, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_RUNC, TemplateOpts,
-    WorkspaceIdentity, render_sandbox_shadow_pool, render_sandbox_template,
-    render_workspace_daemon_service, workspace_daemon_network_policy_name,
-    workspace_daemon_service_name,
+    render_sandbox_shadow_pool, render_sandbox_template, render_workspace_daemon_service,
+    workspace_daemon_network_policy_name, workspace_daemon_service_name,
 };
 use codewire_orchestration::sandbox::{
     ClaimOpts, environment_template_name, render_sandbox_claim, shadow_warm_pool_name,
@@ -244,9 +243,7 @@ fn render_resize_fixture(
         organization_id: "org_contract_1".into(),
         operation_generation: 1,
         credential_runtime,
-        workspace_identity: WorkspaceIdentity::Binding {
-            binding_url: workspace_binding_url(server_namespace),
-        },
+        workspace_binding_url: workspace_binding_url(server_namespace),
         server_namespace: server_namespace.into(),
         cpu_millicores: 250,
         memory_mib: 256,

@@ -62,6 +62,7 @@ async fn admitted_repair(fixture: &LeaseFixture, sandbox: SandboxClient) -> Daem
             uid: "uid-old".into(),
         },
         support_image: crate::sandbox::template::TEST_SUPPORT_IMAGE.into(),
+        timeout: daemon_repair_timeout("standard"),
     }
 }
 

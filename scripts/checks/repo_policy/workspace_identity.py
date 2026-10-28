@@ -24,6 +24,16 @@ are named `cw-pool-<cpu>m-<mem>mi-<disk>gi-<h8>` (never a legacy
 never the confidential runtime, and record `codewire.sh/pool-revision` as the
 SHA-256 of the template spec.
 
+A confidential workspace (Program #2238 B2c) binds the same way, with the
+same binding token, URL and downward-API UID, and never a daemon token. It
+mounts no ConfigMap at all, because the host supplies every mounted file under
+SEV-SNP. Instead its workspace container carries its measured anchors exactly
+once each: the binding roots (a PEM bundle) and the one environment it may bind
+as, the UUID its measured init-data names as the storage key ID. Its measured
+policy pins those anchors and the binding URL, and its daemon state
+(`codewire-run`) is guest memory. It stays cold, and only its storage claim
+carries the environment label.
+
 The orchestration renderer's golden fixtures are the reviewed rendering; the
 Rust test pins renderer == fixture, and this guard pins the fixture against
 the invariant, so neither can drift alone.
@@ -46,6 +56,10 @@ FIXTURES = [
     "crates/codewire-orchestration/tests/fixtures/sandbox/identity-free-sandboxtemplate-runc.golden.json",
     "crates/codewire-orchestration/tests/fixtures/sandbox/warm-pool-sandboxtemplate.golden.json",
 ]
+CONFIDENTIAL_FIXTURE = "crates/codewire-orchestration/tests/fixtures/sandbox/confidential-sandboxtemplate.golden.json"
+MEASURED_ROOTS_ENV = "CODEWIRE_MEASURED_BINDING_ROOTS"
+MEASURED_ENVIRONMENT_ENV = "CODEWIRE_MEASURED_ENVIRONMENT_ID"
+BINDING_URL_ENV = "CODEWIRE_WORKSPACE_BINDING_URL"
 POOL_TEMPLATE_FIXTURE = "crates/codewire-orchestration/tests/fixtures/sandbox/warm-pool-sandboxtemplate.golden.json"
 POOL_FIXTURE = "crates/codewire-orchestration/tests/fixtures/sandbox/warm-pool-sandboxwarmpool.golden.json"
 
@@ -236,6 +250,165 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
             if rule.get("ports") != TAILNET_EGRESS[component] or len(components) != 1:
                 output.append(f"{label}: template egress reaches {component} beyond its public UDP port")
     return output
+
+
+def binding_egress_violations(template: dict[str, Any], label: str) -> list[str]:
+    egress = ((template.get("spec") or {}).get("networkPolicy") or {}).get("egress") or []
+    binding_rules = [rule for rule in egress if any(port.get("port") == 8087 for port in rule.get("ports") or [])]
+    if len(binding_rules) != 1 or binding_rules[0].get("ports") != [{"port": 8087, "protocol": "TCP"}] or not all(
+        (peer.get("podSelector") or {}).get("matchLabels") == {"app.kubernetes.io/component": "orchestration"}
+        and "namespaceSelector" in peer
+        for peer in binding_rules[0].get("to") or [{}]
+    ):
+        return [f"{label}: template egress is not exactly one TCP 8087 rule to orchestration"]
+    return []
+
+
+def confidential_violations(template: dict[str, Any], label: str) -> list[str]:
+    """A confidential workspace binds with only its measured anchors (B2c)."""
+    output: list[str] = []
+    text = json.dumps(template, sort_keys=True)
+    for fragment in FORBIDDEN_TEXT + ("codewire-orchestration-internal-roots", "codewire-coordinator-extra-roots"):
+        if fragment in text:
+            output.append(f"{label}: carries {fragment}")
+    pod_template = (template.get("spec") or {}).get("podTemplate") or {}
+    spec = pod_template.get("spec") or {}
+    if spec.get("runtimeClassName") != "confidential":
+        output.append(f"{label}: does not run the confidential runtime")
+    if ((pod_template.get("metadata") or {}).get("labels") or {}).get("codewire.sh/isolation-tier") != "confidential":
+        output.append(f"{label}: does not carry the confidential tier label")
+    if ENVIRONMENT_LABEL in json.dumps(template.get("metadata") or {}) or ENVIRONMENT_LABEL in json.dumps(pod_template):
+        output.append(f"{label}: carries the environment label outside its storage claim")
+    if spec.get("automountServiceAccountToken") is not False:
+        output.append(f"{label}: automounts a Kubernetes API token")
+    for volume in spec.get("volumes") or []:
+        if "configMap" in volume:
+            output.append(f"{label}: mounts ConfigMap volume {volume.get('name')}, which the host would supply")
+        if "secret" in volume:
+            output.append(f"{label}: mounts Secret volume {volume.get('name')}")
+    run = [volume for volume in spec.get("volumes") or [] if volume.get("name") == "codewire-run"]
+    if run != [{"name": "codewire-run", "emptyDir": {"medium": "Memory"}}]:
+        output.append(f"{label}: the daemon's state is not guest memory")
+    binding = [volume for volume in spec.get("volumes") or [] if volume.get("name") == BINDING_VOLUME]
+    if binding != [{
+        "name": BINDING_VOLUME,
+        "projected": {
+            "defaultMode": 0o440,
+            "sources": [{"serviceAccountToken": {"audience": BINDING_AUDIENCE, "expirationSeconds": 600, "path": "token"}}],
+        },
+    }]:
+        output.append(f"{label}: binding token volume is not exactly the workspace-binding audience")
+    for container in containers(spec):
+        for entry in container.get("env") or []:
+            if entry.get("name") in FORBIDDEN_ENVIRONMENT:
+                output.append(f"{label}: container {container.get('name')} renders {entry.get('name')}")
+            if container.get("name") != "workspace" and entry.get("name") in (MEASURED_ROOTS_ENV, MEASURED_ENVIRONMENT_ENV):
+                output.append(f"{label}: container {container.get('name')} carries a measured anchor")
+        if container.get("envFrom"):
+            output.append(f"{label}: container {container.get('name')} imports an environment source")
+        mounts_token = [mount for mount in container.get("volumeMounts") or [] if mount.get("name") == BINDING_VOLUME]
+        expected = ([{"name": BINDING_VOLUME, "mountPath": BINDING_MOUNT, "readOnly": True}]
+                    if container.get("name") == "workspace" else [])
+        if mounts_token != expected:
+            output.append(f"{label}: binding token mount is not exactly the workspace container's")
+    workspace = next((c for c in spec.get("containers") or [] if c.get("name") == "workspace"), {})
+    entries: dict[str, list[dict[str, Any]]] = {}
+    for entry in workspace.get("env") or []:
+        entries.setdefault(str(entry.get("name")), []).append(entry)
+    if entries.get("CODEWIRE_POD_UID") != [{"name": "CODEWIRE_POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}]:
+        output.append(f"{label}: workspace UID is not from the downward API")
+    anchors: dict[str, str] = {}
+    for name in (BINDING_URL_ENV, MEASURED_ROOTS_ENV, MEASURED_ENVIRONMENT_ENV):
+        found = entries.get(name) or []
+        if len(found) != 1 or not isinstance(found[0].get("value"), str) or set(found[0]) != {"name", "value"}:
+            output.append(f"{label}: workspace does not carry {name} exactly once as a literal")
+            continue
+        anchors[name] = found[0]["value"]
+    url = anchors.get(BINDING_URL_ENV, "")
+    if not (url.startswith("https://") and url.endswith(":8087")):
+        output.append(f"{label}: workspace has no TLS binding listener URL")
+    roots = anchors.get(MEASURED_ROOTS_ENV, "")
+    if "-----BEGIN CERTIFICATE-----" not in roots or "-----END CERTIFICATE-----" not in roots:
+        output.append(f"{label}: measured binding roots are not a PEM certificate bundle")
+    environment_id = anchors.get(MEASURED_ENVIRONMENT_ENV, "")
+    if not UUID.fullmatch(environment_id):
+        output.append(f"{label}: measured environment is not a UUID")
+    if "test -f /codewire/run/daemon/ready" not in json.dumps(workspace.get("readinessProbe") or {}):
+        output.append(f"{label}: workspace readiness is not the daemon's local marker")
+    claims = (template.get("spec") or {}).get("volumeClaimTemplates") or []
+    if [((claim.get("metadata") or {}).get("labels") or {}).get(ENVIRONMENT_LABEL) for claim in claims] != [environment_id]:
+        output.append(f"{label}: the storage claim does not name the measured environment")
+    init_data = init_data_text(template)
+    if not init_data:
+        output.append(f"{label}: Kata init-data is missing or undecodable")
+        init_data = ""
+    if f'"codewire_workspace_storage_key_id" = "{environment_id}"' not in init_data:
+        output.append(f"{label}: init-data does not measure the bound environment as its storage key")
+    # The measured policy pins each anchor as a pretty-printed contract entry.
+    for name, value in anchors.items():
+        if f'"name": {json.dumps(name)}' not in init_data or f'"value": {json.dumps(value)}' not in init_data:
+            output.append(f"{label}: init-data does not pin {name}")
+    if "CODEWIRE_DAEMON_AUTH_TOKEN" in init_data:
+        output.append(f"{label}: init-data names the environment token")
+    output.extend(binding_egress_violations(template, label))
+    return output
+
+
+def confidential_self_test(base: dict[str, Any]) -> None:
+    def rejected(name: str, mutate: Any) -> None:
+        fixture = copy.deepcopy(base)
+        mutate(fixture)
+        if not confidential_violations(fixture, f"negative confidential fixture {name}"):
+            raise RuntimeError(f"negative confidential fixture {name} was accepted")
+
+    def spec(fixture: dict[str, Any]) -> dict[str, Any]:
+        return fixture["spec"]["podTemplate"]["spec"]
+
+    def workspace(fixture: dict[str, Any]) -> dict[str, Any]:
+        return next(c for c in spec(fixture)["containers"] if c["name"] == "workspace")
+
+    def env(fixture: dict[str, Any], name: str) -> dict[str, Any]:
+        return next(e for e in workspace(fixture)["env"] if e["name"] == name)
+
+    def replace_init_data(fixture: dict[str, Any], old: str, new: str) -> None:
+        annotations = fixture["spec"]["podTemplate"]["metadata"]["annotations"]
+        text = gzip.decompress(base64.b64decode(annotations[KATA_INIT_DATA])).decode("utf-8")
+        annotations[KATA_INIT_DATA] = base64.b64encode(gzip.compress(text.replace(old, new).encode("utf-8"))).decode("ascii")
+
+    other = "b3a9c6f2-1d4e-4f5a-8b7c-6d5e4f3a2b1c"
+    measured = env(base, MEASURED_ENVIRONMENT_ENV)["value"]
+    rejected("daemon token", lambda f: workspace(f)["env"].append({"name": "CODEWIRE_DAEMON_AUTH_TOKEN", "value": "x"}))
+    rejected("roots ConfigMap", lambda f: spec(f)["volumes"].append(copy.deepcopy(EXPECTED_ROOTS_VOLUME)))
+    rejected("coordinator extra roots", lambda f: spec(f)["volumes"].append(copy.deepcopy(EXPECTED_EXTRA_ROOTS_VOLUME)))
+    rejected("disk-backed daemon state", lambda f: next(v for v in spec(f)["volumes"] if v["name"] == "codewire-run").__setitem__(
+        "emptyDir", {}))
+    rejected("commodity runtime", lambda f: spec(f).__setitem__("runtimeClassName", "commodity"))
+    rejected("template environment label", lambda f: f["metadata"].__setitem__("labels", {ENVIRONMENT_LABEL: measured}))
+    rejected("missing measured roots", lambda f: workspace(f).__setitem__(
+        "env", [e for e in workspace(f)["env"] if e["name"] != MEASURED_ROOTS_ENV]))
+    rejected("measured roots from a ConfigMap", lambda f: env(f, MEASURED_ROOTS_ENV).update(
+        {"valueFrom": {"configMapKeyRef": {"name": "roots", "key": "ca.crt"}}}))
+    rejected("duplicate measured environment", lambda f: workspace(f)["env"].append(
+        {"name": MEASURED_ENVIRONMENT_ENV, "value": other}))
+    rejected("measured environment not the storage key", lambda f: env(f, MEASURED_ENVIRONMENT_ENV).__setitem__("value", other))
+    rejected("unpinned measured roots", lambda f: env(f, MEASURED_ROOTS_ENV).__setitem__(
+        "value", "-----BEGIN CERTIFICATE-----\nOTHER\n-----END CERTIFICATE-----\n"))
+    rejected("unpinned binding URL", lambda f: env(f, BINDING_URL_ENV).__setitem__(
+        "value", "https://attacker.example:8087"))
+    rejected("plaintext binding URL", lambda f: env(f, BINDING_URL_ENV).__setitem__(
+        "value", "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"))
+    rejected("anchor in DinD", lambda f: next(c for c in spec(f)["containers"] if c["name"] == "dind").setdefault("env", []).append(
+        dict(env(f, MEASURED_ROOTS_ENV))))
+    rejected("token in DinD", lambda f: next(c for c in spec(f)["containers"] if c["name"] == "dind")["volumeMounts"].append(
+        {"name": BINDING_VOLUME, "mountPath": BINDING_MOUNT, "readOnly": True}))
+    rejected("caller-chosen UID", lambda f: env(f, "CODEWIRE_POD_UID").__setitem__("valueFrom", {"fieldRef": {"fieldPath": "metadata.name"}}))
+    rejected("init-data for another environment", lambda f: replace_init_data(f, measured, other))
+    rejected("init-data naming the token", lambda f: replace_init_data(
+        f, '"policy.rego"', '"CODEWIRE_DAEMON_AUTH_TOKEN" = "x"\n"policy.rego"'))
+    rejected("undecodable init-data", lambda f: f["spec"]["podTemplate"]["metadata"]["annotations"].__setitem__(
+        KATA_INIT_DATA, "not base64"))
+    rejected("second binding egress", lambda f: f["spec"]["networkPolicy"]["egress"].append(
+        {"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"protocol": "TCP", "port": 8087}]}))
 
 
 TAILNET_EGRESS = {
@@ -567,6 +740,12 @@ def check_identity_free_workspace(args: argparse.Namespace) -> int:
             failures.append(f"{rel}: unreadable ({error})")
     if len(pool_objects) == 2:
         failures.extend(pool_violations(pool_objects[0], pool_objects[1], POOL_FIXTURE))
+    confidential = None
+    try:
+        confidential = json.loads((ROOT / CONFIDENTIAL_FIXTURE).read_text(encoding="utf-8"))
+        failures.extend(confidential_violations(confidential, CONFIDENTIAL_FIXTURE))
+    except (OSError, ValueError) as error:
+        failures.append(f"{CONFIDENTIAL_FIXTURE}: unreadable ({error})")
     try:
         failures.extend(extra_roots_setting_violations(deployment_manifests()))
     except OSError as error:
@@ -586,11 +765,13 @@ def check_identity_free_workspace(args: argparse.Namespace) -> int:
             self_test(base)
             if len(pool_objects) == 2:
                 pool_self_test(pool_objects[0], pool_objects[1])
+            if confidential is not None:
+                confidential_self_test(confidential)
         except RuntimeError as error:
             failures.append(str(error))
     for failure in failures:
         print(f"::error::identity-free workspace: {failure}")
     if failures:
         return 1
-    print(f"identity-free workspace: OK ({len(FIXTURES)} fixture(s), 1 warm pool{', self-test' if args.self_test else ''})")
+    print(f"identity-free workspace: OK ({len(FIXTURES)} fixture(s), 1 warm pool, 1 confidential{', self-test' if args.self_test else ''})")
     return 0

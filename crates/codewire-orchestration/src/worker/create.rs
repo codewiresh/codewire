@@ -11,7 +11,7 @@ use super::env_data::{
     BackendRow, EnvironmentRow, load_backend_row, load_environment, load_environment_in,
 };
 use super::env_log::emit_authoritative_environment_log_for_states;
-use super::environment_auth::{WorkspaceCredentialScope, issue_environment_daemon_token};
+use super::environment_auth::WorkspaceCredentialScope;
 use super::start_timing::{
     POD_STAGE_PHASES, bind_stage_path, create_milestone_path, duration_ms, pod_stage_timings,
     record_create_milestone, since_accepted, start_profile, with_since_accepted,
@@ -28,9 +28,9 @@ use crate::sandbox::client::{
 use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::sandbox::template::{
     CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DOCKER_MODE_LOCAL_DIND_DIRECT,
-    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec,
-    TemplateOpts, WORKSPACE_READY_TIMEOUT, WorkspaceIdentity, confidential_init_data,
-    runtime_profile_spec, validate_managed_runtime_profile,
+    KATA_COCO_INIT_DATA_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec,
+    TemplateOpts, WORKSPACE_READY_TIMEOUT, confidential_init_data, runtime_profile_spec,
+    validate_managed_runtime_profile,
 };
 use crate::sandbox::warm_pool::{WarmPoolObjects, WorkspaceShape, render_warm_pool};
 use crate::sandbox::{
@@ -166,17 +166,6 @@ pub(super) fn requires_running_runtime_identity(state: &str, desired_state: &str
 
 // ── Worker sandbox config (the cfg slice the create path reads) ────────
 
-/// `SANDBOX_WORKSPACE_IDENTITY_MODE` may only say `binding`, which is also
-/// its default. Every commodity workspace is identity-free: an
-/// environment-token workspace never serves SSH or the tailnet, so it could
-/// never become access-ready (#2460), and a worker configured for one
-/// refuses to start.
-pub const WORKSPACE_IDENTITY_MODE_ENV: &str = "SANDBOX_WORKSPACE_IDENTITY_MODE";
-
-pub fn workspace_identity_mode_supported(value: &str) -> bool {
-    matches!(value.trim(), "" | "binding")
-}
-
 impl SandboxWorkerCfg {
     /// The support image this worker renders, which every resume and Pod
     /// replacement re-pins a Sandbox's daemon to.
@@ -184,13 +173,11 @@ impl SandboxWorkerCfg {
         &self.daemon_image
     }
 
-    /// Review L2: a commodity workspace binds through the binding Service in
-    /// the orchestration namespace (`POD_NAMESPACE`), and its access grant
-    /// names the coordinator or API URL. Without them
-    /// `environment_template_opts` would render environment-token Pods, which
-    /// never serve SSH or the tailnet, so a worker with a sandbox backend
-    /// refuses to start instead, like an unsupported
-    /// `SANDBOX_WORKSPACE_IDENTITY_MODE`.
+    /// Review L2: every workspace binds through the binding Service in the
+    /// orchestration namespace (`POD_NAMESPACE`), and its access grant names
+    /// the coordinator or API URL. Without them there is no listener to
+    /// render a workspace against, so a worker with a sandbox backend refuses
+    /// to start instead.
     pub fn require_workspace_binding_config(&self) -> Result<(), String> {
         let mut missing = Vec::new();
         if self.pod_namespace.trim().is_empty() {
@@ -301,6 +288,12 @@ pub struct SandboxWorkerCfg {
     /// networks on ([`SANDBOX_PUBLIC_MESH_URL_ENV`]). Empty: this platform
     /// offers none, and a create that names a network is refused.
     pub mesh_public_url: String,
+    /// The binding listener's public roots (PEM) that confidential
+    /// workspaces measure (B2c): the issuing CA cert-manager publishes beside
+    /// orchestration's own internal leaf, loaded and checked against that
+    /// leaf at startup. Empty when unavailable, and then no confidential
+    /// workspace renders.
+    pub confidential_binding_roots_pem: String,
 }
 
 /// The hosted Mesh origin handed to workspace daemons, without a trailing
@@ -348,11 +341,6 @@ fn kind_codex_login_check_period_seconds(value: Option<std::ffi::OsString>) -> O
 
 impl SandboxWorkerCfg {
     pub fn from_env() -> Self {
-        let identity_mode = std::env::var(WORKSPACE_IDENTITY_MODE_ENV).unwrap_or_default();
-        assert!(
-            workspace_identity_mode_supported(&identity_mode),
-            "{WORKSPACE_IDENTITY_MODE_ENV} must be binding: an environment-token workspace never serves SSH or the tailnet"
-        );
         let env = std::env::var("ENVIRONMENT").unwrap_or_else(|_| "dev".to_string());
         let env_prefix = match env.as_str() {
             "local" | "development" => "dev",
@@ -464,6 +452,9 @@ impl SandboxWorkerCfg {
             mesh_public_url: sandbox_public_mesh_url(
                 std::env::var(SANDBOX_PUBLIC_MESH_URL_ENV).ok().as_deref(),
             ),
+            // Loaded and verified by the process entrypoint, which holds the
+            // internal TLS identity.
+            confidential_binding_roots_pem: String::new(),
         }
     }
 }
@@ -512,7 +503,6 @@ pub fn environment_template_opts(
     template_base: &str,
     env: &EnvironmentRow,
     operation_generation: i64,
-    daemon_auth_token: &str,
 ) -> anyhow::Result<TemplateOpts> {
     let env_id = env.id.as_str();
     anyhow::ensure!(
@@ -572,18 +562,32 @@ pub fn environment_template_opts(
         memory_mib: i64::from(env.memory_mb),
         disk_gib: i64::from(env.disk_gb),
     };
+    // A confidential workspace measures the roots its daemon trusts (B2c);
+    // without them no confidential rendering exists.
+    anyhow::ensure!(
+        runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL
+            || !cfg.confidential_binding_roots_pem.trim().is_empty(),
+        "confidential workspaces need orchestration's internal TLS roots to measure"
+    );
 
-    Ok(TemplateOpts {
+    let opts = TemplateOpts {
         name: environment_template_name(template_base, env_id),
         environment_id: env_id.to_string(),
         organization_id: env.org_id.clone(),
         operation_generation,
         projection_selection_sha256,
         managed_credential_clients,
-        daemon_auth_token: daemon_auth_token.to_string(),
         codex_login_check_period_seconds: cfg.codex_login_check_period_seconds,
         ..shape_template_opts(cfg, image_ref, &runtime_spec, shape)
-    })
+    };
+    // Its binding listener is one of the measured anchors: a confidential
+    // rendering without one is refused here, never rendered.
+    anyhow::ensure!(
+        runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL
+            || !opts.workspace_binding_url.trim().is_empty(),
+        "confidential workspaces need the workspace binding listener to measure"
+    );
+    Ok(opts)
 }
 
 /// The cluster and shape inputs of a workspace rendering, with no environment
@@ -606,20 +610,23 @@ pub fn shape_template_opts(
     };
 
     let uses_runtime_transport_registry = !cfg.runtime_transport_zones_json.trim().is_empty();
-    // Commodity workspaces are identity-free (design §13); confidential keeps
-    // its measured environment-bound init-data until B2c. A Pod reaches the
+    // Every hosted workspace is identity-free (design §13), confidential too
+    // (B2c), which also measures its binding anchors. A Pod reaches the
     // binding listener only with the orchestration namespace and a
     // coordinator known, which a worker with a sandbox backend requires at
     // startup (`require_workspace_binding_config`).
-    let binds = runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL
-        && !cfg.pod_namespace.trim().is_empty()
-        && !(cfg.coordinator_url.trim().is_empty() && cfg.api_base_url.trim().is_empty());
-    let workspace_identity = if binds {
-        WorkspaceIdentity::Binding {
-            binding_url: workspace_binding_url(cfg.pod_namespace.trim()),
-        }
+    let has_coordinator =
+        !(cfg.coordinator_url.trim().is_empty() && cfg.api_base_url.trim().is_empty());
+    let binds = !cfg.pod_namespace.trim().is_empty() && has_coordinator;
+    let measured_binding_roots = if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        cfg.confidential_binding_roots_pem.clone()
     } else {
-        WorkspaceIdentity::EnvironmentToken
+        String::new()
+    };
+    let workspace_binding_url = if binds {
+        workspace_binding_url(cfg.pod_namespace.trim())
+    } else {
+        String::new()
     };
 
     TemplateOpts {
@@ -631,8 +638,8 @@ pub fn shape_template_opts(
         projection_selection_sha256: None,
         managed_credential_clients: Default::default(),
         confidential_storage_manifest_uri: String::new(),
-        daemon_auth_token: String::new(),
         // Cluster and shape.
+        measured_binding_roots,
         image: image_ref.to_string(),
         image_command,
         support_image: cfg.daemon_image.clone(),
@@ -640,7 +647,7 @@ pub fn shape_template_opts(
         runtime_profile: runtime_spec.profile.clone(),
         docker_mode: runtime_spec.docker_mode.clone(),
         credential_runtime: cfg.credential_runtime.clone(),
-        workspace_identity,
+        workspace_binding_url,
         api_base_url: cfg.api_base_url.clone(),
         coordinator_url: cfg.coordinator_url.clone(),
         server_namespace: cfg.pod_namespace.clone(),
@@ -737,7 +744,7 @@ pub fn warm_pool_template_opts(
         shape,
     );
     anyhow::ensure!(
-        opts.identity_free(),
+        !opts.workspace_binding_url.is_empty(),
         "warm pools require identity-free workspaces (POD_NAMESPACE and a coordinator)"
     );
     Ok(opts)
@@ -973,16 +980,7 @@ pub(super) async fn load_environment_template_opts(
     let (image, base) =
         load_sandbox_template_config(&ctx.pool, env.preset_id.as_deref().unwrap_or_default())
             .await?;
-    let daemon_auth_token =
-        issue_environment_daemon_token(&ctx.sandbox_cfg.session_secret, &env.id)?;
-    environment_template_opts(
-        &ctx.sandbox_cfg,
-        &image,
-        &base,
-        env,
-        operation_generation,
-        &daemon_auth_token,
-    )
+    environment_template_opts(&ctx.sandbox_cfg, &image, &base, env, operation_generation)
 }
 
 /// The allocated Sandbox, not only its template, owns the next Pod's immutable
@@ -1045,15 +1043,8 @@ pub(super) async fn confidential_runtime_template_opts(
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, preset_id).await?;
     let cfg = &ctx.sandbox_cfg;
     let expected_template = environment_per_env_template_name(&image_ref, &template_base, env_id);
-    let daemon_auth_token = issue_environment_daemon_token(&cfg.session_secret, env_id)?;
-    let mut template_opts = environment_template_opts(
-        cfg,
-        &image_ref,
-        &template_base,
-        env,
-        operation_generation,
-        &daemon_auth_token,
-    )?;
+    let mut template_opts =
+        environment_template_opts(cfg, &image_ref, &template_base, env, operation_generation)?;
     template_opts.confidential_storage_manifest_uri = confidential_storage_manifest_uri.to_owned();
     if template_opts.name != expected_template {
         anyhow::bail!("confidential runtime template identity is inconsistent");
@@ -1064,26 +1055,6 @@ pub(super) async fn confidential_runtime_template_opts(
     )
     .map_err(|error| anyhow::anyhow!("runtime profile: {error}"))?;
     Ok(template_opts)
-}
-
-pub(super) async fn authorize_confidential_runtime_for_environment(
-    ctx: &WorkerContext,
-    env: &EnvironmentRow,
-    confidential_storage_manifest_uri: &str,
-    authority: &ActivityAuthority,
-    authoritative_states: &[&str],
-) -> anyhow::Result<()> {
-    if env.isolation_tier != "confidential" {
-        return Ok(());
-    }
-    let template_opts = confidential_runtime_template_opts(
-        ctx,
-        env,
-        confidential_storage_manifest_uri,
-        authority.operation_generation(),
-    )
-    .await?;
-    authorize_confidential_runtime(ctx, &template_opts, authority, authoritative_states).await
 }
 
 pub(super) async fn reconcile_confidential_runtime_before_replacement(
@@ -1108,7 +1079,10 @@ pub(super) async fn reconcile_confidential_runtime_before_replacement(
     .await?;
     authorize_confidential_runtime(ctx, &template_opts, authority, authoritative_states).await?;
 
-    let kernel_params = run_template_mutation(
+    // Publish the measured runtime the authorization names, and see it on
+    // the stale Pod, before that Pod is deleted: the controller then
+    // recreates only the authorized rendering (B2c).
+    let init_data = run_template_mutation(
         authority,
         &template_opts,
         authoritative_states,
@@ -1121,8 +1095,8 @@ pub(super) async fn reconcile_confidential_runtime_before_replacement(
             client.wait_for_workspace_pod_annotation(
                 &stale.name,
                 &stale.uid,
-                KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-                &kernel_params,
+                KATA_COCO_INIT_DATA_ANNOTATION_KEY,
+                &init_data,
                 RUNTIME_METADATA_PROPAGATION_TIMEOUT,
             ),
         )
@@ -1489,35 +1463,12 @@ async fn run_environment_create(
                             return Err(e);
                         }
                     };
-                let daemon_auth_token =
-                    match issue_environment_daemon_token(&cfg.session_secret, env_id) {
-                        Ok(token) => token,
-                        Err(e) => {
-                            emit_create_log(
-                                authority,
-                                "create_claim",
-                                "failed",
-                                &format!("{e:#}"),
-                                None,
-                            )
-                            .await?;
-                            record_error(
-                                &svc,
-                                authority,
-                                env_id,
-                                &format!("environment capabilities: {e:#}"),
-                            )
-                            .await?;
-                            return Err(e);
-                        }
-                    };
                 let mut template_opts = environment_template_opts(
                     cfg,
                     &image_ref,
                     &template_base,
                     &env,
                     authority.operation_generation(),
-                    &daemon_auth_token,
                 )?;
                 template_opts.confidential_storage_manifest_uri =
                     confidential_storage_manifest_uri.unwrap_or_default();
@@ -2278,14 +2229,12 @@ async fn ensure_access_stack_for_environment(
 ) -> anyhow::Result<()> {
     let preset_id = env.preset_id.clone().unwrap_or_default();
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, &preset_id).await?;
-    let daemon_auth_token = issue_environment_daemon_token(&cfg.session_secret, env_id)?;
     let template_opts = environment_template_opts(
         cfg,
         &image_ref,
         &template_base,
         env,
         authority.operation_generation(),
-        &daemon_auth_token,
     )?;
     let runtime_spec = template_opts.runtime_profile_spec();
     validate_managed_runtime_profile(&runtime_spec, cfg.allow_diagnostic_runtime)
@@ -2511,8 +2460,6 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         if !workspace_bootstrap_current(
             &client,
             &template_opts,
-            &claim_name,
-            &claim_uid,
             observation.pod(),
             binding.as_ref(),
         )
@@ -2597,15 +2544,13 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
 
 /// Stale-bootstrap check for the observed Pod (design §12). A bound Pod-scope
 /// runtime compares the binding row's captured generation, digest and
-/// clients; a legacy environment-scope Pod compares the environment it was
-/// rendered with, as before; an identity-free Pod that is not bound yet is
+/// clients; a legacy environment-scope Pod is never current; a Pod that is
+/// not bound yet is
 /// current by construction, because its binding captures the current
 /// environment row under the same fence.
 async fn workspace_bootstrap_current(
     client: &SandboxClient,
     template_opts: &TemplateOpts,
-    claim_name: &str,
-    claim_uid: &str,
     pod: &WorkspacePodIdentity,
     binding: Option<&EnvironmentBinding>,
 ) -> anyhow::Result<bool> {
@@ -2615,11 +2560,9 @@ async fn workspace_bootstrap_current(
         .filter(|live| live.metadata.uid.as_deref() == Some(pod.uid.as_str()))
         .ok_or_else(|| anyhow::anyhow!("workspace bootstrap Pod was replaced"))?;
     match credential_scope(&live_pod) {
-        Some(WorkspaceCredentialScope::Environment) => {
-            client
-                .workspace_bootstrap_matches(template_opts, claim_name, claim_uid, pod)
-                .await
-        }
+        // A Pod rendered before claim-time binding is never current: recovery
+        // restarts it onto the binding rendering (no legacy compatibility).
+        Some(WorkspaceCredentialScope::Environment) => Ok(false),
         Some(WorkspaceCredentialScope::Pod) => Ok(binding
             .filter(|binding| binding.pod_uid == pod.uid)
             .is_none_or(|binding| binding_bootstrap_current(binding, template_opts))),
@@ -2839,12 +2782,6 @@ mod tests {
         }
     }
 
-    /// Commodity Pods always render identity-free, and only `binding` (or
-    /// nothing) is a supported `SANDBOX_WORKSPACE_IDENTITY_MODE`: an
-    /// environment-token commodity workspace could never become
-    /// access-ready. Confidential keeps its rendered token until B2c; a
-    /// configuration without the orchestration namespace or a coordinator,
-    /// which a sandbox worker refuses at startup, renders one too.
     /// The Kind-only Codex login check period: read only by `kind-e2e`
     /// builds, refused outside the daemon's 10-120 second bounds, and given to
     /// an environment's rendering but never to a warm pool's.
@@ -2882,7 +2819,6 @@ mod tests {
             "base",
             &identity_mode_env(),
             7,
-            "daemon-tok",
         )
         .unwrap();
         assert_eq!(environment.codex_login_check_period_seconds, Some(30));
@@ -2910,7 +2846,6 @@ mod tests {
             "base",
             &identity_mode_env(),
             7,
-            "daemon-tok",
         )
         .unwrap();
         assert_eq!(environment.egress_bandwidth, "100M");
@@ -2923,17 +2858,10 @@ mod tests {
         assert_eq!(pool.egress_bandwidth, "100M");
     }
 
+    /// Every workspace renders against its binding listener, confidential
+    /// too (B2c); there is no environment-token rendering.
     #[test]
-    fn commodity_workspaces_always_render_identity_free() {
-        for supported in ["", "binding", " binding "] {
-            assert!(
-                workspace_identity_mode_supported(supported),
-                "{supported:?}"
-            );
-        }
-        for refused in ["environment-token", "Binding", "token", "legacy", "pod"] {
-            assert!(!workspace_identity_mode_supported(refused), "{refused}");
-        }
+    fn every_workspace_renders_against_its_binding_listener() {
         let cfg = SandboxWorkerCfg {
             runtime_profile: "commodity".into(),
             pod_namespace: "dev".into(),
@@ -2942,51 +2870,76 @@ mod tests {
             ..Default::default()
         };
         let render = |cfg: &SandboxWorkerCfg, env: &EnvironmentRow| {
-            environment_template_opts(
-                cfg,
-                "ghcr.io/codewiresh/workspace:1",
-                "base",
-                env,
-                7,
-                "daemon-tok",
-            )
-            .unwrap()
-            .workspace_identity
+            environment_template_opts(cfg, "ghcr.io/codewiresh/workspace:1", "base", env, 7)
+                .unwrap()
+                .workspace_binding_url
         };
         let env = identity_mode_env();
         assert_eq!(
             render(&cfg, &env),
-            WorkspaceIdentity::Binding {
-                binding_url:
-                    "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
-                        .into()
-            }
+            "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
         );
-        // Confidential keeps its rendered token.
+        // Without the binding Service's namespace or a coordinator there is no
+        // listener to render against; a worker with a sandbox backend refuses
+        // to start then (`require_workspace_binding_config`).
         let no_namespace = SandboxWorkerCfg {
             pod_namespace: String::new(),
             ..cfg.clone()
         };
-        assert_eq!(
-            render(&no_namespace, &env),
-            WorkspaceIdentity::EnvironmentToken
-        );
+        assert_eq!(render(&no_namespace, &env), "");
         let no_coordinator = SandboxWorkerCfg {
             api_base_url: String::new(),
             coordinator_url: String::new(),
             ..cfg.clone()
         };
-        assert_eq!(
-            render(&no_coordinator, &env),
-            WorkspaceIdentity::EnvironmentToken
-        );
+        assert_eq!(render(&no_coordinator, &env), "");
+        // A confidential workspace binds too (B2c), measuring orchestration's
+        // own roots; without them it renders nothing at all.
         let confidential = EnvironmentRow {
             isolation_tier: "confidential".into(),
             ..identity_mode_env()
         };
+        let measured_cfg = SandboxWorkerCfg {
+            confidential_binding_roots_pem:
+                "-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n".into(),
+            ..cfg.clone()
+        };
+        assert_eq!(render(&measured_cfg, &confidential), render(&cfg, &env),);
+        let measured = environment_template_opts(
+            &measured_cfg,
+            "ghcr.io/codewiresh/workspace:1",
+            "base",
+            &confidential,
+            7,
+        )
+        .unwrap();
         assert_eq!(
-            render(&cfg, &confidential),
-            WorkspaceIdentity::EnvironmentToken
+            measured.measured_binding_roots,
+            measured_cfg.confidential_binding_roots_pem
+        );
+        assert!(measured.measured_workspace_environment().is_some());
+        // Standard renderings never carry them.
+        assert!(
+            environment_template_opts(
+                &measured_cfg,
+                "ghcr.io/codewiresh/workspace:1",
+                "base",
+                &env,
+                7,
+            )
+            .unwrap()
+            .measured_binding_roots
+            .is_empty()
+        );
+        assert!(
+            environment_template_opts(
+                &cfg,
+                "ghcr.io/codewiresh/workspace:1",
+                "base",
+                &confidential,
+                7,
+            )
+            .is_err()
         );
     }
 
@@ -3584,7 +3537,6 @@ mod tests {
             "preset-base",
             &env,
             7,
-            "daemon-tok",
         )
         .unwrap();
         assert!(opts.image_command.is_empty());
@@ -3608,15 +3560,8 @@ mod tests {
             "/run/confidential-containers/cdh/kbs/codewire/runtime-test-resource"
         );
         // Custom image: sleep infinity + preset-derived name.
-        let opts = environment_template_opts(
-            &cfg,
-            "ghcr.io/acme/img:1",
-            "preset-base",
-            &env,
-            7,
-            "daemon-tok",
-        )
-        .unwrap();
+        let opts =
+            environment_template_opts(&cfg, "ghcr.io/acme/img:1", "preset-base", &env, 7).unwrap();
         assert_eq!(
             opts.image_command,
             vec!["sleep".to_string(), "infinity".to_string()]
@@ -3627,6 +3572,10 @@ mod tests {
     #[test]
     fn confidential_tier_coexists_with_commodity_process_default() {
         let cfg = SandboxWorkerCfg {
+            pod_namespace: "dev".into(),
+            api_base_url: "https://codewire-dev.sh".into(),
+            confidential_binding_roots_pem:
+                "-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n".into(),
             runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
             docker_mode: crate::sandbox::template::DOCKER_MODE_PROFILE_DEFAULT.into(),
             workspace_storage_class: "linstor-local".into(),
@@ -3662,7 +3611,6 @@ mod tests {
             "workspace",
             &standard,
             7,
-            "daemon-tok",
         )
         .unwrap();
         assert_eq!(
@@ -3699,7 +3647,6 @@ mod tests {
             "workspace",
             &confidential,
             7,
-            "daemon-tok",
         )
         .unwrap();
         assert_eq!(
@@ -3742,7 +3689,6 @@ mod tests {
             "workspace",
             &confidential,
             7,
-            "daemon-tok",
         )
         .unwrap_err();
         assert!(
@@ -3758,7 +3704,6 @@ mod tests {
                 "workspace",
                 &standard,
                 7,
-                "daemon-tok",
             )
             .is_ok()
         );
@@ -3802,7 +3747,6 @@ mod tests {
             "workspace",
             &env,
             7,
-            "daemon-tok",
         )
         .unwrap();
 
@@ -3821,15 +3765,9 @@ mod tests {
             direct_udp_lb_ip: "203.0.113.36".into(),
             ..cfg
         };
-        let opts = environment_template_opts(
-            &diagnostic,
-            "ghcr.io/acme/img:1",
-            "workspace",
-            &env,
-            7,
-            "daemon-tok",
-        )
-        .unwrap();
+        let opts =
+            environment_template_opts(&diagnostic, "ghcr.io/acme/img:1", "workspace", &env, 7)
+                .unwrap();
         assert!(!opts.direct_udp_lb_enabled);
     }
 
@@ -3871,7 +3809,6 @@ mod tests {
             "workspace",
             &env,
             7,
-            "daemon-tok",
         )
         .unwrap();
 

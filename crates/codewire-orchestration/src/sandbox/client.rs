@@ -27,6 +27,7 @@ use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 use serde_json::Value;
 
 use super::template::{
+    KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
     KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, LEGACY_DIND_BOOTSTRAP_SCRIPT,
     RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts, dind_bootstrap_script,
     direct_udp_service_name, docker_data_size_gib, eager_mkfs_dind_bootstrap_script,
@@ -377,106 +378,17 @@ mod workspace_bootstrap_tests;
 #[path = "client/claim_ready_tests.rs"]
 mod claim_ready_tests;
 
-const WORKSPACE_BOOTSTRAP_KEYS: [&str; 4] = [
-    "CODEWIRE_ENVIRONMENT_ID",
-    "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
-    "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256",
-    super::template::MANAGED_CREDENTIAL_CLIENTS_ENV,
+/// The workspace environment the rendering owns: the binding, the measured
+/// anchors of a confidential workspace, the daemon's listener and the token
+/// a pre-binding rendering carried. A Claim may never override them.
+const WORKSPACE_OWNED_ENVIRONMENT: [&str; 6] = [
+    codewire_daemon_proto::WORKSPACE_BINDING_URL_ENV,
+    codewire_daemon_proto::WORKSPACE_POD_UID_ENV,
+    codewire_daemon_proto::WORKSPACE_MEASURED_BINDING_ROOTS_ENV,
+    codewire_daemon_proto::WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV,
+    "CODEWIRE_WORKSPACE_SHIM_ADDR",
+    LEGACY_DAEMON_AUTH_TOKEN_ENV,
 ];
-
-fn workspace_owned_environment_keys() -> BTreeSet<String> {
-    let mut keys: BTreeSet<_> = WORKSPACE_BOOTSTRAP_KEYS
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-    const SLOTS: [&str; 5] = ["codex", "openai", "anthropic", "ssh", "github"];
-    // Every name any selection projects in any Anthropic form, and every
-    // name a selected client reserves: an Anthropic name of the form that
-    // is not selected is owned too, and never rendered. Some names depend on
-    // the combination (the GitHub client alone rewrites more Git URL forms
-    // than with an SSH key), so every subset of the closed slots is listed.
-    let selections = (0..1_u8 << SLOTS.len()).flat_map(|bits| {
-        let selection = codewire_access::ManagedCredentialClients::from_profile_slots(
-            SLOTS
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| bits & (1 << index) != 0)
-                .map(|(_, slot)| *slot),
-        )
-        .expect("closed slots");
-        [
-            Some(selection),
-            selection.with_anthropic_subscription_token().ok(),
-            selection.with_anthropic_sign_in().ok(),
-        ]
-        .into_iter()
-        .flatten()
-    });
-    for selection in selections {
-        keys.extend(
-            selection
-                .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
-                .environment
-                .into_keys(),
-        );
-        keys.extend(
-            selection
-                .reserved_environment_keys()
-                .into_iter()
-                .map(str::to_owned),
-        );
-    }
-    // Public roots previously rendered by this same owned workspace bootstrap.
-    // They must not persist when the stock client uses the loopback route.
-    keys.insert("CODEX_CA_CERTIFICATE".into());
-    keys
-}
-
-fn workspace_bootstrap_values(opts: &TemplateOpts) -> anyhow::Result<BTreeMap<String, String>> {
-    anyhow::ensure!(
-        !opts.environment_id.is_empty()
-            && opts.environment_id.trim() == opts.environment_id
-            && !opts.organization_id.is_empty()
-            && opts.operation_generation > 0
-            && opts.name.ends_with(&format!("-{}", opts.environment_id)),
-        "workspace bootstrap authority is incomplete"
-    );
-    let Some(digest) = opts.projection_selection_sha256 else {
-        anyhow::ensure!(
-            opts.managed_credential_clients == Default::default(),
-            "managed credential clients have no selected bootstrap"
-        );
-        return Ok(BTreeMap::new());
-    };
-    anyhow::ensure!(
-        digest != [0; 32] && opts.credential_runtime.is_some(),
-        "workspace bootstrap selection has no runtime trust"
-    );
-    let mut expected = BTreeMap::from([
-        (
-            WORKSPACE_BOOTSTRAP_KEYS[0].to_owned(),
-            opts.environment_id.clone(),
-        ),
-        (
-            WORKSPACE_BOOTSTRAP_KEYS[1].to_owned(),
-            opts.operation_generation.to_string(),
-        ),
-        (
-            WORKSPACE_BOOTSTRAP_KEYS[2].to_owned(),
-            digest.iter().map(|byte| format!("{byte:02x}")).collect(),
-        ),
-        (
-            WORKSPACE_BOOTSTRAP_KEYS[3].to_owned(),
-            opts.managed_credential_clients.encode().to_owned(),
-        ),
-    ]);
-    expected.extend(
-        opts.managed_credential_clients
-            .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
-            .environment,
-    );
-    Ok(expected)
-}
 
 fn workspace_container(containers: &[Value]) -> anyhow::Result<(usize, &Value)> {
     let mut workspace = containers.iter().enumerate().filter(|(_, container)| {
@@ -494,170 +406,6 @@ fn workspace_environment(container: &Value) -> anyhow::Result<&[Value]> {
         Some(Value::Array(env)) => Ok(env),
         _ => anyhow::bail!("workspace environment is malformed"),
     }
-}
-
-fn bootstrap_environment_matches(env: &[Value], expected: &BTreeMap<String, String>) -> bool {
-    let mut seen = BTreeSet::new();
-    let owned = workspace_owned_environment_keys();
-    for entry in env {
-        let Some(name) = entry.get("name").and_then(Value::as_str) else {
-            return false;
-        };
-        // An earlier bootstrap rendered blank placeholders for the Anthropic
-        // form that was not selected; the Pod API stores them as names with
-        // no value. A blank owned name the current bootstrap does not render
-        // is inert, so a Pod rendered before it was dropped still matches.
-        if owned.contains(name)
-            && !expected.contains_key(name)
-            && entry.get("valueFrom").is_none_or(Value::is_null)
-            && environment_value(entry) == Some("")
-        {
-            continue;
-        }
-        if owned.contains(name)
-            && (!seen.insert(name)
-                || !entry.get("valueFrom").is_none_or(Value::is_null)
-                || environment_value(entry) != expected.get(name).map(String::as_str)
-                || !expected.contains_key(name))
-        {
-            return false;
-        }
-    }
-    seen.len() == expected.len()
-}
-
-/// The Pod API omits an empty `value`, so a stored Pod never repeats a blank
-/// placeholder an earlier bootstrap rendered (for example
-/// `ANTHROPIC_API_KEY`). An absent value is the empty string.
-fn environment_value(entry: &Value) -> Option<&str> {
-    match entry.get("value") {
-        None | Some(Value::Null) => Some(""),
-        Some(value) => value.as_str(),
-    }
-}
-
-fn bootstrap_template_matches(
-    object: &DynamicObject,
-    expected: &BTreeMap<String, String>,
-) -> anyhow::Result<bool> {
-    let containers = object
-        .data
-        .pointer("/spec/podTemplate/spec/containers")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("runtime object has no containers"))?;
-    let (_, container) = workspace_container(containers)?;
-    Ok(bootstrap_environment_matches(
-        workspace_environment(container)?,
-        expected,
-    ))
-}
-
-/// JSON Patch modifies only the owned entries, not the surrounding env array.
-/// UID/RV tests bind the validated incarnation and every array index. No retry
-/// substitutes another object's version after a conflict.
-fn workspace_bootstrap_patch(
-    object: &DynamicObject,
-    expected: &BTreeMap<String, String>,
-    recovery: Option<&Value>,
-    clients: &Value,
-) -> anyhow::Result<Option<Patch<()>>> {
-    let env_matches = bootstrap_template_matches(object, expected)?;
-    let mut changes = workspace_client_changes(&object.data, clients, "/spec/podTemplate/spec")?;
-    if let Some(recovery) = recovery {
-        let kernel = recovery
-            .pointer("/spec/podTemplate/metadata/annotations")
-            .and_then(|annotations| annotations.get(KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY))
-            .ok_or_else(|| anyhow::anyhow!("confidential recovery annotation is unavailable"))?;
-        let annotations = "/spec/podTemplate/metadata/annotations";
-        if object
-            .data
-            .pointer(annotations)
-            .and_then(|values| values.get(KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY))
-            != Some(kernel)
-        {
-            anyhow::ensure!(
-                object
-                    .data
-                    .pointer("/spec/podTemplate/metadata")
-                    .is_some_and(Value::is_object),
-                "workspace metadata is unavailable"
-            );
-            if let Some(current) = object.data.pointer(annotations) {
-                anyhow::ensure!(current.is_object(), "workspace annotations are malformed");
-                let key = KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY
-                    .replace('~', "~0")
-                    .replace('/', "~1");
-                changes.push(serde_json::json!({"op":"add", "path":format!("{annotations}/{key}"), "value":kernel}));
-            } else {
-                changes.push(serde_json::json!({"op":"add", "path":annotations, "value":{KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY:kernel}}));
-            }
-        }
-        let policy = "/spec/podTemplate/spec/securityContext/fsGroupChangePolicy";
-        let expected_policy = recovery
-            .pointer(policy)
-            .ok_or_else(|| anyhow::anyhow!("confidential recovery policy is unavailable"))?;
-        if object.data.pointer(policy) != Some(expected_policy) {
-            anyhow::ensure!(
-                object
-                    .data
-                    .pointer("/spec/podTemplate/spec/securityContext")
-                    .is_some_and(Value::is_object),
-                "workspace security context is unavailable"
-            );
-            changes.push(serde_json::json!({"op":"add", "path":policy, "value":expected_policy}));
-        }
-    }
-    if env_matches && changes.is_empty() {
-        return Ok(None);
-    }
-    let uid = object
-        .metadata
-        .uid
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap object has no UID"))?;
-    let version = object
-        .metadata
-        .resource_version
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap object has no resource version"))?;
-    let containers = object
-        .data
-        .pointer("/spec/podTemplate/spec/containers")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("runtime object has no containers"))?;
-    let (index, container) = workspace_container(containers)?;
-    let env = workspace_environment(container)?;
-    anyhow::ensure!(
-        env.iter()
-            .all(|entry| entry.get("name").and_then(Value::as_str).is_some()),
-        "workspace environment is malformed"
-    );
-    let path = format!("/spec/podTemplate/spec/containers/{index}/env");
-    let mut patch = vec![
-        serde_json::json!({"op":"test", "path":"/metadata/uid", "value":uid}),
-        serde_json::json!({"op":"test", "path":"/metadata/resourceVersion", "value":version}),
-    ];
-    if !env_matches && container.get("env").is_none() {
-        patch.push(serde_json::json!({"op":"add", "path":path, "value":[]}));
-    }
-    for (index, entry) in env.iter().enumerate().rev().filter(|_| !env_matches) {
-        if entry
-            .get("name")
-            .and_then(Value::as_str)
-            .is_some_and(|name| workspace_owned_environment_keys().contains(name))
-        {
-            patch.push(serde_json::json!({"op":"remove", "path":format!("{path}/{index}")}));
-        }
-    }
-    for (name, value) in expected.iter().filter(|_| !env_matches) {
-        patch.push(serde_json::json!({"op":"add", "path":format!("{path}/-"), "value":{"name":name,"value":value}}));
-    }
-    patch.extend(changes);
-    Ok(Some(Patch::Json(serde_json::from_value(Value::Array(
-        patch,
-    ))?)))
 }
 
 /// Volumes that held Codex's configuration before the daemon wrote the
@@ -678,180 +426,6 @@ fn workspace_object_has_legacy_codex_home(object: &DynamicObject) -> anyhow::Res
             .and_then(Value::as_str)
             .is_some_and(|name| WORKSPACE_CLIENT_VOLUMES.contains(&name))
     }))
-}
-
-/// Reconcile named machine-owned entries without replacing their surrounding
-/// arrays. Array indices are protected by the outer object's UID/RV tests.
-fn workspace_client_named_changes(
-    data: &Value,
-    path: &str,
-    expected: &[Value],
-    changes: &mut Vec<Value>,
-) -> anyhow::Result<()> {
-    let current = match data.pointer(path) {
-        None => &[][..],
-        Some(Value::Array(values)) => values.as_slice(),
-        _ => anyhow::bail!("workspace client bootstrap array is malformed"),
-    };
-    anyhow::ensure!(
-        current
-            .iter()
-            .all(|entry| entry.get("name").and_then(Value::as_str).is_some()),
-        "workspace client bootstrap entry is malformed"
-    );
-    let owned = |entry: &&Value| {
-        entry
-            .get("name")
-            .and_then(Value::as_str)
-            .is_some_and(|name| WORKSPACE_CLIENT_VOLUMES.contains(&name))
-    };
-    let current_owned: Vec<_> = current.iter().filter(owned).collect();
-    let desired: Vec<_> = expected.iter().filter(owned).collect();
-    if current_owned.len() == desired.len()
-        && current_owned
-            .iter()
-            .map(|entry| entry["name"].as_str().expect("validated entry name"))
-            .collect::<BTreeSet<_>>()
-            .len()
-            == current_owned.len()
-        && current_owned.iter().all(|entry| desired.contains(entry))
-    {
-        return Ok(());
-    }
-    if data.pointer(path).is_none() {
-        changes.push(serde_json::json!({"op":"add","path":path,"value":[]}));
-    }
-    for (index, entry) in current.iter().enumerate().rev() {
-        if owned(&entry) {
-            changes.push(serde_json::json!({"op":"remove","path":format!("{path}/{index}")}));
-        }
-    }
-    for entry in desired {
-        changes.push(serde_json::json!({"op":"add","path":format!("{path}/-"),"value":entry}));
-    }
-    Ok(())
-}
-
-fn workspace_client_changes(
-    data: &Value,
-    clients: &Value,
-    spec_path: &str,
-) -> anyhow::Result<Vec<Value>> {
-    let spec = data
-        .pointer(spec_path)
-        .ok_or_else(|| anyhow::anyhow!("workspace spec is unavailable"))?;
-    let containers = spec
-        .get("containers")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("workspace containers are unavailable"))?;
-    let (workspace_index, _) = workspace_container(containers)?;
-    let init_containers = match spec.get("initContainers") {
-        None => &[][..],
-        Some(Value::Array(values)) => values.as_slice(),
-        _ => anyhow::bail!("workspace bootstrap init is malformed"),
-    };
-    let named_init = |name: &str| -> anyhow::Result<Option<(usize, &Value)>> {
-        let mut found = init_containers
-            .iter()
-            .enumerate()
-            .filter(|(_, container)| container["name"] == name);
-        let first = found.next();
-        anyhow::ensure!(
-            found.next().is_none(),
-            "workspace bootstrap init is duplicated"
-        );
-        Ok(first)
-    };
-    let daemon_init = named_init(super::template::DAEMON_INIT_CONTAINER)?;
-    let client_init = named_init(super::template::CLIENT_BOOTSTRAP_CONTAINER)?;
-    // The daemon reaches `/codewire/bin` by exactly one route, fixed when the
-    // object was created: copied by its init container into an emptyDir, or
-    // mounted from the support image. Older objects keep the copy.
-    let daemon_image = match (daemon_init, workspace_daemon_image(spec)?) {
-        (Some(_), None) if client_init.is_none() => None,
-        (None, Some(image)) => Some(image),
-        (None, None) => anyhow::bail!("workspace bootstrap init is unavailable"),
-        _ => anyhow::bail!("workspace daemon delivery is ambiguous"),
-    };
-    let mut changes = Vec::new();
-    for (path, expected) in [
-        (format!("{spec_path}/volumes"), &clients["volumes"]),
-        (
-            format!("{spec_path}/containers/{workspace_index}/volumeMounts"),
-            &clients["volumeMounts"],
-        ),
-    ] {
-        workspace_client_named_changes(
-            data,
-            &path,
-            expected.as_array().expect("rendered client array"),
-            &mut changes,
-        )?;
-    }
-    let (current, expected) = match daemon_image {
-        None => (daemon_init, &clients["init"]),
-        Some(image) => {
-            let expected = &clients["clientInit"];
-            match (client_init, expected.is_null()) {
-                (None, true) => return Ok(changes),
-                (Some((index, _)), true) => {
-                    changes.push(serde_json::json!({"op":"remove","path":format!("{spec_path}/initContainers/{index}")}));
-                    return Ok(changes);
-                }
-                (None, false) => {
-                    let mut init = expected.clone();
-                    init["image"] = image.into();
-                    changes.push(if spec.get("initContainers").is_none() {
-                        serde_json::json!({"op":"add","path":format!("{spec_path}/initContainers"),"value":[init]})
-                    } else {
-                        serde_json::json!({"op":"add","path":format!("{spec_path}/initContainers/-"),"value":init})
-                    });
-                    return Ok(changes);
-                }
-                (Some(_), false) => (client_init, expected),
-            }
-        }
-    };
-    let (init_index, current_init) = current.expect("selected bootstrap init");
-    workspace_client_named_changes(
-        data,
-        &format!("{spec_path}/initContainers/{init_index}/volumeMounts"),
-        expected["volumeMounts"]
-            .as_array()
-            .expect("rendered client array"),
-        &mut changes,
-    )?;
-    if current_init.get("command") != Some(&expected["command"]) {
-        changes.push(serde_json::json!({"op":"add","path":format!("{spec_path}/initContainers/{init_index}/command"),"value":expected["command"]}));
-    }
-    Ok(changes)
-}
-
-/// The support image a Pod mounts its daemon from, or `None` when its
-/// `codewire-bin` is an emptyDir filled by the daemon init container.
-fn workspace_daemon_image(spec: &Value) -> anyhow::Result<Option<&str>> {
-    let volumes = spec
-        .get("volumes")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let mut daemon = volumes
-        .iter()
-        .filter(|volume| volume["name"] == super::template::DAEMON_VOLUME);
-    let volume = daemon.next();
-    anyhow::ensure!(
-        daemon.next().is_none(),
-        "workspace daemon volume is duplicated"
-    );
-    let Some(image) = volume.and_then(|volume| volume.get("image")) else {
-        return Ok(None);
-    };
-    image
-        .get("reference")
-        .and_then(Value::as_str)
-        .filter(|reference| !reference.is_empty())
-        .map(Some)
-        .ok_or_else(|| anyhow::anyhow!("workspace daemon image is malformed"))
 }
 
 /// The repository an image reference names, without its digest or tag:
@@ -1231,6 +805,9 @@ fn log_dind_bootstrap_refresh(name: &str) {
         "re-rendered the Sandbox's prior DinD bootstrap; its next Pod keeps ~/.codewire private and grows the Docker data image with the disk"
     );
 }
+/// The environment token a workspace rendered before claim-time binding
+/// carried. Start detects it only to replace such an object's Pod spec.
+const LEGACY_DAEMON_AUTH_TOKEN_ENV: &str = "CODEWIRE_DAEMON_AUTH_TOKEN";
 
 /// Whether a SandboxTemplate or Sandbox renders an identity-free workspace:
 /// its workspace container names the binding listener and carries no
@@ -1250,7 +827,7 @@ fn workspace_object_identity_free(object: &DynamicObject) -> anyhow::Result<bool
     };
     match (
         named(codewire_daemon_proto::WORKSPACE_BINDING_URL_ENV),
-        named(super::template::DAEMON_AUTH_TOKEN_ENV),
+        named(LEGACY_DAEMON_AUTH_TOKEN_ENV),
     ) {
         (true, false) => Ok(true),
         (false, _) => Ok(false),
@@ -2457,10 +2034,11 @@ impl SandboxClient {
         }
     }
 
-    /// Reconcile the current confidential runtime fields into the private
-    /// template and the allocated Sandbox before replacing a terminal Pod.
-    /// Updating the SandboxTemplate alone is insufficient because the
-    /// controller does not rewrite an already-created Sandbox.
+    /// Publish the measured confidential Pod template (B2c) into the private
+    /// template and the allocated Sandbox before replacing a terminal Pod, and
+    /// return the init-data the replacement must carry. Updating the
+    /// SandboxTemplate alone is insufficient because the controller does not
+    /// rewrite an already-created Sandbox.
     pub async fn reconcile_per_environment_runtime(
         &self,
         env_id: &str,
@@ -2513,20 +2091,23 @@ impl SandboxClient {
             .get(sandbox_name)
             .await
             .map_err(|error| anyhow::anyhow!("get Sandbox {sandbox_name}: {error}"))?;
-        let (kernel_params, runtime_patch) =
-            rendered_runtime_recovery_patch(&self.namespace, opts)?;
+        let measured = MeasuredPodTemplate::render(&self.namespace, opts)?;
         self.ensure_sandbox_template(opts).await?;
-        sandboxes
+        let updated = sandboxes
             .patch(
                 sandbox_name,
                 &PatchParams::default(),
-                &Patch::Merge(&runtime_patch),
+                &Patch::Merge(&measured.merge_patch()),
             )
             .await
             .map_err(|error| {
-                anyhow::anyhow!("patch Sandbox {sandbox_name} runtime parameters: {error}")
+                anyhow::anyhow!("patch Sandbox {sandbox_name} measured runtime: {error}")
             })?;
-        Ok(kernel_params)
+        anyhow::ensure!(
+            measured.published_on(&updated),
+            "the Sandbox did not take the measured runtime"
+        );
+        Ok(measured.init_data().to_owned())
     }
 
     /// Wait for agent-sandbox to propagate the desired runtime annotation to
@@ -2754,7 +2335,14 @@ impl SandboxClient {
         expected_claim_name: &str,
         expected_claim_uid: &str,
     ) -> anyhow::Result<WorkspaceBootstrapSnapshot> {
-        workspace_bootstrap_values(opts)?;
+        anyhow::ensure!(
+            !opts.environment_id.is_empty()
+                && opts.environment_id.trim() == opts.environment_id
+                && !opts.organization_id.is_empty()
+                && opts.operation_generation > 0
+                && opts.name.ends_with(&format!("-{}", opts.environment_id)),
+            "workspace bootstrap authority is incomplete"
+        );
         let claim_opts = ClaimOpts {
             environment_id: opts.environment_id.clone(),
             org_id: opts.organization_id.clone(),
@@ -2790,7 +2378,7 @@ impl SandboxClient {
                 ) && entry
                     .get("name")
                     .and_then(Value::as_str)
-                    .is_some_and(|name| workspace_owned_environment_keys().contains(name))),
+                    .is_some_and(|name| WORKSPACE_OWNED_ENVIRONMENT.contains(&name))),
                 "workspace bootstrap cannot be overridden by the Claim"
             );
         }
@@ -2896,10 +2484,10 @@ impl SandboxClient {
         })
     }
 
-    /// Refresh only environment-owned bootstrap fields in the private template
-    /// and its allocated Sandbox. Works while suspended without a Pod. The
-    /// caller holds the existing environment-row publication fence, and owns
-    /// suspension/replacement; this never mutates a live Pod's environment.
+    /// Bring the suspended private template and its allocated Sandbox to the
+    /// current rendering before resume. Works while suspended without a Pod.
+    /// The caller holds the environment-row publication fence, and owns
+    /// suspension and replacement; this never mutates a live Pod.
     #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %opts.environment_id))]
     pub async fn reconcile_workspace_bootstrap(
         &self,
@@ -2908,9 +2496,11 @@ impl SandboxClient {
         expected_claim_uid: &str,
         expected_sandbox: &WorkspaceSandboxIdentity,
     ) -> anyhow::Result<()> {
-        if opts.identity_free() {
+        // A confidential workspace publishes its whole measured Pod template
+        // (B2c), which also upgrades a legacy one.
+        if opts.measured_workspace_environment().is_some() {
             return self
-                .reconcile_identity_free_bootstrap(
+                .reconcile_measured_bootstrap(
                     opts,
                     expected_claim_name,
                     expected_claim_uid,
@@ -2918,82 +2508,53 @@ impl SandboxClient {
                 )
                 .await;
         }
-        let expected = workspace_bootstrap_values(opts)?;
+        anyhow::ensure!(
+            opts.runtime_profile_spec().profile != super::template::RUNTIME_PROFILE_CONFIDENTIAL,
+            "a confidential workspace starts only with its measured binding anchors"
+        );
+        anyhow::ensure!(
+            !opts.workspace_binding_url.trim().is_empty(),
+            "a workspace starts only with its binding listener"
+        );
+        self.reconcile_identity_free_bootstrap(
+            opts,
+            expected_claim_name,
+            expected_claim_uid,
+            expected_sandbox,
+        )
+        .await
+    }
+
+    /// Start of a confidential workspace (B2c): publish the measured Pod
+    /// template its start just authorized onto the suspended template and
+    /// Sandbox, under UID and resourceVersion tests, and check that both carry
+    /// it before resume. A start after a release, a roots change or a legacy
+    /// rendering therefore boots exactly what Trustee authorizes.
+    async fn reconcile_measured_bootstrap(
+        &self,
+        opts: &TemplateOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+        expected_sandbox: &WorkspaceSandboxIdentity,
+    ) -> anyhow::Result<()> {
+        let measured = MeasuredPodTemplate::render(&self.namespace, opts)?;
         let before = self
             .read_workspace_bootstrap(opts, expected_claim_name, expected_claim_uid)
             .await?;
         expected_sandbox.require_match(&before.sandbox)?;
         anyhow::ensure!(
+            !before.shared,
+            "a confidential workspace never runs from a shared template"
+        );
+        anyhow::ensure!(
             sandbox_suspension_observed(&before.sandbox),
             "workspace bootstrap refresh requires current controller-completed suspension"
         );
-        // Rollback (`environment-token`) renders legacy Pods for new
-        // environments but leaves an identity-free one as it is: it keeps
-        // binding, and environment values patched into it would make its
-        // binding-mode daemon refuse to start. Only both objects count as
-        // identity-free (review L5). An upgrade interrupted between the
-        // template and the Sandbox is finished rather than skipped, so a start
-        // never resumes a legacy Sandbox beside an identity-free template and
-        // loops on its stale bootstrap.
-        match (
-            workspace_object_identity_free(&before.template)?,
-            workspace_object_identity_free(&before.sandbox)?,
-        ) {
-            (true, true) => return Ok(()),
-            (false, false) => {}
-            (true, false) | (false, true) => {
-                anyhow::ensure!(
-                    !opts.server_namespace.trim().is_empty()
-                        && opts.runtime_profile_spec().profile
-                            != super::template::RUNTIME_PROFILE_CONFIDENTIAL,
-                    "a partial workspace identity upgrade cannot be finished here"
-                );
-                let finish = TemplateOpts {
-                    workspace_identity: super::template::WorkspaceIdentity::Binding {
-                        binding_url: crate::worker::create::workspace_binding_url(
-                            opts.server_namespace.trim(),
-                        ),
-                    },
-                    ..opts.clone()
-                };
-                return self
-                    .reconcile_identity_free_bootstrap(
-                        &finish,
-                        expected_claim_name,
-                        expected_claim_uid,
-                        expected_sandbox,
-                    )
-                    .await;
-            }
-        }
-        let recovery = if opts.runtime_profile_spec().profile
-            == super::template::RUNTIME_PROFILE_CONFIDENTIAL
-        {
-            Some(rendered_runtime_recovery_patch(&self.namespace, opts)?.1)
-        } else {
-            None
-        };
-        let clients = super::template::render_workspace_client_bootstrap(opts);
-        let patches = [
-            (
-                &before.template,
-                self.templates(),
-                workspace_bootstrap_patch(
-                    &before.template,
-                    &expected,
-                    recovery.as_ref(),
-                    &clients,
-                )?,
-            ),
-            (
-                &before.sandbox,
-                self.sandboxes(),
-                workspace_bootstrap_patch(&before.sandbox, &expected, recovery.as_ref(), &clients)?,
-            ),
-        ];
-        // Selecting Codex needs no Pod object: the daemon writes `~/.codex`.
-        for (object, api, patch) in patches {
-            let Some(patch) = patch else {
+        for (object, api, egress) in [
+            (&before.template, self.templates(), true),
+            (&before.sandbox, self.sandboxes(), false),
+        ] {
+            let Some(patch) = measured.json_patch(object, egress)? else {
                 continue;
             };
             let name = object
@@ -3004,56 +2565,43 @@ impl SandboxClient {
             let updated = api
                 .patch(name, &PatchParams::default(), &patch)
                 .await
-                .map_err(|_| anyhow::anyhow!("workspace bootstrap update was not admitted"))?;
+                .map_err(|_| anyhow::anyhow!("measured workspace runtime was not admitted"))?;
             anyhow::ensure!(
                 runtime_object_uid(&updated.metadata, &self.namespace, name)?
                     == object
                         .metadata
                         .uid
                         .as_deref()
-                        .expect("validated runtime UID"),
-                "workspace bootstrap object was replaced during publication"
-            );
-            anyhow::ensure!(
-                workspace_bootstrap_patch(&updated, &expected, recovery.as_ref(), &clients)?
-                    .is_none(),
-                "workspace bootstrap update did not converge"
+                        .expect("validated runtime UID")
+                    && measured.published_on(&updated)
+                    && (!egress || measured.egress_published_on(&updated)),
+                "measured workspace runtime did not converge"
             );
         }
         let after = self
             .read_workspace_bootstrap(opts, expected_claim_name, expected_claim_uid)
             .await?;
         expected_sandbox.require_match(&after.sandbox)?;
-        // Refresh itself can advance metadata.generation. The prior completed
-        // suspension is retained by exact identity and unchanged mode, not by
-        // pretending its condition acknowledges this new template generation.
         anyhow::ensure!(
             after
                 .sandbox
                 .data
                 .pointer("/spec/operatingMode")
                 .and_then(Value::as_str)
-                == Some("Suspended"),
-            "workspace Sandbox resumed during bootstrap publication"
-        );
-        anyhow::ensure!(
-            before.pool.metadata.uid == after.pool.metadata.uid
+                == Some("Suspended")
+                && before.pool.metadata.uid == after.pool.metadata.uid
                 && before.template.metadata.uid == after.template.metadata.uid
-                && before.sandbox.metadata.uid == after.sandbox.metadata.uid,
-            "workspace bootstrap ownership changed during publication"
+                && before.sandbox.metadata.uid == after.sandbox.metadata.uid
+                && measured.published_on(&after.template)
+                && measured.egress_published_on(&after.template)
+                && measured.published_on(&after.sandbox),
+            "measured workspace runtime is no longer current"
         );
-        for object in [&after.template, &after.sandbox] {
-            anyhow::ensure!(
-                workspace_bootstrap_patch(object, &expected, recovery.as_ref(), &clients)?
-                    .is_none(),
-                "workspace bootstrap publication is no longer current"
-            );
-        }
         Ok(())
     }
 
-    /// Upgrade on start (design §12): with the identity mode at `binding`, the
-    /// suspended environment's template and Sandbox get the whole
+    /// Upgrade on start (design §12): a legacy suspended environment's
+    /// template and Sandbox get the whole
     /// identity-free workspace Pod spec (containers, init containers,
     /// volumes, probes, current images) and the template its identity-free
     /// egress. `volumeClaimTemplates` and the Pod template metadata are kept.
@@ -3141,101 +2689,6 @@ impl SandboxClient {
             "workspace identity upgrade is no longer current"
         );
         Ok(())
-    }
-
-    /// Read the actual Pod's immutable tuple, not mutable association labels or
-    /// template intent. A different Pod/owner is an identity error; stale or
-    /// duplicate bootstrap entries return false for lifecycle-owned recovery.
-    pub async fn workspace_bootstrap_matches(
-        &self,
-        opts: &TemplateOpts,
-        expected_claim_name: &str,
-        expected_claim_uid: &str,
-        expected_pod: &WorkspacePodIdentity,
-    ) -> anyhow::Result<bool> {
-        let expected = workspace_bootstrap_values(opts)?;
-        let before = self
-            .read_workspace_bootstrap(opts, expected_claim_name, expected_claim_uid)
-            .await?;
-        let sandbox_name = before
-            .sandbox
-            .metadata
-            .name
-            .as_deref()
-            .expect("validated Sandbox name");
-        let pod_name = before
-            .sandbox
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|annotations| annotations.get("agents.x-k8s.io/pod-name"))
-            .map(String::as_str)
-            .unwrap_or(sandbox_name);
-        anyhow::ensure!(
-            expected_pod.name == pod_name && !expected_pod.uid.is_empty(),
-            "workspace bootstrap Pod is not the observed runtime"
-        );
-        let pod = self
-            .pods()
-            .get(pod_name)
-            .await
-            .map_err(|_| anyhow::anyhow!("workspace bootstrap Pod is unavailable"))?;
-        anyhow::ensure!(
-            runtime_object_uid(&pod.metadata, &self.namespace, pod_name)? == expected_pod.uid,
-            "workspace bootstrap Pod was replaced"
-        );
-        require_runtime_controller(
-            &pod.metadata,
-            "agents.x-k8s.io/v1beta1",
-            "Sandbox",
-            sandbox_name,
-            before
-                .sandbox
-                .metadata
-                .uid
-                .as_deref()
-                .expect("validated Sandbox UID"),
-        )?;
-        let spec = pod
-            .spec
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("workspace Pod has no spec"))?;
-        let containers = serde_json::to_value(&spec.containers)?;
-        let (_, container) =
-            workspace_container(containers.as_array().expect("serialized containers array"))?;
-        let clients = super::template::render_workspace_client_bootstrap(opts);
-        let pod_data = serde_json::json!({"spec":spec});
-        let matches = bootstrap_environment_matches(workspace_environment(container)?, &expected)
-            && workspace_client_changes(&pod_data, &clients, "/spec")?.is_empty();
-        let after = self
-            .read_workspace_bootstrap(opts, expected_claim_name, expected_claim_uid)
-            .await?;
-        anyhow::ensure!(
-            before.pool.metadata.uid == after.pool.metadata.uid
-                && before.template.metadata.uid == after.template.metadata.uid
-                && before.sandbox.metadata.uid == after.sandbox.metadata.uid,
-            "workspace bootstrap ownership changed during observation"
-        );
-        let current_pod_name = after
-            .sandbox
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|annotations| annotations.get("agents.x-k8s.io/pod-name"))
-            .map(String::as_str)
-            .unwrap_or(
-                after
-                    .sandbox
-                    .metadata
-                    .name
-                    .as_deref()
-                    .expect("validated Sandbox name"),
-            );
-        anyhow::ensure!(
-            current_pod_name == expected_pod.name,
-            "workspace bootstrap Pod association changed during observation"
-        );
-        Ok(matches)
     }
 
     /// Capture the currently owned Sandbox/Pod UIDs, including the controller's
@@ -5812,46 +5265,193 @@ fn set_workspace_volume_request(data: &mut Value, storage: &str) -> anyhow::Resu
     Ok(())
 }
 
-fn rendered_runtime_recovery_patch(
-    namespace: &str,
-    opts: &TemplateOpts,
-) -> anyhow::Result<(String, Value)> {
-    opts.validate_confidential_storage_manifest()?;
-    let rendered = render_sandbox_template(namespace, opts);
-    let kernel_params = rendered
-        .pointer("/spec/podTemplate/metadata/annotations")
-        .and_then(Value::as_object)
-        .and_then(|annotations| annotations.get(KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("rendered runtime has no confidential kernel parameters"))?;
-    let fs_group_change_policy = rendered
-        .pointer("/spec/podTemplate/spec/securityContext/fsGroupChangePolicy")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("rendered runtime has no fsGroup change policy"))?;
+/// The Pod-template annotations a confidential workspace's measured runtime
+/// owns: its init-data, its kernel parameters and its confidential volume.
+const MEASURED_POD_ANNOTATIONS: [&str; 3] = [
+    KATA_COCO_INIT_DATA_ANNOTATION_KEY,
+    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
+    KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
+];
 
-    let mut annotations = serde_json::Map::new();
-    annotations.insert(
-        KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY.to_string(),
-        Value::String(kernel_params.clone()),
-    );
-    let patch = serde_json::json!({
-        "spec": {
-            "podTemplate": {
-                "metadata": {
-                    "annotations": annotations,
-                },
-                "spec": {
-                    "securityContext": {
-                        "fsGroupChangePolicy": fs_group_change_policy,
-                    },
+/// A confidential workspace's rendered Pod template as its measured
+/// init-data authorizes it (Program #2238 B2c): the whole Pod spec and the
+/// measured annotations. Start and terminal replacement publish exactly this
+/// beside the authorization, so what boots is what Trustee authorizes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MeasuredPodTemplate {
+    spec: Value,
+    /// The rendered egress, which the private template carries for the
+    /// environment's Pods; the Sandbox has none.
+    network_policy: Option<Value>,
+    /// Every measured key, `None` where this rendering carries none.
+    annotations: Vec<(&'static str, Option<String>)>,
+}
+
+impl MeasuredPodTemplate {
+    pub(crate) fn render(namespace: &str, opts: &TemplateOpts) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            opts.measured_workspace_environment().is_some(),
+            "a measured Pod template needs a confidential identity-free rendering"
+        );
+        opts.validate_confidential_storage_manifest()?;
+        let rendered = render_sandbox_template(namespace, opts);
+        let spec = rendered
+            .pointer("/spec/podTemplate/spec")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("confidential rendering has no Pod spec"))?;
+        let rendered_annotations = rendered
+            .pointer("/spec/podTemplate/metadata/annotations")
+            .and_then(Value::as_object);
+        let annotations = MEASURED_POD_ANNOTATIONS
+            .into_iter()
+            .map(|key| {
+                let value = rendered_annotations
+                    .and_then(|annotations| annotations.get(key))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                (key, value)
+            })
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            annotations
+                .iter()
+                .any(|(key, value)| *key == KATA_COCO_INIT_DATA_ANNOTATION_KEY && value.is_some()),
+            "confidential rendering has no measured init-data"
+        );
+        let network_policy = rendered.pointer("/spec/networkPolicy").cloned();
+        Ok(Self {
+            spec,
+            network_policy,
+            annotations,
+        })
+    }
+
+    /// The init-data annotation the next Pod must carry.
+    pub(crate) fn init_data(&self) -> &str {
+        self.annotations
+            .iter()
+            .find(|(key, _)| *key == KATA_COCO_INIT_DATA_ANNOTATION_KEY)
+            .and_then(|(_, value)| value.as_deref())
+            .expect("a measured Pod template has init-data")
+    }
+
+    /// Whether `object` (a template or Sandbox) already carries this
+    /// measurement. The init-data commits to every measured Pod-spec field,
+    /// so equal measured annotations mean an equal measured Pod.
+    fn published_on(&self, object: &DynamicObject) -> bool {
+        let annotations = object
+            .data
+            .pointer("/spec/podTemplate/metadata/annotations")
+            .and_then(Value::as_object);
+        self.annotations.iter().all(|(key, value)| {
+            annotations
+                .and_then(|annotations| annotations.get(*key))
+                .and_then(Value::as_str)
+                == value.as_deref()
+        })
+    }
+
+    /// Whether the private template carries the rendered egress. A template
+    /// rendered before B2c lacks the binding listener's egress, so its daemon
+    /// could never bind.
+    fn egress_published_on(&self, template: &DynamicObject) -> bool {
+        template.data.pointer("/spec/networkPolicy") == self.network_policy.as_ref()
+    }
+
+    /// The JSON Patch publishing it onto one suspended template or Sandbox,
+    /// bound to its validated UID and resourceVersion; with `egress`, the
+    /// template's rendered egress too. `None` when already published.
+    fn json_patch(
+        &self,
+        object: &DynamicObject,
+        egress: bool,
+    ) -> anyhow::Result<Option<Patch<()>>> {
+        let egress_current = !egress || self.egress_published_on(object);
+        if self.published_on(object) && egress_current {
+            return Ok(None);
+        }
+        let uid = object
+            .metadata
+            .uid
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("measured runtime object has no UID"))?;
+        let version = object
+            .metadata
+            .resource_version
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("measured runtime object has no resource version"))?;
+        let mut patch = vec![
+            serde_json::json!({"op":"test", "path":"/metadata/uid", "value":uid}),
+            serde_json::json!({"op":"test", "path":"/metadata/resourceVersion", "value":version}),
+            serde_json::json!({"op":"replace", "path":"/spec/podTemplate/spec", "value":self.spec}),
+        ];
+        let existing = object
+            .data
+            .pointer("/spec/podTemplate/metadata/annotations")
+            .and_then(Value::as_object);
+        if object.data.pointer("/spec/podTemplate/metadata").is_none() {
+            patch.push(
+                serde_json::json!({"op":"add", "path":"/spec/podTemplate/metadata", "value":{}}),
+            );
+        }
+        if existing.is_none() {
+            patch.push(serde_json::json!(
+                {"op":"add", "path":"/spec/podTemplate/metadata/annotations", "value":{}}
+            ));
+        }
+        if !egress_current {
+            patch.push(match &self.network_policy {
+                Some(policy) => {
+                    serde_json::json!({"op":"add", "path":"/spec/networkPolicy", "value":policy})
+                }
+                None => serde_json::json!({"op":"remove", "path":"/spec/networkPolicy"}),
+            });
+        }
+        for (key, value) in &self.annotations {
+            let path = format!(
+                "/spec/podTemplate/metadata/annotations/{}",
+                key.replace('~', "~0").replace('/', "~1")
+            );
+            match value {
+                Some(value) => {
+                    patch.push(serde_json::json!({"op":"add", "path":path, "value":value}));
+                }
+                None if existing.is_some_and(|annotations| annotations.contains_key(*key)) => {
+                    patch.push(serde_json::json!({"op":"remove", "path":path}));
+                }
+                None => {}
+            }
+        }
+        Ok(Some(Patch::Json(serde_json::from_value(Value::Array(
+            patch,
+        ))?)))
+    }
+
+    /// The merge patch publishing it onto an allocated Sandbox whose Pod is
+    /// being replaced: arrays such as containers and volumes are replaced
+    /// whole, and an absent measured annotation is removed.
+    fn merge_patch(&self) -> Value {
+        let annotations = self
+            .annotations
+            .iter()
+            .map(|(key, value)| {
+                (
+                    (*key).to_owned(),
+                    value.clone().map(Value::String).unwrap_or(Value::Null),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        serde_json::json!({
+            "spec": {
+                "podTemplate": {
+                    "metadata": { "annotations": annotations },
+                    "spec": self.spec,
                 },
             },
-        },
-    });
-    Ok((kernel_params, patch))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -7082,8 +6682,11 @@ mod tests {
         TemplateOpts {
             name: "workspace-env-test".into(),
             environment_id: "env-test".into(),
-            daemon_auth_token: "confidential-recovery-daemon-token".into(),
             runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_CONFIDENTIAL.into(),
+            workspace_binding_url:
+                "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087".into(),
+            measured_binding_roots:
+                "-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n".into(),
             kata_coco_init_data_enabled: true,
             kata_coco_kbs_url: "https://kbs.example.test".into(),
             ..Default::default()
@@ -7091,44 +6694,67 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_runtime_patch_changes_only_recovery_fields() {
-        let (kernel_params, patch) =
-            rendered_runtime_recovery_patch("dev-sandboxes", &confidential_runtime_opts()).unwrap();
+    fn measured_runtime_merge_patch_carries_the_whole_measured_template() {
+        let opts = confidential_runtime_opts();
+        let measured = MeasuredPodTemplate::render("dev-sandboxes", &opts).unwrap();
+        let rendered = render_sandbox_template("dev-sandboxes", &opts);
+        let patch = measured.merge_patch();
+        // The whole Pod spec: containers, volumes and init containers are
+        // arrays, which a merge patch replaces whole.
         assert_eq!(
-            patch
-                .pointer("/spec/podTemplate/metadata/annotations")
-                .and_then(Value::as_object)
-                .and_then(|annotations| {
-                    annotations.get(KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY)
-                }),
-            Some(&json!(kernel_params))
+            patch.pointer("/spec/podTemplate/spec"),
+            rendered.pointer("/spec/podTemplate/spec")
         );
+        let annotations = patch
+            .pointer("/spec/podTemplate/metadata/annotations")
+            .and_then(Value::as_object)
+            .unwrap();
+        // Only the measured keys, so unrelated annotations are kept.
+        assert_eq!(annotations.len(), MEASURED_POD_ANNOTATIONS.len());
         assert_eq!(
-            patch
-                .pointer("/spec/podTemplate/metadata/annotations")
-                .and_then(Value::as_object)
-                .map(serde_json::Map::len),
-            Some(1)
+            annotations[KATA_COCO_INIT_DATA_ANNOTATION_KEY],
+            json!(measured.init_data())
         );
+        assert!(
+            annotations[KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY]
+                .as_str()
+                .unwrap()
+                .contains("agent.log_vport=1025")
+        );
+        // Without storage there is no confidential volume to declare.
         assert_eq!(
-            patch.pointer("/spec/podTemplate/spec/securityContext/fsGroupChangePolicy"),
-            Some(&json!("OnRootMismatch"))
+            annotations[KATA_CONFIDENTIAL_VOLUME_ANNOTATION],
+            Value::Null
         );
-        assert_eq!(
-            patch
-                .pointer("/spec/podTemplate/spec/securityContext")
-                .and_then(Value::as_object)
-                .map(serde_json::Map::len),
-            Some(1)
-        );
+        // Commodity, or a confidential rendering without measured anchors,
+        // has no measured runtime.
+        for unmeasured in [
+            TemplateOpts {
+                runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
+                ..opts.clone()
+            },
+            TemplateOpts {
+                measured_binding_roots: String::new(),
+                ..opts.clone()
+            },
+        ] {
+            assert!(MeasuredPodTemplate::render("dev-sandboxes", &unmeasured).is_err());
+        }
     }
 
     #[tokio::test]
     async fn terminal_recovery_refreshes_the_adopted_sandbox_before_uid_delete() {
         let opts = confidential_runtime_opts();
-        let (expected_kernel_params, _) =
-            rendered_runtime_recovery_patch("dev-sandboxes", &opts).unwrap();
-        assert!(expected_kernel_params.contains("agent.log_vport=1025"));
+        let measured = MeasuredPodTemplate::render("dev-sandboxes", &opts).unwrap();
+        let measured_annotations =
+            measured.merge_patch()["spec"]["podTemplate"]["metadata"]["annotations"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(_, value)| !value.is_null())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<serde_json::Map<_, _>>();
+        let expected_init_data = measured.init_data().to_owned();
 
         let (client, requests) = sandbox_client_with_secret_responses(vec![
             (
@@ -7187,7 +6813,7 @@ mod tests {
                     "apiVersion": "agents.x-k8s.io/v1beta1",
                     "kind": "Sandbox",
                     "metadata": {"name": "workspace-old", "namespace": "dev-sandboxes"},
-                    "spec": {"podTemplate": {"metadata": {"annotations": {}}}}
+                    "spec": {"podTemplate": {"metadata": {"annotations": measured_annotations}}}
                 }),
             ),
             (
@@ -7200,7 +6826,7 @@ mod tests {
                         "namespace": "dev-sandboxes",
                         "uid": "uid-old",
                         "annotations": {
-                            KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY: expected_kernel_params,
+                            KATA_COCO_INIT_DATA_ANNOTATION_KEY: expected_init_data,
                         }
                     }
                 }),
@@ -7252,16 +6878,17 @@ mod tests {
             ),
         ]);
 
-        let kernel_params = client
+        let init_data = client
             .reconcile_per_environment_runtime("env-test", "workspace-old", &opts)
             .await
             .unwrap();
+        assert_eq!(init_data, expected_init_data);
         client
             .wait_for_workspace_pod_annotation(
                 "workspace-old",
                 "uid-old",
-                KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-                &kernel_params,
+                KATA_COCO_INIT_DATA_ANNOTATION_KEY,
+                &init_data,
                 Duration::from_secs(1),
             )
             .await
@@ -7918,7 +7545,6 @@ mod tests {
             name: template_name.into(),
             image: "workspace:test".into(),
             environment_id: "env-test".into(),
-            daemon_auth_token: "synthetic-daemon-token".into(),
             cpu_millicores: 1_000,
             memory_mib: 1_024,
             disk_gib: 10,

@@ -144,12 +144,21 @@ fn build_codewire_kata_policy(opts: &TemplateOpts, authorize_workspace_storage: 
     let manifest_uri = &opts.confidential_storage_manifest_uri;
     let mount_name = format!("confidential-{}", hex_sha256(manifest_uri.as_bytes()));
     let mount_point = format!("/run/kata-containers/shared/containers/passthrough/{mount_name}");
+    // The measured anchors the workspace daemon trusts (B2c), as exact env
+    // entries. `valid_protected_workspace_contract` requires them.
+    let measured_env = opts
+        .measured_workspace_environment()
+        .expect("validated confidential contract has measured anchors")
+        .into_iter()
+        .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+        .collect::<Vec<_>>();
     let mut containers = serde_json::Map::new();
     containers.insert(
         "workspace".into(),
         serde_json::json!({
             "image": opts.image,
             "mount_destinations": ["/home/codewire", "/workspace"],
+            "env": measured_env,
         }),
     );
     if opts.runtime_profile_spec().docker_mode == DOCKER_MODE_GUEST_DIND {
@@ -186,6 +195,7 @@ fn build_codewire_kata_policy(opts: &TemplateOpts, authorize_workspace_storage: 
 fn valid_protected_workspace_contract(opts: &TemplateOpts) -> bool {
     crate::confidential_storage::validate_manifest_uri(&opts.confidential_storage_manifest_uri)
         && crate::confidential_storage::validate_environment_id(&opts.environment_id).is_ok()
+        && opts.measured_workspace_environment().is_some()
 }
 
 const CODEWIRE_KATA_CONFIDENTIAL_STORAGE_POLICY_REGO: &str = r#"
@@ -221,6 +231,14 @@ CreateContainerRequest := true if {
     name := input.OCI.Annotations["io.kubernetes.cri.container-name"]
     expected := codewire_confidential_storage.containers[name]
     input.OCI.Annotations["io.kubernetes.cri.image-name"] == expected.image
+
+    # The measured anchors the workspace daemon trusts: each named variable
+    # appears exactly once, with its measured value.
+    every variable in object.get(expected, "env", []) {
+        prefix := concat("", [variable.name, "="])
+        matching := [entry | some entry in input.OCI.Process.Env; startswith(entry, prefix)]
+        matching == [concat("", [prefix, variable.value])]
+    }
 
     confidential_candidates := [storage | some storage in input.storages; codewire_is_confidential_storage_candidate(storage)]
     count(confidential_candidates) == 1

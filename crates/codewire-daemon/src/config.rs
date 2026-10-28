@@ -9,7 +9,9 @@ use codewire_daemon_proto::DaemonAuthToken;
 pub use codewire_daemon_proto::{
     HOSTED_DAEMON_ACCESS_READY_FILE, HOSTED_DAEMON_CREDENTIAL_FILE, HOSTED_DAEMON_READY_FILE,
     HOSTED_DAEMON_STATE_DIRECTORY, WORKSPACE_BINDING_TLS_ROOTS_FILE, WORKSPACE_BINDING_TOKEN_PATH,
-    WORKSPACE_BINDING_URL_ENV, WORKSPACE_BINDING_WAIT_SECONDS, WORKSPACE_POD_UID_ENV,
+    WORKSPACE_BINDING_URL_ENV, WORKSPACE_BINDING_WAIT_SECONDS,
+    WORKSPACE_MEASURED_BINDING_ROOTS_ENV, WORKSPACE_MEASURED_BINDING_ROOTS_MAX_BYTES,
+    WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV, WORKSPACE_POD_UID_ENV,
 };
 use uuid::Uuid;
 
@@ -351,26 +353,32 @@ impl HostedDaemonMode {
             .and_then(|value| value.into_string().ok())
             .filter(|value| canonical_uid(value))
             .ok_or(ConfigError::InvalidWorkspaceBinding)?;
+        let measured = MeasuredAnchors::from_lookup(&lookup)?;
         Ok(Self::Binding(WorkspaceBindingConfig {
             binding_url,
             pod_uid,
             token_path: WORKSPACE_BINDING_TOKEN_PATH.into(),
             // The listener serves TLS (#2460), verified only against the
             // mounted internal roots; without them the daemon never binds.
+            // A confidential workspace never reads them: it trusts only its
+            // measured roots, held in memory.
             tls_roots_file: WORKSPACE_BINDING_TLS_ROOTS_FILE.into(),
+            measured,
             placement: HostedPlacement::from_lookup(&lookup),
         }))
     }
 }
 
-/// Static configuration of an unbound hosted daemon. It holds no credential
-/// and no environment identity.
+/// Static configuration of an unbound hosted daemon. It holds no credential.
+/// Only a confidential workspace carries an environment identity: the one it
+/// may bind as, which its init-data measures.
 #[derive(Clone, PartialEq, Eq)]
 pub struct WorkspaceBindingConfig {
     binding_url: String,
     pod_uid: String,
     token_path: PathBuf,
     tls_roots_file: PathBuf,
+    measured: Option<MeasuredAnchors>,
     placement: HostedPlacement,
 }
 
@@ -382,8 +390,88 @@ impl fmt::Debug for WorkspaceBindingConfig {
             .field("pod_uid", &self.pod_uid)
             .field("token_path", &self.token_path)
             .field("tls_roots_file", &self.tls_roots_file)
+            .field("measured", &self.measured)
             .finish_non_exhaustive()
     }
+}
+
+/// A confidential workspace's measured trust anchors (Program #2238 B2c).
+///
+/// They arrive as env entries that the measured Kata policy pins exactly, so
+/// the init-data Trustee authorizes before it releases the workspace key
+/// commits to them. The host cannot change them without changing that
+/// measurement. With them the daemon trusts only these roots for the binding
+/// listener, held in memory and never read from a file the host could back,
+/// and accepts a binding only for this environment.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MeasuredAnchors {
+    environment_id: Uuid,
+    binding_roots_pem: String,
+}
+
+impl fmt::Debug for MeasuredAnchors {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MeasuredAnchors")
+            .field("environment_id", &self.environment_id)
+            .field("binding_roots_bytes", &self.binding_roots_pem.len())
+            .finish()
+    }
+}
+
+impl MeasuredAnchors {
+    /// Both entries or neither. One alone, or either malformed, is a
+    /// configuration error: a confidential daemon never falls back to the
+    /// mounted roots or to an unchecked environment.
+    fn from_lookup(
+        lookup: &impl Fn(&str) -> Option<OsString>,
+    ) -> Result<Option<Self>, ConfigError> {
+        let roots = lookup(WORKSPACE_MEASURED_BINDING_ROOTS_ENV);
+        let environment_id = lookup(WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV);
+        let (roots, environment_id) = match (roots, environment_id) {
+            (None, None) => return Ok(None),
+            (Some(roots), Some(environment_id)) => (roots, environment_id),
+            _ => return Err(ConfigError::InvalidMeasuredAnchors),
+        };
+        let environment_id = environment_id
+            .into_string()
+            .ok()
+            .filter(|value| canonical_uid(value))
+            .and_then(|value| Uuid::parse_str(&value).ok())
+            .ok_or(ConfigError::InvalidMeasuredAnchors)?;
+        let binding_roots_pem = roots
+            .into_string()
+            .ok()
+            .filter(|pem| plausible_certificate_bundle(pem))
+            .ok_or(ConfigError::InvalidMeasuredAnchors)?;
+        Ok(Some(Self {
+            environment_id,
+            binding_roots_pem,
+        }))
+    }
+
+    pub fn environment_id(&self) -> Uuid {
+        self.environment_id
+    }
+
+    /// The PEM bundle the binding listener's certificate must chain to.
+    pub fn binding_roots_pem(&self) -> &str {
+        &self.binding_roots_pem
+    }
+}
+
+/// A bounded ASCII PEM bundle holding at least one whole certificate. The
+/// binding transport parses it in full when the daemon builds its client, and
+/// fails closed.
+fn plausible_certificate_bundle(pem: &str) -> bool {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    !pem.is_empty()
+        && pem.len() <= WORKSPACE_MEASURED_BINDING_ROOTS_MAX_BYTES
+        && pem.is_ascii()
+        && pem
+            .find(BEGIN)
+            .is_some_and(|begin| pem[begin + BEGIN.len()..].contains(END))
 }
 
 /// The raw fields of one `BindWorkspace` response, before validation.
@@ -462,9 +550,16 @@ impl WorkspaceBindingConfig {
         &self.token_path
     }
 
-    /// The public roots the binding listener's certificate must chain to.
+    /// The mounted public roots the binding listener's certificate must
+    /// chain to. A confidential workspace uses its [`Self::measured`] roots
+    /// instead.
     pub fn tls_roots_file(&self) -> &Path {
         &self.tls_roots_file
+    }
+
+    /// A confidential workspace's measured anchors.
+    pub fn measured(&self) -> Option<&MeasuredAnchors> {
+        self.measured.as_ref()
     }
 
     /// Redirect the projected token, for tests of the binding loop.
@@ -497,6 +592,15 @@ impl WorkspaceBindingConfig {
             .ok()
             .filter(|id| !id.is_nil() && id.to_string() == response.environment_id)
             .ok_or(invalid)?;
+        // A confidential workspace binds only as the environment its
+        // init-data measures, whatever Pod identity the host presents.
+        if self
+            .measured
+            .as_ref()
+            .is_some_and(|measured| measured.environment_id != environment_id)
+        {
+            return Err(invalid);
+        }
         let operation_generation = u64::try_from(response.operation_generation)
             .ok()
             .filter(|generation| *generation > 0)
@@ -614,6 +718,8 @@ pub enum ConfigError {
     InvalidWorkspaceBinding,
     #[error("{CODEX_LOGIN_CHECK_PERIOD_ENV} must be whole seconds from 10 to 120")]
     InvalidCodexLoginCheckPeriod,
+    #[error("measured workspace anchors are invalid")]
+    InvalidMeasuredAnchors,
 }
 
 /// The Codex login check period `value` selects: [`CODEX_LOGIN_CHECK_PERIOD`]
@@ -1200,6 +1306,126 @@ mod tests {
         assert_eq!(
             binding_config().tls_roots_file(),
             Path::new(WORKSPACE_BINDING_TLS_ROOTS_FILE)
+        );
+    }
+
+    /// A synthetic, public test bundle: only its shape matters here.
+    const MEASURED_ROOTS: &str =
+        "-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n";
+
+    fn measured_config(environment_id: &'static str) -> WorkspaceBindingConfig {
+        match binding_mode(&[
+            (WORKSPACE_BINDING_URL_ENV, BINDING_URL),
+            (WORKSPACE_POD_UID_ENV, POD),
+            (WORKSPACE_MEASURED_BINDING_ROOTS_ENV, MEASURED_ROOTS),
+            (WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV, environment_id),
+        ])
+        .unwrap()
+        {
+            HostedDaemonMode::Binding(config) => config,
+            HostedDaemonMode::EnvironmentToken(_) => panic!("binding mode expected"),
+        }
+    }
+
+    #[test]
+    fn standard_workspaces_carry_no_measured_anchors() {
+        assert!(binding_config().measured().is_none());
+    }
+
+    #[test]
+    fn measured_anchors_are_both_present_and_well_formed_or_refused() {
+        let measured = measured_config(ENVIRONMENT);
+        let anchors = measured.measured().unwrap();
+        assert_eq!(anchors.environment_id().to_string(), ENVIRONMENT);
+        assert_eq!(anchors.binding_roots_pem(), MEASURED_ROOTS);
+        // The mounted roots stay the configured path, which a measured daemon
+        // never reads: it trusts the measured PEM in memory instead.
+        assert_eq!(
+            measured.tls_roots_file(),
+            Path::new(WORKSPACE_BINDING_TLS_ROOTS_FILE)
+        );
+        // The roots never appear in Debug output, only their size.
+        assert!(!format!("{measured:?}").contains("BEGIN CERTIFICATE"));
+
+        let base = [
+            (WORKSPACE_BINDING_URL_ENV, BINDING_URL),
+            (WORKSPACE_POD_UID_ENV, POD),
+        ];
+        for partial in [
+            (WORKSPACE_MEASURED_BINDING_ROOTS_ENV, MEASURED_ROOTS),
+            (WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV, ENVIRONMENT),
+        ] {
+            let mut values = base.to_vec();
+            values.push(partial);
+            assert_eq!(
+                binding_mode(&values).unwrap_err(),
+                ConfigError::InvalidMeasuredAnchors,
+                "{partial:?}"
+            );
+        }
+        let oversized: &'static str = Box::leak(
+            format!(
+                "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+                "A".repeat(WORKSPACE_MEASURED_BINDING_ROOTS_MAX_BYTES)
+            )
+            .into_boxed_str(),
+        );
+        for roots in [
+            "",
+            "not a certificate",
+            "-----BEGIN CERTIFICATE-----\nunterminated\n",
+            "-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\n",
+            "-----BEGIN CERTIFICATE-----\n\u{e9}\n-----END CERTIFICATE-----\n",
+            oversized,
+        ] {
+            let mut values = base.to_vec();
+            values.extend([
+                (WORKSPACE_MEASURED_BINDING_ROOTS_ENV, roots),
+                (WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV, ENVIRONMENT),
+            ]);
+            assert_eq!(
+                binding_mode(&values).unwrap_err(),
+                ConfigError::InvalidMeasuredAnchors,
+                "{:?}",
+                &roots[..roots.len().min(40)]
+            );
+        }
+        for environment_id in [
+            "",
+            "env-1",
+            "00000000-0000-0000-0000-000000000000",
+            "550E8400-E29B-41D4-A716-446655440000",
+            " 550e8400-e29b-41d4-a716-446655440000",
+        ] {
+            let mut values = base.to_vec();
+            values.extend([
+                (WORKSPACE_MEASURED_BINDING_ROOTS_ENV, MEASURED_ROOTS),
+                (WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV, environment_id),
+            ]);
+            assert_eq!(
+                binding_mode(&values).unwrap_err(),
+                ConfigError::InvalidMeasuredAnchors,
+                "{environment_id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_measured_workspace_binds_only_as_its_measured_environment() {
+        let measured = measured_config(ENVIRONMENT);
+        assert_eq!(
+            measured
+                .validate(&response())
+                .unwrap()
+                .environment_id()
+                .to_string(),
+            ENVIRONMENT
+        );
+        // Another environment's binding, even for this Pod's UID, is refused.
+        let other = measured_config("b3a9c6f2-1d4e-4f5a-8b7c-6d5e4f3a2b1c");
+        assert_eq!(
+            other.validate(&response()).unwrap_err(),
+            InvalidWorkspaceBinding
         );
     }
 

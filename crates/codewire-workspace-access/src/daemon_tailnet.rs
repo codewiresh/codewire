@@ -160,10 +160,11 @@ pub trait CoordinatorDialer: Send + Sync + 'static {
 /// The public coordinator named by the grant, through the public gRPC edge.
 /// It trusts the WebPKI roots plus, only when a bundle is mounted at its
 /// extra-roots path, that bundle; a present but unusable bundle refuses
-/// every dial rather than falling back. Like every endpoint the daemon dials,
-/// its host is looked up as an absolute DNS name (#2701).
+/// every dial rather than falling back. A confidential workspace trusts the
+/// WebPKI roots compiled into its measured daemon only. Like every endpoint
+/// the daemon dials, its host is looked up as an absolute DNS name (#2701).
 pub struct PublicCoordinator {
-    extra_roots_file: PathBuf,
+    extra_roots_file: Option<PathBuf>,
 }
 
 impl PublicCoordinator {
@@ -174,7 +175,15 @@ impl PublicCoordinator {
 
     pub fn with_extra_roots_file(extra_roots_file: impl Into<PathBuf>) -> Self {
         Self {
-            extra_roots_file: extra_roots_file.into(),
+            extra_roots_file: Some(extra_roots_file.into()),
+        }
+    }
+
+    /// The WebPKI roots only, never a mounted bundle: for a confidential
+    /// workspace (B2c), whose host supplies every mounted file.
+    pub fn webpki_only() -> Self {
+        Self {
+            extra_roots_file: None,
         }
     }
 }
@@ -192,10 +201,13 @@ impl CoordinatorDialer for PublicCoordinator {
         grant: &WorkspaceAccessGrant,
         environment_id: Uuid,
     ) -> Result<CoordinatorPeerSession, CoordinatorError> {
-        let extra_roots = codewire_tls::read_optional_roots(&self.extra_roots_file)
-            .await
-            .map_err(|_| CoordinatorError::Trust)?
-            .unwrap_or_default();
+        let extra_roots = match &self.extra_roots_file {
+            Some(file) => codewire_tls::read_optional_roots(file)
+                .await
+                .map_err(|_| CoordinatorError::Trust)?
+                .unwrap_or_default(),
+            None => Default::default(),
+        };
         CoordinatorPeerSession::connect_public_edge_grpc_absolute(
             grant.coordinator_url(),
             grant.peer_token().expose_secret(),

@@ -10,7 +10,8 @@
 //! token nor the daemon credential is ever logged.
 //!
 //! The listener serves TLS with the orchestration internal identity, checked
-//! against the mounted public roots on every call (#2460). Besides the
+//! on every call against the mounted public roots (#2460) or, in a
+//! confidential workspace, its measured roots (B2c). Besides the
 //! binding, the same Pod-bound exchange refreshes the daemon's access grant,
 //! records its SSH host public key and allocates UDP peer-relay endpoints.
 
@@ -119,19 +120,34 @@ pub(crate) struct BindingClient {
     in_flight: tokio::sync::Mutex<()>,
 }
 
+/// The public roots the binding listener's certificate must chain to.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BindingRoots<'a> {
+    /// A standard workspace's mounted roots, reread on every call.
+    Mounted(&'a Path),
+    /// A confidential workspace's measured roots (B2c), held in memory and
+    /// never read from a file.
+    Measured(&'a str),
+}
+
 impl BindingClient {
-    /// HTTPS only, verified against `tls_roots`, and HTTP/1.1 only: the
+    /// HTTPS only, verified against `roots`, and HTTP/1.1 only: the
     /// tenant-reachable listener refuses HTTP/2. Fails without usable roots.
     pub(crate) fn new(
         binding_url: &str,
-        tls_roots: &Path,
+        roots: BindingRoots<'_>,
         token_path: &Path,
         timing: BindTiming,
     ) -> anyhow::Result<Self> {
         let origin = binding_url.trim_end_matches('/');
-        let transport = ConnectOriginTransport::for_origin(origin, tls_roots)
-            .map_err(|_| anyhow::anyhow!("workspace binding requires an https origin and roots"))?
-            .http1_only();
+        let transport = match roots {
+            BindingRoots::Mounted(path) => ConnectOriginTransport::for_origin(origin, path),
+            BindingRoots::Measured(pem) => {
+                ConnectOriginTransport::for_origin_with_fixed_roots(origin, pem.as_bytes())
+            }
+        }
+        .map_err(|_| anyhow::anyhow!("workspace binding requires an https origin and roots"))?
+        .http1_only();
         let config = ClientConfig::new(origin.parse()?).with_default_timeout(timing.deadline());
         Ok(Self {
             client: WorkspaceBindingServiceClient::new(transport, config),

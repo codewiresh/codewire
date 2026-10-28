@@ -594,6 +594,12 @@ async fn the_coordinator_is_trusted_through_mounted_extra_roots_only() {
         Err(CoordinatorError::Trust)
     ));
     assert_eq!(coordinator.seen().len(), 1);
+
+    // A confidential workspace (B2c) trusts the WebPKI roots only: the
+    // cluster authority is refused whatever is mounted.
+    let measured = PublicCoordinator::webpki_only();
+    assert!(measured.dial(&grant, ENVIRONMENT).await.is_err());
+    assert_eq!(coordinator.seen().len(), 1);
 }
 
 mod app_ports {

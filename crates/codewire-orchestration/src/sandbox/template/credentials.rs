@@ -1,31 +1,16 @@
 //! Selected material-free stock-client configuration and purpose-specific mounts.
 //!
 //! Codex needs no Pod object: the workspace daemon writes its `config.toml`
-//! into the user's `~/.codex` on the persistent home before it listens, in
-//! both identity modes (`codewire_daemon::codex_home`).
+//! into the user's `~/.codex` on the persistent home before it listens
+//! (`codewire_daemon::codex_home`).
 
-use codewire_access::{CODEX_PLATFORM_TOKEN_FILE, ManagedCredentialClientPlacement};
+use codewire_access::CODEX_PLATFORM_TOKEN_FILE;
 use codewire_daemon_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE;
 use serde_json::{Value, json};
 
 use super::TemplateOpts;
 
-const PROJECTION_SHA256_ENV: &str = "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256";
 pub use codewire_access::MANAGED_CREDENTIAL_CLIENTS_ENV;
-
-pub(super) fn projection_environment(opts: &TemplateOpts) -> Option<Value> {
-    let digest = opts.projection_selection_sha256?;
-    assert!(
-        opts.credential_runtime.is_some(),
-        "selected sources require credential runtime trust"
-    );
-    assert_ne!(
-        digest, [0; 32],
-        "selected projection digest must be nonzero"
-    );
-    Some(json!({"name":PROJECTION_SHA256_ENV,
-        "value":digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()}))
-}
 
 const INPUTS: [&str; 1] = ["SANDBOX_CREDENTIAL_BROKER_NAMESPACE"];
 
@@ -141,15 +126,6 @@ pub(super) fn workspace_mounts() -> Vec<Value> {
     vec![
         json!({"name":"credential-workspace-identity","mountPath":CODEX_PLATFORM_TOKEN_FILE.rsplit_once('/').unwrap().0,"readOnly":true}),
     ]
-}
-
-pub(super) fn workspace_environment(opts: &TemplateOpts) -> Vec<Value> {
-    opts.managed_credential_clients
-        .for_placement(ManagedCredentialClientPlacement::Platform)
-        .environment
-        .into_iter()
-        .map(|(name, value)| json!({"name":name,"value":value}))
-        .collect()
 }
 
 #[cfg(test)]

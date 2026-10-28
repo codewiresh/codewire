@@ -2,7 +2,7 @@ use super::*;
 use crate::sandbox::shadow_warm_pool_name;
 use crate::sandbox::template::{
     CredentialRuntimeTemplateConfig, DOCKER_MODE_GUEST_DIND, RUNTIME_PROFILE_COMMODITY,
-    RUNTIME_PROFILE_RUNC, WorkspaceIdentity,
+    RUNTIME_PROFILE_RUNC,
 };
 
 const NAMESPACE: &str = "dev-sandboxes";
@@ -33,9 +33,7 @@ fn pool_opts() -> TemplateOpts {
         runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
         docker_mode: DOCKER_MODE_GUEST_DIND.into(),
         credential_runtime: Some(CredentialRuntimeTemplateConfig::synthetic(NAMESPACE)),
-        workspace_identity: WorkspaceIdentity::Binding {
-            binding_url: BINDING_URL.into(),
-        },
+        workspace_binding_url: BINDING_URL.into(),
         api_base_url: "https://codewire-dev.sh".into(),
         server_namespace: "dev".into(),
         cpu_millicores: 1000,
@@ -220,7 +218,6 @@ fn pool_spec_equals_each_environment_rendering_of_its_shape() {
                 environment_id: "3d6bb495-efac-419f-bf3a-91696e7c7ca4".into(),
                 organization_id: "76169e1f-3bbf-46be-96e0-cac68e0ac910".into(),
                 operation_generation: 7,
-                daemon_auth_token: "synthetic-daemon".into(),
                 ..opts.clone()
             },
             TemplateOpts {
@@ -228,7 +225,6 @@ fn pool_spec_equals_each_environment_rendering_of_its_shape() {
                 environment_id: "1d2e3f4a-5b6c-4d7e-8f90-a1b2c3d4e5f6".into(),
                 organization_id: "org-other".into(),
                 operation_generation: 12,
-                daemon_auth_token: "daemon-token-other".into(),
                 projection_selection_sha256: Some([0x11; 32]),
                 managed_credential_clients:
                     codewire_access::ManagedCredentialClients::from_profile_slots([
@@ -339,10 +335,6 @@ fn pool_inputs_carry_no_environment_identity() {
             ..base()
         },
         TemplateOpts {
-            daemon_auth_token: "synthetic-daemon".into(),
-            ..base()
-        },
-        TemplateOpts {
             projection_selection_sha256: Some([0x11; 32]),
             ..base()
         },
@@ -355,9 +347,9 @@ fn pool_inputs_carry_no_environment_identity() {
             confidential_storage_manifest_uri: "kbs:///synthetic".into(),
             ..base()
         },
-        // The environment-token rollback renders the daemon token.
+        // Without a binding listener there is nothing to bind a member to.
         TemplateOpts {
-            workspace_identity: WorkspaceIdentity::EnvironmentToken,
+            workspace_binding_url: String::new(),
             ..base()
         },
     ];

@@ -72,9 +72,9 @@ support image's repository (`SANDBOX_DAEMON_IMAGE`,
 `cw daemon repair`, a restart-mode resize and the replacement of a
 terminal Pod re-pin the running Sandbox the same way before they delete its
 Pod, and an unbound Pod that fails its binding check is deleted after a
-best-effort re-pin. Confidential Sandboxes are never re-pinned: their
-measured, attested Pod policy admits exactly the containers they were
-rendered with.
+best-effort re-pin. Confidential Sandboxes are never re-pinned in place:
+each start publishes the whole measured Pod template it authorizes in
+Trustee instead (see "Confidential workspaces" below).
 
 The daemon performs operations that must use the workspace container's process
 namespace, filesystem view, UID/GID, and environment:
@@ -405,7 +405,8 @@ relay, UDP, IP and pod network overhead across nodes.
 
 ## Claim-time workspace binding
 
-Hosted commodity workspaces bind at claim time:
+Every hosted workspace binds at claim time, confidential ones included
+(Program #2238 B2 and B2c):
 
 - **Identity-free Pod.** The workspace container carries no daemon token,
   environment ID, operation generation, projection digest, managed-client
@@ -440,11 +441,10 @@ Hosted commodity workspaces bind at claim time:
 - **Rotating the session secret** changes every daemon credential. Bound
   daemons never re-bind, so it requires restarting the workspace Pods.
 - **No environment-token mode.** The daemon serves SSH and the tailnet only
-  once bound, so an environment-token commodity workspace could never become
-  access-ready. `SANDBOX_WORKSPACE_IDENTITY_MODE` accepts only `binding`, and
-  a worker configured otherwise refuses to start. A legacy environment's
-  suspended template and Sandbox are replaced with the identity-free rendering
-  on its next start.
+  once bound, so nothing renders an environment token. A Sandbox rendered
+  before binding is upgraded to the identity-free rendering on its next start,
+  and a running one is never treated as current, so recovery restarts it onto
+  the binding rendering.
 
 Exposure statement:
 
@@ -467,6 +467,38 @@ Exposure statement:
 Warm-pool members are identity-free and bind at adoption the same way. The
 zero-replica `SandboxWarmPool` referenced by a cold claim remains only because
 the Agent Sandbox CRD requires that indirection for cold creation.
+
+### Confidential workspaces (B2c)
+
+A confidential workspace binds exactly like a standard one, on the SEV-SNP
+runtime, with its trust anchors in its measured Kata init-data:
+
+- **Measured anchors.** Its workspace container carries
+  `CODEWIRE_WORKSPACE_BINDING_URL`, `CODEWIRE_MEASURED_BINDING_ROOTS` (the PEM
+  of orchestration's own issuing CA, beside its internal leaf, never the
+  sandbox-namespace ConfigMap) and `CODEWIRE_MEASURED_ENVIRONMENT_ID` (the
+  UUID the init-data already measures as the storage key ID). The measured
+  policy admits the workspace container only with each exactly once and with
+  its rendered value, so the init-data Trustee authorizes before it releases
+  the workspace key commits to them.
+- **Measured mode in the daemon.** With those entries the daemon trusts only
+  the measured roots for 8087, held in memory, binds only as the measured
+  environment, and trusts the coordinator through WebPKI alone, never a
+  mounted bundle.
+- **No ConfigMap, state in guest memory.** The Pod mounts no ConfigMap: under
+  `shared_fs=none` the host supplies every mounted file. `codewire-run`,
+  which holds the credential and the SSH host key, is a memory emptyDir.
+- **What boots is what Trustee authorizes.** Start and terminal Pod
+  replacement publish the whole measured Pod template they authorize, and
+  replacement waits until the stale Pod shows the new init-data before
+  deleting it. Repair and resize reuse the Sandbox's current, authorized
+  template. A changed binding root, policy text, workspace or DinD image
+  changes the measurement, so the next start republishes it.
+- **Confidential stays cold.** It is never pooled.
+- **Not a hostile-host boundary yet.** A host that uses the Kata agent API
+  (exec), forges the Pod at 8087, reads plaintext 7777 or connects to 2222 can
+  still reach a running workspace. The design note lists the follow-up that
+  closes these paths.
 
 ## Troubleshooting
 
@@ -495,6 +527,9 @@ If Docker fails in a Kata-backed sandbox:
 4. Confirm no host Docker/containerd socket is mounted into the workspace.
 
 ## Validation Checklist
+
+For a `confidential` sandbox, run
+`scripts/runtime/confidential/prove-dev-confidential-binding.sh` on Dev.
 
 For a `commodity` sandbox, expected evidence is:
 

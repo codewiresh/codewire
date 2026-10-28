@@ -13,15 +13,13 @@ use temporalio_sdk::activities::ActivityContext;
 
 use super::activity_authority::{ActivityAuthority, AuthorityLost, is_authority_lost};
 use super::create::{
-    SandboxWorkerCfg, authorize_confidential_runtime_for_environment,
-    environment_per_env_template_name, environment_template_opts, load_environment_template_opts,
-    ready_timeout_for_isolation, reconcile_or_refresh_runtime_identity,
-    reconcile_runtime_identity_for_pod, refresh_workspace_bootstrap,
-    requires_running_runtime_identity, run_template_mutation,
+    SandboxWorkerCfg, environment_per_env_template_name, environment_template_opts,
+    load_environment_template_opts, ready_timeout_for_isolation,
+    reconcile_or_refresh_runtime_identity, reconcile_runtime_identity_for_pod,
+    refresh_workspace_bootstrap, requires_running_runtime_identity, run_template_mutation,
 };
 use super::env_data::{load_backend_row, load_environment};
 use super::env_log::emit_authoritative_environment_log_for_states;
-use super::environment_auth::issue_environment_daemon_token;
 use super::port_dns;
 use super::setup::{
     handle_post_start_configuration, is_setup_activity_cancelled, is_setup_recovery_failed,
@@ -52,14 +50,6 @@ fn is_lifecycle_control_loss(error: &anyhow::Error) -> bool {
     is_authority_lost(error)
         || is_setup_activity_cancelled(error)
         || is_setup_recovery_failed(error)
-}
-
-fn needs_running_confidential_authorization(
-    state: &str,
-    desired_state: &str,
-    isolation_tier: &str,
-) -> bool {
-    state == "running" && desired_state == "started" && isolation_tier == "confidential"
 }
 
 async fn await_reconcile_or_cancel<T, F>(
@@ -201,14 +191,12 @@ async fn ensure_access_stack_for_env(
     let env = load_environment(&ctx.pool, env_id).await?;
     let preset_id = env.preset_id.clone().unwrap_or_default();
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, &preset_id).await?;
-    let daemon_auth_token = issue_environment_daemon_token(&cfg.session_secret, env_id)?;
     let opts = environment_template_opts(
         cfg,
         &image_ref,
         &template_base,
         &env,
         authority.operation_generation(),
-        &daemon_auth_token,
     )?;
     let client = sandbox_client(ctx, namespace)?;
     run_template_mutation(
@@ -345,6 +333,22 @@ pub async fn handle_environment_stop(
     // Design §10: the Pod is observed absent, so its binding is released. A
     // later start binds the new Pod UID.
     release_workspace_binding(&client.client, authority, STOP_MUTATION_STATES).await?;
+    // B2c: with the Pod gone, a stopped confidential environment authorizes
+    // no guest; the next start authorizes exactly what it boots.
+    if env.isolation_tier == "confidential" {
+        let Some(storage) = ctx.confidential_storage.as_ref() else {
+            let error = anyhow::anyhow!("confidential storage providers are not configured");
+            record_environment_error(&svc, authority, env_id, &format!("{error:#}")).await?;
+            return Err(error);
+        };
+        if let Err(e) = authority
+            .run_external_mutation(STOP_MUTATION_STATES, storage.revoke_init_data(env_id))
+            .await
+        {
+            record_environment_error(&svc, authority, env_id, &format!("{e:#}")).await?;
+            return Err(e);
+        }
+    }
     if let Err(e) = authority
         .run_external_mutation(STOP_MUTATION_STATES, client.delete_access_stack(env_id))
         .await
@@ -1333,35 +1337,6 @@ pub async fn handle_environment_reconcile(
             Ok(ReconcileOutcome::Destroyed)
         }
         Action::Noop => {
-            if needs_running_confidential_authorization(
-                &env.state,
-                &env.desired_state,
-                &env.isolation_tier,
-            ) {
-                let storage = ctx.confidential_storage.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("confidential storage providers are not configured")
-                })?;
-                let manifest_uri = await_reconcile_or_cancel(
-                    &activity_ctx,
-                    authority.run_external_mutation(
-                        RUNNING_MUTATION_STATES,
-                        storage.ensure_ready(env_id, env.disk_gb),
-                    ),
-                )
-                .await?;
-                await_reconcile_or_cancel(
-                    &activity_ctx,
-                    authorize_confidential_runtime_for_environment(
-                        ctx,
-                        &env,
-                        &manifest_uri,
-                        authority,
-                        RUNNING_MUTATION_STATES,
-                    ),
-                )
-                .await?;
-            }
-
             if requires_running_runtime_identity(&env.state, &env.desired_state)
                 && let Err(error) = reconcile_running_runtime_identity(ctx, &env, authority).await
             {
@@ -1729,27 +1704,6 @@ mod tests {
                 .is_err()
         );
         Ok(())
-    }
-
-    #[test]
-    fn authorization_backfill_selects_only_stable_running_confidential_environments() {
-        assert!(needs_running_confidential_authorization(
-            "running",
-            "started",
-            "confidential"
-        ));
-        for candidate in [
-            ("running", "stopped", "confidential"),
-            ("starting", "started", "confidential"),
-            ("stopped", "stopped", "confidential"),
-            ("running", "started", "standard"),
-        ] {
-            assert!(!needs_running_confidential_authorization(
-                candidate.0,
-                candidate.1,
-                candidate.2,
-            ));
-        }
     }
 
     fn ready_start_runtime() -> ProbeResult {

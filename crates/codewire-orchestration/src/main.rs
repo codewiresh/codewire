@@ -216,6 +216,66 @@ async fn verify_internal_tls_roots(
     Ok(())
 }
 
+/// The binding listener's public roots that confidential workspaces measure
+/// (Program #2238 B2c): the issuing CA that cert-manager publishes as
+/// `ca.crt` beside the mounted internal leaf. It comes from orchestration's
+/// own Secret, never the tenant-namespace ConfigMap, and must verify that
+/// leaf for the binding listener's name. Best effort: without it no
+/// confidential workspace renders, and nothing else depends on it. A CA
+/// change applies to confidential renders after the next restart.
+async fn confidential_binding_roots(
+    files: Option<&ServerTlsFiles>,
+    cert_file: Option<&str>,
+    server_namespace: &str,
+) -> String {
+    let (Some(files), Some(cert_file)) = (files, cert_file) else {
+        return String::new();
+    };
+    let Some(ca_file) = std::path::Path::new(cert_file.trim())
+        .parent()
+        .map(|directory| directory.join("ca.crt"))
+    else {
+        return String::new();
+    };
+    let pem = match tokio::fs::read(&ca_file).await {
+        Ok(pem)
+            if pem.len() <= codewire_daemon_proto::WORKSPACE_MEASURED_BINDING_ROOTS_MAX_BYTES =>
+        {
+            pem
+        }
+        Ok(_) => {
+            tracing::error!(
+                "internal TLS issuing CA is too large to measure; confidential workspaces are unavailable"
+            );
+            return String::new();
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!(
+                "no internal TLS issuing CA beside the leaf; confidential workspaces are unavailable"
+            );
+            return String::new();
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "read internal TLS issuing CA; confidential workspaces are unavailable");
+            return String::new();
+        }
+    };
+    let host = codewire_orchestration::worker::create::workspace_binding_tls_host(server_namespace);
+    if let Err(error) = files.verify_against_roots(&pem, &host).await {
+        tracing::error!(error = %error, "the internal TLS issuing CA does not verify the binding listener; confidential workspaces are unavailable");
+        return String::new();
+    }
+    match String::from_utf8(pem) {
+        Ok(pem) => pem,
+        Err(_) => {
+            tracing::error!(
+                "internal TLS issuing CA is not text; confidential workspaces are unavailable"
+            );
+            String::new()
+        }
+    }
+}
+
 fn workspace_binding_bind_addr(
     public_bind_addr: SocketAddr,
     configured_port: Option<&str>,
@@ -402,7 +462,7 @@ async fn main() -> anyhow::Result<()> {
     )?
     .map(Arc::new);
 
-    let sandbox_cfg = worker::create::SandboxWorkerCfg::from_env();
+    let mut sandbox_cfg = worker::create::SandboxWorkerCfg::from_env();
     if kube.is_some()
         && let Err(error) = sandbox_cfg.require_workspace_binding_config()
     {
@@ -418,6 +478,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?;
     }
+    sandbox_cfg.confidential_binding_roots_pem = confidential_binding_roots(
+        internal_tls.as_ref(),
+        std::env::var(ORCHESTRATION_INTERNAL_TLS_CERT_FILE_ENV)
+            .ok()
+            .as_deref(),
+        &sandbox_cfg.pod_namespace,
+    )
+    .await;
     let synced_zones = codewire_orchestration::runtime_transport::sync_catalog_json(
         &pool,
         &sandbox_cfg.runtime_transport_zones_json,

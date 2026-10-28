@@ -287,8 +287,13 @@ async fn fixture_with(answers: Vec<Answer>, timing: BindTiming) -> Fixture {
         .with_token_path(&token)
         .with_tls_roots_file(&pki.roots);
     Fixture {
-        client: BindingClient::new(&url, config.tls_roots_file(), config.token_path(), timing)
-            .unwrap(),
+        client: BindingClient::new(
+            &url,
+            BindingRoots::Mounted(config.tls_roots_file()),
+            config.token_path(),
+            timing,
+        )
+        .unwrap(),
         config,
         recorded,
         token,
@@ -571,7 +576,7 @@ async fn the_listener_must_present_a_certificate_from_the_mounted_roots() {
     let other = SyntheticPki::new("localhost");
     let client = BindingClient::new(
         &fixture.url,
-        &other.roots,
+        BindingRoots::Mounted(&other.roots),
         fixture.config.token_path(),
         timing(),
     )
@@ -585,7 +590,7 @@ async fn the_listener_must_present_a_certificate_from_the_mounted_roots() {
     let unmounted = tempfile::tempdir().unwrap();
     let client = BindingClient::new(
         &fixture.url,
-        &unmounted.path().join("ca.crt"),
+        BindingRoots::Mounted(&unmounted.path().join("ca.crt")),
         fixture.config.token_path(),
         timing(),
     )
@@ -596,7 +601,7 @@ async fn the_listener_must_present_a_certificate_from_the_mounted_roots() {
     assert!(
         BindingClient::new(
             "http://localhost:8087",
-            &other.roots,
+            BindingRoots::Mounted(&other.roots),
             fixture.config.token_path(),
             timing()
         )
@@ -605,11 +610,95 @@ async fn the_listener_must_present_a_certificate_from_the_mounted_roots() {
     assert!(
         BindingClient::new(
             &fixture.url,
-            Path::new("ca.crt"),
+            BindingRoots::Mounted(Path::new("ca.crt")),
             fixture.config.token_path(),
             timing()
         )
         .is_err()
+    );
+}
+
+/// A confidential workspace's binding configuration (B2c): its measured
+/// roots and environment, with the mounted roots path pointing elsewhere.
+fn measured_config(
+    fixture: &Fixture,
+    roots_pem: &str,
+    environment_id: &str,
+    mounted_roots: &Path,
+) -> codewire_daemon::WorkspaceBindingConfig {
+    let values = [
+        (
+            WORKSPACE_BINDING_URL_ENV,
+            "https://binding.test:8087".to_owned(),
+        ),
+        (WORKSPACE_POD_UID_ENV, POD.to_owned()),
+        (
+            codewire_daemon::config::WORKSPACE_MEASURED_BINDING_ROOTS_ENV,
+            roots_pem.to_owned(),
+        ),
+        (
+            codewire_daemon::config::WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV,
+            environment_id.to_owned(),
+        ),
+    ];
+    let HostedDaemonMode::Binding(config) = HostedDaemonMode::from_lookup(|name| {
+        values
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| OsString::from(value))
+    })
+    .unwrap() else {
+        panic!("binding mode expected");
+    };
+    config
+        .with_token_path(fixture.config.token_path())
+        .with_tls_roots_file(mounted_roots)
+}
+
+#[tokio::test]
+async fn a_measured_workspace_trusts_only_its_measured_roots_and_environment() {
+    let fixture = fixture(vec![Answer::Bound, Answer::Bound]).await;
+    let measured_pem = std::fs::read_to_string(fixture.config.tls_roots_file()).unwrap();
+    let other = SyntheticPki::new("localhost");
+    let other_pem = std::fs::read_to_string(&other.roots).unwrap();
+
+    // The measured roots verify the listener even when the mounted path holds
+    // another authority's roots: the mount is never read.
+    let config = measured_config(&fixture, &measured_pem, ENVIRONMENT, &other.roots);
+    let roots = BindingRoots::Measured(config.measured().unwrap().binding_roots_pem());
+    let client = BindingClient::new(&fixture.url, roots, config.token_path(), timing()).unwrap();
+    let bound = client.attempt(&config).await.unwrap();
+    assert_eq!(bound.binding.environment_id().to_string(), ENVIRONMENT);
+
+    // Measured roots from another authority never bind, even with the right
+    // roots mounted.
+    let config = measured_config(
+        &fixture,
+        &other_pem,
+        ENVIRONMENT,
+        fixture.config.tls_roots_file(),
+    );
+    let roots = BindingRoots::Measured(config.measured().unwrap().binding_roots_pem());
+    let client = BindingClient::new(&fixture.url, roots, config.token_path(), timing()).unwrap();
+    let calls = fixture.recorded.lock().unwrap().at.len();
+    assert_eq!(
+        client.attempt(&config).await.unwrap_err(),
+        AttemptError::Rejected(ErrorCode::Unavailable)
+    );
+    assert_eq!(fixture.recorded.lock().unwrap().at.len(), calls);
+
+    // A genuine listener's binding for another environment is refused.
+    let config = measured_config(
+        &fixture,
+        &measured_pem,
+        "b3a9c6f2-1d4e-4f5a-8b7c-6d5e4f3a2b1c",
+        &other.roots,
+    );
+    let roots = BindingRoots::Measured(config.measured().unwrap().binding_roots_pem());
+    let client = BindingClient::new(&fixture.url, roots, config.token_path(), timing()).unwrap();
+    assert_eq!(
+        client.attempt(&config).await.unwrap_err(),
+        AttemptError::InvalidResponse
     );
 }
 

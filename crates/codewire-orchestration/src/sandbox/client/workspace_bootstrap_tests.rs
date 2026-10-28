@@ -22,10 +22,13 @@ fn opts() -> TemplateOpts {
         credential_runtime: Some(
             super::super::template::CredentialRuntimeTemplateConfig::synthetic(NS),
         ),
-        daemon_auth_token: "synthetic-daemon-capability".into(),
+        workspace_binding_url: BINDING_URL.into(),
+        support_image: DAEMON_IMAGE.into(),
         ..Default::default()
     }
 }
+const BINDING_URL: &str =
+    "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087";
 fn claim_opts() -> ClaimOpts {
     ClaimOpts {
         environment_id: ENV.into(),
@@ -40,17 +43,22 @@ fn owner(api: &str, kind: &str, name: &str, uid: &str) -> Value {
 fn old_env() -> Vec<Value> {
     vec![
         json!({"name":"UNRELATED","value":"preserve"}),
-        json!({"name":WORKSPACE_BOOTSTRAP_KEYS[0],"value":ENV}),
-        json!({"name":WORKSPACE_BOOTSTRAP_KEYS[1],"value":"6"}),
-        json!({"name":WORKSPACE_BOOTSTRAP_KEYS[2],"value":"cd".repeat(32)}),
+        json!({"name":"CODEWIRE_ENVIRONMENT_ID","value":ENV}),
+        json!({"name":"CODEWIRE_ENVIRONMENT_OPERATION_GENERATION","value":"6"}),
+        json!({"name":"CODEWIRE_ENVIRONMENT_PROJECTION_SHA256","value":"cd".repeat(32)}),
         json!({"name":"UNRELATED_FROM","valueFrom":{"fieldRef":{"fieldPath":"metadata.name"}}}),
     ]
 }
 /// The daemon copy as a Sandbox renders it: the reconciled init container on
 /// the image the Sandbox was created with.
 fn daemon_init() -> Value {
+    let copying = TemplateOpts {
+        runtime_profile: super::super::template::RUNTIME_PROFILE_RUNC.into(),
+        ..opts()
+    };
     let mut init =
-        super::super::template::render_workspace_client_bootstrap(&opts())["init"].clone();
+        render_sandbox_template(NS, &copying)["spec"]["podTemplate"]["spec"]["initContainers"][0]
+            .clone();
     init["image"] = json!(DAEMON_IMAGE);
     init
 }
@@ -147,10 +155,15 @@ fn apply_patch_fixture(object: &mut Value, patch: &Value) -> bool {
             .pointer_mut(parent)
             .expect("patch parent must already exist");
         if operation["op"] == "remove" {
-            parent
-                .as_array_mut()
-                .unwrap()
-                .remove(key.parse::<usize>().unwrap());
+            match parent {
+                Value::Array(values) => {
+                    values.remove(key.parse::<usize>().unwrap());
+                }
+                Value::Object(values) => {
+                    values.remove(&key).expect("a removed member must exist");
+                }
+                _ => panic!("unexpected patch target"),
+            }
         } else if operation["op"] == "replace" {
             let member = match parent {
                 Value::Array(values) => values.get_mut(key.parse::<usize>().unwrap()),
@@ -175,6 +188,7 @@ fn apply_patch_fixture(object: &mut Value, patch: &Value) -> bool {
     *object = next;
     true
 }
+
 fn client(fixture: Fixture) -> (SandboxClient, Arc<Mutex<Fixture>>) {
     let state = Arc::new(Mutex::new(fixture));
     let shared = state.clone();
@@ -261,15 +275,11 @@ fn client(fixture: Fixture) -> (SandboxClient, Arc<Mutex<Fixture>>) {
         state,
     )
 }
+
 fn dynamic(value: &Value) -> DynamicObject {
     serde_json::from_value(value.clone()).unwrap()
 }
-fn expected_pod() -> WorkspacePodIdentity {
-    WorkspacePodIdentity {
-        name: POD.into(),
-        uid: "pod-incarnation".into(),
-    }
-}
+
 fn expected_sandbox() -> WorkspaceSandboxIdentity {
     WorkspaceSandboxIdentity {
         name: SANDBOX.into(),
@@ -277,83 +287,35 @@ fn expected_sandbox() -> WorkspaceSandboxIdentity {
     }
 }
 
-#[test]
-fn expected_tuple_matches_renderer_and_clear_is_absence() {
-    for selected in [false, true] {
-        let mut opts = opts();
-        if !selected {
-            opts.projection_selection_sha256 = None;
-        }
-        let rendered = dynamic(&render_sandbox_template(NS, &opts));
-        assert!(
-            bootstrap_template_matches(&rendered, &workspace_bootstrap_values(&opts).unwrap())
-                .unwrap()
-        );
+/// A confidential workspace as orchestration renders it (B2c).
+fn measured_opts() -> TemplateOpts {
+    TemplateOpts {
+        runtime_profile: super::super::template::RUNTIME_PROFILE_CONFIDENTIAL.into(),
+        workspace_binding_url: "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
+                .into(),
+        measured_binding_roots:
+            "-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n".into(),
+        confidential_storage_manifest_uri: "kbs:///default/codewire-storage-manifests/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+        disk_gib: 20,
+        kata_coco_init_data_enabled: true,
+        kata_coco_kbs_url: "https://kbs.example.test".into(),
+        ..opts()
     }
-    let mut opts = opts();
-    opts.projection_selection_sha256 = Some([0; 32]);
-    assert!(workspace_bootstrap_values(&opts).is_err());
-    opts.projection_selection_sha256 = Some([1; 32]);
-    opts.credential_runtime = None;
-    assert!(workspace_bootstrap_values(&opts).is_err());
 }
 
-#[tokio::test]
-async fn suspended_reconcile_refreshes_only_owned_fields_without_reading_a_pod() {
-    let before = fixture();
-    let original = before.sandbox.clone();
-    let (client, state) = client(before);
-    client
-        .reconcile_workspace_bootstrap(&opts(), &claim_name(ENV), CLAIM_UID, &expected_sandbox())
-        .await
-        .unwrap();
-    client
-        .reconcile_workspace_bootstrap(&opts(), &claim_name(ENV), CLAIM_UID, &expected_sandbox())
-        .await
-        .unwrap();
-    let state = state.lock().unwrap();
-    assert_eq!(
-        state
-            .requests
-            .iter()
-            .filter(|(method, _, _)| *method == Method::PATCH)
-            .count(),
-        2,
-        "second call must be idempotent"
-    );
-    assert!(
-        state
-            .requests
-            .iter()
-            .all(|(_, path, _)| !path.contains("/pods/"))
-    );
-    let mut restored = state.sandbox.clone();
-    restored["spec"]["podTemplate"]["spec"]["containers"][1]["env"] =
-        original["spec"]["podTemplate"]["spec"]["containers"][1]["env"].clone();
-    assert_eq!(
-        restored, original,
-        "unrelated container/PVC/security/metadata fields changed"
-    );
-    let expected = workspace_bootstrap_values(&opts()).unwrap();
-    assert!(bootstrap_template_matches(&dynamic(&state.sandbox), &expected).unwrap());
-    assert!(bootstrap_template_matches(&dynamic(&state.template), &expected).unwrap());
-    for (_, _, patch) in state
+fn patch_count(state: &Fixture) -> usize {
+    state
         .requests
         .iter()
         .filter(|(method, _, _)| *method == Method::PATCH)
-    {
-        assert_eq!(patch[0]["path"], "/metadata/uid");
-        assert_eq!(patch[1]["path"], "/metadata/resourceVersion");
-        assert!(!patch.to_string().contains("UNRELATED"));
-    }
+        .count()
 }
 
 #[tokio::test]
-async fn selected_to_clear_removes_entries_from_both_recipes() {
+async fn confidential_start_publishes_its_whole_measured_runtime_before_resume() {
+    let opts = measured_opts();
+    let measured = MeasuredPodTemplate::render(NS, &opts).unwrap();
     let (client, state) = client(fixture());
-    let mut opts = opts();
-    opts.projection_selection_sha256 = None;
-    opts.credential_runtime = None;
     client
         .reconcile_workspace_bootstrap(&opts, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
         .await
@@ -361,74 +323,150 @@ async fn selected_to_clear_removes_entries_from_both_recipes() {
     {
         let state = state.lock().unwrap();
         for object in [&state.template, &state.sandbox] {
-            let env = object
-                .pointer("/spec/podTemplate/spec/containers/1/env")
-                .unwrap()
-                .as_array()
+            // Exactly the Pod the init-data authorizes: a legacy rendering's
+            // env token and stale containers are gone.
+            assert_eq!(
+                object.pointer("/spec/podTemplate/spec"),
+                Some(&measured.spec)
+            );
+            assert!(!object.to_string().contains("CODEWIRE_DAEMON_AUTH_TOKEN"));
+            let annotations = object
+                .pointer("/spec/podTemplate/metadata/annotations")
                 .unwrap();
-            assert_eq!(env.len(), 2);
-            assert!(bootstrap_environment_matches(env, &BTreeMap::new()));
+            for (key, value) in &measured.annotations {
+                assert_eq!(
+                    annotations.get(*key).and_then(Value::as_str),
+                    value.as_deref()
+                );
+            }
+            assert_eq!(annotations["preserve"], json!("annotation"));
+            assert_eq!(
+                annotations[KATA_COCO_INIT_DATA_ANNOTATION_KEY],
+                json!(measured.init_data())
+            );
         }
+        assert_eq!(state.sandbox["spec"]["operatingMode"], "Suspended");
+        assert_eq!(patch_count(&state), 2);
     }
-    assert!(
-        !client
-            .workspace_bootstrap_matches(&opts, &claim_name(ENV), CLAIM_UID, &expected_pod())
-            .await
-            .unwrap(),
-        "cleared recipes cannot certify the old selected Pod"
-    );
-    {
-        let mut state = state.lock().unwrap();
-        state.pod["spec"]["containers"][1]["env"] = json!([]);
-        state.pod["metadata"]["uid"] = json!("replacement-pod");
-    }
-    assert!(
-        client
-            .workspace_bootstrap_matches(
-                &opts,
-                &claim_name(ENV),
-                CLAIM_UID,
-                &WorkspacePodIdentity {
-                    name: POD.into(),
-                    uid: "replacement-pod".into()
-                }
-            )
-            .await
-            .unwrap()
-    );
+    // Starting again with nothing changed writes nothing.
+    client
+        .reconcile_workspace_bootstrap(&opts, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+        .await
+        .unwrap();
+    assert_eq!(patch_count(&state.lock().unwrap()), 2);
+    // A changed measured input (here orchestration's roots, as after a CA
+    // change; a release that changes the policy text behaves the same)
+    // changes the init-data, so the next start republishes.
+    let released = TemplateOpts {
+        measured_binding_roots:
+            "-----BEGIN CERTIFICATE-----\nMIIBrotated\n-----END CERTIFICATE-----\n".into(),
+        ..measured_opts()
+    };
+    client
+        .reconcile_workspace_bootstrap(&released, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+        .await
+        .unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(patch_count(&state), 4);
+    let republished = MeasuredPodTemplate::render(NS, &released).unwrap();
+    assert_ne!(republished.init_data(), measured.init_data());
+    assert!(republished.published_on(&DynamicObject {
+        types: None,
+        metadata: Default::default(),
+        data: state.sandbox.clone(),
+    }));
 }
 
+/// A confidential template rendered before B2c carries the old egress, with
+/// no route to the binding listener. Start republishes the rendered egress
+/// onto the template even when the measurement is already current, and
+/// never gives the Sandbox one.
 #[tokio::test]
-async fn confidential_reconcile_also_refreshes_only_kernel_and_fs_group_policy() {
-    let mut opts = opts();
-    opts.runtime_profile = super::super::template::RUNTIME_PROFILE_CONFIDENTIAL.into();
-    opts.kata_coco_init_data_enabled = true;
-    opts.kata_coco_kbs_url = "https://kbs.example.test".into();
-    let recovery = rendered_runtime_recovery_patch(NS, &opts).unwrap().1;
+async fn confidential_start_republishes_a_stale_template_egress() {
+    let opts = measured_opts();
+    let measured = MeasuredPodTemplate::render(NS, &opts).unwrap();
+    let rendered_egress = measured.network_policy.clone().expect("rendered egress");
     let (client, state) = client(fixture());
     client
         .reconcile_workspace_bootstrap(&opts, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
         .await
         .unwrap();
-    let state = state.lock().unwrap();
-    for object in [&state.template, &state.sandbox] {
-        assert_eq!(
-            object
-                .pointer("/spec/podTemplate/metadata/annotations")
-                .unwrap()[KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY],
-            recovery
-                .pointer("/spec/podTemplate/metadata/annotations")
-                .unwrap()[KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY]
-        );
-        assert_eq!(
-            object.pointer("/spec/podTemplate/metadata/annotations/preserve"),
-            Some(&json!("annotation"))
-        );
-        assert_eq!(
-            object.pointer("/spec/podTemplate/spec/securityContext"),
-            Some(&json!({"runAsUser":1000,"fsGroupChangePolicy":"OnRootMismatch"}))
-        );
+    {
+        let mut state = state.lock().unwrap();
+        assert_eq!(state.template["spec"]["networkPolicy"], rendered_egress);
+        assert!(state.sandbox["spec"].get("networkPolicy").is_none());
+        state.template["spec"]["networkPolicy"] = json!({ "egress": [] });
     }
+    let before = patch_count(&state.lock().unwrap());
+    client
+        .reconcile_workspace_bootstrap(&opts, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+        .await
+        .unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(
+        patch_count(&state),
+        before + 1,
+        "only the template is patched"
+    );
+    assert_eq!(state.template["spec"]["networkPolicy"], rendered_egress);
+    assert!(state.sandbox["spec"].get("networkPolicy").is_none());
+    assert!(measured.published_on(&DynamicObject {
+        types: None,
+        metadata: Default::default(),
+        data: state.template.clone(),
+    }));
+}
+
+#[tokio::test]
+async fn confidential_start_refuses_a_rendering_without_measured_anchors() {
+    let opts = TemplateOpts {
+        measured_binding_roots: String::new(),
+        ..measured_opts()
+    };
+    let (client, state) = client(fixture());
+    assert!(
+        client
+            .reconcile_workspace_bootstrap(&opts, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+            .await
+            .is_err()
+    );
+    assert_eq!(patch_count(&state.lock().unwrap()), 0);
+}
+
+#[test]
+fn a_measured_annotation_the_rendering_drops_is_removed() {
+    let measured = MeasuredPodTemplate::render(
+        NS,
+        &TemplateOpts {
+            kata_coco_kbs_url: String::new(),
+            ..measured_opts()
+        },
+    )
+    .unwrap();
+    // Without a KBS URL there are no kernel parameters to measure.
+    assert!(measured.annotations.iter().any(|(key, value)| {
+        *key == KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY && value.is_none()
+    }));
+    let mut sandbox = fixture().sandbox;
+    sandbox["spec"]["podTemplate"]["metadata"]["annotations"]
+        [KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY] = json!("agent.log_vport=1025");
+    let object: DynamicObject = serde_json::from_value(sandbox.clone()).unwrap();
+    let Some(Patch::Json(patch)) = measured.json_patch(&object, false).unwrap() else {
+        panic!("a stale measurement must be republished");
+    };
+    let patch = serde_json::to_value(patch).unwrap();
+    assert!(apply_patch_fixture(&mut sandbox, &patch));
+    assert!(
+        sandbox["spec"]["podTemplate"]["metadata"]["annotations"]
+            .get(KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY)
+            .is_none()
+    );
+    let merge = measured.merge_patch();
+    assert_eq!(
+        merge["spec"]["podTemplate"]["metadata"]["annotations"]
+            [KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY],
+        Value::Null
+    );
 }
 
 #[tokio::test]
@@ -448,11 +486,10 @@ async fn wrong_claim_pool_template_or_controller_identity_prevents_every_write()
             6 => fixture.template["metadata"]["labels"][LABEL_ENV_ID] = json!("other-env"),
             7 => fixture.template["metadata"]["deletionTimestamp"] = json!("2026-09-07T00:00:00Z"),
             8 => {
-                fixture.claim["spec"]["env"] = json!([{"containerName":"workspace","name":WORKSPACE_BOOTSTRAP_KEYS[2],"value":"competing"}])
+                fixture.claim["spec"]["env"] = json!([{"containerName":"workspace","name":codewire_daemon_proto::WORKSPACE_BINDING_URL_ENV,"value":"competing"}])
             }
             9 => {
-                fixture.claim["spec"]["env"] =
-                    json!([{"name":WORKSPACE_BOOTSTRAP_KEYS[2],"value":"competing-default"}])
+                fixture.claim["spec"]["env"] = json!([{"name":codewire_daemon_proto::WORKSPACE_MEASURED_BINDING_ROOTS_ENV,"value":"competing-default"}])
             }
             10 => fixture.pool["metadata"]["labels"][LABEL_ENV_ID] = json!("other-env"),
             _ => unreachable!(),
@@ -518,72 +555,6 @@ async fn conditional_conflicts_and_claim_replacement_cannot_report_publication_s
                 .iter()
                 .all(|(method, path, _)| *method != Method::DELETE && !path.contains("/pods/"))
         );
-    }
-}
-
-#[tokio::test]
-async fn actual_pod_tuple_not_recipe_or_relabeling_certifies_bootstrap() {
-    for actual in [false, true] {
-        let mut fixture = fixture();
-        fixture.pod["metadata"]["labels"] =
-            serde_json::to_value(runtime_identity_labels(ENV, ORG, 7, "workspace")).unwrap();
-        if actual {
-            fixture.pod["spec"]["containers"][1]["env"] = json!(
-                workspace_bootstrap_values(&opts())
-                    .unwrap()
-                    .iter()
-                    .map(|(name, value)| json!({"name":name,"value":value}))
-                    .collect::<Vec<_>>()
-            );
-        }
-        let (client, _) = client(fixture);
-        assert_eq!(
-            client
-                .workspace_bootstrap_matches(&opts(), &claim_name(ENV), CLAIM_UID, &expected_pod())
-                .await
-                .unwrap(),
-            actual
-        );
-    }
-}
-
-#[tokio::test]
-async fn immutable_pod_tuple_rejects_duplicate_source_and_identity_changes() {
-    for invalid in 0..5 {
-        let mut fixture = fixture();
-        fixture.pod["spec"]["containers"][1]["env"] = json!(
-            workspace_bootstrap_values(&opts())
-                .unwrap()
-                .iter()
-                .map(|(name, value)| json!({"name":name,"value":value}))
-                .collect::<Vec<_>>()
-        );
-        match invalid {
-            0 => fixture.pod["spec"]["containers"][1]["env"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"name":WORKSPACE_BOOTSTRAP_KEYS[0],"value":ENV})),
-            1 => {
-                fixture.pod["spec"]["containers"][1]["env"][0]["valueFrom"] =
-                    json!({"fieldRef":{"fieldPath":"metadata.name"}})
-            }
-            2 => fixture.pod["metadata"]["uid"] = json!("new-pod"),
-            3 => fixture.pod["metadata"]["ownerReferences"][0]["uid"] = json!("new-sandbox"),
-            4 => {
-                fixture.sandbox["metadata"]["annotations"]["agents.x-k8s.io/pod-name"] =
-                    json!("other-pod")
-            }
-            _ => unreachable!(),
-        }
-        let (client, _) = client(fixture);
-        let result = client
-            .workspace_bootstrap_matches(&opts(), &claim_name(ENV), CLAIM_UID, &expected_pod())
-            .await;
-        if invalid < 2 {
-            assert!(!result.unwrap());
-        } else {
-            assert!(result.is_err());
-        }
     }
 }
 
@@ -935,18 +906,24 @@ async fn exact_claim_suspend_fences_replacement_during_conditional_write() {
     }
 }
 
+/// What a pre-binding rendering wrote for its selected clients: their
+/// platform environment in the workspace container.
 fn install_selected_client_recipe(fixture: &mut Fixture, opts: &TemplateOpts) {
-    let expected = workspace_bootstrap_values(opts).unwrap();
-    let clients = super::super::template::render_workspace_client_bootstrap(opts);
-    for object in [&mut fixture.template, &mut fixture.sandbox] {
-        if let Some(Patch::Json(patch)) =
-            workspace_bootstrap_patch(&dynamic(object), &expected, None, &clients).unwrap()
-        {
-            assert!(apply_patch_fixture(
-                object,
-                &serde_json::to_value(patch).unwrap()
-            ));
-        }
+    let env: Vec<Value> = opts
+        .managed_credential_clients
+        .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
+        .environment
+        .into_iter()
+        .map(|(name, value)| json!({"name":name,"value":value}))
+        .collect();
+    for spec in [
+        &mut fixture.template["spec"]["podTemplate"]["spec"],
+        &mut fixture.sandbox["spec"]["podTemplate"]["spec"],
+    ] {
+        spec["containers"][1]["env"]
+            .as_array_mut()
+            .unwrap()
+            .extend(env.iter().cloned());
     }
     fixture.pod["spec"] = fixture.sandbox["spec"]["podTemplate"]["spec"].clone();
 }
@@ -1003,290 +980,6 @@ fn install_legacy_codex_recipe(fixture: &mut Fixture) {
     }
 }
 
-/// Rollback (`environment-token`) and confidential Pods keep their
-/// environment-scope recipe. A suspended legacy Codex recipe converges on the
-/// next start: no Codex volume, mount or init copy remains, only `CODEX_HOME`
-/// at `~/.codex` when Codex stays selected. The old Pod is stale exactly once;
-/// the Pod rendered from the converged Sandbox certifies, so the
-/// bootstrap-mismatch restart cannot repeat (#2364).
-#[tokio::test]
-async fn suspended_legacy_codex_recipe_converges_and_preserves_unrelated_spec() {
-    for slots in [vec![], vec!["openai"], vec!["github"], vec!["codex"]] {
-        let mut fixture = fixture();
-        install_legacy_codex_recipe(&mut fixture);
-        let (client, state) = client(fixture);
-        let mut target = opts();
-        target.managed_credential_clients =
-            codewire_access::ManagedCredentialClients::from_profile_slots(slots).unwrap();
-        client
-            .reconcile_workspace_bootstrap(
-                &target,
-                &claim_name(ENV),
-                CLAIM_UID,
-                &expected_sandbox(),
-            )
-            .await
-            .unwrap();
-        assert!(
-            !client
-                .workspace_bootstrap_matches(&target, &claim_name(ENV), CLAIM_UID, &expected_pod())
-                .await
-                .unwrap(),
-            "old immutable Codex Pod must not certify replacement"
-        );
-        {
-            let mut state = state.lock().unwrap();
-            for object in [&state.template, &state.sandbox] {
-                let spec = &object["spec"]["podTemplate"]["spec"];
-                for legacy in ["credential-codex", "codex-bootstrap", "/run/codewire-codex"] {
-                    assert!(!spec.to_string().contains(legacy), "{legacy}");
-                }
-                assert_eq!(
-                    spec["containers"][1]["env"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|entry| entry["name"] == "CODEX_HOME")
-                        .map(|entry| entry["value"].clone()),
-                    target
-                        .managed_credential_clients
-                        .contains(codewire_access::ManagedCredentialClient::Codex)
-                        .then(|| json!(codewire_access::CODEX_PLATFORM_HOME))
-                );
-                assert_eq!(spec["initContainers"], json!([daemon_init()]));
-                assert_eq!(
-                    spec["containers"][1]["resources"]["requests"]["cpu"],
-                    "900m"
-                );
-                assert_eq!(
-                    spec["volumes"][0]["persistentVolumeClaim"]["claimName"],
-                    "saved-pvc"
-                );
-                assert!(
-                    spec["containers"][1]["env"]
-                        .as_array()
-                        .unwrap()
-                        .contains(&json!({"name":"UNRELATED","value":"preserve"}))
-                );
-                assert!(
-                    bootstrap_template_matches(
-                        &dynamic(object),
-                        &workspace_bootstrap_values(&target).unwrap()
-                    )
-                    .unwrap()
-                );
-            }
-            state.pod["spec"] = state.sandbox["spec"]["podTemplate"]["spec"].clone();
-            state.pod["metadata"]["uid"] = json!("replacement-pod");
-        }
-        assert!(
-            client
-                .workspace_bootstrap_matches(
-                    &target,
-                    &claim_name(ENV),
-                    CLAIM_UID,
-                    &WorkspacePodIdentity {
-                        name: POD.into(),
-                        uid: "replacement-pod".into()
-                    }
-                )
-                .await
-                .unwrap()
-        );
-        // A second start publishes nothing, and nothing creates a ConfigMap.
-        let writes = state.lock().unwrap().requests.len();
-        client
-            .reconcile_workspace_bootstrap(
-                &target,
-                &claim_name(ENV),
-                CLAIM_UID,
-                &expected_sandbox(),
-            )
-            .await
-            .unwrap();
-        let state = state.lock().unwrap();
-        assert!(
-            state.requests[writes..]
-                .iter()
-                .all(|(method, _, _)| *method == Method::GET)
-        );
-        assert!(
-            state
-                .requests
-                .iter()
-                .all(|(_, path, _)| !path.contains("/configmaps"))
-        );
-        assert!(state.config_map.is_none());
-    }
-}
-
-#[tokio::test]
-async fn actual_pod_clients_require_exact_token_env_mounts_and_init_not_just_selection_sha() {
-    let mut opts = opts();
-    opts.managed_credential_clients =
-        codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
-    let mut current = fixture();
-    install_selected_client_recipe(&mut current, &opts);
-    let (current, _) = client(current);
-    assert!(
-        current
-            .workspace_bootstrap_matches(&opts, &claim_name(ENV), CLAIM_UID, &expected_pod())
-            .await
-            .unwrap()
-    );
-    for corruption in 0..7 {
-        let mut fixture = fixture();
-        install_selected_client_recipe(&mut fixture, &opts);
-        match corruption {
-            0 => {
-                let token = fixture.pod["spec"]["containers"][1]["env"]
-                    .as_array_mut()
-                    .unwrap()
-                    .iter_mut()
-                    .find(|entry| entry["name"] == WORKSPACE_BOOTSTRAP_KEYS[3])
-                    .unwrap();
-                token["value"] = json!("v1:openai");
-            }
-            1 => fixture.pod["spec"]["containers"][1]["env"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"name":"OPENAI_API_KEY","value":"unexpected-routing-placeholder"})),
-            // A Pod that still carries any piece of the legacy Codex recipe.
-            2 => fixture.pod["spec"]["volumes"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"name":"credential-codex-home","emptyDir":{"medium":"Memory","sizeLimit":"256Mi"}})),
-            3 => {
-                fixture.pod["spec"]["containers"][1]["volumeMounts"] =
-                    json!([{"name":"credential-codex-home","mountPath":"/run/codewire-codex"}]);
-            }
-            4 => fixture.pod["spec"]["initContainers"][0]["command"] = json!(["sh", "-c", "true"]),
-            5 => fixture.pod["spec"]["initContainers"][0]["volumeMounts"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"name":"credential-codex-config","mountPath":"/codewire/codex-bootstrap","readOnly":true})),
-            6 => fixture.pod["spec"]["containers"][1]["env"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .find(|entry| entry["name"] == "CODEX_HOME")
-                .unwrap()["value"] = json!(LEGACY_CODEX_HOME),
-            _ => unreachable!(),
-        }
-        let (client, _) = client(fixture);
-        assert!(
-            !client
-                .workspace_bootstrap_matches(&opts, &claim_name(ENV), CLAIM_UID, &expected_pod())
-                .await
-                .unwrap(),
-            "corruption {corruption}"
-        );
-    }
-}
-
-/// The current bootstrap renders only the selected Anthropic form's variable.
-/// A Pod rendered earlier also carries blank placeholders for the other
-/// names, which the Pod API stores without a value; it still certifies its
-/// bootstrap. An unexpected owned name with a value never does.
-#[tokio::test]
-async fn stored_pod_with_former_blank_anthropic_placeholders_still_certifies_its_bootstrap() {
-    let mut opts = opts();
-    opts.managed_credential_clients =
-        codewire_access::ManagedCredentialClients::from_profile_slots(["openai", "anthropic"])
-            .unwrap();
-    let rendered = |opts: &TemplateOpts| {
-        let mut fixture = fixture();
-        install_selected_client_recipe(&mut fixture, opts);
-        fixture
-    };
-    // The current render: no blank Anthropic name at all.
-    let fixture = rendered(&opts);
-    let names: Vec<String> = fixture.pod["spec"]["containers"][1]["env"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["name"].as_str().unwrap().to_owned())
-        .collect();
-    for absent in ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] {
-        assert!(!names.iter().any(|name| name == absent), "{absent}");
-    }
-    let (current, _) = client(fixture);
-    assert!(
-        current
-            .workspace_bootstrap_matches(&opts, &claim_name(ENV), CLAIM_UID, &expected_pod())
-            .await
-            .unwrap()
-    );
-
-    // A Pod stored by the earlier render: the same, plus the blank names.
-    let former = |value: Option<&str>| {
-        let mut fixture = rendered(&opts);
-        let env = fixture.pod["spec"]["containers"][1]["env"]
-            .as_array_mut()
-            .unwrap();
-        for name in ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] {
-            env.push(match value {
-                None => json!({ "name": name }),
-                Some(value) => json!({ "name": name, "value": value }),
-            });
-        }
-        fixture
-    };
-    for blank in [None, Some("")] {
-        let (stored, _) = client(former(blank));
-        assert!(
-            stored
-                .workspace_bootstrap_matches(&opts, &claim_name(ENV), CLAIM_UID, &expected_pod())
-                .await
-                .unwrap(),
-            "{blank:?}"
-        );
-    }
-    // A value in a name the bootstrap does not render still fails.
-    let (valued, _) = client(former(Some("unexpected-routing-placeholder")));
-    assert!(
-        !valued
-            .workspace_bootstrap_matches(&opts, &claim_name(ENV), CLAIM_UID, &expected_pod())
-            .await
-            .unwrap()
-    );
-}
-
-#[tokio::test]
-async fn newly_selected_codex_publishes_only_its_environment_and_no_config_map() {
-    let (client, state) = client(fixture());
-    let mut opts = opts();
-    opts.managed_credential_clients =
-        codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
-    client
-        .reconcile_workspace_bootstrap(&opts, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
-        .await
-        .unwrap();
-    let state = state.lock().unwrap();
-    assert!(state.requests.iter().all(|(_, path, _)| {
-        !path.contains("/configmaps") && !path.contains("/secrets") && !path.contains("/pods/")
-    }));
-    assert!(state.config_map.is_none());
-    for object in [&state.template, &state.sandbox] {
-        let spec = &object["spec"]["podTemplate"]["spec"];
-        assert!(!spec.to_string().contains("credential-codex"));
-        assert!(
-            spec["containers"][1]["env"].as_array().unwrap().contains(
-                &json!({"name":"CODEX_HOME","value":codewire_access::CODEX_PLATFORM_HOME})
-            )
-        );
-        assert!(
-            workspace_client_changes(
-                object,
-                &super::super::template::render_workspace_client_bootstrap(&opts),
-                "/spec/podTemplate/spec"
-            )
-            .unwrap()
-            .is_empty()
-        );
-    }
-}
-
 const DAEMON_IMAGE: &str = "registry.example.invalid/codewire/daemon@sha256:48549d19114407c712d043af3ba2136d97052a2c30c82935190f75a3a61f13ab";
 
 /// A commodity recipe whose daemon is an image volume: no init container
@@ -1306,182 +999,13 @@ fn image_volume_fixture() -> Fixture {
     fixture
 }
 
-fn with_clients(slots: &[&str]) -> TemplateOpts {
-    let mut opts = opts();
-    opts.managed_credential_clients =
-        codewire_access::ManagedCredentialClients::from_profile_slots(slots.iter().copied())
-            .unwrap();
-    opts
-}
-
-/// An image-volume Pod's legacy client bootstrap is removed on the next
-/// start, and no selection adds one back.
-#[tokio::test]
-async fn image_volume_legacy_client_bootstrap_is_removed_and_never_added() {
-    let codex = with_clients(&["codex"]);
-    // A current image-volume recipe gains no init container for Codex.
-    let (fresh, fresh_state) = client(image_volume_fixture());
-    fresh
-        .reconcile_workspace_bootstrap(&codex, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
-        .await
-        .unwrap();
-    assert!(
-        fresh_state.lock().unwrap().sandbox["spec"]["podTemplate"]["spec"]
-            .get("initContainers")
-            .is_none()
-    );
-
-    let mut legacy = image_volume_fixture();
-    install_legacy_codex_recipe(&mut legacy);
-    assert_eq!(
-        legacy.pod["spec"]["initContainers"][0]["name"],
-        "codewire-client-bootstrap"
-    );
-    let (client, state) = client(legacy);
-    client
-        .reconcile_workspace_bootstrap(&codex, &claim_name(ENV), CLAIM_UID, &expected_sandbox())
-        .await
-        .unwrap();
-    {
-        let state = state.lock().unwrap();
-        for object in [&state.template, &state.sandbox] {
-            let spec = &object["spec"]["podTemplate"]["spec"];
-            assert_eq!(spec["initContainers"], json!([]));
-            assert!(!spec.to_string().contains("codewire-daemon-init"));
-            assert!(!spec.to_string().contains("credential-codex"));
-            assert!(
-                spec["volumes"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!({"name":"codewire-bin","image":{"reference":DAEMON_IMAGE,"pullPolicy":"IfNotPresent"}}))
-            );
-            assert_eq!(
-                spec["volumes"][0]["persistentVolumeClaim"]["claimName"],
-                "saved-pvc"
-            );
-        }
-    }
-    assert!(
-        !client
-            .workspace_bootstrap_matches(&codex, &claim_name(ENV), CLAIM_UID, &expected_pod())
-            .await
-            .unwrap(),
-        "a Pod with the legacy client bootstrap must not certify its removal"
-    );
-    let replacement = WorkspacePodIdentity {
-        name: POD.into(),
-        uid: "replacement-pod".into(),
-    };
-    {
-        let mut state = state.lock().unwrap();
-        state.pod["spec"] = state.sandbox["spec"]["podTemplate"]["spec"].clone();
-        state.pod["metadata"]["uid"] = json!("replacement-pod");
-    }
-    for (index, selection) in [codex.clone(), with_clients(&[])].iter().enumerate() {
-        if index > 0 {
-            client
-                .reconcile_workspace_bootstrap(
-                    selection,
-                    &claim_name(ENV),
-                    CLAIM_UID,
-                    &expected_sandbox(),
-                )
-                .await
-                .unwrap();
-            let mut state = state.lock().unwrap();
-            state.pod["spec"] = state.sandbox["spec"]["podTemplate"]["spec"].clone();
-        }
-        assert!(
-            client
-                .workspace_bootstrap_matches(selection, &claim_name(ENV), CLAIM_UID, &replacement)
-                .await
-                .unwrap()
-        );
-        // Reconciling the same selection again writes nothing.
-        let writes = state.lock().unwrap().requests.len();
-        client
-            .reconcile_workspace_bootstrap(
-                selection,
-                &claim_name(ENV),
-                CLAIM_UID,
-                &expected_sandbox(),
-            )
-            .await
-            .unwrap();
-        assert!(
-            state.lock().unwrap().requests[writes..]
-                .iter()
-                .all(|(method, _, _)| *method != Method::PATCH)
-        );
-        let state = state.lock().unwrap();
-        assert_eq!(
-            state.sandbox["spec"]["podTemplate"]["spec"]["initContainers"],
-            json!([])
-        );
-    }
-}
-
-#[test]
-fn daemon_delivery_must_be_exactly_one_route() {
-    let clients = super::super::template::render_workspace_client_bootstrap(&with_clients(&[]));
-    let legacy = blueprint();
-    assert!(
-        workspace_client_changes(&legacy, &clients, "/spec")
-            .unwrap()
-            .is_empty()
-    );
-    let image = image_volume_fixture().pod;
-    assert!(
-        workspace_client_changes(&image, &clients, "/spec")
-            .unwrap()
-            .is_empty()
-    );
-
-    let daemon_init = legacy["spec"]["initContainers"][0].clone();
-    let mut client_init = clients["init"].clone();
-    client_init["name"] = json!("codewire-client-bootstrap");
-    let mut both_routes = image.clone();
-    both_routes["spec"]["initContainers"] = json!([daemon_init]);
-    let mut neither_route = legacy.clone();
-    neither_route["spec"]["initContainers"] = json!([]);
-    let mut copy_with_client_init = legacy.clone();
-    copy_with_client_init["spec"]["initContainers"]
-        .as_array_mut()
-        .unwrap()
-        .push(client_init.clone());
-    let mut duplicate_client_init = image.clone();
-    duplicate_client_init["spec"]["initContainers"] = json!([client_init, client_init]);
-    let mut duplicate_daemon_volume = image.clone();
-    duplicate_daemon_volume["spec"]["volumes"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"name":"codewire-bin","emptyDir":{}}));
-    let mut unnamed_image = image.clone();
-    unnamed_image["spec"]["volumes"][1]["image"] = json!({"pullPolicy":"IfNotPresent"});
-    for (case, spec) in [
-        ("both routes", both_routes),
-        ("neither route", neither_route),
-        ("copy with client init", copy_with_client_init),
-        ("duplicate client init", duplicate_client_init),
-        ("duplicate daemon volume", duplicate_daemon_volume),
-        ("image without reference", unnamed_image),
-    ] {
-        assert!(
-            workspace_client_changes(&spec, &clients, "/spec").is_err(),
-            "{case}"
-        );
-    }
-}
-
 // ------------------------------------------ identity-free upgrade (B2 §12)
 
 fn binding_opts() -> TemplateOpts {
     TemplateOpts {
         server_namespace: "dev".into(),
-        workspace_identity: super::super::template::WorkspaceIdentity::Binding {
-            binding_url:
-                "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087".into(),
-        },
+        workspace_binding_url:
+            "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087".into(),
         ..opts()
     }
 }
@@ -1673,109 +1197,6 @@ async fn an_upgrade_that_races_another_writer_fails_closed() {
                 .is_err()
         );
     }
-}
-
-/// Rollback (`environment-token`) renders legacy Pods for new environments
-/// but leaves an identity-free one untouched: it keeps binding with Pod
-/// scope. Its template carries no environment label; the environment-owned
-/// shadow pool names it.
-#[tokio::test]
-async fn rollback_mode_leaves_an_identity_free_environment_untouched() {
-    let mut before = fixture();
-    let rendered = render_sandbox_template(NS, &binding_opts());
-    for object in [&mut before.template, &mut before.sandbox] {
-        object["spec"]["podTemplate"]["spec"] = rendered["spec"]["podTemplate"]["spec"].clone();
-    }
-    before.template["metadata"]["labels"] = json!({});
-    let (sandboxes, state) = client(before);
-    sandboxes
-        .reconcile_workspace_bootstrap(&opts(), &claim_name(ENV), CLAIM_UID, &expected_sandbox())
-        .await
-        .unwrap();
-    // Binding mode accepts the unlabelled identity-free template too.
-    sandboxes
-        .reconcile_workspace_bootstrap(
-            &binding_opts(),
-            &claim_name(ENV),
-            CLAIM_UID,
-            &expected_sandbox(),
-        )
-        .await
-        .unwrap();
-    assert!(patches(&state.lock().unwrap()).is_empty());
-}
-
-/// Review L5: an upgrade interrupted after the template but before the
-/// Sandbox is finished under rollback too, so the resumed Pod renders from an
-/// identity-free Sandbox instead of looping on a legacy one beside an
-/// identity-free template. The finished state is stable on the next start.
-#[tokio::test]
-async fn rollback_mode_finishes_a_partial_identity_upgrade() {
-    for upgraded_template in [true, false] {
-        let mut before = legacy_fixture();
-        let rendered = render_sandbox_template(NS, &binding_opts());
-        let upgraded = if upgraded_template {
-            &mut before.template
-        } else {
-            &mut before.sandbox
-        };
-        upgraded["spec"]["podTemplate"]["spec"] = rendered["spec"]["podTemplate"]["spec"].clone();
-        if upgraded_template {
-            before.template["spec"]["networkPolicy"] = rendered["spec"]["networkPolicy"].clone();
-        }
-        let (sandboxes, state) = client(before);
-        let rollback = TemplateOpts {
-            server_namespace: "dev".into(),
-            ..opts()
-        };
-        for _ in 0..2 {
-            sandboxes
-                .reconcile_workspace_bootstrap(
-                    &rollback,
-                    &claim_name(ENV),
-                    CLAIM_UID,
-                    &expected_sandbox(),
-                )
-                .await
-                .unwrap();
-        }
-        let state = state.lock().unwrap();
-        assert_eq!(
-            patches(&state).len(),
-            1,
-            "only the legacy half is patched, once"
-        );
-        for object in [&state.template, &state.sandbox] {
-            assert_eq!(
-                object["spec"]["podTemplate"]["spec"],
-                rendered["spec"]["podTemplate"]["spec"]
-            );
-        }
-        assert_eq!(
-            state.template["spec"]["networkPolicy"],
-            rendered["spec"]["networkPolicy"]
-        );
-        assert_eq!(state.sandbox["spec"]["operatingMode"], "Suspended");
-    }
-
-    // Without the orchestration namespace the half upgrade is refused, never
-    // skipped.
-    let mut before = legacy_fixture();
-    before.template["spec"]["podTemplate"]["spec"] =
-        render_sandbox_template(NS, &binding_opts())["spec"]["podTemplate"]["spec"].clone();
-    let (sandboxes, state) = client(before);
-    assert!(
-        sandboxes
-            .reconcile_workspace_bootstrap(
-                &opts(),
-                &claim_name(ENV),
-                CLAIM_UID,
-                &expected_sandbox()
-            )
-            .await
-            .is_err()
-    );
-    assert!(patches(&state.lock().unwrap()).is_empty());
 }
 
 /// An unlabelled template that is not identity-free is not this
@@ -2595,60 +2016,6 @@ fn daemon_image_plan_compares_repositories_not_tags_or_digests() {
     assert_eq!(
         plan_daemon_image(&copy, DAEMON_IMAGE).unwrap(),
         DaemonImagePlan::Kept(DaemonImageKept::ConfidentialRuntime)
-    );
-}
-
-/// #2364 keeps one bootstrap-mismatch restart per attempt. The restart
-/// resumes through the re-pinning writer, and the bootstrap check never reads
-/// the daemon image, so the replacement a re-pin produces certifies and the
-/// restart cannot repeat because of it.
-#[tokio::test]
-async fn a_re_pinned_replacement_certifies_its_bootstrap() {
-    let (client, state) = client(stale_daemon_fixture());
-    assert!(
-        !client
-            .workspace_bootstrap_matches(&opts(), &claim_name(ENV), CLAIM_UID, &expected_pod())
-            .await
-            .unwrap(),
-        "the stale Pod must be the one restart's trigger"
-    );
-    client
-        .reconcile_workspace_bootstrap(&opts(), &claim_name(ENV), CLAIM_UID, &expected_sandbox())
-        .await
-        .unwrap();
-    client
-        .set_replicas_for_identity(
-            &claim_opts(),
-            &claim_name(ENV),
-            CLAIM_UID,
-            &expected_sandbox(),
-            1,
-            DAEMON_IMAGE,
-        )
-        .await
-        .unwrap();
-    {
-        let mut state = state.lock().unwrap();
-        assert_eq!(
-            *daemon_reference_mut(&mut state.sandbox),
-            json!(DAEMON_IMAGE)
-        );
-        state.pod["spec"] = state.sandbox["spec"]["podTemplate"]["spec"].clone();
-        state.pod["metadata"]["uid"] = json!("replacement-pod");
-    }
-    assert!(
-        client
-            .workspace_bootstrap_matches(
-                &opts(),
-                &claim_name(ENV),
-                CLAIM_UID,
-                &WorkspacePodIdentity {
-                    name: POD.into(),
-                    uid: "replacement-pod".into(),
-                },
-            )
-            .await
-            .unwrap()
     );
 }
 

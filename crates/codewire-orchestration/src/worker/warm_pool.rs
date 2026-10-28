@@ -132,7 +132,7 @@ pub fn startup(cfg: &SandboxWorkerCfg, image_cache_enabled: anyhow::Result<bool>
 
 impl WarmPoolConfig {
     /// `Ok(None)` when no shape is configured. Every configured shape renders
-    /// through C1's identity-free renderer, so a rollback identity mode, a
+    /// through C1's identity-free renderer, so a missing binding listener, a
     /// confidential or unmanaged runtime, or an unpinned image outside a
     /// diagnostic cluster refuses the whole configuration.
     pub fn from_cfg(

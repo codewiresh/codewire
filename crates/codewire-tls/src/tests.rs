@@ -240,6 +240,62 @@ async fn real_tls_accepts_explicit_root_and_rejects_wrong_purpose_ca_and_dns() {
 }
 
 #[tokio::test]
+async fn fixed_roots_verify_once_parsed_and_never_follow_a_file() {
+    let broker_ca = Ca::new();
+    let other_ca = Ca::new();
+    let files = Files::new(&broker_ca, "localhost");
+    let server = Server::start(files.identity.clone()).await;
+    let pinned = broker_ca.pem();
+    let endpoint =
+        ClientTlsEndpoint::with_fixed_roots(server.origin.clone(), pinned.as_bytes()).unwrap();
+    drop(endpoint.connect().await.unwrap());
+    // Replacing the mounted file changes nothing for a fixed endpoint.
+    write(&files.roots, other_ca.pem());
+    drop(endpoint.connect().await.unwrap());
+    // Other roots do not verify the server, and the DNS name still counts.
+    let wrong =
+        ClientTlsEndpoint::with_fixed_roots(server.origin.clone(), other_ca.pem().as_bytes())
+            .unwrap();
+    assert!(wrong.connect().await.is_err());
+    files.replace(&broker_ca, "different-service.example");
+    assert!(endpoint.connect().await.is_err());
+    server.stop().await;
+
+    // A malformed or oversized bundle is refused when built, never later.
+    for bytes in [
+        String::new(),
+        "not a certificate".to_owned(),
+        format!("{}garbage", broker_ca.pem()),
+        format!("{}{}", broker_ca.pem(), broker_ca.key.serialize_pem()),
+        "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n".into(),
+        format!(
+            "{}{}",
+            broker_ca.pem(),
+            "A".repeat(crate::files::MAX_CERTIFICATE_BYTES)
+        ),
+    ] {
+        assert_eq!(
+            ClientTlsEndpoint::with_fixed_roots("https://localhost".into(), bytes.as_bytes())
+                .unwrap_err(),
+            TlsError::InvalidPem
+        );
+    }
+    // The origin rules are the mounted endpoint's.
+    assert_eq!(
+        ClientTlsEndpoint::with_fixed_roots("https://127.0.0.1".into(), pinned.as_bytes())
+            .unwrap_err(),
+        TlsError::Configuration
+    );
+    assert!(
+        crate::ConnectOriginTransport::for_origin_with_fixed_roots(
+            "https://localhost:8087",
+            pinned.as_bytes()
+        )
+        .is_ok()
+    );
+}
+
+#[tokio::test]
 async fn malformed_missing_oversize_and_mixed_pem_inputs_fail_closed() {
     let ca = Ca::new();
     let files = Files::new(&ca, "localhost");

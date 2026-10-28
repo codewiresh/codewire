@@ -57,6 +57,20 @@ pub const WORKSPACE_BINDING_TLS_ROOTS_FILE: &str =
 /// The workspace Pod's own UID from the downward API. The daemon compares it
 /// with the reviewed Pod UID in the bind response.
 pub const WORKSPACE_POD_UID_ENV: &str = "CODEWIRE_POD_UID";
+/// A confidential workspace's measured trust anchors (Program #2238 B2c).
+/// Its workspace container carries them as env entries, which the measured
+/// Kata policy pins exactly, so the init-data that Trustee authorizes commits
+/// to them.
+///
+/// The binding listener's public roots: a PEM bundle. In a confidential
+/// workspace the daemon trusts only these for 8087, never the mounted roots,
+/// which the host supplies there.
+pub const WORKSPACE_MEASURED_BINDING_ROOTS_ENV: &str = "CODEWIRE_MEASURED_BINDING_ROOTS";
+/// The only environment a confidential workspace may bind as: the UUID its
+/// init-data already measures as the storage key ID.
+pub const WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV: &str = "CODEWIRE_MEASURED_ENVIRONMENT_ID";
+/// The largest measured roots bundle the daemon accepts.
+pub const WORKSPACE_MEASURED_BINDING_ROOTS_MAX_BYTES: usize = 64 * 1024;
 /// Owner-only (0700) daemon state directory under the Pod's `/codewire/run`.
 pub const HOSTED_DAEMON_STATE_DIRECTORY: &str = "/codewire/run/daemon";
 /// The daemon's local Unix socket for `cw network connect` (#3350): a
@@ -438,6 +452,15 @@ mod tests {
             assert!(!name.is_empty());
         }
         assert_ne!(HOSTED_DAEMON_READY_FILE, HOSTED_DAEMON_CREDENTIAL_FILE);
+        // The measured anchors never reuse a name the binding mode refuses.
+        assert_eq!(
+            WORKSPACE_MEASURED_BINDING_ROOTS_ENV,
+            "CODEWIRE_MEASURED_BINDING_ROOTS"
+        );
+        assert_eq!(
+            WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV,
+            "CODEWIRE_MEASURED_ENVIRONMENT_ID"
+        );
         // The wait stays well inside the listener's 35s connection deadline.
         assert!((1..=20).contains(&WORKSPACE_BINDING_WAIT_SECONDS));
     }

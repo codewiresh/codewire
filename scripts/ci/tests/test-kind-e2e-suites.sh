@@ -717,7 +717,7 @@ if grep -Fq 'CRD_SMOKE_DAEMON_AUTH_TOKEN' "$COMMON" \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs"; then
   fail 'the resize workspace still receives an environment daemon capability'
 fi
-grep -Fq 'workspace_identity: WorkspaceIdentity::Binding {' \
+grep -Fq 'workspace_binding_url: workspace_binding_url(server_namespace)' \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
   fail 'the resize workspace is not rendered identity-free'
 grep -Fq 'CRD_SMOKE_ACCESS_PHASE=cleanup' "$COMMON" ||

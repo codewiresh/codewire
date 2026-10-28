@@ -1865,6 +1865,7 @@ if [ "$event_selected" = false ]; then
         ;;
       scripts/runtime/confidential/*|\
       scripts/runtime/tests/test-confidential-snp-smoke-contract.sh|\
+      scripts/runtime/tests/test-confidential-binding-proof.sh|\
       scripts/runtime/tests/test-resolve-coco-support-lock.sh)
         # This lightweight capability owns confidential image provenance and
         # its fail-closed offline contract fixtures.

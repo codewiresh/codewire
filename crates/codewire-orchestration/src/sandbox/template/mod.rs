@@ -42,9 +42,8 @@ pub use runtime_policy::{
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
 pub(crate) use workspace::{
-    CLIENT_BOOTSTRAP_CONTAINER, DAEMON_INIT_CONTAINER, DAEMON_VOLUME, LEGACY_DIND_BOOTSTRAP_SCRIPT,
-    dind_bootstrap_script, eager_mkfs_dind_bootstrap_script, pre_growth_dind_bootstrap_script,
-    render_workspace_client_bootstrap,
+    DAEMON_INIT_CONTAINER, DAEMON_VOLUME, LEGACY_DIND_BOOTSTRAP_SCRIPT, dind_bootstrap_script,
+    eager_mkfs_dind_bootstrap_script, pre_growth_dind_bootstrap_script,
 };
 pub use workspace::{
     ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,
@@ -66,6 +65,10 @@ pub(crate) fn confidential_init_data(opts: &TemplateOpts) -> anyhow::Result<Stri
     );
     opts.validate_confidential_storage_manifest()?;
     crate::confidential_storage::validate_environment_id(&opts.environment_id)?;
+    anyhow::ensure!(
+        opts.measured_workspace_environment().is_some(),
+        "confidential init-data requires a binding URL and measured binding roots"
+    );
 
     Ok(encoding::build_codewire_kata_policy_init_data(opts, true))
 }
@@ -87,7 +90,6 @@ pub const WORKSPACE_DAEMON_PORT: i64 = 7777;
 pub const WORKSPACE_DAEMON_LISTEN_ADDR: &str = "0.0.0.0:7777";
 pub const SANDBOX_SERVICE_ACCOUNT: &str = codewire_daemon_proto::SANDBOX_SERVICE_ACCOUNT;
 pub const DIND_SOCKET_PATH: &str = "/var/run/docker/docker.sock";
-pub const DAEMON_AUTH_TOKEN_ENV: &str = "CODEWIRE_DAEMON_AUTH_TOKEN";
 pub const KATA_COCO_INIT_DATA_ANNOTATION_KEY: &str =
     "io.katacontainers.config.hypervisor.cc_init_data";
 pub const KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY: &str =
@@ -141,23 +143,6 @@ pub fn sandbox_egress_bandwidth(value: Option<&str>) -> Result<String, String> {
 const APP_PREVIEW_MIN_PORT: i64 = 1;
 const APP_PREVIEW_MAX_PORT: i64 = 65535;
 
-/// How a hosted workspace Pod gets its environment identity (Program #2238
-/// B2, design §8 and §13).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum WorkspaceIdentity {
-    /// Today's rendering: the environment-wide daemon token, environment ID,
-    /// generation, projection digest and managed clients are rendered into
-    /// the workspace container. Only confidential Pods use it, until B2c: such
-    /// a Pod never serves SSH or the tailnet.
-    #[default]
-    EnvironmentToken,
-    /// Identity-free: the Pod carries only a Pod-bound projected token for the
-    /// workspace-binding audience, its own UID from the downward API and the
-    /// binding listener URL. Everything environment-specific comes from the
-    /// bind response.
-    Binding { binding_url: String },
-}
-
 /// Inputs for rendering one environment-scoped sandbox template.
 #[derive(Clone, Default)]
 pub struct TemplateOpts {
@@ -178,9 +163,16 @@ pub struct TemplateOpts {
     /// Exact clients selected by the captured immutable profile revision.
     pub managed_credential_clients: codewire_access::ManagedCredentialClients,
     pub confidential_storage_manifest_uri: String,
-    pub daemon_auth_token: String,
-    /// How the workspace Pod is bound to this environment.
-    pub workspace_identity: WorkspaceIdentity,
+    /// The binding listener's public roots (PEM) that a confidential
+    /// workspace measures: orchestration's own issuing CA, never the
+    /// tenant-namespace ConfigMap. Empty for every other runtime.
+    pub measured_binding_roots: String,
+    /// The workspace-binding listener every hosted workspace binds through
+    /// (Program #2238 B2, B2c). The Pod carries only a Pod-bound projected
+    /// token for the binding audience, its own UID from the downward API and
+    /// this URL; everything environment-specific comes from the bind
+    /// response.
+    pub workspace_binding_url: String,
     pub api_base_url: String,
     pub coordinator_url: String,
     pub server_namespace: String,
@@ -256,8 +248,11 @@ impl fmt::Debug for TemplateOpts {
                 "confidential_storage_manifest_uri",
                 &self.confidential_storage_manifest_uri,
             )
-            .field("daemon_auth_token", &"<redacted>")
-            .field("workspace_identity", &self.workspace_identity)
+            .field(
+                "measured_binding_roots_bytes",
+                &self.measured_binding_roots.len(),
+            )
+            .field("workspace_binding_url", &self.workspace_binding_url)
             .field("api_base_url", &self.api_base_url)
             .field("coordinator_url", &self.coordinator_url)
             .field("server_namespace", &self.server_namespace)
@@ -323,17 +318,33 @@ impl TemplateOpts {
         runtime_profile_spec(&self.runtime_profile, &self.docker_mode, self.dind_enabled)
     }
 
-    /// The workspace-binding listener URL when this workspace is rendered
-    /// identity-free.
-    pub fn workspace_binding_url(&self) -> Option<&str> {
-        match &self.workspace_identity {
-            WorkspaceIdentity::Binding { binding_url } => Some(binding_url),
-            WorkspaceIdentity::EnvironmentToken => None,
+    /// The measured trust anchors of a confidential workspace (B2c), as the
+    /// exact env entries its workspace container carries and its measured
+    /// Kata policy pins: the binding listener URL, its public roots and the
+    /// only environment the Pod may bind as. `None` for any other runtime,
+    /// and for a confidential rendering without a binding URL or measured
+    /// roots, which never renders init-data.
+    pub fn measured_workspace_environment(&self) -> Option<[(&'static str, &str); 3]> {
+        if self.runtime_profile_spec().profile != RUNTIME_PROFILE_CONFIDENTIAL
+            || self.measured_binding_roots.trim().is_empty()
+            || self.workspace_binding_url.trim().is_empty()
+        {
+            return None;
         }
-    }
-
-    pub fn identity_free(&self) -> bool {
-        self.workspace_binding_url().is_some()
+        Some([
+            (
+                codewire_daemon_proto::WORKSPACE_BINDING_URL_ENV,
+                &self.workspace_binding_url,
+            ),
+            (
+                codewire_daemon_proto::WORKSPACE_MEASURED_BINDING_ROOTS_ENV,
+                &self.measured_binding_roots,
+            ),
+            (
+                codewire_daemon_proto::WORKSPACE_MEASURED_ENVIRONMENT_ID_ENV,
+                &self.environment_id,
+            ),
+        ])
     }
 
     /// The support image this rendering mounts or copies the daemon from. A

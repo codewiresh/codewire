@@ -71,6 +71,16 @@ impl DaemonRequestBudget {
     }
 }
 const DAEMON_REPAIR_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A confidential replacement attests and reopens its encrypted storage
+/// before its daemon binds (B2c), so it gets the tier's whole ready budget.
+fn daemon_repair_timeout(isolation_tier: &str) -> Duration {
+    if isolation_tier == "confidential" {
+        crate::sandbox::template::CONFIDENTIAL_WORKSPACE_READY_TIMEOUT
+    } else {
+        DAEMON_REPAIR_TIMEOUT
+    }
+}
 const DAEMON_STATUS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DAEMON_LOG_TAIL_LINES: i64 = 500;
 const MAXIMUM_TEST_ENDPOINT_CONFIG_BYTES: usize = 16 * 1024;
@@ -616,19 +626,19 @@ pub async fn repair_environment_daemon_core(
     // the same replacement without risking pool exhaustion or deleting a
     // newer Pod.
     let mut setup_check = state.pool.begin().await.map_err(AppError::from)?;
-    let current: Option<(String, String, i64)> = sqlx::query_as(
-        "SELECT state, desired_state, environment_operation_generation \
+    let current: Option<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT state, desired_state, environment_operation_generation, isolation_tier \
            FROM environments WHERE id = $1 FOR UPDATE",
     )
     .bind(&target.environment_id)
     .fetch_optional(&mut *setup_check)
     .await
     .map_err(AppError::from)?;
-    let generation = match current.as_ref() {
-        Some((state, desired, generation))
+    let (generation, timeout) = match current.as_ref() {
+        Some((state, desired, generation, isolation_tier))
             if state == "running" && desired == "started" && *generation > 0 =>
         {
-            *generation
+            (*generation, daemon_repair_timeout(isolation_tier))
         }
         _ => {
             return Err(AppError::Conflict(
@@ -681,6 +691,7 @@ pub async fn repair_environment_daemon_core(
             authority,
             current,
             support_image: state.sandbox_cfg.support_image().to_owned(),
+            timeout,
         },
     )
     .await
@@ -700,6 +711,8 @@ struct DaemonRepair {
     current: WorkspacePodIdentity,
     /// The support image the replacement's daemon is re-pinned to.
     support_image: String,
+    /// How long the replacement may take to come up and bind.
+    timeout: Duration,
 }
 
 /// Replace the workspace Pod behind the environment runtime fence.
@@ -763,7 +776,7 @@ impl DaemonRepair {
                 self.sandbox.wait_for_replacement_workspace_pod(
                     &self.current.name,
                     &self.current.uid,
-                    DAEMON_REPAIR_TIMEOUT,
+                    self.timeout,
                 ),
             )
             .await
@@ -791,7 +804,7 @@ impl DaemonRepair {
             &self.authority,
             &["running"],
             &replacement,
-            DAEMON_REPAIR_TIMEOUT,
+            self.timeout,
         )
         .await
         {
@@ -805,7 +818,7 @@ impl DaemonRepair {
                 }),
             );
         }
-        let deadline = tokio::time::Instant::now() + DAEMON_REPAIR_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + self.timeout;
         let status = loop {
             if let Err(error) = self.authority.ensure_for_states(&["running"]).await {
                 return RuntimeMutationOutcome::resolution_required(

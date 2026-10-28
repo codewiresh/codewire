@@ -545,23 +545,22 @@ fn quantity_path(path: &str) -> bool {
         || path.ends_with("/sizeLimit")
 }
 
-/// Refuse shape inputs that carry any environment state, a legacy identity,
-/// or the confidential runtime.
+/// Refuse shape inputs that carry any environment state, no binding
+/// listener, or the confidential runtime.
 pub fn validate_pool_template_opts(opts: &TemplateOpts) -> anyhow::Result<()> {
     anyhow::ensure!(
         opts.runtime_profile_spec().profile != RUNTIME_PROFILE_CONFIDENTIAL,
         "confidential workspaces are never pooled"
     );
     anyhow::ensure!(
-        opts.identity_free(),
-        "warm pools render only identity-free workspaces"
+        !opts.workspace_binding_url.trim().is_empty(),
+        "warm pools render only workspaces that bind"
     );
     let environment_state = [
         ("name", !opts.name.is_empty()),
         ("environment ID", !opts.environment_id.is_empty()),
         ("organization ID", !opts.organization_id.is_empty()),
         ("operation generation", opts.operation_generation != 0),
-        ("daemon token", !opts.daemon_auth_token.is_empty()),
         (
             "projection digest",
             opts.projection_selection_sha256.is_some(),

@@ -43,6 +43,17 @@ const SIDECAR_READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const SETUP_EXEC_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_EXEC_QUIESCENCE: Duration = Duration::from_secs(6);
 const SETUP_POD_RECOVERY_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// How long recovery waits for a replacement Pod to come up and bind. A
+/// confidential guest attests and reopens its encrypted storage first (B2c),
+/// so it gets the tier's whole ready budget.
+fn replacement_runtime_timeout(input: &Inputs) -> Duration {
+    if input.isolation_tier == "confidential" {
+        crate::sandbox::template::CONFIDENTIAL_WORKSPACE_READY_TIMEOUT
+    } else {
+        SETUP_POD_RECOVERY_TIMEOUT
+    }
+}
 const SETUP_POD_RECOVERY_POLL: Duration = Duration::from_millis(500);
 const SETUP_MUTATION_STATES: &[&str] = &["running"];
 // Every chain now launches through the shared projection/provider channel.
@@ -170,6 +181,8 @@ pub struct Repo {
 #[derive(Debug, Clone, Default)]
 pub struct Inputs {
     pub environment_id: String,
+    /// `standard` or `confidential`; only recovery budgets read it.
+    pub isolation_tier: String,
     pub namespace: String,
     pub pod_name: String,
     pub desired_state: String,
@@ -593,6 +606,7 @@ pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
     let spec = &env.project_spec;
     let mut input = Inputs {
         environment_id: env.id.clone(),
+        isolation_tier: env.isolation_tier.clone(),
         namespace: backend.namespace.clone(),
         pod_name: backend.pod_name.clone(),
         desired_state: env.desired_state.clone(),
@@ -972,7 +986,7 @@ impl WorkerSetupOps<'_> {
         } else {
             input.pod_name.clone()
         };
-        let deadline = tokio::time::Instant::now() + SETUP_POD_RECOVERY_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + replacement_runtime_timeout(input);
         loop {
             if self.cancellation_requested() {
                 return Err(SetupActivityCancelled.into());
@@ -1098,7 +1112,7 @@ impl WorkerSetupOps<'_> {
 
         let replacement_probe = match await_setup_or_cancel(&self.activity_ctx, async {
             tokio::time::timeout(
-                SETUP_POD_RECOVERY_TIMEOUT,
+                replacement_runtime_timeout(input),
                 self.authority.run_while_authoritative_for_states(
                     SETUP_MUTATION_STATES,
                     self.wait_for_replacement_runtime(&sandbox, input, old_uid),

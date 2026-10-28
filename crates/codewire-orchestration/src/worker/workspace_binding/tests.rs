@@ -478,3 +478,85 @@ fn early_bind_polls_fast_only_while_a_warm_adoption_can_converge() {
     assert_eq!(early_bind_poll(Duration::from_secs(30)), EARLY_BIND_POLL);
     assert!(EARLY_BIND_FAST_POLL < EARLY_BIND_POLL);
 }
+
+/// A confidential workspace Pod (B2c) as the controller creates it from the
+/// rendering: the SEV-SNP runtime, the daemon copied by an init container
+/// into an emptyDir, a block-mode RWOP claim and the measured anchors.
+fn confidential_pod_and_sandbox() -> (Pod, DynamicObject) {
+    use crate::sandbox::template::{
+        RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts, render_sandbox_template,
+    };
+    let opts = TemplateOpts {
+        name: "workspace-confidential".into(),
+        image: WORKSPACE_IMAGE.into(),
+        support_image: INIT_IMAGE.into(),
+        dind_image: DIND_IMAGE.into(),
+        runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
+        environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
+        workspace_binding_url: "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
+                    .into(),
+        measured_binding_roots:
+            "-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n".into(),
+        confidential_storage_manifest_uri: "kbs:///default/codewire-storage-manifests/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+        disk_gib: 20,
+        kata_coco_init_data_enabled: true,
+        kata_coco_kbs_url: "https://kbs.example.test".into(),
+        server_namespace: "dev".into(),
+        ..Default::default()
+    };
+    let rendered = render_sandbox_template("dev-sandboxes", &opts);
+    let mut spec = rendered["spec"]["podTemplate"]["spec"].clone();
+    // The controller adds the workspace claim from the claim template.
+    spec["volumes"].as_array_mut().unwrap().push(json!({
+        "name": "workspace",
+        "persistentVolumeClaim": { "claimName": "workspace-sandbox" },
+    }));
+    let mut pod = legacy_pod(Vec::new());
+    pod.spec = Some(serde_json::from_value(spec.clone()).unwrap());
+    let sandbox = serde_json::from_value(json!({
+        "apiVersion": "agents.x-k8s.io/v1beta1",
+        "kind": "Sandbox",
+        "metadata": { "name": "sandbox", "uid": SANDBOX_UID },
+        "spec": { "podTemplate": { "spec": rendered["spec"]["podTemplate"]["spec"].clone() } },
+    }))
+    .unwrap();
+    (pod, sandbox)
+}
+
+#[test]
+fn a_confidential_pod_binds_with_pod_scope_like_a_standard_one() {
+    let (pod, sandbox) = confidential_pod_and_sandbox();
+    let spec = pod.spec.as_ref().unwrap();
+    assert_eq!(spec.runtime_class_name.as_deref(), Some("confidential"));
+    // The binding token and no environment token: Pod scope, which 8087
+    // binds, records a host key for and serves access to.
+    assert_eq!(credential_scope(&pod), Some(WorkspaceCredentialScope::Pod));
+    // The init container's support image counts like any other image, and the
+    // kubelet-reported digests must match the pinned references.
+    assert!(images_match(&sandbox, &pod));
+    let mut substituted = pod.clone();
+    substituted.spec.as_mut().unwrap().init_containers.as_mut().unwrap()[0].image = Some(
+        "registry.example.test/codewire/gateway@sha256:5555555555555555555555555555555555555555555555555555555555555555"
+            .into(),
+    );
+    assert!(!images_match(&sandbox, &substituted));
+    // A block-mode claim attached as a device still resolves by its volume.
+    assert!(pvc_matches(
+        &pod,
+        &WorkspacePvc::Claim {
+            name: "workspace-sandbox".into(),
+            uid: POD_UID.into(),
+            bound: true,
+        }
+    ));
+    assert!(pod_still_observed(&pod, POD_UID, SANDBOX_UID));
+    // A confidential Pod that still carried the environment token would be
+    // ambiguous and refused, never bound.
+    let mut both = pod.clone();
+    both.spec.as_mut().unwrap().containers[0]
+        .env
+        .as_mut()
+        .unwrap()
+        .push(env(DAEMON_AUTH_TOKEN_ENV, "synthetic-environment-token"));
+    assert_eq!(credential_scope(&both), None);
+}

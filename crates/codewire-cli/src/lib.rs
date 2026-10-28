@@ -1111,16 +1111,28 @@ async fn run_bound_hosted_daemon(
     paths
         .mark_ready()
         .context("write hosted daemon readiness marker")?;
-    tracing::info!("hosted environment daemon waiting for its workspace binding");
+    // A confidential workspace (B2c) trusts only its measured roots for the
+    // binding listener, never the host-supplied mounted ones.
+    let roots = match config.measured() {
+        Some(measured) => hosted_binding::BindingRoots::Measured(measured.binding_roots_pem()),
+        None => hosted_binding::BindingRoots::Mounted(config.tls_roots_file()),
+    };
+    tracing::info!(
+        measured = config.measured().is_some(),
+        "hosted environment daemon waiting for its workspace binding"
+    );
     let client = std::sync::Arc::new(
         hosted_binding::BindingClient::new(
             config.binding_url(),
-            config.tls_roots_file(),
+            roots,
             config.token_path(),
             hosted_binding::BindTiming::default(),
         )
         .context("configure workspace binding client")?,
     );
+    // Only the Linux access server distinguishes a measured daemon.
+    #[cfg(target_os = "linux")]
+    let measured = config.measured().is_some();
     let bound = hosted_binding::bind_until_accepted(&client, &config).await;
     paths
         .install_binding(&bound.binding)
@@ -1156,6 +1168,7 @@ async fn run_bound_hosted_daemon(
                 grant: bound.access.clone(),
                 daemon_port,
                 exec_shell: codewire_daemon::env::default_shell_for(&daemon_config),
+                measured,
             },
             connector,
             client.clone(),
