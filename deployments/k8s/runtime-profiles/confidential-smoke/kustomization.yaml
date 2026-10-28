@@ -1,6 +1,28 @@
-# Copy this file over kustomization.yaml in a reviewed source PR to restore
-# the inactive control marker and let Flux prune the completed smoke Jobs.
+# This activation template is not the active Kustomization. A reviewed source
+# PR copies it to kustomization.yaml with the confidential runtime profile
+# template. Its confidential Jobs need nodes on AMD SEV-SNP hosts; the
+# commodity Job runs on any runtime node.
+# The release-bound Flux child prunes these Jobs on reversion.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - confidential-smoke-control.yaml
+  - commodity-smoke-job.yaml
+  - confidential-smoke-job.yaml
+  - confidential-attestation-job.yaml
+images:
+  - name: ghcr.io/codewiresh/confidential-probe
+    newName: ghcr.io/codewiresh/confidential-probe
+    digest: sha256:8a4a55dbbcaaef4f34c5b35a20b667d99328db77e3e14bedd5718703d7530517
+patches:
+  - target:
+      version: v1
+      kind: ConfigMap
+      name: codewire-confidential-snp-smoke-control
+    patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: codewire-confidential-snp-smoke-control
+      data:
+        phase: confidential-snp
