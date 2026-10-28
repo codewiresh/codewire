@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, update, ports, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh and preset.
-updated: 2026-10-27
+updated: 2026-10-28
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -11,8 +11,12 @@ environments and `--cloud` to the current organization's; either flag goes
 before or after the command (`cw --cloud stop app` is `cw stop --cloud app`)
 and never falls back to the other placement. Without either, a name is looked
 up across trusted hosts, local VMs and the current organization, and a name
-that exists in both placements is refused. Cloud-only and local-only commands
-are marked.
+that exists in both placements is refused. When the local VMs can't be checked,
+because their supervisor can't be reached or refuses this `cw`, a cloud
+environment's ID still works: the command says the cloud answered. A cloud
+name or ID prefix is then refused, since a local VM may have the same name;
+add `--cloud` to use the cloud one. Cloud-only and local-only commands are
+marked.
 
 ## cw create
 

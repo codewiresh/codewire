@@ -67,39 +67,33 @@ pub(crate) async fn resolve_named_execution_target(
         return Ok(host.current_target());
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let local = if placement != Some(EnvironmentPlacement::Platform) {
-        native_environment(target_ref).await?
-    } else {
-        None
+    let local = match placement {
+        Some(EnvironmentPlacement::Platform) => LocalAnswer::Absent,
+        Some(EnvironmentPlacement::Local) => match native_environment(target_ref).await? {
+            Some(environment) => return Ok(local_execution_target(&environment.name)),
+            None => anyhow::bail!("local environment {target_ref:?} not found"),
+        },
+        // Without a placement a local supervisor that cannot be asked never
+        // blocks the cloud (#3560).
+        None => LocalAnswer::ask(target_ref).await,
     };
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let local: Option<()> = None;
     if placement == Some(EnvironmentPlacement::Local) {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if let Some(environment) = local.as_ref() {
-            return Ok(config::CurrentTargetConfig {
-                kind: "local".to_string(),
-                target_ref: environment.name.clone(),
-                name: environment.name.clone(),
-            });
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let _ = local;
-        {
-            anyhow::bail!("local environment {target_ref:?} not found");
-        }
+        anyhow::bail!("local environment {target_ref:?} not found");
     }
 
     let platform = match resolve_platform(globals, paths, env) {
         Ok(platform) => platform,
         Err(error) if placement.is_none() => {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            if let Some(environment) = local.as_ref() {
-                return Ok(config::CurrentTargetConfig {
-                    kind: "local".to_string(),
-                    target_ref: environment.name.clone(),
-                    name: environment.name.clone(),
-                });
+            match local {
+                LocalAnswer::Found(environment) => {
+                    return Ok(local_execution_target(&environment.name));
+                }
+                // Neither side could answer: the local failure is the one
+                // that applies, since the cloud is not set up here.
+                LocalAnswer::Unavailable(local) => return Err(local),
+                LocalAnswer::Absent => {}
             }
             return Err(unknown_environment_without_cloud(target_ref, error));
         }
@@ -127,34 +121,25 @@ pub(crate) async fn resolve_named_execution_target(
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    match (local, platform_match) {
-        (_, Some((environment_id, EnvironmentMatchKind::ExactId))) => {
+    match choose_placement(target_ref, local, platform_match, || {
+        anyhow::anyhow!(
+            "environment {target_ref:?} exists in both placements; use `cw use --local {target_ref}` or `cw use --cloud {target_ref}`"
+        )
+    })? {
+        PlacementChoice::Local(environment) => Ok(local_execution_target(&environment.name)),
+        PlacementChoice::Cloud {
+            id,
+            local_unavailable,
+        } => {
+            if let Some(local) = &local_unavailable {
+                report_cloud_answered(target_ref, local);
+            }
             let environment = environment_client
-                .get_environment(&org_id, &environment_id)
+                .get_environment(&org_id, &id)
                 .await
                 .context("get environment")?;
             Ok(current_target_from_environment(&environment))
         }
-        (Some(environment), Some((_environment_id, EnvironmentMatchKind::ExactName)))
-            if environment.name == target_ref =>
-        {
-            anyhow::bail!(
-                "environment {target_ref:?} exists in both placements; use `cw use --local {target_ref}` or `cw use --cloud {target_ref}`"
-            )
-        }
-        (Some(environment), _) => Ok(config::CurrentTargetConfig {
-            kind: "local".to_string(),
-            target_ref: environment.name.clone(),
-            name: environment.name,
-        }),
-        (None, Some((environment_id, _))) => {
-            let environment = environment_client
-                .get_environment(&org_id, &environment_id)
-                .await
-                .context("get environment")?;
-            Ok(current_target_from_environment(&environment))
-        }
-        (None, None) => anyhow::bail!("environment {target_ref:?} not found"),
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     match platform_match {
@@ -166,6 +151,15 @@ pub(crate) async fn resolve_named_execution_target(
             Ok(current_target_from_environment(&environment))
         }
         None => anyhow::bail!("environment {target_ref:?} not found"),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn local_execution_target(name: &str) -> config::CurrentTargetConfig {
+    config::CurrentTargetConfig {
+        kind: "local".to_string(),
+        target_ref: name.to_owned(),
+        name: name.to_owned(),
     }
 }
 

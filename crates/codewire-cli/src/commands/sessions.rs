@@ -517,12 +517,15 @@ async fn resolve_unplaced_session_target(
             environment,
         });
     }
+    // The selected local VM, named again, is answered without asking the
+    // cloud. A local supervisor that cannot be asked only skips this: the
+    // lookup below still finds a cloud environment (#3560).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(requested) = environment.and_then(trimmed_str)
         && let Ok(target) = config::current_target(&paths.mesh_data_dir)
         && target.kind == "local"
         && target.target_ref != "local"
-        && let Some(environment) = native_environment(&target.target_ref).await?
+        && let Ok(Some(environment)) = native_environment(&target.target_ref).await
         && native_session_request_matches(&environment, requested)
     {
         return Ok(native_session_target(environment));

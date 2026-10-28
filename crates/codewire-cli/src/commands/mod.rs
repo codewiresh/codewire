@@ -2672,6 +2672,8 @@ pub(crate) mod flat;
 pub(crate) mod inventory;
 pub(crate) mod lifecycle_output;
 mod mesh_commands;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod placement_choice;
 mod platform_commands;
 mod policy;
 pub(crate) mod project_file;
@@ -2692,6 +2694,10 @@ pub(crate) use flat::{HelpArgs, RetiredEnvArgs};
 #[cfg(target_os = "linux")]
 pub(crate) use mesh_commands::retained::StateDir as MeshStateDir;
 pub(crate) use mesh_commands::*;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use placement_choice::{
+    LocalAnswer, PlacementChoice, choose_placement, report_cloud_answered,
+};
 pub(crate) use platform_commands::*;
 pub(crate) use policy::*;
 pub(crate) use secrets::*;
