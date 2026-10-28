@@ -527,7 +527,9 @@ milestone_snapshot() {
 }
 
 # p50 and p95 (ms) of one milestone over the creates between two snapshots,
-# interpolated within buckets as histogram_quantile does.
+# interpolated within buckets as histogram_quantile does. A quantile in the
+# +Inf bucket is reported as the top finite bound with p*_over_top true: the
+# real value is above it.
 milestone_quantiles() { # BEFORE AFTER MILESTONE -> JSON
   awk -v want="$3" '
     # FILENAME, not FNR == NR: an empty first snapshot must stay "before".
@@ -541,14 +543,14 @@ milestone_quantiles() { # BEFORE AFTER MILESTONE -> JSON
         if (b < a) { t = les[i]; les[i] = les[j]; les[j] = t }
       }
       total = (n > 0) ? delta[les[n]] : 0
-      if (total <= 0) { print "{\"count\":0,\"p50_ms\":null,\"p95_ms\":null}"; exit }
+      if (total <= 0) { print "{\"count\":0,\"p50_ms\":null,\"p95_ms\":null,\"p50_over_top\":false,\"p95_over_top\":false}"; exit }
       split("0.5 0.95", qs, " ")
       for (q = 1; q <= 2; q++) {
-        rank = qs[q] * total; prev_le = 0; prev_c = 0; out[q] = "null"
+        rank = qs[q] * total; prev_le = 0; prev_c = 0; out[q] = "null"; over[q] = "false"
         for (i = 1; i <= n; i++) {
           c = delta[les[i]]
           if (c >= rank) {
-            if (les[i] == "+Inf") { out[q] = int(prev_le * 1000); break }
+            if (les[i] == "+Inf") { out[q] = int(prev_le * 1000); over[q] = "true"; break }
             le = les[i] + 0
             frac = (c - prev_c > 0) ? (rank - prev_c) / (c - prev_c) : 1
             out[q] = int((prev_le + (le - prev_le) * frac) * 1000); break
@@ -556,7 +558,7 @@ milestone_quantiles() { # BEFORE AFTER MILESTONE -> JSON
           prev_le = (les[i] == "+Inf") ? prev_le : les[i] + 0; prev_c = c
         }
       }
-      printf "{\"count\":%d,\"p50_ms\":%s,\"p95_ms\":%s}\n", total, out[1], out[2]
+      printf "{\"count\":%d,\"p50_ms\":%s,\"p95_ms\":%s,\"p50_over_top\":%s,\"p95_over_top\":%s}\n", total, out[1], out[2], over[1], over[2]
     }' "$1" "$2"
 }
 
@@ -753,7 +755,7 @@ stop_check() { # METRICS_JSON -> sets STOP_REASON
 
 measure() { # STEP TARGET NEW_IDS_FILE BEFORE_SNAPSHOT AFTER_SNAPSHOT BASE_JSON -> JSON
   local step="$1" target="$2" new_ids="$3" before="$4" after="$5" base="$6"
-  local ready_ms=() ssh_ms=() failed=0 warm=0 id result instance guest
+  local ready_ms=() ssh_ms=() failed=0 warm=0 id result instance guest running
   while IFS= read -r id; do
     [[ -n "$id" ]] || continue
     result="$(cat "$RUN_DIR/ready-$id" 2>/dev/null || echo missing)"
@@ -764,11 +766,15 @@ measure() { # STEP TARGET NEW_IDS_FILE BEFORE_SNAPSHOT AFTER_SNAPSHOT BASE_JSON 
     [[ ! -s "$RUN_DIR/ssh-$id" ]] || ssh_ms+=("$(cat "$RUN_DIR/ssh-$id")")
     [[ "$(cat "$RUN_DIR/class-$id" 2>/dev/null)" != warm ]] || warm=$((warm + 1))
   done <"$new_ids"
+  # Per-sandbox memory divides by the sandboxes that became ready over the
+  # whole run: refused ones are Pending and use no node memory.
+  running="$({ grep -l '^ready ' "$RUN_DIR"/ready-* 2>/dev/null || true; } | wc -l)"
   instance="$(node_instance)"
   guest="$(guest_memory_gib)"
   jq -n \
     --argjson step "$step" --argjson target "$target" --argjson created "$CREATED" \
     --argjson new "$(grep -c . "$new_ids" || true)" --argjson failed "$failed" --argjson warm "$warm" \
+    --argjson running "$running" \
     --arg ready_p50 "$(printf '%s\n' "${ready_ms[@]}" | grep . | percentile 50)" \
     --arg ready_p95 "$(printf '%s\n' "${ready_ms[@]}" | grep . | percentile 95)" \
     --arg ssh_p50 "$(printf '%s\n' "${ssh_ms[@]}" | grep . | percentile 50)" \
@@ -785,7 +791,7 @@ measure() { # STEP TARGET NEW_IDS_FILE BEFORE_SNAPSHOT AFTER_SNAPSHOT BASE_JSON 
     --arg guest "$guest" \
     --argjson workload_gib "$(awk -v m="$MEMORY_MIB" -v f="$WORKLOAD_MEMORY" 'BEGIN {printf "%.4f", m * f / 1024}')" '
     def num: if . == "" then null else tonumber end;
-    {step: $step, target: $target, created: $created, new: $new, failed_creates: $failed,
+    {step: $step, target: $target, created: $created, ready_sandboxes: $running, new: $new, failed_creates: $failed,
      warm_hits: $warm, warm_hit_rate: (if $new > 0 then $warm / $new else null end),
      ready_p50_ms: ($ready_p50 | num), ready_p95_ms: ($ready_p95 | num),
      first_ssh_p50_ms: ($ssh_p50 | num), first_ssh_p95_ms: ($ssh_p95 | num), first_ssh_samples: $ssh_n,
@@ -794,9 +800,9 @@ measure() { # STEP TARGET NEW_IDS_FILE BEFORE_SNAPSHOT AFTER_SNAPSHOT BASE_JSON 
      pod_working_set_gib: ($guest | num), workload_memory_gib: $workload_gib}
     + $requests + $node + $thin
     | . + {
-        host_memory_per_sandbox_gib: (if .node_memory_used_gib == null or $base.node_memory_used_gib == null or $created == 0 then null
-          else ((.node_memory_used_gib - $base.node_memory_used_gib) / $created) end),
-        pod_working_set_per_sandbox_gib: (if .pod_working_set_gib == null or $created == 0 then null else (.pod_working_set_gib / $created) end)
+        host_memory_per_sandbox_gib: (if .node_memory_used_gib == null or $base.node_memory_used_gib == null or $running == 0 then null
+          else ((.node_memory_used_gib - $base.node_memory_used_gib) / $running) end),
+        pod_working_set_per_sandbox_gib: (if .pod_working_set_gib == null or $running == 0 then null else (.pod_working_set_gib / $running) end)
       }
     | . + {overhead_per_sandbox_gib: (if .host_memory_per_sandbox_gib == null then null
           else (.host_memory_per_sandbox_gib - .workload_memory_gib) end)}'
@@ -841,12 +847,13 @@ write_summary() {
     printf 'Run `%s`. Workload: %s of each vCPU busy, %s of memory touched. Hold %s s per step.\n\n' \
       "$RUN_ID" "$WORKLOAD_CPU" "$WORKLOAD_MEMORY" "$HOLD_SECONDS"
     printf 'Prediction from requests: `%s`\n\n' "$(jq -c . "$RUN_DIR/prediction.json" 2>/dev/null)"
-    printf '| Sandboxes | Failed | Warm | Ready p50/p95 ms | SSH p50/p95 ms | Server setup p50/p95 ms | Pods | Req CPU %% | Req mem %% | Node CPU %% | Node mem %% | PSI mem/cpu %% | Host GiB/sb | Overhead GiB/sb | Pod WS GiB/sb | Thin %% | Overcommit |\n'
-    printf '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n'
+    printf '| Sandboxes | Ready | Failed | Warm | Ready p50/p95 ms | SSH p50/p95 ms | Server setup p50/p95 ms | Pods | Req CPU %% | Req mem %% | Node CPU %% | Node mem %% | PSI mem/cpu %% | Host GiB/sb | Overhead GiB/sb | Pod WS GiB/sb | Thin %% | Overcommit |\n'
+    printf '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n'
     jq -r '
       def f: if . == null then "–" else (. * 10 | round / 10 | tostring) end;
       def i: if . == null then "–" else (round | tostring) end;
-      "| \(.created) | \(.failed_creates) | \(.warm_hits)/\(.new) | \(.ready_p50_ms|i)/\(.ready_p95_ms|i) | \(.first_ssh_p50_ms|i)/\(.first_ssh_p95_ms|i) | \(.server_setup_complete.p50_ms|i)/\(.server_setup_complete.p95_ms|i) | \(.pods)/\(.allocatable_pods) | \(100 * .requested_cpu_m / .allocatable_cpu_m | f) | \(100 * .requested_memory_mib / .allocatable_memory_mib | f) | \(.node_cpu_pct|f) | \(.node_memory_pct|f) | \(.psi_memory_some_pct|f)/\(.psi_cpu_some_pct|f) | \(.host_memory_per_sandbox_gib|f) | \(.overhead_per_sandbox_gib|f) | \(.pod_working_set_per_sandbox_gib|f) | \(.thin_used_pct|f) | \(.overcommit|f) |"
+      def q($k): .[$k + "_ms"] as $v | if .[$k + "_over_top"] then ">\($v|i)" else ($v|i) end;
+      "| \(.created) | \(.ready_sandboxes // "–") | \(.failed_creates) | \(.warm_hits)/\(.new) | \(.ready_p50_ms|i)/\(.ready_p95_ms|i) | \(.first_ssh_p50_ms|i)/\(.first_ssh_p95_ms|i) | \(.server_setup_complete|q("p50"))/\(.server_setup_complete|q("p95")) | \(.pods)/\(.allocatable_pods) | \(100 * .requested_cpu_m / .allocatable_cpu_m | f) | \(100 * .requested_memory_mib / .allocatable_memory_mib | f) | \(.node_cpu_pct|f) | \(.node_memory_pct|f) | \(.psi_memory_some_pct|f)/\(.psi_cpu_some_pct|f) | \(.host_memory_per_sandbox_gib|f) | \(.overhead_per_sandbox_gib|f) | \(.pod_working_set_per_sandbox_gib|f) | \(.thin_used_pct|f) | \(.overcommit|f) |"
     ' "$RUN_DIR/steps.jsonl" 2>/dev/null
     printf '\nStopped: %s\n' "${STOP_REASON:-every step completed}"
   } >"$RUN_DIR/summary.md"
@@ -951,7 +958,7 @@ for target in "${STEP_COUNTS[@]}"; do
   metrics="$(measure "$step" "$target" "$RUN_DIR/new-$step" "$RUN_DIR/milestones-$step.before" \
     "$RUN_DIR/milestones-$step.after" "$BASE")"
   printf '%s\n' "$metrics" >>"$RUN_DIR/steps.jsonl"
-  log "step $step: $(jq -c '{created, failed_creates, warm_hits, ready_p50_ms, ready_p95_ms, first_ssh_p50_ms, node_memory_pct, node_cpu_pct, psi_memory_some_pct, thin_used_pct, pods}' <<<"$metrics")"
+  log "step $step: $(jq -c '{created, ready_sandboxes, failed_creates, warm_hits, ready_p50_ms, ready_p95_ms, first_ssh_p50_ms, node_memory_pct, node_cpu_pct, psi_memory_some_pct, thin_used_pct, pods}' <<<"$metrics")"
   if [[ -z "$BASELINE_READY_MS" ]]; then
     BASELINE_READY_MS="$(jq -r '.ready_p50_ms // empty' <<<"$metrics")"
   fi
