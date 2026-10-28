@@ -24,8 +24,6 @@
       valueFrom:
         fieldRef:
           fieldPath: metadata.namespace
-    - name: OTEL_EXPORTER_OTLP_ENDPOINT
-      value: ""
     # Mount the Connect conformance probe (connect-rpc/03 D8)
     # — local-kind/e2e manifests only, never base or production.
     - name: CONNECT_TESTING_SURFACE

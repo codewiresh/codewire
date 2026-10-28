@@ -84,11 +84,6 @@ spec:
                 secretKeyRef:
                   name: codewire-db-app
                   key: password
-            # Unused: billing calls `obs::init` and never exports traces
-            # (docs/CONFIGURATION.md "Tracing"); only orchestration and the
-            # dashboard read this variable.
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otel-collector.observability.svc:4317"
           resources:
             requests:
               cpu: 50m
