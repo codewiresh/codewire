@@ -1919,6 +1919,8 @@ async fn a_claimed_warm_member_is_re_pinned_and_its_pool_template_is_not() {
     pinned_resume(&client, &state, DAEMON_IMAGE).await.unwrap();
     let state = state.lock().unwrap();
     let path = format!("/spec/podTemplate/spec/volumes/{index}");
+    // Its Docker data init follows the support image in the same patch.
+    let init = "/spec/podTemplate/spec/initContainers/0";
     assert_eq!(
         patches(&state),
         [&pinned_resume_patch(
@@ -1927,11 +1929,15 @@ async fn a_claimed_warm_member_is_re_pinned_and_its_pool_template_is_not() {
                 json!({"op":"test","path":format!("{path}/name"),"value":"codewire-bin"}),
                 json!({"op":"test","path":format!("{path}/image/reference"),"value":OLD_DAEMON_IMAGE}),
                 json!({"op":"replace","path":format!("{path}/image/reference"),"value":DAEMON_IMAGE}),
+                json!({"op":"test","path":format!("{init}/name"),"value":DOCKER_DATA_INIT_CONTAINER}),
+                json!({"op":"test","path":format!("{init}/image"),"value":OLD_DAEMON_IMAGE}),
+                json!({"op":"replace","path":format!("{init}/image"),"value":DAEMON_IMAGE}),
             ]
         )]
     );
     let mut expected = sandbox;
     *daemon_reference_mut(&mut expected) = json!(DAEMON_IMAGE);
+    expected["spec"]["podTemplate"]["spec"]["initContainers"][0]["image"] = json!(DAEMON_IMAGE);
     expected["spec"]["operatingMode"] = json!("Running");
     assert_eq!(state.sandbox, expected);
     assert_eq!(state.template, template);
@@ -2029,7 +2035,7 @@ fn running(mut before: Fixture) -> Fixture {
 
 /// The fenced re-pin a Pod replacement writes: UID and resourceVersion
 /// tests, then the entry's tests and replace. No operating mode.
-fn replacement_patch(version: &str, repin: [Value; 3]) -> Value {
+fn replacement_patch(version: &str, repin: impl IntoIterator<Item = Value>) -> Value {
     let mut patch = vec![
         json!({"op":"test","path":"/metadata/uid","value":"sandbox-incarnation"}),
         json!({"op":"test","path":"/metadata/resourceVersion","value":version}),
@@ -2226,8 +2232,32 @@ async fn a_pod_replaced_before_the_re_pin_is_neither_re_pinned_nor_deleted() {
     }
 }
 
-/// `before` with a DinD bootstrap of `command` in its template, Sandbox and
-/// Pod, and the Sandbox on `runtime_class`.
+/// The data variables a commodity or runc guest DinD renders for a 40 GiB
+/// disk, after Docker's own TLS setting.
+fn loop_dind_env() -> Value {
+    json!([
+        {"name":"DOCKER_TLS_CERTDIR","value":""},
+        {"name":"CODEWIRE_DOCKER_DATA_IMAGE","value":"/workspace/.codewire/docker-data.ext4"},
+        {"name":"CODEWIRE_DOCKER_DATA_ROOT","value":"/var/lib/docker"},
+        {"name":"CODEWIRE_DOCKER_DATA_SIZE","value":"38G"},
+        {"name":"CODEWIRE_DOCKER_MOUNT_MODE","value":"loop"},
+    ])
+}
+
+/// The Docker data init a Start re-renders beside [`loop_dind_env`].
+fn data_init(support_image: &str) -> Value {
+    docker_data_init_container(
+        support_image,
+        loop_dind_env().as_array().unwrap()[1..]
+            .iter()
+            .filter(|entry| entry["name"] != "CODEWIRE_DOCKER_DATA_ROOT")
+            .cloned()
+            .collect(),
+    )
+}
+
+/// `before` with a loop-mounted DinD bootstrap of `command` in its template,
+/// Sandbox and Pod, and the Sandbox on `runtime_class`.
 fn with_dind(mut before: Fixture, command: Value, runtime_class: Option<&str>) -> Fixture {
     for spec in [
         &mut before.template["spec"]["podTemplate"]["spec"],
@@ -2236,6 +2266,7 @@ fn with_dind(mut before: Fixture, command: Value, runtime_class: Option<&str>) -
     ] {
         assert_eq!(spec["containers"][0]["name"], "dind");
         spec["containers"][0]["command"] = command.clone();
+        spec["containers"][0]["env"] = loop_dind_env();
         if let Some(class) = runtime_class {
             spec["runtimeClassName"] = json!(class);
         }
@@ -2253,28 +2284,52 @@ fn legacy_dind(before: Fixture) -> Fixture {
     )
 }
 
-/// The exact operations that re-render the fixture's DinD bootstrap.
-fn dind_operations() -> [Value; 3] {
-    [
+/// The exact operations that re-render the fixture's `prior` DinD bootstrap
+/// and add its Docker data init: after `inits`, the init containers the
+/// Sandbox already has, or as its only one.
+fn dind_operations(prior: &str, inits: Option<&Value>) -> Vec<Value> {
+    let mut operations = vec![
         json!({"op":"test","path":"/spec/podTemplate/spec/containers/0/name","value":"dind"}),
-        json!({"op":"test","path":"/spec/podTemplate/spec/containers/0/command/2","value":LEGACY_DIND_BOOTSTRAP_SCRIPT}),
+        json!({"op":"test","path":"/spec/podTemplate/spec/containers/0/command/2","value":prior}),
         json!({"op":"replace","path":"/spec/podTemplate/spec/containers/0/command/2","value":dind_bootstrap_script()}),
-    ]
+    ];
+    match inits {
+        Some(inits) => {
+            for (index, init) in inits.as_array().unwrap().iter().enumerate() {
+                operations.push(json!({"op":"test","path":format!("/spec/podTemplate/spec/initContainers/{index}/name"),"value":init["name"]}));
+            }
+            operations.push(json!({"op":"add","path":"/spec/podTemplate/spec/initContainers/-","value":data_init(DAEMON_IMAGE)}));
+        }
+        None => operations.push(
+            json!({"op":"add","path":"/spec/podTemplate/spec/initContainers","value":[data_init(DAEMON_IMAGE)]}),
+        ),
+    }
+    operations
 }
 
-/// `sandbox` with the current DinD bootstrap and `mode`.
+/// The fixture's operations for its legacy bootstrap beside its daemon copy.
+fn legacy_operations() -> Vec<Value> {
+    dind_operations(LEGACY_DIND_BOOTSTRAP_SCRIPT, Some(&json!([daemon_init()])))
+}
+
+/// `sandbox` with the current DinD bootstrap, its Docker data init last, and
+/// `mode`.
 fn re_rendered(mut sandbox: Value, mode: &str) -> Value {
-    sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["command"][2] =
-        json!(dind_bootstrap_script());
+    let spec = &mut sandbox["spec"]["podTemplate"]["spec"];
+    spec["containers"][0]["command"][2] = json!(dind_bootstrap_script());
+    match spec.get_mut("initContainers").and_then(Value::as_array_mut) {
+        Some(inits) => inits.push(data_init(DAEMON_IMAGE)),
+        None => spec["initContainers"] = json!([data_init(DAEMON_IMAGE)]),
+    }
     sandbox["spec"]["operatingMode"] = json!(mode);
     sandbox
 }
 
-/// Start, through either writer, re-renders exactly the legacy DinD script in
-/// the same patch as the mode (and any daemon re-pin). The DinD image and
-/// environment, the workspace container and image, the volumes, the
-/// per-environment template and the Pod are untouched; no workspace image is
-/// re-pinned.
+/// Start, through either writer, re-renders exactly the legacy DinD script
+/// and adds the Docker data init in the same patch as the mode (and any
+/// daemon re-pin). The DinD image and environment, the workspace container
+/// and image, the volumes, the per-environment template and the Pod are
+/// untouched; no workspace image is re-pinned.
 #[tokio::test]
 async fn start_re_renders_a_legacy_dind_bootstrap_and_nothing_else() {
     for generic in [false, true] {
@@ -2289,64 +2344,257 @@ async fn start_re_renders_a_legacy_dind_bootstrap_and_nothing_else() {
         let state = state.lock().unwrap();
         assert_eq!(
             patches(&state),
-            [&resume_patch(generic, &dind_operations())],
+            [&resume_patch(generic, &legacy_operations())],
             "generic={generic}"
         );
         assert_eq!(state.sandbox, re_rendered(sandbox, "Running"));
         assert_eq!(state.template, template);
         assert_eq!(state.pod, pod);
-        let script = state.sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["command"][2]
-            .as_str()
-            .unwrap();
-        assert!(script.contains("chmod 0755 \"$codewire_dir\"") && !script.contains("0775"));
+        let spec = &state.sandbox["spec"]["podTemplate"]["spec"];
+        assert_eq!(spec["containers"][0]["image"], "unchanged-dind");
+        assert_eq!(spec["containers"][0]["env"], loop_dind_env());
+        let names: Vec<_> = spec["initContainers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|init| init["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["codewire-daemon-init", DOCKER_DATA_INIT_CONTAINER]);
     }
-    // With a stale daemon the one patch carries both, the daemon first.
+    // With a stale daemon image volume the one patch carries both, the
+    // daemon first, and the data init becomes the only init container.
     let before = legacy_dind(stale_daemon_fixture());
     let sandbox = before.sandbox.clone();
     let (result, state) = resume_through(before, false, DAEMON_IMAGE).await;
     result.unwrap();
     let state = state.lock().unwrap();
     let mut between = repin_operations(OLD_DAEMON_IMAGE, DAEMON_IMAGE).to_vec();
-    between.extend(dind_operations());
+    between.extend(dind_operations(LEGACY_DIND_BOOTSTRAP_SCRIPT, None));
     assert_eq!(patches(&state), [&resume_patch(false, &between)]);
     let mut expected = re_rendered(sandbox, "Running");
     *daemon_reference_mut(&mut expected) = json!(DAEMON_IMAGE);
     assert_eq!(state.sandbox, expected);
 }
 
-/// #3554: a Sandbox rendered before the bootstrap grew the Docker data image,
-/// with the lazy or the eager mkfs, is re-rendered exactly like a legacy one,
-/// so its next Pod grows the image with a grown workspace disk.
+/// A runc Sandbox that copies its daemon from an older support image
+/// re-pins the copy and re-renders DinD in one patch: the daemon copy's image
+/// changes first, and the data init still follows it.
 #[tokio::test]
-async fn start_re_renders_a_pre_growth_dind_bootstrap() {
-    for prior in [
-        pre_growth_dind_bootstrap_script(),
-        eager_mkfs_dind_bootstrap_script(),
+async fn start_re_pins_a_daemon_copy_and_re_renders_dind_in_one_patch() {
+    let before = legacy_dind(stale_copy_fixture(Some("runc")));
+    let sandbox = before.sandbox.clone();
+    let (result, state) = resume_through(before, false, DAEMON_IMAGE).await;
+    result.unwrap();
+    let state = state.lock().unwrap();
+    let mut between = init_repin_operations(OLD_DAEMON_IMAGE, DAEMON_IMAGE).to_vec();
+    between.extend(dind_operations(
+        LEGACY_DIND_BOOTSTRAP_SCRIPT,
+        sandbox.pointer("/spec/podTemplate/spec/initContainers"),
+    ));
+    assert_eq!(patches(&state), [&resume_patch(false, &between)]);
+    let mut expected = re_rendered(sandbox, "Running");
+    expected["spec"]["podTemplate"]["spec"]["initContainers"][0]["image"] = json!(DAEMON_IMAGE);
+    assert_eq!(state.sandbox, expected);
+    let names: Vec<_> = expected["spec"]["podTemplate"]["spec"]["initContainers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|init| init["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["codewire-daemon-init", DOCKER_DATA_INIT_CONTAINER]);
+}
+
+/// #3554 and #3208: every bootstrap a stored Sandbox carries is re-rendered
+/// like the legacy one, so its next Pod prepares the Docker data image in
+/// the data init and DinD only mounts it. That includes the one that grew
+/// the image inside DinD, which a Sandbox created while Dev briefly ran
+/// Docker 29.9.2 carries beside that image: its DinD image is kept, and the
+/// current bootstrap runs on it.
+#[tokio::test]
+async fn start_re_renders_every_prior_dind_bootstrap() {
+    const DIND_29_9_2: &str = "docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977";
+    for (label, prior, image) in [
+        ("legacy", LEGACY_DIND_BOOTSTRAP_SCRIPT.to_owned(), None),
+        ("eager mkfs", eager_mkfs_dind_bootstrap_script(), None),
+        ("pre-growth", pre_growth_dind_bootstrap_script(), None),
+        ("growth in DinD", growth_in_dind_bootstrap_script(), None),
+        (
+            "growth in DinD on 29.9.2",
+            growth_in_dind_bootstrap_script(),
+            Some(DIND_29_9_2),
+        ),
     ] {
-        let before = with_dind(fixture(), json!(["sh", "-ec", prior.clone()]), None);
-        let (template, sandbox, pod) = (
-            before.template.clone(),
-            before.sandbox.clone(),
-            before.pod.clone(),
-        );
-        let (result, state) = resume_through(before, false, DAEMON_IMAGE).await;
-        result.unwrap();
-        let state = state.lock().unwrap();
-        let mut operations = dind_operations();
-        operations[1] = json!({"op":"test","path":"/spec/podTemplate/spec/containers/0/command/2","value":prior});
-        assert_eq!(patches(&state), [&resume_patch(false, &operations)]);
-        assert_eq!(state.sandbox, re_rendered(sandbox, "Running"));
-        assert_eq!(state.template, template);
-        assert_eq!(state.pod, pod);
-        let script = state.sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["command"][2]
-            .as_str()
-            .unwrap();
-        assert!(script.contains("resize2fs") && script.contains("lazy_itable_init=1"));
+        for copy in [false, true] {
+            let mut before = with_dind(
+                if copy {
+                    fixture()
+                } else {
+                    image_volume_fixture()
+                },
+                json!(["sh", "-ec", prior.clone()]),
+                None,
+            );
+            if let Some(image) = image {
+                before.sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["image"] =
+                    json!(image);
+            }
+            let (template, sandbox, pod) = (
+                before.template.clone(),
+                before.sandbox.clone(),
+                before.pod.clone(),
+            );
+            let (result, state) = resume_through(before, false, DAEMON_IMAGE).await;
+            result.unwrap();
+            let state = state.lock().unwrap();
+            let inits = copy.then(|| json!([daemon_init()]));
+            assert_eq!(
+                patches(&state),
+                [&resume_patch(
+                    false,
+                    &dind_operations(&prior, inits.as_ref())
+                )],
+                "{label} copy={copy}"
+            );
+            assert_eq!(
+                state.sandbox,
+                re_rendered(sandbox.clone(), "Running"),
+                "{label} copy={copy}"
+            );
+            assert_eq!(
+                state.sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["image"],
+                sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["image"],
+                "{label}: the DinD image is kept"
+            );
+            assert_eq!(state.template, template, "{label} copy={copy}");
+            assert_eq!(state.pod, pod, "{label} copy={copy}");
+        }
     }
 }
 
-/// Only an exact prior script is re-rendered: a current, unknown or direct
-/// dockerd command, and a confidential runtime, are left as they are.
+/// A Sandbox spec with `spec` as its Pod spec.
+fn sandbox_object(spec: Value) -> DynamicObject {
+    serde_json::from_value(json!({
+        "apiVersion":"agents.x-k8s.io/v1beta1","kind":"Sandbox",
+        "metadata":{"name":SANDBOX,"namespace":NS,"uid":"sandbox-incarnation"},
+        "spec":{"podTemplate":{"spec":spec}},
+    }))
+    .unwrap()
+}
+
+/// A Sandbox rendered with an earlier bootstrap is, once re-rendered, exactly
+/// the Pod spec a fresh render gives it: the same DinD script and the same
+/// data init in the same place, on commodity (beside the daemon image
+/// volume) and on runc (after the daemon copy).
+#[test]
+fn a_re_rendered_sandbox_matches_a_fresh_render() {
+    for profile in [
+        super::super::template::RUNTIME_PROFILE_COMMODITY,
+        super::super::template::RUNTIME_PROFILE_RUNC,
+    ] {
+        let opts = TemplateOpts {
+            runtime_profile: profile.into(),
+            docker_mode: super::super::template::DOCKER_MODE_GUEST_DIND.into(),
+            support_image: DAEMON_IMAGE.into(),
+            disk_gib: 40,
+            ..binding_opts()
+        };
+        let fresh = render_sandbox_template(NS, &opts)["spec"]["podTemplate"]["spec"].clone();
+        let dind = fresh["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|container| container["name"] == "dind")
+            .unwrap();
+        for prior in [
+            LEGACY_DIND_BOOTSTRAP_SCRIPT.to_owned(),
+            eager_mkfs_dind_bootstrap_script(),
+            pre_growth_dind_bootstrap_script(),
+            growth_in_dind_bootstrap_script(),
+        ] {
+            let mut stored = fresh.clone();
+            stored["containers"][dind]["command"][2] = json!(prior);
+            let inits = stored["initContainers"].as_array_mut().unwrap();
+            inits.retain(|init| init["name"] != DOCKER_DATA_INIT_CONTAINER);
+            if inits.is_empty() {
+                stored.as_object_mut().unwrap().remove("initContainers");
+            }
+            let object = sandbox_object(stored);
+            let operations = dind_bootstrap_refresh(&object, DAEMON_IMAGE)
+                .unwrap()
+                .expect("a prior bootstrap is re-rendered");
+            let mut patched = object.data.clone();
+            assert!(apply_patch_fixture(&mut patched, &json!(operations)));
+            assert_eq!(patched["spec"]["podTemplate"]["spec"], fresh, "{profile}");
+            // The re-rendered Sandbox has nothing left to refresh.
+            let current = sandbox_object(fresh.clone());
+            assert!(
+                dind_bootstrap_refresh(&current, DAEMON_IMAGE)
+                    .unwrap()
+                    .is_none(),
+                "{profile}"
+            );
+        }
+    }
+}
+
+/// A current Sandbox's data init follows the support image as its daemon
+/// does, within the support image's repository and only to a digest; a
+/// prior bootstrap beside a data init is ambiguous and left alone.
+#[test]
+fn the_docker_data_init_follows_the_support_image() {
+    let opts = TemplateOpts {
+        runtime_profile: super::super::template::RUNTIME_PROFILE_COMMODITY.into(),
+        support_image: OLD_DAEMON_IMAGE.into(),
+        disk_gib: 40,
+        ..binding_opts()
+    };
+    let stale = render_sandbox_template(NS, &opts)["spec"]["podTemplate"]["spec"].clone();
+    let index = stale["initContainers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|init| init["name"] == DOCKER_DATA_INIT_CONTAINER)
+        .unwrap();
+    let path = format!("/spec/podTemplate/spec/initContainers/{index}");
+    assert_eq!(
+        dind_bootstrap_refresh(&sandbox_object(stale.clone()), DAEMON_IMAGE).unwrap(),
+        Some(vec![
+            json!({"op":"test","path":format!("{path}/name"),"value":DOCKER_DATA_INIT_CONTAINER}),
+            json!({"op":"test","path":format!("{path}/image"),"value":OLD_DAEMON_IMAGE}),
+            json!({"op":"replace","path":format!("{path}/image"),"value":DAEMON_IMAGE}),
+        ])
+    );
+    for (label, support) in [
+        ("current", OLD_DAEMON_IMAGE),
+        (
+            "another repository",
+            "registry.example.invalid/other/daemon@sha256:48549d19114407c712d043af3ba2136d97052a2c30c82935190f75a3a61f13ab",
+        ),
+        ("unpinned", "registry.example.invalid/codewire/daemon:e2e"),
+    ] {
+        assert_eq!(
+            dind_bootstrap_refresh(&sandbox_object(stale.clone()), support).unwrap(),
+            None,
+            "{label}"
+        );
+    }
+    let mut ambiguous = stale;
+    let dind = ambiguous["containers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|container| container["name"] == "dind")
+        .unwrap();
+    ambiguous["containers"][dind]["command"][2] = json!(growth_in_dind_bootstrap_script());
+    assert_eq!(
+        dind_bootstrap_refresh(&sandbox_object(ambiguous), DAEMON_IMAGE).unwrap(),
+        None
+    );
+}
+
+/// Only an exact prior script on a loop-mounted image is re-rendered: a
+/// current, unknown or direct dockerd command, a plain directory, and a
+/// confidential runtime, are left as they are.
 #[tokio::test]
 async fn start_keeps_any_other_dind_bootstrap() {
     let cases = [
@@ -2363,6 +2611,11 @@ async fn start_keeps_any_other_dind_bootstrap() {
         (
             "confidential pre-growth",
             json!(["sh", "-ec", pre_growth_dind_bootstrap_script()]),
+            Some("confidential"),
+        ),
+        (
+            "confidential growth in DinD",
+            json!(["sh", "-ec", growth_in_dind_bootstrap_script()]),
             Some("confidential"),
         ),
         ("unknown", json!(["sh", "-ec", "exec dockerd"]), None),
@@ -2393,11 +2646,23 @@ async fn start_keeps_any_other_dind_bootstrap() {
         expected["spec"]["operatingMode"] = json!("Running");
         assert_eq!(state.sandbox, expected, "{label}");
     }
+    // A plain directory needs no data image, so it moves nowhere.
+    let mut before = legacy_dind(fixture());
+    before.sandbox["spec"]["podTemplate"]["spec"]["containers"][0]["env"][4]["value"] =
+        json!("none");
+    let sandbox = before.sandbox.clone();
+    let (result, state) = resume_through(before, false, DAEMON_IMAGE).await;
+    result.unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(patches(&state), [&resume_patch(false, &[])]);
+    let mut expected = sandbox;
+    expected["spec"]["operatingMode"] = json!("Running");
+    assert_eq!(state.sandbox, expected);
 }
 
 /// Daemon repair, restart-mode resize and terminal-Pod replacement rebuild
 /// the Pod from the Sandbox's spec, so they re-render the legacy bootstrap
-/// before deleting the Pod, with no operating mode.
+/// and add the data init before deleting the Pod, with no operating mode.
 #[tokio::test]
 async fn a_pod_replacement_re_renders_a_legacy_dind_bootstrap_first() {
     let before = running(legacy_dind(fixture()));
@@ -2407,7 +2672,7 @@ async fn a_pod_replacement_re_renders_a_legacy_dind_bootstrap_first() {
     let state = state.lock().unwrap();
     assert_eq!(
         patches(&state),
-        [&replacement_patch("30", dind_operations())]
+        [&replacement_patch("30", legacy_operations())]
     );
     assert_eq!(
         writes(&state),

@@ -55,8 +55,10 @@ The self-contained `cw` binary provides the environment daemon through the
 private `cw __hosted-daemon` entrypoint. The support image contains that
 binary at `/usr/local/bin/cw`, and the workspace container runs it as
 `/codewire/bin/cw`. Commodity workspaces mount the support image's
-`usr/local/bin` there as a read-only OCI image volume, so they start without an
-init container. Confidential, `runc` and Kind workspaces keep a
+`usr/local/bin` there as a read-only OCI image volume, so they start without a
+daemon init container; with guest DinD, their only init container prepares
+Docker's data image (see Runtime Profiles and Docker). Confidential, `runc` and
+Kind workspaces keep a
 `codewire-daemon-init` init container that copies only `cw` into a
 `/codewire/bin` emptyDir: confidential guests pull images inside the guest,
 where image volumes do not apply. There is no standalone daemon binary,
@@ -197,7 +199,7 @@ not isolate orchestration from a Mesh that holds that secret.
 1. Kubernetes starts the workspace Pod from the `SandboxClaim` (or adopts a
    warm-pool member).
 2. On commodity, the kubelet mounts `/codewire/bin` read-only from the
-   support image and no init container runs. Elsewhere, the
+   support image and no daemon init container runs. Elsewhere, the
    `codewire-daemon-init` init container copies `/usr/local/bin/cw` from the
    support image to `/codewire/bin/cw` and prepares `/codewire/run/processes`.
    A hosted daemon with launch projection creates its owner-private (0700)
@@ -313,20 +315,34 @@ The workspace container must not mount `/var/run/docker.sock`,
 runtime boundary, not the Kubernetes node's socket.
 
 The `dind` data root must stay inside the runtime boundary and must not use the
-Kubernetes node's Docker/containerd sockets. Commodity currently creates an
-ext4 image at `/workspace/.codewire/docker-data.ext4`, mounts it at
-`/var/lib/docker`, and uses dockerd `vfs`, because the current Kata guest
-rejects `overlay2` for this path. The commodity smoke checks for the ext4
-over-mount specifically, not just any mountpoint.
+Kubernetes node's Docker/containerd sockets. Commodity keeps an ext4 image at
+`/workspace/.codewire/docker-data.ext4`, mounts it at `/var/lib/docker`, and
+uses dockerd `vfs`, because the current Kata guest rejects `overlay2` for this
+path. The commodity smoke checks for the ext4 over-mount specifically, not
+just any mountpoint.
 
-The image is created once, on the Pod's first start, as a sparse file of
+The DinD image ships no filesystem tools since Docker 29.9.2 (#3208), so the
+`codewire-docker-data-init` init container prepares the image from the support
+image's e2fsprogs before DinD starts, and DinD only mounts it and starts
+dockerd with busybox. The init container runs as root with only the workspace
+volume, and reads the same `CODEWIRE_DOCKER_DATA_IMAGE`, `_SIZE` and
+`_MOUNT_MODE` as DinD. On commodity it is the Pod's only init container, so it
+runs before the workspace starts; elsewhere it follows `codewire-daemon-init`.
+
+The image is created on the Pod's first start as a sparse file of
 `CODEWIRE_DOCKER_DATA_SIZE`, and formatted with `-E
 lazy_itable_init=1,lazy_journal_init=1`. A freshly truncated file reads as
 zeros, so skipping the inode-table and journal zeroing is safe, and the
 format writes a few MiB at any size instead of the journal (512 MiB at
 78 GiB, 1 GiB at 198 GiB). Where the storage cannot discard, the kernel
-zeroes the inode tables in the background after the mount. A later start
-reuses the image as it is: the bootstrap never resizes it.
+zeroes the inode tables in the background after the mount. A grown workspace
+disk renders a larger size: the next start extends the image to it, never
+shrinking it, then checks (`e2fsck -f`) and grows (`resize2fs`) its
+filesystem offline, which also finishes an interrupted grow. A failed format
+or grow never fails the init container: Docker then reports the missing image,
+or starts at its previous size. A Start or Pod replacement re-renders a
+Sandbox whose DinD still formats or grows the image itself, adding the init
+container in the same patch.
 
 Confidential QEMU-SNP is different: the confidential guest has ext4 support
 but no loop devices, so `mount -o loop` fails even when the target directory exists. For
@@ -350,8 +366,8 @@ Docker never decides whether a workspace is Ready. The workspace container's
 probes are the same with or without DinD: an identity-free workspace's
 startup and readiness probes test only the daemon's marker, and an
 environment-token workspace has none. The `dind` container has no probe, so a
-running `dind` counts as ready while its bootstrap creates and mounts the
-ext4 data image and dockerd starts; a bootstrap that exits still leaves the
+running `dind` counts as ready while its bootstrap mounts the ext4 data image
+and dockerd starts; a bootstrap that exits still leaves the
 Pod unready until the kubelet restarts it, and a dockerd that exits is
 restarted the same way. So the Claim turns Ready, and MarkRunning, setup and
 SSH proceed, without waiting for dockerd; nothing that waits for the Claim

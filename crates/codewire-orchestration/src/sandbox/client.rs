@@ -27,10 +27,11 @@ use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 use serde_json::Value;
 
 use super::template::{
-    KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
-    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, LEGACY_DIND_BOOTSTRAP_SCRIPT,
-    RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts, dind_bootstrap_script,
-    direct_udp_service_name, docker_data_size_gib, eager_mkfs_dind_bootstrap_script,
+    DOCKER_DATA_INIT_CONTAINER, DOCKER_DATA_INIT_ENV, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
+    KATA_CONFIDENTIAL_VOLUME_ANNOTATION, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
+    LEGACY_DIND_BOOTSTRAP_SCRIPT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts,
+    dind_bootstrap_script, direct_udp_service_name, docker_data_init_container,
+    docker_data_size_gib, eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
     pre_growth_dind_bootstrap_script, render_direct_udp_service, render_sandbox_shadow_pool,
     render_sandbox_template, render_warm_member_bridge, render_workspace_daemon_network_policy,
     render_workspace_daemon_service, warm_member_daemon_bridge_name,
@@ -729,20 +730,32 @@ fn log_daemon_image_repin(
 /// The operations that re-render a Sandbox's prior DinD bootstrap to the
 /// current one: the legacy one ([`LEGACY_DIND_BOOTSTRAP_SCRIPT`]), so the
 /// workspace home's `.codewire` stays 0755 and the workspace daemon opens its
-/// platform session store (#2639), and the eager- and lazy-`mkfs` ones that
+/// platform session store (#2639), the eager- and lazy-`mkfs` ones that
 /// never grew the Docker data image
 /// ([`eager_mkfs_dind_bootstrap_script`], [`pre_growth_dind_bootstrap_script`]),
-/// so a grown workspace disk grows that image too (#3554). Every resume and
-/// Pod replacement that
-/// re-pins the daemon image carries them, as the controller builds each new
-/// Pod from the Sandbox's own spec. They `test` the container's index, name
-/// and exact prior script and `replace` only that script: the DinD image and
-/// environment, the workspace image, volumes and workspace contents are
-/// untouched. Any other script is left alone, and so is a confidential
+/// so a grown workspace disk grows that image too (#3554), and the one that
+/// formats and grows it inside DinD ([`growth_in_dind_bootstrap_script`]),
+/// whose e2fsprogs the Docker 29.9.2 DinD image no longer ships (#3208).
+/// Every resume and Pod replacement that re-pins the daemon image carries
+/// them, as the controller builds each new Pod from the Sandbox's own spec.
+///
+/// One patch brings both halves: DinD's script, tested exact and replaced,
+/// and the [`DOCKER_DATA_INIT_CONTAINER`] that now prepares the image, added
+/// last with the support image and DinD's own data image, size and mount
+/// mode. The current DinD bootstrap only mounts an image the data init made,
+/// on the DinD image the Sandbox already pins or a newer one. A Sandbox that
+/// already has the data init keeps it on the current support image, re-pinned
+/// as [`plan_daemon_image`] re-pins the daemon. The DinD image and the rest
+/// of the environment, the workspace image, volumes and workspace contents
+/// are untouched. Any other script is left alone, and so is a confidential
 /// runtime, whose measured policy admits exactly the rendered containers.
 /// `None` when there is nothing to re-render.
-fn dind_bootstrap_refresh(sandbox: &DynamicObject) -> anyhow::Result<Option<[Value; 3]>> {
+fn dind_bootstrap_refresh(
+    sandbox: &DynamicObject,
+    support_image: &str,
+) -> anyhow::Result<Option<Vec<Value>>> {
     let spec_path = "/spec/podTemplate/spec";
+    let name = sandbox.metadata.name.as_deref().unwrap_or_default();
     let Some(pod_spec) = sandbox.data.pointer(spec_path) else {
         return Ok(None);
     };
@@ -765,16 +778,18 @@ fn dind_bootstrap_refresh(sandbox: &DynamicObject) -> anyhow::Result<Option<[Val
         .and_then(Value::as_array)
         .filter(|command| command.len() == 3 && command[0] == "sh" && command[1] == "-ec")
         .and_then(|command| command[2].as_str());
-    // Re-rendering an eager-`mkfs` bootstrap is harmless: it formats only a
-    // missing image, and the one it formatted is kept.
+    // Re-rendering an eager-`mkfs` bootstrap is harmless: the data init
+    // formats only a missing image, and the one it formatted is kept.
     let prior = script.filter(|script| {
         *script == LEGACY_DIND_BOOTSTRAP_SCRIPT
             || *script == eager_mkfs_dind_bootstrap_script()
             || *script == pre_growth_dind_bootstrap_script()
+            || *script == growth_in_dind_bootstrap_script()
     });
-    if script.is_some_and(|script| prior.is_none() && script != dind_bootstrap_script()) {
+    let current = script.is_some_and(|script| script == dind_bootstrap_script());
+    if script.is_some() && prior.is_none() && !current {
         tracing::warn!(
-            sandbox = sandbox.metadata.name.as_deref().unwrap_or_default(),
+            sandbox = name,
             "Sandbox DinD bootstrap is neither current nor a known prior one; it is not re-rendered"
         );
     }
@@ -784,25 +799,114 @@ fn dind_bootstrap_refresh(sandbox: &DynamicObject) -> anyhow::Result<Option<[Val
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("workspace runtime class is malformed"))?,
     };
-    let Some(prior) = prior else {
-        return Ok(None);
-    };
     if !["", RUNTIME_CLASS_RUNC, RUNTIME_CLASS_COMMODITY].contains(&runtime_class) {
         return Ok(None);
     }
+    let inits = match pod_spec.get("initContainers") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(inits)) => Some(inits),
+        Some(_) => anyhow::bail!("workspace initContainers are malformed"),
+    };
+    let data_init = match inits {
+        Some(inits) => daemon_named_entry(pod_spec, "initContainers", DOCKER_DATA_INIT_CONTAINER)?
+            .map(|found| (inits, found)),
+        None => None,
+    };
+    let init_path = format!("{spec_path}/initContainers");
+    if current {
+        return Ok(data_init.and_then(|(_, (init_index, init))| {
+            docker_data_init_repin(&format!("{init_path}/{init_index}"), init, support_image)
+        }));
+    }
+    let Some(prior) = prior else {
+        return Ok(None);
+    };
+    if data_init.is_some() {
+        tracing::warn!(
+            sandbox = name,
+            "Sandbox carries a prior DinD bootstrap beside a Docker data init; it is not re-rendered"
+        );
+        return Ok(None);
+    }
+    let dind_env = match container.get("env") {
+        None => &[][..],
+        Some(Value::Array(env)) => env.as_slice(),
+        Some(_) => anyhow::bail!("workspace DinD environment is malformed"),
+    };
+    let mount_mode = dind_env
+        .iter()
+        .find(|entry| {
+            entry.get("name").and_then(Value::as_str) == Some("CODEWIRE_DOCKER_MOUNT_MODE")
+        })
+        .and_then(|entry| entry.get("value"))
+        .and_then(Value::as_str);
+    if mount_mode != Some("loop") {
+        // Only a loop-mounted image moved to the data init; no commodity or
+        // runc rendering keeps a plain directory.
+        return Ok(None);
+    }
+    let init_env = dind_env
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| DOCKER_DATA_INIT_ENV.contains(&name))
+        })
+        .cloned()
+        .collect();
     let path = format!("{spec_path}/containers/{index}");
-    Ok(Some([
+    let mut operations = vec![
         serde_json::json!({"op":"test","path":format!("{path}/name"),"value":"dind"}),
         serde_json::json!({"op":"test","path":format!("{path}/command/2"),"value":prior}),
         serde_json::json!({"op":"replace","path":format!("{path}/command/2"),"value":dind_bootstrap_script()}),
-    ]))
+    ];
+    let data_init = docker_data_init_container(support_image, init_env);
+    match inits {
+        // Each existing init container keeps its place by name; a daemon
+        // re-pin earlier in the same patch changes only its image.
+        Some(inits) => {
+            for (init_index, init) in inits.iter().enumerate() {
+                operations.push(serde_json::json!({
+                    "op":"test","path":format!("{init_path}/{init_index}/name"),"value":init.get("name"),
+                }));
+            }
+            operations.push(
+                serde_json::json!({"op":"add","path":format!("{init_path}/-"),"value":data_init}),
+            );
+        }
+        None => {
+            operations.push(serde_json::json!({"op":"add","path":init_path,"value":[data_init]}))
+        }
+    }
+    Ok(Some(operations))
 }
 
-/// Log a DinD bootstrap re-render an admitted patch carried.
+/// Re-pin a Sandbox's Docker data init to the current support image, under
+/// the rules [`plan_daemon_image`] keeps for the daemon: only from the
+/// configured support image's repository, and only to a digest-pinned one.
+/// The image cache holds the current support image, so the next Pod's init
+/// starts from it.
+fn docker_data_init_repin(path: &str, init: &Value, support_image: &str) -> Option<Vec<Value>> {
+    let from = init.get("image").and_then(Value::as_str)?;
+    if from == support_image
+        || !super::warm_pool::digest_pinned(support_image)
+        || image_repository(from) != image_repository(support_image)
+    {
+        return None;
+    }
+    Some(vec![
+        serde_json::json!({"op":"test","path":format!("{path}/name"),"value":DOCKER_DATA_INIT_CONTAINER}),
+        serde_json::json!({"op":"test","path":format!("{path}/image"),"value":from}),
+        serde_json::json!({"op":"replace","path":format!("{path}/image"),"value":support_image}),
+    ])
+}
+
+/// Log a DinD bootstrap refresh an admitted patch carried.
 fn log_dind_bootstrap_refresh(name: &str) {
     tracing::info!(
         name,
-        "re-rendered the Sandbox's prior DinD bootstrap; its next Pod keeps ~/.codewire private and grows the Docker data image with the disk"
+        "refreshed the Sandbox's Docker data bootstrap; its next Pod prepares the Docker data image in its init container from the current support image"
     );
 }
 /// The environment token a workspace rendered before claim-time binding
@@ -1890,7 +1994,7 @@ impl SandboxClient {
                 .filter(|version| !version.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("Sandbox {name} has no resource version"))?;
             let repin = daemon_image_repin(&sandbox, support_image)?;
-            let dind = dind_bootstrap_refresh(&sandbox)?;
+            let dind = dind_bootstrap_refresh(&sandbox, support_image)?;
             if repin.is_none() && dind.is_none() {
                 return Ok(DaemonImageRepinOutcome::Unchanged);
             }
@@ -3225,7 +3329,7 @@ impl SandboxClient {
             (
                 daemon_image_repin(&sandbox, support_image)
                     .map_err(|e| anyhow::anyhow!("set operatingMode: Sandbox {name}: {e}"))?,
-                dind_bootstrap_refresh(&sandbox)
+                dind_bootstrap_refresh(&sandbox, support_image)
                     .map_err(|e| anyhow::anyhow!("set operatingMode: Sandbox {name}: {e}"))?,
             )
         } else {
@@ -3378,10 +3482,9 @@ impl SandboxClient {
             Some(image) => daemon_image_repin(sandbox, image)?.map(|repin| (image, repin)),
             None => None,
         };
-        let dind = if replicas > 0 {
-            dind_bootstrap_refresh(sandbox)?
-        } else {
-            None
+        let dind = match support_image.filter(|_| replicas > 0) {
+            Some(image) => dind_bootstrap_refresh(sandbox, image)?,
+            None => None,
         };
         operations.extend(repin.iter().flat_map(|(_, repin)| repin.operations.clone()));
         operations.extend(dind.iter().flatten().cloned());
@@ -5194,27 +5297,42 @@ fn set_workspace_resources(data: &mut Value, cpu: &str, memory: &str) -> anyhow:
 }
 
 /// Size a loop-mounted DinD data image for `disk_gb`, so the next Pod's
-/// bootstrap grows the image with the workspace disk (#3554). It only ever
-/// grows: a smaller rendering than the image already carries is left alone,
-/// and so is a runtime without a loop-mounted image (no DinD, or the
-/// confidential profile, whose measured policy admits exactly what it was
-/// rendered with and whose volume never expands).
+/// Docker data init (or, in a Sandbox not yet re-rendered, its DinD
+/// bootstrap) grows the image with the workspace disk (#3554, #3208). DinD
+/// and the data init carry the same size, and each only ever grows: a smaller
+/// rendering than one already carries is left alone, and so is a runtime
+/// without a loop-mounted image (no DinD, or the confidential profile, whose
+/// measured policy admits exactly what it was rendered with and whose volume
+/// never expands).
 fn set_docker_data_size(data: &mut Value, disk_gb: i32) -> anyhow::Result<()> {
-    let Some(containers) = data
-        .pointer_mut("/spec/podTemplate/spec/containers")
-        .and_then(Value::as_array_mut)
-    else {
-        return Ok(());
-    };
-    let Some(dind) = containers
-        .iter_mut()
-        .find(|container| container.get("name").and_then(Value::as_str) == Some("dind"))
-    else {
-        return Ok(());
-    };
-    let Some(env) = dind.get_mut("env").and_then(Value::as_array_mut) else {
-        return Ok(());
-    };
+    let desired = docker_data_size_gib(i64::from(disk_gb));
+    for (array, name) in [
+        ("containers", "dind"),
+        ("initContainers", DOCKER_DATA_INIT_CONTAINER),
+    ] {
+        let Some(containers) = data
+            .pointer_mut(&format!("/spec/podTemplate/spec/{array}"))
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        let Some(container) = containers
+            .iter_mut()
+            .find(|container| container.get("name").and_then(Value::as_str) == Some(name))
+        else {
+            continue;
+        };
+        let Some(env) = container.get_mut("env").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        grow_docker_data_size(env, desired)?;
+    }
+    Ok(())
+}
+
+/// Raise one container's `CODEWIRE_DOCKER_DATA_SIZE` to `desired` GiB when it
+/// loop-mounts the image and carries less.
+fn grow_docker_data_size(env: &mut Vec<Value>, desired: i64) -> anyhow::Result<()> {
     let value_of = |env: &[Value], name: &str| {
         env.iter()
             .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
@@ -5225,7 +5343,6 @@ fn set_docker_data_size(data: &mut Value, disk_gb: i32) -> anyhow::Result<()> {
     if value_of(env, "CODEWIRE_DOCKER_MOUNT_MODE").as_deref() != Some("loop") {
         return Ok(());
     }
-    let desired = docker_data_size_gib(i64::from(disk_gb));
     let current = value_of(env, "CODEWIRE_DOCKER_DATA_SIZE")
         .and_then(|size| size.strip_suffix('G')?.parse::<i64>().ok());
     if current.is_some_and(|current| current >= desired) {
@@ -5238,7 +5355,7 @@ fn set_docker_data_size(data: &mut Value, disk_gb: i32) -> anyhow::Result<()> {
         Some(entry) => {
             entry
                 .as_object_mut()
-                .ok_or_else(|| anyhow::anyhow!("DinD environment entry is not an object"))?
+                .ok_or_else(|| anyhow::anyhow!("Docker data environment entry is not an object"))?
                 .insert("value".into(), size);
         }
         None => env.push(serde_json::json!({ "name": "CODEWIRE_DOCKER_DATA_SIZE", "value": size })),
@@ -6359,6 +6476,31 @@ mod tests {
         let before = no_docker.clone();
         set_docker_data_size(&mut no_docker, 120).unwrap();
         assert_eq!(no_docker, before);
+
+        // The Docker data init carries DinD's size, and grows with it, never
+        // down; a Sandbox not yet re-rendered has only DinD's.
+        let with_init = |dind_size: &str, init_size: &str| {
+            let mut runtime = dind("loop", dind_size);
+            runtime["spec"]["podTemplate"]["spec"]["initContainers"] = json!([
+                {"name": "codewire-daemon-init", "env": []},
+                {"name": DOCKER_DATA_INIT_CONTAINER, "env": [
+                    {"name": "CODEWIRE_DOCKER_DATA_IMAGE", "value": "/workspace/.codewire/docker-data.ext4"},
+                    {"name": "CODEWIRE_DOCKER_DATA_SIZE", "value": init_size},
+                    {"name": "CODEWIRE_DOCKER_MOUNT_MODE", "value": "loop"}
+                ]}
+            ]);
+            runtime
+        };
+        let mut grown = with_init("78G", "78G");
+        set_docker_data_size(&mut grown, 120).unwrap();
+        assert_eq!(grown, with_init("118G", "118G"));
+        let mut kept = with_init("118G", "118G");
+        set_docker_data_size(&mut kept, 80).unwrap();
+        assert_eq!(kept, with_init("118G", "118G"));
+        // Each is raised to the rendering on its own, never down.
+        let mut behind = with_init("118G", "78G");
+        set_docker_data_size(&mut behind, 100).unwrap();
+        assert_eq!(behind, with_init("118G", "98G"));
     }
 
     #[test]

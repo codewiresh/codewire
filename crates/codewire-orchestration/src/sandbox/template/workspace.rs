@@ -507,12 +507,18 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     // The daemon in the workspace container writes Codex's `~/.codex` on the
     // persistent home itself, so no init container
     // copies client configuration. On confidential, no init container can
-    // reach that protected disk at all.
+    // reach that protected disk at all. A guest DinD's data image is
+    // prepared before DinD mounts it (#3208), last, as a Start re-renders it
+    // into an older Sandbox.
+    let mut init_containers = Vec::new();
     if !daemon_image_volume {
-        spec.insert(
-            "initContainers".into(),
-            json!([daemon_init_container(support_image, &runtime_spec.profile)]),
-        );
+        init_containers.push(daemon_init_container(support_image, &runtime_spec.profile));
+    }
+    if let Some(data_init) = docker_data_init(opts, &runtime_spec, support_image) {
+        init_containers.push(data_init);
+    }
+    if !init_containers.is_empty() {
+        spec.insert("initContainers".into(), Value::Array(init_containers));
     }
     spec.insert("containers".into(), Value::Array(containers));
     spec.insert("volumes".into(), Value::Array(volumes));
@@ -683,6 +689,107 @@ fn daemon_init_container(support_image: &str, profile: &str) -> Value {
     })
 }
 
+/// Prepares the loop-mounted Docker data image before DinD starts, from the
+/// support image's e2fsprogs: the DinD image ships none since Docker 29.9.2
+/// (#3208). It renders beside a guest DinD on every profile but confidential,
+/// whose DinD keeps a plain directory on the protected disk. A commodity Pod
+/// takes its daemon from an image volume and has no other init container, so
+/// this one is its only serial step before the workspace starts; the
+/// `codewire-daemon-init` name stays the daemon copy's alone
+/// (`plan_daemon_image` reads it as the daemon's source).
+pub(crate) const DOCKER_DATA_INIT_CONTAINER: &str = "codewire-docker-data-init";
+
+/// The Docker data image variables DinD renders that the data init reads too.
+pub(crate) const DOCKER_DATA_INIT_ENV: [&str; 3] = [
+    "CODEWIRE_DOCKER_DATA_IMAGE",
+    "CODEWIRE_DOCKER_DATA_SIZE",
+    "CODEWIRE_DOCKER_MOUNT_MODE",
+];
+
+/// The data init's own limits. It formats a fresh image and checks and grows
+/// a grown one before the workspace starts, so its CPU is not capped at the
+/// daemon copy's 100m. The request, and so scheduling, matches the copy's.
+fn docker_data_init_resources() -> Value {
+    json!({
+        "requests": { "cpu": "25m", "memory": "32Mi" },
+        "limits": { "cpu": "1", "memory": "512Mi" },
+    })
+}
+
+/// The data init for a guest DinD's environment: the same data image, size
+/// and mount mode DinD renders, as root, with only the workspace volume.
+pub(crate) fn docker_data_init_container(support_image: &str, env: Vec<Value>) -> Value {
+    json!({
+        "name": DOCKER_DATA_INIT_CONTAINER,
+        "image": support_image,
+        "securityContext": { "runAsUser": 0, "runAsGroup": 0 },
+        "command": ["sh", "-c", docker_data_image_prepare_script()],
+        "env": env,
+        "volumeMounts": [{ "name": "workspace", "mountPath": "/workspace" }],
+        "resources": docker_data_init_resources(),
+    })
+}
+
+/// The data init's shell: it prepares the Docker data image offline, before
+/// DinD mounts it, so DinD needs only busybox. It never fails the init
+/// container: Docker never decides whether the workspace starts (owner,
+/// 2026-10-06), so a failure is logged and DinD then reports a missing image
+/// or starts at its previous size.
+///
+/// - The image's directory, the workspace home's `.codewire`, is the
+///   workspace user's and owner-writable only.
+/// - A missing or empty image is created at the rendered size and formatted
+///   lazily; a failed create removes it, so the next start tries again.
+/// - A grown workspace disk renders a larger size: the image is extended to
+///   it, never shrunk, and a malformed size is ignored. Whenever the image is
+///   larger than its filesystem, including after an interrupted grow, the
+///   filesystem is checked and grown offline to fill it.
+pub(crate) fn docker_data_image_prepare_script() -> &'static str {
+    DOCKER_DATA_IMAGE_PREPARE_SCRIPT
+}
+
+const DOCKER_DATA_IMAGE_PREPARE_SCRIPT: &str = r#"data_image="${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}"
+data_size="${CODEWIRE_DOCKER_DATA_SIZE:-8G}"
+mount_mode="${CODEWIRE_DOCKER_MOUNT_MODE:-loop}"
+if [ "$mount_mode" = "loop" ]; then
+  codewire_dir="$(dirname "$data_image")"
+  mkdir -p "$codewire_dir"
+  chown 1000:1000 "$codewire_dir"
+  # Owner-writable only: the workspace daemon refuses a group- or
+  # world-writable ancestor of its platform session store.
+  chmod 0755 "$codewire_dir"
+  if [ ! -s "$data_image" ]; then
+    # A fresh sparse image reads as zeros, so mke2fs skips zeroing its
+    # inode tables and journal: a few MiB of writes at any size.
+    if ! { truncate -s "$data_size" "$data_image" &&
+      mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$data_image"; }; then
+      rm -f "$data_image"
+      echo "the Docker data image $data_image was not created; Docker does not start" >&2
+    fi
+  fi
+  if [ -s "$data_image" ]; then
+    # A grown workspace disk renders a larger data size: extend the image to
+    # it, never shrinking it, and grow its filesystem offline to fill the
+    # image. Growth keeps every byte, and a failed grow still starts Docker
+    # at its previous size (#3554).
+    data_gib="${data_size%G}"
+    case "$data_gib" in ''|*[!0-9]*) data_gib=0 ;; esac
+    if [ "$(stat -c %s "$data_image")" -lt "$((data_gib * 1073741824))" ]; then
+      truncate -s "$data_size" "$data_image" || true
+    fi
+    data_fs_bytes="$(dumpe2fs -h "$data_image" 2>/dev/null | awk -F: '$1 == "Block count" { count = $2 } $1 == "Block size" { size = $2 } END { printf "%.0f", count * size }')"
+    if [ "$(stat -c %s "$data_image")" -gt "${data_fs_bytes:-0}" ]; then
+      # resize2fs grows an unmounted filesystem only after a forced check;
+      # e2fsck exits 1 when it corrected something.
+      fsck_status=0
+      e2fsck -fy "$data_image" >/dev/null || fsck_status=$?
+      if [ "$fsck_status" -gt 1 ] || ! resize2fs "$data_image"; then
+        echo "the Docker data filesystem did not grow to $data_size; Docker keeps its previous size" >&2
+      fi
+    fi
+  fi
+fi"#;
+
 /// The DinD bootstrap Sandboxes were rendered with before 531fc0f7e, exactly
 /// as their stored Pod specs carry it. It made the workspace home's
 /// `.codewire` group-writable (0775) at every Pod start, so a workspace daemon
@@ -720,39 +827,26 @@ pub(crate) fn eager_mkfs_dind_bootstrap_script() -> String {
 }
 
 /// The DinD bootstrap rendered from Program #2238's lazy `mkfs.ext4` until
-/// #3554. It differs from [`dind_bootstrap_script`] only in growing the
-/// Docker data image: it created the image once and never grew it, so a
+/// #3554. It differs from [`growth_in_dind_bootstrap_script`] only in growing
+/// the Docker data image: it created the image once and never grew it, so a
 /// grown workspace disk left Docker at its first size. Start and Pod
 /// replacement re-render it.
 pub(crate) fn pre_growth_dind_bootstrap_script() -> String {
-    dind_bootstrap_script().replace(&format!("\n{DATA_IMAGE_GROWTH}"), "")
+    growth_in_dind_bootstrap_script().replace(&format!("\n{DATA_IMAGE_GROWTH}"), "")
 }
 
-/// After the mount, a grown workspace disk renders a larger data size:
-/// extend the image to it (never shrinking it) and grow its mounted
-/// filesystem online to fill the image. An interrupted grow finishes at the
-/// next start.
-const DATA_IMAGE_GROWTH: &str = r#"  # A grown workspace disk renders a larger data size: extend the image to
-  # it, never shrinking it, and grow its mounted filesystem online to fill
-  # the image. Growth keeps every byte, and a failed grow still starts
-  # Docker at its previous size (#3554).
-  data_gib="${data_size%G}"
-  case "$data_gib" in ''|*[!0-9]*) data_gib=0 ;; esac
-  if [ "$(stat -c %s "$data_image")" -lt "$((data_gib * 1073741824))" ]; then
-    truncate -s "$data_size" "$data_image" || true
-  fi
-  data_device="$(awk -v target="$data_root" '$2 == target && $3 == "ext4" { print $1; exit }' /proc/mounts)"
-  data_fs_bytes="$(dumpe2fs -h "$data_device" 2>/dev/null | awk -F: '$1 == "Block count" { count = $2 } $1 == "Block size" { size = $2 } END { printf "%.0f", count * size }')"
-  if [ "$(stat -c %s "$data_image")" -gt "${data_fs_bytes:-0}" ]; then
-    { losetup -c "$data_device" && resize2fs "$data_device"; } ||
-      echo "the Docker data filesystem did not grow to $data_size; Docker keeps its previous size" >&2
-  fi"#;
-
-const LAZY_MKFS: &str = r#"    # A fresh sparse image reads as zeros, so mke2fs skips zeroing its
-    # inode tables and journal: a few MiB of writes at any size.
-    mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$data_image""#;
-
-pub(crate) fn dind_bootstrap_script() -> String {
+/// The DinD bootstrap rendered from #3554 until #3208, which formats and
+/// grows the Docker data image inside DinD with e2fsprogs. The Docker
+/// 29.9.2 DinD image ships none, so a commodity or runc Sandbox that carries
+/// it fails to start Docker on that image (`mkfs.ext4: not found`, exit
+/// 127). Start and Pod replacement re-render it to [`dind_bootstrap_script`]
+/// beside the [`DOCKER_DATA_INIT_CONTAINER`] that prepares the image.
+///
+/// A confidential DinD still renders it: there it keeps a plain directory
+/// (`CODEWIRE_DOCKER_MOUNT_MODE=none`), so it runs only busybox `mkdir`,
+/// `chown` and `chmod`, and no init container can reach the protected disk
+/// to own `.codewire` in its place.
+pub(crate) fn growth_in_dind_bootstrap_script() -> String {
     format!(
         r#"data_image="${{CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}}"
 data_root="${{CODEWIRE_DOCKER_DATA_ROOT:-/var/lib/docker}}"
@@ -781,12 +875,104 @@ exec dockerd --host "unix://{DIND_SOCKET_PATH}" --group 1000 --data-root "$data_
     )
 }
 
+/// After the mount, a grown workspace disk renders a larger data size:
+/// extend the image to it (never shrinking it) and grow its mounted
+/// filesystem online to fill the image. An interrupted grow finishes at the
+/// next start.
+const DATA_IMAGE_GROWTH: &str = r#"  # A grown workspace disk renders a larger data size: extend the image to
+  # it, never shrinking it, and grow its mounted filesystem online to fill
+  # the image. Growth keeps every byte, and a failed grow still starts
+  # Docker at its previous size (#3554).
+  data_gib="${data_size%G}"
+  case "$data_gib" in ''|*[!0-9]*) data_gib=0 ;; esac
+  if [ "$(stat -c %s "$data_image")" -lt "$((data_gib * 1073741824))" ]; then
+    truncate -s "$data_size" "$data_image" || true
+  fi
+  data_device="$(awk -v target="$data_root" '$2 == target && $3 == "ext4" { print $1; exit }' /proc/mounts)"
+  data_fs_bytes="$(dumpe2fs -h "$data_device" 2>/dev/null | awk -F: '$1 == "Block count" { count = $2 } $1 == "Block size" { size = $2 } END { printf "%.0f", count * size }')"
+  if [ "$(stat -c %s "$data_image")" -gt "${data_fs_bytes:-0}" ]; then
+    { losetup -c "$data_device" && resize2fs "$data_device"; } ||
+      echo "the Docker data filesystem did not grow to $data_size; Docker keeps its previous size" >&2
+  fi"#;
+
+const LAZY_MKFS: &str = r#"    # A fresh sparse image reads as zeros, so mke2fs skips zeroing its
+    # inode tables and journal: a few MiB of writes at any size.
+    mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$data_image""#;
+
+/// The guest DinD bootstrap of every profile but confidential: it mounts the
+/// data image [`DOCKER_DATA_INIT_CONTAINER`] prepared and starts Docker on
+/// it, with only busybox, which the DinD image keeps (#3208). A missing image
+/// stops Docker with a reason, never the workspace.
+pub(crate) fn dind_bootstrap_script() -> String {
+    format!(
+        r#"data_image="${{CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}}"
+data_root="${{CODEWIRE_DOCKER_DATA_ROOT:-/var/lib/docker}}"
+mount_mode="${{CODEWIRE_DOCKER_MOUNT_MODE:-loop}}"
+mkdir -p "$data_root"
+if [ "$mount_mode" = "loop" ]; then
+  if [ ! -s "$data_image" ]; then
+    echo "the Docker data image $data_image is missing; the {DOCKER_DATA_INIT_CONTAINER} init container prepares it before Docker starts" >&2
+    exit 1
+  fi
+  if ! awk -v target="$data_root" '$2 == target && $3 == "ext4" {{ found = 1 }} END {{ exit found ? 0 : 1 }}' /proc/mounts; then
+    mount -o loop "$data_image" "$data_root"
+  fi
+elif [ "$mount_mode" != "none" ]; then
+  echo "unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode" >&2
+  exit 1
+fi
+exec dockerd --host "unix://{DIND_SOCKET_PATH}" --group 1000 --data-root "$data_root" --storage-driver vfs"#
+    )
+}
+
+/// The Docker data variables a guest DinD renders: a loop-mounted image at
+/// `/var/lib/docker`, or on confidential a plain directory on the protected
+/// disk.
+fn guest_dind_data_env(opts: &TemplateOpts, runtime_spec: &RuntimeProfileSpec) -> Vec<Value> {
+    let (data_root, mount_mode) = if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        ("/workspace/.codewire/docker-root", "none")
+    } else {
+        ("/var/lib/docker", "loop")
+    };
+    vec![
+        json!({ "name": "CODEWIRE_DOCKER_DATA_IMAGE", "value": "/workspace/.codewire/docker-data.ext4" }),
+        json!({ "name": "CODEWIRE_DOCKER_DATA_ROOT", "value": data_root }),
+        json!({ "name": "CODEWIRE_DOCKER_DATA_SIZE", "value": format!("{}G", docker_data_size_gib(opts.disk_gib)) }),
+        json!({ "name": "CODEWIRE_DOCKER_MOUNT_MODE", "value": mount_mode }),
+    ]
+}
+
+/// The data init a Pod renders: beside a guest DinD with a loop-mounted
+/// image, never on confidential.
+fn docker_data_init(
+    opts: &TemplateOpts,
+    runtime_spec: &RuntimeProfileSpec,
+    support_image: &str,
+) -> Option<Value> {
+    if runtime_spec.docker_mode != DOCKER_MODE_GUEST_DIND
+        || runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL
+    {
+        return None;
+    }
+    let env = guest_dind_data_env(opts, runtime_spec)
+        .into_iter()
+        .filter(|entry| {
+            entry["name"]
+                .as_str()
+                .is_some_and(|name| DOCKER_DATA_INIT_ENV.contains(&name))
+        })
+        .collect();
+    Some(docker_data_init_container(support_image, env))
+}
+
 fn dind_container(
     opts: &TemplateOpts,
     runtime_spec: &RuntimeProfileSpec,
     ext4_data_root: bool,
 ) -> Value {
-    let command = if ext4_data_root {
+    let command = if ext4_data_root && runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        json!(["sh", "-ec", growth_in_dind_bootstrap_script()])
+    } else if ext4_data_root {
         json!(["sh", "-ec", dind_bootstrap_script()])
     } else {
         json!([
@@ -800,18 +986,9 @@ fn dind_container(
         ])
     };
     let env = if ext4_data_root {
-        let (data_root, mount_mode) = if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
-            ("/workspace/.codewire/docker-root", "none")
-        } else {
-            ("/var/lib/docker", "loop")
-        };
-        json!([
-            { "name": "DOCKER_TLS_CERTDIR", "value": "" },
-            { "name": "CODEWIRE_DOCKER_DATA_IMAGE", "value": "/workspace/.codewire/docker-data.ext4" },
-            { "name": "CODEWIRE_DOCKER_DATA_ROOT", "value": data_root },
-            { "name": "CODEWIRE_DOCKER_DATA_SIZE", "value": format!("{}G", docker_data_size_gib(opts.disk_gib)) },
-            { "name": "CODEWIRE_DOCKER_MOUNT_MODE", "value": mount_mode },
-        ])
+        let mut env = vec![json!({ "name": "DOCKER_TLS_CERTDIR", "value": "" })];
+        env.extend(guest_dind_data_env(opts, runtime_spec));
+        Value::Array(env)
     } else {
         json!([ { "name": "DOCKER_TLS_CERTDIR", "value": "" } ])
     };

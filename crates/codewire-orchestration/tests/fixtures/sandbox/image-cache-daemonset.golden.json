@@ -3,7 +3,7 @@
   "kind": "DaemonSet",
   "metadata": {
     "annotations": {
-      "codewire.sh/image-cache-state": "{\"version\":2,\"generation\":2,\"sets\":[{\"release\":2,\"generation\":2,\"images\":[\"registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"registry.example.invalid/codewire/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c\"]},{\"release\":1,\"generation\":1,\"images\":[\"registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"registry.example.invalid/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c\"]}],\"retired\":[],\"spec_sha256\":\"24964f5c4e40dcb0442b5ae3ea94479d6ad0086e3e59f487e0034e88f175e401\"}"
+      "codewire.sh/image-cache-state": "{\"version\":3,\"generation\":2,\"sets\":[{\"release\":2,\"generation\":2,\"images\":[\"registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"registry.example.invalid/codewire/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977\"]},{\"release\":1,\"generation\":1,\"images\":[\"registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"registry.example.invalid/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977\"]}],\"retired\":[],\"spec_sha256\":\"7d637330553048a399b72c9a1c38ace76f8c0c3eae91c9145291a5daae5c425f\"}"
     },
     "labels": {
       "app.kubernetes.io/component": "image-cache",
@@ -38,7 +38,7 @@
               "sleep",
               "2147483647"
             ],
-            "image": "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
+            "image": "docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977",
             "imagePullPolicy": "IfNotPresent",
             "name": "idle",
             "resources": {

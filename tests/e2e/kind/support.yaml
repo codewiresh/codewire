@@ -22,7 +22,7 @@ data:
   # Workspace volumes use Kind's built-in local-path StorageClass. The
   # setting has no default (docs/CONFIGURATION.md).
   SANDBOX_WORKSPACE_STORAGE_CLASS: standard
-  SANDBOX_DIND_IMAGE: docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c
+  SANDBOX_DIND_IMAGE: docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
   # The image cache's tool image is a hardcoded public DinD reference, so the
   # cache cannot satisfy this gate's sealed local-alias provenance yet; keep
   # it out of the disposable overlay until the tool image follows the

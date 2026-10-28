@@ -189,6 +189,30 @@ mod tests {
         }
     }
 
+    /// A Pod spec's only init container is the guest DinD's Docker data init:
+    /// the support image as root, the three data variables, and only the
+    /// workspace volume, so no credential, token or daemon copy reaches it.
+    fn assert_only_docker_data_init(pod_spec: &Value) {
+        let inits = pod_spec["initContainers"].as_array().expect("init containers");
+        assert_eq!(inits.len(), 1, "{inits:?}");
+        let init = &inits[0];
+        assert_eq!(init["name"], DOCKER_DATA_INIT_CONTAINER);
+        assert_eq!(init["command"], json!(["sh", "-c", docker_data_image_prepare_script()]));
+        assert_eq!(
+            init["volumeMounts"],
+            json!([{ "name": "workspace", "mountPath": "/workspace" }])
+        );
+        let names: Vec<_> = init["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, DOCKER_DATA_INIT_ENV);
+        assert_eq!(init["securityContext"], json!({ "runAsUser": 0, "runAsGroup": 0 }));
+        assert!(init.get("envFrom").is_none());
+    }
+
     fn load_golden(name: &str) -> Value {
         let path = format!(
             "{}/tests/fixtures/sandbox/{name}",
@@ -382,9 +406,10 @@ mod tests {
                 );
             } else {
                 // The same-UID hosted daemon creates its owner-private process
-                // directory and writes Codex's home at startup: no init
-                // container runs.
-                assert!(workspace.get("initContainers").is_none());
+                // directory and writes Codex's home at startup: only the
+                // guest DinD's Docker data init runs, and it reaches only the
+                // workspace volume.
+                assert_only_docker_data_init(workspace);
             }
         }
     }
@@ -436,9 +461,10 @@ mod tests {
             }
         }
         // Commodity mounts the daemon from the support image and selected
-        // Codex needs no init container; confidential keeps only the daemon
+        // Codex needs no init container, so only the guest DinD's Docker data
+        // init runs, without a credential; confidential keeps only the daemon
         // copy, which never reaches the home.
-        assert!(workspace.get("initContainers").is_none());
+        assert_only_docker_data_init(workspace);
         let confidential = measured(opts.clone());
         let confidential = render_sandbox_template("dev-sandboxes", &confidential);
         let confidential_inits = confidential["spec"]["podTemplate"]["spec"]["initContainers"]
@@ -584,7 +610,7 @@ mod tests {
                 )["spec"]
             );
             assert_no_legacy_codex(&rendered);
-            assert!(spec.get("initContainers").is_none());
+            assert_only_docker_data_init(spec);
         }
         let mut opts = credential_opts();
         opts.managed_credential_clients = Default::default();
@@ -936,13 +962,15 @@ mod tests {
                     mount,
                     &json!({"name":"codewire-bin","mountPath":"/codewire/bin","subPath":"usr/local/bin","readOnly":true})
                 );
-                assert!(spec.get("initContainers").is_none(), "{profile}");
+                assert_only_docker_data_init(spec);
             } else {
                 assert_eq!(volume, &json!({"name":"codewire-bin","emptyDir":{}}));
                 assert_eq!(
                     mount,
                     &json!({"name":"codewire-bin","mountPath":"/codewire/bin"})
                 );
+                // Without a guest DinD (runc and none here), or with
+                // confidential's plain directory, only the daemon copy runs.
                 let init = spec["initContainers"].as_array().unwrap();
                 assert_eq!(init.len(), 1, "{profile}");
                 assert_eq!(init[0]["name"], "codewire-daemon-init");
@@ -1071,8 +1099,9 @@ mod tests {
             "gateway must not share the workspace runtime pod"
         );
         // The daemon comes read-only from the exact support image, so the
-        // commodity Pod starts without an init container.
-        assert!(pod_template["spec"].get("initContainers").is_none());
+        // commodity Pod's only init container prepares the guest DinD's data
+        // image (#3208).
+        assert_only_docker_data_init(&pod_template["spec"]);
         assert!(
             pod_template["spec"]["volumes"]
                 .as_array()
@@ -1111,21 +1140,68 @@ mod tests {
         assert_eq!(command[0].as_str(), Some("sh"));
         assert_eq!(command[1].as_str(), Some("-ec"));
         let bootstrap = command[2].as_str().unwrap();
-        assert!(bootstrap.contains("mkfs.ext4"));
-        assert!(bootstrap.contains("mount -o loop"));
-        assert!(bootstrap.contains("chown 1000:1000 \"$codewire_dir\""));
-        assert!(bootstrap.contains("chmod 0755 \"$codewire_dir\""));
-        assert!(!bootstrap.contains("0775"));
-        // A fresh sparse image is formatted without zeroing its inode tables
-        // or journal (Program #2238).
+        assert_eq!(bootstrap, dind_bootstrap_script());
+        // DinD only mounts the image the data init prepared, with busybox:
+        // the Docker 29.9.2 DinD image ships no e2fsprogs (#3208).
+        for tool in [
+            "mkfs", "mke2fs", "e2fsck", "resize2fs", "dumpe2fs", "losetup", "truncate", "chown",
+            "chmod",
+        ] {
+            assert!(!bootstrap.contains(tool), "DinD runs {tool}");
+        }
+        assert!(bootstrap.contains("mkdir -p \"$data_root\""));
+        assert!(bootstrap.contains("mount -o loop \"$data_image\" \"$data_root\""));
         assert!(bootstrap.contains(
+            "awk -v target=\"$data_root\" '$2 == target && $3 == \"ext4\" { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts"
+        ));
+        let missing = bootstrap.find("if [ ! -s \"$data_image\" ]; then").unwrap();
+        assert!(missing < bootstrap.find("mount -o loop").unwrap());
+        assert!(bootstrap[missing..].starts_with(
+            "if [ ! -s \"$data_image\" ]; then\n    echo \"the Docker data image $data_image is missing; the codewire-docker-data-init init container prepares it before Docker starts\" >&2\n    exit 1\n  fi"
+        ));
+        assert!(bootstrap.contains("echo \"unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode\" >&2"));
+        assert!(bootstrap.ends_with(
+            "exec dockerd --host \"unix:///var/run/docker/docker.sock\" --group 1000 --data-root \"$data_root\" --storage-driver vfs"
+        ));
+
+        // The data init prepares the image offline: it owns `.codewire`,
+        // formats a missing image lazily (Program #2238), and grows a grown
+        // one with a forced check before resize2fs, never shrinking it and
+        // never failing the init container.
+        let prepare = docker_data_image_prepare_script();
+        assert!(prepare.contains("chown 1000:1000 \"$codewire_dir\""));
+        assert!(prepare.contains("chmod 0755 \"$codewire_dir\""));
+        assert!(!prepare.contains("0775"));
+        assert!(prepare.contains(
             "mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 \"$data_image\""
         ));
-        // The bootstrap stored Sandboxes carry from before 531fc0f7e differs
-        // only in that mode; Start and Pod replacement re-render it (#2639).
-        // The one rendered until #2238 differs only in its eager mkfs, and
-        // the one rendered until #3554 only in not growing the Docker data
-        // image; Start and Pod replacement re-render both.
+        assert!(prepare.contains("rm -f \"$data_image\""));
+        assert!(prepare.contains("truncate -s \"$data_size\" \"$data_image\" || true"));
+        assert!(prepare.contains("dumpe2fs -h \"$data_image\""));
+        let fsck = prepare.find("e2fsck -fy \"$data_image\"").unwrap();
+        let resize = prepare.find("resize2fs \"$data_image\"").unwrap();
+        assert!(fsck < resize);
+        for absent in ["mount -o", "losetup", "set -e", "dockerd"] {
+            assert!(!prepare.contains(absent), "the data init runs {absent}");
+        }
+        assert!(
+            prepare
+                .lines()
+                .all(|line| !line.trim_start().starts_with("exit")),
+            "the data init never exits early"
+        );
+        assert!(
+            prepare.find("mkfs.ext4").unwrap() < prepare.find("data_gib=").unwrap(),
+            "growth follows the format of a missing image"
+        );
+
+        // The bootstraps stored Sandboxes carry. The one from before
+        // 531fc0f7e differs from the eager-mkfs one only in its 0775 mode
+        // (#2639); the eager one, rendered until #2238, from the lazy one
+        // only in its mkfs; the lazy one, rendered until #3554, from the one
+        // that grows inside DinD only in not growing. Start and Pod
+        // replacement re-render each of them (#3208).
+        let growth_in_dind = growth_in_dind_bootstrap_script();
         assert_eq!(
             LEGACY_DIND_BOOTSTRAP_SCRIPT.replace(
                 "chmod 0775 \"$codewire_dir\"",
@@ -1135,7 +1211,7 @@ mod tests {
             ),
             eager_mkfs_dind_bootstrap_script()
         );
-        assert_ne!(eager_mkfs_dind_bootstrap_script(), bootstrap);
+        assert_ne!(eager_mkfs_dind_bootstrap_script(), growth_in_dind);
         assert_eq!(
             eager_mkfs_dind_bootstrap_script().replace(
                 "    mkfs.ext4 -q -F \"$data_image\"",
@@ -1145,19 +1221,35 @@ mod tests {
             ),
             pre_growth_dind_bootstrap_script()
         );
-        let growth_start = bootstrap.find("  # A grown workspace disk").unwrap();
-        let growth_end = bootstrap.find("elif [ \"$mount_mode\" != \"none\" ]").unwrap();
+        let growth_start = growth_in_dind.find("  # A grown workspace disk").unwrap();
+        let growth_end = growth_in_dind
+            .find("elif [ \"$mount_mode\" != \"none\" ]")
+            .unwrap();
         assert_eq!(
-            format!("{}{}", &bootstrap[..growth_start], &bootstrap[growth_end..]),
+            format!(
+                "{}{}",
+                &growth_in_dind[..growth_start],
+                &growth_in_dind[growth_end..]
+            ),
             pre_growth_dind_bootstrap_script()
         );
-        let growth = &bootstrap[growth_start..growth_end];
-        assert!(growth.contains("truncate -s \"$data_size\" \"$data_image\" || true"));
+        let growth = &growth_in_dind[growth_start..growth_end];
         assert!(growth.contains("losetup -c \"$data_device\" && resize2fs \"$data_device\""));
-        assert!(!growth.contains("mkfs"));
-        // Growth follows the mount and never touches the mkfs that formats a
-        // missing image.
-        assert!(bootstrap.find("mount -o loop").unwrap() < growth_start);
+        // The variants a Start re-renders are all distinct from the current
+        // bootstrap and from each other.
+        let variants = [
+            LEGACY_DIND_BOOTSTRAP_SCRIPT.to_owned(),
+            eager_mkfs_dind_bootstrap_script(),
+            pre_growth_dind_bootstrap_script(),
+            growth_in_dind,
+            dind_bootstrap_script(),
+        ];
+        for (index, variant) in variants.iter().enumerate() {
+            assert!(
+                variants[index + 1..].iter().all(|other| other != variant),
+                "variant {index} repeats"
+            );
+        }
         assert!(bootstrap.contains("--data-root \"$data_root\""));
         assert!(bootstrap.contains("--storage-driver vfs"));
         assert!(dind["env"].as_array().unwrap().iter().any(|env| {
@@ -3277,6 +3369,125 @@ mod tests {
         assert_eq!(
             render_sandbox_template("dev-sandboxes", &confidential_golden_opts()),
             load_golden("confidential-sandboxtemplate.golden.json"),
+        );
+    }
+
+    /// The Docker data init renders beside a guest DinD with a loop-mounted
+    /// image on every profile but confidential, after any daemon copy, and
+    /// carries DinD's own data image, size and mount mode (#3208).
+    #[test]
+    fn a_guest_dind_renders_the_docker_data_init_after_any_daemon_copy() {
+        let spec = |opts: &TemplateOpts| {
+            render_sandbox_template("dev-sandboxes", opts)["spec"]["podTemplate"]["spec"].clone()
+        };
+        let init_names = |spec: &Value| -> Vec<String> {
+            spec["initContainers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|init| init["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        for (profile, docker_mode, expected) in [
+            (
+                RUNTIME_PROFILE_COMMODITY,
+                DOCKER_MODE_GUEST_DIND,
+                &[DOCKER_DATA_INIT_CONTAINER][..],
+            ),
+            (RUNTIME_PROFILE_COMMODITY, DOCKER_MODE_LOCAL_DIND_DIRECT, &[]),
+            (RUNTIME_PROFILE_COMMODITY, DOCKER_MODE_NONE, &[]),
+            (
+                RUNTIME_PROFILE_RUNC,
+                DOCKER_MODE_GUEST_DIND,
+                &["codewire-daemon-init", DOCKER_DATA_INIT_CONTAINER],
+            ),
+            (
+                RUNTIME_PROFILE_NONE,
+                DOCKER_MODE_GUEST_DIND,
+                &["codewire-daemon-init", DOCKER_DATA_INIT_CONTAINER],
+            ),
+            (
+                RUNTIME_PROFILE_RUNC,
+                DOCKER_MODE_LOCAL_DIND_DIRECT,
+                &["codewire-daemon-init"],
+            ),
+        ] {
+            let opts = TemplateOpts {
+                runtime_profile: profile.into(),
+                docker_mode: docker_mode.into(),
+                ..commodity_opts()
+            };
+            let spec = spec(&opts);
+            assert_eq!(init_names(&spec), expected, "{profile} {docker_mode}");
+            let Some(data_init) = spec["initContainers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|init| init["name"] == DOCKER_DATA_INIT_CONTAINER)
+            else {
+                continue;
+            };
+            assert_eq!(data_init["image"], opts.effective_support_image());
+            let dind = spec["containers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|container| container["name"] == "dind")
+                .unwrap();
+            assert_eq!(dind["command"][2], dind_bootstrap_script());
+            let dind_data_env: Vec<_> = dind["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| DOCKER_DATA_INIT_ENV.contains(&entry["name"].as_str().unwrap()))
+                .cloned()
+                .collect();
+            assert_eq!(data_init["env"], Value::Array(dind_data_env));
+        }
+    }
+
+    /// Confidential keeps its DinD bootstrap and its daemon copy exactly:
+    /// its DinD keeps a plain directory, so it runs only busybox on the
+    /// Docker 29.9.2 image and no init container reaches the protected disk.
+    #[test]
+    fn confidential_keeps_its_dind_bootstrap_and_only_the_daemon_copy() {
+        let rendered = render_sandbox_template("dev-sandboxes", &confidential_golden_opts());
+        let spec = &rendered["spec"]["podTemplate"]["spec"];
+        let inits = spec["initContainers"].as_array().unwrap();
+        assert_eq!(inits.len(), 1);
+        assert_eq!(inits[0]["name"], "codewire-daemon-init");
+        assert!(!rendered.to_string().contains(DOCKER_DATA_INIT_CONTAINER));
+        let dind = spec["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|container| container["name"] == "dind")
+            .unwrap();
+        assert_eq!(dind["command"], json!(["sh", "-ec", growth_in_dind_bootstrap_script()]));
+        assert!(dind["env"].as_array().unwrap().contains(
+            &json!({ "name": "CODEWIRE_DOCKER_MOUNT_MODE", "value": "none" })
+        ));
+        assert_eq!(dind["image"], DEFAULT_DIND_IMAGE);
+    }
+
+    /// Moving the data image's preparation changes the pool template, so a
+    /// warm pool rolls to members whose DinD no longer formats inside DinD.
+    #[test]
+    fn the_docker_data_init_changes_the_pool_revision() {
+        let template = render_sandbox_template("dev-sandboxes", &commodity_opts());
+        let mut prior = template["spec"].clone();
+        let pod = prior["podTemplate"]["spec"].as_object_mut().unwrap();
+        pod.remove("initContainers").unwrap();
+        let dind = pod["containers"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|container| container["name"] == "dind")
+            .unwrap();
+        dind["command"][2] = growth_in_dind_bootstrap_script().into();
+        assert_ne!(
+            crate::sandbox::warm_pool::pool_revision(&template["spec"]),
+            crate::sandbox::warm_pool::pool_revision(&prior)
         );
     }
 

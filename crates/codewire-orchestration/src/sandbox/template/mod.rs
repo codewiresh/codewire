@@ -41,9 +41,13 @@ pub use runtime_policy::{
 };
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
+#[cfg(test)]
+pub(crate) use workspace::docker_data_image_prepare_script;
 pub(crate) use workspace::{
-    DAEMON_INIT_CONTAINER, DAEMON_VOLUME, LEGACY_DIND_BOOTSTRAP_SCRIPT, dind_bootstrap_script,
-    eager_mkfs_dind_bootstrap_script, pre_growth_dind_bootstrap_script,
+    DAEMON_INIT_CONTAINER, DAEMON_VOLUME, DOCKER_DATA_INIT_CONTAINER, DOCKER_DATA_INIT_ENV,
+    LEGACY_DIND_BOOTSTRAP_SCRIPT, dind_bootstrap_script, docker_data_init_container,
+    eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
+    pre_growth_dind_bootstrap_script,
 };
 pub use workspace::{
     ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,
@@ -85,7 +89,7 @@ pub const CONFIDENTIAL_WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(1
 /// (`SANDBOX_DAEMON_IMAGE`, docs/CONFIGURATION.md); there is no default.
 #[cfg(test)]
 pub(crate) const TEST_SUPPORT_IMAGE: &str = "registry.example.invalid/codewire/daemon@sha256:adaba1f8e5ca50ed7aaeaf1b15d0588e441cadd1830e508a83108f798f66e029";
-pub const DEFAULT_DIND_IMAGE: &str = "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c";
+pub const DEFAULT_DIND_IMAGE: &str = "docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977";
 pub const WORKSPACE_DAEMON_PORT: i64 = 7777;
 pub const WORKSPACE_DAEMON_LISTEN_ADDR: &str = "0.0.0.0:7777";
 pub const SANDBOX_SERVICE_ACCOUNT: &str = codewire_daemon_proto::SANDBOX_SERVICE_ACCOUNT;
@@ -407,3 +411,5 @@ include!("tests.rs");
 
 #[cfg(test)]
 mod bridge_tests;
+#[cfg(test)]
+mod docker_data_tests;

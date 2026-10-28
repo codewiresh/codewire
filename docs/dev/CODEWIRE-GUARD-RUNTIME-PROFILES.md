@@ -82,9 +82,10 @@ the pod-local socket volume; the workspace uses
 guest, not the Kubernetes node's Docker socket.
 
 The `dind` data root must avoid host Docker/containerd sockets and must remain
-inside the runtime boundary. Commodity currently creates
-`/workspace/.codewire/docker-data.ext4`, mounts it inside the guest at
-`/var/lib/docker`, and starts dockerd with `vfs`. Confidential QEMU-SNP guests
+inside the runtime boundary. On commodity the `codewire-docker-data-init` init
+container creates `/workspace/.codewire/docker-data.ext4` from the support
+image's e2fsprogs, and DinD mounts it inside the guest at `/var/lib/docker`
+and starts dockerd with `vfs`. Confidential QEMU-SNP guests
 currently have ext4 support but no loop devices (`/dev/loop-control` and
 `/dev/loop*` are absent), so confidential uses a plain workspace-local
 `vfs` data root at `/workspace/.codewire/docker-root` instead of `mount -o
