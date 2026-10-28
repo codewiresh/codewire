@@ -181,21 +181,30 @@ else:
     # the checks run in their own job on the build runner, after the
     # archives, each Darwin check in its own target folder and cargo-zigbuild
     # wrapper folder, since the checks run at once (#3494).
+    # On a main push the same checks run in Build test archives, beside the
+    # legs (BUILD_ONCE_CHECKS, infra#1534 lever 3), with the same tools set up
+    # under the same selection, and only there.
     assert '\n  cw-release-assets:\n' not in ci
     compile_job = ci.split('\n  rust-compile:\n', 1)[1].split('\n  rust-checks:\n', 1)[0]
-    assert 'check-darwin-cross.sh' not in compile_job and 'Darwin' not in compile_job
+    assert 'check-darwin-cross.sh' not in compile_job
     checks_job = ci.split('\n  rust-checks:\n', 1)[1].split('\n  rust-packages:\n', 1)[0]
     cw_selected = "needs.verification-selection.outputs.cw_package_selected == 'true'"
-    setup = checks_job.split('      - name: Set up pinned Darwin C cross-check tools\n', 1)[1].split('      - name:', 1)[0]
-    assert "tested_tree_receipt != 'accepted'" in setup and cw_selected in setup
-    assert "contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_local_vmm|')" in setup
-    assert install in setup and export in setup and setup.index(install) < setup.index(export)
-    assert '"${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -' in setup
-    run = checks_job.split('      - name: Run the Rust checks\n', 1)[1].split('      - name:', 1)[0]
-    assert "CW_PACKAGE_SELECTED: ${{ needs.verification-selection.outputs.cw_package_selected }}" in run
-    assert 'run: scripts/ci/setup/build-once.sh checks' in run
-    assert checks_job.index('Bring the warm build folder to this commit') < checks_job.index('Set up pinned Darwin C cross-check tools')
-    assert checks_job.index('Set up pinned Darwin C cross-check tools') < checks_job.index('Run the Rust checks')
+    main_push = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    assert f"      BUILD_ONCE_CHECKS: ${{{{ {main_push} }}}}\n" in compile_job
+    assert f"!({main_push})" in checks_job.split('    steps:\n', 1)[0]
+    for job, run_name, command in ((checks_job, 'Run the Rust checks', 'build-once.sh checks'),
+                                   (compile_job, 'Run the build legs', 'build-once.sh build')):
+        setup = job.split('      - name: Set up pinned Darwin C cross-check tools\n', 1)[1].split('      - name:', 1)[0]
+        assert "tested_tree_receipt != 'accepted'" in setup and cw_selected in setup
+        assert "contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_local_vmm|')" in setup
+        assert (main_push in setup) == (job is compile_job)
+        assert install in setup and export in setup and setup.index(install) < setup.index(export)
+        assert '"${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -' in setup
+        run = job.split(f'      - name: {run_name}\n', 1)[1].split('      - name:', 1)[0]
+        assert "CW_PACKAGE_SELECTED: ${{ needs.verification-selection.outputs.cw_package_selected }}" in run
+        assert f'run: scripts/ci/setup/{command}' in run
+        assert job.index('Bring the warm build folder to this commit') < job.index('Set up pinned Darwin C cross-check tools')
+        assert job.index('Set up pinned Darwin C cross-check tools') < job.index(f'- name: {run_name}')
     script = (source / 'scripts/ci/verify/run-rust-checks.sh').read_text()
     assert ("phase 'cw Darwin cross-check' env CARGO_TARGET_DIR=\"$cw_darwin_target\" \\\n"
             "    CARGO_ZIGBUILD_CACHE_DIR=\"$cw_darwin_target\" \\\n"

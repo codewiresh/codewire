@@ -3267,6 +3267,12 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
       echo 'rust-packages: the archive path must follow the fetch' >&2
       exit 1
     fi
+  elif [ "$job_id" = rust-checks ]; then
+    # On a main push the Rust checks run in Build test archives, beside the
+    # legs (infra#1534 lever 3); the job graph below proves both events.
+    grep -qF \
+      "    if: \${{ needs.verification-selection.outputs.${expectation_name}_expected == 'true' && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}" \
+      "$block"
   else
     grep -qF \
       "    if: \${{ needs.verification-selection.outputs.${expectation_name}_expected == 'true' }}" \
@@ -6242,6 +6248,27 @@ for selection in sorted(set(realistic) | synthetic):
                 raise SystemExit(
                     f"{job_id} has selected work but is not dispatched for {selection} "
                     f"(cw={cw} desktop={desktop}): {gated}")
+        # The Rust checks run exactly once wherever the archives are built: in
+        # Rust checks after the build, or on a main push in the build itself,
+        # beside its legs (BUILD_ONCE_CHECKS; infra#1534 lever 3), with their
+        # Darwin tools set up in that one job. Required verification reads
+        # the result of the job that ran them.
+        compile_started = evaluate(jobs["rust-compile"]["if"], context)
+        checks_started = evaluate(jobs["rust-checks"]["if"], context)
+        beside = env_value(jobs["rust-compile"]["env"]["BUILD_ONCE_CHECKS"], context)
+        on_main = event == "push to main"
+        if beside != ("true" if on_main else "false"):
+            raise SystemExit(f"the build runs the Rust checks beside its legs={beside} on a {event}")
+        if checks_started != (compile_started and not on_main):
+            raise SystemExit(f"Rust checks started={checks_started} with the build started={compile_started} "
+                             f"on a {event} for {selection}")
+        darwin = {job_id for job_id in ("rust-compile", "rust-checks")
+                  if evaluate(jobs[job_id]["if"], context)
+                  and any(step.get("name") == "Set up pinned Darwin C cross-check tools"
+                          and evaluate(step["if"], context) for step in jobs[job_id]["steps"])}
+        wanted_darwin = (facts[0] == "true" or "|transport_pkg_codewire_local_vmm|" in selection) and compile_started
+        if darwin != ({"rust-compile" if on_main else "rust-checks"} if wanted_darwin else set()):
+            raise SystemExit(f"the Darwin tools are set up in {sorted(darwin)} on a {event} for {selection}")
         # The Tooling job starts exactly when a Tooling family is selected.
         families = tooling_parts(selection)
         if evaluate(jobs["tooling"]["if"], context) != bool(families):
@@ -6289,6 +6316,22 @@ for selection in scheduled:
                 raise SystemExit(f"a scheduled run starts {job_id} with no work for {selection}")
         checked += 1
 print(f"dispatched jobs always have work: {checked} event, selection and artifact combinations")
+
+# Required verification takes the Rust checks' result from the job that ran
+# them: Build test archives on a main push, Rust checks otherwise. A failed
+# or missing check is never read as success.
+checks_result = next(step for step in jobs["required-verification"]["steps"]
+                     if step.get("name") == "Require capability groups")["env"]["VERIFICATION_RUST_CHECKS_RESULT"]
+for event in ("push to main", "pull request"):
+    for compile_result, checks_result_value in itertools.product(
+            ("success", "failure", "cancelled", "skipped"), ("success", "failure", "cancelled", "skipped")):
+        context = {**EVENTS[event], "needs.rust-compile.result": compile_result,
+                   "needs.rust-checks.result": checks_result_value}
+        seen = env_value(checks_result, context)
+        wanted = compile_result if event == "push to main" else checks_result_value
+        if seen != wanted:
+            raise SystemExit(f"Required verification reads the Rust checks as {seen}, not {wanted}, on a {event}")
+print("Rust checks: once per build, in Build test archives on a main push and in Rust checks otherwise")
 PY
 }
 defer_slow_check check_job_work

@@ -17,7 +17,9 @@
 #                                   never removes (bound_targets)
 #   build-once.sh build OUT         run every wanted leg (LEGS below) at once;
 #                                   each writes its test archives to
-#                                   OUT/<leg>.<ext>
+#                                   OUT/<leg>.<ext>; with BUILD_ONCE_CHECKS=true
+#                                   (a main push) the Rust checks run beside
+#                                   them, under the same jobserver
 #   build-once.sh leg NAME OUT      run one leg
 #   build-once.sh legs              list the wanted legs
 #   build-once.sh publish OUT       upload every OUT/<leg>.* to the archive
@@ -25,8 +27,9 @@
 #                                   output <leg>_sha256
 #   build-once.sh checks            run the Rust checks (run-rust-checks.sh)
 #                                   at once under one jobserver, each in its
-#                                   own target folder, in the Rust checks job
-#                                   after prepare
+#                                   own target folder: in the Rust checks job
+#                                   after prepare (every run but a main
+#                                   push), or within build
 #
 # The build folder, /ci-cache/main or /ci-cache/pr:
 # - src: a persistent clone. The job's checkout is fetched into it, so git
@@ -249,10 +252,14 @@ mark_used() {
 
 job_folders() {
   # job_folders build|checks: the target folders the job is about to use,
-  # the wanted legs or the Rust checks' folders. A leg's desktop folder goes
-  # and stays with its leg.
+  # the wanted legs or the Rust checks' folders, and both for a build that
+  # runs the checks beside its legs (BUILD_ONCE_CHECKS). A leg's desktop
+  # folder goes and stays with its leg.
   case "$1" in
-    build) wanted_legs ;;
+    build)
+      wanted_legs
+      if [ "${BUILD_ONCE_CHECKS:-}" = true ]; then printf '%s\n' "${CHECK_FOLDERS[@]}"; fi
+      ;;
     checks) printf '%s\n' "${CHECK_FOLDERS[@]}" ;;
   esac
 }
@@ -561,15 +568,35 @@ run_one_leg() {
   fi
 }
 
+run_checks_beside_legs() {
+  # run_checks_beside_legs LOGS: the Rust checks (checks below) with their
+  # own log, as one more task beside the legs; a failure is listed in
+  # LOGS/failed as "checks".
+  local logs="$1" started=$SECONDS status=0
+  echo "[build-once] checks: start"
+  "$ROOT/scripts/ci/setup/build-once.sh" checks > "$logs/checks.log" 2>&1 || status=1
+  echo "[build-once] checks: finish (status=$status elapsed_seconds=$((SECONDS - started)))"
+  if [ "$status" -ne 0 ]; then
+    echo checks >> "$logs/failed"
+    return 1
+  fi
+}
+
 run_legs() {
   # run_legs OUT LOGS: every wanted leg at once, under the jobserver build
-  # started; it fails when any leg failed.
+  # started, and on a main push the Rust checks beside them (infra#1534
+  # lever 3: they started only after the whole build, 51-177 s later, and
+  # took about as long as the test jobs after it); it fails when any of them
+  # failed.
   local out="$1" logs="$2" name pid status=0
   local -a pids=()
   while read -r name; do
     [ -n "$name" ] || continue
     run_one_leg "$name" "$out" "$logs" & pids+=("$!")
   done < <(wanted_legs)
+  if [ "${BUILD_ONCE_CHECKS:-}" = true ]; then
+    run_checks_beside_legs "$logs" & pids+=("$!")
+  fi
   for pid in "${pids[@]}"; do
     wait "$pid" || status=1
   done
@@ -601,18 +628,21 @@ build() {
   tokens="$(jobserver_tokens)"
   [[ "$tokens" =~ ^[1-9][0-9]*$ ]] || die "invalid jobserver size: $tokens"
   [ "${BUILD_ONCE_COLD:-false}" = false ] || echo 'build-once: cold build folders'
-  echo "build-once: legs $(wanted_legs | tr '\n' ' ')at once, $tokens compilers in all"
+  local beside=''
+  [ "${BUILD_ONCE_CHECKS:-}" != true ] || beside='and the Rust checks '
+  echo "build-once: legs $(wanted_legs | tr '\n' ' ')${beside}at once, $tokens compilers in all"
   # A Cargo that cannot reach the jobserver falls back to these few jobs.
-  CARGO_BUILD_JOBS=4 python3 "$ROOT/scripts/ci/setup/jobserver.py" "$tokens" -- \
+  # The checks find it in BUILD_ONCE_JOBSERVER and take no other.
+  CARGO_BUILD_JOBS=4 BUILD_ONCE_JOBSERVER="$tokens" python3 "$ROOT/scripts/ci/setup/jobserver.py" "$tokens" -- \
     "$ROOT/scripts/ci/setup/build-once.sh" run-legs "$out" "$logs" || status=1
   while read -r name; do
     [ -f "$logs/$name.log" ] || continue
     echo "::group::$name"; cat "$logs/$name.log"; echo '::endgroup::'
-  done < <(wanted_legs)
+  done < <(wanted_legs; [ "${BUILD_ONCE_CHECKS:-}" != true ] || echo checks)
   grep -h '^\[build-once\]' "$logs"/*.log 2>/dev/null || true
   if [ -f "$logs/failed" ]; then
     while read -r name; do
-      echo "::error::the $name leg failed"
+      if [ "$name" = checks ]; then echo '::error::the Rust checks failed'; else echo "::error::the $name leg failed"; fi
       tail -n 80 "$logs/$name.log"
     done < "$logs/failed"
   fi
@@ -642,8 +672,8 @@ publish() {
 
 checks() {
   # The Rust checks (run-rust-checks.sh) from src, in their own warm target
-  # folders, on the build runner after this run's archives (the Rust checks
-  # job). A check that read a corrupt output in one of them wipes the folders
+  # folders, on the build runner: after this run's archives in the Rust
+  # checks job, or beside the legs on a main push (build). A check that read a corrupt output in one of them wipes the folders
   # its log names (clippy when it names none) and runs once more, as a leg
   # does (rebuild_corrupt_leg).
   local log folder folders=() status=0
@@ -678,17 +708,25 @@ run_checks() {
   # 24112), and the checks one after another at 20.4 GiB. A Cargo that
   # cannot reach the jobserver falls back to these few jobs.
   local tokens
+  local -a folders=(CARGO_TARGET_DIR="$work/targets/clippy"
+    RUST_CHECKS_FEATURES_TARGET_DIR="$work/targets/clippy_features"
+    RUST_CHECKS_DARWIN_TARGET_DIR="$work/targets/darwin"
+    RUST_CHECKS_CW_DARWIN_TARGET_DIR="$work/targets/darwin_cw"
+    CODEWIRE_DESKTOP_CHECK_TARGET_DIR="$work/targets/desktop")
+  # Beside the legs (build), the checks take their compilers from the legs'
+  # jobserver, which their Cargo finds in CARGO_MAKEFLAGS.
+  if [ -n "${BUILD_ONCE_JOBSERVER:-}" ]; then
+    echo "build-once: the Rust checks at once, beside the legs, from their $BUILD_ONCE_JOBSERVER compilers"
+    env "${folders[@]}" "$BUILD_ONCE_SRC/scripts/ci/verify/run-rust-checks.sh"
+    return
+  fi
   tokens="$(jobserver_tokens)"
   [[ "$tokens" =~ ^[1-9][0-9]*$ ]] || die "invalid jobserver size: $tokens"
   if [[ "${CARGO_BUILD_JOBS:-}" =~ ^[1-9][0-9]*$ ]] && (( CARGO_BUILD_JOBS < tokens )); then
     tokens="$CARGO_BUILD_JOBS"
   fi
   echo "build-once: the Rust checks at once, $tokens compilers in all"
-  env CARGO_TARGET_DIR="$work/targets/clippy" \
-    RUST_CHECKS_FEATURES_TARGET_DIR="$work/targets/clippy_features" \
-    RUST_CHECKS_DARWIN_TARGET_DIR="$work/targets/darwin" \
-    RUST_CHECKS_CW_DARWIN_TARGET_DIR="$work/targets/darwin_cw" \
-    CODEWIRE_DESKTOP_CHECK_TARGET_DIR="$work/targets/desktop" \
+  env "${folders[@]}" \
     CARGO_BUILD_JOBS=4 python3 "$ROOT/scripts/ci/setup/jobserver.py" "$tokens" -- \
     "$BUILD_ONCE_SRC/scripts/ci/verify/run-rust-checks.sh"
 }

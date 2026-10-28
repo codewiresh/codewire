@@ -334,6 +334,18 @@ kept $CHECK_FOLDERS
 [ "$(removals)" -eq 0 ] || fail 'the bound removed a folder this job is about to use'
 grep -q 'disk 90% used with no target folder left that this job does not use' "$work/prepare.log" ||
   fail 'the bound did not say every folder left is in use'
+# A main push's build runs the Rust checks beside its legs
+# (BUILD_ONCE_CHECKS): its prepare keeps their folders as its own, where a
+# build without them removes them first, as any live folder it does not use.
+rm -rf "$marker_root/targets"
+for folder in $CHECK_FOLDERS archive; do mark "$folder" 690 '1 hour ago'; done
+GITHUB_RUN_ID=700 PREPARE_JOB=build BUILD_ONCE_CHECKS=true FAKE_DF_PER_LEG=16 targets_prepare
+# shellcheck disable=SC2086 # Each check folder is one argument.
+kept $CHECK_FOLDERS archive
+[ "$(removals)" -eq 0 ] || fail 'a build with the Rust checks removed their folders'
+GITHUB_RUN_ID=700 PREPARE_JOB=build FAKE_DF_PER_LEG=16 targets_prepare
+[ "$(removals)" -gt 0 ] || fail 'a build without the Rust checks kept their folders over 80 %'
+kept archive
 if "$SCRIPT" finish >/dev/null 2>&1; then fail 'the retired finish subcommand was accepted'; fi
 
 # A leg that reads a corrupt output from its warm target folder wipes the
@@ -414,6 +426,8 @@ if legs_build compile; then fail 'a compile error passed'; fi
 mkdir -p "$legs_src/scripts/ci/verify"
 cat > "$legs_src/scripts/ci/verify/run-rust-checks.sh" <<'CHECKS'
 #!/bin/sh
+echo "checks-start $(date +%s%N)" >> "$LEGS_STATE/times"; sleep "${CHECKS_SLEEP:-0}"
+echo "checks-end $(date +%s%N)" >> "$LEGS_STATE/times"
 echo "checks $PWD $CARGO_TARGET_DIR $RUST_CHECKS_FEATURES_TARGET_DIR $RUST_CHECKS_DARWIN_TARGET_DIR $RUST_CHECKS_CW_DARWIN_TARGET_DIR $CODEWIRE_DESKTOP_CHECK_TARGET_DIR" >> "$LEGS_STATE/checks"
 echo "jobs ${CARGO_BUILD_JOBS:-} ${CARGO_MAKEFLAGS:-none}" >> "$LEGS_STATE/jobserver"
 case "$CHECKS_MODE" in
@@ -474,6 +488,40 @@ grep -q "the Rust checks read a corrupt output in $checks_root/darwin_cw; it is 
 if checks_run lint; then fail 'a failed check passed'; fi
 [ "$(wc -l < "$work/legs-state/checks")" -eq 1 ] || fail 'a failed check was rerun'
 [ -e "$checks_root/clippy/broken" ] || fail 'a failed check wiped its folder'
+
+# On a main push the Rust checks run beside the legs (BUILD_ONCE_CHECKS): at
+# the same time, from the legs' one jobserver, with their own log; a failed
+# check fails the build, and the legs still finish.
+legs_checks_build() {
+  rm -rf "$work/legs-out" "$work/legs-state"; mkdir -p "$work/legs-out" "$work/legs-state"
+  mkdir -p "$checks_root/clippy"; rm -f "$checks_root/clippy/broken" "$checks_root/darwin_cw/broken"
+  [ "$1" != lint ] || : > "$checks_root/clippy/broken"
+  PATH="$work/legs-bin:$PATH" BUILD_ONCE_ROOT="$work/legs-root" BUILD_ONCE_SRC="$legs_src" \
+    LEGS_STATE="$work/legs-state" LEGS_CARGO_MODE=ok RUNNER_TEMP="$work/legs-state" VERIFICATION_SELECTION='' \
+    BUILD_ONCE_JOBSERVER_TOKENS=6 BUILD_ONCE_CHECKS=true CHECKS_MODE="$1" CHECKS_SLEEP=1 GITHUB_RUN_ID=78 \
+    "$SCRIPT" build "$work/legs-out" > "$work/legs-checks.log" 2>&1
+}
+legs_checks_build ok || fail "the build with the Rust checks failed: $(cat "$work/legs-checks.log")"
+[ "$(at archive-start)" -lt "$(at checks-end)" ] && [ "$(at checks-start)" -lt "$(at archive-end)" ] ||
+  fail 'the Rust checks did not run beside the legs'
+read -r _ jobs makeflags < "$work/legs-state/jobserver"
+[ "$jobs" = 4 ] && [ "$makeflags" = "$(at archive-makeflags)" ] && [[ "$makeflags" == '-j6 '* ]] ||
+  fail "the Rust checks did not take the legs' jobserver: $jobs $makeflags, legs $(at archive-makeflags)"
+grep -qx "checks $legs_src $checks_root/clippy $checks_root/clippy_features $checks_root/darwin $checks_root/darwin_cw $checks_root/desktop" \
+  "$work/legs-state/checks" || fail "the Rust checks ran outside src or their folders: $(cat "$work/legs-state/checks")"
+grep -q '^build-once: legs archive and the Rust checks at once, 6 compilers in all$' "$work/legs-checks.log" ||
+  fail "the build did not report the Rust checks beside its legs: $(cat "$work/legs-checks.log")"
+grep -q '^build-once: the Rust checks at once, beside the legs, from their 6 compilers$' "$work/legs-checks.log" &&
+  grep -q '^\[build-once\] checks: finish (status=0 elapsed_seconds=[0-9]*)$' "$work/legs-checks.log" ||
+  fail "the Rust checks' log or time did not reach the job log"
+[ "$(cat "$checks_root/clippy/.build-once-used")" = 78 ] || fail 'the Rust checks beside the legs did not mark their folders'
+if legs_checks_build lint; then fail 'a failed Rust check passed the build'; fi
+grep -q '^::error::the Rust checks failed$' "$work/legs-checks.log" || fail 'the failed Rust checks were not reported'
+[ -f "$work/legs-out/archive.tar.zst" ] || fail 'a failed Rust check stopped the legs'
+# Without BUILD_ONCE_CHECKS (every run but a main push) the build runs no
+# check: Rust checks does, after it.
+legs_build ok || fail "a build without the Rust checks failed: $(cat "$work/legs.log")"
+[ ! -s "$work/legs-state/checks" ] || fail 'a build without BUILD_ONCE_CHECKS ran the Rust checks'
 
 # publish uploads every leg output and names its job output after the leg.
 mkdir -p "$work/out" "$work/store/v1/archives"
