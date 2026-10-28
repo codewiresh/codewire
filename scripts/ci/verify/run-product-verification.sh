@@ -307,7 +307,9 @@ shard_test() {
     arg="$1"
     shift
     if [ "$arg" = -- ]; then
-      filter=("$@")
+      # Keep the separator: what follows it belongs to the test binary
+      # (--ignored, --exact, names), not to cargo.
+      filter=(-- "$@")
       break
     fi
     build+=("$arg")

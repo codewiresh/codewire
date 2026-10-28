@@ -5137,6 +5137,32 @@ defer_check run_primitive_rust_case graph_failure rust_pkg_codewire_protected_st
 defer_check run_primitive_rust_case forbidden_provider rust_pkg_codewire_protected_store 1 0 '' platform,platform-test-support
 defer_check run_primitive_rust_case clippy_failure rust_pkg_codewire_protected_store 1 1 clippy
 
+# In the all stage, shard_test hands everything after `--` to the test binary:
+# cargo must receive the separator, or it rejects --ignored and --exact.
+run_shard_test_all_stage_case() {
+  local log="$primitive_probe/shard-test-all.log" out="$primitive_probe/shard-test-all.out"
+  : > "$log"
+  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$log" \
+    PRIMITIVE_RUST_BODY="$primitive_rust_body" RUST_SHARD_STAGE=all \
+    bash -c '
+      set -euo pipefail
+      source "$PRIMITIVE_RUST_BODY"
+      shard_test live "--run-ignored only -E test(=a::b)" \
+        -p codewire-vmm-guest-probe --lib -- --ignored --exact a::b
+      shard_test plain "" -p codewire-protected-store --features platform --all-targets
+    ' > "$out" 2>&1 || { cat "$out" >&2; exit 1; }
+  local expected
+  expected="$(printf '%s\n' \
+    'test --locked -p codewire-vmm-guest-probe --lib -- --ignored --exact a::b' \
+    'test --locked -p codewire-protected-store --features platform --all-targets')"
+  [[ "$(cat "$log")" == "$expected" ]] || {
+    echo 'shard_test all stage must pass test-binary arguments after --, and add no -- without them' >&2
+    cat "$log" >&2
+    exit 1
+  }
+}
+defer_check run_shard_test_all_stage_case
+
 run_admin_rust_case() {
   local name="$1" tokens="$2" graph="$3" expected_status="$4" fail="${5:-}"
   local log="$primitive_probe/admin-rust-$name.log" output="$primitive_probe/admin-rust-$name.out"
@@ -5245,7 +5271,7 @@ run_pod_identity_rust_case() {
     [[ "$status" == 0 ]] || { cat "$primitive_probe/pod-identity-$name.out" >&2; exit 1; }
   fi
   clippy_count="$(grep -cxF 'clippy --locked -p codewire-server-core --features kubernetes-identity --all-targets -- -D warnings' "$log" || true)"
-  test_count="$(grep -cxF 'test --locked -p codewire-server-core --features kubernetes-identity --lib pod_identity::' "$log" || true)"
+  test_count="$(grep -cxF 'test --locked -p codewire-server-core --features kubernetes-identity --lib -- pod_identity::' "$log" || true)"
   [[ "$clippy_count" == "$expected" ]] || { echo "$name: missing or duplicate Pod identity Clippy" >&2; exit 1; }
   if [[ "$fail" == clippy ]]; then
     [[ "$test_count" == 0 ]] || { echo "$name: tests followed failed Pod identity Clippy" >&2; exit 1; }
