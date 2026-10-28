@@ -1225,14 +1225,24 @@ impl TemporalTrigger {
                     .build(),
             )
             .build();
-        self.client
-            .start_workflow(
-                EnvironmentWorkflow::run,
-                EnvironmentCommand::default(),
-                options,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("signal/start environment workflow: {e}"))?;
+        // The RPC runs span-free: Temporal's frontend closes connections at
+        // their maximum age, and the SDK's channel reopens one lazily inside
+        // the next call, through an executor that keeps the caller's span for
+        // the connection's life (#3581). The signal carries the trace context
+        // itself, so the workflow's activities still join this trace.
+        let client = self.client.clone();
+        codewire_server_core::span_free::detached(async move {
+            client
+                .start_workflow(
+                    EnvironmentWorkflow::run,
+                    EnvironmentCommand::default(),
+                    options,
+                )
+                .await
+                .map(|_| ())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("signal/start environment workflow: {e}"))?;
         Ok(())
     }
 

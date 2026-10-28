@@ -127,6 +127,23 @@ pub async fn kube_client_default() -> kube::Result<kube::Client> {
     )
 }
 
+/// Run `fut` in a task with no current span and await it. For a client
+/// with no executor hook (the Temporal SDK's tonic channel): a connection it
+/// opens or reopens inside `fut` then holds no caller span. The caller keeps
+/// its own span around the await, and anything that must join its trace
+/// carries the context explicitly ([`crate::obs::TraceContext`]).
+pub async fn detached<F>(fut: F) -> F::Output
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match tokio::spawn(fut).await {
+        Ok(output) => output,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => panic!("detached task cancelled: {error}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -185,6 +202,37 @@ mod tests {
     #[tokio::test]
     async fn the_detached_executor_never_holds_the_request_span() {
         assert!(request_closes_while_task_lives(super::DetachedExecutor).await);
+    }
+
+    /// A connection spawned through hyper-util's executor inside
+    /// [`super::detached`] does not hold the caller's span.
+    #[tokio::test]
+    async fn a_connection_opened_inside_detached_work_never_holds_the_caller_span() {
+        use tracing::Instrument as _;
+
+        let closed = Closed::default();
+        let subscriber = tracing_subscriber::registry().with(closed.clone());
+        let _default = tracing::subscriber::set_default(subscriber);
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        async move {
+            super::detached(async move {
+                hyper::rt::Executor::execute(&hyper_util::rt::TokioExecutor::new(), async move {
+                    let _ = stopped.await;
+                });
+            })
+            .await;
+        }
+        .instrument(tracing::info_span!("request"))
+        .await;
+        tokio::task::yield_now().await;
+        let closed_early = closed
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|name| name == "request");
+        let _ = stop.send(());
+        assert!(closed_early);
     }
 
     /// One Kubernetes API request through `client`, against a server that
