@@ -577,15 +577,6 @@ run_product_command() {
       --admin-oidc "${smoke_args[@]}"
 }
 
-# Pending B2c: the product phase creates a confidential environment, and
-# confidential environments cannot bind to the workspace binding yet. Since
-# daemon-hosted access (#2460) serves SSH and the tailnet only from a bound
-# daemon, the API refuses them with "confidential isolation is temporarily
-# unavailable". The phase is skipped explicitly and the run never reports a
-# pass while it is skipped.
-COCO_PRODUCT_PENDING_B2C=1
-COCO_PRODUCT_SKIPPED=0
-
 run_coco_product() {
   local product_log="$EVIDENCE_DIR/coco-product.log"
 
@@ -593,11 +584,6 @@ run_coco_product() {
     log "skipping Codewire product CoCo smoke"
     return 0
   }
-  if [[ "$COCO_PRODUCT_PENDING_B2C" == "1" ]]; then
-    log "SKIPPED pending B2c: the Codewire product CoCo smoke creates a confidential environment, and confidential isolation is temporarily unavailable"
-    COCO_PRODUCT_SKIPPED=1
-    return 0
-  fi
   log "running Codewire product smoke against the Flux-promoted confidential profile"
   if run_product_command >"$product_log" 2>&1; then
     [[ "$COCO_EXPECT_REFUSAL" == "0" ]] || \
@@ -619,10 +605,6 @@ main() {
   run_raw_jobs
   run_guest_attestation
   run_coco_product
-  if [[ "$COCO_PRODUCT_SKIPPED" == "1" ]]; then
-    log "confidential SNP smoke NOT PASSED: platform checks completed; the product CoCo phase is skipped pending B2c (rerun with --skip-coco to accept the platform checks alone)"
-    exit 77
-  fi
   log "confidential SNP smoke passed"
   log "restore the commodity Dev profile in codewire/deploy and the baseline smoke Kustomization through reviewed commits"
 }

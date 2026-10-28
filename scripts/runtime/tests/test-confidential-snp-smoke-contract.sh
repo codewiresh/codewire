@@ -170,29 +170,12 @@ EOF
 cmp "$forward_dir/expected" "$forward_dir/capture"
 rm -rf "$forward_dir"
 
-# Pending B2c the product phase, which creates a confidential environment the
-# API refuses, is skipped with its reason and the run never reports a pass.
-rg -F 'COCO_PRODUCT_PENDING_B2C=1' "$SMOKE" >/dev/null
-rg -F 'SKIPPED pending B2c' "$SMOKE" >/dev/null
-rg -F 'confidential SNP smoke NOT PASSED' "$SMOKE" >/dev/null
-awk '/^main\(\) \{/,/^}/' "$SMOKE" | rg -F 'exit 77' >/dev/null
-skip_dir="$(mktemp -d "$ROOT/.tmp/confidential-smoke-b2c-skip.XXXXXX")"
-(
-  export EVIDENCE_DIR="$skip_dir"
-  export RUN_COCO_PRODUCT=0
-  # shellcheck disable=SC1090
-  source <(sed '$d' "$SMOKE")
-  RUN_COCO_PRODUCT=1
-  run_product_command() {
-    printf 'pending B2c product phase ran the product smoke\n' >&2
-    exit 1
-  }
-  run_coco_product 2>"$skip_dir/log"
-  [[ "$COCO_PRODUCT_SKIPPED" == 1 ]]
-  rg -F 'SKIPPED pending B2c' "$skip_dir/log" >/dev/null
-  rg -F 'confidential isolation is temporarily unavailable' "$skip_dir/log" >/dev/null
-)
-rm -rf "$skip_dir"
+
+# B2c lifted the confidential refusal: the product phase runs, never skips.
+if rg -F 'PENDING_B2C' "$SMOKE" >/dev/null || rg -F 'exit 77' "$SMOKE" >/dev/null; then
+  echo "confidential SNP smoke still skips its product phase" >&2
+  exit 1
+fi
 
 jq -n '{
   metadata: {generation: 7},

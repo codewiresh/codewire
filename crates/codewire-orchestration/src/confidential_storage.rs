@@ -55,32 +55,22 @@ pub struct FeatureFlags {
 
 impl FeatureFlags {
     pub fn from_env() -> anyhow::Result<Self> {
+        Self::from_settings(
+            env_setting("SANDBOX_CONFIDENTIAL_STORAGE_ENABLED")?.as_deref(),
+            env_setting("SANDBOX_CONFIDENTIAL_ADMIN_ONLY")?.as_deref(),
+        )
+    }
+
+    /// The flags a deployment's settings select. Confidential storage is off
+    /// unless a deployment turns it on, and admin-only unless one turns that
+    /// off: a deployment that names neither, as Production does, refuses
+    /// every confidential create and start.
+    fn from_settings(enabled: Option<&str>, admin_only: Option<&str>) -> anyhow::Result<Self> {
         Ok(Self {
-            enabled: parse_bool_env("SANDBOX_CONFIDENTIAL_STORAGE_ENABLED", false)?,
-            admin_only: parse_bool_env("SANDBOX_CONFIDENTIAL_ADMIN_ONLY", true)?,
+            enabled: parse_bool("SANDBOX_CONFIDENTIAL_STORAGE_ENABLED", enabled, false)?,
+            admin_only: parse_bool("SANDBOX_CONFIDENTIAL_ADMIN_ONLY", admin_only, true)?,
         })
     }
-}
-
-/// The stable refusal while a confidential workspace cannot bind. Daemon-
-/// hosted access (#2460) serves SSH and the tailnet only from a bound daemon,
-/// and a confidential workspace keeps its measured, environment-bound identity
-/// until B2c moves it onto the workspace binding; until then no confidential
-/// environment is created or started.
-pub const CONFIDENTIAL_ISOLATION_UNAVAILABLE: &str =
-    "confidential isolation is temporarily unavailable";
-pub const CONFIDENTIAL_ISOLATION_UNAVAILABLE_CODE: &str = "CONFIDENTIAL_ISOLATION_UNAVAILABLE";
-
-/// Refuse to create or start a confidential environment until B2c.
-pub fn refuse_confidential_isolation(isolation_tier: &str) -> AppResult<()> {
-    if isolation_tier != "confidential" {
-        return Ok(());
-    }
-    Err(AppError::Coded {
-        status: StatusCode::SERVICE_UNAVAILABLE,
-        code: CONFIDENTIAL_ISOLATION_UNAVAILABLE_CODE,
-        detail: CONFIDENTIAL_ISOLATION_UNAVAILABLE.into(),
-    })
 }
 
 /// Authoritative product gate for confidential create and interactive
@@ -111,13 +101,20 @@ pub fn require_interactive_access(
     Ok(())
 }
 
-fn parse_bool_env(name: &str, default: bool) -> anyhow::Result<bool> {
+fn env_setting(name: &str) -> anyhow::Result<Option<String>> {
     match std::env::var(name) {
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Ok(value) if value == "true" => Ok(true),
-        Ok(value) if value == "false" => Ok(false),
-        Ok(value) => anyhow::bail!("{name} must be true or false, got {value:?}"),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} must be valid UTF-8"),
+    }
+}
+
+fn parse_bool(name: &str, value: Option<&str>, default: bool) -> anyhow::Result<bool> {
+    match value {
+        None => Ok(default),
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(value) => anyhow::bail!("{name} must be true or false, got {value:?}"),
     }
 }
 
@@ -2264,23 +2261,6 @@ mod tests {
     }
 
     #[test]
-    fn confidential_isolation_is_refused_with_a_stable_unavailable_error() {
-        assert!(refuse_confidential_isolation("standard").is_ok());
-        match refuse_confidential_isolation("confidential") {
-            Err(AppError::Coded {
-                status,
-                code,
-                detail,
-            }) => {
-                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-                assert_eq!(code, "CONFIDENTIAL_ISOLATION_UNAVAILABLE");
-                assert_eq!(detail, "confidential isolation is temporarily unavailable");
-            }
-            other => panic!("confidential isolation was not refused: {other:?}"),
-        }
-    }
-
-    #[test]
     fn admin_only_gate_rejects_non_admins_and_api_keys() {
         let flags = FeatureFlags {
             enabled: true,
@@ -2301,6 +2281,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// With the refusal lifted (B2c), only the deployment's settings expose
+    /// confidential environments. Production sets neither flag, so even an
+    /// administrator is refused there; Dev's activated profile enables it for
+    /// administrators only.
+    #[test]
+    fn a_deployment_without_the_flag_refuses_confidential_even_for_admins() {
+        let production = FeatureFlags::from_settings(None, None).unwrap();
+        assert_eq!(
+            production,
+            FeatureFlags {
+                enabled: false,
+                admin_only: true,
+            }
+        );
+        for user in [user(true, false), user(false, false)] {
+            assert!(require_interactive_access(production, &user, "confidential").is_err());
+            assert!(require_interactive_access(production, &user, "standard").is_ok());
+        }
+        let dev = FeatureFlags::from_settings(Some("true"), Some("true")).unwrap();
+        assert!(require_interactive_access(dev, &user(true, false), "confidential").is_ok());
+        assert!(require_interactive_access(dev, &user(false, false), "confidential").is_err());
+        assert!(FeatureFlags::from_settings(Some("yes"), None).is_err());
     }
 
     #[tokio::test]
