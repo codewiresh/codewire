@@ -617,7 +617,7 @@ pub(crate) enum CredentialProfilesCommand {
     List(CredentialListArgs),
     #[command(
         about = "Make a cloud credential profile your default",
-        long_about = "Make a cloud credential profile your default. A cloud `cw env create` uses it when you name no profile, the dashboard preselects it, and lists show it first. Your first profile becomes your default, and the default cannot be deleted: make another profile the default first."
+        long_about = "Make a cloud credential profile your default. A cloud `cw create` uses it when you name no profile, the dashboard preselects it, and lists show it first. Your first profile becomes your default, and the default cannot be deleted: make another profile the default first."
     )]
     Default(CredentialProfileDefaultArgs),
 }

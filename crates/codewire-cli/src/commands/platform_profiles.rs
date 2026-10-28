@@ -147,7 +147,7 @@ async fn handle_profile(
                 "platform returned a different default profile"
             );
             eprintln!(
-                "Default credential profile: {:?}. A cloud `cw env create` uses it when you name no profile.",
+                "Default credential profile: {:?}. A cloud `cw create` uses it when you name no profile.",
                 selected.name
             );
             Ok(())
