@@ -947,9 +947,12 @@ jobs:
           RUST_TEST_ARCHIVE: ${{ steps.test-archive.outputs.ready == 'true' && format('{0}/tests', runner.temp) || '' }}
           RUST_TEST_NEXTEST: ${{ runner.temp }}/nextest/cargo-nextest
           # These tests mostly wait: at 16 threads they averaged 1.8 cores and
-          # peaked at 5.6 (main run 26920), so twice main's share of 16 runs
-          # at once (#3602).
-          RUST_ARCHIVE_TEST_THREADS: '32'
+          # peaked at 5.6 (main run 26920), so twice the guest's CPU share
+          # runs at once: 32 on main's VM, 16 on a pull request's medium guest
+          # (#3602). A fixed 32, four times a medium guest's share, made this
+          # job one of the host's largest disk writers, and it timed out in a
+          # host-wide disk stall (pull request run 27253).
+          RUST_ARCHIVE_THREADS_PER_CORE: '2'
         run: scripts/ci/verify/run-product-verification.sh rust-transport
 
       - name: Report and clean Rust cache

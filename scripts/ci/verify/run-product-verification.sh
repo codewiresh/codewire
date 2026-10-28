@@ -165,24 +165,23 @@ run_rust_archive_tests() {
   # The build runner's build folder, /ci-cache/main on a push to main and
   # /ci-cache/pr otherwise (build-once-tree.sh). Test binaries carry its paths
   # (the compile-time CARGO_MANIFEST_DIR and CARGO_BIN_EXE_*), so the checkout
-  # and the extracted target folder go there. RUST_ARCHIVE_TEST_THREADS, when
-  # the job sets it, is how many tests run at once; otherwise a metal guest
-  # runs as many as its share of the host (cpu-share.sh), and elsewhere the CI
+  # and the extracted target folder go there. A metal guest runs as many tests
+  # at once as its share of the host (cpu-share.sh) times
+  # RUST_ARCHIVE_THREADS_PER_CORE (1 unless the job sets it); elsewhere the CI
   # profile's own count applies.
   local nextest="${RUST_TEST_NEXTEST:-cargo-nextest}" root share
+  local per_core="${RUST_ARCHIVE_THREADS_PER_CORE:-1}"
   # shellcheck source=scripts/ci/setup/build-once-tree.sh
   source "$ROOT/scripts/ci/setup/build-once-tree.sh"
   root="$(build_once_tree)"
   # shellcheck source=scripts/ci/setup/cpu-share.sh
   source "$ROOT/scripts/ci/setup/cpu-share.sh"
   share="$(ci_cpu_share)"
-  if [ -n "${RUST_ARCHIVE_TEST_THREADS:-}" ]; then
-    [[ "$RUST_ARCHIVE_TEST_THREADS" =~ ^[1-9][0-9]{0,3}$ ]] || {
-      echo "::error::RUST_ARCHIVE_TEST_THREADS=$RUST_ARCHIVE_TEST_THREADS is not a positive integer" >&2
-      return 2
-    }
-    share="$RUST_ARCHIVE_TEST_THREADS"
-  fi
+  [[ "$per_core" =~ ^[1-4]$ ]] || {
+    echo "::error::RUST_ARCHIVE_THREADS_PER_CORE=$per_core is not 1 to 4" >&2
+    return 2
+  }
+  [ -z "$share" ] || share=$((share * per_core))
   local filter="" part status=0
   for part in "${RUST_ARCHIVE_FILTERS[@]}"; do
     filter="${filter:+$filter | }$part"

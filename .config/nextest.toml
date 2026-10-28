@@ -39,8 +39,9 @@ path = "junit.xml"
 # A real two-endpoint journey (two cw hosts, direct UDP and TLS DERP) runs for
 # about a minute. Beside about 45 other tests in one nextest run it timed out
 # (codewire runs 21593 and 21646, on a heavy guest that sized nothing from its
-# CPU share), so it reserves 16 threads: it runs beside at most 16 others.
-# Where a run has 16 threads or fewer it runs alone.
+# CPU share), so it reserves 16 threads: it runs beside at most 16 others
+# (main's 32 threads). Where a run has 16 threads or fewer, as on a pull
+# request's medium guest, it runs alone.
 [[profile.ci.overrides]]
 filter = 'binary_id(codewire-cli-bin::host_member_control) & test(=host_members_two_real_endpoints_direct_and_tls_derp)'
 priority = 100
