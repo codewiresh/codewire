@@ -2,17 +2,17 @@
 // the post-publish proposal rewrites this file and policy refuses other edits.
 
 /// Content digest of the published workspace image.
-pub const DIGEST: &str = "sha256:b84ce377ef2499206ccecbd367e45efec6e7ec02d14b6d0a23e679b4737a28f7";
+pub const DIGEST: &str = "sha256:b31ef4cf6883f80ab88f918cfcbe640aab3b456b17cca4a48fabe4f7fd7121d0";
 /// The image at the public GHCR mirror, pulled anonymously by local
 /// environments. A deployment pulls the same digest from its configured
 /// repository.
-pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:b84ce377ef2499206ccecbd367e45efec6e7ec02d14b6d0a23e679b4737a28f7";
+pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:b31ef4cf6883f80ab88f918cfcbe640aab3b456b17cca4a48fabe4f7fd7121d0";
 /// Platforms the published image index serves.
 pub const PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64"];
 /// Commit the image was built from.
-pub const SOURCE_SHA: &str = "d0c548f7ef02f25ec8954aedaac3a378f12c3619";
+pub const SOURCE_SHA: &str = "070c30d9dcfaedc3891e9a4f415a7a9742637a71";
 /// Identity of the image definition at `SOURCE_SHA`; see the generator.
-pub const INPUTS_SHA256: &str = "c63dc87f26a22d6c998ec423edae1557da99b8d2553cf397818ee55fe9725074";
+pub const INPUTS_SHA256: &str = "86580819c3efbab9e8f648fe1ad81fef2ff55ba5664514dac66b766d22ecfe72";
 /// Agent CLI versions the image definition at `SOURCE_SHA` installs.
 pub const AGENT_VERSIONS: &[(&str, &str)] = &[
     ("claude", "2.1.308"),
@@ -23,6 +23,7 @@ pub const AGENT_VERSIONS: &[(&str, &str)] = &[
 ];
 /// Earlier published digests, newest first, that older clients may send.
 pub const PREVIOUS_DIGESTS: &[&str] = &[
+    "sha256:b84ce377ef2499206ccecbd367e45efec6e7ec02d14b6d0a23e679b4737a28f7",
     "sha256:0f2c983137159fba49360212c09b0d2e7e93c0890ebcb480e83ead110e144dda",
     "sha256:18507516efbc3494aa06ca982a23cc9b37c0fbc139076d3fa33c4116bfc8c021",
     "sha256:351bed9404bc79390c06a02d67a4e348f0cb2cd3d29a3555a9cef1505717b655",
