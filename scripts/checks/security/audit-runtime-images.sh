@@ -44,7 +44,7 @@ if ! python3 scripts/ci/images/workspace-image-pin.py show >/dev/null; then
   echo "runtime image audit: the published workspace pin is not well formed" >&2
   exit 1
 fi
-readonly dind_image='docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977'
+readonly dind_image='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
 rust_channel="$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' \
   rust-toolchain.toml)"
 if [[ ! "$rust_channel" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

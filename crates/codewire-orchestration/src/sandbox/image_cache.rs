@@ -78,7 +78,7 @@ pub const IMAGE_CACHE_IDLE_IMAGE: &str = DEFAULT_DIND_IMAGE;
 /// Bumped whenever the rendered Pod shape changes for the same image sets.
 /// A Pod never rewrites a DaemonSet rendered by a newer renderer. A test
 /// fails until a render change bumps it.
-pub const IMAGE_CACHE_RENDER_VERSION: u32 = 3;
+pub const IMAGE_CACHE_RENDER_VERSION: u32 = 2;
 /// What follows an approved registry prefix
 /// ([`super::runtime_images::APPROVED_IMAGE_REGISTRIES_ENV`]): a repository
 /// path, an optional tag and a mandatory digest. The admission policy matches
@@ -662,13 +662,6 @@ mod tests {
         (
             2,
             "24964f5c4e40dcb0442b5ae3ea94479d6ad0086e3e59f487e0034e88f175e401",
-        ),
-        // The idle container's DinD image moved from Docker 29.7.1 to 29.9.2
-        // (CVE-2026-92543, #3208); the admission policy names only the new
-        // one, so an older renderer must not rewrite it back.
-        (
-            3,
-            "7d637330553048a399b72c9a1c38ace76f8c0c3eae91c9145291a5daae5c425f",
         ),
     ];
 

@@ -23,8 +23,8 @@ case "$*" in
   *'ghcr.io/codewiresh/workspace:c0a265c6eb6cea7353a632b92e7c5819f0629583'*)
     printf '{"Digest":"sha256:7645bc90934a603724751a2363657933f673eaf469857e64e3462c7042fd1808","Labels":{"org.opencontainers.image.revision":"%s"}}\n' "${MOCK_WORKSPACE_REVISION:-c0a265c6eb6cea7353a632b92e7c5819f0629583}"
     ;;
-  *'docker.io/library/docker@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977'*)
-    printf '%s\n' '{"Digest":"sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977","Labels":{}}'
+  *'docker.io/library/docker@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'*)
+    printf '%s\n' '{"Digest":"sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c","Labels":{}}'
     ;;
   *)
     exit 1
@@ -54,9 +54,9 @@ grep -Fx "source_sha=$SOURCE_SHA" <<<"$output" >/dev/null
 grep -Fx "daemon_image=$DAEMON_IMAGE" <<<"$output" >/dev/null
 grep -Fx 'daemon_public_image=ghcr.io/codewiresh/daemon@sha256:b606b5e4b119c4117b9163943702ff3fcea56d1c0e2f85a6ad3bf2ffa3dfc1c1' <<<"$output" >/dev/null
 grep -Fx 'workspace_image=ghcr.io/codewiresh/workspace@sha256:7645bc90934a603724751a2363657933f673eaf469857e64e3462c7042fd1808' <<<"$output" >/dev/null
-grep -Fx 'dind_image=docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977' <<<"$output" >/dev/null
+grep -Fx 'dind_image=docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c' <<<"$output" >/dev/null
 
-jq '.images.dind = "docker.io/library/docker:29.9.2-dind@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$LOCK" >"$TMPDIR_TEST/wrong-digest.json"
+jq '.images.dind = "docker.io/library/docker:29.7.1-dind@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$LOCK" >"$TMPDIR_TEST/wrong-digest.json"
 expect_failure "resolved dind digest mismatch" run_resolver "$TMPDIR_TEST/wrong-digest.json"
 
 expect_failure "daemon revision mismatch" env MOCK_DAEMON_REVISION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa PATH="$TMPDIR_TEST/bin:$PATH" "$RESOLVER" --lock "$LOCK" --daemon-image "$DAEMON_IMAGE" --source-sha "$SOURCE_SHA"

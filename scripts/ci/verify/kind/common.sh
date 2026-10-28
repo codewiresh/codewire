@@ -133,7 +133,7 @@ if [ -z "${DEFAULT_KIND_WORKSPACE_IMAGE+x}" ]; then
   DEFAULT_KIND_WORKSPACE_IMAGE="$(python3 "$ROOT/scripts/ci/images/workspace-image-pin.py" show public-image)"
 fi
 if [ -z "${DEFAULT_KIND_DIND_IMAGE+x}" ]; then
-  DEFAULT_KIND_DIND_IMAGE='docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977'
+  DEFAULT_KIND_DIND_IMAGE='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
 fi
 if [ -z "${KIND_WORKSPACE_IMAGE+x}" ]; then
   KIND_WORKSPACE_IMAGE="$DEFAULT_KIND_WORKSPACE_IMAGE"
@@ -1868,7 +1868,7 @@ import sys
 rendered, local_dind = sys.argv[1:]
 path = Path(rendered)
 text = path.read_text()
-public_dind = "docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977"
+public_dind = "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c"
 old = f"  SANDBOX_DIND_IMAGE: {public_dind}\n"
 if text.count(old) != 1:
     raise SystemExit("Kind overlay Dind image occurrence mismatch")

@@ -35,7 +35,7 @@ case "$*" in
     jq -cn '{spec:{template:{spec:{containers:[{name:"orchestration",envFrom:[{secretRef:{name:"codewire-secrets"}},{configMapRef:{name:"codewire-config-live"}}]}]}}}}'
     ;;
   '-n dev get configmap codewire-config-live -o json')
-    jq -cn '{data:{SANDBOX_DAEMON_IMAGE:"registry.example.invalid/codewire/daemon@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",SANDBOX_DIND_IMAGE:"docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977",SANDBOX_KATA_COCO_KBS_URL:"https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080",SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI:"kbs:///default/containers/auth",SANDBOX_KATA_COCO_TEST_RESOURCE_URI:"kbs:///default/codewire/runtime-test-resource",SANDBOX_KATA_COCO_INIT_DATA_ENABLED:"true"}}'
+    jq -cn '{data:{SANDBOX_DAEMON_IMAGE:"registry.example.invalid/codewire/daemon@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",SANDBOX_DIND_IMAGE:"docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",SANDBOX_KATA_COCO_KBS_URL:"https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080",SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI:"kbs:///default/containers/auth",SANDBOX_KATA_COCO_TEST_RESOURCE_URI:"kbs:///default/codewire/runtime-test-resource",SANDBOX_KATA_COCO_INIT_DATA_ENABLED:"true"}}'
     ;;
   '-n flux-system get kustomization codewire-deploy-workloads-dev -o json')
     jq -cn '{metadata:{annotations:{"deploy.codewire.sh/source-sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},status:{lastAppliedRevision:"main@sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}'
@@ -98,8 +98,8 @@ case "${*: -1}" in
   docker://ghcr.io/codewiresh/workspace:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
     jq -cn '{Digest:"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",Labels:{"org.opencontainers.image.revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}'
     ;;
-  docker://docker.io/library/docker@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977)
-    jq -cn '{Digest:"sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977",Labels:{}}'
+  docker://docker.io/library/docker@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c)
+    jq -cn '{Digest:"sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",Labels:{}}'
     ;;
   *)
     printf 'unexpected skopeo arguments: %s\n' "$*" >&2
@@ -258,7 +258,7 @@ PRIVATE_PULL_PROBE_UUID='be31063a-8ec8-46d5-aa17-75cda1729370' \
 EVIDENCE_DIR="$dind_evidence" \
   "$SCRIPT" --wait-seconds 301 --image-role dind
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].image' "$manifest")" == \
-  'docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977' ]]
+  'docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c' ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].securityContext.privileged' "$manifest")" == 'true' ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .spec.containers[0].name' "$manifest")" == 'dind' ]]
 [[ "$(yq -r 'select(.kind == "Pod") | .metadata.annotations."codewire.sh/workspace"' "$manifest")" == 'true' ]]
