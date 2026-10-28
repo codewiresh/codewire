@@ -30,11 +30,28 @@ failure-output = "immediate-final"
 [profile.ci.junit]
 path = "junit.xml"
 
+# Nextest starts higher-priority tests first, across every binary, and fills
+# the remaining threads with the rest. The longest tests start first, so the
+# run ends near the longest test's own time, not that time after everything
+# else (main run 26920: the 32 s, 16 s and 15 s tests started 85-104 s in,
+# and the run took 120 s for 43 s of work per thread; #3602).
+#
 # A real two-endpoint journey (two cw hosts, direct UDP and TLS DERP) runs for
-# about a minute under cargo test, beside its own binary's tests only. In one
-# nextest run beside every other binary's tests it timed out (codewire runs
-# 21593, with no reservation, and 21646, with 16 of the guest's threads), so
-# it runs alone.
+# about a minute. Beside about 45 other tests in one nextest run it timed out
+# (codewire runs 21593 and 21646, on a heavy guest that sized nothing from its
+# CPU share), so it reserves 16 threads: it runs beside at most 16 others.
+# Where a run has 16 threads or fewer it runs alone.
 [[profile.ci.overrides]]
 filter = 'binary_id(codewire-cli-bin::host_member_control) & test(=host_members_two_real_endpoints_direct_and_tls_derp)'
-threads-required = "num-test-threads"
+priority = 100
+threads-required = 16
+
+# Each took 15-32 s in main runs 26814 and 26920.
+[[profile.ci.overrides]]
+filter = """
+(binary_id(codewire-local-credentials) & test(=rpc_tests::repository_preparation_outlasts_the_control_request_deadline))
+| (binary_id(codewire-local-vmm) & test(=supervisor::snapshots::linux::tests::capture_removes_every_delivered_sign_in_from_the_copy_only))
+| (binary_id(codewire-workspace-access) & test(=daemon_tailnet::tests::access_is_renewed_at_half_life_and_each_token_reproves_the_session))
+| (binary_id(codewire-daemon::conformance) & test(=silent_attachment_emits_periodic_status_heartbeat))
+"""
+priority = 50

@@ -1144,6 +1144,9 @@ run_paths_case rust_root_toolchain pull_request refs/pull/500/head false \
 run_paths_case rust_workspace_hack_config pull_request refs/pull/5021/head false \
   'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   .config/hakari.toml
+run_paths_case rust_nextest_config pull_request refs/pull/5023/head false \
+  'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  .config/nextest.toml
 run_paths_case rust_workspace_hack pull_request refs/pull/5022/head false \
   'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-workspace-hack/Cargo.toml crates/codewire-workspace-hack/src/lib.rs

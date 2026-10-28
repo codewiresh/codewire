@@ -798,9 +798,6 @@ if [ "$event_selected" = false ]; then
 
     # CI policy changes validate only the workflow/selector contract. Product
     # files in the same PR still add their own families below.
-    # .config/nextest.toml is read only by the dispatch-only test-archive
-    # measurement (infra#1632) until a CI job runs tests from the archive;
-    # that change must make it select the Rust families it runs.
     case "$path" in
       .gitea/workflows/ci.yaml|.gitea/workflows/manual-diagnostics.yaml|\
       .gitea/workflows/ci-start-latency.yaml|\
@@ -1005,6 +1002,13 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       Cargo.toml|Cargo.lock|rust-toolchain.toml|.config/hakari.toml)
+        select_rust_workspace
+        recognized=true
+        ;;
+      .config/nextest.toml)
+        # Its CI profile schedules every test the Rust / transport shards run
+        # from their archives (threads, priorities, reservations), so a
+        # change to it runs them all (#3602).
         select_rust_workspace
         recognized=true
         ;;
