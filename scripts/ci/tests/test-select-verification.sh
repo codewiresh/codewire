@@ -1618,7 +1618,7 @@ run_paths_case dashboard_image_verifier pull_request refs/pull/123/head false \
   'deploy go_consumer_interop go_support policy release confidential_script_tests security security_js web' \
   scripts/ci/verify/dashboard-image.sh
 run_paths_case dashboard_sandbox_image_inputs pull_request refs/pull/1231/head false \
-  'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
+  'database policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/src/sandbox/mod.rs \
   crates/codewire-orchestration/src/sandbox/template.rs \
   crates/codewire-orchestration/src/sandbox/template/network.rs

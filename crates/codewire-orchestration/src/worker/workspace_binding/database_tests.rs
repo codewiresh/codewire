@@ -1762,17 +1762,26 @@ fn pool_born(
         &format!("{CLAIMS_API}/{NAMESPACE}/sandboxclaims/{name}"),
         |claim| claim["spec"]["warmPoolRef"] = json!({ "name": objects.name }),
     );
-    let images: Vec<(String, String)> = rendering["spec"]["podTemplate"]["spec"]["containers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|container| {
-            (
-                container["name"].as_str().unwrap().to_owned(),
-                container["image"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect();
+    let images_of = |field: &str| -> Vec<(String, String)> {
+        rendering["spec"]["podTemplate"]["spec"][field]
+            .as_array()
+            .map(|containers| {
+                containers
+                    .iter()
+                    .map(|container| {
+                        (
+                            container["name"].as_str().unwrap().to_owned(),
+                            container["image"].as_str().unwrap().to_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let images = images_of("containers");
+    // The Pod runs the rendering's init containers too (the Docker data init
+    // since #3611), and the bind checks their images like the containers'.
+    let init_images = images_of("initContainers");
     fake.update(
         &format!("{SANDBOXES_API}/{NAMESPACE}/sandboxes/{name}"),
         |sandbox| {
@@ -1814,6 +1823,24 @@ fn pool_born(
                 }))
                 .collect::<Vec<_>>()
         );
+        if !init_images.is_empty() {
+            pod["spec"]["initContainers"] = json!(
+                init_images
+                    .iter()
+                    .map(|(name, image)| json!({ "name": name, "image": image }))
+                    .collect::<Vec<_>>()
+            );
+            pod["status"]["initContainerStatuses"] = json!(
+                init_images
+                    .iter()
+                    .map(|(name, image)| json!({
+                        "name": name, "image": image, "imageID": image, "ready": true,
+                        "restartCount": 0,
+                        "state": { "terminated": { "exitCode": 0, "reason": "Completed" } },
+                    }))
+                    .collect::<Vec<_>>()
+            );
+        }
     });
     fake
 }

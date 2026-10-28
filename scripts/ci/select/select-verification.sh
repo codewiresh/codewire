@@ -1736,8 +1736,16 @@ if [ "$event_selected" = false ]; then
       crates/codewire-orchestration/src/connect/mesh_authorization.rs|\
       crates/codewire-orchestration/src/worker/lifecycle.rs|\
       crates/codewire-orchestration/src/workspace_binding/store.rs|\
+      crates/codewire-orchestration/src/worker/workspace_binding.rs|\
+      crates/codewire-orchestration/src/sandbox/client.rs|\
+      crates/codewire-orchestration/src/sandbox/warm_pool.rs|\
+      crates/codewire-orchestration/src/sandbox/template.rs|\
+      crates/codewire-orchestration/src/sandbox/template/*|\
       crates/codewire-orchestration/tests/environment_external_cleanup.rs|\
       crates/codewire-orchestration/tests/environment_sources.rs)
+        # The workspace binding, its Sandbox reads and the pool rendering it
+        # compares a pool-born Sandbox against are what the binding database
+        # tests exercise; #3611 changed the rendering without selecting them.
         # The database family (run-integration-verification.sh database_lane_*)
         # runs these files' ignored PostgreSQL tests; no other family does, so a
         # change to one must select it (#3194). test-select-verification.sh
