@@ -47,8 +47,9 @@ impl CredentialBridge {
         context
             .validate_at(now_unix_ms()?)
             .map_err(|_| invalid_projection_context())?;
-        if context.environment_id != *self.environment_id.as_bytes()
-            || context.operation_generation != self.environment_generation
+        let identity = self.identity();
+        if context.environment_id != *identity.environment_id.as_bytes()
+            || context.operation_generation != identity.environment_generation
         {
             return Err(invalid_projection_context());
         }
@@ -114,8 +115,9 @@ impl CredentialBridge {
             .map_err(|_| invalid_projection_context())?;
         validate_projection_recipient(recipient_public_key)
             .map_err(|_| invalid_projection_context())?;
-        if context.environment_id != *self.environment_id.as_bytes()
-            || context.operation_generation != self.environment_generation
+        let identity = self.identity();
+        if context.environment_id != *identity.environment_id.as_bytes()
+            || context.operation_generation != identity.environment_generation
         {
             return Err(invalid_projection_context());
         }

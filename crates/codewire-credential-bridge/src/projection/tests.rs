@@ -4,8 +4,8 @@ use super::*;
 
 fn initial_context(bridge: &CredentialBridge, lifetime_ms: u64) -> ProjectionContext {
     ProjectionContext {
-        environment_id: *bridge.environment_id.as_bytes(),
-        operation_generation: bridge.environment_generation,
+        environment_id: *bridge.identity().environment_id.as_bytes(),
+        operation_generation: bridge.identity().environment_generation,
         selection_sha256: [3; 32],
         deadline_unix_ms: now_unix_ms().unwrap() + lifetime_ms,
     }
@@ -165,8 +165,8 @@ impl Harness {
 
     fn context(&self) -> ProjectionContext {
         ProjectionContext {
-            environment_id: *self.bridge.environment_id.as_bytes(),
-            operation_generation: self.bridge.environment_generation,
+            environment_id: *self.bridge.identity().environment_id.as_bytes(),
+            operation_generation: self.bridge.identity().environment_generation,
             selection_sha256: [3; 32],
             deadline_unix_ms: now_unix_ms().unwrap() + 5_000,
         }
@@ -259,7 +259,7 @@ async fn typed_projection_round_trip_uses_current_authenticated_epoch() {
 async fn invalid_coordinates_and_unadmitted_connection_enqueue_nothing() {
     let bridge = bridge();
     let context = ProjectionContext {
-        environment_id: *bridge.environment_id.as_bytes(),
+        environment_id: *bridge.identity().environment_id.as_bytes(),
         operation_generation: 7,
         selection_sha256: [3; 32],
         deadline_unix_ms: now_unix_ms().unwrap() + 5_000,

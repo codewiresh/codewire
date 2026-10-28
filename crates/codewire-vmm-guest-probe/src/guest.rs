@@ -787,6 +787,7 @@ pub async fn run_daemon() -> Result<()> {
     let daemon = codewire_daemon::serve_native_grpc_with_incoming(
         config,
         codex_home,
+        None,
         HostOnlyIncoming::new(listener.incoming()),
         shutdown_signal(),
     );

@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -81,16 +81,41 @@ pub struct CredentialBridgeOutput {
     closed: bool,
 }
 
-/// One fixed environment generation's material-free request/response state.
+/// One environment generation's material-free request/response state.
 /// Copies share the active connection, request budget and replacement epoch.
 /// A [`EpochReplacement::Drain`] activation keeps the replaced epoch, the
-/// draining one, relaying only the requests already sent on it.
+/// draining one, relaying only the requests already sent on it. A local VM
+/// restored from a VM checkpoint moves the bridge to its new identity with
+/// [`CredentialBridge::rotate_identity`].
 #[derive(Clone)]
 pub struct CredentialBridge {
-    environment_id: Uuid,
-    environment_generation: u64,
+    /// Written only while `inner` is locked, so an activation that holds
+    /// `inner` sees the identity its connection must have been prepared for.
+    identity: Arc<std::sync::Mutex<BridgeIdentity>>,
     inner: Arc<Mutex<BridgeState>>,
     host_admitted: Arc<Notify>,
+}
+
+/// The environment and generation a bridge serves: what its Ready frame
+/// names and what every projection and login request is bound to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BridgeIdentity {
+    pub environment_id: Uuid,
+    pub environment_generation: u64,
+}
+
+impl BridgeIdentity {
+    fn new(environment_id: Uuid, environment_generation: u64) -> Result<Self, Status> {
+        if environment_id.is_nil() || environment_generation == 0 {
+            return Err(Status::invalid_argument(
+                "credential bridge identity is invalid",
+            ));
+        }
+        Ok(Self {
+            environment_id,
+            environment_generation,
+        })
+    }
 }
 
 struct BridgeState {
@@ -224,6 +249,8 @@ enum BridgeFailure {
 /// currently active peer. It is not evidence that transport authentication ran.
 pub struct PreparedBridgeConnection {
     bridge: CredentialBridge,
+    /// The identity its Ready frame named; activation refuses another.
+    identity: BridgeIdentity,
     output: GuestOutput,
     close: oneshot::Sender<Option<Status>>,
 }
@@ -265,14 +292,11 @@ impl CredentialBridge {
     /// The caller supplies coordinates already bound to its trusted transport.
     /// Nonzero coordinates are necessary, but are not authentication.
     pub fn new(environment_id: Uuid, environment_generation: u64) -> Result<Self, Status> {
-        if environment_id.is_nil() || environment_generation == 0 {
-            return Err(Status::invalid_argument(
-                "credential bridge identity is invalid",
-            ));
-        }
         Ok(Self {
-            environment_id,
-            environment_generation,
+            identity: Arc::new(std::sync::Mutex::new(BridgeIdentity::new(
+                environment_id,
+                environment_generation,
+            )?)),
             inner: Arc::new(Mutex::new(BridgeState {
                 next_epoch: 0,
                 active: None,
@@ -286,6 +310,40 @@ impl CredentialBridge {
         })
     }
 
+    /// The environment and generation this bridge serves now.
+    pub fn identity(&self) -> BridgeIdentity {
+        *self.identity.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Move the bridge to a new identity: a local VM restored from a VM
+    /// checkpoint, as a new environment or a new generation of its own. Every
+    /// epoch admitted under the old identity is closed and its requests fail;
+    /// a connection prepared for the old identity can no longer activate.
+    /// Only a host that opens with the new identity is admitted afterwards.
+    pub async fn rotate_identity(
+        &self,
+        environment_id: Uuid,
+        environment_generation: u64,
+    ) -> Result<(), Status> {
+        let identity = BridgeIdentity::new(environment_id, environment_generation)?;
+        let (closed, lost) = {
+            let mut state = self.inner.lock().await;
+            *self.identity.lock().unwrap_or_else(PoisonError::into_inner) = identity;
+            let closed = state
+                .active
+                .take()
+                .into_iter()
+                .chain(state.draining.take())
+                .collect::<Vec<_>>();
+            (closed, state.take_all())
+        };
+        for host in closed {
+            let _ = host.cancel.send(());
+        }
+        lost.fail();
+        Ok(())
+    }
+
     /// Queue Ready without admitting requests or replacing an active peer.
     /// A relay sends this stream to the private RPC before awaiting headers;
     /// a daemon prepares it after validating its authenticated Open frame.
@@ -294,18 +352,20 @@ impl CredentialBridge {
     ) -> Result<(PreparedBridgeConnection, CredentialBridgeOutput), Status> {
         let (output, receiver) = mpsc::channel(HOST_OUTPUT_BUFFER);
         let (close, closed) = oneshot::channel();
+        let identity = self.identity();
         output
             .try_send(Ok(guest_message(
                 v1::credential_bridge_guest_message::Payload::Ready(v1::CredentialBridgeReady {
                     protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
-                    environment_id: self.environment_id.to_string(),
-                    environment_generation: self.environment_generation,
+                    environment_id: identity.environment_id.to_string(),
+                    environment_generation: identity.environment_generation,
                 }),
             )))
             .map_err(|_| Status::resource_exhausted("credential bridge output is unavailable"))?;
         Ok((
             PreparedBridgeConnection {
                 bridge: self.clone(),
+                identity,
                 output,
                 close,
             },
@@ -630,6 +690,12 @@ impl CredentialBridge {
 }
 
 impl PreparedBridgeConnection {
+    /// The identity this connection's Ready frame named. A host's Open must
+    /// name it; activation refuses the connection once the bridge rotated.
+    pub fn identity(&self) -> BridgeIdentity {
+        self.identity
+    }
+
     /// Activate only after the consumer has authenticated/admitted this exact
     /// transport. No Open is consumed or synthesized here. Later Open frames
     /// are invalid, just like any other out-of-order frame. The epoch serves
@@ -686,6 +752,11 @@ impl PreparedBridgeConnection {
             if self.output.is_closed() {
                 return Err(Status::unavailable(
                     "credential bridge output is unavailable",
+                ));
+            }
+            if self.bridge.identity() != self.identity {
+                return Err(Status::failed_precondition(
+                    "credential bridge identity changed",
                 ));
             }
             state.next_epoch = state

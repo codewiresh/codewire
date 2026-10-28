@@ -86,8 +86,14 @@ impl Harness {
             panic!("Ready must precede activation and all requests");
         };
         assert_eq!(ready.protocol_version, CREDENTIAL_BRIDGE_PROTOCOL_VERSION);
-        assert_eq!(ready.environment_id, bridge.environment_id.to_string());
-        assert_eq!(ready.environment_generation, bridge.environment_generation);
+        assert_eq!(
+            ready.environment_id,
+            bridge.identity().environment_id.to_string()
+        );
+        assert_eq!(
+            ready.environment_generation,
+            bridge.identity().environment_generation
+        );
         (prepared, output)
     }
 
@@ -286,6 +292,55 @@ async fn replacement_closes_stale_stream_and_fails_its_pending_request() {
 }
 
 #[tokio::test]
+async fn rotation_closes_the_old_identity_and_admits_only_the_new_one() {
+    let mut old = Harness::new().await;
+    let (task, _) = old.submit().await;
+    // Prepared under the old identity but not yet activated: a host that
+    // opened with the old coordinates must not slip in after the rotation.
+    let (stale, _stale_output) = Harness::prepare(&old.bridge).await;
+    let rotated = Uuid::new_v4();
+    bounded(old.bridge.rotate_identity(rotated, 8))
+        .await
+        .unwrap();
+    assert_eq!(
+        old.bridge.identity(),
+        BridgeIdentity {
+            environment_id: rotated,
+            environment_generation: 8,
+        }
+    );
+    assert_eq!(
+        bounded(task).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(bounded(old.output.next()).await.is_none());
+    let error = match stale.activate(tokio_stream::pending()).await {
+        Ok(_) => panic!("a connection prepared for the old identity activated"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    let bridge = old.bridge.clone();
+    old.stop().await;
+
+    // Ready names the new identity, and the new epoch serves requests.
+    let mut new = Harness::for_bridge(bridge).await;
+    let (task, request) = new.submit().await;
+    new.send(start(&request.request_id)).await;
+    new.send(end(&request.request_id)).await;
+    assert_eq!(bounded(task).await.unwrap().status(), StatusCode::OK);
+    new.stop().await;
+}
+
+#[tokio::test]
+async fn rotation_refuses_an_invalid_identity_and_keeps_the_current_one() {
+    let bridge = bridge();
+    let before = bridge.identity();
+    assert!(bridge.rotate_identity(Uuid::nil(), 9).await.is_err());
+    assert!(bridge.rotate_identity(Uuid::new_v4(), 0).await.is_err());
+    assert_eq!(bridge.identity(), before);
+}
+
+#[tokio::test]
 async fn out_of_order_or_unknown_host_frames_fail_closed() {
     for case in 0..8 {
         let mut harness = Harness::new().await;
@@ -301,7 +356,7 @@ async fn out_of_order_or_unknown_host_frames_fail_closed() {
             3 => Some(start("unknown-id")),
             4 => Some(HostPayload::Open(v1::CredentialBridgeOpen {
                 protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
-                environment_id: harness.bridge.environment_id.to_string(),
+                environment_id: harness.bridge.identity().environment_id.to_string(),
                 environment_generation: 7,
                 capabilities: Vec::new(),
             })),

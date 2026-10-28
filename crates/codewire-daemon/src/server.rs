@@ -178,7 +178,17 @@ where
     IE: Into<Box<dyn Error + Send + Sync>>,
     F: Future<Output = ()> + Send + 'static,
 {
-    serve(config, runtime_state, None, None, None, incoming, shutdown).await
+    serve(
+        config,
+        runtime_state,
+        None,
+        None,
+        None,
+        None,
+        incoming,
+        shutdown,
+    )
+    .await
 }
 
 /// Dedicated owner-private Linux trusted-host control. The binding is the
@@ -236,6 +246,35 @@ where
             ),
         )),
         None,
+        None,
+        incoming,
+        shutdown,
+    )
+    .await
+}
+
+/// [`serve_grpc_with_incoming`] with token rotation, as a local guest daemon
+/// serves it, for tests that need no guest homes.
+#[cfg(test)]
+pub(crate) async fn serve_rotating_grpc_for_tests<I, IO, IE, F>(
+    config: Config,
+    rotations: crate::auth_rotation::RotationRequests,
+    incoming: I,
+    shutdown: F,
+) -> Result<()>
+where
+    I: Stream<Item = std::result::Result<IO, IE>> + Send + 'static,
+    IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
+    IE: Into<Box<dyn Error + Send + Sync>>,
+    F: Future<Output = ()> + Send + 'static,
+{
+    serve(
+        config,
+        DaemonRuntimeState::ready(),
+        None,
+        None,
+        None,
+        Some(rotations),
         incoming,
         shutdown,
     )
@@ -266,6 +305,7 @@ where
         config,
         DaemonRuntimeState::ready(),
         Some(logins),
+        None,
         None,
         None,
         incoming,
@@ -301,6 +341,7 @@ where
         Some(logins),
         None,
         Some((app_ports, pod_uid)),
+        None,
         incoming,
         shutdown,
     )
@@ -312,10 +353,14 @@ where
 /// `codex_home` on the workload user's behalf ([`crate::codex_home::login`]),
 /// through the one listed direct delivery exception
 /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions").
+/// With `rotations`, the guest can rotate the daemon's token and credential
+/// bridge identity when the VM resumes from a VM checkpoint
+/// ([`crate::auth_rotation`]).
 #[cfg(target_os = "linux")]
 pub async fn serve_native_grpc_with_incoming<I, IO, IE, F>(
     config: Config,
     codex_home: crate::codex_home::CodexHome,
+    rotations: Option<crate::auth_rotation::RotationRequests>,
     incoming: I,
     shutdown: F,
 ) -> Result<()>
@@ -338,6 +383,7 @@ where
         }),
         None,
         None,
+        rotations,
         incoming,
         shutdown,
     )
@@ -377,6 +423,7 @@ type HostControlBinding = crate::host_control::HostControlBinding;
 #[cfg(not(target_os = "linux"))]
 type HostControlBinding = std::convert::Infallible;
 
+#[allow(clippy::too_many_arguments)] // Each entry point passes its own subset.
 async fn serve<I, IO, IE, F>(
     config: Config,
     runtime_state: DaemonRuntimeState,
@@ -386,6 +433,8 @@ async fn serve<I, IO, IE, F>(
     host_control_binding: Option<(HostControlBinding, crate::durable_session::HostBounds)>,
     // A bound daemon's application ports and its own Pod UID.
     bound: Option<(crate::app_ports::AppPortsSender, &str)>,
+    // A local guest daemon's token and bridge identity rotations.
+    rotations: Option<crate::auth_rotation::RotationRequests>,
     incoming: I,
     shutdown: F,
 ) -> Result<()>
@@ -488,8 +537,19 @@ where
     drop(startup_config);
     let transport_shutdown = TransportShutdown::new();
     let incoming_shutdown = Arc::clone(&transport_shutdown);
-    let incoming = incoming
-        .map(move |result| result.map(|io| ShutdownIo::new(io, Arc::clone(&incoming_shutdown))));
+    // Every connection ends with the token epoch it was accepted in. Only a
+    // local guest daemon given `rotations` ever ends one.
+    let auth = implementation.auth();
+    let _rotations = rotations.map(|requests| {
+        AbortOnDropHandle::new(tokio::spawn(crate::auth_rotation::serve_rotations(
+            requests,
+            auth.clone(),
+            bridge_owner.shared_bridge(),
+        )))
+    });
+    let incoming = incoming.map(move |result| {
+        result.map(|io| auth.bind_connection(ShutdownIo::new(io, Arc::clone(&incoming_shutdown))))
+    });
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // The agents' own logins, beside gRPC and the guest ingress. Each asks
     // only over an admitted epoch and stops with the daemon.

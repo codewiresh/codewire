@@ -10,7 +10,8 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, Response};
 use codewire_credential_bridge::{
-    CredentialBridge as SharedCredentialBridge, CredentialBridgeOutput, EpochReplacement,
+    BridgeIdentity, CredentialBridge as SharedCredentialBridge, CredentialBridgeOutput,
+    EpochReplacement,
 };
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_daemon_proto::{CREDENTIAL_BRIDGE_LOOPBACK_PORT, CREDENTIAL_BRIDGE_PROTOCOL_VERSION};
@@ -165,8 +166,8 @@ impl CredentialBridge {
             .ok_or_else(|| Status::failed_precondition("credential bridge is unavailable"))
     }
 
-    /// The shared bridge itself, for the hosted Codex login writer.
-    #[cfg(target_os = "linux")]
+    /// The shared bridge itself, for the agent login writers and a local
+    /// guest daemon's identity rotation.
     pub(crate) fn shared_bridge(&self) -> Option<SharedCredentialBridge> {
         self.shared().ok().cloned()
     }
@@ -232,17 +233,24 @@ impl CredentialBridge {
         };
         // A local host's Open is read eagerly, before preparing; a hosted
         // Open arrives only after the broker admitted the prepared Ready.
+        // A local VM restored from a VM checkpoint rotates the bridge's
+        // identity; the Open must name the identity the Ready will.
+        let identity = self.shared()?.identity();
         let local_capabilities = if hosted {
             None
         } else {
             Some(tokio::select! {
                 biased;
                 _ = self.owner.shutdown.cancelled() => return Err(hosted::unavailable()),
-                result = read_open(&mut input, config, deadline) => result?,
+                result = read_open(&mut input, identity, deadline) => result?,
             })
         };
         let (prepared, output) = self.shared()?.prepare_connection()?;
-        let config = config.clone();
+        if prepared.identity() != identity {
+            return Err(Status::failed_precondition(
+                "credential bridge identity changed",
+            ));
+        }
         let owner = self.owner.clone();
         let accepting = self.owner.accepting.lock().await;
         if !*accepting || self.owner.shutdown.is_cancelled() {
@@ -275,7 +283,7 @@ impl CredentialBridge {
             let admitted = tokio::select! {
                 biased;
                 _ = owner.shutdown.cancelled() => return,
-                result = read_open(&mut input, &config, deadline) => result,
+                result = read_open(&mut input, identity, deadline) => result,
             };
             let Ok(capabilities) = admitted else {
                 return;
@@ -405,7 +413,7 @@ fn bind_hosted_loopback(address: std::net::SocketAddr) -> io::Result<TcpListener
 /// lists for this epoch. A malformed capability list refuses the epoch.
 async fn read_open<S>(
     input: &mut S,
-    config: &CredentialBridgeConfig,
+    identity: BridgeIdentity,
     deadline: tokio::time::Instant,
 ) -> Result<Vec<String>, Status>
 where
@@ -421,8 +429,8 @@ where
         ));
     };
     if open.protocol_version != CREDENTIAL_BRIDGE_PROTOCOL_VERSION
-        || open.environment_id != config.environment_id.to_string()
-        || open.environment_generation != config.environment_generation
+        || open.environment_id != identity.environment_id.to_string()
+        || open.environment_generation != identity.environment_generation
     {
         return Err(Status::failed_precondition(
             "credential bridge identity is invalid",

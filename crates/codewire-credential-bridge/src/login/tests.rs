@@ -73,8 +73,8 @@ impl Harness {
         )
         .unwrap();
         let context = CodexLoginContext {
-            environment_id: *self.bridge.environment_id.as_bytes(),
-            environment_generation: self.bridge.environment_generation,
+            environment_id: *self.bridge.identity().environment_id.as_bytes(),
+            environment_generation: self.bridge.identity().environment_generation,
             request_id: *Uuid::parse_str(request_id).unwrap().as_bytes(),
             deadline_unix_ms: request.deadline_unix_ms,
         };

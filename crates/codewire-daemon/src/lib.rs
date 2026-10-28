@@ -2,6 +2,7 @@ pub mod access;
 #[cfg(target_os = "linux")]
 mod agent_login;
 pub mod app_ports;
+pub mod auth_rotation;
 #[cfg(target_os = "linux")]
 pub mod claude_home;
 pub mod client;

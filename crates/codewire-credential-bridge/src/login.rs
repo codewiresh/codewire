@@ -169,9 +169,10 @@ impl CredentialBridge {
         let recipient = ProjectionRecipient::new();
         let request_id = Uuid::new_v4();
         let deadline = tokio::time::Instant::now() + LOGIN_REQUEST_LIFETIME;
+        let identity = self.identity();
         let context = CodexLoginContext {
-            environment_id: *self.environment_id.as_bytes(),
-            environment_generation: self.environment_generation,
+            environment_id: *identity.environment_id.as_bytes(),
+            environment_generation: identity.environment_generation,
             request_id: *request_id.as_bytes(),
             deadline_unix_ms: login_now_unix_ms()?
                 .checked_add(LOGIN_REQUEST_LIFETIME.as_millis() as u64)

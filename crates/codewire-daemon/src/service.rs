@@ -10,7 +10,6 @@ use codewire_daemon_proto::{
     DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITIES, DAEMON_CAPABILITY_CREDENTIAL_BRIDGE,
     DAEMON_MINIMUM_PROTOCOL_VERSION, DAEMON_PROTOCOL_VERSION,
 };
-use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
@@ -47,6 +46,9 @@ pub struct DaemonServiceImpl {
     /// serves no tailnet (environment-token mode, local placements).
     app_ports: Option<AppPortsSender>,
     workload_sockets: crate::forward::WorkloadSockets,
+    /// The token every RPC must present. It starts as `config.auth_token`;
+    /// only a local guest daemon rotates it (`auth_rotation`).
+    auth: crate::auth_rotation::DaemonAuth,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -87,6 +89,7 @@ impl DaemonServiceImpl {
         let credential_bridge = CredentialBridge::new(config.credential_bridge.clone());
         Self {
             session_engine: SessionEngine::new(&config, credential_bridge.clone()),
+            auth: crate::auth_rotation::DaemonAuth::new(config.auth_token.clone()),
             credential_bridge,
             config,
             runtime_state,
@@ -120,17 +123,12 @@ impl DaemonServiceImpl {
     }
 
     fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
-        let expected = self.config.auth_token.expose_secret();
-        let Some(actual) = request
-            .metadata()
-            .get(DAEMON_AUTH_TOKEN_HEADER)
-            .and_then(|value| value.to_str().ok())
-        else {
-            return Err(Status::unauthenticated("missing daemon auth token"));
-        };
-        if !bool::from(actual.as_bytes().ct_eq(expected.as_bytes())) {
-            return Err(Status::unauthenticated("invalid daemon auth token"));
-        }
+        self.auth.authorize(
+            request
+                .metadata()
+                .get(DAEMON_AUTH_TOKEN_HEADER)
+                .and_then(|value| value.to_str().ok()),
+        )?;
         self.config
             .validate_host()
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
@@ -139,6 +137,10 @@ impl DaemonServiceImpl {
 
     pub(crate) fn credential_bridge(&self) -> CredentialBridge {
         self.credential_bridge.clone()
+    }
+
+    pub(crate) fn auth(&self) -> crate::auth_rotation::DaemonAuth {
+        self.auth.clone()
     }
 }
 
@@ -1147,6 +1149,132 @@ mod tests {
                 token: TEST_AUTH_TOKEN.parse().unwrap(),
             },
         )
+    }
+
+    async fn client_with_token(addr: SocketAddr, token: &str) -> TestClient {
+        let channel = Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .expect("connect daemon");
+        DaemonServiceClient::with_interceptor(
+            channel,
+            TestAuthInterceptor {
+                token: token.parse().unwrap(),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn rotation_refuses_the_old_token_ends_its_streams_and_keeps_sessions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let home_root = temp.path().join("home");
+        std::fs::create_dir_all(&workspace_root).expect("workspace");
+        std::fs::create_dir_all(&home_root).expect("home");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let config = Config {
+            listen_addr: addr.to_string(),
+            workspace_root,
+            home_root,
+            auth_token: DaemonAuthToken::new("synthetic-before").unwrap(),
+            process_execution: crate::execution::ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            host: None,
+            launch_projection: None,
+            session_working_dir: None,
+        };
+        let (rotation, requests) = crate::auth_rotation::rotation_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(crate::server::serve_rotating_grpc_for_tests(
+            config,
+            requests,
+            TcpListenerStream::new(listener),
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        let mut old = client_with_token(addr, "synthetic-before").await;
+        let session = old
+            .launch_session(v1::LaunchSessionRequest {
+                command: vec!["sh".into(), "-c".into(), "exec sleep 30".into()],
+                name: "ticker".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .session
+            .unwrap();
+        let (attach_input, input) = mpsc::channel(4);
+        attach_input
+            .send(v1::SessionAttachMessage {
+                payload: Some(v1::session_attach_message::Payload::Attach(
+                    v1::AttachSessionRequest {
+                        session_id: session.session_id.clone(),
+                        output_offset: 0,
+                    },
+                )),
+            })
+            .await
+            .unwrap();
+        let mut attached = old
+            .attach_session(ReceiverStream::new(input))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let epoch = rotation
+            .rotate(crate::auth_rotation::RotatedIdentity {
+                token: DaemonAuthToken::new("synthetic-after").unwrap(),
+                environment_id: uuid::Uuid::new_v4(),
+                environment_generation: 2,
+            })
+            .await
+            .unwrap();
+        assert_eq!(epoch, 1);
+
+        // The stream admitted with the old token ends.
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(Some(_)) = attached.message().await {}
+        })
+        .await;
+        assert!(ended.is_ok(), "the old epoch's attach stream did not end");
+
+        // The old token is refused on a new connection, too.
+        let mut stale = client_with_token(addr, "synthetic-before").await;
+        assert_eq!(
+            stale
+                .list_sessions(v1::ListSessionsRequest {})
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+
+        // The session kept running and is reachable with the new token.
+        let mut new = client_with_token(addr, "synthetic-after").await;
+        let sessions = new
+            .list_sessions(v1::ListSessionsRequest {})
+            .await
+            .unwrap()
+            .into_inner()
+            .sessions;
+        let kept = sessions
+            .iter()
+            .find(|record| record.session_id == session.session_id)
+            .expect("the session survives the rotation");
+        assert_eq!(kept.state, session.state);
+        new.stop_session(v1::StopSessionRequest {
+            session_id: session.session_id.clone(),
+        })
+        .await
+        .unwrap();
+        let _ = shutdown_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(10), server).await;
     }
 
     #[tokio::test]

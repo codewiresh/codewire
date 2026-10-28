@@ -146,8 +146,8 @@ fn bridge() -> CredentialBridge {
 
 fn context(bridge: &CredentialBridge) -> ProjectionContext {
     ProjectionContext {
-        environment_id: *bridge.environment_id.as_bytes(),
-        operation_generation: bridge.environment_generation,
+        environment_id: *bridge.identity().environment_id.as_bytes(),
+        operation_generation: bridge.identity().environment_generation,
         selection_sha256: [3; 32],
         deadline_unix_ms: now_ms() + 5_000,
     }
