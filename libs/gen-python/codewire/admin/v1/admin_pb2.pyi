@@ -30,16 +30,20 @@ class GetStatsResponse(_message.Message):
     def __init__(self, total_environments: _Optional[int] = ..., active_environments: _Optional[int] = ..., monthly_cpu_hours: _Optional[float] = ..., monthly_memory_gb_hours: _Optional[float] = ..., monthly_cost_cents: _Optional[int] = ...) -> None: ...
 
 class Organization(_message.Message):
-    __slots__ = ("id", "name", "slug", "created_at")
+    __slots__ = ("id", "name", "slug", "created_at", "billing_plan", "billing_status")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     SLUG_FIELD_NUMBER: _ClassVar[int]
     CREATED_AT_FIELD_NUMBER: _ClassVar[int]
+    BILLING_PLAN_FIELD_NUMBER: _ClassVar[int]
+    BILLING_STATUS_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
     slug: str
     created_at: _timestamp_pb2.Timestamp
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., slug: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    billing_plan: str
+    billing_status: str
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., slug: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., billing_plan: _Optional[str] = ..., billing_status: _Optional[str] = ...) -> None: ...
 
 class ListOrganizationsRequest(_message.Message):
     __slots__ = ()
@@ -258,3 +262,113 @@ class ClearOrganizationEnvironmentQuotaResponse(_message.Message):
     organization_id: str
     cleared: bool
     def __init__(self, organization_id: _Optional[str] = ..., cleared: _Optional[bool] = ...) -> None: ...
+
+class GetOrganizationOverviewRequest(_message.Message):
+    __slots__ = ("organization_id",)
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    def __init__(self, organization_id: _Optional[str] = ...) -> None: ...
+
+class OrganizationMember(_message.Message):
+    __slots__ = ("user_id", "email", "role", "joined_at")
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
+    EMAIL_FIELD_NUMBER: _ClassVar[int]
+    ROLE_FIELD_NUMBER: _ClassVar[int]
+    JOINED_AT_FIELD_NUMBER: _ClassVar[int]
+    user_id: str
+    email: str
+    role: str
+    joined_at: _timestamp_pb2.Timestamp
+    def __init__(self, user_id: _Optional[str] = ..., email: _Optional[str] = ..., role: _Optional[str] = ..., joined_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+
+class OrganizationSubscription(_message.Message):
+    __slots__ = ("kind", "plan", "status", "updated_at")
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    PLAN_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
+    kind: str
+    plan: str
+    status: str
+    updated_at: _timestamp_pb2.Timestamp
+    def __init__(self, kind: _Optional[str] = ..., plan: _Optional[str] = ..., status: _Optional[str] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+
+class OrganizationBilling(_message.Message):
+    __slots__ = ("billing_plan", "billing_status", "billing_exempt", "effective_plan", "subscriptions")
+    BILLING_PLAN_FIELD_NUMBER: _ClassVar[int]
+    BILLING_STATUS_FIELD_NUMBER: _ClassVar[int]
+    BILLING_EXEMPT_FIELD_NUMBER: _ClassVar[int]
+    EFFECTIVE_PLAN_FIELD_NUMBER: _ClassVar[int]
+    SUBSCRIPTIONS_FIELD_NUMBER: _ClassVar[int]
+    billing_plan: str
+    billing_status: str
+    billing_exempt: bool
+    effective_plan: str
+    subscriptions: _containers.RepeatedCompositeFieldContainer[OrganizationSubscription]
+    def __init__(self, billing_plan: _Optional[str] = ..., billing_status: _Optional[str] = ..., billing_exempt: _Optional[bool] = ..., effective_plan: _Optional[str] = ..., subscriptions: _Optional[_Iterable[_Union[OrganizationSubscription, _Mapping]]] = ...) -> None: ...
+
+class OrganizationEnvironmentUsage(_message.Message):
+    __slots__ = ("active_environments", "active_sandboxes", "cpu_millicores", "memory_mb")
+    ACTIVE_ENVIRONMENTS_FIELD_NUMBER: _ClassVar[int]
+    ACTIVE_SANDBOXES_FIELD_NUMBER: _ClassVar[int]
+    CPU_MILLICORES_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_MB_FIELD_NUMBER: _ClassVar[int]
+    active_environments: int
+    active_sandboxes: int
+    cpu_millicores: int
+    memory_mb: int
+    def __init__(self, active_environments: _Optional[int] = ..., active_sandboxes: _Optional[int] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ...) -> None: ...
+
+class OrganizationApiKey(_message.Message):
+    __slots__ = ("name", "created_at", "last_used_at", "disabled", "expires_at")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_FIELD_NUMBER: _ClassVar[int]
+    LAST_USED_AT_FIELD_NUMBER: _ClassVar[int]
+    DISABLED_FIELD_NUMBER: _ClassVar[int]
+    EXPIRES_AT_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    created_at: _timestamp_pb2.Timestamp
+    last_used_at: _timestamp_pb2.Timestamp
+    disabled: bool
+    expires_at: _timestamp_pb2.Timestamp
+    def __init__(self, name: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., last_used_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., disabled: _Optional[bool] = ..., expires_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+
+class GetOrganizationOverviewResponse(_message.Message):
+    __slots__ = ("organization", "members", "billing", "quota", "usage", "api_keys")
+    ORGANIZATION_FIELD_NUMBER: _ClassVar[int]
+    MEMBERS_FIELD_NUMBER: _ClassVar[int]
+    BILLING_FIELD_NUMBER: _ClassVar[int]
+    QUOTA_FIELD_NUMBER: _ClassVar[int]
+    USAGE_FIELD_NUMBER: _ClassVar[int]
+    API_KEYS_FIELD_NUMBER: _ClassVar[int]
+    organization: Organization
+    members: _containers.RepeatedCompositeFieldContainer[OrganizationMember]
+    billing: OrganizationBilling
+    quota: GetOrganizationEnvironmentQuotaResponse
+    usage: OrganizationEnvironmentUsage
+    api_keys: _containers.RepeatedCompositeFieldContainer[OrganizationApiKey]
+    def __init__(self, organization: _Optional[_Union[Organization, _Mapping]] = ..., members: _Optional[_Iterable[_Union[OrganizationMember, _Mapping]]] = ..., billing: _Optional[_Union[OrganizationBilling, _Mapping]] = ..., quota: _Optional[_Union[GetOrganizationEnvironmentQuotaResponse, _Mapping]] = ..., usage: _Optional[_Union[OrganizationEnvironmentUsage, _Mapping]] = ..., api_keys: _Optional[_Iterable[_Union[OrganizationApiKey, _Mapping]]] = ...) -> None: ...
+
+class GetDefaultEnvironmentQuotaRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class GetDefaultEnvironmentQuotaResponse(_message.Message):
+    __slots__ = ("quota", "stored")
+    QUOTA_FIELD_NUMBER: _ClassVar[int]
+    STORED_FIELD_NUMBER: _ClassVar[int]
+    quota: EnvironmentQuota
+    stored: bool
+    def __init__(self, quota: _Optional[_Union[EnvironmentQuota, _Mapping]] = ..., stored: _Optional[bool] = ...) -> None: ...
+
+class SetDefaultEnvironmentQuotaRequest(_message.Message):
+    __slots__ = ("quota",)
+    QUOTA_FIELD_NUMBER: _ClassVar[int]
+    quota: EnvironmentQuota
+    def __init__(self, quota: _Optional[_Union[EnvironmentQuota, _Mapping]] = ...) -> None: ...
+
+class SetDefaultEnvironmentQuotaResponse(_message.Message):
+    __slots__ = ("quota",)
+    QUOTA_FIELD_NUMBER: _ClassVar[int]
+    quota: EnvironmentQuota
+    def __init__(self, quota: _Optional[_Union[EnvironmentQuota, _Mapping]] = ...) -> None: ...

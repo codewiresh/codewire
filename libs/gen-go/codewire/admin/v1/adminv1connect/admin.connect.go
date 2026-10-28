@@ -59,6 +59,15 @@ const (
 	// AdminServiceClearOrganizationEnvironmentQuotaProcedure is the fully-qualified name of the
 	// AdminService's ClearOrganizationEnvironmentQuota RPC.
 	AdminServiceClearOrganizationEnvironmentQuotaProcedure = "/codewire.admin.v1.AdminService/ClearOrganizationEnvironmentQuota"
+	// AdminServiceGetOrganizationOverviewProcedure is the fully-qualified name of the AdminService's
+	// GetOrganizationOverview RPC.
+	AdminServiceGetOrganizationOverviewProcedure = "/codewire.admin.v1.AdminService/GetOrganizationOverview"
+	// AdminServiceGetDefaultEnvironmentQuotaProcedure is the fully-qualified name of the AdminService's
+	// GetDefaultEnvironmentQuota RPC.
+	AdminServiceGetDefaultEnvironmentQuotaProcedure = "/codewire.admin.v1.AdminService/GetDefaultEnvironmentQuota"
+	// AdminServiceSetDefaultEnvironmentQuotaProcedure is the fully-qualified name of the AdminService's
+	// SetDefaultEnvironmentQuota RPC.
+	AdminServiceSetDefaultEnvironmentQuotaProcedure = "/codewire.admin.v1.AdminService/SetDefaultEnvironmentQuota"
 )
 
 // AdminServiceClient is a client for the codewire.admin.v1.AdminService service.
@@ -89,6 +98,18 @@ type AdminServiceClient interface {
 	// environment quota, so its plan fallback applies again, and writes an
 	// audit entry. Clearing an organization without one changes nothing.
 	ClearOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.ClearOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.ClearOrganizationEnvironmentQuotaResponse], error)
+	// GetOrganizationOverview returns what an operator inspects for one
+	// organization: identity, members, billing, environment quota, current
+	// environment usage and API keys (names and dates only, never key
+	// material).
+	GetOrganizationOverview(context.Context, *connect.Request[v1.GetOrganizationOverviewRequest]) (*connect.Response[v1.GetOrganizationOverviewResponse], error)
+	// GetDefaultEnvironmentQuota returns the limits an organization without
+	// its own quota gets. A plan's workspace limit still sets the sandbox and
+	// environment counts when the plan has one.
+	GetDefaultEnvironmentQuota(context.Context, *connect.Request[v1.GetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.GetDefaultEnvironmentQuotaResponse], error)
+	// SetDefaultEnvironmentQuota replaces those defaults and writes an audit
+	// entry with the previous and new values.
+	SetDefaultEnvironmentQuota(context.Context, *connect.Request[v1.SetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.SetDefaultEnvironmentQuotaResponse], error)
 }
 
 // NewAdminServiceClient constructs a client for the codewire.admin.v1.AdminService service. By
@@ -163,6 +184,26 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(adminServiceMethods.ByName("ClearOrganizationEnvironmentQuota")),
 			connect.WithClientOptions(opts...),
 		),
+		getOrganizationOverview: connect.NewClient[v1.GetOrganizationOverviewRequest, v1.GetOrganizationOverviewResponse](
+			httpClient,
+			baseURL+AdminServiceGetOrganizationOverviewProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("GetOrganizationOverview")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		getDefaultEnvironmentQuota: connect.NewClient[v1.GetDefaultEnvironmentQuotaRequest, v1.GetDefaultEnvironmentQuotaResponse](
+			httpClient,
+			baseURL+AdminServiceGetDefaultEnvironmentQuotaProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("GetDefaultEnvironmentQuota")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		setDefaultEnvironmentQuota: connect.NewClient[v1.SetDefaultEnvironmentQuotaRequest, v1.SetDefaultEnvironmentQuotaResponse](
+			httpClient,
+			baseURL+AdminServiceSetDefaultEnvironmentQuotaProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("SetDefaultEnvironmentQuota")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -177,6 +218,9 @@ type adminServiceClient struct {
 	getOrganizationEnvironmentQuota   *connect.Client[v1.GetOrganizationEnvironmentQuotaRequest, v1.GetOrganizationEnvironmentQuotaResponse]
 	setOrganizationEnvironmentQuota   *connect.Client[v1.SetOrganizationEnvironmentQuotaRequest, v1.SetOrganizationEnvironmentQuotaResponse]
 	clearOrganizationEnvironmentQuota *connect.Client[v1.ClearOrganizationEnvironmentQuotaRequest, v1.ClearOrganizationEnvironmentQuotaResponse]
+	getOrganizationOverview           *connect.Client[v1.GetOrganizationOverviewRequest, v1.GetOrganizationOverviewResponse]
+	getDefaultEnvironmentQuota        *connect.Client[v1.GetDefaultEnvironmentQuotaRequest, v1.GetDefaultEnvironmentQuotaResponse]
+	setDefaultEnvironmentQuota        *connect.Client[v1.SetDefaultEnvironmentQuotaRequest, v1.SetDefaultEnvironmentQuotaResponse]
 }
 
 // GetStats calls codewire.admin.v1.AdminService.GetStats.
@@ -228,6 +272,21 @@ func (c *adminServiceClient) ClearOrganizationEnvironmentQuota(ctx context.Conte
 	return c.clearOrganizationEnvironmentQuota.CallUnary(ctx, req)
 }
 
+// GetOrganizationOverview calls codewire.admin.v1.AdminService.GetOrganizationOverview.
+func (c *adminServiceClient) GetOrganizationOverview(ctx context.Context, req *connect.Request[v1.GetOrganizationOverviewRequest]) (*connect.Response[v1.GetOrganizationOverviewResponse], error) {
+	return c.getOrganizationOverview.CallUnary(ctx, req)
+}
+
+// GetDefaultEnvironmentQuota calls codewire.admin.v1.AdminService.GetDefaultEnvironmentQuota.
+func (c *adminServiceClient) GetDefaultEnvironmentQuota(ctx context.Context, req *connect.Request[v1.GetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.GetDefaultEnvironmentQuotaResponse], error) {
+	return c.getDefaultEnvironmentQuota.CallUnary(ctx, req)
+}
+
+// SetDefaultEnvironmentQuota calls codewire.admin.v1.AdminService.SetDefaultEnvironmentQuota.
+func (c *adminServiceClient) SetDefaultEnvironmentQuota(ctx context.Context, req *connect.Request[v1.SetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.SetDefaultEnvironmentQuotaResponse], error) {
+	return c.setDefaultEnvironmentQuota.CallUnary(ctx, req)
+}
+
 // AdminServiceHandler is an implementation of the codewire.admin.v1.AdminService service.
 type AdminServiceHandler interface {
 	// GetStats returns global environment counts and current-month usage totals.
@@ -256,6 +315,18 @@ type AdminServiceHandler interface {
 	// environment quota, so its plan fallback applies again, and writes an
 	// audit entry. Clearing an organization without one changes nothing.
 	ClearOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.ClearOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.ClearOrganizationEnvironmentQuotaResponse], error)
+	// GetOrganizationOverview returns what an operator inspects for one
+	// organization: identity, members, billing, environment quota, current
+	// environment usage and API keys (names and dates only, never key
+	// material).
+	GetOrganizationOverview(context.Context, *connect.Request[v1.GetOrganizationOverviewRequest]) (*connect.Response[v1.GetOrganizationOverviewResponse], error)
+	// GetDefaultEnvironmentQuota returns the limits an organization without
+	// its own quota gets. A plan's workspace limit still sets the sandbox and
+	// environment counts when the plan has one.
+	GetDefaultEnvironmentQuota(context.Context, *connect.Request[v1.GetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.GetDefaultEnvironmentQuotaResponse], error)
+	// SetDefaultEnvironmentQuota replaces those defaults and writes an audit
+	// entry with the previous and new values.
+	SetDefaultEnvironmentQuota(context.Context, *connect.Request[v1.SetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.SetDefaultEnvironmentQuotaResponse], error)
 }
 
 // NewAdminServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -326,6 +397,26 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(adminServiceMethods.ByName("ClearOrganizationEnvironmentQuota")),
 		connect.WithHandlerOptions(opts...),
 	)
+	adminServiceGetOrganizationOverviewHandler := connect.NewUnaryHandler(
+		AdminServiceGetOrganizationOverviewProcedure,
+		svc.GetOrganizationOverview,
+		connect.WithSchema(adminServiceMethods.ByName("GetOrganizationOverview")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	adminServiceGetDefaultEnvironmentQuotaHandler := connect.NewUnaryHandler(
+		AdminServiceGetDefaultEnvironmentQuotaProcedure,
+		svc.GetDefaultEnvironmentQuota,
+		connect.WithSchema(adminServiceMethods.ByName("GetDefaultEnvironmentQuota")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	adminServiceSetDefaultEnvironmentQuotaHandler := connect.NewUnaryHandler(
+		AdminServiceSetDefaultEnvironmentQuotaProcedure,
+		svc.SetDefaultEnvironmentQuota,
+		connect.WithSchema(adminServiceMethods.ByName("SetDefaultEnvironmentQuota")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.admin.v1.AdminService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case AdminServiceGetStatsProcedure:
@@ -346,6 +437,12 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 			adminServiceSetOrganizationEnvironmentQuotaHandler.ServeHTTP(w, r)
 		case AdminServiceClearOrganizationEnvironmentQuotaProcedure:
 			adminServiceClearOrganizationEnvironmentQuotaHandler.ServeHTTP(w, r)
+		case AdminServiceGetOrganizationOverviewProcedure:
+			adminServiceGetOrganizationOverviewHandler.ServeHTTP(w, r)
+		case AdminServiceGetDefaultEnvironmentQuotaProcedure:
+			adminServiceGetDefaultEnvironmentQuotaHandler.ServeHTTP(w, r)
+		case AdminServiceSetDefaultEnvironmentQuotaProcedure:
+			adminServiceSetDefaultEnvironmentQuotaHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -389,4 +486,16 @@ func (UnimplementedAdminServiceHandler) SetOrganizationEnvironmentQuota(context.
 
 func (UnimplementedAdminServiceHandler) ClearOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.ClearOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.ClearOrganizationEnvironmentQuotaResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.ClearOrganizationEnvironmentQuota is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) GetOrganizationOverview(context.Context, *connect.Request[v1.GetOrganizationOverviewRequest]) (*connect.Response[v1.GetOrganizationOverviewResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.GetOrganizationOverview is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) GetDefaultEnvironmentQuota(context.Context, *connect.Request[v1.GetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.GetDefaultEnvironmentQuotaResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.GetDefaultEnvironmentQuota is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) SetDefaultEnvironmentQuota(context.Context, *connect.Request[v1.SetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.SetDefaultEnvironmentQuotaResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.SetDefaultEnvironmentQuota is not implemented"))
 }

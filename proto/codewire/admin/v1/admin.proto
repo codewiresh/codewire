@@ -65,6 +65,28 @@ service AdminService {
   // audit entry. Clearing an organization without one changes nothing.
   rpc ClearOrganizationEnvironmentQuota(ClearOrganizationEnvironmentQuotaRequest)
       returns (ClearOrganizationEnvironmentQuotaResponse);
+
+  // GetOrganizationOverview returns what an operator inspects for one
+  // organization: identity, members, billing, environment quota, current
+  // environment usage and API keys (names and dates only, never key
+  // material).
+  rpc GetOrganizationOverview(GetOrganizationOverviewRequest)
+      returns (GetOrganizationOverviewResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // GetDefaultEnvironmentQuota returns the limits an organization without
+  // its own quota gets. A plan's workspace limit still sets the sandbox and
+  // environment counts when the plan has one.
+  rpc GetDefaultEnvironmentQuota(GetDefaultEnvironmentQuotaRequest)
+      returns (GetDefaultEnvironmentQuotaResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // SetDefaultEnvironmentQuota replaces those defaults and writes an audit
+  // entry with the previous and new values.
+  rpc SetDefaultEnvironmentQuota(SetDefaultEnvironmentQuotaRequest)
+      returns (SetDefaultEnvironmentQuotaResponse);
 }
 
 message GetStatsRequest {}
@@ -82,6 +104,9 @@ message Organization {
   string name = 2;
   string slug = 3;
   google.protobuf.Timestamp created_at = 4;
+  // organizations.billing_plan and billing_status, "none" when unset.
+  string billing_plan = 5;
+  string billing_status = 6;
 }
 
 message ListOrganizationsRequest {}
@@ -227,4 +252,81 @@ message ClearOrganizationEnvironmentQuotaResponse {
   string organization_id = 1;
   // True when an explicit quota existed and was removed.
   bool cleared = 2;
+}
+
+message GetOrganizationOverviewRequest {
+  string organization_id = 1;
+}
+
+message OrganizationMember {
+  string user_id = 1;
+  string email = 2;
+  string role = 3;
+  google.protobuf.Timestamp joined_at = 4;
+}
+
+message OrganizationSubscription {
+  // "environment" or "organization".
+  string kind = 1;
+  string plan = 2;
+  string status = 3;
+  google.protobuf.Timestamp updated_at = 4;
+}
+
+message OrganizationBilling {
+  // organizations.billing_plan and billing_status.
+  string billing_plan = 1;
+  string billing_status = 2;
+  bool billing_exempt = 3;
+  // The plan quotas and billing resolve: the newest live environment
+  // subscription, else the newest live organization subscription, else a
+  // live billing_plan; empty when none applies.
+  string effective_plan = 4;
+  // Subscriptions in active, trialing or past_due status, newest first.
+  repeated OrganizationSubscription subscriptions = 5;
+}
+
+message OrganizationEnvironmentUsage {
+  // Environments consuming compute: not destroyed, destroying, error,
+  // stopped or archived.
+  int64 active_environments = 1;
+  int64 active_sandboxes = 2;
+  int64 cpu_millicores = 3;
+  int64 memory_mb = 4;
+}
+
+message OrganizationApiKey {
+  string name = 1;
+  google.protobuf.Timestamp created_at = 2;
+  // Unset when the key was never used.
+  google.protobuf.Timestamp last_used_at = 3;
+  bool disabled = 4;
+  // Unset when the key never expires.
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message GetOrganizationOverviewResponse {
+  Organization organization = 1;
+  repeated OrganizationMember members = 2;
+  OrganizationBilling billing = 3;
+  GetOrganizationEnvironmentQuotaResponse quota = 4;
+  OrganizationEnvironmentUsage usage = 5;
+  // Newest first.
+  repeated OrganizationApiKey api_keys = 6;
+}
+
+message GetDefaultEnvironmentQuotaRequest {}
+
+message GetDefaultEnvironmentQuotaResponse {
+  EnvironmentQuota quota = 1;
+  // False when no stored defaults exist and the built-in ones apply.
+  bool stored = 2;
+}
+
+message SetDefaultEnvironmentQuotaRequest {
+  EnvironmentQuota quota = 1;
+}
+
+message SetDefaultEnvironmentQuotaResponse {
+  EnvironmentQuota quota = 1;
 }

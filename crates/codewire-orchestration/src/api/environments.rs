@@ -734,11 +734,11 @@ pub(crate) async fn require_org_member(
 
 /// Mirrors `api.OrgEnvironmentUsage`. COUNT/SUM come back as int8.
 #[derive(Debug, Default, Clone, Copy)]
-struct OrgEnvironmentUsage {
-    active_total: i64,
-    active_sandbox: i64,
-    total_cpu: i64,
-    total_memory_mb: i64,
+pub(crate) struct OrgEnvironmentUsage {
+    pub(crate) active_total: i64,
+    pub(crate) active_sandbox: i64,
+    pub(crate) total_cpu: i64,
+    pub(crate) total_memory_mb: i64,
 }
 
 /// Mirrors `api.OrgQuota`.
@@ -753,7 +753,7 @@ pub(crate) struct OrgQuota {
 /// Mirrors `countActiveEnvironments` (active = consuming compute). A stopped
 /// environment whose start was admitted counts, since it is about to consume
 /// compute; otherwise concurrent starts could both pass the check (#3256).
-async fn count_active_environments<'e, E>(
+pub(crate) async fn count_active_environments<'e, E>(
     executor: E,
     org_id: &str,
 ) -> Result<OrgEnvironmentUsage, sqlx::Error>
@@ -783,10 +783,45 @@ where
     })
 }
 
+/// The limits an organization without its own quota gets when no
+/// `environment_quota_defaults` row can be read (0004 seeds these values).
+pub(crate) const FALLBACK_QUOTA_DEFAULTS: OrgQuota = OrgQuota {
+    max_concurrent_environments: 10,
+    max_concurrent_sandbox: 50,
+    max_cpu_millicores: 32_000,
+    max_memory_mb: 65_536,
+};
+
+/// The administrator-set defaults for organizations without their own
+/// quota (#3583), or [`FALLBACK_QUOTA_DEFAULTS`] without a readable row.
+pub(crate) async fn quota_defaults(pool: &PgPool) -> OrgQuota {
+    match sqlx::query_as::<_, (i32, i32, i32, i32)>(
+        r#"SELECT max_concurrent_environments, max_concurrent_sandbox,
+                  max_cpu_millicores, max_memory_mb
+           FROM environment_quota_defaults WHERE singleton"#,
+    )
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some((envs, sandbox, cpu, mem))) => OrgQuota {
+            max_concurrent_environments: envs,
+            max_concurrent_sandbox: sandbox,
+            max_cpu_millicores: cpu,
+            max_memory_mb: mem,
+        },
+        Ok(None) => FALLBACK_QUOTA_DEFAULTS,
+        Err(error) => {
+            tracing::warn!(error = %error, "quota defaults unreadable; using the fallback");
+            FALLBACK_QUOTA_DEFAULTS
+        }
+    }
+}
+
 /// Mirrors `resolveQuotaFromPlan`: defaults applied for unresolved
 /// fields. `plan_max_ws` is the sandbox plan's max_concurrent_ws (0
-/// when the plan is unknown).
-fn resolve_quota_from_plan(plan_max_ws: i32) -> OrgQuota {
+/// when the plan is unknown), which still sets the sandbox count, and
+/// the environment count with it, when the plan has one.
+fn resolve_quota_from_plan(plan_max_ws: i32, defaults: OrgQuota) -> OrgQuota {
     let mut q = OrgQuota {
         max_concurrent_sandbox: plan_max_ws,
         ..Default::default()
@@ -797,16 +832,16 @@ fn resolve_quota_from_plan(plan_max_ws: i32) -> OrgQuota {
         q.max_concurrent_environments = q.max_concurrent_sandbox;
     }
     if q.max_concurrent_environments == 0 {
-        q.max_concurrent_environments = 10;
+        q.max_concurrent_environments = defaults.max_concurrent_environments;
     }
     if q.max_concurrent_sandbox == 0 {
-        q.max_concurrent_sandbox = 50;
+        q.max_concurrent_sandbox = defaults.max_concurrent_sandbox;
     }
     if q.max_cpu_millicores == 0 {
-        q.max_cpu_millicores = 32000;
+        q.max_cpu_millicores = defaults.max_cpu_millicores;
     }
     if q.max_memory_mb == 0 {
-        q.max_memory_mb = 65536;
+        q.max_memory_mb = defaults.max_memory_mb;
     }
     q
 }
@@ -852,12 +887,12 @@ pub(crate) async fn get_org_quota(pool: &PgPool, org_id: &str) -> OrgQuota {
         .flatten()
         .unwrap_or(0)
     };
-    resolve_quota_from_plan(plan_max_ws)
+    resolve_quota_from_plan(plan_max_ws, quota_defaults(pool).await)
 }
 
 /// Mirrors `billing.ResolveEffectiveOrgEnvironmentPlan` (the plan-name
 /// slice; the Stripe subscription id is irrelevant for quotas).
-async fn resolve_effective_plan(pool: &PgPool, org_id: &str) -> String {
+pub(crate) async fn resolve_effective_plan(pool: &PgPool, org_id: &str) -> String {
     if let Ok(Some((plan,))) = sqlx::query_as::<_, (String,)>(
         r#"SELECT plan FROM environment_subscriptions
            WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due')
@@ -1608,7 +1643,7 @@ mod tests {
     #[test]
     fn quota_plan_fallback_mirrors_go_defaults() {
         // Unknown plan (0) → all defaults.
-        let q = resolve_quota_from_plan(0);
+        let q = resolve_quota_from_plan(0, FALLBACK_QUOTA_DEFAULTS);
         assert_eq!(
             (
                 q.max_concurrent_environments,
@@ -1619,16 +1654,44 @@ mod tests {
             (10, 50, 32000, 65536)
         );
         // Plan cap propagates to the total-environments cap.
-        let q = resolve_quota_from_plan(5);
+        let q = resolve_quota_from_plan(5, FALLBACK_QUOTA_DEFAULTS);
         assert_eq!(
             (q.max_concurrent_environments, q.max_concurrent_sandbox),
             (5, 5)
         );
         // Unlimited plan.
-        let q = resolve_quota_from_plan(-1);
+        let q = resolve_quota_from_plan(-1, FALLBACK_QUOTA_DEFAULTS);
         assert_eq!(
             (q.max_concurrent_environments, q.max_concurrent_sandbox),
             (-1, -1)
+        );
+        // Administrator defaults fill only what the plan leaves open: a
+        // plan's workspace limit still sets the sandbox and environment
+        // counts.
+        let raised = OrgQuota {
+            max_concurrent_environments: 200,
+            max_concurrent_sandbox: -1,
+            max_cpu_millicores: 400_000,
+            max_memory_mb: 1_600_000,
+        };
+        let q = resolve_quota_from_plan(0, raised);
+        assert_eq!(
+            (
+                q.max_concurrent_environments,
+                q.max_concurrent_sandbox,
+                q.max_cpu_millicores,
+                q.max_memory_mb
+            ),
+            (200, -1, 400_000, 1_600_000)
+        );
+        let q = resolve_quota_from_plan(5, raised);
+        assert_eq!(
+            (
+                q.max_concurrent_environments,
+                q.max_concurrent_sandbox,
+                q.max_cpu_millicores
+            ),
+            (5, 5, 400_000)
         );
     }
 

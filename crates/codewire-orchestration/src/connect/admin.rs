@@ -11,14 +11,20 @@ use codewire_admin_proto::codewire::admin::v1::{
     AdminService, AuditLogEntry as ProtoAuditLogEntry, ClearOrganizationEnvironmentQuotaRequest,
     ClearOrganizationEnvironmentQuotaResponse, EnvironmentLifecycleJournalEntry,
     EnvironmentQuota as ProtoEnvironmentQuota, EnvironmentStartupTiming,
+    GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse,
     GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse,
     GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse,
     GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse,
-    GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse,
+    GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest,
+    GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse,
     ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse,
     ListOrganizationsRequest, ListOrganizationsResponse, Organization as ProtoOrganization,
-    SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse,
-    StartupPhaseSummary,
+    OrganizationApiKey as ProtoOrganizationApiKey, OrganizationBilling as ProtoOrganizationBilling,
+    OrganizationEnvironmentUsage as ProtoOrganizationEnvironmentUsage,
+    OrganizationMember as ProtoOrganizationMember,
+    OrganizationSubscription as ProtoOrganizationSubscription, SetDefaultEnvironmentQuotaRequest,
+    SetDefaultEnvironmentQuotaResponse, SetOrganizationEnvironmentQuotaRequest,
+    SetOrganizationEnvironmentQuotaResponse, StartupPhaseSummary,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
@@ -28,11 +34,12 @@ use crate::api::ApiState;
 use crate::api::admin::{
     self, AdminEnvironmentLifecycleJournalEntry, AdminEnvironmentQuota,
     AdminEnvironmentStartupPhaseSummary, AdminEnvironmentStartupTiming,
-    AdminEnvironmentStartupTimings, AdminOrg, AuditLogEntry, ListAuditLogsParams,
+    AdminEnvironmentStartupTimings, AdminOrg, AdminOrganizationEnvironmentQuota,
+    AdminOrganizationOverview, AuditLogEntry, ListAuditLogsParams,
 };
 
-/// Registers the seven AdminService reads and the two audited quota writes on
-/// their generated Connect routes.
+/// Registers the nine AdminService reads and the three audited quota writes
+/// on their generated Connect routes.
 pub fn router(state: ApiState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(AdminConnectService { state }))
 }
@@ -189,12 +196,60 @@ impl AdminService for AdminConnectService {
             admin::get_organization_environment_quota_core(&self.state.pool, organization_id)
                 .await
                 .map_err(|error| rpc_app_error(&error, &ctx))?;
-        connectrpc::Response::ok(GetOrganizationEnvironmentQuotaResponse {
-            organization_id: quota.organization_id,
-            explicit: quota.explicit.map(proto_environment_quota).into(),
-            effective: Some(proto_environment_quota(quota.effective)).into(),
+        connectrpc::Response::ok(proto_organization_quota(quota))
+    }
+
+    async fn get_default_environment_quota(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, GetDefaultEnvironmentQuotaRequest>,
+    ) -> ServiceResult<GetDefaultEnvironmentQuotaResponse> {
+        let (quota, stored) = admin::get_default_environment_quota_core(&self.state.pool)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(GetDefaultEnvironmentQuotaResponse {
+            quota: Some(proto_environment_quota(quota)).into(),
+            stored,
             ..Default::default()
         })
+    }
+
+    async fn set_default_environment_quota(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetDefaultEnvironmentQuotaRequest>,
+    ) -> ServiceResult<SetDefaultEnvironmentQuotaResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let quota = required_quota(request.view().quota.as_option().map(|quota| {
+            (
+                quota.max_concurrent_environments,
+                quota.max_concurrent_sandbox,
+                quota.max_cpu_millicores,
+                quota.max_memory_mb,
+            )
+        }))
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let quota =
+            admin::set_default_environment_quota_core(&self.state.pool, &actor.user_id, quota)
+                .await
+                .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(SetDefaultEnvironmentQuotaResponse {
+            quota: Some(proto_environment_quota(quota)).into(),
+            ..Default::default()
+        })
+    }
+
+    async fn get_organization_overview(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, GetOrganizationOverviewRequest>,
+    ) -> ServiceResult<GetOrganizationOverviewResponse> {
+        let organization_id = required_organization_id(request.view().organization_id)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let overview = admin::get_organization_overview_core(&self.state.pool, organization_id)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto_organization_overview(overview))
     }
 
     async fn set_organization_environment_quota(
@@ -206,26 +261,15 @@ impl AdminService for AdminConnectService {
         let request = request.view();
         let organization_id = required_organization_id(request.organization_id)
             .map_err(|error| rpc_app_error(&error, &ctx))?;
-        let quota = request
-            .quota
-            .as_option()
-            .map(|quota| AdminEnvironmentQuota {
-                max_concurrent_environments: quota.max_concurrent_environments,
-                max_concurrent_sandbox: quota.max_concurrent_sandbox,
-                max_cpu_millicores: quota.max_cpu_millicores,
-                max_memory_mb: quota.max_memory_mb,
-            })
-            .ok_or_else(|| {
-                rpc_app_error(
-                    &AppError::Validation {
-                        errors: vec![ValidationIssue {
-                            path: "/quota".into(),
-                            message: "must be set".into(),
-                        }],
-                    },
-                    &ctx,
-                )
-            })?;
+        let quota = required_quota(request.quota.as_option().map(|quota| {
+            (
+                quota.max_concurrent_environments,
+                quota.max_concurrent_sandbox,
+                quota.max_cpu_millicores,
+                quota.max_memory_mb,
+            )
+        }))
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
         let quota = admin::set_organization_environment_quota_core(
             &self.state.pool,
             &actor.user_id,
@@ -277,6 +321,26 @@ fn required_organization_id(value: &str) -> AppResult<&str> {
     Ok(value)
 }
 
+/// The request's four limits, as (environments, sandboxes, CPU millicores,
+/// memory MiB); a request without a quota is refused.
+fn required_quota(quota: Option<(i32, i32, i32, i32)>) -> AppResult<AdminEnvironmentQuota> {
+    quota
+        .map(
+            |(environments, sandbox, cpu, memory)| AdminEnvironmentQuota {
+                max_concurrent_environments: environments,
+                max_concurrent_sandbox: sandbox,
+                max_cpu_millicores: cpu,
+                max_memory_mb: memory,
+            },
+        )
+        .ok_or_else(|| AppError::Validation {
+            errors: vec![ValidationIssue {
+                path: "/quota".into(),
+                message: "must be set".into(),
+            }],
+        })
+}
+
 fn proto_environment_quota(value: AdminEnvironmentQuota) -> ProtoEnvironmentQuota {
     ProtoEnvironmentQuota {
         max_concurrent_environments: value.max_concurrent_environments,
@@ -293,8 +357,97 @@ fn proto_organization(value: AdminOrg) -> AppResult<ProtoOrganization> {
         name: value.name,
         slug: value.slug,
         created_at: Some(proto_timestamp(&value.created_at)?).into(),
+        billing_plan: value.billing_plan,
+        billing_status: value.billing_status,
         ..Default::default()
     })
+}
+
+fn proto_organization_quota(
+    quota: AdminOrganizationEnvironmentQuota,
+) -> GetOrganizationEnvironmentQuotaResponse {
+    GetOrganizationEnvironmentQuotaResponse {
+        organization_id: quota.organization_id,
+        explicit: quota.explicit.map(proto_environment_quota).into(),
+        effective: Some(proto_environment_quota(quota.effective)).into(),
+        ..Default::default()
+    }
+}
+
+/// Database timestamps are UTC without a zone.
+fn proto_naive_timestamp(value: chrono::NaiveDateTime) -> Timestamp {
+    let value = value.and_utc();
+    Timestamp::from_unix(value.timestamp(), value.timestamp_subsec_nanos() as i32)
+}
+
+fn proto_organization_overview(
+    value: AdminOrganizationOverview,
+) -> GetOrganizationOverviewResponse {
+    GetOrganizationOverviewResponse {
+        organization: Some(ProtoOrganization {
+            id: value.id,
+            name: value.name,
+            slug: value.slug,
+            created_at: value.created_at.map(proto_naive_timestamp).into(),
+            billing_plan: value.billing.billing_plan.clone(),
+            billing_status: value.billing.billing_status.clone(),
+            ..Default::default()
+        })
+        .into(),
+        members: value
+            .members
+            .into_iter()
+            .map(|member| ProtoOrganizationMember {
+                user_id: member.user_id,
+                email: member.email,
+                role: member.role,
+                joined_at: member.joined_at.map(proto_naive_timestamp).into(),
+                ..Default::default()
+            })
+            .collect(),
+        billing: Some(ProtoOrganizationBilling {
+            billing_plan: value.billing.billing_plan,
+            billing_status: value.billing.billing_status,
+            billing_exempt: value.billing.billing_exempt,
+            effective_plan: value.billing.effective_plan,
+            subscriptions: value
+                .billing
+                .subscriptions
+                .into_iter()
+                .map(|subscription| ProtoOrganizationSubscription {
+                    kind: subscription.kind.to_owned(),
+                    plan: subscription.plan,
+                    status: subscription.status,
+                    updated_at: subscription.updated_at.map(proto_naive_timestamp).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .into(),
+        quota: Some(proto_organization_quota(value.quota)).into(),
+        usage: Some(ProtoOrganizationEnvironmentUsage {
+            active_environments: value.usage.active_environments,
+            active_sandboxes: value.usage.active_sandboxes,
+            cpu_millicores: value.usage.cpu_millicores,
+            memory_mb: value.usage.memory_mb,
+            ..Default::default()
+        })
+        .into(),
+        api_keys: value
+            .api_keys
+            .into_iter()
+            .map(|key| ProtoOrganizationApiKey {
+                name: key.name,
+                created_at: key.created_at.map(proto_naive_timestamp).into(),
+                last_used_at: key.last_used_at.map(proto_naive_timestamp).into(),
+                disabled: key.disabled,
+                expires_at: key.expires_at.map(proto_naive_timestamp).into(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
 }
 
 fn proto_audit_log(value: AuditLogEntry) -> AppResult<ProtoAuditLogEntry> {

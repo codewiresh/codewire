@@ -18,7 +18,10 @@ use serde::{Deserialize, Serialize, Serializer};
 use sqlx::Row;
 
 use super::ApiState;
-use super::environments::{OrgQuota, format_time, get_org_quota};
+use super::environments::{
+    FALLBACK_QUOTA_DEFAULTS, OrgQuota, count_active_environments, format_time, get_org_quota,
+    resolve_effective_plan,
+};
 
 #[cfg(test)]
 mod quota_database_tests;
@@ -112,12 +115,14 @@ pub struct AdminOrg {
     pub name: String,
     pub slug: String,
     pub created_at: String,
+    pub billing_plan: String,
+    pub billing_status: String,
 }
 
 /// Shared global organization query used by AdminService.
 pub(crate) async fn list_admin_organizations_core(state: &ApiState) -> AppResult<Vec<AdminOrg>> {
     let rows = sqlx::query(
-        r#"SELECT id, name, slug, created_at
+        r#"SELECT id, name, slug, created_at, billing_plan, billing_status
            FROM organizations
            ORDER BY name ASC"#,
     )
@@ -136,6 +141,8 @@ pub(crate) async fn list_admin_organizations_core(state: &ApiState) -> AppResult
             name: r.try_get("name").map_err(AppError::from)?,
             slug: r.try_get("slug").map_err(AppError::from)?,
             created_at: format_time(created_at),
+            billing_plan: r.try_get("billing_plan").map_err(AppError::from)?,
+            billing_status: r.try_get("billing_status").map_err(AppError::from)?,
         });
     }
 
@@ -1033,4 +1040,289 @@ mod tests {
             assert_eq!(detail, "limit must be between 1 and 500");
         }
     }
+}
+
+/// One member of an organization, for the admin overview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminOrganizationMember {
+    pub user_id: String,
+    pub email: String,
+    pub role: String,
+    pub joined_at: Option<chrono::NaiveDateTime>,
+}
+
+/// A live (active, trialing or past_due) subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminOrganizationSubscription {
+    /// "environment" or "organization".
+    pub kind: &'static str,
+    pub plan: String,
+    pub status: String,
+    pub updated_at: Option<chrono::NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminOrganizationBilling {
+    pub billing_plan: String,
+    pub billing_status: String,
+    pub billing_exempt: bool,
+    pub effective_plan: String,
+    pub subscriptions: Vec<AdminOrganizationSubscription>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdminOrganizationUsage {
+    pub active_environments: i64,
+    pub active_sandboxes: i64,
+    pub cpu_millicores: i64,
+    pub memory_mb: i64,
+}
+
+/// An API key's name and dates. Key hashes and prefixes are never read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminOrganizationApiKey {
+    pub name: String,
+    pub created_at: Option<chrono::NaiveDateTime>,
+    pub last_used_at: Option<chrono::NaiveDateTime>,
+    pub disabled: bool,
+    pub expires_at: Option<chrono::NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminOrganizationOverview {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub created_at: Option<chrono::NaiveDateTime>,
+    pub members: Vec<AdminOrganizationMember>,
+    pub billing: AdminOrganizationBilling,
+    pub quota: AdminOrganizationEnvironmentQuota,
+    pub usage: AdminOrganizationUsage,
+    pub api_keys: Vec<AdminOrganizationApiKey>,
+}
+
+/// Shared organization overview read used by AdminService.
+pub(crate) async fn get_organization_overview_core(
+    pool: &sqlx::PgPool,
+    organization_id: &str,
+) -> AppResult<AdminOrganizationOverview> {
+    let failure = |action: &'static str| move |error| quota_failure(action, error);
+    type OrganizationRow = (
+        String,
+        String,
+        String,
+        Option<chrono::NaiveDateTime>,
+        String,
+        String,
+        bool,
+    );
+    let organization: Option<OrganizationRow> = sqlx::query_as(
+        r#"SELECT id, name, slug, created_at, billing_plan, billing_status, billing_exempt
+           FROM organizations WHERE id = $1"#,
+    )
+    .bind(organization_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(failure("read organization"))?;
+    let Some((id, name, slug, created_at, billing_plan, billing_status, billing_exempt)) =
+        organization
+    else {
+        return Err(AppError::NotFound("organization not found".into()));
+    };
+
+    let members = sqlx::query_as::<_, (String, String, String, Option<chrono::NaiveDateTime>)>(
+        r#"SELECT m.user_id, COALESCE(u.email, ''), m.role, m.created_at
+           FROM org_members m LEFT JOIN users u ON u.id = m.user_id
+           WHERE m.org_id = $1
+           ORDER BY m.created_at, m.user_id"#,
+    )
+    .bind(organization_id)
+    .fetch_all(pool)
+    .await
+    .map_err(failure("read organization members"))?
+    .into_iter()
+    .map(
+        |(user_id, email, role, joined_at)| AdminOrganizationMember {
+            user_id,
+            email,
+            role,
+            joined_at,
+        },
+    )
+    .collect();
+
+    let subscriptions =
+        sqlx::query_as::<_, (String, String, String, Option<chrono::NaiveDateTime>)>(
+            r#"SELECT 'environment', plan, status, updated_at FROM environment_subscriptions
+             WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due')
+           UNION ALL
+           SELECT 'organization', plan, status, updated_at FROM org_subscriptions
+             WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due')
+           ORDER BY 4 DESC NULLS LAST"#,
+        )
+        .bind(organization_id)
+        .fetch_all(pool)
+        .await
+        .map_err(failure("read organization subscriptions"))?
+        .into_iter()
+        .map(
+            |(kind, plan, status, updated_at)| AdminOrganizationSubscription {
+                kind: if kind == "environment" {
+                    "environment"
+                } else {
+                    "organization"
+                },
+                plan,
+                status,
+                updated_at,
+            },
+        )
+        .collect();
+
+    let usage = count_active_environments(pool, organization_id)
+        .await
+        .map_err(failure("count active environments"))?;
+
+    let api_keys = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<chrono::NaiveDateTime>,
+            Option<chrono::NaiveDateTime>,
+            bool,
+            Option<chrono::NaiveDateTime>,
+        ),
+    >(
+        r#"SELECT name, created_at, last_used_at, disabled_at IS NOT NULL, expires_at
+           FROM api_keys WHERE org_id = $1
+           ORDER BY created_at DESC NULLS LAST, name"#,
+    )
+    .bind(organization_id)
+    .fetch_all(pool)
+    .await
+    .map_err(failure("read organization API keys"))?
+    .into_iter()
+    .map(
+        |(name, created_at, last_used_at, disabled, expires_at)| AdminOrganizationApiKey {
+            name,
+            created_at,
+            last_used_at,
+            disabled,
+            expires_at,
+        },
+    )
+    .collect();
+
+    Ok(AdminOrganizationOverview {
+        id,
+        name,
+        slug,
+        created_at,
+        members,
+        billing: AdminOrganizationBilling {
+            billing_plan,
+            billing_status,
+            billing_exempt,
+            effective_plan: resolve_effective_plan(pool, organization_id).await,
+            subscriptions,
+        },
+        quota: get_organization_environment_quota_core(pool, organization_id).await?,
+        usage: AdminOrganizationUsage {
+            active_environments: usage.active_total,
+            active_sandboxes: usage.active_sandbox,
+            cpu_millicores: usage.total_cpu,
+            memory_mb: usage.total_memory_mb,
+        },
+        api_keys,
+    })
+}
+
+/// The defaults for organizations without their own quota, and whether they
+/// are stored or the built-in fallback.
+pub(crate) async fn get_default_environment_quota_core(
+    pool: &sqlx::PgPool,
+) -> AppResult<(AdminEnvironmentQuota, bool)> {
+    let stored = stored_default_environment_quota(pool, false)
+        .await
+        .map_err(|error| quota_failure("read environment quota defaults", error))?;
+    Ok(match stored {
+        Some(quota) => (quota, true),
+        None => (FALLBACK_QUOTA_DEFAULTS.into(), false),
+    })
+}
+
+async fn stored_default_environment_quota<'e, E>(
+    executor: E,
+    lock: bool,
+) -> Result<Option<AdminEnvironmentQuota>, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let query = if lock {
+        r#"SELECT max_concurrent_environments, max_concurrent_sandbox,
+                  max_cpu_millicores, max_memory_mb
+           FROM environment_quota_defaults WHERE singleton FOR UPDATE"#
+    } else {
+        r#"SELECT max_concurrent_environments, max_concurrent_sandbox,
+                  max_cpu_millicores, max_memory_mb
+           FROM environment_quota_defaults WHERE singleton"#
+    };
+    let row: Option<(i32, i32, i32, i32)> = sqlx::query_as(query).fetch_optional(executor).await?;
+    Ok(row.map(
+        |(environments, sandbox, cpu, memory)| AdminEnvironmentQuota {
+            max_concurrent_environments: environments,
+            max_concurrent_sandbox: sandbox,
+            max_cpu_millicores: cpu,
+            max_memory_mb: memory,
+        },
+    ))
+}
+
+/// Replaces the defaults for organizations without their own quota and
+/// records the previous and new values in the audit log, in one transaction.
+pub(crate) async fn set_default_environment_quota_core(
+    pool: &sqlx::PgPool,
+    actor_user_id: &str,
+    quota: AdminEnvironmentQuota,
+) -> AppResult<AdminEnvironmentQuota> {
+    validate_environment_quota(&quota)?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| quota_failure("start environment quota defaults update", error))?;
+    let previous = stored_default_environment_quota(&mut *transaction, true)
+        .await
+        .map_err(|error| quota_failure("read environment quota defaults", error))?
+        .unwrap_or_else(|| FALLBACK_QUOTA_DEFAULTS.into());
+    sqlx::query(
+        r#"INSERT INTO environment_quota_defaults
+               (singleton, max_concurrent_environments, max_concurrent_sandbox,
+                max_cpu_millicores, max_memory_mb, updated_at)
+           VALUES (true, $1, $2, $3, $4, NOW())
+           ON CONFLICT (singleton) DO UPDATE SET
+               max_concurrent_environments = EXCLUDED.max_concurrent_environments,
+               max_concurrent_sandbox = EXCLUDED.max_concurrent_sandbox,
+               max_cpu_millicores = EXCLUDED.max_cpu_millicores,
+               max_memory_mb = EXCLUDED.max_memory_mb,
+               updated_at = EXCLUDED.updated_at"#,
+    )
+    .bind(quota.max_concurrent_environments)
+    .bind(quota.max_concurrent_sandbox)
+    .bind(quota.max_cpu_millicores)
+    .bind(quota.max_memory_mb)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| quota_failure("update environment quota defaults", error))?;
+    audit_quota_change(
+        &mut transaction,
+        "admin.environment_quota_defaults_set",
+        actor_user_id,
+        serde_json::json!({ "previous": previous, "quota": quota }),
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| quota_failure("commit environment quota defaults update", error))?;
+    Ok(quota)
 }

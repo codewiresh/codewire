@@ -4,11 +4,15 @@ use codewire_proto::google::rpc::BadRequest;
 use connectrpc::ConnectError;
 
 use crate::{
-    admin_connect::AuditLogRow,
+    admin_connect::{
+        AdminApiKeyRow, AdminMemberRow, AdminOrganizationRow, AdminOrganizationView,
+        AdminSubscriptionRow, AuditLogRow, QuotaLimitView, QuotaView,
+    },
     response::{HTMX_REQUEST, login_redirect, safe_auth_continuation, two_factor_redirect},
     templates::{
-        AdminAccountsTemplate, AdminAuditTemplate, OrganizationFormTemplate,
-        OrganizationListTemplate, SetupTwoFactorTemplate, TwoFactorRecoveryTemplate,
+        AdminAccountsTemplate, AdminAuditTemplate, AdminOrganizationTemplate,
+        AdminOrganizationsTemplate, OrganizationFormTemplate, OrganizationListTemplate,
+        SetupTwoFactorTemplate, TwoFactorRecoveryTemplate,
     },
     transport::browser_headers,
     view::{
@@ -435,4 +439,163 @@ fn auth_redirects_preserve_the_originating_rust_route() {
         response.headers().get(header::LOCATION).unwrap(),
         "/setup-2fa?return_to=%2Forganizations%2Fnew%2F"
     );
+}
+
+fn admin_view() -> DashboardView {
+    DashboardView {
+        user_name: "<unsafe admin>".into(),
+        is_admin: true,
+        ..Default::default()
+    }
+}
+
+fn unsafe_organization(has_explicit_quota: bool) -> AdminOrganizationView {
+    let limit = |value: i32, display: &str| QuotaLimitView {
+        value,
+        display: display.into(),
+    };
+    AdminOrganizationView {
+        id: "org_safe-1".into(),
+        name: "<script>alert('org')</script>".into(),
+        slug: "safe-org".into(),
+        created: "2026-10-28".into(),
+        members: vec![AdminMemberRow {
+            email: "<unsafe@example.test>".into(),
+            role: "owner".into(),
+            joined: "2026-10-28".into(),
+        }],
+        billing_plan: "<plan>".into(),
+        billing_status: "active".into(),
+        billing_exempt: true,
+        effective_plan: "unlimited".into(),
+        subscriptions: vec![AdminSubscriptionRow {
+            kind: "environment".into(),
+            plan: "unlimited".into(),
+            status: "active".into(),
+            updated: "2026-10-28".into(),
+        }],
+        has_explicit_quota,
+        effective_quota: QuotaView {
+            environments: limit(-1, "Unlimited"),
+            sandboxes: limit(200, "200"),
+            cpu_millicores: limit(400_000, "400 vCPU"),
+            memory_mb: limit(1_600_000, "1562.5 GiB"),
+        },
+        active_environments: 3,
+        active_sandboxes: 3,
+        used_cpu: "6 vCPU".into(),
+        used_memory: "24 GiB".into(),
+        api_keys: vec![AdminApiKeyRow {
+            name: "</td><script>alert('key')</script>".into(),
+            created: "2026-10-28".into(),
+            last_used: "Never".into(),
+            expires: "Never".into(),
+            disabled: false,
+        }],
+    }
+}
+
+#[test]
+fn admin_organizations_template_links_each_row_and_escapes_names() {
+    let view = admin_view();
+    let organizations = vec![AdminOrganizationRow {
+        name: "<script>alert('org')</script>".into(),
+        slug: "safe-org".into(),
+        billing_plan: "unlimited".into(),
+        billing_status: "active".into(),
+        created: "2026-10-28".into(),
+        url: "/admin/organizations/org_safe-1/".into(),
+    }];
+    let defaults = unsafe_organization(false).effective_quota;
+    let body = AdminOrganizationsTemplate {
+        view: &view,
+        organizations: &organizations,
+        defaults: &defaults,
+        csrf_token: "csrf-safe",
+        message: "",
+        error: "",
+    }
+    .render()
+    .expect("render admin organizations page");
+    assert!(!body.contains("<script>"));
+    // The whole row opens the organization through its one stretched link.
+    assert!(body.contains(r#"<table class="cw-table cw-table--row-links">"#));
+    assert!(body.contains(
+        r#"<th scope="row"><a class="cw-row-link" href="/admin/organizations/org_safe-1/">"#
+    ));
+    assert_eq!(body.matches(r#"class="cw-row-link""#).count(), 1);
+    // The defaults form: labelled, starting at the stored defaults, and
+    // saying that a plan's workspace limit still sets the sandbox count.
+    assert!(body.contains(r#"action="/admin/organizations/_actions/defaults/set""#));
+    assert!(body.contains(r#"<input type="hidden" name="_csrf" value="csrf-safe">"#));
+    assert!(body.contains("Defaults for organizations without their own quota"));
+    assert!(body.contains("A plan's workspace limit still sets the sandbox"));
+    for (label, name, value) in [
+        ("Concurrent environments", "environments", "-1"),
+        ("Concurrent sandboxes", "sandboxes", "200"),
+        ("CPU (millicores)", "cpu_millicores", "400000"),
+        ("Memory (MiB)", "memory_mb", "1600000"),
+    ] {
+        assert!(
+            body.contains(&format!(
+                r#"<label class="cw-field"><span>{label}</span><input class="cw-input" type="number" name="{name}" min="-1" step="1" value="{value}" required></label>"#
+            )),
+            "{name}"
+        );
+    }
+    assert!(body.contains(r#"<th scope="col">Plan</th>"#));
+    assert!(body.contains(r#"<th scope="row">"#));
+    assert!(body.contains(r#"href="/admin/organizations/">Organizations</a>"#));
+}
+
+#[test]
+fn admin_organization_template_shows_billing_quota_usage_and_escapes_upstream_data() {
+    let view = admin_view();
+    for has_explicit_quota in [false, true] {
+        let organization = unsafe_organization(has_explicit_quota);
+        let body = AdminOrganizationTemplate {
+            view: &view,
+            organization: &organization,
+            csrf_token: "csrf-safe",
+            message: "",
+            error: "",
+        }
+        .render()
+        .expect("render admin organization page");
+        assert!(!body.contains("<script>"));
+        assert!(!body.contains("<unsafe@example.test>"));
+        assert!(!body.contains("<plan>"));
+        // Usage against the effective limits, as a description list.
+        assert!(body.contains("<dt>Sandboxes</dt><dd>3 <small>of 200</small></dd>"));
+        assert!(body.contains("<dt>Environments</dt><dd>3 <small>of Unlimited</small></dd>"));
+        assert!(body.contains("<dt>Effective plan</dt><dd>unlimited</dd>"));
+        assert!(body.contains("<dt>Billing exempt</dt><dd>Yes</dd>"));
+        // Every quota control is labelled and starts at the effective value.
+        for (label, name, value) in [
+            ("Concurrent environments", "environments", "-1"),
+            ("Concurrent sandboxes", "sandboxes", "200"),
+            ("CPU (millicores)", "cpu_millicores", "400000"),
+            ("Memory (MiB)", "memory_mb", "1600000"),
+        ] {
+            assert!(
+                body.contains(&format!(
+                    r#"<label class="cw-field"><span>{label}</span><input class="cw-input" type="number" name="{name}" min="-1" step="1" value="{value}" required></label>"#
+                )),
+                "{name}"
+            );
+        }
+        assert!(body.contains(r#"action="/admin/organizations/_actions/quota/set""#));
+        assert!(
+            body.contains(r#"<input type="hidden" name="organization_id" value="org_safe-1">"#)
+        );
+        assert!(body.contains(r#"<input type="hidden" name="_csrf" value="csrf-safe">"#));
+        assert_eq!(
+            body.contains(r#"action="/admin/organizations/_actions/quota/clear""#),
+            has_explicit_quota
+        );
+        assert_eq!(
+            body.contains("the plan fallback applies."),
+            !has_explicit_quota
+        );
+    }
 }

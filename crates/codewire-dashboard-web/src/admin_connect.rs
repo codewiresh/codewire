@@ -2,9 +2,12 @@ use std::time::Duration;
 
 use axum::http::HeaderValue;
 use codewire_admin_proto::codewire::admin::v1::{
-    AdminServiceClient, BillingCatalogServiceClient, CreatePlanRequest, CreatePriceRequest,
-    GetCatalogRequest, GetStatsRequest, ListAuditLogsRequest, ListSubscriptionMigrationsRequest,
-    PlanSpec, PreviewSubscriptionMigrationRequest, RunSubscriptionMigrationRequest,
+    AdminServiceClient, BillingCatalogServiceClient, ClearOrganizationEnvironmentQuotaRequest,
+    CreatePlanRequest, CreatePriceRequest, EnvironmentQuota, GetCatalogRequest,
+    GetDefaultEnvironmentQuotaRequest, GetOrganizationOverviewRequest, GetStatsRequest,
+    ListAuditLogsRequest, ListOrganizationsRequest, ListSubscriptionMigrationsRequest, PlanSpec,
+    PreviewSubscriptionMigrationRequest, RunSubscriptionMigrationRequest,
+    SetDefaultEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaRequest,
     SetPlanArchivedRequest, SetPriceArchivedRequest, UpdatePlanRequest, UpdatePriceRequest,
     UpdateSettingRequest,
 };
@@ -134,6 +137,86 @@ pub(crate) struct AdminCatalogView {
     pub(crate) csrf_token: String,
     pub(crate) message: String,
     pub(crate) error: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct AdminOrganizationRow {
+    pub(crate) name: String,
+    pub(crate) slug: String,
+    pub(crate) billing_plan: String,
+    pub(crate) billing_status: String,
+    pub(crate) created: String,
+    pub(crate) url: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct AdminMemberRow {
+    pub(crate) email: String,
+    pub(crate) role: String,
+    pub(crate) joined: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct AdminSubscriptionRow {
+    pub(crate) kind: String,
+    pub(crate) plan: String,
+    pub(crate) status: String,
+    pub(crate) updated: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct AdminApiKeyRow {
+    pub(crate) name: String,
+    pub(crate) created: String,
+    pub(crate) last_used: String,
+    pub(crate) expires: String,
+    pub(crate) disabled: bool,
+}
+
+/// One limit as the page shows it: the raw value for the form and a
+/// readable one ("Unlimited", "32 vCPU").
+#[derive(Debug, Clone, Default)]
+pub(crate) struct QuotaLimitView {
+    pub(crate) value: i32,
+    pub(crate) display: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct QuotaView {
+    pub(crate) environments: QuotaLimitView,
+    pub(crate) sandboxes: QuotaLimitView,
+    pub(crate) cpu_millicores: QuotaLimitView,
+    pub(crate) memory_mb: QuotaLimitView,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AdminOrganizationView {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) slug: String,
+    pub(crate) created: String,
+    pub(crate) members: Vec<AdminMemberRow>,
+    pub(crate) billing_plan: String,
+    pub(crate) billing_status: String,
+    pub(crate) billing_exempt: bool,
+    pub(crate) effective_plan: String,
+    pub(crate) subscriptions: Vec<AdminSubscriptionRow>,
+    pub(crate) has_explicit_quota: bool,
+    pub(crate) effective_quota: QuotaView,
+    pub(crate) active_environments: i64,
+    pub(crate) active_sandboxes: i64,
+    pub(crate) used_cpu: String,
+    pub(crate) used_memory: String,
+    pub(crate) api_keys: Vec<AdminApiKeyRow>,
+}
+
+/// The four limits an operator submits; each -1 (unlimited) or positive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct QuotaMutation {
+    pub(crate) environments: i32,
+    pub(crate) sandboxes: i32,
+    pub(crate) cpu_millicores: i32,
+    pub(crate) memory_mb: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -477,6 +560,231 @@ pub(crate) async fn run_migration(
         .ok_or_else(|| ConnectError::internal("migration result missing"))
 }
 
+pub(crate) async fn organizations(
+    state: &AppState,
+    cookie: HeaderValue,
+) -> Result<Vec<AdminOrganizationRow>, ConnectError> {
+    let response = admin_client(state, cookie)
+        .list_organizations(ListOrganizationsRequest::default())
+        .await?
+        .into_owned();
+    Ok(response
+        .organizations
+        .into_iter()
+        .map(|organization| AdminOrganizationRow {
+            url: format!("/admin/organizations/{}/", organization.id),
+            name: organization.name,
+            slug: organization.slug,
+            billing_plan: organization.billing_plan,
+            billing_status: organization.billing_status,
+            created: timestamp_text(
+                organization
+                    .created_at
+                    .into_option()
+                    .map(|value| value.seconds),
+            ),
+        })
+        .collect())
+}
+
+pub(crate) async fn organization(
+    state: &AppState,
+    cookie: HeaderValue,
+    organization_id: &str,
+) -> Result<AdminOrganizationView, ConnectError> {
+    let response = admin_client(state, cookie)
+        .get_organization_overview(GetOrganizationOverviewRequest {
+            organization_id: organization_id.to_owned(),
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    let organization = response.organization.into_option().unwrap_or_default();
+    let billing = response.billing.into_option().unwrap_or_default();
+    let quota = response.quota.into_option().unwrap_or_default();
+    let usage = response.usage.into_option().unwrap_or_default();
+    Ok(AdminOrganizationView {
+        id: organization.id,
+        name: organization.name,
+        slug: organization.slug,
+        created: timestamp_text(
+            organization
+                .created_at
+                .into_option()
+                .map(|value| value.seconds),
+        ),
+        members: response
+            .members
+            .into_iter()
+            .map(|member| AdminMemberRow {
+                email: if member.email.is_empty() {
+                    member.user_id
+                } else {
+                    member.email
+                },
+                role: member.role,
+                joined: timestamp_text(member.joined_at.into_option().map(|value| value.seconds)),
+            })
+            .collect(),
+        billing_plan: billing.billing_plan,
+        billing_status: billing.billing_status,
+        billing_exempt: billing.billing_exempt,
+        effective_plan: if billing.effective_plan.is_empty() {
+            "None".to_owned()
+        } else {
+            billing.effective_plan
+        },
+        subscriptions: billing
+            .subscriptions
+            .into_iter()
+            .map(|subscription| AdminSubscriptionRow {
+                kind: subscription.kind,
+                plan: subscription.plan,
+                status: subscription.status,
+                updated: timestamp_text(
+                    subscription
+                        .updated_at
+                        .into_option()
+                        .map(|value| value.seconds),
+                ),
+            })
+            .collect(),
+        has_explicit_quota: quota.explicit.is_set(),
+        effective_quota: quota_view(quota.effective.into_option().unwrap_or_default()),
+        active_environments: usage.active_environments,
+        active_sandboxes: usage.active_sandboxes,
+        used_cpu: cpu_text(usage.cpu_millicores),
+        used_memory: memory_text(usage.memory_mb),
+        api_keys: response
+            .api_keys
+            .into_iter()
+            .map(|key| AdminApiKeyRow {
+                name: key.name,
+                created: timestamp_text(key.created_at.into_option().map(|value| value.seconds)),
+                last_used: key
+                    .last_used_at
+                    .into_option()
+                    .map(|value| calendar_datetime(value.seconds))
+                    .unwrap_or_else(|| "Never".to_owned()),
+                expires: key
+                    .expires_at
+                    .into_option()
+                    .map(|value| calendar_datetime(value.seconds))
+                    .unwrap_or_else(|| "Never".to_owned()),
+                disabled: key.disabled,
+            })
+            .collect(),
+    })
+}
+
+pub(crate) async fn set_organization_quota(
+    state: &AppState,
+    cookie: HeaderValue,
+    organization_id: &str,
+    quota: QuotaMutation,
+) -> Result<(), ConnectError> {
+    admin_client(state, cookie)
+        .set_organization_environment_quota(SetOrganizationEnvironmentQuotaRequest {
+            organization_id: organization_id.to_owned(),
+            quota: Some(quota_message(quota)).into(),
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+/// The defaults for organizations without their own quota.
+pub(crate) async fn default_quota(
+    state: &AppState,
+    cookie: HeaderValue,
+) -> Result<QuotaView, ConnectError> {
+    let response = admin_client(state, cookie)
+        .get_default_environment_quota(GetDefaultEnvironmentQuotaRequest::default())
+        .await?
+        .into_owned();
+    Ok(quota_view(response.quota.into_option().unwrap_or_default()))
+}
+
+pub(crate) async fn set_default_quota(
+    state: &AppState,
+    cookie: HeaderValue,
+    quota: QuotaMutation,
+) -> Result<(), ConnectError> {
+    admin_client(state, cookie)
+        .set_default_environment_quota(SetDefaultEnvironmentQuotaRequest {
+            quota: Some(quota_message(quota)).into(),
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+fn quota_message(quota: QuotaMutation) -> EnvironmentQuota {
+    EnvironmentQuota {
+        max_concurrent_environments: quota.environments,
+        max_concurrent_sandbox: quota.sandboxes,
+        max_cpu_millicores: quota.cpu_millicores,
+        max_memory_mb: quota.memory_mb,
+        ..Default::default()
+    }
+}
+
+pub(crate) async fn clear_organization_quota(
+    state: &AppState,
+    cookie: HeaderValue,
+    organization_id: &str,
+) -> Result<(), ConnectError> {
+    admin_client(state, cookie)
+        .clear_organization_environment_quota(ClearOrganizationEnvironmentQuotaRequest {
+            organization_id: organization_id.to_owned(),
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+fn timestamp_text(seconds: Option<i64>) -> String {
+    seconds
+        .map(calendar_datetime)
+        .unwrap_or_else(|| "Unknown time".to_owned())
+}
+
+fn quota_view(quota: EnvironmentQuota) -> QuotaView {
+    QuotaView {
+        environments: limit(quota.max_concurrent_environments, |value| value.to_string()),
+        sandboxes: limit(quota.max_concurrent_sandbox, |value| value.to_string()),
+        cpu_millicores: limit(quota.max_cpu_millicores, |value| cpu_text(i64::from(value))),
+        memory_mb: limit(quota.max_memory_mb, |value| memory_text(i64::from(value))),
+    }
+}
+
+fn limit(value: i32, display: impl Fn(i32) -> String) -> QuotaLimitView {
+    QuotaLimitView {
+        value,
+        display: if value == -1 {
+            "Unlimited".to_owned()
+        } else {
+            display(value)
+        },
+    }
+}
+
+fn cpu_text(millicores: i64) -> String {
+    if millicores % 1000 == 0 {
+        format!("{} vCPU", millicores / 1000)
+    } else {
+        format!("{:.2} vCPU", millicores as f64 / 1000.0)
+    }
+}
+
+fn memory_text(mebibytes: i64) -> String {
+    if mebibytes % 1024 == 0 {
+        format!("{} GiB", mebibytes / 1024)
+    } else {
+        format!("{:.1} GiB", mebibytes as f64 / 1024.0)
+    }
+}
+
 fn plan_view(plan: codewire_admin_proto::codewire::admin::v1::CatalogPlan) -> CatalogPlanView {
     let spec = plan.plan.into_option().unwrap_or_default();
     CatalogPlanView {
@@ -578,5 +886,23 @@ mod tests {
         assert!(bounded("é".repeat(3_000), 4_096).len() <= 4_099);
         assert_eq!(severity_tone("error"), "danger");
         assert_eq!(severity_tone("unknown"), "muted");
+    }
+
+    #[test]
+    fn quota_limits_read_as_operators_count_them() {
+        let view = quota_view(EnvironmentQuota {
+            max_concurrent_environments: -1,
+            max_concurrent_sandbox: 50,
+            max_cpu_millicores: 32_000,
+            max_memory_mb: 65_536,
+            ..Default::default()
+        });
+        assert_eq!(view.environments.display, "Unlimited");
+        assert_eq!(view.environments.value, -1);
+        assert_eq!(view.sandboxes.display, "50");
+        assert_eq!(view.cpu_millicores.display, "32 vCPU");
+        assert_eq!(view.memory_mb.display, "64 GiB");
+        assert_eq!(cpu_text(2_500), "2.50 vCPU");
+        assert_eq!(memory_text(1_536), "1.5 GiB");
     }
 }

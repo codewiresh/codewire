@@ -101,6 +101,28 @@ pub(crate) fn router() -> Router<AppState> {
             "/admin/accounts/_actions/enabled",
             post(admin::set_account_enabled),
         )
+        .route("/admin/organizations", get(slash_redirect))
+        .route("/admin/organizations/", get(admin::organizations))
+        .route(
+            "/admin/organizations/_actions/quota/set",
+            post(admin::set_organization_quota),
+        )
+        .route(
+            "/admin/organizations/_actions/quota/clear",
+            post(admin::clear_organization_quota),
+        )
+        .route(
+            "/admin/organizations/_actions/defaults/set",
+            post(admin::set_default_quota),
+        )
+        .route(
+            "/admin/organizations/{organization_id}",
+            get(slash_redirect),
+        )
+        .route(
+            "/admin/organizations/{organization_id}/",
+            get(admin::organization),
+        )
         .route("/admin/audit", get(slash_redirect))
         .route("/admin/audit/", get(admin::audit))
         .route("/admin/billing", get(slash_redirect))

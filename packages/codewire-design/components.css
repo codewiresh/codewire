@@ -52,6 +52,14 @@
 
 .cw-table tbody tr:hover { background: var(--bg-primary); }
 
+/* A table whose rows each open a page. The row's one link stays its only
+   focus stop; its ::after stretches over the row, so a click anywhere on the
+   row follows it. The link keeps its own focus ring, and the row highlights
+   while it holds focus. */
+.cw-table--row-links tbody tr { position: relative; }
+.cw-table--row-links tbody tr:focus-within { background: var(--bg-primary); }
+.cw-table--row-links .cw-row-link::after { position: absolute; inset: 0; content: ""; }
+
 .cw-table tbody tr:last-child :is(td, th) {
   border-bottom: 0;
 }

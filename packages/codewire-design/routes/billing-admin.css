@@ -9,9 +9,10 @@
 .cw-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); }
 .cw-stat-grid--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .cw-stat { min-width: 0; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-base); }
-.cw-stat > span, .cw-stat > strong { display: block; }
-.cw-stat > span { color: var(--fg-tertiary); font-size: var(--text-small); }
-.cw-stat > strong { margin-top: var(--space-0-5); overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-title); font-weight: var(--weight-medium); }
+dl.cw-stat-grid { margin: 0; }
+.cw-stat > span, .cw-stat > strong, .cw-stat > dt, .cw-stat > dd { display: block; margin: 0; }
+.cw-stat > span, .cw-stat > dt { color: var(--fg-tertiary); font-size: var(--text-small); }
+.cw-stat > strong, .cw-stat > dd { margin-top: var(--space-0-5); overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-title); font-weight: var(--weight-medium); }
 .cw-stat small { color: var(--fg-tertiary); font-size: var(--text-small); font-weight: var(--weight-regular); }
 .cw-usage-chart { margin: var(--space-5) 0 0; padding-top: var(--space-4); border-top: 1px solid var(--border-subtle); }
 .cw-usage-chart figcaption { margin-bottom: var(--space-2); color: var(--fg-secondary); font-size: var(--text-small); }

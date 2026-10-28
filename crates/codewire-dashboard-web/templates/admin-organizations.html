@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Organizations · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/billing-admin-v1.css">
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+  </head>
+  <body class="cw-body" data-route="admin">
+    <div class="cw-app" data-dashboard-app data-mobile-open="false" data-sidebar-collapsed="{{ view.sidebar_collapsed }}">
+      <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
+      <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button><a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span class="cw-sr-only">Codewire</span></a></header>
+      <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+      <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
+      <main class="cw-main">{% let crumb_scope = "admin" %}{% let crumb_page = "organizations" %}{% include "console-header.html" %}<div class="cw-main-inner"><div class="cw-page cw-admin-stack">
+        <header class="cw-admin-heading"><div><h1 class="cw-page-title">Organizations</h1><p>Inspect any organization's members, billing, environment quota, usage and API keys.</p></div></header>
+        {% if !message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ message }}</p>{% endif %}
+        {% if !error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ error }}</p>{% endif %}
+        <section class="cw-card" aria-labelledby="defaults-heading">
+          <header class="cw-card-header"><div><h2 id="defaults-heading">Defaults for organizations without their own quota</h2><p>Every organization without its own quota gets these limits. A plan's workspace limit still sets the sandbox and environment counts when the plan has one.</p></div></header>
+          <div class="cw-card-body">
+            <form class="cw-catalog-form" method="post" action="/admin/organizations/_actions/defaults/set" aria-labelledby="defaults-heading">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <label class="cw-field"><span>Concurrent environments</span><input class="cw-input" type="number" name="environments" min="-1" step="1" value="{{ defaults.environments.value }}" required></label>
+              <label class="cw-field"><span>Concurrent sandboxes</span><input class="cw-input" type="number" name="sandboxes" min="-1" step="1" value="{{ defaults.sandboxes.value }}" required></label>
+              <label class="cw-field"><span>CPU (millicores)</span><input class="cw-input" type="number" name="cpu_millicores" min="-1" step="1" value="{{ defaults.cpu_millicores.value }}" required></label>
+              <label class="cw-field"><span>Memory (MiB)</span><input class="cw-input" type="number" name="memory_mb" min="-1" step="1" value="{{ defaults.memory_mb.value }}" required></label>
+              <p class="cw-muted">Now {{ defaults.environments.display }} environments, {{ defaults.sandboxes.display }} sandboxes, {{ defaults.cpu_millicores.display }} and {{ defaults.memory_mb.display }}. Each limit is a positive number, or -1 for unlimited. Saving writes an audit entry.</p>
+              <div class="cw-form-action"><button class="cw-button" type="submit">Save defaults</button></div>
+            </form>
+          </div>
+        </section>
+        <section class="cw-card" aria-labelledby="organizations-heading">
+          <header class="cw-card-header"><div><h2 id="organizations-heading">All organizations</h2><p>{{ organizations.len() }} organizations</p></div></header>
+          {% if organizations.is_empty() %}<div class="cw-card-body"><p class="cw-muted">No organizations exist yet.</p></div>{% else %}
+          <div class="cw-table-wrap"><table class="cw-table cw-table--row-links"><thead><tr><th scope="col">Organization</th><th scope="col">Slug</th><th scope="col">Plan</th><th scope="col">Billing status</th><th scope="col">Created</th></tr></thead><tbody>
+            {% for organization in organizations %}<tr>
+              <th scope="row"><a class="cw-row-link" href="{{ organization.url }}">{{ organization.name }}</a></th>
+              <td><code>{{ organization.slug }}</code></td>
+              <td>{{ organization.billing_plan }}</td>
+              <td>{{ organization.billing_status }}</td>
+              <td>{{ organization.created }}</td>
+            </tr>{% endfor %}
+          </tbody></table></div>{% endif %}
+        </section>
+      </div></div></main>
+    </div>
+  </body>
+</html>

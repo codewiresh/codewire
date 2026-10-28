@@ -136,9 +136,12 @@ async fn default_access_profile_upgrade_backfills_the_oldest_and_refuses_deletin
             .await?;
         anyhow::ensure!(profiles == 0);
 
-        // Rollback: dropping what 0003 added restores the 0002 schema.
+        // Rollback: dropping what 0003 added restores the 0002 schema, once
+        // the later migrations ensure_schema also applied are rolled back
+        // first (0004's table).
         sqlx::raw_sql(
-            "DROP TABLE platform_access_profile_defaults; \
+            "DROP TABLE environment_quota_defaults; \
+             DROP TABLE platform_access_profile_defaults; \
              ALTER TABLE platform_access_profiles DROP CONSTRAINT platform_access_profiles_id_user_id_key;",
         )
         .execute(&pool)

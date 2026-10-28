@@ -1,6 +1,6 @@
 use axum::{
     Form,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::Response,
 };
@@ -8,7 +8,7 @@ use connectrpc::{ConnectError, ErrorCode};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    admin_connect::{self, CatalogPlanView, PlanMutation, PriceMutation},
+    admin_connect::{self, CatalogPlanView, PlanMutation, PriceMutation, QuotaMutation},
     auth::{authenticated_identity, enforce_two_factor},
     error::WebError,
     raw_auth::{forward_session_cookies, get_json, post_json},
@@ -23,7 +23,8 @@ use crate::{
     },
     state::AppState,
     templates::{
-        AdminAccountsTemplate, AdminAuditTemplate, AdminBillingTemplate, AdminOverviewTemplate,
+        AdminAccountsTemplate, AdminAuditTemplate, AdminBillingTemplate, AdminOrganizationTemplate,
+        AdminOrganizationsTemplate, AdminOverviewTemplate,
     },
     view::{AccountAccessView, DashboardView},
 };
@@ -32,6 +33,7 @@ const ADMIN_PATH: &str = "/admin/";
 const ACCOUNTS_PATH: &str = "/admin/accounts/";
 const AUDIT_PATH: &str = "/admin/audit/";
 const BILLING_PATH: &str = "/admin/billing/";
+const ORGANIZATIONS_PATH: &str = "/admin/organizations/";
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct AdminQuery {
@@ -88,6 +90,34 @@ pub(super) struct AccountAccessSubmission {
     csrf: String,
     user_id: String,
     enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct QuotaSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    organization_id: String,
+    environments: i32,
+    sandboxes: i32,
+    cpu_millicores: i32,
+    memory_mb: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct DefaultQuotaSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    environments: i32,
+    sandboxes: i32,
+    cpu_millicores: i32,
+    memory_mb: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct QuotaClearSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    organization_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -296,6 +326,162 @@ pub(super) async fn set_account_enabled(
         }
         _ => account_redirect(&state, "", "unavailable", &headers),
     }
+}
+
+pub(super) async fn organizations(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let continuation = ORGANIZATIONS_PATH.to_owned();
+    let (dashboard, cookie) = match admin_context(&state, &headers, &continuation, &query.org).await
+    {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let organizations = match admin_connect::organizations(&state, cookie.clone()).await {
+        Ok(organizations) => organizations,
+        Err(error) => return admin_connect_error(error, &continuation, &headers),
+    };
+    let defaults = match admin_connect::default_quota(&state, cookie).await {
+        Ok(defaults) => defaults,
+        Err(error) => return admin_connect_error(error, &continuation, &headers),
+    };
+    let token = page_csrf_token(&headers);
+    with_csrf_cookie(
+        render_page(AdminOrganizationsTemplate {
+            view: &dashboard,
+            organizations: &organizations,
+            defaults: &defaults,
+            csrf_token: &token,
+            message: defaults_message(&query.message),
+            error: quota_error(&query.error),
+        }),
+        csrf_cookie(&state.public_origin, &token),
+    )
+}
+
+pub(super) async fn set_default_quota(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+    Form(submission): Form<DefaultQuotaSubmission>,
+) -> Response {
+    let cookie = match admin_action_page_context_for(
+        &state,
+        &headers,
+        &submission.csrf,
+        &query.org,
+        ORGANIZATIONS_PATH,
+    )
+    .await
+    {
+        Ok((_, cookie)) => cookie,
+        Err(response) => return response,
+    };
+    let quota = QuotaMutation {
+        environments: submission.environments,
+        sandboxes: submission.sandboxes,
+        cpu_millicores: submission.cpu_millicores,
+        memory_mb: submission.memory_mb,
+    };
+    if !valid_quota(quota) {
+        return admin_redirect_to(&state, ORGANIZATIONS_PATH, "", "invalid", &headers);
+    }
+    let result = admin_connect::set_default_quota(&state, cookie, quota).await;
+    quota_response(
+        &state,
+        result,
+        ORGANIZATIONS_PATH,
+        "defaults-saved",
+        &headers,
+    )
+}
+
+pub(super) async fn organization(
+    State(state): State<AppState>,
+    Path(organization_id): Path<String>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !valid_organization_id(&organization_id) {
+        return error_page(WebError::NotFound);
+    }
+    let continuation = organization_path(&organization_id);
+    let (dashboard, cookie) = match admin_context(&state, &headers, &continuation, &query.org).await
+    {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let organization = match admin_connect::organization(&state, cookie, &organization_id).await {
+        Ok(organization) => organization,
+        Err(error) => return admin_connect_error(error, &continuation, &headers),
+    };
+    let token = page_csrf_token(&headers);
+    with_csrf_cookie(
+        render_page(AdminOrganizationTemplate {
+            view: &dashboard,
+            organization: &organization,
+            csrf_token: &token,
+            message: quota_message(&query.message),
+            error: quota_error(&query.error),
+        }),
+        csrf_cookie(&state.public_origin, &token),
+    )
+}
+
+pub(super) async fn set_organization_quota(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+    Form(submission): Form<QuotaSubmission>,
+) -> Response {
+    if !valid_organization_id(&submission.organization_id) {
+        return error_page(WebError::NotFound);
+    }
+    let path = organization_path(&submission.organization_id);
+    let cookie =
+        match admin_action_page_context_for(&state, &headers, &submission.csrf, &query.org, &path)
+            .await
+        {
+            Ok((_, cookie)) => cookie,
+            Err(response) => return response,
+        };
+    let quota = QuotaMutation {
+        environments: submission.environments,
+        sandboxes: submission.sandboxes,
+        cpu_millicores: submission.cpu_millicores,
+        memory_mb: submission.memory_mb,
+    };
+    if !valid_quota(quota) {
+        return admin_redirect_to(&state, &path, "", "invalid", &headers);
+    }
+    let result =
+        admin_connect::set_organization_quota(&state, cookie, &submission.organization_id, quota)
+            .await;
+    quota_response(&state, result, &path, "quota-saved", &headers)
+}
+
+pub(super) async fn clear_organization_quota(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+    Form(submission): Form<QuotaClearSubmission>,
+) -> Response {
+    if !valid_organization_id(&submission.organization_id) {
+        return error_page(WebError::NotFound);
+    }
+    let path = organization_path(&submission.organization_id);
+    let cookie =
+        match admin_action_page_context_for(&state, &headers, &submission.csrf, &query.org, &path)
+            .await
+        {
+            Ok((_, cookie)) => cookie,
+            Err(response) => return response,
+        };
+    let result =
+        admin_connect::clear_organization_quota(&state, cookie, &submission.organization_id).await;
+    quota_response(&state, result, &path, "quota-cleared", &headers)
 }
 
 pub(super) async fn audit(
@@ -874,6 +1060,71 @@ fn admin_redirect_to(
     )
 }
 
+/// Organization ids reach a URL path, so only the characters ids are made of
+/// are accepted.
+fn valid_organization_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn organization_path(organization_id: &str) -> String {
+    format!("{ORGANIZATIONS_PATH}{organization_id}/")
+}
+
+/// Each limit is -1 (unlimited) or positive, as the server requires.
+fn valid_quota(quota: QuotaMutation) -> bool {
+    [
+        quota.environments,
+        quota.sandboxes,
+        quota.cpu_millicores,
+        quota.memory_mb,
+    ]
+    .into_iter()
+    .all(|value| value == -1 || value > 0)
+}
+
+fn quota_response(
+    state: &AppState,
+    result: Result<(), ConnectError>,
+    path: &str,
+    message: &str,
+    headers: &HeaderMap,
+) -> Response {
+    match result {
+        Ok(()) => admin_redirect_to(state, path, message, "", headers),
+        Err(error) if error.code == ErrorCode::Unauthenticated => login_redirect(path, headers),
+        Err(error) => admin_redirect_to(state, path, "", mutation_error(&error), headers),
+    }
+}
+
+fn quota_message(value: &str) -> &'static str {
+    match value {
+        "quota-saved" => "Environment quota saved.",
+        "quota-cleared" => "Environment quota cleared; the plan fallback applies.",
+        _ => "",
+    }
+}
+
+fn defaults_message(value: &str) -> &'static str {
+    match value {
+        "defaults-saved" => "Default environment limits saved.",
+        _ => "",
+    }
+}
+
+fn quota_error(value: &str) -> &'static str {
+    match value {
+        "not-authorized" => "You do not have permission to change environment quotas.",
+        "invalid" => "Each limit must be a positive number, or -1 for unlimited.",
+        "not-found" => "The organization no longer exists.",
+        "conflict" | "unavailable" => "Environment quotas are temporarily unavailable.",
+        _ => "",
+    }
+}
+
 fn account_message(value: &str) -> &'static str {
     match value {
         "account-enabled" => "Account enabled and access email sent.",
@@ -953,6 +1204,45 @@ fn default_proration() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn organization_ids_and_quota_limits_are_an_exact_allowlist() {
+        assert!(valid_organization_id("org_1-A"));
+        for refused in [
+            "",
+            "../admin",
+            "org/1",
+            "org 1",
+            "org?x=1",
+            &"a".repeat(129),
+        ] {
+            assert!(!valid_organization_id(refused), "{refused:?}");
+        }
+        assert_eq!(organization_path("org_1"), "/admin/organizations/org_1/");
+        let quota = QuotaMutation {
+            environments: -1,
+            sandboxes: 200,
+            cpu_millicores: 400_000,
+            memory_mb: 1_600_000,
+        };
+        assert!(valid_quota(quota));
+        assert!(!valid_quota(QuotaMutation {
+            sandboxes: 0,
+            ..quota
+        }));
+        assert!(!valid_quota(QuotaMutation {
+            memory_mb: -2,
+            ..quota
+        }));
+        assert_eq!(quota_message("quota-saved"), "Environment quota saved.");
+        assert_eq!(quota_message("<script>"), "");
+        assert_eq!(
+            defaults_message("defaults-saved"),
+            "Default environment limits saved."
+        );
+        assert_eq!(defaults_message("quota-saved"), "");
+        assert_eq!(quota_error("<script>"), "");
+    }
 
     #[test]
     fn audit_filters_and_pagination_are_bounded_and_encoded() {

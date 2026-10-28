@@ -46,6 +46,7 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 mod tests {
     mod default_access_profile;
     mod environment_mesh;
+    mod environment_quota_defaults;
     mod owner_sources;
     mod preview_browser;
     mod runtime_dispatch_scope;
@@ -62,9 +63,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced), 0002 and 0003.
+    // (which equals the 41-migration history it replaced), 0002, 0003 and 0004.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "a6bdde810c701c2f12c8b9fb8404d5babd00f5f46562ca3d685d9494b28cda47";
+        "50c2a43485de966a346bfaa8acc1dfd44483dcac455b62481428a45a6298d665";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -73,6 +74,8 @@ mod tests {
     const APPLIED_ENVIRONMENT_MESH_CHECKSUM: &str = "1580d3734456d7e5ef52527fb29e286529be4df083d5e5884db1ec59570609026ed0d70c0cdba61da5fe1baeaa70cfaa";
     // SHA-384 of 0003_default_access_profile.sql (#3550).
     const APPLIED_DEFAULT_ACCESS_PROFILE_CHECKSUM: &str = "729b64927ce42848db8f5a96d8a15845d50232f8dfccc409618974cad9f1c87e964b2416e5da27cf126273f10000c0cd";
+    // SHA-384 of 0004_environment_quota_defaults.sql (#3583).
+    const APPLIED_ENVIRONMENT_QUOTA_DEFAULTS_CHECKSUM: &str = "4c28b1cb4809bd52472e999eaf8693d840036cb096ad94bef2782ef599c1010ed5fc247d04ef62ef65da8a61d7e53189";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1157,6 +1160,7 @@ mod tests {
             (1, APPLIED_BASELINE_CHECKSUM),
             (2, APPLIED_ENVIRONMENT_MESH_CHECKSUM),
             (3, APPLIED_DEFAULT_ACCESS_PROFILE_CHECKSUM),
+            (4, APPLIED_ENVIRONMENT_QUOTA_DEFAULTS_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1187,8 +1191,8 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 3
-                    && first.iter().map(|migration| migration.0).eq([1, 2, 3])
+                first.len() == 4
+                    && first.iter().map(|migration| migration.0).eq([1, 2, 3, 4])
                     && first.iter().all(|migration| migration.2)
             );
             let fingerprint: String = sqlx::query_scalar(include_str!(

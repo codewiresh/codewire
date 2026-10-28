@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .admin_pb2 import ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListOrganizationsRequest, ListOrganizationsResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse
+from .admin_pb2 import ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListOrganizationsRequest, ListOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -60,6 +60,15 @@ class AdminService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def clear_organization_environment_quota(self, request: ClearOrganizationEnvironmentQuotaRequest, ctx: RequestContext[ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse]) -> ClearOrganizationEnvironmentQuotaResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def get_organization_overview(self, request: GetOrganizationOverviewRequest, ctx: RequestContext[GetOrganizationOverviewRequest, GetOrganizationOverviewResponse]) -> GetOrganizationOverviewResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def get_default_environment_quota(self, request: GetDefaultEnvironmentQuotaRequest, ctx: RequestContext[GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse]) -> GetDefaultEnvironmentQuotaResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def set_default_environment_quota(self, request: SetDefaultEnvironmentQuotaRequest, ctx: RequestContext[SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse]) -> SetDefaultEnvironmentQuotaResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -165,6 +174,36 @@ class AdminServiceASGIApplication(ConnectASGIApplication[AdminService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.clear_organization_environment_quota,
+                ),
+                "/codewire.admin.v1.AdminService/GetOrganizationOverview": Endpoint.unary(
+                    method=MethodInfo(
+                        name="GetOrganizationOverview",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=GetOrganizationOverviewRequest,
+                        output=GetOrganizationOverviewResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.get_organization_overview,
+                ),
+                "/codewire.admin.v1.AdminService/GetDefaultEnvironmentQuota": Endpoint.unary(
+                    method=MethodInfo(
+                        name="GetDefaultEnvironmentQuota",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=GetDefaultEnvironmentQuotaRequest,
+                        output=GetDefaultEnvironmentQuotaResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.get_default_environment_quota,
+                ),
+                "/codewire.admin.v1.AdminService/SetDefaultEnvironmentQuota": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SetDefaultEnvironmentQuota",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=SetDefaultEnvironmentQuotaRequest,
+                        output=SetDefaultEnvironmentQuotaResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.set_default_environment_quota,
                 ),
             },
             interceptors=interceptors,
@@ -398,6 +437,70 @@ class AdminServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def get_organization_overview(
+        self,
+        request: GetOrganizationOverviewRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetOrganizationOverviewResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetOrganizationOverview",
+                service_name="codewire.admin.v1.AdminService",
+                input=GetOrganizationOverviewRequest,
+                output=GetOrganizationOverviewResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def get_default_environment_quota(
+        self,
+        request: GetDefaultEnvironmentQuotaRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetDefaultEnvironmentQuotaResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetDefaultEnvironmentQuota",
+                service_name="codewire.admin.v1.AdminService",
+                input=GetDefaultEnvironmentQuotaRequest,
+                output=GetDefaultEnvironmentQuotaResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def set_default_environment_quota(
+        self,
+        request: SetDefaultEnvironmentQuotaRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetDefaultEnvironmentQuotaResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetDefaultEnvironmentQuota",
+                service_name="codewire.admin.v1.AdminService",
+                input=SetDefaultEnvironmentQuotaRequest,
+                output=SetDefaultEnvironmentQuotaResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class AdminServiceSync(Protocol):
     def get_stats(self, request: GetStatsRequest, ctx: RequestContext[GetStatsRequest, GetStatsResponse]) -> GetStatsResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -424,6 +527,15 @@ class AdminServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def clear_organization_environment_quota(self, request: ClearOrganizationEnvironmentQuotaRequest, ctx: RequestContext[ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse]) -> ClearOrganizationEnvironmentQuotaResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def get_organization_overview(self, request: GetOrganizationOverviewRequest, ctx: RequestContext[GetOrganizationOverviewRequest, GetOrganizationOverviewResponse]) -> GetOrganizationOverviewResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def get_default_environment_quota(self, request: GetDefaultEnvironmentQuotaRequest, ctx: RequestContext[GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse]) -> GetDefaultEnvironmentQuotaResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def set_default_environment_quota(self, request: SetDefaultEnvironmentQuotaRequest, ctx: RequestContext[SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse]) -> SetDefaultEnvironmentQuotaResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -527,6 +639,36 @@ class AdminServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.clear_organization_environment_quota,
+                ),
+                "/codewire.admin.v1.AdminService/GetOrganizationOverview": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="GetOrganizationOverview",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=GetOrganizationOverviewRequest,
+                        output=GetOrganizationOverviewResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.get_organization_overview,
+                ),
+                "/codewire.admin.v1.AdminService/GetDefaultEnvironmentQuota": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="GetDefaultEnvironmentQuota",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=GetDefaultEnvironmentQuotaRequest,
+                        output=GetDefaultEnvironmentQuotaResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.get_default_environment_quota,
+                ),
+                "/codewire.admin.v1.AdminService/SetDefaultEnvironmentQuota": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SetDefaultEnvironmentQuota",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=SetDefaultEnvironmentQuotaRequest,
+                        output=SetDefaultEnvironmentQuotaResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.set_default_environment_quota,
                 ),
             },
             interceptors=interceptors,
@@ -746,6 +888,67 @@ class AdminServiceClientSync(ConnectClientSync):
                 service_name="codewire.admin.v1.AdminService",
                 input=ClearOrganizationEnvironmentQuotaRequest,
                 output=ClearOrganizationEnvironmentQuotaResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def get_organization_overview(
+        self,
+        request: GetOrganizationOverviewRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetOrganizationOverviewResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetOrganizationOverview",
+                service_name="codewire.admin.v1.AdminService",
+                input=GetOrganizationOverviewRequest,
+                output=GetOrganizationOverviewResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def get_default_environment_quota(
+        self,
+        request: GetDefaultEnvironmentQuotaRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetDefaultEnvironmentQuotaResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetDefaultEnvironmentQuota",
+                service_name="codewire.admin.v1.AdminService",
+                input=GetDefaultEnvironmentQuotaRequest,
+                output=GetDefaultEnvironmentQuotaResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def set_default_environment_quota(
+        self,
+        request: SetDefaultEnvironmentQuotaRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetDefaultEnvironmentQuotaResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetDefaultEnvironmentQuota",
+                service_name="codewire.admin.v1.AdminService",
+                input=SetDefaultEnvironmentQuotaRequest,
+                output=SetDefaultEnvironmentQuotaResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

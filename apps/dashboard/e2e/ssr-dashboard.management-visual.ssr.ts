@@ -158,4 +158,30 @@ test.describe.serial("rounded management interface", () => {
       await expectNoPageOverflow(page);
     }
   });
+
+  test("renders the admin organizations list and opens an organization from anywhere on its row", async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    const response = await page.goto(`/admin/organizations/?org=${slug}`);
+    expect(response?.status()).toBe(200);
+    await expect(page.getByRole("heading", { name: "Organizations", exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Defaults for organizations without their own quota" }),
+    ).toBeVisible();
+    await expect(page.getByLabel("Concurrent sandboxes")).toHaveAttribute("min", "-1");
+    await expectNoPageOverflow(page);
+
+    // A click on the row's slug cell, not its name, opens the organization;
+    // the name link stays the row's only focusable element.
+    const row = page.locator("tbody tr").filter({ has: page.locator("code", { hasText: slug }) });
+    await expect(row.locator("a, button, input, [tabindex]")).toHaveCount(1);
+    await row.locator("code", { hasText: slug }).click();
+    await expect(page).toHaveURL(/\/admin\/organizations\/[A-Za-z0-9_-]+\/$/);
+    await expect(page.getByRole("heading", { name: "Management Visual", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Environment quota and usage" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Billing" })).toBeVisible();
+    await expect(page.getByLabel("Memory (MiB)")).toBeVisible();
+    await expectNoPageOverflow(page);
+  });
 });

@@ -1,6 +1,9 @@
 use askama::Template;
 
-use crate::admin_connect::{AdminCatalogView, AdminStatsView, AuditLogRow};
+use crate::admin_connect::{
+    AdminCatalogView, AdminOrganizationRow, AdminOrganizationView, AdminStatsView, AuditLogRow,
+    QuotaView,
+};
 use crate::billing_connect::BillingPageView;
 use crate::view::EnvironmentCreateFormView;
 use crate::view::{
@@ -34,6 +37,27 @@ pub(crate) struct SettingsApiKeysTemplate<'a> {
 pub(crate) struct AdminOverviewTemplate<'a> {
     pub(crate) view: &'a DashboardView,
     pub(crate) stats: &'a AdminStatsView,
+}
+
+#[derive(Template)]
+#[template(path = "admin-organizations.html")]
+pub(crate) struct AdminOrganizationsTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) organizations: &'a [AdminOrganizationRow],
+    pub(crate) defaults: &'a QuotaView,
+    pub(crate) csrf_token: &'a str,
+    pub(crate) message: &'a str,
+    pub(crate) error: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "admin-organization.html")]
+pub(crate) struct AdminOrganizationTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) organization: &'a AdminOrganizationView,
+    pub(crate) csrf_token: &'a str,
+    pub(crate) message: &'a str,
+    pub(crate) error: &'a str,
 }
 
 #[derive(Template)]

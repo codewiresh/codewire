@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ organization.name }} · Organizations · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/billing-admin-v1.css">
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+  </head>
+  <body class="cw-body" data-route="admin">
+    <div class="cw-app" data-dashboard-app data-mobile-open="false" data-sidebar-collapsed="{{ view.sidebar_collapsed }}">
+      <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
+      <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button><a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span class="cw-sr-only">Codewire</span></a></header>
+      <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+      <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
+      <main class="cw-main">{% let crumb_scope = "admin" %}{% let crumb_page = "organizations" %}{% include "console-header.html" %}<div class="cw-main-inner"><div class="cw-page cw-admin-stack">
+        <header class="cw-admin-heading"><div><h1 class="cw-page-title">{{ organization.name }}</h1><p><code>{{ organization.slug }}</code> · created {{ organization.created }} · <a href="/admin/organizations/">All organizations</a></p></div></header>
+        {% if !message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ message }}</p>{% endif %}
+        {% if !error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ error }}</p>{% endif %}
+
+        <section class="cw-card" aria-labelledby="quota-heading">
+          <header class="cw-card-header"><div><h2 id="quota-heading">Environment quota and usage</h2><p>{% if organization.has_explicit_quota %}This organization has its own quota.{% else %}No quota of its own: the plan fallback applies.{% endif %} Creates are checked against the limits below.</p></div></header>
+          <div class="cw-card-body cw-admin-section">
+            <dl class="cw-stat-grid">
+              <div class="cw-stat"><dt>Environments</dt><dd>{{ organization.active_environments }} <small>of {{ organization.effective_quota.environments.display }}</small></dd></div>
+              <div class="cw-stat"><dt>Sandboxes</dt><dd>{{ organization.active_sandboxes }} <small>of {{ organization.effective_quota.sandboxes.display }}</small></dd></div>
+              <div class="cw-stat"><dt>CPU</dt><dd>{{ organization.used_cpu }} <small>of {{ organization.effective_quota.cpu_millicores.display }}</small></dd></div>
+              <div class="cw-stat"><dt>Memory</dt><dd>{{ organization.used_memory }} <small>of {{ organization.effective_quota.memory_mb.display }}</small></dd></div>
+            </dl>
+            <form class="cw-catalog-form" method="post" action="/admin/organizations/_actions/quota/set" aria-label="Set this organization's quota">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="organization_id" value="{{ organization.id }}">
+              <label class="cw-field"><span>Concurrent environments</span><input class="cw-input" type="number" name="environments" min="-1" step="1" value="{{ organization.effective_quota.environments.value }}" required></label>
+              <label class="cw-field"><span>Concurrent sandboxes</span><input class="cw-input" type="number" name="sandboxes" min="-1" step="1" value="{{ organization.effective_quota.sandboxes.value }}" required></label>
+              <label class="cw-field"><span>CPU (millicores)</span><input class="cw-input" type="number" name="cpu_millicores" min="-1" step="1" value="{{ organization.effective_quota.cpu_millicores.value }}" required></label>
+              <label class="cw-field"><span>Memory (MiB)</span><input class="cw-input" type="number" name="memory_mb" min="-1" step="1" value="{{ organization.effective_quota.memory_mb.value }}" required></label>
+              <p class="cw-muted">Each limit is a positive number, or -1 for unlimited. Saving writes an audit entry.</p>
+              <div class="cw-form-action"><button class="cw-button" type="submit">Save quota</button></div>
+            </form>
+            {% if organization.has_explicit_quota %}<form class="cw-danger-zone" method="post" action="/admin/organizations/_actions/quota/clear"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><input type="hidden" name="organization_id" value="{{ organization.id }}"><p class="cw-muted">Clearing removes this organization's own quota, so the plan fallback applies again.</p><button class="cw-button cw-button--outline" type="submit">Clear quota</button></form>{% endif %}
+          </div>
+        </section>
+
+        <section class="cw-card" aria-labelledby="billing-heading">
+          <header class="cw-card-header"><div><h2 id="billing-heading">Billing</h2><p>The effective plan is the one quotas and billing resolve.</p></div></header>
+          <div class="cw-card-body cw-admin-section">
+            <dl class="cw-stat-grid">
+              <div class="cw-stat"><dt>Effective plan</dt><dd>{{ organization.effective_plan }}</dd></div>
+              <div class="cw-stat"><dt>Organization plan</dt><dd>{{ organization.billing_plan }}</dd></div>
+              <div class="cw-stat"><dt>Billing status</dt><dd>{{ organization.billing_status }}</dd></div>
+              <div class="cw-stat"><dt>Billing exempt</dt><dd>{% if organization.billing_exempt %}Yes{% else %}No{% endif %}</dd></div>
+            </dl>
+            {% if organization.subscriptions.is_empty() %}<p class="cw-muted">No active, trialing or past-due subscriptions.</p>{% else %}
+            <div class="cw-table-wrap"><table class="cw-table"><caption class="cw-sr-only">Live subscriptions</caption><thead><tr><th scope="col">Subscription</th><th scope="col">Plan</th><th scope="col">Status</th><th scope="col">Updated</th></tr></thead><tbody>
+              {% for subscription in organization.subscriptions %}<tr><th scope="row">{{ subscription.kind }}</th><td>{{ subscription.plan }}</td><td>{{ subscription.status }}</td><td>{{ subscription.updated }}</td></tr>{% endfor %}
+            </tbody></table></div>{% endif %}
+          </div>
+        </section>
+
+        <section class="cw-card" aria-labelledby="members-heading">
+          <header class="cw-card-header"><div><h2 id="members-heading">Members</h2><p>{{ organization.members.len() }} members</p></div></header>
+          {% if organization.members.is_empty() %}<div class="cw-card-body"><p class="cw-muted">This organization has no members.</p></div>{% else %}
+          <div class="cw-table-wrap"><table class="cw-table"><thead><tr><th scope="col">Member</th><th scope="col">Role</th><th scope="col">Joined</th></tr></thead><tbody>
+            {% for member in organization.members %}<tr><th scope="row">{{ member.email }}</th><td>{{ member.role }}</td><td>{{ member.joined }}</td></tr>{% endfor %}
+          </tbody></table></div>{% endif %}
+        </section>
+
+        <section class="cw-card" aria-labelledby="api-keys-heading">
+          <header class="cw-card-header"><div><h2 id="api-keys-heading">API keys</h2><p>{{ organization.api_keys.len() }} keys. Names and dates only.</p></div></header>
+          {% if organization.api_keys.is_empty() %}<div class="cw-card-body"><p class="cw-muted">This organization has no API keys.</p></div>{% else %}
+          <div class="cw-table-wrap"><table class="cw-table"><thead><tr><th scope="col">Key</th><th scope="col">State</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col">Expires</th></tr></thead><tbody>
+            {% for key in organization.api_keys %}<tr><th scope="row">{{ key.name }}</th><td>{% if key.disabled %}<span class="cw-badge" data-tone="warning">Disabled</span>{% else %}<span class="cw-badge" data-tone="success">Active</span>{% endif %}</td><td>{{ key.created }}</td><td>{{ key.last_used }}</td><td>{{ key.expires }}</td></tr>{% endfor %}
+          </tbody></table></div>{% endif %}
+        </section>
+      </div></div></main>
+    </div>
+  </body>
+</html>

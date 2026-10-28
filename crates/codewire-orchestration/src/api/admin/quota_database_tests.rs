@@ -183,3 +183,264 @@ async fn db_quota_writes_refuse_an_unknown_organization_and_invalid_limits() -> 
     .await;
     db.finish(result).await
 }
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_organization_overview_reports_members_billing_quota_usage_and_key_names() -> Result<()>
+{
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        let pool = &db.pool;
+        sqlx::query(
+            "INSERT INTO org_members (id, org_id, user_id, role) VALUES ('overview-member', $1, $2, 'admin')",
+        )
+        .bind(ORGANIZATION)
+        .bind(ADMIN)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE organizations SET billing_plan = 'team', billing_status = 'active', \
+             billing_exempt = true WHERE id = $1",
+        )
+        .bind(ORGANIZATION)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO environment_subscriptions (org_id, plan, status, updated_at) \
+             VALUES ($1, 'unlimited', 'active', NOW())",
+        )
+        .bind(ORGANIZATION)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO org_subscriptions (org_id, plan, status, updated_at) \
+             VALUES ($1, 'starter', 'canceled', NOW())",
+        )
+        .bind(ORGANIZATION)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO environment_presets(id, org_id, name, slug, project_spec) \
+             VALUES ('overview-preset', $1, 'Overview', 'overview', \
+             '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)",
+        )
+        .bind(ORGANIZATION)
+        .execute(pool)
+        .await?;
+        // A stopped environment that is meant to stay stopped consumes nothing.
+        for (id, state, desired) in [
+            ("overview-running", "running", "started"),
+            ("overview-stopped", "stopped", "stopped"),
+        ] {
+            sqlx::query(
+                "INSERT INTO environments \
+                 (id, org_id, created_by, preset_id, type, state, desired_state, project_spec, \
+                  cpu_millicores, memory_mb) \
+                 VALUES ($1, $2, $3, 'overview-preset', 'sandbox', $4, $5, \
+                 '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb, 2000, 8192)",
+            )
+            .bind(id)
+            .bind(ORGANIZATION)
+            .bind(ADMIN)
+            .bind(state)
+            .bind(desired)
+            .execute(pool)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO api_keys (user_id, org_id, name, key_hash, key_prefix, disabled_at) VALUES \
+             ($1, $2, 'load-tool', 'hash-must-not-appear', 'cw_prefix', NULL), \
+             ($1, $2, 'retired', 'hash-must-not-appear-either', 'cw_old', NOW())",
+        )
+        .bind(ADMIN)
+        .bind(ORGANIZATION)
+        .execute(pool)
+        .await?;
+        set_organization_environment_quota_core(pool, ADMIN, ORGANIZATION, RAISED)
+            .await
+            .map_err(app_error)?;
+
+        let overview = get_organization_overview_core(pool, ORGANIZATION)
+            .await
+            .map_err(app_error)?;
+        ensure!(overview.id == ORGANIZATION);
+        ensure!(
+            overview
+                .members
+                .iter()
+                .any(|member| member.user_id == ADMIN
+                    && member.role == "admin"
+                    && member.email == format!("{ADMIN}@example.test")),
+            "{:?}",
+            overview.members
+        );
+        ensure!(overview.billing.billing_plan == "team");
+        ensure!(overview.billing.billing_status == "active");
+        ensure!(overview.billing.billing_exempt);
+        // The live environment subscription wins over billing_plan.
+        ensure!(overview.billing.effective_plan == "unlimited");
+        ensure!(overview.billing.subscriptions.len() == 1, "{:?}", overview.billing);
+        ensure!(overview.billing.subscriptions[0].kind == "environment");
+        ensure!(overview.quota.explicit == Some(RAISED));
+        // Only the running environment consumes compute.
+        ensure!(
+            overview.usage
+                == AdminOrganizationUsage {
+                    active_environments: 1,
+                    active_sandboxes: 1,
+                    cpu_millicores: 2000,
+                    memory_mb: 8192,
+                },
+            "{:?}",
+            overview.usage
+        );
+        let mut names: Vec<_> = overview
+            .api_keys
+            .iter()
+            .map(|key| (key.name.as_str(), key.disabled))
+            .collect();
+        names.sort_unstable();
+        ensure!(names == [("load-tool", false), ("retired", true)], "{names:?}");
+        ensure!(!format!("{overview:?}").contains("hash-must-not-appear"));
+        ensure!(!format!("{overview:?}").contains("cw_prefix"));
+
+        let missing = get_organization_overview_core(pool, "missing").await;
+        ensure!(matches!(missing, Err(AppError::NotFound(_))), "{missing:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_quota_defaults_apply_to_organizations_without_their_own_quota() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        db.organization("quota-planned").await?;
+        db.organization("quota-own").await?;
+        let pool = &db.pool;
+        // A plan whose workspace limit still sets the sandbox count.
+        sqlx::query(
+            "INSERT INTO billing_catalog_plans \
+             (resource_type, plan_key, display_name, price_cents, max_concurrent_ws, \
+              cpu_overage_cents, mem_overage_cents) \
+             VALUES ('sandbox', 'quota-seven', 'Seven', 0, 7, 1, 1)",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE organizations SET billing_plan = 'quota-seven', billing_status = 'active' \
+             WHERE id = 'quota-planned'",
+        )
+        .execute(pool)
+        .await?;
+        set_organization_environment_quota_core(pool, ADMIN, "quota-own", RAISED)
+            .await
+            .map_err(app_error)?;
+
+        // The migration's seed is today's constants.
+        let seeded = AdminEnvironmentQuota {
+            max_concurrent_environments: 10,
+            max_concurrent_sandbox: 50,
+            max_cpu_millicores: 32_000,
+            max_memory_mb: 65_536,
+        };
+        ensure!(
+            get_default_environment_quota_core(pool)
+                .await
+                .map_err(app_error)?
+                == (seeded, true)
+        );
+        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, ORGANIZATION).await) == seeded);
+
+        let defaults = AdminEnvironmentQuota {
+            max_concurrent_environments: 120,
+            max_concurrent_sandbox: -1,
+            max_cpu_millicores: 256_000,
+            max_memory_mb: 1_048_576,
+        };
+        set_default_environment_quota_core(pool, ADMIN, defaults)
+            .await
+            .map_err(app_error)?;
+        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, ORGANIZATION).await) == defaults);
+        // The plan keeps its sandbox and environment counts; CPU and memory
+        // come from the defaults.
+        ensure!(
+            AdminEnvironmentQuota::from(get_org_quota(pool, "quota-planned").await)
+                == AdminEnvironmentQuota {
+                    max_concurrent_environments: 7,
+                    max_concurrent_sandbox: 7,
+                    ..defaults
+                }
+        );
+        // An organization with its own quota is unaffected.
+        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, "quota-own").await) == RAISED);
+
+        let entries: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT action, user_id, metadata FROM audit_logs \
+             WHERE action = 'admin.environment_quota_defaults_set' AND severity = 'warn'",
+        )
+        .fetch_all(pool)
+        .await?;
+        ensure!(entries.len() == 1, "{entries:?}");
+        let (_, user, metadata) = &entries[0];
+        ensure!(user == ADMIN);
+        ensure!(
+            metadata["previous"] == serde_json::to_value(seeded)?,
+            "{metadata}"
+        );
+        ensure!(
+            metadata["quota"] == serde_json::to_value(defaults)?,
+            "{metadata}"
+        );
+
+        // Invalid limits change nothing and write no audit entry.
+        let outcome = set_default_environment_quota_core(
+            pool,
+            ADMIN,
+            AdminEnvironmentQuota {
+                max_cpu_millicores: 0,
+                ..defaults
+            },
+        )
+        .await;
+        ensure!(
+            matches!(outcome, Err(AppError::Validation { .. })),
+            "{outcome:?}"
+        );
+        ensure!(
+            get_default_environment_quota_core(pool)
+                .await
+                .map_err(app_error)?
+                == (defaults, true)
+        );
+
+        // Without a stored row the built-in constants apply, and a write
+        // stores the row again.
+        sqlx::query("DELETE FROM environment_quota_defaults")
+            .execute(pool)
+            .await?;
+        ensure!(
+            get_default_environment_quota_core(pool)
+                .await
+                .map_err(app_error)?
+                == (seeded, false)
+        );
+        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, ORGANIZATION).await) == seeded);
+        set_default_environment_quota_core(pool, ADMIN, seeded)
+            .await
+            .map_err(app_error)?;
+        ensure!(
+            get_default_environment_quota_core(pool)
+                .await
+                .map_err(app_error)?
+                == (seeded, true)
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

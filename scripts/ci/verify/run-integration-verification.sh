@@ -650,7 +650,7 @@ database_lane_core() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 23
+  assert_passed_count "server-core migration matrix" "$logfile" 24
 
   logfile="$RUN_DIR/platform-credential-storage.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -981,7 +981,7 @@ database_lane_orchestration_workspaces() {
     cargo test --locked -p codewire-orchestration --lib \
       'api::admin::quota_database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "admin environment quota matrix" "$logfile" 3
+  assert_passed_count "admin environment quota matrix" "$logfile" 5
 
   logfile="$RUN_DIR/workspace-binding-recorder.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
