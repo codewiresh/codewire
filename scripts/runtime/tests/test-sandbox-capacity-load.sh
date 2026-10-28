@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016 # Single-quoted patterns match literal source text.
-# Contract tests for the Dev sandbox capacity load (#3583): it runs only
-# against Dev with the smoke key, refuses unsafe options before any network or
-# build step, is read-only toward Kubernetes, deletes only environments it
-# named, and computes milestone percentiles from histogram deltas.
+# Contract tests for the sandbox capacity load (#3583): it runs against Dev
+# with the Dev smoke key, or against Production only with the explicit
+# confirmation, the Prod server, kube-access's context and the Prod smoke key;
+# refuses unsafe options before any network or build step; is read-only
+# toward Kubernetes; deletes only environments it named; and computes
+# milestone percentiles from histogram deltas and the cluster view from
+# per-node records.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -15,7 +18,8 @@ refuses() {
   local expected="$1"
   shift
   local output
-  if output="$(env -u CODEWIRE_DEV_SMOKE_API_KEY "$@" 2>&1)"; then
+  if output="$(env -u CODEWIRE_DEV_SMOKE_API_KEY -u CODEWIRE_PROD_SMOKE_API_KEY -u KUBE_CONTEXT \
+    -u INFRA_TRANSIENT_KUBE_AUTH "$@" 2>&1)"; then
     fail "accepted: $*"
   fi
   [[ "$output" == *"$expected"* ]] || fail "unexpected refusal for $*: $output"
@@ -41,6 +45,30 @@ refuses '--latency-factor must be at least 1' env CODEWIRE_DEV_SMOKE_API_KEY=x "
 refuses 'MAX_NODE_MEMORY_PCT must be 1-100' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --max-node-memory-pct 0
 refuses 'shell tracing is enabled' env CODEWIRE_DEV_SMOKE_API_KEY=x bash -x "$LOAD"
 refuses 'unknown argument' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --keep
+
+# Dev mode never takes the Prod key or kube-access's Prod context.
+refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' env CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD"
+refuses 'only against the codewire-dev context' env KUBE_CONTEXT=cw-prod-hz-eu-1 CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
+# Production mode needs the exact confirmation, server, kube-access context
+# and Prod smoke key, each checked before any network or build step.
+prod_access=(KUBE_CONTEXT=cw-prod-hz-eu-1 KUBECONFIG=/nonexistent/kubeconfig INFRA_TRANSIENT_KUBE_AUTH=1)
+refuses '--confirm-production must be cw-prod-hz-eu-1' env "${prod_access[@]}" CODEWIRE_PROD_SMOKE_API_KEY=x \
+  "$LOAD" --confirm-production codewire-prod
+refuses 'Production mode runs only against https://codewire.sh' env "${prod_access[@]}" CODEWIRE_PROD_SMOKE_API_KEY=x \
+  CODEWIRE_SERVER_URL=https://codewire-dev.sh "$LOAD" --confirm-production cw-prod-hz-eu-1
+refuses 'Production mode runs only through scripts/kube-access' env KUBE_CONTEXT=cw-prod-hz-eu-1 \
+  CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD" --confirm-production cw-prod-hz-eu-1
+refuses 'Production mode runs only through scripts/kube-access' env KUBE_CONTEXT=codewire-dev \
+  KUBECONFIG=/nonexistent/kubeconfig INFRA_TRANSIENT_KUBE_AUTH=1 CODEWIRE_PROD_SMOKE_API_KEY=x \
+  "$LOAD" --confirm-production cw-prod-hz-eu-1
+refuses 'CODEWIRE_PROD_SMOKE_API_KEY is required' env "${prod_access[@]}" CODEWIRE_DEV_SMOKE_API_KEY=x \
+  "$LOAD" --confirm-production cw-prod-hz-eu-1
+# With every Production guard met, option validation is next.
+refuses '--max-sandboxes must be 1-500' env "${prod_access[@]}" CODEWIRE_PROD_SMOKE_API_KEY=x \
+  "$LOAD" --confirm-production cw-prod-hz-eu-1 --max-sandboxes 501
+# Production's stop thresholds are stricter than Dev's.
+grep -qF ': "${MAX_NODE_MEMORY_PCT:=85}" "${MAX_NODE_CPU_PCT:=80}" "${MAX_PSI_MEMORY_PCT:=5}"' "$LOAD" ||
+  fail 'Production stop thresholds are not the conservative defaults'
 
 # Kubernetes access is read-only: kubectl_ro is the only kubectl call, and it
 # allows get alone.
@@ -93,11 +121,27 @@ result="$(bash -c 'source "$1"; milestone_quantiles "$2" "$3" setup_complete' _ 
 grep -qF '/ $running) end)' "$LOAD" || fail 'per-sandbox host memory does not divide by ready sandboxes'
 grep -qF "running=\"\$({ grep -l '^ready ' \"\$RUN_DIR\"/ready-* 2>/dev/null || true; }" "$LOAD" || fail 'ready sandboxes are not counted from the ready records'
 
-# The summary shows the ready count and marks a quantile above the top bucket.
+# The cluster view sums capacity and requests, takes the worst node for
+# percentages and pressure, and names every degraded node.
+printf '%s\n' \
+  '{"node":"a","node_condition":"ok","allocatable_cpu_m":1000,"allocatable_memory_mib":100,"allocatable_pods":10,"requested_cpu_m":500,"requested_memory_mib":90,"pods":5,"node_cpu_pct":20,"node_memory_pct":40,"node_memory_total_gib":10,"node_memory_used_gib":4,"psi_memory_some_pct":0,"thin_pool":"t","thin_total_gib":100,"thin_used_gib":10,"thin_used_pct":10}' \
+  '{"node":"b","node_condition":"MemoryPressure=True","allocatable_cpu_m":1000,"allocatable_memory_mib":100,"allocatable_pods":10,"requested_cpu_m":100,"requested_memory_mib":10,"pods":3,"node_cpu_pct":60,"node_memory_pct":10,"node_memory_total_gib":10,"node_memory_used_gib":1,"psi_memory_some_pct":3,"thin_pool":"t","thin_total_gib":100,"thin_used_gib":50,"thin_used_pct":50}' \
+  >"$work/nodes.jsonl"
+result="$(bash -c 'source "$1"; aggregate_nodes "$2" <"$3"' _ "$work/functions.sh" \
+  '[{"volume_definitions":[{"size_kib":209715200}]}]' "$work/nodes.jsonl" | jq -c 'del(.nodes)')"
+expected='{"node_condition":"b: MemoryPressure=True","allocatable_cpu_m":2000,"allocatable_memory_mib":200,"allocatable_pods":20,"requested_cpu_m":600,"requested_memory_mib":100,"pods":8,"node_cpu_pct":60,"node_memory_pct":40,"node_memory_total_gib":20,"node_memory_used_gib":5,"psi_cpu_some_pct":null,"psi_memory_some_pct":3,"psi_memory_full_pct":null,"psi_io_some_pct":null,"thin_pool":"t","thin_total_gib":200,"thin_used_gib":60,"thin_used_pct":50,"provisioned_gib":200,"overcommit":1,"resource_definitions":1}'
+[[ "$result" == "$expected" ]] || fail "unexpected cluster view: $result"
+
+# The summary shows the ready count, marks a quantile above the top bucket,
+# and has one row per node with the run's sandboxes on it.
 mkdir -p "$work/run"
-printf '%s\n' '{"created":25,"ready_sandboxes":18,"failed_creates":7,"warm_hits":4,"new":15,"server_setup_complete":{"p50_ms":52500,"p95_ms":60000,"p50_over_top":false,"p95_over_top":true},"pods":37,"allocatable_pods":110,"requested_cpu_m":1,"allocatable_cpu_m":2,"requested_memory_mib":1,"allocatable_memory_mib":2}' >"$work/run/steps.jsonl"
-bash -c 'source "$1"; RUN_DIR="$2" NODE=n SHAPE=default CPU_M=2000 MEMORY_MIB=8192 DISK_GIB=80 RUN_ID=r WORKLOAD_CPU=0.5 WORKLOAD_MEMORY=0.5 HOLD_SECONDS=180 write_summary' _ "$work/functions.sh" "$work/run"
+printf '%s\n' '{"created":25,"ready_sandboxes":18,"failed_creates":7,"warm_hits":4,"new":15,"server_setup_complete":{"p50_ms":52500,"p95_ms":60000,"p50_over_top":false,"p95_over_top":true},"pods":37,"allocatable_pods":110,"requested_cpu_m":1,"allocatable_cpu_m":2,"requested_memory_mib":1,"allocatable_memory_mib":2,"placement":{"node-a":11},"nodes":[{"node":"node-a","pods":20,"allocatable_pods":110,"requested_cpu_m":1,"allocatable_cpu_m":2,"requested_memory_mib":1,"allocatable_memory_mib":2,"node_cpu_pct":12.34,"node_memory_pct":40,"psi_memory_some_pct":0,"psi_cpu_some_pct":1,"thin_used_pct":3},{"node":"node-b","pods":17,"allocatable_pods":110,"requested_cpu_m":1,"allocatable_cpu_m":2,"requested_memory_mib":1,"allocatable_memory_mib":2}]}' >"$work/run/steps.jsonl"
+bash -c 'source "$1"; NODES=(node-a node-b); RUN_DIR="$2" SHAPE=default CPU_M=2000 MEMORY_MIB=8192 DISK_GIB=80 RUN_ID=r WORKLOAD_CPU=0.5 WORKLOAD_MEMORY=0.5 HOLD_SECONDS=180 write_summary' _ "$work/functions.sh" "$work/run"
 grep -qF '| 25 | 18 | 7 | 4/15 |' "$work/run/summary.md" || fail "summary lacks the ready count: $(cat "$work/run/summary.md")"
 grep -qF '| 52500/>60000 |' "$work/run/summary.md" || fail "summary does not mark a p95 above the top bucket: $(cat "$work/run/summary.md")"
+grep -qF '| 25 | node-a | 11 | 20/110 | 50 | 50 | 12.3 | 40 | 0/1 | 3 |' "$work/run/summary.md" ||
+  fail "summary lacks the per-node row: $(cat "$work/run/summary.md")"
+grep -qF '| 25 | node-b | 0 | 17/110 |' "$work/run/summary.md" || fail "summary lacks a node without run sandboxes"
+grep -qF '# Sandbox capacity: node-a node-b,' "$work/run/summary.md" || fail "summary does not name both nodes"
 
 printf 'sandbox capacity load tests: ok\n'
