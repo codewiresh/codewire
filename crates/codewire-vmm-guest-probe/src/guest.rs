@@ -3318,6 +3318,10 @@ fn mount_workspace_cgroups() -> Result<()> {
             "required cgroup path is not a regular control file"
         );
     }
+    // The workspace container, dockerd and every Docker container run under
+    // this one parent, so a VM checkpoint can freeze the whole workload while
+    // Codewire's own guest services keep running.
+    crate::workload_cgroup::WorkloadCgroup::create(Path::new(CGROUP_HIERARCHY_PATH))?;
     Ok(())
 }
 
@@ -5019,6 +5023,7 @@ fn workspace_oci_config_with_cw(plan: &WorkspacePlan, cw_asset: bool) -> Result<
         ],
         "linux": {
             "rootfsPropagation": "rslave",
+            "cgroupsPath": crate::workload_cgroup::WORKSPACE_CGROUPS_PATH,
             "resources": {
                 "devices": std::iter::once(serde_json::json!({ "allow": false, "access": "rwm" }))
                     .chain(allowed_devices)
@@ -5682,6 +5687,15 @@ fn spawn_docker_daemon(identity: &WorkspaceIdentity) -> Result<std::process::Chi
     let namespace_fd = namespace.as_raw_fd();
     let docker_root = CString::new(DOCKER_ROOT_PATH).context("encode private Docker root path")?;
     let root = CString::new("/").expect("root path contains no NUL");
+    // dockerd joins the workload cgroup before it execs, so containerd, the
+    // shims and anything else it starts are frozen with the workload.
+    let cgroup = OpenOptions::new()
+        .write(true)
+        .open(crate::workload_cgroup::WorkloadCgroup::dockerd_procs(
+            Path::new(CGROUP_HIERARCHY_PATH),
+        ))
+        .context("open dockerd's workload cgroup")?;
+    let cgroup_fd = cgroup.as_raw_fd();
     let mut command = Command::new(DOCKER_ROOT_BINARY_PATH);
     command
         .args([
@@ -5698,6 +5712,10 @@ fn spawn_docker_daemon(identity: &WorkspaceIdentity) -> Result<std::process::Chi
             "--log-opt=max-file=3",
             "--log-level=error",
             "--shutdown-timeout=5",
+            &format!(
+                "--cgroup-parent={}",
+                crate::workload_cgroup::DOCKER_CGROUP_PARENT
+            ),
         ])
         .env_clear()
         .env(
@@ -5716,6 +5734,7 @@ fn spawn_docker_daemon(identity: &WorkspaceIdentity) -> Result<std::process::Chi
         command.pre_exec(move || {
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1
                 || libc::getppid() != 1
+                || libc::write(cgroup_fd, b"0".as_ptr().cast(), 1) != 1
                 || libc::setns(namespace_fd, libc::CLONE_NEWNET) == -1
                 || libc::chroot(docker_root.as_ptr()) == -1
                 || libc::chdir(root.as_ptr()) == -1
@@ -5727,6 +5746,7 @@ fn spawn_docker_daemon(identity: &WorkspaceIdentity) -> Result<std::process::Chi
     }
     let mut child = command.spawn().context("start guest-local Docker daemon")?;
     drop(namespace);
+    drop(cgroup);
     let deadline = Instant::now() + DOCKER_START_TIMEOUT;
     loop {
         if let Some(status) = child.try_wait().context("observe Docker startup")? {
@@ -6914,6 +6934,14 @@ mod tests {
             hosts["options"],
             serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
         );
+    }
+
+    #[test]
+    fn workspace_container_runs_in_the_freezable_workload_cgroup() {
+        let plan = test_workspace_plan();
+        let config: serde_json::Value =
+            serde_json::from_slice(&workspace_oci_config(&plan).unwrap()).unwrap();
+        assert_eq!(config["linux"]["cgroupsPath"], "/workload/workspace");
     }
 
     #[test]

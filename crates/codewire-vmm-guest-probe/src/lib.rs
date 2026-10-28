@@ -35,6 +35,8 @@ mod setup_archive;
 #[cfg(target_os = "linux")]
 mod setup_verify;
 #[cfg(target_os = "linux")]
+mod workload_cgroup;
+#[cfg(target_os = "linux")]
 mod workspace_plan;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
