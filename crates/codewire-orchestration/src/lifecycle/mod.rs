@@ -142,6 +142,15 @@ pub trait LifecycleStore {
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
 }
 
+/// What a start asks of its organization's environment quota: the limits,
+/// read before the admission transaction, and the environment's own shape.
+pub(crate) struct StartQuota<'a> {
+    pub(crate) quota: crate::api::environments::OrgQuota,
+    pub(crate) env_type: &'a str,
+    pub(crate) cpu_millicores: i32,
+    pub(crate) memory_mb: i32,
+}
+
 /// Mirrors `environmentlifecycle.Service` over any store.
 pub struct Service<S> {
     store: S,
@@ -169,46 +178,75 @@ impl Service<PgLifecycleStore> {
         }
     }
 
-    /// Reserves Confidential capacity and records the normal start intent in
-    /// one transaction. Standard environments retain the ordinary intent
-    /// path. This prevents concurrent stopped environments from both passing
-    /// admission before either becomes active.
-    pub async fn admit_confidential_start(
+    /// Admits a start: under the organization row lock it checks the
+    /// environment quota (#3256) and, for a Confidential environment, its
+    /// capacity, then records the start intent, all in one transaction. A
+    /// stopped environment that intends to start counts as active, so
+    /// concurrent starts in one organization cannot both pass admission
+    /// before either becomes active. A refused quota surfaces as the
+    /// [`AppError`](codewire_server_core::AppError) inside the error.
+    pub(crate) async fn admit_start(
         &self,
         env_id: &str,
         org_id: &str,
         isolation_tier: &str,
+        quota: StartQuota<'_>,
     ) -> anyhow::Result<()> {
-        if isolation_tier == "standard" {
-            return self.set_desired_state(env_id, "started").await;
-        }
-        if isolation_tier != "confidential" {
+        if isolation_tier != "standard" && isolation_tier != "confidential" {
             anyhow::bail!("unsupported environment isolation tier {isolation_tier:?}");
         }
 
         let mut tx = self.store.pool.begin().await?;
-        reserve_confidential_capacity(&mut tx, org_id).await?;
-        let changed = sqlx::query(
-            "UPDATE environments SET desired_state = 'started', state_changed_at = NOW() WHERE id = $1 AND org_id = $2 AND state = 'stopped'",
-        )
-        .bind(env_id)
-        .bind(org_id)
-        .execute(&mut *tx)
-        .await?;
-        if changed.rows_affected() != 1 {
-            anyhow::bail!("environment is no longer stopped");
-        }
-        PgLifecycleStore::append_log_and_journal(
+        sqlx::query("SELECT id FROM organizations WHERE id = $1 FOR UPDATE")
+            .bind(org_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        crate::api::environments::check_quota_in(
             &mut tx,
-            env_id,
+            quota.quota,
+            org_id,
+            quota.env_type,
+            quota.cpu_millicores,
+            quota.memory_mb,
+        )
+        .await?;
+        let entry = if isolation_tier == "confidential" {
+            reserve_confidential_capacity(&mut tx, org_id).await?;
+            let changed = sqlx::query(
+                "UPDATE environments SET desired_state = 'started', state_changed_at = NOW() WHERE id = $1 AND org_id = $2 AND state = 'stopped'",
+            )
+            .bind(env_id)
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?;
+            if changed.rows_affected() != 1 {
+                anyhow::bail!("environment is no longer stopped");
+            }
             LogEntry {
                 phase: "lifecycle_intent",
                 status: "completed",
                 message: "desired state -> started (confidential capacity reserved)".into(),
                 metadata: serde_json::json!({"kind": "desired_state", "desired_state": "started", "isolation_tier": "confidential"}),
-            },
-        )
-        .await?;
+            }
+        } else {
+            let changed = sqlx::query(
+                "UPDATE environments SET desired_state = 'started', state_changed_at = NOW() WHERE id = $1 AND org_id = $2",
+            )
+            .bind(env_id)
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?;
+            if changed.rows_affected() != 1 {
+                anyhow::bail!("environment not found");
+            }
+            LogEntry {
+                phase: "lifecycle_intent",
+                status: "completed",
+                message: "desired state -> started".into(),
+                metadata: serde_json::json!({"kind": "desired_state", "desired_state": "started"}),
+            }
+        };
+        PgLifecycleStore::append_log_and_journal(&mut tx, env_id, entry).await?;
         tx.commit().await?;
         Ok(())
     }

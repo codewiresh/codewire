@@ -1724,6 +1724,7 @@ if [ "$event_selected" = false ]; then
       crates/*/src/*database_tests.rs|\
       crates/*/src/*/database_tests/*|\
       crates/codewire-billing/src/billing_teardown.rs|\
+      crates/codewire-orchestration/src/api/create.rs|\
       crates/codewire-orchestration/src/api/cw_runtime/owner.rs|\
       crates/codewire-orchestration/src/api/environment_daemon/session_mutation/tests.rs|\
       crates/codewire-orchestration/src/api/environment_resize.rs|\

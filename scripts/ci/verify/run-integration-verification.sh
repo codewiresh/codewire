@@ -898,6 +898,13 @@ database_lane_orchestration_workspaces() {
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "environment resize admission matrix" "$logfile" 3
 
+  logfile="$RUN_DIR/environment-create-capacity.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::create::tests::db_quota_' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "environment create capacity matrix" "$logfile" 4
+
   logfile="$RUN_DIR/ssh-proxy-runtime-lease.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-orchestration --lib \

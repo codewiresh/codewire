@@ -391,6 +391,7 @@ suites = [
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::cw_runtime::owner::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform cw runtime journal matrix', 'count': 31},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::platform_agents::journal::database_tests::db_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform managed agent journal matrix', 'count': 40},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_resize::tests::db_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'environment resize admission matrix', 'count': 3},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::create::tests::db_quota_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment create capacity matrix', 'count': 4},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::ssh_proxy::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'SSH proxy runtime lease matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_daemon::repair_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment daemon repair lease matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environments::access_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment membership access matrix', 'count': 1},
@@ -442,6 +443,7 @@ lane_labels = {
     'orchestration-workspaces': {'environment source admission matrix', 'admin startup summary matrix',
                                  'workspace binding recorder matrix', 'workspace binding access store matrix',
                                  'environment Mesh membership matrix', 'environment resize admission matrix',
+                                 'environment create capacity matrix',
                                  'SSH proxy runtime lease matrix', 'environment daemon repair lease matrix',
                                  'environment membership access matrix', 'organization membership credential matrix',
                                  'billing session bind matrix', 'credential relay target matrix'},
@@ -677,9 +679,10 @@ executions = [command for command in commands if command['args'][0] == 'test'
 # 45 suite contracts before the broker admission matrix ran in four lanes by
 # module (one suite became eight); 442 required tests (437, plus #3402's
 # ListOrganizations statement test and #3550's default-profile migration and
-# store tests). The server-core pool health matrix adds one suite of 2.
-assert len(executions) == len(suites) == 53
-assert sum(suite['count'] for suite in suites) == 442
+# store tests). The server-core pool health matrix adds one suite of 2, and
+# #3256's environment create capacity matrix one suite of 4.
+assert len(executions) == len(suites) == 54
+assert sum(suite['count'] for suite in suites) == 446
 assert commands.index(actual_batches[-1]) < commands.index(executions[0]), 'a lane started before every harness compiled'
 # Against one explicit database the lanes run one after another, in lane order.
 for expected, actual in zip([suite for lane in lane_order for suite in lane_suites[lane]], executions):

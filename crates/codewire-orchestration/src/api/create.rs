@@ -20,8 +20,8 @@ use sqlx::{PgPool, Row};
 
 use super::ApiState;
 use super::environments::{
-    ENV_SELECT_COLS, ENV_SELECT_JOINS, Environment, check_quota, check_rate_limit, coded,
-    require_org_member, scan_environment, trigger_environment,
+    ENV_SELECT_COLS, ENV_SELECT_JOINS, Environment, OrgQuota, check_quota_in, check_rate_limit,
+    coded, get_org_quota, require_org_member, scan_environment, trigger_environment,
 };
 use crate::confidential_storage::require_interactive_access;
 use crate::repository_mount::validate_repository_mounts;
@@ -643,6 +643,9 @@ struct InsertEnvironmentParams<'a> {
     isolation_tier: &'a str,
     ttl_seconds: Option<i32>,
     body: &'a CreateEnvironmentBody,
+    /// The organization's limits, read before the transaction; usage is
+    /// counted inside it.
+    quota: OrgQuota,
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
@@ -691,9 +694,18 @@ async fn insert_environment(
         .await
         .map_err(crate::access_profiles::profile_error)?;
     super::environment_sources::lock_source_owners_in(&mut transaction, p.user, p.org_id).await?;
-    if p.isolation_tier == "confidential" {
-        reserve_confidential_capacity(&mut transaction, p.org_id).await?;
-    }
+    reserve_capacity(
+        &mut transaction,
+        p.org_id,
+        CapacityRequest {
+            quota: p.quota,
+            env_type: p.env_type,
+            isolation_tier: p.isolation_tier,
+            cpu_millicores: p.cpu_millicores,
+            memory_mb: p.memory_mb,
+        },
+    )
+    .await?;
     let row = sqlx::query(&sql)
         .bind(p.org_id)
         .bind(&p.user.user_id)
@@ -790,11 +802,44 @@ fn invalid_node_name() -> AppError {
     )
 }
 
-/// Checks the catalog entitlement and concurrent capacity while holding an
-/// organization-row lock. The new environment row is inserted in the same
-/// transaction, so a successful check is a reservation and a failed check
-/// creates no environment.
-async fn reserve_confidential_capacity(
+/// What one create asks of its organization's capacity.
+struct CapacityRequest<'a> {
+    quota: OrgQuota,
+    env_type: &'a str,
+    isolation_tier: &'a str,
+    cpu_millicores: i32,
+    memory_mb: i32,
+}
+
+/// Reserves a create's capacity: the organization's environment quota for
+/// every tier, and the confidential catalog entitlement and concurrency for
+/// a confidential one. It holds the organization row lock, and the new
+/// environment row is inserted in the same transaction, so concurrent creates
+/// in one organization are counted one after another (#3256). A successful
+/// check is a reservation; a refused check, or any later failure before
+/// commit, rolls back and leaves no environment behind.
+async fn reserve_capacity(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: &str,
+    request: CapacityRequest<'_>,
+) -> AppResult<()> {
+    lock_organization_row(transaction, org_id).await?;
+    check_quota_in(
+        transaction,
+        request.quota,
+        org_id,
+        request.env_type,
+        request.cpu_millicores,
+        request.memory_mb,
+    )
+    .await?;
+    if request.isolation_tier == "confidential" {
+        reserve_confidential_capacity(transaction, org_id).await?;
+    }
+    Ok(())
+}
+
+async fn lock_organization_row(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     org_id: &str,
 ) -> AppResult<()> {
@@ -809,6 +854,18 @@ async fn reserve_confidential_capacity(
                 "organization not found",
             )
         })?;
+    Ok(())
+}
+
+/// Checks the catalog entitlement and concurrent capacity while holding an
+/// organization-row lock. The new environment row is inserted in the same
+/// transaction, so a successful check is a reservation and a failed check
+/// creates no environment.
+async fn reserve_confidential_capacity(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: &str,
+) -> AppResult<()> {
+    lock_organization_row(transaction, org_id).await?;
 
     let plan: String = sqlx::query_scalar(
         r#"SELECT COALESCE(
@@ -1117,7 +1174,9 @@ pub(crate) async fn create_environment_core(
             let cpu = resource_i32(u64::from(cpu), "cpu_millicores")?;
             let memory_mib = resource_i32(memory_mib, "memory_mib")?;
             let disk_gib = resource_i32(disk_gib, "disk_gib")?;
-            check_quota(pool, org_id, "sandbox", cpu, memory_mib).await?;
+            // Limits only; usage is counted under the organization row lock
+            // in insert_environment's transaction.
+            let quota = get_org_quota(pool, org_id).await;
 
             for agent in &body.project_spec.agents.tools {
                 if !valid_agent_type(agent) {
@@ -1143,6 +1202,7 @@ pub(crate) async fn create_environment_core(
                     isolation_tier,
                     ttl_seconds: ttl,
                     body: &body,
+                    quota,
                 },
             )
             .await?;
@@ -1759,7 +1819,22 @@ credentials: {profile: user/work}
         transaction.rollback().await.unwrap();
 
         crate::lifecycle::Service::for_pool(pool.clone())
-            .admit_confidential_start(&environment_id, &org_id, "confidential")
+            .admit_start(
+                &environment_id,
+                &org_id,
+                "confidential",
+                crate::lifecycle::StartQuota {
+                    quota: OrgQuota {
+                        max_concurrent_environments: -1,
+                        max_concurrent_sandbox: -1,
+                        max_cpu_millicores: -1,
+                        max_memory_mb: -1,
+                    },
+                    env_type: "sandbox",
+                    cpu_millicores: 0,
+                    memory_mb: 0,
+                },
+            )
             .await
             .expect("a stopped environment can atomically reserve confidential capacity");
         let mut transaction = pool.begin().await.unwrap();
@@ -2444,5 +2519,344 @@ credentials: {profile: user/work}
         let id = generate_short_id();
         assert_eq!(id.len(), 4);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// One synthetic organization whose explicit quota allows `limit`
+    /// concurrent environments, for the capacity database tests.
+    struct QuotaFixture {
+        pool: sqlx::PgPool,
+        user: AuthUser,
+        org_id: String,
+        preset_id: String,
+    }
+
+    impl QuotaFixture {
+        async fn new(max_connections: u32, limit: i32) -> Self {
+            let database_url = std::env::var("TEST_DATABASE_URL")
+                .expect("ignored DB test requires TEST_DATABASE_URL");
+            let pool = PgPoolOptions::new()
+                .max_connections(max_connections)
+                .connect(&database_url)
+                .await
+                .unwrap();
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let user_id = format!("user_quota_{suffix}");
+            let org_id = format!("org_quota_{suffix}");
+            let preset_id = format!("preset_quota_{suffix}");
+            sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+                .bind(&user_id)
+                .bind(format!("{user_id}@example.test"))
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(&org_id)
+            .bind(format!("Quota {suffix}"))
+            .bind(format!("quota-{suffix}"))
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO org_members (id, org_id, user_id) VALUES ($1, $2, $3)")
+                .bind(format!("member_quota_{suffix}"))
+                .bind(&org_id)
+                .bind(&user_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                r#"INSERT INTO environment_quotas
+                     (org_id, max_concurrent_environments, max_concurrent_sandbox,
+                      max_cpu_millicores, max_memory_mb)
+                   VALUES ($1, $2, $2, -1, -1)"#,
+            )
+            .bind(&org_id)
+            .bind(limit)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                r#"INSERT INTO environment_presets (id, org_id, name, build_status, project_spec)
+                   VALUES ($1, $2, 'Quota test', 'ready',
+                           '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
+            )
+            .bind(&preset_id)
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            Self {
+                pool,
+                user: AuthUser {
+                    user_id,
+                    org_id: None,
+                    is_admin: false,
+                    via_api_key: false,
+                },
+                org_id,
+                preset_id,
+            }
+        }
+
+        async fn create(&self, body: &CreateEnvironmentBody) -> AppResult<Environment> {
+            let quota = get_org_quota(&self.pool, &self.org_id).await;
+            insert_environment(
+                &self.pool,
+                InsertEnvironmentParams {
+                    org_id: &self.org_id,
+                    user: &self.user,
+                    preset_id: &self.preset_id,
+                    env_type: "sandbox",
+                    name: body.name.clone(),
+                    cpu_millicores: 1_000,
+                    memory_mb: 1_024,
+                    disk_gb: 10,
+                    isolation_tier: "standard",
+                    ttl_seconds: None,
+                    body,
+                    quota,
+                },
+            )
+            .await
+        }
+
+        async fn environment_count(&self) -> i64 {
+            sqlx::query_scalar("SELECT COUNT(*) FROM environments WHERE org_id = $1")
+                .bind(&self.org_id)
+                .fetch_one(&self.pool)
+                .await
+                .unwrap()
+        }
+
+        async fn cleanup(self) {
+            for (sql, id) in [
+                ("DELETE FROM environments WHERE org_id = $1", &self.org_id),
+                (
+                    "DELETE FROM environment_presets WHERE id = $1",
+                    &self.preset_id,
+                ),
+                (
+                    "DELETE FROM environment_quotas WHERE org_id = $1",
+                    &self.org_id,
+                ),
+                ("DELETE FROM org_members WHERE org_id = $1", &self.org_id),
+                ("DELETE FROM organizations WHERE id = $1", &self.org_id),
+                ("DELETE FROM users WHERE id = $1", &self.user.user_id),
+            ] {
+                sqlx::query(sql).bind(id).execute(&self.pool).await.unwrap();
+            }
+        }
+    }
+
+    fn is_quota_exceeded(error: &AppError) -> bool {
+        matches!(
+            error,
+            AppError::Coded {
+                code: "quota_exceeded",
+                ..
+            }
+        )
+    }
+
+    /// #3256: parallel creates at the quota boundary. The organization has
+    /// one free slot of three; ten creates race for it and exactly one wins.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_quota_parallel_creates_at_the_limit_admit_exactly_the_free_slots() {
+        const RACERS: usize = 10;
+        let fixture = QuotaFixture::new(RACERS as u32 + 2, 3).await;
+        let body = CreateEnvironmentBody::default();
+        for _ in 0..2 {
+            fixture
+                .create(&body)
+                .await
+                .expect("a create below the limit is admitted");
+        }
+
+        let start = std::sync::Arc::new(tokio::sync::Barrier::new(RACERS));
+        let fixture = std::sync::Arc::new(fixture);
+        let mut racers = tokio::task::JoinSet::new();
+        for _ in 0..RACERS {
+            let (fixture, start) = (fixture.clone(), start.clone());
+            racers.spawn(async move {
+                let body = CreateEnvironmentBody::default();
+                start.wait().await;
+                fixture.create(&body).await.map(|_| ())
+            });
+        }
+        let (mut admitted, mut refused) = (0, 0);
+        while let Some(outcome) = racers.join_next().await {
+            match outcome.unwrap() {
+                Ok(()) => admitted += 1,
+                Err(error) if is_quota_exceeded(&error) => refused += 1,
+                Err(error) => panic!("unexpected create error: {error:?}"),
+            }
+        }
+        assert_eq!((admitted, refused), (1, RACERS - 1));
+        assert_eq!(fixture.environment_count().await, 3);
+
+        let fixture = std::sync::Arc::into_inner(fixture).unwrap();
+        fixture.cleanup().await;
+    }
+
+    /// A create that fails after its reservation (here, an invalid Mesh node
+    /// name, checked after the row is inserted) rolls back and frees the slot.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_quota_failed_create_releases_its_reservation() {
+        let fixture = QuotaFixture::new(2, 1).await;
+        let failing = CreateEnvironmentBody {
+            name: Some("not a node name".into()),
+            network: Some("quota-net".into()),
+            ..Default::default()
+        };
+        let error = fixture
+            .create(&failing)
+            .await
+            .expect_err("an invalid node name fails the create after its reservation");
+        assert!(matches!(
+            error,
+            AppError::Coded {
+                code: "invalid_node_name",
+                ..
+            }
+        ));
+        assert_eq!(fixture.environment_count().await, 0);
+        fixture
+            .create(&CreateEnvironmentBody::default())
+            .await
+            .expect("the failed create left its slot free");
+        let error = fixture
+            .create(&CreateEnvironmentBody::default())
+            .await
+            .expect_err("the quota is now full");
+        assert!(is_quota_exceeded(&error));
+        assert_eq!(fixture.environment_count().await, 1);
+        fixture.cleanup().await;
+    }
+
+    /// #3256: the start path counts and records the start intent under the
+    /// same organization lock. One slot is free and two stopped environments
+    /// start at once: exactly one is admitted.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_quota_parallel_starts_at_the_limit_admit_exactly_the_free_slot() {
+        let fixture = QuotaFixture::new(4, 1).await;
+        let mut stopped = Vec::new();
+        for index in 0..2 {
+            let environment_id = format!("{}_stopped_{index}", fixture.org_id);
+            sqlx::query(
+                r#"INSERT INTO environments
+                     (id, org_id, created_by, type, preset_id, state, desired_state,
+                      cpu_millicores, memory_mb, isolation_tier, project_spec)
+                   VALUES ($1, $2, $3, 'sandbox', $4, 'stopped', 'stopped', 1000, 1024,
+                           'standard',
+                           '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
+            )
+            .bind(&environment_id)
+            .bind(&fixture.org_id)
+            .bind(&fixture.user.user_id)
+            .bind(&fixture.preset_id)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+            stopped.push(environment_id);
+        }
+        let quota = get_org_quota(&fixture.pool, &fixture.org_id).await;
+        let start = |environment_id: &str| {
+            let (pool, org_id, environment_id) = (
+                fixture.pool.clone(),
+                fixture.org_id.clone(),
+                environment_id.to_owned(),
+            );
+            async move {
+                crate::lifecycle::Service::for_pool(pool)
+                    .admit_start(
+                        &environment_id,
+                        &org_id,
+                        "standard",
+                        crate::lifecycle::StartQuota {
+                            quota,
+                            env_type: "sandbox",
+                            cpu_millicores: 1_000,
+                            memory_mb: 1_024,
+                        },
+                    )
+                    .await
+            }
+        };
+        let (first, second) = tokio::join!(start(&stopped[0]), start(&stopped[1]));
+        let mut refused = 0;
+        for outcome in [first, second] {
+            if let Err(error) = outcome {
+                let error = error
+                    .downcast::<AppError>()
+                    .expect("a refused start carries its AppError");
+                assert!(is_quota_exceeded(&error), "unexpected refusal: {error:?}");
+                refused += 1;
+            }
+        }
+        assert_eq!(refused, 1);
+        let starting: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM environments WHERE org_id = $1 AND desired_state = 'started'",
+        )
+        .bind(&fixture.org_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(starting, 1);
+        sqlx::query("DELETE FROM environment_lifecycle_journal WHERE environment_id = ANY($1)")
+            .bind(&stopped)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM environment_logs WHERE environment_id = ANY($1)")
+            .bind(&stopped)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        fixture.cleanup().await;
+    }
+
+    /// When the organization's usage cannot be counted, the reservation
+    /// refuses with a retryable error instead of admitting the create.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_quota_refuses_when_usage_cannot_be_counted() {
+        let fixture = QuotaFixture::new(2, 5).await;
+        let quota = get_org_quota(&fixture.pool, &fixture.org_id).await;
+        let mut transaction = fixture.pool.begin().await.unwrap();
+        // A temporary table shadows `environments` for this transaction only,
+        // so the usage count fails while the organization lock succeeds.
+        sqlx::query("CREATE TEMPORARY TABLE environments (org_id text) ON COMMIT DROP")
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        let error = reserve_capacity(
+            &mut transaction,
+            &fixture.org_id,
+            CapacityRequest {
+                quota,
+                env_type: "sandbox",
+                isolation_tier: "standard",
+                cpu_millicores: 1_000,
+                memory_mb: 1_024,
+            },
+        )
+        .await
+        .expect_err("an unreadable usage count must refuse the create");
+        transaction.rollback().await.unwrap();
+        assert!(matches!(
+            error,
+            AppError::Coded {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "quota_unavailable",
+                ..
+            }
+        ));
+        assert_eq!(fixture.environment_count().await, 0);
+        fixture.cleanup().await;
     }
 }

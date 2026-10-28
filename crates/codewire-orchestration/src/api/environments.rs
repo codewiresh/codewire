@@ -750,11 +750,16 @@ pub(crate) struct OrgQuota {
     pub(crate) max_memory_mb: i32,
 }
 
-/// Mirrors `countActiveEnvironments` (active = consuming compute).
-async fn count_active_environments(
-    pool: &PgPool,
+/// Mirrors `countActiveEnvironments` (active = consuming compute). A stopped
+/// environment whose start was admitted counts, since it is about to consume
+/// compute; otherwise concurrent starts could both pass the check (#3256).
+async fn count_active_environments<'e, E>(
+    executor: E,
     org_id: &str,
-) -> Result<OrgEnvironmentUsage, sqlx::Error> {
+) -> Result<OrgEnvironmentUsage, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let (active_total, active_sandbox, total_cpu, total_memory_mb): (i64, i64, i64, i64) =
         sqlx::query_as(
             r#"SELECT
@@ -764,10 +769,11 @@ async fn count_active_environments(
                 COALESCE(SUM(memory_mb), 0)
              FROM environments
              WHERE org_id = $1
-               AND state NOT IN ('destroyed', 'destroying', 'error', 'stopped', 'archived')"#,
+               AND state NOT IN ('destroyed', 'destroying', 'error', 'archived')
+               AND NOT (state = 'stopped' AND desired_state IS DISTINCT FROM 'started')"#,
         )
         .bind(org_id)
-        .fetch_one(pool)
+        .fetch_one(executor)
         .await?;
     Ok(OrgEnvironmentUsage {
         active_total,
@@ -950,22 +956,34 @@ fn evaluate_quota(
     Ok(())
 }
 
-/// Mirrors `checkQuota` — fails open on DB errors.
-pub(crate) async fn check_quota(
-    pool: &PgPool,
+/// The quota cannot be enforced because the organization's usage could not
+/// be read. The request is refused rather than admitted unchecked; it is
+/// safe to retry.
+pub(crate) fn quota_unavailable(org_id: &str, error: &sqlx::Error) -> AppError {
+    tracing::warn!(org_id, %error, "quota check: failed to count active environments");
+    coded(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "quota_unavailable",
+        "the environment quota could not be checked; retry in a moment",
+    )
+}
+
+/// Mirrors `checkQuota`, with usage counted inside `transaction`. The caller
+/// holds the organization row lock and records the create or start in the
+/// same transaction, so concurrent requests in one organization are counted
+/// one after another, and a refused or failed one leaves nothing behind. A
+/// failed usage count refuses the request (#3256).
+pub(crate) async fn check_quota_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    quota: OrgQuota,
     org_id: &str,
     env_type: &str,
     cpu: i32,
     mem: i32,
 ) -> Result<(), AppError> {
-    let usage = match count_active_environments(pool, org_id).await {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::warn!(org_id, error = %e, "quota check: failed to count active environments");
-            return Ok(());
-        }
-    };
-    let quota = get_org_quota(pool, org_id).await;
+    let usage = count_active_environments(&mut **transaction, org_id)
+        .await
+        .map_err(|error| quota_unavailable(org_id, &error))?;
     evaluate_quota(quota, usage, env_type, cpu, mem)
 }
 
@@ -1278,20 +1296,27 @@ pub(crate) async fn start_environment_core(
                 Ok(true) => {}
             }
 
-            // Check quota — starting resumes compute allocation.
-            check_quota(
-                &state.pool,
-                org_id,
-                &env.env_type,
-                env.cpu_millicores,
-                env.memory_mb,
-            )
-            .await?;
-
+            // Starting resumes compute allocation: the quota is checked and
+            // the start intent recorded under the organization row lock.
+            let quota = get_org_quota(&state.pool, org_id).await;
             if let Err(error) = lifecycle
-                .admit_confidential_start(&env.id, org_id, &env.isolation_tier)
+                .admit_start(
+                    &env.id,
+                    org_id,
+                    &env.isolation_tier,
+                    crate::lifecycle::StartQuota {
+                        quota,
+                        env_type: &env.env_type,
+                        cpu_millicores: env.cpu_millicores,
+                        memory_mb: env.memory_mb,
+                    },
+                )
                 .await
             {
+                let error = match error.downcast::<AppError>() {
+                    Ok(refused) => return Err(refused),
+                    Err(error) => error,
+                };
                 if error.to_string().contains("CONFIDENTIAL_CAPACITY_UNAVAILABLE") {
                     return Err(coded(
                         StatusCode::CONFLICT,
