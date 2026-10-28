@@ -1883,7 +1883,11 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
         vec![
             "admin_invoice_credits:cascade",
             "api_keys:no_action",
+            "billing_card_grants:set_null",
+            "billing_credit_balances:cascade",
+            "billing_credit_ledger:cascade",
             "billing_external_operations:cascade",
+            "billing_top_ups:cascade",
             "environment_presets:no_action",
             "environment_quotas:no_action",
             "environment_resize_operations:cascade",

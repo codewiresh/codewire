@@ -345,7 +345,7 @@ import time
 
 root, temporary = map(Path, sys.argv[1:])
 suites = [
-    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'migrate::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core migration matrix', 'count': 25},
+    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'migrate::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core migration matrix', 'count': 26},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'storage', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform credential storage matrix', 'count': 24},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'profiles', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform access profile matrix', 'count': 16},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'owner_sources', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform owner-source authority matrix', 'count': 5},
@@ -687,9 +687,9 @@ executions = [command for command in commands if command['args'][0] == 'test'
 # #3256's environment create capacity matrix one of 4, the admin
 # environment quota matrix (#3583) one of 5, and #3583's quota-defaults
 # migration test one more in the server-core migration matrix, and #2497's
-# confidential opt-in migration test one more again.
+# confidential opt-in and #3381's rate-card migration tests one more each.
 assert len(executions) == len(suites) == 55
-assert sum(suite['count'] for suite in suites) == 453
+assert sum(suite['count'] for suite in suites) == 454
 assert commands.index(actual_batches[-1]) < commands.index(executions[0]), 'a lane started before every harness compiled'
 # Against one explicit database the lanes run one after another, in lane order.
 for expected, actual in zip([suite for lane in lane_order for suite in lane_suites[lane]], executions):

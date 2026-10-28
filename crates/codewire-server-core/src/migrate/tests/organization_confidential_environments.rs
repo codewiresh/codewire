@@ -49,8 +49,14 @@ async fn organization_confidential_upgrade_leaves_every_organization_out() -> an
             "the upgrade needs existing organizations"
         );
 
-        ensure_schema(&db.url).await?;
-        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
+        // Through 0005 only, so its rollback restores the 0004 shape; later
+        // migrations prove their own upgrade and rollback.
+        let through_0005 = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(MIGRATOR.iter().take(5).cloned().collect()),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        through_0005.run(&pool).await?;
+        anyhow::ensure!(fingerprint(&pool).await? != previous);
         let existing = opted_in(&pool).await?;
         anyhow::ensure!(
             existing.len() as i64 == organizations && existing.iter().all(|(_, enabled)| !enabled),
