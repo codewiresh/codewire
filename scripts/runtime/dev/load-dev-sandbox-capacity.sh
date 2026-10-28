@@ -1,0 +1,963 @@
+#!/usr/bin/env bash
+# Dev sandbox capacity load (#3583, Program #2238).
+#
+# Ramps synthetic sandboxes of one shape onto one Kata runtime node in steps,
+# runs a bounded CPU and memory workload in each, and records at every step
+# what the node, storage and platform report, until a stop condition holds.
+# It then deletes everything the run created and proves it is gone.
+#
+# It runs only against Dev, only with the dedicated smoke identity in the
+# smoke organization (owner, 2026-10-28, on #3583: "Reuse smoke org, no new
+# key"), and only touches environments it named itself. Kubernetes access is
+# read-only (get, including get --raw through the API server's service proxy
+# for LINSTOR and orchestration metrics). No credential is ever printed,
+# logged or written to disk.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+
+CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"
+KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
+SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
+ORCHESTRATION_NAMESPACE="${ORCHESTRATION_NAMESPACE:-dev}"
+ORCHESTRATION_METRICS="${ORCHESTRATION_METRICS:-codewire-orchestration:8084}"
+# NAMESPACE/linstor-controller:3370; empty: found by name at start.
+LINSTOR_SERVICE="${LINSTOR_SERVICE:-}"
+PROM_URL="${PROM_URL:-}"
+PROM_CLUSTER="${PROM_CLUSTER:-cw-dev-hz-eu-1}"
+# Empty: the one Kata runtime-candidate node, found at preflight.
+NODE="${NODE:-}"
+LOAD_IMAGE="${LOAD_IMAGE:-workspace}"
+LOAD_TTL="${LOAD_TTL:-4h}"
+LOAD_TMP_PARENT="${LOAD_TMP_PARENT:-$ROOT/.tmp/sandbox-capacity}"
+CW_BIN="${CW_BIN:-}"
+
+SHAPE="default"
+STEPS="10,25,50,100,150,200"
+MAX_SANDBOXES=200
+HOLD_SECONDS=180
+READY_TIMEOUT_SECONDS=600
+CLEANUP_TIMEOUT_SECONDS=900
+SSH_SAMPLE=10
+WORKLOAD_CPU=0.5
+WORKLOAD_MEMORY=0.5
+# Stop thresholds, checked before every step.
+LATENCY_FACTOR=3
+MAX_NODE_MEMORY_PCT=90
+MAX_NODE_CPU_PCT=90
+MAX_PSI_MEMORY_PCT=10
+MAX_PSI_CPU_PCT=50
+MAX_THIN_POOL_PCT=80
+MODE=run
+
+# Every environment this tool creates is named NAME_PREFIX<run>-<n>; nothing
+# else is ever deleted.
+readonly NAME_PREFIX="cap-"
+readonly MILESTONE="codewire_environment_create_milestone_seconds"
+
+RUN_ID=""
+RUN_DIR=""
+# Background helpers stop once this process is gone, even after a SIGKILL.
+readonly MAIN_PID=$$
+CREATED=0
+STOP_REASON=""
+BASELINE_READY_MS=""
+declare -a ENV_IDS=()
+declare -A WAITER_PIDS=() SSH_PIDS=()
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/runtime/dev/with-dev-smoke-auth.sh -- \
+    scripts/runtime/dev/load-dev-sandbox-capacity.sh [options]
+
+Ramps sandboxes of one shape onto one Dev runtime node, step by step, each
+running a bounded CPU and memory workload, and records per step: node CPU,
+memory and pressure (PSI); host memory per sandbox, and that less the
+workload's touched memory (the Kata VM, DinD and guest overhead); requested
+CPU and memory against allocatable;
+pod count; LINSTOR thin-pool use and overcommit; create-to-ready and
+create-to-first-SSH p50/p95 (client side, and server side from the
+codewire_environment_create_milestone_seconds histogram); and the warm-pool
+hit rate.
+
+Before every step it stops when the previous step had a failed or late
+create, when create-to-ready p95 exceeds --latency-factor times the first
+step's p50, when node memory, CPU, memory PSI, CPU PSI or thin-pool use
+crosses its threshold, when the scheduler refused a sandbox, or when a node
+condition degrades. On every exit it deletes every environment it created and
+proves that their environments, claims, Sandboxes, Pods, PVCs, PVs and
+LINSTOR resources are gone. A run that died without cleaning up is cleaned up
+by the next start.
+
+Modes:
+  (default)        run the ramp
+  --dry-run        preflight only: leftovers, node state, predicted limits
+  --cleanup-only   clean up what earlier runs left, prove it, and exit
+
+Options:
+  --shape S              default (2 vCPU/8 GiB/80 GiB) or small (1 vCPU/4 GiB/80 GiB)
+  --steps LIST           cumulative sandbox counts (default 10,25,50,100,150,200)
+  --max-sandboxes N      hard cap on the total created (default 200)
+  --hold-seconds N       time under load before each measurement (default 180)
+  --workload-cpu F       fraction of each sandbox's vCPUs kept busy (default 0.5)
+  --workload-memory F    fraction of each sandbox's memory allocated and touched (default 0.5)
+  --ssh-sample N         new sandboxes per step timed to first SSH (default 10)
+  --latency-factor F     stop when ready p95 > F x the first step's p50 (default 3)
+  --max-node-memory-pct N, --max-node-cpu-pct N,
+  --max-psi-memory-pct N, --max-psi-cpu-pct N,
+  --max-thin-pool-pct N  stop thresholds (defaults 90, 90, 10, 50, 80)
+  --node NAME            runtime node (default: the one Kata runtime-candidate node)
+  --cw-bin PATH          prebuilt cw binary (default: build one)
+  -h, --help             show this help
+
+Environment:
+  CODEWIRE_DEV_SMOKE_API_KEY  required (set by with-dev-smoke-auth.sh)
+  KUBECONFIG                  defaults to ~/src/infra/kubeconfig-oidc.yaml
+  PROM_URL                    required: the System Prometheus that scrapes Dev
+
+Results go to .tmp/sandbox-capacity/<run>/: steps.jsonl (one record per
+step) and summary.md.
+USAGE
+}
+
+log() { printf '[sandbox-capacity] %s\n' "$*" >&2; }
+die() { printf '[sandbox-capacity] ERROR: %s\n' "$*" >&2; exit 1; }
+require_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
+now_ms() { date +%s%3N; }
+
+# A sleep a signal interrupts at once: bash runs a trap only after a
+# foreground command returns, but `wait` returns on the signal.
+pause() { sleep "$1" & wait "$!"; }
+
+kubectl_ro() {
+  case "$1" in
+    get) ;;
+    *) die "read-only kubectl refused verb $1" ;;
+  esac
+  kubectl --context "$KUBE_CONTEXT" "$@"
+}
+
+# Every environment this tool touches is a Dev cloud one.
+cw() { timeout 120 "$CW_BIN" --cloud --server "$CODEWIRE_SERVER_URL" "$@"; }
+
+# One instant PromQL value, empty when the series is absent.
+prom() {
+  curl -fsG --max-time 20 "$PROM_URL/api/v1/query" --data-urlencode "query=$1" 2>/dev/null |
+    jq -r '.data.result[0].value[1] // empty' 2>/dev/null || true
+}
+
+# Nearest-rank percentile of the numbers on stdin.
+percentile() {
+  sort -n | awk -v p="$1" '{a[NR]=$1} END {if (NR == 0) {print ""; exit} i = int((p * NR + 99) / 100); if (i < 1) i = 1; print a[i]}'
+}
+
+is_number() { [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
+
+# Exit 0 when A > B (decimals allowed); an empty A never exceeds.
+exceeds() { [[ -n "$1" ]] && awk -v a="$1" -v b="$2" 'BEGIN {exit !(a > b)}'; }
+
+while (($# > 0)); do
+  case "$1" in
+    --shape) [[ $# -ge 2 ]] || die "--shape requires a value"; SHAPE="$2"; shift 2 ;;
+    --steps) [[ $# -ge 2 ]] || die "--steps requires a value"; STEPS="$2"; shift 2 ;;
+    --max-sandboxes) [[ $# -ge 2 ]] || die "--max-sandboxes requires a value"; MAX_SANDBOXES="$2"; shift 2 ;;
+    --hold-seconds) [[ $# -ge 2 ]] || die "--hold-seconds requires a value"; HOLD_SECONDS="$2"; shift 2 ;;
+    --workload-cpu) [[ $# -ge 2 ]] || die "--workload-cpu requires a value"; WORKLOAD_CPU="$2"; shift 2 ;;
+    --workload-memory) [[ $# -ge 2 ]] || die "--workload-memory requires a value"; WORKLOAD_MEMORY="$2"; shift 2 ;;
+    --ssh-sample) [[ $# -ge 2 ]] || die "--ssh-sample requires a value"; SSH_SAMPLE="$2"; shift 2 ;;
+    --latency-factor) [[ $# -ge 2 ]] || die "--latency-factor requires a value"; LATENCY_FACTOR="$2"; shift 2 ;;
+    --max-node-memory-pct) [[ $# -ge 2 ]] || die "$1 requires a value"; MAX_NODE_MEMORY_PCT="$2"; shift 2 ;;
+    --max-node-cpu-pct) [[ $# -ge 2 ]] || die "$1 requires a value"; MAX_NODE_CPU_PCT="$2"; shift 2 ;;
+    --max-psi-memory-pct) [[ $# -ge 2 ]] || die "$1 requires a value"; MAX_PSI_MEMORY_PCT="$2"; shift 2 ;;
+    --max-psi-cpu-pct) [[ $# -ge 2 ]] || die "$1 requires a value"; MAX_PSI_CPU_PCT="$2"; shift 2 ;;
+    --max-thin-pool-pct) [[ $# -ge 2 ]] || die "$1 requires a value"; MAX_THIN_POOL_PCT="$2"; shift 2 ;;
+    --node) [[ $# -ge 2 ]] || die "--node requires a value"; NODE="$2"; shift 2 ;;
+    --cw-bin) [[ $# -ge 2 ]] || die "--cw-bin requires a value"; CW_BIN="$2"; shift 2 ;;
+    --dry-run) MODE=dry-run; shift ;;
+    --cleanup-only) MODE=cleanup-only; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
+[[ "$CODEWIRE_SERVER_URL" == "https://codewire-dev.sh" ]] || die "this load runs only against Dev"
+[[ "$KUBE_CONTEXT" == "codewire-dev" ]] || die "this load runs only against the codewire-dev context"
+case "$SHAPE" in
+  default) CPU_M=2000; MEMORY_MIB=8192; DISK_GIB=80 ;;
+  small) CPU_M=1000; MEMORY_MIB=4096; DISK_GIB=80 ;;
+  *) die "--shape must be default or small" ;;
+esac
+[[ "$STEPS" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || die "--steps must be a comma-separated list of positive counts"
+IFS=, read -r -a STEP_COUNTS <<<"$STEPS"
+if ! [[ "$MAX_SANDBOXES" =~ ^[1-9][0-9]*$ ]] || (( MAX_SANDBOXES > 500 )); then
+  die "--max-sandboxes must be 1-500"
+fi
+previous=0
+for count in "${STEP_COUNTS[@]}"; do
+  (( count > previous )) || die "--steps must increase"
+  (( count <= MAX_SANDBOXES )) || die "--steps exceeds --max-sandboxes ($MAX_SANDBOXES)"
+  previous="$count"
+done
+for value in HOLD_SECONDS SSH_SAMPLE MAX_NODE_MEMORY_PCT MAX_NODE_CPU_PCT MAX_PSI_MEMORY_PCT \
+  MAX_PSI_CPU_PCT MAX_THIN_POOL_PCT; do
+  [[ "${!value}" =~ ^[0-9]+$ ]] || die "$value must be a non-negative integer"
+done
+for value in MAX_NODE_MEMORY_PCT MAX_NODE_CPU_PCT MAX_PSI_MEMORY_PCT MAX_PSI_CPU_PCT MAX_THIN_POOL_PCT; do
+  (( ${!value} >= 1 && ${!value} <= 100 )) || die "$value must be 1-100"
+done
+for value in WORKLOAD_CPU WORKLOAD_MEMORY; do
+  if ! is_number "${!value}" || ! awk -v v="${!value}" 'BEGIN {exit !(v >= 0 && v <= 0.9)}'; then
+    die "$value must be between 0 and 0.9"
+  fi
+done
+if ! is_number "$LATENCY_FACTOR" || ! awk -v v="$LATENCY_FACTOR" 'BEGIN {exit !(v >= 1)}'; then
+  die "--latency-factor must be at least 1"
+fi
+[[ "$PROM_URL" =~ ^https?://[^[:space:]]+$ ]] || die "PROM_URL must name the System Prometheus that scrapes Dev"
+[[ -n "${CODEWIRE_DEV_SMOKE_API_KEY:-}" ]] ||
+  die "CODEWIRE_DEV_SMOKE_API_KEY is required; run through scripts/runtime/dev/with-dev-smoke-auth.sh"
+for command in jq kubectl curl timeout awk date sort ssh base64; do require_cmd "$command"; done
+if [[ -z "${KUBECONFIG:-}" && -f "$HOME/src/infra/kubeconfig-oidc.yaml" ]]; then
+  export KUBECONFIG="$HOME/src/infra/kubeconfig-oidc.yaml"
+fi
+
+umask 077
+mkdir -p "$LOAD_TMP_PARENT"
+RUN_ID="$(date -u +%Y%m%d%H%M%S)"
+RUN_DIR="$LOAD_TMP_PARENT/$RUN_ID"
+mkdir -p "$RUN_DIR"
+: >"$RUN_DIR/envs.tsv"
+export CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY"
+export CW_CONFIG_DIR="$RUN_DIR/cw-config"
+mkdir -p "$CW_CONFIG_DIR"
+
+if [[ -z "$CW_BIN" ]]; then
+  require_cmd cargo
+  log "building cw"
+  (cd "$ROOT" && timeout 900 cargo build --locked --profile ci -p codewire-cli-bin --bin cw) \
+    >"$RUN_DIR/build.log" 2>&1 || die "cw build failed (see $RUN_DIR/build.log)"
+  CW_BIN="$ROOT/target/ci/cw"
+fi
+[[ -x "$CW_BIN" ]] || die "cw binary is not executable: $CW_BIN"
+
+# ------------------------------------------------------------ inventory
+
+# Live environments of the smoke organization as "id<TAB>name" rows; fails
+# when the list cannot be read, so an unreadable list never looks empty.
+list_envs() {
+  local listing
+  listing="$(cw ls --output json 2>/dev/null)" || return 1
+  jq -r '(if type == "array" then . else (.environments // []) end)[]
+      | select((.state // "") != "destroyed") | [.id, (.name // "")] | @tsv' <<<"$listing"
+}
+
+# Sandbox, Pod, PVC and PV names behind one environment, as one JSON object.
+env_objects() { # ID
+  local id="$1" sandbox pod pvcs pv volumes="[]"
+  sandbox="$(kubectl_ro get sandboxclaim -n "$SANDBOX_NAMESPACE" "sandbox-$id" -o json 2>/dev/null |
+    jq -r '.status.sandbox.name // ""' || true)"
+  pod=""
+  if [[ -n "$sandbox" ]]; then
+    pod="$(kubectl_ro get sandbox -n "$SANDBOX_NAMESPACE" "$sandbox" -o json 2>/dev/null |
+      jq -r --arg s "$sandbox" '.metadata.annotations["agents.x-k8s.io/pod-name"] // $s' || true)"
+  fi
+  if [[ -n "$pod" ]]; then
+    pvcs="$(kubectl_ro get pod -n "$SANDBOX_NAMESPACE" "$pod" -o json 2>/dev/null |
+      jq -r '.spec.volumes[]? | .persistentVolumeClaim.claimName // empty' || true)"
+    local pvc
+    while IFS= read -r pvc; do
+      [[ -n "$pvc" ]] || continue
+      pv="$(kubectl_ro get pvc -n "$SANDBOX_NAMESPACE" "$pvc" -o json 2>/dev/null | jq -r '.spec.volumeName // ""' || true)"
+      volumes="$(jq -c --arg pvc "$pvc" --arg pv "$pv" '. + [{pvc: $pvc, pv: $pv}]' <<<"$volumes")"
+    done <<<"$pvcs"
+  fi
+  jq -nc --arg id "$id" --arg claim "sandbox-$id" --arg sandbox "$sandbox" --arg pod "$pod" \
+    --argjson volumes "$volumes" '{id: $id, claim: $claim, sandbox: $sandbox, pod: $pod, volumes: $volumes}'
+}
+
+linstor_get() { # PATH
+  local namespace="${LINSTOR_SERVICE%%/*}" service="${LINSTOR_SERVICE#*/}"
+  kubectl_ro get --raw "/api/v1/namespaces/$namespace/services/$service/proxy/$1"
+}
+
+# ------------------------------------------------------------ cleanup
+
+remove_env_ids() { # IDS...
+  local id attempt
+  for id in "$@"; do
+    for attempt in 1 2 3; do
+      if cw rm --yes "$id" >/dev/null 2>&1; then break; fi
+      cw info "$id" --output json >/dev/null 2>&1 || break
+      sleep 2
+    done
+  done
+}
+
+# Exit 0 once nothing recorded in OBJECTS (jsonl) exists any more.
+objects_gone() { # OBJECTS_FILE
+  local file="$1" record id claim sandbox pod pvc pv left=0 resources
+  resources="$(linstor_get v1/resource-definitions 2>/dev/null | jq -r '.[].name' 2>/dev/null || echo '?')"
+  while IFS= read -r record; do
+    [[ -n "$record" ]] || continue
+    id="$(jq -r .id <<<"$record")"
+    claim="$(jq -r .claim <<<"$record")"
+    sandbox="$(jq -r .sandbox <<<"$record")"
+    pod="$(jq -r .pod <<<"$record")"
+    if cw info "$id" --output json 2>/dev/null | jq -e '(.state // "") != "destroyed"' >/dev/null 2>&1; then
+      log "cleanup: environment $id still exists"; left=1
+    fi
+    kubectl_ro get sandboxclaim -n "$SANDBOX_NAMESPACE" "$claim" >/dev/null 2>&1 && { log "cleanup: claim $claim remains"; left=1; }
+    [[ -z "$sandbox" ]] || ! kubectl_ro get sandbox -n "$SANDBOX_NAMESPACE" "$sandbox" >/dev/null 2>&1 ||
+      { log "cleanup: Sandbox $sandbox remains"; left=1; }
+    [[ -z "$pod" ]] || ! kubectl_ro get pod -n "$SANDBOX_NAMESPACE" "$pod" >/dev/null 2>&1 ||
+      { log "cleanup: Pod $pod remains"; left=1; }
+    while IFS=$'\t' read -r pvc pv; do
+      [[ -n "$pvc" ]] || continue
+      kubectl_ro get pvc -n "$SANDBOX_NAMESPACE" "$pvc" >/dev/null 2>&1 && { log "cleanup: PVC $pvc remains"; left=1; }
+      if [[ -n "$pv" ]]; then
+        kubectl_ro get pv "$pv" >/dev/null 2>&1 && { log "cleanup: PV $pv remains"; left=1; }
+        if [[ "$resources" == '?' ]]; then
+          log "cleanup: LINSTOR resource definitions unreadable"; left=1
+        elif grep -qxF "$pv" <<<"$resources"; then
+          log "cleanup: LINSTOR resource $pv remains"; left=1
+        fi
+      fi
+    done < <(jq -r '.volumes[] | [.pvc, .pv] | @tsv' <<<"$record")
+  done <"$file"
+  return "$left"
+}
+
+# Delete one run's environments, then wait until every recorded object is
+# gone. Marks the run cleaned only on proof.
+clean_run_dir() { # DIR
+  local dir="$1" ids=() deadline
+  [[ -f "$dir/envs.tsv" ]] || return 0
+  mapfile -t ids < <(cut -f1 "$dir/envs.tsv" | sort -u)
+  # Objects of environments recorded before their Pod existed.
+  local id
+  touch "$dir/objects.jsonl"
+  for id in "${ids[@]}"; do
+    grep -qF "\"id\":\"$id\"" "$dir/objects.jsonl" || env_objects "$id" >>"$dir/objects.jsonl"
+  done
+  ((${#ids[@]} == 0)) || { log "deleting ${#ids[@]} environments of run $(basename "$dir")"; remove_env_ids "${ids[@]}"; }
+  deadline=$(( $(date +%s) + CLEANUP_TIMEOUT_SECONDS ))
+  until objects_gone "$dir/objects.jsonl" 2>"$dir/cleanup.log"; do
+    if (( $(date +%s) >= deadline )); then
+      cat "$dir/cleanup.log" >&2
+      return 1
+    fi
+    pause 10
+  done
+  date -u +%FT%TZ >"$dir/cleaned"
+  log "cleanup proved for run $(basename "$dir"): ${#ids[@]} environments and their claims, Sandboxes, Pods, PVCs, PVs and LINSTOR resources are gone"
+}
+
+# Earlier runs that never proved cleanup, then any environment carrying the
+# tool's prefix that no run recorded.
+clean_leftovers() {
+  local dir orphans=() envs
+  for dir in "$LOAD_TMP_PARENT"/*/; do
+    dir="${dir%/}"
+    [[ "$dir" != "$RUN_DIR" && -f "$dir/envs.tsv" && ! -f "$dir/cleaned" ]] || continue
+    log "run $(basename "$dir") did not prove its cleanup; cleaning it now"
+    clean_run_dir "$dir" || die "could not prove cleanup of run $(basename "$dir")"
+  done
+  envs="$(list_envs)" || die "cannot list the smoke organization's environments"
+  mapfile -t orphans < <(awk -F'\t' -v p="$NAME_PREFIX" 'index($2, p) == 1 {print $1}' <<<"$envs")
+  if ((${#orphans[@]} > 0)); then
+    log "found ${#orphans[@]} unrecorded $NAME_PREFIX* environments; cleaning them"
+    local orphan_dir="$LOAD_TMP_PARENT/orphans-$RUN_ID"
+    mkdir -p "$orphan_dir"
+    printf '%s\t-\t-\n' "${orphans[@]}" >"$orphan_dir/envs.tsv"
+    clean_run_dir "$orphan_dir" || die "could not prove cleanup of unrecorded environments"
+  fi
+}
+
+on_exit() {
+  local status=$?
+  trap - EXIT
+  local pid
+  for pid in "${WAITER_PIDS[@]}" "${SSH_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+  wait 2>/dev/null || true
+  if [[ -n "$RUN_DIR" && "$MODE" == run ]]; then
+    if ! clean_run_dir "$RUN_DIR"; then
+      log "cleanup NOT proved; the next start retries it (run $RUN_ID)"
+      status=1
+    fi
+  fi
+  exit "$status"
+}
+
+# ------------------------------------------------------------ node state
+
+node_json() { kubectl_ro get node "$NODE" -o json; }
+
+node_instance() {
+  node_json | jq -r '.status.addresses[] | select(.type == "InternalIP") | .address' | head -n1
+}
+
+# "ok" or the first degraded condition.
+node_condition() {
+  node_json | jq -r '
+    [.status.conditions[]
+      | select((.type == "Ready" and .status != "True")
+          or (.type != "Ready" and .status == "True"))
+      | "\(.type)=\(.status)"] | if length == 0 then "ok" else join(",") end'
+}
+
+# Requested CPU (millicores) and memory (MiB) on the node, Pod overhead
+# included, against allocatable, plus the pod count.
+node_requests() {
+  jq -n --slurpfile nodes <(node_json) --slurpfile podlists <(kubectl_ro get pods -A \
+    --field-selector "spec.nodeName=$NODE,status.phase!=Succeeded,status.phase!=Failed" -o json) '
+    $nodes[0] as $node | $podlists[0] as $pods |
+    def cpu: if . == null then 0 elif endswith("m") then (.[:-1] | tonumber) else (tonumber * 1000) end;
+    def mib:
+      if . == null then 0
+      elif endswith("Ki") then (.[:-2] | tonumber / 1024)
+      elif endswith("Mi") then (.[:-2] | tonumber)
+      elif endswith("Gi") then (.[:-2] | tonumber * 1024)
+      elif endswith("Ti") then (.[:-2] | tonumber * 1048576)
+      elif endswith("k") then (.[:-1] | tonumber * 1000 / 1048576)
+      elif endswith("M") then (.[:-1] | tonumber * 1000000 / 1048576)
+      elif endswith("G") then (.[:-1] | tonumber * 1000000000 / 1048576)
+      else (tonumber / 1048576) end;
+    def pod_cpu: ([.spec.containers[].resources.requests.cpu | cpu] | add) + (.spec.overhead.cpu | cpu);
+    def pod_mib: ([.spec.containers[].resources.requests.memory | mib] | add) + (.spec.overhead.memory | mib);
+    {
+      allocatable_cpu_m: ($node.status.allocatable.cpu | cpu),
+      allocatable_memory_mib: ($node.status.allocatable.memory | mib | floor),
+      allocatable_pods: ($node.status.allocatable.pods | tonumber),
+      requested_cpu_m: ([$pods.items[] | pod_cpu] | add // 0),
+      requested_memory_mib: ([$pods.items[] | pod_mib] | add // 0 | floor),
+      pods: ($pods.items | length)
+    }'
+}
+
+# Requested CPU and memory of one sandbox of this shape, from a live pool
+# member of the same shape when one exists, else from the shape plus the
+# Dind and Kata overhead requests seen on Dev.
+sandbox_request() {
+  local member
+  member="$(kubectl_ro get pods -n "$SANDBOX_NAMESPACE" -o json | jq -c --arg prefix "cw-pool-${CPU_M}m-${MEMORY_MIB}mi-" '
+    [.items[] | select(.metadata.name | startswith($prefix))][0] // empty')"
+  if [[ -n "$member" ]]; then
+    jq -c '
+      def cpu: if . == null then 0 elif endswith("m") then (.[:-1] | tonumber) else (tonumber * 1000) end;
+      def mib: if . == null then 0 elif endswith("Mi") then (.[:-2] | tonumber)
+        elif endswith("Gi") then (.[:-2] | tonumber * 1024) else (tonumber / 1048576) end;
+      {cpu_m: (([.spec.containers[].resources.requests.cpu | cpu] | add) + (.spec.overhead.cpu | cpu)),
+       memory_mib: (([.spec.containers[].resources.requests.memory | mib] | add) + (.spec.overhead.memory | mib)),
+       source: "pool member"}' <<<"$member"
+  else
+    jq -nc --argjson cpu "$CPU_M" --argjson mem "$MEMORY_MIB" \
+      '{cpu_m: ($cpu + 750), memory_mib: ($mem + 1024 + 130), source: "shape + dind + Kata overhead"}'
+  fi
+}
+
+thin_pool() {
+  local pools definitions
+  pools="$(linstor_get v1/view/storage-pools 2>/dev/null || echo '[]')"
+  definitions="$(linstor_get 'v1/resource-definitions?with_volume_definitions=true' 2>/dev/null || echo '[]')"
+  jq -n --arg node "$NODE" --argjson pools "$pools" --argjson definitions "$definitions" '
+    ([$pools[] | select(.node_name == $node and .provider_kind == "LVM_THIN")][0]) as $pool
+    | if $pool == null then {thin_pool: null} else
+      {
+        thin_pool: $pool.storage_pool_name,
+        thin_total_gib: ($pool.total_capacity / 1048576),
+        thin_used_gib: (($pool.total_capacity - $pool.free_capacity) / 1048576),
+        thin_used_pct: (100 * ($pool.total_capacity - $pool.free_capacity) / $pool.total_capacity),
+        provisioned_gib: ([$definitions[] | .volume_definitions[]?.size_kib] | add // 0 | . / 1048576),
+        overcommit: (([$definitions[] | .volume_definitions[]?.size_kib] | add // 0) / $pool.total_capacity),
+        resource_definitions: ($definitions | length)
+      } end'
+}
+
+node_metrics() { # INSTANCE -> JSON
+  local i="$1" sel
+  sel="cluster=\"$PROM_CLUSTER\",instance=\"$i:9100\""
+  jq -n \
+    --arg cpu "$(prom "100 * (1 - avg(rate(node_cpu_seconds_total{$sel,mode=\"idle\"}[2m])))")" \
+    --arg total "$(prom "node_memory_MemTotal_bytes{$sel}")" \
+    --arg avail "$(prom "node_memory_MemAvailable_bytes{$sel}")" \
+    --arg psi_cpu "$(prom "100 * rate(node_pressure_cpu_waiting_seconds_total{$sel}[1m])")" \
+    --arg psi_mem "$(prom "100 * rate(node_pressure_memory_waiting_seconds_total{$sel}[1m])")" \
+    --arg psi_mem_full "$(prom "100 * rate(node_pressure_memory_stalled_seconds_total{$sel}[1m])")" \
+    --arg psi_io "$(prom "100 * rate(node_pressure_io_waiting_seconds_total{$sel}[1m])")" '
+    def num: if . == "" then null else tonumber end;
+    {
+      node_cpu_pct: ($cpu | num),
+      node_memory_total_gib: (if ($total | num) == null then null else (($total | num) / 1073741824) end),
+      node_memory_used_gib: (if ($total | num) == null or ($avail | num) == null then null
+        else ((($total | num) - ($avail | num)) / 1073741824) end),
+      node_memory_pct: (if ($total | num) == null or ($avail | num) == null then null
+        else (100 * (1 - ($avail | num) / ($total | num))) end),
+      psi_cpu_some_pct: ($psi_cpu | num),
+      psi_memory_some_pct: ($psi_mem | num),
+      psi_memory_full_pct: ($psi_mem_full | num),
+      psi_io_some_pct: ($psi_io | num)
+    }'
+}
+
+# Memory the run's own sandbox pods use, from cAdvisor's pod-level series
+# (container=""). For a Kata pod this tracks the VM's cgroup, near its sized
+# memory rather than what the host spends, so overhead is derived from the
+# host's own usage instead.
+guest_memory_gib() {
+  local pods
+  pods="$(jq -r '.pod | select(. != "")' "$RUN_DIR/objects.jsonl" 2>/dev/null | paste -sd'|')"
+  [[ -n "$pods" ]] || { printf '\n'; return; }
+  prom "sum(container_memory_working_set_bytes{cluster=\"$PROM_CLUSTER\",namespace=\"$SANDBOX_NAMESPACE\",container=\"\",pod=~\"$pods\"}) / 1073741824"
+}
+
+# The milestone histogram's bucket counts, one "milestone path le count" row
+# per bucket, commodity profile only.
+milestone_snapshot() {
+  kubectl_ro get --raw "/api/v1/namespaces/$ORCHESTRATION_NAMESPACE/services/$ORCHESTRATION_METRICS/proxy/metrics" 2>/dev/null |
+    awk -v m="${MILESTONE}_bucket" '
+      index($0, m "{") == 1 && $0 ~ /profile="commodity"/ {
+        # Anchor each label at a boundary: profile="..." also ends in le="...".
+        match($0, /[{,]milestone="[^"]*"/); ms = substr($0, RSTART + 12, RLENGTH - 13)
+        match($0, /[{,]path="[^"]*"/); path = substr($0, RSTART + 7, RLENGTH - 8)
+        match($0, /[{,]le="[^"]*"/); le = substr($0, RSTART + 5, RLENGTH - 6)
+        print ms, path, le, $NF
+      }' || true
+}
+
+# p50 and p95 (ms) of one milestone over the creates between two snapshots,
+# interpolated within buckets as histogram_quantile does.
+milestone_quantiles() { # BEFORE AFTER MILESTONE -> JSON
+  awk -v want="$3" '
+    # FILENAME, not FNR == NR: an empty first snapshot must stay "before".
+    FILENAME == ARGV[1] { if ($1 == want) before[$2 " " $3] = $4; next }
+    $1 == want { key = $2 " " $3; delta[$3] += $4 - (key in before ? before[key] : 0) }
+    END {
+      n = 0
+      for (le in delta) { les[++n] = le }
+      for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) {
+        a = (les[i] == "+Inf") ? 1e300 : les[i] + 0; b = (les[j] == "+Inf") ? 1e300 : les[j] + 0
+        if (b < a) { t = les[i]; les[i] = les[j]; les[j] = t }
+      }
+      total = (n > 0) ? delta[les[n]] : 0
+      if (total <= 0) { print "{\"count\":0,\"p50_ms\":null,\"p95_ms\":null}"; exit }
+      split("0.5 0.95", qs, " ")
+      for (q = 1; q <= 2; q++) {
+        rank = qs[q] * total; prev_le = 0; prev_c = 0; out[q] = "null"
+        for (i = 1; i <= n; i++) {
+          c = delta[les[i]]
+          if (c >= rank) {
+            if (les[i] == "+Inf") { out[q] = int(prev_le * 1000); break }
+            le = les[i] + 0
+            frac = (c - prev_c > 0) ? (rank - prev_c) / (c - prev_c) : 1
+            out[q] = int((prev_le + (le - prev_le) * frac) * 1000); break
+          }
+          prev_le = (les[i] == "+Inf") ? prev_le : les[i] + 0; prev_c = c
+        }
+      }
+      printf "{\"count\":%d,\"p50_ms\":%s,\"p95_ms\":%s}\n", total, out[1], out[2]
+    }' "$1" "$2"
+}
+
+# ------------------------------------------------------------ sandboxes
+
+# A bounded workload: WORKERS processes busy DUTY of every 100 ms, and BYTES
+# allocated with every page written, all ending after SECONDS.
+WORKLOAD_PY='import multiprocessing as mp, sys, time
+seconds, workers, duty, size = float(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4])
+end = time.time() + seconds
+def burn():
+    while time.time() < end:
+        busy = time.time() + 0.1 * duty
+        while time.time() < busy:
+            pass
+        time.sleep(0.1 * (1 - duty))
+procs = [mp.Process(target=burn) for _ in range(workers)] if duty > 0 else []
+for p in procs:
+    p.start()
+block = bytearray(size)
+block[::4096] = b"\x01" * len(range(0, size, 4096))
+while time.time() < end:
+    time.sleep(5)
+for p in procs:
+    p.join()
+'
+
+# The workload runs as its own detached session (`cw run --detach`), bounded
+# by timeout; a short follow-up run checks that it is alive. A plain run that
+# backgrounds it does not return until its session ends.
+start_workload() { # ID SECONDS
+  local id="$1" seconds="$2" workers bytes encoded attempt
+  workers=$(( (CPU_M + 999) / 1000 ))
+  bytes="$(awk -v m="$MEMORY_MIB" -v f="$WORKLOAD_MEMORY" 'BEGIN {printf "%d", m * f * 1048576}')"
+  encoded="$(printf '%s' "$WORKLOAD_PY" | base64 -w0)"
+  timeout 120 "$CW_BIN" --cloud --server "$CODEWIRE_SERVER_URL" run --detach --in "$id" --name cap-load -- \
+    bash -c "printf '%s' '$encoded' | base64 -d >/tmp/cap-load.py && exec timeout $((seconds + 60)) python3 /tmp/cap-load.py $seconds $workers $WORKLOAD_CPU $bytes" \
+    >/dev/null 2>&1 || return 1
+  for attempt in 1 2 3 4 5; do
+    if timeout 60 "$CW_BIN" --cloud --server "$CODEWIRE_SERVER_URL" run --no-tty --in "$id" -- \
+      pgrep -f cap-load.py </dev/null >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+create_env() { # N -> environment id on stdout
+  local n="$1" name out id attempt
+  out="$RUN_DIR/create-$n.out"
+  name="${NAME_PREFIX}${RUN_ID}-${n}"
+  for attempt in 1 2 3 4; do
+    now_ms >"$RUN_DIR/create-$n.started"
+    if cw create --no-file --image "$LOAD_IMAGE" --name "$name" --cpu "${CPU_M}m" \
+      --memory "$MEMORY_MIB" --disk "$DISK_GIB" --isolation standard --ttl "$LOAD_TTL" \
+      --no-network --no-wait --yes --output json >"$out" 2>"$out.err"; then
+      break
+    fi
+    # Ten creates per user per 60 s (check_rate_limit); the window closes 60 s
+    # after the last accepted create.
+    if ((attempt < 4)) && grep -q 'too many environment creates' "$out.err"; then
+      log "create rate limited; waiting 61 s"
+      pause 61
+      continue
+    fi
+    sed 's/[[:cntrl:]]//g' "$out.err" | tail -n 3 >&2
+    return 1
+  done
+  id="$(jq -r '.id // empty' "$out" 2>/dev/null || true)"
+  [[ "$id" =~ ^[0-9a-f-]{36}$ ]] || return 1
+  printf '%s\t%s\t%s\n' "$id" "$name" "$(cat "$RUN_DIR/create-$n.started")" >>"$RUN_DIR/envs.tsv"
+  printf '%s\n' "$id"
+}
+
+# Background: wait until the environment is running with setup complete, then
+# record its create-to-ready time, objects and pool classification.
+wait_ready_bg() { # ID STARTED_MS
+  local id="$1" started="$2" deadline info result="$RUN_DIR/ready-$1"
+  deadline=$(( $(date +%s) + READY_TIMEOUT_SECONDS ))
+  while (( $(date +%s) < deadline )); do
+    kill -0 "$MAIN_PID" 2>/dev/null || return 1
+    info="$(cw info "$id" --output json 2>/dev/null || true)"
+    if jq -e '.state == "running" and .setup_complete == true' <<<"$info" >/dev/null 2>&1; then
+      printf 'ready %s\n' "$(( $(now_ms) - started ))" >"$result"
+      return 0
+    fi
+    if jq -e '.state == "error" or ((.setup_error // "") | length > 0)' <<<"$info" >/dev/null 2>&1; then
+      printf 'error %s\n' "$(jq -r '.setup_error // .state' <<<"$info" | tr -d '[:cntrl:]' | head -c 200)" >"$result"
+      return 1
+    fi
+    sleep 1
+  done
+  printf 'timeout\n' >"$result"
+  return 1
+}
+
+managed_ssh_config() {
+  local config="$RUN_DIR/ssh_config"
+  if [[ ! -s "$config" ]]; then
+    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" setup ssh --ssh-config-file "$config" >/dev/null ||
+      { log "cw setup ssh could not write the managed SSH block"; return 1; }
+  fi
+  printf '%s\n' "$config"
+}
+
+first_ssh_bg() { # ID STARTED_MS CONFIG
+  local id="$1" started="$2" config="$3" deadline
+  deadline=$(( $(date +%s) + READY_TIMEOUT_SECONDS ))
+  while (( $(date +%s) < deadline )); do
+    kill -0 "$MAIN_PID" 2>/dev/null || return 1
+    if env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" timeout 30 ssh -F "$config" -T \
+      -o BatchMode=yes -o ConnectTimeout=20 "cw-cloud-$id" true </dev/null >/dev/null 2>&1; then
+      printf '%s\n' "$(( $(now_ms) - started ))" >"$RUN_DIR/ssh-$id"
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+# "warm" when the Claim adopted a member of a shared pool, else "cold".
+classify() { # ID
+  local ref launch sandbox
+  ref="$(kubectl_ro get sandboxclaim -n "$SANDBOX_NAMESPACE" "sandbox-$1" -o json 2>/dev/null |
+    jq -r '.spec.warmPoolRef.name // ""' || true)"
+  sandbox="$(kubectl_ro get sandboxclaim -n "$SANDBOX_NAMESPACE" "sandbox-$1" -o json 2>/dev/null |
+    jq -r '.status.sandbox.name // ""' || true)"
+  launch=""
+  [[ -z "$sandbox" ]] || launch="$(kubectl_ro get sandbox -n "$SANDBOX_NAMESPACE" "$sandbox" -o json 2>/dev/null |
+    jq -r '.metadata.labels["agents.x-k8s.io/launch-type"] // ""' || true)"
+  if [[ "$ref" == cw-pool-* && "$launch" == warm ]]; then echo warm; else echo cold; fi
+}
+
+# The scheduler's resource refusal for one of the run's still-Pending pods,
+# if any. Transient reasons, such as a PVC not yet bound, do not count.
+scheduler_refusal() {
+  local pending
+  pending="$(kubectl_ro get pods -n "$SANDBOX_NAMESPACE" --field-selector status.phase=Pending -o json 2>/dev/null |
+    jq -r '.items[].metadata.name' || true)"
+  [[ -n "$pending" ]] || return 0
+  pending="$(grep -xF -f <(jq -r '.pod | select(. != "")' "$RUN_DIR/objects.jsonl" 2>/dev/null) <<<"$pending" || true)"
+  [[ -n "$pending" ]] || return 0
+  kubectl_ro get events -n "$SANDBOX_NAMESPACE" --field-selector reason=FailedScheduling -o json 2>/dev/null |
+    jq -r --arg pending "$pending" '
+      ($pending | split("\n") | map(select(. != ""))) as $mine
+      | [.items[] | select(.involvedObject.name as $n | $mine | index($n) != null)
+        | .message | select(test("Insufficient|Too many pods|exceed"; "i"))][-1] // empty' || true
+}
+
+# Record each environment's Sandbox, Pod, PVCs and PVs. With "missing", only
+# environments whose Pod is not recorded yet are read again.
+refresh_objects() { # all|missing
+  local id tmp="$RUN_DIR/objects.jsonl.new" record
+  touch "$RUN_DIR/objects.jsonl"
+  : >"$tmp"
+  for id in "${ENV_IDS[@]}"; do
+    record="$(grep -F "\"id\":\"$id\"" "$RUN_DIR/objects.jsonl" | head -n1 || true)"
+    if [[ "$1" == missing && -n "$record" ]] && jq -e '.pod != "" and (.volumes | length) > 0 and all(.volumes[]; .pv != "")' <<<"$record" >/dev/null; then
+      printf '%s\n' "$record" >>"$tmp"
+    else
+      env_objects "$id" >>"$tmp"
+    fi
+  done
+  mv "$tmp" "$RUN_DIR/objects.jsonl"
+}
+
+# ------------------------------------------------------------ steps
+
+stop_check() { # METRICS_JSON -> sets STOP_REASON
+  local m="$1" v
+  v="$(jq -r '.node_condition' <<<"$m")"
+  [[ "$v" == ok ]] || { STOP_REASON="node condition degraded: $v"; return; }
+  v="$(jq -r '.scheduler_refusal // ""' <<<"$m")"
+  [[ -z "$v" ]] || { STOP_REASON="scheduler refusal: $v"; return; }
+  v="$(jq -r '.failed_creates' <<<"$m")"
+  [[ "$v" == 0 ]] || { STOP_REASON="$v create(s) failed or were not ready within ${READY_TIMEOUT_SECONDS} s"; return; }
+  v="$(jq -r '.ready_p95_ms // empty' <<<"$m")"
+  if [[ -n "$BASELINE_READY_MS" ]] && exceeds "$v" "$(awk -v b="$BASELINE_READY_MS" -v f="$LATENCY_FACTOR" 'BEGIN {print b * f}')"; then
+    STOP_REASON="create-to-ready p95 ${v} ms exceeds ${LATENCY_FACTOR} x the first step's p50 (${BASELINE_READY_MS} ms)"; return
+  fi
+  v="$(jq -r '.node_memory_pct // empty' <<<"$m")"
+  ! exceeds "$v" "$MAX_NODE_MEMORY_PCT" || { STOP_REASON="node memory ${v}% exceeds ${MAX_NODE_MEMORY_PCT}%"; return; }
+  v="$(jq -r '.node_cpu_pct // empty' <<<"$m")"
+  ! exceeds "$v" "$MAX_NODE_CPU_PCT" || { STOP_REASON="node CPU ${v}% exceeds ${MAX_NODE_CPU_PCT}%"; return; }
+  v="$(jq -r '.psi_memory_some_pct // empty' <<<"$m")"
+  ! exceeds "$v" "$MAX_PSI_MEMORY_PCT" || { STOP_REASON="memory pressure ${v}% exceeds ${MAX_PSI_MEMORY_PCT}%"; return; }
+  v="$(jq -r '.psi_cpu_some_pct // empty' <<<"$m")"
+  ! exceeds "$v" "$MAX_PSI_CPU_PCT" || { STOP_REASON="CPU pressure ${v}% exceeds ${MAX_PSI_CPU_PCT}%"; return; }
+  v="$(jq -r '.thin_used_pct // empty' <<<"$m")"
+  ! exceeds "$v" "$MAX_THIN_POOL_PCT" || { STOP_REASON="thin pool ${v}% exceeds ${MAX_THIN_POOL_PCT}%"; return; }
+  STOP_REASON=""
+}
+
+measure() { # STEP TARGET NEW_IDS_FILE BEFORE_SNAPSHOT AFTER_SNAPSHOT BASE_JSON -> JSON
+  local step="$1" target="$2" new_ids="$3" before="$4" after="$5" base="$6"
+  local ready_ms=() ssh_ms=() failed=0 warm=0 id result instance guest
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    result="$(cat "$RUN_DIR/ready-$id" 2>/dev/null || echo missing)"
+    case "$result" in
+      ready\ *) ready_ms+=("${result#ready }") ;;
+      *) failed=$((failed + 1)); log "step $step: $id: $result" ;;
+    esac
+    [[ ! -s "$RUN_DIR/ssh-$id" ]] || ssh_ms+=("$(cat "$RUN_DIR/ssh-$id")")
+    [[ "$(cat "$RUN_DIR/class-$id" 2>/dev/null)" != warm ]] || warm=$((warm + 1))
+  done <"$new_ids"
+  instance="$(node_instance)"
+  guest="$(guest_memory_gib)"
+  jq -n \
+    --argjson step "$step" --argjson target "$target" --argjson created "$CREATED" \
+    --argjson new "$(grep -c . "$new_ids" || true)" --argjson failed "$failed" --argjson warm "$warm" \
+    --arg ready_p50 "$(printf '%s\n' "${ready_ms[@]}" | grep . | percentile 50)" \
+    --arg ready_p95 "$(printf '%s\n' "${ready_ms[@]}" | grep . | percentile 95)" \
+    --arg ssh_p50 "$(printf '%s\n' "${ssh_ms[@]}" | grep . | percentile 50)" \
+    --arg ssh_p95 "$(printf '%s\n' "${ssh_ms[@]}" | grep . | percentile 95)" \
+    --argjson ssh_n "${#ssh_ms[@]}" \
+    --argjson setup "$(milestone_quantiles "$before" "$after" setup_complete)" \
+    --argjson access "$(milestone_quantiles "$before" "$after" access_ready)" \
+    --argjson requests "$(node_requests)" \
+    --argjson node "$(node_metrics "$instance")" \
+    --argjson thin "$(thin_pool)" \
+    --argjson base "$base" \
+    --arg condition "$(node_condition)" \
+    --arg refusal "$(scheduler_refusal)" \
+    --arg guest "$guest" \
+    --argjson workload_gib "$(awk -v m="$MEMORY_MIB" -v f="$WORKLOAD_MEMORY" 'BEGIN {printf "%.4f", m * f / 1024}')" '
+    def num: if . == "" then null else tonumber end;
+    {step: $step, target: $target, created: $created, new: $new, failed_creates: $failed,
+     warm_hits: $warm, warm_hit_rate: (if $new > 0 then $warm / $new else null end),
+     ready_p50_ms: ($ready_p50 | num), ready_p95_ms: ($ready_p95 | num),
+     first_ssh_p50_ms: ($ssh_p50 | num), first_ssh_p95_ms: ($ssh_p95 | num), first_ssh_samples: $ssh_n,
+     server_setup_complete: $setup, server_access_ready: $access,
+     node_condition: $condition, scheduler_refusal: (if $refusal == "" then null else $refusal end),
+     pod_working_set_gib: ($guest | num), workload_memory_gib: $workload_gib}
+    + $requests + $node + $thin
+    | . + {
+        host_memory_per_sandbox_gib: (if .node_memory_used_gib == null or $base.node_memory_used_gib == null or $created == 0 then null
+          else ((.node_memory_used_gib - $base.node_memory_used_gib) / $created) end),
+        pod_working_set_per_sandbox_gib: (if .pod_working_set_gib == null or $created == 0 then null else (.pod_working_set_gib / $created) end)
+      }
+    | . + {overhead_per_sandbox_gib: (if .host_memory_per_sandbox_gib == null then null
+          else (.host_memory_per_sandbox_gib - .workload_memory_gib) end)}'
+}
+
+preflight() { # -> base JSON
+  local instance condition requests request others base
+  kubectl_ro get node "$NODE" >/dev/null || die "cannot read node $NODE"
+  node_json | jq -e '.metadata.labels["katacontainers.io/kata-runtime"] == "true"' >/dev/null ||
+    die "$NODE is not a Kata runtime node"
+  # Placement: the commodity RuntimeClass selects Kata runtime-candidate
+  # nodes; with one such node every sandbox lands on it, which each step
+  # checks. More than one would need a supported pin.
+  local runtime_nodes
+  runtime_nodes="$(kubectl_ro get nodes -l 'katacontainers.io/kata-runtime=true,node.codewire.sh/runtime-candidate=true' -o name | wc -l)"
+  [[ "$runtime_nodes" == 1 ]] ||
+    die "$runtime_nodes runtime nodes match the commodity RuntimeClass; this tool needs exactly one to place on $NODE"
+  condition="$(node_condition)"
+  [[ "$condition" == ok ]] || die "node $NODE is degraded before the run: $condition"
+  others="$(list_envs)" || die "cannot list the smoke organization's environments"
+  others="$(awk -F'\t' -v p="$NAME_PREFIX" 'NF && index($2, p) != 1' <<<"$others" | wc -l)"
+  [[ "$others" == 0 ]] || die "the smoke organization has $others live environments this tool did not create; wait for them to finish"
+  instance="$(node_instance)"
+  [[ -n "$instance" ]] || die "node $NODE has no InternalIP"
+  requests="$(node_requests)"
+  request="$(sandbox_request)"
+  base="$(jq -n --argjson r "$requests" --argjson n "$(node_metrics "$instance")" --argjson t "$(thin_pool)" '$r + $n + $t')"
+  jq -n --argjson b "$base" --argjson s "$request" --arg shape "$SHAPE" '
+    {shape: $shape, sandbox_request: $s,
+     predicted_by_memory: ((($b.allocatable_memory_mib - $b.requested_memory_mib) / $s.memory_mib) | floor),
+     predicted_by_cpu: ((($b.allocatable_cpu_m - $b.requested_cpu_m) / $s.cpu_m) | floor),
+     predicted_by_pods: ($b.allocatable_pods - $b.pods)}' >"$RUN_DIR/prediction.json"
+  log "baseline: $(jq -c '{pods, requested_cpu_m, requested_memory_mib, node_memory_used_gib, thin_used_pct}' <<<"$base")"
+  log "predicted refusals: $(jq -c . "$RUN_DIR/prediction.json")"
+  printf '%s\n' "$base"
+}
+
+write_summary() {
+  # shellcheck disable=SC2016 # Backticks are Markdown code spans.
+  {
+    printf '# Sandbox capacity: %s, shape %s (%s m CPU, %s MiB, %s GiB)\n\n' "$NODE" "$SHAPE" "$CPU_M" "$MEMORY_MIB" "$DISK_GIB"
+    printf 'Run `%s`. Workload: %s of each vCPU busy, %s of memory touched. Hold %s s per step.\n\n' \
+      "$RUN_ID" "$WORKLOAD_CPU" "$WORKLOAD_MEMORY" "$HOLD_SECONDS"
+    printf 'Prediction from requests: `%s`\n\n' "$(jq -c . "$RUN_DIR/prediction.json" 2>/dev/null)"
+    printf '| Sandboxes | Failed | Warm | Ready p50/p95 ms | SSH p50/p95 ms | Server setup p50/p95 ms | Pods | Req CPU %% | Req mem %% | Node CPU %% | Node mem %% | PSI mem/cpu %% | Host GiB/sb | Overhead GiB/sb | Pod WS GiB/sb | Thin %% | Overcommit |\n'
+    printf '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n'
+    jq -r '
+      def f: if . == null then "–" else (. * 10 | round / 10 | tostring) end;
+      def i: if . == null then "–" else (round | tostring) end;
+      "| \(.created) | \(.failed_creates) | \(.warm_hits)/\(.new) | \(.ready_p50_ms|i)/\(.ready_p95_ms|i) | \(.first_ssh_p50_ms|i)/\(.first_ssh_p95_ms|i) | \(.server_setup_complete.p50_ms|i)/\(.server_setup_complete.p95_ms|i) | \(.pods)/\(.allocatable_pods) | \(100 * .requested_cpu_m / .allocatable_cpu_m | f) | \(100 * .requested_memory_mib / .allocatable_memory_mib | f) | \(.node_cpu_pct|f) | \(.node_memory_pct|f) | \(.psi_memory_some_pct|f)/\(.psi_cpu_some_pct|f) | \(.host_memory_per_sandbox_gib|f) | \(.overhead_per_sandbox_gib|f) | \(.pod_working_set_per_sandbox_gib|f) | \(.thin_used_pct|f) | \(.overcommit|f) |"
+    ' "$RUN_DIR/steps.jsonl" 2>/dev/null
+    printf '\nStopped: %s\n' "${STOP_REASON:-every step completed}"
+  } >"$RUN_DIR/summary.md"
+}
+
+# ------------------------------------------------------------ main
+
+if [[ "$MODE" == run ]]; then trap on_exit EXIT; fi
+trap 'exit 130' HUP INT TERM
+
+if [[ -z "$LINSTOR_SERVICE" ]]; then
+  linstor_namespace="$(kubectl_ro get services -A --field-selector metadata.name=linstor-controller \
+    -o jsonpath='{.items[*].metadata.namespace}')"
+  [[ "$linstor_namespace" =~ ^[a-z0-9-]+$ ]] || die "no single linstor-controller service; set LINSTOR_SERVICE"
+  LINSTOR_SERVICE="$linstor_namespace/linstor-controller:3370"
+fi
+if [[ -z "$NODE" ]]; then
+  mapfile -t runtime_nodes < <(kubectl_ro get nodes \
+    -l 'katacontainers.io/kata-runtime=true,node.codewire.sh/runtime-candidate=true' -o name)
+  [[ "${#runtime_nodes[@]}" == 1 ]] ||
+    die "${#runtime_nodes[@]} Kata runtime-candidate nodes; name one with --node"
+  NODE="${runtime_nodes[0]#node/}"
+  log "runtime node: $NODE"
+fi
+
+clean_leftovers
+if [[ "$MODE" == cleanup-only ]]; then
+  log "no leftovers remain"
+  rm -rf -- "$RUN_DIR"
+  exit 0
+fi
+BASE="$(preflight)"
+if [[ "$MODE" == dry-run ]]; then
+  cat "$RUN_DIR/prediction.json"
+  rm -rf -- "$RUN_DIR"
+  exit 0
+fi
+
+SSH_CONFIG="$(managed_ssh_config)" || die "no managed SSH configuration"
+WORKLOAD_SECONDS=$(( (${#STEP_COUNTS[@]} + 1) * (HOLD_SECONDS + READY_TIMEOUT_SECONDS) ))
+: >"$RUN_DIR/steps.jsonl"
+step=0
+for target in "${STEP_COUNTS[@]}"; do
+  step=$((step + 1))
+  if [[ -n "$STOP_REASON" ]]; then break; fi
+  log "step $step: ramp to $target sandboxes"
+  milestone_snapshot >"$RUN_DIR/milestones-$step.before"
+  : >"$RUN_DIR/new-$step"
+  sampled=0
+  while (( CREATED < target )); do
+    n=$((CREATED + 1))
+    if ! id="$(create_env "$n")"; then
+      STOP_REASON="create $n was refused"
+      break
+    fi
+    CREATED="$n"
+    ENV_IDS+=("$id")
+    printf '%s\n' "$id" >>"$RUN_DIR/new-$step"
+    started="$(cut -f3 <<<"$(grep -F "$id" "$RUN_DIR/envs.tsv")")"
+    wait_ready_bg "$id" "$started" & WAITER_PIDS[$id]=$!
+    if (( sampled < SSH_SAMPLE )); then
+      first_ssh_bg "$id" "$started" "$SSH_CONFIG" & SSH_PIDS[$id]=$!
+      sampled=$((sampled + 1))
+    fi
+  done
+  mapfile -t STEP_IDS <"$RUN_DIR/new-$step"
+  # Wait for this step's creates, failing fast on a scheduler refusal: the
+  # refused sandboxes' waiters stop and they count as failed.
+  for id in "${STEP_IDS[@]}"; do
+    while kill -0 "${WAITER_PIDS[$id]}" 2>/dev/null; do
+      refresh_objects missing
+      refusal="$(scheduler_refusal)"
+      if [[ -n "$refusal" ]]; then
+        log "step $step: scheduler refused a sandbox: $refusal"
+        STOP_REASON="scheduler refusal: $refusal"
+        for pending_id in "${STEP_IDS[@]}"; do
+          kill "${WAITER_PIDS[$pending_id]}" "${SSH_PIDS[$pending_id]:-}" 2>/dev/null || true
+        done
+        break 2
+      fi
+      pause 5
+    done
+  done
+  for id in "${STEP_IDS[@]}"; do
+    if [[ -n "${SSH_PIDS[$id]:-}" ]]; then wait "${SSH_PIDS[$id]}" 2>/dev/null || true; unset "SSH_PIDS[$id]"; fi
+    wait "${WAITER_PIDS[$id]}" 2>/dev/null || true
+    unset "WAITER_PIDS[$id]"
+    if [[ "$(cut -d' ' -f1 "$RUN_DIR/ready-$id" 2>/dev/null)" == ready ]]; then
+      classify "$id" >"$RUN_DIR/class-$id"
+      start_workload "$id" "$WORKLOAD_SECONDS" || log "step $step: workload did not start in $id"
+    fi
+  done
+  refresh_objects all
+  # Every sandbox must run on the measured node.
+  elsewhere="$(jq -r '.pod | select(. != "")' "$RUN_DIR/objects.jsonl" | while IFS= read -r pod; do
+    kubectl_ro get pod -n "$SANDBOX_NAMESPACE" "$pod" -o json 2>/dev/null | jq -r --arg node "$NODE" \
+      'select(.spec.nodeName != null and .spec.nodeName != $node) | .metadata.name'; done)"
+  [[ -z "$elsewhere" ]] || { STOP_REASON="sandboxes scheduled off $NODE: $elsewhere"; }
+  log "step $step: holding ${HOLD_SECONDS} s under load"
+  pause "$HOLD_SECONDS"
+  milestone_snapshot >"$RUN_DIR/milestones-$step.after"
+  metrics="$(measure "$step" "$target" "$RUN_DIR/new-$step" "$RUN_DIR/milestones-$step.before" \
+    "$RUN_DIR/milestones-$step.after" "$BASE")"
+  printf '%s\n' "$metrics" >>"$RUN_DIR/steps.jsonl"
+  log "step $step: $(jq -c '{created, failed_creates, warm_hits, ready_p50_ms, ready_p95_ms, first_ssh_p50_ms, node_memory_pct, node_cpu_pct, psi_memory_some_pct, thin_used_pct, pods}' <<<"$metrics")"
+  if [[ -z "$BASELINE_READY_MS" ]]; then
+    BASELINE_READY_MS="$(jq -r '.ready_p50_ms // empty' <<<"$metrics")"
+  fi
+  [[ -n "$STOP_REASON" ]] || stop_check "$metrics"
+  [[ -z "$STOP_REASON" ]] || log "stop: $STOP_REASON"
+done
+write_summary
+log "results: $RUN_DIR/summary.md"
+cat "$RUN_DIR/summary.md"
