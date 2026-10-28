@@ -31,11 +31,11 @@ PROM_URL="${PROM_URL:-}"
 PROM_CLUSTER="${PROM_CLUSTER:-}"
 LOAD_IMAGE="${LOAD_IMAGE:-workspace}"
 LOAD_TTL="${LOAD_TTL:-4h}"
-LOAD_TMP_PARENT="${LOAD_TMP_PARENT:-$ROOT/.tmp/sandbox-capacity}"
+LOAD_TMP_PARENT="${LOAD_TMP_PARENT:-}"
 CW_BIN="${CW_BIN:-}"
 
 SHAPE="default"
-STEPS="10,25,50,100,150,200"
+STEPS="auto"
 MAX_SANDBOXES=200
 HOLD_SECONDS=180
 READY_TIMEOUT_SECONDS=600
@@ -110,8 +110,13 @@ Modes:
   --cleanup-only   clean up what earlier runs left, prove it, and exit
 
 Options:
-  --shape S              default (2 vCPU/8 GiB/80 GiB) or small (1 vCPU/4 GiB/80 GiB)
-  --steps LIST           cumulative sandbox counts (default 10,25,50,100,150,200)
+  --shape S              every shape has an 80 GiB disk:
+                         small (1 vCPU/4 GiB), default (2 vCPU/8 GiB),
+                         large (4 vCPU/16 GiB), xlarge (8 vCPU/32 GiB),
+                         memory (1 vCPU/32 GiB), max (32 vCPU/64 GiB, the
+                         default organization quota)
+  --steps LIST           cumulative sandbox counts, or auto (the default):
+                         25, 50, 75 and 100% of the predicted limit, then two past it
   --max-sandboxes N      hard cap on the total created (default 200)
   --hold-seconds N       time under load before each measurement (default 180)
   --workload-cpu F       fraction of each sandbox's vCPUs kept busy (default 0.5)
@@ -135,8 +140,9 @@ Environment:
                                Production: the one kube-access renders
   PROM_URL                     required: the System Prometheus that scrapes the cluster
 
-Results go to .tmp/sandbox-capacity/<run>/: steps.jsonl (one record per
-step) and summary.md.
+Results go to .tmp/sandbox-capacity/<run>/ (Production: .tmp/sandbox-capacity-prod/<run>/):
+steps.jsonl (one record per step) and summary.md. Start-up cleanup only
+touches runs of the same server.
 USAGE
 }
 
@@ -205,7 +211,7 @@ if [[ -z "$PRODUCTION" ]]; then
   : "${CODEWIRE_SERVER_URL:=https://codewire-dev.sh}" "${KUBE_CONTEXT:=codewire-dev}"
   : "${SANDBOX_NAMESPACE:=dev-sandboxes}" "${ORCHESTRATION_NAMESPACE:=dev}" "${PROM_CLUSTER:=cw-dev-hz-eu-1}"
   : "${MAX_NODE_MEMORY_PCT:=90}" "${MAX_NODE_CPU_PCT:=90}" "${MAX_PSI_MEMORY_PCT:=10}"
-  : "${MAX_PSI_CPU_PCT:=50}" "${MAX_THIN_POOL_PCT:=80}"
+  : "${MAX_PSI_CPU_PCT:=50}" "${MAX_THIN_POOL_PCT:=80}" "${LOAD_TMP_PARENT:=$ROOT/.tmp/sandbox-capacity}"
   [[ "$CODEWIRE_SERVER_URL" == "https://codewire-dev.sh" ]] ||
     die "this load runs only against Dev unless --confirm-production $PRODUCTION_CLUSTER"
   [[ "$KUBE_CONTEXT" == "codewire-dev" ]] || die "this load runs only against the codewire-dev context in Dev mode"
@@ -217,7 +223,7 @@ else
   : "${CODEWIRE_SERVER_URL:=https://codewire.sh}"
   : "${SANDBOX_NAMESPACE:=prod-sandboxes}" "${ORCHESTRATION_NAMESPACE:=prod}" "${PROM_CLUSTER:=$PRODUCTION_CLUSTER}"
   : "${MAX_NODE_MEMORY_PCT:=85}" "${MAX_NODE_CPU_PCT:=80}" "${MAX_PSI_MEMORY_PCT:=5}"
-  : "${MAX_PSI_CPU_PCT:=30}" "${MAX_THIN_POOL_PCT:=70}"
+  : "${MAX_PSI_CPU_PCT:=30}" "${MAX_THIN_POOL_PCT:=70}" "${LOAD_TMP_PARENT:=$ROOT/.tmp/sandbox-capacity-prod}"
   [[ "$CODEWIRE_SERVER_URL" == "https://codewire.sh" ]] || die "Production mode runs only against https://codewire.sh"
   # kube-access exports the context with a temporary kubeconfig and marks it.
   [[ "$KUBE_CONTEXT" == "$PRODUCTION_CLUSTER" && -n "${KUBECONFIG:-}" && "${INFRA_TRANSIENT_KUBE_AUTH:-}" == 1 ]] ||
@@ -226,22 +232,33 @@ else
     die "CODEWIRE_PROD_SMOKE_API_KEY is required; run through scripts/runtime/prod/with-prod-smoke-auth.sh"
   SMOKE_API_KEY="$CODEWIRE_PROD_SMOKE_API_KEY"
 fi
+# max is the default organization quota (32 vCPU / 64 GiB), the largest one
+# environment an organization without its own quota can have; the product has
+# no per-environment limit beyond the quota.
 case "$SHAPE" in
-  default) CPU_M=2000; MEMORY_MIB=8192; DISK_GIB=80 ;;
-  small) CPU_M=1000; MEMORY_MIB=4096; DISK_GIB=80 ;;
-  *) die "--shape must be default or small" ;;
+  small) CPU_M=1000; MEMORY_MIB=4096 ;;
+  default) CPU_M=2000; MEMORY_MIB=8192 ;;
+  large) CPU_M=4000; MEMORY_MIB=16384 ;;
+  xlarge) CPU_M=8000; MEMORY_MIB=32768 ;;
+  memory) CPU_M=1000; MEMORY_MIB=32768 ;;
+  max) CPU_M=32000; MEMORY_MIB=65536 ;;
+  *) die "--shape must be small, default, large, xlarge, memory or max" ;;
 esac
-[[ "$STEPS" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || die "--steps must be a comma-separated list of positive counts"
-IFS=, read -r -a STEP_COUNTS <<<"$STEPS"
+DISK_GIB=80
 if ! [[ "$MAX_SANDBOXES" =~ ^[1-9][0-9]*$ ]] || (( MAX_SANDBOXES > 500 )); then
   die "--max-sandboxes must be 1-500"
 fi
-previous=0
-for count in "${STEP_COUNTS[@]}"; do
-  (( count > previous )) || die "--steps must increase"
-  (( count <= MAX_SANDBOXES )) || die "--steps exceeds --max-sandboxes ($MAX_SANDBOXES)"
-  previous="$count"
-done
+STEP_COUNTS=()
+if [[ "$STEPS" != auto ]]; then
+  [[ "$STEPS" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || die "--steps must be auto or a comma-separated list of positive counts"
+  IFS=, read -r -a STEP_COUNTS <<<"$STEPS"
+  previous=0
+  for count in "${STEP_COUNTS[@]}"; do
+    (( count > previous )) || die "--steps must increase"
+    (( count <= MAX_SANDBOXES )) || die "--steps exceeds --max-sandboxes ($MAX_SANDBOXES)"
+    previous="$count"
+  done
+fi
 for value in HOLD_SECONDS SSH_SAMPLE MAX_NODE_MEMORY_PCT MAX_NODE_CPU_PCT MAX_PSI_MEMORY_PCT \
   MAX_PSI_CPU_PCT MAX_THIN_POOL_PCT; do
   [[ "${!value}" =~ ^[0-9]+$ ]] || die "$value must be a non-negative integer"
@@ -269,6 +286,8 @@ RUN_ID="$(date -u +%Y%m%d%H%M%S)"
 RUN_DIR="$LOAD_TMP_PARENT/$RUN_ID"
 mkdir -p "$RUN_DIR"
 : >"$RUN_DIR/envs.tsv"
+# Each run names its server; cleanup at start skips runs of another one.
+printf '%s\n' "$CODEWIRE_SERVER_URL" >"$RUN_DIR/server"
 export CODEWIRE_API_KEY="$SMOKE_API_KEY"
 unset SMOKE_API_KEY
 export CW_CONFIG_DIR="$RUN_DIR/cw-config"
@@ -398,10 +417,16 @@ clean_run_dir() { # DIR
 # Earlier runs that never proved cleanup, then any environment carrying the
 # tool's prefix that no run recorded.
 clean_leftovers() {
-  local dir orphans=() envs
+  local dir orphans=() envs run_server
   for dir in "$LOAD_TMP_PARENT"/*/; do
     dir="${dir%/}"
     [[ "$dir" != "$RUN_DIR" && -f "$dir/envs.tsv" && ! -f "$dir/cleaned" ]] || continue
+    # Runs from before Production mode carry no server file and were Dev's.
+    run_server="$(cat "$dir/server" 2>/dev/null || echo https://codewire-dev.sh)"
+    if [[ "$run_server" != "$CODEWIRE_SERVER_URL" ]]; then
+      log "run $(basename "$dir") belongs to $run_server; it is cleaned only from there"
+      continue
+    fi
     log "run $(basename "$dir") did not prove its cleanup; cleaning it now"
     clean_run_dir "$dir" || die "could not prove cleanup of run $(basename "$dir")"
   done
@@ -411,6 +436,7 @@ clean_leftovers() {
     log "found ${#orphans[@]} unrecorded $NAME_PREFIX* environments; cleaning them"
     local orphan_dir="$LOAD_TMP_PARENT/orphans-$RUN_ID"
     mkdir -p "$orphan_dir"
+    printf '%s\n' "$CODEWIRE_SERVER_URL" >"$orphan_dir/server"
     printf '%s\t-\t-\n' "${orphans[@]}" >"$orphan_dir/envs.tsv"
     clean_run_dir "$orphan_dir" || die "could not prove cleanup of unrecorded environments"
   fi
@@ -477,25 +503,26 @@ node_requests() { # NODE
     }'
 }
 
-# Requested CPU and memory of one sandbox of this shape, from a live pool
-# member of the same shape when one exists, else from the shape plus the
-# Dind and Kata overhead requests seen on Dev.
+# What one sandbox of this shape reserves: the workspace's request (equal to
+# the shape), DinD's request read from a live pool member (the same for every
+# shape), and the commodity RuntimeClass's fixed Pod overhead.
 sandbox_request() {
-  local member
-  member="$(kubectl_ro get pods -n "$SANDBOX_NAMESPACE" -o json | jq -c --arg prefix "cw-pool-${CPU_M}m-${MEMORY_MIB}mi-" '
-    [.items[] | select(.metadata.name | startswith($prefix))][0] // empty')"
-  if [[ -n "$member" ]]; then
-    jq -c '
-      def cpu: if . == null then 0 elif endswith("m") then (.[:-1] | tonumber) else (tonumber * 1000) end;
-      def mib: if . == null then 0 elif endswith("Mi") then (.[:-2] | tonumber)
-        elif endswith("Gi") then (.[:-2] | tonumber * 1024) else (tonumber / 1048576) end;
-      {cpu_m: (([.spec.containers[].resources.requests.cpu | cpu] | add) + (.spec.overhead.cpu | cpu)),
-       memory_mib: (([.spec.containers[].resources.requests.memory | mib] | add) + (.spec.overhead.memory | mib)),
-       source: "pool member"}' <<<"$member"
-  else
-    jq -nc --argjson cpu "$CPU_M" --argjson mem "$MEMORY_MIB" \
-      '{cpu_m: ($cpu + 750), memory_mib: ($mem + 1024 + 130), source: "shape + dind + Kata overhead"}'
-  fi
+  local dind kata
+  dind="$(kubectl_ro get pods -n "$SANDBOX_NAMESPACE" -o json 2>/dev/null | jq -c '
+    [.items[] | select(.metadata.name | startswith("cw-pool-")) | .spec.containers[]
+      | select(.name == "dind") | .resources.requests][0] // empty' || true)"
+  kata="$(kubectl_ro get runtimeclass commodity -o json 2>/dev/null | jq -c '.overhead.podFixed // empty' || true)"
+  jq -nc --argjson cpu "$CPU_M" --argjson mem "$MEMORY_MIB" --argjson dind "${dind:-null}" --argjson kata "${kata:-null}" '
+    def cpu: if . == null then 0 elif endswith("m") then (.[:-1] | tonumber) else (tonumber * 1000) end;
+    def mib: if . == null then 0 elif endswith("Mi") then (.[:-2] | tonumber)
+      elif endswith("Gi") then (.[:-2] | tonumber * 1024) else (tonumber / 1048576) end;
+    {workspace: {cpu_m: $cpu, memory_mib: $mem},
+     dind: (if $dind == null then {cpu_m: 500, memory_mib: 1024, source: "template default"}
+       else {cpu_m: ($dind.cpu | cpu), memory_mib: ($dind.memory | mib), source: "pool member"} end),
+     kata: (if $kata == null then {cpu_m: 250, memory_mib: 130, source: "template default"}
+       else {cpu_m: ($kata.cpu | cpu), memory_mib: ($kata.memory | mib), source: "RuntimeClass commodity"} end)}
+    | . + {cpu_m: (.workspace.cpu_m + .dind.cpu_m + .kata.cpu_m),
+           memory_mib: (.workspace.memory_mib + .dind.memory_mib + .kata.memory_mib)}'
 }
 
 # The node's LVM thin pool from a storage-pools view.
@@ -893,6 +920,41 @@ measure() { # STEP TARGET NEW_IDS_FILE BEFORE_SNAPSHOT AFTER_SNAPSHOT BASE_JSON 
           else (.host_memory_per_sandbox_gib - .workload_memory_gib) end)}'
 }
 
+# Per node: how many sandboxes of the shape fit by free CPU, memory and pods,
+# the smallest of those, and which resource sets it. A sandbox fits on one
+# node or not at all, so each node is floored on its own and the total is the
+# sum of the nodes' fits.
+predict() { # BASE_JSON REQUEST_JSON
+  jq -n --argjson b "$1" --argjson s "$2" --arg shape "$SHAPE" '
+    def fit($free; $each): if $free <= 0 then 0 else ($free / $each | floor) end;
+    ($b.nodes | map(
+       {node, allocatable_cpu_m, allocatable_memory_mib, allocatable_pods, requested_cpu_m, requested_memory_mib, pods,
+        by_cpu: fit(.allocatable_cpu_m - .requested_cpu_m; $s.cpu_m),
+        by_memory: fit(.allocatable_memory_mib - .requested_memory_mib; $s.memory_mib),
+        by_pods: fit(.allocatable_pods - .pods; 1)}
+       | ([.by_cpu, .by_memory, .by_pods] | min) as $fits
+       | . + {fits: $fits,
+              first_limit: ([if .by_cpu == $fits then "CPU requests" else empty end,
+                             if .by_memory == $fits then "memory requests" else empty end,
+                             if .by_pods == $fits then "pods" else empty end] | join(" and "))})) as $per_node
+    | {shape: $shape, sandbox_request: $s,
+       predicted_total: ($per_node | map(.fits) | add),
+       predicted_by_cpu: ($per_node | map(.by_cpu) | add),
+       predicted_by_memory: ($per_node | map(.by_memory) | add),
+       predicted_by_pods: ($per_node | map(.by_pods) | add),
+       per_node: $per_node}'
+}
+
+# auto: 25, 50, 75 and 100% of the predicted total, then two past it so the
+# ramp reaches a refusal; capped at MAX_SANDBOXES.
+auto_steps() { # PREDICTION_FILE
+  jq -r --argjson cap "$MAX_SANDBOXES" '
+    .predicted_total as $p
+    | if $p < 1 then "" else
+        [$p * 0.25, $p * 0.5, $p * 0.75, $p, $p + 2] | map(ceil | select(. >= 1) | if . > $cap then $cap else . end)
+        | unique | map(tostring) | join(",") end' "$1"
+}
+
 preflight() { # -> base JSON
   local node request others base
   for node in "${NODES[@]}"; do
@@ -905,18 +967,7 @@ preflight() { # -> base JSON
   base="$(nodes_state)"
   [[ "$(jq -r .node_condition <<<"$base")" == ok ]] ||
     die "a runtime node is degraded before the run: $(jq -r .node_condition <<<"$base")"
-  # Free requests fit per node, so each node's count is floored on its own.
-  jq -n --argjson b "$base" --argjson s "$request" --arg shape "$SHAPE" '
-    def fit($free; $each): if $free <= 0 then 0 else ($free / $each | floor) end;
-    ($b.nodes | map({node,
-       by_memory: fit(.allocatable_memory_mib - .requested_memory_mib; $s.memory_mib),
-       by_cpu: fit(.allocatable_cpu_m - .requested_cpu_m; $s.cpu_m),
-       by_pods: fit(.allocatable_pods - .pods; 1)})) as $per_node
-    | {shape: $shape, sandbox_request: $s,
-       predicted_by_memory: ($per_node | map(.by_memory) | add),
-       predicted_by_cpu: ($per_node | map(.by_cpu) | add),
-       predicted_by_pods: ($per_node | map(.by_pods) | add),
-       per_node: $per_node}' >"$RUN_DIR/prediction.json"
+  predict "$base" "$request" >"$RUN_DIR/prediction.json"
   log "baseline: $(jq -c '{pods, requested_cpu_m, requested_memory_mib, node_memory_used_gib, thin_used_pct}' <<<"$base")"
   log "predicted refusals: $(jq -c . "$RUN_DIR/prediction.json")"
   printf '%s\n' "$base"
@@ -928,7 +979,17 @@ write_summary() {
     printf '# Sandbox capacity: %s, shape %s (%s m CPU, %s MiB, %s GiB)\n\n' "${NODES[*]}" "$SHAPE" "$CPU_M" "$MEMORY_MIB" "$DISK_GIB"
     printf 'Run `%s`. Workload: %s of each vCPU busy, %s of memory touched. Hold %s s per step.\n\n' \
       "$RUN_ID" "$WORKLOAD_CPU" "$WORKLOAD_MEMORY" "$HOLD_SECONDS"
-    printf 'Prediction from requests: `%s`\n\n' "$(jq -c . "$RUN_DIR/prediction.json" 2>/dev/null)"
+    jq -r '
+      def gib: . / 1024 * 10 | round / 10 | tostring;
+      def cores: . / 1000 * 100 | round / 100 | tostring;
+      .sandbox_request as $s
+      | "Each sandbox reserves \($s.cpu_m | cores) CPU and \($s.memory_mib | gib) GiB: workspace \($s.workspace.cpu_m | cores) CPU / \($s.workspace.memory_mib | gib) GiB, DinD \($s.dind.cpu_m | cores) / \($s.dind.memory_mib | gib), Kata \($s.kata.cpu_m | cores) / \($s.kata.memory_mib | gib).\n",
+        "Prediction before the run, from requests (\(.predicted_total) in all):\n",
+        "| Node | Allocatable CPU / GiB / pods | Requested before | Fit by CPU / memory / pods | Fits | First limit |",
+        "|---|---|---|---|---|---|",
+        (.per_node[] | "| \(.node) | \(.allocatable_cpu_m | cores) / \(.allocatable_memory_mib | gib) / \(.allocatable_pods) | \(.requested_cpu_m | cores) / \(.requested_memory_mib | gib) / \(.pods) | \(.by_cpu) / \(.by_memory) / \(.by_pods) | \(.fits) | \(.first_limit) |"),
+        ""' "$RUN_DIR/prediction.json" 2>/dev/null || true
+    printf 'Measured:\n\n'
     printf '| Sandboxes | Ready | Failed | Warm | Ready p50/p95 ms | SSH p50/p95 ms | Server setup p50/p95 ms | Pods | Req CPU %% | Req mem %% | Node CPU %% | Node mem %% | PSI mem/cpu %% | Host GiB/sb | Overhead GiB/sb | Pod WS GiB/sb | Thin %% | Overcommit |\n'
     printf '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n'
     jq -r '
@@ -980,6 +1041,12 @@ if [[ "$MODE" == dry-run ]]; then
   exit 0
 fi
 
+if [[ "$STEPS" == auto ]]; then
+  STEPS="$(auto_steps "$RUN_DIR/prediction.json")"
+  [[ -n "$STEPS" ]] || die "no $SHAPE sandbox fits on the runtime nodes"
+  IFS=, read -r -a STEP_COUNTS <<<"$STEPS"
+fi
+log "steps: $STEPS"
 SSH_CONFIG="$(managed_ssh_config)" || die "no managed SSH configuration"
 WORKLOAD_SECONDS=$(( (${#STEP_COUNTS[@]} + 1) * (HOLD_SECONDS + READY_TIMEOUT_SECONDS) ))
 : >"$RUN_DIR/steps.jsonl"

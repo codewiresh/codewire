@@ -35,7 +35,7 @@ refuses 'PROM_URL must name' env -u PROM_URL CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD
 export PROM_URL=http://prometheus.example.invalid:9090
 refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' "$LOAD"
 refuses '--shape must be' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --shape huge
-refuses '--steps must be a comma-separated' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --steps 10,,20
+refuses '--steps must be auto or a comma-separated' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --steps 10,,20
 refuses '--steps must increase' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --steps 10,10
 refuses '--steps exceeds --max-sandboxes' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --steps 10,300
 refuses '--max-sandboxes must be 1-500' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --max-sandboxes 501
@@ -92,6 +92,12 @@ grep -qF -- '--ttl "$LOAD_TTL"' "$LOAD" || fail 'creates carry no TTL'
 grep -qF 'exec timeout $((seconds + 60)) python3' "$LOAD" || fail 'the workload is not bounded by timeout'
 grep -qF 'run --detach --in "$id" --name cap-load' "$LOAD" || fail 'the workload does not run as a detached session'
 
+# Run records are kept per environment, and start-up cleanup skips a run of
+# another server.
+grep -qF '"${LOAD_TMP_PARENT:=$ROOT/.tmp/sandbox-capacity-prod}"' "$LOAD" || fail 'Production runs share the Dev run records'
+grep -qF 'printf '"'"'%s\n'"'"' "$CODEWIRE_SERVER_URL" >"$RUN_DIR/server"' "$LOAD" || fail 'a run does not record its server'
+grep -qF '[[ "$run_server" != "$CODEWIRE_SERVER_URL" ]]' "$LOAD" || fail 'start-up cleanup does not check the run server'
+
 # Milestone percentiles: interpolated within buckets over the delta of two
 # snapshots, with an empty first snapshot still read as "before".
 work="$(mktemp -d "${TMPDIR:-/tmp}/cw-capacity-tests.XXXXXX")"
@@ -132,10 +138,31 @@ result="$(bash -c 'source "$1"; aggregate_nodes "$2" <"$3"' _ "$work/functions.s
 expected='{"node_condition":"b: MemoryPressure=True","allocatable_cpu_m":2000,"allocatable_memory_mib":200,"allocatable_pods":20,"requested_cpu_m":600,"requested_memory_mib":100,"pods":8,"node_cpu_pct":60,"node_memory_pct":40,"node_memory_total_gib":20,"node_memory_used_gib":5,"psi_cpu_some_pct":null,"psi_memory_some_pct":3,"psi_memory_full_pct":null,"psi_io_some_pct":null,"thin_pool":"t","thin_total_gib":200,"thin_used_gib":60,"thin_used_pct":50,"provisioned_gib":200,"overcommit":1,"resource_definitions":1}'
 [[ "$result" == "$expected" ]] || fail "unexpected cluster view: $result"
 
+# The prediction floors each node on its own, names what runs out first
+# (ties included), and auto steps climb to two past the total.
+printf '%s' '{"nodes":[{"node":"cpu-bound","allocatable_cpu_m":64000,"allocatable_memory_mib":1000000,"allocatable_pods":110,"requested_cpu_m":4000,"requested_memory_mib":15000,"pods":20},{"node":"memory-bound","allocatable_cpu_m":128000,"allocatable_memory_mib":500000,"allocatable_pods":110,"requested_cpu_m":4000,"requested_memory_mib":15000,"pods":20},{"node":"tie","allocatable_cpu_m":3500,"allocatable_memory_mib":67844,"allocatable_pods":110,"requested_cpu_m":0,"requested_memory_mib":0,"pods":0}]}' >"$work/base.json"
+request='{"workspace":{"cpu_m":1000,"memory_mib":32768},"dind":{"cpu_m":500,"memory_mib":1024},"kata":{"cpu_m":250,"memory_mib":130},"cpu_m":1750,"memory_mib":33922}'
+result="$(bash -c 'source "$1"; SHAPE=memory predict "$(cat "$2")" "$3"' _ "$work/functions.sh" "$work/base.json" "$request" |
+  jq -c '{predicted_total, per_node: [.per_node[] | {node, by_cpu, by_memory, fits, first_limit}]}')"
+expected='{"predicted_total":45,"per_node":[{"node":"cpu-bound","by_cpu":34,"by_memory":29,"fits":29,"first_limit":"memory requests"},{"node":"memory-bound","by_cpu":70,"by_memory":14,"fits":14,"first_limit":"memory requests"},{"node":"tie","by_cpu":2,"by_memory":2,"fits":2,"first_limit":"CPU requests and memory requests"}]}'
+[[ "$result" == "$expected" ]] || fail "unexpected prediction: $result"
+printf '%s' '{"predicted_total":24}' >"$work/p24.json"
+printf '%s' '{"predicted_total":3}' >"$work/p3.json"
+printf '%s' '{"predicted_total":0}' >"$work/p0.json"
+[[ "$(bash -c 'source "$1"; MAX_SANDBOXES=200 auto_steps "$2"' _ "$work/functions.sh" "$work/p24.json")" == 6,12,18,24,26 ]] ||
+  fail 'auto steps do not climb to two past the prediction'
+[[ "$(bash -c 'source "$1"; MAX_SANDBOXES=200 auto_steps "$2"' _ "$work/functions.sh" "$work/p3.json")" == 1,2,3,5 ]] ||
+  fail 'auto steps repeat a count for a small prediction'
+[[ "$(bash -c 'source "$1"; MAX_SANDBOXES=20 auto_steps "$2"' _ "$work/functions.sh" "$work/p24.json")" == 6,12,18,20 ]] ||
+  fail 'auto steps exceed --max-sandboxes'
+[[ -z "$(bash -c 'source "$1"; MAX_SANDBOXES=200 auto_steps "$2"' _ "$work/functions.sh" "$work/p0.json")" ]] ||
+  fail 'auto steps ramp when nothing fits'
+
 # The summary shows the ready count, marks a quantile above the top bucket,
 # and has one row per node with the run's sandboxes on it.
 mkdir -p "$work/run"
 printf '%s\n' '{"created":25,"ready_sandboxes":18,"failed_creates":7,"warm_hits":4,"new":15,"server_setup_complete":{"p50_ms":52500,"p95_ms":60000,"p50_over_top":false,"p95_over_top":true},"pods":37,"allocatable_pods":110,"requested_cpu_m":1,"allocatable_cpu_m":2,"requested_memory_mib":1,"allocatable_memory_mib":2,"placement":{"node-a":11},"nodes":[{"node":"node-a","pods":20,"allocatable_pods":110,"requested_cpu_m":1,"allocatable_cpu_m":2,"requested_memory_mib":1,"allocatable_memory_mib":2,"node_cpu_pct":12.34,"node_memory_pct":40,"psi_memory_some_pct":0,"psi_cpu_some_pct":1,"thin_used_pct":3},{"node":"node-b","pods":17,"allocatable_pods":110,"requested_cpu_m":1,"allocatable_cpu_m":2,"requested_memory_mib":1,"allocatable_memory_mib":2}]}' >"$work/run/steps.jsonl"
+printf '%s' '{"sandbox_request":{"workspace":{"cpu_m":2000,"memory_mib":8192},"dind":{"cpu_m":500,"memory_mib":1024},"kata":{"cpu_m":250,"memory_mib":130},"cpu_m":2750,"memory_mib":9346},"predicted_total":24,"per_node":[{"node":"node-a","allocatable_cpu_m":127950,"allocatable_memory_mib":256041,"allocatable_pods":110,"requested_cpu_m":9154,"requested_memory_mib":29845,"pods":13,"by_cpu":43,"by_memory":24,"by_pods":97,"fits":24,"first_limit":"memory requests"}]}' >"$work/run/prediction.json"
 bash -c 'source "$1"; NODES=(node-a node-b); RUN_DIR="$2" SHAPE=default CPU_M=2000 MEMORY_MIB=8192 DISK_GIB=80 RUN_ID=r WORKLOAD_CPU=0.5 WORKLOAD_MEMORY=0.5 HOLD_SECONDS=180 write_summary' _ "$work/functions.sh" "$work/run"
 grep -qF '| 25 | 18 | 7 | 4/15 |' "$work/run/summary.md" || fail "summary lacks the ready count: $(cat "$work/run/summary.md")"
 grep -qF '| 52500/>60000 |' "$work/run/summary.md" || fail "summary does not mark a p95 above the top bucket: $(cat "$work/run/summary.md")"
@@ -143,5 +170,25 @@ grep -qF '| 25 | node-a | 11 | 20/110 | 50 | 50 | 12.3 | 40 | 0/1 | 3 |' "$work/
   fail "summary lacks the per-node row: $(cat "$work/run/summary.md")"
 grep -qF '| 25 | node-b | 0 | 17/110 |' "$work/run/summary.md" || fail "summary lacks a node without run sandboxes"
 grep -qF '# Sandbox capacity: node-a node-b,' "$work/run/summary.md" || fail "summary does not name both nodes"
+grep -qF 'Each sandbox reserves 2.75 CPU and 9.1 GiB: workspace 2 CPU / 8 GiB, DinD 0.5 / 1, Kata 0.25 / 0.1.' "$work/run/summary.md" ||
+  fail "summary lacks the reservation breakdown: $(cat "$work/run/summary.md")"
+grep -qF '| node-a | 127.95 / 250 / 110 | 9.15 / 29.1 / 13 | 43 / 24 / 97 | 24 | memory requests |' "$work/run/summary.md" ||
+  fail "summary lacks the per-node prediction: $(cat "$work/run/summary.md")"
+
+# Start-up cleanup retries a Dev run that never proved cleanup, including one
+# from before runs named their server, and leaves a Production run alone.
+mkdir -p "$work/parent/old-dev" "$work/parent/prod-run" "$work/parent/done"
+: >"$work/parent/old-dev/envs.tsv"
+: >"$work/parent/prod-run/envs.tsv"
+printf 'https://codewire.sh\n' >"$work/parent/prod-run/server"
+: >"$work/parent/done/envs.tsv"
+: >"$work/parent/done/cleaned"
+result="$(bash -c 'source "$1"
+  list_envs() { :; }
+  clean_run_dir() { printf "cleaned %s\n" "$(basename "$1")"; }
+  log() { :; }
+  NAME_PREFIX=cap- LOAD_TMP_PARENT="$2" RUN_DIR="$2/current" RUN_ID=r CODEWIRE_SERVER_URL=https://codewire-dev.sh clean_leftovers' \
+  _ "$work/functions.sh" "$work/parent")"
+[[ "$result" == 'cleaned old-dev' ]] || fail "start-up cleanup crossed environments: $result"
 
 printf 'sandbox capacity load tests: ok\n'
