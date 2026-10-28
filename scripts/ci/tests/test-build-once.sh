@@ -415,6 +415,27 @@ legs_build missing || fail "a missing crate was not rebuilt: $(cat "$work/legs.l
 [ "$(wc -l < "$work/legs-state/calls")" -eq 2 ] || fail 'the missing-crate leg did not build exactly twice'
 grep -q "read a corrupt output in $work/legs-root/pr/targets/archive; it is wiped" "$work/legs.log" ||
   fail 'a missing crate did not wipe the leg'"'"'s own folder'
+# A leg whose builds run in batches (the database leg) keeps each batch but
+# its first in batch-NAME inside its folder: a corrupt output there wipes
+# that batch's folder alone, never the leg's own or another batch's.
+cat > "$legs_src/scripts/ci/verify/run-integration-verification.sh" <<'DATABASE'
+#!/bin/sh
+echo x >> "$LEGS_STATE/database-calls"
+broken="$CARGO_TARGET_DIR/batch-orchestration/debug/deps/libbroken.rlib"
+if [ -e "$broken" ]; then echo "error: $broken: failed to mmap file"; exit 101; fi
+DATABASE
+chmod +x "$legs_src/scripts/ci/verify/run-integration-verification.sh"
+batch_root="$work/legs-root/pr/targets/database"
+mkdir -p "$batch_root/batch-orchestration/debug/deps" "$batch_root/batch-billing" "$batch_root/debug"
+printf 'half' > "$batch_root/batch-orchestration/debug/deps/libbroken.rlib"
+: > "$batch_root/batch-billing/kept"
+: > "$batch_root/debug/kept"
+LEGS_SELECTION='|database|' legs_build ok || fail "a corrupt batch output was not rebuilt: $(cat "$work/legs.log")"
+[ "$(wc -l < "$work/legs-state/database-calls")" -eq 2 ] || fail 'the corrupt batch did not build exactly twice'
+grep -q "read a corrupt output in $batch_root/batch-orchestration; it is wiped" "$work/legs.log" ||
+  fail "the corrupt batch's folder was not the one wiped: $(cat "$work/legs.log")"
+[ -e "$batch_root/batch-billing/kept" ] && [ -e "$batch_root/debug/kept" ] ||
+  fail "a corrupt batch output wiped the leg's or another batch's folder"
 if legs_build compile; then fail 'a compile error passed'; fi
 [ "$(wc -l < "$work/legs-state/calls")" -eq 1 ] || fail 'a compile error was rebuilt'
 [ -e "$work/legs-root/pr/targets/archive/debug/deps/libbroken.rlib" ] || fail 'a compile error wiped the target folder'

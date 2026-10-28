@@ -114,7 +114,7 @@ cargo_ci() {
 # Compile once (infra#1632). Two modes replace Cargo for the database suites
 # and the service planes, so the lanes below stay the one list of what runs:
 # - database-archives (on the pull request build runner): each `cargo test
-#   ... --no-run` of build_database_suites becomes `cargo nextest archive` of
+#   ... --no-run` of DATABASE_BUILD_BATCHES becomes `cargo nextest archive` of
 #   the same package and feature set into ARCHIVE_BUILD_DIR, one archive per
 #   package and feature set, and the CI-profile migration runner is copied
 #   beside them.
@@ -124,7 +124,7 @@ cargo_ci() {
 #   lanes' output checks read it as before. `cargo build` of the migration
 #   runner is a no-op: the archives carry it.
 # - services-PLANE-archives and RUST_SERVICE_ARCHIVES do the same for one
-#   service plane: build_service_suites lists its tests, and its `cargo
+#   service plane: service_build_batches lists its tests, and its `cargo
 #   build`s build for real, in the archives' profile, with keep_binaries
 #   copying the binaries the plane starts beside the archives. From archives,
 #   `cargo build` and `cargo test --no-run` are no-ops.
@@ -303,13 +303,14 @@ extract_archives() {
     # rewrap_cli does), and may write to its CARGO_TARGET_TMPDIR: link each
     # archive's binaries into the target folder it was built in, which each
     # build-once leg has of its own (targets/database, targets/services_control
-    # and so on; main run 23071), and make its tmp folder. A binary two
-    # archives of one folder carry (one package in two feature sets) is linked
-    # to neither, so a test that starts it fails rather than start the other
-    # build.
+    # and so on; main run 23071), and each of its build batches but the first
+    # inside it (targets/database/batch-orchestration; compile_batches), and
+    # make its tmp folder. A binary two archives of one folder carry (one
+    # package in two feature sets) is linked to neither, so a test that
+    # starts it fails rather than start the other build.
     metadata="$RUN_DIR/archives/$key/target/nextest/binaries-metadata.json"
     target="$(jq -r '."rust-build-meta"."target-directory" // empty' "$metadata")"
-    [[ "$target" =~ ^"$DATABASE_ARCHIVE_BUILD_ROOT"/targets/[A-Za-z0-9_-]+$ ]] ||
+    [[ "$target" =~ ^"$DATABASE_ARCHIVE_BUILD_ROOT"/targets/[A-Za-z0-9_-]+(/batch-[a-z0-9-]+)?$ ]] ||
       { echo "::error::archive $key was built in ${target:-no recorded folder}, not a target folder of $DATABASE_ARCHIVE_BUILD_ROOT" >&2; return 2; }
     mkdir -p "$target/tmp"
     while read -r binary; do
@@ -508,34 +509,139 @@ readonly DATABASE_LANE_ORDER=(
   orchestration-workspaces
 )
 
-# Each batch uses one package and feature set, as its lane runs it.
-build_database_suites() {
+# The database suites' builds. Each uses one package and feature set, as its
+# lane runs it. DATABASE_BUILD_BATCHES groups them: the builds of one batch
+# run in order in one target folder, where they share their units. Here
+# they all run one after another in one folder; building archives on the
+# build runner, the batches run at once (compile_batches).
+database_build_server_core() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib --test session_auth \
       --test org_deletion_lifecycle --test oauth_bearer_auth --no-run
-
+}
+database_build_platform_credentials() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
       --test profiles --test refresh --test authority --test owner_sources --no-run
-
+}
+database_build_orchestration() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-orchestration --lib --test access_profiles \
       --test credentials --test environment_external_cleanup --test environment_sources --no-run
-
+}
+database_build_credential_service_enrollment() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service --features enrollment --lib --no-run
+}
+database_build_credential_service() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service --lib --no-run
+}
+database_build_credential_broker() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
       --lib --no-run
+}
+database_build_credential_broker_ssh() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-broker --no-default-features \
       --features platform,ssh-agent --lib --no-run
+}
+database_build_billing() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-billing --lib --no-run
+}
+database_build_mesh() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-mesh --lib --no-run
+}
+# The migration runner the database job runs, in the CI profile (archives
+# only: the lanes build their own with reset_schema's cargo build).
+database_build_migration_runner() {
+  command cargo build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate
+  install -m 0755 "$CARGO_CI_DIR/codewire-db-migrate" "$ARCHIVE_BUILD_DIR/codewire-db-migrate"
+}
+# The batches, about evenly long. One after another in one folder, main run
+# 27000 took 589 s: server-core 105 s, mesh 11; orchestration 135;
+# credential-service with enrollment 32, without 5, credential-broker 64,
+# with ssh-agent 19; platform-credentials 56, billing 59; the migration
+# runner 88. Each batch is one more target folder on the build disk.
+readonly DATABASE_BUILD_BATCHES=(
+  'server_core mesh'
+  orchestration
+  'credential_service_enrollment credential_service credential_broker credential_broker_ssh'
+  'platform_credentials billing'
+)
+
+build_database_suites() {
+  local batch step
+  for batch in "${DATABASE_BUILD_BATCHES[@]}"; do
+    for step in $batch; do
+      "database_build_$step"
+    done
+  done
+}
+
+# compile_batches PREFIX BATCH...: building archives on the build runner, run
+# every batch at once. A batch is a list of steps, PREFIX_STEP, which run in
+# order. Cargo locks a target folder for a whole build, so each batch builds
+# in a folder of its own: the first in this run's folder (CARGO_CI_TARGET_DIR,
+# the leg's), each other one in batch-NAME inside it, NAME its first step,
+# which stays with the leg's folder (build-once.sh). Every batch takes its
+# compilers from the build's one jobserver (build-once.sh build). Each
+# batch's output follows in batch order; any batch failing fails the build,
+# after every batch has ended.
+compile_batches() {
+  local prefix="$1" batch step dir status failed=false first=true
+  shift
+  local logs="$RUN_DIR/batches"
+  local -a pids=()
+  rm -rf -- "$logs"
+  mkdir -p "$logs"
+  for batch in "$@"; do
+    read -r step _ <<< "$batch"
+    # The first batch's folder holds the other batches' folders: its size
+    # leaves them out.
+    local -a size_args=(--exclude="$CARGO_CI_TARGET_DIR/batch-*")
+    if [ "$first" = true ]; then
+      dir="$CARGO_CI_TARGET_DIR"
+      first=false
+    else
+      dir="$CARGO_CI_TARGET_DIR/batch-${step//_/-}"
+      size_args=()
+    fi
+    (
+      started=$SECONDS
+      # The folder by its last name only: a full path in the log reads as a
+      # folder to wipe on a corrupt output (build-once.sh).
+      echo "[build batch] $step: start (folder ${dir##*/})"
+      CARGO_CI_DIR="$dir${CARGO_CI_DIR#"$CARGO_CI_TARGET_DIR"}"
+      CARGO_CI_TARGET_DIR="$dir"
+      CARGO_TARGET_DIR="$dir"
+      export CARGO_TARGET_DIR
+      for step in $batch; do
+        "${prefix}_$step"
+      done
+      # Its folder's size sizes the build disk (build-once.sh bound_targets).
+      echo "[build batch] ${batch%% *}: finish (elapsed_seconds=$((SECONDS - started)) folder_size=$(
+        du -sh "${size_args[@]}" "$dir" 2>/dev/null | cut -f1))"
+    ) > "$logs/$step.log" 2>&1 &
+    pids+=("$!")
+  done
+  local index=0
+  for batch in "$@"; do
+    read -r step _ <<< "$batch"
+    status=0
+    wait "${pids[$index]}" || status=$?
+    index=$((index + 1))
+    cat "$logs/$step.log"
+    if [ "$status" -ne 0 ]; then
+      echo "::error::the $step build batch failed (status $status)"
+      failed=true
+    fi
+  done
+  rm -rf -- "$logs"
+  [ "$failed" = false ]
 }
 
 database_lane_core() {
@@ -1282,28 +1388,56 @@ build_selected_services() {
 
 # Building a service plane's archives (compile once, infra#1632): every test
 # the run_* functions below run, one build per package and feature set, as
-# they run it. The orchestration wire contract builds in
-# build_selected_services. A test missing here fails its run, which finds no
+# they run it, in batches (compile_batches). The first batch builds the
+# binaries the plane starts, the migration runner first, and with them the
+# orchestration wire contract (build_selected_services); each other batch
+# one package's tests. A test missing here fails its run, which finds no
 # archive, or no test, for it.
-build_service_suites() {
-  local -a coordinator=(--lib)
+service_build_binaries() {
+  cargo_ci build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate
+  keep_binaries codewire-db-migrate
+  build_selected_services
+}
+service_build_idp() {
   if selected service_idp; then
     cargo_ci test --locked --profile ci -p codewire-idp --test db_flow \
       --test session_inventory --test two_factor_replacement --test rewrap_cli --no-run
   fi
-  selected service_coordinator && coordinator+=(--test wire_contract)
+}
+service_build_coordinator() {
+  local -a coordinator=(--lib)
+  if selected service_coordinator; then coordinator+=(--test wire_contract); fi
   if selected service_coordinator || selected service_nats; then
     cargo_ci test --locked --profile ci -p codewire-coordinator "${coordinator[@]}" --no-run
   fi
+}
+service_build_billing() {
   if selected service_billing; then
     cargo_ci test --locked --profile ci -p codewire-billing --test wire_contract --no-run
   fi
+}
+service_build_connectcore() {
   if selected service_connectcore; then
     cargo_ci test --locked --profile ci -p codewire-server-core --test connect_auth --no-run
   fi
+}
+service_build_orchestration() {
   if selected service_orchestration; then
     cargo_ci test --locked --profile ci -p codewire-orchestration --lib --no-run
   fi
+}
+# service_build_batches PLANE: the plane's batches, one per line. One after
+# another in one folder, the control plane took 371 s in main run 26920 (the
+# migration runner 89 s, the binaries 80, idp 74, coordinator 52, billing
+# 62, connect_auth 2), and the runtime plane 194 s in main run 27000 (the
+# orchestration wire contract 92 s, the orchestration library 85). A step
+# whose service is not selected builds nothing.
+service_build_batches() {
+  case "$1" in
+    control) printf '%s\n' 'binaries connectcore' idp coordinator billing ;;
+    runtime) printf '%s\n' 'binaries coordinator' orchestration ;;
+    *) echo "::error::unknown service plane: $1" >&2; return 2 ;;
+  esac
 }
 
 # The idp suites, in the order run_idp runs them against one database. In
@@ -2081,9 +2215,7 @@ case "$MODE" in
     # The build runner's half of compile once: no PostgreSQL, no tests.
     : "${ARCHIVE_BUILD_DIR:?ARCHIVE_BUILD_DIR is required}"
     mkdir -p "$ARCHIVE_BUILD_DIR"
-    build_database_suites
-    command cargo build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate
-    install -m 0755 "$CARGO_CI_DIR/codewire-db-migrate" "$ARCHIVE_BUILD_DIR/codewire-db-migrate"
+    compile_batches database_build "${DATABASE_BUILD_BATCHES[@]}" migration_runner
     log "database archives built: $(find "$ARCHIVE_BUILD_DIR" -name '*.tar.zst' | wc -l)"
     exit 0
     ;;
@@ -2099,10 +2231,8 @@ case "$MODE" in
     mkdir -p "$ARCHIVE_BUILD_DIR"
     plane="${MODE#services-}"
     SELECTION="$(service_plane_selection "${plane%-archives}")"
-    cargo_ci build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate
-    keep_binaries codewire-db-migrate
-    build_selected_services
-    build_service_suites
+    mapfile -t batches < <(service_build_batches "${plane%-archives}")
+    compile_batches service_build "${batches[@]}"
     log "$MODE built: $(find "$ARCHIVE_BUILD_DIR" -name '*.tar.zst' | wc -l) archives, $(find "$ARCHIVE_BUILD_DIR" -maxdepth 1 -type f ! -name '*.tar.zst' | wc -l) binaries"
     exit 0
     ;;

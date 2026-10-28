@@ -166,8 +166,9 @@ locally. CI confirms the result; it is not the first integration environment.
 That mode runs its suites in four lanes (`core`, `credential-service`,
 `credential-broker`, `orchestration`), each in order against its own
 PostgreSQL. Add a suite to the lane of the crate it tests, and its harness to
-`build_database_suites`. Against one explicit database the lanes run one after
-another.
+a `database_build_*` step in one of `DATABASE_BUILD_BATCHES`, whose batches
+the CI build runner builds at once. Against one explicit database the lanes
+run one after another.
 
 ### Network deletion
 

@@ -401,11 +401,12 @@ suites = [
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::credential_relay::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'credential relay target matrix', 'count': 1},
     {'args': ['test', '-p', 'codewire-server-core', '--lib', 'db::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core pool health matrix', 'count': 2},
 ]
+# In the order of DATABASE_BUILD_BATCHES: one after another here, in one
+# folder; the build runner's batches at once are checked below.
 batches = [
     ['test', '-p', 'codewire-server-core', '--lib', '--test', 'session_auth',
      '--test', 'org_deletion_lifecycle', '--test', 'oauth_bearer_auth', '--no-run'],
-    ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'storage',
-     '--test', 'profiles', '--test', 'refresh', '--test', 'authority', '--test', 'owner_sources', '--no-run'],
+    ['test', '-p', 'codewire-mesh', '--lib', '--no-run'],
     ['test', '--locked', '-p', 'codewire-orchestration', '--lib', '--test', 'access_profiles',
      '--test', 'credentials', '--test', 'environment_external_cleanup', '--test', 'environment_sources', '--no-run'],
     ['test', '--locked', '-p', 'codewire-credential-service', '--features', 'enrollment', '--lib', '--no-run'],
@@ -414,8 +415,9 @@ batches = [
      '--lib', '--no-run'],
     ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features',
      'platform,ssh-agent', '--lib', '--no-run'],
+    ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'storage',
+     '--test', 'profiles', '--test', 'refresh', '--test', 'authority', '--test', 'owner_sources', '--no-run'],
     ['test', '-p', 'codewire-billing', '--lib', '--no-run'],
-    ['test', '-p', 'codewire-mesh', '--lib', '--no-run'],
 ]
 # Ten lanes, each keeping its suites in their established order. Every
 # harness compiles before any lane starts.
@@ -912,6 +914,16 @@ extract_case '[{"name":"codewire-idp","path":"debug/codewire-idp"}]' leg targets
   { echo 'the extractor made no CARGO_TARGET_TMPDIR in the leg target folder' >&2; exit 1; }
 [ ! -e "$TMP/extract-leg/build/targets/archive" ] ||
   { echo 'the extractor linked into a folder the archive was not built in' >&2; exit 1; }
+# A leg's build batch has its own folder inside the leg's (compile_batches).
+extract_case '[{"name":"codewire-orchestration","path":"debug/codewire-orchestration"}]' batch \
+  targets/database/batch-orchestration ||
+  { cat "$TMP/extract-batch/out.log" >&2; echo 'the extractor refused a build batch folder' >&2; exit 1; }
+[ -L "$TMP/extract-batch/build/targets/database/batch-orchestration/debug/codewire-orchestration" ] &&
+  [ -d "$TMP/extract-batch/build/targets/database/batch-orchestration/tmp" ] ||
+  { echo 'the extractor did not link the binary in its build batch folder' >&2; exit 1; }
+if extract_case '[{"name":"codewire-idp","path":"debug/codewire-idp"}]' nested targets/database/debug; then
+  echo 'the extractor accepted a nested folder that is no build batch' >&2; exit 1
+fi
 if extract_case '[{"name":"codewire-idp","path":"debug/codewire-idp"}]' outside /elsewhere/target; then
   echo 'the extractor accepted a target folder outside the build tree' >&2; exit 1
 fi
@@ -1033,5 +1045,198 @@ grep -qF '::error::service lane idp-two-factor failed' "$TMP/service-lanes-faile
   { cat "$TMP/service-lanes-failed/out" >&2; echo 'the failed control-plane lane was not reported' >&2; exit 1; }
 [ "$(grep -c '^end ' "$TMP/service-lanes-failed/trace")" -eq 7 ] ||
   { echo 'the other control-plane lanes did not run to their end' >&2; exit 1; }
+
+# Building archives on the build runner (database-archives and
+# services-PLANE-archives), the builds run in batches at once, each batch in
+# its own target folder (compile_batches; infra#1534 lever 2). Batching
+# changes only where and when each build runs: the build invocations, so
+# every package, feature set and test target, are exactly those of the
+# builds one after another in one folder (EXPECTED_* below, from main before
+# the batches). The fake Cargo records each invocation with its folder and
+# time, writes what the runner copies and a unit in its folder, and holds
+# each folder's first build until every batch has started, for at most 30 s.
+archive_tools="$TMP/archive-build-tools"
+mkdir -p "$archive_tools"
+cat > "$archive_tools/cargo" <<'CARGO'
+#!/usr/bin/env bash
+set -euo pipefail
+trace="${ARCHIVE_TRACE:?}"
+args="$*"
+out='' previous='' package='' bin=''
+for arg in "$@"; do
+  case "$previous" in
+    --archive-file) out="$arg" ;;
+    -p) [ -n "$package" ] || package="$arg" ;;
+    --bin) bin="$arg" ;;
+  esac
+  previous="$arg"
+done
+# The output folder varies by case; the trace names it OUT.
+args="${args//"${ARCHIVE_OUT:?}"/OUT}"
+mkdir -p "$CARGO_TARGET_DIR"
+printf 'unit' > "$CARGO_TARGET_DIR/unit.rlib"
+: > "$trace/active/$$"
+# Each folder's first build waits until every batch has started one.
+if mkdir "$trace/first-$(printf '%s' "$CARGO_TARGET_DIR" | sha256sum | cut -c1-16)" 2>/dev/null; then
+  for _ in $(seq 1 300); do
+    started=("$trace/first-"*)
+    [ "${#started[@]}" -lt "$ARCHIVE_BATCHES" ] || break
+    sleep 0.1
+  done
+fi
+active=("$trace/active/"*)
+printf '%s\n' "${#active[@]}" >> "$trace/running"
+printf '%s %s|%s\n' "$(date +%s%N)" "${CARGO_TARGET_DIR#"$ARCHIVE_TARGETS"}" "$args" >> "$trace/calls"
+rm -f -- "$trace/active/$$"
+[ "$package" != "${ARCHIVE_FAIL:-none}" ] || { echo "error: could not compile \`$package\`"; exit 101; }
+if [ "$1" = build ]; then
+  profile=debug
+  [[ " $* " != *' --profile ci '* ]] || profile=ci
+  mkdir -p "$CARGO_TARGET_DIR/$profile"
+  if [ -n "$bin" ]; then
+    printf '#!/bin/sh\n' > "$CARGO_TARGET_DIR/$profile/$bin"
+  else
+    for arg in "$@"; do
+      case "$arg" in codewire-*) printf '#!/bin/sh\n' > "$CARGO_TARGET_DIR/$profile/$arg" ;; esac
+    done
+  fi
+  chmod 755 "$CARGO_TARGET_DIR/$profile"/*
+  exit 0
+fi
+# The orchestration wire contract builds its package's binaries too.
+if [[ " $* " == *' --features kind-e2e --test wire_contract '* ]]; then
+  mkdir -p "$CARGO_TARGET_DIR/debug"
+  for binary in codewire-orchestration log-stream-smoke temporal-smoke; do
+    printf '#!/bin/sh\n' > "$CARGO_TARGET_DIR/debug/$binary"
+    chmod 755 "$CARGO_TARGET_DIR/debug/$binary"
+  done
+fi
+if [ -n "$out" ]; then printf 'archive' > "$out"; fi
+CARGO
+chmod +x "$archive_tools/cargo"
+# archive_build_case NAME MODE LEG BATCHES SELECTION [FAILING PACKAGE]
+archive_build_case() {
+  local name="$1" mode="$2" leg="$3" batches="$4" selection="$5" failing="${6:-none}"
+  local case_dir="$TMP/archive-build-$name"
+  mkdir -p "$case_dir/trace/active" "$case_dir/out" "$case_dir/build/targets"
+  PATH="$archive_tools:$PATH" ARCHIVE_TRACE="$case_dir/trace" ARCHIVE_OUT="$case_dir/out" \
+    ARCHIVE_TARGETS="$case_dir/build/targets/" ARCHIVE_BATCHES="$batches" ARCHIVE_FAIL="$failing" \
+    CARGO_TARGET_DIR="$case_dir/build/targets/$leg" CODEWIRE_CARGO_CI_TARGET_DIR="$case_dir/build/targets/$leg" \
+    ARCHIVE_BUILD_DIR="$case_dir/out" RUN_DIR="$case_dir/run" VERIFICATION_SELECTION="$selection" \
+    "$ROOT/scripts/ci/verify/run-integration-verification.sh" "$mode" > "$case_dir/log" 2>&1
+}
+# archive_build_calls NAME: the invocations, without folders, sorted.
+archive_build_calls() {
+  cut -d' ' -f2- "$TMP/archive-build-$1/trace/calls" | cut -d'|' -f2- | sort
+}
+# archive_build_folders NAME: each folder and its invocations, in the order
+# they ran there.
+archive_build_folders() {
+  sort -n "$TMP/archive-build-$1/trace/calls" | cut -d' ' -f2- | sort -s -t'|' -k1,1 |
+    awk -F'|' '$1 != folder { folder = $1; print folder ":" } { print "  " $2 }'
+}
+archive_build_check() {
+  local name="$1" expected_calls="$2" expected_folders="$3" batches="$4" actual
+  actual="$(archive_build_calls "$name")"
+  [ "$actual" = "$(sort <<< "$expected_calls")" ] ||
+    { printf '%s built:\n%s\nnot the builds one after another:\n%s\n' "$name" "$actual" "$(sort <<< "$expected_calls")" >&2; exit 1; }
+  actual="$(archive_build_folders "$name")"
+  [ "$actual" = "$expected_folders" ] ||
+    { printf '%s built in its folders:\n%s\nnot:\n%s\n' "$name" "$actual" "$expected_folders" >&2; exit 1; }
+  [ "$(sort -n "$TMP/archive-build-$name/trace/running" | tail -n 1)" = "$batches" ] ||
+    { echo "the $batches $name build batches did not run at the same time" >&2; exit 1; }
+}
+EXPECTED_DATABASE_ARCHIVES='nextest archive --locked -p codewire-server-core --lib --test session_auth --test org_deletion_lifecycle --test oauth_bearer_auth --archive-file OUT/codewire-server-core.tar.zst
+nextest archive --locked -p codewire-platform-credentials --test storage --test profiles --test refresh --test authority --test owner_sources --archive-file OUT/codewire-platform-credentials.tar.zst
+nextest archive --locked -p codewire-orchestration --lib --test access_profiles --test credentials --test environment_external_cleanup --test environment_sources --archive-file OUT/codewire-orchestration.tar.zst
+nextest archive --locked -p codewire-credential-service --features enrollment --lib --archive-file OUT/codewire-credential-service--features-enrollment.tar.zst
+nextest archive --locked -p codewire-credential-service --lib --archive-file OUT/codewire-credential-service.tar.zst
+nextest archive --locked -p codewire-credential-broker --no-default-features --features platform --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform.tar.zst
+nextest archive --locked -p codewire-credential-broker --no-default-features --features platform,ssh-agent --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform-ssh-agent.tar.zst
+nextest archive --locked -p codewire-billing --lib --archive-file OUT/codewire-billing.tar.zst
+nextest archive --locked -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst
+build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate'
+archive_build_case database database-archives database 5 '|valid:v3|database|complete|' ||
+  { cat "$TMP/archive-build-database/log" >&2; echo 'the database archive build failed' >&2; exit 1; }
+archive_build_check database "$EXPECTED_DATABASE_ARCHIVES" 'database:
+  nextest archive --locked -p codewire-server-core --lib --test session_auth --test org_deletion_lifecycle --test oauth_bearer_auth --archive-file OUT/codewire-server-core.tar.zst
+  nextest archive --locked -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst
+database/batch-credential-service-enrollment:
+  nextest archive --locked -p codewire-credential-service --features enrollment --lib --archive-file OUT/codewire-credential-service--features-enrollment.tar.zst
+  nextest archive --locked -p codewire-credential-service --lib --archive-file OUT/codewire-credential-service.tar.zst
+  nextest archive --locked -p codewire-credential-broker --no-default-features --features platform --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform.tar.zst
+  nextest archive --locked -p codewire-credential-broker --no-default-features --features platform,ssh-agent --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform-ssh-agent.tar.zst
+database/batch-migration-runner:
+  build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate
+database/batch-orchestration:
+  nextest archive --locked -p codewire-orchestration --lib --test access_profiles --test credentials --test environment_external_cleanup --test environment_sources --archive-file OUT/codewire-orchestration.tar.zst
+database/batch-platform-credentials:
+  nextest archive --locked -p codewire-platform-credentials --test storage --test profiles --test refresh --test authority --test owner_sources --archive-file OUT/codewire-platform-credentials.tar.zst
+  nextest archive --locked -p codewire-billing --lib --archive-file OUT/codewire-billing.tar.zst' 5
+[ "$(find "$TMP/archive-build-database/out" -name '*.tar.zst' | wc -l)" -eq 9 ] &&
+  [ -x "$TMP/archive-build-database/out/codewire-db-migrate" ] ||
+  { echo 'the database archive build did not write every archive and the migration runner' >&2; exit 1; }
+# Each batch reports its time and its own folder's size: the first batch's
+# leaves out the batch folders inside it.
+for batch in server_core orchestration; do
+  grep -q "^\[build batch\] $batch: finish (elapsed_seconds=[0-9]* folder_size=[0-9.]\+[KMG])$" "$TMP/archive-build-database/log" ||
+    { grep '^\[build batch\]' "$TMP/archive-build-database/log" >&2; echo "the $batch build batch did not report its time and folder size" >&2; exit 1; }
+done
+# A failing build stops its own batch at once and fails the build, after
+# every other batch has run to its end.
+if archive_build_case database-failed database-archives database 5 '|valid:v3|database|complete|' codewire-server-core; then
+  echo 'a failed database build batch passed' >&2; exit 1
+fi
+grep -qF '::error::the server_core build batch failed' "$TMP/archive-build-database-failed/log" ||
+  { cat "$TMP/archive-build-database-failed/log" >&2; echo 'the failed build batch was not reported' >&2; exit 1; }
+! grep -q 'codewire-mesh' "$TMP/archive-build-database-failed/trace/calls" ||
+  { echo 'a batch went on after its failed build' >&2; exit 1; }
+[ "$(wc -l < "$TMP/archive-build-database-failed/trace/calls")" -eq 9 ] ||
+  { echo 'the other build batches did not run to their end' >&2; exit 1; }
+
+EXPECTED_SERVICES_CONTROL_ARCHIVES='build --locked -p codewire-server-core --bin codewire-db-migrate
+build --locked -p codewire-idp -p codewire-coordinator -p codewire-billing
+nextest archive --locked -p codewire-idp --test db_flow --test session_inventory --test two_factor_replacement --test rewrap_cli --archive-file OUT/codewire-idp.tar.zst
+nextest archive --locked -p codewire-coordinator --lib --test wire_contract --archive-file OUT/codewire-coordinator.tar.zst
+nextest archive --locked -p codewire-billing --test wire_contract --archive-file OUT/codewire-billing.tar.zst
+nextest archive --locked -p codewire-server-core --test connect_auth --archive-file OUT/codewire-server-core.tar.zst'
+archive_build_case control services-control-archives services_control 4 "$full" ||
+  { cat "$TMP/archive-build-control/log" >&2; echo 'the control-plane archive build failed' >&2; exit 1; }
+archive_build_check control "$EXPECTED_SERVICES_CONTROL_ARCHIVES" 'services_control:
+  build --locked -p codewire-server-core --bin codewire-db-migrate
+  build --locked -p codewire-idp -p codewire-coordinator -p codewire-billing
+  nextest archive --locked -p codewire-server-core --test connect_auth --archive-file OUT/codewire-server-core.tar.zst
+services_control/batch-billing:
+  nextest archive --locked -p codewire-billing --test wire_contract --archive-file OUT/codewire-billing.tar.zst
+services_control/batch-coordinator:
+  nextest archive --locked -p codewire-coordinator --lib --test wire_contract --archive-file OUT/codewire-coordinator.tar.zst
+services_control/batch-idp:
+  nextest archive --locked -p codewire-idp --test db_flow --test session_inventory --test two_factor_replacement --test rewrap_cli --archive-file OUT/codewire-idp.tar.zst' 4
+for binary in codewire-db-migrate codewire-idp codewire-coordinator codewire-billing; do
+  [ -x "$TMP/archive-build-control/out/$binary" ] ||
+    { echo "the control-plane archive build did not keep $binary" >&2; exit 1; }
+done
+
+EXPECTED_SERVICES_RUNTIME_ARCHIVES='build --locked -p codewire-server-core --bin codewire-db-migrate
+build --locked -p codewire-coordinator
+build --locked -p codewire-cli-bin --bin cw
+nextest archive --locked -p codewire-orchestration --features kind-e2e --test wire_contract --archive-file OUT/codewire-orchestration--features-kind-e2e.tar.zst
+nextest archive --locked -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst
+nextest archive --locked -p codewire-orchestration --lib --archive-file OUT/codewire-orchestration.tar.zst'
+archive_build_case runtime services-runtime-archives services_runtime 2 \
+  '|valid:v3|service_orchestration|service_nats|service_temporal|complete|' ||
+  { cat "$TMP/archive-build-runtime/log" >&2; echo 'the runtime-plane archive build failed' >&2; exit 1; }
+archive_build_check runtime "$EXPECTED_SERVICES_RUNTIME_ARCHIVES" 'services_runtime:
+  build --locked -p codewire-server-core --bin codewire-db-migrate
+  build --locked -p codewire-coordinator
+  build --locked -p codewire-cli-bin --bin cw
+  nextest archive --locked -p codewire-orchestration --features kind-e2e --test wire_contract --archive-file OUT/codewire-orchestration--features-kind-e2e.tar.zst
+  nextest archive --locked -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst
+services_runtime/batch-orchestration:
+  nextest archive --locked -p codewire-orchestration --lib --archive-file OUT/codewire-orchestration.tar.zst' 2
+for binary in codewire-db-migrate cw; do
+  [ -x "$TMP/archive-build-runtime/out/$binary" ] ||
+    { echo "the runtime-plane archive build did not keep $binary" >&2; exit 1; }
+done
 
 printf '[test-integration-postgres] hermetic selection, prerequisite, scope, and cleanup cases passed\n'

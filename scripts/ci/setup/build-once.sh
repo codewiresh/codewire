@@ -39,7 +39,11 @@
 # - targets: one Cargo target folder per leg (targets/<leg>, and the local
 #   VMM leg's desktop folder), so the legs build side by side without
 #   waiting on each other's folder lock, and the Rust checks' own
-#   (CHECK_FOLDERS); any other folder there is removed. Each folder's
+#   (CHECK_FOLDERS); any other folder there is removed. A leg whose builds
+#   run in batches at once (the database and service-plane legs,
+#   run-integration-verification.sh compile_batches) keeps each batch but
+#   its first in a folder of its own inside the leg's, targets/<leg>/batch-*,
+#   which goes and stays with the leg's folder. Each folder's
 #   .build-once-used mark names the last run that used it (GITHUB_RUN_ID),
 #   and its time orders the disk bound's removals (bound_targets).
 # - cargo-home: the registry index and downloaded crates.
@@ -537,10 +541,11 @@ rebuild_corrupt_leg() {
   # rebuild_corrupt_leg NAME OUT LOG: succeeds only when the leg showed a
   # corrupt output in a target folder it names, and its one rebuild passed.
   # Only the named folders are wiped: the other legs build in their own
-  # folders beside this one.
+  # folders beside this one, and a build batch in its own inside its leg's
+  # (a batch's folder alone; the leg's own folder with its batches').
   local name="$1" out="$2" log="$3" folders folder
   grep -Eq "$CORRUPT_OUTPUT" "$log" || return 1
-  folders="$(grep -oE "$work/targets/[A-Za-z0-9_-]+" "$log" | sort -u)"
+  folders="$(grep -oE "$work/targets/[A-Za-z0-9_-]+(/batch-[a-z0-9-]+)?" "$log" | sort -u)"
   # A missing crate (E0463 and its kin) names no folder: the leg's own.
   [ -n "$folders" ] || folders="$work/targets/$name $work/targets/${name}_desktop"
   for folder in $folders; do
