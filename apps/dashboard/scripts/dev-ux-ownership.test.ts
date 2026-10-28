@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DevUxError, OwnedUxSandbox, failureClassOf, uxOrganizationSlug } from "./dev-ux-ownership";
+import { DevUxError, OwnedUxSandbox, cwFailureClass, failureClassOf, uxOrganizationSlug } from "./dev-ux-ownership";
 
 const USER = "1".repeat(32);
 const ORG = "2".repeat(32);
@@ -261,6 +261,11 @@ test("failure classes come from the error's type and fixed patterns, never its v
     [new DevUxError("terminal-attach"), "assertion"],
     [new DevUxError("ux-route", "navigation"), "navigation"],
     [new DevUxError("create-to-terminal-enabled", "timeout"), "timeout"],
+    // A step that failed on a cw command keeps that command's class.
+    [new DevUxError("create-sandbox", "dns"), "dns"],
+    [Object.assign(new Error(canary), { failureClass: "http_503" }), "http_503"],
+    [Object.assign(new Error(canary), { failureClass: "exit_1" }), "exit_1"],
+    [Object.assign(new Error(canary), { failureClass: "http_999" }), "unexpected"],
     [new Error("Target page, context or browser has been closed"), "unexpected"],
     [new Error(`locator.click: ${canary} net error elsewhere`), "unexpected"],
     [Object.assign(new Error(canary), { failureClass: canary }), "unexpected"],
@@ -268,5 +273,28 @@ test("failure classes come from the error's type and fixed patterns, never its v
     [undefined, "unexpected"],
   ] as const) {
     expect(failureClassOf(error)).toBe(expected);
+  }
+});
+
+// The same closed set, from the same fixed patterns, as the shell smoke's
+// cw_failure_class; nothing from stderr is returned.
+test("cw failures are classified like the shell smoke's cw_failure_class", () => {
+  const canary = "hostile-cw-stderr-canary";
+  for (const [status, stderr, expected] of [
+    [124, "", "timeout"],
+    [137, "", "timeout"],
+    [1, `Error: HTTP status server error (503 Service Unavailable) ${canary}`, "http_503"],
+    [1, `Error: HTTP error 401 ${canary}`, "http_401"],
+    [1, `list orgs: dns error: failed to lookup address information: Try again ${canary}`, "dns"],
+    [1, `Temporary failure in name resolution ${canary}`, "dns"],
+    [1, `tls handshake eof ${canary}`, "tls"],
+    [1, `operation timed out ${canary}`, "timeout"],
+    [1, `tcp connect error: Connection refused (os error 111) ${canary}`, "refused"],
+    [1, `error sending request for url ${canary}`, "connect"],
+    [1, `connection reset by peer ${canary}`, "connect"],
+    [1, canary, "exit_1"],
+    [2, "", "exit_2"],
+  ] as const) {
+    expect(cwFailureClass(status, stderr)).toBe(expected);
   }
 });

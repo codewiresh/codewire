@@ -275,7 +275,9 @@ case " $* " in
   *" whoami --output json "*) printf '%s\\n' '${whoami}' ;;
   *" org list --output json "*) printf '%s\\n' '[{"id":"${ORG}","role":"owner","slug":"dedicated-smoke"}]' ;;
   *" org current "*) printf 'ID: ${ORG}\\nRole: owner\\n' ;;
-  *" --cloud ls --output json "*) "${process.execPath}" -e "$list_rows" live ;;
+  *" --cloud ls --output json "*)
+    ${mode === "ux-lookup-dns" ? `printf '%s\\n' 'Error: list orgs: dns error: failed to lookup address information: Try again (hostile-cw-stderr-canary)' >&2; exit 1` : ":"}
+    "${process.execPath}" -e "$list_rows" live ;;
   *" --cloud ls --all --output json "*)
     printf 'list-all\\n' >>"${directory}/audit"
     "${process.execPath}" -e "$list_rows" all ;;
@@ -426,6 +428,23 @@ for (const mode of ["ux-success", "ux-large-history", "ux-failure", "ux-signal",
     }
   });
 }
+
+// A cw lookup that fails names its cause from the shell smoke's closed set,
+// never its stderr, and no Sandbox is created or removed.
+test("a failed cw lookup carries its cw failure class, not an assertion", async () => {
+  const value = await fixture("ux-lookup-dns");
+  const result = await helper.main([...value.args, "--ux-walkthrough", "enabled"], JOURNEY_DEADLINE_MS)
+    .catch((error) => error);
+  expect(result).toBeInstanceOf(helper.FixedStageError);
+  expect(result.stage).toBe("identity-command");
+  expect(result.failureClass).toBe("dns");
+  expect(helper.failureLines(result)).toEqual([
+    "[dev-smoke-browser-auth] ERROR: identity-command",
+    "[dev-smoke-browser-auth] failure-class: dns",
+  ]);
+  expect(await readFile(join(value.directory, "audit"), "utf8")).toBe("logout\n");
+  expect(await readdir(value.config)).toEqual([]);
+});
 
 test("the large-history fixture would overflow a whole-history list", () => {
   const listed = LARGE_HISTORY.map(({ id, name, state }) => ({

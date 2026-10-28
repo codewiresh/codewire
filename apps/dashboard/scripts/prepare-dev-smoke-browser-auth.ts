@@ -18,7 +18,7 @@ import { accessSync } from "node:fs";
 import { basename, join } from "node:path";
 import { userInfo } from "node:os";
 import {
-  DevUxError, OwnedUxSandbox, failureClassOf, uxOrganizationSlug, type FailureClass,
+  DevUxError, OwnedUxSandbox, cwFailureClass, failureClassOf, uxOrganizationSlug, type FailureClass,
 } from "./dev-ux-ownership";
 
 const DEV_ORIGIN = "https://codewire-dev.sh";
@@ -397,27 +397,44 @@ async function signOut(page: Page): Promise<void> {
   }
 }
 
-async function runJson(cwBin: string, env: NodeJS.ProcessEnv, args: string[], deadline: number): Promise<unknown> {
+// One cw command's private stdout. A nonzero exit names its cause from the
+// shell smoke's closed cw_failure_class set, read from its private stderr,
+// which is only tested and never repeated; oversized output stays an
+// assertion.
+async function runText(cwBin: string, env: NodeJS.ProcessEnv, args: string[], deadline: number): Promise<string> {
   const child = spawn(cwBin, ["--server", DEV_ORIGIN, ...args], {
     env, stdio: ["ignore", "pipe", "pipe"], detached: true,
   });
   if (!child.stdout || !child.stderr) fail("child-process");
   let stdout = "";
+  let stderr = "";
   let bytes = 0;
+  let errorBytes = 0;
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
     bytes += Buffer.byteLength(chunk);
     if (bytes <= MAX_PRIVATE_OUTPUT_BYTES) stdout += chunk;
     else child.kill("SIGTERM");
   });
-  drain(child.stderr, child);
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    errorBytes += Buffer.byteLength(chunk);
+    if (errorBytes <= MAX_PRIVATE_OUTPUT_BYTES) stderr += chunk;
+    else signalProcessGroup(child, "SIGTERM");
+  });
   let exit: number;
   try { exit = await childExit(child, deadline); }
   catch (error) {
     if (!await stopProcessGroup(child)) fail("cleanup-incomplete");
     throw error;
   }
-  if (exit !== 0 || bytes > MAX_PRIVATE_OUTPUT_BYTES) fail("identity-command");
+  if (bytes > MAX_PRIVATE_OUTPUT_BYTES || errorBytes > MAX_PRIVATE_OUTPUT_BYTES) fail("identity-command");
+  if (exit !== 0) fail("identity-command", cwFailureClass(exit, stderr));
+  return stdout;
+}
+
+async function runJson(cwBin: string, env: NodeJS.ProcessEnv, args: string[], deadline: number): Promise<unknown> {
+  const stdout = await runText(cwBin, env, args, deadline);
   try { return JSON.parse(stdout); } catch { fail("identity-response"); }
 }
 
@@ -437,30 +454,6 @@ export function assertIdentityResponses(
   const roles = [...current.matchAll(/^Role:\s+(\S+)\s*$/gm)].map((match) => match[1]);
   if (ids.length !== 1 || ids[0] !== expected.expectedOrgId
     || roles.length !== 1 || roles[0] !== "owner") fail("organization-mismatch");
-}
-
-async function runText(cwBin: string, env: NodeJS.ProcessEnv, args: string[], deadline: number): Promise<string> {
-  const child = spawn(cwBin, ["--server", DEV_ORIGIN, ...args], {
-    env, stdio: ["ignore", "pipe", "pipe"], detached: true,
-  });
-  if (!child.stdout || !child.stderr) fail("child-process");
-  let stdout = "";
-  let bytes = 0;
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    bytes += Buffer.byteLength(chunk);
-    if (bytes <= MAX_PRIVATE_OUTPUT_BYTES) stdout += chunk;
-    else child.kill("SIGTERM");
-  });
-  drain(child.stderr, child);
-  let exit: number;
-  try { exit = await childExit(child, deadline); }
-  catch (error) {
-    if (!await stopProcessGroup(child)) fail("cleanup-incomplete");
-    throw error;
-  }
-  if (exit !== 0 || bytes > MAX_PRIVATE_OUTPUT_BYTES) fail("identity-command");
-  return stdout;
 }
 
 async function clearDirectory(path: string): Promise<void> {

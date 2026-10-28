@@ -1,9 +1,31 @@
 // Value-blind ownership and cleanup for the protected Dev browser walkthrough.
 // Never accept resource selectors from rendered error text or sweep an account.
 
-// Closed failure classes for the helper's one failure-class line (#3132).
-export type FailureClass = "timeout" | "assertion" | "navigation" | "unexpected";
-const FAILURE_CLASSES: ReadonlySet<string> = new Set(["timeout", "assertion", "navigation", "unexpected"]);
+// Closed failure classes for the helper's one failure-class line (#3132). A
+// failed cw command adds the shell smoke's cw_failure_class set: dns, tls,
+// refused, connect, http_NNN or exit_N.
+export type FailureClass = "timeout" | "assertion" | "navigation" | "unexpected"
+  | "dns" | "tls" | "refused" | "connect" | `http_${number}` | `exit_${number}`;
+const FAILURE_CLASS = /^(?:timeout|assertion|navigation|unexpected|dns|tls|refused|connect|http_[1-5][0-9]{2}|exit_[0-9]{1,3})$/;
+
+export function isFailureClass(value: unknown): value is FailureClass {
+  return typeof value === "string" && FAILURE_CLASS.test(value);
+}
+
+// The class of one failed cw command, from its exit status and fixed patterns
+// in its private stderr, exactly as the shell smoke's cw_failure_class reads
+// them. The stderr is only tested, never repeated.
+export function cwFailureClass(status: number, stderr: string): FailureClass {
+  if (status === 124 || status === 137) return "timeout";
+  const code = /HTTP (?:error|status (?:client|server) error \() ?([1-5][0-9]{2})/.exec(stderr)?.[1];
+  if (code) return `http_${Number(code)}`;
+  if (/dns error|failed to lookup address|name or service not known|temporary failure in name resolution/i.test(stderr)) return "dns";
+  if (/tls error|certificate|tls handshake/i.test(stderr)) return "tls";
+  if (/timed out|deadline exceeded|deadline_exceeded/i.test(stderr)) return "timeout";
+  if (/connection refused/i.test(stderr)) return "refused";
+  if (/error sending request|connection reset|tcp connect error|broken pipe/i.test(stderr)) return "connect";
+  return `exit_${Math.min(Math.max(Math.trunc(status), 0), 255)}`;
+}
 // Playwright navigation failures: a Chromium net error, or a goto or reload
 // that failed or was interrupted. The message is only tested, never repeated.
 const NAVIGATION_FAILURE = /net::ERR_[A-Z0-9_]+|^(?:page|frame)\.(?:goto|reload|goBack|goForward):|interrupted by another navigation/;
@@ -16,7 +38,7 @@ const POLLED_EXPECTATION = /^expect\(/;
 export function failureClassOf(error: unknown): FailureClass {
   if (!(error instanceof Error)) return "unexpected";
   const carried = (error as { failureClass?: unknown }).failureClass;
-  if (typeof carried === "string" && FAILURE_CLASSES.has(carried)) return carried as FailureClass;
+  if (isFailureClass(carried)) return carried;
   if (error.name === "TimeoutError") return "timeout";
   if ("matcherResult" in error && (error as { matcherResult?: unknown }).matcherResult) return "assertion";
   if (POLLED_EXPECTATION.test(error.message)) return "assertion";
