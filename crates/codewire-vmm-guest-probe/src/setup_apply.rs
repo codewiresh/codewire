@@ -98,6 +98,11 @@ where
         ),
     )?;
     let lower = open_directory_at(&generation, LOWER_NAME)?;
+    // The process umask narrows mkdirat's mode; the lower root's is exact.
+    fs_result(
+        "set OCI lower directory mode",
+        rfs::fchmod(&lower, Mode::from_raw_mode(OCI_LOWER_ROOT_MODE)),
+    )?;
     let mut writer = LayerWriter::new(lower, write_payload);
 
     for ((layer, uncompressed_bytes), plan) in header

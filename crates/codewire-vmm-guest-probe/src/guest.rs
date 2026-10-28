@@ -6225,6 +6225,9 @@ fn write_durable(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
             Err(error) => return Err(error).context("create durable temporary file"),
         };
         let operation = (|| {
+            // The process umask narrows the creation mode; the published
+            // mode is exact.
+            file.set_permissions(fs::Permissions::from_mode(mode))?;
             file.write_all(bytes)?;
             file.sync_all()?;
             fs::rename(&temporary, path)?;
