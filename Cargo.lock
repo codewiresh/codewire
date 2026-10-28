@@ -2197,6 +2197,7 @@ dependencies = [
  "http 1.4.1",
  "http-body-util",
  "hyper",
+ "hyper-timeout",
  "hyper-util",
  "jsonschema",
  "k8s-openapi",

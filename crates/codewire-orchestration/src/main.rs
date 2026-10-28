@@ -448,7 +448,9 @@ async fn main() -> anyhow::Result<()> {
     // Ambient kube client (in-cluster or KUBECONFIG). Unavailable
     // mirrors the Go worker with a nil sandbox backend: setup health
     // checks pass and workspace execs fail warn-only.
-    let kube = match kube::Client::try_default().await {
+    // Span-free connections (#3581): a request that opens a connection
+    // must not keep its span open for the connection's life.
+    let kube = match codewire_server_core::span_free::kube_client_default().await {
         Ok(c) => Some(c),
         Err(e) => {
             tracing::warn!(error = %e, "kube client unavailable; workspace exec disabled");

@@ -1283,7 +1283,7 @@ impl SandboxClient {
     /// Builds from the ambient kube config (in-cluster or KUBECONFIG),
     /// like the Go client's rest.InClusterConfig / kubeconfig fallback.
     pub async fn from_env(namespace: &str) -> anyhow::Result<Self> {
-        let client = Client::try_default().await?;
+        let client = codewire_server_core::span_free::kube_client_default().await?;
         Ok(Self::new(client, namespace))
     }
 

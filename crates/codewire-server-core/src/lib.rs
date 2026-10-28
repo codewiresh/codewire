@@ -53,6 +53,7 @@ pub mod peer_token;
 pub mod pod_identity;
 pub mod rest_sunset;
 pub mod runtime_images;
+pub mod span_free;
 pub mod validation;
 
 pub use config::ServiceConfig;

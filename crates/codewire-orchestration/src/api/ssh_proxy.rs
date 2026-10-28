@@ -364,6 +364,7 @@ async fn daemon_channel_from_port_forward(stream: PortForwardedStream) -> anyhow
     Endpoint::from_static("http://hosted-daemon.internal")
         .connect_timeout(DAEMON_HEALTH_PROBE_TIMEOUT)
         .timeout(DAEMON_HEALTH_PROBE_TIMEOUT)
+        .executor(codewire_server_core::span_free::DetachedExecutor)
         .connect_with_connector(connector)
         .await
         .map_err(Into::into)

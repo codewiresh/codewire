@@ -209,6 +209,7 @@ impl CaptureBackend for PlatformBackend<'_> {
         let channel = Endpoint::from_shared(endpoint)
             .map_err(|_| binding_unavailable())?
             .connect_timeout(READ_TIMEOUT)
+            .executor(codewire_server_core::span_free::DetachedExecutor)
             .connect()
             .await
             .map_err(|_| binding_unavailable())?;

@@ -39,6 +39,7 @@ pub(super) fn connect(
     let endpoint = Endpoint::from_shared(target.endpoint.clone())
         .map_err(|_| ())?
         .connect_timeout(CONNECT_TIMEOUT)
+        .executor(codewire_server_core::span_free::DetachedExecutor)
         .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
         .keep_alive_while_idle(true);
     let channel = endpoint.connect_with_connector_lazy(tower::service_fn(move |uri: Uri| {

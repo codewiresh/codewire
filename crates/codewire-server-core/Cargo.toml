@@ -17,7 +17,7 @@ path = "src/lib.rs"
 default = []
 # Exact-purpose projected Kubernetes Pod identity. User OAuth bearers remain
 # opaque and never enter this verifier.
-kubernetes-identity = ["dep:async-trait", "dep:kube", "dep:k8s-openapi", "dep:codewire-daemon-proto"]
+kubernetes-identity = ["dep:async-trait", "dep:kube", "dep:k8s-openapi", "dep:codewire-daemon-proto", "dep:hyper-timeout"]
 # Opt-in OpenTelemetry OTLP exporter. The OTel deps drag in a hefty
 # transitive tree; services that don't ship traces upstream skip the
 # feature and tracing-subscriber alone handles structured logs.
@@ -27,6 +27,8 @@ otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", 
 async-trait = { workspace = true, optional = true }
 kube = { workspace = true, optional = true }
 k8s-openapi = { workspace = true, optional = true }
+# The span-free Kubernetes client (span_free.rs) builds kube's connector stack.
+hyper-timeout = { workspace = true, optional = true }
 codewire-daemon-proto = { workspace = true, optional = true }
 codewire-workspace-image = { workspace = true }
 axum = { workspace = true }

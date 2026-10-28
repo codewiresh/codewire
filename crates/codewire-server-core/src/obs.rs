@@ -916,8 +916,14 @@ mod tests {
             struct Probe;
             impl tracing::Subscriber for Probe {
                 fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-                    let expected = metadata.name().starts_with("export");
-                    assert_eq!(exported_span(metadata), expected, "{}", metadata.name());
+                    // Other tests' callsites register while this dispatcher
+                    // lives; a panic here would poison tracing's dispatcher
+                    // lock for the whole test binary. Judge only our own.
+                    let name = metadata.name();
+                    if name.starts_with("export") || name.starts_with("skip") {
+                        let expected = name.starts_with("export");
+                        assert_eq!(exported_span(metadata), expected, "{name}");
+                    }
                     false
                 }
                 fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
@@ -945,6 +951,10 @@ mod tests {
                 tracing::info!("skip_codewire_event");
             });
         }
+
+        /// `EXPORT_ACTIVE` is process-wide: tests that turn it on run one at
+        /// a time, or one would turn export off under another.
+        static EXPORT_ACTIVE_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
         #[derive(Clone, Debug, Default)]
         struct Collected(std::sync::Arc<std::sync::Mutex<Vec<opentelemetry_sdk::trace::SpanData>>>);
@@ -977,6 +987,7 @@ mod tests {
             let subscriber = tracing_subscriber::registry().with(exporter.layers());
             let _default = tracing::subscriber::set_default(subscriber);
             opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+            let _export_active = EXPORT_ACTIVE_TESTS.lock().await;
             EXPORT_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
 
             let carried = std::sync::Arc::new(std::sync::Mutex::new(TraceContext::default()));
@@ -1094,6 +1105,86 @@ mod tests {
                 "{traceparent}"
             );
             assert!(traceparent.contains(&child.span_context.span_id().to_string()));
+        }
+
+        /// A Temporal activity as the worker runs it: the SDK's `RunActivity`
+        /// span (not a Codewire target), Codewire's activity span joined to
+        /// the sender's trace, and Codewire work under it. Every exported
+        /// span's parent is the sender's span or another exported span, so
+        /// the trace is one connected tree (#3581).
+        #[tokio::test]
+        async fn an_activity_trace_has_no_orphaned_span() {
+            use tracing::Instrument as _;
+            use tracing_subscriber::layer::SubscriberExt as _;
+
+            let collected = Collected::default();
+            let exporter = super::super::otel::Exporter::with_processor(
+                "orchestration",
+                opentelemetry_sdk::trace::SimpleSpanProcessor::new(collected.clone()),
+            );
+            let subscriber = tracing_subscriber::registry().with(exporter.layers());
+            let _default = tracing::subscriber::set_default(subscriber);
+            opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+            let _export_active = EXPORT_ACTIVE_TESTS.lock().await;
+            EXPORT_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+
+            let sender = TraceContext {
+                traceparent: Some(
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+                ),
+                tracestate: None,
+            };
+            let run_activity = tracing::info_span!(
+                target: "temporalio_sdk",
+                "RunActivity",
+                "otel.name" = "RunActivity:EnvironmentSetupActivity",
+                "otel.kind" = "server",
+            );
+            async {
+                let activity = tracing::debug_span!(
+                    "temporal.activity",
+                    otel.name = "EnvironmentSetupActivity",
+                    otel.kind = "consumer",
+                );
+                sender.attach_to(&activity);
+                async {
+                    let step = tracing::debug_span!("configure_environment");
+                    async {
+                        tracing::debug!(
+                            target: "sqlx::query",
+                            summary = "SELECT 1",
+                            elapsed_secs = 0.001_f64,
+                        );
+                    }
+                    .instrument(step)
+                    .await;
+                }
+                .instrument(activity)
+                .await;
+            }
+            .instrument(run_activity)
+            .await;
+            exporter.provider().force_flush().unwrap();
+            EXPORT_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+
+            let spans = collected.0.lock().unwrap().clone();
+            let names: Vec<&str> = spans.iter().map(|span| span.name.as_ref()).collect();
+            let trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap();
+            let sender_span = SpanId::from_hex("00f067aa0ba902b7").unwrap();
+            let exported: std::collections::HashSet<SpanId> = spans
+                .iter()
+                .map(|span| span.span_context.span_id())
+                .collect();
+            for span in &spans {
+                assert_eq!(span.span_context.trace_id(), trace_id, "{names:?}");
+                assert!(
+                    span.parent_span_id == sender_span || exported.contains(&span.parent_span_id),
+                    "{} names a parent that was not exported: {names:?}",
+                    span.name
+                );
+            }
+            assert!(names.contains(&"EnvironmentSetupActivity"), "{names:?}");
+            assert!(names.contains(&"configure_environment"), "{names:?}");
         }
 
         #[test]

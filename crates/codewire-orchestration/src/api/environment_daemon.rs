@@ -1217,6 +1217,7 @@ async fn daemon_channel_for_endpoint(
             AppError::InternalMsg("failed to resolve environment daemon".into())
         })?
         .connect_timeout(DAEMON_CONNECT_TIMEOUT)
+        .executor(codewire_server_core::span_free::DetachedExecutor)
         .timeout(budget.timeout())
         .connect()
         .await

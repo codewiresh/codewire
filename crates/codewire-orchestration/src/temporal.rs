@@ -1169,7 +1169,12 @@ impl TemporalTrigger {
         } else {
             format!("http://{host_port}")
         };
-        let conn_opts = ConnectionOptions::new(url::Url::parse(&target)?).build();
+        let conn_opts = ConnectionOptions::new(url::Url::parse(&target)?)
+            // One frontend Service address, connected now. DNS load
+            // balancing would open connections lazily inside the first
+            // request, whose span the connection then holds (#3581).
+            .dns_load_balancing(None)
+            .build();
         let connection = Connection::connect(conn_opts).await?;
         let client = Client::new(
             connection,
@@ -1352,7 +1357,12 @@ pub async fn run_temporal_worker(
     } else {
         format!("http://{host_port}")
     };
-    let conn_opts = ConnectionOptions::new(url::Url::parse(&target)?).build();
+    let conn_opts = ConnectionOptions::new(url::Url::parse(&target)?)
+        // One frontend Service address, connected now. DNS load
+        // balancing would open connections lazily inside the first
+        // request, whose span the connection then holds (#3581).
+        .dns_load_balancing(None)
+        .build();
     let connection = Connection::connect(conn_opts).await?;
     let client = Client::new(
         connection,
