@@ -115,7 +115,7 @@ serde_json = "1"
 futures = "0.3"
 
 # SSH
-russh = "0.63.2"
+russh = "=0.64.1"
 russh-sftp = "2"
 
 # Terminal emulation
