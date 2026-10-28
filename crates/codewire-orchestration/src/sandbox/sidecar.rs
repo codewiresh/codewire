@@ -22,7 +22,17 @@ use super::host_keys::HostKeyStore;
 pub const WORKSPACE_SSH_PORT: u16 = codewire_daemon_proto::WORKSPACE_SSH_PORT;
 const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Between access readiness attempts.
-const ACCESS_READY_POLL: Duration = Duration::from_millis(250);
+const ACCESS_READY_POLL: Duration = Duration::from_millis(100);
+/// One direct connect of an access readiness attempt. A freshly bound
+/// member's endpoint is regenerated (new identity, its bridge) a few hundred
+/// milliseconds after the bind, and a SYN that lands before that is dropped
+/// by policy; the kernel would only resend it after its 1 s RTO (#3625). A
+/// short connect, tried again at once, sends a fresh SYN instead.
+const ACCESS_DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+/// For this long an access readiness attempt connects over the Pod network
+/// only; after it, an attempt may fall back to a kube port-forward, as the
+/// file routes do.
+const ACCESS_DIRECT_ONLY_WINDOW: Duration = Duration::from_secs(5);
 /// How long one access readiness attempt may take, connect to key exchange.
 const ACCESS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -78,6 +88,15 @@ impl AsyncWrite for PortForwardedStream {
 }
 
 async fn direct_stream(pod: &Pod, pod_name: &str, port: u16) -> anyhow::Result<TcpStream> {
+    direct_stream_within(pod, pod_name, port, DIRECT_CONNECT_TIMEOUT).await
+}
+
+async fn direct_stream_within(
+    pod: &Pod,
+    pod_name: &str,
+    port: u16,
+    connect_timeout: Duration,
+) -> anyhow::Result<TcpStream> {
     let pod_ip = pod
         .status
         .as_ref()
@@ -89,10 +108,30 @@ async fn direct_stream(pod: &Pod, pod_name: &str, port: u16) -> anyhow::Result<T
         .map_err(|e| anyhow::anyhow!("parse pod IP {pod_ip}: {e}"))?;
     let addr = SocketAddr::new(ip, port);
 
-    tokio::time::timeout(DIRECT_CONNECT_TIMEOUT, TcpStream::connect(addr))
+    tokio::time::timeout(connect_timeout, TcpStream::connect(addr))
         .await
         .map_err(|_| anyhow::anyhow!("connect {addr}: timed out"))?
         .map_err(|e| anyhow::anyhow!("connect {addr}: {e}"))
+}
+
+/// How an access readiness attempt reaches the Pod.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccessProbePath {
+    /// The Pod network only, with [`ACCESS_DIRECT_CONNECT_TIMEOUT`].
+    DirectOnly,
+    /// The Pod network, then a kube port-forward ([`SandboxClient::workspace_ssh_stream`]).
+    DirectThenForward,
+}
+
+/// Attempts in the first [`ACCESS_DIRECT_ONLY_WINDOW`] of the wait use the
+/// Pod network only: a slow port-forward there would hide a SYN the
+/// member's not-yet-regenerated policy dropped. Later attempts may forward.
+fn access_probe_path(waited: Duration) -> AccessProbePath {
+    if waited < ACCESS_DIRECT_ONLY_WINDOW {
+        AccessProbePath::DirectOnly
+    } else {
+        AccessProbePath::DirectThenForward
+    }
 }
 
 /// Accepts exactly the host key the environment's currently bound Pod
@@ -192,6 +231,21 @@ impl SandboxClient {
         self.forwarded_stream(&pod_name, port, direct_error).await
     }
 
+    /// The current workspace Pod's `port` over the Pod network only, with an
+    /// access readiness attempt's short connect.
+    async fn workspace_direct_stream(&self, env_id: &str, port: u16) -> anyhow::Result<TcpStream> {
+        let pod = self
+            .current_workspace_pod_object(env_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("workspace SSH: {e}"))?;
+        let pod_name = pod
+            .metadata
+            .name
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("workspace SSH: the Pod has no name"))?;
+        direct_stream_within(&pod, &pod_name, port, ACCESS_DIRECT_CONNECT_TIMEOUT).await
+    }
+
     async fn port_forward_pod_stream(
         &self,
         pod_name: &str,
@@ -262,11 +316,13 @@ impl SandboxClient {
         host_keys: &dyn HostKeyStore,
     ) -> anyhow::Result<()> {
         let mut last = None;
+        let started = tokio::time::Instant::now();
         let ready = tokio::time::timeout(timeout, async {
             loop {
+                let path = access_probe_path(started.elapsed());
                 let attempt = tokio::time::timeout(
                     ACCESS_HANDSHAKE_TIMEOUT,
-                    self.pinned_key_exchange(env_id, port, host_keys),
+                    self.pinned_key_exchange(env_id, port, host_keys, path),
                 )
                 .await
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("SSH key exchange timed out")));
@@ -289,9 +345,18 @@ impl SandboxClient {
         env_id: &str,
         port: u16,
         host_keys: &dyn HostKeyStore,
+        path: AccessProbePath,
     ) -> anyhow::Result<()> {
         let pinned = PinnedHostKey::current(env_id, host_keys).await?;
-        let (stream, _pf) = self.workspace_ssh_stream(env_id, port).await?.into_parts();
+        let (stream, _pf) = match path {
+            AccessProbePath::DirectOnly => {
+                let stream = self.workspace_direct_stream(env_id, port).await?;
+                (Box::new(stream) as Box<dyn AsyncReadWrite>, None)
+            }
+            AccessProbePath::DirectThenForward => {
+                self.workspace_ssh_stream(env_id, port).await?.into_parts()
+            }
+        };
         let handle = russh::client::connect_stream(sidecar_ssh_config(), stream, pinned)
             .await
             .map_err(|e| anyhow::anyhow!("SSH key exchange with the recorded host key: {e}"))?;
@@ -640,6 +705,24 @@ mod tests {
             WORKSPACE_SSH_PORT,
             codewire_daemon_proto::WORKSPACE_SSH_PORT
         );
+    }
+
+    #[test]
+    fn access_readiness_connects_directly_before_it_may_forward() {
+        assert_eq!(
+            access_probe_path(Duration::ZERO),
+            AccessProbePath::DirectOnly
+        );
+        assert_eq!(
+            access_probe_path(ACCESS_DIRECT_ONLY_WINDOW - Duration::from_millis(1)),
+            AccessProbePath::DirectOnly
+        );
+        assert_eq!(
+            access_probe_path(ACCESS_DIRECT_ONLY_WINDOW),
+            AccessProbePath::DirectThenForward
+        );
+        // A dropped SYN costs one short connect, never the kernel's 1 s RTO.
+        assert!(ACCESS_DIRECT_CONNECT_TIMEOUT + ACCESS_READY_POLL < Duration::from_secs(1));
     }
 
     #[tokio::test]
