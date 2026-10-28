@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Dev acceptance for confidential workspaces that bind like standard ones
-# (Program #2238 B2c, docs/plans/2026-10-07-confidential-binding-b2c.md).
+# (Program #2238 B2c; design: private-docs designs/2026-10-07-confidential-binding-b2c.md).
 #
 # Creates one confidential environment on Dev's SEV-SNP node through the
 # product CLI and proves, as a user sees it:
@@ -9,7 +9,7 @@
 #     in guest memory and carries the measured anchors exactly once;
 #   - its measured init-data pins those anchors, names its environment as the
 #     storage key, never carries a daemon token, and equals its Sandbox's;
-#   - `cw config-ssh` then OpenSSH runs a command line and keeps its exit
+#   - `cw setup ssh` then OpenSSH runs a command line and keeps its exit
 #     status, scp round-trips over SFTP, over WebSocket and over the tailnet;
 #   - the recorded host key is the one served, and any other key is refused;
 #   - optionally, the credential relay serves a selected profile, and the
@@ -31,9 +31,9 @@ SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
 SNP_NODE_LABEL="${SNP_NODE_LABEL:-node.codewire.sh/confidential-snp=true}"
 PROOF_IMAGE="${PROOF_IMAGE:-workspace}"
-PROOF_CPU="${PROOF_CPU:-2000}"
-PROOF_MEMORY="${PROOF_MEMORY:-8192}"
-PROOF_DISK="${PROOF_DISK:-20}"
+PROOF_CPU="${PROOF_CPU:-2}"
+PROOF_MEMORY="${PROOF_MEMORY:-8GB}"
+PROOF_DISK="${PROOF_DISK:-20GB}"
 PROOF_TTL="${PROOF_TTL:-3h}"
 # A confidential guest attests and opens its encrypted storage before its
 # daemon binds: the tier's ready budget is 30 minutes.
@@ -123,7 +123,7 @@ cw() { timeout 180 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" "$@"; }
 
 cleanup() {
   if [[ "$CREATED" == 1 && "$KEEP" == 0 && -n "$ENV_ID" ]]; then
-    cw env rm --yes "$ENV_ID" >/dev/null 2>&1 || log "cleanup: could not remove $ENV_ID"
+    cw rm --yes "$ENV_ID" >/dev/null 2>&1 || log "cleanup: could not remove $ENV_ID"
   fi
   if [[ -n "$TMPDIR_PROOF" && -d "$TMPDIR_PROOF" ]]; then
     rm -rf -- "$TMPDIR_PROOF"
@@ -159,7 +159,7 @@ build_cw() {
     return
   fi
   log "building cw"
-  (cd "$ROOT" && cargo build -q -p codewire-cli --bin cw) || die "cw build failed"
+  (cd "$ROOT" && cargo build -q -p codewire-cli-bin --bin cw) || die "cw build failed"
   CW_BIN="$(cd "$ROOT" && cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')/debug/cw"
   [[ -x "$CW_BIN" ]] || die "built cw not found at $CW_BIN"
 }
@@ -168,7 +168,7 @@ build_cw() {
 
 env_state() {
   local out="$TMPDIR_PROOF/env-info.out"
-  cw env info "$ENV_ID" >"$out" 2>&1 || return 1
+  cw info "$ENV_ID" >"$out" 2>&1 || return 1
   awk '$1 == "State:" {print $2; exit}' "$out"
 }
 
@@ -192,18 +192,20 @@ create_env() {
   local name out started finished args
   name="b2c-proof-$(date +%s)"
   out="$TMPDIR_PROOF/create.out"
-  args=(env create --image "$PROOF_IMAGE" --name "$name" --cpu "$PROOF_CPU"
+  args=(create --image "$PROOF_IMAGE" --name "$name" --cpu "$PROOF_CPU"
     --memory "$PROOF_MEMORY" --disk "$PROOF_DISK" --isolation confidential
-    --ttl "$PROOF_TTL" --no-network --no-wait --yes)
+    --ttl "$PROOF_TTL" --no-network --no-wait --yes --output json)
   if [[ -n "$CREDENTIAL_PROFILE" ]]; then
     args+=(--profile "$CREDENTIAL_PROFILE")
+  else
+    args+=(--no-profile)
   fi
   started="$(seconds_now)"
   if ! cw "${args[@]}" >"$out" 2>&1; then
     sed 's/[[:cntrl:]]//g' "$out" >&2
     die "confidential create was refused"
   fi
-  ENV_ID="$(awk '/^[[:space:]]*ID:/ {print $2; exit}' "$out")"
+  ENV_ID="$(jq -r '.id // empty' "$out" 2>/dev/null || true)"
   [[ "$ENV_ID" =~ ^[0-9a-f-]{36}$ ]] || die "could not read the created environment ID"
   CREATED=1
   pass "confidential create accepted ($ENV_ID)"
@@ -344,8 +346,8 @@ guest_sees_its_measured_environment() {
 ssh_config() {
   local config="$TMPDIR_PROOF/ssh_config"
   if [[ ! -s "$config" ]]; then
-    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" config-ssh --ssh-config-file "$config" >/dev/null ||
-      die "cw config-ssh could not write the managed SSH block"
+    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" setup ssh --ssh-config-file "$config" >/dev/null ||
+      die "cw setup ssh could not write the managed SSH block"
   fi
   printf '%s\n' "$config"
 }
@@ -476,9 +478,9 @@ prove_stop_start() {
   before_key="$TMPDIR_PROOF/known_hosts.previous"
   recorded_host_key >"$before_key" || true
   log "stopping and starting $ENV_ID"
-  cw env stop "$ENV_ID" >/dev/null || { fail "stop accepted"; return; }
+  cw stop "$ENV_ID" >/dev/null || { fail "stop accepted"; return; }
   if ! wait_for_state stopped; then fail "environment stopped"; return; fi
-  cw env start "$ENV_ID" >/dev/null || { fail "start accepted"; return; }
+  cw start "$ENV_ID" >/dev/null || { fail "start accepted"; return; }
   if ! wait_for_state running; then fail "environment running again"; return; fi
   pass "a confidential stop and start reaches running"
   capture_pod

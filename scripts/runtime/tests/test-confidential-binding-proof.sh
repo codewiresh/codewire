@@ -38,6 +38,13 @@ fi
 )
 # Creates use the user's login, never an API key, and the confidential tier.
 grep -F -- '--isolation confidential' "$PROOF" >/dev/null || fail "the proof does not create a confidential environment"
+# The proof drives the current CLI: `cw env *` and `cw config-ssh` were
+# removed, and the cw binary lives in codewire-cli-bin.
+if grep -nE '\bcw (env|config-ssh)\b|[^-](env (create|info|stop|start|rm)) ' "$PROOF" >/dev/null; then
+  fail "the proof still calls a removed cw command"
+fi
+grep -F -- '-p codewire-cli-bin --bin cw' "$PROOF" >/dev/null || fail "the proof builds cw from the wrong package"
+grep -F -- 'setup ssh --ssh-config-file' "$PROOF" >/dev/null || fail "the proof does not write its SSH config with cw setup ssh"
 if grep -nE 'API_KEY|--api-key' "$PROOF" >/dev/null; then
   fail "the proof uses an API key; confidential creates are admin-only user logins"
 fi
