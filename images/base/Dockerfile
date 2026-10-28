@@ -32,7 +32,7 @@ RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
 # Every supported architecture has an explicit reviewed digest; unknown
 # architectures fail closed instead of silently receiving a different binary.
 ARG TARGETARCH
-ARG DOCKER_VERSION=29.7.1
+ARG DOCKER_VERSION=29.9.2
 ARG BUILDX_VERSION=0.36.0
 ARG COMPOSE_VERSION=5.4.0
 ARG GH_VERSION=2.97.0
@@ -40,13 +40,13 @@ RUN set -euo pipefail; \
     case "$TARGETARCH" in \
       amd64) \
         docker_arch=x86_64; compose_arch=x86_64; gh_arch=amd64; \
-        docker_sha=0fcea2a8b4d1b54ccc9010e3451b78504a369d414f37eb3bb79300e1b5c22ce6; \
+        docker_sha=9ac225999fd5e863f7694c728ef23d480616b1e5639328fa309befd4243d69eb; \
         buildx_sha=07823fdfcd82a41be90155a8b16876c1a780a6462de805a9f3f63b3119ccfb99; \
         compose_sha=837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be; \
         gh_sha=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112 ;; \
       arm64) \
         docker_arch=aarch64; compose_arch=aarch64; gh_arch=arm64; \
-        docker_sha=4eb4d1b21131897ed3990aac31039161bf4bdd07fcfb733e996010319ff4e069; \
+        docker_sha=873b3e0207857c3b2f28392fb922f3ea6efe37620c16d4d4aaf2fef409c90b73; \
         buildx_sha=70382de03915c07c488ae4ddc4f7e169ee978f953e754ecfce110ba017e0132b; \
         compose_sha=fc5d1371f1ec7987e703da94ede49af3fbfb240b83f22991a98511de7bc4b93b; \
         gh_sha=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5 ;; \
