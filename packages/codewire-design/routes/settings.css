@@ -106,14 +106,18 @@
   [data-dashboard-app] .cw-personal-secrets-page [data-dialog-open] { display: none; }
 }
 
-@media (max-width: 63.9375rem) {
+@media (max-width: 48rem) {
   [data-dashboard-app] .cw-settings-content :is(#security, #sessions) { scroll-margin-top: calc(var(--console-header) + var(--space-3)); }
+}
+
+/* The context navigation is a strip above the content below 64rem. */
+@media (max-width: 64rem) {
+  [data-dashboard-app] .cw-settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
 }
 
 @media (max-width: 48rem) {
   [data-dashboard-app] .cw-security-row { grid-template-columns: minmax(0, 1fr); }
   [data-dashboard-app] .cw-security-actions { justify-content: start; }
-  [data-dashboard-app] .cw-settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   [data-dashboard-app] .cw-settings-content { padding: var(--space-4) var(--space-4) var(--space-8); }
   [data-dashboard-app] .cw-settings-details div { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
   [data-dashboard-app] .cw-settings-list-heading { align-items: start; flex-direction: column; }

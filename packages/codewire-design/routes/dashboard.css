@@ -12,7 +12,7 @@
 /* A collapsed sidebar keeps a rail holding only the button that expands it;
    the page takes the rest. Phones use the drawer instead. */
 .cw-console-brand-row > .cw-sidebar-expand { display: none; }
-@media (min-width: 64rem) {
+@media (width > 48rem) {
   .cw-app[data-sidebar-collapsed="true"] { --sidebar-width: var(--sidebar-rail-width); }
   .cw-app[data-sidebar-collapsed="true"] .cw-sidebar-slot .cw-sidebar > :not(.cw-console-brand-row),
   .cw-app[data-sidebar-collapsed="true"] .cw-sidebar-slot .cw-console-brand-row > :not(.cw-sidebar-expand) { display: none; }
@@ -46,7 +46,7 @@
 .cw-rail-name { overflow: hidden; font-family: var(--font-sans); font-size: var(--text-secondary); line-height: var(--leading-ui); text-overflow: ellipsis; white-space: nowrap; }
 .cw-rail-state { color: var(--fg-tertiary); font-family: var(--font-sans); font-size: var(--text-micro); line-height: var(--leading-tight); }
 .cw-rail-status { margin: var(--space-3) 0; padding-inline: var(--cw-sidebar-row-padding); color: var(--fg-tertiary); font-size: var(--text-small); }
-.cw-console-empty-org { margin: var(--space-1) var(--cw-sidebar-gutter); padding: var(--space-4) var(--cw-sidebar-row-padding); border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-tertiary); font-size: var(--text-small); }
+.cw-console-empty-org { margin: var(--space-1) var(--cw-sidebar-gutter) auto; padding: var(--space-4) var(--cw-sidebar-row-padding); border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-tertiary); font-size: var(--text-small); }
 .cw-console-empty-org p { margin: 0 0 var(--space-2); }
 .cw-console-empty-org a { color: var(--accent-text); }
 .cw-console-admin { padding: var(--space-2) var(--cw-sidebar-gutter); border-top: 1px solid var(--border-subtle); }
@@ -94,7 +94,7 @@
 .cw-sandbox-terminal { min-height: 0; background: var(--bg-base); }
 .cw-sandbox-terminal .cw-terminal-panel { min-width: 0; height: 100%; overflow: hidden; }
 
-@media (max-width: 63.9375rem) {
+@media (max-width: 48rem) {
   .cw-console-header { display: none; }
   .cw-sandbox-detail-main { padding-top: var(--mobile-bar); }
 }

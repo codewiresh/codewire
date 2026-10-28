@@ -13,7 +13,7 @@
 .cw-sandbox-table-shell { overflow: visible; }
 .cw-sandbox-table { table-layout: fixed; }
 .cw-sandbox-table th:nth-child(1) { width: 24%; }
-.cw-sandbox-table th:nth-child(2) { width: 12%; }
+.cw-sandbox-table th:nth-child(2) { width: 8.5rem; }
 .cw-sandbox-table th:nth-child(3) { width: 23%; }
 .cw-sandbox-table th:nth-child(4) { width: 20%; }
 .cw-sandbox-table th:nth-child(5) { width: 14%; }
@@ -157,10 +157,11 @@
 .cw-port-preview-url { display: block; overflow-wrap: anywhere; font-size: var(--text-small); }
 .cw-port-dialog { width: min(42rem, calc(100% - var(--space-8))); }
 
+/* Below 64rem the sidebar still takes its width, so the table has a phone's
+   room: it keeps the name, state and actions. */
 @media (max-width: 64rem) {
-  .cw-sandbox-table th:nth-child(4), .cw-sandbox-table td:nth-child(4),
-  .cw-sandbox-table th:nth-child(5), .cw-sandbox-table td:nth-child(5) { display: none; }
-  .cw-sandbox-table th:nth-child(1) { width: 32%; }
+  .cw-sandbox-table :is(th, td):is(:nth-child(3), :nth-child(4), :nth-child(5)) { display: none; }
+  .cw-sandbox-table th:nth-child(1) { width: auto; }
 }
 
 @media (max-width: 48rem) {
@@ -171,9 +172,6 @@
   .cw-environment-filters .cw-input, .cw-environment-filters .cw-select { width: 100%; }
   .cw-environment-toolbar > .cw-button { width: 100%; margin-left: 0; }
   .cw-filter-menu-panel { right: 0; left: auto; }
-  .cw-sandbox-table th:nth-child(3), .cw-sandbox-table td:nth-child(3) { display: none; }
-  .cw-sandbox-table th:nth-child(1) { width: auto; }
-  .cw-sandbox-table th:nth-child(2) { width: 6rem; }
   .cw-sandbox-table th:last-child { width: var(--space-10); }
   .cw-create-resources { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cw-port-form, .cw-port-row { grid-template-columns: minmax(0, 1fr); }

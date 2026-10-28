@@ -956,7 +956,11 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
   .cw-drawer-body {
     padding: var(--space-4) var(--space-4) var(--space-5);
   }
+}
 
+/* Beside the main sidebar, a content column narrower than 64rem has no room
+   for a second side panel: the context navigation becomes a strip above it. */
+@media (max-width: 64rem) {
   .cw-context-nav {
     gap: var(--space-2);
     overflow: hidden;

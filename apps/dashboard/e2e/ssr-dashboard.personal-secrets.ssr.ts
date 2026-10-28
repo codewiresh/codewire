@@ -162,7 +162,7 @@ test("empty and unavailable states remain distinct and pagination never implies 
   await expect(page.getByText("No personal secrets yet. Add a secret when a workload needs one.", { exact: true })).toBeVisible();
   await expect(action(page, "Add secret")).toBeVisible();
   await expect(page.locator(".cw-personal-secret-row")).toHaveCount(0);
-  const mobile = (page.viewportSize()?.width || 0) < 1024;
+  const mobile = (page.viewportSize()?.width || 0) <= 768;
   if (mobile) await action(page, "Toggle sidebar").click();
   const sidebar = page.locator(mobile ? ".cw-mobile-drawer" : ".cw-sidebar-slot");
   await expect(sidebar.getByText("Choose an organization above to view its Sandboxes.", { exact: true })).toBeVisible();

@@ -1226,7 +1226,7 @@ fieldset.cw-field > legend {
   border: 0;
 }
 
-@media (max-width: 1023px) {
+@media (max-width: 48rem) {
   .cw-sidebar-slot {
     display: none;
   }
