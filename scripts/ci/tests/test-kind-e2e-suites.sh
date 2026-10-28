@@ -2377,7 +2377,7 @@ env \
   assert_no_public_dind_images() {
     # Admission expressions name allowed images without launching them. Check
     # workload image fields and the runtime configuration instead of CEL text.
-    if grep -Eq '^[[:space:]]*(-[[:space:]]+)?(image|SANDBOX_DIND_IMAGE):.*docker[.]io/library/docker:29[.]7[.]1-dind' "$1"; then
+    if grep -Eq '^[[:space:]]*(-[[:space:]]+)?(image|SANDBOX_DIND_IMAGE):.*docker[.]io/library/docker:[0-9]+[.][0-9]+[.][0-9]+-dind' "$1"; then
       fail 'sealed Kind overlay retained the public DinD image'
     fi
   }
@@ -2697,7 +2697,7 @@ env \
   assert_sandbox_supply_chain ||
     fail 'sealed runtime rejected a template where optional DinD is inactive'
 
-  configured_dind='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
+  configured_dind='docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977'
   if assert_sandbox_supply_chain >/dev/null 2>&1; then
     fail 'sealed runtime accepted a substituted configured DinD input'
   fi
