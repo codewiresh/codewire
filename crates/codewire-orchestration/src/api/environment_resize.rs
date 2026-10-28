@@ -306,6 +306,21 @@ pub(crate) fn classify_execution_mode(
     let compute_changed = desired.cpu_millicores != previous.cpu_millicores
         || desired.memory_mb != previous.memory_mb;
     if !compute_changed {
+        // A VM runtime attaches the workspace disk when the guest boots, so
+        // its filesystem grows only in a replacement Pod (#3616). Deciding
+        // that here asks for restart consent before anything is changed.
+        if let Some(runtime_class) = pod.map(|pod| pod.runtime_class_name.as_str())
+            && desired.disk_gb > previous.disk_gb
+            && !matches!(runtime_class, "" | RUNTIME_CLASS_RUNC)
+        {
+            return Ok((
+                EnvironmentResizeExecutionMode::Restart,
+                format!(
+                    "runtime class {runtime_class} attaches the workspace disk when the VM boots; \
+                     its filesystem grows only in a replacement Pod"
+                ),
+            ));
+        }
         return Ok((
             EnvironmentResizeExecutionMode::InPlace,
             "persistent storage will be expanded without replacing the workspace Pod".into(),
@@ -511,7 +526,8 @@ async fn build_resize_plan(
         None
     };
 
-    let pod = if environment_state == "running" && compute_changed {
+    let disk_grows = params.desired_resources.disk_gb > previous.disk_gb;
+    let pod = if environment_state == "running" && (compute_changed || disk_grows) {
         Some(
             client
                 .as_ref()
@@ -1340,6 +1356,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn disk_growth_on_a_running_vm_asks_for_restart_before_changing_anything() {
+        let previous = EnvironmentResources {
+            cpu_millicores: 2_000,
+            memory_mb: 8_192,
+            disk_gb: 80,
+        };
+        let desired = EnvironmentResources {
+            disk_gb: 200,
+            ..previous
+        };
+        for runtime_class in [RUNTIME_CLASS_COMMODITY, "kata-clh", "kata-qemu-snp"] {
+            let pod = pod_with_runtime_class(runtime_class);
+            assert_eq!(
+                classify_execution_mode("running", previous, desired, Some(&pod))
+                    .unwrap()
+                    .0,
+                EnvironmentResizeExecutionMode::Restart,
+                "{runtime_class}"
+            );
+        }
+        for runtime_class in ["", RUNTIME_CLASS_RUNC] {
+            let pod = pod_with_runtime_class(runtime_class);
+            assert_eq!(
+                classify_execution_mode("running", previous, desired, Some(&pod))
+                    .unwrap()
+                    .0,
+                EnvironmentResizeExecutionMode::InPlace,
+                "{runtime_class:?}"
+            );
+        }
+        assert_eq!(
+            classify_execution_mode("stopped", previous, desired, None)
+                .unwrap()
+                .0,
+            EnvironmentResizeExecutionMode::ApplyOnStart
+        );
+    }
+
     fn pod_with_runtime_class(runtime_class_name: &str) -> WorkspacePodResizeState {
         WorkspacePodResizeState {
             identity: crate::sandbox::client::WorkspacePodIdentity {
@@ -1408,15 +1463,15 @@ mod tests {
                 EnvironmentResizeExecutionMode::ApplyOnStart
             );
 
-            // Storage-only growth never touches the VM's compute size.
-            assert_eq!(
-                classify(EnvironmentResources {
-                    disk_gb: 20,
-                    ..previous
-                })
-                .0,
-                EnvironmentResizeExecutionMode::InPlace
-            );
+            // Storage-only growth keeps the VM's compute size, but the guest
+            // filesystem grows only in a replacement Pod (#3616), so it asks
+            // for restart consent up front.
+            let (mode, reason) = classify(EnvironmentResources {
+                disk_gb: 20,
+                ..previous
+            });
+            assert_eq!(mode, EnvironmentResizeExecutionMode::Restart);
+            assert!(reason.contains("replacement Pod"), "{reason}");
         }
 
         // runc (Kind) keeps live CPU and memory growth.

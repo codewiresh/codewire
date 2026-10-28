@@ -420,7 +420,7 @@ pub async fn handle_environment_resize(
                     {
                         return Err(TerminalResizeFailure {
                             code: "restart_consent_required",
-                            message: "Kubernetes requires workspace Pod replacement to finish filesystem expansion; retry with allow-restart consent".into(),
+                            message: "Kubernetes requires workspace Pod replacement to finish filesystem expansion; the volume has grown and its filesystem grows when the workspace Pod is next replaced: stop and start the environment to finish it".into(),
                         }
                         .into());
                     }
