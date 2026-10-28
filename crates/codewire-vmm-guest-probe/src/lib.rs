@@ -1,6 +1,7 @@
 //! Shared seed codec, canonical initramfs writer, and Linux guest helpers for
 //! the Codewire-owned microVM spike.
 
+mod checkpoint_protocol;
 mod network;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -39,12 +40,22 @@ mod workload_cgroup;
 #[cfg(target_os = "linux")]
 mod workspace_plan;
 
+pub use checkpoint_protocol::{
+    CHECKPOINT_CHALLENGE_LEN, CHECKPOINT_HELLO_LEN, CHECKPOINT_HOST_ENTROPY_LEN,
+    CHECKPOINT_REPLY_LEN, CHECKPOINT_REQUEST_LEN, CheckpointAction, CheckpointError,
+    CheckpointHello, CheckpointKey, CheckpointReply, CheckpointRequest, CheckpointStatus,
+    GUEST_CHECKPOINT_ABI, GUEST_CHECKPOINT_VSOCK_PORT, ResumeReport, resume_transition_allowed,
+};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use direct_share::{
     DIRECT_SHARE_PLAN_PATH, DIRECT_SHARE_PLAN_RELATIVE_PATH, DirectShareMount, DirectSharePlan,
     DirectSharePlanError, MAX_DIRECT_SHARE_PLAN_BYTES, MAX_DIRECT_SHARES,
     VM_ONLY_CAPABILITY_MARKER,
 };
+/// Referenced by the guest entrypoint and read from the admitted init ELF: a
+/// boot whose init lacks it has no checkpoint hook, so it is never
+/// checkpointed (#3046 R4). The version is [`GUEST_CHECKPOINT_ABI`].
+pub const GUEST_CHECKPOINT_ABI_MARKER: &[u8] = b"\0CWCHECKPOINTABI\0hook=1\0";
 pub use network::{
     GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN,
     NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NETWORK_HOST_READY_TIMEOUT_SECONDS,

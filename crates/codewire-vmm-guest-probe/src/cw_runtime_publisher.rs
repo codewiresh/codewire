@@ -128,6 +128,33 @@ impl RuntimeCache {
         Ok(cache)
     }
 
+    /// Moves the publisher to a restored boot's identity (#3046 R4). A new
+    /// generation of this environment only changes the binding. A fork is a
+    /// new environment: the selection keeps its runtimes and revision, takes
+    /// the fork's environment id, and drops the source's operation receipts,
+    /// which no caller of the fork can observe.
+    pub fn rebind(&mut self, environment_id: Uuid, generation: u64) -> Result<()> {
+        let binding = RuntimeBinding {
+            environment_id,
+            generation,
+            bootstrap_catalog_sha256: self.binding.bootstrap_catalog_sha256.clone(),
+        };
+        binding.validate().map_err(anyhow::Error::msg)?;
+        if environment_id == self.binding.environment_id {
+            self.binding = binding;
+            return Ok(());
+        }
+        let mut selection = self.selection()?;
+        selection.environment_id = environment_id;
+        selection.operations.clear();
+        let previous = std::mem::replace(&mut self.binding, binding);
+        if let Err(error) = self.commit(&selection) {
+            self.binding = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn selection(&self) -> Result<RuntimeSelection> {
         let deadline = Instant::now() + Duration::from_secs(LIVE_RUNTIME_TIMEOUT_SECONDS);
         self.validate_roots()?;
@@ -770,9 +797,8 @@ pub async fn read_frame<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&bytes).context("invalid runtime frame")
 }
 
-pub async fn serve(cache: RuntimeCache) -> Result<()> {
+pub async fn serve(cache: Arc<Mutex<RuntimeCache>>) -> Result<()> {
     let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, LIVE_RUNTIME_VSOCK_PORT))?;
-    let cache = Arc::new(Mutex::new(cache));
     let transfer = Arc::new(tokio::sync::Semaphore::new(1));
     let connections = Arc::new(tokio::sync::Semaphore::new(8));
     loop {
@@ -1325,6 +1351,61 @@ mod tests {
                     Err(RuntimeRefusal::Identity)
                 );
             }
+            "rebind" => {
+                fixture.publish(id);
+                let source = fixture.select(id);
+                let selected = fixture.cache().control(&source).unwrap().selection;
+                assert_eq!(selected.operations.len(), 1);
+                // A restored boot of the same environment: only the binding
+                // moves, and the old generation's requests are refused.
+                fixture
+                    .cache
+                    .as_mut()
+                    .unwrap()
+                    .rebind(fixture.binding.environment_id, 2)
+                    .unwrap();
+                assert_eq!(fixture.cache().selection().unwrap(), selected);
+                assert_eq!(
+                    fixture.cache().control(&source),
+                    Err(RuntimeRefusal::Identity)
+                );
+                fixture.binding.generation = 2;
+                fixture
+                    .cache()
+                    .control(&fixture.request(RuntimeAction::Info))
+                    .unwrap();
+                // A fork: the fork's identity, the same runtimes and revision,
+                // and none of the source's receipts.
+                let source_binding = fixture.binding.clone();
+                let fork = Uuid::new_v4();
+                fixture.cache.as_mut().unwrap().rebind(fork, 1).unwrap();
+                let forked = fixture.cache().selection().unwrap();
+                assert_eq!(forked.environment_id, fork);
+                assert_eq!(forked.catalog, selected.catalog);
+                assert_eq!(forked.revision, selected.revision);
+                assert!(forked.operations.is_empty());
+                assert_eq!(
+                    fixture.cache().control(&RuntimeRequest {
+                        protocol_version: LIVE_RUNTIME_PROTOCOL,
+                        binding: source_binding,
+                        action: RuntimeAction::Info,
+                    }),
+                    Err(RuntimeRefusal::Identity)
+                );
+                // The fork's next boot admits the rebound selection.
+                fixture.binding.environment_id = fork;
+                fixture.reopen(2);
+                assert_eq!(fixture.cache().selection().unwrap(), forked);
+                assert!(
+                    fixture
+                        .cache
+                        .as_mut()
+                        .unwrap()
+                        .rebind(Uuid::nil(), 3)
+                        .is_err()
+                );
+                assert_eq!(fixture.cache().selection().unwrap(), forked);
+            }
             "staging" => {
                 let stage = fixture.root.join(format!("stage-{}", Uuid::new_v4()));
                 create_directory(&stage, 0, 0o700).unwrap();
@@ -1608,6 +1689,10 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed; 0 ignored"));
+    }
+    #[test]
+    fn live_runtime_rebinds_to_a_restored_boot_and_a_fork() {
+        kernel("rebind");
     }
     #[test]
     fn live_runtime_receipt_capacity_preserves_selection_and_observation() {

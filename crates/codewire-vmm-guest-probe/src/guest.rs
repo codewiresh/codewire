@@ -289,10 +289,14 @@ struct LinuxCapabilityData {
     inheritable: u32,
 }
 
+#[path = "checkpoint.rs"]
+mod checkpoint;
+
 pub fn run_init() -> Result<()> {
     // Keep the startup capability in the actual sealed guest ELF. Host
     // preflight reads it from the admitted boot image without executing it.
     std::hint::black_box(crate::GUEST_RUNTIME_ABI_MARKER);
+    std::hint::black_box(crate::GUEST_CHECKPOINT_ABI_MARKER);
     std::hint::black_box(crate::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER);
     std::hint::black_box(crate::VM_ONLY_CAPABILITY_MARKER);
     ensure!(
@@ -392,6 +396,7 @@ pub fn run_init() -> Result<()> {
     // control traffic. The child deliberately rereads it from the immutable
     // disk rather than inheriting the token through argv or environment.
     start_boot_progress(&seed, GuestBootStage::RootMounted)?;
+    checkpoint::start()?;
     let plan = if let Some(binding) = seed.setup() {
         let setup_device = wait_for_disk_by_serial(
             Path::new(SYS_BLOCK_PATH),
@@ -510,17 +515,20 @@ pub fn run_init() -> Result<()> {
         daemon.0.as_mut().expect("daemon start child is present"),
     )?;
     record_boot_stage("workspace-running")?;
+    let network = network.into_child()?;
+    // A resume from a VM checkpoint re-keys both before the workload thaws.
+    checkpoint::set_rekey_targets(
+        daemon
+            .0
+            .as_ref()
+            .expect("daemon start child is present")
+            .id(),
+        network.id(),
+    )?;
 
     record_boot_stage("daemon-started")?;
     let daemon = daemon.0.take().expect("daemon start child is present");
-    supervise_guest(
-        daemon,
-        workspace,
-        network.into_child()?,
-        docker,
-        poweroff,
-        vm_only,
-    )
+    supervise_guest(daemon, workspace, network, docker, poweroff, vm_only)
 }
 
 /// Run only the entitlement-gated macOS `/dev/fd` hardware fixture.
@@ -784,13 +792,40 @@ pub async fn run_daemon() -> Result<()> {
     // picker; unless the sign-in form is selected, Codewire's Claude login is
     // removed. Here for the workload user.
     claude_home.prepare(config.managed_credential_clients);
+    let publisher = publisher.map(|cache| Arc::new(std::sync::Mutex::new(cache)));
+    // PID 1 signals a resume from a VM checkpoint once it has reseeded and
+    // the runner has written the restored boot's seed.
+    let (rotation, rotations) = codewire_daemon::auth_rotation::rotation_channel();
+    let mut resumes =
+        signal(SignalKind::user_defined1()).context("listen for checkpoint resume signals")?;
+    let rekeys = {
+        let codex_home = codex_home.clone();
+        let publisher = publisher.clone();
+        async move {
+            while resumes.recv().await.is_some() {
+                if let Err(error) =
+                    rekey_daemon(&rotation, &codex_home, &claude_home, publisher.as_ref()).await
+                {
+                    // PID 1 times out waiting for the acknowledgement, and
+                    // the runner kills the restored VM before it thaws.
+                    eprintln!("codewire guest: daemon re-key failed: {error:#}");
+                }
+            }
+        }
+    };
     let daemon = codewire_daemon::serve_native_grpc_with_incoming(
         config,
         codex_home,
-        None,
+        Some(rotations),
         HostOnlyIncoming::new(listener.incoming()),
         shutdown_signal(),
     );
+    let daemon = async move {
+        tokio::select! {
+            result = daemon => result,
+            () = rekeys => bail!("checkpoint resume signals stopped"),
+        }
+    };
     if let Some(cache) = publisher {
         tokio::select! {
             result = daemon => result.context("serve authenticated guest daemon over AF_VSOCK"),
@@ -804,6 +839,41 @@ pub async fn run_daemon() -> Result<()> {
             .await
             .context("serve authenticated guest daemon over AF_VSOCK")
     }
+}
+
+/// Moves the daemon to the restored boot's identity in the seed: its token
+/// and credential bridge identity, the runtime publisher's binding and, on a
+/// fork, the delivered sign-ins, which the fork's own authority delivers
+/// again. Acknowledges to PID 1 last.
+async fn rekey_daemon(
+    rotation: &codewire_daemon::auth_rotation::AuthRotation,
+    codex_home: &codewire_daemon::codex_home::CodexHome,
+    claude_home: &codewire_daemon::claude_home::ClaudeHome,
+    publisher: Option<&Arc<std::sync::Mutex<crate::cw_runtime_publisher::RuntimeCache>>>,
+) -> Result<()> {
+    let seed = tokio::task::spawn_blocking(checkpoint::read_seed_direct)
+        .await
+        .context("reread the seed")??;
+    rotation
+        .rotate(codewire_daemon::auth_rotation::RotatedIdentity {
+            token: codewire_daemon::DaemonAuthToken::new(seed.auth_token())
+                .context("validate the restored daemon token")?,
+            environment_id: seed.vm_id(),
+            environment_generation: seed.generation(),
+        })
+        .await
+        .context("rotate the daemon's authority")?;
+    let removed = sync_login_environment(Path::new(LOGIN_ENVIRONMENT_PATH), seed.vm_id(), || {
+        codewire_daemon::login_cleanup::clear_logins(codex_home, claude_home)
+    })?;
+    if let Some(publisher) = publisher {
+        publisher
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .rebind(seed.vm_id(), seed.generation())
+            .context("rebind the runtime publisher")?;
+    }
+    checkpoint::acknowledge_rekey(checkpoint::DAEMON_REKEY, &seed, removed)
 }
 
 fn initialize_live_cw_runtime(
@@ -867,12 +937,18 @@ pub async fn run_network_agent() -> Result<()> {
         read_seed_from_discovered_disk(),
         "workspace-net-seed-failed",
     )?;
-    let vm_id = seed.vm_id();
-    let generation = seed.generation();
-    let key = network_agent_startup(
+    let mut vm_id = seed.vm_id();
+    let mut generation = seed.generation();
+    let mut key = network_agent_startup(
         NetworkKey::derive(seed.auth_token(), vm_id, generation)
             .context("derive guest network session key"),
         "workspace-net-seed-failed",
+    )?;
+    // PID 1 signals a resume from a VM checkpoint: the restored boot's host
+    // worker authenticates with the key of the seed the runner wrote for it.
+    let mut resumes = network_agent_startup(
+        signal(SignalKind::user_defined1()).context("listen for checkpoint resume signals"),
+        "workspace-net-async-failed",
     )?;
     let tun_descriptor = open_and_configure_tun()?;
     // RUSTSEC-2026-0386: an owned `OwnedFd` is outside `AsyncFd::new`'s unsound case; `register` migration is #3249.
@@ -910,6 +986,19 @@ pub async fn run_network_agent() -> Result<()> {
                 // bounded packet is the fail-closed path. It also prevents a
                 // later worker from receiving pre-authentication traffic.
                 let _ = packet?;
+            }
+            Some(()) = resumes.recv() => {
+                // A failure leaves the old key, so the restored boot's worker
+                // is refused; PID 1 times out and the VM never thaws.
+                match checkpoint::read_seed_direct().and_then(|seed| {
+                    let rekeyed = NetworkKey::derive(seed.auth_token(), seed.vm_id(), seed.generation())
+                        .context("derive the restored network key")?;
+                    checkpoint::acknowledge_rekey(checkpoint::NETWORK_REKEY, &seed, false)?;
+                    Ok((seed.vm_id(), seed.generation(), rekeyed))
+                }) {
+                    Ok(rekeyed) => (vm_id, generation, key) = rekeyed,
+                    Err(error) => eprintln!("codewire guest: network re-key failed: {error:#}"),
+                }
             }
             accepted = listener.accept() => {
                 let (stream, peer) = accepted.context("accept guest network AF_VSOCK session")?;
@@ -3374,9 +3463,9 @@ fn start_boot_progress(seed: &Seed, initial_stage: GuestBootStage) -> Result<()>
     };
     let (progress_tx, progress_rx) = watch::channel(initial);
     let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
-    let vm_id = seed.vm_id();
-    let generation = seed.generation();
-    let token = Zeroizing::new(seed.auth_token().to_owned());
+    // The progress server and the checkpoint hook read this boot's identity
+    // from one cell, which a resume from a VM checkpoint replaces.
+    checkpoint::install_identity(seed)?;
     thread::Builder::new()
         .name("codewire-guest-progress".to_owned())
         .spawn(move || {
@@ -3403,7 +3492,7 @@ fn start_boot_progress(seed: &Seed, initial_stage: GuestBootStage) -> Result<()>
                     }
                 };
                 let _ = ready_tx.send(Ok(()));
-                serve_boot_progress(listener, vm_id, generation, token, progress_rx).await;
+                serve_boot_progress(listener, progress_rx).await;
             });
         })
         .context("spawn guest progress server")?;
@@ -3418,9 +3507,6 @@ fn start_boot_progress(seed: &Seed, initial_stage: GuestBootStage) -> Result<()>
 
 async fn serve_boot_progress(
     listener: VsockListener,
-    vm_id: uuid::Uuid,
-    generation: u64,
-    token: Zeroizing<String>,
     progress: watch::Receiver<BootProgressSnapshot>,
 ) {
     loop {
@@ -3430,6 +3516,12 @@ async fn serve_boot_progress(
         if !is_host_cid(peer.cid()) {
             continue;
         }
+        // Each connection uses the identity current when it was accepted.
+        let Ok((vm_id, generation, token)) = checkpoint::with_identity(|identity| {
+            (identity.vm_id, identity.generation, identity.token.clone())
+        }) else {
+            continue;
+        };
         let _ = serve_boot_progress_connection(
             stream,
             vm_id,
