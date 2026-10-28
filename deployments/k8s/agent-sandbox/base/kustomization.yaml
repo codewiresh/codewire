@@ -11,3 +11,16 @@ resources:
   - crds/extensions.agents.x-k8s.io_sandboxclaims.yaml
   - crds/extensions.agents.x-k8s.io_sandboxtemplates.yaml
   - crds/extensions.agents.x-k8s.io_sandboxwarmpools.yaml
+
+# Flux must never prune the controller's Namespace, even when a source change
+# stops declaring it (infra#1671). A patch keeps the vendored controller.yaml
+# byte-identical to its pinned release.
+patches:
+  - target: { version: v1, kind: Namespace }
+    patch: |-
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: any
+        annotations:
+          kustomize.toolkit.fluxcd.io/prune: disabled

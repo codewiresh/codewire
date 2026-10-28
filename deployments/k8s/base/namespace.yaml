@@ -5,3 +5,7 @@ metadata:
   labels:
     app.kubernetes.io/name: codewire
     app.kubernetes.io/managed-by: kustomize
+  # Flux must never prune this Namespace, even when a source change stops
+  # declaring it (infra#1671). Removing it means deleting it on purpose.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
