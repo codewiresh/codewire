@@ -38,20 +38,11 @@ fn bridge(opts: &TemplateOpts) -> Value {
     render_warm_member_bridge(NAMESPACE, opts, BOUND_SANDBOX).unwrap()
 }
 
-fn load_golden(name: &str) -> Value {
-    let path = format!(
-        "{}/tests/fixtures/sandbox/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    serde_json::from_str(&std::fs::read_to_string(&path).expect("Rust-owned golden file missing"))
-        .unwrap()
-}
-
 #[test]
 fn warm_member_bridge_matches_golden_files() {
-    assert_eq!(
-        bridge(&bridge_opts()),
-        load_golden("warm-member-bridge-daemon-networkpolicy.golden.json")
+    crate::test_golden::assert_golden(
+        "warm-member-bridge-daemon-networkpolicy.golden.json",
+        &bridge(&bridge_opts()),
     );
 }
 

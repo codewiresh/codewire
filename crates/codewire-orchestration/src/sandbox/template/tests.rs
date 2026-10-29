@@ -213,16 +213,6 @@ mod tests {
         assert!(init.get("envFrom").is_none());
     }
 
-    fn load_golden(name: &str) -> Value {
-        let path = format!(
-            "{}/tests/fixtures/sandbox/{name}",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        serde_json::from_str(
-            &std::fs::read_to_string(&path).expect("Rust-owned golden file missing"),
-        )
-        .unwrap()
-    }
 
     #[test]
     fn operation_generation_never_changes_the_workspace_template() {
@@ -2905,14 +2895,14 @@ mod tests {
 
     #[test]
     fn zero_replica_shadow_pool_matches_golden_file() {
-        assert_eq!(
-            render_sandbox_shadow_pool(
+        crate::test_golden::assert_golden(
+            "sandboxwarmpool.golden.json",
+            &render_sandbox_shadow_pool(
                 "codewire-runtime",
                 "shadow-golden",
                 "tmpl-golden",
                 "env-golden",
             ),
-            load_golden("sandboxwarmpool.golden.json"),
         );
     }
 
@@ -3369,9 +3359,9 @@ mod tests {
 
     #[test]
     fn confidential_template_matches_golden_file() {
-        assert_eq!(
-            render_sandbox_template("dev-sandboxes", &confidential_golden_opts()),
-            load_golden("confidential-sandboxtemplate.golden.json"),
+        crate::test_golden::assert_golden(
+            "confidential-sandboxtemplate.golden.json",
+            &render_sandbox_template("dev-sandboxes", &confidential_golden_opts()),
         );
     }
 
@@ -3497,17 +3487,17 @@ mod tests {
     #[test]
     fn identity_free_template_matches_golden_file() {
         let opts = identity_free_opts();
-        assert_eq!(
-            render_sandbox_template("dev-sandboxes", &opts),
-            load_golden("identity-free-sandboxtemplate.golden.json"),
+        crate::test_golden::assert_golden(
+            "identity-free-sandboxtemplate.golden.json",
+            &render_sandbox_template("dev-sandboxes", &opts),
         );
         let runc = TemplateOpts {
             runtime_profile: RUNTIME_PROFILE_RUNC.into(),
             ..identity_free_opts()
         };
-        assert_eq!(
-            render_sandbox_template("dev-sandboxes", &runc),
-            load_golden("identity-free-sandboxtemplate-runc.golden.json"),
+        crate::test_golden::assert_golden(
+            "identity-free-sandboxtemplate-runc.golden.json",
+            &render_sandbox_template("dev-sandboxes", &runc),
         );
     }
 

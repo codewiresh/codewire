@@ -24,5 +24,8 @@ pub mod temporal;
 #[allow(dead_code)]
 #[path = "../../codewire-platform-credentials/tests/support/mod.rs"]
 pub(crate) mod test_database_support;
+/// The sandbox rendering goldens and their bless mode.
+#[cfg(test)]
+pub(crate) mod test_golden;
 pub mod worker;
 pub mod workspace_binding;

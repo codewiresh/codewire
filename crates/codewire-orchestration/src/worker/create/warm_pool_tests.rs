@@ -100,14 +100,6 @@ fn environment_opts(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> TemplateOpt
     .unwrap()
 }
 
-fn load_golden(name: &str) -> Value {
-    let path = format!(
-        "{}/tests/fixtures/sandbox/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    serde_json::from_str(&std::fs::read_to_string(path).expect("golden file missing")).unwrap()
-}
-
 /// Enabling the confidential tier alongside commodity (the Dev confidential
 /// activation profile: CoCo init-data, the KBS contract and the confidential
 /// StorageClass) leaves every commodity warm pool byte-identical, so
@@ -353,14 +345,8 @@ fn warm_pool_matches_golden_files() {
         shapes()[0],
     );
     let objects = render_warm_pool(&cfg.sandbox_namespace, &opts, 2, false).unwrap();
-    assert_eq!(
-        objects.template,
-        load_golden("warm-pool-sandboxtemplate.golden.json")
-    );
-    assert_eq!(
-        objects.pool,
-        load_golden("warm-pool-sandboxwarmpool.golden.json")
-    );
+    crate::test_golden::assert_golden("warm-pool-sandboxtemplate.golden.json", &objects.template);
+    crate::test_golden::assert_golden("warm-pool-sandboxwarmpool.golden.json", &objects.pool);
 }
 
 /// The CEL list literal a policy variable or overlay value carries.

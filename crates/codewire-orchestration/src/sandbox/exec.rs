@@ -1,6 +1,7 @@
 //! Workspace exec. Every command the worker runs inside a workspace container
 //! goes through `build_workspace_exec_command`; Rust-owned fixtures under
-//! `tests/fixtures/sandbox` pin its output byte-for-byte.
+//! `tests/fixtures/sandbox` pin its output by value (`crate::test_golden`; regenerate
+//! them with `CODEWIRE_BLESS_GOLDENS=1`).
 
 use std::collections::BTreeMap;
 
@@ -487,16 +488,6 @@ fn exit_code_from_status(s: &Status) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-
-    fn golden_argv(name: &str) -> Vec<String> {
-        let path = format!(
-            "{}/tests/fixtures/sandbox/{name}",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let data = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read golden {path}: {e}"));
-        serde_json::from_str(&data).expect("golden is a JSON argv array")
-    }
 
     #[test]
     fn exec_command_matches_golden_basic() {
@@ -509,9 +500,9 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        assert_eq!(
-            build_workspace_exec_command(&cmd, "", &BTreeMap::new()),
-            golden_argv("execcommand-basic.golden.json")
+        crate::test_golden::assert_golden(
+            "execcommand-basic.golden.json",
+            &serde_json::json!(build_workspace_exec_command(&cmd, "", &BTreeMap::new())),
         );
     }
 
@@ -526,7 +517,7 @@ mod tests {
         env.insert("A_FIRST".to_string(), "plain".to_string());
         env.insert("B_META".to_string(), "$HOME `cmd` \"dq\"".to_string());
         let argv = build_workspace_exec_command(&cmd, "/workspace/my repo", &env);
-        assert_eq!(argv, golden_argv("execcommand-full.golden.json"));
+        crate::test_golden::assert_golden("execcommand-full.golden.json", &serde_json::json!(argv));
     }
 
     #[tokio::test]

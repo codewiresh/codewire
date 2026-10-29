@@ -695,14 +695,6 @@ mod tests {
         state
     }
 
-    fn load_golden(name: &str) -> Value {
-        let path = format!(
-            "{}/tests/fixtures/sandbox/{name}",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        serde_json::from_str(&std::fs::read_to_string(path).expect("golden file missing")).unwrap()
-    }
-
     fn state_of(daemon_set: &Value) -> CacheState {
         CacheState::parse(
             daemon_set["metadata"]["annotations"][IMAGE_CACHE_STATE_ANNOTATION]
@@ -739,11 +731,7 @@ mod tests {
     fn rendered_daemon_set_matches_golden_file() {
         let (live, _) = apply(None, &release(GATEWAY_A, 1));
         let (live, _) = apply(live, &release(GATEWAY_B, 2));
-        assert_eq!(
-            live.unwrap(),
-            load_golden("image-cache-daemonset.golden.json"),
-            "image cache DaemonSet render drifted from its golden file"
-        );
+        crate::test_golden::assert_golden("image-cache-daemonset.golden.json", &live.unwrap());
     }
 
     #[test]

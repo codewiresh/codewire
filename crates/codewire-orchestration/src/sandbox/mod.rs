@@ -1,7 +1,8 @@
 //! Agent-sandbox CRD identifiers and CR renderers.
 //!
 //! The Rust renderer owns these live CR shapes. Checked-in fixtures under
-//! `tests/fixtures/sandbox` pin the serialized output byte-for-byte.
+//! `tests/fixtures/sandbox` pin the serialized output by value (`crate::test_golden`; regenerate
+//! them with `CODEWIRE_BLESS_GOLDENS=1`).
 
 pub mod client;
 pub mod exec;
@@ -275,19 +276,9 @@ mod tests {
 
     #[test]
     fn sandbox_claim_matches_golden_file() {
-        let golden_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/sandbox/sandboxclaim.golden.json"
-        );
-        let want: Value = serde_json::from_str(
-            &std::fs::read_to_string(golden_path).expect("Rust-owned golden file missing"),
-        )
-        .unwrap();
-
-        let got = render_sandbox_claim("codewire-runtime", &golden_fixture());
-        assert_eq!(
-            got, want,
-            "SandboxClaim render drifted from its golden file"
+        crate::test_golden::assert_golden(
+            "sandboxclaim.golden.json",
+            &render_sandbox_claim("codewire-runtime", &golden_fixture()),
         );
     }
 
