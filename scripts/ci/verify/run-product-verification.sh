@@ -673,6 +673,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
   scripts/ci/tests/test-integration-postgres.sh
   scripts/ci/tests/test-select-verification.sh
+  python3 -I -B scripts/ci/tests/test-ci-workflow-structure.py
   python3 -I -B scripts/ci/tests/test-cw-runtime-source.py
   scripts/ci/tests/test-local-rust-cache.sh
   scripts/ci/tests/test-build-local-image.sh

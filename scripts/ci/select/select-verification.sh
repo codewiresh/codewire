@@ -878,6 +878,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-run-side-by-side.sh|\
       scripts/ci/tests/test-standard-families.sh|\
       scripts/ci/tests/test-darwin-cross-check.sh|\
+      scripts/ci/tests/test-ci-workflow-structure.py|\
       scripts/ci/tests/test-ci-runner-image-contract.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/tests/test-install-cargo-nextest.sh|\

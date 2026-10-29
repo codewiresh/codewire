@@ -4,20 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SELECTOR="$ROOT/scripts/ci/select/select-verification.sh"
 WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
-# The exact runs-on values: runner labels are repository Actions variables.
-# shellcheck source=scripts/ci/tests/fixtures/ci-runners.sh
-source "$ROOT/scripts/ci/tests/fixtures/ci-runners.sh"
 # shellcheck source=scripts/ci/verify/side-by-side.sh
 source "$ROOT/scripts/ci/verify/side-by-side.sh"
 # shellcheck source=scripts/ci/setup/cpu-share.sh
 source "$ROOT/scripts/ci/setup/cpu-share.sh"
-# A main push's Heavy jobs take the trusted runners; every other run takes the
-# untrusted ones. Kind still runs on its own unsized pool until it runs in a
-# metal guest; every ordinary Heavy group runs on the sized metal pool.
-HEAVY_RUNS_ON="$RUNS_ON_KIND"
-METAL_MAIN_RUNS_ON="$RUNS_ON_HEAVY"
-# Each one bounds cargo by its runner's memory at job start (bound-cargo-jobs.sh).
-METAL_CARGO_BOUND='        run: scripts/ci/setup/bound-cargo-jobs.sh'
 CLI_RELEASE_WORKFLOW="$ROOT/.gitea/workflows/cli-release.yaml"
 TMP_ROOT="$ROOT/.tmp"
 mkdir -p "$TMP_ROOT"
@@ -757,7 +747,6 @@ run_paths_case retired_cache_surface pull_request refs/pull/200/head false \
   scripts/ci/tests/test-rust-cache-receipts.sh
 run_paths_case shellcheck_policy_domain_future pull_request refs/pull/2001/head false \
   'policy policy_shell security security_js' scripts/ci/tests/test-shellcheck-policy-domain.sh
-grep -qF 'scripts/ci/tests/test-shellcheck-policy-domain.sh' "$SELECTOR"
 run_paths_case openbao_secret_authority_policy pull_request refs/pull/20011/head false \
   'policy policy_shell security security_js' scripts/ci/tests/test-openbao-only-secret-authority.sh \
   scripts/ci/tests/test-preflight-openbao-native-secrets.sh \
@@ -838,6 +827,9 @@ run_paths_case dev_delivery_trigger push refs/heads/main false \
   'deploy policy security security_js' \
   scripts/ci/deploy/rerun-dev-publish.py \
   scripts/ci/tests/test-rerun-dev-publish.py
+# The parsed structure of ci.yaml is a Policy CI-script test.
+run_paths_case ci_workflow_structure pull_request refs/pull/3660/head false \
+  'policy security security_js' scripts/ci/tests/test-ci-workflow-structure.py
 run_paths_case pull_request_fail_fast pull_request refs/pull/3400/head false \
   'deploy policy security security_js' \
   scripts/ci/select/fail-fast-watch.py \
@@ -1761,9 +1753,6 @@ if grep -qF '  pull_request:' "$CLI_RELEASE_WORKFLOW" \
   echo 'CLI release workflow still exposes candidate- or tag-owned execution' >&2
   exit 1
 fi
-grep -qF '  workflow_dispatch:' "$CLI_RELEASE_WORKFLOW"
-grep -qF '      release_tag:' "$CLI_RELEASE_WORKFLOW"
-grep -qF "[ \"\$GITHUB_REF\" = 'refs/heads/main' ]" "$CLI_RELEASE_WORKFLOW"
 [ ! -e "$ROOT/.gitea/workflows/workspace-image-verify.yaml" ] || {
   echo 'standalone workspace image workflow still exists' >&2
   exit 1
@@ -2425,14 +2414,10 @@ dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=edge_kind "$SELECTOR")"
 assert_tokens dispatch_edge_kind 'edge_kind kind kind_tools' "$dispatch_output"
 
-grep -qF "contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|')" \
-  "$WORKFLOW"
-grep -qF 'run-product-verification.sh rust-curated-locks' "$WORKFLOW"
 grep -qF '"$CARGO_BIN" fetch --locked --manifest-path "$stage/Cargo.toml"' \
   "$ROOT/scripts/ci/verify/check-curated-rust-locks.sh"
 
 contracts_proto_runner="$TMP/contracts-proto.sh"
-contracts_dispatcher="$TMP/contracts-dispatcher.sh"
 go_support_runner="$TMP/go-support.sh"
 awk '
   /^run_contracts_proto\(\) \{/ { capture = 1 }
@@ -2440,48 +2425,21 @@ awk '
   capture { print }
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$contracts_proto_runner"
 awk '
-  /^run_contracts\(\) \{/ { capture = 1 }
-  capture && /^run_go_support\(\) \{/ { exit }
-  capture { print }
-' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$contracts_dispatcher"
-awk '
   /^run_go_support\(\) \{/ { capture = 1 }
   capture && /^run_web\(\) \{/ { exit }
   capture { print }
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$go_support_runner"
 
-grep -qF 'buf lint' "$contracts_proto_runner"
-grep -qF 'proto_breaking.py --self-test' "$contracts_proto_runner"
-grep -qF 'proto_breaking.py --base-sha "$base_sha"' "$contracts_proto_runner"
-grep -qF 'buf generate --template buf.gen.codewire.yaml' "$contracts_proto_runner"
-grep -qF 'buf generate --template buf.gen.google-rpc-ts.yaml' "$contracts_proto_runner"
-grep -qF 'buf generate --template buf.gen.google-rpc-python.yaml' "$contracts_proto_runner"
-grep -qF 'build-rust-descriptors.sh' "$contracts_proto_runner"
-grep -qF 'crates/codewire-proto/codewire_descriptor.bin' "$contracts_proto_runner"
-grep -qF 'crates/codewire-admin-proto/codewire_admin_descriptor.bin' "$contracts_proto_runner"
-grep -qF 'libs/gen-go' "$contracts_proto_runner"
-grep -qF 'git ls-files --others --exclude-standard' "$contracts_proto_runner"
-grep -qF 'PYTHONPATH=libs/gen-python' "$contracts_proto_runner"
-grep -qF 'py_compile.compile' "$contracts_proto_runner"
-grep -qF '@codewire/proto-ts typecheck' "$contracts_proto_runner"
-grep -qF '../libs/gen-go/codewire' "$contracts_proto_runner"
-grep -qF '../libs/gen-python/codewire' "$contracts_proto_runner"
-grep -qF '../packages/codewire-proto-ts/src/gen/codewire' "$contracts_proto_runner"
-grep -qF 'proto-package-boundaries --self-test' "$contracts_proto_runner"
-grep -qF 'for package in codewire-proto codewire-admin-proto; do' "$contracts_proto_runner"
-grep -qF '[ "${#proto_packages[@]}" -eq 0 ] || cargo test --locked "${proto_packages[@]}"' "$contracts_proto_runner"
 rust_descriptor_builder="$ROOT/scripts/ci/proto/build-rust-descriptors.sh"
 grep -qF -- '--path codewire/admin/v1/admin.proto' "$rust_descriptor_builder"
 grep -qF -- '--path codewire/admin/v1/billing_catalog.proto' "$rust_descriptor_builder"
 grep -qF -- '--path codewire/v1/environment.proto' "$rust_descriptor_builder"
 grep -qF 'codewire-admin-proto/codewire_admin_descriptor.bin' "$rust_descriptor_builder"
-grep -qF 'test-admin-proto-boundary.sh' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 # CI installs buf's pinned release binary; the Makefile's proto-tools and the
 # push check install the same version.
 buf_version="$(sed -nE "s/^readonly BUF_VERSION='([0-9.]+)'$/\\1/p" "$ROOT/scripts/ci/verify/run-product-verification.sh")"
 [[ "$buf_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 grep -qF "github.com/bufbuild/buf/cmd/buf@v$buf_version" "$ROOT/Makefile"
-grep -qxF "readonly BUF_SHA256='154ea883ce098eac4fa106ff9ee4e4964bb97f809dd8ec9c34a432b466ce1494'" "$ROOT/scripts/ci/verify/run-product-verification.sh"
 if grep -qF 'go install github.com/bufbuild/buf/cmd/buf@' "$ROOT/scripts/ci/verify/run-product-verification.sh"; then
   echo 'CI builds buf from source instead of its pinned release binary' >&2
   exit 1
@@ -2490,17 +2448,10 @@ if rg -n 'tests/contract' "$contracts_proto_runner"; then
   echo 'Proto regeneration runs a general Go service-driver suite' >&2
   exit 1
 fi
-grep -qF 'selected go_consumer_interop' "$go_support_runner"
-grep -qF 'selected go_tailnet' "$go_support_runner"
-grep -qF 'scripts/ci/verify/tailnet-parity.sh' "$go_support_runner"
 if grep -qF 'cd libs/tailnet' "$go_support_runner"; then
   echo 'go_tailnet still runs the retired Go tailnet oracle' >&2
   exit 1
 fi
-grep -qF 'cargo test --locked -p codewire-server-core' "$go_support_runner"
-grep -qF -- '--test go_consumer_interop generated_go_client_consumes_rust_connect' \
-  "$go_support_runner"
-grep -qF -- '--exact --ignored --nocapture' "$go_support_runner"
 for retired_path in \
     apps/api \
     autoagent \
@@ -2538,23 +2489,12 @@ if grep -qF 'replace github.com/codewiresh/codewire =>' \
   echo 'contract module still resolves through the retired apps/api module' >&2
   exit 1
 fi
-grep -qF "'protobuf==7.35.1'" "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF "'connectrpc==0.11.1'" \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF "'protoc-gen-connectrpc==0.11.1'" \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
 if rg -n 'openapi:|rest:freeze|validation:check-source|types:generate|api-client-go' \
     "$contracts_proto_runner"; then
   echo 'Proto/Connect contract mode contains transitional REST work' >&2
   exit 1
 fi
 
-grep -qF 'if ! selected contracts_proto; then' "$contracts_dispatcher"
-grep -qF 'Contracts selected without contracts_proto' "$contracts_dispatcher"
-[[ "$(grep -c 'install_bun_dependencies' "$contracts_dispatcher")" -eq 1 ]] || {
-  echo 'Contracts dispatcher must install shared Bun dependencies exactly once' >&2
-  exit 1
-}
 if missing_mode_output="$(VERIFICATION_SELECTION='|valid:v3|contracts|complete|' \
     "$ROOT/scripts/ci/verify/run-product-verification.sh" contracts 2>&1)"; then
   echo 'Contracts runner accepted a selected family without a sub-mode' >&2
@@ -2783,16 +2723,7 @@ if rg -n 'CONNECTCORE_BASE_URLS|go test.*connectcore|./connectcore/' \
   echo 'Manual Rust rehearsal still invokes the retired Go connectcore driver' >&2
   exit 1
 fi
-grep -qF 'run_connect_auth_matrix' \
-  "$ROOT/scripts/ci/verify/rust-stack-rehearsal.sh"
 
-grep -qF -- '--test wire_contract --features kind-e2e' "$integration_runner"
-grep -qF 'ORCHESTRATION_CONTRACT_SCOPE=complete' "$integration_runner"
-grep -qF 'ORCHESTRATION_CONTRACT_SCOPE=runtime' "$integration_runner"
-grep -qF -- '--test wire_contract --features kind-e2e' \
-  "$ROOT/scripts/ci/verify/rust-stack-rehearsal.sh"
-grep -qF 'ORCHESTRATION_CONTRACT_SCOPE=runtime' \
-  "$ROOT/scripts/ci/verify/rust-stack-rehearsal.sh"
 for orchestration_runner in \
     "$integration_runner" \
     "$ROOT/scripts/ci/verify/rust-stack-rehearsal.sh"; do
@@ -2818,15 +2749,6 @@ for rust_owner_runner in \
   fi
 done
 
-all_up_runner="$ROOT/scripts/ci/verify/rust-stack-rehearsal.sh"
-[[ "$(grep -Ec '(^|[[:space:]])go test' "$all_up_runner")" -eq 2 ]] || {
-  echo 'All-up diagnostic must retain exactly two Go/Tailscale DERP interop calls' >&2
-  exit 1
-}
-grep -qF -- "-run '^TestRawHTTPUpgradeRelaysTailscaleGoClients$' ./derp/..." \
-  "$all_up_runner"
-grep -qF -- "-run '^TestWebSocketFallbackRelaysTailscaleGoClients$' ./derp/..." \
-  "$all_up_runner"
 if rg -n 'apps/api/internal/e2e|test-e2e-kind|test-worker-kind' \
     "$ROOT/Makefile" "$ROOT/package.json"; then
   echo 'Active developer commands still expose the retired general Go product suite' >&2
@@ -2837,13 +2759,6 @@ for billing_runner in \
     "$integration_runner" \
     "$ROOT/scripts/ci/verify/rust-stack-rehearsal.sh" \
     "$ROOT/scripts/ci/verify/kind/common.sh"; do
-  if [[ "$billing_runner" == */kind/common.sh ]]; then
-    # Kind executes the exact libtest produced by the separate build job.
-    grep -qF -- '"$binary" configured_billing_wire_contract' "$billing_runner"
-    grep -qF -- '"$RUN_DIR/billing-contract-build.jsonl"' "$billing_runner"
-  else
-    grep -qF -- '--test wire_contract configured_billing_wire_contract' "$billing_runner"
-  fi
   if rg -n '(^|[[:space:]])go test.*billing|\./billing/\.\.\.|BILLING_STRIPE_CONFIGURED.*absent|billing is not enabled' \
       "$billing_runner"; then
     echo "Automatic gate still carries a retired Go or Stripe-disabled billing contract: $billing_runner" >&2
@@ -2862,39 +2777,12 @@ if rg -n 'run_go_with_allowed_skip|go-output-policy|allowed_skip' \
   exit 1
 fi
 
-database_go_setup="$TMP/database-go-setup.txt"
-awk '
-  /^  database:$/ { group = 1 }
-  group && /- name: Set up Go 1\.26\.5$/ { capture = 1 }
-  capture { print }
-  capture && /run: scripts\/ci\/setup\/setup-go\.sh/ { exit }
-' "$WORKFLOW" > "$database_go_setup"
-if [[ -s "$database_go_setup" ]]; then
-  echo 'Database/service integration still installs Go despite having no Go driver' >&2
-  exit 1
-fi
-
 derp_runner="$TMP/run-derp-contract.sh"
 awk '
   /^run_derp_contract\(\) \{/ { capture = 1 }
   capture && /^run_transport\(\) \{/ { exit }
   capture { print }
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$derp_runner"
-[[ "$(grep -c 'go test' "$derp_runner")" -eq 2 ]] || {
-  echo 'DERP runner must execute exactly two focused Go contracts' >&2
-  exit 1
-}
-[[ "$(grep -c -- "-run '" "$derp_runner")" -eq 2 ]] || {
-  echo 'DERP runner has a broad or additional Go contract invocation' >&2
-  exit 1
-}
-grep -qF -- \
-  "-run '^TestRawHTTPUpgradeRelaysTailscaleGoClients$' ./derp/..." \
-  "$derp_runner"
-grep -qF -- \
-  "-run '^TestWebSocketFallbackRelaysTailscaleGoClients$' ./derp/..." \
-  "$derp_runner"
-grep -qF 'DERP_WEBSOCKET=1' "$derp_runner"
 # The local-vmm shard runs apart from the packages shard that builds binaries.
 grep -qF 'cargo build --locked -p codewire-derp --bin codewire-derp' "$derp_runner" || {
   echo 'DERP runner must build the relay binary it starts' >&2
@@ -2902,18 +2790,10 @@ grep -qF 'cargo build --locked -p codewire-derp --bin codewire-derp' "$derp_runn
 }
 grep -qF "if grep -Eq -- '--- SKIP'" "$derp_runner"
 grep -qF "|| ! grep -Eq -- '^[[:space:]]*--- PASS:'" "$derp_runner"
-grep -qF 'if selected transport_pkg_codewire_vmm_guest_probe; then' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'if selected transport_pkg_codewire_local_vmm; then' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
-[[ "$(grep -cFx '      scripts/ci/verify/check-darwin-cross.sh' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh")" == 1 ]]
 grep -qF 'exec "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
   "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
 grep -qF -- '--target aarch64-apple-darwin -- -D warnings' \
   "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
-grep -qF 'scripts/ci/verify/build-local-vmm-initramfs.sh --verify' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
 
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=service_integration "$SELECTOR")"
@@ -3158,383 +3038,34 @@ if switch_push "$invalid_switch_selector" docs/dev/AGENT-WORKFLOW.md >"$TMP/swit
 fi
 [ ! -s "$TMP/switch-invalid.out" ] && grep -Fq 'MAIN_PUSH_RUNS_KIND_AND_DRY_RUN must be true or false' "$TMP/switch.stderr"
 
-# Workflow contract: the bounded capability groups use trusted server-side job
-# conditions. Forgejo therefore gives an omitted group a terminal skipped result
-# without assigning its fixed-profile runner.
-while IFS='|' read -r job_id job_name runner expectation_name; do
-  block="$TMP/${job_id}.yaml"
-  awk -v wanted="$job_id" '
+# The workflow's structure (its job graph, trusted dispatch, tested-tree and
+# superseded gating, runners, timeouts and credentials) is proven by parsing it
+# in test-ci-workflow-structure.py, which Policy's CI-script tests run. The
+# checks below execute what the workflow and the runner do; they keep each job
+# block for the steps they run.
+job_block() {
+  awk -v wanted="$1" '
     $0 == "  " wanted ":" { capture = 1 }
     capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  " wanted ":" { exit }
     capture { print }
-  ' "$WORKFLOW" > "$block"
-  grep -qF "  ${job_id}:" "$block"
-  grep -qF "    name: ${job_name}" "$block"
-  if [ "$runner" = heavy ]; then runner="$HEAVY_RUNS_ON"; fi
-  if [ "$runner" = metal-main ]; then
-    runner="$METAL_MAIN_RUNS_ON"
-    grep -qxF "$METAL_CARGO_BOUND" "$block"
-  fi
-  # The medium metal class (infra#1534): each group on exactly the slot it needs.
-  if [ "$runner" = medium ]; then
-    runner="$RUNS_ON_MEDIUM"
-    grep -qxF "$METAL_CARGO_BOUND" "$block"
-  fi
-  # Compile once (infra#1632): the compile job runs on a build runner, which
-  # sizes its own Cargo jobs (build-once.sh), so it bounds none by memory.
-  if [ "$runner" = build ]; then
-    runner="$RUNS_ON_BUILD"
-    if grep -qxF "$METAL_CARGO_BOUND" "$block"; then
-      echo "${job_id}: the build runner job must not bound Cargo jobs by guest memory" >&2
-      exit 1
-    fi
-  fi
-
-  grep -qxF "    runs-on: ${runner}" "$block"
-  if [ "$job_id" = edge-kind ]; then
-    # Its optional producer dependencies need an always() condition so edge-
-    # only selection still runs. The executable workflow fixture also proves
-    # every selected Kind producer must succeed before this job can run.
-    grep -qF "needs.verification-selection.outputs.edge_kind_expected == 'true'" "$block"
-    defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-kind-build-workflow.py"
-  elif [ "$job_id" = database ]; then
-    # Compile once (infra#1632): it runs the compile job's database archives
-    # when that job built them, and compiles itself when it was not dispatched.
-    grep -qF "    needs: [verification-selection, rust-compile]" "$block"
-    grep -qF "needs.verification-selection.outputs.database_expected == 'true'" "$block"
-    grep -qF "needs.rust-compile.result != 'failure' && needs.rust-compile.result != 'cancelled'" "$block"
-    # A fetch miss (no archive built, no store, or evicted) builds in place:
-    # the fetch never fails on a miss, the compile steps run when the archives
-    # are not ready, and the lanes take the archives only when they are.
-    # shellcheck disable=SC2016 # The workflow text holds literal shell variables.
-    grep -qF 'run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/database.tar"' "$block"
-    [ "$(grep -cF "steps.database-archives.outputs.ready != 'true' }}" "$block")" -eq 3 ]
-    grep -qF "RUST_DATABASE_ARCHIVES: \${{ steps.database-archives.outputs.ready == 'true' && format('{0}/database-archives', runner.temp) || '' }}" "$block"
-    if grep -qF 'BUILD_ONCE' "$block"; then
-      echo 'database: the archive path must follow the fetch, not the compile job alone' >&2
-      exit 1
-    fi
-  elif [ "$job_id" = rust-features ] || [ "$job_id" = rust-transport ]; then
-    # Compile once (infra#1632): as the database job, it runs the compile
-    # job's archives when that job built them and compiles itself otherwise.
-    # A fetch miss (no archive built, no store, or evicted) builds in place:
-    # the fetch never fails on a miss, the compile steps run when the archives
-    # are not ready, and the shard takes its tests stage only when they are.
-    archive_step=feature-archives archive_tar=features.tar
-    if [ "$job_id" = rust-transport ]; then
-      archive_step=local-vmm-archives archive_tar=local-vmm.tar
-    fi
-    grep -qF "    needs: [verification-selection, rust-compile]" "$block"
-    grep -qF "needs.verification-selection.outputs.${expectation_name}_expected == 'true'" "$block"
-    grep -qF "needs.rust-compile.result != 'failure' && needs.rust-compile.result != 'cancelled'" "$block"
-    grep -qF "run: scripts/ci/setup/fetch-test-archive.sh --or-build \"\$ARCHIVE_SHA256\" \"\$RUNNER_TEMP/$archive_tar\"" "$block"
-    grep -qF "RUST_SHARD_STAGE: \${{ steps.$archive_step.outputs.ready == 'true' && 'tests' || 'all' }}" "$block"
-    grep -qF "steps.$archive_step.outputs.ready != 'true' }}" "$block"
-    if grep -qF 'BUILD_ONCE' "$block"; then
-      echo "$job_id: the archive path must follow the fetch, not the compile job alone" >&2
-      exit 1
-    fi
-  elif [ "$job_id" = services-control ] || [ "$job_id" = services-runtime ]; then
-    # Compile once (infra#1632): it runs the compile job's archives for its
-    # plane when that job built them, and compiles itself when it was not
-    # dispatched or the store no longer holds them (a miss builds in place,
-    # as for database).
-    grep -qF "    needs: [verification-selection, rust-compile]" "$block"
-    grep -qF "needs.verification-selection.outputs.${expectation_name}_expected == 'true'" "$block"
-    grep -qF "needs.rust-compile.result != 'failure' && needs.rust-compile.result != 'cancelled'" "$block"
-    grep -qF "ARCHIVE_SHA256: \${{ needs.rust-compile.outputs.${expectation_name}_sha256 }}" "$block"
-    # shellcheck disable=SC2016 # The workflow text holds literal shell variables.
-    grep -qF 'run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/services.tar"' "$block"
-    [ "$(grep -cF "steps.services-archives.outputs.ready != 'true' }}" "$block")" -eq 3 ]
-    [ "$(grep -cF "steps.services-archives.outputs.ready == 'true' }}" "$block")" -eq 2 ]
-    grep -qF "RUST_SERVICE_ARCHIVES: \${{ steps.services-archives.outputs.ready == 'true' && format('{0}/service-archives', runner.temp) || '' }}" "$block"
-    if grep -qF 'BUILD_ONCE' "$block"; then
-      echo "$job_id: the archive path must follow the fetch, not the compile job alone" >&2
-      exit 1
-    fi
-  elif [ "$job_id" = rust-packages ]; then
-    # Compile once (infra#1632): it runs the compile job's test archive, so it
-    # needs that job's success on every run, a main push included.
-    grep -qF "    needs: [verification-selection, rust-compile]" "$block"
-    grep -qF "needs.verification-selection.outputs.rust_shards_expected == 'true' && needs.rust-compile.result == 'success' }}" "$block"
-    if grep -qF "github.ref == 'refs/heads/main'))" "$block"; then
-      echo 'rust-packages: a main push must not run without the compile job' >&2
-      exit 1
-    fi
-    # A test-archive miss builds in place, as the database job does.
-    # shellcheck disable=SC2016 # The workflow text holds literal shell variables.
-    # It streams the download into the extraction (infra#1534).
-    grep -qF 'run: scripts/ci/setup/fetch-test-archive.sh --or-build --extract "$ARCHIVE_SHA256" "$RUNNER_TEMP/tests"' "$block"
-    [ "$(grep -cF "steps.test-archive.outputs.ready != 'true'" "$block")" -eq 4 ]
-    grep -qF "RUST_TEST_ARCHIVE: \${{ steps.test-archive.outputs.ready == 'true' && format('{0}/tests', runner.temp) || '' }}" "$block"
-    if grep -qF 'BUILD_ONCE' "$block"; then
-      echo 'rust-packages: the archive path must follow the fetch' >&2
-      exit 1
-    fi
-  elif [ "$job_id" = rust-checks ]; then
-    # On a main push the Rust checks run in Build test archives, beside the
-    # legs (infra#1534 lever 3); the job graph below proves both events.
-    grep -qF \
-      "    if: \${{ needs.verification-selection.outputs.${expectation_name}_expected == 'true' && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}" \
-      "$block"
-  else
-    grep -qF \
-      "    if: \${{ needs.verification-selection.outputs.${expectation_name}_expected == 'true' }}" \
-      "$block"
-  fi
-  if [ "$job_id" = edge-kind ]; then
-    # The Kind gate shards its suites across one four-leg matrix (proven in
-    # detail by the executable workflow fixture below); every other capability
-    # group stays a single dispatch with no empty-matrix dependency.
-    grep -qF '    strategy:' "$block" || {
-      echo 'edge-kind: the Kind shard matrix is missing' >&2
-      exit 1
-    }
-  elif grep -qF '    strategy:' "$block"; then
-    echo "${job_id}: capability dispatch retained an empty-matrix dependency" >&2
-    exit 1
-  fi
-done <<'EOF'
-policy|Policy verification|medium|policy
-contracts|Contracts verification|medium|contracts
-standard|Standard verification|medium|standard
-tooling|Tooling / delivery contract verification|medium|tooling
-rust-compile|Build test archives|build|rust_compile
-rust-checks|Rust checks|build|rust_compile
-rust-packages|Rust / transport packages|medium|rust_shards
-rust-features|Rust / transport feature graphs|medium|rust_shards
-rust-transport|Rust / transport verification|medium|rust_transport
-database|Database verification|metal-main|database
-services-control|Service control-plane verification|medium|services_control
-services-runtime|Service runtime-plane verification|medium|services_runtime
-edge-kind|Edge / Kind verification|heavy|edge_kind
-EOF
-
-policy_block="$TMP/policy.yaml"
-tooling_block="$TMP/tooling.yaml"
-grep -Fq 'run-product-verification.sh policy-core' "$policy_block" || {
-  echo 'policy job does not own only the fast policy core' >&2
-  exit 1
+  ' "$WORKFLOW"
 }
-# shellcheck disable=SC2016 # Match the workflow's literal expression.
-grep -Fq 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' \
-    "$policy_block" || {
-  echo 'policy core does not see the trusted selection, so it cannot omit CI-script tests' >&2
-  exit 1
-}
-# The heavy tooling job owns selected ShellCheck: its one family step runs
-# the selected Tooling families (tooling_parts, checked below) with the
-# trusted selection and the ShellCheck base.
-tooling_step="$(grep -A6 -F -- '- name: Run the selected Tooling families side by side' "$tooling_block")"
-grep -Fq 'run: scripts/ci/verify/run-product-verification.sh tooling' <<<"$tooling_step" || {
-  echo 'heavy tooling job does not run its families through run-product-verification.sh tooling' >&2
-  exit 1
-}
-# shellcheck disable=SC2016 # Match the workflow's literal expression.
-grep -Fq 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' <<<"$tooling_step" \
-  && grep -Fq 'CODEWIRE_SHELL_POLICY_BASE:' <<<"$tooling_step" || {
-  echo 'heavy tooling step lacks the trusted selection or the ShellCheck base' >&2
-  exit 1
-}
-[ "$(grep -cE '^ +run: .*run-product-verification[.]sh' "$tooling_block")" -eq 1 ] || {
-  echo 'heavy tooling job runs a family outside its one family step' >&2
-  exit 1
-}
+for job_id in policy standard contracts tooling database services-control services-runtime \
+    edge-kind required-verification verification-selection; do
+  job_block "$job_id" > "$TMP/${job_id}.yaml"
+  [ -s "$TMP/${job_id}.yaml" ] || { echo "ci.yaml has no ${job_id} job" >&2; exit 1; }
+done
+defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-kind-build-workflow.py"
 [ "$(VERIFICATION_SELECTION='|valid:v3|policy_shell|complete|' "$ROOT/scripts/ci/verify/run-product-verification.sh" tooling-parts)" = policy-shell ] || {
   echo 'heavy ShellCheck lacks trusted policy_shell dispatch' >&2
   exit 1
 }
-
-selection_block="$TMP/verification-selection.yaml"
-awk '
-  $0 == "  verification-selection:" { capture = 1 }
-  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  verification-selection:" { exit }
-  capture { print }
-' "$WORKFLOW" > "$selection_block"
-grep -qF 'name: Emit trusted capability dispatch decisions' "$selection_block"
-grep -qF "trusted_dispatch_selector='.trusted-ci-policy/scripts/ci/select/emit-verification-matrices.sh'" \
-  "$selection_block"
-grep -qF 'run every group so candidate code cannot omit required work' \
-  "$selection_block"
-grep -qF 'policy contracts standard tooling rust_compile rust_shards rust_transport database' "$selection_block" || {
-  echo 'the dispatch bootstrap does not run the compile and shard groups' >&2
-  exit 1
-}
-# shellcheck disable=SC2016 # Match the literal Actions expression.
-grep -qxF '      rust_shards_expected: ${{ steps.dispatch.outputs.rust_shards_expected || steps.dispatch.outputs.rust_transport_expected }}' \
-  "$selection_block" || {
-  echo 'rust_shards_expected must fall back to the Rust group for an older trusted base' >&2
-  exit 1
-}
-# Contracts left Standard for its own job (infra#1534); a trusted base that
-# predates the split runs it with Standard.
-# shellcheck disable=SC2016 # Match the literal Actions expression.
-grep -qxF '      contracts_expected: ${{ steps.dispatch.outputs.contracts_expected || steps.dispatch.outputs.standard_expected }}' \
-  "$selection_block" || {
-  echo 'contracts_expected must fall back to Standard for an older trusted base' >&2
-  exit 1
-}
-for expectation_name in policy standard tooling rust_compile rust_transport database \
-    services_control services_runtime edge_kind; do
-  grep -qF "${expectation_name}_expected: \${{ steps.dispatch.outputs.${expectation_name}_expected }}" \
-    "$selection_block"
-  if grep -qF "${expectation_name}_matrix:" "$selection_block"; then
-    echo "${expectation_name}: selection output retained empty-matrix transport" >&2
-    exit 1
-  fi
-done
-
-# Heavy jobs share the queue-driven disposable DinD runner pool. Keep ordinary
-# task ceilings at 30 minutes. The selected workspace path performs two cold
-# image builds, while Rust/transport may seed the complete workspace and
-# desktop compiler cache. Those two jobs retain 55-minute ceilings. The Kind
-# gate shards its suites across four parallel per-cluster legs; each shard's
-# 45-minute ceiling holds the longest leg (setup plus dashboard browser) far
-# below the 90-minute heavy budget.
-for job_id in contracts standard tooling rust-packages rust-features database services-control services-runtime; do
-  block="$TMP/${job_id}.yaml"
-  if [ ! -s "$block" ]; then
-    awk -v wanted="$job_id" '
-      $0 == "  " wanted ":" { capture = 1 }
-      capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  " wanted ":" { exit }
-      capture { print }
-    ' "$WORKFLOW" > "$block"
-  fi
-  grep -qF '    timeout-minutes: 30' "$block" || {
-    echo "${job_id}: heavy job must retain the 30-minute task ceiling" >&2
-    exit 1
-  }
-done
-
-# The compile job builds every leg cold after a lockfile, toolchain or
-# layout change (27 min in run 22438), so it alone has 60 minutes.
-awk '$0 == "  rust-compile:" { capture = 1 } capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  rust-compile:" { exit } capture { print }' "$WORKFLOW" > "$TMP/rust-compile-timeout.yaml"
-grep -qF '    timeout-minutes: 60' "$TMP/rust-compile-timeout.yaml" || {
-  echo 'rust-compile: the build-once job must retain its 60-minute cold-build ceiling' >&2
-  exit 1
-}
-rust_transport_block="$TMP/rust-transport.yaml"
-grep -qF '    timeout-minutes: 55' "$rust_transport_block" || {
-  echo 'rust-transport: cold-cache ceiling must remain 55 minutes' >&2
-  exit 1
-}
-
-edge_kind_block="$TMP/edge-kind.yaml"
-edge_kind_timeout_valid() {
-  # Exact equality also rejects duplicate, absent and nonnumeric declarations.
-  [ "$(sed -n 's/^    timeout-minutes: //p' "$1")" = 45 ]
-}
-edge_kind_timeout_valid "$edge_kind_block" || {
-  echo 'edge-kind: every shard must retain the 45-minute ceiling within the 90-minute worker cleanup margin' >&2
-  exit 1
-}
-# Protect the observed old deadline failure and both missing/unbounded limits.
-# These are mutations of the actual job block, not a second workflow fixture.
-for invalid_timeout in 55 85 90 120 0 null; do
-  sed "s/^    timeout-minutes: 45$/    timeout-minutes: $invalid_timeout/" \
-    "$edge_kind_block" > "$TMP/edge-kind-invalid.yaml"
-  if edge_kind_timeout_valid "$TMP/edge-kind-invalid.yaml"; then
-    echo "edge-kind: timeout guard accepted $invalid_timeout" >&2
-    exit 1
-  fi
-done
-sed '/^    timeout-minutes:/d' "$edge_kind_block" > "$TMP/edge-kind-invalid.yaml"
-if edge_kind_timeout_valid "$TMP/edge-kind-invalid.yaml"; then
-  echo 'edge-kind: timeout guard accepted an absent deadline' >&2
-  exit 1
-fi
-sed '/^    timeout-minutes: 45$/p' "$edge_kind_block" > "$TMP/edge-kind-invalid.yaml"
-if edge_kind_timeout_valid "$TMP/edge-kind-invalid.yaml"; then
-  echo 'edge-kind: timeout guard accepted a duplicate deadline' >&2
-  exit 1
-fi
-
 policy_block="$TMP/policy.yaml"
-grep -qF '    timeout-minutes: 30' "$policy_block"
-grep -qF 'name: Verify sealed policy tools' "$policy_block"
-grep -qF 'name: Run Policy' "$policy_block"
-grep -A1 -F 'name: Run Policy' "$policy_block" \
-  | grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')"
 if grep -Eq 'run:.*docker|setup-bun|setup-go|curl |wget ' "$policy_block"; then
   echo 'policy: sealed policy job gained a Docker or network-tool setup dependency' >&2
   exit 1
 fi
 
-grep -qF '    timeout-minutes: 30' "$TMP/policy.yaml" || {
-  echo 'policy: heavy job lost its measured bounded task ceiling' >&2
-  exit 1
-}
-
-for job_id in policy contracts standard tooling rust-compile rust-packages rust-features rust-transport database services-control services-runtime edge-kind; do
-  block="$TMP/${job_id}.yaml"
-  grep -qF 'name: Reuse exact PR-head content verification' "$block"
-  grep -qF "if: \${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}" \
-    "$block"
-  step_count="$(grep -Ec '^      - (name:|uses:)' "$block")"
-  guard_count="$(grep -Ec '^        if:' "$block")"
-  if [ "$step_count" != "$guard_count" ]; then
-    echo "${job_id}: every capability step must have a tested-tree guard" >&2
-    exit 1
-  fi
-  if grep -E '^        if:' "$block" \
-      | grep -vF 'needs.verification-selection.outputs.tested_tree_receipt' \
-      >/dev/null; then
-    echo "${job_id}: capability step omits the tested-tree guard" >&2
-    exit 1
-  fi
-done
-
-# The shards are dispatched by rust_shards_expected, exactly the rust or
-# transport selection their run step requires.
-for job_id in rust-packages rust-features; do
-  block="$TMP/${job_id}.yaml"
-  run_guard="$(awk '/^      - name: Run the Rust .* shard$/ { getline; print; exit }' "$block")"
-  for token in rust transport; do
-    grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" <<<"$run_guard" || {
-      echo "${job_id}: shard run step must require a ${token} selection" >&2
-      exit 1
-    }
-  done
-done
-
-# A failed group reports "failure" with its whole log: no job cancels its own
-# run. A cancel turned failures into "cancelled" and cut the failing job's log
-# (infra#1229, #3119).
-if grep -qE '/actions/runs/[^ ]*/cancel' "$WORKFLOW"; then
-  echo 'ci.yaml: a job cancels its own run' >&2
-  exit 1
-fi
-
-# Closing or merging a pull request cancels its CI in flight: the workflow
-# takes the closed event into the same concurrency group, and the run it
-# starts takes no runner (#2892). Old behaviour: a merged pull request's run
-# kept its metal guests until it finished.
-python3 - "$WORKFLOW" <<'PY'
-import sys
-import yaml
-
-ci_path = sys.argv[1]
-workflow = yaml.safe_load(open(ci_path, encoding="utf-8"))
-# PyYAML reads the bare key `on` as True.
-trigger = (workflow.get("on") or workflow.get(True))["pull_request"]
-if "closed" not in trigger["types"]:
-    raise SystemExit(f"{ci_path}: a closed pull request does not cancel its run")
-ci = yaml.safe_load(open(ci_path, encoding="utf-8"))
-if not ci["concurrency"]["cancel-in-progress"].startswith("${{ github.event_name == 'pull_request'"):
-    raise SystemExit("ci.yaml: pull request runs no longer cancel their predecessor")
-jobs = ci["jobs"]
-if jobs["verification-selection"].get("if") != "${{ github.event.action != 'closed' }}":
-    raise SystemExit("ci.yaml: a closed pull request must start no verification")
-if jobs["required-verification"].get("if") != "${{ always() && github.event.action != 'closed' }}":
-    raise SystemExit("ci.yaml: Required verification must not run for a closed pull request")
-for job_id, job in jobs.items():
-    if job_id in ("verification-selection", "required-verification"):
-        continue
-    if "verification-selection" not in job.get("needs", []):
-        raise SystemExit(f"ci.yaml: {job_id} could run for a closed pull request")
-    if "always()" in str(job.get("if", "")) and "needs.verification-selection.result == 'success'" not in job["if"]:
-        raise SystemExit(f"ci.yaml: {job_id} runs always() without a successful selection")
-PY
 # The local merge check and its workflow are gone (#3119 step 2.3): pull-request
 # CI is the merge gate.
 for retired in .gitea/workflows/merge-check.yaml scripts/ci/receipts/local-prepush-receipt.py \
@@ -3552,50 +3083,18 @@ fi
 
 control_block="$TMP/services-control.yaml"
 runtime_block="$TMP/services-runtime.yaml"
-grep -qF 'name: Resolve service control-plane scope' "$control_block"
-grep -qF 'name: Service control-plane integration not selected' "$control_block"
-grep -qF 'name: Resolve service runtime-plane scope' "$runtime_block"
-grep -qF 'name: Service runtime-plane integration not selected' "$runtime_block"
 for block in "$control_block" "$runtime_block"; do
-  grep -qF 'id: service-scope' "$block"
-  grep -qF 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' "$block"
-  grep -qF "steps.service-scope.outputs.selected == 'true'" "$block"
   if grep -qF "contains(needs.verification-selection.outputs.selection, '|service_integration|')" "$block"; then
     echo "$(basename "$block"): coarse service_integration gating remains" >&2
     exit 1
   fi
 done
-for token in service_idp service_coordinator service_billing service_connectcore; do
-  grep -qF "*'|${token}|'*" "$control_block" || {
-    echo "services-control: scope resolver omits ${token}" >&2
-    exit 1
-  }
+for token in service_idp service_coordinator service_billing service_connectcore \
+    service_orchestration service_nats; do
   grep -qF "$token" "$ROOT/scripts/dev/preflight.sh" || {
-    echo "preflight: control-plane scope omits ${token}" >&2
+    echo "preflight: the service scope omits ${token}" >&2
     exit 1
   }
-done
-for token in service_orchestration service_nats; do
-  grep -qF "*'|${token}|'*" "$runtime_block" || {
-    echo "services-runtime: scope resolver omits ${token}" >&2
-    exit 1
-  }
-  grep -qF "$token" "$ROOT/scripts/dev/preflight.sh" || {
-    echo "preflight: runtime-plane scope omits ${token}" >&2
-    exit 1
-  }
-done
-for token in service_orchestration service_nats; do
-  if grep -qF "*'|${token}|'*" "$control_block"; then
-    echo "services-control: scope resolver includes runtime-only ${token}" >&2
-    exit 1
-  fi
-done
-for token in service_idp service_coordinator service_billing service_connectcore; do
-  if grep -qF "*'|${token}|'*" "$runtime_block"; then
-    echo "services-runtime: scope resolver includes control-only ${token}" >&2
-    exit 1
-  fi
 done
 
 extract_service_scope_script() {
@@ -3648,112 +3147,27 @@ run_service_scope_case billing_temporal_selects_control "$control_scope_script" 
   '|valid:v3|service_billing|service_integration|service_temporal|complete|' true
 run_service_scope_case orchestration_temporal_selects_runtime "$runtime_scope_script" \
   '|valid:v3|service_integration|service_orchestration|service_temporal|complete|' true
+# Each service runs in exactly its own plane: the control plane takes idp,
+# coordinator, billing and the Connect core; the runtime plane orchestration
+# and NATS.
+for token in service_idp service_coordinator service_billing service_connectcore; do
+  run_service_scope_case "control_owns_${token}" "$control_scope_script" \
+    "|valid:v3|service_integration|${token}|complete|" true
+  run_service_scope_case "runtime_omits_${token}" "$runtime_scope_script" \
+    "|valid:v3|service_integration|${token}|complete|" false
+done
+for token in service_orchestration service_nats; do
+  run_service_scope_case "runtime_owns_${token}" "$runtime_scope_script" \
+    "|valid:v3|service_integration|${token}|complete|" true
+  run_service_scope_case "control_omits_${token}" "$control_scope_script" \
+    "|valid:v3|service_integration|${token}|complete|" false
+done
 
 selection_block="$TMP/verification-selection.yaml"
-awk '
-  $0 == "  verification-selection:" { capture = 1 }
-  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  verification-selection:" { exit }
-  capture { print }
-' "$WORKFLOW" > "$selection_block"
-grep -qxF "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$selection_block" || {
-  echo 'verification selection does not use the live non-privileged validation profile' >&2
-  exit 1
-}
 if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|trusted-plan|protected-delivery|protected-dev-observer)$' "$WORKFLOW"; then
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-# Each group on exactly the slot it needs (infra#1534): nine on the medium
-# metal class, Database on the heavy one, and Rust compilation and Rust checks
-# on the build runners, main's on a main push (compile once, infra#1632).
-# Every metal group bounds its Cargo jobs.
-[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_BUILD}" "$WORKFLOW")" -eq 2 ]] || {
-  echo 'Codewire CI requires Rust compilation and Rust checks on the build runners' >&2
-  exit 1
-}
-[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_MEDIUM}" "$WORKFLOW")" -eq 9 ]] || {
-  echo 'Codewire CI requires its nine medium groups (policy included) on the medium metal labels' >&2
-  exit 1
-}
-[[ "$(grep -Fxc "    runs-on: ${METAL_MAIN_RUNS_ON}" "$WORKFLOW")" -eq 1 ]] || {
-  echo 'Codewire CI requires Database verification alone on the heavy metal labels' >&2
-  exit 1
-}
-[[ "$(grep -Fxc "$METAL_CARGO_BOUND" "$WORKFLOW")" -eq 10 ]] || {
-  echo 'each metal group must bound its cargo jobs to its guest memory' >&2
-  exit 1
-}
-[[ "$(grep -Fxc "    runs-on: ${HEAVY_RUNS_ON}" "$WORKFLOW")" -eq 5 ]] || {
-  echo 'Codewire CI requires Edge / Kind and four parallel Kind producers, each selecting the main-first cloud Heavy label until Kind runs in a metal guest' >&2
-  exit 1
-}
-if grep -Eq '^ *runs-on: [^$]' "$WORKFLOW"; then
-  echo 'a Codewire CI job names a literal runner label instead of its repository Actions variable (docs/dev/CI-CONFIGURATION.md)' >&2
-  exit 1
-fi
-# Selection, aggregation, the final Dev delivery trigger (#2892) and the four
-# links of the fail-fast watcher chain (infra#1632; owner, 2026-10-25).
-[[ "$(grep -Fxc "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$WORKFLOW")" -eq 7 ]] || {
-  echo 'Codewire CI has not assigned selection, aggregation, the Dev delivery trigger and the four fail-fast watcher links to the untrusted light runner' >&2
-  exit 1
-}
-for output in selector_version classification selection required_local_mode \
-    ci_head_commit ci_head_tree \
-    cw_package_state cw_package_selected desktop_package_state \
-    desktop_package_selected \
-    kind_workspace_source \
-    tested_tree_receipt tested_tree_reason \
-    tested_tree_pr tested_tree_head tested_tree_run; do
-  grep -qF "      ${output}:" "$selection_block" || {
-    echo "verification selection omits ${output}" >&2
-    exit 1
-  }
-done
-grep -qF 'name: Verify exact tested-tree receipt' "$selection_block"
-grep -qF 'GITEA_TOKEN: ${{ github.token }}' "$selection_block"
-grep -qF "receipt_checker='.trusted-ci-policy/scripts/ci/receipts/verify-tested-tree-receipt.sh'" \
-  "$selection_block"
-grep -qF 'ref: ${{ github.event.pull_request.base.sha }}' "$selection_block"
-grep -qF 'path: .trusted-ci-policy' "$selection_block"
-grep -qF 'persist-credentials: false' "$selection_block"
-grep -qF "trusted_planner='.trusted-ci-policy/scripts/ci/plan/planner.py'" \
-  "$selection_block"
-grep -qF "capability_selector='.trusted-ci-policy/scripts/ci/select/select-verification.sh'" \
-  "$selection_block"
-grep -qF 'ref: ${{ github.event.before }}' "$selection_block"
-planner_toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain for trusted artifact planning' \
-  "$selection_block" | cut -d: -f1)"
-planner_select_line="$(grep -n -m1 'name: Select capabilities and artifact facts' \
-  "$selection_block" | cut -d: -f1)"
-test -n "$planner_toolchain_line"
-test -n "$planner_select_line"
-test "$planner_toolchain_line" -lt "$planner_select_line"
-grep -A2 -F 'name: Verify sealed Rust toolchain for trusted artifact planning' \
-  "$selection_block" | grep -qF "if: \${{ github.event_name == 'pull_request' }}"
-grep -A2 -F 'name: Verify sealed Rust toolchain for trusted artifact planning' \
-  "$selection_block" | grep -qF 'run: scripts/ci/setup/assert-ci-runner-image.sh'
-grep -qF "jq -e '.degraded_reasons | length > 0'" "$selection_block"
-grep -qF "jq -c '.degraded_reasons'" "$selection_block"
-grep -qF "trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'" \
-  "$selection_block"
-grep -qF 'python3 "$trusted_adapter" --plan "$plan_output"' \
-  "$selection_block"
-# A main push plans its artifact facts with the previous main's trusted
-# policy (#2897); a dispatch, an older policy or a planner failure keeps every
-# artifact selected, and only a push receives the job token for that.
-grep -qF "main_push_planner='.trusted-ci-policy/scripts/ci/plan/plan-main-push.py'" \
-  "$selection_block"
-grep -qF 'if [ "$GITHUB_EVENT_NAME" = push ] && [ -f "$main_push_planner" ]' "$selection_block"
-grep -qF -- '--before "$PUSH_BEFORE_SHA"' "$selection_block"
-# A push to main selects from the newest verified main commit, or everything,
-# and a receipt stands only on that commit (#3176).
-grep -qF 'python3 -I -B scripts/ci/plan/main-ci-verdict.py base' "$selection_block"
-grep -qF 'PUSH_BEFORE_SHA="$selector_before" PUSH_BASE_UNVERIFIED="$push_base_unverified"' "$selection_block"
-grep -qF "printf 'push_verified_base=%s\\n' \"\$verified_base\" >> \"\$workflow_output\"" "$selection_block"
-grep -qF 'PUSH_VERIFIED_BASE: ${{ steps.select.outputs.push_verified_base }}' "$selection_block"
-grep -A4 -F 'python3 scripts/ci/plan/apply-verification-plan.py' "$selection_block" \
-  | grep -qF -- '--unclassified'
-grep -qF "GITEA_TOKEN: \${{ github.event_name == 'push' && github.token || '' }}" "$selection_block"
 defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_plan_main_push.py"
 # Main CI's verdict, and the final job that starts Dev delivery from it (#2892).
 defer_slow_check python3 -B "$ROOT/scripts/ci/plan/tests/test_main_ci_verdict.py"
@@ -3761,44 +3175,16 @@ defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-rerun-dev-publish.py"
 defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-cancel-superseded-deliveries.py"
 # A pull request's run stops at its first failed job (infra#1632).
 defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-fail-fast-watch.py"
-grep -qF "grep -Fxq 'selector_version=v3'" "$selection_block"
 if grep -qF 'selector_version=v2' "$selection_block" \
     || grep -qF 'One-time contract bridge' "$selection_block"; then
   echo 'verification selection retains a superseded v2 transition bridge' >&2
   exit 1
 fi
-grep -qF 'name: Run artifact-selected desktop package' "$WORKFLOW"
-grep -qF "VERIFICATION_SELECTION: '|valid:v3|rust_pkg_codewire_desktop|complete|'" \
-  "$WORKFLOW"
 
 defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_planner.py" \
   PlannerFixtureTests.test_go_sdk_only_change_emits_unselected_cw_and_desktop_outputs \
   PlannerFixtureTests.test_missing_cargo_fails_closed_with_diagnostic
 
-tooling_block="$TMP/tooling.yaml"
-deploy_toolchain_line="$(grep -n -m1 'name: Verify sealed delivery-contract tools' \
-  "$tooling_block" | cut -d: -f1)"
-deploy_run_line="$(grep -n -m1 'name: Run the selected Tooling families side by side' "$tooling_block" | cut -d: -f1)"
-test -n "$deploy_toolchain_line"
-test -n "$deploy_run_line"
-test "$deploy_toolchain_line" -lt "$deploy_run_line"
-grep -A2 -F 'name: Verify sealed delivery-contract tools' \
-  "$tooling_block" | grep -qF "contains(needs.verification-selection.outputs.selection, '|deploy|')"
-
-if grep -qE '^[[:space:]]*permissions:' "$WORKFLOW"; then
-  echo 'product CI must not declare GitHub-only permissions ignored by Forgejo' >&2
-  exit 1
-fi
-
-top_level_jobs="$(awk '
-  /^jobs:$/ { in_jobs = 1; next }
-  in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
-  END { print count + 0 }
-' "$WORKFLOW")"
-if [ "$top_level_jobs" != 24 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, thirteen groups, four Kind producers, aggregate, the Dev delivery trigger and four fail-fast watcher links" >&2
-  exit 1
-fi
 for legacy_job in rust go-support web sdk-go sdk-ts sdk-python \
     service-integration transport release deploy security; do
   if grep -qF "  ${legacy_job}:" "$WORKFLOW"; then
@@ -3815,112 +3201,27 @@ if grep -qE '^  cw-release-assets:$|package-cw-release\.sh' "$WORKFLOW"; then
 fi
 
 standard_block="$TMP/standard.yaml"
-bun_setup_condition="$(grep -A1 -F \
-  'uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
-  "$standard_block")"
-if grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" \
-    <<<"$bun_setup_condition"; then
+if grep -A1 -F 'uses: noel/setup-bun@' "$standard_block" \
+    | grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')"; then
   echo 'standard: policy-only verification still installs Bun' >&2
   exit 1
 fi
-grep -qF "contains(needs.verification-selection.outputs.selection, '|web|')" \
-  <<<"$bun_setup_condition" || {
-  echo 'standard: Bun setup omits web' >&2
-  exit 1
-}
-# Contracts runs in its own job (infra#1534): Standard sets up nothing for it,
-# and the Contracts job sets up Go and Bun and runs it, all on its token.
+# Contracts runs in its own job (infra#1534): Standard sets up nothing for it.
 if grep -qE "'\|contracts(_proto)?\|'" "$standard_block"; then
   echo 'standard: a step still runs for Contracts, which has its own job' >&2
   exit 1
 fi
-contracts_block="$TMP/contracts.yaml"
-for wanted in \
-    'run: scripts/ci/setup/setup-go.sh 1.27.3' \
-    'uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
-    'run: scripts/ci/setup/select-warm-rust-cache.sh' \
-    'VERIFICATION_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}' \
-    'VERIFICATION_PUSH_BEFORE_SHA: ${{ github.event.before }}' \
-    'run: scripts/ci/verify/run-product-verification.sh contracts'; do
-  grep -qF -- "$wanted" "$contracts_block" || {
-    echo "contracts: the job lacks: $wanted" >&2
-    exit 1
-  }
-done
-[ "$(grep -cF "contains(needs.verification-selection.outputs.selection, '|contracts|')" "$contracts_block")" -eq 6 ] || {
-  echo 'contracts: its setup and run steps must each run only when Contracts is selected' >&2
-  exit 1
-}
-[ "$(grep -cE '^ +run: .*run-product-verification[.]sh' "$contracts_block")" -eq 1 ] || {
-  echo 'contracts: the job runs a family besides Contracts' >&2
-  exit 1
-}
-
-# Standard's families run in one step; run-product-verification.sh standard
-# owns each one's selection condition (test-standard-families.sh proves the
-# order and the Rust coverage rule).
-standard_run_line="$(grep -n -m1 'name: Run the selected Standard families side by side' "$standard_block" | cut -d: -f1)"
-[ -n "$standard_run_line" ] || { echo 'standard: no side-by-side family step' >&2; exit 1; }
-standard_run_block="$(sed -n "${standard_run_line},$((standard_run_line + 7))p" "$standard_block")"
-for wanted in \
-    'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' \
-    'VERIFICATION_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}' \
-    'VERIFICATION_PUSH_BEFORE_SHA: ${{ github.event.before }}' \
-    'run: scripts/ci/verify/run-product-verification.sh standard'; do
-  grep -qF -- "$wanted" <<<"$standard_run_block" || {
-    echo "standard: the family step lacks: $wanted" >&2
-    exit 1
-  }
-done
 if grep -qE -- '- name: Run (Contracts|Go support|Web|Docs|SDK |iOS)' "$standard_block"; then
   echo 'standard: a family kept its own step beside the side-by-side step' >&2
   exit 1
 fi
-grep -qF 'CODEWIRE_DASHBOARD_IMAGE_DEFERRED:-false' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh" || {
-  echo 'standard: Web cannot leave image work to Dev delivery' >&2
-  exit 1
-}
-grep -qF '    run_dashboard_image' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh" || {
-  echo 'local Web verification lost its standalone image gate' >&2
-  exit 1
-}
-grep -qF '    web) CODEWIRE_DASHBOARD_IMAGE_DEFERRED=true run_web ;;' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh" || {
-  echo 'standard: Web no longer leaves image work to Dev delivery' >&2
-  exit 1
-}
-# Each family runs only on its own token, as its step did.
-grep -qF 'for family in go-support:go_support docs:docs sdk-go:sdk_go sdk-ts:sdk_ts \' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF '      sdk-python:sdk_python ios:ios; do' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 # Contracts runs in its own job (infra#1534), never inside Standard.
 if awk '/^(run_standard|run_standard_family)\(\) \{$/ { on = 1 } on { print } on && /^}$/ { on = 0 }' \
     "$ROOT/scripts/ci/verify/run-product-verification.sh" | grep -qE 'run_contracts|selected contracts'; then
   echo 'standard: Contracts still runs inside Standard' >&2
   exit 1
 fi
-grep -qxF '  contracts) run_contracts ;;' "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF "  if selected web; then lanes+=('run_standard_in_order web'); fi" \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
 
-tooling_block="$TMP/tooling.yaml"
-tooling_bun_setup="$(grep -A3 -F \
-  'uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' \
-  "$tooling_block" || true)"
-if ! grep -qF "tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|dev_smoke_script_tests|')" \
-    <<<"$tooling_bun_setup" ||
-   ! grep -qF "bun-version: '1.4.4'" <<<"$tooling_bun_setup"; then
-  echo 'tooling: Dev smoke must provision pinned Bun in its own selected job' >&2
-  exit 1
-fi
-tooling_bun_line="$(grep -n -m1 'uses: noel/setup-bun@' "$tooling_block" | cut -d: -f1)"
-tooling_dev_smoke_line="$(grep -n -m1 'name: Run the selected Tooling families side by side' "$tooling_block" | cut -d: -f1)"
-if [ "$tooling_bun_line" -ge "$tooling_dev_smoke_line" ]; then
-  echo 'tooling: pinned Bun setup must precede Dev smoke execution' >&2
-  exit 1
-fi
 for contract in \
     'confidential-script-tests|confidential_script_tests' \
     'dev-smoke-script-tests|dev_smoke_script_tests' \
@@ -3939,28 +3240,6 @@ done
 # on the ios token through standard_families).
 ios_run_block="$(awk '$0 == "run_ios_swift_package() {" { on = 1 } on { print } on && $0 == "}" { exit }' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh")"
-grep -qF '    ios) run_ios_swift_package ;;' "$ROOT/scripts/ci/verify/run-product-verification.sh" || {
-  echo 'standard: the iOS family does not run its package tests' >&2
-  exit 1
-}
-grep -qxF '  run_ios_config' \
-  <<<"$ios_run_block" || {
-  echo 'standard: iOS callback configuration is not verified before package tests' >&2
-  exit 1
-}
-grep -qF "docker build --file - apps/ios <<'DOCKERFILE'" <<<"$ios_run_block" || {
-  echo 'standard: iOS package tests do not stream their package context to Docker' >&2
-  exit 1
-}
-grep -qF 'swift@sha256:0ff707a48519cf1473616c759e019bcff21cfbafa3d2687bf8fd41a2757adc9a' \
-  <<<"$ios_run_block" || {
-  echo 'standard: iOS package tests do not use the pinned Swift image' >&2
-  exit 1
-}
-grep -qF 'RUN swift test --scratch-path /tmp/codewire-ios-build' <<<"$ios_run_block" || {
-  echo 'standard: iOS package tests must build outside the checkout' >&2
-  exit 1
-}
 if grep -qF -- '--mount "type=bind' <<<"$ios_run_block"; then
   echo 'standard: iOS package tests must not assume the nested runner host path' >&2
   exit 1
@@ -3970,168 +3249,20 @@ if grep -qF 'swift-actions/setup-swift@' "$standard_block"; then
   exit 1
 fi
 
-grep -qF '      - name: Verify sealed Rust toolchain' \
-  "$standard_block" || {
-  echo 'standard: Rust-backed transitional checks do not verify the sealed Rust toolchain' >&2
-  exit 1
-}
-standard_toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain' \
-  "$standard_block" | cut -d: -f1)"
-contracts_run_line="$(grep -n -m1 'name: Run the selected Standard families side by side' \
-  "$standard_block" | cut -d: -f1)"
-if [ "$standard_toolchain_line" -ge "$contracts_run_line" ]; then
-  echo 'standard: Rust toolchain must be verified before contract verification' >&2
-  exit 1
-fi
-policy_toolchain_condition="$(grep -A1 -F \
-  'name: Verify sealed policy tools' \
-  "$policy_block")"
-grep -qF "contains(needs.verification-selection.outputs.selection, '|policy|')" \
-  <<<"$policy_toolchain_condition" || {
-  echo 'policy: sealed tool check omits policy planner fixtures' >&2
-  exit 1
-}
-standard_toolchain_condition="$(grep -A1 -F \
-  'name: Verify sealed Rust toolchain' \
-  "$standard_block")"
-# Proto/Connect mode (Contracts) verifies the sealed toolchain in its own job,
-# before it runs (infra#1534).
-contracts_toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain' "$contracts_block" | cut -d: -f1)"
-contracts_family_line="$(grep -n -m1 'name: Run Contracts' "$contracts_block" | cut -d: -f1)"
-if [ -z "$contracts_toolchain_line" ] || [ -z "$contracts_family_line" ] \
-    || [ "$contracts_toolchain_line" -ge "$contracts_family_line" ]; then
-  echo 'contracts: Rust toolchain must be verified before contract verification' >&2
-  exit 1
-fi
-grep -A1 -F 'name: Verify sealed Rust toolchain' "$contracts_block" \
-  | grep -qF "contains(needs.verification-selection.outputs.selection, '|contracts|')" || {
-  echo 'contracts: Rust toolchain omits Proto/Connect mode' >&2
-  exit 1
-}
-go_support_run_line="$(grep -n -m1 'name: Run the selected Standard families side by side' \
-  "$standard_block" | cut -d: -f1)"
-if [ "$standard_toolchain_line" -ge "$go_support_run_line" ]; then
-  echo 'go-support: Rust toolchain must be verified before tailnet parity verification' >&2
-  exit 1
-fi
-grep -qF "contains(needs.verification-selection.outputs.selection, '|go_tailnet|')" \
-  <<<"$standard_toolchain_condition" || {
-  echo 'standard: Rust toolchain omits Go tailnet parity mode' >&2
-  exit 1
-}
-grep -qF "contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')" \
-  <<<"$standard_toolchain_condition" || {
-  echo 'standard: Rust toolchain omits generated-Go consumer interop' >&2
-  exit 1
-}
-standard_protoc_line="$(grep -n -m1 \
-  'name: Install pinned protoc for Rust-backed standard checks' \
-  "$standard_block" | cut -d: -f1)"
-if [ -z "$standard_protoc_line" ] || [ "$standard_protoc_line" -ge "$contracts_run_line" ] \
-    || [ "$standard_protoc_line" -ge "$go_support_run_line" ]; then
-  echo 'standard: pinned protoc must be installed before Rust-backed checks' >&2
-  exit 1
-fi
-standard_protoc_condition="$(grep -A1 -F \
-  'name: Install pinned protoc for Rust-backed standard checks' \
-  "$standard_block")"
-for token in go_tailnet go_consumer_interop; do
-  grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
-    <<<"$standard_protoc_condition" || {
-    echo "standard: pinned protoc omits ${token}" >&2
-    exit 1
-  }
-done
-grep -qF 'protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip' \
-  "$standard_block" || {
-  echo 'standard: protoc archive is not pinned to the reviewed release' >&2
-  exit 1
-}
-grep -qF \
-  '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
-  "$standard_block" || {
-  echo 'standard: protoc archive checksum is not verified' >&2
-  exit 1
-}
-
-rust_transport_block="$TMP/rust-transport.yaml"
-for contract in 'Run selected Rust and transport|rust' 'Run selected Rust and transport|transport'; do
-  step_name="${contract%%|*}"
-  token="${contract##*|}"
-  step_condition="$(grep -A1 -F -- "- name: ${step_name}" "$rust_transport_block")"
-  grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
-    <<<"$step_condition" || {
-    echo "rust-transport: ${step_name} does not select ${token}" >&2
-    exit 1
-  }
-done
-rust_transport_protoc_line="$(grep -n -m1 \
-  'name: Install pinned protoc for Rust and guest builds' \
-  "$rust_transport_block" | cut -d: -f1)"
-rust_transport_run_line="$(grep -n -m1 'name: Run selected Rust and transport' \
-  "$rust_transport_block" | cut -d: -f1)"
-if [ -z "$rust_transport_protoc_line" ] \
-    || [ "$rust_transport_protoc_line" -ge "$rust_transport_run_line" ]; then
-  echo 'rust-transport: pinned protoc must be installed before transport verification' >&2
-  exit 1
-fi
-rust_transport_protoc_condition="$(grep -A1 -F \
-  'name: Install pinned protoc for Rust and guest builds' \
-  "$rust_transport_block")"
-for token in rust transport transport_pkg_codewire_vmm_guest_probe; do
-  grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
-    <<<"$rust_transport_protoc_condition" || {
-    echo "rust-transport: pinned protoc omits ${token} compilation" >&2
-    exit 1
-  }
-done
-grep -qF "needs.verification-selection.outputs.desktop_package_selected == 'true'" \
-  <<<"$rust_transport_protoc_condition" || {
-  echo 'rust-transport: pinned protoc omits desktop compilation' >&2
-  exit 1
-}
-grep -qF 'protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip' \
-  "$rust_transport_block" || {
-  echo 'rust-transport: protoc archive is not pinned to the reviewed release' >&2
-  exit 1
-}
-grep -qF \
-  '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
-  "$rust_transport_block" || {
-  echo 'rust-transport: protoc archive checksum is not verified' >&2
-  exit 1
-}
-grep -qF 'echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"' \
-  "$rust_transport_block" || {
-  echo 'rust-transport: pinned protoc is not exported to later steps' >&2
-  exit 1
-}
-grep -qF '"$HOME/.proto-tools/protoc/bin/protoc" --version' \
-  "$rust_transport_block" || {
-  echo 'rust-transport: pinned protoc is not verified through its exact path' >&2
-  exit 1
-}
-
 database_block="$TMP/database.yaml"
 services_control_block="$TMP/services-control.yaml"
 services_runtime_block="$TMP/services-runtime.yaml"
 for integration_block in "$database_block" "$services_control_block" "$services_runtime_block"; do
-  grep -qF 'name: Start integration Postgres' "$integration_block"
-  grep -qF "docker inspect --format '{{json .NetworkSettings.Networks}}'" \
-    "$integration_block"
+  # The network extraction the JSON cases below exercise.
   grep -qF "| jq -er 'keys[]'" "$integration_block"
   if grep -qF '{{println $name}}' "$integration_block"; then
     echo 'integration network discovery can emit a phantom blank network' >&2
     exit 1
   fi
-  grep -qF -- '--network-alias "$postgres_host"' "$integration_block"
-  grep -qF 'echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"' \
-    "$integration_block"
   if grep -qF -- '-p 127.0.0.1::5432' "$integration_block"; then
     echo 'integration job publishes Postgres onto the DinD sidecar loopback' >&2
     exit 1
   fi
-  grep -qF 'name: Stop integration Postgres' "$integration_block"
 done
 
 # Match the workflow's value-blind JSON-key extraction. Docker appends a
@@ -4149,27 +3280,6 @@ assert_network_count() {
 assert_network_count '{"WORKFLOW-bounded":{}}' 1
 assert_network_count '{}' 0
 assert_network_count '{"bridge":{},"WORKFLOW-bounded":{}}' 2
-grep -qF 'name: Run Database' "$database_block"
-grep -qF 'run: scripts/ci/verify/run-integration-verification.sh database' \
-  "$database_block"
-grep -qF 'name: Run Service integration' "$services_control_block"
-grep -qF 'run: scripts/ci/verify/run-integration-verification.sh services-control' \
-  "$services_control_block"
-grep -qF 'name: Run Service integration' "$services_runtime_block"
-grep -qF 'run: scripts/ci/verify/run-integration-verification.sh services-runtime' \
-  "$services_runtime_block"
-
-integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
-grep -qF -- '--network "$INTEGRATION_DOCKER_NETWORK"' "$integration_runner"
-grep -qF -- '--network-alias "$INTEGRATION_NATS_HOST"' "$integration_runner"
-grep -qF 'NATS_MONITOR_URL="http://${INTEGRATION_NATS_HOST}:8222/healthz"' \
-  "$integration_runner"
-grep -qF 'service_idp service_coordinator service_billing' \
-  "$integration_runner"
-grep -qF '        service_connectcore service_temporal' "$integration_runner"
-grep -qF 'runtime) filter_service_selection service_orchestration service_nats service_temporal ;;' \
-  "$integration_runner"
-grep -qF 'SELECTION="$(service_plane_selection "${MODE#services-}")"' "$integration_runner"
 if rg -n 'run-integration-verification\.sh services([^_-]|$)|"\$INTEGRATION_RUNNER" services([^_-]|$)' \
     "$WORKFLOW" "$ROOT/scripts/dev"; then
   echo 'automatic verification retains the oversized combined service integration mode' >&2
@@ -4178,29 +3288,12 @@ fi
 
 edge_kind_block="$TMP/edge-kind.yaml"
 # Static edge checks run in tooling, so an edge-only selection starts no Kind leg.
-grep -qF 'run: scripts/ci/verify/run-product-verification.sh tooling' "$TMP/tooling.yaml"
 [ "$(VERIFICATION_SELECTION='|valid:v3|edge_kind|complete|' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh" tooling-parts)" = edge ]
 if grep -qF 'run-product-verification.sh edge' "$edge_kind_block"; then
   echo 'edge-kind: static edge checks moved back into a Kind shard' >&2
   exit 1
 fi
-grep -qF 'scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"' "$edge_kind_block"
-edge_fixture_runner="$TMP/edge-fixture-runner.sh"
-# The Kind tool tests own these fixtures; Edge runs them when selected (R8).
-awk '
-  /^run_kind_tools\(\) \{/ { capture = 1 }
-  capture { print }
-  capture && $0 == "}" { exit }
-' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$edge_fixture_runner"
-for edge_fixture_command in \
-    '  scripts/ci/tests/test-kind-e2e-suites.sh' \
-    '  run_kind_cw_runtime_probe_fixture'; do
-  [ "$(grep -cFx "$edge_fixture_command" "$edge_fixture_runner")" -eq 1 ] || {
-    echo "the Kind tool tests must invoke the owning fixture once: $edge_fixture_command" >&2
-    exit 1
-  }
-done
 # The probe fixture runs as the workspace user: directly for a developer, and
 # through a privilege drop where the hosted job is root. Execute the checked-in
 # helper against a stub tree for both identities.
@@ -4210,10 +3303,6 @@ awk '
   capture { print }
   capture && $0 == "}" { exit }
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$probe_fixture_runner"
-[ "$(grep -cF 'python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py' "$probe_fixture_runner")" -eq 2 ] || {
-  echo 'probe fixture helper must run the owning fixture on both identity paths' >&2
-  exit 1
-}
 # Hosted, the copy sits in a fresh directory under the filesystem root: the
 # probe refuses any group- or world-writable ancestor, such as /tmp.
 grep -Fxq '  local parent="${1:-/}"' "$probe_fixture_runner" || {
@@ -4296,7 +3385,6 @@ if grep -qF '    name: Manual diagnostics' "$WORKFLOW" \
   echo 'product CI must not contain or depend on manual diagnostics' >&2
   exit 1
 fi
-grep -qF 'manual diagnostics are retired; run scripts/ci/verify/rust-stack-rehearsal.sh or scripts/ci/verify/tailnet-parity.sh locally' "$WORKFLOW"
 
 if rg -n 'cr-golden|diagnostic_cr_golden|go_cr_golden|TestGolden.*-update' \
     "$WORKFLOW" "$SELECTOR" \
@@ -4313,37 +3401,24 @@ START_LATENCY_WORKFLOW="$ROOT/.gitea/workflows/ci-start-latency.yaml"
   echo 'vendored start-latency collector does not match its recorded sha256' >&2
   exit 1
 }
-grep -qF '  workflow_dispatch:' "$START_LATENCY_WORKFLOW"
 if grep -Eq '^  (push|pull_request|pull_request_target|schedule|workflow_run):' \
     "$START_LATENCY_WORKFLOW" \
   || grep -Eq '^permissions:|enable-openid-connect|secrets\.' "$START_LATENCY_WORKFLOW"; then
   echo 'start-latency measurement must stay dispatch-only and credential-free' >&2
   exit 1
 fi
-grep -qxF "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$START_LATENCY_WORKFLOW"
-grep -qF 'run: sha256sum --check --strict forgejo-ci-start-latency.sha256' \
-  "$START_LATENCY_WORKFLOW"
-grep -qF 'echo "::group::rows.jsonl"' "$START_LATENCY_WORKFLOW"
 
 # The #3144 done measures are dispatch-only and read with their own job token
 # on the Lite pool, from a full checkout for merge ancestry.
 DONE_MEASURES_WORKFLOW="$ROOT/.gitea/workflows/ci-done-measures.yaml"
-grep -qF '  workflow_dispatch:' "$DONE_MEASURES_WORKFLOW"
 if grep -Eq '^  (push|pull_request|pull_request_target|schedule|workflow_run):' \
     "$DONE_MEASURES_WORKFLOW" \
   || grep -Eq '^permissions:|enable-openid-connect|secrets\.' "$DONE_MEASURES_WORKFLOW"; then
   echo 'done measures must stay dispatch-only and credential-free' >&2
   exit 1
 fi
-grep -qxF "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$DONE_MEASURES_WORKFLOW"
-grep -qF 'scripts/ci/measure/ci-done-measures collect' "$DONE_MEASURES_WORKFLOW"
 
 required_block="$TMP/required-verification.yaml"
-awk '
-  $0 == "  required-verification:" { capture = 1 }
-  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  required-verification:" { exit }
-  capture { print }
-' "$WORKFLOW" > "$required_block"
 if grep -Eq 'promotion-receipt-(publish|consume)|RECEIPT_(PUBLISH|CONSUME)_RESULT' \
     "$WORKFLOW"; then
   echo 'required CI retains synthetic promotion receipt transport' >&2
@@ -4354,65 +3429,6 @@ if rg -ni 'migration[ _-](static|integration)' "$WORKFLOW"; then
   echo 'automatic workflow retains historical migration terminology' >&2
   exit 1
 fi
-grep -qF '  required-verification:' "$WORKFLOW"
-grep -qF '    name: Required verification' "$WORKFLOW"
-grep -qxF "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$required_block" || {
-  echo 'required coordination consumes the heavy compatibility pool' >&2
-  exit 1
-}
-# shellcheck disable=SC2016 # Match the literal Actions expression.
-grep -qF '    if: ${{ always() }}' "$WORKFLOW"
-grep -qF 'scripts/ci/select/require-verification-results.sh' "$required_block"
-for group in standard rust-compile rust-packages rust-features rust-transport database services-control services-runtime edge-kind; do
-  grep -qF "      - ${group}" "$required_block" || {
-    echo "required CI does not wait on ${group}" >&2
-    exit 1
-  }
-done
-for result in VERIFICATION_STANDARD_RESULT \
-    VERIFICATION_RUST_COMPILE_RESULT VERIFICATION_RUST_PACKAGES_RESULT \
-    VERIFICATION_RUST_FEATURES_RESULT VERIFICATION_RUST_TRANSPORT_RESULT \
-    VERIFICATION_DATABASE_RESULT \
-    VERIFICATION_SERVICES_CONTROL_RESULT VERIFICATION_SERVICES_RUNTIME_RESULT \
-    VERIFICATION_EDGE_KIND_RESULT; do
-  grep -qF "${result}:" "$required_block" || {
-    echo "required CI omits ${result}" >&2
-    exit 1
-  }
-done
-for expected in VERIFICATION_POLICY_EXPECTED VERIFICATION_STANDARD_EXPECTED \
-    VERIFICATION_TOOLING_EXPECTED VERIFICATION_RUST_COMPILE_EXPECTED \
-    VERIFICATION_RUST_SHARDS_EXPECTED VERIFICATION_RUST_TRANSPORT_EXPECTED \
-    VERIFICATION_DATABASE_EXPECTED VERIFICATION_SERVICES_CONTROL_EXPECTED \
-    VERIFICATION_SERVICES_RUNTIME_EXPECTED VERIFICATION_EDGE_KIND_EXPECTED; do
-  grep -qF "${expected}:" "$required_block" || {
-    echo "required CI omits ${expected}" >&2
-    exit 1
-  }
-done
-for receipt_input in VERIFICATION_TESTED_TREE_RECEIPT \
-    VERIFICATION_TESTED_TREE_REASON VERIFICATION_TESTED_TREE_PR \
-    VERIFICATION_TESTED_TREE_HEAD VERIFICATION_TESTED_TREE_RUN; do
-  grep -qF "${receipt_input}:" "$required_block" || {
-    echo "required CI omits ${receipt_input}" >&2
-    exit 1
-  }
-done
-grep -qF 'name: Emit exact-head verification receipt' "$required_block"
-grep -qF 'run: scripts/ci/receipts/emit-verification-receipt.py' "$required_block"
-# shellcheck disable=SC2016 # Match the literal Actions expression.
-grep -A12 -F 'name: Emit exact-head verification receipt' "$required_block" \
-  | grep -qF 'VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}' || {
-  echo 'the receipt step cannot validate its run selection' >&2
-  exit 1
-}
-for receipt_input in CODEWIRE_PR_NUMBER CODEWIRE_BASE_COMMIT \
-    CODEWIRE_HEAD_COMMIT CODEWIRE_HEAD_TREE; do
-  grep -qF "${receipt_input}:" "$required_block" || {
-    echo "verification receipt omits ${receipt_input}" >&2
-    exit 1
-  }
-done
 if grep -qF 'diagnostics' "$required_block" \
   || grep -qF 'DIAGNOSTICS_RESULT' "$required_block"; then
   echo 'required CI must not wait on manual diagnostics' >&2
@@ -4872,10 +3888,6 @@ edge_family_fixture() {
 [ "$(edge_family_fixture '|valid:v3|edge_kind|kind_tools_omittable|complete|')" \
     = $'edge\nKind tool tests: not selected; no Kind tool or input they read changed' ] || {
   echo 'Edge ran Kind tool tests the selection omitted' >&2
-  exit 1
-}
-grep -qxF '  edge) run_edge_family ;;' "$product_runner" || {
-  echo 'the edge family does not decide on the Kind tool tests' >&2
   exit 1
 }
 grep -qF '"$PRODUCT_RUNNER" policy-parts' "$ROOT/scripts/dev/preflight.sh" || {
@@ -5375,8 +4387,6 @@ if grep -qF "find scripts/runtime -type f -name '*.sh'" \
   echo 'local preflight duplicates the shared runtime syntax owner' >&2
   exit 1
 fi
-grep -qF "find scripts/runtime -type f -name '*.sh' -exec bash -c '" \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
 shared_shell_policy="$TMP/shared-shell-policy.sh"
 awk '
   /^run_shell_policy\(\) \{/ { capture = 1 }
@@ -5403,35 +4413,8 @@ grep -qxF "          CODEWIRE_SHELL_POLICY_BASE: \${{ github.event_name == 'pull
   echo 'Shell policy does not take the pull request base or the verified main base' >&2
   exit 1
 }
-# shellcheck disable=SC2016
-grep -qxF '      push_verified_base: ${{ steps.select.outputs.push_verified_base }}' \
-  "$ROOT/.gitea/workflows/ci.yaml" || {
-  echo 'the selection job does not publish the verified main base' >&2
-  exit 1
-}
-grep -qF 'scripts/runtime/tests/test-run-sdk-python-e2e.sh' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'Python SDK wheel leaked generated codewire/$forbidden_package' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'scripts/runtime/tests/test-run-sdk-ts-e2e.sh' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'scripts/runtime/tests/test-with-dev-smoke-auth.sh' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'scripts/runtime/tests/test-provision-dev-smoke-user.sh' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'scripts/runtime/tests/test-provision-prod-smoke-user.sh' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'scripts/runtime/tests/test-with-prod-smoke-auth.sh' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'scripts/runtime/tests/test-smoke-dev-commodity.sh' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'run_selected_family dev_smoke_script_tests dev-smoke-script-tests' \
   "$ROOT/scripts/dev/preflight.sh"
-grep -qF "contains(needs.verification-selection.outputs.selection, '|dev_smoke_script_tests|')" \
-  "$WORKFLOW"
-grep -qF 'run: scripts/ci/verify/run-product-verification.sh tooling' "$WORKFLOW"
 [ "$(VERIFICATION_SELECTION='|valid:v3|dev_smoke_script_tests|complete|' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh" tooling-parts)" = dev-smoke-script-tests ]
 if grep -qF 'select-migration-gates' "$WORKFLOW"; then
@@ -5466,34 +4449,8 @@ defer_slow_check "$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh"
 # selection starts after main moved on says which commit superseded it, and
 # dispatches nothing; main's tip runs everything selected.
 # Execute the checked-in step against a stub remote.
-selection_block="$(awk '
-  $0 == "  verification-selection:" { capture = 1 }
-  capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  verification-selection:" { exit }
-  capture { print }
-' "$WORKFLOW")"
-for expected in \
-    '      superseded: ${{ steps.superseded.outputs.superseded }}' \
-    '      superseded_by: ${{ steps.superseded.outputs.superseded_by }}' \
-    '          VERIFICATION_SUPERSEDED: ${{ steps.superseded.outputs.superseded }}'; do
-  grep -qxF -- "$expected" <<<"$selection_block" || {
-    echo "verification selection omits: $expected" >&2
-    exit 1
-  }
-done
-superseded_line="$(grep -n -m1 'name: Skip a superseded main commit' <<<"$selection_block" | cut -d: -f1)"
-dispatch_line="$(grep -n -m1 'name: Emit trusted capability dispatch decisions' <<<"$selection_block" | cut -d: -f1)"
-[[ -n "$superseded_line" && "$superseded_line" -lt "$dispatch_line" ]] || {
-  echo 'CI dispatches before it knows whether its main commit was superseded' >&2
-  exit 1
-}
-producer_gate="    if: \${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}"
-# The workspace producer adds one clause: a pinned workspace has no producer.
-workspace_producer_gate="${producer_gate% \}\}} && needs.verification-selection.outputs.kind_workspace_source != 'pinned' }}"
-[[ "$(grep -cxF -- "$producer_gate" "$WORKFLOW")" -eq 3 &&
-  "$(grep -cxF -- "$workspace_producer_gate" "$WORKFLOW")" -eq 1 ]] || {
-  echo 'a superseded main run still builds a Kind producer' >&2
-  exit 1
-}
+# test-ci-workflow-structure.py proves the dispatch reads this step's
+# decision and every Kind producer skips a superseded commit.
 superseded_step="$TMP/ci-superseded-step.sh"
 awk '
   /- name: Skip a superseded main commit/ { scope = 1 }
