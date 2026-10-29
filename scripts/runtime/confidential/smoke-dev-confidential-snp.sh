@@ -234,6 +234,25 @@ assert_ready_current() {
     -f "$READY_CURRENT_SELECTOR" "$file"
 }
 
+# A Flux child applied this source when it reads a GitRepository named for
+# the source SHA and its last applied revision is that GitRepository's
+# current artifact. The workload child reads the deploy repository's hosted
+# tree (codewire-hosted-<sha>), so its revision is a deploy commit, not the
+# source SHA; the confidential-smoke child reads codewire-source-<sha>.
+assert_applied_source() {
+  local name="$1" file="$2" source_sha="$3" ref_kind ref_name artifact applied
+  ref_kind="$(jq -r '.spec.sourceRef.kind // empty' "$file")"
+  ref_name="$(jq -r '.spec.sourceRef.name // empty' "$file")"
+  [[ "$ref_kind" == GitRepository && "$ref_name" =~ ^codewire-(hosted|source)-${source_sha}$ ]] || \
+    die "$name does not read a GitRepository for source $source_sha"
+  artifact="$(kubectl_dev -n flux-system get gitrepository "$ref_name" \
+    -o jsonpath='{.status.artifact.revision}')" || \
+    die "cannot read GitRepository $ref_name"
+  applied="$(jq -r '.status.lastAppliedRevision // empty' "$file")"
+  [[ -n "$artifact" && "$applied" == "$artifact" ]] || \
+    die "$name did not apply source $source_sha"
+}
+
 run_host_gate() {
   [[ "$RUN_HOST_GATE" == "1" ]] || {
     log "skipping host SNP gate"
@@ -321,10 +340,8 @@ resolve_active_release() {
     die "$WORKLOAD_KUSTOMIZATION has no exact source annotation"
   [[ "$(jq -r '.metadata.annotations["deploy.codewire.sh/source-sha"] // empty' "$smoke_json")" == "$COCO_SOURCE_SHA" ]] || \
     die "workload and confidential-smoke Flux children do not share one source SHA"
-  [[ "$(jq -r '.status.lastAppliedRevision // empty' "$workloads_json")" == "main@sha1:$COCO_SOURCE_SHA" ]] || \
-    die "$WORKLOAD_KUSTOMIZATION did not apply source $COCO_SOURCE_SHA"
-  [[ "$(jq -r '.status.lastAppliedRevision // empty' "$smoke_json")" == "main@sha1:$COCO_SOURCE_SHA" ]] || \
-    die "$SMOKE_KUSTOMIZATION did not apply source $COCO_SOURCE_SHA"
+  assert_applied_source "$WORKLOAD_KUSTOMIZATION" "$workloads_json" "$COCO_SOURCE_SHA"
+  assert_applied_source "$SMOKE_KUSTOMIZATION" "$smoke_json" "$COCO_SOURCE_SHA"
 
   kubectl_dev -n "$PROBE_NAMESPACE" get configmap "$SMOKE_CONTROL_CONFIGMAP" -o json \
     >"$EVIDENCE_DIR/$SMOKE_CONTROL_CONFIGMAP.json"

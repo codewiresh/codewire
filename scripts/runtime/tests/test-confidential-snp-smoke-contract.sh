@@ -621,14 +621,31 @@ case "$*" in
   '-n flux-system get kustomization codewire-deploy-workloads-dev -o json'|\
   '-n flux-system get kustomization codewire-deploy-confidential-smoke-dev -o json')
     name="${5}"
-    jq -n --arg name "$name" --arg source 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' '{
+    # The workload child reads the deploy repository's hosted tree, so its
+    # applied revision is a deploy commit; the smoke child reads the source.
+    if [[ "$name" == codewire-deploy-workloads-dev ]]; then
+      repository=codewire-hosted-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      applied="main@sha1:${FLUX_HOSTED_APPLIED:-dddddddddddddddddddddddddddddddddddddddd}"
+    else
+      repository=codewire-source-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      applied=main@sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    fi
+    jq -n --arg name "$name" --arg source 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+      --arg repository "$repository" --arg applied "$applied" '{
       metadata: {name: $name, generation: 4, annotations: {"deploy.codewire.sh/source-sha": $source}},
+      spec: {sourceRef: {kind: "GitRepository", name: $repository}},
       status: {
         observedGeneration: 4,
-        lastAppliedRevision: ("main@sha1:" + $source),
+        lastAppliedRevision: $applied,
         conditions: [{type: "Ready", status: "True", observedGeneration: 4}]
       }
     }'
+    ;;
+  "-n flux-system get gitrepository codewire-hosted-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -o jsonpath={.status.artifact.revision}")
+    printf '%s' main@sha1:dddddddddddddddddddddddddddddddddddddddd
+    ;;
+  "-n flux-system get gitrepository codewire-source-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -o jsonpath={.status.artifact.revision}")
+    printf '%s' main@sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     ;;
   '-n codewire-runtime-probes get configmap codewire-confidential-snp-smoke-control -o json')
     jq -n '{data: {phase: "confidential-snp"}}'
@@ -684,6 +701,22 @@ PATH="$bootstrap_dir/bin:$PATH" \
     printf 'bootstrap-only smoke fixture failed\n' >&2
     exit 1
   }
+# A hosted child that has not applied its GitRepository's artifact is refused.
+if PATH="$bootstrap_dir/bin:$PATH" \
+  KUBECTL_BIN="$bootstrap_dir/bin/kubectl" \
+  KUBE_CONTEXT=mock \
+  FLUX_HOSTED_APPLIED=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  EVIDENCE_DIR="$bootstrap_dir/stale-evidence" \
+  "$SMOKE" --skip-host-gate --skip-raw-jobs --skip-guest-attestation --skip-coco \
+  >"$bootstrap_dir/stale.stdout" 2>"$bootstrap_dir/stale.stderr"; then
+  printf 'the smoke accepted a workload child behind its hosted source\n' >&2
+  exit 1
+fi
+rg -F 'codewire-deploy-workloads-dev did not apply source' "$bootstrap_dir/stale.stderr" >/dev/null || {
+  sed -n '1,40p' "$bootstrap_dir/stale.stderr" >&2
+  printf 'the stale hosted child failed for another reason\n' >&2
+  exit 1
+}
 [[ ! -e "$bootstrap_dir/skopeo-was-called" ]] || {
   printf 'bootstrap-only smoke unexpectedly resolved product images\n' >&2
   exit 1
