@@ -68,6 +68,12 @@ const (
 	// AdminServiceSetDefaultEnvironmentQuotaProcedure is the fully-qualified name of the AdminService's
 	// SetDefaultEnvironmentQuota RPC.
 	AdminServiceSetDefaultEnvironmentQuotaProcedure = "/codewire.admin.v1.AdminService/SetDefaultEnvironmentQuota"
+	// AdminServiceSetOrganizationRateCardProcedure is the fully-qualified name of the AdminService's
+	// SetOrganizationRateCard RPC.
+	AdminServiceSetOrganizationRateCardProcedure = "/codewire.admin.v1.AdminService/SetOrganizationRateCard"
+	// AdminServiceAdjustOrganizationCreditProcedure is the fully-qualified name of the AdminService's
+	// AdjustOrganizationCredit RPC.
+	AdminServiceAdjustOrganizationCreditProcedure = "/codewire.admin.v1.AdminService/AdjustOrganizationCredit"
 )
 
 // AdminServiceClient is a client for the codewire.admin.v1.AdminService service.
@@ -110,6 +116,14 @@ type AdminServiceClient interface {
 	// SetDefaultEnvironmentQuota replaces those defaults and writes an audit
 	// entry with the previous and new values.
 	SetDefaultEnvironmentQuota(context.Context, *connect.Request[v1.SetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.SetDefaultEnvironmentQuotaResponse], error)
+	// SetOrganizationRateCard assigns one organization's rate card: regular,
+	// discounted or unlimited. A change writes an audit entry; assigning the
+	// card it already has changes nothing.
+	SetOrganizationRateCard(context.Context, *connect.Request[v1.SetOrganizationRateCardRequest]) (*connect.Response[v1.SetOrganizationRateCardResponse], error)
+	// AdjustOrganizationCredit adds or removes compute credit with a reason,
+	// as a ledger entry naming the administrator, and writes an audit entry.
+	// A repeated idempotency key for the organization changes nothing.
+	AdjustOrganizationCredit(context.Context, *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error)
 }
 
 // NewAdminServiceClient constructs a client for the codewire.admin.v1.AdminService service. By
@@ -204,6 +218,18 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(adminServiceMethods.ByName("SetDefaultEnvironmentQuota")),
 			connect.WithClientOptions(opts...),
 		),
+		setOrganizationRateCard: connect.NewClient[v1.SetOrganizationRateCardRequest, v1.SetOrganizationRateCardResponse](
+			httpClient,
+			baseURL+AdminServiceSetOrganizationRateCardProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("SetOrganizationRateCard")),
+			connect.WithClientOptions(opts...),
+		),
+		adjustOrganizationCredit: connect.NewClient[v1.AdjustOrganizationCreditRequest, v1.AdjustOrganizationCreditResponse](
+			httpClient,
+			baseURL+AdminServiceAdjustOrganizationCreditProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("AdjustOrganizationCredit")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -221,6 +247,8 @@ type adminServiceClient struct {
 	getOrganizationOverview           *connect.Client[v1.GetOrganizationOverviewRequest, v1.GetOrganizationOverviewResponse]
 	getDefaultEnvironmentQuota        *connect.Client[v1.GetDefaultEnvironmentQuotaRequest, v1.GetDefaultEnvironmentQuotaResponse]
 	setDefaultEnvironmentQuota        *connect.Client[v1.SetDefaultEnvironmentQuotaRequest, v1.SetDefaultEnvironmentQuotaResponse]
+	setOrganizationRateCard           *connect.Client[v1.SetOrganizationRateCardRequest, v1.SetOrganizationRateCardResponse]
+	adjustOrganizationCredit          *connect.Client[v1.AdjustOrganizationCreditRequest, v1.AdjustOrganizationCreditResponse]
 }
 
 // GetStats calls codewire.admin.v1.AdminService.GetStats.
@@ -287,6 +315,16 @@ func (c *adminServiceClient) SetDefaultEnvironmentQuota(ctx context.Context, req
 	return c.setDefaultEnvironmentQuota.CallUnary(ctx, req)
 }
 
+// SetOrganizationRateCard calls codewire.admin.v1.AdminService.SetOrganizationRateCard.
+func (c *adminServiceClient) SetOrganizationRateCard(ctx context.Context, req *connect.Request[v1.SetOrganizationRateCardRequest]) (*connect.Response[v1.SetOrganizationRateCardResponse], error) {
+	return c.setOrganizationRateCard.CallUnary(ctx, req)
+}
+
+// AdjustOrganizationCredit calls codewire.admin.v1.AdminService.AdjustOrganizationCredit.
+func (c *adminServiceClient) AdjustOrganizationCredit(ctx context.Context, req *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error) {
+	return c.adjustOrganizationCredit.CallUnary(ctx, req)
+}
+
 // AdminServiceHandler is an implementation of the codewire.admin.v1.AdminService service.
 type AdminServiceHandler interface {
 	// GetStats returns global environment counts and current-month usage totals.
@@ -327,6 +365,14 @@ type AdminServiceHandler interface {
 	// SetDefaultEnvironmentQuota replaces those defaults and writes an audit
 	// entry with the previous and new values.
 	SetDefaultEnvironmentQuota(context.Context, *connect.Request[v1.SetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.SetDefaultEnvironmentQuotaResponse], error)
+	// SetOrganizationRateCard assigns one organization's rate card: regular,
+	// discounted or unlimited. A change writes an audit entry; assigning the
+	// card it already has changes nothing.
+	SetOrganizationRateCard(context.Context, *connect.Request[v1.SetOrganizationRateCardRequest]) (*connect.Response[v1.SetOrganizationRateCardResponse], error)
+	// AdjustOrganizationCredit adds or removes compute credit with a reason,
+	// as a ledger entry naming the administrator, and writes an audit entry.
+	// A repeated idempotency key for the organization changes nothing.
+	AdjustOrganizationCredit(context.Context, *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error)
 }
 
 // NewAdminServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -417,6 +463,18 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(adminServiceMethods.ByName("SetDefaultEnvironmentQuota")),
 		connect.WithHandlerOptions(opts...),
 	)
+	adminServiceSetOrganizationRateCardHandler := connect.NewUnaryHandler(
+		AdminServiceSetOrganizationRateCardProcedure,
+		svc.SetOrganizationRateCard,
+		connect.WithSchema(adminServiceMethods.ByName("SetOrganizationRateCard")),
+		connect.WithHandlerOptions(opts...),
+	)
+	adminServiceAdjustOrganizationCreditHandler := connect.NewUnaryHandler(
+		AdminServiceAdjustOrganizationCreditProcedure,
+		svc.AdjustOrganizationCredit,
+		connect.WithSchema(adminServiceMethods.ByName("AdjustOrganizationCredit")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.admin.v1.AdminService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case AdminServiceGetStatsProcedure:
@@ -443,6 +501,10 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 			adminServiceGetDefaultEnvironmentQuotaHandler.ServeHTTP(w, r)
 		case AdminServiceSetDefaultEnvironmentQuotaProcedure:
 			adminServiceSetDefaultEnvironmentQuotaHandler.ServeHTTP(w, r)
+		case AdminServiceSetOrganizationRateCardProcedure:
+			adminServiceSetOrganizationRateCardHandler.ServeHTTP(w, r)
+		case AdminServiceAdjustOrganizationCreditProcedure:
+			adminServiceAdjustOrganizationCreditHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -498,4 +560,12 @@ func (UnimplementedAdminServiceHandler) GetDefaultEnvironmentQuota(context.Conte
 
 func (UnimplementedAdminServiceHandler) SetDefaultEnvironmentQuota(context.Context, *connect.Request[v1.SetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.SetDefaultEnvironmentQuotaResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.SetDefaultEnvironmentQuota is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) SetOrganizationRateCard(context.Context, *connect.Request[v1.SetOrganizationRateCardRequest]) (*connect.Response[v1.SetOrganizationRateCardResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.SetOrganizationRateCard is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) AdjustOrganizationCredit(context.Context, *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.AdjustOrganizationCredit is not implemented"))
 }

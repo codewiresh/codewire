@@ -43,6 +43,36 @@
           </div>
         </section>
 
+        <section class="cw-card" aria-labelledby="credit-heading">
+          <header class="cw-card-header"><div><h2 id="credit-heading">Rate card and credit</h2><p>Regular and Discounted draw running sandboxes from prepaid credit and refuse creates and starts without it. Unlimited is never charged and has no quota.</p></div></header>
+          <div class="cw-card-body cw-admin-section">
+            <dl class="cw-stat-grid">
+              <div class="cw-stat"><dt>Rate card</dt><dd>{{ organization.rate_card }}</dd></div>
+              <div class="cw-stat"><dt>Credit balance</dt><dd>{% if organization.credit_negative %}<span class="cw-badge" data-tone="warning">{{ organization.credit_balance }}</span>{% else %}{{ organization.credit_balance }}{% endif %}</dd></div>
+            </dl>
+            <form class="cw-catalog-form" method="post" action="/admin/organizations/_actions/rate-card/set" aria-label="Set this organization's rate card">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="organization_id" value="{{ organization.id }}">
+              <label class="cw-field"><span>Rate card</span><select class="cw-select" name="rate_card">{% for card in organization.rate_cards %}<option value="{{ card.value }}"{% if card.selected %} selected{% endif %}>{{ card.label }}</option>{% endfor %}</select></label>
+              <p class="cw-muted">Saving a different card writes an audit entry.</p>
+              <div class="cw-form-action"><button class="cw-button" type="submit">Save rate card</button></div>
+            </form>
+            <form class="cw-catalog-form" method="post" action="/admin/organizations/_actions/credit/adjust" aria-label="Grant or remove credit">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="organization_id" value="{{ organization.id }}">
+              <input type="hidden" name="idempotency_key" value="{{ credit_key }}">
+              <label class="cw-field"><span>Amount (EUR)</span><input class="cw-input" type="text" name="amount" inputmode="decimal" pattern="[+\-]?[0-9]{1,6}(\.[0-9]{1,2})?" placeholder="25.00" required></label>
+              <label class="cw-field"><span>Reason</span><input class="cw-input" type="text" name="reason" maxlength="500" required></label>
+              <p class="cw-muted">A positive amount grants credit and a negative one removes it. Each adjustment is recorded with your name and reason, and audited.</p>
+              <div class="cw-form-action"><button class="cw-button" type="submit">Adjust credit</button></div>
+            </form>
+            {% if organization.credit_entries.is_empty() %}<p class="cw-muted">No credit entries yet.</p>{% else %}
+            <div class="cw-table-wrap"><table class="cw-table"><caption class="cw-sr-only">Recent credit entries, newest first</caption><thead><tr><th scope="col">Entry</th><th scope="col">Amount</th><th scope="col">When</th><th scope="col">Reason</th></tr></thead><tbody>
+              {% for entry in organization.credit_entries %}<tr><th scope="row">{{ entry.kind }}</th><td>{{ entry.amount }}</td><td>{{ entry.when }}</td><td>{{ entry.note }}</td></tr>{% endfor %}
+            </tbody></table></div>{% endif %}
+          </div>
+        </section>
+
         <section class="cw-card" aria-labelledby="billing-heading">
           <header class="cw-card-header"><div><h2 id="billing-heading">Billing</h2><p>The effective plan is the one quotas and billing resolve.</p></div></header>
           <div class="cw-card-body cw-admin-section">

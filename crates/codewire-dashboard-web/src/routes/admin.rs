@@ -114,6 +114,25 @@ pub(super) struct DefaultQuotaSubmission {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct RateCardSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    organization_id: String,
+    rate_card: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct CreditSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    organization_id: String,
+    /// Euros, signed, at most two decimals.
+    amount: String,
+    reason: String,
+    idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct QuotaClearSubmission {
     #[serde(rename = "_csrf")]
     csrf: String,
@@ -427,11 +446,13 @@ pub(super) async fn organization(
         Err(error) => return admin_connect_error(error, &continuation, &headers),
     };
     let token = page_csrf_token(&headers);
+    let credit_key = uuid::Uuid::new_v4().simple().to_string();
     with_csrf_cookie(
         render_page(AdminOrganizationTemplate {
             view: &dashboard,
             organization: &organization,
             csrf_token: &token,
+            credit_key: &credit_key,
             message: quota_message(&query.message),
             error: quota_error(&query.error),
         }),
@@ -469,6 +490,78 @@ pub(super) async fn set_organization_quota(
         admin_connect::set_organization_quota(&state, cookie, &submission.organization_id, quota)
             .await;
     quota_response(&state, result, &path, "quota-saved", &headers)
+}
+
+pub(super) async fn set_organization_rate_card(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+    Form(submission): Form<RateCardSubmission>,
+) -> Response {
+    if !valid_organization_id(&submission.organization_id) {
+        return error_page(WebError::NotFound);
+    }
+    let path = organization_path(&submission.organization_id);
+    let cookie =
+        match admin_action_page_context_for(&state, &headers, &submission.csrf, &query.org, &path)
+            .await
+        {
+            Ok((_, cookie)) => cookie,
+            Err(response) => return response,
+        };
+    if !admin_connect::RATE_CARDS
+        .iter()
+        .any(|(value, _)| *value == submission.rate_card)
+    {
+        return admin_redirect_to(&state, &path, "", "invalid-rate-card", &headers);
+    }
+    let result = admin_connect::set_organization_rate_card(
+        &state,
+        cookie,
+        &submission.organization_id,
+        &submission.rate_card,
+    )
+    .await;
+    quota_response(&state, result, &path, "rate-card-saved", &headers)
+}
+
+pub(super) async fn adjust_organization_credit(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+    Form(submission): Form<CreditSubmission>,
+) -> Response {
+    if !valid_organization_id(&submission.organization_id) {
+        return error_page(WebError::NotFound);
+    }
+    let path = organization_path(&submission.organization_id);
+    let cookie =
+        match admin_action_page_context_for(&state, &headers, &submission.csrf, &query.org, &path)
+            .await
+        {
+            Ok((_, cookie)) => cookie,
+            Err(response) => return response,
+        };
+    let reason = submission.reason.trim();
+    let Some(amount_nano_eur) = admin_connect::euro_amount_nano(&submission.amount) else {
+        return admin_redirect_to(&state, &path, "", "invalid-credit", &headers);
+    };
+    if reason.is_empty()
+        || reason.chars().count() > 500
+        || !valid_organization_id(&submission.idempotency_key)
+    {
+        return admin_redirect_to(&state, &path, "", "invalid-credit", &headers);
+    }
+    let result = admin_connect::adjust_organization_credit(
+        &state,
+        cookie,
+        &submission.organization_id,
+        amount_nano_eur,
+        reason,
+        &submission.idempotency_key,
+    )
+    .await;
+    quota_response(&state, result, &path, "credit-adjusted", &headers)
 }
 
 pub(super) async fn clear_organization_quota(
@@ -1165,6 +1258,8 @@ fn quota_message(value: &str) -> &'static str {
         "quota-cleared" => "Environment quota cleared; the defaults apply.",
         "confidential-enabled" => "Organization opted in to confidential environments.",
         "confidential-disabled" => "Organization removed from confidential environments.",
+        "rate-card-saved" => "Rate card saved.",
+        "credit-adjusted" => "Credit adjusted.",
         _ => "",
     }
 }
@@ -1178,10 +1273,16 @@ fn defaults_message(value: &str) -> &'static str {
 
 fn quota_error(value: &str) -> &'static str {
     match value {
-        "not-authorized" => "You do not have permission to change environment quotas.",
+        "not-authorized" => "You do not have permission to change organizations.",
         "invalid" => "Each limit must be a positive number, or -1 for unlimited.",
+        "invalid-rate-card" => "Choose Regular, Discounted or Unlimited.",
+        "invalid-credit" => {
+            "Enter a non-zero amount in euros, with at most two decimals and at most 100,000 either way, and a reason."
+        }
         "not-found" => "The organization no longer exists.",
-        "conflict" | "unavailable" => "Environment quotas are temporarily unavailable.",
+        "conflict" | "unavailable" => {
+            "Organization changes are temporarily unavailable; try again."
+        }
         "confidential-unavailable" => "Confidential environments are temporarily unavailable.",
         _ => "",
     }

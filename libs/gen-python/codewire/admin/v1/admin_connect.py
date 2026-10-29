@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .admin_pb2 import ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListOrganizationsRequest, ListOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse
+from .admin_pb2 import AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse, ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListOrganizationsRequest, ListOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest, SetOrganizationRateCardResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -69,6 +69,12 @@ class AdminService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def set_default_environment_quota(self, request: SetDefaultEnvironmentQuotaRequest, ctx: RequestContext[SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse]) -> SetDefaultEnvironmentQuotaResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def set_organization_rate_card(self, request: SetOrganizationRateCardRequest, ctx: RequestContext[SetOrganizationRateCardRequest, SetOrganizationRateCardResponse]) -> SetOrganizationRateCardResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def adjust_organization_credit(self, request: AdjustOrganizationCreditRequest, ctx: RequestContext[AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse]) -> AdjustOrganizationCreditResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -204,6 +210,26 @@ class AdminServiceASGIApplication(ConnectASGIApplication[AdminService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.set_default_environment_quota,
+                ),
+                "/codewire.admin.v1.AdminService/SetOrganizationRateCard": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SetOrganizationRateCard",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=SetOrganizationRateCardRequest,
+                        output=SetOrganizationRateCardResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.set_organization_rate_card,
+                ),
+                "/codewire.admin.v1.AdminService/AdjustOrganizationCredit": Endpoint.unary(
+                    method=MethodInfo(
+                        name="AdjustOrganizationCredit",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=AdjustOrganizationCreditRequest,
+                        output=AdjustOrganizationCreditResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.adjust_organization_credit,
                 ),
             },
             interceptors=interceptors,
@@ -501,6 +527,46 @@ class AdminServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def set_organization_rate_card(
+        self,
+        request: SetOrganizationRateCardRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetOrganizationRateCardResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetOrganizationRateCard",
+                service_name="codewire.admin.v1.AdminService",
+                input=SetOrganizationRateCardRequest,
+                output=SetOrganizationRateCardResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def adjust_organization_credit(
+        self,
+        request: AdjustOrganizationCreditRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AdjustOrganizationCreditResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="AdjustOrganizationCredit",
+                service_name="codewire.admin.v1.AdminService",
+                input=AdjustOrganizationCreditRequest,
+                output=AdjustOrganizationCreditResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class AdminServiceSync(Protocol):
     def get_stats(self, request: GetStatsRequest, ctx: RequestContext[GetStatsRequest, GetStatsResponse]) -> GetStatsResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -536,6 +602,12 @@ class AdminServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def set_default_environment_quota(self, request: SetDefaultEnvironmentQuotaRequest, ctx: RequestContext[SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse]) -> SetDefaultEnvironmentQuotaResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def set_organization_rate_card(self, request: SetOrganizationRateCardRequest, ctx: RequestContext[SetOrganizationRateCardRequest, SetOrganizationRateCardResponse]) -> SetOrganizationRateCardResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def adjust_organization_credit(self, request: AdjustOrganizationCreditRequest, ctx: RequestContext[AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse]) -> AdjustOrganizationCreditResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -669,6 +741,26 @@ class AdminServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.set_default_environment_quota,
+                ),
+                "/codewire.admin.v1.AdminService/SetOrganizationRateCard": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SetOrganizationRateCard",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=SetOrganizationRateCardRequest,
+                        output=SetOrganizationRateCardResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.set_organization_rate_card,
+                ),
+                "/codewire.admin.v1.AdminService/AdjustOrganizationCredit": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="AdjustOrganizationCredit",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=AdjustOrganizationCreditRequest,
+                        output=AdjustOrganizationCreditResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.adjust_organization_credit,
                 ),
             },
             interceptors=interceptors,
@@ -949,6 +1041,44 @@ class AdminServiceClientSync(ConnectClientSync):
                 service_name="codewire.admin.v1.AdminService",
                 input=SetDefaultEnvironmentQuotaRequest,
                 output=SetDefaultEnvironmentQuotaResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def set_organization_rate_card(
+        self,
+        request: SetOrganizationRateCardRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetOrganizationRateCardResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetOrganizationRateCard",
+                service_name="codewire.admin.v1.AdminService",
+                input=SetOrganizationRateCardRequest,
+                output=SetOrganizationRateCardResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def adjust_organization_credit(
+        self,
+        request: AdjustOrganizationCreditRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AdjustOrganizationCreditResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="AdjustOrganizationCredit",
+                service_name="codewire.admin.v1.AdminService",
+                input=AdjustOrganizationCreditRequest,
+                output=AdjustOrganizationCreditResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

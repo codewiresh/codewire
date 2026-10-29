@@ -23,6 +23,9 @@ use super::environments::{
     resolve_effective_plan,
 };
 
+pub mod credit;
+#[cfg(test)]
+mod credit_database_tests;
 #[cfg(test)]
 mod quota_database_tests;
 #[cfg(test)]
@@ -1099,6 +1102,8 @@ pub struct AdminOrganizationOverview {
     pub created_at: Option<chrono::NaiveDateTime>,
     pub members: Vec<AdminOrganizationMember>,
     pub billing: AdminOrganizationBilling,
+    /// The rate card, credit balance and newest ledger entries (#3381).
+    pub credit: credit::AdminOrganizationCredit,
     pub quota: AdminOrganizationEnvironmentQuota,
     pub usage: AdminOrganizationUsage,
     pub api_keys: Vec<AdminOrganizationApiKey>,
@@ -1229,6 +1234,7 @@ pub(crate) async fn get_organization_overview_core(
             effective_plan: resolve_effective_plan(pool, organization_id).await,
             subscriptions,
         },
+        credit: credit::organization_credit(pool, organization_id).await?,
         quota: get_organization_environment_quota_core(pool, organization_id).await?,
         usage: AdminOrganizationUsage {
             active_environments: usage.active_total,

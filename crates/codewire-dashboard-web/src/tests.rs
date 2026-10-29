@@ -474,6 +474,23 @@ fn unsafe_organization(has_explicit_quota: bool) -> AdminOrganizationView {
             status: "active".into(),
             updated: "2026-10-28".into(),
         }],
+        rate_card: "Discounted".into(),
+        rate_cards: crate::admin_connect::RATE_CARDS
+            .iter()
+            .map(|(value, label)| crate::admin_connect::RateCardOption {
+                value,
+                label,
+                selected: *value == "discounted",
+            })
+            .collect(),
+        credit_balance: "-€0.003385".into(),
+        credit_negative: true,
+        credit_entries: vec![crate::admin_connect::AdminCreditRow {
+            kind: "Adjustment".into(),
+            amount: "€25.00".into(),
+            when: "2026-10-28".into(),
+            note: "<script>alert('reason')</script>".into(),
+        }],
         has_explicit_quota,
         confidential_environments: Some(false),
         effective_quota: QuotaView {
@@ -565,6 +582,7 @@ fn admin_organization_template_shows_billing_quota_usage_and_escapes_upstream_da
             view: &view,
             organization: &organization,
             csrf_token: "csrf-safe",
+            credit_key: "credit-key-1",
             message: "",
             error: "",
         }
@@ -596,6 +614,22 @@ fn admin_organization_template_shows_billing_quota_usage_and_escapes_upstream_da
         assert!(
             body.contains(r#"<input type="hidden" name="organization_id" value="org_safe-1">"#)
         );
+        // The rate card, starting at the organization's, and the balance.
+        assert!(body.contains("<dt>Rate card</dt><dd>Discounted</dd>"));
+        assert!(body.contains(
+            r#"<dt>Credit balance</dt><dd><span class="cw-badge" data-tone="warning">-€0.003385</span></dd>"#
+        ));
+        assert!(body.contains(r#"action="/admin/organizations/_actions/rate-card/set""#));
+        assert!(body.contains(
+            r#"<select class="cw-select" name="rate_card"><option value="regular">Regular</option><option value="discounted" selected>Discounted</option><option value="unlimited">Unlimited</option></select>"#
+        ));
+        // The credit form carries its one-time key; the ledger is a table.
+        assert!(body.contains(r#"action="/admin/organizations/_actions/credit/adjust""#));
+        assert!(
+            body.contains(r#"<input type="hidden" name="idempotency_key" value="credit-key-1">"#)
+        );
+        assert!(body.contains(r#"<label class="cw-field"><span>Reason</span><input class="cw-input" type="text" name="reason" maxlength="500" required></label>"#));
+        assert!(body.contains("<tr><th scope=\"row\">Adjustment</th><td>€25.00</td>"));
         assert!(body.contains(r#"<input type="hidden" name="_csrf" value="csrf-safe">"#));
         assert_eq!(
             body.contains(r#"action="/admin/organizations/_actions/quota/clear""#),
@@ -623,6 +657,7 @@ fn admin_organization_confidential_toggle_follows_the_opt_in() {
             view: &view,
             organization: &organization,
             csrf_token: "csrf-safe",
+            credit_key: "credit-key-1",
             message: "",
             error: "",
         }

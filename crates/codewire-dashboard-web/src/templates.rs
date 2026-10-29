@@ -56,6 +56,9 @@ pub(crate) struct AdminOrganizationTemplate<'a> {
     pub(crate) view: &'a DashboardView,
     pub(crate) organization: &'a AdminOrganizationView,
     pub(crate) csrf_token: &'a str,
+    /// A fresh key for the credit form, so a resubmitted form applies its
+    /// adjustment once (#3381).
+    pub(crate) credit_key: &'a str,
     pub(crate) message: &'a str,
     pub(crate) error: &'a str,
 }

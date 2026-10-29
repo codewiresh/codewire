@@ -983,6 +983,13 @@ database_lane_orchestration_workspaces() {
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "admin environment quota matrix" "$logfile" 5
 
+  logfile="$RUN_DIR/admin-organization-credit.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::admin::credit_database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "admin organization credit matrix" "$logfile" 2
+
   logfile="$RUN_DIR/workspace-binding-recorder.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-orchestration --lib \

@@ -1,5 +1,5 @@
 //! Connect-RPC adapter for global administrator reads and the audited
-//! organization environment-quota writes.
+//! organization environment-quota, rate card and credit writes.
 //!
 //! This module maps [`crate::api::admin`] core functions to protobuf and
 //! renders Connect errors.
@@ -8,23 +8,26 @@ use std::sync::Arc;
 
 use buffa_types::{Duration, Struct, Timestamp, Value};
 use codewire_admin_proto::codewire::admin::v1::{
-    AdminService, AuditLogEntry as ProtoAuditLogEntry, ClearOrganizationEnvironmentQuotaRequest,
-    ClearOrganizationEnvironmentQuotaResponse, EnvironmentLifecycleJournalEntry,
-    EnvironmentQuota as ProtoEnvironmentQuota, EnvironmentStartupTiming,
-    GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse,
-    GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse,
-    GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse,
-    GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse,
-    GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest,
-    GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse,
-    ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse,
-    ListOrganizationsRequest, ListOrganizationsResponse, Organization as ProtoOrganization,
-    OrganizationApiKey as ProtoOrganizationApiKey, OrganizationBilling as ProtoOrganizationBilling,
+    AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse, AdminService,
+    AuditLogEntry as ProtoAuditLogEntry, ClearOrganizationEnvironmentQuotaRequest,
+    ClearOrganizationEnvironmentQuotaResponse, CreditLedgerEntry as ProtoCreditLedgerEntry,
+    EnvironmentLifecycleJournalEntry, EnvironmentQuota as ProtoEnvironmentQuota,
+    EnvironmentStartupTiming, GetDefaultEnvironmentQuotaRequest,
+    GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest,
+    GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest,
+    GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest,
+    GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest,
+    GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest,
+    ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest,
+    ListEnvironmentLifecycleJournalResponse, ListOrganizationsRequest, ListOrganizationsResponse,
+    Organization as ProtoOrganization, OrganizationApiKey as ProtoOrganizationApiKey,
+    OrganizationBilling as ProtoOrganizationBilling,
     OrganizationEnvironmentUsage as ProtoOrganizationEnvironmentUsage,
     OrganizationMember as ProtoOrganizationMember,
     OrganizationSubscription as ProtoOrganizationSubscription, SetDefaultEnvironmentQuotaRequest,
     SetDefaultEnvironmentQuotaResponse, SetOrganizationEnvironmentQuotaRequest,
-    SetOrganizationEnvironmentQuotaResponse, StartupPhaseSummary,
+    SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest,
+    SetOrganizationRateCardResponse, StartupPhaseSummary,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
@@ -38,8 +41,8 @@ use crate::api::admin::{
     AdminOrganizationOverview, AuditLogEntry, ListAuditLogsParams,
 };
 
-/// Registers the nine AdminService reads and the three audited quota writes
-/// on their generated Connect routes.
+/// Registers the nine AdminService reads, the three audited quota writes and
+/// the audited rate card and credit writes on their generated Connect routes.
 pub fn router(state: ApiState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(AdminConnectService { state }))
 }
@@ -306,6 +309,58 @@ impl AdminService for AdminConnectService {
             ..Default::default()
         })
     }
+
+    async fn set_organization_rate_card(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetOrganizationRateCardRequest>,
+    ) -> ServiceResult<SetOrganizationRateCardResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let organization_id = required_organization_id(request.organization_id)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let change = admin::credit::set_organization_rate_card_core(
+            &self.state.pool,
+            &actor.user_id,
+            organization_id,
+            request.rate_card.trim(),
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(SetOrganizationRateCardResponse {
+            organization_id: organization_id.to_owned(),
+            rate_card: change.rate_card,
+            previous_rate_card: change.previous,
+            ..Default::default()
+        })
+    }
+
+    async fn adjust_organization_credit(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, AdjustOrganizationCreditRequest>,
+    ) -> ServiceResult<AdjustOrganizationCreditResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let organization_id = required_organization_id(request.organization_id)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let adjustment = admin::credit::adjust_organization_credit_core(
+            &self.state.pool,
+            &actor.user_id,
+            organization_id,
+            request.amount_nano_eur,
+            request.reason,
+            request.idempotency_key,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(AdjustOrganizationCreditResponse {
+            organization_id: organization_id.to_owned(),
+            balance_nano_eur: adjustment.balance_nano_eur,
+            applied: adjustment.applied,
+            ..Default::default()
+        })
+    }
 }
 
 fn required_organization_id(value: &str) -> AppResult<&str> {
@@ -419,6 +474,21 @@ fn proto_organization_overview(
                     plan: subscription.plan,
                     status: subscription.status,
                     updated_at: subscription.updated_at.map(proto_naive_timestamp).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            rate_card: value.credit.rate_card,
+            credit_balance_nano_eur: value.credit.balance_nano_eur,
+            recent_credit: value
+                .credit
+                .recent
+                .into_iter()
+                .map(|entry| ProtoCreditLedgerEntry {
+                    kind: entry.kind,
+                    amount_nano_eur: entry.amount_nano_eur,
+                    created_at: Some(proto_naive_timestamp(entry.created_at.naive_utc())).into(),
+                    reason: entry.reason,
+                    actor_user_id: entry.actor_user_id,
                     ..Default::default()
                 })
                 .collect(),

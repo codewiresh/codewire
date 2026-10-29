@@ -294,18 +294,38 @@ class OrganizationSubscription(_message.Message):
     def __init__(self, kind: _Optional[str] = ..., plan: _Optional[str] = ..., status: _Optional[str] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class OrganizationBilling(_message.Message):
-    __slots__ = ("billing_plan", "billing_status", "billing_exempt", "effective_plan", "subscriptions")
+    __slots__ = ("billing_plan", "billing_status", "billing_exempt", "effective_plan", "subscriptions", "rate_card", "credit_balance_nano_eur", "recent_credit")
     BILLING_PLAN_FIELD_NUMBER: _ClassVar[int]
     BILLING_STATUS_FIELD_NUMBER: _ClassVar[int]
     BILLING_EXEMPT_FIELD_NUMBER: _ClassVar[int]
     EFFECTIVE_PLAN_FIELD_NUMBER: _ClassVar[int]
     SUBSCRIPTIONS_FIELD_NUMBER: _ClassVar[int]
+    RATE_CARD_FIELD_NUMBER: _ClassVar[int]
+    CREDIT_BALANCE_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
+    RECENT_CREDIT_FIELD_NUMBER: _ClassVar[int]
     billing_plan: str
     billing_status: str
     billing_exempt: bool
     effective_plan: str
     subscriptions: _containers.RepeatedCompositeFieldContainer[OrganizationSubscription]
-    def __init__(self, billing_plan: _Optional[str] = ..., billing_status: _Optional[str] = ..., billing_exempt: _Optional[bool] = ..., effective_plan: _Optional[str] = ..., subscriptions: _Optional[_Iterable[_Union[OrganizationSubscription, _Mapping]]] = ...) -> None: ...
+    rate_card: str
+    credit_balance_nano_eur: int
+    recent_credit: _containers.RepeatedCompositeFieldContainer[CreditLedgerEntry]
+    def __init__(self, billing_plan: _Optional[str] = ..., billing_status: _Optional[str] = ..., billing_exempt: _Optional[bool] = ..., effective_plan: _Optional[str] = ..., subscriptions: _Optional[_Iterable[_Union[OrganizationSubscription, _Mapping]]] = ..., rate_card: _Optional[str] = ..., credit_balance_nano_eur: _Optional[int] = ..., recent_credit: _Optional[_Iterable[_Union[CreditLedgerEntry, _Mapping]]] = ...) -> None: ...
+
+class CreditLedgerEntry(_message.Message):
+    __slots__ = ("kind", "amount_nano_eur", "created_at", "reason", "actor_user_id")
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    AMOUNT_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    ACTOR_USER_ID_FIELD_NUMBER: _ClassVar[int]
+    kind: str
+    amount_nano_eur: int
+    created_at: _timestamp_pb2.Timestamp
+    reason: str
+    actor_user_id: str
+    def __init__(self, kind: _Optional[str] = ..., amount_nano_eur: _Optional[int] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., reason: _Optional[str] = ..., actor_user_id: _Optional[str] = ...) -> None: ...
 
 class OrganizationEnvironmentUsage(_message.Message):
     __slots__ = ("active_environments", "active_sandboxes", "cpu_millicores", "memory_mb")
@@ -372,3 +392,43 @@ class SetDefaultEnvironmentQuotaResponse(_message.Message):
     QUOTA_FIELD_NUMBER: _ClassVar[int]
     quota: EnvironmentQuota
     def __init__(self, quota: _Optional[_Union[EnvironmentQuota, _Mapping]] = ...) -> None: ...
+
+class SetOrganizationRateCardRequest(_message.Message):
+    __slots__ = ("organization_id", "rate_card")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    RATE_CARD_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    rate_card: str
+    def __init__(self, organization_id: _Optional[str] = ..., rate_card: _Optional[str] = ...) -> None: ...
+
+class SetOrganizationRateCardResponse(_message.Message):
+    __slots__ = ("organization_id", "rate_card", "previous_rate_card")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    RATE_CARD_FIELD_NUMBER: _ClassVar[int]
+    PREVIOUS_RATE_CARD_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    rate_card: str
+    previous_rate_card: str
+    def __init__(self, organization_id: _Optional[str] = ..., rate_card: _Optional[str] = ..., previous_rate_card: _Optional[str] = ...) -> None: ...
+
+class AdjustOrganizationCreditRequest(_message.Message):
+    __slots__ = ("organization_id", "amount_nano_eur", "reason", "idempotency_key")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    AMOUNT_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    IDEMPOTENCY_KEY_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    amount_nano_eur: int
+    reason: str
+    idempotency_key: str
+    def __init__(self, organization_id: _Optional[str] = ..., amount_nano_eur: _Optional[int] = ..., reason: _Optional[str] = ..., idempotency_key: _Optional[str] = ...) -> None: ...
+
+class AdjustOrganizationCreditResponse(_message.Message):
+    __slots__ = ("organization_id", "balance_nano_eur", "applied")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    BALANCE_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
+    APPLIED_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    balance_nano_eur: int
+    applied: bool
+    def __init__(self, organization_id: _Optional[str] = ..., balance_nano_eur: _Optional[int] = ..., applied: _Optional[bool] = ...) -> None: ...

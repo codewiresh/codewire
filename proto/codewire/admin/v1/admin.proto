@@ -87,6 +87,18 @@ service AdminService {
   // entry with the previous and new values.
   rpc SetDefaultEnvironmentQuota(SetDefaultEnvironmentQuotaRequest)
       returns (SetDefaultEnvironmentQuotaResponse);
+
+  // SetOrganizationRateCard assigns one organization's rate card: regular,
+  // discounted or unlimited. A change writes an audit entry; assigning the
+  // card it already has changes nothing.
+  rpc SetOrganizationRateCard(SetOrganizationRateCardRequest)
+      returns (SetOrganizationRateCardResponse);
+
+  // AdjustOrganizationCredit adds or removes compute credit with a reason,
+  // as a ledger entry naming the administrator, and writes an audit entry.
+  // A repeated idempotency key for the organization changes nothing.
+  rpc AdjustOrganizationCredit(AdjustOrganizationCreditRequest)
+      returns (AdjustOrganizationCreditResponse);
 }
 
 message GetStatsRequest {}
@@ -284,6 +296,25 @@ message OrganizationBilling {
   string effective_plan = 4;
   // Subscriptions in active, trialing or past_due status, newest first.
   repeated OrganizationSubscription subscriptions = 5;
+  // The organization's rate card: regular, discounted or unlimited.
+  string rate_card = 6;
+  // The prepaid compute credit, in nano-euros (1e-9 EUR); below zero when
+  // usage outran it.
+  int64 credit_balance_nano_eur = 7;
+  // The newest credit ledger entries, newest first, at most 20.
+  repeated CreditLedgerEntry recent_credit = 8;
+}
+
+message CreditLedgerEntry {
+  // grant, usage, top_up or adjustment.
+  string kind = 1;
+  // Signed, in nano-euros: positive adds credit, negative draws it.
+  int64 amount_nano_eur = 2;
+  google.protobuf.Timestamp created_at = 3;
+  // An adjustment's reason; empty for other entries.
+  string reason = 4;
+  // The administrator who made an adjustment; empty for other entries.
+  string actor_user_id = 5;
 }
 
 message OrganizationEnvironmentUsage {
@@ -329,4 +360,34 @@ message SetDefaultEnvironmentQuotaRequest {
 
 message SetDefaultEnvironmentQuotaResponse {
   EnvironmentQuota quota = 1;
+}
+
+message SetOrganizationRateCardRequest {
+  string organization_id = 1;
+  // regular, discounted or unlimited.
+  string rate_card = 2;
+}
+
+message SetOrganizationRateCardResponse {
+  string organization_id = 1;
+  string rate_card = 2;
+  string previous_rate_card = 3;
+}
+
+message AdjustOrganizationCreditRequest {
+  string organization_id = 1;
+  // Non-zero, at most EUR 100,000 either way, in nano-euros.
+  int64 amount_nano_eur = 2;
+  // Why, for the ledger and the audit log; 1 to 500 characters.
+  string reason = 3;
+  // 1 to 128 letters, digits, '-' or '_'; a retry with the same key
+  // applies nothing again.
+  string idempotency_key = 4;
+}
+
+message AdjustOrganizationCreditResponse {
+  string organization_id = 1;
+  int64 balance_nano_eur = 2;
+  // False when the idempotency key had already been applied.
+  bool applied = 3;
 }

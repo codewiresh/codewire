@@ -2,15 +2,16 @@ use std::{collections::HashSet, time::Duration};
 
 use axum::http::HeaderValue;
 use codewire_admin_proto::codewire::admin::v1::{
-    AdminServiceClient, BillingCatalogServiceClient, ClearOrganizationEnvironmentQuotaRequest,
-    CreatePlanRequest, CreatePriceRequest, EnvironmentQuota, GetCatalogRequest,
-    GetDefaultEnvironmentQuotaRequest, GetOrganizationOverviewRequest, GetStatsRequest,
-    ListAuditLogsRequest, ListConfidentialOrganizationsRequest, ListOrganizationsRequest,
+    AdjustOrganizationCreditRequest, AdminServiceClient, BillingCatalogServiceClient,
+    ClearOrganizationEnvironmentQuotaRequest, CreatePlanRequest, CreatePriceRequest,
+    EnvironmentQuota, GetCatalogRequest, GetDefaultEnvironmentQuotaRequest,
+    GetOrganizationOverviewRequest, GetStatsRequest, ListAuditLogsRequest,
+    ListConfidentialOrganizationsRequest, ListOrganizationsRequest,
     ListSubscriptionMigrationsRequest, PlanSpec, PreviewSubscriptionMigrationRequest,
     RunSubscriptionMigrationRequest, SetDefaultEnvironmentQuotaRequest,
     SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationEnvironmentQuotaRequest,
-    SetPlanArchivedRequest, SetPriceArchivedRequest, UpdatePlanRequest, UpdatePriceRequest,
-    UpdateSettingRequest,
+    SetOrganizationRateCardRequest, SetPlanArchivedRequest, SetPriceArchivedRequest,
+    UpdatePlanRequest, UpdatePriceRequest, UpdateSettingRequest,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
@@ -193,6 +194,30 @@ pub(crate) struct QuotaView {
     pub(crate) memory_mb: QuotaLimitView,
 }
 
+/// One rate card an administrator can choose (#3381).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RateCardOption {
+    pub(crate) value: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) selected: bool,
+}
+
+/// The rate cards, in the order the page offers them.
+pub(crate) const RATE_CARDS: [(&str, &str); 3] = [
+    ("regular", "Regular"),
+    ("discounted", "Discounted"),
+    ("unlimited", "Unlimited"),
+];
+
+/// One credit ledger entry as the page shows it.
+#[derive(Debug)]
+pub(crate) struct AdminCreditRow {
+    pub(crate) kind: String,
+    pub(crate) amount: String,
+    pub(crate) when: String,
+    pub(crate) note: String,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct AdminOrganizationView {
     pub(crate) id: String,
@@ -205,6 +230,13 @@ pub(crate) struct AdminOrganizationView {
     pub(crate) billing_exempt: bool,
     pub(crate) effective_plan: String,
     pub(crate) subscriptions: Vec<AdminSubscriptionRow>,
+    /// The card's name, as the page shows it.
+    pub(crate) rate_card: String,
+    pub(crate) rate_cards: Vec<RateCardOption>,
+    /// Signed, in euros.
+    pub(crate) credit_balance: String,
+    pub(crate) credit_negative: bool,
+    pub(crate) credit_entries: Vec<AdminCreditRow>,
     pub(crate) has_explicit_quota: bool,
     pub(crate) effective_quota: QuotaView,
     /// Opted in to confidential environments (#2497); `None` while the
@@ -693,6 +725,33 @@ pub(crate) async fn organization(
         } else {
             billing.effective_plan
         },
+        rate_card: RATE_CARDS
+            .iter()
+            .find(|(value, _)| *value == billing.rate_card)
+            .map_or_else(
+                || billing.rate_card.clone(),
+                |(_, label)| (*label).to_owned(),
+            ),
+        rate_cards: RATE_CARDS
+            .iter()
+            .map(|(value, label)| RateCardOption {
+                value,
+                label,
+                selected: *value == billing.rate_card,
+            })
+            .collect(),
+        credit_balance: euro_text(billing.credit_balance_nano_eur),
+        credit_negative: billing.credit_balance_nano_eur < 0,
+        credit_entries: billing
+            .recent_credit
+            .into_iter()
+            .map(|entry| AdminCreditRow {
+                kind: credit_kind_text(&entry.kind).to_owned(),
+                amount: euro_text(entry.amount_nano_eur),
+                when: timestamp_text(entry.created_at.into_option().map(|value| value.seconds)),
+                note: entry.reason,
+            })
+            .collect(),
         subscriptions: billing
             .subscriptions
             .into_iter()
@@ -734,6 +793,42 @@ pub(crate) async fn organization(
             })
             .collect(),
     })
+}
+
+pub(crate) async fn set_organization_rate_card(
+    state: &AppState,
+    cookie: HeaderValue,
+    organization_id: &str,
+    rate_card: &str,
+) -> Result<(), ConnectError> {
+    admin_client(state, cookie)
+        .set_organization_rate_card(SetOrganizationRateCardRequest {
+            organization_id: organization_id.to_owned(),
+            rate_card: rate_card.to_owned(),
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn adjust_organization_credit(
+    state: &AppState,
+    cookie: HeaderValue,
+    organization_id: &str,
+    amount_nano_eur: i64,
+    reason: &str,
+    idempotency_key: &str,
+) -> Result<(), ConnectError> {
+    admin_client(state, cookie)
+        .adjust_organization_credit(AdjustOrganizationCreditRequest {
+            organization_id: organization_id.to_owned(),
+            amount_nano_eur,
+            reason: reason.to_owned(),
+            idempotency_key: idempotency_key.to_owned(),
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
 }
 
 pub(crate) async fn set_organization_quota(
@@ -814,6 +909,60 @@ fn quota_view(quota: EnvironmentQuota) -> QuotaView {
         sandboxes: limit(quota.max_concurrent_sandbox, |value| value.to_string()),
         cpu_millicores: limit(quota.max_cpu_millicores, |value| cpu_text(i64::from(value))),
         memory_mb: limit(quota.max_memory_mb, |value| memory_text(i64::from(value))),
+    }
+}
+
+const NANO_EUR_PER_CENT: i64 = 10_000_000;
+const NANO_EUR_PER_EURO: i64 = 1_000_000_000;
+
+/// A nano-euro amount in euros: two decimals, or up to six when the amount
+/// has more (a minute of usage is a fraction of a cent), never rounded up.
+pub(crate) fn euro_text(nano_eur: i64) -> String {
+    let sign = if nano_eur < 0 { "-" } else { "" };
+    let magnitude = nano_eur.unsigned_abs();
+    let whole = magnitude / NANO_EUR_PER_EURO as u64;
+    let fraction = format!("{:09}", magnitude % NANO_EUR_PER_EURO as u64);
+    let fraction = fraction[..6].trim_end_matches('0');
+    let fraction = format!("{fraction:0<2}");
+    format!("{sign}€{whole}.{fraction}")
+}
+
+/// An administrator's euro amount ("25", "-10.5", "+0.01") in nano-euros:
+/// at most two decimals, non-zero, and at most EUR 100,000 either way.
+pub(crate) fn euro_amount_nano(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (negative, digits) = match text.as_bytes().first()? {
+        b'-' => (true, &text[1..]),
+        b'+' => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    if whole.is_empty()
+        || whole.len() > 6
+        || fraction.len() > 2
+        || (digits.contains('.') && fraction.is_empty())
+        || !whole
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let cents = whole.parse::<i64>().ok()? * 100 + format!("{fraction:0<2}").parse::<i64>().ok()?;
+    if cents == 0 || cents > 100_000 * 100 {
+        return None;
+    }
+    let nano = cents * NANO_EUR_PER_CENT;
+    Some(if negative { -nano } else { nano })
+}
+
+fn credit_kind_text(kind: &str) -> &'static str {
+    match kind {
+        "grant" => "Card grant",
+        "usage" => "Usage",
+        "top_up" => "Top-up",
+        "adjustment" => "Adjustment",
+        _ => "Other",
     }
 }
 
@@ -936,6 +1085,38 @@ fn severity_tone(severity: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn euro_amounts_round_trip_as_operators_write_them() {
+        use super::{euro_amount_nano, euro_text};
+        assert_eq!(euro_text(50_000_000_000), "€50.00");
+        assert_eq!(euro_text(-1_500_000_000), "-€1.50");
+        assert_eq!(euro_text(0), "€0.00");
+        // A minute of the default sandbox is a fraction of a cent.
+        assert_eq!(euro_text(-3_385_000), "-€0.003385");
+        assert_eq!(euro_text(-3_385_999), "-€0.003385");
+        assert_eq!(euro_amount_nano("25"), Some(25_000_000_000));
+        assert_eq!(euro_amount_nano(" -10.5 "), Some(-10_500_000_000));
+        assert_eq!(euro_amount_nano("+0.01"), Some(10_000_000));
+        assert_eq!(euro_amount_nano("100000"), Some(100_000_000_000_000));
+        for invalid in [
+            "",
+            "-",
+            "0",
+            "0.00",
+            "1.",
+            ".5",
+            "1.234",
+            "100000.01",
+            "1e3",
+            "1,5",
+            "--1",
+            "abc",
+            "9999999",
+        ] {
+            assert_eq!(euro_amount_nano(invalid), None, "{invalid:?}");
+        }
+    }
+
     use super::*;
 
     #[test]

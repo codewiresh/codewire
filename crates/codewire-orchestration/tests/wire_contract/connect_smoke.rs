@@ -205,6 +205,28 @@ async fn assert_auth_boundary(harness: &Harness) {
         )
         .await;
     assert_connect_error(&denied, StatusCode::FORBIDDEN, "permission_denied", "");
+
+    // Nor may one switch a rate card or move credit (#3381).
+    for (method, body) in [
+        (
+            "SetOrganizationRateCard",
+            json!({"organizationId": PRIMARY_ORG, "rateCard": "unlimited"}),
+        ),
+        (
+            "AdjustOrganizationCredit",
+            json!({
+                "organizationId": PRIMARY_ORG,
+                "amountNanoEur": "50000000000",
+                "reason": "contract",
+                "idempotencyKey": "contract",
+            }),
+        ),
+    ] {
+        let denied = harness
+            .connect_json(ADMIN_SERVICE, method, body, Auth::Admin)
+            .await;
+        assert_connect_error(&denied, StatusCode::FORBIDDEN, "permission_denied", "");
+    }
 }
 
 async fn assert_resize_contract(harness: &Harness) {
