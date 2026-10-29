@@ -5,7 +5,7 @@ import { expect, test } from "./helpers/fixture-test";
 // separately covers transport; this preview never pretends to be a backend.
 test.use({ storageState: { cookies: [], origins: [] } });
 
-test("ports load in place and late dismissed responses cannot redirect or replace current content", async ({ page }) => {
+test("ports load in place and late dismissed responses cannot redirect or replace current content", { tag: "@mobile" }, async ({ page }) => {
   const designOrigin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!designOrigin, "Run make design-system for the focused fixture check");
   await page.goto(`${designOrigin}/reference/fixtures/terminal.html`);
@@ -54,7 +54,7 @@ test("ports load in place and late dismissed responses cannot redirect or replac
   expect(await terminal!.evaluate((element) => element === document.querySelector("[data-terminal-root]"))).toBe(true);
 });
 
-test("sandbox dialogs and resize dismiss without navigation or terminal replacement", async ({ page }) => {
+test("sandbox dialogs and resize dismiss without navigation or terminal replacement", { tag: "@mobile" }, async ({ page }) => {
   const designOrigin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!designOrigin, "Run make design-system for the focused fixture check");
   await page.goto(`${designOrigin}/reference/fixtures/terminal.html`);
@@ -135,7 +135,7 @@ test("legacy Escape does not consume a key without a drawer or interfere with na
   expect(await renderer.evaluate((element) => element === document.querySelector(".xterm"))).toBe(true);
 });
 
-test("terminal presentation preserves colors, metrics, selection and strict CSP", async ({ page, context }) => {
+test("terminal presentation preserves colors, metrics, selection and strict CSP", { tag: "@mobile" }, async ({ page, context }) => {
   const designOrigin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!designOrigin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for the focused fixture check");
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: designOrigin! });

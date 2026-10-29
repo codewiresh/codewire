@@ -44,7 +44,7 @@ test.beforeEach(async ({ page }) => {
   await page.goto(fixture());
 });
 
-test("one inventory lists every key with its organization, status and permitted actions", async ({ page }) => {
+test("one inventory lists every key with its organization, status and permitted actions", { tag: "@mobile" }, async ({ page }) => {
   const personal = page.getByRole("list", { name: "Personal", exact: true });
   await expect(personal.getByRole("link")).toHaveText(["Account", "Credentials", "Secrets", "API keys"]);
   await expect(personal.locator('[aria-current="page"]')).toHaveText("API keys");
@@ -97,7 +97,7 @@ test("the filter toolbar searches, filters by status and organization, and keeps
   expect(Object.fromEntries(url.searchParams)).toEqual({ cursor: "fixture-page", search: "beta", status: "disabled", organization: "fixture-org-beta" });
 });
 
-test("Create requires an explicit organization, one footer and preserves dirty drafts", async ({ page }) => {
+test("Create requires an explicit organization, one footer and preserves dirty drafts", { tag: "@mobile" }, async ({ page }) => {
   const posts = await capturePosts(page);
   const trigger = action(page, "Create key");
   await trigger.click();
@@ -145,7 +145,7 @@ test("menu actions and the Delete confirmation submit exact key and organization
   expect(posts[1]).toEqual(submitted("delete", { org_id: "fixture-org-alpha", key_id: "fixture-key-ci" }));
 });
 
-test("unavailable organization inventory is not confused with no memberships", async ({ page }) => {
+test("unavailable organization inventory is not confused with no memberships", { tag: "@mobile" }, async ({ page }) => {
   await page.goto(fixture("-unavailable"));
   await expect(page.getByRole("status")).toContainText("does not mean you have no keys");
   await expect(action(page, "Create key")).toBeDisabled();
@@ -159,7 +159,7 @@ test("unavailable organization inventory is not confused with no memberships", a
   await fits(page);
 });
 
-test("one-time reveal replaces inventory, supports copy and clears only its raw value on pagehide", async ({ page, context }) => {
+test("one-time reveal replaces inventory, supports copy and clears only its raw value on pagehide", { tag: "@mobile" }, async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto(fixture("-one-time"));
   await expect(page.locator("body")).toHaveAttribute("hx-history", "false");
@@ -189,7 +189,7 @@ test("one-time reveal replaces inventory, supports copy and clears only its raw 
 test.describe("without JavaScript", () => {
   test.use({ javaScriptEnabled: false });
 
-  test("native Create, menus and Delete remain usable without dialog launchers", async ({ page }) => {
+  test("native Create, menus and Delete remain usable without dialog launchers", { tag: "@mobile" }, async ({ page }) => {
     const posts = await capturePosts(page);
     for (const launcher of await page.locator("[data-dialog-open]").all()) await expect(launcher).toBeHidden();
     const form = page.getByRole("form", { name: "Create API key", exact: true });

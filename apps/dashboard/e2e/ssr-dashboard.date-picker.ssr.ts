@@ -23,7 +23,7 @@ test.beforeEach(async () => {
   test.skip(!process.env.CODEWIRE_DESIGN_ORIGIN, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
 });
 
-test("the expiry calendar selects UTC dates by keyboard and pointer and writes the native value", async ({ page }) => {
+test("the expiry calendar selects UTC dates by keyboard and pointer and writes the native value", { tag: "@mobile" }, async ({ page }) => {
   await page.goto(fixture());
   const dialog = await openExpiry(page);
   const input = dialog.getByLabel("Hard expiry (UTC)", { exact: true });

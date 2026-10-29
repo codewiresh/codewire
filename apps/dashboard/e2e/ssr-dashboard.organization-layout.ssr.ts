@@ -2,7 +2,7 @@ import { expect, test } from "./helpers/fixture-test";
 
 test.use({ storageState: { cookies: [], origins: [] } });
 
-test("Create Organization keeps a readable title and bounded form at desktop and mobile widths", async ({ page }) => {
+test("Create Organization keeps a readable title and bounded form at desktop and mobile widths", { tag: "@mobile" }, async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
   await page.goto(`${origin}/reference/fixtures/create-organization.html`);
@@ -35,7 +35,7 @@ test("Create Organization keeps a readable title and bounded form at desktop and
   await expect(form.getByRole("button", { name: "Create Organization" })).toBeVisible();
 });
 
-test("the sidebar stays a sidebar except on a phone and keeps its footer at the bottom without an organization", async ({ browser }) => {
+test("the sidebar stays a sidebar except on a phone and keeps its footer at the bottom without an organization", { tag: "@mobile" }, async ({ browser }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
   // Each case opens its own context: the mobile project emulates touch, and touch decides here.

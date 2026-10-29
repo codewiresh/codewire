@@ -2,7 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { designFixtureSpecPattern } from "./e2e/helpers/design-fixtures";
+import { designFixtureMobileTag, designFixtureSpecPattern } from "./e2e/helpers/design-fixtures";
 import { mobileLayoutSpecPattern } from "./e2e/helpers/mobile-layout";
 
 const dashboardDir = path.dirname(fileURLToPath(import.meta.url));
@@ -55,9 +55,12 @@ const designFixtureProjects = [
       screenshot: "only-on-failure" as const,
     },
   },
+  // Only the fixture tests that look at the page at the mobile width
+  // (e2e/helpers/design-fixtures-mobile.ts); the rest run once, above.
   {
     name: "design-fixtures-mobile",
     testMatch: designFixtureSpecPattern,
+    grep: new RegExp(designFixtureMobileTag),
     timeout: designFixtureTimeout,
     use: {
       ...devices["Pixel 5"],

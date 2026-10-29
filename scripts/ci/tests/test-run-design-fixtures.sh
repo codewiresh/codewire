@@ -12,7 +12,9 @@ fail() {
   exit 1
 }
 
-# Write a Playwright JSON report with one spec per "project:status" argument.
+# Write a Playwright JSON report with one spec per "project:status[:untagged]"
+# argument. A mobile-project spec carries the @mobile tag unless untagged; the
+# report names a tag without its "@".
 report() {
   local name="$1"
   shift
@@ -23,10 +25,11 @@ import sys
 path, *results = sys.argv[1:]
 specs = []
 for index, result in enumerate(results):
-    project, status = result.split(":")
+    project, status, *untagged = result.split(":")
     specs.append({
         "title": f"case {index}",
         "file": "ssr-dashboard.fixture.ssr.ts",
+        "tags": ["mobile"] if project == "design-fixtures-mobile" and not untagged else [],
         "tests": [{"projectName": project, "status": status}],
     })
 with open(path, "w", encoding="utf-8") as handle:
@@ -63,6 +66,11 @@ report skipped design-fixtures-desktop:expected design-fixtures-mobile:expected 
 rejects skipped 'design-fixtures-mobile skipped'
 report failed design-fixtures-desktop:unexpected design-fixtures-desktop:expected design-fixtures-mobile:expected
 rejects failed 'design-fixtures-desktop unexpected'
+# The mobile project runs only the tests tagged @mobile
+# (e2e/helpers/design-fixtures-mobile.ts): an untagged one there means its
+# grep was lost, and every fixture test runs twice again.
+report untagged design-fixtures-desktop:expected design-fixtures-mobile:expected design-fixtures-mobile:expected:untagged
+rejects untagged 'design-fixtures-mobile ran a test without @mobile'
 report foreign design-fixtures-desktop:expected design-fixtures-mobile:expected dashboard-ssr-desktop:expected
 rejects foreign "unexpected project 'dashboard-ssr-desktop'"
 printf '{not json' >"$TMP/unreadable.json"
@@ -101,4 +109,4 @@ if "$RUNNER" unexpected-argument >"$TMP/usage.out" 2>&1; then
   fail 'runner accepted an unexpected argument'
 fi
 
-printf '[test-run-design-fixtures] report judgement: pass, flaky, network namespace and fallback, empty, missing project, skipped, failed, foreign project, unreadable and run errors\n'
+printf '[test-run-design-fixtures] report judgement: pass, flaky, network namespace and fallback, empty, missing project, skipped, failed, untagged mobile, foreign project, unreadable and run errors\n'

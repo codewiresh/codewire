@@ -51,7 +51,7 @@ async function refresh(page: Page, changes: Change[] = [], search?: string) {
   }, { changes, search });
 }
 
-test("a click anywhere on a row opens its Sandbox, except on the row menu", async ({ page }) => {
+test("a click anywhere on a row opens its Sandbox, except on the row menu", { tag: "@mobile" }, async ({ page }) => {
   await openInventory(page);
   const row = page.locator(`tr[data-environment-id="${quietMesa}"]`);
   const href = await row.locator("a.cw-environment-name").getAttribute("href");

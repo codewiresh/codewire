@@ -17,7 +17,7 @@ test.beforeEach(async ({ page }) => {
   await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
 });
 
-test("inline GitHub browser adds a repository without changing the runtime profile or draft", async ({ page }) => {
+test("inline GitHub browser adds a repository without changing the runtime profile or draft", { tag: "@mobile" }, async ({ page }) => {
   const drawer = page.locator("[data-drawer-panel]");
   const browser = page.locator("[data-github-browser]");
   await page.getByRole("textbox", { name: "Name", exact: true }).fill("keep-my-sandbox-draft");
@@ -266,7 +266,7 @@ test("a slow repository load shows its progress and keeps saying so", async ({ p
   await expect(browser.locator("[data-github-placeholder]")).toBeHidden();
 });
 
-test("repository rows show the full name and visibility pills", async ({ page }) => {
+test("repository rows show the full name and visibility pills", { tag: "@mobile" }, async ({ page }) => {
   const browser = page.locator("[data-github-browser]");
   const pills = (name: string) => browser.locator(`[data-repository-name="${name}"] .cw-badge`);
   await expect(pills("codewiresh/codewire")).toHaveText(["Private"]);
@@ -363,7 +363,7 @@ async function expectActionOnControlLine(page: Page, action: ReturnType<Page["lo
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 }
 
-test("a selected repository's remove button sits on its input line", async ({ page }) => {
+test("a selected repository's remove button sits on its input line", { tag: "@mobile" }, async ({ page }) => {
   const row = page.locator("[data-repository-row]").first();
   await expectActionOnControlLine(page, row.getByRole("button", { name: "Remove repository" }), [
     row.getByRole("textbox", { name: "Repository URL", exact: true }),
@@ -376,7 +376,7 @@ test("a selected repository's remove button sits on its input line", async ({ pa
 const rejectedPortRow = '<li class="cw-field-row cw-app-port-row" data-app-port-row><div class="cw-field"><label class="cw-label" for="app-port-0">Internal port</label><input class="cw-input cw-mono" id="app-port-0" name="app_port_0" type="number" min="1" max="65535" value="0" placeholder="3000" required aria-invalid="true" aria-describedby="app-port-error-0"><p class="cw-field-error" id="app-port-error-0" role="alert">Use a port from 1 to 65535.</p></div><div class="cw-field"><label class="cw-label" for="app-label-0">Preview label</label><input class="cw-input cw-mono" id="app-label-0" name="app_label_0" value="web" placeholder="web" required></div><div class="cw-field"><label class="cw-label" for="app-access-0">Who can open the preview?</label><select class="cw-select" id="app-access-0" name="app_access_0"><option value="creator" selected>Sandbox creator</option></select></div><button class="cw-icon-button" type="button" data-remove-app-port aria-label="Remove preview port"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button></li>';
 
 for (const state of ["added", "rejected"] as const) {
-  test(`a preview port's remove button sits on its input line (${state})`, async ({ page }) => {
+  test(`a preview port's remove button sits on its input line (${state})`, { tag: "@mobile" }, async ({ page }) => {
     if (state === "added") await page.getByRole("button", { name: "Add", exact: true }).click();
     else {
       await page.route((url) => url.pathname === fixturePath, async (route) => {
@@ -394,7 +394,7 @@ for (const state of ["added", "rejected"] as const) {
   });
 }
 
-test("Add port sits on the input line of the ports form, even beside an error", async ({ page }) => {
+test("Add port sits on the input line of the ports form, even beside an error", { tag: "@mobile" }, async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN!;
   await page.route("**/reference/fixtures/terminal-ports.html", async (route) => {
     const response = await route.fetch();

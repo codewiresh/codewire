@@ -187,7 +187,7 @@ async function focusGaps(page: Page) {
 }
 
 for (const fixture of fixtures) {
-  test(`${fixture} renders within the design contract`, async ({ page }, testInfo) => {
+  test(`${fixture} renders within the design contract`, { tag: "@mobile" }, async ({ page }, testInfo) => {
     const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
     test.skip(!origin, "Run make design-check");
     await page.goto(`${origin}/reference/fixtures/${fixture}`);
@@ -235,7 +235,7 @@ async function capitalsOffset(control: Locator, label: Locator = control) {
   return centre - middle;
 }
 
-test("single-line controls centre their capitals, not a line box", async ({ page }) => {
+test("single-line controls centre their capitals, not a line box", { tag: "@mobile" }, async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system for fixture checks");
   await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
@@ -255,7 +255,7 @@ test("single-line controls centre their capitals, not a line box", async ({ page
 
 // An icon beside a bare text node keeps the label off centre by up to 1.5 px
 // at 390; a span label is trimmed like a text-only button's.
-test("buttons with an icon centre their label's capitals", async ({ page }) => {
+test("buttons with an icon centre their label's capitals", { tag: "@mobile" }, async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system for fixture checks");
   for (const [fixture, name, control] of [

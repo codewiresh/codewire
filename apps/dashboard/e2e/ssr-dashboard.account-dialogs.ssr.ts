@@ -4,7 +4,7 @@ import { expect, test } from "./helpers/fixture-test";
 // are intercepted externally; no instrumentation enters the product assets.
 test.use({ storageState: { cookies: [], origins: [] } });
 
-test("Account sections share a page and exact-session confirmation cancels safely", async ({ page }) => {
+test("Account sections share a page and exact-session confirmation cancels safely", { tag: "@mobile" }, async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
   const requests: string[] = [];
@@ -44,7 +44,7 @@ test("Account sections share a page and exact-session confirmation cancels safel
 
 const fixture = (name: string) => `${process.env.CODEWIRE_DESIGN_ORIGIN}/reference/fixtures/${name}`;
 
-test("Security replaces the authenticator and regenerates codes through focused proof dialogs", async ({ page }) => {
+test("Security replaces the authenticator and regenerates codes through focused proof dialogs", { tag: "@mobile" }, async ({ page }) => {
   test.skip(!process.env.CODEWIRE_DESIGN_ORIGIN, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -103,7 +103,7 @@ test("Security replaces the authenticator and regenerates codes through focused 
   expect(errors).toEqual([]);
 });
 
-test("the new-authenticator state shows its one-time key and code field", async ({ page }) => {
+test("the new-authenticator state shows its one-time key and code field", { tag: "@mobile" }, async ({ page }) => {
   test.skip(!process.env.CODEWIRE_DESIGN_ORIGIN, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
   await page.goto(fixture("settings-account-replace-authenticator.html"));
   const confirm = page.getByRole("dialog", { name: "Add your new authenticator", exact: true });
@@ -118,7 +118,7 @@ test("the new-authenticator state shows its one-time key and code field", async 
   await page.screenshot({ path: test.info().outputPath("account-new-authenticator.png") });
 });
 
-test("the replaced state shows ten new codes and withholds revoked sessions", async ({ page }) => {
+test("the replaced state shows ten new codes and withholds revoked sessions", { tag: "@mobile" }, async ({ page }) => {
   test.skip(!process.env.CODEWIRE_DESIGN_ORIGIN, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
   await page.goto(fixture("settings-account-authenticator-replaced.html"));
   const done = page.getByRole("dialog", { name: "Authenticator replaced", exact: true });

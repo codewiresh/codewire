@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Run every editable design-fixture browser spec against the static design
-# server with the pinned Chromium. The specs skip when CODEWIRE_DESIGN_ORIGIN is
-# unset, so this runner owns their gate: it fails when a test fails, when any
-# test is skipped, or when either viewport project runs nothing.
+# server with the pinned Chromium: every test at desktop width, and the tests
+# tagged @mobile at mobile width too. The specs skip when CODEWIRE_DESIGN_ORIGIN
+# is unset, so this runner owns their gate: it fails when a test fails, when
+# any test is skipped, when the mobile project runs an untagged test, or when
+# either viewport project runs nothing.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -47,6 +49,11 @@ def walk(suite):
                 failures.append(f"unexpected project {project!r} ran {spec.get('title')!r}")
                 continue
             outcomes[project][status] += 1
+            # Only the fixture tests that look at the mobile width run there
+            # (apps/dashboard/e2e/helpers/design-fixtures-mobile.ts). The
+            # report names a tag without its "@".
+            if project == "design-fixtures-mobile" and "mobile" not in spec.get("tags", []):
+                failures.append(f"{project} ran a test without @mobile: {spec.get('file')} › {spec.get('title')}")
             if status != "expected" and status != "flaky":
                 failures.append(f"{project} {status}: {spec.get('file')} › {spec.get('title')}")
     for child in suite.get("suites", []):

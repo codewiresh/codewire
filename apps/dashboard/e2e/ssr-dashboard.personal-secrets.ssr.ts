@@ -26,7 +26,7 @@ test.beforeEach(async ({ page }) => {
   await page.goto(fixture());
 });
 
-test("Settings uses one subtitle-free heading and personal destinations independent of organization navigation", async ({ page }) => {
+test("Settings uses one subtitle-free heading and personal destinations independent of organization navigation", { tag: "@mobile" }, async ({ page }) => {
   for (const [path, active] of [["settings-account", "Account"], ["settings-credentials", "Credentials"], ["settings-secrets", "Secrets"]]) {
     await page.goto(fixture(path));
     const aside = page.locator(".cw-context-nav");
@@ -56,7 +56,7 @@ test("Settings uses one subtitle-free heading and personal destinations independ
   await page.screenshot({ path: test.info().outputPath("scoped-settings-navigation.png") });
 });
 
-test("Add secret keeps drafts only in the active DOM and never submits on dismissal", async ({ page }) => {
+test("Add secret keeps drafts only in the active DOM and never submits on dismissal", { tag: "@mobile" }, async ({ page }) => {
   let posts = 0;
   page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
   const add = action(page, "Add secret");
@@ -91,7 +91,7 @@ test("Add secret keeps drafts only in the active DOM and never submits on dismis
   expect(posts).toBe(0);
 });
 
-test("replacement and rename footers target only the original key and preserve page context", async ({ page }) => {
+test("replacement and rename footers target only the original key and preserve page context", { tag: "@mobile" }, async ({ page }) => {
   const posts: { path: string; cursor: string | null; fields: Record<string, string> }[] = [];
   await page.route("**/settings/secrets/_actions/**", async (route) => {
     const request = route.request();
@@ -130,7 +130,7 @@ test("replacement and rename footers target only the original key and preserve p
   await fits(page, rename);
 });
 
-test("Delete requires its own confirmation, Cancel is default and no value is sent", async ({ page }) => {
+test("Delete requires its own confirmation, Cancel is default and no value is sent", { tag: "@mobile" }, async ({ page }) => {
   const posts: Record<string, string>[] = [];
   await page.route("**/settings/secrets/_actions/delete**", async (route) => {
     posts.push(Object.fromEntries(new URLSearchParams(route.request().postData() || "")));
@@ -154,7 +154,7 @@ test("Delete requires its own confirmation, Cancel is default and no value is se
   expect(posts[0]).toEqual({ _csrf: "design-fixture-only", account_id: "fixture-personal-account", key: "APP_TOKEN" });
 });
 
-test("empty and unavailable states remain distinct and pagination never implies a total", async ({ page }) => {
+test("empty and unavailable states remain distinct and pagination never implies a total", { tag: "@mobile" }, async ({ page }) => {
   const pages = page.getByRole("navigation", { name: "Secret pages", exact: true });
   await expect(pages.getByRole("link", { name: "First page" })).toHaveAttribute("href", "settings-secrets.html?creation_draft=00000000-0000-4000-8000-000000000003");
   await expect(pages.getByRole("link", { name: "Next page" })).toHaveAttribute("href", "settings-secrets.html?cursor=DATABASE_URL&creation_draft=00000000-0000-4000-8000-000000000003");
@@ -189,7 +189,7 @@ test("empty and unavailable states remain distinct and pagination never implies 
 test.describe("Personal Secrets without JavaScript", () => {
   test.use({ javaScriptEnabled: false });
 
-  test("native forms submit exact fields and Delete exposes its warning before confirmation", async ({ page }) => {
+  test("native forms submit exact fields and Delete exposes its warning before confirmation", { tag: "@mobile" }, async ({ page }) => {
     const posts: { path: string; cursor: string | null; fields: Record<string, string> }[] = [];
     await page.route("**/settings/secrets/_actions/**", async (route) => {
       const request = route.request();

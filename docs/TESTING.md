@@ -92,13 +92,17 @@ failures.
 | `setup` | Performs a real Rust form login and proves the dashboard and scoped HttpOnly session cookie |
 | `dashboard-ssr-desktop` | Runs the complete server-rendered behavior suite at desktop size |
 | `dashboard-ssr-mobile` | Runs the specs that check the mobile layout, listed in `e2e/helpers/mobile-layout.ts`; their desktop-only secret and lifecycle mutations are explicitly skipped |
-| `design-fixtures-desktop`, `design-fixtures-mobile` | Run the editable design-fixture specs at 1440 and 390 pixels; defined only when `CODEWIRE_DESIGN_ORIGIN` is set, as `make design-check` does |
+| `design-fixtures-desktop`, `design-fixtures-mobile` | Run the editable design-fixture specs at 1440 pixels, and their tests tagged `@mobile` again at 390; defined only when `CODEWIRE_DESIGN_ORIGIN` is set, as `make design-check` does |
 
 No project depends on `setup`: every spec signs in as its own worker identity,
 so nothing waits for the shared login. A spec belongs in the mobile project
 when one of its tests checks the mobile layout; `e2e/helpers/mobile-layout.test.ts`
 fails when a spec with a mobile check is missing from the list, or a listed
-spec no longer has one. There are no `chromium`, `lifecycle`, `signup`,
+spec no longer has one. A design-fixture test carries `@mobile` when it looks at
+the page at the project's width (its viewport size, `isMobile`, touch, or the
+geometry of what it shows) before setting a viewport of its own;
+`e2e/helpers/design-fixtures-mobile.test.ts` fails when such a test lacks the
+tag or a tagged one no longer looks. There are no `chromium`, `lifecycle`, `signup`,
 `billing`, or `oidc` projects; those were names from the retired React suite.
 
 Every run writes a JSON report, with each test's duration, retries and

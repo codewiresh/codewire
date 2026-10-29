@@ -93,7 +93,7 @@ async function review(page: Page) {
   return dialog;
 }
 
-test("reviews consequences and resolves only a matching operation observation", async ({ page }) => {
+test("reviews consequences and resolves only a matching operation observation", { tag: "@mobile" }, async ({ page }) => {
   const state = await transport(page);
   const opened = await open(page);
   // Choosing is an editor: Cancel plus its one primary action, no Back.
@@ -153,7 +153,7 @@ test("reviews consequences and resolves only a matching operation observation", 
 });
 
 // #2333: the server refuses Resize while setup owns the running Sandbox.
-test("Resize waits for setup with a visible reason and returns when setup finishes", async ({ page }) => {
+test("Resize waits for setup with a visible reason and returns when setup finishes", { tag: "@mobile" }, async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN");
   const state = await transport(page);

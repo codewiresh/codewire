@@ -1008,7 +1008,7 @@ test("genuine encoded bytes are bounded before the frame cap is reached", async 
   expect(state.stops).toBe(0);
 });
 
-test("terminal tabs after the first launch explicitly, retain separate displays and bound the visible tab set", async ({ page }, testInfo) => {
+test("terminal tabs after the first launch explicitly, retain separate displays and bound the visible tab set", { tag: "@mobile" }, async ({ page }, testInfo) => {
   const state = await transport(page);
   await openFixture(page);
   await automaticTerminal(page, state);
@@ -1240,7 +1240,7 @@ test("a failed deletion restores the actions that recover the Sandbox", async ({
   await expect(page.locator("[data-sandbox-deleted]")).toBeHidden();
 });
 
-test("a terminal refit after copying keeps the copy announcement", async ({ page }) => {
+test("a terminal refit after copying keeps the copy announcement", { tag: "@mobile" }, async ({ page }) => {
   const state = await transport(page);
   await openFixture(page);
   await automaticTerminal(page, state);
@@ -2413,7 +2413,7 @@ test("inventory Stop retains its native fallback when refreshed metadata is inva
   await expect(page.locator("[data-inventory-stop-dialog]")).not.toBeVisible();
 });
 
-test("live deletion metadata preserves nanoseconds, terminal and open confirmation without inferring expiry", async ({ page }) => {
+test("live deletion metadata preserves nanoseconds, terminal and open confirmation without inferring expiry", { tag: "@mobile" }, async ({ page }) => {
   const state = await transport(page);
   state.sessions = [{ sessionId: sessionId(1), state: "running" }];
   state.detail = { state: "running", desiredState: "started", tone: "success", lastEvent: "just now",

@@ -2,7 +2,7 @@ import { expect, test } from "./helpers/fixture-test";
 
 test.use({ storageState: { cookies: [], origins: [] } });
 
-test("preview choices show an unassigned URL pattern and native labeled rows", async ({ page }) => {
+test("preview choices show an unassigned URL pattern and native labeled rows", { tag: "@mobile" }, async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
   await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
@@ -28,7 +28,7 @@ test("preview choices show an unassigned URL pattern and native labeled rows", a
   await expect(ports.locator("li[data-app-port-row]")).toHaveCount(0);
 });
 
-test("assigned preview URL copies exactly and clipboard denial has a manual fallback", async ({ page, context }) => {
+test("assigned preview URL copies exactly and clipboard denial has a manual fallback", { tag: "@mobile" }, async ({ page, context }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });

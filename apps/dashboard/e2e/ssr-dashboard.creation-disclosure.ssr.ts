@@ -382,7 +382,7 @@ test("dirty Create Close keeps inputs and saved draft until explicit Discard", a
   expect(await page.evaluate((key) => sessionStorage.getItem(key), keyForDraft(selectionsDraft()))).toBeNull();
 });
 
-test("dirty Create Close can save the draft and reopening Create restores it", async ({ page }) => {
+test("dirty Create Close can save the draft and reopening Create restores it", { tag: "@mobile" }, async ({ page }) => {
   await page.goto(fixtureUrl());
   await page.getByLabel("CPU", { exact: true }).selectOption("2000");
   await page.getByLabel("Name", { exact: true }).fill("kept-after-close");

@@ -34,3 +34,11 @@ const escaped = (name: string) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 export const designFixtureSpecPattern = new RegExp(
   `apps/dashboard/e2e/(?:${designFixtureSpecs.map(escaped).join("|")})$`,
 );
+
+// The fixture tests that run in the mobile project as well as the desktop
+// one: those that look at the page at the project's own width (its viewport
+// size, isMobile, touch, or the geometry of what it shows) before setting a
+// viewport of their own. Every other fixture test does the same thing at both
+// widths, or sets the widths it checks itself, so it runs once, in the desktop
+// project. design-fixtures-mobile.test.ts keeps the tags honest.
+export const designFixtureMobileTag = "@mobile";

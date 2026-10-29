@@ -53,7 +53,7 @@ const footer = async (owner: Locator, primary?: string, dismissal = "Cancel") =>
   }
 };
 
-test("six full-row choices open focused provider editors with Back and one footer", async ({ page }) => {
+test("six full-row choices open focused provider editors with Back and one footer", { tag: "@mobile" }, async ({ page }) => {
   const errors: string[] = [];
   const posts: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -139,7 +139,7 @@ test("saved GitHub connection opens its exact reconnect dialog without submittin
   expect(posts).toBe(0);
 });
 
-test("SSH chooses Generate or Import and Back clears private values only after discard", async ({ page }) => {
+test("SSH chooses Generate or Import and Back clears private values only after discard", { tag: "@mobile" }, async ({ page }) => {
   let posts = 0;
   page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
   await choose(page, "SSH key");
@@ -173,7 +173,7 @@ test("SSH chooses Generate or Import and Back clears private values only after d
   expect(posts).toBe(0);
 });
 
-test("rows keep status and expiry visible and open focused editors straight from their menu", async ({ page }) => {
+test("rows keep status and expiry visible and open focused editors straight from their menu", { tag: "@mobile" }, async ({ page }) => {
   // Anchored on the menu's name, which stays put when the label text is replaced below.
   const row = page.locator(".cw-credential-row").filter({ has: page.locator('summary[aria-label="Actions for Work API"]') });
   await expect(row.locator(".cw-credential-identity")).toContainText("Expires 2026-12-31 12:00 UTC");
@@ -215,7 +215,7 @@ test("rows keep status and expiry visible and open focused editors straight from
   await fits(page, page.locator("#credential-fixture-openai-rename"));
 });
 
-test("a Claude subscription token reads its expiry and is replaced by paste from its menu", async ({ page }) => {
+test("a Claude subscription token reads its expiry and is replaced by paste from its menu", { tag: "@mobile" }, async ({ page }) => {
   const posts: { path: string; fields: Record<string, string> }[] = [];
   await page.route("**/settings/credentials/_actions/**", async (route) => {
     const request = route.request();
@@ -258,7 +258,7 @@ test("a Claude subscription token reads its expiry and is replaced by paste from
     .not.toContain("synthetic-subscription-token-canary");
 });
 
-test("a credential whose refresh failed says Reconnect needed and reconnects from its row", async ({ page }) => {
+test("a credential whose refresh failed says Reconnect needed and reconnects from its row", { tag: "@mobile" }, async ({ page }) => {
   let posts = 0;
   page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
   const row = page.locator(".cw-credential-row").filter({ has: page.locator('summary[aria-label="Actions for Work Codex"]') });
@@ -283,7 +283,7 @@ test("a credential whose refresh failed says Reconnect needed and reconnects fro
   expect(posts).toBe(0);
 });
 
-test("profile rows open exact-revision editors from their menu with native validation", async ({ page }) => {
+test("profile rows open exact-revision editors from their menu with native validation", { tag: "@mobile" }, async ({ page }) => {
   let posts = 0;
   page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
   const create = action(page, "Create profile");
@@ -335,7 +335,7 @@ test("profile rows open exact-revision editors from their menu with native valid
   expect(posts).toBe(0);
 });
 
-test("profile Rename edits one name at the observed revision and posts only the label", async ({ page }) => {
+test("profile Rename edits one name at the observed revision and posts only the label", { tag: "@mobile" }, async ({ page }) => {
   const posts: { path: string; fields: Record<string, string> }[] = [];
   await page.route("**/settings/credentials/_actions/**", async (route) => {
     const request = route.request();
@@ -430,7 +430,7 @@ test("inner form replacement fences pending dismissal and preserves new validati
   await expect(api).not.toBeVisible();
 });
 
-test("reconnect consent and destructive confirms preserve exact authority and never submit on navigation", async ({ page }) => {
+test("reconnect consent and destructive confirms preserve exact authority and never submit on navigation", { tag: "@mobile" }, async ({ page }) => {
   const posts: { path: string; fields: Record<string, string> }[] = [];
   await page.route("**/settings/credentials/_actions/**", async (route) => {
     const request = route.request();

@@ -5,7 +5,7 @@ import { expect, test } from "./helpers/fixture-test";
 // Reduced motion removes that race; a rarer one under heavy load remains.
 test.use({ storageState: { cookies: [], origins: [] }, contextOptions: { reducedMotion: "reduce" } });
 
-test("Create resource help stays readable without editing or closing the form", async ({ page }) => {
+test("Create resource help stays readable without editing or closing the form", { tag: "@mobile" }, async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
   await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
@@ -52,7 +52,7 @@ test("Create resource help stays readable without editing or closing the form", 
 });
 
 for (const fixture of ["create-sandbox.html", "edit-sandbox-sources.html"]) {
-  test(`${fixture} keeps source detail behind accessible help`, async ({ page }) => {
+  test(`${fixture} keeps source detail behind accessible help`, { tag: "@mobile" }, async ({ page }) => {
     const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
     test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
     await page.goto(`${origin}/reference/fixtures/${fixture}`);
@@ -99,7 +99,7 @@ test("source help without a trigger id stays open while its container scrolls", 
   await expect(help).not.toHaveAttribute("data-field-help-trigger");
 });
 
-test("workspace image choices open as a listbox, filter, and pick by keyboard or pointer", async ({ page }) => {
+test("workspace image choices open as a listbox, filter, and pick by keyboard or pointer", { tag: "@mobile" }, async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
   await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
