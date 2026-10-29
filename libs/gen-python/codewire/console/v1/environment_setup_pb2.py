@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from codewire.v1 import preset_pb2 as codewire_dot_v1_dot_preset__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n+codewire/console/v1/environment_setup.proto\x12\x13\x63odewire.console.v1\x1a\x18\x63odewire/v1/preset.proto\";\n\"GetEnvironmentCreateOptionsRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\"\xb0\x01\n#GetEnvironmentCreateOptionsResponse\x12-\n\x07presets\x18\x02 \x03(\x0b\x32\x13.codewire.v1.PresetR\x07presets\x12.\n\x13preview_base_domain\x18\x04 \x01(\tR\x11previewBaseDomainJ\x04\x08\x01\x10\x02J\x04\x08\x03\x10\x04R\rgithub_statusR\x0fsecret_projects\"\x1c\n\x1aIssueTerminalTicketRequest\"5\n\x1bIssueTerminalTicketResponse\x12\x16\n\x06ticket\x18\x01 \x01(\tR\x06ticket2\xab\x02\n\x17\x45nvironmentSetupService\x12\x95\x01\n\x1bGetEnvironmentCreateOptions\x12\x37.codewire.console.v1.GetEnvironmentCreateOptionsRequest\x1a\x38.codewire.console.v1.GetEnvironmentCreateOptionsResponse\"\x03\x90\x02\x01\x12x\n\x13IssueTerminalTicket\x12/.codewire.console.v1.IssueTerminalTicketRequest\x1a\x30.codewire.console.v1.IssueTerminalTicketResponseB\xe8\x01\n\x17\x63om.codewire.console.v1B\x15\x45nvironmentSetupProtoP\x01ZHgithub.com/codewiresh/codewire/libs/gen-go/codewire/console/v1;consolev1\xa2\x02\x03\x43\x43X\xaa\x02\x13\x43odewire.Console.V1\xca\x02\x13\x43odewire\\Console\\V1\xe2\x02\x1f\x43odewire\\Console\\V1\\GPBMetadata\xea\x02\x15\x43odewire::Console::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n+codewire/console/v1/environment_setup.proto\x12\x13\x63odewire.console.v1\x1a\x18\x63odewire/v1/preset.proto\";\n\"GetEnvironmentCreateOptionsRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\"\xe7\x01\n#GetEnvironmentCreateOptionsResponse\x12-\n\x07presets\x18\x02 \x03(\x0b\x32\x13.codewire.v1.PresetR\x07presets\x12.\n\x13preview_base_domain\x18\x04 \x01(\tR\x11previewBaseDomain\x12\x35\n\x16\x63onfidential_available\x18\x05 \x01(\x08R\x15\x63onfidentialAvailableJ\x04\x08\x01\x10\x02J\x04\x08\x03\x10\x04R\rgithub_statusR\x0fsecret_projects\"\x1c\n\x1aIssueTerminalTicketRequest\"5\n\x1bIssueTerminalTicketResponse\x12\x16\n\x06ticket\x18\x01 \x01(\tR\x06ticket2\xab\x02\n\x17\x45nvironmentSetupService\x12\x95\x01\n\x1bGetEnvironmentCreateOptions\x12\x37.codewire.console.v1.GetEnvironmentCreateOptionsRequest\x1a\x38.codewire.console.v1.GetEnvironmentCreateOptionsResponse\"\x03\x90\x02\x01\x12x\n\x13IssueTerminalTicket\x12/.codewire.console.v1.IssueTerminalTicketRequest\x1a\x30.codewire.console.v1.IssueTerminalTicketResponseB\xe8\x01\n\x17\x63om.codewire.console.v1B\x15\x45nvironmentSetupProtoP\x01ZHgithub.com/codewiresh/codewire/libs/gen-go/codewire/console/v1;consolev1\xa2\x02\x03\x43\x43X\xaa\x02\x13\x43odewire.Console.V1\xca\x02\x13\x43odewire\\Console\\V1\xe2\x02\x1f\x43odewire\\Console\\V1\\GPBMetadata\xea\x02\x15\x43odewire::Console::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -38,11 +38,11 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_GETENVIRONMENTCREATEOPTIONSREQUEST']._serialized_start=94
   _globals['_GETENVIRONMENTCREATEOPTIONSREQUEST']._serialized_end=153
   _globals['_GETENVIRONMENTCREATEOPTIONSRESPONSE']._serialized_start=156
-  _globals['_GETENVIRONMENTCREATEOPTIONSRESPONSE']._serialized_end=332
-  _globals['_ISSUETERMINALTICKETREQUEST']._serialized_start=334
-  _globals['_ISSUETERMINALTICKETREQUEST']._serialized_end=362
-  _globals['_ISSUETERMINALTICKETRESPONSE']._serialized_start=364
-  _globals['_ISSUETERMINALTICKETRESPONSE']._serialized_end=417
-  _globals['_ENVIRONMENTSETUPSERVICE']._serialized_start=420
-  _globals['_ENVIRONMENTSETUPSERVICE']._serialized_end=719
+  _globals['_GETENVIRONMENTCREATEOPTIONSRESPONSE']._serialized_end=387
+  _globals['_ISSUETERMINALTICKETREQUEST']._serialized_start=389
+  _globals['_ISSUETERMINALTICKETREQUEST']._serialized_end=417
+  _globals['_ISSUETERMINALTICKETRESPONSE']._serialized_start=419
+  _globals['_ISSUETERMINALTICKETRESPONSE']._serialized_end=472
+  _globals['_ENVIRONMENTSETUPSERVICE']._serialized_start=475
+  _globals['_ENVIRONMENTSETUPSERVICE']._serialized_end=774
 # @@protoc_insertion_point(module_scope)

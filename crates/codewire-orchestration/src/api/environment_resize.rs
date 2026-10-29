@@ -18,7 +18,7 @@ use sqlx::{Row, Transaction};
 use super::ApiState;
 use super::environment_daemon::list_environment_daemon_sessions_core;
 use super::environments::{
-    Environment, fetch_env_summary, get_environment_core, get_org_quota,
+    Environment, admission_quota, fetch_env_summary, get_environment_core,
     require_environment_access, require_org_member, trigger_environment,
 };
 use crate::confidential_storage::require_confidential_access;
@@ -784,7 +784,7 @@ async fn resize_environment_core_inner(
         ));
     }
 
-    let quota = get_org_quota(&state.pool, &params.org_id).await;
+    let quota = admission_quota(&state.pool, &params.org_id).await?;
     let dispatch_ambiguous = AtomicBool::new(false);
     // The admitted operation outlives a dropped request, so it owns its inputs.
     let owned_state = state.clone();

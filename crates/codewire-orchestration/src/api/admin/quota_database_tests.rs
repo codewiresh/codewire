@@ -51,7 +51,7 @@ async fn db_quota_set_overwrites_and_is_what_creates_are_checked_against() -> Re
             .await
             .map_err(app_error)?;
         ensure!(before.explicit.is_none());
-        // Without a row, the plan fallback's fixed CPU and memory caps apply.
+        // Without a row, the defaults' CPU and memory caps apply.
         ensure!(before.effective.max_cpu_millicores == 32_000);
         ensure!(before.effective.max_memory_mb == 65_536);
 
@@ -71,7 +71,7 @@ async fn db_quota_set_overwrites_and_is_what_creates_are_checked_against() -> Re
             .map_err(app_error)?;
         ensure!(after.explicit == Some(unlimited), "{after:?}");
         ensure!(after.effective == unlimited, "{after:?}");
-        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, ORGANIZATION).await) == unlimited);
+        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, ORGANIZATION).await?) == unlimited);
 
         let entries = audit_entries(pool).await?;
         ensure!(entries.len() == 2, "{entries:?}");
@@ -92,7 +92,7 @@ async fn db_quota_set_overwrites_and_is_what_creates_are_checked_against() -> Re
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn db_quota_clear_restores_the_plan_fallback_and_audits_only_a_removal() -> Result<()> {
+async fn db_quota_clear_restores_the_defaults_and_audits_only_a_removal() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
         seed(&db).await?;
@@ -321,8 +321,10 @@ async fn db_quota_defaults_apply_to_organizations_without_their_own_quota() -> R
         seed(&db).await?;
         db.organization("quota-planned").await?;
         db.organization("quota-own").await?;
+        db.organization("quota-unlimited").await?;
         let pool = &db.pool;
-        // A plan whose workspace limit still sets the sandbox count.
+        // A plan with a workspace limit, which no longer sets any limit
+        // (#3381).
         sqlx::query(
             "INSERT INTO billing_catalog_plans \
              (resource_type, plan_key, display_name, price_cents, max_concurrent_ws, \
@@ -340,6 +342,15 @@ async fn db_quota_defaults_apply_to_organizations_without_their_own_quota() -> R
         set_organization_environment_quota_core(pool, ADMIN, "quota-own", RAISED)
             .await
             .map_err(app_error)?;
+        // The Unlimited card has no quota, even with its own quota stored.
+        sqlx::query(
+            "UPDATE organizations SET rate_card = 'unlimited' WHERE id = 'quota-unlimited'",
+        )
+        .execute(pool)
+        .await?;
+        set_organization_environment_quota_core(pool, ADMIN, "quota-unlimited", RAISED)
+            .await
+            .map_err(app_error)?;
 
         // The migration's seed is today's constants.
         let seeded = AdminEnvironmentQuota {
@@ -354,7 +365,7 @@ async fn db_quota_defaults_apply_to_organizations_without_their_own_quota() -> R
                 .map_err(app_error)?
                 == (seeded, true)
         );
-        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, ORGANIZATION).await) == seeded);
+        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, ORGANIZATION).await?) == seeded);
 
         let defaults = AdminEnvironmentQuota {
             max_concurrent_environments: 120,
@@ -365,19 +376,18 @@ async fn db_quota_defaults_apply_to_organizations_without_their_own_quota() -> R
         set_default_environment_quota_core(pool, ADMIN, defaults)
             .await
             .map_err(app_error)?;
-        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, ORGANIZATION).await) == defaults);
-        // The plan keeps its sandbox and environment counts; CPU and memory
-        // come from the defaults.
+        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, ORGANIZATION).await?) == defaults);
+        // A plan changes nothing: the defaults apply.
         ensure!(
-            AdminEnvironmentQuota::from(get_org_quota(pool, "quota-planned").await)
-                == AdminEnvironmentQuota {
-                    max_concurrent_environments: 7,
-                    max_concurrent_sandbox: 7,
-                    ..defaults
-                }
+            AdminEnvironmentQuota::from(get_org_quota(pool, "quota-planned").await?) == defaults
         );
         // An organization with its own quota is unaffected.
-        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, "quota-own").await) == RAISED);
+        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, "quota-own").await?) == RAISED);
+        // Unlimited has no limit at all.
+        ensure!(
+            AdminEnvironmentQuota::from(get_org_quota(pool, "quota-unlimited").await?)
+                == AdminEnvironmentQuota::from(crate::api::environments::NO_QUOTA)
+        );
 
         let entries: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
             "SELECT action, user_id, metadata FROM audit_logs \
@@ -429,7 +439,7 @@ async fn db_quota_defaults_apply_to_organizations_without_their_own_quota() -> R
                 .map_err(app_error)?
                 == (seeded, false)
         );
-        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, ORGANIZATION).await) == seeded);
+        ensure!(AdminEnvironmentQuota::from(get_org_quota(pool, ORGANIZATION).await?) == seeded);
         set_default_environment_quota_core(pool, ADMIN, seeded)
             .await
             .map_err(app_error)?;

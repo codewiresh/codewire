@@ -174,6 +174,10 @@ async fn lookup_repo_config(
 pub struct EnvironmentCreateOptionsBody {
     pub presets: Vec<PresetWire>,
     pub preview_base_domain: String,
+    /// Whether this caller may create a confidential environment here: the
+    /// deployment enables it and the organization is opted in (#2497). No
+    /// plan or catalog row is involved (#3381).
+    pub confidential_available: bool,
 }
 
 fn preview_domain_is_valid(domain: &str) -> bool {
@@ -213,6 +217,15 @@ pub(crate) async fn get_environment_create_options_core(
             "failed to list presets",
         )
     })?;
+    let confidential_available = crate::confidential_storage::require_confidential_access(
+        &state.pool,
+        state.confidential_storage_flags,
+        user,
+        org_id,
+        "confidential",
+    )
+    .await
+    .is_ok();
     Ok(EnvironmentCreateOptionsBody {
         presets,
         preview_base_domain: if preview_domain_is_valid(&state.preview_base_domain) {
@@ -220,6 +233,7 @@ pub(crate) async fn get_environment_create_options_core(
         } else {
             String::new()
         },
+        confidential_available,
     })
 }
 
@@ -442,6 +456,7 @@ mod tests {
         let options = EnvironmentCreateOptionsBody {
             presets: vec![preset(codewire_project::ProjectSpec::default())],
             preview_base_domain: "preview.example.test".into(),
+            confidential_available: false,
         };
         assert_eq!(options.presets.len(), 1);
         assert_eq!(options.preview_base_domain, "preview.example.test");

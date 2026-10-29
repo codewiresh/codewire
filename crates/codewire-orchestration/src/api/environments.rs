@@ -789,101 +789,77 @@ pub(crate) const FALLBACK_QUOTA_DEFAULTS: OrgQuota = OrgQuota {
 };
 
 /// The administrator-set defaults for organizations without their own
-/// quota (#3583), or [`FALLBACK_QUOTA_DEFAULTS`] without a readable row.
-pub(crate) async fn quota_defaults(pool: &PgPool) -> OrgQuota {
-    match sqlx::query_as::<_, (i32, i32, i32, i32)>(
+/// quota (#3583), or [`FALLBACK_QUOTA_DEFAULTS`] when no row is stored. A
+/// failed read is an error: admission refuses rather than guess (#3256).
+pub(crate) async fn quota_defaults(pool: &PgPool) -> Result<OrgQuota, sqlx::Error> {
+    Ok(sqlx::query_as::<_, (i32, i32, i32, i32)>(
         r#"SELECT max_concurrent_environments, max_concurrent_sandbox,
                   max_cpu_millicores, max_memory_mb
            FROM environment_quota_defaults WHERE singleton"#,
     )
     .fetch_optional(pool)
-    .await
-    {
-        Ok(Some((envs, sandbox, cpu, mem))) => OrgQuota {
+    .await?
+    .map_or(FALLBACK_QUOTA_DEFAULTS, |(envs, sandbox, cpu, mem)| {
+        OrgQuota {
             max_concurrent_environments: envs,
             max_concurrent_sandbox: sandbox,
             max_cpu_millicores: cpu,
             max_memory_mb: mem,
-        },
-        Ok(None) => FALLBACK_QUOTA_DEFAULTS,
-        Err(error) => {
-            tracing::warn!(error = %error, "quota defaults unreadable; using the fallback");
-            FALLBACK_QUOTA_DEFAULTS
         }
-    }
+    }))
 }
 
-/// Mirrors `resolveQuotaFromPlan`: defaults applied for unresolved
-/// fields. `plan_max_ws` is the sandbox plan's max_concurrent_ws (0
-/// when the plan is unknown), which still sets the sandbox count, and
-/// the environment count with it, when the plan has one.
-fn resolve_quota_from_plan(plan_max_ws: i32, defaults: OrgQuota) -> OrgQuota {
-    let mut q = OrgQuota {
-        max_concurrent_sandbox: plan_max_ws,
-        ..Default::default()
-    };
-    if q.max_concurrent_sandbox == -1 {
-        q.max_concurrent_environments = -1;
-    } else if q.max_concurrent_sandbox > 0 {
-        q.max_concurrent_environments = q.max_concurrent_sandbox;
-    }
-    if q.max_concurrent_environments == 0 {
-        q.max_concurrent_environments = defaults.max_concurrent_environments;
-    }
-    if q.max_concurrent_sandbox == 0 {
-        q.max_concurrent_sandbox = defaults.max_concurrent_sandbox;
-    }
-    if q.max_cpu_millicores == 0 {
-        q.max_cpu_millicores = defaults.max_cpu_millicores;
-    }
-    if q.max_memory_mb == 0 {
-        q.max_memory_mb = defaults.max_memory_mb;
-    }
-    q
-}
+/// The rate card with no charge and no quota (#3381).
+pub(crate) const UNLIMITED_RATE_CARD: &str = "unlimited";
 
-/// Mirrors `getOrgQuota`: explicit environment_quotas row →
-/// plan-derived → hardcoded defaults.
-pub(crate) async fn get_org_quota(pool: &PgPool, org_id: &str) -> OrgQuota {
-    if let Ok(Some((envs, sandbox, cpu, mem))) = sqlx::query_as::<_, (i32, i32, i32, i32)>(
-        r#"SELECT max_concurrent_environments, max_concurrent_sandbox,
-                  max_cpu_millicores, max_memory_mb
-           FROM environment_quotas WHERE org_id = $1"#,
+/// No limit of any kind: what an organization on the Unlimited card gets.
+pub(crate) const NO_QUOTA: OrgQuota = OrgQuota {
+    max_concurrent_environments: -1,
+    max_concurrent_sandbox: -1,
+    max_cpu_millicores: -1,
+    max_memory_mb: -1,
+};
+
+/// An organization's limits (#3381): none on the Unlimited rate card;
+/// otherwise its own quota (#3597), else the administrator defaults (#3583).
+/// A failed read of the card, the organization's quota or the defaults is an
+/// error, never looser limits: admission turns it into the retryable
+/// `quota_unavailable` refusal (#3256).
+pub(crate) async fn get_org_quota(pool: &PgPool, org_id: &str) -> Result<OrgQuota, sqlx::Error> {
+    type Row = (String, Option<i32>, Option<i32>, Option<i32>, Option<i32>);
+    match sqlx::query_as::<_, Row>(
+        r#"SELECT o.rate_card, q.max_concurrent_environments, q.max_concurrent_sandbox,
+                  q.max_cpu_millicores, q.max_memory_mb
+           FROM organizations o
+           LEFT JOIN environment_quotas q ON q.org_id = o.id
+           WHERE o.id = $1"#,
     )
     .bind(org_id)
     .fetch_optional(pool)
-    .await
+    .await?
     {
-        return OrgQuota {
+        Some((rate_card, ..)) if rate_card == UNLIMITED_RATE_CARD => Ok(NO_QUOTA),
+        Some((_, Some(envs), Some(sandbox), Some(cpu), Some(mem))) => Ok(OrgQuota {
             max_concurrent_environments: envs,
             max_concurrent_sandbox: sandbox,
             max_cpu_millicores: cpu,
             max_memory_mb: mem,
-        };
+        }),
+        _ => quota_defaults(pool).await,
     }
+}
 
-    // Plan fallback. The effective-plan resolution mirrors
-    // billing.ResolveEffectiveOrgEnvironmentPlan (env subscription →
-    // org subscription → organizations.billing_plan), and the plan
-    // lookup reads the billing_catalog_plans table that backs Go's
-    // in-memory catalog (archived plans included, as in
-    // GetResourcePlan).
-    let plan = resolve_effective_plan(pool, org_id).await;
-    let plan_max_ws: i32 = if plan.is_empty() {
-        0
-    } else {
-        sqlx::query_scalar(
-            r#"SELECT max_concurrent_ws FROM billing_catalog_plans
-               WHERE resource_type = 'sandbox' AND plan_key = $1"#,
+/// The limits a create, start or resize is admitted against, or the
+/// retryable `quota_unavailable` refusal when they cannot be read (#3256).
+pub(crate) async fn admission_quota(pool: &PgPool, org_id: &str) -> Result<OrgQuota, AppError> {
+    get_org_quota(pool, org_id).await.map_err(|error| {
+        tracing::warn!(org_id, %error, "quota check: failed to read the organization's limits");
+        coded(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "quota_unavailable",
+            "the environment quota could not be checked; retry in a moment",
         )
-        .bind(&plan)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(0)
-    };
-    resolve_quota_from_plan(plan_max_ws, quota_defaults(pool).await)
+    })
 }
 
 /// Mirrors `billing.ResolveEffectiveOrgEnvironmentPlan` (the plan-name
@@ -1284,14 +1260,7 @@ pub(crate) async fn start_environment_core(
                     } else {
                         lifecycle.reset_for_retry(&env.id).await
                     };
-                    if let Err(error) = retry {
-                        if error.to_string().contains("CONFIDENTIAL_CAPACITY_UNAVAILABLE") {
-                            return Err(coded(
-                                StatusCode::CONFLICT,
-                                "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
-                                "confidential environment capacity is currently unavailable",
-                            ));
-                        }
+                    if retry.is_err() {
                         return Err(coded(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "internal_error",
@@ -1337,7 +1306,7 @@ pub(crate) async fn start_environment_core(
 
             // Starting resumes compute allocation: the quota is checked and
             // the start intent recorded under the organization row lock.
-            let quota = get_org_quota(&state.pool, org_id).await;
+            let quota = admission_quota(&state.pool, org_id).await?;
             if let Err(error) = lifecycle
                 .admit_start(
                     &env.id,
@@ -1356,13 +1325,6 @@ pub(crate) async fn start_environment_core(
                     Ok(refused) => return Err(refused),
                     Err(error) => error,
                 };
-                if error.to_string().contains("CONFIDENTIAL_CAPACITY_UNAVAILABLE") {
-                    return Err(coded(
-                        StatusCode::CONFLICT,
-                        "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
-                        "confidential environment capacity is currently unavailable",
-                    ));
-                }
                 tracing::error!(%error, environment_id = env.id, "start environment admission failed");
                 return Err(coded(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1648,61 +1610,6 @@ mod tests {
                 9999
             )
             .is_ok()
-        );
-    }
-
-    #[test]
-    fn quota_plan_fallback_mirrors_go_defaults() {
-        // Unknown plan (0) → all defaults.
-        let q = resolve_quota_from_plan(0, FALLBACK_QUOTA_DEFAULTS);
-        assert_eq!(
-            (
-                q.max_concurrent_environments,
-                q.max_concurrent_sandbox,
-                q.max_cpu_millicores,
-                q.max_memory_mb
-            ),
-            (10, 50, 32000, 65536)
-        );
-        // Plan cap propagates to the total-environments cap.
-        let q = resolve_quota_from_plan(5, FALLBACK_QUOTA_DEFAULTS);
-        assert_eq!(
-            (q.max_concurrent_environments, q.max_concurrent_sandbox),
-            (5, 5)
-        );
-        // Unlimited plan.
-        let q = resolve_quota_from_plan(-1, FALLBACK_QUOTA_DEFAULTS);
-        assert_eq!(
-            (q.max_concurrent_environments, q.max_concurrent_sandbox),
-            (-1, -1)
-        );
-        // Administrator defaults fill only what the plan leaves open: a
-        // plan's workspace limit still sets the sandbox and environment
-        // counts.
-        let raised = OrgQuota {
-            max_concurrent_environments: 200,
-            max_concurrent_sandbox: -1,
-            max_cpu_millicores: 400_000,
-            max_memory_mb: 1_600_000,
-        };
-        let q = resolve_quota_from_plan(0, raised);
-        assert_eq!(
-            (
-                q.max_concurrent_environments,
-                q.max_concurrent_sandbox,
-                q.max_cpu_millicores,
-                q.max_memory_mb
-            ),
-            (200, -1, 400_000, 1_600_000)
-        );
-        let q = resolve_quota_from_plan(5, raised);
-        assert_eq!(
-            (
-                q.max_concurrent_environments,
-                q.max_concurrent_sandbox,
-                q.max_cpu_millicores
-            ),
-            (5, 5, 400_000)
         );
     }
 

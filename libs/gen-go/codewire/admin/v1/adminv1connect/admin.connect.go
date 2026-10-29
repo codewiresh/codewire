@@ -89,14 +89,15 @@ type AdminServiceClient interface {
 	GetEnvironmentStartupTimings(context.Context, *connect.Request[v1.GetEnvironmentStartupTimingsRequest]) (*connect.Response[v1.GetEnvironmentStartupTimingsResponse], error)
 	// GetOrganizationEnvironmentQuota returns one organization's explicit
 	// environment quota, when it has one, and the quota creates are checked
-	// against: the explicit quota, or the plan fallback without one.
+	// against: none on the Unlimited rate card, else the explicit quota, else
+	// the defaults.
 	GetOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.GetOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.GetOrganizationEnvironmentQuotaResponse], error)
 	// SetOrganizationEnvironmentQuota creates or replaces one organization's
 	// explicit environment quota and writes an audit entry.
 	SetOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.SetOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.SetOrganizationEnvironmentQuotaResponse], error)
 	// ClearOrganizationEnvironmentQuota removes one organization's explicit
-	// environment quota, so its plan fallback applies again, and writes an
-	// audit entry. Clearing an organization without one changes nothing.
+	// environment quota, so the defaults apply again, and writes an audit
+	// entry. Clearing an organization without one changes nothing.
 	ClearOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.ClearOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.ClearOrganizationEnvironmentQuotaResponse], error)
 	// GetOrganizationOverview returns what an operator inspects for one
 	// organization: identity, members, billing, environment quota, current
@@ -104,8 +105,7 @@ type AdminServiceClient interface {
 	// material).
 	GetOrganizationOverview(context.Context, *connect.Request[v1.GetOrganizationOverviewRequest]) (*connect.Response[v1.GetOrganizationOverviewResponse], error)
 	// GetDefaultEnvironmentQuota returns the limits an organization without
-	// its own quota gets. A plan's workspace limit still sets the sandbox and
-	// environment counts when the plan has one.
+	// its own quota gets, unless it is on the Unlimited rate card.
 	GetDefaultEnvironmentQuota(context.Context, *connect.Request[v1.GetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.GetDefaultEnvironmentQuotaResponse], error)
 	// SetDefaultEnvironmentQuota replaces those defaults and writes an audit
 	// entry with the previous and new values.
@@ -306,14 +306,15 @@ type AdminServiceHandler interface {
 	GetEnvironmentStartupTimings(context.Context, *connect.Request[v1.GetEnvironmentStartupTimingsRequest]) (*connect.Response[v1.GetEnvironmentStartupTimingsResponse], error)
 	// GetOrganizationEnvironmentQuota returns one organization's explicit
 	// environment quota, when it has one, and the quota creates are checked
-	// against: the explicit quota, or the plan fallback without one.
+	// against: none on the Unlimited rate card, else the explicit quota, else
+	// the defaults.
 	GetOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.GetOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.GetOrganizationEnvironmentQuotaResponse], error)
 	// SetOrganizationEnvironmentQuota creates or replaces one organization's
 	// explicit environment quota and writes an audit entry.
 	SetOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.SetOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.SetOrganizationEnvironmentQuotaResponse], error)
 	// ClearOrganizationEnvironmentQuota removes one organization's explicit
-	// environment quota, so its plan fallback applies again, and writes an
-	// audit entry. Clearing an organization without one changes nothing.
+	// environment quota, so the defaults apply again, and writes an audit
+	// entry. Clearing an organization without one changes nothing.
 	ClearOrganizationEnvironmentQuota(context.Context, *connect.Request[v1.ClearOrganizationEnvironmentQuotaRequest]) (*connect.Response[v1.ClearOrganizationEnvironmentQuotaResponse], error)
 	// GetOrganizationOverview returns what an operator inspects for one
 	// organization: identity, members, billing, environment quota, current
@@ -321,8 +322,7 @@ type AdminServiceHandler interface {
 	// material).
 	GetOrganizationOverview(context.Context, *connect.Request[v1.GetOrganizationOverviewRequest]) (*connect.Response[v1.GetOrganizationOverviewResponse], error)
 	// GetDefaultEnvironmentQuota returns the limits an organization without
-	// its own quota gets. A plan's workspace limit still sets the sandbox and
-	// environment counts when the plan has one.
+	// its own quota gets, unless it is on the Unlimited rate card.
 	GetDefaultEnvironmentQuota(context.Context, *connect.Request[v1.GetDefaultEnvironmentQuotaRequest]) (*connect.Response[v1.GetDefaultEnvironmentQuotaResponse], error)
 	// SetDefaultEnvironmentQuota replaces those defaults and writes an audit
 	// entry with the previous and new values.

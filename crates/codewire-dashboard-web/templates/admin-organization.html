@@ -21,7 +21,7 @@
         {% if !error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ error }}</p>{% endif %}
 
         <section class="cw-card" aria-labelledby="quota-heading">
-          <header class="cw-card-header"><div><h2 id="quota-heading">Environment quota and usage</h2><p>{% if organization.has_explicit_quota %}This organization has its own quota.{% else %}No quota of its own: the plan fallback applies.{% endif %} Creates are checked against the limits below.</p></div></header>
+          <header class="cw-card-header"><div><h2 id="quota-heading">Environment quota and usage</h2><p>{% if organization.has_explicit_quota %}This organization has its own quota.{% else %}No quota of its own: the defaults apply.{% endif %} Creates are checked against the limits below.</p></div></header>
           <div class="cw-card-body cw-admin-section">
             <dl class="cw-stat-grid">
               <div class="cw-stat"><dt>Environments</dt><dd>{{ organization.active_environments }} <small>of {{ organization.effective_quota.environments.display }}</small></dd></div>
@@ -39,7 +39,7 @@
               <p class="cw-muted">Each limit is a positive number, or -1 for unlimited. Saving writes an audit entry.</p>
               <div class="cw-form-action"><button class="cw-button" type="submit">Save quota</button></div>
             </form>
-            {% if organization.has_explicit_quota %}<form class="cw-danger-zone" method="post" action="/admin/organizations/_actions/quota/clear"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><input type="hidden" name="organization_id" value="{{ organization.id }}"><p class="cw-muted">Clearing removes this organization's own quota, so the plan fallback applies again.</p><button class="cw-button cw-button--outline" type="submit">Clear quota</button></form>{% endif %}
+            {% if organization.has_explicit_quota %}<form class="cw-danger-zone" method="post" action="/admin/organizations/_actions/quota/clear"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><input type="hidden" name="organization_id" value="{{ organization.id }}"><p class="cw-muted">Clearing removes this organization's own quota, so the defaults apply again.</p><button class="cw-button cw-button--outline" type="submit">Clear quota</button></form>{% endif %}
           </div>
         </section>
 
@@ -60,7 +60,7 @@
         </section>
 
         <section class="cw-card" aria-labelledby="confidential-heading">
-          <header class="cw-card-header"><div><h2 id="confidential-heading">Confidential environments</h2><p>Members of an opted-in organization can create confidential environments where the deployment enables them and the plan has a confidential catalog entry.</p></div></header>
+          <header class="cw-card-header"><div><h2 id="confidential-heading">Confidential environments</h2><p>Members of an opted-in organization can create confidential environments where the deployment enables them, within the organization's environment quota.</p></div></header>
           <div class="cw-card-body cw-admin-section">
             {% match organization.confidential_environments %}{% when Some(enabled) %}<form class="cw-confidential-organization" method="post" action="/admin/organizations/_actions/confidential/set">
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">

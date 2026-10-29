@@ -111,8 +111,8 @@ type BillingCatalogServiceClient interface {
 	ListConfidentialOrganizations(context.Context, *connect.Request[v1.ListConfidentialOrganizationsRequest]) (*connect.Response[v1.ListConfidentialOrganizationsResponse], error)
 	// SetOrganizationConfidentialEnvironments opts one organization in to, or
 	// out of, confidential environments. It is global-admin only and audited.
-	// An opted-in organization still needs a confidential catalog entry for its
-	// plan and a deployment that enables confidential storage.
+	// An opted-in organization still needs a deployment that enables
+	// confidential storage, and room in its environment quota.
 	SetOrganizationConfidentialEnvironments(context.Context, *connect.Request[v1.SetOrganizationConfidentialEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationConfidentialEnvironmentsResponse], error)
 }
 
@@ -345,8 +345,8 @@ type BillingCatalogServiceHandler interface {
 	ListConfidentialOrganizations(context.Context, *connect.Request[v1.ListConfidentialOrganizationsRequest]) (*connect.Response[v1.ListConfidentialOrganizationsResponse], error)
 	// SetOrganizationConfidentialEnvironments opts one organization in to, or
 	// out of, confidential environments. It is global-admin only and audited.
-	// An opted-in organization still needs a confidential catalog entry for its
-	// plan and a deployment that enables confidential storage.
+	// An opted-in organization still needs a deployment that enables
+	// confidential storage, and room in its environment quota.
 	SetOrganizationConfidentialEnvironments(context.Context, *connect.Request[v1.SetOrganizationConfidentialEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationConfidentialEnvironmentsResponse], error)
 }
 

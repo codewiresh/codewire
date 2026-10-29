@@ -179,8 +179,8 @@ impl Service<PgLifecycleStore> {
     }
 
     /// Admits a start: under the organization row lock it checks the
-    /// environment quota (#3256) and, for a Confidential environment, its
-    /// capacity, then records the start intent, all in one transaction. A
+    /// environment quota (#3256), the same for every tier (#3381), then
+    /// records the start intent, all in one transaction. A
     /// stopped environment that intends to start counts as active, so
     /// concurrent starts in one organization cannot both pass admission
     /// before either becomes active. A refused quota surfaces as the
@@ -211,7 +211,6 @@ impl Service<PgLifecycleStore> {
         )
         .await?;
         let entry = if isolation_tier == "confidential" {
-            reserve_confidential_capacity(&mut tx, org_id).await?;
             let changed = sqlx::query(
                 "UPDATE environments SET desired_state = 'started', state_changed_at = NOW() WHERE id = $1 AND org_id = $2 AND state = 'stopped'",
             )
@@ -225,7 +224,7 @@ impl Service<PgLifecycleStore> {
             LogEntry {
                 phase: "lifecycle_intent",
                 status: "completed",
-                message: "desired state -> started (confidential capacity reserved)".into(),
+                message: "desired state -> started (confidential)".into(),
                 metadata: serde_json::json!({"kind": "desired_state", "desired_state": "started", "isolation_tier": "confidential"}),
             }
         } else {
@@ -251,12 +250,10 @@ impl Service<PgLifecycleStore> {
         Ok(())
     }
 
-    /// Reacquires Confidential capacity atomically with the existing
-    /// error-to-pending retry transition. A retry cannot over-admit while a
-    /// different stopped start is being accepted for the same organization.
+    /// Retries an errored Confidential start: moves it back to pending with
+    /// the start intent, fenced on its organization.
     pub async fn retry_confidential_start(&self, env_id: &str, org_id: &str) -> anyhow::Result<()> {
         let mut tx = self.store.pool.begin().await?;
-        reserve_confidential_capacity(&mut tx, org_id).await?;
         let changed = sqlx::query(
             r#"UPDATE environments SET state = 'pending', desired_state = 'started', error_reason = NULL,
                retry_count = retry_count + 1, state_changed_at = NOW()
@@ -275,8 +272,7 @@ impl Service<PgLifecycleStore> {
             LogEntry {
                 phase: "lifecycle_transition",
                 status: "completed",
-                message: "state transition error -> pending (confidential capacity reserved)"
-                    .into(),
+                message: "state transition error -> pending (confidential)".into(),
                 metadata: serde_json::json!({
                     "kind": "state_transition",
                     "from": "error",
@@ -290,54 +286,6 @@ impl Service<PgLifecycleStore> {
         tx.commit().await?;
         Ok(())
     }
-}
-
-async fn reserve_confidential_capacity(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    org_id: &str,
-) -> anyhow::Result<()> {
-    sqlx::query("SELECT id FROM organizations WHERE id = $1 FOR UPDATE")
-        .bind(org_id)
-        .fetch_one(&mut **tx)
-        .await?;
-    let plan: String = sqlx::query_scalar(
-            r#"SELECT COALESCE(
-                  (SELECT plan FROM environment_subscriptions WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due') ORDER BY updated_at DESC LIMIT 1),
-                  (SELECT plan FROM org_subscriptions WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due') ORDER BY updated_at DESC LIMIT 1),
-                  (SELECT billing_plan FROM organizations WHERE id = $1 AND billing_plan NOT IN ('', 'none') AND billing_status IN ('active', 'trialing', 'past_due')),
-                  '')"#,
-        )
-        .bind(org_id)
-        .fetch_one(&mut **tx)
-        .await?;
-    let catalog: Option<(i32, f64, f64)> = sqlx::query_as(
-        r#"SELECT max_concurrent_ws, cpu_overage_cents, mem_overage_cents
-               FROM billing_catalog_plans WHERE resource_type = 'confidential_sandbox'
-                 AND plan_key = $1 AND archived_at IS NULL"#,
-    )
-    .bind(&plan)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((limit, cpu_rate, memory_rate)) = catalog else {
-        anyhow::bail!("CONFIDENTIAL_CAPACITY_UNAVAILABLE");
-    };
-    let active: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM environments WHERE org_id = $1
-               AND isolation_tier = 'confidential'
-               AND state NOT IN ('destroyed', 'destroying', 'error', 'archived')
-               AND NOT (state = 'stopped' AND desired_state = 'stopped')"#,
-    )
-    .bind(org_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    if limit == 0
-        || cpu_rate <= 0.0
-        || memory_rate <= 0.0
-        || (limit != -1 && active >= i64::from(limit))
-    {
-        anyhow::bail!("CONFIDENTIAL_CAPACITY_UNAVAILABLE");
-    }
-    Ok(())
 }
 
 impl<S: LifecycleStore> Service<S> {

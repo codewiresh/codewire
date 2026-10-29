@@ -1162,7 +1162,7 @@ fn quota_response(
 fn quota_message(value: &str) -> &'static str {
     match value {
         "quota-saved" => "Environment quota saved.",
-        "quota-cleared" => "Environment quota cleared; the plan fallback applies.",
+        "quota-cleared" => "Environment quota cleared; the defaults apply.",
         "confidential-enabled" => "Organization opted in to confidential environments.",
         "confidential-disabled" => "Organization removed from confidential environments.",
         _ => "",

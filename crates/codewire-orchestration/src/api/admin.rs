@@ -823,7 +823,10 @@ pub(crate) async fn get_organization_environment_quota_core(
     let explicit = explicit_environment_quota(pool, organization_id, false)
         .await
         .map_err(|error| quota_failure("read environment quota", error))?;
-    let effective = get_org_quota(pool, organization_id).await.into();
+    let effective = get_org_quota(pool, organization_id)
+        .await
+        .map_err(|error| quota_failure("read effective environment quota", error))?
+        .into();
     Ok(AdminOrganizationEnvironmentQuota {
         organization_id: organization_id.to_owned(),
         explicit,
@@ -885,7 +888,7 @@ pub(crate) async fn set_organization_environment_quota_core(
     Ok(quota)
 }
 
-/// Removes one organization's explicit quota, so its plan fallback applies
+/// Removes one organization's explicit quota, so the defaults apply
 /// again. Returns whether one existed; only a removal is audited.
 pub(crate) async fn clear_organization_environment_quota_core(
     pool: &sqlx::PgPool,

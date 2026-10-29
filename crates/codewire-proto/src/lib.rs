@@ -578,6 +578,7 @@ mod tests {
             vec![
                 (Some(2), Some("presets")),
                 (Some(4), Some("preview_base_domain")),
+                (Some(5), Some("confidential_available")),
             ]
         );
         for (number, name) in [(1, "github_status"), (3, "secret_projects")] {

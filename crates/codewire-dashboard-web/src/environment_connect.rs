@@ -2,10 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::HeaderValue;
 use codewire_proto::codewire::{
-    console::v1::{
-        BillingServiceClient, EnvironmentSetupServiceClient, GetBillingOverviewRequest,
-        GetEnvironmentCreateOptionsRequest, ListResourcePlansRequest,
-    },
+    console::v1::{EnvironmentSetupServiceClient, GetEnvironmentCreateOptionsRequest},
     v1::{
         CreateEnvironmentRequest, CreatePortRequest, DeleteEnvironmentRequest, DeletePortRequest,
         Environment, EnvironmentResizeExecutionMode, EnvironmentResizeOperation,
@@ -42,7 +39,6 @@ pub(crate) struct EnvironmentCreateOptions {
     pub(crate) preview_base_domain: String,
     pub(crate) agents: Vec<EnvironmentAgentView>,
     pub(crate) confidential_available: bool,
-    pub(crate) confidential_price: String,
     pub(crate) sources: crate::view::EnvironmentSourceFieldsView,
 }
 
@@ -123,13 +119,6 @@ pub(crate) fn environment_log_events(
         }
     });
     receiver
-}
-
-fn billing_client(state: &AppState, cookie: HeaderValue) -> BillingServiceClient<BrowserTransport> {
-    BillingServiceClient::new(
-        transport(state, cookie),
-        ClientConfig::new(state.billing_origin.clone()).with_default_timeout(UNARY_TIMEOUT),
-    )
 }
 
 fn port_client(state: &AppState, cookie: HeaderValue) -> PortServiceClient<BrowserTransport> {
@@ -296,54 +285,19 @@ pub(crate) async fn create_options(
         transport(state, cookie.clone()),
         client_config(state, UNARY_TIMEOUT),
     );
-    let overview_client = billing_client(state, cookie.clone());
-    let plans_client = billing_client(state, cookie.clone());
-    // Presets, billing and sources are independent reads; waiting on each in
-    // turn only adds round trips before the choices appear.
-    let (setup, overview, plans, sources) = tokio::join!(
+    // Presets and sources are independent reads; waiting on each in turn
+    // only adds round trips before the choices appear.
+    let (setup, sources) = tokio::join!(
         setup_client.get_environment_create_options(GetEnvironmentCreateOptionsRequest {
             org_id: org_id.to_owned(),
-            ..Default::default()
-        }),
-        overview_client.get_billing_overview(GetBillingOverviewRequest {
-            org_id: org_id.to_owned(),
-            ..Default::default()
-        }),
-        plans_client.list_resource_plans(ListResourcePlansRequest {
-            resource_type: "confidential_sandbox".to_owned(),
             ..Default::default()
         }),
         crate::environment_sources::options(state, cookie, org_id),
     );
     let setup = setup?.into_owned();
-
-    // The catalog is public to organization members.  Failure to read it does
-    // not block the create form; the server still performs authoritative,
-    // atomic admission when a confidential environment is submitted.
-    let (confidential_available, confidential_price) = match (overview, plans) {
-        (Ok(overview), Ok(plans)) => {
-            let plan_key = overview.into_owned().plan;
-            let plans = plans.into_owned().plans;
-            plans
-                .get(&plan_key)
-                .map(|plan| {
-                    let available = plan.max_concurrent_ws != 0
-                        && plan.cpu_overage_millicents > 0
-                        && plan.mem_overage_millicents > 0;
-                    let price = available.then(|| {
-                        format!(
-                            "${:.4} / CPU-hour + ${:.4} / GiB-hour",
-                            plan.cpu_overage_millicents as f64 / 100_000.0,
-                            plan.mem_overage_millicents as f64 / 100_000.0,
-                        )
-                    });
-                    (available, price.unwrap_or_default())
-                })
-                .unwrap_or_default()
-        }
-        _ => (false, String::new()),
-    };
-    let confidential_available = confidential_available && CONFIDENTIAL_ISOLATION_AVAILABLE;
+    // The organization's opt-in decides it (#2497); no plan is involved
+    // (#3381). Create admission checks it again.
+    let confidential_available = setup.confidential_available && CONFIDENTIAL_ISOLATION_AVAILABLE;
 
     let presets = setup
         .presets
@@ -395,7 +349,6 @@ pub(crate) async fn create_options(
         preview_base_domain: validated_preview_domain(&setup.preview_base_domain),
         agents: agent_catalog(),
         confidential_available,
-        confidential_price,
         sources,
     })
 }

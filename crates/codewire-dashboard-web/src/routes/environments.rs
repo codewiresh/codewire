@@ -293,7 +293,6 @@ impl EnvironmentSubmission {
             isolation_tier: self.isolation_tier.trim().to_owned(),
             confidential_available: false,
             show_confidential_controls: false,
-            confidential_price: String::new(),
             preview_base_domain: String::new(),
             selected_agents: self.agents.clone(),
             app_ports: app_port_rows(&self.app_ports),
@@ -2133,7 +2132,6 @@ pub(super) fn default_create_form(token: String, expanded: bool) -> EnvironmentC
         isolation_tier: "standard".to_owned(),
         confidential_available: false,
         show_confidential_controls: false,
-        confidential_price: String::new(),
         preview_base_domain: String::new(),
         selected_agents: Vec::new(),
         app_ports: Vec::new(),
@@ -2159,7 +2157,6 @@ pub(super) fn hydrate_options(
     form.presets = options.presets;
     form.agents = options.agents;
     form.confidential_available = options.confidential_available;
-    form.confidential_price = options.confidential_price;
     let mut sources = options.sources;
     sources.retain_submission(&form.sources);
     form.sources = sources;
@@ -2561,7 +2558,6 @@ mod tests {
                     sources: Default::default(),
                     preview_base_domain: String::new(),
                     confidential_available: false,
-                    confidential_price: String::new(),
                 },
             );
             let html = EnvironmentCreateFormTemplate {
@@ -3151,7 +3147,6 @@ mod tests {
         let mut form = default_create_form("csrf".into(), true);
         form.show_confidential_controls = true;
         form.confidential_available = false;
-        form.confidential_price = "$0.1000 / CPU-hour + $0.0500 / GiB-hour".to_owned();
         let html = EnvironmentCreateFormTemplate {
             organization: &organization,
             form: &form,
@@ -3161,7 +3156,6 @@ mod tests {
         assert!(html.contains(
             r#"<option value="confidential" disabled>Confidential isolation is temporarily unavailable</option>"#
         ));
-        assert!(!html.contains("CPU-hour"));
     }
 
     #[test]
@@ -4019,7 +4013,6 @@ mod tests {
             preview_base_domain: String::new(),
             agents: vec![],
             confidential_available: false,
-            confidential_price: String::new(),
             sources: crate::view::EnvironmentSourceFieldsView {
                 application_selection_enabled: true,
                 credential_selection_enabled: true,
@@ -4068,7 +4061,6 @@ mod tests {
             preview_base_domain: String::new(),
             agents: vec![],
             confidential_available: false,
-            confidential_price: String::new(),
             sources: crate::view::EnvironmentSourceFieldsView {
                 application_selection_enabled: true,
                 credential_selection_enabled: true,
@@ -4318,7 +4310,6 @@ mod tests {
         let options = EnvironmentCreateOptions {
             preview_base_domain: String::new(),
             confidential_available: false,
-            confidential_price: String::new(),
             presets: vec![crate::view::EnvironmentPresetOption {
                 id: "preset-id".to_owned(),
                 name: "Preset".to_owned(),

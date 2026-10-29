@@ -49,7 +49,8 @@ service AdminService {
 
   // GetOrganizationEnvironmentQuota returns one organization's explicit
   // environment quota, when it has one, and the quota creates are checked
-  // against: the explicit quota, or the plan fallback without one.
+  // against: none on the Unlimited rate card, else the explicit quota, else
+  // the defaults.
   rpc GetOrganizationEnvironmentQuota(GetOrganizationEnvironmentQuotaRequest)
       returns (GetOrganizationEnvironmentQuotaResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -61,8 +62,8 @@ service AdminService {
       returns (SetOrganizationEnvironmentQuotaResponse);
 
   // ClearOrganizationEnvironmentQuota removes one organization's explicit
-  // environment quota, so its plan fallback applies again, and writes an
-  // audit entry. Clearing an organization without one changes nothing.
+  // environment quota, so the defaults apply again, and writes an audit
+  // entry. Clearing an organization without one changes nothing.
   rpc ClearOrganizationEnvironmentQuota(ClearOrganizationEnvironmentQuotaRequest)
       returns (ClearOrganizationEnvironmentQuotaResponse);
 
@@ -76,8 +77,7 @@ service AdminService {
   }
 
   // GetDefaultEnvironmentQuota returns the limits an organization without
-  // its own quota gets. A plan's workspace limit still sets the sandbox and
-  // environment counts when the plan has one.
+  // its own quota gets, unless it is on the Unlimited rate card.
   rpc GetDefaultEnvironmentQuota(GetDefaultEnvironmentQuotaRequest)
       returns (GetDefaultEnvironmentQuotaResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;

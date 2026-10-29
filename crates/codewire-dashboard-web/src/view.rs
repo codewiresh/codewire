@@ -1529,7 +1529,6 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) isolation_tier: String,
     pub(crate) confidential_available: bool,
     pub(crate) show_confidential_controls: bool,
-    pub(crate) confidential_price: String,
     pub(crate) preview_base_domain: String,
     pub(crate) selected_agents: Vec<String>,
     pub(crate) app_ports: Vec<EnvironmentAppPortFormRow>,

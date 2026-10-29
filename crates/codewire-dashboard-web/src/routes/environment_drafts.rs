@@ -487,8 +487,6 @@ mod tests {
                     || [
                         "/ListOrganizations",
                         "/GetEnvironmentCreateOptions",
-                        "/GetBillingOverview",
-                        "/ListResourcePlans",
                         "/ListSecretProjects",
                         "/ListAccessProfiles",
                         "/ListCredentials"

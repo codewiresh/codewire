@@ -533,11 +533,11 @@ fn admin_organizations_template_links_each_row_and_escapes_names() {
     );
     assert!(!body.contains("_actions/confidential"));
     // The defaults form: labelled, starting at the stored defaults, and
-    // saying that a plan's workspace limit still sets the sandbox count.
+    // saying that the Unlimited rate card has no limits.
     assert!(body.contains(r#"action="/admin/organizations/_actions/defaults/set""#));
     assert!(body.contains(r#"<input type="hidden" name="_csrf" value="csrf-safe">"#));
     assert!(body.contains("Defaults for organizations without their own quota"));
-    assert!(body.contains("A plan's workspace limit still sets the sandbox"));
+    assert!(body.contains("An organization on the Unlimited rate card has no limits."));
     for (label, name, value) in [
         ("Concurrent environments", "environments", "-1"),
         ("Concurrent sandboxes", "sandboxes", "200"),
@@ -602,7 +602,7 @@ fn admin_organization_template_shows_billing_quota_usage_and_escapes_upstream_da
             has_explicit_quota
         );
         assert_eq!(
-            body.contains("the plan fallback applies."),
+            body.contains("No quota of its own: the defaults apply."),
             !has_explicit_quota
         );
     }

@@ -30,6 +30,10 @@ message GetEnvironmentCreateOptionsResponse {
   // Environment IDs are assigned only after creation, so pre-create URLs are
   // patterns, never assigned addresses or external TCP port mappings.
   string preview_base_domain = 4;
+  // Whether the caller may create a confidential environment in this
+  // organization: the deployment enables confidential environments and the
+  // organization is opted in. Admission still checks it on create.
+  bool confidential_available = 5;
 }
 
 message IssueTerminalTicketRequest {}

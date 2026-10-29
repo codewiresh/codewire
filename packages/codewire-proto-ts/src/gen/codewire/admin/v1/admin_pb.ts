@@ -1120,7 +1120,8 @@ export const AdminService: GenService<{
   /**
    * GetOrganizationEnvironmentQuota returns one organization's explicit
    * environment quota, when it has one, and the quota creates are checked
-   * against: the explicit quota, or the plan fallback without one.
+   * against: none on the Unlimited rate card, else the explicit quota, else
+   * the defaults.
    *
    * @generated from rpc codewire.admin.v1.AdminService.GetOrganizationEnvironmentQuota
    */
@@ -1142,8 +1143,8 @@ export const AdminService: GenService<{
   },
   /**
    * ClearOrganizationEnvironmentQuota removes one organization's explicit
-   * environment quota, so its plan fallback applies again, and writes an
-   * audit entry. Clearing an organization without one changes nothing.
+   * environment quota, so the defaults apply again, and writes an audit
+   * entry. Clearing an organization without one changes nothing.
    *
    * @generated from rpc codewire.admin.v1.AdminService.ClearOrganizationEnvironmentQuota
    */
@@ -1167,8 +1168,7 @@ export const AdminService: GenService<{
   },
   /**
    * GetDefaultEnvironmentQuota returns the limits an organization without
-   * its own quota gets. A plan's workspace limit still sets the sandbox and
-   * environment counts when the plan has one.
+   * its own quota gets, unless it is on the Unlimited rate card.
    *
    * @generated from rpc codewire.admin.v1.AdminService.GetDefaultEnvironmentQuota
    */

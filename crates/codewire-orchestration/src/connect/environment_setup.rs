@@ -48,6 +48,7 @@ impl EnvironmentSetupService for EnvironmentSetupConnectService {
         connectrpc::Response::ok(GetEnvironmentCreateOptionsResponse {
             presets,
             preview_base_domain: options.preview_base_domain,
+            confidential_available: options.confidential_available,
             ..Default::default()
         })
     }

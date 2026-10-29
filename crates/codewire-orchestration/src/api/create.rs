@@ -20,8 +20,8 @@ use sqlx::{PgPool, Row};
 
 use super::ApiState;
 use super::environments::{
-    ENV_SELECT_COLS, ENV_SELECT_JOINS, Environment, OrgQuota, check_quota_in, check_rate_limit,
-    coded, get_org_quota, require_org_member, scan_environment, trigger_environment,
+    ENV_SELECT_COLS, ENV_SELECT_JOINS, Environment, OrgQuota, admission_quota, check_quota_in,
+    check_rate_limit, coded, require_org_member, scan_environment, trigger_environment,
 };
 use crate::confidential_storage::require_confidential_access;
 use crate::repository_mount::validate_repository_mounts;
@@ -700,7 +700,6 @@ async fn insert_environment(
         CapacityRequest {
             quota: p.quota,
             env_type: p.env_type,
-            isolation_tier: p.isolation_tier,
             cpu_millicores: p.cpu_millicores,
             memory_mb: p.memory_mb,
         },
@@ -806,18 +805,18 @@ fn invalid_node_name() -> AppError {
 struct CapacityRequest<'a> {
     quota: OrgQuota,
     env_type: &'a str,
-    isolation_tier: &'a str,
     cpu_millicores: i32,
     memory_mb: i32,
 }
 
-/// Reserves a create's capacity: the organization's environment quota for
-/// every tier, and the confidential catalog entitlement and concurrency for
-/// a confidential one. It holds the organization row lock, and the new
-/// environment row is inserted in the same transaction, so concurrent creates
-/// in one organization are counted one after another (#3256). A successful
-/// check is a reservation; a refused check, or any later failure before
-/// commit, rolls back and leaves no environment behind.
+/// Reserves a create's capacity: the organization's environment quota, for
+/// every tier alike (#3381; a confidential environment needs only the
+/// organization's opt-in, which the caller checked). It holds the
+/// organization row lock, and the new environment row is inserted in the
+/// same transaction, so concurrent creates in one organization are counted
+/// one after another (#3256). A successful check is a reservation; a refused
+/// check, or any later failure before commit, rolls back and leaves no
+/// environment behind.
 async fn reserve_capacity(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     org_id: &str,
@@ -832,11 +831,7 @@ async fn reserve_capacity(
         request.cpu_millicores,
         request.memory_mb,
     )
-    .await?;
-    if request.isolation_tier == "confidential" {
-        reserve_confidential_capacity(transaction, org_id).await?;
-    }
-    Ok(())
+    .await
 }
 
 async fn lock_organization_row(
@@ -854,75 +849,6 @@ async fn lock_organization_row(
                 "organization not found",
             )
         })?;
-    Ok(())
-}
-
-/// Checks the catalog entitlement and concurrent capacity while holding an
-/// organization-row lock. The new environment row is inserted in the same
-/// transaction, so a successful check is a reservation and a failed check
-/// creates no environment.
-async fn reserve_confidential_capacity(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    org_id: &str,
-) -> AppResult<()> {
-    lock_organization_row(transaction, org_id).await?;
-
-    let plan: String = sqlx::query_scalar(
-        r#"SELECT COALESCE(
-              (SELECT plan FROM environment_subscriptions
-                WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due')
-                ORDER BY updated_at DESC LIMIT 1),
-              (SELECT plan FROM org_subscriptions
-                WHERE org_id = $1 AND status IN ('active', 'trialing', 'past_due')
-                ORDER BY updated_at DESC LIMIT 1),
-              (SELECT billing_plan FROM organizations
-                WHERE id = $1 AND billing_plan NOT IN ('', 'none')
-                  AND billing_status IN ('active', 'trialing', 'past_due')),
-              '')"#,
-    )
-    .bind(org_id)
-    .fetch_one(&mut **transaction)
-    .await?;
-
-    let catalog: Option<(i32, f64, f64)> = sqlx::query_as(
-        r#"SELECT max_concurrent_ws, cpu_overage_cents, mem_overage_cents
-           FROM billing_catalog_plans
-           WHERE resource_type = 'confidential_sandbox' AND plan_key = $1
-             AND archived_at IS NULL"#,
-    )
-    .bind(&plan)
-    .fetch_optional(&mut **transaction)
-    .await?;
-    let Some((max_concurrent, cpu_rate, memory_rate)) = catalog else {
-        return Err(coded(
-            StatusCode::CONFLICT,
-            "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
-            "confidential environments are not available for this plan",
-        ));
-    };
-    if cpu_rate <= 0.0 || memory_rate <= 0.0 || max_concurrent == 0 {
-        return Err(coded(
-            StatusCode::CONFLICT,
-            "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
-            "confidential environments are currently unavailable",
-        ));
-    }
-    let active: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM environments
-           WHERE org_id = $1 AND isolation_tier = 'confidential'
-             AND state NOT IN ('destroyed', 'destroying', 'error', 'archived')
-             AND NOT (state = 'stopped' AND desired_state = 'stopped')"#,
-    )
-    .bind(org_id)
-    .fetch_one(&mut **transaction)
-    .await?;
-    if max_concurrent != -1 && active >= i64::from(max_concurrent) {
-        return Err(coded(
-            StatusCode::CONFLICT,
-            "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
-            "confidential environment capacity is currently unavailable",
-        ));
-    }
     Ok(())
 }
 
@@ -1184,7 +1110,7 @@ pub(crate) async fn create_environment_core(
             let disk_gib = resource_i32(disk_gib, "disk_gib")?;
             // Limits only; usage is counted under the organization row lock
             // in insert_environment's transaction.
-            let quota = get_org_quota(pool, org_id).await;
+            let quota = admission_quota(pool, org_id).await?;
 
             for agent in &body.project_spec.agents.tools {
                 if !valid_agent_type(agent) {
@@ -1242,6 +1168,7 @@ pub(crate) async fn create_environment_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::environments::get_org_quota;
     use codewire_server_core::AppError;
     use codewire_server_core::validation::validate_value;
     use sqlx::postgres::PgPoolOptions;
@@ -1729,7 +1656,7 @@ credentials: {profile: user/work}
 
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL"]
-    async fn db_confidential_capacity_is_atomic_and_plan_scoped() {
+    async fn db_quota_applies_to_confidential_admission_without_a_plan_row() {
         let database_url =
             std::env::var("TEST_DATABASE_URL").expect("ignored DB test requires TEST_DATABASE_URL");
         let pool = PgPoolOptions::new()
@@ -1742,7 +1669,6 @@ credentials: {profile: user/work}
         let org_id = format!("org_confidential_{suffix}");
         let preset_id = format!("preset_confidential_{suffix}");
         let environment_id = format!("env_confidential_{suffix}");
-        let plan_key = format!("confidential_{suffix}");
 
         sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
             .bind(&user_id)
@@ -1750,25 +1676,26 @@ credentials: {profile: user/work}
             .execute(&pool)
             .await
             .unwrap();
+        // No plan and no catalog row (#3381): one sandbox at a time from the
+        // organization's own quota.
         sqlx::query(
-            "INSERT INTO organizations (id, name, slug, created_by, billing_plan, billing_status) VALUES ($1, $2, $3, $4, $5, 'active')",
+            "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $2, $3, $4)",
         )
         .bind(&org_id)
         .bind(format!("Confidential {suffix}"))
         .bind(format!("confidential-{suffix}"))
         .bind(&user_id)
-        .bind(&plan_key)
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO billing_catalog_plans (resource_type, plan_key, display_name, price_cents, max_concurrent_ws, cpu_overage_cents, mem_overage_cents) VALUES ('confidential_sandbox', $1, 'Confidential test', 0, 1, 1, 1)",
+            "INSERT INTO environment_quotas (org_id, max_concurrent_environments, \
+             max_concurrent_sandbox, max_cpu_millicores, max_memory_mb) VALUES ($1, -1, 1, -1, -1)",
         )
-        .bind(&plan_key)
+        .bind(&org_id)
         .execute(&pool)
         .await
         .unwrap();
-
         sqlx::query(
             r#"INSERT INTO environment_presets (id, org_id, name, build_status, project_spec)
                VALUES ($1, $2, 'Confidential test', 'ready',
@@ -1779,8 +1706,17 @@ credentials: {profile: user/work}
         .execute(&pool)
         .await
         .unwrap();
+        let request = |quota| CapacityRequest {
+            quota,
+            env_type: "sandbox",
+            cpu_millicores: 0,
+            memory_mb: 0,
+        };
+        let quota = get_org_quota(&pool, &org_id).await.unwrap();
+        assert_eq!(quota.max_concurrent_sandbox, 1);
+
         let mut transaction = pool.begin().await.unwrap();
-        reserve_confidential_capacity(&mut transaction, &org_id)
+        reserve_capacity(&mut transaction, &org_id, request(quota))
             .await
             .unwrap();
         sqlx::query(
@@ -1800,18 +1736,25 @@ credentials: {profile: user/work}
         .unwrap();
         transaction.commit().await.unwrap();
 
+        let refused = |error: AppError| {
+            assert!(
+                matches!(
+                    error,
+                    AppError::Coded {
+                        code: "quota_exceeded",
+                        ..
+                    }
+                ),
+                "{error:?}"
+            );
+        };
         let mut transaction = pool.begin().await.unwrap();
-        let error = reserve_confidential_capacity(&mut transaction, &org_id)
-            .await
-            .expect_err("the second active confidential environment must be rejected");
+        refused(
+            reserve_capacity(&mut transaction, &org_id, request(quota))
+                .await
+                .expect_err("the second active environment must be refused"),
+        );
         transaction.rollback().await.unwrap();
-        assert!(matches!(
-            error,
-            AppError::Coded {
-                code: "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
-                ..
-            }
-        ));
 
         sqlx::query(
             "UPDATE environments SET state = 'stopped', desired_state = 'stopped' WHERE id = $1",
@@ -1821,9 +1764,9 @@ credentials: {profile: user/work}
         .await
         .unwrap();
         let mut transaction = pool.begin().await.unwrap();
-        reserve_confidential_capacity(&mut transaction, &org_id)
+        reserve_capacity(&mut transaction, &org_id, request(quota))
             .await
-            .expect("a fully stopped environment must release confidential capacity");
+            .expect("a fully stopped environment releases its place");
         transaction.rollback().await.unwrap();
 
         crate::lifecycle::Service::for_pool(pool.clone())
@@ -1832,31 +1775,21 @@ credentials: {profile: user/work}
                 &org_id,
                 "confidential",
                 crate::lifecycle::StartQuota {
-                    quota: OrgQuota {
-                        max_concurrent_environments: -1,
-                        max_concurrent_sandbox: -1,
-                        max_cpu_millicores: -1,
-                        max_memory_mb: -1,
-                    },
+                    quota,
                     env_type: "sandbox",
                     cpu_millicores: 0,
                     memory_mb: 0,
                 },
             )
             .await
-            .expect("a stopped environment can atomically reserve confidential capacity");
+            .expect("a stopped confidential environment starts within the quota");
         let mut transaction = pool.begin().await.unwrap();
-        let error = reserve_confidential_capacity(&mut transaction, &org_id)
-            .await
-            .expect_err("a stopped environment with start intent must reserve capacity");
+        refused(
+            reserve_capacity(&mut transaction, &org_id, request(quota))
+                .await
+                .expect_err("a stopped environment with start intent holds its place"),
+        );
         transaction.rollback().await.unwrap();
-        assert!(matches!(
-            error,
-            AppError::Coded {
-                code: "CONFIDENTIAL_CAPACITY_UNAVAILABLE",
-                ..
-            }
-        ));
 
         sqlx::query(
             "UPDATE environments SET state = 'error', desired_state = 'stopped' WHERE id = $1",
@@ -1868,7 +1801,7 @@ credentials: {profile: user/work}
         crate::lifecycle::Service::for_pool(pool.clone())
             .retry_confidential_start(&environment_id, &org_id)
             .await
-            .expect("an errored environment must reacquire capacity before retry");
+            .expect("an errored confidential environment retries");
         let retried: (String, String) =
             sqlx::query_as("SELECT state, desired_state FROM environments WHERE id = $1")
                 .bind(&environment_id)
@@ -1876,6 +1809,21 @@ credentials: {profile: user/work}
                 .await
                 .unwrap();
         assert_eq!(retried, ("pending".to_owned(), "started".to_owned()));
+
+        // On the Unlimited card the organization's own quota no longer applies.
+        sqlx::query("UPDATE organizations SET rate_card = 'unlimited' WHERE id = $1")
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let unlimited = get_org_quota(&pool, &org_id).await.unwrap();
+        assert_eq!(unlimited.max_concurrent_sandbox, -1);
+        assert_eq!(unlimited.max_cpu_millicores, -1);
+        let mut transaction = pool.begin().await.unwrap();
+        reserve_capacity(&mut transaction, &org_id, request(unlimited))
+            .await
+            .expect("Unlimited has no quota");
+        transaction.rollback().await.unwrap();
 
         sqlx::query("DELETE FROM environments WHERE id = $1")
             .bind(&environment_id)
@@ -1887,13 +1835,11 @@ credentials: {profile: user/work}
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query(
-            "DELETE FROM billing_catalog_plans WHERE resource_type = 'confidential_sandbox' AND plan_key = $1",
-        )
-        .bind(&plan_key)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("DELETE FROM environment_quotas WHERE org_id = $1")
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(&org_id)
             .execute(&pool)
@@ -2609,7 +2555,7 @@ credentials: {profile: user/work}
         }
 
         async fn create(&self, body: &CreateEnvironmentBody) -> AppResult<Environment> {
-            let quota = get_org_quota(&self.pool, &self.org_id).await;
+            let quota = get_org_quota(&self.pool, &self.org_id).await.unwrap();
             insert_environment(
                 &self.pool,
                 InsertEnvironmentParams {
@@ -2772,7 +2718,7 @@ credentials: {profile: user/work}
             .unwrap();
             stopped.push(environment_id);
         }
-        let quota = get_org_quota(&fixture.pool, &fixture.org_id).await;
+        let quota = get_org_quota(&fixture.pool, &fixture.org_id).await.unwrap();
         let start = |environment_id: &str| {
             let (pool, org_id, environment_id) = (
                 fixture.pool.clone(),
@@ -2828,13 +2774,70 @@ credentials: {profile: user/work}
         fixture.cleanup().await;
     }
 
+    /// When the organization's limits cannot be read, admission refuses with
+    /// the retryable quota_unavailable instead of falling back to looser
+    /// limits (#3256): its card or own quota, and the defaults it falls back
+    /// to.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_quota_refuses_when_limits_cannot_be_read() {
+        // One connection, so a temporary table shadows the real one for every
+        // query the pool runs.
+        let fixture = QuotaFixture::new(1, 5).await;
+        let refused = |result: Result<OrgQuota, AppError>| {
+            assert!(
+                matches!(
+                    result,
+                    Err(AppError::Coded {
+                        status: StatusCode::SERVICE_UNAVAILABLE,
+                        code: "quota_unavailable",
+                        ..
+                    })
+                ),
+                "{result:?}"
+            );
+        };
+        admission_quota(&fixture.pool, &fixture.org_id)
+            .await
+            .expect("readable limits admit");
+        sqlx::query("CREATE TEMPORARY TABLE environment_quotas (org_id text)")
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        refused(admission_quota(&fixture.pool, &fixture.org_id).await);
+        sqlx::query("DROP TABLE pg_temp.environment_quotas")
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        // Without its own quota the organization falls back to the defaults,
+        // and an unreadable default refuses too.
+        sqlx::query("DELETE FROM environment_quotas WHERE org_id = $1")
+            .bind(&fixture.org_id)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TEMPORARY TABLE environment_quota_defaults (singleton boolean)")
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        refused(admission_quota(&fixture.pool, &fixture.org_id).await);
+        sqlx::query("DROP TABLE pg_temp.environment_quota_defaults")
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        admission_quota(&fixture.pool, &fixture.org_id)
+            .await
+            .expect("the defaults admit again once readable");
+        fixture.cleanup().await;
+    }
+
     /// When the organization's usage cannot be counted, the reservation
     /// refuses with a retryable error instead of admitting the create.
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL"]
     async fn db_quota_refuses_when_usage_cannot_be_counted() {
         let fixture = QuotaFixture::new(2, 5).await;
-        let quota = get_org_quota(&fixture.pool, &fixture.org_id).await;
+        let quota = get_org_quota(&fixture.pool, &fixture.org_id).await.unwrap();
         let mut transaction = fixture.pool.begin().await.unwrap();
         // A temporary table shadows `environments` for this transaction only,
         // so the usage count fails while the organization lock succeeds.
@@ -2848,7 +2851,6 @@ credentials: {profile: user/work}
             CapacityRequest {
                 quota,
                 env_type: "sandbox",
-                isolation_tier: "standard",
                 cpu_millicores: 1_000,
                 memory_mb: 1_024,
             },
