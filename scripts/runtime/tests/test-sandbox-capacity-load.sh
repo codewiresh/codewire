@@ -72,9 +72,10 @@ grep -qF ': "${MAX_NODE_MEMORY_PCT:=85}" "${MAX_NODE_CPU_PCT:=80}" "${MAX_PSI_ME
 
 # Kubernetes access is read-only: kubectl_ro is the only kubectl call, and it
 # allows get alone.
-mapfile -t direct < <(grep -n 'kubectl --context' "$LOAD")
+mapfile -t direct < <(grep -nE '(^|[[:space:]])kubectl --' "$LOAD")
 [[ "${#direct[@]}" -eq 1 ]] || fail "unexpected direct kubectl calls: ${direct[*]}"
-grep -qF "kubectl --context \"\$KUBE_CONTEXT\" \"\$@\"" "$LOAD" || fail 'kubectl_ro is not the read path'
+grep -qF 'kubectl --request-timeout="${KUBECTL_TIMEOUT_SECONDS}s" --context "$KUBE_CONTEXT" "$@"' "$LOAD" ||
+  fail 'kubectl_ro is not the read path'
 if grep -nE 'kubectl_ro +(apply|create|patch|edit|delete|exec|scale|label|annotate|cordon|drain)' "$LOAD"; then
   fail 'kubectl_ro is called with a mutating verb'
 fi
@@ -190,5 +191,55 @@ result="$(bash -c 'source "$1"
   NAME_PREFIX=cap- LOAD_TMP_PARENT="$2" RUN_DIR="$2/current" RUN_ID=r CODEWIRE_SERVER_URL=https://codewire-dev.sh clean_leftovers' \
   _ "$work/functions.sh" "$work/parent")"
 [[ "$result" == 'cleaned old-dev' ]] || fail "start-up cleanup crossed environments: $result"
+
+# A hung kubectl (or credential plugin) fails within the bound instead of
+# stalling the run.
+mkdir -p "$work/bin"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >"%s/kubectl-args"\nexec sleep 600\n' "$work" >"$work/bin/kubectl"
+chmod +x "$work/bin/kubectl"
+sed -n '/^kubectl_ro() {/,/^}/p' "$LOAD" >"$work/kubectl_ro.sh"
+started=$SECONDS
+if PATH="$work/bin:$PATH" bash -c 'die() { exit 3; }; source "$1"; KUBE_CONTEXT=ctx KUBECTL_TIMEOUT_SECONDS=2 kubectl_ro get nodes' \
+  _ "$work/kubectl_ro.sh"; then
+  fail 'a hung kubectl succeeded'
+fi
+(( SECONDS - started <= 10 )) || fail "a hung kubectl took $((SECONDS - started)) s, past its 2 s bound"
+grep -qF -- '--request-timeout=2s --context ctx get nodes' "$work/kubectl-args" || fail "kubectl_ro does not pass its request timeout: $(cat "$work/kubectl-args")"
+
+# A step past its wall-clock limit records why and signals the run.
+mkdir -p "$work/watchdog"
+result="$(bash -c 'source "$1"; MAIN_PID=$$; RUN_DIR="$2"; MAX_STEP_MINUTES=0
+  trap "echo signalled; exit 0" TERM
+  start_watchdog 3; sleep 10 & wait $!; echo "not signalled"' _ "$work/functions.sh" "$work/watchdog")"
+[[ "$result" == signalled ]] || fail "the step watchdog did not signal the run: $result"
+[[ "$(cat "$work/watchdog/watchdog")" == 'step 3 exceeded its 0-minute limit' ]] || fail 'the step watchdog did not record why'
+grep -qF 'start_watchdog "$step"' "$LOAD" || fail 'steps do not arm the watchdog'
+grep -qF '  stop_watchdog' "$LOAD" || fail 'exit does not disarm the watchdog'
+
+# Creates retry once after a client-side deadline, record an environment
+# that was created anyway, and never retry a server refusal.
+create_case() { # SCRIPT_OF_CW_OUTCOMES EXISTING_NAME -> "id calls retries"
+  local dir
+  dir="$(mktemp -d "$work/create.XXXXXX")"
+  printf '%s\n' "$1" >"$dir/outcomes"
+  bash -c 'source "$1"; RUN_DIR="$2"; NAME_PREFIX=cap-; RUN_ID=r; CPU_M=1000; MEMORY_MIB=4096; DISK_GIB=80
+    LOAD_IMAGE=workspace; LOAD_TTL=4h; existing_name="$3"
+    log() { :; }; pause() { :; }; now_ms() { echo 0; }
+    list_envs() { [[ -z "$existing_name" ]] || printf "%s\t%s\n" 11111111-1111-1111-1111-111111111111 "$existing_name"; }
+    cw() { local outcome; outcome="$(sed -n "$(( $(wc -l <"$RUN_DIR/calls" 2>/dev/null || echo 0) + 1 ))p" "$RUN_DIR/outcomes")"
+      echo call >>"$RUN_DIR/calls"
+      case "$outcome" in
+        ok) printf "{\"id\":\"22222222-2222-2222-2222-222222222222\"}" ;;
+        deadline) echo "list orgs: client-side deadline exceeded" >&2; return 1 ;;
+        *) echo "$outcome" >&2; return 1 ;;
+      esac; }
+    id="$(create_env 1 2>/dev/null)" || id=failed
+    echo "$id $(grep -c . "$RUN_DIR/calls") $(grep -c . "$RUN_DIR/create-retries" 2>/dev/null || echo 0)"' \
+    _ "$work/functions.sh" "$dir" "$2"
+}
+[[ "$(create_case $'deadline\nok' '')" == '22222222-2222-2222-2222-222222222222 2 1' ]] || fail 'a client-side deadline is not retried once'
+[[ "$(create_case 'deadline' cap-r-1)" == '11111111-1111-1111-1111-111111111111 1 1' ]] || fail 'an environment created despite a deadline is not recorded'
+[[ "$(create_case $'deadline\ndeadline\nok' '')" == 'failed 2 1' ]] || fail 'a second client-side deadline is retried'
+[[ "$(create_case $'environment quota exceeded\nok' '')" == 'failed 1 0' ]] || fail 'a server refusal is retried'
 
 printf 'sandbox capacity load tests: ok\n'

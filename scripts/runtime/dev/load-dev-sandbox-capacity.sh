@@ -40,6 +40,11 @@ MAX_SANDBOXES=200
 HOLD_SECONDS=180
 READY_TIMEOUT_SECONDS=600
 CLEANUP_TIMEOUT_SECONDS=900
+# Every kubectl call ends within this bound, even when DNS or the credential
+# plugin hangs (#3583: one unbounded call stalled a Prod run for 10 h).
+KUBECTL_TIMEOUT_SECONDS="${KUBECTL_TIMEOUT_SECONDS:-60}"
+# A step that runs longer than this stops the run, which then cleans up.
+MAX_STEP_MINUTES=45
 SSH_SAMPLE=10
 WORKLOAD_CPU=0.5
 WORKLOAD_MEMORY=0.5
@@ -122,6 +127,7 @@ Options:
   --workload-cpu F       fraction of each sandbox's vCPUs kept busy (default 0.5)
   --workload-memory F    fraction of each sandbox's memory allocated and touched (default 0.5)
   --ssh-sample N         new sandboxes per step timed to first SSH (default 10)
+  --max-step-minutes N   stop and clean up when one step runs longer (default 45)
   --latency-factor F     stop when ready p95 > F x the first step's p50 (default 3)
   --max-node-memory-pct N, --max-node-cpu-pct N,
   --max-psi-memory-pct N, --max-psi-cpu-pct N,
@@ -160,7 +166,8 @@ kubectl_ro() {
     get) ;;
     *) die "read-only kubectl refused verb $1" ;;
   esac
-  kubectl --context "$KUBE_CONTEXT" "$@"
+  timeout -k 5 "$KUBECTL_TIMEOUT_SECONDS" \
+    kubectl --request-timeout="${KUBECTL_TIMEOUT_SECONDS}s" --context "$KUBE_CONTEXT" "$@"
 }
 
 # Every environment this tool touches is a cloud one on CODEWIRE_SERVER_URL.
@@ -191,6 +198,7 @@ while (($# > 0)); do
     --workload-cpu) [[ $# -ge 2 ]] || die "--workload-cpu requires a value"; WORKLOAD_CPU="$2"; shift 2 ;;
     --workload-memory) [[ $# -ge 2 ]] || die "--workload-memory requires a value"; WORKLOAD_MEMORY="$2"; shift 2 ;;
     --ssh-sample) [[ $# -ge 2 ]] || die "--ssh-sample requires a value"; SSH_SAMPLE="$2"; shift 2 ;;
+    --max-step-minutes) [[ $# -ge 2 ]] || die "$1 requires a value"; MAX_STEP_MINUTES="$2"; shift 2 ;;
     --latency-factor) [[ $# -ge 2 ]] || die "--latency-factor requires a value"; LATENCY_FACTOR="$2"; shift 2 ;;
     --max-node-memory-pct) [[ $# -ge 2 ]] || die "$1 requires a value"; MAX_NODE_MEMORY_PCT="$2"; shift 2 ;;
     --max-node-cpu-pct) [[ $# -ge 2 ]] || die "$1 requires a value"; MAX_NODE_CPU_PCT="$2"; shift 2 ;;
@@ -259,6 +267,8 @@ if [[ "$STEPS" != auto ]]; then
     previous="$count"
   done
 fi
+[[ "$MAX_STEP_MINUTES" =~ ^[1-9][0-9]*$ ]] || die "--max-step-minutes must be a positive integer"
+[[ "$KUBECTL_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "KUBECTL_TIMEOUT_SECONDS must be a positive integer"
 for value in HOLD_SECONDS SSH_SAMPLE MAX_NODE_MEMORY_PCT MAX_NODE_CPU_PCT MAX_PSI_MEMORY_PCT \
   MAX_PSI_CPU_PCT MAX_THIN_POOL_PCT; do
   [[ "${!value}" =~ ^[0-9]+$ ]] || die "$value must be a non-negative integer"
@@ -275,7 +285,7 @@ if ! is_number "$LATENCY_FACTOR" || ! awk -v v="$LATENCY_FACTOR" 'BEGIN {exit !(
   die "--latency-factor must be at least 1"
 fi
 [[ "$PROM_URL" =~ ^https?://[^[:space:]]+$ ]] || die "PROM_URL must name the System Prometheus that scrapes the cluster"
-for command in jq kubectl curl timeout awk date sort ssh base64; do require_cmd "$command"; done
+for command in jq kubectl curl timeout awk date sort ssh base64 pkill; do require_cmd "$command"; done
 if [[ -z "$PRODUCTION" && -z "${KUBECONFIG:-}" && -f "$HOME/src/infra/kubeconfig-oidc.yaml" ]]; then
   export KUBECONFIG="$HOME/src/infra/kubeconfig-oidc.yaml"
 fi
@@ -446,8 +456,14 @@ on_exit() {
   local status=$?
   trap - EXIT
   local pid
+  stop_watchdog
   for pid in "${WAITER_PIDS[@]}" "${SSH_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
   wait 2>/dev/null || true
+  if [[ -n "$RUN_DIR" && -s "$RUN_DIR/watchdog" ]]; then
+    STOP_REASON="$(cat "$RUN_DIR/watchdog")"
+    log "stop: $STOP_REASON"
+    write_summary || true
+  fi
   if [[ -n "$RUN_DIR" && "$MODE" == run ]]; then
     if ! clean_run_dir "$RUN_DIR"; then
       log "cleanup NOT proved; the next start retries it (run $RUN_ID)"
@@ -455,6 +471,25 @@ on_exit() {
     fi
   fi
   exit "$status"
+}
+
+# One step's wall-clock limit: a background timer records why and sends
+# TERM, whose trap exits through on_exit, which cleans up. kubectl and cw
+# calls are bounded, so the trap runs within KUBECTL_TIMEOUT_SECONDS.
+WATCHDOG_PID=""
+start_watchdog() { # STEP
+  stop_watchdog
+  ( sleep $((MAX_STEP_MINUTES * 60)) &&
+      printf 'step %s exceeded its %s-minute limit\n' "$1" "$MAX_STEP_MINUTES" >"$RUN_DIR/watchdog" &&
+      kill -TERM "$MAIN_PID" ) &
+  WATCHDOG_PID=$!
+}
+stop_watchdog() {
+  if [[ -n "$WATCHDOG_PID" ]]; then
+    pkill -P "$WATCHDOG_PID" 2>/dev/null || true
+    kill "$WATCHDOG_PID" 2>/dev/null || true
+  fi
+  WATCHDOG_PID=""
 }
 
 # ------------------------------------------------------------ node state
@@ -723,10 +758,10 @@ start_workload() { # ID SECONDS
 }
 
 create_env() { # N -> environment id on stdout
-  local n="$1" name out id attempt
+  local n="$1" name out id attempt retried=0 existing
   out="$RUN_DIR/create-$n.out"
   name="${NAME_PREFIX}${RUN_ID}-${n}"
-  for attempt in 1 2 3 4; do
+  for attempt in 1 2 3 4 5; do
     now_ms >"$RUN_DIR/create-$n.started"
     if cw create --no-file --image "$LOAD_IMAGE" --name "$name" --cpu "${CPU_M}m" \
       --memory "$MEMORY_MIB" --disk "$DISK_GIB" --isolation standard --ttl "$LOAD_TTL" \
@@ -735,9 +770,26 @@ create_env() { # N -> environment id on stdout
     fi
     # Ten creates per user per 60 s (check_rate_limit); the window closes 60 s
     # after the last accepted create.
-    if ((attempt < 4)) && grep -q 'too many environment creates' "$out.err"; then
+    if ((attempt < 5)) && grep -q 'too many environment creates' "$out.err"; then
       log "create rate limited; waiting 61 s"
       pause 61
+      continue
+    fi
+    # One retry for a client-side deadline only: the request may never have
+    # reached the server, or its answer was lost. An environment of this name
+    # that does exist is recorded instead of created twice. A server refusal
+    # is never retried.
+    if ((retried == 0)) && grep -q 'client-side deadline exceeded' "$out.err"; then
+      retried=1
+      printf 'create %s: client-side deadline exceeded\n' "$n" >>"$RUN_DIR/create-retries"
+      existing="$(list_envs 2>/dev/null | awk -F'\t' -v name="$name" '$2 == name {print $1; exit}' || true)"
+      if [[ -n "$existing" ]]; then
+        log "create $n: client-side deadline exceeded; $name exists, recording it"
+        jq -nc --arg id "$existing" '{id: $id}' >"$out"
+        break
+      fi
+      log "create $n: client-side deadline exceeded; retrying once"
+      pause 5
       continue
     fi
     sed 's/[[:cntrl:]]//g' "$out.err" | tail -n 3 >&2
@@ -1006,6 +1058,9 @@ write_summary() {
       .created as $created | (.placement // {}) as $placement | (.nodes // [])[]
       | "| \($created) | \(.node) | \($placement[.node] // 0) | \(.pods)/\(.allocatable_pods) | \(100 * .requested_cpu_m / .allocatable_cpu_m | f) | \(100 * .requested_memory_mib / .allocatable_memory_mib | f) | \(.node_cpu_pct|f) | \(.node_memory_pct|f) | \(.psi_memory_some_pct|f)/\(.psi_cpu_some_pct|f) | \(.thin_used_pct|f) |"
     ' "$RUN_DIR/steps.jsonl" 2>/dev/null
+    if [[ -s "$RUN_DIR/create-retries" ]]; then
+      printf '\nCreates retried once after a client-side deadline: %s\n' "$(grep -c . "$RUN_DIR/create-retries")"
+    fi
     printf '\nStopped: %s\n' "${STOP_REASON:-every step completed}"
   } >"$RUN_DIR/summary.md"
 }
@@ -1055,6 +1110,7 @@ for target in "${STEP_COUNTS[@]}"; do
   step=$((step + 1))
   if [[ -n "$STOP_REASON" ]]; then break; fi
   log "step $step: ramp to $target sandboxes"
+  start_watchdog "$step"
   milestone_snapshot >"$RUN_DIR/milestones-$step.before"
   : >"$RUN_DIR/new-$step"
   sampled=0
@@ -1118,6 +1174,7 @@ for target in "${STEP_COUNTS[@]}"; do
   [[ -n "$STOP_REASON" ]] || stop_check "$metrics"
   [[ -z "$STOP_REASON" ]] || log "stop: $STOP_REASON"
 done
+stop_watchdog
 write_summary
 log "results: $RUN_DIR/summary.md"
 cat "$RUN_DIR/summary.md"
