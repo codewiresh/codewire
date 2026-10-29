@@ -123,6 +123,13 @@ enum AccessProbePath {
     DirectThenForward,
 }
 
+/// Why one access probe failed: on the host key (none recorded, or the
+/// daemon presented another), or before it reached the daemon at all.
+enum ProbeFailure {
+    Key(anyhow::Error),
+    Transport(anyhow::Error),
+}
+
 /// Attempts in the first [`ACCESS_DIRECT_ONLY_WINDOW`] of the wait use the
 /// Pod network only: a slow port-forward there would hide a SYN the
 /// member's not-yet-regenerated policy dropped. Later attempts may forward.
@@ -214,7 +221,12 @@ impl SandboxClient {
 
     /// The current workspace Pod's `port` over the Pod network only, with an
     /// access readiness attempt's short connect.
-    async fn workspace_direct_stream(&self, env_id: &str, port: u16) -> anyhow::Result<TcpStream> {
+    async fn workspace_direct_stream(
+        &self,
+        env_id: &str,
+        port: u16,
+        connect_timeout: Duration,
+    ) -> anyhow::Result<TcpStream> {
         let pod = self
             .current_workspace_pod_object(env_id)
             .await
@@ -224,7 +236,7 @@ impl SandboxClient {
             .name
             .clone()
             .ok_or_else(|| anyhow::anyhow!("workspace SSH: the Pod has no name"))?;
-        direct_stream_within(&pod, &pod_name, port, ACCESS_DIRECT_CONNECT_TIMEOUT).await
+        direct_stream_within(&pod, &pod_name, port, connect_timeout).await
     }
 
     async fn port_forward_pod_stream(
@@ -285,39 +297,66 @@ impl SandboxClient {
         timeout: Duration,
         host_keys: &dyn HostKeyStore,
     ) -> anyhow::Result<()> {
-        self.wait_for_workspace_access_ready_on(env_id, WORKSPACE_SSH_PORT, timeout, host_keys)
-            .await
+        self.wait_for_workspace_access_ready_on(
+            env_id,
+            WORKSPACE_SSH_PORT,
+            timeout,
+            ACCESS_DIRECT_CONNECT_TIMEOUT,
+            host_keys,
+        )
+        .await
     }
 
+    /// `connect_timeout` bounds each direct attempt's connect:
+    /// [`ACCESS_DIRECT_CONNECT_TIMEOUT`] in production, and in tests a bound
+    /// loopback never misses, since they test the probe, not that bound.
     async fn wait_for_workspace_access_ready_on(
         &self,
         env_id: &str,
         port: u16,
         timeout: Duration,
+        connect_timeout: Duration,
         host_keys: &dyn HostKeyStore,
     ) -> anyhow::Result<()> {
-        let mut last = None;
+        // The last host-key failure, and any transport failure since it. A
+        // probe that never reached the daemon says nothing about its key, so
+        // it never hides the key failure from the timeout's reason.
+        let mut key = None;
+        let mut transport = None;
         let started = tokio::time::Instant::now();
         let ready = tokio::time::timeout(timeout, async {
             loop {
                 let path = access_probe_path(started.elapsed());
                 let attempt = tokio::time::timeout(
                     ACCESS_HANDSHAKE_TIMEOUT,
-                    self.pinned_key_exchange(env_id, port, host_keys, path),
+                    self.pinned_key_exchange(env_id, port, connect_timeout, host_keys, path),
                 )
                 .await
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("SSH key exchange timed out")));
+                .unwrap_or_else(|_| {
+                    Err(ProbeFailure::Transport(anyhow::anyhow!(
+                        "SSH key exchange timed out"
+                    )))
+                });
                 match attempt {
                     Ok(()) => return,
-                    Err(error) => last = Some(error),
+                    Err(ProbeFailure::Key(error)) => {
+                        key = Some(error);
+                        transport = None;
+                    }
+                    Err(ProbeFailure::Transport(error)) => transport = Some(error),
                 }
                 tokio::time::sleep(ACCESS_READY_POLL).await;
             }
         })
         .await;
-        ready.map_err(|_| match last.take() {
-            Some(error) => anyhow::anyhow!("workspace SSH access readiness timed out: {error}"),
-            None => anyhow::anyhow!("workspace SSH access readiness timed out"),
+        ready.map_err(|_| match (transport.take(), key.take()) {
+            (Some(transport), Some(key)) => anyhow::anyhow!(
+                "workspace SSH access readiness timed out: {transport}, after {key}"
+            ),
+            (Some(error), None) | (None, Some(error)) => {
+                anyhow::anyhow!("workspace SSH access readiness timed out: {error}")
+            }
+            (None, None) => anyhow::anyhow!("workspace SSH access readiness timed out"),
         })
     }
 
@@ -325,22 +364,34 @@ impl SandboxClient {
         &self,
         env_id: &str,
         port: u16,
+        connect_timeout: Duration,
         host_keys: &dyn HostKeyStore,
         path: AccessProbePath,
-    ) -> anyhow::Result<()> {
-        let pinned = PinnedHostKey::current(env_id, host_keys).await?;
+    ) -> Result<(), ProbeFailure> {
+        let pinned = PinnedHostKey::current(env_id, host_keys)
+            .await
+            .map_err(ProbeFailure::Key)?;
         let (stream, _pf) = match path {
             AccessProbePath::DirectOnly => {
-                let stream = self.workspace_direct_stream(env_id, port).await?;
+                let stream = self
+                    .workspace_direct_stream(env_id, port, connect_timeout)
+                    .await
+                    .map_err(ProbeFailure::Transport)?;
                 (Box::new(stream) as Box<dyn AsyncReadWrite>, None)
             }
-            AccessProbePath::DirectThenForward => {
-                self.workspace_ssh_stream(env_id, port).await?.into_parts()
-            }
+            AccessProbePath::DirectThenForward => self
+                .workspace_ssh_stream(env_id, port)
+                .await
+                .map_err(ProbeFailure::Transport)?
+                .into_parts(),
         };
         let handle = russh::client::connect_stream(sidecar_ssh_config(), stream, pinned)
             .await
-            .map_err(|e| anyhow::anyhow!("SSH key exchange with the recorded host key: {e}"))?;
+            .map_err(|e| {
+                ProbeFailure::Key(anyhow::anyhow!(
+                    "SSH key exchange with the recorded host key: {e}"
+                ))
+            })?;
         let _ = handle
             .disconnect(russh::Disconnect::ByApplication, "", "en")
             .await;
@@ -414,6 +465,10 @@ mod tests {
     const NAMESPACE: &str = "synthetic-sandboxes";
     const ENVIRONMENT: &str = "6f1d1e9a-0b1c-4a52-9a4e-2c1f00000001";
     const SANDBOX_UID: &str = "5a4db0c5-e29b-41d4-a716-446655440000";
+    /// A loopback connect on a loaded workstation has taken over 300 ms, past
+    /// [`ACCESS_DIRECT_CONNECT_TIMEOUT`]; these tests probe a live listener,
+    /// so they bound the connect well clear of that.
+    const TEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// The Claim, its bound Sandbox and the Pod that Sandbox controls, at
     /// `pod_ip`. Records every path the client reads.
@@ -555,6 +610,7 @@ mod tests {
                 ENVIRONMENT,
                 port,
                 Duration::from_secs(10),
+                TEST_CONNECT_TIMEOUT,
                 &Recorded(Some(openssh(&host_key(1)))),
             )
             .await
@@ -577,6 +633,7 @@ mod tests {
                     ENVIRONMENT,
                     port,
                     Duration::from_millis(1_500),
+                    TEST_CONNECT_TIMEOUT,
                     &store,
                 )
                 .await
@@ -592,6 +649,7 @@ mod tests {
                 ENVIRONMENT,
                 port,
                 Duration::from_millis(600),
+                TEST_CONNECT_TIMEOUT,
                 &Recorded(Some(openssh(&host_key(1)))),
             )
             .await
