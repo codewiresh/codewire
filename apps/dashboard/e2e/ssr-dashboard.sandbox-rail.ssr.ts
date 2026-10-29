@@ -54,6 +54,9 @@ test("on a phone only the open drawer's rail refreshes", async ({ page }) => {
   await openRails(page, { width: 390, height: 844 }, true);
   await page.clock.runFor(10_000);
   expect(await refreshes(page)).toEqual([]);
+  // Open the drawer between ticks: its next refresh is a whole interval after
+  // this one, not skipped at the old schedule's next tick (#3648).
+  await page.clock.runFor(2_000);
   await page.getByRole("button", { name: "Toggle sidebar" }).click();
   await expect.poll(() => refreshes(page)).toEqual(["drawer"]);
   await page.clock.runFor(10_000);

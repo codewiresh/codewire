@@ -562,12 +562,22 @@ document.addEventListener("htmx:afterSwap", (event) => {
   const rails = () => Array.from(document.querySelectorAll("[data-sandbox-rail]"));
   // A copy rendered loading has no refresh time, so it is due at once.
   const due = (rail) => Date.now() - Number(rail.dataset.railRefreshedAt || 0) >= RAIL_INTERVAL_MS - 250;
+  let timer = 0;
   const refreshShown = () => {
     if (document.hidden) return;
+    let refreshed = false;
     for (const rail of rails()) {
       if (rail.getClientRects().length === 0 || !due(rail)) continue;
       rail.dataset.railRefreshedAt = String(Date.now());
       rail.dispatchEvent(new CustomEvent("sandbox-rail-refresh"));
+      refreshed = true;
+    }
+    // A refresh restarts the interval, so a copy refreshed when the drawer
+    // opens or the tab returns refreshes again a whole interval later, not at
+    // the next tick of the old schedule, which it would skip as not yet due.
+    if (refreshed) {
+      window.clearInterval(timer);
+      timer = window.setInterval(refreshShown, RAIL_INTERVAL_MS);
     }
   };
   // htmx binds the rail's trigger on DOMContentLoaded before this listener runs.
@@ -577,7 +587,7 @@ document.addEventListener("htmx:afterSwap", (event) => {
       if (rail.dataset.railLoading !== "true") rail.dataset.railRefreshedAt = now;
     }
     refreshShown();
-    window.setInterval(refreshShown, RAIL_INTERVAL_MS);
+    if (!timer) timer = window.setInterval(refreshShown, RAIL_INTERVAL_MS);
   });
   document.addEventListener("visibilitychange", refreshShown);
   if (app) {
