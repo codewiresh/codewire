@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use axum::http::HeaderValue;
 use codewire_admin_proto::codewire::admin::v1::{
@@ -128,20 +128,12 @@ impl Default for MigrationPreviewView {
     }
 }
 
-/// An organization opted in to confidential environments.
-#[derive(Clone, Debug)]
-pub(crate) struct ConfidentialOrganizationView {
-    pub(crate) slug: String,
-    pub(crate) name: String,
-}
-
 #[derive(Debug)]
 pub(crate) struct AdminCatalogView {
     pub(crate) plans: Vec<CatalogPlanView>,
     pub(crate) prices: Vec<CatalogPriceView>,
     pub(crate) settings: Vec<CatalogSettingView>,
     pub(crate) migrations: Vec<MigrationRunView>,
-    pub(crate) confidential_organizations: Vec<ConfidentialOrganizationView>,
     pub(crate) preview: MigrationPreviewView,
     pub(crate) csrf_token: String,
     pub(crate) message: String,
@@ -156,6 +148,9 @@ pub(crate) struct AdminOrganizationRow {
     pub(crate) billing_status: String,
     pub(crate) created: String,
     pub(crate) url: String,
+    /// Opted in to confidential environments (#2497); `None` while the
+    /// billing service that owns the opt-in cannot be read.
+    pub(crate) confidential_environments: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -212,6 +207,9 @@ pub(crate) struct AdminOrganizationView {
     pub(crate) subscriptions: Vec<AdminSubscriptionRow>,
     pub(crate) has_explicit_quota: bool,
     pub(crate) effective_quota: QuotaView,
+    /// Opted in to confidential environments (#2497); `None` while the
+    /// billing service that owns the opt-in cannot be read.
+    pub(crate) confidential_environments: Option<bool>,
     pub(crate) active_environments: i64,
     pub(crate) active_sandboxes: i64,
     pub(crate) used_cpu: String,
@@ -338,20 +336,16 @@ pub(crate) async fn catalog(
     error: String,
 ) -> Result<AdminCatalogView, ConnectError> {
     let catalog_rpc = catalog_client(state, cookie.clone());
-    let migrations_rpc = catalog_client(state, cookie.clone());
-    let confidential_rpc = catalog_client(state, cookie);
-    let (catalog, migrations, confidential) = tokio::join!(
+    let migrations_rpc = catalog_client(state, cookie);
+    let (catalog, migrations) = tokio::join!(
         catalog_rpc.get_catalog(GetCatalogRequest::default()),
         migrations_rpc.list_subscription_migrations(ListSubscriptionMigrationsRequest {
             limit: 25,
             ..Default::default()
         }),
-        confidential_rpc
-            .list_confidential_organizations(ListConfidentialOrganizationsRequest::default()),
     );
     let catalog = catalog?.into_owned();
     let migrations = migrations?.into_owned();
-    let confidential = confidential?.into_owned();
     Ok(AdminCatalogView {
         plans: catalog.plans.into_iter().map(plan_view).collect(),
         prices: catalog
@@ -378,14 +372,6 @@ pub(crate) async fn catalog(
             .migrations
             .into_iter()
             .map(migration_view)
-            .collect(),
-        confidential_organizations: confidential
-            .organizations
-            .into_iter()
-            .map(|organization| ConfidentialOrganizationView {
-                slug: organization.slug,
-                name: organization.name,
-            })
             .collect(),
         preview: MigrationPreviewView::default(),
         csrf_token,
@@ -602,18 +588,44 @@ pub(crate) async fn run_migration(
         .ok_or_else(|| ConnectError::internal("migration result missing"))
 }
 
+/// The ids of the organizations opted in to confidential environments, from
+/// the billing service that owns the opt-in (#2497). `None` when billing
+/// cannot answer, so the Organizations pages still render without it.
+async fn confidential_organization_ids(
+    state: &AppState,
+    cookie: HeaderValue,
+) -> Option<HashSet<String>> {
+    let response = catalog_client(state, cookie)
+        .list_confidential_organizations(ListConfidentialOrganizationsRequest::default())
+        .await
+        .ok()?
+        .into_owned();
+    Some(
+        response
+            .organizations
+            .into_iter()
+            .map(|organization| organization.organization_id)
+            .collect(),
+    )
+}
+
 pub(crate) async fn organizations(
     state: &AppState,
     cookie: HeaderValue,
 ) -> Result<Vec<AdminOrganizationRow>, ConnectError> {
-    let response = admin_client(state, cookie)
-        .list_organizations(ListOrganizationsRequest::default())
-        .await?
-        .into_owned();
+    let admin_rpc = admin_client(state, cookie.clone());
+    let (response, confidential) = tokio::join!(
+        admin_rpc.list_organizations(ListOrganizationsRequest::default()),
+        confidential_organization_ids(state, cookie),
+    );
+    let response = response?.into_owned();
     Ok(response
         .organizations
         .into_iter()
         .map(|organization| AdminOrganizationRow {
+            confidential_environments: confidential
+                .as_ref()
+                .map(|ids| ids.contains(&organization.id)),
             url: format!("/admin/organizations/{}/", organization.id),
             name: organization.name,
             slug: organization.slug,
@@ -634,18 +646,23 @@ pub(crate) async fn organization(
     cookie: HeaderValue,
     organization_id: &str,
 ) -> Result<AdminOrganizationView, ConnectError> {
-    let response = admin_client(state, cookie)
-        .get_organization_overview(GetOrganizationOverviewRequest {
+    let admin_rpc = admin_client(state, cookie.clone());
+    let (response, confidential) = tokio::join!(
+        admin_rpc.get_organization_overview(GetOrganizationOverviewRequest {
             organization_id: organization_id.to_owned(),
             ..Default::default()
-        })
-        .await?
-        .into_owned();
+        }),
+        confidential_organization_ids(state, cookie),
+    );
+    let response = response?.into_owned();
     let organization = response.organization.into_option().unwrap_or_default();
     let billing = response.billing.into_option().unwrap_or_default();
     let quota = response.quota.into_option().unwrap_or_default();
     let usage = response.usage.into_option().unwrap_or_default();
     Ok(AdminOrganizationView {
+        confidential_environments: confidential
+            .as_ref()
+            .map(|ids| ids.contains(&organization.id)),
         id: organization.id,
         name: organization.name,
         slug: organization.slug,

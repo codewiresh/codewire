@@ -68,8 +68,8 @@ Usage:
 
 Prerequisites on Dev (outside this script):
   - a confidential storage class and the active confidential SNP profile;
-  - the smoke organization opted in to confidential environments on the
-    admin billing page (Confidential environments);
+  - the smoke organization opted in to confidential environments on its
+    admin Organizations page (Confidential environments);
   - a human OpenBao session, so with-dev-smoke-auth.sh can load the smoke
     identity;
   - read-only kubectl access to the Dev cluster (KUBE_CONTEXT).

@@ -112,6 +112,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(admin::clear_organization_quota),
         )
         .route(
+            "/admin/organizations/_actions/confidential/set",
+            post(admin::set_organization_confidential),
+        )
+        .route(
             "/admin/organizations/_actions/defaults/set",
             post(admin::set_default_quota),
         )
@@ -154,10 +158,6 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/admin/billing/_actions/settings/update",
             post(admin::update_setting),
-        )
-        .route(
-            "/admin/billing/_actions/confidential-organizations",
-            post(admin::set_confidential_organization),
         )
         .route(
             "/admin/billing/_actions/migrations/preview",

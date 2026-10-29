@@ -36,12 +36,13 @@
         <section class="cw-card" aria-labelledby="organizations-heading">
           <header class="cw-card-header"><div><h2 id="organizations-heading">All organizations</h2><p>{{ organizations.len() }} organizations</p></div></header>
           {% if organizations.is_empty() %}<div class="cw-card-body"><p class="cw-muted">No organizations exist yet.</p></div>{% else %}
-          <div class="cw-table-wrap"><table class="cw-table cw-table--row-links"><thead><tr><th scope="col">Organization</th><th scope="col">Slug</th><th scope="col">Plan</th><th scope="col">Billing status</th><th scope="col">Created</th></tr></thead><tbody>
+          <div class="cw-table-wrap"><table class="cw-table cw-table--row-links"><thead><tr><th scope="col">Organization</th><th scope="col">Slug</th><th scope="col">Plan</th><th scope="col">Billing status</th><th scope="col">Confidential environments</th><th scope="col">Created</th></tr></thead><tbody>
             {% for organization in organizations %}<tr>
               <th scope="row"><a class="cw-row-link" href="{{ organization.url }}">{{ organization.name }}</a></th>
               <td><code>{{ organization.slug }}</code></td>
               <td>{{ organization.billing_plan }}</td>
               <td>{{ organization.billing_status }}</td>
+              <td>{% match organization.confidential_environments %}{% when Some(true) %}<span class="cw-badge" data-tone="success">Opted in</span>{% when Some(false) %}Not opted in{% when None %}Unavailable{% endmatch %}</td>
               <td>{{ organization.created }}</td>
             </tr>{% endfor %}
           </tbody></table></div>{% endif %}

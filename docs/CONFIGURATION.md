@@ -115,8 +115,9 @@ overlays (`deployments/k8s/overlays/local-kind*` and `tests/e2e/kind`) use
 Kind's built-in `standard` class.
 
 With the switch on, a confidential environment is still refused until a global
-admin opts its organization in, under Confidential environments on the admin
-billing page (`/admin/billing`); each change is written to the audit log. Then
+admin opts its organization in, under Confidential environments on that
+organization's admin page (`/admin/organizations/<id>/`), whose list also shows
+every organization's opt-in; each change is written to the audit log. Then
 any active member of that organization, or an API key scoped to it, may create,
 start, resize and reach its confidential environments. Every other caller is
 refused with `CONFIDENTIAL_NOT_ENABLED` or `CONFIDENTIAL_MEMBERSHIP_REQUIRED`.

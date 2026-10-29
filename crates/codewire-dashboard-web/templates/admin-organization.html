@@ -59,6 +59,22 @@
           </div>
         </section>
 
+        <section class="cw-card" aria-labelledby="confidential-heading">
+          <header class="cw-card-header"><div><h2 id="confidential-heading">Confidential environments</h2><p>Members of an opted-in organization can create confidential environments where the deployment enables them and the plan has a confidential catalog entry.</p></div></header>
+          <div class="cw-card-body cw-admin-section">
+            {% match organization.confidential_environments %}{% when Some(enabled) %}<form class="cw-confidential-organization" method="post" action="/admin/organizations/_actions/confidential/set">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="organization_id" value="{{ organization.id }}">
+              <input type="hidden" name="organization_slug" value="{{ organization.slug }}">
+              {% if enabled %}<input type="hidden" name="enabled" value="false">
+              <p><span class="cw-badge" data-tone="success">Opted in</span> Changing it writes an audit entry.</p>
+              <button class="cw-button cw-button--outline" type="submit">Remove opt-in</button>{% else %}<input type="hidden" name="enabled" value="true">
+              <p><span class="cw-badge">Not opted in</span> Changing it writes an audit entry.</p>
+              <button class="cw-button" type="submit">Opt in</button>{% endif %}
+            </form>{% when None %}<p class="cw-muted">Whether this organization is opted in cannot be read right now.</p>{% endmatch %}
+          </div>
+        </section>
+
         <section class="cw-card" aria-labelledby="members-heading">
           <header class="cw-card-header"><div><h2 id="members-heading">Members</h2><p>{{ organization.members.len() }} members</p></div></header>
           {% if organization.members.is_empty() %}<div class="cw-card-body"><p class="cw-muted">This organization has no members.</p></div>{% else %}

@@ -80,7 +80,7 @@ Options:
 The product phase runs as the dedicated Dev smoke identity through
 scripts/runtime/dev/with-dev-smoke-auth.sh, which needs the normal human
 OpenBao OIDC session; its organization must be opted in to confidential
-environments (the admin billing page) and its plan needs a confidential
+environments (on its admin Organizations page) and its plan needs a confidential
 catalog entry.
 
 Activation spans two repositories and transitions together. The Dev runtime

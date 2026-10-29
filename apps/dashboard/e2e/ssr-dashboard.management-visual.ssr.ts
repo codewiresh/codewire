@@ -181,6 +181,7 @@ test.describe.serial("rounded management interface", () => {
     await expect(page.getByRole("heading", { name: "Management Visual", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Environment quota and usage" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Billing" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Confidential environments" })).toBeVisible();
     await expect(page.getByLabel("Memory (MiB)")).toBeVisible();
     await expectNoPageOverflow(page);
   });

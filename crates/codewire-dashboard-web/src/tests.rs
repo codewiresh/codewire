@@ -475,6 +475,7 @@ fn unsafe_organization(has_explicit_quota: bool) -> AdminOrganizationView {
             updated: "2026-10-28".into(),
         }],
         has_explicit_quota,
+        confidential_environments: Some(false),
         effective_quota: QuotaView {
             environments: limit(-1, "Unlimited"),
             sandboxes: limit(200, "200"),
@@ -505,6 +506,7 @@ fn admin_organizations_template_links_each_row_and_escapes_names() {
         billing_status: "active".into(),
         created: "2026-10-28".into(),
         url: "/admin/organizations/org_safe-1/".into(),
+        confidential_environments: Some(true),
     }];
     let defaults = unsafe_organization(false).effective_quota;
     let body = AdminOrganizationsTemplate {
@@ -524,6 +526,12 @@ fn admin_organizations_template_links_each_row_and_escapes_names() {
         r#"<th scope="row"><a class="cw-row-link" href="/admin/organizations/org_safe-1/">"#
     ));
     assert_eq!(body.matches(r#"class="cw-row-link""#).count(), 1);
+    // The confidential opt-in is a column of state, not a control in the row.
+    assert!(body.contains(r#"<th scope="col">Confidential environments</th>"#));
+    assert!(
+        body.contains(r#"<td><span class="cw-badge" data-tone="success">Opted in</span></td>"#)
+    );
+    assert!(!body.contains("_actions/confidential"));
     // The defaults form: labelled, starting at the stored defaults, and
     // saying that a plan's workspace limit still sets the sandbox count.
     assert!(body.contains(r#"action="/admin/organizations/_actions/defaults/set""#));
@@ -598,4 +606,49 @@ fn admin_organization_template_shows_billing_quota_usage_and_escapes_upstream_da
             !has_explicit_quota
         );
     }
+}
+
+/// The confidential opt-in is one button whose verb follows the state, posting
+/// the opposite state with the organization's id and slug; while billing
+/// cannot say, the page says so and offers no button (#2497).
+#[test]
+fn admin_organization_confidential_toggle_follows_the_opt_in() {
+    let view = admin_view();
+    let render = |confidential_environments: Option<bool>| {
+        let organization = AdminOrganizationView {
+            confidential_environments,
+            ..unsafe_organization(false)
+        };
+        AdminOrganizationTemplate {
+            view: &view,
+            organization: &organization,
+            csrf_token: "csrf-safe",
+            message: "",
+            error: "",
+        }
+        .render()
+        .expect("render admin organization page")
+    };
+    let action = r#"action="/admin/organizations/_actions/confidential/set""#;
+    let ids = r#"<input type="hidden" name="organization_id" value="org_safe-1">
+              <input type="hidden" name="organization_slug" value="safe-org">"#;
+
+    let off = render(Some(false));
+    assert!(off.contains(r#"<h2 id="confidential-heading">Confidential environments</h2>"#));
+    assert!(off.contains(action) && off.contains(ids));
+    assert!(off.contains(r#"<input type="hidden" name="enabled" value="true">"#));
+    assert!(off.contains(r#"<span class="cw-badge">Not opted in</span>"#));
+    assert!(off.contains(r#"<button class="cw-button" type="submit">Opt in</button>"#));
+
+    let on = render(Some(true));
+    assert!(on.contains(action) && on.contains(ids));
+    assert!(on.contains(r#"<input type="hidden" name="enabled" value="false">"#));
+    assert!(on.contains(r#"<span class="cw-badge" data-tone="success">Opted in</span>"#));
+    assert!(on.contains(
+        r#"<button class="cw-button cw-button--outline" type="submit">Remove opt-in</button>"#
+    ));
+
+    let unknown = render(None);
+    assert!(!unknown.contains(action));
+    assert!(unknown.contains("Whether this organization is opted in cannot be read right now."));
 }

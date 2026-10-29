@@ -187,6 +187,7 @@ pub(super) struct SettingSubmission {
 pub(super) struct ConfidentialOrganizationSubmission {
     #[serde(rename = "_csrf")]
     csrf: String,
+    organization_id: String,
     organization_slug: String,
     enabled: bool,
 }
@@ -492,6 +493,56 @@ pub(super) async fn clear_organization_quota(
     quota_response(&state, result, &path, "quota-cleared", &headers)
 }
 
+/// Opt an organization in to, or out of, confidential environments (#2497),
+/// from its admin page. Global administrators only; the billing service owns
+/// the opt-in, checks the administrator again and writes the audit event.
+pub(super) async fn set_organization_confidential(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+    Form(submission): Form<ConfidentialOrganizationSubmission>,
+) -> Response {
+    if !valid_organization_id(&submission.organization_id) {
+        return error_page(WebError::NotFound);
+    }
+    let path = organization_path(&submission.organization_id);
+    let cookie =
+        match admin_action_page_context_for(&state, &headers, &submission.csrf, &query.org, &path)
+            .await
+        {
+            Ok((_, cookie)) => cookie,
+            Err(response) => return response,
+        };
+    let slug = submission.organization_slug;
+    if !codewire_server_core::organization_slug::valid_organization_slug(&slug) {
+        return admin_redirect_to(&state, &path, "", "not-found", &headers);
+    }
+    let result =
+        admin_connect::set_confidential_environments(&state, cookie, slug, submission.enabled)
+            .await;
+    match result {
+        Ok(()) => admin_redirect_to(
+            &state,
+            &path,
+            if submission.enabled {
+                "confidential-enabled"
+            } else {
+                "confidential-disabled"
+            },
+            "",
+            &headers,
+        ),
+        Err(error) if error.code == ErrorCode::Unauthenticated => login_redirect(&path, &headers),
+        Err(error) => {
+            let code = match mutation_error(&error) {
+                "unavailable" | "conflict" => "confidential-unavailable",
+                code => code,
+            };
+            admin_redirect_to(&state, &path, "", code, &headers)
+        }
+    }
+}
+
 pub(super) async fn audit(
     State(state): State<AppState>,
     Query(query): Query<AuditQuery>,
@@ -711,42 +762,6 @@ pub(super) async fn update_setting(
         "setting-saved",
         &headers,
     )
-}
-
-/// Opt an organization in to, or out of, confidential environments (#2497).
-/// Global administrators only; the billing service writes the audit event.
-pub(super) async fn set_confidential_organization(
-    State(state): State<AppState>,
-    Query(query): Query<AdminQuery>,
-    headers: HeaderMap,
-    Form(submission): Form<ConfidentialOrganizationSubmission>,
-) -> Response {
-    let cookie = match admin_action_context(&state, &headers, &submission.csrf, &query.org).await {
-        Ok(cookie) => cookie,
-        Err(response) => return response,
-    };
-    let slug = submission.organization_slug.trim().to_ascii_lowercase();
-    if !codewire_server_core::organization_slug::valid_organization_slug(&slug) {
-        return admin_redirect(&state, "", "confidential-invalid", &headers);
-    }
-    let result =
-        admin_connect::set_confidential_environments(&state, cookie, slug, submission.enabled)
-            .await;
-    match result {
-        Err(error) if error.code == ErrorCode::NotFound => {
-            admin_redirect(&state, "", "confidential-not-found", &headers)
-        }
-        result => mutation_response(
-            &state,
-            result,
-            if submission.enabled {
-                "confidential-enabled"
-            } else {
-                "confidential-disabled"
-            },
-            &headers,
-        ),
-    }
 }
 
 pub(super) async fn preview_migration(
@@ -1148,6 +1163,8 @@ fn quota_message(value: &str) -> &'static str {
     match value {
         "quota-saved" => "Environment quota saved.",
         "quota-cleared" => "Environment quota cleared; the plan fallback applies.",
+        "confidential-enabled" => "Organization opted in to confidential environments.",
+        "confidential-disabled" => "Organization removed from confidential environments.",
         _ => "",
     }
 }
@@ -1165,6 +1182,7 @@ fn quota_error(value: &str) -> &'static str {
         "invalid" => "Each limit must be a positive number, or -1 for unlimited.",
         "not-found" => "The organization no longer exists.",
         "conflict" | "unavailable" => "Environment quotas are temporarily unavailable.",
+        "confidential-unavailable" => "Confidential environments are temporarily unavailable.",
         _ => "",
     }
 }
@@ -1209,8 +1227,6 @@ fn admin_message(value: &str) -> &'static str {
         "price-archived" => "Stripe price archive state updated.",
         "setting-saved" => "Billing setting saved.",
         "migration-ran" => "Subscription migration completed.",
-        "confidential-enabled" => "Organization opted in to confidential environments.",
-        "confidential-disabled" => "Organization removed from confidential environments.",
         _ => "",
     }
 }
@@ -1222,8 +1238,6 @@ fn admin_error(value: &str) -> &'static str {
         "not-found" => "The catalog record no longer exists.",
         "conflict" => "A conflicting catalog record already exists.",
         "unavailable" => "The billing catalog is temporarily unavailable.",
-        "confidential-invalid" => "Enter an organization slug.",
-        "confidential-not-found" => "No organization has that slug.",
         _ => "",
     }
 }
@@ -1252,56 +1266,6 @@ fn default_proration() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The confidential environments section (#2497): opted-in organizations
-    /// are a list whose Remove buttons name their organization, and the opt-in
-    /// field has a label.
-    #[test]
-    fn confidential_organizations_are_a_labelled_list_and_form() {
-        use askama::Template as _;
-        let catalog = |organizations: Vec<admin_connect::ConfidentialOrganizationView>| {
-            admin_connect::AdminCatalogView {
-                plans: Vec::new(),
-                prices: Vec::new(),
-                settings: Vec::new(),
-                migrations: Vec::new(),
-                confidential_organizations: organizations,
-                preview: Default::default(),
-                csrf_token: "csrf".into(),
-                message: String::new(),
-                error: String::new(),
-            }
-        };
-        let view = crate::view::DashboardView::default();
-        let render = |catalog: &admin_connect::AdminCatalogView| {
-            AdminBillingTemplate {
-                view: &view,
-                catalog,
-            }
-            .render()
-            .unwrap()
-        };
-        let empty = render(&catalog(Vec::new()));
-        assert!(empty.contains("No organizations are opted in."));
-        assert!(empty.contains(
-            r#"<label class="cw-field"><span>Organization slug</span><input class="cw-input cw-input--mono" name="organization_slug" required"#
-        ));
-        let listed = render(&catalog(vec![
-            admin_connect::ConfidentialOrganizationView {
-                slug: "codewire-dev-smoke".into(),
-                name: "Codewire Dev Smoke".into(),
-            },
-        ]));
-        assert!(listed.contains(r#"<ul class="cw-row-list" aria-label="Opted-in organizations">"#));
-        assert!(listed.contains(
-            r#"<input type="hidden" name="organization_slug" value="codewire-dev-smoke"><input type="hidden" name="enabled" value="false">"#
-        ));
-        assert!(
-            listed.contains(
-                r#"<span>Remove</span><span class="cw-sr-only"> codewire-dev-smoke</span>"#
-            )
-        );
-    }
 
     #[test]
     fn organization_ids_and_quota_limits_are_an_exact_allowlist() {
