@@ -988,7 +988,7 @@ database_lane_orchestration_workspaces() {
     cargo test --locked -p codewire-orchestration --lib \
       'worker::workspace_binding::database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "workspace binding recorder matrix" "$logfile" 20
+  assert_passed_count "workspace binding recorder matrix" "$logfile" 21
 
   logfile="$RUN_DIR/workspace-binding-access-store.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

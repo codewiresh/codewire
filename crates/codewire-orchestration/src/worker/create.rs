@@ -17,13 +17,15 @@ use super::start_timing::{
     record_create_milestone, since_accepted, start_profile, with_since_accepted,
 };
 use super::workspace_binding::{
-    EnvironmentBinding, bind_before_ready, bind_workspace_runtime, binding_bootstrap_current,
-    credential_scope, definitive_refusal, live_environment_binding, sandbox_bound_by_any,
+    EarlyBind, EnvironmentBinding, bind_before_ready, bind_workspace_runtime,
+    binding_bootstrap_current, credential_scope, definitive_refusal, live_environment_binding,
+    sandbox_bound_by_any,
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::sandbox::client::{
-    ProbeResult, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
+    ProbeResult, RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity,
+    WorkspaceSandboxIdentity,
 };
 use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::sandbox::template::{
@@ -1129,6 +1131,9 @@ async fn run_environment_create(
     let mut bootstrap_recovered = false;
     let mut workspace_resumed = false;
     let mut reconciled_runtime: Option<ReconciledRuntime> = None;
+    // #3627: the warm member this attempt's `create_claim` pass just bound
+    // and reached, until the first ready action observes it.
+    let mut fresh_warm_bind: Option<FreshWarmBind> = None;
     // Program #2238 C3: after a pool-born Claim failed its first bind and
     // was re-claimed, this attempt claims cold.
     let mut reclaimed_cold = false;
@@ -1188,19 +1193,35 @@ async fn run_environment_create(
         if create_action_requires_runtime_identity(action) {
             let backend = backend.as_ref().expect("ready runtime requires backend");
             let observed = ReconciledRuntime::observe(&env, backend, &probe);
-            if reconciled_runtime.as_ref() != Some(&observed) {
+            let step = runtime_identity_step(
+                reconciled_runtime.as_ref(),
+                fresh_warm_bind.take(),
+                &observed,
+                backend,
+            );
+            if step != RuntimeIdentityStep::Reuse {
                 reconciled_runtime = None;
-                match reconcile_or_refresh_runtime_identity(
-                    ctx,
-                    &env,
-                    backend,
-                    authority,
-                    &[env.state.as_str()],
-                    &probe,
-                    !bootstrap_recovered,
-                )
-                .await
-                {
+                let states = [env.state.as_str()];
+                let result = match &step {
+                    RuntimeIdentityStep::Confirm(fresh) => confirm_fresh_warm_bind(
+                        ctx, &env, backend, authority, &states, &probe, fresh,
+                    )
+                    .await
+                    .map(|()| false),
+                    _ => {
+                        reconcile_or_refresh_runtime_identity(
+                            ctx,
+                            &env,
+                            backend,
+                            authority,
+                            &states,
+                            &probe,
+                            !bootstrap_recovered,
+                        )
+                        .await
+                    }
+                };
+                match result {
                     Ok(true) => {
                         bootstrap_recovered = true;
                         // The old probe must not overwrite the replacement's backend
@@ -1220,6 +1241,9 @@ async fn run_environment_create(
             }
         } else {
             reconciled_runtime = None;
+            if !keeps_fresh_warm_bind(action) {
+                fresh_warm_bind = None;
+            }
         }
 
         match action {
@@ -1734,7 +1758,7 @@ async fn run_environment_create(
                     None,
                 )
                 .await?;
-                let gateway_result = wait_with_early_bind(
+                let gateway_result = wait_with_early_bind_recording(
                     ctx,
                     &env,
                     authority,
@@ -1748,7 +1772,13 @@ async fn run_environment_create(
                         )),
                     ),
                 )
-                .await;
+                .await
+                .map(|((), early)| {
+                    // #3627: this wait bound the warm member and then reached
+                    // its bound daemon, so the next ready action need not
+                    // bind, apply the access stack or probe it again.
+                    fresh_warm_bind = early.and_then(FreshWarmBind::from_early_bind);
+                });
                 let gateway_elapsed = gateway_started.elapsed();
                 let gateway_meta = Some(serde_json::json!({
                     "duration_ms": duration_ms(gateway_elapsed),
@@ -1924,7 +1954,7 @@ const ACCESS_READY_STARTED_MESSAGE: &str = "Waiting for SSH access";
 /// `mark_running` committed; every later write still checks authority for
 /// its own states.
 #[derive(Debug, Clone, PartialEq)]
-struct ReconciledRuntime {
+pub(super) struct ReconciledRuntime {
     environment: EnvironmentRow,
     namespace: String,
     claim_name: String,
@@ -1935,7 +1965,11 @@ struct ReconciledRuntime {
 }
 
 impl ReconciledRuntime {
-    fn observe(environment: &EnvironmentRow, backend: &BackendRow, probe: &ProbeResult) -> Self {
+    pub(super) fn observe(
+        environment: &EnvironmentRow,
+        backend: &BackendRow,
+        probe: &ProbeResult,
+    ) -> Self {
         Self {
             environment: environment.clone(),
             namespace: backend.namespace.clone(),
@@ -1951,6 +1985,112 @@ impl ReconciledRuntime {
     fn entered_running(&mut self) {
         self.environment.state = "running".to_string();
     }
+}
+
+/// A warm-pool member this create attempt itself just bound and reached
+/// (#3627): during the `access_ready` wait of its own `create_claim` pass the
+/// early bind recorded the binding of exactly this Pod, with every check of
+/// [`record_workspace_binding`](super::workspace_binding::record_workspace_binding),
+/// and the wait's pinned-key exchange with that bound daemon then succeeded.
+///
+/// The first ready action that observes exactly this runtime (the same
+/// environment row the bind captured, the same Claim, the same Pod name, UID
+/// and address) with the backend still naming the Pod as bound needs only
+/// what that bind and wait did not prove: [`confirm_fresh_warm_bind`]. Any
+/// other observation, and every Start, retry, replacement or recovery, runs
+/// the full [`reconcile_or_refresh_runtime_identity`].
+///
+/// What the full reconcile would repeat for this exact runtime, and why the
+/// bind already established it:
+/// - the backend association and organization: the bind's recorder compared
+///   the same database row, and `runtime` pins namespace and Claim;
+/// - the exact Claim → Sandbox → Pod chain and the Pod's identity labels:
+///   the bind read the chain and required it bind-ready (labels converged,
+///   nothing terminating, the Pod controlled by the observed Sandbox);
+/// - the bootstrap (`WorkspaceBootstrapMismatch`): only a Pod-scope Pod binds
+///   early, so its scope is current, and its binding captured this exact
+///   environment row's generation, projection digest and managed clients,
+///   re-checked under the bind's fence. `runtime` holds that row, so an
+///   unchanged row compares equal to the binding, and any change that could
+///   make the bootstrap stale (a republished selection, new clients, a new
+///   generation) misses here and reconciles, with recovery;
+/// - the §5 checks (images, PVC, service account, pool rendering): the bind
+///   ran them on this Pod UID, whose spec is immutable; a repeat for an
+///   already-bound Sandbox no longer checks the pool rendering at all;
+/// - the Claim label patch: create wrote it, and the bind saw it converged;
+/// - the access stack and the access probe: this pass applied the same
+///   rendering's Services and policies, and its `access_ready` wait proved
+///   the daemon of this Pod's live binding serves its recorded host key.
+#[derive(Debug, PartialEq)]
+pub(super) struct FreshWarmBind {
+    runtime: ReconciledRuntime,
+    observation: RuntimeIdentityObservation,
+}
+
+impl FreshWarmBind {
+    /// Only a warm bind of a Pod with a known address qualifies. A cold bind,
+    /// a legacy Pod and a Pod some earlier attempt bound record nothing here.
+    pub(super) fn from_early_bind(early: EarlyBind) -> Option<Self> {
+        if early.recorded.path != StartPath::Warm || early.pod_ip.is_empty() {
+            return None;
+        }
+        let pod = early.observation.pod();
+        let runtime = ReconciledRuntime {
+            environment: early.environment,
+            namespace: early.backend.namespace,
+            claim_name: early.backend.claim_name,
+            claim_uid: early.backend.claim_uid,
+            pod_name: pod.name.clone(),
+            pod_uid: pod.uid.clone(),
+            pod_ip: early.pod_ip,
+        };
+        Some(Self {
+            runtime,
+            observation: early.observation,
+        })
+    }
+
+    /// The ready action observes exactly the runtime this bind checked, and
+    /// the backend's bound-Pod pointer, which a release clears, still names
+    /// its Pod.
+    fn matches(&self, observed: &ReconciledRuntime, backend: &BackendRow) -> bool {
+        self.runtime == *observed && backend.pod_uid.as_deref() == Some(observed.pod_uid.as_str())
+    }
+}
+
+/// What a ready create action does about runtime identity.
+#[derive(Debug, PartialEq)]
+pub(super) enum RuntimeIdentityStep {
+    /// This attempt already reconciled exactly this runtime.
+    Reuse,
+    /// This attempt just bound and reached exactly this runtime.
+    Confirm(Box<FreshWarmBind>),
+    /// Anything else: the full reconcile, with bootstrap recovery.
+    Reconcile,
+}
+
+pub(super) fn runtime_identity_step(
+    reconciled: Option<&ReconciledRuntime>,
+    fresh: Option<FreshWarmBind>,
+    observed: &ReconciledRuntime,
+    backend: &BackendRow,
+) -> RuntimeIdentityStep {
+    if reconciled == Some(observed) {
+        return RuntimeIdentityStep::Reuse;
+    }
+    match fresh {
+        Some(fresh) if fresh.matches(observed, backend) => {
+            RuntimeIdentityStep::Confirm(Box::new(fresh))
+        }
+        _ => RuntimeIdentityStep::Reconcile,
+    }
+}
+
+/// A fresh warm bind waits through a `wait_for_ready` pass for its Claim to
+/// report Ready. Any other action that is not a ready action (a resume, a new
+/// Claim) drops it, and the first ready action consumes it.
+fn keeps_fresh_warm_bind(action: CreateAction) -> bool {
+    action == CreateAction::WaitForReady
 }
 
 /// The create action whose committed transition records the workspace Pod's
@@ -2341,6 +2481,64 @@ pub(super) async fn publish_backend_probe(
     Ok(())
 }
 
+/// The ready-action check for a [`FreshWarmBind`] (#3627): what its bind and
+/// `access_ready` wait did not already prove. The bind requires labels
+/// converged but not readiness, so this keeps the full reconcile's
+/// [`SandboxClient::wait_for_claim_runtime_identity`] on the bound
+/// observation: the same exact chain, nothing terminating, labels converged,
+/// Claim Ready, the Sandbox Ready at its current generation and the Pod
+/// Running and Ready. It then publishes the probe's Pod address under the
+/// activity's fence, as the reconcile does. Both run for the states the
+/// reconcile would have used. No bind, access stack or access probe runs
+/// again; normally this is one read of the chain and one fenced update.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env.id))]
+async fn confirm_fresh_warm_bind(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    backend: &BackendRow,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    probe: &ProbeResult,
+    fresh: &FreshWarmBind,
+) -> anyhow::Result<()> {
+    let client = require_client(ctx, &backend.namespace)?;
+    confirm_fresh_warm_bind_with(&client, env, backend, authority, states, probe, fresh).await
+}
+
+pub(super) async fn confirm_fresh_warm_bind_with(
+    client: &SandboxClient,
+    env: &EnvironmentRow,
+    backend: &BackendRow,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    probe: &ProbeResult,
+    fresh: &FreshWarmBind,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        env.id == authority.environment_id(),
+        "runtime identity authority does not match environment"
+    );
+    let opts = ClaimOpts {
+        environment_id: env.id.clone(),
+        org_id: env.org_id.clone(),
+        operation_generation: authority.operation_generation(),
+        ..Default::default()
+    };
+    authority
+        .run_while_authoritative_for_states(
+            states,
+            client.wait_for_claim_runtime_identity(
+                &opts,
+                &backend.claim_name,
+                &backend.claim_uid,
+                &fresh.observation,
+                ready_timeout_for_isolation(&env.isolation_tier),
+            ),
+        )
+        .await?;
+    publish_backend_probe(authority, states, probe).await
+}
+
 /// Reconcile labels for an already-observed live runtime using only the
 /// activity's existing generation. The Claim write and DB association read
 /// share its row fence; controller convergence never holds that SQL lock.
@@ -2359,7 +2557,8 @@ pub(super) async fn reconcile_runtime_identity(
 /// chain is bind-ready (design §10, amended). The wait decides the outcome:
 /// a recorded or skipped bind lets it continue, a refused bind fails it, and
 /// the bind is dropped once the wait ends. The post-ready runtime-identity
-/// reconcile still binds, idempotently, before MarkRunning and setup. A
+/// reconcile still binds, idempotently, before MarkRunning and setup, except
+/// right after create's own warm bind and access wait ([`FreshWarmBind`]). A
 /// recorded warm bind gets its warm-member bridge (#2434) at once, after the
 /// binding committed, so the gateway's connects need not wait for the
 /// relabelled member's new Cilium identity.
@@ -2371,19 +2570,36 @@ pub(super) async fn wait_with_early_bind<T>(
     states: &[&str],
     wait: impl std::future::Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
+    wait_with_early_bind_recording(ctx, env, authority, states, wait)
+        .await
+        .map(|(result, _)| result)
+}
+
+/// [`wait_with_early_bind`], also returning the binding the early bind
+/// recorded while `wait` ran, when it recorded one and its bridge step
+/// finished before `wait` succeeded.
+async fn wait_with_early_bind_recording<T>(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    wait: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<(T, Option<EarlyBind>)> {
     let Some(kube) = ctx.kube.as_ref() else {
-        return wait.await;
+        return wait.await.map(|result| (result, None));
     };
     let bind = bind_before_ready(kube, Some(&ctx.sandbox_cfg), authority, states);
     tokio::pin!(wait);
     tokio::pin!(bind);
     let mut binding = true;
+    let mut bound = None;
     loop {
         tokio::select! {
-            result = &mut wait => return result,
+            result = &mut wait => return result.map(|result| (result, bound)),
             result = &mut bind, if binding => {
                 binding = false;
-                if let Some(recorded) = result? {
+                if let Some(early) = result? {
+                    let recorded = &early.recorded;
                     if let Some(path) = bind_stage_path(&env.state, recorded.path) {
                         observe_create_stage(
                             StartStage::WorkspaceBind,
@@ -2392,8 +2608,9 @@ pub(super) async fn wait_with_early_bind<T>(
                             recorded.elapsed,
                         );
                     }
-                    warm_bridge::bridge_warm_member(ctx, env, authority, states, &recorded)
+                    warm_bridge::bridge_warm_member(ctx, env, authority, states, recorded)
                         .await?;
+                    bound = Some(early);
                 }
             }
         }
@@ -2542,7 +2759,7 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
 /// not bound yet is
 /// current by construction, because its binding captures the current
 /// environment row under the same fence.
-async fn workspace_bootstrap_current(
+pub(super) async fn workspace_bootstrap_current(
     client: &SandboxClient,
     template_opts: &TemplateOpts,
     pod: &WorkspacePodIdentity,
@@ -3244,6 +3461,367 @@ mod tests {
                 b.pod_ip.clear();
                 b.pod_name.clear();
             })
+        );
+    }
+
+    const BOUND_POD: &str = "pod-uid";
+
+    /// What [`bind_before_ready`] hands the create loop after recording the
+    /// binding of `pod_uid` under `environment` and `backend`.
+    fn early_bind(
+        path: StartPath,
+        environment: &EnvironmentRow,
+        backend: &BackendRow,
+        pod_uid: &str,
+    ) -> EarlyBind {
+        EarlyBind {
+            recorded: super::super::workspace_binding::RecordedBind {
+                elapsed: Duration::from_millis(80),
+                path,
+                sandbox_uid: "sandbox-uid".into(),
+            },
+            environment: environment.clone(),
+            backend: backend.clone(),
+            observation: RuntimeIdentityObservation::for_test(
+                "sandbox-uid",
+                "sandbox-env",
+                pod_uid,
+            ),
+            pod_ip: "10.0.0.5".into(),
+        }
+    }
+
+    /// One pool-born create, from `create_claim`, walked the way the
+    /// activity loop does with the loop's own runtime identity decisions.
+    struct WarmWalk {
+        /// What the `create_claim` pass's early bind recorded, if anything.
+        bind: Option<StartPath>,
+        /// The Claim reports Ready only after one `wait_for_ready` pass.
+        claim_ready_late: bool,
+        /// What changed between the bind and the first ready action.
+        after_bind: fn(&mut EnvironmentRow, &mut ProbeResult, &mut BackendRow),
+        /// The first full reconcile finds a stale bootstrap and recovers by
+        /// replacing the Pod, as `reconcile_or_refresh_runtime_identity` does.
+        stale_bootstrap: bool,
+    }
+
+    impl Default for WarmWalk {
+        fn default() -> Self {
+            Self {
+                bind: Some(StartPath::Warm),
+                claim_ready_late: false,
+                after_bind: |_, _, _| {},
+                stale_bootstrap: false,
+            }
+        }
+    }
+
+    /// The actions taken and, for each ready action that needed runtime
+    /// identity, whether it confirmed the fresh warm bind or ran the full
+    /// reconcile (a second bind, the access stack and a second probe).
+    fn walk_warm_create(walk: WarmWalk) -> (Vec<CreateAction>, Vec<&'static str>) {
+        let mut env = environment("pending");
+        let mut stored = backend("ns", "", "", false);
+        let mut observed = probe(false, false);
+        let mut actions = Vec::new();
+        let mut steps = Vec::new();
+        let mut reconciled: Option<ReconciledRuntime> = None;
+        let mut fresh: Option<FreshWarmBind> = None;
+        let mut recovered = false;
+        loop {
+            let action = next_create_action(&env.state, Some(&stored), false, &observed);
+            actions.push(action);
+            assert!(actions.len() <= 10, "create did not converge: {actions:?}");
+            if create_action_requires_runtime_identity(action) {
+                let runtime = ReconciledRuntime::observe(&env, &stored, &observed);
+                match runtime_identity_step(reconciled.as_ref(), fresh.take(), &runtime, &stored) {
+                    RuntimeIdentityStep::Reuse => {}
+                    RuntimeIdentityStep::Confirm(_) => {
+                        steps.push("confirm");
+                        reconciled = Some(runtime);
+                    }
+                    RuntimeIdentityStep::Reconcile => {
+                        steps.push("reconcile");
+                        if walk.stale_bootstrap && !recovered {
+                            // Recovery restarts the Pod onto the current
+                            // bootstrap and binds the replacement; the loop
+                            // then observes it afresh.
+                            recovered = true;
+                            observed.pod_uid = "replacement-uid".into();
+                            stored.pod_uid = Some("replacement-uid".into());
+                            continue;
+                        }
+                        reconciled = Some(runtime);
+                    }
+                }
+            } else {
+                reconciled = None;
+                if !keeps_fresh_warm_bind(action) {
+                    fresh = None;
+                }
+            }
+            match action {
+                CreateAction::CreateClaim => {
+                    env.state = "creating".into();
+                    stored.claim_name = "sandbox-env".into();
+                    stored.claim_uid = "claim-uid".into();
+                    observed = probe(true, !walk.claim_ready_late);
+                    if walk.claim_ready_late {
+                        observed.pod_exists = true;
+                        observed.pod_phase = "Running".into();
+                        observed.pod_name = "sandbox-env".into();
+                        observed.pod_uid = BOUND_POD.into();
+                        observed.pod_ip = "10.0.0.5".into();
+                    }
+                    if let Some(path) = walk.bind {
+                        // The bind records the pointer; the liveness loop
+                        // stores the Pod during the access wait.
+                        stored.pod_uid = Some(BOUND_POD.into());
+                        stored.pod_name = "sandbox-env".into();
+                        stored.pod_ip = "10.0.0.5".into();
+                        fresh = FreshWarmBind::from_early_bind(early_bind(
+                            path, &env, &stored, BOUND_POD,
+                        ));
+                    }
+                    (walk.after_bind)(&mut env, &mut observed, &mut stored);
+                }
+                CreateAction::WaitForReady => observed.claim_ready = true,
+                CreateAction::StoreBackend => {
+                    stored.pod_name = observed.pod_name.clone();
+                    stored.pod_ip = observed.pod_ip.clone();
+                }
+                CreateAction::MarkRunning => {
+                    env.state = "running".into();
+                    reconciled.as_mut().unwrap().entered_running();
+                }
+                CreateAction::PublishSetup => return (actions, steps),
+                other => panic!("unexpected create action {other}"),
+            }
+        }
+    }
+
+    /// #3627: right after this attempt bound the warm member and reached it,
+    /// `mark_running` and `publish_setup` follow with only the confirmation:
+    /// no second bind, access stack or probe, also when the Claim reports
+    /// Ready one `wait_for_ready` pass later.
+    #[test]
+    fn a_fresh_warm_bind_goes_to_running_without_a_second_reconcile() {
+        use CreateAction::*;
+        let (actions, steps) = walk_warm_create(WarmWalk::default());
+        assert_eq!(actions, [CreateClaim, MarkRunning, PublishSetup]);
+        assert_eq!(steps, ["confirm"]);
+
+        let (actions, steps) = walk_warm_create(WarmWalk {
+            claim_ready_late: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            actions,
+            [CreateClaim, WaitForReady, MarkRunning, PublishSetup]
+        );
+        assert_eq!(steps, ["confirm"]);
+
+        // The confirmation applies to exactly the bound observation.
+        let env = environment("creating");
+        let mut stored = backend("ns", "sandbox-env", "10.0.0.5", false);
+        stored.claim_uid = "claim-uid".into();
+        stored.pod_uid = Some(BOUND_POD.into());
+        let mut ready = probe(true, true);
+        ready.pod_uid = BOUND_POD.into();
+        let observed = ReconciledRuntime::observe(&env, &stored, &ready);
+        let fresh =
+            FreshWarmBind::from_early_bind(early_bind(StartPath::Warm, &env, &stored, BOUND_POD))
+                .expect("a warm bind with an address qualifies");
+        assert!(matches!(
+            runtime_identity_step(None, Some(fresh), &observed, &stored),
+            RuntimeIdentityStep::Confirm(_)
+        ));
+        // Once reconciled or confirmed, later ready actions reuse it.
+        assert_eq!(
+            runtime_identity_step(Some(&observed), None, &observed, &stored),
+            RuntimeIdentityStep::Reuse
+        );
+    }
+
+    /// #3627: every other path keeps the full reconcile: a cold bind, no bind
+    /// in this attempt (a retry, a Pod some earlier attempt bound), and any
+    /// change after the bind, above all a replaced Pod.
+    #[test]
+    fn anything_but_the_freshly_bound_warm_runtime_still_reconciles() {
+        use CreateAction::*;
+        type Change = fn(&mut EnvironmentRow, &mut ProbeResult, &mut BackendRow);
+        let cases: [(&str, Option<StartPath>, Change); 9] = [
+            ("cold bind", Some(StartPath::Cold), |_, _, _| {}),
+            ("no bind in this attempt", None, |_, _, _| {}),
+            (
+                "replaced Pod",
+                Some(StartPath::Warm),
+                |_, probe, backend| {
+                    probe.pod_uid = "replacement-uid".into();
+                    backend.pod_uid = Some("replacement-uid".into());
+                },
+            ),
+            (
+                "replaced Pod not yet bound",
+                Some(StartPath::Warm),
+                |_, probe, _| {
+                    probe.pod_uid = "replacement-uid".into();
+                },
+            ),
+            (
+                "new Pod address",
+                Some(StartPath::Warm),
+                |_, probe, backend| {
+                    probe.pod_ip = "10.0.0.6".into();
+                    backend.pod_ip = "10.0.0.6".into();
+                },
+            ),
+            (
+                "binding released",
+                Some(StartPath::Warm),
+                |_, _, backend| {
+                    backend.pod_uid = None;
+                },
+            ),
+            ("new Claim", Some(StartPath::Warm), |_, _, backend| {
+                backend.claim_uid = "claim-uid-2".into();
+            }),
+            ("resized", Some(StartPath::Warm), |env, _, _| {
+                env.memory_mb = 4096
+            }),
+            ("new generation", Some(StartPath::Warm), |env, _, _| {
+                env.operation_generation = 8;
+            }),
+        ];
+        for (case, bind, after_bind) in cases {
+            let (actions, steps) = walk_warm_create(WarmWalk {
+                bind,
+                after_bind,
+                ..Default::default()
+            });
+            assert_eq!(steps, ["reconcile"], "{case}: {actions:?}");
+            assert_eq!(*actions.last().unwrap(), PublishSetup, "{case}");
+        }
+
+        // A Pod whose address the bind did not see records nothing.
+        let env = environment("creating");
+        let stored = backend("ns", "sandbox-env", "10.0.0.5", false);
+        let mut unaddressed = early_bind(StartPath::Warm, &env, &stored, BOUND_POD);
+        unaddressed.pod_ip.clear();
+        assert!(FreshWarmBind::from_early_bind(unaddressed).is_none());
+        assert!(
+            FreshWarmBind::from_early_bind(early_bind(StartPath::Cold, &env, &stored, BOUND_POD))
+                .is_none()
+        );
+        // Only a readiness wait keeps it; a resume or a new Claim drops it,
+        // and the first ready action consumes it either way.
+        assert!(keeps_fresh_warm_bind(WaitForReady));
+        for action in [ResumeWorkspace, EnsureNamespace, CreateClaim] {
+            assert!(!keeps_fresh_warm_bind(action), "{action}");
+        }
+    }
+
+    /// #3627: whatever makes the bound Pod's bootstrap stale (the check that
+    /// selects `WorkspaceBootstrapMismatch` recovery) also changes the
+    /// environment row the bind captured, so the ready action reconciles and
+    /// recovers exactly as before; with the row unchanged, the binding the
+    /// bind wrote is current by the same rule.
+    #[test]
+    fn bootstrap_mismatch_recovery_still_runs_after_a_fresh_warm_bind() {
+        use super::super::workspace_binding::pod_scope_capture;
+        let cfg = SandboxWorkerCfg {
+            credential_runtime: Some(
+                crate::sandbox::template::CredentialRuntimeTemplateConfig::synthetic("ns"),
+            ),
+            ..Default::default()
+        };
+        let mut bound_env = environment("creating");
+        bound_env.projection_selection = Ok(Some(codewire_project::PlatformProjectionSelection {
+            creator: "synthetic-creator".into(),
+            organization: "org-1".into(),
+            organization_selected: true,
+            project_id: None,
+            user_selected: false,
+            profile: Some(("98657d60-ce77-40c7-897c-6323b52e3a96".into(), 3)),
+            ordinary_keys: ["APP_MODE".into()].into(),
+            reserved_keys: codewire_project::platform_projection_reserved_keys([]).unwrap(),
+        }));
+        bound_env.managed_credential_clients =
+            Ok(codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap());
+        let mut stored = backend("ns", "sandbox-env", "10.0.0.5", false);
+        stored.claim_uid = "claim-uid".into();
+        stored.pod_uid = Some(BOUND_POD.into());
+        let mut ready = probe(true, true);
+        ready.pod_uid = BOUND_POD.into();
+        // The binding the early bind wrote for this Pod.
+        let captured = pod_scope_capture(&bound_env).unwrap();
+        let binding = EnvironmentBinding {
+            pod_uid: BOUND_POD.into(),
+            operation_generation: captured.operation_generation,
+            projection_selection_sha256: captured.projection_selection_sha256,
+            managed_credential_clients: captured.managed_credential_clients,
+            credential_scope: WorkspaceCredentialScope::Pod,
+        };
+        let opts = |env: &EnvironmentRow| {
+            environment_template_opts(&cfg, "ghcr.io/codewiresh/workspace:1", "base", env, 7)
+                .unwrap()
+        };
+        let step = |env: &EnvironmentRow| {
+            let fresh = FreshWarmBind::from_early_bind(early_bind(
+                StartPath::Warm,
+                &bound_env,
+                &stored,
+                BOUND_POD,
+            ));
+            runtime_identity_step(
+                None,
+                fresh,
+                &ReconciledRuntime::observe(env, &stored, &ready),
+                &stored,
+            )
+        };
+
+        assert!(binding_bootstrap_current(&binding, &opts(&bound_env)));
+        assert!(matches!(step(&bound_env), RuntimeIdentityStep::Confirm(_)));
+
+        let mut new_clients = bound_env.clone();
+        new_clients.managed_credential_clients =
+            Ok(codewire_access::ManagedCredentialClients::from_profile_slots(["openai"]).unwrap());
+        let mut new_selection = bound_env.clone();
+        if let Ok(Some(selection)) = new_selection.projection_selection.as_mut() {
+            selection.ordinary_keys = ["APP_MODE".into(), "APP_REGION".into()].into();
+        }
+        for (case, republished) in [
+            ("new managed clients", new_clients),
+            ("republished selection", new_selection),
+        ] {
+            assert!(
+                !binding_bootstrap_current(&binding, &opts(&republished)),
+                "{case}"
+            );
+            assert_eq!(step(&republished), RuntimeIdentityStep::Reconcile, "{case}");
+        }
+
+        // The loop: the republished row reconciles, finds the stale
+        // bootstrap, recovers onto a replacement Pod, and reconciles that.
+        let (actions, steps) = walk_warm_create(WarmWalk {
+            after_bind: |env, _, _| {
+                env.managed_credential_clients =
+                    codewire_access::ManagedCredentialClients::from_profile_slots(["github"])
+                        .map_err(|_| codewire_project::PlatformProjectionSelectionError);
+            },
+            stale_bootstrap: true,
+            ..Default::default()
+        });
+        assert_eq!(steps, ["reconcile", "reconcile"], "{actions:?}");
+        assert_eq!(
+            actions,
+            [
+                CreateAction::CreateClaim,
+                CreateAction::MarkRunning,
+                CreateAction::MarkRunning,
+                CreateAction::PublishSetup
+            ]
         );
     }
 

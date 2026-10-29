@@ -622,6 +622,16 @@ impl FakeKube {
             .collect()
     }
 
+    /// Every request served so far, as method and path.
+    fn requests(&self) -> Vec<(String, String)> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(method, path, _)| (method.clone(), path.clone()))
+            .collect()
+    }
+
     fn client(&self) -> kube::Client {
         use axum::body::{Body, to_bytes};
         use axum::http::{Request, Response, StatusCode};
@@ -2017,6 +2027,163 @@ async fn db_a_pool_born_sandbox_binds_as_its_rendering_and_then_as_its_own() -> 
         // only its first bind is a warm start.
         ensure!(outcome == WriteOutcome::Recorded && path == StartPath::Cold);
         ensure!(pointer(&db.pool, ENV_A).await?.0.as_deref() == Some(replacement_uid));
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+async fn workspace_bind_logs(pool: &PgPool, environment: &str) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM environment_logs \
+          WHERE environment_id = $1 AND phase = 'workspace_bind'",
+    )
+    .bind(environment)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// #3627: a fresh warm bind, then the create loop's first ready action. The
+/// early bind hands back exactly what it checked, the ready action observes
+/// that same runtime, and the bootstrap the full reconcile would check is
+/// current, so the action only confirms convergence and publishes the Pod's
+/// address: reads and one fenced update, with no second bind, no access
+/// stack write and no access probe. A replaced Pod takes the full reconcile,
+/// and the confirmation itself refuses it.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_fresh_warm_bind_is_confirmed_without_binding_or_applying_access_again() -> Result<()>
+{
+    use crate::worker::create::{
+        FreshWarmBind, ReconciledRuntime, RuntimeIdentityStep, confirm_fresh_warm_bind_with,
+        environment_template_opts, runtime_identity_step, workspace_bootstrap_current,
+    };
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        set_state(&db.pool, ENV_A, "creating").await?;
+        pool_shape(&db.pool, ENV_A).await?;
+        let cfg = pool_cfg();
+        let env = load_environment(&db.pool, ENV_A).await?;
+        let rendering = pool_born_rendering(&cfg, &env, NAMESPACE)?;
+        let adopted = pool_born(ENV_A, POD_1, &rendering, true);
+        adopted.update(&pod_path(ENV_A), |pod| {
+            pod["status"]["podIP"] = json!("10.0.0.5");
+        });
+        let kube = adopted.client();
+        let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
+        let early = tokio::time::timeout(
+            Duration::from_secs(5),
+            bind_before_ready(&kube, Some(&cfg), &authority, &["creating"]),
+        )
+        .await??
+        .ok_or_else(|| anyhow::anyhow!("the early bind did not record"))?;
+        ensure!(early.recorded.path == StartPath::Warm);
+        ensure!(early.observation == observed(ENV_A, POD_1) && early.pod_ip == "10.0.0.5");
+        let fresh = FreshWarmBind::from_early_bind(early)
+            .ok_or_else(|| anyhow::anyhow!("a warm bind did not qualify"))?;
+
+        // The create loop's next pass.
+        let env = load_environment(&db.pool, ENV_A).await?;
+        let backend = crate::worker::env_data::load_backend_row(&db.pool, ENV_A).await?;
+        let client = SandboxClient::new(kube.clone(), NAMESPACE);
+        let probe = client.probe_environment(ENV_A).await?;
+        let observation = ReconciledRuntime::observe(&env, &backend, &probe);
+        // What the skipped reconcile would have found: a current bootstrap.
+        let opts = environment_template_opts(
+            &cfg,
+            "registry.example.test/codewire/workspace:synthetic",
+            "workspace",
+            &env,
+            GENERATION,
+        )?;
+        let live = live_environment_binding(&db.pool, ENV_A).await?;
+        ensure!(
+            workspace_bootstrap_current(
+                &client,
+                &opts,
+                observed(ENV_A, POD_1).pod(),
+                live.as_ref()
+            )
+            .await?
+        );
+        let RuntimeIdentityStep::Confirm(fresh) =
+            runtime_identity_step(None, Some(fresh), &observation, &backend)
+        else {
+            anyhow::bail!("the freshly bound runtime was not confirmed");
+        };
+
+        let binds = workspace_bind_logs(&db.pool, ENV_A).await?;
+        ensure!(binds == 1, "{binds}");
+        let served = adopted.requests().len();
+        confirm_fresh_warm_bind_with(
+            &client,
+            &env,
+            &backend,
+            &authority,
+            &[env.state.as_str()],
+            &probe,
+            &fresh,
+        )
+        .await?;
+        let requests = adopted.requests().split_off(served);
+        ensure!(!requests.is_empty());
+        ensure!(
+            requests.iter().all(|(method, path)| method == "GET"
+                && !path.contains("/services")
+                && !path.contains("/networkpolicies")),
+            "{requests:?}"
+        );
+        ensure!(workspace_bind_logs(&db.pool, ENV_A).await? == binds);
+        ensure!(pointer(&db.pool, ENV_A).await?.0.as_deref() == Some(POD_1));
+        let stored = crate::worker::env_data::load_backend_row(&db.pool, ENV_A).await?;
+        ensure!(stored.pod_ip == "10.0.0.5" && stored.pod_name == format!("sandbox-{ENV_A}"));
+
+        // The Pod was replaced after the bind: the ready action reconciles,
+        // and a confirmation of the old observation is refused.
+        let replaced = pool_born(ENV_A, POD_2, &rendering, true);
+        replaced.update(&pod_path(ENV_A), |pod| {
+            pod["status"]["podIP"] = json!("10.0.0.5");
+        });
+        let replaced_client = SandboxClient::new(replaced.client(), NAMESPACE);
+        let replaced_probe = replaced_client.probe_environment(ENV_A).await?;
+        ensure!(replaced_probe.pod_uid == POD_2);
+        let stale = || {
+            FreshWarmBind::from_early_bind(EarlyBind {
+                recorded: RecordedBind {
+                    elapsed: Duration::from_millis(80),
+                    path: StartPath::Warm,
+                    sandbox_uid: sandbox_uid(ENV_A),
+                },
+                environment: env.clone(),
+                backend: backend.clone(),
+                observation: observed(ENV_A, POD_1),
+                pod_ip: "10.0.0.5".into(),
+            })
+            .unwrap()
+        };
+        ensure!(
+            runtime_identity_step(
+                None,
+                Some(stale()),
+                &ReconciledRuntime::observe(&env, &backend, &replaced_probe),
+                &backend,
+            ) == RuntimeIdentityStep::Reconcile
+        );
+        ensure!(
+            confirm_fresh_warm_bind_with(
+                &replaced_client,
+                &env,
+                &backend,
+                &authority,
+                &[env.state.as_str()],
+                &replaced_probe,
+                &stale(),
+            )
+            .await
+            .is_err()
+        );
+        ensure!(replaced.deletes().is_empty());
         Ok(())
     }
     .await;

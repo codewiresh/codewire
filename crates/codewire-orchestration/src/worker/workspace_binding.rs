@@ -1275,6 +1275,19 @@ pub(crate) struct RecordedBind {
     pub sandbox_uid: String,
 }
 
+/// A binding [`bind_before_ready`] recorded, with the exact inputs the
+/// recorder's checks consumed: the environment and backend rows it bound
+/// under, the observed Claim → Sandbox → Pod chain it bound, and that Pod's
+/// address as the same read saw it. The create loop compares these with its
+/// next observation (#3627); they confer no authority of their own.
+pub(crate) struct EarlyBind {
+    pub recorded: RecordedBind,
+    pub environment: EnvironmentRow,
+    pub backend: BackendRow,
+    pub observation: RuntimeIdentityObservation,
+    pub pod_ip: String,
+}
+
 /// [`record_workspace_binding`] with its environment log row
 /// (`workspace_bind`, with `duration_ms`, which A0a's stage metric reads)
 /// and its closed-category counter. A repeat for an already-bound Pod is
@@ -1402,8 +1415,8 @@ fn early_bind_poll(waited: Duration) -> Duration {
 /// through the enforced [`bind_workspace_runtime`], with every §5 check and
 /// the locked re-check of the captured values.
 ///
-/// Returns the record time and start path when this call recorded the
-/// binding, or `None` when the Pod was already bound or is a legacy Pod,
+/// Returns the recorded binding with the inputs it checked when this call
+/// recorded it, or `None` when the Pod was already bound or is a legacy Pod,
 /// which keeps the post-ready order unchanged. A refusal that can clear (labels not yet
 /// converged, a replaced Pod, an unreadable chain) is retried; any other
 /// refusal fails exactly as the post-ready bind does. The caller drops this
@@ -1414,7 +1427,7 @@ pub(crate) async fn bind_before_ready(
     cfg: Option<&SandboxWorkerCfg>,
     authority: &ActivityAuthority,
     states: &[&str],
-) -> anyhow::Result<Option<RecordedBind>> {
+) -> anyhow::Result<Option<EarlyBind>> {
     let pool = authority.pool();
     let started = tokio::time::Instant::now();
     loop {
@@ -1453,7 +1466,23 @@ pub(crate) async fn bind_before_ready(
                 )
                 .await
                 {
-                    Ok(elapsed) => return Ok(elapsed),
+                    Ok(None) => return Ok(None),
+                    Ok(Some(recorded)) => {
+                        let runtime = read.expect("the bind-ready read succeeded");
+                        let pod_ip = runtime
+                            .pod
+                            .status
+                            .as_ref()
+                            .and_then(|status| status.pod_ip.clone())
+                            .unwrap_or_default();
+                        return Ok(Some(EarlyBind {
+                            recorded,
+                            environment: env,
+                            backend,
+                            observation: runtime.observation,
+                            pod_ip,
+                        }));
+                    }
                     Err(error)
                         if matches!(
                             error.downcast_ref::<BindRefused>(),
