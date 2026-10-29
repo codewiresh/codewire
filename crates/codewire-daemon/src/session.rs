@@ -546,7 +546,7 @@ fn pty_wait_result(
 /// Input is read promptly and held in order. A burst of keystroke-sized
 /// frames, such as a fast paste or `ssh -tt host < file` at connect, is
 /// therefore never left unread in HTTP/2, whose flood guard ends the whole
-/// connection after about a hundred unread small DATA frames (#2822). Only at
+/// connection when unread small DATA frames pile up (#2822, #3688). Only at
 /// the byte bound does the session stop reading, still watching for
 /// cancellation, until the launch completes; the client then waits behind
 /// flow control rather than the launch being cancelled (#2830).

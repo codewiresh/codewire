@@ -1146,6 +1146,176 @@ mod tests {
         );
     }
 
+    /// A runtime with one worker, which [`stall`] can hold up.
+    fn one_worker_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// Hold up every task on a one-worker runtime, its HTTP/2 connection
+    /// included, until the returned sender is dropped: as a busy host delays
+    /// one side of a session while the other keeps sending.
+    fn stall(runtime: &tokio::runtime::Runtime) -> std::sync::mpsc::Sender<()> {
+        let (stalled, held) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel::<()>();
+        runtime.spawn(async move {
+            let _ = stalled.send(());
+            // Blocks the only worker on purpose.
+            let _ = resumed.recv();
+        });
+        held.recv().unwrap();
+        resume
+    }
+
+    /// Small terminal frames: one byte each, as a shell echoes keystrokes.
+    const SMALL_FRAMES: usize = 400;
+
+    fn small_frame(index: usize) -> Vec<u8> {
+        vec![b'a' + (index % 26) as u8]
+    }
+
+    fn pty_start() -> PtyStart {
+        PtyStart {
+            command: vec!["sh".into()],
+            working_dir: String::new(),
+            env: Vec::new(),
+            term: String::new(),
+            width: 80,
+            height: 24,
+        }
+    }
+
+    /// Output the client has not read yet, a byte per frame, waits for it
+    /// while the client's side is held up: the connection is kept and every
+    /// byte arrives in order (#3688). Unread small DATA frames count against
+    /// HTTP/2's flood guard, which once allowed only about a hundred.
+    #[test]
+    fn small_output_frames_queued_behind_a_busy_client_keep_the_session() {
+        let server = one_worker_runtime();
+        let client = one_worker_runtime();
+        let daemon = RecordingDaemon {
+            hold_pty_output: true,
+            ..Default::default()
+        };
+        let addr = server.block_on(spawn_recording_daemon(daemon.clone()));
+        let mut session = client.block_on(async {
+            DaemonSessionClient::connect_endpoint(
+                format!("http://{addr}"),
+                DaemonAuthToken::new("gateway-daemon-test-token").unwrap(),
+            )
+            .await
+            .unwrap()
+            .pty_session(pty_start())
+            .await
+            .unwrap()
+        });
+        let output = server.block_on(daemon.held_pty_output());
+
+        let held = stall(&client);
+        server.block_on(async {
+            let messages = (0..SMALL_FRAMES)
+                .map(|index| v1::pty_message::Payload::Stdout(small_frame(index)))
+                .chain([v1::pty_message::Payload::Exit(v1::ExitStatus { code: 0 })]);
+            for payload in messages {
+                output
+                    .send(Ok(v1::PtyMessage {
+                        payload: Some(payload),
+                    }))
+                    .await
+                    .unwrap();
+                // Each message leaves as its own DATA frame once the
+                // server has taken it.
+                while output.capacity() < output.max_capacity() {
+                    sleep(Duration::from_millis(1)).await;
+                }
+            }
+            sleep(Duration::from_millis(200)).await;
+        });
+        drop(held);
+
+        // The reader shares the client's one worker with its connection, as
+        // a busy client's tasks wait their turn.
+        let reader = client.spawn(async move {
+            timeout(Duration::from_secs(20), async {
+                let mut stdout = Vec::new();
+                loop {
+                    match session.next_output().await {
+                        Ok(Some(DaemonSessionOutput::Stdout(data))) => stdout.extend(data),
+                        Ok(Some(DaemonSessionOutput::Exit(code))) => return (stdout, Ok(code)),
+                        other => return (stdout, Err(format!("{other:?}"))),
+                    }
+                }
+            })
+            .await
+            .expect("the session ended")
+        });
+        let (stdout, exit) = client.block_on(reader).unwrap();
+        let expected: Vec<u8> = (0..SMALL_FRAMES).flat_map(small_frame).collect();
+        assert_eq!(
+            exit,
+            Ok(0),
+            "after {} of {} bytes",
+            stdout.len(),
+            expected.len()
+        );
+        assert!(stdout == expected, "the output arrived changed");
+    }
+
+    /// Input the daemon has not read yet, a byte per frame as keystrokes are
+    /// typed, waits for it while the daemon's side is held up: the
+    /// connection is kept and every byte arrives in order (#3688).
+    #[test]
+    fn small_input_frames_queued_behind_a_busy_daemon_keep_the_session() {
+        let server = one_worker_runtime();
+        let client = one_worker_runtime();
+        let daemon = RecordingDaemon {
+            hold_pty_output: true,
+            ..Default::default()
+        };
+        let addr = server.block_on(spawn_recording_daemon(daemon.clone()));
+        let session = client.block_on(async {
+            DaemonSessionClient::connect_endpoint(
+                format!("http://{addr}"),
+                DaemonAuthToken::new("gateway-daemon-test-token").unwrap(),
+            )
+            .await
+            .unwrap()
+            .pty_session(pty_start())
+            .await
+            .unwrap()
+        });
+        let _output = server.block_on(daemon.held_pty_output());
+        server.block_on(daemon.wait_for_pty_frames(1));
+
+        let held = stall(&server);
+        client.block_on(async {
+            for index in 0..SMALL_FRAMES {
+                session
+                    .send_input(PtySessionInput::Stdin(small_frame(index)))
+                    .await
+                    .unwrap();
+                // Typed one at a time, each leaves as its own DATA frame.
+                sleep(Duration::from_millis(1)).await;
+            }
+            sleep(Duration::from_millis(200)).await;
+        });
+        drop(held);
+
+        let frames = server.block_on(daemon.wait_for_pty_frames(1 + SMALL_FRAMES));
+        let stdin: Vec<u8> = frames[1..]
+            .iter()
+            .flat_map(|frame| match &frame.payload {
+                Some(v1::pty_message::Payload::Stdin(data)) => data.clone(),
+                other => panic!("unexpected input frame {other:?}"),
+            })
+            .collect();
+        let expected: Vec<u8> = (0..SMALL_FRAMES).flat_map(small_frame).collect();
+        assert!(stdin == expected, "the input arrived changed");
+    }
+
     #[tokio::test]
     async fn grpc_sessions_reject_eof_without_an_exit_frame() {
         let daemon = RecordingDaemon {
@@ -1206,7 +1376,13 @@ mod tests {
         file_requests: Arc<Mutex<RecordingFileRequests>>,
         close_exec_before_exit: bool,
         close_pty_before_exit: bool,
+        /// Hand the PTY session's output to the test instead of answering
+        /// at once.
+        hold_pty_output: bool,
+        held_pty_output: Arc<std::sync::Mutex<Option<PtyOutputSender>>>,
     }
+
+    type PtyOutputSender = tokio::sync::mpsc::Sender<Result<v1::PtyMessage, Status>>;
 
     #[derive(Clone, Default)]
     struct RecordingFileRequests {
@@ -1249,6 +1425,20 @@ mod tests {
             })
             .await
             .expect("pty frames")
+        }
+
+        /// The output of the PTY session a `hold_pty_output` daemon opened.
+        async fn held_pty_output(&self) -> PtyOutputSender {
+            timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(output) = self.held_pty_output.lock().unwrap().clone() {
+                        return output;
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("held pty output")
         }
     }
 
@@ -1428,6 +1618,10 @@ mod tests {
             });
 
             let (tx, rx) = tokio::sync::mpsc::channel(4);
+            if self.hold_pty_output {
+                *self.held_pty_output.lock().unwrap() = Some(tx);
+                return Ok(Response::new(ReceiverStream::new(rx)));
+            }
             tx.send(Ok(v1::PtyMessage {
                 payload: Some(v1::pty_message::Payload::Stdout(b"pty-out".to_vec())),
             }))
