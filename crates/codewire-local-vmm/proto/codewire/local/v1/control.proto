@@ -317,6 +317,90 @@ message SupervisorInfo {
   bytes configuration_sha256 = 2;
 }
 
+// VM checkpoints (protocol 20, Linux, #3046 R4): a running local VM's memory,
+// device state and disks at one instant, kept in the same host store as disk
+// snapshots. A VM checkpoint stays on this host; it is never exported.
+service LocalCheckpointService {
+  rpc CreateCheckpoint(CreateCheckpointRequest) returns (Checkpoint);
+  rpc ListCheckpoints(ListCheckpointsRequest) returns (ListCheckpointsResponse);
+  rpc GetCheckpoint(CheckpointSelector) returns (Checkpoint);
+  rpc DeleteCheckpoint(CheckpointSelector) returns (Checkpoint);
+}
+
+message CreateCheckpointRequest {
+  // The running source environment, by name.
+  string environment = 1;
+  // The new VM checkpoint's name, unique on this host among snapshots and
+  // VM checkpoints; never a UUID. Empty takes `<environment>-<UTC time>`.
+  string name = 2;
+  // The platform account the capturing cw is signed in to, or absent.
+  PlatformAccount account = 3;
+}
+
+// A VM checkpoint by name or ID.
+message CheckpointSelector {
+  string checkpoint = 1;
+}
+
+message ListCheckpointsRequest {
+  // Only the VM checkpoints of this environment, by name; empty lists all.
+  string environment = 1;
+}
+
+message ListCheckpointsResponse {
+  repeated Checkpoint checkpoints = 1;
+}
+
+// How long each part of a capture took, in microseconds.
+message CheckpointTimings {
+  // The guest freezing its workload.
+  uint64 guest_freeze_us = 1;
+  // From the freeze to the thaw: how long the workload stood still.
+  uint64 workload_frozen_us = 2;
+  // From vm.pause to vm.resume: how long the VM stood still.
+  uint64 vm_paused_us = 3;
+  // Writing the memory and device state.
+  uint64 memory_write_us = 4;
+  // Cloning the disks.
+  uint64 disk_clone_us = 5;
+  // The whole capture, as the supervisor saw it.
+  uint64 total_us = 6;
+}
+
+message Checkpoint {
+  string id = 1;
+  string name = 2;
+  int64 created_unix_ms = 3;
+  string source_environment_id = 4;
+  string source_name = 5;
+  // paired: exact together with its memory, crash-consistent alone.
+  string consistency = 6;
+  // Always ["local"]: a VM checkpoint never leaves this host.
+  repeated string locations = 7;
+  string architecture = 8;
+  uint32 vcpus = 9;
+  uint32 memory_mib = 10;
+  uint64 disk_bytes = 11;
+  uint64 docker_disk_bytes = 12;
+  string image = 13;
+  // The disks, as for a snapshot.
+  repeated SnapshotDisk disks = 14;
+  // The memory file's size and the bytes it holds on the host filesystem.
+  uint64 memory_bytes = 15;
+  uint64 memory_allocated_bytes = 16;
+  // The VMM the checkpoint restores only into.
+  string vmm_version = 17;
+  string vmm_sha256 = 18;
+  uint32 guest_checkpoint_abi = 19;
+  CheckpointTimings timings = 20;
+  // Restore is refused, and why: another CPU, or the pinned VMM is gone.
+  string unrestorable_reason = 21;
+  repeated string warnings = 22;
+  PlatformAccount account = 23;
+  // The source's boot generation at capture.
+  uint64 source_generation = 24;
+}
+
 service EnvironmentRunnerService {
   // Mandatory immutable compatibility fence. Supervisors call this before
   // adoption or any RPC that can observe or change runner/VM state.
@@ -346,6 +430,47 @@ service EnvironmentRunnerService {
   // Owner-only startup seam. Never waits on the main runner state mutex and
   // never admits a different or dead generation. Normal access stays Ready-only.
   rpc GetGenerationDaemonAccess(GetGenerationDaemonAccessRequest) returns (DaemonAccess);
+  // Runner protocol 10 (#3046 R4): freeze the running generation's
+  // workload, pause the VM, write its memory and device state, clone its
+  // disks, resume and thaw, into vms/<id>/checkpoints/out-<operation_id>.
+  // The supervisor takes that tree over and treats it as untrusted.
+  rpc CheckpointVm(CheckpointVmRequest) returns (CheckpointVmResponse);
+}
+
+message CheckpointVmRequest {
+  string environment_id = 1;
+  // The running boot generation; any other is refused.
+  uint64 generation = 2;
+  string operation_id = 3;
+}
+
+// The seed bindings the captured guest applied at boot, which a restore's
+// new seed must repeat exactly. Its daemon token, environment id and
+// generation are re-keyed instead.
+message CheckpointBootBindings {
+  string skill_snapshot_sha256 = 1;
+  string environment_projection_sha256 = 2;
+  string managed_credential_clients = 3;
+  bool docker = 4;
+  string cw_runtime_catalog_generation = 5;
+  uint32 daemon_vsock_port = 6;
+}
+
+message CheckpointVmResponse {
+  CheckpointTimings timings = 1;
+  uint64 memory_bytes = 2;
+  uint32 guest_checkpoint_abi = 3;
+  string vmm_version = 4;
+  string vmm_sha256 = 5;
+  uint32 vsock_cid = 6;
+  // The root generation's storage name, as StartVmRequest.root_generation.
+  string root_generation = 7;
+  // The captured boot's one-boot setup disk, when it had one: a restore
+  // attaches a placeholder of this size.
+  uint64 setup_disk_bytes = 8;
+  CheckpointBootBindings boot = 9;
+  // The checkpoint is complete but the VM did not resume; it is stopped.
+  bool resume_failed = 10;
 }
 
 message GetRunnerProtocolInfoRequest {}

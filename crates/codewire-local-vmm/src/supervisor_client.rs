@@ -632,6 +632,86 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    /// Fails with `Unimplemented` before contacting a supervisor older than
+    /// protocol 20, which has no VM checkpoints.
+    pub fn require_local_checkpoints(&self) -> Result<(), Status> {
+        if self.supports(SupervisorFeature::LocalCheckpoints) {
+            Ok(())
+        } else {
+            Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which has no VM checkpoints; `cw upgrade --vms` moves them to this cw once they are idle",
+            ))
+        }
+    }
+
+    async fn checkpoint_client(
+        &self,
+    ) -> Result<
+        v1::local_checkpoint_service_client::LocalCheckpointServiceClient<
+            tonic::transport::Channel,
+        >,
+        Status,
+    > {
+        self.require_local_checkpoints()?;
+        // Every connection keeps the original socket-derived peer pin.
+        let channel = connect_supervisor_peer(self.peer_pin.clone())
+            .await
+            .map_err(|_| Status::failed_precondition("retained native supervisor changed"))?;
+        Ok(v1::local_checkpoint_service_client::LocalCheckpointServiceClient::new(channel))
+    }
+
+    pub async fn create_checkpoint(
+        &self,
+        environment: &str,
+        name: &str,
+        account: Option<v1::PlatformAccount>,
+    ) -> Result<v1::Checkpoint, Status> {
+        Ok(self
+            .checkpoint_client()
+            .await?
+            .create_checkpoint(v1::CreateCheckpointRequest {
+                environment: environment.to_owned(),
+                name: name.to_owned(),
+                account,
+            })
+            .await?
+            .into_inner())
+    }
+
+    pub async fn list_checkpoints(&self, environment: &str) -> Result<Vec<v1::Checkpoint>, Status> {
+        Ok(self
+            .checkpoint_client()
+            .await?
+            .list_checkpoints(v1::ListCheckpointsRequest {
+                environment: environment.to_owned(),
+            })
+            .await?
+            .into_inner()
+            .checkpoints)
+    }
+
+    pub async fn get_checkpoint(&self, checkpoint: &str) -> Result<v1::Checkpoint, Status> {
+        Ok(self
+            .checkpoint_client()
+            .await?
+            .get_checkpoint(v1::CheckpointSelector {
+                checkpoint: checkpoint.to_owned(),
+            })
+            .await?
+            .into_inner())
+    }
+
+    pub async fn delete_checkpoint(&self, checkpoint: &str) -> Result<v1::Checkpoint, Status> {
+        Ok(self
+            .checkpoint_client()
+            .await?
+            .delete_checkpoint(v1::CheckpointSelector {
+                checkpoint: checkpoint.to_owned(),
+            })
+            .await?
+            .into_inner())
+    }
+
     async fn runtime_client(
         &self,
     ) -> Result<

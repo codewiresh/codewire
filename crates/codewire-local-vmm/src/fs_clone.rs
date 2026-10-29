@@ -73,7 +73,11 @@ pub(crate) fn clone_or_copy(
     Ok(mode)
 }
 
-fn reflink(source: &File, destination: &File) -> io::Result<()> {
+/// Share every extent of `source` with the empty `destination`. A VM
+/// checkpoint clones a running VM's disks this way while it is paused: the
+/// filesystem writes back the source's dirty pages first, so the clone is the
+/// disk exactly as the paused VM left it.
+pub(crate) fn reflink(source: &File, destination: &File) -> io::Result<()> {
     // SAFETY: both descriptors are live for the call; FICLONE takes the source
     // descriptor as its integer argument and writes nothing back.
     let result = unsafe {
@@ -88,6 +92,44 @@ fn reflink(source: &File, destination: &File) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+/// Whether files in `directory` can share extents: a VM checkpoint needs
+/// that, since it clones the disks while the VM is paused (#3046 R4).
+pub(crate) fn reflink_works(directory: &Path) -> io::Result<bool> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let probe = |name: &str| {
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(directory.join(name))
+    };
+    let token = uuid::Uuid::new_v4();
+    let source_name = format!(".reflink-probe-{token}-a");
+    let destination_name = format!(".reflink-probe-{token}-b");
+    let result = (|| {
+        let mut source = probe(&source_name)?;
+        source.write_all(&[0x5a; 4096])?;
+        source.sync_all()?;
+        let destination = probe(&destination_name)?;
+        match reflink(&source, &destination) {
+            Ok(()) => Ok(true),
+            Err(error) if reflink_unsupported(&error) => Ok(false),
+            Err(error) => Err(error),
+        }
+    })();
+    for name in [&source_name, &destination_name] {
+        match std::fs::remove_file(directory.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    result
 }
 
 /// Errors that mean "this filesystem cannot share extents here", not a
@@ -397,6 +439,17 @@ mod tests {
             .write_all_at(b"changed", 0)
             .unwrap();
         assert_eq!(contents(&source)[..7], [b'a'; 7]);
+    }
+
+    #[test]
+    fn the_reflink_probe_agrees_with_a_reflink_and_leaves_nothing_behind() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = sparse_source(&directory.path().join("source"));
+        let destination = new_file(&directory.path().join("destination"));
+        let works = reflink(&source, &destination).is_ok();
+        let probe = tempfile::tempdir().unwrap();
+        assert_eq!(reflink_works(probe.path()).unwrap(), works);
+        assert_eq!(std::fs::read_dir(probe.path()).unwrap().count(), 0);
     }
 
     const REFUSED_WRITE_CHILD: &str = "CODEWIRE_FS_CLONE_REFUSED_WRITE_CHILD";

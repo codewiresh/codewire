@@ -378,6 +378,25 @@ impl AdmittedArtifacts {
         Ok(())
     }
 
+    /// The guest init answers the VM checkpoint hook (#3046 R4): only a boot
+    /// of such a guest is checkpointed, and its checkpoints restored.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn require_guest_checkpoint_abi(&self) -> Result<(), ArtifactError> {
+        let init = read_canonical_initramfs_entry(&self.initramfs, b"init")?;
+        let marker = codewire_vmm_guest_probe::GUEST_CHECKPOINT_ABI_MARKER;
+        if init
+            .windows(marker.len())
+            .filter(|bytes| *bytes == marker)
+            .count()
+            != 1
+        {
+            return Err(ArtifactError::GuestCheckpointUnsupported(
+                self.initramfs.path().to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn require_live_cw_runtime_publisher(&self) -> Result<(), ArtifactError> {
         let init = read_canonical_initramfs_entry(&self.initramfs, b"init")?;
         let marker = codewire_vmm_guest_probe::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER;
@@ -405,6 +424,10 @@ pub enum ArtifactError {
         "retained boot assets do not support the current startup protocol; explicitly upgrade the environment boot assets before starting or updating cw: {0}"
     )]
     GuestSeedProtocolUnsupported(PathBuf),
+    #[error(
+        "this environment's guest has no VM checkpoint hook; restart it once with this cw's runtime to enable VM checkpoints: {0}"
+    )]
+    GuestCheckpointUnsupported(PathBuf),
     #[error(
         "this local VM runtime cannot keep codewire.yaml workspace.vm_only folders on the VM's disk; reinstall it with `cw setup --local --replace`, or set `workspace: {{vm_only: []}}`: {0}"
     )]

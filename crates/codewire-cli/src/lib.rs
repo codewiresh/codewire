@@ -463,6 +463,12 @@ enum Command {
     )]
     Snapshot(SnapshotArgs),
     #[command(
+        hide = true,
+        about = "Save, list and remove VM checkpoints of running local VMs",
+        long_about = "Save, list and remove VM checkpoints.\n\nA VM checkpoint saves a running local VM's memory, device state and disks at one instant, on this host (Linux). It holds everything the VM's memory held and is never exported.\n\n  cw checkpoint create app --name before-refactor\n  cw checkpoint ls\n  cw checkpoint inspect before-refactor\n  cw checkpoint rm before-refactor"
+    )]
+    Checkpoint(CheckpointArgs),
+    #[command(
         alias = "networks",
         about = "Manage Mesh networks for environments and nodes",
         long_about = "Manage Mesh networks for environments and nodes.\n\nChoose the Mesh with the global --cloud (Codewire Cloud Mesh, your platform's hosted Mesh) or --local (the local Mesh service from `cw mesh up`), or one endpoint with --mesh-url. Without them, the selected network's Mesh is used, else the one Mesh available. Every result names the Mesh, its endpoint and the organization."
@@ -915,6 +921,7 @@ where
         Command::Credentials(args) => handle_credentials_command(&globals, args).await,
         Command::Policy(args) => handle_policy_command(&globals, args).await,
         Command::Snapshot(args) => handle_snapshot_command(&globals, args).await,
+        Command::Checkpoint(args) => handle_checkpoint_command(&globals, args).await,
         Command::Network { command } => handle_network_command(&globals, command).await,
         Command::Mesh { command } => handle_mesh_command(&globals, command).await,
         #[cfg(target_os = "linux")]
@@ -1030,6 +1037,7 @@ fn validate_placement_scope(
             | Command::Credentials(_)
             | Command::Policy(_)
             | Command::Snapshot(_)
+            | Command::Checkpoint(_)
             | Command::Secrets(_)
             | Command::Env(_)
             | Command::Run(_)

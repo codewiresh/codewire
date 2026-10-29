@@ -1153,6 +1153,7 @@ mod linux {
             RunnerError::CwRuntimeDiskChanged => "cw-runtime-disk-changed",
             RunnerError::CwRuntime(_) => "cw-runtime",
             RunnerError::InvalidRequest => "invalid-request",
+            RunnerError::Checkpoint(_) => "checkpoint",
             RunnerError::InvalidArtifactStagingLayout => "invalid-artifact-layout",
             RunnerError::Artifact(_) => "artifact",
             RunnerError::Path(_) => "path",
@@ -3821,6 +3822,7 @@ mod linux {
             let generations_dir = vm_dir.join("generations");
             let seed_dir = vm_dir.join("seed");
             let diagnostics_dir = vm_dir.join("diagnostics");
+            let vm_dir_checkpoints = vm_dir.join("checkpoints");
             VmPaths {
                 api_socket: api_dir.join("api.sock"),
                 vsock_socket: vsock_dir.join("vsock.sock"),
@@ -3840,6 +3842,7 @@ mod linux {
                 vsock_dir,
                 disks_dir,
                 seed_dir,
+                checkpoints_dir: vm_dir_checkpoints,
                 diagnostics_dir,
             }
         }

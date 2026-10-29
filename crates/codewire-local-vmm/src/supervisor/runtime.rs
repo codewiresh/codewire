@@ -2112,6 +2112,12 @@ mod tests {
         ) -> Result<Response<v1::RunnerInfo>, Status> {
             self.forbidden()
         }
+        async fn checkpoint_vm(
+            &self,
+            _: Request<v1::CheckpointVmRequest>,
+        ) -> Result<Response<v1::CheckpointVmResponse>, Status> {
+            self.forbidden()
+        }
         type WatchRunnerStream =
             Pin<Box<dyn Stream<Item = Result<v1::RunnerEvent, Status>> + Send>>;
         async fn watch_runner(
@@ -2193,7 +2199,7 @@ mod tests {
             cw_runtime_catalog_generation: binding.bootstrap_catalog_sha256.clone(),
         };
         let service = ObservedRunnerFixture {
-            protocol: Arc::new(std::sync::atomic::AtomicU32::new(9)),
+            protocol: Arc::new(std::sync::atomic::AtomicU32::new(10)),
             info: Arc::new(std::sync::Mutex::new(info.clone())),
             reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             access_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -2233,7 +2239,7 @@ mod tests {
         assert_eq!(access.guest_port, DAEMON_VSOCK_PORT);
         assert_eq!(service.reads.load(Ordering::SeqCst), 2);
         assert_eq!(service.access_reads.load(Ordering::SeqCst), 1);
-        for protocol in [0, 8, 10] {
+        for protocol in [0, 9, 11] {
             service.protocol.store(protocol, Ordering::SeqCst);
             let reads = service.reads.load(Ordering::SeqCst);
             assert!(

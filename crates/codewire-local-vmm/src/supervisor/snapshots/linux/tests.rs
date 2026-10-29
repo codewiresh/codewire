@@ -562,6 +562,7 @@ fn reconciliation_brings_rows_and_directories_into_agreement_both_ways() {
         path
     };
     let row = |id: Uuid, name: &str, state: SnapshotState| SnapshotRow {
+        kind: crate::snapshot_store::SnapshotKind::Disk,
         id,
         name: name.to_owned(),
         state,
@@ -1163,6 +1164,7 @@ fn reconcile_holds_the_in_flight_lock_while_a_capture_finishes() {
             let worker = std::thread::spawn(move || {
                 store
                     .insert(&SnapshotRow {
+                        kind: crate::snapshot_store::SnapshotKind::Disk,
                         id,
                         name: "s1".to_owned(),
                         state: SnapshotState::Ready,
@@ -1770,4 +1772,257 @@ async fn keeping_everything_fails_when_it_cannot_list_what_is_on_disk() {
     fs::write(&blobs, b"").unwrap();
     let result = retain(&config, &mut BTreeMap::new(), &mut BTreeSet::new());
     assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// VM checkpoints in the same store (#3046 R4).
+
+/// Publish a VM checkpoint of the source, made from disk snapshot
+/// `snapshot`'s files plus `vmm/` files a VMM would have written.
+async fn publish_checkpoint(source: &Source, snapshot: &v1::Snapshot, name: &str) -> SnapshotRow {
+    let config = config(source);
+    let engine = config.engine_root();
+    let (_, disk) = ready_snapshot(&config, canonical_id(&snapshot.id).unwrap()).unwrap();
+    let operation = Uuid::new_v4();
+    let staging_name = format!("{CAPTURE_STAGING_PREFIX}{operation}");
+    let staging = snapshots_root(&engine).unwrap().path().join(&staging_name);
+    let from = snapshot_dir(source, snapshot);
+    let copy = |relative: &str| {
+        let target = staging.join(relative);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        for directory in [target.parent().unwrap(), &staging] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::copy(from.join(relative), &target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    copy("disks/state.raw");
+    let storage = disk.storage_generation().unwrap();
+    copy(&format!("root/{storage}/root.raw"));
+    fs::set_permissions(staging.join("root"), fs::Permissions::from_mode(0o700)).unwrap();
+    let vmm = staging.join("vmm");
+    fs::create_dir(&vmm).unwrap();
+    fs::set_permissions(&vmm, fs::Permissions::from_mode(0o700)).unwrap();
+    let memory_bytes = u64::from(disk.resources.memory_mib) * MIB;
+    fs::write(vmm.join("config.json"), b"{\"cpus\":{}}").unwrap();
+    fs::write(vmm.join("state.json"), b"{\"snapshot_data\":{}}").unwrap();
+    File::create(vmm.join("memory-ranges"))
+        .unwrap()
+        .set_len(memory_bytes)
+        .unwrap();
+    for file in crate::state::CHECKPOINT_VMM_FILES {
+        fs::set_permissions(vmm.join(file), fs::Permissions::from_mode(0o400)).unwrap();
+    }
+    let digest = |file: &str| format!("{:x}", Sha256::digest(fs::read(vmm.join(file)).unwrap()));
+    let mut manifest = disk.clone();
+    manifest.schema_version = CHECKPOINT_MANIFEST_SCHEMA_VERSION;
+    manifest.kind = "checkpoint".to_owned();
+    manifest.id = Uuid::new_v4();
+    manifest.name = name.to_owned();
+    manifest.consistency = Consistency::Paired;
+    manifest.removed_logins = 0;
+    manifest.checkpoint = Some(crate::supervisor::checkpoints::CheckpointManifest {
+        source_generation: 3,
+        vsock_cid: 7,
+        vmm: crate::supervisor::checkpoints::VmmPin {
+            version: "v54.0".to_owned(),
+            sha256: "c".repeat(64),
+        },
+        guest_checkpoint_abi: codewire_vmm_guest_probe::GUEST_CHECKPOINT_ABI,
+        host: crate::supervisor::checkpoints::HostIdentity {
+            cpu: "synthetic:1:2:3".to_owned(),
+            kernel_release: "6.0.0-synthetic".to_owned(),
+        },
+        memory_bytes,
+        config_sha256: digest("config.json"),
+        state_sha256: digest("state.json"),
+        setup_disk_bytes: None,
+        boot: crate::supervisor::checkpoints::BootBindings {
+            skill_snapshot_sha256: None,
+            environment_projection_sha256: None,
+            managed_credential_clients: codewire_access::ManagedCredentialClients::default()
+                .encode()
+                .to_owned(),
+            docker: false,
+            cw_runtime_catalog_generation: None,
+            daemon_vsock_port: 7777,
+        },
+        timings: crate::supervisor::checkpoints::Timings::default(),
+    });
+    let store = store(&config).unwrap();
+    publish(&config, &store, staging_name, &manifest, &mut || {})
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn checkpoints_and_snapshots_share_the_store_but_not_their_commands() {
+    let source = source(StoredEnvironmentState::Stopped);
+    let config = config(&source);
+    let snapshot = capture_named(&source, "s1").await.unwrap();
+    let row = publish_checkpoint(&source, &snapshot, "c1").await;
+    assert_eq!(
+        row.kind,
+        SnapshotKind::Checkpoint {
+            source_environment_id: source.environment.id
+        }
+    );
+    // One name space: a snapshot cannot take a checkpoint's name.
+    assert_eq!(
+        capture_named(&source, "c1").await.unwrap_err().code(),
+        tonic::Code::AlreadyExists
+    );
+    // Each command family sees only its own kind.
+    assert_eq!(
+        list(&config)
+            .unwrap()
+            .into_iter()
+            .map(|snapshot| snapshot.name)
+            .collect::<Vec<_>>(),
+        ["s1"]
+    );
+    let checkpoints = list_ready(&config, true).unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].0.name, "c1");
+    assert!(
+        get(&config, "c1")
+            .unwrap_err()
+            .message()
+            .contains("is a VM checkpoint")
+    );
+    assert!(delete(&config, "c1").is_err());
+    assert!(
+        find_ready(&config, "s1", true)
+            .unwrap_err()
+            .message()
+            .contains("is a disk snapshot")
+    );
+    // A snapshot restore never takes a checkpoint.
+    assert!(matches!(
+        ready_snapshot(&config, row.id),
+        Err(SupervisorError::NotFound(_))
+    ));
+    assert_eq!(
+        store(&config)
+            .unwrap()
+            .checkpoint_count(source.environment.id)
+            .unwrap(),
+        1
+    );
+    let removed = delete_ready(&config, "c1", true, |row, _| Ok(row.name.clone())).unwrap();
+    assert_eq!(removed, "c1");
+    assert!(list_ready(&config, true).unwrap().is_empty());
+    assert!(
+        !config
+            .engine_root()
+            .join("snapshots")
+            .join(row.id.to_string())
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn a_checkpoint_survives_the_loss_of_the_store_only_with_its_own_vmm_files() {
+    let source = source(StoredEnvironmentState::Stopped);
+    let config = config(&source);
+    let snapshot = capture_named(&source, "s1").await.unwrap();
+    let kept = publish_checkpoint(&source, &snapshot, "c1").await;
+    let tampered = publish_checkpoint(&source, &snapshot, "c2").await;
+    // c2's state file no longer matches its manifest.
+    let state = config
+        .engine_root()
+        .join("snapshots")
+        .join(tampered.id.to_string())
+        .join("vmm/state.json");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&state, b"{\"changed\":true}").unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o400)).unwrap();
+    forget_store(&config);
+    for file in [crate::snapshot_store::DATABASE_FILE, RETENTION_FILE] {
+        fs::remove_file(config.root.join(file)).unwrap();
+    }
+    let adopted = list_ready(&config, true).unwrap();
+    assert_eq!(adopted.len(), 1);
+    assert_eq!(adopted[0].0, {
+        let mut row = kept.clone();
+        row.created_unix_ms = adopted[0].0.created_unix_ms;
+        row
+    });
+    assert!(adopted[0].0.kind.is_checkpoint());
+}
+
+#[tokio::test]
+async fn a_deleted_environment_takes_its_checkpoints_with_it() {
+    let source = source(StoredEnvironmentState::Stopped);
+    let config = config(&source);
+    let snapshot = capture_named(&source, "s1").await.unwrap();
+    publish_checkpoint(&source, &snapshot, "c1").await;
+    publish_checkpoint(&source, &snapshot, "c2").await;
+    crate::supervisor::checkpoints::retire_for_environment(
+        &source.service.supervisor,
+        source.environment.id,
+    )
+    .await
+    .unwrap();
+    assert!(list_ready(&config, true).unwrap().is_empty());
+    // The disk snapshot stays; a replay changes nothing.
+    assert_eq!(list(&config).unwrap().len(), 1);
+    crate::supervisor::checkpoints::retire_for_environment(
+        &source.service.supervisor,
+        source.environment.id,
+    )
+    .await
+    .unwrap();
+}
+
+#[test]
+fn a_checkpoint_manifest_must_name_its_own_kind_and_memory() {
+    let mut checkpoint = crate::supervisor::checkpoints::CheckpointManifest {
+        source_generation: 1,
+        vsock_cid: 3,
+        vmm: crate::supervisor::checkpoints::VmmPin {
+            version: "v54.0".to_owned(),
+            sha256: "a".repeat(64),
+        },
+        guest_checkpoint_abi: codewire_vmm_guest_probe::GUEST_CHECKPOINT_ABI,
+        host: crate::supervisor::checkpoints::HostIdentity {
+            cpu: "x".to_owned(),
+            kernel_release: String::new(),
+        },
+        memory_bytes: 512 * MIB,
+        config_sha256: "b".repeat(64),
+        state_sha256: "c".repeat(64),
+        setup_disk_bytes: None,
+        boot: crate::supervisor::checkpoints::BootBindings {
+            skill_snapshot_sha256: None,
+            environment_projection_sha256: Some("d".repeat(64)),
+            managed_credential_clients: codewire_access::ManagedCredentialClients::default()
+                .encode()
+                .to_owned(),
+            docker: true,
+            cw_runtime_catalog_generation: None,
+            daemon_vsock_port: 7777,
+        },
+        timings: crate::supervisor::checkpoints::Timings::default(),
+    };
+    checkpoint.validate(512).unwrap();
+    assert!(checkpoint.validate(1024).is_err());
+    for broken in [
+        |c: &mut crate::supervisor::checkpoints::CheckpointManifest| c.source_generation = 0,
+        |c: &mut crate::supervisor::checkpoints::CheckpointManifest| c.vsock_cid = 2,
+        |c: &mut crate::supervisor::checkpoints::CheckpointManifest| c.guest_checkpoint_abi = 99,
+        |c: &mut crate::supervisor::checkpoints::CheckpointManifest| {
+            c.vmm.sha256 = "short".to_owned()
+        },
+        |c: &mut crate::supervisor::checkpoints::CheckpointManifest| {
+            c.boot.managed_credential_clients = "bogus".to_owned()
+        },
+        |c: &mut crate::supervisor::checkpoints::CheckpointManifest| c.setup_disk_bytes = Some(0),
+    ] {
+        let mut changed = checkpoint.clone();
+        broken(&mut changed);
+        assert!(changed.validate(512).is_err());
+    }
+    checkpoint.setup_disk_bytes = Some(MIB);
+    checkpoint.validate(512).unwrap();
 }

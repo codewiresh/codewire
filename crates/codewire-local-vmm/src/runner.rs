@@ -92,6 +92,9 @@ use crate::state::{
     publish_seed, valid_root_generation,
 };
 
+#[cfg(target_os = "linux")]
+mod checkpoint;
+
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 // Guest cleanup can drain daemon, workspace, Docker and network for five
 // seconds each before sync/reboot. One overall bound includes RPC dispatch.
@@ -320,6 +323,7 @@ impl CloudHypervisorRunner {
         }
         .with_docker_disk(docker_disk.as_ref().map(|_| paths.docker_disk.clone()))?
         .with_cw_runtime_disk(cw_runtime_disk.as_ref().map(|disk| disk.path.clone()))?
+        .with_checkpoint_dir(Some(paths.checkpoints_dir.clone()))?
         .with_virtiofs(
             direct_shares
                 .iter()
@@ -5300,6 +5304,8 @@ pub enum RunnerError {
     CwRuntime(#[from] CwRuntimeError),
     #[error("invalid VM create request")]
     InvalidRequest,
+    #[error("VM checkpoint: {0}")]
+    Checkpoint(&'static str),
     #[error(
         "artifact lock and artifact directory must be siblings beneath one canonical private parent"
     )]
@@ -5508,6 +5514,7 @@ impl RunnerError {
             Self::CwRuntimeDiskChanged => "cw_runtime_disk_changed",
             Self::CwRuntime(_) => "cw_runtime",
             Self::InvalidRequest => "invalid_request",
+            Self::Checkpoint(_) => "checkpoint",
             Self::InvalidArtifactStagingLayout => "invalid_artifact_staging_layout",
             Self::Artifact(_) => "artifact",
             Self::Path(_) => "path",

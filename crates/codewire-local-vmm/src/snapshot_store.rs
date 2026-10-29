@@ -1,4 +1,4 @@
-//! The host's local disk snapshot index (#3046 R1).
+//! The host's local disk snapshot and VM checkpoint index (#3046 R1, R4).
 //!
 //! Each snapshot is a directory of disk copies and a manifest under
 //! `engine/snapshots/<id>`; this store names them. It is its own SQLite file
@@ -9,6 +9,11 @@
 //! runtime artifact generation and the content its root generation and
 //! workspace plan reference. The rows and directories are reconciled with
 //! each other when the supervisor first uses the store (`supervisor::snapshots`).
+//!
+//! A VM checkpoint (R4) is a row too, sharing the one name space, the limit
+//! and the reconciliation; its row in `checkpoints` names its source
+//! environment, for the per-environment limit and for deleting it with its
+//! source.
 
 // Snapshots are Linux only, so most of this module is unused on other
 // targets.
@@ -30,13 +35,14 @@ use crate::supervisor_metadata::{valid_environment_name, valid_sha256};
 
 pub(crate) const DATABASE_FILE: &str = "snapshots.db";
 const APPLICATION_ID: i64 = 0x4357_534e; // "CWSN"
-/// 1: snapshots. 2: capture intents.
-const SCHEMA_VERSION: i64 = 2;
+/// 1: snapshots. 2: capture intents. 3: VM checkpoints.
+const SCHEMA_VERSION: i64 = 3;
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-/// The most snapshots one host keeps.
+/// The most snapshots and VM checkpoints one host keeps.
 pub(crate) const MAX_SNAPSHOTS: usize = 256;
 
-const SCHEMA: [(&str, &str); 2] = [
+/// Ordered by name, as the schema check reads them.
+const SCHEMA: [(&str, &str); 3] = [
     // A capture about to publish `snapshots/<id>`: a directory with an
     // intent and no row is a capture that never finished, which may go. A
     // directory with neither is a snapshot whose row was lost, rebuilt from
@@ -46,6 +52,14 @@ const SCHEMA: [(&str, &str); 2] = [
         "CREATE TABLE capture_intents (
   id TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 36),
   created_unix_ms INTEGER NOT NULL
+) STRICT",
+    ),
+    // The rows that are VM checkpoints, and the environment each captured.
+    (
+        "checkpoints",
+        "CREATE TABLE checkpoints (
+  id TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 36),
+  source_environment_id TEXT NOT NULL CHECK (length(source_environment_id) = 36)
 ) STRICT",
     ),
     (
@@ -112,9 +126,23 @@ pub(crate) struct Retained {
     pub(crate) content: BTreeMap<Sha256Digest, u64>,
 }
 
+/// A disk snapshot, or a VM checkpoint of one environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotKind {
+    Disk,
+    Checkpoint { source_environment_id: Uuid },
+}
+
+impl SnapshotKind {
+    pub(crate) fn is_checkpoint(self) -> bool {
+        matches!(self, Self::Checkpoint { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SnapshotRow {
     pub(crate) id: Uuid,
+    pub(crate) kind: SnapshotKind,
     pub(crate) name: String,
     pub(crate) state: SnapshotState,
     pub(crate) created_unix_ms: i64,
@@ -164,19 +192,22 @@ impl SnapshotStore {
             }
             transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        } else if application_id == APPLICATION_ID && user_version == 1 {
+        } else if application_id == APPLICATION_ID && (user_version == 1 || user_version == 2) {
             // Version 1 came in two shapes: the snapshots table alone, and
             // later with capture_intents too, still stamped 1. Add the
             // intents only where they are missing, in the transaction that
             // decided it holds version 1; the exact schema is validated
             // after.
-            let intents: i64 = transaction.query_row(
-                "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-                params![SCHEMA[0].0],
-                |row| row.get(0),
-            )?;
-            if intents == 0 {
-                transaction.execute_batch(&format!("{};", SCHEMA[0].1))?;
+            // Version 2 adds nothing to migrate but the checkpoints table.
+            for (name, statement) in [SCHEMA[0], SCHEMA[1]] {
+                let present: i64 = transaction.query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                    params![name],
+                    |row| row.get(0),
+                )?;
+                if present == 0 {
+                    transaction.execute_batch(&format!("{statement};"))?;
+                }
             }
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -280,6 +311,15 @@ impl SnapshotStore {
                     .map_err(|_| SnapshotStoreError::InvalidDatabase)?,
             ],
         )?;
+        if let SnapshotKind::Checkpoint {
+            source_environment_id,
+        } = row.kind
+        {
+            transaction.execute(
+                "INSERT INTO checkpoints(id, source_environment_id) VALUES (?1, ?2)",
+                params![row.id.to_string(), source_environment_id.to_string()],
+            )?;
+        }
         transaction.execute(
             "DELETE FROM capture_intents WHERE id = ?1",
             params![row.id.to_string()],
@@ -288,13 +328,24 @@ impl SnapshotStore {
         Ok(())
     }
 
+    /// How many VM checkpoints `environment_id` has, deleting ones included.
+    pub(crate) fn checkpoint_count(
+        &self,
+        environment_id: Uuid,
+    ) -> Result<usize, SnapshotStoreError> {
+        let count: i64 = self.connection().query_row(
+            "SELECT count(*) FROM checkpoints WHERE source_environment_id = ?1",
+            params![environment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
     /// Every snapshot, by name.
     pub(crate) fn list(&self) -> Result<Vec<SnapshotRow>, SnapshotStoreError> {
         let connection = self.connection();
-        let mut statement = connection.prepare(
-            "SELECT id, name, state, created_unix_ms, manifest_sha256, retained
-             FROM snapshots ORDER BY name",
-        )?;
+        let mut statement =
+            connection.prepare(&format!("{SELECT_ROWS} ORDER BY snapshots.name"))?;
         let rows = statement
             .query_map([], read_row)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -315,10 +366,7 @@ impl SnapshotStore {
         };
         let row = connection
             .query_row(
-                &format!(
-                    "SELECT id, name, state, created_unix_ms, manifest_sha256, retained
-                     FROM snapshots WHERE {column} = ?1"
-                ),
+                &format!("{SELECT_ROWS} WHERE snapshots.{column} = ?1"),
                 params![selector],
                 read_row,
             )
@@ -337,10 +385,17 @@ impl SnapshotStore {
     }
 
     pub(crate) fn remove(&self, id: Uuid) -> Result<(), SnapshotStoreError> {
-        self.connection().execute(
+        let mut connection = self.connection();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "DELETE FROM checkpoints WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        transaction.execute(
             "DELETE FROM snapshots WHERE id = ?1",
             params![id.to_string()],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -375,6 +430,12 @@ fn now_unix_ms() -> i64 {
 
 fn valid_row(row: &SnapshotRow) -> bool {
     !row.id.is_nil()
+        && !matches!(
+            row.kind,
+            SnapshotKind::Checkpoint {
+                source_environment_id
+            } if source_environment_id.is_nil()
+        )
         && valid_environment_name(&row.name)
         && valid_sha256(&row.manifest_sha256)
         && row
@@ -384,6 +445,12 @@ fn valid_row(row: &SnapshotRow) -> bool {
             .all(|generation| valid_sha256(generation))
 }
 
+/// Every row, with its VM checkpoint source when it is one.
+const SELECT_ROWS: &str = "SELECT snapshots.id, snapshots.name, snapshots.state,
+  snapshots.created_unix_ms, snapshots.manifest_sha256, snapshots.retained,
+  checkpoints.source_environment_id
+ FROM snapshots LEFT JOIN checkpoints ON checkpoints.id = snapshots.id";
+
 /// `None` for a row this cw did not write.
 fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SnapshotRow>> {
     let id: String = row.get(0)?;
@@ -392,9 +459,17 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SnapshotRow>> {
     let created_unix_ms: i64 = row.get(3)?;
     let manifest_sha256: String = row.get(4)?;
     let retained: String = row.get(5)?;
+    let source: Option<String> = row.get(6)?;
     let parsed = (|| {
+        let kind = match source {
+            None => SnapshotKind::Disk,
+            Some(source) => SnapshotKind::Checkpoint {
+                source_environment_id: Uuid::parse_str(&source).ok().filter(|id| !id.is_nil())?,
+            },
+        };
         let snapshot = SnapshotRow {
             id: Uuid::parse_str(&id).ok().filter(|id| !id.is_nil())?,
+            kind,
             name,
             state: SnapshotState::parse(&state)?,
             created_unix_ms,
@@ -449,6 +524,7 @@ mod tests {
     fn row(name: &str) -> SnapshotRow {
         SnapshotRow {
             id: Uuid::new_v4(),
+            kind: SnapshotKind::Disk,
             name: name.to_owned(),
             state: SnapshotState::Ready,
             created_unix_ms: 1,
@@ -518,18 +594,53 @@ mod tests {
     }
 
     #[test]
+    fn checkpoints_share_the_name_space_and_are_counted_by_source() {
+        let store = SnapshotStore::in_memory().unwrap();
+        let source = Uuid::new_v4();
+        let mut checkpoint = row("c1");
+        checkpoint.kind = SnapshotKind::Checkpoint {
+            source_environment_id: source,
+        };
+        store.insert(&checkpoint).unwrap();
+        store.insert(&row("s1")).unwrap();
+        let mut clash = row("c1");
+        clash.kind = SnapshotKind::Disk;
+        assert!(matches!(
+            store.insert(&clash),
+            Err(SnapshotStoreError::AlreadyExists(_))
+        ));
+        assert_eq!(store.find("c1").unwrap().unwrap(), checkpoint);
+        assert_eq!(store.find("s1").unwrap().unwrap().kind, SnapshotKind::Disk);
+        assert_eq!(store.checkpoint_count(source).unwrap(), 1);
+        assert_eq!(store.checkpoint_count(Uuid::new_v4()).unwrap(), 0);
+        store.remove(checkpoint.id).unwrap();
+        assert_eq!(store.checkpoint_count(source).unwrap(), 0);
+        assert_eq!(store.list().unwrap().len(), 1);
+        let mut nil = row("c2");
+        nil.kind = SnapshotKind::Checkpoint {
+            source_environment_id: Uuid::nil(),
+        };
+        assert!(store.insert(&nil).is_err());
+    }
+
+    #[test]
     fn a_version_one_store_gains_capture_intents_and_keeps_its_rows() {
         // The first version 1: the snapshots table alone.
-        version_one_store_migrates(&[SCHEMA[1].1]);
+        older_store_migrates(&[SCHEMA[2].1], 1);
     }
 
     #[test]
     fn a_version_one_store_that_already_has_capture_intents_migrates() {
         // The later version 1: both tables, still stamped 1.
-        version_one_store_migrates(&[SCHEMA[0].1, SCHEMA[1].1]);
+        older_store_migrates(&[SCHEMA[0].1, SCHEMA[2].1], 1);
     }
 
-    fn version_one_store_migrates(statements: &[&str]) {
+    #[test]
+    fn a_version_two_store_gains_checkpoints_and_keeps_its_rows() {
+        older_store_migrates(&[SCHEMA[0].1, SCHEMA[2].1], 2);
+    }
+
+    fn older_store_migrates(statements: &[&str], version: i64) {
         let parent = tempfile::tempdir().unwrap();
         let path = parent.path().join("runtime");
         std::fs::create_dir(&path).unwrap();
@@ -554,7 +665,9 @@ mod tests {
             connection
                 .pragma_update(None, "application_id", APPLICATION_ID)
                 .unwrap();
-            connection.pragma_update(None, "user_version", 1).unwrap();
+            connection
+                .pragma_update(None, "user_version", version)
+                .unwrap();
             connection
                 .execute(
                     "INSERT INTO snapshots(id, name, state, created_unix_ms, manifest_sha256, retained)
@@ -584,9 +697,15 @@ mod tests {
         );
         store.record_intent(Uuid::new_v4()).unwrap();
         assert_eq!(store.intents().unwrap().len(), kept + 1);
+        let mut checkpoint = row("c1");
+        checkpoint.kind = SnapshotKind::Checkpoint {
+            source_environment_id: Uuid::new_v4(),
+        };
+        store.insert(&checkpoint).unwrap();
         drop(store);
-        // Reopening finds version 2 and validates it.
-        SnapshotStore::open(&root).unwrap();
+        // Reopening finds the current version and validates it.
+        let reopened = SnapshotStore::open(&root).unwrap();
+        assert_eq!(reopened.find("c1").unwrap().unwrap(), checkpoint);
     }
 
     #[test]

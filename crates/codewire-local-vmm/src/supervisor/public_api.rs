@@ -93,6 +93,11 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
         "/codewire.local.v1.LocalSnapshotService/{*method}",
         v1::local_snapshot_service_server::LocalSnapshotServiceServer::new(supervisor.clone()),
     );
+    // VM checkpoints (#3046 R4, protocol 20).
+    let router = router.route_service(
+        "/codewire.local.v1.LocalCheckpointService/{*method}",
+        v1::local_checkpoint_service_server::LocalCheckpointServiceServer::new(supervisor.clone()),
+    );
     router
         .route_service(
             PRIVATE_SUPERVISOR_ROUTE,

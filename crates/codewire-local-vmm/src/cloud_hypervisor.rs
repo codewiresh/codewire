@@ -21,7 +21,6 @@ const FORBIDDEN_FLAGS: &[&str] = &[
     "--device",
     "--firmware",
     "--generic-vhost-user",
-    "--landlock-rules",
     "--memory-zone",
     "--net",
     "--numa",
@@ -48,6 +47,8 @@ const ALLOWED_FLAG_COUNTS: &[(&str, usize)] = &[
     ("--rng", 1),
     ("--seccomp", 1),
     ("--landlock", 1),
+    // Exactly the VM's own checkpoint directory, when it has one (#3046 R4).
+    ("--landlock-rules", 1),
 ];
 
 #[derive(Clone, PartialEq, Eq)]
@@ -70,6 +71,9 @@ pub struct CloudHypervisorConfig {
     pub vcpus: u8,
     pub memory_mib: u32,
     pub virtiofs: Vec<VirtioFsConfig>,
+    /// `vms/<id>/checkpoints`, the one directory Landlock lets the VMM write
+    /// into, where it writes VM checkpoints (#3046 R4).
+    pub checkpoint_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,6 +104,7 @@ impl fmt::Debug for CloudHypervisorConfig {
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
             .field("virtiofs_count", &self.virtiofs.len())
+            .field("checkpoint_dir", &self.checkpoint_dir)
             .finish()
     }
 }
@@ -205,9 +210,28 @@ impl CloudHypervisorConfig {
             vcpus,
             memory_mib,
             virtiofs: Vec::new(),
+            checkpoint_dir: None,
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// Let the VMM write VM checkpoints into `directory` and nothing else.
+    pub fn with_checkpoint_dir(
+        mut self,
+        directory: Option<PathBuf>,
+    ) -> Result<Self, CloudHypervisorConfigError> {
+        self.checkpoint_dir = directory;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// The `--landlock-rules` value for the checkpoint directory.
+    fn landlock_rule(&self) -> Result<Option<String>, CloudHypervisorConfigError> {
+        self.checkpoint_dir
+            .as_deref()
+            .map(|directory| Ok(format!("path={},access=rw", display(directory)?)))
+            .transpose()
     }
 
     pub fn with_virtiofs(
@@ -434,6 +458,13 @@ impl CloudHypervisorConfig {
         // `--landlock-rules` broadening is permitted. This is defense in depth;
         // same-UID host processes and the host kernel remain trusted.
         arguments.push(OsString::from("--landlock"));
+        // The one broadening: the VMM may write VM checkpoints into its own
+        // private checkpoint directory (#3046 R4). Everything it writes there
+        // is input to the supervisor, never trusted.
+        let landlock_rule = self.landlock_rule()?;
+        if let Some(rule) = &landlock_rule {
+            push_option(&mut arguments, "--landlock-rules", rule);
+        }
 
         let command = CommandSpec {
             program: self.executable.clone(),
@@ -443,6 +474,7 @@ impl CloudHypervisorConfig {
                 + usize::from(self.setup_disk.is_some())
                 + usize::from(self.cw_runtime_disk.is_some()),
             expected_fs_count: self.virtiofs.len(),
+            landlock_rule,
         };
         command.validate_allowlist()?;
         Ok(command)
@@ -472,6 +504,9 @@ impl CloudHypervisorConfig {
             paths.push(runtime.as_path());
         }
         paths.extend(self.virtiofs.iter().map(|share| share.socket.as_path()));
+        if let Some(directory) = &self.checkpoint_dir {
+            paths.push(directory.as_path());
+        }
         paths
     }
 }
@@ -482,6 +517,7 @@ pub struct CommandSpec {
     arguments: Vec<OsString>,
     expected_disk_count: usize,
     expected_fs_count: usize,
+    landlock_rule: Option<String>,
 }
 
 impl fmt::Debug for CommandSpec {
@@ -510,6 +546,7 @@ impl CommandSpec {
             arguments: Vec::new(),
             expected_disk_count: 3,
             expected_fs_count: 0,
+            landlock_rule: None,
         }
     }
 
@@ -520,6 +557,7 @@ impl CommandSpec {
             arguments,
             expected_disk_count: 3,
             expected_fs_count: 0,
+            landlock_rule: None,
         }
     }
 
@@ -554,6 +592,9 @@ impl CommandSpec {
                 if flag == "--seccomp" && value != "true" {
                     return Err(CloudHypervisorConfigError::InvalidSeccompValue);
                 }
+                if flag == "--landlock-rules" && self.landlock_rule.as_deref() != Some(value) {
+                    return Err(CloudHypervisorConfigError::ForbiddenDevice(flag.to_owned()));
+                }
                 index += 1;
             }
         }
@@ -561,6 +602,7 @@ impl CommandSpec {
             let expected_count = match *required {
                 "--disk" => self.expected_disk_count,
                 "--fs" => self.expected_fs_count,
+                "--landlock-rules" => usize::from(self.landlock_rule.is_some()),
                 _ => *expected_count,
             };
             let actual_count = counts.get(required).copied().unwrap_or_default();
@@ -704,6 +746,57 @@ mod tests {
                 && argument.contains("readonly=on")
                 && argument.contains("lock_granularity=full")
         }));
+    }
+
+    #[test]
+    fn the_checkpoint_directory_is_the_one_landlock_rule() {
+        let command = config().command().unwrap();
+        assert!(
+            !command
+                .arguments()
+                .iter()
+                .any(|argument| argument == "--landlock-rules")
+        );
+        let with_rule = config()
+            .with_checkpoint_dir(Some("/state/checkpoints".into()))
+            .unwrap();
+        let command = with_rule.command().unwrap();
+        let args = command
+            .arguments()
+            .iter()
+            .map(|argument| argument.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--landlock-rules", "path=/state/checkpoints,access=rw"])
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|argument| **argument == "--landlock-rules")
+                .count(),
+            1
+        );
+        // Another rule, or a second one, is refused.
+        let mut arguments = command.arguments().to_vec();
+        let index = arguments
+            .iter()
+            .position(|argument| argument == "path=/state/checkpoints,access=rw")
+            .unwrap();
+        arguments[index] = "path=/,access=rw".into();
+        let mut tampered = command.clone();
+        tampered.arguments = arguments;
+        assert!(tampered.validate_allowlist().is_err());
+        let mut doubled = command.clone();
+        doubled.arguments.extend([
+            OsString::from("--landlock-rules"),
+            OsString::from("path=/state/checkpoints,access=rw"),
+        ]);
+        assert!(doubled.validate_allowlist().is_err());
+        assert!(
+            config()
+                .with_checkpoint_dir(Some("relative".into()))
+                .is_err()
+        );
     }
 
     #[test]

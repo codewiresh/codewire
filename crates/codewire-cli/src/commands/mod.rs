@@ -2663,6 +2663,7 @@ pub(crate) enum OutputFormat {
     Text,
 }
 
+mod checkpoint;
 mod collaboration;
 mod core;
 mod current_environment;
@@ -2683,6 +2684,7 @@ mod snapshot;
 mod ssh_trust;
 mod storage_placement;
 
+pub(crate) use checkpoint::*;
 pub(crate) use collaboration::*;
 pub(crate) use core::*;
 pub(crate) use current_environment::{handle_current_command, handle_use_command};

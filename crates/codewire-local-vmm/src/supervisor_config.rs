@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 19;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 20;
 /// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
 /// update, a supervisor in [minimum, current] keeps serving its VMs; only an
 /// idle older one is replaced (`supervisor_upgrade`).
@@ -61,6 +61,10 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         19,
         "local disk snapshots (#3046, Linux): LocalSnapshotService (CreateSnapshot, ListSnapshots, GetSnapshot, DeleteSnapshot) and CreateEnvironmentRequest.snapshot; an older supervisor would refuse a create journaled from a snapshot as an invalid replay",
     ),
+    (
+        20,
+        "VM checkpoints (#3046 R4, Linux): LocalCheckpointService (CreateCheckpoint, ListCheckpoints, GetCheckpoint, DeleteCheckpoint), runner protocol 10 (CheckpointVm), snapshots.db schema 3; an older supervisor cannot open the store after this one migrated it",
+    ),
 ];
 
 /// A supervisor capability newer than the minimum protocol.
@@ -76,15 +80,18 @@ pub enum SupervisorFeature {
     NetworkPolicySelection,
     /// Local disk snapshots and creating environments from them.
     LocalSnapshots,
+    /// VM checkpoints of running local VMs.
+    LocalCheckpoints,
 }
 
 impl SupervisorFeature {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Retire,
         Self::Ssh,
         Self::NetworkPolicies,
         Self::NetworkPolicySelection,
         Self::LocalSnapshots,
+        Self::LocalCheckpoints,
     ];
 
     /// The protocol that introduced it.
@@ -95,6 +102,7 @@ impl SupervisorFeature {
             Self::NetworkPolicies => 16,
             Self::NetworkPolicySelection => 17,
             Self::LocalSnapshots => 19,
+            Self::LocalCheckpoints => 20,
         }
     }
 }
@@ -385,7 +393,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 19);
+        assert_eq!(info.protocol_version, 20);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

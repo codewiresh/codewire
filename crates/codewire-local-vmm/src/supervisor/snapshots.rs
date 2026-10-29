@@ -33,7 +33,7 @@
 use super::*;
 use crate::control::v1::local_snapshot_service_server::LocalSnapshotService;
 use crate::snapshot_store::{
-    Retained, SnapshotRow, SnapshotState, SnapshotStore, SnapshotStoreError,
+    Retained, SnapshotKind, SnapshotRow, SnapshotState, SnapshotStore, SnapshotStoreError,
 };
 
 #[cfg(target_os = "linux")]
@@ -43,8 +43,10 @@ const SNAPSHOTS_DIRECTORY: &str = "snapshots";
 const TRASH_DIRECTORY: &str = "trash";
 const MANIFEST_FILE: &str = "manifest.json";
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
+/// A VM checkpoint's manifest: schema 1 plus its `checkpoint` object.
+pub(in crate::supervisor) const CHECKPOINT_MANIFEST_SCHEMA_VERSION: u32 = 2;
 const MAXIMUM_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
-const CAPTURE_STAGING_PREFIX: &str = ".staging-";
+pub(in crate::supervisor) const CAPTURE_STAGING_PREFIX: &str = ".staging-";
 const RESTORE_STAGING_PREFIX: &str = ".restore-";
 /// `trash/snapshot-delete-<operation>-<id>`, which the orphan inventory knows.
 pub(crate) const TRASH_PREFIX: &str = "snapshot-delete-";
@@ -66,7 +68,7 @@ const LINUX_ONLY: &str = "local disk snapshots need a Linux host for now";
 /// Where a disk came from and goes back to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum DiskRole {
+pub(in crate::supervisor) enum DiskRole {
     State,
     Docker,
     Root,
@@ -84,83 +86,89 @@ impl DiskRole {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Consistency {
+pub(in crate::supervisor) enum Consistency {
     /// The guest shut its filesystems down cleanly.
     Clean,
     /// What a power loss would have left, as after a forced stop.
     Crash,
+    /// A VM checkpoint's disks: exact together with its memory, and
+    /// crash-consistent alone.
+    Paired,
 }
 
 impl Consistency {
-    fn as_str(self) -> &'static str {
+    pub(in crate::supervisor) fn as_str(self) -> &'static str {
         match self {
             Self::Clean => "clean",
             Self::Crash => "crash",
+            Self::Paired => "paired",
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManifestSource {
-    environment_id: Uuid,
-    name: String,
+pub(in crate::supervisor) struct ManifestSource {
+    pub(in crate::supervisor) environment_id: Uuid,
+    pub(in crate::supervisor) name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManifestResources {
-    vcpus: u8,
-    memory_mib: u32,
-    disk_bytes: u64,
-    docker_disk_bytes: u64,
+pub(in crate::supervisor) struct ManifestResources {
+    pub(in crate::supervisor) vcpus: u8,
+    pub(in crate::supervisor) memory_mib: u32,
+    pub(in crate::supervisor) disk_bytes: u64,
+    pub(in crate::supervisor) docker_disk_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManifestDisk {
-    role: DiskRole,
-    bytes: u64,
+pub(in crate::supervisor) struct ManifestDisk {
+    pub(in crate::supervisor) role: DiskRole,
+    pub(in crate::supervisor) bytes: u64,
     /// `reflink` or `copy`.
-    mode: String,
+    pub(in crate::supervisor) mode: String,
     /// The disk's ext4 UUID, which every copy of it keeps.
-    filesystem_uuid: Uuid,
+    pub(in crate::supervisor) filesystem_uuid: Uuid,
 }
 
 /// How the source was created, which a restore's request names again exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SourceInputs {
-    source_path: String,
-    implicit_path_mode: String,
-    implicit_vm_only: Vec<String>,
+pub(in crate::supervisor) struct SourceInputs {
+    pub(in crate::supervisor) source_path: String,
+    pub(in crate::supervisor) implicit_path_mode: String,
+    pub(in crate::supervisor) implicit_vm_only: Vec<String>,
 }
 
 /// Recorded from the source as information only: a restore derives every
 /// one of these again from its own request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RecordedAuthority {
-    platform_source_authority: Option<PlatformSourceAuthority>,
-    access_profile_reference: String,
-    cw_runtime_catalog_generation: Option<String>,
-    host_ports: Vec<HostPortBinding>,
-    mesh: Option<MeshAttachment>,
-    network_policy: String,
+pub(in crate::supervisor) struct RecordedAuthority {
+    pub(in crate::supervisor) platform_source_authority: Option<PlatformSourceAuthority>,
+    pub(in crate::supervisor) access_profile_reference: String,
+    pub(in crate::supervisor) cw_runtime_catalog_generation: Option<String>,
+    pub(in crate::supervisor) host_ports: Vec<HostPortBinding>,
+    pub(in crate::supervisor) mesh: Option<MeshAttachment>,
+    pub(in crate::supervisor) network_policy: String,
 }
 
 /// A signed-in platform account: server, organization and user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PlatformAccount {
-    server_url: String,
-    organization_id: String,
-    user_id: String,
+pub(in crate::supervisor) struct PlatformAccount {
+    pub(in crate::supervisor) server_url: String,
+    pub(in crate::supervisor) organization_id: String,
+    pub(in crate::supervisor) user_id: String,
 }
 
 impl PlatformAccount {
     /// The account a request names, validated; `None` when it names none.
-    fn from_proto(account: Option<&v1::PlatformAccount>) -> Result<Option<Self>, Status> {
+    pub(in crate::supervisor) fn from_proto(
+        account: Option<&v1::PlatformAccount>,
+    ) -> Result<Option<Self>, Status> {
         let Some(account) = account else {
             return Ok(None);
         };
@@ -187,7 +195,7 @@ impl PlatformAccount {
         }))
     }
 
-    fn proto(&self) -> v1::PlatformAccount {
+    pub(in crate::supervisor) fn proto(&self) -> v1::PlatformAccount {
         v1::PlatformAccount {
             server_url: self.server_url.clone(),
             organization_id: self.organization_id.clone(),
@@ -196,50 +204,65 @@ impl PlatformAccount {
     }
 }
 
-/// `manifest.json`, schema 1. It never holds credential material, the seed or
-/// Mesh state.
+/// `manifest.json`, schema 1, or 2 for a VM checkpoint. It never holds
+/// credential material, the seed or Mesh state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Manifest {
-    schema_version: u32,
-    kind: String,
-    id: Uuid,
-    name: String,
-    created_unix_ms: i64,
-    source: ManifestSource,
-    consistency: Consistency,
-    locations: Vec<String>,
-    architecture: String,
-    resources: ManifestResources,
-    disks: Vec<ManifestDisk>,
-    project_spec_json: String,
-    project_spec_sha256: String,
-    workspace_plan: WorkspacePlan,
-    root_generation: WorkspaceGenerationRecord,
+pub(in crate::supervisor) struct Manifest {
+    pub(in crate::supervisor) schema_version: u32,
+    pub(in crate::supervisor) kind: String,
+    pub(in crate::supervisor) id: Uuid,
+    pub(in crate::supervisor) name: String,
+    pub(in crate::supervisor) created_unix_ms: i64,
+    pub(in crate::supervisor) source: ManifestSource,
+    pub(in crate::supervisor) consistency: Consistency,
+    pub(in crate::supervisor) locations: Vec<String>,
+    pub(in crate::supervisor) architecture: String,
+    pub(in crate::supervisor) resources: ManifestResources,
+    pub(in crate::supervisor) disks: Vec<ManifestDisk>,
+    pub(in crate::supervisor) project_spec_json: String,
+    pub(in crate::supervisor) project_spec_sha256: String,
+    pub(in crate::supervisor) workspace_plan: WorkspacePlan,
+    pub(in crate::supervisor) root_generation: WorkspaceGenerationRecord,
     /// The source's direct-share admission discriminators, which a restore
     /// journals so a folder swapped since is refused at its boot.
-    direct_share_discriminators: String,
-    source_inputs: SourceInputs,
-    recorded: RecordedAuthority,
+    pub(in crate::supervisor) direct_share_discriminators: String,
+    pub(in crate::supervisor) source_inputs: SourceInputs,
+    pub(in crate::supervisor) recorded: RecordedAuthority,
     /// The platform account the capturing cw was signed in to, if any. A
     /// restore signed in to another one is refused.
-    platform_account: Option<PlatformAccount>,
-    removed_logins: u32,
-    capture_milliseconds: u64,
+    pub(in crate::supervisor) platform_account: Option<PlatformAccount>,
+    pub(in crate::supervisor) removed_logins: u32,
+    pub(in crate::supervisor) capture_milliseconds: u64,
+    /// What makes a VM checkpoint: present exactly when `kind` is
+    /// `checkpoint` (#3046 R4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::supervisor) checkpoint: Option<super::checkpoints::CheckpointManifest>,
 }
 
 impl Manifest {
-    fn validate(&self, id: Uuid) -> Result<(), SupervisorError> {
+    pub(in crate::supervisor) fn validate(&self, id: Uuid) -> Result<(), SupervisorError> {
         self.root_generation.validate()?;
         self.workspace_plan.validate()?;
+        let kind_valid = match (self.kind.as_str(), &self.checkpoint) {
+            ("disk", None) => {
+                self.schema_version == MANIFEST_SCHEMA_VERSION
+                    && self.consistency != Consistency::Paired
+            }
+            ("checkpoint", Some(checkpoint)) => {
+                self.schema_version == CHECKPOINT_MANIFEST_SCHEMA_VERSION
+                    && self.consistency == Consistency::Paired
+                    && checkpoint.validate(self.resources.memory_mib).is_ok()
+            }
+            _ => false,
+        };
         let roles = self.disks.iter().map(|disk| disk.role).collect::<Vec<_>>();
         let expected = if self.resources.docker_disk_bytes == 0 {
             vec![DiskRole::State, DiskRole::Root]
         } else {
             vec![DiskRole::State, DiskRole::Docker, DiskRole::Root]
         };
-        if self.schema_version != MANIFEST_SCHEMA_VERSION
-            || self.kind != "disk"
+        if !kind_valid
             || self.id != id
             || !valid_environment_name(&self.name)
             || self.locations != ["local"]
@@ -269,16 +292,26 @@ impl Manifest {
         Ok(())
     }
 
+    /// The store row kind this manifest describes.
+    pub(in crate::supervisor) fn row_kind(&self) -> SnapshotKind {
+        match self.checkpoint {
+            Some(_) => SnapshotKind::Checkpoint {
+                source_environment_id: self.source.environment_id,
+            },
+            None => SnapshotKind::Disk,
+        }
+    }
+
     fn disk(&self, role: DiskRole) -> Option<&ManifestDisk> {
         self.disks.iter().find(|disk| disk.role == role)
     }
 
-    fn storage_generation(&self) -> Result<String, SupervisorError> {
+    pub(in crate::supervisor) fn storage_generation(&self) -> Result<String, SupervisorError> {
         workspace_storage_generation(&self.root_generation).map_err(Into::into)
     }
 
     /// What collection keeps so this snapshot still boots.
-    fn retained(&self) -> Result<Retained, SupervisorError> {
+    pub(in crate::supervisor) fn retained(&self) -> Result<Retained, SupervisorError> {
         let mut content = BTreeMap::new();
         retain_image_content(&mut content, &self.root_generation.image)?;
         retain_workspace_plan_content(&mut content, &self.workspace_plan)?;
@@ -297,7 +330,9 @@ impl Manifest {
 static STORES: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<SnapshotStore>>>> =
     std::sync::OnceLock::new();
 
-fn store(config: &NativeRuntimeConfig) -> Result<Arc<SnapshotStore>, SupervisorError> {
+pub(in crate::supervisor) fn store(
+    config: &NativeRuntimeConfig,
+) -> Result<Arc<SnapshotStore>, SupervisorError> {
     let mut stores = STORES
         .get_or_init(Default::default)
         .lock()
@@ -341,10 +376,10 @@ fn in_flight() -> std::sync::MutexGuard<'static, BTreeSet<String>> {
 }
 
 /// One name in flight until dropped.
-struct InFlight(String);
+pub(in crate::supervisor) struct InFlight(String);
 
 impl InFlight {
-    fn new(name: String) -> Self {
+    pub(in crate::supervisor) fn new(name: String) -> Self {
         in_flight().insert(name.clone());
         Self(name)
     }
@@ -413,7 +448,7 @@ fn retained_cache() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Retained>
 /// Record what collection must keep: every row's retention, plus `extra`,
 /// a snapshot about to be inserted. Called before an insert (with it) and
 /// after every change, so the record never keeps less than the store.
-fn publish_retention(
+pub(in crate::supervisor) fn publish_retention(
     config: &NativeRuntimeConfig,
     store: &SnapshotStore,
     extra: Option<&Retained>,
@@ -433,14 +468,14 @@ fn publish_retention(
     Ok(())
 }
 
-fn store_error(error: SnapshotStoreError) -> SupervisorError {
+pub(in crate::supervisor) fn store_error(error: SnapshotStoreError) -> SupervisorError {
     match error {
         SnapshotStoreError::Path(error) => SupervisorError::Path(error),
         _ => SupervisorError::InvalidState,
     }
 }
 
-fn store_status(error: SnapshotStoreError) -> Status {
+pub(in crate::supervisor) fn store_status(error: SnapshotStoreError) -> Status {
     match error {
         SnapshotStoreError::AlreadyExists(_) => Status::already_exists(error.to_string()),
         SnapshotStoreError::TooManySnapshots => Status::resource_exhausted(error.to_string()),
@@ -452,7 +487,9 @@ fn status(error: SupervisorError) -> Status {
     Status::from(error)
 }
 
-fn snapshots_root(engine_root: &Path) -> Result<PrivateRoot, SupervisorError> {
+pub(in crate::supervisor) fn snapshots_root(
+    engine_root: &Path,
+) -> Result<PrivateRoot, SupervisorError> {
     let engine = PrivateRoot::open(engine_root)?;
     let path = engine.ensure_dir(Path::new(SNAPSHOTS_DIRECTORY), 0o700)?;
     Ok(PrivateRoot::open(&path)?)
@@ -464,7 +501,7 @@ fn trash_root(engine_root: &Path) -> Result<PrivateRoot, SupervisorError> {
     Ok(PrivateRoot::open(&path)?)
 }
 
-fn now_unix_ms() -> i64 {
+pub(in crate::supervisor) fn now_unix_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| {
@@ -472,7 +509,7 @@ fn now_unix_ms() -> i64 {
         })
 }
 
-fn canonical_id(value: &str) -> Option<Uuid> {
+pub(in crate::supervisor) fn canonical_id(value: &str) -> Option<Uuid> {
     Uuid::parse_str(value)
         .ok()
         .filter(|id| !id.is_nil() && id.to_string() == value)
@@ -1101,13 +1138,16 @@ mod linux {
         let row = store(config)?
             .find(&id.to_string())
             .map_err(store_error)?
-            .filter(|row| row.state == SnapshotState::Ready)
+            .filter(|row| row.state == SnapshotState::Ready && row.kind == SnapshotKind::Disk)
             .ok_or_else(|| SupervisorError::NotFound(id.to_string()))?;
         let manifest = read_manifest(&config.engine_root(), &row)?;
         Ok((row, manifest))
     }
 
-    fn read_manifest(engine_root: &Path, row: &SnapshotRow) -> Result<Manifest, SupervisorError> {
+    pub(in crate::supervisor) fn read_manifest(
+        engine_root: &Path,
+        row: &SnapshotRow,
+    ) -> Result<Manifest, SupervisorError> {
         let snapshots = snapshots_root(engine_root)?;
         let directory = snapshots.open_private_directory(Path::new(&row.id.to_string()), 0o700)?;
         let opened =
@@ -1129,7 +1169,7 @@ mod linux {
         let manifest: Manifest =
             serde_json::from_slice(&bytes).map_err(|_| SupervisorError::InvalidState)?;
         manifest.validate(row.id)?;
-        if manifest.name != row.name {
+        if manifest.name != row.name || manifest.row_kind() != row.kind {
             return Err(SupervisorError::InvalidState);
         }
         Ok(manifest)
@@ -1204,6 +1244,7 @@ mod linux {
                 ))
             })?;
         let manifest = Manifest {
+            checkpoint: None,
             schema_version: MANIFEST_SCHEMA_VERSION,
             kind: "disk".to_owned(),
             id: snapshot_id,
@@ -1264,30 +1305,54 @@ mod linux {
             removed_logins,
             capture_milliseconds: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         };
-        manifest.validate(snapshot_id).map_err(status)?;
+        let staging_name = copied.staging_name.clone();
+        let row = publish(
+            &supervisor.config,
+            &store,
+            staging_name,
+            &manifest,
+            &mut || cleanup.disarm(),
+        )
+        .await?;
+        snapshot_proto(&supervisor.config.engine_root(), &row, &manifest, true).map_err(status)
+    }
+
+    /// Publish the complete staging tree `staging_name` under `manifest`'s
+    /// id and name it in the store: a capture intent first, the retention
+    /// collection must keep, the manifest and one rename, then the row.
+    /// `published` runs once the tree has its final name.
+    pub(in crate::supervisor) async fn publish(
+        config: &NativeRuntimeConfig,
+        store: &SnapshotStore,
+        staging_name: String,
+        manifest: &Manifest,
+        published: &mut (dyn FnMut() + Send),
+    ) -> Result<SnapshotRow, Status> {
+        let id = manifest.id;
+        manifest.validate(id).map_err(status)?;
         let retained = manifest.retained().map_err(status)?;
-        let bytes = serde_json::to_vec_pretty(&manifest)
+        let bytes = serde_json::to_vec_pretty(manifest)
             .map_err(|_| status(SupervisorError::InvalidState))?;
-        let engine_root = supervisor.config.engine_root();
+        let engine_root = config.engine_root();
         let manifest_sha256 = format!("{:x}", Sha256::digest(&bytes));
         let publish_root = engine_root.clone();
-        let staging_name = copied.staging_name.clone();
         // Before the directory is named: a directory with an intent and no
         // row is a capture that never finished. Collection keeps the new
         // snapshot's roots from here.
-        store.record_intent(snapshot_id).map_err(store_status)?;
-        publish_retention(&supervisor.config, &store, Some(&retained)).map_err(status)?;
+        store.record_intent(id).map_err(store_status)?;
+        publish_retention(config, store, Some(&retained)).map_err(status)?;
         tokio::task::spawn_blocking(move || {
-            publish_capture(&publish_root, &staging_name, snapshot_id, &bytes)
+            publish_capture(&publish_root, &staging_name, id, &bytes)
         })
         .await
         .map_err(|_| Status::internal("snapshot publication task failed"))?
         .map_err(status)?;
-        cleanup.disarm();
+        published();
         test_hook(&engine_root, "capture-published");
         let row = SnapshotRow {
-            id: snapshot_id,
-            name: snapshot_name,
+            id,
+            kind: manifest.row_kind(),
+            name: manifest.name.clone(),
             state: SnapshotState::Ready,
             created_unix_ms: manifest.created_unix_ms,
             manifest_sha256,
@@ -1296,14 +1361,14 @@ mod linux {
         if let Err(error) = store.insert(&row) {
             // Published but not named: nothing can refer to it, so it goes,
             // here or at the next call's reconciliation.
-            if remove_published(&engine_root, snapshot_id, Uuid::new_v4()).is_ok() {
-                let _ = store.remove_intent(snapshot_id);
+            if remove_published(&engine_root, id, Uuid::new_v4()).is_ok() {
+                let _ = store.remove_intent(id);
             }
-            let _ = publish_retention(&supervisor.config, &store, None);
+            let _ = publish_retention(config, store, None);
             return Err(store_status(error));
         }
-        publish_retention(&supervisor.config, &store, None).map_err(status)?;
-        snapshot_proto(&engine_root, &row, &manifest, true).map_err(status)
+        publish_retention(config, store, None).map_err(status)?;
+        Ok(row)
     }
 
     /// The source, stopped with no staged change, once its idle runner is
@@ -1389,7 +1454,9 @@ mod linux {
     }
 
     /// The source's request inputs, recovered from its workspace plan.
-    fn source_inputs(environment: &EnvironmentRecord) -> Result<SourceInputs, SupervisorError> {
+    pub(in crate::supervisor) fn source_inputs(
+        environment: &EnvironmentRecord,
+    ) -> Result<SourceInputs, SupervisorError> {
         let project: codewire_project::ProjectSpec = serde_json::from_slice(
             environment
                 .project_spec_json
@@ -2788,46 +2855,74 @@ mod linux {
     // Listing, inspection and deletion.
 
     pub(super) fn list(config: &NativeRuntimeConfig) -> Result<Vec<v1::Snapshot>, Status> {
+        let engine_root = config.engine_root();
+        list_ready(config, false)?
+            .iter()
+            .map(|(row, manifest)| {
+                snapshot_proto(&engine_root, row, manifest, false).map_err(status)
+            })
+            .collect()
+    }
+
+    /// Every ready disk snapshot, or every ready VM checkpoint, with its
+    /// verified manifest.
+    pub(in crate::supervisor) fn list_ready(
+        config: &NativeRuntimeConfig,
+        checkpoints: bool,
+    ) -> Result<Vec<(SnapshotRow, Manifest)>, Status> {
         let store = store(config).map_err(status)?;
         let engine_root = config.engine_root();
         settle(config, &store).map_err(status)?;
-        let mut snapshots = Vec::new();
+        let mut ready = Vec::new();
         for row in store.list().map_err(store_status)? {
-            if row.state != SnapshotState::Ready {
+            if row.state != SnapshotState::Ready || row.kind.is_checkpoint() != checkpoints {
                 continue;
             }
             let manifest = read_manifest(&engine_root, &row).map_err(status)?;
-            snapshots.push(snapshot_proto(&engine_root, &row, &manifest, false).map_err(status)?);
+            ready.push((row, manifest));
         }
-        Ok(snapshots)
+        Ok(ready)
     }
 
     pub(super) fn get(
         config: &NativeRuntimeConfig,
         selector: &str,
     ) -> Result<v1::Snapshot, Status> {
-        let (row, manifest) = find_ready(config, selector)?;
+        let (row, manifest) = find_ready(config, selector, false)?;
         snapshot_proto(&config.engine_root(), &row, &manifest, true).map_err(status)
     }
 
-    fn find_ready(
+    /// The ready disk snapshot, or VM checkpoint, `selector` names.
+    pub(in crate::supervisor) fn find_ready(
         config: &NativeRuntimeConfig,
         selector: &str,
+        checkpoint: bool,
     ) -> Result<(SnapshotRow, Manifest), Status> {
-        let not_found = || {
-            Status::not_found(format!(
-                "no local snapshot is named {selector}; list them with `cw snapshot ls`"
-            ))
+        let (noun, list) = if checkpoint {
+            ("VM checkpoint", "cw checkpoint ls")
+        } else {
+            ("snapshot", "cw snapshot ls")
         };
         if selector.is_empty() {
-            return Err(Status::invalid_argument("name a snapshot"));
+            return Err(Status::invalid_argument(format!("name a {noun}")));
         }
         let row = store(config)
             .map_err(status)?
             .find(selector)
             .map_err(store_status)?
             .filter(|row| row.state == SnapshotState::Ready)
-            .ok_or_else(not_found)?;
+            .ok_or_else(|| {
+                Status::not_found(format!(
+                    "no local {noun} is named {selector}; list them with `{list}`"
+                ))
+            })?;
+        if row.kind.is_checkpoint() != checkpoint {
+            return Err(Status::failed_precondition(if checkpoint {
+                format!("{selector} is a disk snapshot; use `cw snapshot` for it")
+            } else {
+                format!("{selector} is a VM checkpoint; use `cw checkpoint` for it")
+            }));
+        }
         let manifest = read_manifest(&config.engine_root(), &row).map_err(status)?;
         Ok((row, manifest))
     }
@@ -2840,17 +2935,36 @@ mod linux {
         selector: &str,
     ) -> Result<v1::Snapshot, Status> {
         let engine_root = config.engine_root();
+        delete_ready(config, selector, false, |row, manifest| {
+            snapshot_proto(&engine_root, row, manifest, false).map_err(status)
+        })
+    }
+
+    /// Delete the ready disk snapshot, or VM checkpoint, `selector` names,
+    /// as [`delete`] does; `describe` runs on it before anything changes.
+    pub(in crate::supervisor) fn delete_ready<T>(
+        config: &NativeRuntimeConfig,
+        selector: &str,
+        checkpoint: bool,
+        describe: impl FnOnce(&SnapshotRow, &Manifest) -> Result<T, Status>,
+    ) -> Result<T, Status> {
+        let engine_root = config.engine_root();
         let store = store(config).map_err(status)?;
         // A delete an earlier call left unfinished is settled first.
         settle(config, &store).map_err(status)?;
-        let (row, manifest) = find_ready(config, selector)?;
+        let (row, manifest) = find_ready(config, selector, checkpoint)?;
+        let noun = if checkpoint {
+            "VM checkpoint"
+        } else {
+            "snapshot"
+        };
         let Some(_in_flight) = InFlight::try_new(row.id.to_string()) else {
             return Err(Status::failed_precondition(format!(
-                "snapshot {} is being created or removed; try again when that finishes",
+                "{noun} {} is being created or removed; try again when that finishes",
                 row.name
             )));
         };
-        let proto = snapshot_proto(&engine_root, &row, &manifest, false).map_err(status)?;
+        let proto = describe(&row, &manifest)?;
         let snapshots = snapshots_root(&engine_root).map_err(status)?;
         let directory = snapshots
             .open_private_directory(Path::new(&row.id.to_string()), 0o700)
@@ -2864,7 +2978,7 @@ mod linux {
         })?;
         flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|_| {
             Status::failed_precondition(format!(
-                "an environment is being created from snapshot {}; remove it once that finishes",
+                "an environment is being created from {noun} {}; remove it once that finishes",
                 row.name
             ))
         })?;
@@ -2878,7 +2992,7 @@ mod linux {
             unmark_directory_deleting(&directory).map_err(status)?;
             return Err(match marked {
                 Err(error) => store_status(error),
-                Ok(_) => Status::not_found(format!("no local snapshot is named {selector}")),
+                Ok(_) => Status::not_found(format!("no local {noun} is named {selector}")),
             });
         }
         drop(directory);
@@ -2945,7 +3059,7 @@ mod linux {
         fs::symlink_metadata(directory.join(DELETING_MARKER)).is_ok()
     }
 
-    pub(super) fn snapshot_proto(
+    pub(in crate::supervisor) fn snapshot_proto(
         engine_root: &Path,
         row: &SnapshotRow,
         manifest: &Manifest,
@@ -3087,7 +3201,7 @@ mod linux {
     }
 
     /// [`reconcile`], then publish retention again if it adopted anything.
-    pub(super) fn settle(
+    pub(in crate::supervisor) fn settle(
         config: &NativeRuntimeConfig,
         store: &SnapshotStore,
     ) -> Result<(), SupervisorError> {
@@ -3269,8 +3383,14 @@ mod linux {
                 return Ok(false);
             }
         }
+        if let Some(checkpoint) = &manifest.checkpoint
+            && !checkpoint.files_match(directory.path())
+        {
+            return Ok(false);
+        }
         let row = SnapshotRow {
             id,
+            kind: manifest.row_kind(),
             name: manifest.name.clone(),
             state: SnapshotState::Ready,
             created_unix_ms: manifest.created_unix_ms,
@@ -3284,7 +3404,7 @@ mod linux {
     /// exact layout, opening every directory and file without following a
     /// link: only the files and directories a snapshot holds. An unexpected
     /// object leaves its directory, and the tree, for the orphan inventory.
-    pub(super) fn remove_snapshot_tree(tree: &Path) -> io::Result<()> {
+    pub(in crate::supervisor) fn remove_snapshot_tree(tree: &Path) -> io::Result<()> {
         let (Some(parent), Some(name)) = (tree.parent(), tree.file_name()) else {
             return Err(io::Error::other("a snapshot tree has no parent"));
         };
@@ -3299,6 +3419,14 @@ mod linux {
             .map_err(path_io)?;
         remove_member(&root, MANIFEST_FILE)?;
         remove_member(&root, DELETING_MARKER)?;
+        if let Some(vmm) = optional_member_directory(&root, "vmm")? {
+            for name in crate::state::CHECKPOINT_VMM_FILES {
+                remove_member(&vmm, name)?;
+            }
+            drop(vmm);
+            root.remove_empty_private_directory(Path::new("vmm"))
+                .map_err(path_io)?;
+        }
         remove_disks(&root)?;
         remove_generations(&root, "root")?;
         if let Some(vm) = optional_member_directory(&root, "vm")? {
@@ -3382,3 +3510,8 @@ mod linux {
 
 #[cfg(target_os = "linux")]
 use linux::{capture, delete, get, list, place_snapshot_tree, ready_snapshot, reconcile};
+#[cfg(target_os = "linux")]
+pub(in crate::supervisor) use linux::{
+    delete_ready, find_ready, list_ready, publish, remove_snapshot_tree, settle, snapshot_proto,
+    source_inputs,
+};

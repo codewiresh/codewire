@@ -138,6 +138,40 @@ impl ChApiClient {
             .map(|_| ())
     }
 
+    /// Stops every vCPU and drains in-flight block requests (#3046 R4).
+    pub async fn pause(&self) -> Result<(), ChApiError> {
+        self.expect_success(Method::Put, Endpoint::VmPause, &[])
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn resume(&self) -> Result<(), ChApiError> {
+        self.expect_success(Method::Put, Endpoint::VmResume, &[])
+            .await
+            .map(|_| ())
+    }
+
+    /// Writes a paused VM's configuration, device state and memory into the
+    /// existing directory `destination`. Writing the memory takes about a
+    /// second per few GiB, so it has its own bound.
+    pub async fn snapshot(&self, destination: &Path, timeout: Duration) -> Result<(), ChApiError> {
+        if !destination.is_absolute() {
+            return Err(ChApiError::EncodeRequest);
+        }
+        let destination = destination.to_str().ok_or(ChApiError::EncodeRequest)?;
+        let body = serde_json::to_vec(&serde_json::json!({
+            "destination_url": format!("file://{destination}"),
+        }))
+        .map_err(|_| ChApiError::EncodeRequest)?;
+        let response = self
+            .request_within(Method::Put, Endpoint::VmSnapshot, &body, timeout)
+            .await?;
+        if !(200..300).contains(&response.status) {
+            return Err(ChApiError::HttpStatus(response.status));
+        }
+        Ok(())
+    }
+
     /// Exercise Cloud Hypervisor's native Landlock boundary without exposing
     /// a general-purpose hotplug method. A successful response is always an
     /// error: the requested path is deliberately outside the admitted VM tree.
@@ -191,6 +225,17 @@ impl ChApiClient {
         endpoint: Endpoint,
         body: &[u8],
     ) -> Result<HttpResponse, ChApiError> {
+        self.request_within(method, endpoint, body, self.request_timeout)
+            .await
+    }
+
+    async fn request_within(
+        &self,
+        method: Method,
+        endpoint: Endpoint,
+        body: &[u8],
+        request_timeout: Duration,
+    ) -> Result<HttpResponse, ChApiError> {
         if body.len() > MAX_BODY_BYTES {
             return Err(ChApiError::EncodeRequest);
         }
@@ -202,7 +247,7 @@ impl ChApiClient {
                 .map_err(|_| ChApiError::Connect)?;
 
         let request = build_request(method, endpoint, body);
-        tokio::time::timeout(self.request_timeout, async {
+        tokio::time::timeout(request_timeout, async {
             stream
                 .write_all(&request)
                 .await
@@ -247,6 +292,9 @@ enum Endpoint {
     VmInfo,
     VmShutdown,
     VmAddDisk,
+    VmPause,
+    VmResume,
+    VmSnapshot,
 }
 
 impl Endpoint {
@@ -256,6 +304,9 @@ impl Endpoint {
             Self::VmInfo => "/api/v1/vm.info",
             Self::VmShutdown => "/api/v1/vm.shutdown",
             Self::VmAddDisk => "/api/v1/vm.add-disk",
+            Self::VmPause => "/api/v1/vm.pause",
+            Self::VmResume => "/api/v1/vm.resume",
+            Self::VmSnapshot => "/api/v1/vm.snapshot",
         }
     }
 }
@@ -394,6 +445,56 @@ mod tests {
         assert_eq!(info.memory_actual_size, Some(536_870_912));
         let request = captured.lock().await;
         assert!(request.starts_with(b"GET /api/v1/vm.info HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_calls_use_their_endpoints() {
+        for (call, path) in [
+            ("pause", "vm.pause"),
+            ("resume", "vm.resume"),
+            ("snapshot", "vm.snapshot"),
+        ] {
+            let (_temp, socket, captured) =
+                fake_api(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n").await;
+            let client = ChApiClient::new(socket).unwrap();
+            match call {
+                "pause" => client.pause().await.unwrap(),
+                "resume" => client.resume().await.unwrap(),
+                _ => client
+                    .snapshot(
+                        Path::new("/vm/checkpoints/out-1/vmm"),
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    .unwrap(),
+            }
+            let request = String::from_utf8(captured.lock().await.clone()).unwrap();
+            assert!(
+                request.starts_with(&format!("PUT /api/v1/{path} HTTP/1.1\r\n")),
+                "{request}"
+            );
+            if call == "snapshot" {
+                assert!(
+                    request.ends_with(r#"{"destination_url":"file:///vm/checkpoints/out-1/vmm"}"#),
+                    "{request}"
+                );
+            }
+        }
+        let (_temp, socket, _) =
+            fake_api(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n\r\n[]").await;
+        assert!(matches!(
+            ChApiClient::new(socket).unwrap().pause().await,
+            Err(ChApiError::HttpStatus(500))
+        ));
+        let (_temp, socket, _) =
+            fake_api(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n").await;
+        assert!(matches!(
+            ChApiClient::new(socket)
+                .unwrap()
+                .snapshot(Path::new("relative"), Duration::from_secs(1))
+                .await,
+            Err(ChApiError::EncodeRequest)
+        ));
     }
 
     #[tokio::test]

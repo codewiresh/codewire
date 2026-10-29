@@ -5,6 +5,7 @@
 //! credentials never are.
 
 mod bootstrap;
+mod checkpoints;
 mod metadata;
 mod network_policies;
 mod runtime;
@@ -5689,6 +5690,7 @@ impl Supervisor {
                         }
                         DeletionTreeLocation::Trash(_) | DeletionTreeLocation::Missing => {}
                     }
+                    checkpoints::retire_for_environment(self, environment_id).await?;
                     operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::MoveToTrash => {
@@ -11298,6 +11300,13 @@ mod tests {
         ) -> Result<Response<v1::DaemonAccess>, Status> {
             self.unexpected_use()
         }
+
+        async fn checkpoint_vm(
+            &self,
+            _request: Request<v1::CheckpointVmRequest>,
+        ) -> Result<Response<v1::CheckpointVmResponse>, Status> {
+            self.unexpected_use()
+        }
     }
 
     fn spawn_test_runner_protocol_server(
@@ -11452,7 +11461,7 @@ mod tests {
         );
         let live = child.capture(&executable);
         let service = TestRunnerProtocolService {
-            reply: TestRunnerProtocolReply::Version(9),
+            reply: TestRunnerProtocolReply::Version(10),
             useful_calls: Arc::new(AtomicUsize::new(0)),
             shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
             info_gate: None,
@@ -11491,7 +11500,7 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = parent.path().join("unresponsive.sock");
         let (identity, calls, stop, server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(9));
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(10));
         let executable = fs::canonicalize("/bin/sleep").unwrap();
         let mut child = ShutdownTestChild(
             crate::test_child(&mut Command::new(&executable))
@@ -20196,7 +20205,7 @@ mod concurrency_tests {
         let gate = RunnerInfoGate::default();
         let (socket, _calls, stop_runner, _server) = spawn_gated_test_runner_server(
             &core.config.runner_socket(environment_id),
-            TestRunnerProtocolReply::Version(9),
+            TestRunnerProtocolReply::Version(10),
             Some(gate.clone()),
         );
         attach_named_test_runner_process(core, name, socket);

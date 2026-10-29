@@ -52,6 +52,10 @@ pub struct VmPaths {
     pub seed_dir: PathBuf,
     pub seed_disk: PathBuf,
     pub diagnostics_dir: PathBuf,
+    /// VM checkpoints: the one directory the VMM may write (#3046 R4). Its
+    /// inode is never replaced while the VMM runs, since Landlock binds it;
+    /// only its children are created, moved and removed.
+    pub checkpoints_dir: PathBuf,
     pub serial_log: PathBuf,
     pub vmm_log: PathBuf,
     pub event_monitor: PathBuf,
@@ -76,6 +80,10 @@ impl VmPaths {
         let generations_dir = vm_root.ensure_dir(Path::new("generations"), 0o700)?;
         let seed_dir = vm_root.ensure_dir(Path::new("seed"), 0o700)?;
         let diagnostics_dir = vm_root.ensure_dir(Path::new("diagnostics"), 0o700)?;
+        #[cfg(target_os = "linux")]
+        let checkpoints_dir = vm_root.ensure_dir(Path::new(CHECKPOINTS_DIRECTORY), 0o700)?;
+        #[cfg(not(target_os = "linux"))]
+        let checkpoints_dir = vm_dir.join(CHECKPOINTS_DIRECTORY);
         let api_socket = api_dir.join("api.sock");
         let vsock_socket = vsock_dir.join(VSOCK_SOCKET_NAME);
         for socket in [
@@ -105,6 +113,7 @@ impl VmPaths {
             generations_dir,
             seed_dir,
             diagnostics_dir,
+            checkpoints_dir,
         })
     }
 
@@ -160,6 +169,15 @@ impl VmPaths {
                     .remove_private_regular(Path::new(&direct_share_pid_file_name(index)), 0o600)?;
             }
             vm.remove_empty_private_directory(Path::new("fs"))?;
+        }
+        // A capture an earlier run left unfinished, and the VM checkpoint an
+        // earlier boot restored from: no VMM maps it any more (#3046 R4).
+        if let Some(checkpoints) =
+            optional_private_directory(&vm, Path::new(CHECKPOINTS_DIRECTORY))?
+        {
+            for name in checkpoint_tree_names(&checkpoints)? {
+                remove_checkpoint_tree(&checkpoints, &name)?;
+            }
         }
         Ok(())
     }
@@ -538,6 +556,13 @@ pub fn cleanup_trashed_vm(
         }
         vm.remove_empty_private_directory(Path::new("diagnostics"))?;
     }
+    if let Some(checkpoints) = optional_private_directory(&vm, Path::new(CHECKPOINTS_DIRECTORY))? {
+        for name in checkpoint_tree_names(&checkpoints)? {
+            remove_checkpoint_tree(&checkpoints, &name)?;
+        }
+        drop(checkpoints);
+        vm.remove_empty_private_directory(Path::new(CHECKPOINTS_DIRECTORY))?;
+    }
     if let Some(generations) = optional_private_directory(&vm, Path::new("generations"))? {
         for name in admitted_generation_names(&generations)? {
             let generation = generations.open_private_directory(Path::new(&name), 0o700)?;
@@ -671,7 +696,7 @@ fn optional_private_directory(
 }
 
 pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError> {
-    const ENTRIES: [&str; 9] = [
+    const ENTRIES: [&str; 10] = [
         "api",
         "vsock",
         "fs",
@@ -679,6 +704,7 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
         "seed",
         "diagnostics",
         "generations",
+        CHECKPOINTS_DIRECTORY,
         "vm.lock",
         "state.json",
     ];
@@ -779,6 +805,9 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
             Err(error) => return Err(error.into()),
         }
     }
+    if let Some(checkpoints) = optional_private_directory(vm, Path::new(CHECKPOINTS_DIRECTORY))? {
+        checkpoint_tree_names(&checkpoints)?;
+    }
     if let Some(generations) = optional_private_directory(vm, Path::new("generations"))? {
         for name in admitted_generation_names(&generations)? {
             let generation = generations.open_private_directory(Path::new(&name), 0o700)?;
@@ -793,6 +822,119 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
                 Err(error) if path_error_is_not_found(&error) => {}
                 Err(error) => return Err(error.into()),
             }
+        }
+    }
+    Ok(())
+}
+
+/// `vms/<id>/checkpoints` (#3046 R4).
+pub(crate) const CHECKPOINTS_DIRECTORY: &str = "checkpoints";
+/// `checkpoints/out-<operation>`: one capture the VMM and the runner write.
+pub(crate) const CHECKPOINT_OUT_PREFIX: &str = "out-";
+/// `checkpoints/in`: the VM checkpoint this boot restored from, which its
+/// memory stays mapped from while the VMM runs.
+pub(crate) const CHECKPOINT_IN: &str = "in";
+/// The files the VMM writes for one VM checkpoint.
+pub(crate) const CHECKPOINT_VMM_FILES: [&str; 3] = ["config.json", "state.json", "memory-ranges"];
+const CHECKPOINT_TREE_LIMIT: usize = 16;
+
+/// The names in a checkpoints directory, each `in` or `out-<uuid>`; anything
+/// else is an unexpected object.
+pub(crate) fn checkpoint_tree_names(checkpoints: &PrivateRoot) -> Result<Vec<String>, StateError> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(checkpoints.path()).map_err(|source| StateError::Io {
+        path: checkpoints.path().to_owned(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| StateError::Io {
+            path: checkpoints.path().to_owned(),
+            source,
+        })?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| StateError::UnexpectedOwnedObject(entry.path()))?;
+        let valid = name == CHECKPOINT_IN
+            || name
+                .strip_prefix(CHECKPOINT_OUT_PREFIX)
+                .and_then(|operation| Uuid::parse_str(operation).ok())
+                .is_some_and(|operation| {
+                    !operation.is_nil() && name == format!("{CHECKPOINT_OUT_PREFIX}{operation}")
+                });
+        if !valid {
+            return Err(StateError::UnexpectedOwnedObject(entry.path()));
+        }
+        names.push(name);
+        if names.len() > CHECKPOINT_TREE_LIMIT {
+            return Err(StateError::UnexpectedOwnedObject(
+                checkpoints.path().to_owned(),
+            ));
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Remove one checkpoint tree by its exact layout, never following a link:
+/// `in` holds the VMM's files; `out-<operation>` holds them under `vmm/`,
+/// with the disks under `disks/` and the root under `root/<generation>/`.
+/// An unexpected object fails the removal and stays for the orphan
+/// inventory.
+pub(crate) fn remove_checkpoint_tree(
+    checkpoints: &PrivateRoot,
+    name: &str,
+) -> Result<(), StateError> {
+    let Some(tree) = optional_private_directory(checkpoints, Path::new(name))? else {
+        return Ok(());
+    };
+    if name == CHECKPOINT_IN {
+        remove_checkpoint_files(&tree, &CHECKPOINT_VMM_FILES)?;
+    } else {
+        if let Some(vmm) = optional_private_directory(&tree, Path::new("vmm"))? {
+            remove_checkpoint_files(&vmm, &CHECKPOINT_VMM_FILES)?;
+            drop(vmm);
+            tree.remove_empty_private_directory(Path::new("vmm"))?;
+        }
+        if let Some(disks) = optional_private_directory(&tree, Path::new("disks"))? {
+            remove_checkpoint_files(&disks, &["state.raw", "docker.raw"])?;
+            drop(disks);
+            tree.remove_empty_private_directory(Path::new("disks"))?;
+        }
+        if let Some(root) = optional_private_directory(&tree, Path::new("root"))? {
+            for generation in admitted_generation_names(&root)? {
+                let directory = root.open_private_directory(Path::new(&generation), 0o700)?;
+                remove_checkpoint_files(&directory, &["root.raw"])?;
+                drop(directory);
+                root.remove_empty_private_directory(Path::new(&generation))?;
+            }
+            drop(root);
+            tree.remove_empty_private_directory(Path::new("root"))?;
+        }
+    }
+    drop(tree);
+    checkpoints.remove_empty_private_directory(Path::new(name))?;
+    Ok(())
+}
+
+/// Remove each named regular file the VMM or the runner wrote (0600, or 0400
+/// once sealed).
+fn remove_checkpoint_files(directory: &PrivateRoot, names: &[&str]) -> Result<(), StateError> {
+    for name in names {
+        let mut removed = false;
+        for mode in [0o400, 0o600] {
+            match directory.remove_private_regular(Path::new(name), mode) {
+                Ok(_) => {
+                    removed = true;
+                    break;
+                }
+                Err(PathError::UnsafeFile(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if !removed {
+            return Err(StateError::UnexpectedOwnedObject(
+                directory.path().join(name),
+            ));
         }
     }
     Ok(())
