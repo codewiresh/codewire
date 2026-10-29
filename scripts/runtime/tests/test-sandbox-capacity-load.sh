@@ -198,13 +198,43 @@ mkdir -p "$work/bin"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >"%s/kubectl-args"\nexec sleep 600\n' "$work" >"$work/bin/kubectl"
 chmod +x "$work/bin/kubectl"
 sed -n '/^kubectl_ro() {/,/^}/p' "$LOAD" >"$work/kubectl_ro.sh"
+ro_helpers='die() { exit 3; }; log() { :; }; pause() { sleep "$1"; }'
 started=$SECONDS
-if PATH="$work/bin:$PATH" bash -c 'die() { exit 3; }; source "$1"; KUBE_CONTEXT=ctx KUBECTL_TIMEOUT_SECONDS=2 kubectl_ro get nodes' \
+if PATH="$work/bin:$PATH" bash -c "$ro_helpers"'; source "$1"; KUBE_CONTEXT=ctx KUBECTL_TIMEOUT_SECONDS=2 kubectl_ro get nodes' \
   _ "$work/kubectl_ro.sh"; then
   fail 'a hung kubectl succeeded'
 fi
-(( SECONDS - started <= 10 )) || fail "a hung kubectl took $((SECONDS - started)) s, past its 2 s bound"
+# Two bounded attempts of 2 s and the 3 s pause between them.
+(( SECONDS - started <= 15 )) || fail "a hung kubectl took $((SECONDS - started)) s, past two 2 s bounds"
 grep -qF -- '--request-timeout=2s --context ctx get nodes' "$work/kubectl-args" || fail "kubectl_ro does not pass its request timeout: $(cat "$work/kubectl-args")"
+
+# A read that fails to reach the server is retried once; a server answer is
+# not, nor a second connection failure. Output appears once, from the
+# attempt that settled.
+kubectl_case() { # OUTCOMES -> "output|exit|calls"
+  local dir
+  dir="$(mktemp -d "$work/kubectl.XXXXXX")"
+  printf '%s\n' "$1" >"$dir/outcomes"
+  cat >"$dir/kubectl" <<'STUB'
+#!/usr/bin/env bash
+dir="$(dirname "$0")"
+echo call >>"$dir/calls"
+case "$(sed -n "$(grep -c . "$dir/calls")p" "$dir/outcomes")" in
+  ok) echo '{"items":[]}' ;;
+  connect) echo partial; echo 'Unable to connect to the server: dial tcp 192.0.2.1:6443: i/o timeout' >&2; exit 1 ;;
+  forbidden) echo 'Error from server (Forbidden): nodes is forbidden' >&2; exit 1 ;;
+esac
+STUB
+  chmod +x "$dir/kubectl"
+  local output rc=0
+  output="$(PATH="$dir:$PATH" bash -c "$ro_helpers"'; source "$1"; KUBE_CONTEXT=ctx KUBECTL_TIMEOUT_SECONDS=5 kubectl_ro get nodes 2>/dev/null' \
+    _ "$work/kubectl_ro.sh")" || rc=$?
+  printf '%s|%s|%s\n' "$output" "$rc" "$(grep -c . "$dir/calls")"
+}
+[[ "$(kubectl_case $'connect\nok')" == '{"items":[]}|0|2' ]] || fail "a dropped connection is not retried once: $(kubectl_case $'connect\nok')"
+[[ "$(kubectl_case $'forbidden\nok')" == '|1|1' ]] || fail 'a server refusal is retried'
+[[ "$(kubectl_case $'connect\nconnect\nok')" == 'partial|1|2' ]] || fail 'a second connection failure is retried'
+refuses 'read-only kubectl refused verb delete' bash -c "$ro_helpers"'; die() { echo "$1"; exit 3; }; source "$1"; kubectl_ro delete pod x' _ "$work/kubectl_ro.sh"
 
 # A step past its wall-clock limit records why and signals the run.
 mkdir -p "$work/watchdog"

@@ -161,13 +161,42 @@ now_ms() { date +%s%3N; }
 # foreground command returns, but `wait` returns on the signal.
 pause() { sleep "$1" & wait "$!"; }
 
+# A read that fails to reach the server (a connection error, or the time
+# bound) is retried once after 3 s, so one dropped packet does not end a run.
+# An answer from the server, such as Forbidden or NotFound, is never retried;
+# only get is ever sent. Output is held until the call settles, so a retry
+# never follows partial output.
 kubectl_ro() {
   case "$1" in
     get) ;;
     *) die "read-only kubectl refused verb $1" ;;
   esac
-  timeout -k 5 "$KUBECTL_TIMEOUT_SECONDS" \
-    kubectl --request-timeout="${KUBECTL_TIMEOUT_SECONDS}s" --context "$KUBE_CONTEXT" "$@"
+  local attempt rc out err
+  out="$(mktemp "${TMPDIR:-/tmp}/cw-capacity-kubectl.XXXXXX")"
+  err="$(mktemp "${TMPDIR:-/tmp}/cw-capacity-kubectl.XXXXXX")"
+  for attempt in 1 2; do
+    rc=0
+    timeout -k 5 "$KUBECTL_TIMEOUT_SECONDS" \
+      kubectl --request-timeout="${KUBECTL_TIMEOUT_SECONDS}s" --context "$KUBE_CONTEXT" "$@" >"$out" 2>"$err" || rc=$?
+    ((rc != 0 && attempt == 1)) || break
+    ! grep -q 'Error from server' "$err" || break
+    if ((rc == 124 || rc == 137)) ||
+      grep -qiE 'Unable to connect to the server|i/o timeout|connection refused|connection reset|TLS handshake timeout|no route to host' "$err"; then
+      if ((rc == 124 || rc == 137)); then
+        log "kubectl get retried once after no answer within ${KUBECTL_TIMEOUT_SECONDS} s"
+      else
+        log "kubectl get retried once after: $(head -n1 "$err")"
+      fi
+      [[ -z "${RUN_DIR:-}" || ! -d "$RUN_DIR" ]] || printf '%s\n' "$rc" >>"$RUN_DIR/kubectl-retries"
+      pause 3
+      continue
+    fi
+    break
+  done
+  cat "$out"
+  cat "$err" >&2
+  rm -f -- "$out" "$err"
+  return "$rc"
 }
 
 # Every environment this tool touches is a cloud one on CODEWIRE_SERVER_URL.
@@ -1058,6 +1087,9 @@ write_summary() {
       .created as $created | (.placement // {}) as $placement | (.nodes // [])[]
       | "| \($created) | \(.node) | \($placement[.node] // 0) | \(.pods)/\(.allocatable_pods) | \(100 * .requested_cpu_m / .allocatable_cpu_m | f) | \(100 * .requested_memory_mib / .allocatable_memory_mib | f) | \(.node_cpu_pct|f) | \(.node_memory_pct|f) | \(.psi_memory_some_pct|f)/\(.psi_cpu_some_pct|f) | \(.thin_used_pct|f) |"
     ' "$RUN_DIR/steps.jsonl" 2>/dev/null
+    if [[ -s "$RUN_DIR/kubectl-retries" ]]; then
+      printf '\nKubectl reads retried once after a connection failure: %s\n' "$(grep -c . "$RUN_DIR/kubectl-retries")"
+    fi
     if [[ -s "$RUN_DIR/create-retries" ]]; then
       printf '\nCreates retried once after a client-side deadline: %s\n' "$(grep -c . "$RUN_DIR/create-retries")"
     fi
