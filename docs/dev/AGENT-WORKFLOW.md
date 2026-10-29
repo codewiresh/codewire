@@ -88,6 +88,26 @@ Use additional gates only for their failure class:
 - Rust CLI-only work: the changed crates' `cargo test` and `cargo clippy`,
   plus the host journey with a built `cw`
 
+Ignored Rust tests either run in a named CI step or are manual. CI runs the
+database tests (the database lanes), the egress broker's host-interface refusal
+(in a private network namespace, `scripts/ci/verify/run-in-public-netns.sh`;
+a job that cannot make one, as CI's container jobs cannot today, says so in a
+notice, and local qualification on a host that can runs it),
+the daemon's stock-`gh` ingress, the tailnet client through the real relay
+binary (beside the DERP contract), and the guest-probe kernel fixtures where the
+job can make a mount namespace. The rest need something CI does not have, and
+their `#[ignore]` reason says what: live Dev endpoints (`live_tls_derp_relay_two_rust_clients`,
+`live_tailscale_stun_server_discovers_mapped_addr`), the host OpenSSH client
+(workspace-access's two `openssh_client_*` diagnostics), Docker and the support
+image's base (`docker_data_image_prepare_smoke`), standalone Mesh and DERP builds
+(`explicit_standalone_overrides_are_pinned_and_reused_by_a_different_cw`), real
+agent payloads (`host_members_managed_two_real_endpoints_direct_and_tls_derp`),
+a packaged service image (`packaged_agent_signs_and_drains`), an Xvfb/DBus
+browser runner (`linux_native_browser_journey`), an overlay lower layer
+(`a_share_copied_up_on_overlay_between_boots_is_not_refused`) or a pinned Claude
+client (`pinned_claude_2_1_238_client_format`). Run one with `--ignored --exact`
+and the environment its reason names.
+
 After focused checks and diff review, commit the credible candidate and push
 it. The pre-push hook (`scripts/dev/pre-push.sh`, run by the shared dispatcher)
 runs `scripts/dev/preflight.sh --for-push` on every branch push: the

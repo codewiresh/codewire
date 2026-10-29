@@ -162,7 +162,8 @@ if record['tool'] == 'cargo' and sys.argv[1:] == json.loads(os.environ.get('COMP
     sys.exit(46)
 ''')
 tool.chmod(0o755)
-for name in ('zig', 'cargo-zigbuild'):
+# The fixture job can make a namespace (unshare -rn true succeeds).
+for name in ('zig', 'cargo-zigbuild', 'unshare'):
     shutil.copy(tool, binary / name)
 shutil.copy(source_root / 'scripts/ci/verify/check-darwin-cross.sh',
             runner.parent / 'check-darwin-cross.sh')
@@ -178,6 +179,8 @@ for helper in ('scripts/ci/tests/test-openbao-only-secret-authority.sh',
                'crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh',
                'crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py',
                'scripts/ci/verify/build-local-vmm-initramfs.sh',
+               'scripts/ci/verify/run-in-public-netns.sh',
+               'scripts/ci/setup/fetch-pinned-gh.sh',
                'scripts/ci/release/package-codewire-desktop.sh'):
     destination = fixture / helper
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -213,13 +216,15 @@ def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None,
     return records, result.stdout
 
 def generic(records):
-    # Privileged kernel fixtures run with --ignored only where the host can
-    # grant a mount namespace; they are not part of a package graph. The
-    # Darwin cross-check's clippy is asserted on its own below.
+    # Privileged kernel fixtures and the other named --ignored tests are not
+    # part of a package graph (a test run inside a namespace builds first,
+    # --no-run, outside it). The Darwin cross-check's clippy is asserted on
+    # its own below.
     return [r['args'] for r in records if r['tool'] == 'cargo'
             and r['args'][0] in ('build', 'clippy', 'test')
             and '--features' not in r['args'] and '--manifest-path' not in r['args']
-            and '--ignored' not in r['args'] and 'aarch64-apple-darwin' not in r['args']]
+            and '--ignored' not in r['args'] and '--no-run' not in r['args']
+            and 'aarch64-apple-darwin' not in r['args']]
 
 def expected(*arguments):
     # Workspace clippy runs once in the fast compile job, not per package graph,
@@ -243,6 +248,21 @@ records, _ = run(['rust', 'transport', 'rust_workspace'] +
 assert generic(records) == expected('--workspace') + expected(
     *[a for p in sorted(packages) for a in ('-p', p)])
 assert any(r['args'] == ['--production-features'] for r in records)
+# The two security-boundary tests outside the archive: the egress broker's
+# refusal inside a public-address namespace (built outside it first), and the
+# daemon's stock-gh ingress against the image's gh.
+netns = [r for r in records if r['tool'] == 'run-in-public-netns.sh']
+assert len(netns) == 1 and netns[0]['args'][:3] == ['1.1.1.1', '--', 'cargo'], netns
+assert 'a_connection_to_the_hosts_own_interface_address_is_refused' in netns[0]['args'], netns
+assert any(r['tool'] == 'cargo' and '--no-run' in r['args'] and 'native_egress_broker' in r['args'] for r in records)
+assert sum(r['tool'] == 'fetch-pinned-gh.sh' for r in records) == 1
+assert any(r['tool'] == 'cargo' and 'credential_bridge::tests::stock_gh_rest_and_graphql_use_authenticated_unix_ingress' in r['args']
+           for r in records)
+# A job that cannot make the namespace says so and runs the rest.
+no_netns, output = run(['rust', 'rust_workspace'], fail_tool='unshare', status=0)
+assert not any(r['tool'] == 'run-in-public-netns.sh' for r in no_netns)
+assert 'host-interface refusal did not run' in output, output
+assert sum(r['tool'] == 'fetch-pinned-gh.sh' for r in no_netns) == 1
 assert any('--features' in r['args'] and 'platform' in r['args'] for r in records)
 for helper in ('test-cli-host-managed.py', 'test-cli-update-mesh-endpoints.py',
                'test-build-cw-release-dir.py'):

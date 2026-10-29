@@ -896,7 +896,7 @@ mod tests {
     /// selected-profile bootstrap or provider authorization. The binary must
     /// come from the checksum-verified Codewire image toolchain.
     #[tokio::test]
-    #[ignore = "requires the explicitly supplied, verified stock gh 2.97.0 binary"]
+    #[ignore = "requires the verified stock gh 2.97.0 binary named by CODEWIRE_TEST_GH_BIN; CI fetches the workspace image's pin"]
     async fn stock_gh_rest_and_graphql_use_authenticated_unix_ingress() {
         use std::process::{Output, Stdio};
 

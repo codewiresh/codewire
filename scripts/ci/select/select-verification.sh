@@ -1991,7 +1991,26 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      crates/codewire-derp/*)
+      scripts/ci/setup/fetch-pinned-gh.sh)
+        # The daemon's stock-gh ingress test runs against the gh the
+        # workspace image pins (a pin change alone runs it with the daemon's
+        # next change).
+        select_token rust
+        select_token rust_pkg_codewire_daemon
+        ;;
+      scripts/ci/verify/run-in-public-netns.sh)
+        # The egress broker's host-interface refusal runs inside it.
+        select_token rust
+        select_token rust_pkg_codewire_cli_bin
+        ;;
+    esac
+
+    case "$path" in
+      crates/codewire-derp/*|\
+      crates/codewire-tailnet/src/derp.rs|crates/codewire-tailnet/src/derp/*|\
+      crates/codewire-tailnet/src/conn.rs|crates/codewire-tailnet/src/conn/*)
+        # The relay contract, and the tailnet client's own proofs through the
+        # real relay binary (run_tailnet_real_derp).
         select_token transport_derp_contract
         ;;
     esac

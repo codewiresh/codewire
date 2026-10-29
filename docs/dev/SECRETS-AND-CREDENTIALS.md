@@ -1697,8 +1697,10 @@ model and contain the expected assistant text. This is not SDK, streaming or
 agent compatibility proof; the existing synthetic streaming test remains separate.
 Cleanup must finish before the named PASS.
 
-The bounded synthetic stock-`gh` transport test can be run explicitly with the
-absolute path to `gh 2.97.0` from the checksum-verified Codewire image toolchain:
+The bounded synthetic stock-`gh` transport test runs in CI's Rust feature-graph
+shard whenever the daemon is selected, against the `gh` that
+`scripts/ci/setup/fetch-pinned-gh.sh` fetches from the workspace image's own pin
+(`images/base/Dockerfile`). Run it locally with the absolute path to that `gh`:
 
 ```sh
 CODEWIRE_TEST_GH_BIN=/absolute/verified/gh cargo test -p codewire-daemon credential_bridge::tests::stock_gh_rest_and_graphql_use_authenticated_unix_ingress -- --ignored --exact

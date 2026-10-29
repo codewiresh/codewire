@@ -453,7 +453,7 @@ fn connect_through_broker(
 /// A broker that does not know the host's addresses dials a listener on that
 /// address. Sent the addresses exactly as the runner reads them, it refuses.
 #[test]
-#[ignore = "needs a network namespace with a public interface address"]
+#[ignore = "needs a network namespace with a public interface address; run it through run-in-public-netns.sh"]
 fn a_connection_to_the_hosts_own_interface_address_is_refused() {
     let host: IpAddr = std::env::var("CODEWIRE_TEST_HOST_ADDRESS")
         .expect("CODEWIRE_TEST_HOST_ADDRESS")

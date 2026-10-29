@@ -1446,6 +1446,20 @@ run_paths_case retired_go_e2e_source pull_request refs/pull/87/head false \
 run_paths_case rust_tailnet pull_request refs/pull/9/head false \
   'policy transport transport_pkg_codewire_tailnet' \
   crates/codewire-tailnet/src/lib.rs
+# The two security-boundary tests that run outside the package archive: the
+# daemon's stock-gh ingress (gh pinned by the workspace image) and the egress
+# broker's host-interface refusal (in a private network namespace).
+run_paths_case stock_gh_pin pull_request refs/pull/9/head false \
+  'policy rust rust_pkg_codewire_daemon security security_js' \
+  scripts/ci/setup/fetch-pinned-gh.sh
+run_paths_case public_netns_runner pull_request refs/pull/9/head false \
+  'policy rust rust_pkg_codewire_cli_bin security security_js' \
+  scripts/ci/verify/run-in-public-netns.sh
+# The relay client and the tunnel also run through the real relay binary
+# beside the DERP contract (run_tailnet_real_derp).
+run_paths_case rust_tailnet_relay pull_request refs/pull/9/head false \
+  'policy transport transport_derp_contract transport_pkg_codewire_tailnet' \
+  crates/codewire-tailnet/src/derp/tests.rs crates/codewire-tailnet/src/conn/tests.rs
 run_paths_case rust_netstack pull_request refs/pull/90/head false \
   'policy transport transport_pkg_codewire_netstack transport_pkg_codewire_tailnet' \
   crates/codewire-netstack/src/lib.rs
@@ -3994,6 +4008,10 @@ selected() { [[ "$SELECTION" == *"|$1|"* ]]; }
 has_root_rust_selection() { return 0; }
 RUST_SHARD_STAGE="${RUST_SHARD_STAGE:-all}"
 run_rust_packages() { printf '%s\n' "$*" > "$PRIMITIVE_PACKAGE_LOG"; }
+# The namespaced and stock-gh steps are traced by
+# test-cargo-target-runner-failures.sh; routing here does not run them.
+run_host_interface_refusal() { :; }
+run_daemon_stock_gh() { :; }
 python3() {
   if [[ "$*" == '-B scripts/ci/tests/test-cli-host-managed.py' ]]; then
     if [[ -n "${PRIMITIVE_HOST_ROUTING_LOG:-}" ]]; then

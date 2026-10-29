@@ -7,6 +7,11 @@
 //! candidate binary can exercise the same `/derp` entrypoint as the Go server.
 //! The STUN listener covers the STUN-only edge mode used by the current Go
 //! binary. Mesh forwarding covers the multi-replica DERP deployment shape.
+//!
+//! CI proves the built binary twice beside its own tests: the Tailscale Go
+//! clients' contract (tests/contract/derp), and the Rust tailnet client's
+//! relay interop and two-Conn tunnel through it (run_tailnet_real_derp in
+//! run-product-verification.sh).
 
 mod admission;
 mod runner;

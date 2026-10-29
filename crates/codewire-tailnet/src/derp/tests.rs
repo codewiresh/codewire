@@ -248,7 +248,7 @@ async fn handshake_and_send_recv_inprocess() {
 /// without needing a custom rustls cert verifier. (TLS connect is also
 /// implemented and used in production via [`super::connect_tls`].)
 #[tokio::test]
-#[ignore = "spawns the codewire-derp server binary; run explicitly with CODEWIRE_DERP_BIN set"]
+#[ignore = "spawns the codewire-derp server binary named by CODEWIRE_DERP_BIN; CI runs it beside the DERP contract"]
 async fn derp_interop_relay_two_rust_clients_via_server_binary() {
     use std::process::Stdio;
     use std::time::Duration;

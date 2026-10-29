@@ -407,9 +407,22 @@ mod tests {
     }
 
     #[test]
-    fn this_host_reports_without_failing() {
-        // Runs the real probes; the result depends on the host.
-        let _ = host_prerequisites();
+    fn this_hosts_probe_names_root_exactly_when_it_runs_as_root() {
+        // Runs the real probes. Which problems they find depends on the host,
+        // but the root problem is there exactly when this test runs as root,
+        // every problem names its fix, and a second probe agrees.
+        let problems = host_prerequisites();
+        let as_root = problems
+            .iter()
+            .any(|problem| problem.problem == "cw is running as root");
+        assert_eq!(as_root, current_uid() == 0, "{problems:?}");
+        assert!(
+            problems
+                .iter()
+                .all(|problem| !problem.problem.is_empty() && !problem.fix.is_empty()),
+            "{problems:?}"
+        );
+        assert_eq!(host_prerequisites(), problems);
     }
 
     #[test]

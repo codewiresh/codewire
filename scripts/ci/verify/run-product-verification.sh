@@ -306,9 +306,12 @@ shard_stage() {
 # CARGO_TEST_ARGS are cargo test's name filter and harness arguments, and
 # NEXTEST_SELECTION is the same choice for cargo-nextest (split on spaces).
 # RUST_SHARD_WORKSPACE names a detached workspace, relative to the root.
+# RUST_SHARD_RUN_IN names a command (split on spaces) the tests run inside,
+# such as run-in-public-netns.sh ADDRESS --; the build stays outside it.
 shard_test() {
   local key="$1" selection="$2" arg
-  local -a build=() filter=() selection_args=()
+  local -a build=() filter=() selection_args=() run_in=()
+  read -r -a run_in <<< "${RUST_SHARD_RUN_IN:-}"
   shift 2
   while [ "$#" -gt 0 ]; do
     arg="$1"
@@ -322,7 +325,14 @@ shard_test() {
     build+=("$arg")
   done
   case "$RUST_SHARD_STAGE" in
-    all) cargo test --locked "${build[@]}" "${filter[@]}" ;;
+    all)
+      if [ "${#run_in[@]}" -gt 0 ]; then
+        cargo test --locked "${build[@]}" --no-run || return $?
+        "${run_in[@]}" cargo test --locked --offline "${build[@]}" "${filter[@]}"
+      else
+        cargo test --locked "${build[@]}" "${filter[@]}"
+      fi
+      ;;
     archives)
       [ ! -e "$RUST_SHARD_ARCHIVES/$key.tar.zst" ] || {
         echo "::error::two test steps share the archive $key" >&2
@@ -337,6 +347,44 @@ shard_test() {
       ;;
     checks) return 0 ;;
   esac
+}
+
+# public_netns_available: this job can make a user and network namespace.
+public_netns_available() {
+  command -v unshare >/dev/null 2>&1 && unshare -rn true 2>/dev/null
+}
+
+# #2614 against a real interface: a broker sent the host's addresses refuses
+# a connection to one. The test needs an interface holding a public address,
+# which only a private network namespace can give it
+# (run-in-public-netns.sh). A job that cannot make one says so; local
+# qualification on a host that can runs it.
+run_host_interface_refusal() {
+  if [ "$RUST_SHARD_STAGE" != archives ] && shard_stage tests && ! public_netns_available; then
+    echo '::notice::the egress broker host-interface refusal did not run: this job cannot make a user and network namespace (unshare -rn)'
+    return 0
+  fi
+  RUST_SHARD_RUN_IN="scripts/ci/verify/run-in-public-netns.sh 1.1.1.1 --" \
+    shard_test cli-bin-host-interface-refusal \
+    '--run-ignored only -E test(=a_connection_to_the_hosts_own_interface_address_is_refused)' \
+    -p codewire-cli-bin --test native_egress_broker -- --ignored --exact \
+    a_connection_to_the_hosts_own_interface_address_is_refused
+}
+
+# The daemon's authenticated credential ingress with the stock gh the
+# workspace image ships (fetch-pinned-gh.sh reads the image's pin).
+run_daemon_stock_gh() {
+  local gh_dir="" status=0
+  if shard_stage tests; then
+    gh_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/stock-gh.XXXXXX")"
+    scripts/ci/setup/fetch-pinned-gh.sh "$gh_dir" || { rm -rf -- "$gh_dir"; return 1; }
+  fi
+  CODEWIRE_TEST_GH_BIN="${gh_dir:+$gh_dir/gh}" shard_test daemon-stock-gh \
+    '--run-ignored only -E test(=credential_bridge::tests::stock_gh_rest_and_graphql_use_authenticated_unix_ingress)' \
+    -p codewire-daemon --lib -- --ignored --exact \
+    credential_bridge::tests::stock_gh_rest_and_graphql_use_authenticated_unix_ingress || status=$?
+  [ -z "$gh_dir" ] || rm -rf -- "$gh_dir"
+  return "$status"
 }
 
 # The archives' build folder (build-once.sh). As for the packages shard, the
@@ -413,9 +461,11 @@ run_shard_archive() {
   # detached workspace runs with nextest's defaults, like cargo test.
   [ "$workspace" = . ] || profile=()
   echo "[rust-shard-archive] $key: $*"
+  local -a run_in=()
+  read -r -a run_in <<< "${RUST_SHARD_RUN_IN:-}"
   (
     cd "$root/src/$workspace"
-    "${RUST_TEST_NEXTEST:-cargo-nextest}" nextest run \
+    "${run_in[@]}" "${RUST_TEST_NEXTEST:-cargo-nextest}" nextest run \
       --binaries-metadata "$target/nextest/binaries-metadata.json" \
       --cargo-metadata "$target/nextest/cargo-metadata.json" \
       --target-dir-remap "$target" --workspace-remap "$root/src/$workspace" \
@@ -1258,6 +1308,12 @@ run_rust() {
     shard_test credential-service-enrollment '' \
       -p codewire-credential-service --features enrollment --all-targets
   fi
+  if selected rust_workspace || selected rust_pkg_codewire_cli_bin; then
+    run_host_interface_refusal
+  fi
+  if selected rust_workspace || selected rust_pkg_codewire_daemon; then
+    run_daemon_stock_gh
+  fi
   if selected rust_pkg_codewire_oidc; then
     if shard_stage checks; then
       cargo check -p codewire-oidc --no-default-features
@@ -1277,6 +1333,15 @@ run_rust_compile() {
   scripts/ci/verify/compile-all-targets.sh
 }
 
+# The tailnet client's own proofs against the real relay binary: two Rust
+# DERP clients relay a packet through it, and two Conns tunnel through it.
+run_tailnet_real_derp() {
+  CODEWIRE_DERP_BIN="$(realpath "$1")" shard_test tailnet-real-derp \
+    '--run-ignored only -E test(=conn::tests::real_derp_tunnel)|test(=derp::tests::derp_interop_relay_two_rust_clients_via_server_binary)' \
+    -p codewire-tailnet --lib -- --ignored --exact \
+    conn::tests::real_derp_tunnel derp::tests::derp_interop_relay_two_rust_clients_via_server_binary
+}
+
 run_derp_contract() {
   # The packages shard builds this binary in its own job. Build it here so the
   # local-vmm shard stands alone; under "all" the graph already built it.
@@ -1288,6 +1353,7 @@ run_derp_contract() {
     archives)
       cargo build --locked -p codewire-derp --bin codewire-derp || return $?
       install -m 0755 "$derp" "$RUST_SHARD_ARCHIVES/codewire-derp"
+      run_tailnet_real_derp "$derp"
       return
       ;;
     tests)
@@ -1343,6 +1409,7 @@ run_derp_contract() {
       fi
     done
   )
+  run_tailnet_real_derp "$derp"
 }
 
 privileged_mount_namespace_available() {

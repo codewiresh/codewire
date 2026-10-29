@@ -14,8 +14,8 @@
 //! * [`channel_shim_tunnel`] (default, hermetic) — an in-process shim wires
 //!   each Conn's outbound transport channel to the other's inbound channel,
 //!   standing in for the DERP relay. Runs under plain `cargo test`.
-//! * [`real_derp_tunnel`] (`#[ignore]`, opt-in) — spawns the real Go
-//!   `codewire-derp` binary and relays the encrypted WG datagrams through it
+//! * [`real_derp_tunnel`] (`#[ignore]`, opt-in) — spawns the real
+//!   `codewire-derp` server binary and relays the encrypted WG datagrams through it
 //!   via the Rust [`crate::derp::Client`], exactly like the #46 interop test.
 //!   This proves the tunnel over the real relay. Gated on `CODEWIRE_DERP_BIN`.
 
@@ -486,7 +486,7 @@ fn peer_relay_path_is_distinct_from_direct_udp() {
 ///   cargo test -p codewire-tailnet --release real_derp_tunnel -- --ignored --nocapture
 /// ```
 #[tokio::test]
-#[ignore = "spawns the codewire-derp server binary; run explicitly with CODEWIRE_DERP_BIN set"]
+#[ignore = "spawns the codewire-derp server binary named by CODEWIRE_DERP_BIN; CI runs it beside the DERP contract"]
 async fn real_derp_tunnel() {
     use std::process::Stdio;
 
