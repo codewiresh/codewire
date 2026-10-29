@@ -1401,14 +1401,14 @@ run_paths_case kind_harness pull_request refs/pull/845/head false \
   scripts/ci/verify/kind/common.sh \
   scripts/ci/verify/kind/suites/integrated.sh \
   scripts/ci/verify/kind/suites/final-fencing.sh \
-  scripts/ci/verify/kind/suites/environment-session.sh \
+  scripts/ci/verify/kind/suites/runtime-acceptance.sh \
   scripts/ci/tests/test-kind-e2e-cleanup.sh \
   scripts/ci/tests/test-kind-e2e-suites.sh \
   scripts/ci/tests/test-kind-forwards.sh
 run_paths_case kind_harness_opt_in pull_request refs/pull/846/head true \
   'edge_kind kind policy security security_js' \
   scripts/ci/verify/kind/suites/final-fencing.sh \
-  scripts/ci/verify/kind/suites/environment-session.sh
+  scripts/ci/verify/kind/suites/runtime-acceptance.sh
 run_paths_case kind_fixture_only pull_request refs/pull/847/head false \
   'policy security security_js' \
   scripts/ci/tests/test-kind-e2e-suites.sh \
@@ -2662,7 +2662,7 @@ for rust_owner_runner in \
     "$ROOT/scripts/ci/verify/kind/common.sh" \
     "$ROOT/scripts/ci/verify/kind/suites/integrated.sh" \
     "$ROOT/scripts/ci/verify/kind/suites/final-fencing.sh" \
-    "$ROOT/scripts/ci/verify/kind/suites/environment-session.sh" \
+    "$ROOT/scripts/ci/verify/kind/suites/runtime-acceptance.sh" \
     "$ROOT/scripts/dev/dev-stack.sh"; do
   if rg -n '(^|[[:space:]])go (test|run|build)|apps/api/internal/e2e' \
       "$rust_owner_runner"; then

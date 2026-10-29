@@ -584,7 +584,12 @@ grep -Fq 'ShellCheck analysis: start (' <<<"$baseline_output" \
   || fail 'ShellCheck start timing is absent'
 grep -Fq 'shards=3 timeout_seconds=600)' <<<"$baseline_output" \
   || fail 'ShellCheck default shards or deadline changed'
-grep -Eq '^ShellCheck shard 1/3 \(scripts=[0-9]+ heaviest=scripts/ci/tests/test-kind-e2e-suites\.sh\): start$' \
+# The costliest script is whichever the checker's own cost table measures as
+# costliest; this test names none.
+measured_costliest="$(sed -n "/^readonly SHELLCHECK_MEASURED_COST_MS='$/,/^'$/p" "$CHECKER" |
+  awk 'NF == 2' | sort -rn | head -n 1 | cut -d' ' -f2)"
+[[ -n "$measured_costliest" ]] || fail 'the checker has no measured cost table'
+grep -Eq "^ShellCheck shard 1/3 \(scripts=[0-9]+ heaviest=${measured_costliest//./\\.}\): start$" \
   <<<"$baseline_output" || fail 'the costliest repository script did not lead the first shard'
 grep -Eq 'ShellCheck analysis: finish \(status=1 elapsed_seconds=[0-9]+\)' \
   <<<"$baseline_output" || fail 'ShellCheck finish timing is absent'

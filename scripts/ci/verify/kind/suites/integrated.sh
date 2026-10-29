@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Complete integrated Kind gate. This order is the merge-boundary contract.
+# The complete integrated Kind gate (`make e2e-kind`): the Kind suites, in
+# order, on one cluster. It is a local tool, never a merge gate.
 set -euo pipefail
 
 if [ "${KIND_E2E_COMMON_LOADED:-0}" != "1" ]; then

@@ -35,8 +35,6 @@ source "$ROOT/scripts/ci/verify/kind/suites/integrated.sh"
 source "$ROOT/scripts/ci/verify/kind/suites/dashboard-browser.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/final-fencing.sh
 source "$ROOT/scripts/ci/verify/kind/suites/final-fencing.sh"
-# shellcheck source=scripts/ci/verify/kind/suites/environment-session.sh
-source "$ROOT/scripts/ci/verify/kind/suites/environment-session.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/cw-runtime.sh
 source "$ROOT/scripts/ci/verify/kind/suites/cw-runtime.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/sandbox-supply-chain.sh
@@ -72,7 +70,6 @@ usage:
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite workspace-services
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite dashboard-browser
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite final-fencing
-  KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite environment-session
   CLUSTER=<profile> scripts/ci/verify/kind-e2e.sh suite cw-runtime
   CLUSTER=<profile> scripts/ci/verify/kind-e2e.sh suite cw-managed-agents
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite sandbox-supply-chain
@@ -185,9 +182,6 @@ dispatch_kind_e2e() {
       ;;
     dashboard-browser)
       run_retained_dashboard_browser_suite
-      ;;
-    environment-session)
-      run_retained_environment_session_suite
       ;;
     cw-runtime)
       run_retained_cw_runtime_suite

@@ -99,7 +99,6 @@ readonly SHELLCHECK_MEASURED_COST_MS='
 7100 scripts/ci/verify/kind/suites/sandbox-supply-chain.sh
 7000 scripts/ci/verify/kind/suites/dashboard-browser.sh
 7000 scripts/ci/verify/kind/suites/edge-contract.sh
-7000 scripts/ci/verify/kind/suites/environment-session.sh
 7000 scripts/ci/verify/kind/suites/final-fencing.sh
 7000 scripts/ci/verify/kind/suites/up.sh
 7000 scripts/ci/verify/kind/suites/workspace-services.sh

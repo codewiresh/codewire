@@ -1,0 +1,25 @@
+# The Kind smoke inventory: every program the Kind suites run from the host,
+# one per line, in build order. Each build reads this list and nothing else:
+# the CI build (scripts/ci/images/build-kind-smokes.sh), the kind-dev build
+# (scripts/dev/kind/build-smokes.sh), the CI artifact transfer
+# (kind-build-artifacts.py) and a retained suite's check of what it consumed
+# (common.sh). A GROUP is one cargo build: one crate and one feature set ("-"
+# for none). KIND is bin, example or test (a test target the suites run).
+#
+# GROUP          CRATE                   FEATURES  KIND     NAME
+orchestration    codewire-orchestration  kind-e2e  bin      crd-smoke
+orchestration    codewire-orchestration  kind-e2e  bin      environment-setup-smoke
+orchestration    codewire-orchestration  kind-e2e  bin      exec-smoke
+orchestration    codewire-orchestration  kind-e2e  bin      exec-stream-smoke
+orchestration    codewire-orchestration  kind-e2e  bin      file-service-smoke
+orchestration    codewire-orchestration  kind-e2e  bin      prepare-stream-smoke
+orchestration    codewire-orchestration  kind-e2e  bin      log-stream-smoke
+orchestration    codewire-orchestration  kind-e2e  bin      temporal-smoke
+orchestration    codewire-orchestration  kind-e2e  bin      temporal-fencing-smoke
+orchestration    codewire-orchestration  kind-e2e  bin      reconciler-ttl-smoke
+client           codewire-client         -         example  platform-run-smoke
+client           codewire-client         -         example  environment-session-smoke
+client           codewire-client         -         example  environment-cw-runtime-smoke
+client-kind-e2e  codewire-client         kind-e2e  example  coordinator-ingress-smoke
+cli              codewire-cli-bin        -         bin      cw
+billing          codewire-billing        -         test     wire_contract

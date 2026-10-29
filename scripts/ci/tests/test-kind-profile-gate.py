@@ -216,7 +216,7 @@ run_kind_up() {{
   printf owner >"$KUBECONFIG"
   trap cleanup EXIT
 }}
-run_retained_environment_session_suite() {{
+run_retained_final_fencing_suite() {{
   trap retained_suite_cleanup EXIT
   RETAINED_KUBECONFIG="$RUN_DIR/suite-context"
   export KUBECONFIG="$RETAINED_KUBECONFIG"
@@ -234,7 +234,7 @@ run_retained_runtime_acceptance_suite() {{
 dump_cluster_state() {{ :; }}
 stop_remote_dind_kind_forwarding() {{ printf stopped >"$RUN_DIR/forwarding"; }}
 delete_owned_kind_cluster() {{ printf deletion >"$RUN_DIR/deletion"; }}
-dispatch_kind_e2e shard environment-session runtime-acceptance
+dispatch_kind_e2e shard final-fencing runtime-acceptance
 ''')
                 self.assertEqual(result.returncode, 42 if failure else 0, result.stderr)
                 self.assertEqual((self.directory / "forwarding").read_text(), "stopped")

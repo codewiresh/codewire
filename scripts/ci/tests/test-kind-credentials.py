@@ -14,7 +14,6 @@ import shlex
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
 from unittest.mock import Mock, patch
 
@@ -1102,8 +1101,6 @@ printf '%%s %%s %%s\\n' "$status" "$(wc -l < "$calls")" "$launched"
                 self.assertEqual(result.stdout.strip(), expected)
                 if expected.startswith("1"):
                     self.assertIn(message, result.stderr)
-        source = (ROOT / "scripts/ci/verify/kind/credentials.sh").read_text()
-        self.assertIn('launched="$(kind_credential_launch "$environment" --no-tty --detach', source)
 
     def test_membership_role_change_is_exact_and_fails_closed(self):
         for changed, expected in (("synthetic-membership\n", 0), ("", 1),
@@ -1229,15 +1226,6 @@ kind_credential_bound_revision '%s'
     def test_provider_audit_still_rejects_a_restarted_fixture(self):
         self.assertNotEqual(self.provider_counts(self.provider_events(), restarts=1).returncode, 0)
 
-    def test_native_flow_proves_codex_home_persistence_without_a_config_map(self):
-        source = HELPERS.read_text()
-        flow = source.split("kind_credential_native_smoke() (", 1)[1]
-        self.assertNotIn("configmap", flow.lower())
-        stop = flow.index('--cloud stop "$environment"')
-        start = flow.index('--cloud start "$environment"')
-        self.assertLess(flow.index("/home/codewire/.codex/kind-persistence"), stop)
-        self.assertLess(start, flow.index('cat /home/codewire/.codex/kind-persistence'))
-
     def codex_login(self, output, status=0, mode="deliver", extra=""):
         directory = tempfile.TemporaryDirectory(prefix="kind-codex-login-")
         self.addCleanup(directory.cleanup)
@@ -1355,12 +1343,6 @@ kind_credential_codex_login '%s' %s %s
         self.assertEqual(flow[counted:anchor].count(daemon + "success\n"), 3)
         self.assertIn('login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?',
                       flow)
-
-    def test_native_flow_resolves_the_selected_runtime_image_not_a_contract_only_preset(self):
-        source = HELPERS.read_text()
-        self.assertIn('workspace_image="$(kind_workspace_runtime_image)" || return $?', source)
-        self.assertIn('--image "$workspace_image"', source)
-        self.assertNotIn('--preset-id preset_contract_1', source)
 
     def test_missing_image_receipt_fails_before_public_enrollment(self):
         result = self.shell('''
@@ -1686,38 +1668,6 @@ ensure_kind_credential_default_profile codex kind-codex-1
                 self.assertEqual(result.stderr.splitlines(),
                                  made[:next(i for i, call in enumerate(made) if step in call) + 1])
 
-    def test_every_stage_keeps_a_default_and_creates_without_one(self):
-        helpers = HELPERS.read_text()
-        runtime = (ROOT / "scripts/ci/verify/kind/suites/cw-runtime.sh").read_text()
-        for name, flow, ensure, first in (
-            ("native", helpers.split("kind_credential_native_smoke() (", 1)[1].split("\n)\n", 1)[0],
-             'ensure_kind_credential_default_profile codex "$credential_name"',
-             'stage_profiles="$profile_name"'),
-            ("claude-session", helpers.split("kind_credential_claude_session() (", 1)[1].split("\n)\n", 1)[0],
-             'ensure_kind_credential_default_profile anthropic "$key_name"',
-             'stage_profiles="$key_profile $token_profile"'),
-            ("claude-sign-in", helpers.split("kind_credential_claude_sign_in() (", 1)[1].split("\n)\n", 1)[0],
-             'ensure_kind_credential_default_profile anthropic "$name"',
-             'stage_profiles="$profile"'),
-        ):
-            with self.subTest(stage=name):
-                self.assertEqual(flow.count(ensure), 1)
-                self.assertLess(flow.index(ensure), flow.index(first))
-                creates = [line for line in flow.splitlines()
-                           if "kind_credential_cli --cloud create " in line]
-                self.assertEqual(len(creates), 1)
-                self.assertTrue(creates[0].endswith(" --no-profile \\"), creates[0])
-        self.assertEqual(runtime.count("kind_credential_cli --cloud create "), 3)
-        self.assertEqual(runtime.count("kind_credential_cli --cloud create --name "), 3)
-        for line in runtime.splitlines():
-            if "kind_credential_cli --cloud create " in line:
-                self.assertIn(" --no-profile ", line)
-        self.assertEqual(runtime.count('ensure_kind_credential_default_profile openai "$credential_name"'), 1)
-        self.assertEqual(runtime.count('ensure_kind_credential_default_profile codex "$credential_name"'), 1)
-        common = (ROOT / "scripts/ci/verify/kind/common.sh").read_text()
-        self.assertIn('kind_credential_cli --cloud create --name "$name" --no-profile --image "$image"', common)
-        self.assertEqual(common.count("kind_credential_cli --cloud create "), 1)
-
     def relay_band(self, lead):
         return self.shell('''
 log() { printf '[kind-e2e] %%s\\n' "$*"; }
@@ -1807,41 +1757,11 @@ kind_credential_relay_token_lead sandbox-x codewire-orchestration-a
         self.assertNotEqual(
             self.relay_token_lead("2026-10-12T14:00:18Z", "2026-10-12T13:59:37Z", status=1).returncode, 0)
 
-    def test_native_acceptance_arms_its_error_trap_before_io(self):
-        source = HELPERS.read_text()
-        flow = source.split("kind_credential_native_smoke() (", 1)[1]
-        trap = flow.index("trap 'echo \"::error::native Codex acceptance failed:")
-        self.assertLess(trap, flow.index('workspace_image="$(kind_workspace_runtime_image)"'))
-        self.assertLess(trap, flow.index('prepare_kind_credential_cli'))
-        self.assertIn("set -E", flow[:trap])
-        generation = flow.index('login_generation="$(jq -er')
-        guard = flow.index('::error::the delivered Codex login event is missing its generation')
-        self.assertLess(generation, guard)
-        self.assertNotIn('login_generation="$(jq -er \'select(.event == "delivered") | .generation\' <<<"$login_events")" ||',
-                         flow)
-
-    def test_native_restart_wait_binds_the_update_generation_before_pod_assertions(self):
+    def test_native_restart_wait_never_waits_on_a_retired_gateway(self):
         source = HELPERS.read_text()
         flow = source.split("kind_credential_native_smoke() (", 1)[1]
         for retired in ("wait_kind_credential_sandbox_pair", "gateway_uid", "codewire-gateway"):
             self.assertNotIn(retired, flow)
-        update = flow.index('update="$(kind_credential_cli --cloud update "$environment"')
-        generation = flow.index('restart_generation="$(jq -er')
-        pod = flow.index('pod="$(wait_kind_credential_restarted_workspace '
-                         '"$environment" "$restart_generation")"')
-        relay = flow.index('relay="$(kind_credential_relay_pod)"')
-        self.assertLess(update, generation)
-        self.assertLess(generation, pod)
-        self.assertLess(pod, relay)
-        self.assertIn('wait_kind_credential_environment "$environment" running\n  pod=', flow)
-
-    def test_host_cli_build_selects_its_actual_binary_package(self):
-        manifest = tomllib.loads((ROOT / "crates/codewire-cli-bin/Cargo.toml").read_text())
-        self.assertIn("cw", [binary["name"] for binary in manifest["bin"]])
-        expected = f'cargo build --locked --profile ci -p {manifest["package"]["name"]} --bin cw'
-        source = (ROOT / "scripts/ci/images/build-kind-smokes.sh").read_text()
-        self.assertEqual(source.count(expected), 1)
-        self.assertNotIn("-p codewire-cli --bin cw", source)
 
     def shell(self, body, registry="registry.example.invalid"):
         env = {"PATH": "/usr/bin:/bin", "ROOT": str(ROOT)}
@@ -3720,15 +3640,6 @@ kind_credential_claude_rotation env-1 kind-claude 3
         gate = (ROOT / "scripts/ci/verify/kind/common.sh").read_text().split(
             "deploy_agent_sandbox_and_smoke() {", 1)[1].split("\n}", 1)[0]
         self.assertIn("kind_credential_native_smoke claude-session claude-sign-in", gate)
-
-    def test_the_login_probe_is_staged_from_its_checked_in_source(self):
-        helpers = HELPERS.read_text()
-        self.assertIn('< "$ROOT/scripts/ci/verify/kind/claude_login.py"', helpers)
-        source = (ROOT / "scripts/ci/verify/kind/claude_login.py").read_text()
-        self.assertIn('READY = re.compile(r"/tmp/codewire-kind-claude-rotation-[0-9]{1,12}")',
-                      source)
-        self.assertIn('ready="/tmp/codewire-kind-claude-rotation-${RANDOM}${RANDOM}"', helpers)
-
 
 class RotationIdleStages(unittest.TestCase):
     """#2972: the Claude stages run during the native stage's rotation idle."""

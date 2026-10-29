@@ -1267,14 +1267,13 @@ build_retained_kind_smokes() {
   fi
   mkdir -p "$RUN_DIR"
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-ci ]; then
-    local consumed missing=0
-    for consumed in \
-        crd-smoke environment-setup-smoke exec-smoke exec-stream-smoke \
-        file-service-smoke prepare-stream-smoke log-stream-smoke temporal-smoke \
-        temporal-fencing-smoke reconciler-ttl-smoke cw \
-        examples/platform-run-smoke examples/environment-session-smoke \
-        examples/environment-cw-runtime-smoke \
-        examples/coordinator-ingress-smoke; do
+    local consumed missing=0 programs
+    # Every program of the smoke inventory, where the consumed set put it.
+    programs="$(awk '!/^[[:space:]]*(#|$)/ && $4 == "bin" { print $5 }
+        !/^[[:space:]]*(#|$)/ && $4 == "example" { print "examples/" $5 }' \
+        "$ROOT/scripts/ci/verify/kind/smokes.txt")" || return $?
+    [ -n "$programs" ] || { echo "::error::the Kind smoke inventory names no program"; return 1; }
+    for consumed in $programs; do
       if [ ! -x "$CARGO_CI_DIR/$consumed" ]; then
         echo "::error::consumed Kind smoke binary is missing: ${CARGO_CI_DIR}/${consumed}; rerun kind-e2e.sh up"
         missing=1

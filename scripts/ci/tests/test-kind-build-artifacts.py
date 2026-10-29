@@ -918,5 +918,56 @@ class PinnedWorkspaceTests(unittest.TestCase):
                     self.assertEqual(artifact.main(), status)
 
 
+class SmokeInventoryTests(unittest.TestCase):
+    """The smoke inventory every Kind smoke build reads names real targets."""
+
+    @staticmethod
+    def cargo_target(crate: str, kind: str, name: str) -> tuple[bool, set[str]]:
+        import tomllib
+        directory = ROOT / "crates" / crate
+        manifest = tomllib.loads((directory / "Cargo.toml").read_text())
+        declared = {entry["name"]: entry for entry in manifest.get(kind, [])}
+        if name in declared:
+            return True, set(declared[name].get("required-features", []))
+        found = {
+            "bin": (directory / "src/bin" / f"{name}.rs").exists()
+            or (name == manifest["package"]["name"] and (directory / "src/main.rs").exists()),
+            "example": (directory / "examples" / f"{name}.rs").exists(),
+            "test": (directory / "tests" / f"{name}.rs").exists(),
+        }[kind]
+        return found, set()
+
+    def test_every_row_names_a_target_of_its_crate_built_with_its_features(self) -> None:
+        rows = artifact.smoke_inventory()
+        self.assertTrue(rows)
+        for group, crate, features, kind, name in rows:
+            with self.subTest(group=group, name=name):
+                self.assertEqual(manifest_name(crate), crate)
+                found, required = self.cargo_target(crate, kind, name)
+                self.assertTrue(found, f"{crate} has no {kind} target {name}")
+                selected = set() if features == "-" else set(features.split(","))
+                self.assertLessEqual(required, selected,
+                                     f"{name} needs features {sorted(required)} its group {group} does not build")
+
+    def test_an_unreadable_inventory_fails_closed(self) -> None:
+        good = "a codewire-a kind-e2e bin one-smoke\nb codewire-b - test wire_contract\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "smokes.txt"
+            path.write_text("# comment\n\n" + good)
+            self.assertEqual(len(artifact.smoke_inventory(path)), 2)
+            for bad in ("a codewire-other kind-e2e bin two-smoke", "a codewire-a - bin two-smoke",
+                        "a codewire-a kind-e2e test two", "c codewire-c - library x",
+                        "c codewire-c - bin", "c codewire-c - bin bad;name"):
+                with self.subTest(bad=bad):
+                    path.write_text(good + bad + "\n")
+                    with self.assertRaises(artifact.ArtifactError):
+                        artifact.smoke_inventory(path)
+
+
+def manifest_name(crate: str) -> str:
+    import tomllib
+    return tomllib.loads((ROOT / "crates" / crate / "Cargo.toml").read_text())["package"]["name"]
+
+
 if __name__ == "__main__":
     unittest.main()

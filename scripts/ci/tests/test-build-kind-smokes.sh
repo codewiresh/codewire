@@ -18,9 +18,22 @@ fail() {
 }
 
 fixture_root="$work/repository"
-mkdir -p "$fixture_root/scripts/ci/images" "$fixture_root/scripts/ci/verify" \
+mkdir -p "$fixture_root/scripts/ci/images" "$fixture_root/scripts/ci/verify/kind" \
   "$work/bin" "$work/output"
 cp "$BUILDER" "$fixture_root/scripts/ci/images/build-kind-smokes.sh"
+# A synthetic inventory: the builder builds what the inventory names, one
+# cargo build per group, and nothing it does not name.
+manifest="$fixture_root/scripts/ci/verify/kind/smokes.txt"
+cat >"$manifest" <<'EOF'
+# GROUP  CRATE           FEATURES  KIND     NAME
+alpha    codewire-alpha  kind-e2e  bin      first-smoke
+
+alpha    codewire-alpha  kind-e2e  bin      second-smoke
+beta     codewire-beta   -         example  third-smoke
+gamma    codewire-gamma  kind-e2e  example  fourth-smoke
+delta    codewire-delta  -         bin      cw
+billing  codewire-billing -        test     wire_contract
+EOF
 
 cat >"$fixture_root/scripts/ci/verify/run-host-rust-build.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -70,11 +83,11 @@ run_builder() {
 }
 
 cat >"$work/expected.calls" <<'EOF'
-cargo <build> <--profile> <ci> <-p> <codewire-orchestration> <--bin> <crd-smoke> <--bin> <environment-setup-smoke> <--bin> <exec-smoke> <--bin> <exec-stream-smoke> <--bin> <file-service-smoke> <--bin> <prepare-stream-smoke> <--bin> <log-stream-smoke> <--bin> <temporal-smoke> <--bin> <temporal-fencing-smoke> <--bin> <reconciler-ttl-smoke> <--bin> <sidecar-smoke> <--features> <kind-e2e>
-cargo <build> <--profile> <ci> <-p> <codewire-client> <--example> <platform-run-smoke> <--example> <environment-session-smoke> <--example> <environment-cw-runtime-smoke>
-cargo <build> <--profile> <ci> <-p> <codewire-client> <--example> <coordinator-ingress-smoke> <--features> <kind-e2e>
-cargo <build> <--locked> <--profile> <ci> <-p> <codewire-cli-bin> <--bin> <cw>
-cargo <test> <--locked> <--profile> <ci> <-p> <codewire-billing> <--test> <wire_contract> <--no-run> <--message-format=json> <configured_billing_wire_contract>
+cargo <build> <--locked> <--profile> <ci> <-p> <codewire-alpha> <--bin> <first-smoke> <--bin> <second-smoke> <--features> <kind-e2e>
+cargo <build> <--locked> <--profile> <ci> <-p> <codewire-beta> <--example> <third-smoke>
+cargo <build> <--locked> <--profile> <ci> <-p> <codewire-gamma> <--example> <fourth-smoke> <--features> <kind-e2e>
+cargo <build> <--locked> <--profile> <ci> <-p> <codewire-delta> <--bin> <cw>
+cargo <test> <--locked> <--profile> <ci> <-p> <codewire-billing> <--test> <wire_contract> <--no-run> <--message-format=json>
 EOF
 
 : >"$work/cargo.calls"
@@ -126,6 +139,26 @@ set +e
 usage_two_status=$?
 set -e
 [[ "$usage_two_status" -eq 2 ]] || fail 'a retired second artifact path was accepted'
+
+# An inventory the builder cannot read builds nothing.
+cp "$manifest" "$work/manifest.good"
+for bad in \
+    'alpha codewire-other kind-e2e bin extra-smoke' \
+    'alpha codewire-alpha - bin extra-smoke' \
+    'alpha codewire-alpha kind-e2e test extra' \
+    'epsilon codewire-epsilon - library extra-smoke' \
+    'epsilon codewire-epsilon - bin extra;smoke' \
+    'epsilon codewire-epsilon - bin'; do
+  { cat "$work/manifest.good"; printf '%s\n' "$bad"; } >"$manifest"
+  : >"$work/cargo.calls"
+  rm -f "$work/cargo.count"
+  if run_builder >"$work/bad.out" 2>&1; then
+    fail "an unreadable inventory line was built: $bad"
+  fi
+  [[ ! -s "$work/cargo.calls" ]] || fail "an unreadable inventory line still ran cargo: $bad"
+  grep -Fq 'smokes.txt:' "$work/bad.out" || fail "an unreadable inventory line was not named: $bad"
+done
+cp "$work/manifest.good" "$manifest"
 
 bash -n "$BUILDER" "$0"
 printf '[test-build-kind-smokes] command sequence, artifact path, timing, and failure propagation passed\n'

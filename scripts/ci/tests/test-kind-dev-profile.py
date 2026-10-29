@@ -246,13 +246,20 @@ def record_digest(service_digest: str, crate: str, features: str = "", fixture_f
     return hashlib.sha256(f"{service_digest} {crate} {features} {fixture_features}\n".encode()).hexdigest()
 
 
-# The smoke inventory the retained suites consume (common.sh).
-SMOKE_INVENTORY = [
-    "crd-smoke", "environment-setup-smoke", "exec-smoke", "exec-stream-smoke", "file-service-smoke",
-    "prepare-stream-smoke", "log-stream-smoke", "temporal-smoke", "temporal-fencing-smoke", "reconciler-ttl-smoke",
-    "cw", "examples/platform-run-smoke", "examples/environment-session-smoke", "examples/environment-cw-runtime-smoke",
-    "examples/coordinator-ingress-smoke",
-]
+# The smoke inventory every Kind smoke build reads: (group, crate, features,
+# kind, name) rows.
+INVENTORY = ROOT / "scripts/ci/verify/kind/smokes.txt"
+INVENTORY_ROWS = [tuple(line.split()) for line in INVENTORY.read_text().splitlines()
+                  if line.strip() and not line.lstrip().startswith("#")]
+
+
+def inventory_outputs(rows=INVENTORY_ROWS) -> dict[str, set[str]]:
+    """Each inventory group's installed paths below the smoke directory."""
+    outputs: dict[str, set[str]] = {}
+    for group, _crate, _features, kind, name in rows:
+        path = {"bin": name, "example": f"examples/{name}", "test": f"kind-smoke-tests/{name}"}[kind]
+        outputs.setdefault(group, set()).add(path)
+    return outputs
 
 
 # deploy-service.sh build parameters: crate, features, fixture features.
@@ -287,6 +294,7 @@ class DeveloperProfileTests(unittest.TestCase):
             path.mkdir(parents=True, mode=0o700)
         shutil.copy2(ROOT / "scripts/ci/verify/kind/credentials.sh",
                      self.tree / "scripts/ci/verify/kind/credentials.sh")
+        shutil.copy2(INVENTORY, self.tree / "scripts/ci/verify/kind/smokes.txt")
         # Distinct synthetic public roots for deploy-service.sh's republish step.
         (self.state / "roots").mkdir(mode=0o700)
         for name in ("codewire-kind-credential-broker-root", "codewire-kind-orchestration-internal-root",
@@ -851,14 +859,14 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         bake, = [call["args"] for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]]
         self.assertEqual(bake[bake.index("--builder") + 1], builder)
 
+    # One build per inventory group, in the inventory's order: crate,
+    # features, bins, examples and test target.
     SMOKE_BUILDS = [
-        ("codewire-orchestration", "kind-e2e",
-         "crd-smoke environment-setup-smoke exec-smoke exec-stream-smoke file-service-smoke prepare-stream-smoke "
-         "log-stream-smoke temporal-smoke temporal-fencing-smoke reconciler-ttl-smoke sidecar-smoke", "", ""),
-        ("codewire-client", "", "", "platform-run-smoke environment-session-smoke environment-cw-runtime-smoke", ""),
-        ("codewire-client", "kind-e2e", "", "coordinator-ingress-smoke", ""),
-        ("codewire-cli-bin", "", "cw", "", ""),
-        ("codewire-billing", "", "", "", "wire_contract"),
+        (crate, "" if features == "-" else features,
+         " ".join(row[4] for row in INVENTORY_ROWS if row[0] == group and row[3] == "bin"),
+         " ".join(row[4] for row in INVENTORY_ROWS if row[0] == group and row[3] == "example"),
+         " ".join(row[4] for row in INVENTORY_ROWS if row[0] == group and row[3] == "test"))
+        for group, crate, features in dict.fromkeys(row[:3] for row in INVENTORY_ROWS)
     ]
 
     def run_smokes(self, *groups: str, **environment: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
@@ -903,7 +911,7 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
             self.assertEqual(self.bake_arg(call["args"], "KIND_DEV_TREE"),
                              hashlib.sha256(str(self.tree).encode()).hexdigest()[:16])
         installed = sorted(str(path.relative_to(smokes)) for path in smokes.rglob("*") if path.is_file())
-        expected = sorted(SMOKE_INVENTORY + ["sidecar-smoke", "kind-smoke-tests/wire_contract"])
+        expected = sorted(set().union(*inventory_outputs().values()))
         self.assertEqual(installed, expected)
         # The suite selects the billing contract from the receipt with its own query.
         common = (ROOT / "scripts/ci/verify/kind/common.sh").read_text()
@@ -1072,6 +1080,19 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertIn("suite integrated: rust_pkg_codewire_billing, rust_pkg_codewire_tls", result.stderr)
         self.assertLess(result.stderr.index("suite edge-contract:"), result.stderr.index("[kind-deploy]"))
         self.assertEqual([call["args"][1] for call in self.calls("suite")], ["edge-contract", "credentials", "integrated"])
+
+    def test_selected_cli_and_workspace_access_run_the_user_ssh_journey(self) -> None:
+        # The workspace-services suite runs the user SSH journey (common.sh
+        # workspace_user_ssh_smoke): the CLI and workspace-access crates select it.
+        for token, crate in (("rust_pkg_codewire_cli", "codewire-cli"),
+                             ("rust_pkg_codewire_workspace_access", "codewire-workspace-access")):
+            with self.subTest(token=token):
+                self.calls_path.write_text("")
+                result = self.run_script("test-selected.sh", FAKE_SELECTION=f"rust|{token}",
+                                         FAKE_CHANGES=f"crate {crate}")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertRegex(result.stderr, rf"suite workspace-services: (.*, )?{token}(,|\n|$)")
+                self.assertIn("workspace-services", [call["args"][1] for call in self.calls("suite")])
 
     def test_selected_full_gate_runs_and_deploys_nothing(self) -> None:
         for name, environment, reason in (
@@ -1522,15 +1543,7 @@ class SmokeGroupTests(unittest.TestCase):
             seen.add(name)
             return runs[name].union(*(closure(other, seen) for other in calls[name]))
 
-        builder = (ROOT / "scripts/dev/kind/build-smokes.sh").read_text()
-        group_table = builder[builder.index("build_group() {"):builder.index("esac", builder.index("build_group() {"))]
-        outputs: dict[str, set[str]] = {}
-        for group, build in re.findall(r"^\s+([a-z0-9-]+)\)\s*(?:#[^\n]*\n\s*)?(smoke .*?);;", group_table, re.M | re.S):
-            parts = re.findall(r"'([^']*)'|(\S+)", build.replace("\\\n", " "))
-            words = [quoted or bare for quoted, bare in parts][1:]
-            _, _, bins, examples, test = words
-            outputs[group] = set(bins.split()) | {f"examples/{name}" for name in examples.split()} \
-                | ({f"kind-smoke-tests/{test}"} if test else set())
+        outputs = inventory_outputs()
         self.assertEqual(set(outputs), {"orchestration", "client", "client-kind-e2e", "cli", "billing"})
         common = (kind / "common.sh").read_text()
         table = common[common.index("kind_suite_smoke_groups() {"):common.index("esac", common.index("kind_suite_smoke_groups() {"))]
@@ -1553,6 +1566,11 @@ class SmokeGroupTests(unittest.TestCase):
                 needed = closure(entry, set())
                 self.assertTrue(needed, f"{suite} runs no smoke binary")
                 self.assertLessEqual(needed, built, f"{suite} runs smokes outside its groups")
+        # And the inventory builds nothing no suite runs (sidecar-smoke was
+        # built for every Kind run and run by none).
+        run_anywhere = set().union(*(closure(entry, set()) for entry in entries.values()))
+        unused = set().union(*outputs.values()) - run_anywhere
+        self.assertFalse(unused, f"the smoke inventory builds programs no Kind suite runs: {sorted(unused)}")
 
 
 class SelectionTableTests(unittest.TestCase):

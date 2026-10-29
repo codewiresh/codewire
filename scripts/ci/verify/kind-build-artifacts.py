@@ -51,28 +51,53 @@ GROUP_IMAGES = {
     "daemon": ("codewire-daemon:e2e",),
 }
 PRODUCT_IMAGES = GROUP_IMAGES["product"] + GROUP_IMAGES["daemon"]
-SMOKE_FILES = {
-    "bin-crd-smoke": "crd-smoke",
-    "bin-environment-setup-smoke": "environment-setup-smoke",
-    "bin-exec-smoke": "exec-smoke",
-    "bin-exec-stream-smoke": "exec-stream-smoke",
-    "bin-file-service-smoke": "file-service-smoke",
-    "bin-prepare-stream-smoke": "prepare-stream-smoke",
-    "bin-log-stream-smoke": "log-stream-smoke",
-    "bin-temporal-smoke": "temporal-smoke",
-    "bin-temporal-fencing-smoke": "temporal-fencing-smoke",
-    "bin-reconciler-ttl-smoke": "reconciler-ttl-smoke",
-    "bin-cw": "cw",
-    "example-platform-run-smoke": "examples/platform-run-smoke",
-    "example-environment-session-smoke": "examples/environment-session-smoke",
-    "example-environment-cw-runtime-smoke": "examples/environment-cw-runtime-smoke",
-    "example-coordinator-ingress-smoke": "examples/coordinator-ingress-smoke",
-}
-TEST_FILES = {
-    "test-billing-wire-contract": (
-        "billing-contract-build.jsonl", "wire_contract", ["test"],
-    ),
-}
+SMOKE_INVENTORY = "scripts/ci/verify/kind/smokes.txt"
+SMOKE_FIELD = re.compile(r"[a-z0-9][a-z0-9_,-]*")
+# The receipt the smoke build writes for its test target, which the suites read.
+SMOKE_TEST_RECEIPT = "billing-contract-build.jsonl"
+
+
+def smoke_inventory(path: Path | None = None) -> list[tuple[str, str, str, str, str]]:
+    """The Kind smoke inventory's rows: group, crate, features, kind, name.
+
+    The builds read the same file (build-kind-smokes.sh, build-smokes.sh); a
+    group is one crate and one feature set.
+    """
+    path = ROOT / SMOKE_INVENTORY if path is None else path
+    rows, groups = [], {}
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) != 5 or not all(SMOKE_FIELD.fullmatch(field) or (index == 2 and field == "-")
+                                       for index, field in enumerate(fields)):
+            raise ArtifactError(f"{path}:{number}: want GROUP CRATE FEATURES KIND NAME")
+        group, crate, features, kind, name = fields
+        if kind not in ("bin", "example", "test"):
+            raise ArtifactError(f"{path}:{number}: unknown smoke kind {kind}")
+        if groups.setdefault(group, (crate, features, kind == "test")) != (crate, features, kind == "test"):
+            raise ArtifactError(f"{path}:{number}: group {group} mixes crates, feature sets or targets")
+        rows.append((group, crate, features, kind, name))
+    return rows
+
+
+def _smoke_files() -> tuple[dict[str, str], dict[str, tuple[str, str, list[str]]]]:
+    programs, tests = {}, {}
+    for group, _crate, _features, kind, name in smoke_inventory():
+        if kind == "bin":
+            programs[f"bin-{name}"] = name
+        elif kind == "example":
+            programs[f"example-{name}"] = f"examples/{name}"
+        else:
+            tests[f"test-{group}-{name.replace('_', '-')}"] = (SMOKE_TEST_RECEIPT, name, ["test"])
+    if len(tests) != 1:
+        raise ArtifactError("the smoke inventory must name exactly one test target, the billing contract")
+    return programs, tests
+
+
+# Every program and test target the Kind suites run, as the artifact names
+# them: from the smoke inventory, never a second list.
+SMOKE_FILES, TEST_FILES = _smoke_files()
 BUILD_ENTRYPOINTS = {
     "workspace": "scripts/ci/verify/verify-workspace-image.sh",
     "product": "scripts/ci/images/build-kind-images.sh",

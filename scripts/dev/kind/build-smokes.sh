@@ -9,12 +9,14 @@
 #
 # Usage: build-smokes.sh SMOKE_DIR BILLING_TEST_ARTIFACT_JSONL [GROUP...]
 #
-# Each GROUP is one build: orchestration (the orchestration smokes), client
-# (the client examples), client-kind-e2e (the coordinator ingress example),
-# cli (the host cw) and billing (the billing wire contract). No GROUP builds
-# them all. `make kind-test` sets KIND_SMOKE_RUN once per run, and each suite
-# names the groups it runs (common.sh kind_suite_smoke_groups): a group that
-# run already built is not built again (#2973).
+# Each GROUP is one build of the smoke inventory
+# (scripts/ci/verify/kind/smokes.txt), which names its crate, features and
+# programs: orchestration (the orchestration smokes), client (the client
+# examples), client-kind-e2e (the coordinator ingress example), cli (the host
+# cw) and billing (the billing wire contract). No GROUP builds them all.
+# `make kind-test` sets KIND_SMOKE_RUN once per run, and each suite names the
+# groups it runs (common.sh kind_suite_smoke_groups): a group that run already
+# built is not built again (#2973).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -28,7 +30,22 @@ die() { printf '[kind-smokes] error: %s\n' "$*" >&2; exit 1; }
 [[ $# -ge 2 && "$1" == /* && "$2" == /* ]] ||
   die 'usage: build-smokes.sh SMOKE_DIR BILLING_TEST_ARTIFACT_JSONL [GROUP...] (absolute paths)'
 readonly SMOKE_DIR="$1" BILLING_JSONL="$2"
-readonly SMOKE_GROUPS=(orchestration client client-kind-e2e cli billing)
+readonly INVENTORY="$ROOT/scripts/ci/verify/kind/smokes.txt"
+# inventory_group GROUP: the group's crate, features ("" for none), bins,
+# examples and test target, one per line, from the inventory.
+inventory_group() {
+  awk -v group="$1" '
+    /^[[:space:]]*(#|$)/ || $1 != group { next }
+    { crate = $2; features = ($3 == "-" ? "" : $3)
+      if ($4 == "bin") bins = bins (bins ? " " : "") $5
+      else if ($4 == "example") examples = examples (examples ? " " : "") $5
+      else test = $5 }
+    END { if (crate) printf "%s\n%s\n%s\n%s\n%s\n", crate, features, bins, examples, test }
+  ' "$INVENTORY"
+}
+mapfile -t SMOKE_GROUPS < <(awk '!/^[[:space:]]*(#|$)/ && !seen[$1]++ { print $1 }' "$INVENTORY")
+readonly SMOKE_GROUPS
+[ "${#SMOKE_GROUPS[@]}" -gt 0 ] || die "the smoke inventory ${INVENTORY#"$ROOT"/} names no group"
 requested=("${@:3}")
 [ "${#requested[@]}" -gt 0 ] || requested=("${SMOKE_GROUPS[@]}")
 for group in "${requested[@]}"; do
@@ -74,19 +91,10 @@ smoke() {
 }
 
 build_group() {
-  case "$1" in
-    orchestration)
-      smoke codewire-orchestration kind-e2e \
-        'crd-smoke environment-setup-smoke exec-smoke exec-stream-smoke file-service-smoke prepare-stream-smoke log-stream-smoke temporal-smoke temporal-fencing-smoke reconciler-ttl-smoke sidecar-smoke' \
-        '' '' ;;
-    client)
-      smoke codewire-client '' '' \
-        'platform-run-smoke environment-session-smoke environment-cw-runtime-smoke' '' ;;
-    client-kind-e2e) smoke codewire-client kind-e2e '' 'coordinator-ingress-smoke' '' ;;
-    # The same build the daemon deploy layers into the sandbox image.
-    cli) smoke codewire-cli-bin '' 'cw' '' '' ;;
-    billing) smoke codewire-billing '' '' '' wire_contract ;;
-  esac
+  local -a build
+  mapfile -t build < <(inventory_group "$1")
+  [ "${#build[@]}" -eq 5 ] || die "the smoke inventory has no group $1"
+  smoke "${build[0]}" "${build[1]}" "${build[2]}" "${build[3]}" "${build[4]}"
 }
 
 # The groups this make kind-test run already built into SMOKE_DIR. Another

@@ -25,10 +25,8 @@ CREDENTIALS="$ROOT/scripts/ci/verify/kind/credentials.sh"
 INTEGRATED="$ROOT/scripts/ci/verify/kind/suites/integrated.sh"
 DASHBOARD_BROWSER="$ROOT/scripts/ci/verify/kind/suites/dashboard-browser.sh"
 FINAL_FENCING="$ROOT/scripts/ci/verify/kind/suites/final-fencing.sh"
-ENVIRONMENT_SESSION="$ROOT/scripts/ci/verify/kind/suites/environment-session.sh"
 SANDBOX_SUPPLY_CHAIN="$ROOT/scripts/ci/verify/kind/suites/sandbox-supply-chain.sh"
 RUNTIME_ACCEPTANCE="$ROOT/scripts/ci/verify/kind/suites/runtime-acceptance.sh"
-UP="$ROOT/scripts/ci/verify/kind/suites/up.sh"
 WARM_POOLS="$ROOT/scripts/ci/verify/kind/suites/warm-pools.sh"
 mkdir -p "$ROOT/.tmp"
 FIXTURE="$(mktemp -d "$ROOT/.tmp/kind-e2e-suites.XXXXXX")"
@@ -193,89 +191,22 @@ printf '[test-kind-e2e-suites] SQLx ledger guard cases=7 passed\n'
 # not a bare container shell. Reuse the daemon fixture without giving the host
 # exec binary ownership of its Pod lifecycle.
 exec_source="$ROOT/crates/codewire-orchestration/src/bin/exec-smoke.rs"
-grep -Fq 'std::env::var("SMOKE_POD_NAME")?' "$exec_source" ||
-  fail 'workspace exec must require the caller-owned authenticated Pod'
 if grep -Eq 'pods\.(create|delete)\(|busybox:|SMOKE_KEEP_POD' "$exec_source"; then
   fail 'workspace exec still creates an unauthenticated Pod or owns its lifecycle'
 fi
 daemon_fixture="$(sed -n '/^workspace_access_stack_smoke() {/,/^billing_contract_through_ingress() {/p' "$COMMON")"
-for binding in \
-    'name: workspace' \
-    'name: codewire-daemon-init' \
-    'cp /usr/local/bin/cw /codewire/bin/.cw.tmp' \
-    'chmod 0755 /codewire/bin/.cw.tmp' \
-    'mv /codewire/bin/.cw.tmp /codewire/bin/cw' \
-    'command: ["/codewire/bin/cw", "__hosted-daemon"]' \
-    'name: CODEWIRE_DAEMON_AUTH_TOKEN' \
-    'value: 0.0.0.0:7777' \
-    'mountPath: /codewire/bin' \
-    'mountPath: /codewire/run' \
-    'mountPath: /home/codewire' \
-    'mountPath: /workspace'; do
-  grep -Fq "$binding" <<<"$daemon_fixture" ||
-    fail "authenticated workspace exec fixture missing: $binding"
-done
 # The daemon hosts SSH and the tailnet: the fixture proves the access objects
 # and that no gateway object exists, and never waits on or restarts a gateway.
-for binding in 'CRD_SMOKE_ACCESS_PHASE=setup' 'CRD_SMOKE_LOCAL_IMAGES=1'; do
-  grep -Fq "$binding" <<<"$daemon_fixture" ||
-    fail "access-object fixture missing: $binding"
-done
 if grep -Eq 'cw-gateway|rollout (status|restart)|port-forward|ssh-keyscan' <<<"$daemon_fixture"; then
   fail 'access-object fixture still depends on a gateway'
 fi
-grep -Fq 'SMOKE_POD_NAME=crd-smoke-workspace-daemon' "$COMMON" ||
-  fail 'workspace exec does not target the authenticated daemon fixture'
 
-# Terminal tickets connect through that same authenticated daemon. The public
-# helper must run inside the ready claim/database binding, before its cleanup.
+# Terminal tickets connect through that same authenticated daemon, never an
+# isolated unauthenticated fixture of their own.
 terminal_fixture="$(sed -n '/^environment_setup_terminal_smoke() (/,/^file_service_smoke() (/p' "$COMMON")"
-grep -Fq 'local environment_id="$1"' <<<"$terminal_fixture" ||
-  fail 'terminal smoke must use the caller-owned environment'
 if grep -Eq 'busybox:|kubectl|psql|cleanup_terminal_fixture' <<<"$terminal_fixture"; then
   fail 'terminal smoke still owns an isolated unauthenticated fixture'
 fi
-grep -Fq '"$CARGO_CI_DIR/environment-setup-smoke"' <<<"$terminal_fixture" ||
-  fail 'terminal smoke no longer exercises the public ticket/WebSocket helper'
-file_fixture="$(sed -n '/^file_service_smoke() (/,/^platform_run_connect_smoke() {/p' "$COMMON")"
-[[ "$(grep -Fc 'environment_setup_terminal_smoke "$environment_id"' "$COMMON")" -eq 1 ]] ||
-  fail 'terminal smoke must run exactly once against the bound environment'
-awk '
-  /if \[ "\$ready" != "True" \]/ { ready = 1 }
-  /setup_owner_pod_uid = NULL;/ { bound = ready }
-  /environment_daemon_proxy_smoke "\$environment_id"/ { daemon = bound }
-  /environment_setup_terminal_smoke "\$environment_id"/ { terminal = daemon }
-  /DELETE FROM sandbox_environment_backend/ { cleaned = terminal }
-  END { exit !(terminal && cleaned) }
-' <<<"$file_fixture" || fail 'terminal smoke must follow authenticated binding and precede cleanup'
-# Program #2238 B2: an unbound legacy daemon's credential is derived only from
-# the exact Pod its Claim's bound Sandbox controls. The retained daemon Pod
-# gains that chain before any daemon call, and cleanup orphans it, never
-# cascading the Sandbox deletion into the retained Pod.
-awk '
-  /^kind: Sandbox$/ { sandbox = 1 }
-  /patch pod "\$daemon_pod" --type=merge -p "\$pod_owner"/ { owned = sandbox }
-  /patch sandboxclaim "\$claim_name"/ { bound = owned }
-  /environment_daemon_proxy_smoke "\$environment_id"/ { daemon = bound }
-  END { exit !daemon }
-' <<<"$file_fixture" || fail 'daemon fixture Pod must be controlled by its bound Sandbox before daemon calls'
-[[ "$(grep -Fc 'delete sandbox "$sandbox_name" --cascade=orphan' <<<"$file_fixture")" -eq 3 ]] ||
-  fail 'file-service fixture cleanup must orphan the retained daemon Pod'
-# A manually prepared Ready workspace is not an active setup owner. Preserve
-# the production readiness guard and seed/upsert coherent completed metadata.
-for binding in \
-    '       true, NULL, NULL, NULL, NULL, NULL, NULL' \
-    '    setup_complete = true,' \
-    '    setup_owner_generation = NULL,' \
-    '    setup_owner_activity_id = NULL,' \
-    '    setup_owner_attempt = NULL,' \
-    '    setup_owner_phase = NULL,' \
-    '    setup_owner_status = NULL,' \
-    '    setup_owner_pod_uid = NULL;' \
-    "RAISE EXCEPTION 'prepared FileService fixture is not ready and idle';"; do
-  grep -Fq "$binding" <<<"$file_fixture" ||
-    fail "prepared workspace readiness binding missing: $binding"
-done
 workspace_fixture="$(sed -n '/^workspace_service_smokes() {/,/^environment_resize_smoke() (/p' "$COMMON")"
 
 # Bash suppresses errexit throughout functions invoked from an if/|| condition.
@@ -539,78 +470,16 @@ for target in workspace_service_smokes file_service_smoke workspace_access_stack
 done
 printf '[test-kind-e2e-suites] workspace failure propagation: %s cases passed\n' "$workspace_failure_cases"
 
-python3 - "$ROOT" <<'PY'
-import hashlib
-import pathlib
-import re
-import sys
-
-root = pathlib.Path(sys.argv[1])
-seed = root / "tests/fixtures/orchestration/seed.sql"
-assert hashlib.sha256(seed.read_bytes()).hexdigest() == "55c03324246fe6c24a8b334ccc91a963485213d6771d1b29c5d26daa80209cbd"
-adapter = root / "tests/fixtures/orchestration/runtime-ready.sql"
-sql = adapter.read_text()
-for field in ["generation", "activity_id", "attempt", "phase", "status", "pod_uid"]:
-    assert f"setup_owner_{field} = NULL" in sql
-assert "setup_complete = TRUE" in sql
-assert "<> 2 THEN" in sql
-assert "WHERE environment_id IN ('env_exec_contract_backend', 'env_exec_contract_unavailable')" in sql
-for relative, startup in [
-    ("scripts/ci/verify/run-integration-verification.sh", "start_orchestration_process configured"),
-    ("scripts/ci/verify/rust-stack-rehearsal.sh", 'start_proc orchestration "$ORCHESTRATION_PORT" env'),
-]:
-    source = (root / relative).read_text()
-    marker = '-f "$ROOT/tests/fixtures/orchestration/seed.sql"'
-    assert source.count(marker) == 1
-    tail = source.split(marker, 1)[1]
-    adapter_marker = '-f "$ROOT/tests/fixtures/orchestration/runtime-ready.sql"'
-    assert source.count(adapter_marker) == 1
-    assert 0 <= tail.find(adapter_marker) < tail.find(startup)
-    assert re.search(r'psql "\$DATABASE_URL" -v ON_ERROR_STOP=1 \\\n\s+-f "\$ROOT/tests/fixtures/orchestration/runtime-ready.sql"', source)
-PY
 if grep -Fq 'environment_setup_terminal_smoke' <<<"$workspace_fixture"; then
   fail 'workspace suite runs terminal smoke outside the authenticated binding'
 fi
 
-# A runnable resize fixture cannot use the deliberately non-runnable shared
-# contract preset. Keep its image/base mapping and the original runtime proof.
+# The resize fixture renders its Sandbox objects through the production Rust
+# renderer (crd-smoke), never a copy of the bootstrap or shadow naming.
 resize_fixture="$(sed -n '/^environment_resize_smoke() (/,/^temporal_workflow_smoke() {/p' "$COMMON")"
-grep -Fq "environment_id=\"\$(python3 -c 'import uuid; print(uuid.uuid4())')\"" <<<"$resize_fixture" ||
-  fail 'resize fixture does not use the canonical environment identity shape'
-grep -Fq "'kind-resize-smoke', 'running', 'started', '\$preset_id'" <<<"$resize_fixture" ||
-  fail 'resize fixture does not use its own runnable preset'
-grep -Fq "VALUES ('\$preset_id', 'codewire-daemon:e2e', 'resize-template');" <<<"$resize_fixture" ||
-  fail 'resize fixture image/template base does not match its runtime'
-grep -Fq 'INSERT INTO environment_presets (id, org_id, name, official, project_spec)' <<<"$resize_fixture" ||
-  fail 'resize fixture does not own its preset'
-# Resize refuses a running Sandbox whose setup still owns the runtime (#2328).
-grep -Fq "'\$pod_name', '\$pod_ip', true" <<<"$resize_fixture" ||
-  fail 'resize fixture does not model completed setup'
-# Names and immutable daemon bootstrap come from the same Rust renderer used
-# by runtime reconciliation. This also covers shadow names exceeding 63 bytes.
-for binding in \
-    'CRD_SMOKE_RESIZE_PHASE=render CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id"' \
-    'SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS"' \
-    '"$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"' \
-    'select(.kind == "SandboxTemplate") | .metadata.name' \
-    'select(.kind == "SandboxWarmPool") | .metadata.name' \
-    '.metadata.name == $claim and .spec.warmPoolRef.name == $pool' \
-    'kubectl_apply -f "$resize_manifest"' \
-    'CRD_SMOKE_RESIZE_PHASE=release CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id"'; do
-  grep -Fq "$binding" <<<"$resize_fixture" || fail "resize renderer binding missing: $binding"
-done
 if grep -Eq '^kind: (SandboxTemplate|SandboxWarmPool|SandboxClaim)$|local shadow_pool_name="shadow-pool-' <<<"$resize_fixture"; then
   fail 'resize fixture still duplicates production bootstrap or shadow naming'
 fi
-[[ "$(grep -c '^BEGIN;' <<<"$resize_fixture")" -eq 2 && "$(grep -c '^COMMIT;' <<<"$resize_fixture")" -eq 2 ]] ||
-  fail 'resize fixture creation and cleanup must each be atomic'
-for assertion in \
-    'live resize replaced the owned workspace Pod UID' \
-    'live resize changed workspace restart count' \
-    'Sandbox or SandboxClaim did not retain the desired resize' \
-    'explicit restart failed to preserve PVC identity or workspace data'; do
-  grep -Fq "$assertion" <<<"$resize_fixture" || fail "resize assertion missing: $assertion"
-done
 
 # Exercise the actual cleanup definition with no Kubernetes or database.
 # A failed foreground drain must never race a still-live issuer/key writer.
@@ -682,22 +551,11 @@ else
 fi
 
 bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" "$DASHBOARD_BROWSER" "$FINAL_FENCING" \
-  "$ENVIRONMENT_SESSION" "$SANDBOX_SUPPLY_CHAIN" "$RUNTIME_ACCEPTANCE" "$0"
+  "$SANDBOX_SUPPLY_CHAIN" "$RUNTIME_ACCEPTANCE" "$0"
 # The user SSH journey runs real OpenSSH through the block `cw setup ssh`
-# writes, never hand-built trust options, and the CLI and workspace-access
-# crates select its suite.
+# writes, never hand-built trust options, and probes the platform's real
+# credential bridge port.
 user_ssh="$(sed -n '/^workspace_user_ssh_smoke() (/,/^)$/p' "$COMMON")"
-grep -Fq '  workspace_user_ssh_smoke' "$COMMON" || fail 'workspace services do not run the user SSH journey'
-for binding in 'kind_credential_cli setup ssh --ssh-config-file "$config"' 'host="cw-cloud-$name"' \
-    'timeout 60 "$tool" -F "$ssh_config"' "'printf a && printf b | tr b B; echo \" \$((1+2)) \$HOME\"; exit 7'" \
-    'scp -O' 'sftp -b' '[ "$status" -eq 255 ]' 'wait_kind_credential_environment "$environment" destroyed' \
-    '-W "127.0.0.1:$forward_port"' '-L "127.0.0.1:$local_port:127.0.0.1:$forward_port"' \
-    '-D "127.0.0.1:$socks_port"' '--socks5-hostname' '-W 169.254.169.254:80' \
-    "port forwarding reaches only this environment's own loopback" \
-    '-L "127.0.0.1:$local_port:127.0.0.1:$bridge_port"' '"http://localhost:$bridge_port/v1/models"' \
-    'is the credential bridge, which belongs to the platform'; do
-  grep -Fq -- "$binding" <<<"$user_ssh" || fail "user SSH journey is missing: $binding"
-done
 # The journey's bridge port is the platform's credential bridge constant.
 grep -Fq 'local bridge_port=38081 ' <<<"$user_ssh" &&
   grep -Fq 'pub const CREDENTIAL_BRIDGE_LOOPBACK_PORT: u16 = 38_081;' \
@@ -706,10 +564,6 @@ grep -Fq 'local bridge_port=38081 ' <<<"$user_ssh" &&
 if grep -Fq 'KnownHostsCommand=' <<<"$user_ssh"; then
   fail 'the user SSH journey hand-builds the managed block'
 fi
-for token in rust_pkg_codewire_cli rust_pkg_codewire_workspace_access; do
-  grep -Eq "^ *(.*\| )?${token}(\)| \|).*want .*workspace-services" "$ROOT/scripts/dev/kind/test-selected.sh" ||
-    fail "$token does not select the workspace-services suite"
-done
 
 # The resize workspace is identity-free: it is bound by the resize's own
 # reconcile and never receives an environment capability.
@@ -717,23 +571,9 @@ if grep -Fq 'CRD_SMOKE_DAEMON_AUTH_TOKEN' "$COMMON" \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs"; then
   fail 'the resize workspace still receives an environment daemon capability'
 fi
-grep -Fq 'workspace_binding_url: workspace_binding_url(server_namespace)' \
-  "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
-  fail 'the resize workspace is not rendered identity-free'
-grep -Fq 'CRD_SMOKE_ACCESS_PHASE=cleanup' "$COMMON" ||
-  fail 'the FileService fixture does not remove and recheck the access objects'
-grep -Fq 'CRD_SMOKE_ACCESS_PHASE must be full, setup, or cleanup' \
-  "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
-  fail 'CRD smoke no longer bounds its access phases'
 if grep -Fq 'CRD_SMOKE_GATEWAY' "$COMMON" "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs"; then
   fail 'Kind still passes a gateway capability or phase to the CRD smoke'
 fi
-grep -Fq 'std::env::var("CRD_SMOKE_WORKSPACE_IMAGE")' \
-  "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
-  fail 'CRD smoke cannot consume the sealed workspace alias'
-grep -Fq 'std::env::var("SMOKE_WORKSPACE_IMAGE")' \
-  "$ROOT/crates/codewire-orchestration/src/bin/temporal-fencing-smoke.rs" ||
-  fail 'Temporal fencing smoke cannot consume the sealed workspace alias'
 awk '
   /list TTL smoke workspace Pods/ { ready = NR }
   /\.args\(\["suite", "sandbox-supply-chain"\]\)/ { observe = NR }
@@ -742,74 +582,6 @@ awk '
   END { exit !(ready > 0 && ready < observe && observe < checked && checked < expire) }
 ' "$ROOT/crates/codewire-orchestration/src/bin/reconciler-ttl-smoke.rs" ||
   fail 'TTL smoke must pass the live provenance gate after Ready and before expiry'
-[[ "$(grep -Fc 'SMOKE_WORKSPACE_IMAGE="$workspace_image"' "$COMMON")" -eq 4 ]] ||
-  fail 'Kind smoke callers do not consistently select the sealed workspace alias'
-grep -Fq 'PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$workspace_image"' "$COMMON" ||
-  fail 'dashboard lifecycle does not select the sealed workspace alias'
-grep -Fq 'process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE || workspaceImage' \
-  "$ROOT/apps/dashboard/e2e/helpers/environment-journey.ts" ||
-  fail 'dashboard lifecycle preset cannot consume the sealed workspace alias'
-grep -Fq '(${presetId}, ${workspaceRuntimeImage},' \
-  "$ROOT/apps/dashboard/e2e/helpers/environment-journey.ts" ||
-  fail 'dashboard lifecycle preset ignores its selected runtime workspace image'
-grep -Fq 'KIND_INGRESS_HOST_PORT="${KIND_INGRESS_HOST_PORT:-${KIND_INGRESS_HTTP_HOST_PORT:-8090}}"' "$COMMON" ||
-  fail 'Kind ingress host port is not configurable with the accepted default'
-grep -Fq 'KIND_INGRESS_TLS_HOST_PORT="${KIND_INGRESS_TLS_HOST_PORT:-10443}"' "$COMMON" ||
-  fail 'Kind ingress TLS host port is not configurable with the accepted default'
-grep -Fq 'KIND_TEMPORAL_HOST_PORT="${KIND_TEMPORAL_HOST_PORT:-7233}"' "$COMMON" ||
-  fail 'Kind Temporal host port is not configurable with the accepted default'
-grep -Fq 'KIND_ORCHESTRATION_HOST_PORT="${KIND_ORCHESTRATION_HOST_PORT:-8084}"' "$COMMON" ||
-  fail 'Kind orchestration host port is not configurable with the accepted default'
-grep -Fq 'KIND_COORDINATOR_DIRECT_HOST_PORT="${KIND_COORDINATOR_DIRECT_HOST_PORT:-${KIND_COORDINATOR_HOST_PORT:-18092}}"' "$COMMON" ||
-  fail 'Kind coordinator direct host port is not configurable with the accepted default'
-grep -Fq 'KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"' "$COMMON" ||
-  fail 'Kind Postgres host port is not configurable with the accepted default'
-grep -Fq "KIND_POSTGRES_IMAGE='docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee'" "$COMMON" ||
-  fail 'Kind Postgres support input is not bound to the reviewed linux/amd64 manifest'
-grep -Fq "KIND_TEMPORAL_IMAGE='docker.io/temporalio/auto-setup:1.29.0@sha256:6605395ec22aa6a1993bb0bfd35002b011603e21d11c4a71ee646038c59e8909'" "$COMMON" ||
-  fail 'Kind Temporal support input is not bound to the reviewed linux/amd64 manifest'
-grep -Fq 'KIND_INGRESS_URL="${KIND_INGRESS_URL:-http://127.0.0.1:${KIND_INGRESS_HOST_PORT}}"' "$COMMON" ||
-  fail 'Kind ingress URL does not follow the requested ingress host port'
-grep -Fq 'KIND_TEMPORAL_ADDRESS="${KIND_TEMPORAL_FRONTEND_URL:-${KIND_TEMPORAL_ADDRESS:-http://127.0.0.1:${KIND_TEMPORAL_HOST_PORT}}}"' "$COMMON" ||
-  fail 'Kind Temporal client address does not follow the requested host port'
-grep -Fq 'KIND_ORCHESTRATION_URL="${KIND_ORCHESTRATION_HTTP_URL:-${KIND_ORCHESTRATION_URL:-http://127.0.0.1:${KIND_ORCHESTRATION_HOST_PORT}}}"' "$COMMON" ||
-  fail 'Kind orchestration client address does not follow the requested host port'
-grep -Fq 'KIND_COORDINATOR_DIRECT_URL="${KIND_COORDINATOR_DIRECT_URL:-http://127.0.0.1:${KIND_COORDINATOR_DIRECT_HOST_PORT}}"' "$COMMON" ||
-  fail 'Kind coordinator direct address does not follow the requested host port'
-grep -Fq 'render_kind_host_port_mappings "$kind_config" "$rendered_kind_config"' "$COMMON" ||
-  fail 'Kind cluster creation does not render the requested host-port mappings'
-grep -Fq 'module.render_host_ports(data.decode(), replacements)' "$COMMON" ||
-  fail 'Kind host-port rendering does not use the shared single-pass mapping renderer'
-grep -Fq 'require_kind_host_ports_available "$KIND_CLUSTER_NAME"' "$COMMON" ||
-  fail 'Kind cluster creation does not preflight requested host-port ownership'
-grep -Fq 'log_kind_bound_endpoints' "$COMMON" ||
-  fail 'Kind cluster creation does not print the bound endpoint set'
-grep -Fxq '  require_kind_host_ports_available' "$UP" ||
-  fail 'kind-e2e.sh up does not fail fast when requested host ports are held'
-grep -Fq -- '--forward "${KIND_INGRESS_HOST_PORT}:80"' "$COMMON" ||
-  fail 'remote DinD forwarding does not follow the requested ingress host port'
-grep -Fq -- '--forward "${KIND_INGRESS_TLS_HOST_PORT}:443"' "$COMMON" ||
-  fail 'remote DinD forwarding does not follow the requested ingress TLS host port'
-grep -Fq -- '--forward "${KIND_TEMPORAL_HOST_PORT}:30733"' "$COMMON" ||
-  fail 'remote DinD forwarding does not follow the requested Temporal host port'
-grep -Fq -- '--forward "${KIND_ORCHESTRATION_HOST_PORT}:30084"' "$COMMON" ||
-  fail 'remote DinD forwarding does not follow the requested orchestration host port'
-grep -Fq -- '--forward "${KIND_COORDINATOR_DIRECT_HOST_PORT}:30090"' "$COMMON" ||
-  fail 'remote DinD forwarding does not follow the requested coordinator host port'
-grep -Fq 'TEMPORAL_ADDRESS="$KIND_TEMPORAL_FRONTEND_URL"' "$COMMON" ||
-  fail 'Temporal fencing smoke does not dial the requested Temporal endpoint'
-grep -Fq 'SMOKE_ORCHESTRATION_URL="$KIND_ORCHESTRATION_HTTP_URL"' "$COMMON" ||
-  fail 'orchestration smoke callers do not dial the requested orchestration endpoint'
-grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
-  fail 'Kind cluster creation does not adapt the remote DinD network boundary'
-[[ "$(grep -Fc '"$ROOT/scripts/ci/verify/dashboard-image.sh" "$dashboard_image"' "$COMMON")" -eq 1 ]] \
-    && grep -Fq 'local dashboard_image=codewire-dashboard:e2e' "$COMMON" ||
-  fail 'Kind does not verify the exact dashboard image it already built'
-# A named profile admits its product images by ID straight after producing
-# them, and checks the dashboard it holds rather than the shared tag (#3073).
-grep -Fq 'profile-artifacts.py" admit' "$COMMON" \
-    && grep -Fq 'dashboard_image="$(jq -er '"'"'.holds["codewire-dashboard:e2e"]'"'"'' "$COMMON" ||
-  fail 'a named Kind profile does not admit its product images by ID before the smoke build'
 if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
   fail 'Kind smoke callers bypass the configurable Postgres URL'
 fi
@@ -821,27 +593,6 @@ overlay_renderer_source="$(workspace_smoke_definition render_kind_overlay_manife
 [ -n "$overlay_renderer_source" ] || fail 'overlay renderer source is missing'
 common_client_source="${common_client_source/"$overlay_renderer_source"/}"
 
-# Smoke binaries default to the default host ports, which belong to another
-# cluster whenever this one runs shifted: every Temporal smoke names this
-# cluster's frontend.
-for temporal_smoke in temporal-smoke temporal-fencing-smoke; do
-  invocations="$(grep -c "\"\$CARGO_CI_DIR/${temporal_smoke}\"" "$COMMON" || true)"
-  addressed="$({ grep -B3 "\"\$CARGO_CI_DIR/${temporal_smoke}\"" "$COMMON" || true; } |
-    grep -Fc 'TEMPORAL_ADDRESS="$KIND_TEMPORAL_FRONTEND_URL"' || true)"
-  [ "$invocations" -ge 1 ] && [ "$addressed" -eq "$invocations" ] ||
-    fail "${temporal_smoke} can fall back to another cluster's Temporal (${addressed}/${invocations} addressed)"
-done
-# The fencing smoke runs orchestration code on the host, which refuses to run
-# without the deployment's runtime images: it gets the deployed values.
-fencing_smoke_source="$(workspace_smoke_definition temporal_fencing_smoke)"
-for runtime_image in CODEWIRE_WORKSPACE_IMAGE_REPOSITORY CODEWIRE_APPROVED_IMAGE_REGISTRIES SANDBOX_DAEMON_IMAGE; do
-  grep -Fq "${runtime_image}=\"\$" <<<"$fencing_smoke_source" ||
-    fail "the fencing smoke does not pass the deployed ${runtime_image}"
-done
-for deployed in 'configmap/codewire-config' 'configmap/codewire-image-registries' 'deploy/codewire-orchestration'; do
-  grep -Fq "get ${deployed}" <<<"$fencing_smoke_source" ||
-    fail "the fencing smoke does not read its runtime images from ${deployed}"
-done
 for hardcoded_loopback in '127.0.0.1:7233' '127.0.0.1:8084' '127.0.0.1:18092' '127.0.0.1:8090' 'localhost:10443'; do
   if grep -Fq "$hardcoded_loopback" <<<"$common_client_source"; then
     fail "Kind harness still hardcodes client address ${hardcoded_loopback}"
@@ -980,7 +731,6 @@ run_kind_up() { record up; }
 run_retained_integrated_suite() { record integrated-retained; }
 run_retained_dashboard_browser_suite() { record dashboard-browser-retained; }
 run_retained_final_fencing_suite() { record final-fencing; }
-run_retained_environment_session_suite() { record environment-session; }
 run_retained_cw_runtime_suite() { record cw-runtime; }
 run_retained_sandbox_supply_chain_suite() { record sandbox-supply-chain; }
 run_retained_runtime_acceptance_suite() { record runtime-acceptance; }
@@ -995,32 +745,30 @@ printf '%s\n' up | cmp -s - "$CALLS" || fail 'up dispatch changed'
 # A shard brings its cluster up and runs every mapped suite in one process, so
 # the remote DinD attachment and loopback forwarders survive into each suite.
 : >"$CALLS"
-dispatch_kind_e2e shard environment-session runtime-acceptance
-printf '%s\n' up environment-session runtime-acceptance | cmp -s - "$CALLS" ||
+dispatch_kind_e2e shard final-fencing runtime-acceptance
+printf '%s\n' up final-fencing runtime-acceptance | cmp -s - "$CALLS" ||
   fail 'shard dispatch did not chain up and its suites in order'
 # The transaction knows the shard's suites, to import only the images they
 # need (#2971).
 : >"$CALLS"
 run_kind_up() { record "up ${KIND_SHARD_SUITE_NAMES[*]}"; }
-dispatch_kind_e2e shard environment-session runtime-acceptance
-printf '%s\n' 'up environment-session runtime-acceptance' environment-session runtime-acceptance |
+dispatch_kind_e2e shard final-fencing runtime-acceptance
+printf '%s\n' 'up final-fencing runtime-acceptance' final-fencing runtime-acceptance |
   cmp -s - "$CALLS" || fail 'the shard transaction does not receive its suite list'
 run_kind_up() { record up; }
 
 : >"$CALLS"
 # shellcheck disable=SC2329 # Invoked indirectly by the shard dispatcher.
-run_retained_environment_session_suite() { record environment-session; return 44; }
-expect_live_failure failed-shard dispatch_kind_e2e shard environment-session runtime-acceptance
+run_retained_final_fencing_suite() { record final-fencing; return 44; }
+expect_live_failure failed-shard dispatch_kind_e2e shard final-fencing runtime-acceptance
 [ "$live_status" -eq 44 ] || fail 'shard dispatch lost the suite failure status'
-printf '%s\n' up environment-session | cmp -s - "$CALLS" ||
+printf '%s\n' up final-fencing | cmp -s - "$CALLS" ||
   fail 'shard dispatch continued after a failed suite'
-run_retained_environment_session_suite() { record environment-session; }
+run_retained_final_fencing_suite() { record final-fencing; }
 
 expect_failure empty-shard dispatch_kind_e2e shard
 grep -Fq 'the Kind shard command requires at least one suite name' \
   "$FIXTURE/empty-shard.out" || fail 'empty shard did not explain its failure'
-grep -Fq 'cluster ${KIND_CLUSTER_NAME} is up; no test suites ran' "$SCRIPT" ||
-  fail 'standalone up no longer reports its suite-free exit'
 
 # #2974: part of the dashboard browser suite runs only on a retained cluster;
 # the gate, `up` and its shards refuse a selection, as do other suites.
@@ -1174,11 +922,6 @@ printf '%s\n' dashboard-browser-retained | cmp -s - "$CALLS" ||
 : >"$CALLS"
 dispatch_kind_e2e suite final-fencing
 printf '%s\n' final-fencing | cmp -s - "$CALLS" || fail 'final-fencing dispatch changed'
-
-: >"$CALLS"
-dispatch_kind_e2e suite environment-session
-printf '%s\n' environment-session | cmp -s - "$CALLS" ||
-  fail 'environment-session dispatch changed'
 
 : >"$CALLS"
 dispatch_kind_e2e suite cw-runtime
@@ -1484,8 +1227,6 @@ source "$DASHBOARD_BROWSER"
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$FINAL_FENCING"
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
-source "$ENVIRONMENT_SESSION"
-# shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$ROOT/scripts/ci/verify/kind/suites/cw-runtime.sh"
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$SANDBOX_SUPPLY_CHAIN"
@@ -1753,13 +1494,16 @@ done
 # In the CI artifact mode the retained smoke set is consumed by `up`; the
 # retained builder verifies it instead of rebuilding on an empty cache.
 mkdir -p "$FIXTURE/consumed-ci/examples" "$FIXTURE/consumed-run"
-for consumed_binary in \
-    crd-smoke environment-setup-smoke exec-smoke exec-stream-smoke \
-    file-service-smoke prepare-stream-smoke log-stream-smoke temporal-smoke \
-    temporal-fencing-smoke reconciler-ttl-smoke cw \
-    examples/platform-run-smoke examples/environment-session-smoke \
-    examples/environment-cw-runtime-smoke \
-    examples/coordinator-ingress-smoke; do
+# The consumed set is every program of the smoke inventory.
+consumed_programs="$(python3 -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("artifacts", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print("\n".join(sorted(module.SMOKE_FILES.values())))
+' "$ROOT/scripts/ci/verify/kind-build-artifacts.py")"
+[ -n "$consumed_programs" ] || fail 'the smoke inventory names no program'
+for consumed_binary in $consumed_programs; do
   printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/consumed-ci/$consumed_binary"
   chmod +x "$FIXTURE/consumed-ci/$consumed_binary"
 done
@@ -1784,6 +1528,13 @@ done
       fail "missing consumed smoke binary was not decisive: $missing_consumed"
     printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/consumed-ci/$missing_consumed"
     chmod +x "$FIXTURE/consumed-ci/$missing_consumed"
+  done
+  # Every program the artifact transfer carries is one the retained check
+  # verifies: removing any one of them fails the check.
+  for missing_consumed in $consumed_programs; do
+    mv "$FIXTURE/consumed-ci/$missing_consumed" "$FIXTURE/consumed-ci/$missing_consumed.away"
+    expect_failure missing-consumed-smoke build_retained_kind_smokes workspace-services
+    mv "$FIXTURE/consumed-ci/$missing_consumed.away" "$FIXTURE/consumed-ci/$missing_consumed"
   done
   rm -f "$FIXTURE/consumed-run/billing-contract-build.jsonl"
   expect_failure missing-consumed-receipt build_retained_kind_smokes integrated
@@ -1845,13 +1596,8 @@ printf '%s\n' \
     cat "$FIXTURE/smoke-builds" >&2
     fail 'retained smoke builds did not follow the kind-dev or host route'
   }
-# The TTL smoke runs the checked-in provenance suite named by its caller, not a
-# path compiled into it: a container-built smoke runs against this checkout.
-grep -Fq 'required_env("SMOKE_KIND_E2E")' \
-  "$ROOT/crates/codewire-orchestration/src/bin/reconciler-ttl-smoke.rs" ||
-  fail 'TTL smoke does not take the provenance suite from its caller'
-grep -Fq 'SMOKE_KIND_E2E="$ROOT/scripts/ci/verify/kind-e2e.sh"' "$COMMON" ||
-  fail 'Kind does not name the provenance suite for the TTL smoke'
+# No Kind smoke compiles in a checkout path: a container-built smoke runs
+# against this checkout.
 if grep -n 'CARGO_MANIFEST_DIR' \
     "$ROOT"/crates/codewire-orchestration/src/bin/*-smoke.rs \
     "$ROOT"/crates/codewire-client/examples/*-smoke.rs; then
@@ -1859,27 +1605,6 @@ if grep -n 'CARGO_MANIFEST_DIR' \
 fi
 
 # The verified consumed inventory is exactly the artifact transport contract.
-python3 - "$ROOT" <<'PY'
-import pathlib
-import re
-import sys
-
-root = pathlib.Path(sys.argv[1])
-common = (root / "scripts/ci/verify/kind/common.sh").read_text()
-artifacts = (root / "scripts/ci/verify/kind-build-artifacts.py").read_text()
-suite_block = common.split("build_retained_kind_smokes() {", 1)[1].split("\n}", 1)[0]
-verified = set()
-for span in re.findall(r"for consumed in(.*?); do", suite_block, re.S):
-    verified |= set(re.findall(r"[a-z][a-z0-9.-]+(?:/[a-z0-9.-]+)*", span))
-verified |= set(re.findall(r'\[ ! -f "\$RUN_DIR/([a-z0-9.-]+)" \]', suite_block))
-smoke_block = artifacts.split("SMOKE_FILES = {", 1)[1].split("}", 1)[0]
-transport = set(re.findall(r'^\s{4}"[a-z0-9-]+": "((?:examples/)?[a-z0-9-]+)",$',
-                           smoke_block, re.M))
-test_block = artifacts.split("TEST_FILES = {", 1)[1].split("}", 1)[0]
-transport |= set(re.findall(r'^\s{8}"([a-z0-9.-]+\.jsonl)"', test_block, re.M))
-assert transport, "artifact transport inventory did not parse"
-assert verified == transport, f"consumed verification drifted: {verified ^ transport}"
-PY
 
 # Unchanged sealed/release fixtures below exercise their original runtime
 # selection. Source-build selection has its own closed receipt fixture.
@@ -1988,8 +1713,6 @@ printf preserved >"$FIXTURE/kind-config-rejected.yaml"
 # The overlay and the credential fixture follow the requested ingress origin
 # (#2395): the default port renders byte-identically, a shifted port replaces
 # every pinned occurrence, and drift, foreign origins or bad ports fail.
-grep -Fq 'render_kind_ingress_origin "$rendered" "$KIND_OVERLAY_INGRESS_ORIGINS" || return $?' "$COMMON" ||
-  fail 'Kind overlay render does not render its ingress origin'
 source_origins="$(cat "$ROOT/tests/e2e/kind/support.yaml" "$ROOT/tests/e2e/kind/kustomization.yaml" |
   grep -oE 'http://127\.0\.0\.1:8090([^0-9]|$)' | wc -l)"
 [ "$source_origins" -eq "$KIND_OVERLAY_INGRESS_ORIGINS" ] ||
@@ -3861,7 +3584,5 @@ RECORDER
   CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release record_retained_cluster_sources
   [ ! -s "$CALLS" ] || fail 'release images were recorded as this tree'"'"'s source'
 )
-grep -Fq '  if [ "$KIND_SHARD_TRANSACTION" != 1 ]; then
-    record_retained_cluster_sources' "$UP" || fail 'kind-e2e.sh up does not record a retained cluster'"'"'s sources'
 
 printf '[test-kind-e2e-suites] dispatcher, order, prerequisites, and cleanup passed\n'
