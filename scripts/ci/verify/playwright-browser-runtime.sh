@@ -1,86 +1,5 @@
 #!/usr/bin/env bash
-# Shared Chromium version and renderer-backing preflight. Source this file.
-
-playwright_snapshot_os_release() {
-  if [ ! -r /etc/os-release ]; then
-    return 1
-  fi
-
-  (
-    # shellcheck disable=SC1091
-    source /etc/os-release
-    printf '%s-%s\n' "${ID:-unknown}" "${VERSION_ID:-unknown}"
-  )
-}
-
-playwright_snapshot_package_version() {
-  dpkg-query -W -f='${Version}' "$1" 2>/dev/null
-}
-
-playwright_snapshot_fonts_config_sha256() {
-  sha256sum /etc/fonts/fonts.conf 2>/dev/null | awk '{ print $1 }'
-}
-
-playwright_snapshot_font_files_sha256() {
-  fc-list --format '%{file}\n' 2>/dev/null \
-    | LC_ALL=C sort -u \
-    | while IFS= read -r font_file; do
-        [ -n "$font_file" ] && sha256sum "$font_file"
-      done \
-    | sha256sum \
-    | awk '{ print $1 }'
-}
-
-verify_playwright_snapshot_runtime() {
-  local snapshot_environment="${CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV:-}"
-  local actual_os actual_version actual_fonts_config actual_font_files
-  local package expected_version
-
-  case "$snapshot_environment" in
-    '')
-      printf '[playwright-browser] snapshot_env=platform-auto\n'
-      return 0
-      ;;
-    ubuntu24-cft145)
-      ;;
-    *)
-      echo "::error::unsupported explicit Playwright snapshot environment: ${snapshot_environment}"
-      return 1
-      ;;
-  esac
-
-  actual_os="$(playwright_snapshot_os_release || true)"
-  if [ "$actual_os" != ubuntu-24.04 ]; then
-    echo "::error::Playwright snapshot environment ubuntu24-cft145 requires Ubuntu 24.04; found ${actual_os:-unreadable}"
-    return 1
-  fi
-
-  while IFS='=' read -r package expected_version; do
-    actual_version="$(playwright_snapshot_package_version "$package" || true)"
-    if [ "$actual_version" != "$expected_version" ]; then
-      echo "::error::Playwright snapshot environment ubuntu24-cft145 requires ${package}=${expected_version}; found ${actual_version:-unreadable}"
-      return 1
-    fi
-  done <<'EOF'
-fontconfig=2.15.0-1.1ubuntu2
-libfontconfig1=2.15.0-1.1ubuntu2
-libfreetype6=2.13.2+dfsg-1ubuntu0.1
-EOF
-
-  actual_fonts_config="$(playwright_snapshot_fonts_config_sha256 || true)"
-  if [ "$actual_fonts_config" != 93a23ba073996edb8b42d6c89ebc2ec5fd2101ce82cb65ba0db358dabf55ca22 ]; then
-    echo "::error::Playwright snapshot environment ubuntu24-cft145 has an unexpected Fontconfig configuration"
-    return 1
-  fi
-
-  actual_font_files="$(playwright_snapshot_font_files_sha256 || true)"
-  if [ "$actual_font_files" != 1b870a4e39c927334f6efc08fdd849094ac4f1eeb47209636c43e6c89feb6084 ]; then
-    echo "::error::Playwright snapshot environment ubuntu24-cft145 has an unexpected font inventory"
-    return 1
-  fi
-
-  printf '[playwright-browser] snapshot_env=ubuntu24-cft145, renderer=ubuntu-24.04-fonts-v1\n'
-}
+# Shared Chromium version and browser-backing preflight. Source this file.
 
 prepare_playwright_browser_runtime() {
   local chromium="$1" root="$2"
@@ -99,8 +18,6 @@ prepare_playwright_browser_runtime() {
     echo "::error::dashboard browser version is ${actual_version:-unreadable}; expected pinned Chromium ${expected_version:-unreadable}. Set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH to scripts/ci/install-pinned-playwright-chromium.sh output"
     return 1
   fi
-
-  verify_playwright_snapshot_runtime || return 1
 
   temp_path="${TMPDIR:-/tmp}"
   if [ ! -d "$temp_path" ] || [ ! -w "$temp_path" ]; then

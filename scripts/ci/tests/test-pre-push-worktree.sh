@@ -279,7 +279,6 @@ trap 'cleanup_environment_tmp; chmod -R u+w "$TMP" 2>/dev/null || true; rm -rf "
 
 run_environment() {
   env -u RUSTUP_TOOLCHAIN -u PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH \
-    -u CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV \
     PATH="$environment_tree/bin:$PATH" TMPDIR="$environment_ok_tmp" \
     FIXTURE_RUST_VERSION="$pinned_rust" FIXTURE_ZIGBUILD_VERSION=0.23.0 \
     FIXTURE_CHROMIUM_VERSION="$pinned_chromium" \

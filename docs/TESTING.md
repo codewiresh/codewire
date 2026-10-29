@@ -54,14 +54,6 @@ this checkout's `.tmp/`, or install it there with the checksum-verifying
 cached in `~/.cache/codewire/chrome-for-testing/`, so a new worktree unpacks it
 without downloading again.
 
-Visual baselines are renderer-specific. An ordinary local run uses the
-automatic `linux` snapshot suffix. The `ubuntu24-cft145` suffix is reserved for
-the pinned Ubuntu 24.04 CI renderer; the browser preflight verifies its OS,
-Fontconfig/FreeType packages, Fontconfig configuration, and font inventory
-before Playwright starts. Generate or update that baseline only inside the
-runner-equivalent image. Never copy a locally rendered image into the Ubuntu
-baseline merely because the pixels look similar.
-
 The Playwright browser itself is DNS-isolated to `localhost` and
 `127.0.0.1`. Provision browser binaries and other immutable inputs before the
 suite starts; a browser test must not fetch public dependencies or generate

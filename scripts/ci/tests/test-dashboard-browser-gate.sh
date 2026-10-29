@@ -42,65 +42,9 @@ chmod +x "$test_root/chromium" "$test_root/wrong-chromium"
     printf 'fixture 4194304 1048576 3145728 25%% /fixture\n'
   }
   export TMPDIR=/tmp
-  unset CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV
   prepare_playwright_browser_runtime "$test_root/chromium" "$ROOT" >/dev/null
   [ "$CODEWIRE_PLAYWRIGHT_USE_DEV_SHM" = 1 ]
 ) || fail 'adequate /dev/shm runtime fixture was rejected'
-
-(
-  # shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
-  source "$BROWSER_RUNTIME"
-  playwright_snapshot_os_release() { printf 'ubuntu-24.04\n'; }
-  playwright_snapshot_package_version() {
-    case "$1" in
-      fontconfig | libfontconfig1) printf '2.15.0-1.1ubuntu2' ;;
-      libfreetype6) printf '2.13.2+dfsg-1ubuntu0.1' ;;
-      *) return 1 ;;
-    esac
-  }
-  playwright_snapshot_fonts_config_sha256() {
-    printf '93a23ba073996edb8b42d6c89ebc2ec5fd2101ce82cb65ba0db358dabf55ca22\n'
-  }
-  playwright_snapshot_font_files_sha256() {
-    printf '1b870a4e39c927334f6efc08fdd849094ac4f1eeb47209636c43e6c89feb6084\n'
-  }
-  df() {
-    printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
-    printf 'fixture 4194304 1048576 3145728 25%% /fixture\n'
-  }
-  export CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV=ubuntu24-cft145 TMPDIR=/tmp
-  prepare_playwright_browser_runtime "$test_root/chromium" "$ROOT" >/dev/null
-) || fail 'exact Ubuntu snapshot renderer fixture was rejected'
-
-if (
-  # shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
-  source "$BROWSER_RUNTIME"
-  playwright_snapshot_os_release() { printf 'arch-rolling\n'; }
-  export CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV=ubuntu24-cft145 TMPDIR=/tmp
-  prepare_playwright_browser_runtime "$test_root/chromium" "$ROOT"
-) >/dev/null 2>&1; then
-  fail 'non-Ubuntu runtime was allowed to claim the Ubuntu snapshot environment'
-fi
-
-if (
-  # shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
-  source "$BROWSER_RUNTIME"
-  playwright_snapshot_os_release() { printf 'ubuntu-24.04\n'; }
-  playwright_snapshot_package_version() { printf 'unexpected-version'; }
-  export CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV=ubuntu24-cft145 TMPDIR=/tmp
-  prepare_playwright_browser_runtime "$test_root/chromium" "$ROOT"
-) >/dev/null 2>&1; then
-  fail 'mismatched Ubuntu renderer packages were accepted'
-fi
-
-if (
-  # shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
-  source "$BROWSER_RUNTIME"
-  export CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV=future-unpinned-renderer TMPDIR=/tmp
-  prepare_playwright_browser_runtime "$test_root/chromium" "$ROOT"
-) >/dev/null 2>&1; then
-  fail 'unknown explicit snapshot environment was accepted'
-fi
 
 if (
   # shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
@@ -110,7 +54,6 @@ if (
     printf 'fixture 4194304 4190208 4096 100%% /fixture\n'
   }
   export TMPDIR=/tmp
-  unset CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV
   prepare_playwright_browser_runtime "$test_root/chromium" "$ROOT"
 ) >/dev/null 2>&1; then
   fail 'low-capacity browser backing fixture was accepted'
@@ -120,7 +63,6 @@ if (
   # shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
   source "$BROWSER_RUNTIME"
   export TMPDIR=/tmp
-  unset CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV
   prepare_playwright_browser_runtime "$test_root/wrong-chromium" "$ROOT"
 ) >/dev/null 2>&1; then
   fail 'wrong Chromium version fixture was accepted'

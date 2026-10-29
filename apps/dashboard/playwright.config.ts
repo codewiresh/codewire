@@ -17,7 +17,6 @@ const billingOrigin = process.env.CODEWIRE_BILLING_ORIGIN || "http://127.0.0.1:8
 const browserApiOrigin = process.env.CODEWIRE_BROWSER_API_ORIGIN || apiOrigin;
 const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 const useDevShm = process.env.CODEWIRE_PLAYWRIGHT_USE_DEV_SHM === "1";
-const snapshotEnvironment = process.env.CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV || "{platform}";
 const skipSharedSetup = process.env.PLAYWRIGHT_SKIP_SHARED_SETUP === "1";
 const localOnlyResolverRule = "--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1";
 // Keep the browser off the host GPU. Hardware video acceleration is the only
@@ -84,10 +83,6 @@ export default defineConfig({
   // The JSON report records every test's duration, retries and outcome. CI
   // uploads it from every dashboard run, green or red (#2974).
   reporter: [["html"], ["json", { outputFile: path.join(dashboardDir, "test-report/results.json") }]],
-  snapshotPathTemplate: `{testDir}/{testFilePath}-snapshots/{arg}-{projectName}-${snapshotEnvironment}{ext}`,
-  expect: {
-    toHaveScreenshot: { maxDiffPixelRatio: 0.015 },
-  },
   use: {
     launchOptions: {
       args: [localOnlyResolverRule, ...hostGpuIsolation],
