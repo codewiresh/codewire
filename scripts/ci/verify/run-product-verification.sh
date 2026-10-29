@@ -724,6 +724,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-run-host-rust-build.sh
   scripts/ci/tests/test-check-workspace-hack.sh
   python3 -B scripts/ci/tests/test-integration-lane.py
+  scripts/ci/tests/test-ci-tests-wired.sh
   python3 scripts/dev/test-macos-cli.py
   python3 scripts/dev/test-macos-ext4-tool.py
   python3 scripts/dev/test-macos-git-tool.py
@@ -1558,6 +1559,7 @@ run_release() {
   scripts/ci/tests/test-mint-github-app-token.sh
   scripts/ci/tests/test-copy-image-to-ghcr.sh
   scripts/ci/tests/test-dispatch-deploy-dev.sh
+  scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh
   scripts/ci/tests/test-dispatch-deploy-prod.sh
   scripts/ci/tests/test-publish-image-to-ghcr.sh
   scripts/ci/tests/test-publish-image-to-harbor.sh

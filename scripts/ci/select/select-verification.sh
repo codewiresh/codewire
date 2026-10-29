@@ -875,6 +875,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-runner-no-bytecode.sh|\
       scripts/ci/tests/test-local-rust-cache.sh|\
       scripts/ci/tests/test-run-host-rust-build.sh|\
+      scripts/ci/tests/test-ci-tests-wired.sh|\
       scripts/ci/tests/test-run-side-by-side.sh|\
       scripts/ci/tests/test-standard-families.sh|\
       scripts/ci/tests/test-darwin-cross-check.sh|\

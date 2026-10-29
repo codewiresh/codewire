@@ -699,6 +699,10 @@ run_paths_case ci_self pull_request refs/pull/2/head false \
 run_paths_case host_rust_build_fixture pull_request refs/pull/3055/head false \
   'policy security security_js' \
   scripts/ci/tests/test-run-host-rust-build.sh
+# So does the check that every script test is run by something.
+run_paths_case ci_tests_wired pull_request refs/pull/3055/head false \
+  'policy security security_js' \
+  scripts/ci/tests/test-ci-tests-wired.sh
 printf '%s\n' .gitea/workflows/unmapped-neighbour.yaml > "$TMP/unmapped-workflow.paths"
 unmapped_workflow="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/3055/head \
