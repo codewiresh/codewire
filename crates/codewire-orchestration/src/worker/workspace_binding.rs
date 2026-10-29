@@ -43,7 +43,7 @@ use super::start_timing::{
     with_since_accepted,
 };
 use crate::sandbox::client::{
-    RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity, WorkspacePvc,
+    BindableRuntime, RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity, WorkspacePvc,
 };
 use crate::sandbox::warm_pool::{
     LAUNCH_TYPE_LABEL, WarmPoolObjects, is_warm_pool_name, pod_spec_pool_revision,
@@ -989,6 +989,9 @@ struct CheckedBinding {
 /// The §5.1–§5.5 checks against live objects, shared by the enforced path.
 /// `observation` pins the exact Sandbox and Pod incarnation the caller
 /// observed and waited on; anything else is refused, never relabelled.
+/// `read` is the §5.1 chain when the caller read it immediately before this
+/// call ([`bind_before_ready`], #3629); otherwise this reads it. Either way
+/// §5.2 re-reads the Pod after it.
 async fn check_bindable_runtime(
     client: &SandboxClient,
     pool: &PgPool,
@@ -996,6 +999,7 @@ async fn check_bindable_runtime(
     env: &EnvironmentRow,
     backend: &BackendFacts,
     observation: &RuntimeIdentityObservation,
+    read: Option<&BindableRuntime>,
 ) -> anyhow::Result<Result<CheckedBinding, Refusal>> {
     let opts = ClaimOpts {
         environment_id: env.id.clone(),
@@ -1006,12 +1010,19 @@ async fn check_bindable_runtime(
     let refuse = |reason, scope, definitive| Ok(Err((reason, scope, definitive)));
     // §5.1 and §10 (amended): the exact chain, bind-ready. Claim Ready is not
     // required and never suffices.
-    let runtime = match client
-        .read_bindable_runtime(&opts, &backend.claim_name, &backend.claim_uid)
-        .await
-    {
-        Ok(runtime) => runtime,
-        Err(_) => return refuse(BindRefused::ChainUnverified, None, false),
+    let fresh;
+    let runtime = match read {
+        Some(runtime) => runtime,
+        None => {
+            fresh = match client
+                .read_bindable_runtime(&opts, &backend.claim_name, &backend.claim_uid)
+                .await
+            {
+                Ok(runtime) => runtime,
+                Err(_) => return refuse(BindRefused::ChainUnverified, None, false),
+            };
+            &fresh
+        }
     };
     if runtime.observation != *observation {
         return refuse(BindRefused::PodChanged, None, false);
@@ -1022,8 +1033,34 @@ async fn check_bindable_runtime(
     let pod_identity = runtime.observation.pod().clone();
     let sandbox_uid = runtime.observation.sandbox_uid().to_owned();
 
+    // The reads below depend only on the §5.1 chain, so they run together
+    // (#3629); their results are judged in the order of the sections.
+    let pool_born = is_warm_pool_name(&runtime.warm_pool_ref);
+    let (pod, ever_bound, bound_by_any, pvc) = tokio::join!(
+        client.get_workspace_pod(&pod_identity.name),
+        async {
+            if pool_born {
+                sandbox_ever_bound(pool, &env.id, &sandbox_uid).await
+            } else {
+                Ok(true)
+            }
+        },
+        async {
+            if pool_born {
+                sandbox_bound_by_any(pool, &sandbox_uid).await
+            } else {
+                Ok(true)
+            }
+        },
+        client.resolve_workspace_pvc(
+            &backend.claim_name,
+            &backend.claim_uid,
+            backend.workspace_pvc_uid.as_deref(),
+        ),
+    );
+
     // §5.2: re-read the Pod.
-    let Some(pod) = client.get_workspace_pod(&pod_identity.name).await? else {
+    let Some(pod) = pod? else {
         return refuse(BindRefused::PodChanged, None, false);
     };
     let scope = credential_scope(&pod);
@@ -1041,8 +1078,7 @@ async fn check_bindable_runtime(
     // from its immutable spec (review M1), so a stale, foreign or altered
     // member never binds. Without the configuration to render it, refuse
     // without deleting.
-    let pool_born = is_warm_pool_name(&runtime.warm_pool_ref);
-    if pool_born && !sandbox_ever_bound(pool, &env.id, &sandbox_uid).await? {
+    if pool_born && !ever_bound? {
         let Some(cfg) = cfg else {
             return refuse(
                 BindRefused::Denied("pool rendering unverified"),
@@ -1072,14 +1108,7 @@ async fn check_bindable_runtime(
     // §5.4: the workspace PVC, by UID. A resolution error may be an API
     // failure, so it refuses without deleting; the Pod mounting another claim
     // than the resolved one is definitive.
-    let pvc = match client
-        .resolve_workspace_pvc(
-            &backend.claim_name,
-            &backend.claim_uid,
-            backend.workspace_pvc_uid.as_deref(),
-        )
-        .await
-    {
+    let pvc = match pvc {
         Ok(pvc) => pvc,
         Err(_) => return refuse(BindRefused::Denied("workspace PVC"), scope, false),
     };
@@ -1108,10 +1137,7 @@ async fn check_bindable_runtime(
             .and_then(|labels| labels.get(LAUNCH_TYPE_LABEL))
             .map(String::as_str),
     );
-    let path = if pool_born
-        && adopted == StartPath::Warm
-        && !sandbox_bound_by_any(pool, &sandbox_uid).await?
-    {
+    let path = if pool_born && adopted == StartPath::Warm && !bound_by_any? {
         StartPath::Warm
     } else {
         StartPath::Cold
@@ -1162,6 +1188,9 @@ async fn pod_has_binding(pool: &PgPool, pod_uid: &str) -> anyhow::Result<bool> {
 /// Returns the write outcome and the start path of the bound Sandbox (warm
 /// for an adopted pool member). `cfg` renders a pool-born Sandbox's expected
 /// spec for its first bind; without it such a bind is refused.
+/// `read` is the chain the caller read immediately before, if any
+/// ([`check_bindable_runtime`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_workspace_binding(
     kube: &kube::Client,
     cfg: Option<&SandboxWorkerCfg>,
@@ -1170,6 +1199,7 @@ pub(crate) async fn record_workspace_binding(
     authority: &ActivityAuthority,
     states: &[&str],
     observation: &RuntimeIdentityObservation,
+    read: Option<&BindableRuntime>,
 ) -> anyhow::Result<(WriteOutcome, StartPath)> {
     anyhow::ensure!(
         env.id == authority.environment_id()
@@ -1194,7 +1224,8 @@ pub(crate) async fn record_workspace_binding(
         "workspace binding backend association changed"
     );
     let client = SandboxClient::new(kube.clone(), &facts.namespace);
-    let checked = match check_bindable_runtime(&client, pool, cfg, env, &facts, observation).await?
+    let checked = match check_bindable_runtime(&client, pool, cfg, env, &facts, observation, read)
+        .await?
     {
         Ok(checked) => checked,
         Err((reason, scope, definitive)) => {
@@ -1303,9 +1334,43 @@ pub(crate) async fn bind_workspace_runtime(
     states: &[&str],
     observation: &RuntimeIdentityObservation,
 ) -> anyhow::Result<Option<RecordedBind>> {
+    bind_workspace_runtime_read(
+        kube,
+        cfg,
+        env,
+        backend,
+        authority,
+        states,
+        observation,
+        None,
+    )
+    .await
+}
+
+/// [`bind_workspace_runtime`] with the §5.1 chain its caller just read.
+#[allow(clippy::too_many_arguments)]
+async fn bind_workspace_runtime_read(
+    kube: &kube::Client,
+    cfg: Option<&SandboxWorkerCfg>,
+    env: &EnvironmentRow,
+    backend: &BackendRow,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    observation: &RuntimeIdentityObservation,
+    read: Option<&BindableRuntime>,
+) -> anyhow::Result<Option<RecordedBind>> {
     let started = Instant::now();
-    let result =
-        record_workspace_binding(kube, cfg, env, backend, authority, states, observation).await;
+    let result = record_workspace_binding(
+        kube,
+        cfg,
+        env,
+        backend,
+        authority,
+        states,
+        observation,
+        read,
+    )
+    .await;
     let elapsed = started.elapsed();
     let metadata = Some(serde_json::json!({
         "duration_ms": i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX),
@@ -1394,9 +1459,10 @@ const EARLY_BIND_POLL: Duration = Duration::from_millis(500);
 
 /// A warm member's adoption converges within a few hundred milliseconds of
 /// its claim, and its daemon serves SSH only once the binding is recorded, so
-/// for this long after the wait begins the chain is re-read every
-/// [`EARLY_BIND_FAST_POLL`] instead; a cold Pod still takes seconds to start,
-/// and its bind readiness then lands as a change to its own status.
+/// for this long after the wait begins the chain is re-read on each change to
+/// the Claim, or every [`EARLY_BIND_FAST_POLL`] without one; a cold Pod still
+/// takes seconds to start, and its bind readiness then lands as a change to
+/// its own status.
 const EARLY_BIND_FAST_WINDOW: Duration = Duration::from_secs(2);
 const EARLY_BIND_FAST_POLL: Duration = Duration::from_millis(100);
 
@@ -1431,8 +1497,8 @@ pub(crate) async fn bind_before_ready(
     let pool = authority.pool();
     let started = tokio::time::Instant::now();
     loop {
-        // The chain's Pod, when this pass read the chain and did not bind.
-        let mut observed_pod = None;
+        // The chain, when this pass read it and did not bind.
+        let mut observed = None;
         let env = load_environment(pool, authority.environment_id()).await?;
         let backend = super::env_data::load_backend_row(pool, authority.environment_id())
             .await
@@ -1455,7 +1521,9 @@ pub(crate) async fn bind_before_ready(
                 if credential_scope(&runtime.pod) != Some(WorkspaceCredentialScope::Pod) {
                     return Ok(None);
                 }
-                match bind_workspace_runtime(
+                // The recorder's §5.1 check uses this read instead of reading
+                // the same chain again (#3629).
+                match bind_workspace_runtime_read(
                     kube,
                     cfg,
                     &env,
@@ -1463,6 +1531,7 @@ pub(crate) async fn bind_before_ready(
                     authority,
                     states,
                     &runtime.observation,
+                    Some(runtime),
                 )
                 .await
                 {
@@ -1495,16 +1564,27 @@ pub(crate) async fn bind_before_ready(
                     Err(error) => return Err(error),
                 }
             }
-            observed_pod = read.ok().map(|runtime| (client, runtime.pod));
+            observed = read.ok().map(|runtime| (client, runtime));
         }
         let waited = started.elapsed();
-        match observed_pod {
-            Some((client, pod)) if waited >= EARLY_BIND_FAST_WINDOW => {
+        match observed {
+            Some((client, runtime)) if waited >= EARLY_BIND_FAST_WINDOW => {
                 client
-                    .wait_for_workspace_pod_revision(&pod, EARLY_BIND_FAST_POLL, EARLY_BIND_POLL)
+                    .wait_for_workspace_pod_revision(
+                        &runtime.pod,
+                        EARLY_BIND_FAST_POLL,
+                        EARLY_BIND_POLL,
+                    )
                     .await;
             }
-            _ => tokio::time::sleep(early_bind_poll(waited)).await,
+            // A warm member's adoption ends with a Claim change, so the chain
+            // is re-read as that lands, at most one fast poll later (#3629).
+            Some((client, runtime)) => {
+                client
+                    .wait_for_claim_change(&runtime.claim, EARLY_BIND_FAST_POLL)
+                    .await;
+            }
+            None => tokio::time::sleep(early_bind_poll(waited)).await,
         }
     }
 }

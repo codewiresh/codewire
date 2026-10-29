@@ -48,6 +48,9 @@ pub enum WorkspacePvc {
 
 /// The live chain observed for one binding attempt.
 pub struct BindableRuntime {
+    /// The Claim as this read saw it; [`SandboxClient::wait_for_claim_change`]
+    /// waits from its revision.
+    pub claim: DynamicObject,
     pub sandbox: DynamicObject,
     pub pod: Pod,
     pub observation: RuntimeIdentityObservation,
@@ -104,6 +107,7 @@ impl SandboxClient {
             .unwrap_or_default()
             .to_owned();
         Ok(BindableRuntime {
+            claim: snapshot.claim,
             sandbox: snapshot.sandbox,
             pod: snapshot.pod,
             observation: snapshot.observation,
@@ -150,6 +154,20 @@ impl SandboxClient {
                 Err(_) => {}
             }
         }
+    }
+
+    /// Returns on the first change to the Claim after the observed revision,
+    /// or once `fallback` elapses. A warm member's adoption ends with the
+    /// Claim turning Ready within a few tens of milliseconds of the Pod's
+    /// labels converging, so the early bind re-reads the chain on that change
+    /// instead of on a timer (#3629). Orchestration may watch Claims, not Pods
+    /// or Sandboxes. A watch that cannot open waits out `fallback`.
+    pub async fn wait_for_claim_change(&self, observed: &DynamicObject, fallback: Duration) {
+        let Some(name) = observed.metadata.name.as_deref() else {
+            tokio::time::sleep(fallback).await;
+            return;
+        };
+        wait_for_object_change(&self.claims, name, observed, fallback).await;
     }
 
     /// The workspace Pod by name, or `None` when it is gone.

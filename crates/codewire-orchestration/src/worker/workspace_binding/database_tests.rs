@@ -806,6 +806,7 @@ async fn enforced(
         &authority,
         states,
         &observed(environment, pod_uid),
+        None,
     )
     .await
     .map(|(outcome, _)| outcome)
@@ -1682,6 +1683,7 @@ async fn db_each_missing_bind_condition_refuses_the_bind() -> Result<()> {
             &authority,
             &["creating"],
             &observed(ENV_A, POD_1),
+            None,
         )
         .await
         .expect_err("a changed backend row was bound");
@@ -1704,6 +1706,7 @@ async fn db_each_missing_bind_condition_refuses_the_bind() -> Result<()> {
             &authority,
             &["creating"],
             &observed(ENV_A, POD_1),
+            None,
         )
         .await
         .expect_err("a stale Pod-scope capture was bound");
@@ -1874,6 +1877,7 @@ async fn enforced_with(
         &authority,
         states,
         &observed(environment, pod_uid),
+        None,
     )
     .await
 }
@@ -2041,6 +2045,50 @@ async fn workspace_bind_logs(pool: &PgPool, environment: &str) -> Result<i64> {
     .bind(environment)
     .fetch_one(pool)
     .await?)
+}
+
+/// #3629: an early bind reads the Claim → Sandbox → Pod chain once and hands
+/// that read to the recorder's §5.1 check. The check still re-reads the Pod
+/// (§5.2) and resolves the PVC through the Claim and the Sandbox (§5.4).
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_an_early_bind_reads_the_chain_once() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        set_state(&db.pool, ENV_A, "creating").await?;
+        pool_shape(&db.pool, ENV_A).await?;
+        let cfg = pool_cfg();
+        let env = load_environment(&db.pool, ENV_A).await?;
+        let rendering = pool_born_rendering(&cfg, &env, NAMESPACE)?;
+        let adopted = pool_born(ENV_A, POD_1, &rendering, true);
+        let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
+        let early = tokio::time::timeout(
+            Duration::from_secs(5),
+            bind_before_ready(&adopted.client(), Some(&cfg), &authority, &["creating"]),
+        )
+        .await??
+        .ok_or_else(|| anyhow::anyhow!("the early bind did not record"))?;
+        ensure!(early.recorded.path == StartPath::Warm);
+        let name = format!("sandbox-{ENV_A}");
+        let requests = adopted.requests();
+        let gets = |suffix: String| {
+            requests
+                .iter()
+                .filter(|(method, path)| method == "GET" && path.ends_with(&suffix))
+                .count()
+        };
+        let counts = (
+            gets(format!("/sandboxclaims/{name}")),
+            gets(format!("/sandboxes/{name}")),
+            gets(format!("/pods/{name}")),
+        );
+        // The chain read, then the PVC resolve; the chain read, then §5.2.
+        ensure!(counts == (2, 2, 2), "{counts:?} {requests:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
 }
 
 /// #3627: a fresh warm bind, then the create loop's first ready action. The
