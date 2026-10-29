@@ -1379,6 +1379,10 @@ run_paths_case integration_service_harness pull_request refs/pull/831/head false
 run_present_paths_case integration_lane_lock pull_request refs/pull/2755/head false \
   'database policy security security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   scripts/ci/verify/integration-lane.py
+# So is the check that every database test runs in exactly one database suite.
+run_present_paths_case database_test_coverage pull_request refs/pull/2755/head false \
+  'database policy security security_js service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  scripts/ci/verify/database-test-coverage.py
 run_paths_case temporal_service pull_request refs/pull/84/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal' \
   crates/codewire-orchestration/src/worker/create.rs
@@ -2618,9 +2622,6 @@ while IFS= read -r source; do
 done <<<"$integration_harness_sources"
 
 integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
-# Database owns the destroy-hint regression. The activity-fencing lane must
-# retain its exact two tests instead of also selecting this ignored worker test.
-activity_fencing_block="$(sed -n '/^run_orchestration() {/,/^  start_orchestration$/p' "$integration_runner")"
 # The orchestration service and its smokes come from the wire contract's own
 # test build. A separate binary build compiled the crate one more time.
 orchestration_build_block="$(sed -n '/^build_selected_services() {/,/^}$/p' "$integration_runner")"
@@ -2629,88 +2630,9 @@ if grep -Eq 'cargo_ci build .*-p codewire-orchestration' <<<"$orchestration_buil
   echo 'services build the orchestration binaries apart from the wire contract test build' >&2
   exit 1
 fi
-grep -qF "'worker::' -- --ignored" <<<"$activity_fencing_block"
-grep -qF -- "--skip 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek'" <<<"$activity_fencing_block"
-grep -qF -- "--skip 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure'" <<<"$activity_fencing_block"
-grep -qF -- "--skip 'worker::create::projection_database_tests::'" <<<"$activity_fencing_block"
-grep -qF -- "--skip 'worker::workspace_binding::database_tests::'" <<<"$activity_fencing_block"
-grep -qF -- "--skip 'worker::billing_sessions::database_tests::'" <<<"$activity_fencing_block"
-grep -qF -- "--skip 'worker::credential_relay::database_tests::'" <<<"$activity_fencing_block"
-grep -qF 'assert_passed_count "orchestration activity fencing matrix" "$logfile" 2' <<<"$activity_fencing_block"
-destroy_hint_block="$(sed -n '/logfile="$RUN_DIR\/environment-destroy-template-hint.log"/,/assert_passed_count "environment destroy template hint matrix"/p' "$integration_runner")"
-grep -qF 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure' <<<"$destroy_hint_block"
-grep -qF -- '-- --ignored --exact --nocapture' <<<"$destroy_hint_block"
-grep -qF 'assert_passed_count "environment destroy template hint matrix" "$logfile" 1' <<<"$destroy_hint_block"
-grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
-# The broker admission matrix's 50 tests run in four lanes by module.
-grep -qF -- '--lib platform::tests:: -- --ignored \' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 13' "$integration_runner"
-for broker_part in 'checked:: -- --ignored --nocapture --test-threads=1|checked lease|8' \
-    'claude_sign_in:: -- --ignored --nocapture --test-threads=1|Claude sign-in|5' \
-    'decision:: -- --ignored --nocapture --test-threads=1|decision|8' \
-    'codex_login:: -- --ignored --nocapture --test-threads=1|Codex login|4' \
-    'keepalive:: -- --ignored --nocapture --test-threads=1|keepalive|5' \
-    'material_cache:: -- --ignored --nocapture --test-threads=1|material cache|5' \
-    'subscription:: -- --ignored --nocapture --test-threads=1|subscription|2'; do
-  IFS='|' read -r broker_filter broker_label broker_count <<<"$broker_part"
-  grep -qF -- "--lib platform::tests::${broker_filter}" "$integration_runner"
-  grep -qF -- "--skip platform::tests::${broker_filter%%::*}::" "$integration_runner"
-  grep -qF "assert_passed_count \"platform broker ${broker_label} matrix\" \"\$logfile\" ${broker_count}" "$integration_runner"
-done
-grep -qF -- '--features platform,ssh-agent --lib platform::tests::ssh::' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker SSH matrix" "$logfile" 5' "$integration_runner"
-grep -qF -- '--lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 4' "$integration_runner"
-grep -qF 'cargo test --locked -p codewire-credential-service' "$integration_runner"
-grep -qF -- '--skip tests::database::projection::' "$integration_runner"
-grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF -- '--lib tests::database::projection::' "$integration_runner"
-grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 13' "$integration_runner"
-grep -qF -- '--lib delegation::authority::tests::' "$integration_runner"
-grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfile" 8' "$integration_runner"
-grep -qF 'cargo test --locked -p codewire-orchestration --test access_profiles' "$integration_runner"
-grep -qF 'assert_passed_count "public access profile restricted API matrix" "$logfile" 8' "$integration_runner"
-grep -qF 'assert_passed_count "public credential metadata matrix" "$logfile" 3' "$integration_runner"
-grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 28' "$integration_runner"
-grep -qF -- '--lib runtime::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "isolated credential runtime matrix" "$logfile" 5' "$integration_runner"
-grep -qF -- '--lib runtime::kind::config::tests::effective_acl_guard_rejects_direct_column_and_membership_authority' "$integration_runner"
-grep -qF 'assert_passed_count "Kind credential effective ACL matrix" "$logfile" 1' "$integration_runner"
-grep -qF 'cargo test --locked -p codewire-credential-service --features enrollment' "$integration_runner"
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
-grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 26' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
 grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 11' "$integration_runner"
-grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 24' "$integration_runner"
-grep -qF 'assert_passed_count "platform access profile matrix" "$logfile" 16' "$integration_runner"
-grep -qF 'cargo test --locked -p codewire-platform-credentials --test owner_sources' "$integration_runner"
-grep -qF 'assert_passed_count "platform owner-source authority matrix" "$logfile" 5' "$integration_runner"
-grep -qF -- "'worker::create::projection_database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "environment projection capture matrix" "$logfile" 5' "$integration_runner"
-grep -qF -- "'api::admin::startup_database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "admin startup summary matrix" "$logfile" 2' "$integration_runner"
-grep -qF -- "'api::admin::quota_database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "admin environment quota matrix" "$logfile" 5' "$integration_runner"
-grep -qF -- "'api::admin::credit_database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "admin organization credit matrix" "$logfile" 2' "$integration_runner"
-grep -qF -- "'worker::workspace_binding::database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "workspace binding recorder matrix" "$logfile" 21' "$integration_runner"
-grep -qF -- "'workspace_binding::store::database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "workspace binding access store matrix" "$logfile" 4' "$integration_runner"
-grep -qF -- "'api::environment_resize::tests::db_'" "$integration_runner"
-grep -qF 'assert_passed_count "environment resize admission matrix" "$logfile" 3' "$integration_runner"
-grep -qF -- "'api::create::tests::db_quota_'" "$integration_runner"
-grep -qF 'assert_passed_count "environment create capacity matrix" "$logfile" 6' "$integration_runner"
-grep -qF -- "'api::ssh_proxy::database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "SSH proxy runtime lease matrix" "$logfile" 2' "$integration_runner"
-grep -qF -- "'api::environment_daemon::repair_database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "environment daemon repair lease matrix" "$logfile" 2' "$integration_runner"
-grep -qF -- "'worker::billing_sessions::database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "billing session bind matrix" "$logfile" 4' "$integration_runner"
-grep -qF -- "'worker::credential_relay::database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "credential relay target matrix" "$logfile" 1' "$integration_runner"
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \
   "$integration_runner"
 if rg -n 'run_connectcore|CONNECTCORE_BASE_URLS|go test.*connectcore' \

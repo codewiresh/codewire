@@ -330,8 +330,11 @@ grep -Fq -- '--locked --profile ci -p codewire-server-core --bin codewire-db-mig
   "$FAKE_CARGO_LOG"
 
 
-# Preserve the accepted execution contracts while adding source-admission proof:
-# compile grouping may change, but no suite, environment or count may disappear.
+# The database mode end to end, with a fake Cargo. No suite or count is kept
+# here: each suite lists its tests first and must pass that many
+# (counted_suite), and every database test must be in exactly one listing
+# (database-test-coverage.py). The cases below prove the runner does both, and
+# keep its lanes, their databases and their scheduling.
 python3 - "$ROOT" "$TMP" <<'PYTHON'
 from concurrent.futures import ThreadPoolExecutor
 import fcntl
@@ -344,64 +347,6 @@ import tempfile
 import time
 
 root, temporary = map(Path, sys.argv[1:])
-suites = [
-    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'migrate::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core migration matrix', 'count': 26},
-    {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'storage', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform credential storage matrix', 'count': 24},
-    {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'profiles', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform access profile matrix', 'count': 16},
-    {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'owner_sources', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform owner-source authority matrix', 'count': 5},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::preview::authorization::database_tests::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'preview browser authorization matrix', 'count': 9},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--test', 'access_profiles', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'public access profile restricted API matrix', 'count': 8},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--test', 'credentials', '--', '--ignored', '--nocapture', '--test-threads=3'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'public credential metadata matrix', 'count': 3},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--features', 'enrollment', '--lib', 'mutation::tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'public credential mutation matrix', 'count': 28},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--features', 'enrollment', '--lib', 'runtime::tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'isolated credential runtime matrix', 'count': 5},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--features', 'enrollment', '--lib', 'repositories::tests::integration::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'GitHub repository discovery matrix', 'count': 9},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--features', 'enrollment', '--lib', 'runtime::kind::config::tests::effective_acl_guard_rejects_direct_column_and_membership_authority', '--', '--exact', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'Kind credential effective ACL matrix', 'count': 1},
-    {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'refresh', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform credential refresh matrix', 'count': 14},
-    {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'authority', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform credential restricted-role matrix', 'count': 13},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform', '--lib', 'platform::tests::', '--', '--ignored', '--skip', 'platform::tests::checked::', '--skip', 'platform::tests::claude_sign_in::', '--skip', 'platform::tests::codex_login::', '--skip', 'platform::tests::decision::', '--skip', 'platform::tests::keepalive::', '--skip', 'platform::tests::material_cache::', '--skip', 'platform::tests::subscription::', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker admission matrix', 'count': 13, 'matrix': 'platform broker admission matrix'},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform', '--lib', 'platform::tests::checked::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker checked lease matrix', 'count': 8, 'matrix': 'platform broker admission matrix'},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform', '--lib', 'platform::tests::claude_sign_in::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker Claude sign-in matrix', 'count': 5, 'matrix': 'platform broker admission matrix'},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform', '--lib', 'platform::tests::decision::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker decision matrix', 'count': 8, 'matrix': 'platform broker admission matrix'},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform', '--lib', 'platform::tests::codex_login::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker Codex login matrix', 'count': 4, 'matrix': 'platform broker admission matrix'},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform', '--lib', 'platform::tests::keepalive::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker keepalive matrix', 'count': 5, 'matrix': 'platform broker admission matrix'},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform', '--lib', 'platform::tests::material_cache::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker material cache matrix', 'count': 5, 'matrix': 'platform broker admission matrix'},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform', '--lib', 'platform::tests::subscription::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker subscription matrix', 'count': 2, 'matrix': 'platform broker admission matrix'},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform,ssh-agent', '--lib', 'platform::tests::ssh::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker SSH matrix', 'count': 5},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform', '--lib', 'platform::bridge::tests::rotation::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker gRPC rotation drain matrix', 'count': 4},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--lib', 'tests::database::', '--', '--ignored', '--skip', 'tests::database::projection::', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform runtime restricted identity matrix', 'count': 6},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--lib', 'tests::database::projection::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform runtime projection matrix', 'count': 13},
-    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--features', 'enrollment', '--lib', 'delegation::authority::tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'owner-local delegation authority matrix', 'count': 8},
-    {'args': ['test', '--locked', '-p', 'codewire-server-core', '--test', 'oauth_bearer_auth', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'OAuth-only restricted identity matrix', 'count': 6},
-    {'args': ['test', '-p', 'codewire-server-core', '--test', 'session_auth', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'session hash-only matrix', 'count': 4},
-    {'args': ['test', '-p', 'codewire-server-core', '--test', 'org_deletion_lifecycle', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'organization deletion lifecycle matrix', 'count': 20},
-    {'args': ['test', '-p', 'codewire-billing', '--lib', 'billing_teardown::tests::db_', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'organization billing teardown matrix', 'count': 5},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'connect::mesh_authorization::tests::generated_mesh_authorization_service_enforces_the_canonical_matrix', '--', '--ignored', '--exact', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'Mesh authorization receiver matrix', 'count': 1},
-    {'args': ['test', '-p', 'codewire-orchestration', '--test', 'environment_external_cleanup', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'environment external cleanup matrix', 'count': 9},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_daemon::session_mutation::tests::db_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment session admission matrix', 'count': 5},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure', '--', '--ignored', '--exact', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment destroy template hint matrix', 'count': 1},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::create::projection_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment projection capture matrix', 'count': 5},
-    {'args': ['test', '-p', 'codewire-orchestration', '--lib', 'worker::tenant_secret_teardown::tests::db_', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'organization tenant secret teardown matrix', 'count': 2},
-    {'args': ['test', '-p', 'codewire-orchestration', '--lib', 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek', '--', '--ignored', '--exact', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'encrypted tenant secret store matrix', 'count': 1},
-    {'args': ['test', '-p', 'codewire-mesh', '--lib', 'store::migration_tests::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'Mesh migration ledger', 'count': 16},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--test', 'environment_sources', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment source admission matrix', 'count': 6},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::admin::startup_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'admin startup summary matrix', 'count': 2},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::admin::quota_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'admin environment quota matrix', 'count': 5},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::admin::credit_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'admin organization credit matrix', 'count': 2},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::workspace_binding::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'workspace binding recorder matrix', 'count': 21},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'workspace_binding::store::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'workspace binding access store matrix', 'count': 4},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'environment_mesh::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment Mesh membership matrix', 'count': 3},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::cw_runtime::owner::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform cw runtime journal matrix', 'count': 31},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::platform_agents::journal::database_tests::db_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform managed agent journal matrix', 'count': 40},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_resize::tests::db_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'environment resize admission matrix', 'count': 3},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::create::tests::db_quota_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment create capacity matrix', 'count': 6},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::ssh_proxy::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'SSH proxy runtime lease matrix', 'count': 2},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_daemon::repair_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment daemon repair lease matrix', 'count': 2},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environments::access_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment membership access matrix', 'count': 1},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::organizations::membership_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'organization membership credential matrix', 'count': 2},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::billing_sessions::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'billing session bind matrix', 'count': 4},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::credential_relay::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'credential relay target matrix', 'count': 1},
-    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'db::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core pool health matrix', 'count': 2},
-]
 # In the order of DATABASE_BUILD_BATCHES: one after another here, in one
 # folder; the build runner's batches at once are checked below.
 batches = [
@@ -420,62 +365,22 @@ batches = [
      '--test', 'profiles', '--test', 'refresh', '--test', 'authority', '--test', 'owner_sources', '--no-run'],
     ['test', '-p', 'codewire-billing', '--lib', '--no-run'],
 ]
-# Ten lanes, each keeping its suites in their established order. Every
-# harness compiles before any lane starts.
 lane_order = ['core', 'credential-mutations', 'credential-service', 'broker-admission', 'broker-checked',
               'broker-decisions', 'broker-refresh', 'orchestration', 'orchestration-journals',
               'orchestration-workspaces']
-lane_labels = {
-    'core': {'server-core migration matrix', 'server-core pool health matrix',
-             'platform credential storage matrix',
-             'platform access profile matrix', 'platform owner-source authority matrix',
-             'platform credential refresh matrix', 'platform credential restricted-role matrix',
-             'OAuth-only restricted identity matrix', 'session hash-only matrix',
-             'organization deletion lifecycle matrix', 'organization billing teardown matrix',
-             'Mesh migration ledger'},
-    'credential-mutations': {'public credential mutation matrix', 'owner-local delegation authority matrix'},
-    'credential-service': {'isolated credential runtime matrix', 'GitHub repository discovery matrix',
-                           'Kind credential effective ACL matrix', 'platform runtime restricted identity matrix',
-                           'platform runtime projection matrix'},
-    'broker-admission': {'platform broker admission matrix', 'platform broker Claude sign-in matrix',
-                         'platform broker gRPC rotation drain matrix'},
-    'broker-checked': {'platform broker checked lease matrix'},
-    'broker-decisions': {'platform broker decision matrix', 'platform broker Codex login matrix'},
-    'broker-refresh': {'platform broker keepalive matrix', 'platform broker material cache matrix',
-                       'platform broker subscription matrix', 'platform broker SSH matrix'},
-    'orchestration-journals': {'platform cw runtime journal matrix', 'platform managed agent journal matrix'},
-    'orchestration-workspaces': {'environment source admission matrix', 'admin startup summary matrix',
-                                 'admin environment quota matrix', 'admin organization credit matrix',
-                                 'workspace binding recorder matrix', 'workspace binding access store matrix',
-                                 'environment Mesh membership matrix', 'environment resize admission matrix',
-                                 'environment create capacity matrix',
-                                 'SSH proxy runtime lease matrix', 'environment daemon repair lease matrix',
-                                 'environment membership access matrix', 'organization membership credential matrix',
-                                 'billing session bind matrix', 'credential relay target matrix'},
-}
-for suite in suites:
-    suite['lane'] = next((lane for lane, labels in lane_labels.items() if suite['label'] in labels), 'orchestration')
-assert sum(suite['lane'] != 'orchestration' for suite in suites) == sum(map(len, lane_labels.values()))
-lane_suites = {lane: [suite for suite in suites if suite['lane'] == lane] for lane in lane_order}
-assert all(lane_suites.values()), 'a database lane runs no suite'
-# The broker admission matrix runs in four lanes by module: together its
-# parts still require every one of its 50 tests.
-assert sum(suite['count'] for suite in suites
-           if suite.get('matrix') == 'platform broker admission matrix') == 50
-assert len({suite['label'] for suite in suites}) == len(suites)
 # The fakes are shared; each case traces into its own folder, so the cases
 # below run side by side and are checked in order afterwards.
 tools = temporary / 'database-tools'
 tools.mkdir()
 cases_root = temporary / 'database-cases'
 cases_root.mkdir()
-# The fake Cargo looks a suite up by its arguments, one suite per line:
-# index, count, and the arguments joined by the unit separator.
-assert all(not set(arg) & {'\t', '\n', '\x1f'} for suite in suites for arg in suite['args'])
-(tools / 'suites.tsv').write_text(''.join(
-    f"{index}\t{suite['count']}\t{chr(31).join(suite['args'])}\n" for index, suite in enumerate(suites)))
 # Bash, not Python: the cases start it about two thousand times, and an
-# interpreter start per call was most of this test's time.
+# interpreter start per call was most of this test's time. A suite is its
+# arguments; its listing names three tests of its own (plus an ignored one a
+# run without --ignored leaves out), and a run passes them. DB_TRACE_FAILURE
+# KIND:TEXT changes the suites whose arguments contain TEXT: empty lists none,
+# count passes one fewer than listed, skip reports a missing database, test
+# fails; compile:PACKAGE fails that package's build.
 cargo = tools / 'cargo'
 cargo.write_text(r'''#!/usr/bin/env bash
 set -euo pipefail
@@ -524,6 +429,28 @@ for arg in "$@"; do
   echo 'Finished compiling synthetic database harnesses'
   exit 0
 done
+args=("$@") listing='' kind="${failure%%:*}" text="${failure#*:}"
+if [ "${args[-1]}" = --list ]; then
+  listing=all
+  unset 'args[-1]'
+elif [ "${args[-1]}" = --ignored ] && [ "${args[-2]}" = --list ]; then
+  listing=ignored
+  unset "args[${#args[@]}-1]" "args[${#args[@]}-2]"
+fi
+key="${args[*]}"
+suite="fixture::s$(printf '%s' "$key" | sha256sum | cut -c1-12)"
+selected=false
+[ -z "$text" ] || [[ "$key" != *"$text"* ]] || selected=true
+if [ -n "$listing" ]; then
+  if [ "$listing" = all ]; then
+    [ "$kind:$selected" = empty:true ] || printf '%s::case_%s: test\n' "$suite" 1 "$suite" 2 "$suite" 3
+  fi
+  if [[ " $key " != *' --ignored '* ]]; then
+    printf '%s::ignored_case: test\n' "$suite"
+  fi
+  printf '\n3 tests, 0 benchmarks\n'
+  exit 0
+fi
 # Count the database executions running at once across lanes: each marks
 # itself active and records how many are, held for DB_TRACE_HOLD seconds.
 : > "$work/active/$$"
@@ -546,17 +473,17 @@ if [ -n "${DB_TRACE_BARRIER:-}" ]; then
 fi
 [ -z "${DB_TRACE_HOLD:-}" ] || sleep "$DB_TRACE_HOLD"
 rm -f -- "$work/active/$$"
-IFS=$'\x1f'
-key="$*"
-IFS=$' \t\n'
-index='' count=''
-while IFS=$'\t' read -r line_index line_count line_args; do
-  if [ "$line_args" = "$key" ]; then index="$line_index" count="$line_count"; break; fi
-done < "${BASH_SOURCE[0]%/*}/suites.tsv"
-[ -n "$index" ] || { echo 'Unexpected database execution' >&2; exit 1; }
-[ "$failure" != "test:$index" ] || exit 43
-if [ "$failure" = "skip:$index" ]; then echo 'DATABASE_URL unset'; fi
-if [ "$failure" = "count:$index" ]; then count=$((count - 1)); fi
+count=3
+if [ "$selected" = true ]; then
+  case "$kind" in
+    test) exit 43 ;;
+    skip) echo 'DATABASE_URL unset' ;;
+    count) count=2 ;;
+  esac
+fi
+# A test that runs a child test process prints the child's result first
+# (the credential mutation matrix does); the suite's own result is the last.
+echo 'test result: ok. 1 passed; 0 failed; 0 ignored (a child test process)'
 echo "test result: ok. $count passed; 0 failed; 0 ignored"
 ''')
 cargo.chmod(0o755)
@@ -567,6 +494,15 @@ cargo.chmod(0o755)
 (tools / 'docker').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$DB_TRACE_ROOT/docker.log"\n'
                               '[ "$1" != rm ] || sleep "${DB_TRACE_RM_DELAY:-0}"\nexit 0\n')
 (tools / 'docker').chmod(0o755)
+# The sources the coverage check reads: none with a database test, or one
+# with a database test no fake listing names.
+no_database_tests = temporary / 'sources-none'
+(no_database_tests / 'crates').mkdir(parents=True)
+unwired = temporary / 'sources-unwired'
+(unwired / 'crates' / 'fixture' / 'src').mkdir(parents=True)
+(unwired / 'crates' / 'fixture' / 'Cargo.toml').write_text('[package]\nname = "codewire-fixture"\nversion = "0.0.0"\n')
+(unwired / 'crates' / 'fixture' / 'src' / 'lib.rs').write_text(
+    '#[tokio::test]\n#[ignore = "requires isolated TEST_DATABASE_URL"]\nasync fn db_nothing_runs() {}\n')
 
 lock_dir = temporary / 'lane-locks'
 
@@ -574,7 +510,8 @@ def case_environment(failure='', extra=None):
     work = Path(tempfile.mkdtemp(dir=cases_root))
     (work / 'active').mkdir()
     return {
-        'CODEWIRE_INTEGRATION_LOCK_DIR': str(lock_dir), **(extra or {}),
+        'CODEWIRE_INTEGRATION_LOCK_DIR': str(lock_dir),
+        'DATABASE_TEST_SOURCE_ROOT': str(no_database_tests), **(extra or {}),
         'PATH': str(tools) + os.pathsep + os.environ['PATH'],
         'CODEWIRE_LOCAL_RUST_CACHE': 'off',
         'CARGO_TARGET_DIR': str(work / 'debug-target'),
@@ -597,6 +534,13 @@ def run_case(failure='', extra=None):
                              'database'], env=environment, cwd=root, capture_output=True, text=True)
     commands = [json.loads(line) for line in case_file(environment, 'trace.jsonl').read_text().splitlines()]
     return result, commands, environment
+
+def is_listing(command):
+    return command['args'][-1] == '--list' or command['args'][-2:] == ['--list', '--ignored']
+
+def executions_of(commands):
+    return [command for command in commands if command['args'][0] == 'test'
+            and '--no-run' not in command['args'] and not is_listing(command)]
 
 # The integration lane lock (#2755). Another run holds the 62000 range:
 # this hermetic fixture sets no VERIFICATION_PORT_BASE, so it neither takes
@@ -634,17 +578,14 @@ lane_lock = ThreadPoolExecutor(max_workers=1).submit(lane_lock_case)
 # that network, and the lanes run side by side. A database execution holds
 # its place briefly there, so lanes that run at once overlap in the count.
 network = {'INTEGRATION_DOCKER_NETWORK': 'codewire-fixture-net', 'DB_TRACE_HOLD': '0.02'}
-broker_index = next(i for i, suite in enumerate(suites) if suite['label'] == 'platform broker admission matrix')
-journal_index = next(i for i, item in enumerate(suites)
-                     if item['label'] == 'platform cw runtime journal matrix')
-def suite_index(label):
-    return next(i for i, suite in enumerate(suites) if suite['label'] == label)
+# Suites picked by their arguments: the first suite of the first lane, two
+# that run without --ignored and report a skip, and the journal matrix.
+first_suite = 'codewire-server-core --lib migrate::'
 failures = ['compile:codewire-server-core', 'compile:codewire-platform-credentials',
-            'compile:codewire-orchestration', 'test:0',
-            'test:' + str(suite_index('organization billing teardown matrix')),
-            'skip:' + str(suite_index('session hash-only matrix')),
-            'skip:' + str(suite_index('organization deletion lifecycle matrix')),
-            'skip:' + str(suite_index('environment external cleanup matrix'))]
+            'compile:codewire-orchestration', 'test:' + first_suite,
+            'test:billing_teardown::tests::db_',
+            'skip:--test session_auth', 'skip:--test org_deletion_lifecycle',
+            'skip:--test environment_external_cleanup']
 cases = {
     'explicit': pool.submit(run_case),
     'lanes': pool.submit(run_case, extra=network),
@@ -661,68 +602,75 @@ cases = {
     'invalid': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': 'two'}),
     'too many': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12', 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE': '11'}),
     'malformed': pool.submit(run_case, extra=network | {'CODEWIRE_CI_CPU_SHARE': '12cores'}),
-    'failed lane': pool.submit(run_case, 'test:' + str(broker_index), extra=network),
-    'journal': pool.submit(run_case, 'test:' + str(journal_index)),
-    **{'count:' + str(index): pool.submit(run_case, 'count:' + str(index)) for index in range(len(suites))},
+    'failed lane': pool.submit(run_case, 'test:platform::tests:: -- --ignored --skip', extra=network),
+    'journal': pool.submit(run_case, 'test:platform_agents::journal::database_tests::db_'),
+    # What the pinned counts caught, and what they missed. A suite that
+    # passes fewer tests than its filter lists (a dropped test), in a lane
+    # and against the one explicit database:
+    'dropped': pool.submit(run_case, 'count:api::cw_runtime::owner::database_tests::'),
+    'dropped in a lane': pool.submit(run_case, 'count:platform::tests::checked::', extra=network),
+    # a filter that matches nothing;
+    'empty': pool.submit(run_case, 'empty:--test owner_sources'),
+    # and a database test that no suite lists, which no count could see:
+    'unwired': pool.submit(run_case, extra={'DATABASE_TEST_SOURCE_ROOT': str(unwired)}),
     **{failure: pool.submit(run_case, failure) for failure in failures},
 }
 
 result, commands, environment = cases['explicit'].result()
 assert result.returncode == 0, result.stdout + result.stderr
 assert '[product-integration] green' in result.stdout
-assert commands[0]['args'] == ['build', '--locked', '--profile', 'ci', '-p',
-                               'codewire-server-core', '--bin', 'codewire-db-migrate']
-assert commands[0]['target'] == environment['CODEWIRE_CARGO_CI_TARGET_DIR']
 actual_batches = [command for command in commands if '--no-run' in command['args']]
 assert [command['args'] for command in actual_batches] == batches
 assert all(command['target'] == environment['CARGO_TARGET_DIR'] and
            command['test_database'] == environment['DATABASE_URL_RUST'] for command in actual_batches)
-# Every database suite runs in the test profile its batch built.
-assert not any(suite['ci'] for suite in suites)
-executions = [command for command in commands if command['args'][0] == 'test'
-              and '--no-run' not in command['args']]
-# 45 suite contracts before the broker admission matrix ran in four lanes by
-# module (one suite became eight); 442 required tests (437, plus #3402's
-# ListOrganizations statement test and #3550's default-profile migration and
-# store tests). The server-core pool health matrix adds one suite of 2,
-# #3256's environment create capacity matrix one of 4, the admin
-# environment quota matrix (#3583) one of 5, and #3583's quota-defaults
-# migration test one more in the server-core migration matrix, #2497's
-# confidential opt-in and #3381's rate-card migration tests one more each,
-# #3627's warm-bind confirmation test one more in the workspace binding
-# recorder matrix, and #3381's confidential admission and unreadable-limits
-# tests two more in the create capacity matrix,
-# and #3381's admin organization credit matrix one suite of 2.
-assert len(executions) == len(suites) == 56
-assert sum(suite['count'] for suite in suites) == 459
-assert commands.index(actual_batches[-1]) < commands.index(executions[0]), 'a lane started before every harness compiled'
-# Against one explicit database the lanes run one after another, in lane order.
-for expected, actual in zip([suite for lane in lane_order for suite in lane_suites[lane]], executions):
-    assert actual['args'] == expected['args'], expected['label']
-    assert actual['target'] == environment['CODEWIRE_CARGO_CI_TARGET_DIR' if expected['ci']
-                                           else 'CARGO_TARGET_DIR'], expected['label']
-    field = 'test_database' if expected['database_env'] == 'TEST_DATABASE_URL' else 'database'
-    assert actual[field] == environment['DATABASE_URL_RUST'], expected['label']
+executions = executions_of(commands)
+listings = [command for command in commands if command['args'][-1] == '--list']
+# Every suite lists its tests before any runs, after every harness compiled,
+# and then runs once; the coverage check found no database test unlisted.
+assert executions and len(executions) == len(listings), (len(executions), len(listings))
+assert [command['args'][:-1] for command in listings] == [command['args'] for command in executions]
+assert commands.index(actual_batches[-1]) < commands.index(listings[0]), 'a suite listed before every harness compiled'
+assert commands.index(listings[-1]) < commands.index(executions[0]), 'a suite ran before every suite listed'
+assert 'each of 0 database tests runs in exactly one of ' in result.stdout, result.stdout
+# The migration runner builds before any suite runs; every suite runs in the
+# test profile its batch built, against the explicit database.
+migration = next(command for command in commands if command['args'][0] == 'build')
+assert migration['args'] == ['build', '--locked', '--profile', 'ci', '-p', 'codewire-server-core', '--bin', 'codewire-db-migrate']
+assert migration['target'] == environment['CODEWIRE_CARGO_CI_TARGET_DIR']
+assert commands.index(migration) < commands.index(executions[0])
+for execution in executions:
+    assert execution['target'] == environment['CARGO_TARGET_DIR'], execution['args']
+    assert environment['DATABASE_URL_RUST'] in (execution['test_database'], execution['database']), execution['args']
+# A suite that runs without --ignored lists the ignored tests apart.
+plain = [command for command in executions if '--ignored' not in command['args']]
+assert plain and all(command['args'] + ['--list', '--ignored'] in [c['args'] for c in commands] for command in plain)
 for batch in actual_batches:
     package = batch['args'][batch['args'].index('-p') + 1]
     first_test = next(command for command in executions if package in command['args'])
     assert commands.index(batch) < commands.index(first_test)
+# Each suite's listing is kept for the coverage check: three tests a suite.
+listed = sorted((Path(environment['RUN_DIR']) / 'suite-listings').glob('*.list'))
+assert len(listed) == len(executions) and all(len(path.read_text().splitlines()) == 3 for path in listed)
 # With CI's job network each lane after the first gets its own PostgreSQL on
 # that network, migrated before the lanes start side by side. Each lane runs
-# its own suites in order against its own database, and every lane container
-# is removed afterwards, also when a lane fails.
+# its own suites in the order the listing pass ran them, against its own
+# database, and every lane container is removed afterwards, also when a lane
+# fails.
 def lane_url(lane):
     return ('postgres://codewire:codewire@codewire-integration-postgres-' + lane + ':5432/codewire'
             if lane != 'core' else environment['DATABASE_URL_RUST'])
+def lane_runs(commands):
+    return {lane: [command['args'] for command in executions_of(commands)
+                   if (command['test_database'] or command['database']) == lane_url(lane)]
+            for lane in lane_order}
 def check_lanes(commands, case, complete=True):
-    executions = [command for command in commands if command['args'][0] == 'test' and '--no-run' not in command['args']]
+    runs = lane_runs(commands)
+    order = [command['args'] for command in executions]
     for lane in lane_order:
-        expected = [suite for suite in lane_suites[lane]]
-        actual = [command for command in executions
-                  if (command['test_database'] or command['database']) == lane_url(lane)]
-        assert [command['args'] for command in actual] == [suite['args'] for suite in expected][:len(actual)], lane
-        if complete:
-            assert len(actual) == len(expected), lane
+        assert runs[lane] or not complete, lane
+        assert [order.index(args) for args in runs[lane]] == sorted(order.index(args) for args in runs[lane]), lane
+    if complete:
+        assert sorted(args for lane in lane_order for args in runs[lane]) == sorted(order), 'a suite ran in no lane or twice'
     migrations = [command for command in commands if command['args'][0] == 'build']
     assert len(migrations) == len(lane_order), migrations
     started = case_file(case, 'docker.log').read_text().splitlines()
@@ -746,6 +694,7 @@ for lane in lane_order:
     assert f'=== database lane {lane} ===' in lanes.stdout, lane
     assert f'CODEWIRE_CI_PHASE name=database-lane-{lane} seconds=' in lanes.stdout, lane
 check_lanes(lane_commands, lanes_environment)
+suites_per_lane = {lane: len(runs) for lane, runs in lane_runs(lane_commands).items()}
 instant, instant_commands, instant_environment = cases['instant'].result()
 assert instant.returncode == 0 and '[product-integration] green' in instant.stdout, instant.stdout + instant.stderr
 for lane in lane_order:
@@ -760,8 +709,7 @@ assert shared.returncode == 0 and '[product-integration] green' in shared.stdout
 assert 'database lanes: 10 at a time, 2 test threads each: ' + lane_start_order in shared.stdout, shared.stdout
 check_lanes(shared_commands, shared_environment)
 assert peak_running(shared_environment) <= 10, 'more than ten lanes ran at once'
-lane_executions = [command for command in shared_commands
-                   if command['args'][0] == 'test' and '--no-run' not in command['args']]
+lane_executions = executions_of(shared_commands)
 assert lane_executions and all(command['threads'] == '2' for command in lane_executions), lane_executions[:2]
 for lane in lane_order:
     assert f'CODEWIRE_CI_PHASE name=database-lane-{lane} seconds=' in shared.stdout, lane
@@ -786,10 +734,10 @@ assert peak_running(serial_environment) == 1, 'lanes overlapped at one at a time
 check_lanes(serial_commands, serial_environment)
 invalid, invalid_commands, _ = cases['invalid'].result()
 assert invalid.returncode != 0 and 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to 10' in invalid.stdout + invalid.stderr
-assert not [command for command in invalid_commands if command['args'][0] == 'test' and '--no-run' not in command['args']]
+assert not executions_of(invalid_commands)
 too_many, too_many_commands, _ = cases['too many'].result()
 assert too_many.returncode != 0 and 'CODEWIRE_CI_DATABASE_LANES_AT_ONCE must be 1 to 10, not 11' in too_many.stdout + too_many.stderr
-assert not [command for command in too_many_commands if command['args'][0] == 'test' and '--no-run' not in command['args']]
+assert not executions_of(too_many_commands)
 # A malformed share is ignored with a warning, never read as a smaller one.
 malformed, _, _ = cases['malformed'].result()
 assert malformed.returncode == 0 and 'database lanes: 10 at a time:' in malformed.stdout, malformed.stdout
@@ -798,28 +746,44 @@ failed_lane, failed_commands, failed_environment = cases['failed lane'].result()
 assert failed_lane.returncode != 0 and '[product-integration] green' not in failed_lane.stdout
 assert '::error::database lane broker-admission failed' in failed_lane.stdout, failed_lane.stdout
 check_lanes(failed_commands, failed_environment, complete=False)
-for lane in (lane for lane in lane_order if lane != 'broker-admission'):
-    assert sum((command['test_database'] or command['database']) == lane_url(lane) for command in failed_commands
-               if command['args'][0] == 'test' and '--no-run' not in command['args']) == len(lane_suites[lane]), lane
-# Every retained assertion must fail on an incorrect count. This also catches
-# deleting the assertion while leaving the corresponding test command present.
-for index in range(len(suites)):
-    failed, _, _ = cases['count:' + str(index)].result()
-    assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, index
+for lane, runs in lane_runs(failed_commands).items():
+    if lane != 'broker-admission':
+        assert len(runs) == suites_per_lane[lane], lane
+# A dropped test fails its suite, against one database and in a lane.
+dropped, _, _ = cases['dropped'].result()
+assert dropped.returncode != 0 and '[product-integration] green' not in dropped.stdout
+assert '::error::platform cw runtime journal matrix passed 2 of the 3 tests its filter lists' in dropped.stdout, dropped.stdout
+dropped, _, _ = cases['dropped in a lane'].result()
+assert dropped.returncode != 0 and '::error::database lane broker-checked failed' in dropped.stdout, dropped.stdout
+assert 'platform broker checked lease matrix passed 2 of the 3 tests its filter lists' in dropped.stdout, dropped.stdout
+# A filter that matches nothing fails before any suite runs.
+empty, empty_commands, _ = cases['empty'].result()
+assert empty.returncode != 0 and '::error::platform owner-source authority matrix selects no test' in empty.stdout, empty.stdout
+assert not executions_of(empty_commands)
+# A database test no suite lists fails the run before any suite runs.
+unwired_run, unwired_commands, _ = cases['unwired'].result()
+assert unwired_run.returncode != 0 and '[product-integration] green' not in unwired_run.stdout
+assert 'codewire-fixture database test db_nothing_runs (crates/fixture/src/lib.rs:2) runs in no database lane' in unwired_run.stderr, unwired_run.stderr
+assert not executions_of(unwired_commands)
 failed, trace, _ = cases['journal'].result()
 assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout
-assert trace[-1]['args'] == suites[journal_index]['args']
+assert 'api::platform_agents::journal::database_tests::db_' in trace[-1]['args']
 for failure in failures:
     failed, trace, _ = cases[failure].result()
     assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, failure
     if failure.startswith('compile:'):
         assert '--no-run' in trace[-1]['args'], failure
+    if failure.startswith('skip:'):
+        assert 'skipped: a test found no database' in failed.stdout, failure
 lane_lock.result()
 pool.shutdown()
 
-print(f'Database batching: {len(suites) + 10} trace/failure cases; '
-      f'all {len(suites)} suite contracts and {sum(suite["count"] for suite in suites)} required tests preserved')
+print(f'Database lanes: {len(cases) + 1} trace/failure cases over {len(executions)} counted suites')
 PYTHON
+
+# The coverage check's own fixtures: an unwired test, a test two suites run,
+# and tests written by a macro.
+python3 -B "$ROOT/scripts/ci/verify/database-test-coverage.py" --self-test
 
 # Every integration PostgreSQL gets the same server settings (#3198) and the
 # same digest-pinned image: the ones this file starts above, ci.yaml's "Start
@@ -1228,9 +1192,8 @@ EXPECTED_SERVICES_RUNTIME_ARCHIVES='build --locked -p codewire-server-core --bin
 build --locked -p codewire-coordinator
 build --locked -p codewire-cli-bin --bin cw
 nextest archive --locked -p codewire-orchestration --features kind-e2e --test wire_contract --archive-file OUT/codewire-orchestration--features-kind-e2e.tar.zst
-nextest archive --locked -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst
-nextest archive --locked -p codewire-orchestration --lib --archive-file OUT/codewire-orchestration.tar.zst'
-archive_build_case runtime services-runtime-archives services_runtime 2 \
+nextest archive --locked -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst'
+archive_build_case runtime services-runtime-archives services_runtime 1 \
   '|valid:v3|service_orchestration|service_nats|service_temporal|complete|' ||
   { cat "$TMP/archive-build-runtime/log" >&2; echo 'the runtime-plane archive build failed' >&2; exit 1; }
 archive_build_check runtime "$EXPECTED_SERVICES_RUNTIME_ARCHIVES" 'services_runtime:
@@ -1238,9 +1201,7 @@ archive_build_check runtime "$EXPECTED_SERVICES_RUNTIME_ARCHIVES" 'services_runt
   build --locked -p codewire-coordinator
   build --locked -p codewire-cli-bin --bin cw
   nextest archive --locked -p codewire-orchestration --features kind-e2e --test wire_contract --archive-file OUT/codewire-orchestration--features-kind-e2e.tar.zst
-  nextest archive --locked -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst
-services_runtime/batch-orchestration:
-  nextest archive --locked -p codewire-orchestration --lib --archive-file OUT/codewire-orchestration.tar.zst' 2
+  nextest archive --locked -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst' 1
 for binary in codewire-db-migrate cw; do
   [ -x "$TMP/archive-build-runtime/out/$binary" ] ||
     { echo "the runtime-plane archive build did not keep $binary" >&2; exit 1; }

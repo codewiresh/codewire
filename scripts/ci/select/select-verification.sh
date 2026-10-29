@@ -954,6 +954,7 @@ if [ "$event_selected" = false ]; then
     case "$path" in
       scripts/ci/verify/run-integration-verification.sh|scripts/ci/verify/integration-lane.py|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
+      scripts/ci/verify/database-test-coverage.py|\
       scripts/ci/setup/load-fixture-images.sh|scripts/ci/tests/test-load-fixture-images.sh)
         # These files own database execution and every service's integration
         # harness, including the PostgreSQL both run against (#3198) and how
@@ -1730,6 +1731,10 @@ if [ "$event_selected" = false ]; then
       crates/*/src/*/database_tests/*|\
       crates/codewire-billing/src/billing_teardown.rs|\
       crates/codewire-orchestration/src/api/create.rs|\
+      crates/codewire-orchestration/src/api/presets.rs|\
+      crates/codewire-orchestration/src/confidential_storage.rs|\
+      crates/codewire-orchestration/src/worker/activity_authority.rs|\
+      crates/codewire-orchestration/src/worker/setup_lease.rs|\
       crates/codewire-orchestration/src/api/cw_runtime/owner.rs|\
       crates/codewire-orchestration/src/api/environment_daemon/session_mutation/tests.rs|\
       crates/codewire-orchestration/src/api/environment_resize.rs|\

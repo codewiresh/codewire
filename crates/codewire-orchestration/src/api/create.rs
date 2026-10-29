@@ -1878,7 +1878,7 @@ credentials: {profile: user/work}
         )
         .bind(&org_id)
         .bind(format!("Sequential auto preset {suffix}"))
-        .bind(format!("sequential-auto-preset-{suffix}"))
+        .bind(format!("preset-seq-{suffix}"))
         .bind(&user_id)
         .execute(&pool)
         .await

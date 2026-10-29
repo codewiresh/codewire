@@ -20,6 +20,8 @@ CARGO_CI_DIR="$CARGO_CI_TARGET_DIR/ci"
 # Names below are per process: merge qualification runs several of these
 # side by side under one run ID (scripts/dev/preflight.sh --all).
 RUN_DIR="${RUN_DIR:-$ROOT/.tmp/codewire-product-integration-${GITHUB_RUN_ID:-local}-$$}"
+# Each database suite's listing of its tests (counted_suite).
+SUITE_LISTINGS="$RUN_DIR/suite-listings"
 DATABASE_URL_EXPLICIT=false
 DATABASE_URL_RUST_EXPLICIT=false
 [[ -v DATABASE_URL ]] && DATABASE_URL_EXPLICIT=true
@@ -173,7 +175,7 @@ archive_cargo() {
   fi
   [ "$command" = test ] || { echo "::error::archive mode cannot run cargo $command" >&2; return 2; }
   local package="" features="" no_default=false no_run=false name="" exact=false ignored=default
-  local threads="" nocapture=false profile="" arg
+  local threads="" nocapture=false profile="" list=false arg
   local -a binaries=() skips=() cargo_args=()
   while [ "$#" -gt 0 ]; do
     arg="$1"
@@ -206,6 +208,7 @@ archive_cargo() {
       --include-ignored) ignored=all ;;
       --exact) exact=true ;;
       --nocapture) nocapture=true ;;
+      --list) list=true ;;
       --test-threads=*) threads="${arg#--test-threads=}" ;;
       --skip) skips+=("$1"); shift ;;
       --skip=*) skips+=("${arg#--skip=}") ;;
@@ -238,11 +241,19 @@ archive_cargo() {
   for part in "${skips[@]}"; do
     filter+=" & !test($part)"
   done
-  local -a run_args=(--run-ignored "$ignored" -E "$filter" --no-tests=fail --no-fail-fast
+  local -a reuse_args=(
     --binaries-metadata "$extracted/target/nextest/binaries-metadata.json"
     --cargo-metadata "$extracted/target/nextest/cargo-metadata.json"
     --target-dir-remap "$extracted/target"
     --workspace-remap "$DATABASE_ARCHIVE_BUILD_ROOT/src")
+  if [ "$list" = true ]; then
+    # The tests this run would run, as libtest's --list names them.
+    "${RUST_TEST_NEXTEST:-cargo-nextest}" nextest list --run-ignored "$ignored" -E "$filter" \
+      --message-format oneline "${reuse_args[@]}" | sed -nE 's/^[^ ]+ ([^ ]+)$/\1: test/p'
+    return
+  fi
+  local -a run_args=(--run-ignored "$ignored" -E "$filter" --no-tests=fail --no-fail-fast
+    "${reuse_args[@]}")
   [ -z "$threads" ] || run_args+=(--test-threads "$threads")
   # cargo's --nocapture let the lanes read a passing test's output; keep it.
   [ "$nocapture" = false ] || run_args+=(--success-output immediate)
@@ -425,6 +436,90 @@ assert_passed_count() {
   count="$(sed -nE 's/.*test result: ok\. ([0-9]+) passed.*/\1/p' "$logfile" | tail -n 1)"
   if [ "$count" != "$expected" ]; then
     echo "::error::${label} reported ${count:-no} passing tests; expected ${expected}"
+    return 1
+  fi
+}
+
+# suite_tests COMMAND...: the names of the tests COMMAND, a `cargo test` with
+# its filter and test arguments, would run, one per line. libtest's --list
+# also names the ignored tests a run without --ignored leaves out, so those
+# are listed apart and taken away.
+suite_tests() {
+  local -a command=("$@")
+  local arg separator=false ignored=false
+  for arg in "${command[@]}"; do
+    if [ "$separator" = true ]; then
+      case "$arg" in --ignored|--include-ignored) ignored=true ;; esac
+    fi
+    [ "$arg" != -- ] || separator=true
+  done
+  [ "$separator" = true ] || command+=(--)
+  local all only
+  all="$(mktemp "$RUN_DIR/suite-tests.XXXXXX")"
+  only="$(mktemp "$RUN_DIR/suite-tests.XXXXXX")"
+  "${command[@]}" --list | sed -nE 's/^(.+): test$/\1/p' | sort -u > "$all"
+  if [ "$ignored" = false ]; then
+    "${command[@]}" --list --ignored | sed -nE 's/^(.+): test$/\1/p' | sort -u > "$only"
+  fi
+  comm -23 "$all" "$only"
+  rm -f -- "$all" "$only"
+}
+
+# counted_suite LABEL NAME [VARIABLE=VALUE...] -- COMMAND...: runs one
+# database suite, COMMAND a `cargo test` with the VARIABLEs set, into
+# $RUN_DIR/NAME.log. Its count is never kept here: the suite first lists the
+# tests its own filter selects (suite_tests), at least one, into
+# $SUITE_LISTINGS/NAME.list as PACKAGE<TAB>TEST lines, and must then pass
+# exactly that many. database-test-coverage.py reads the listings: every
+# database test must be in exactly one. A test that skipped itself for want
+# of its database (it prints "DATABASE_URL unset") fails the suite. With
+# SUITE_LIST_ONLY=true it only lists, reusing an earlier listing to run.
+counted_suite() {
+  local label="$1" name="$2" logfile="$RUN_DIR/$2.log" listing package="" arg previous=""
+  local expected passed
+  shift 2
+  local -a variables=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    variables+=("$1")
+    shift
+  done
+  [ "$#" -gt 1 ] || { echo "::error::${label}: counted_suite needs -- COMMAND" >&2; return 2; }
+  shift
+  for arg in "$@"; do
+    [ "$previous" != -p ] || package="$arg"
+    previous="$arg"
+  done
+  [ -n "$package" ] || { echo "::error::${label}: the suite names no package (-p)" >&2; return 2; }
+  listing="$SUITE_LISTINGS/$name.list"
+  mkdir -p "$SUITE_LISTINGS"
+  if [ ! -f "$listing" ]; then
+    (
+      for arg in "${variables[@]}"; do export "${arg?}"; done
+      suite_tests "$@"
+    ) > "$listing.names"
+    sed "s/^/$package\t/" "$listing.names" > "$listing"
+    rm -f -- "$listing.names"
+  fi
+  expected="$(wc -l < "$listing")"
+  if [ "$expected" -eq 0 ]; then
+    rm -f -- "$listing"
+    echo "::error::${label} selects no test; its filter matches nothing"
+    return 1
+  fi
+  [ "${SUITE_LIST_ONLY:-false}" != true ] || return 0
+  (
+    for arg in "${variables[@]}"; do export "${arg?}"; done
+    "$@"
+  ) | tee "$logfile"
+  if grep -q 'DATABASE_URL unset' "$logfile"; then
+    echo "::error::${label} skipped: a test found no database"
+    return 1
+  fi
+  # The suite's own result is its last: a test that runs a child test
+  # process prints that child's result before it.
+  passed="$(sed -nE 's/.*test result: ok\. ([0-9]+) passed.*/\1/p' "$logfile" | tail -n 1)"
+  if [ "$passed" != "$expected" ]; then
+    echo "::error::${label} passed ${passed:-no} of the ${expected} tests its filter lists"
     return 1
   fi
 }
@@ -645,427 +740,362 @@ compile_batches() {
 }
 
 database_lane_core() {
-  local logfile
-  logfile="$RUN_DIR/server-core-migrate.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
-      | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 26
+  counted_suite "server-core migration matrix" server-core-migrate \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture
 
-  logfile="$RUN_DIR/platform-credential-storage.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform credential storage matrix" platform-credential-storage \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-platform-credentials --test storage \
-      -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential storage matrix" "$logfile" 24
+      -- --ignored --nocapture --test-threads=4
 
-  logfile="$RUN_DIR/platform-access-profiles.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform access profile matrix" platform-access-profiles \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-platform-credentials --test profiles \
-      -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform access profile matrix" "$logfile" 16
+      -- --ignored --nocapture --test-threads=4
 
-  logfile="$RUN_DIR/platform-owner-source-authority.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform owner-source authority matrix" platform-owner-source-authority \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-platform-credentials --test owner_sources \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform owner-source authority matrix" "$logfile" 5
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/platform-credential-refresh.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform credential refresh matrix" platform-credential-refresh \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-platform-credentials --test refresh \
-      -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential refresh matrix" "$logfile" 14
+      -- --ignored --nocapture --test-threads=4
 
-  logfile="$RUN_DIR/platform-credential-authority.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform credential restricted-role matrix" platform-credential-authority \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-platform-credentials --test authority \
-      -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential restricted-role matrix" "$logfile" 13
+      -- --ignored --nocapture --test-threads=4
 
-  logfile="$RUN_DIR/oauth-bearer-identity.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "OAuth-only restricted identity matrix" oauth-bearer-identity \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-server-core --test oauth_bearer_auth \
-      -- --ignored --nocapture | tee "$logfile"
-  assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6
+      -- --ignored --nocapture
 
-  logfile="$RUN_DIR/session-hash-only.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test -p codewire-server-core --test session_auth -- --nocapture | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::session hash-only matrix skipped"
-    return 1
-  fi
-  assert_passed_count "session hash-only matrix" "$logfile" 4
+  counted_suite "session hash-only matrix" session-hash-only \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-server-core --test session_auth -- --nocapture
 
-  logfile="$RUN_DIR/organization-deletion-lifecycle.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "organization deletion lifecycle matrix" organization-deletion-lifecycle \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-server-core --test org_deletion_lifecycle \
-      -- --nocapture | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::organization deletion lifecycle matrix skipped"
-    return 1
-  fi
-  assert_passed_count "organization deletion lifecycle matrix" "$logfile" 20
+      -- --nocapture
 
-  logfile="$RUN_DIR/organization-billing-teardown.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "organization billing teardown matrix" organization-billing-teardown \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-billing --lib 'billing_teardown::tests::db_' \
-      -- --nocapture | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::organization billing teardown matrix skipped"
-    return 1
-  fi
-  assert_passed_count "organization billing teardown matrix" "$logfile" 5
+      -- --nocapture
 
-  logfile="$RUN_DIR/mesh-migration-ledger.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "Mesh migration ledger" mesh-migration-ledger \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-mesh --lib 'store::migration_tests::' \
-      -- --ignored --nocapture | tee "$logfile"
-  assert_passed_count "Mesh migration ledger" "$logfile" 16
+      -- --ignored --nocapture
 
-  logfile="$RUN_DIR/server-core-pool-health.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo test -p codewire-server-core --lib db:: -- --ignored --nocapture --test-threads=1 \
-      | tee "$logfile"
-  assert_passed_count "server-core pool health matrix" "$logfile" 2
+  counted_suite "server-core pool health matrix" server-core-pool-health \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-server-core --lib db:: -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_credential_mutations() {
-  local logfile
-  logfile="$RUN_DIR/public-credential-mutations.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "public credential mutation matrix" public-credential-mutations \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-service --features enrollment \
-      --lib mutation::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "public credential mutation matrix" "$logfile" 28
+      --lib mutation::tests:: -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/owner-local-delegation-authority.log"
-  TMPDIR="$RUN_DIR" TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "owner-local delegation authority matrix" owner-local-delegation-authority \
+    TMPDIR="$RUN_DIR" TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib delegation::authority::tests:: \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "owner-local delegation authority matrix" "$logfile" 8
+      -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_credential_service() {
-  local logfile
-  logfile="$RUN_DIR/isolated-credential-runtime.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "isolated credential runtime matrix" isolated-credential-runtime \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-service --features enrollment \
-      --lib runtime::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "isolated credential runtime matrix" "$logfile" 5
+      --lib runtime::tests:: -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/github-repository-discovery.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "GitHub repository discovery matrix" github-repository-discovery \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-service --features enrollment \
-      --lib repositories::tests::integration:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "GitHub repository discovery matrix" "$logfile" 9
+      --lib repositories::tests::integration:: -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/kind-credential-effective-acl.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "Kind credential effective ACL matrix" kind-credential-effective-acl \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib runtime::kind::config::tests::effective_acl_guard_rejects_direct_column_and_membership_authority \
-      -- --exact --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "Kind credential effective ACL matrix" "$logfile" 1
+      -- --exact --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/platform-runtime-identity.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform runtime restricted identity matrix" platform-runtime-identity \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-service \
       --lib tests::database:: -- --ignored \
       --skip tests::database::projection:: \
-      --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform runtime restricted identity matrix" "$logfile" 6
+      --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/platform-runtime-projection.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform runtime projection matrix" platform-runtime-projection \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-service \
       --lib tests::database::projection:: \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform runtime projection matrix" "$logfile" 13
+      -- --ignored --nocapture --test-threads=1
 }
 
 # The broker admission matrix (platform::tests, 50 tests) runs in four lanes:
 # this one runs the tests of platform::tests itself, and the other broker
 # lanes its modules. A new module runs here until it is given a lane.
 database_lane_broker_admission() {
-  local logfile
-  logfile="$RUN_DIR/platform-broker-admission.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform broker admission matrix" platform-broker-admission \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
       --lib platform::tests:: -- --ignored \
       --skip platform::tests::checked:: --skip platform::tests::claude_sign_in:: \
       --skip platform::tests::codex_login:: --skip platform::tests::decision:: \
       --skip platform::tests::keepalive:: --skip platform::tests::material_cache:: \
       --skip platform::tests::subscription:: \
-      --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker admission matrix" "$logfile" 13
+      --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/platform-broker-claude-sign-in.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform broker Claude sign-in matrix" platform-broker-claude-sign-in \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
-      --lib platform::tests::claude_sign_in:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker Claude sign-in matrix" "$logfile" 5
+      --lib platform::tests::claude_sign_in:: -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/platform-broker-grpc-rotation.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform broker gRPC rotation drain matrix" platform-broker-grpc-rotation \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
-      --lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 4
+      --lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_broker_checked() {
-  local logfile
-  logfile="$RUN_DIR/platform-broker-checked.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform broker checked lease matrix" platform-broker-checked \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
-      --lib platform::tests::checked:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker checked lease matrix" "$logfile" 8
+      --lib platform::tests::checked:: -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_broker_decisions() {
-  local logfile
-  logfile="$RUN_DIR/platform-broker-decision.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform broker decision matrix" platform-broker-decision \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
-      --lib platform::tests::decision:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker decision matrix" "$logfile" 8
+      --lib platform::tests::decision:: -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/platform-broker-codex-login.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform broker Codex login matrix" platform-broker-codex-login \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
-      --lib platform::tests::codex_login:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker Codex login matrix" "$logfile" 4
+      --lib platform::tests::codex_login:: -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_broker_refresh() {
-  local logfile
-  logfile="$RUN_DIR/platform-broker-keepalive.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform broker keepalive matrix" platform-broker-keepalive \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
-      --lib platform::tests::keepalive:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker keepalive matrix" "$logfile" 5
+      --lib platform::tests::keepalive:: -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/platform-broker-material-cache.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform broker material cache matrix" platform-broker-material-cache \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
-      --lib platform::tests::material_cache:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker material cache matrix" "$logfile" 5
+      --lib platform::tests::material_cache:: -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/platform-broker-subscription.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform broker subscription matrix" platform-broker-subscription \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
-      --lib platform::tests::subscription:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker subscription matrix" "$logfile" 2
+      --lib platform::tests::subscription:: -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/platform-broker-ssh.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform broker SSH matrix" platform-broker-ssh \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-credential-broker --no-default-features \
       --features platform,ssh-agent --lib platform::tests::ssh:: \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker SSH matrix" "$logfile" 5
+      -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_orchestration() {
-  local logfile
-  logfile="$RUN_DIR/preview-browser-authorization.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "preview browser authorization matrix" preview-browser-authorization \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
-      api::preview::authorization::database_tests:: -- --ignored --nocapture \
-      | tee "$logfile"
-  assert_passed_count "preview browser authorization matrix" "$logfile" 9
+      api::preview::authorization::database_tests:: -- --ignored --nocapture
 
-  logfile="$RUN_DIR/public-access-profiles.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "public access profile restricted API matrix" public-access-profiles \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --test access_profiles \
-      -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "public access profile restricted API matrix" "$logfile" 8
+      -- --ignored --nocapture --test-threads=4
 
-  logfile="$RUN_DIR/public-credential-metadata.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "public credential metadata matrix" public-credential-metadata \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --test credentials \
-      -- --ignored --nocapture --test-threads=3 | tee "$logfile"
-  assert_passed_count "public credential metadata matrix" "$logfile" 3
+      -- --ignored --nocapture --test-threads=3
 
-  logfile="$RUN_DIR/mesh-authorization-receiver.log"
   # The orchestration batch already built this harness; a CI-profile build
   # compiled the crate again for one test.
-  DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "Mesh authorization receiver matrix" mesh-authorization-receiver \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       connect::mesh_authorization::tests::generated_mesh_authorization_service_enforces_the_canonical_matrix \
-      -- --ignored --exact --nocapture | tee "$logfile"
-  assert_passed_count "Mesh authorization receiver matrix" "$logfile" 1
+      -- --ignored --exact --nocapture
 
-  logfile="$RUN_DIR/environment-external-cleanup.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "environment external cleanup matrix" environment-external-cleanup \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-orchestration --test environment_external_cleanup \
-      -- --nocapture | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::environment external cleanup matrix skipped"
-    return 1
-  fi
-  assert_passed_count "environment external cleanup matrix" "$logfile" 9
+      -- --nocapture
 
-  logfile="$RUN_DIR/environment-session-admission.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "environment session admission matrix" environment-session-admission \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::environment_daemon::session_mutation::tests::db_' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment session admission matrix" "$logfile" 5
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/environment-destroy-template-hint.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "environment destroy template hint matrix" environment-destroy-template-hint \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure \
-      -- --ignored --exact --nocapture | tee "$logfile"
-  assert_passed_count "environment destroy template hint matrix" "$logfile" 1
+      -- --ignored --exact --nocapture
 
-  logfile="$RUN_DIR/environment-projection-capture.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "environment projection capture matrix" environment-projection-capture \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'worker::create::projection_database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment projection capture matrix" "$logfile" 5
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/organization-tenant-secret-teardown.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "organization tenant secret teardown matrix" organization-tenant-secret-teardown \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-orchestration --lib \
       'worker::tenant_secret_teardown::tests::db_' \
-      -- --nocapture | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::organization tenant secret teardown matrix skipped"
-    return 1
-  fi
-  assert_passed_count "organization tenant secret teardown matrix" "$logfile" 2
+      -- --nocapture
 
-  logfile="$RUN_DIR/encrypted-tenant-secret-store.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "encrypted tenant secret store matrix" encrypted-tenant-secret-store \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-orchestration --lib \
       'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek' \
-      -- --ignored --exact --nocapture | tee "$logfile"
-  assert_passed_count "encrypted tenant secret store matrix" "$logfile" 1
+      -- --ignored --exact --nocapture
 }
 
 database_lane_orchestration_journals() {
-  local logfile
-  logfile="$RUN_DIR/platform-cw-runtime-journal.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform cw runtime journal matrix" platform-cw-runtime-journal \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::cw_runtime::owner::database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform cw runtime journal matrix" "$logfile" 31
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/platform-managed-agent-journal.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "platform managed agent journal matrix" platform-managed-agent-journal \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::platform_agents::journal::database_tests::db_' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform managed agent journal matrix" "$logfile" 40
+      -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_orchestration_workspaces() {
-  local logfile
-  logfile="$RUN_DIR/environment-source-admission.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "environment source admission matrix" environment-source-admission \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --test environment_sources \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment source admission matrix" "$logfile" 6
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/admin-startup-summary.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "admin startup summary matrix" admin-startup-summary \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::admin::startup_database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "admin startup summary matrix" "$logfile" 2
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/admin-environment-quota.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "admin environment quota matrix" admin-environment-quota \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::admin::quota_database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "admin environment quota matrix" "$logfile" 5
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/admin-organization-credit.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "admin organization credit matrix" admin-organization-credit \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::admin::credit_database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "admin organization credit matrix" "$logfile" 2
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/workspace-binding-recorder.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "workspace binding recorder matrix" workspace-binding-recorder \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'worker::workspace_binding::database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "workspace binding recorder matrix" "$logfile" 21
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/workspace-binding-access-store.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "workspace binding access store matrix" workspace-binding-access-store \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'workspace_binding::store::database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "workspace binding access store matrix" "$logfile" 4
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/environment-mesh-membership.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "environment Mesh membership matrix" environment-mesh-membership \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'environment_mesh::database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment Mesh membership matrix" "$logfile" 3
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/environment-resize-admission.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "environment resize admission matrix" environment-resize-admission \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::environment_resize::tests::db_' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment resize admission matrix" "$logfile" 3
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/environment-create-capacity.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "environment create capacity matrix" environment-create-capacity \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
-      'api::create::tests::db_quota_' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment create capacity matrix" "$logfile" 6
+      'api::create::tests::db_' \
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/ssh-proxy-runtime-lease.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "SSH proxy runtime lease matrix" ssh-proxy-runtime-lease \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::ssh_proxy::database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "SSH proxy runtime lease matrix" "$logfile" 2
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/environment-daemon-repair-lease.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "environment daemon repair lease matrix" environment-daemon-repair-lease \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::environment_daemon::repair_database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment daemon repair lease matrix" "$logfile" 2
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/environment-membership-access.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "environment membership access matrix" environment-membership-access \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::environments::access_database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment membership access matrix" "$logfile" 1
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/organization-membership-credentials.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "organization membership credential matrix" organization-membership-credentials \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::organizations::membership_database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "organization membership credential matrix" "$logfile" 2
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/billing-session-bind.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "billing session bind matrix" billing-session-bind \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'worker::billing_sessions::database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "billing session bind matrix" "$logfile" 4
+      -- --ignored --nocapture --test-threads=1
 
-  logfile="$RUN_DIR/credential-relay-targets.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+  counted_suite "credential relay target matrix" credential-relay-targets \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'worker::credential_relay::database_tests::' \
-      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "credential relay target matrix" "$logfile" 1
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "preset projection matrix" preset-projection \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::presets::tests::db_' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "confidential environment access matrix" confidential-environment-access \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'confidential_storage::tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "orchestration activity fencing matrix" orchestration-activity-fencing \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::activity_authority::tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "environment setup lease matrix" environment-setup-lease \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::setup_lease::tests::db_' \
+      -- --ignored --nocapture --test-threads=1
 }
 
 run_database_lane() {
@@ -1201,15 +1231,27 @@ run_lanes() {
   [ "$failed" = false ]
 }
 
+# list_database_suites: every database lane's suites list their tests, and
+# each database test must be in exactly one listing, before any lane runs.
+list_database_suites() {
+  local lane
+  for lane in "${DATABASE_LANES[@]}"; do
+    SUITE_LIST_ONLY=true run_database_lane "$lane"
+  done
+  python3 -B "$ROOT/scripts/ci/verify/database-test-coverage.py" \
+    --root "${DATABASE_TEST_SOURCE_ROOT:-$ROOT}" --listings "$SUITE_LISTINGS"
+}
+
 run_database() {
   local lane
   local -A lane_url=() lane_rust_url=()
-  reset_schema
   if [ -n "${RUST_DATABASE_ARCHIVES:-}" ]; then
     extract_archives "$RUST_DATABASE_ARCHIVES"
   else
     build_database_suites
   fi
+  list_database_suites
+  reset_schema
   if ! integration_postgres_lanes_available; then
     log "database lanes run one after another against the explicit database"
     for lane in "${DATABASE_LANES[@]}"; do
@@ -1428,21 +1470,17 @@ service_build_connectcore() {
     cargo_ci test --locked --profile ci -p codewire-server-core --test connect_auth --no-run
   fi
 }
-service_build_orchestration() {
-  if selected service_orchestration; then
-    cargo_ci test --locked --profile ci -p codewire-orchestration --lib --no-run
-  fi
-}
 # service_build_batches PLANE: the plane's batches, one per line. One after
 # another in one folder, the control plane took 371 s in main run 26920 (the
 # migration runner 89 s, the binaries 80, idp 74, coordinator 52, billing
 # 62, connect_auth 2), and the runtime plane 194 s in main run 27000 (the
-# orchestration wire contract 92 s, the orchestration library 85). A step
-# whose service is not selected builds nothing.
+# orchestration wire contract 92 s, the orchestration library 85; the
+# library's database tests now run in the database lanes, which build it
+# anyway). A step whose service is not selected builds nothing.
 service_build_batches() {
   case "$1" in
     control) printf '%s\n' 'binaries connectcore' idp coordinator billing ;;
-    runtime) printf '%s\n' 'binaries coordinator' orchestration ;;
+    runtime) printf '%s\n' 'binaries coordinator' ;;
     *) echo "::error::unknown service plane: $1" >&2; return 2 ;;
   esac
 }
@@ -1972,19 +2010,7 @@ start_orchestration() {
 }
 
 run_orchestration() {
-  local logfile="$RUN_DIR/orchestration-activity-fencing.log"
-  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-orchestration --lib \
-      'worker::' -- --ignored \
-      --skip 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek' \
-      --skip 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure' \
-      --skip 'worker::create::projection_database_tests::' \
-      --skip 'worker::workspace_binding::database_tests::' \
-      --skip 'worker::billing_sessions::database_tests::' \
-      --skip 'worker::credential_relay::database_tests::' \
-      --nocapture | tee "$logfile"
-  assert_passed_count "orchestration activity fencing matrix" "$logfile" 2
-
+  local logfile
   start_orchestration
   logfile="$RUN_DIR/orchestration-contract.log"
   ORCHESTRATION_BASE_URL="http://127.0.0.1:${ORCHESTRATION_PORT}" \

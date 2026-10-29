@@ -572,8 +572,10 @@ tooling when one of these breaks; do not work around it per session:
   `cargo-zigbuild`) wins over a system Rust.
 - `node_modules` and `.venv-proto` must belong to the worktree, not be
   symlinks to another checkout.
-- Database matrix test counts are pinned in `run-integration-verification.sh`,
-  `test-integration-postgres.sh`, and `test-select-verification.sh`; update all
-  three together.
+- The database lanes keep no test counts. Each suite lists the tests its own
+  filter selects and must pass that many, and
+  `scripts/ci/verify/database-test-coverage.py` fails the database job when a
+  test whose `#[ignore]` reason names `DATABASE_URL` runs in no lane or in
+  two. A new database test needs a lane filter that selects it.
 - The Kind gate requires the pinned Chromium from
   `scripts/ci/install-pinned-playwright-chromium.sh`.
