@@ -67,29 +67,6 @@ impl FeatureFlags {
     }
 }
 
-/// The stable refusal while confidential key release is not proven bound to
-/// a registered launch measurement. The Dev pre-registration negative
-/// (#2497, 2026-10-29) saw a guest attest and receive a KBS resource before
-/// its measurement was registered, so by the owner's decision on #2497 ("If
-/// the proof fails, the lift is reverted.") no confidential environment is
-/// created or started until a negative passes. The organization opt-in and
-/// `require_confidential_access` stay in place behind this refusal.
-pub const CONFIDENTIAL_ISOLATION_UNAVAILABLE: &str =
-    "confidential isolation is temporarily unavailable";
-pub const CONFIDENTIAL_ISOLATION_UNAVAILABLE_CODE: &str = "CONFIDENTIAL_ISOLATION_UNAVAILABLE";
-
-/// Refuse to create or start a confidential environment (#2497).
-pub fn refuse_confidential_isolation(isolation_tier: &str) -> AppResult<()> {
-    if isolation_tier != "confidential" {
-        return Ok(());
-    }
-    Err(AppError::Coded {
-        status: StatusCode::SERVICE_UNAVAILABLE,
-        code: CONFIDENTIAL_ISOLATION_UNAVAILABLE_CODE,
-        detail: CONFIDENTIAL_ISOLATION_UNAVAILABLE.into(),
-    })
-}
-
 /// Authoritative product gate for confidential create and interactive
 /// operations (#2497). A confidential environment is served only when:
 /// - the deployment's confidential-storage switch is on;
@@ -2315,25 +2292,6 @@ mod tests {
         assert!(manifest_uri("not-a-digest").is_err());
         assert_eq!(device_size_bytes(20).unwrap(), 20 * 1024 * 1024 * 1024);
         assert!(device_size_bytes(0).is_err());
-    }
-
-    /// Until a pre-registration negative passes (#2497), every confidential
-    /// create and start is refused with one stable error.
-    #[test]
-    fn confidential_isolation_is_refused_with_a_stable_unavailable_error() {
-        assert!(refuse_confidential_isolation("standard").is_ok());
-        match refuse_confidential_isolation("confidential") {
-            Err(AppError::Coded {
-                status,
-                code,
-                detail,
-            }) => {
-                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-                assert_eq!(code, "CONFIDENTIAL_ISOLATION_UNAVAILABLE");
-                assert_eq!(detail, "confidential isolation is temporarily unavailable");
-            }
-            other => panic!("confidential isolation was not refused: {other:?}"),
-        }
     }
 
     /// Production sets no confidential-storage switch and opts no

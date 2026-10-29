@@ -1150,14 +1150,6 @@ async fn run_environment_create(
             );
             return Ok(());
         }
-        // Confidential environments are refused until a pre-registration
-        // negative passes (#2497): the API refuses them, and a create that
-        // still arrives fails with the same reason.
-        if env.isolation_tier == "confidential" {
-            let reason = crate::confidential_storage::CONFIDENTIAL_ISOLATION_UNAVAILABLE;
-            record_error(&svc, authority, env_id, reason).await?;
-            anyhow::bail!(reason);
-        }
 
         let profile = start_profile(cfg, &env.isolation_tier);
         // No backend row yet is fine — first iteration.

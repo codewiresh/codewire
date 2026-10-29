@@ -430,7 +430,8 @@ impl EnvironmentSubmission {
             "" | "standard" => IsolationTier::Standard,
             "confidential" if form.confidential_available => IsolationTier::Confidential,
             "confidential" => {
-                form.form_error = "Confidential isolation is temporarily unavailable.".to_owned();
+                form.form_error =
+                    "Confidential Sandboxes are not available for this organization.".to_owned();
                 IsolationTier::Unspecified
             }
             _ => {
@@ -3139,23 +3140,6 @@ mod tests {
         .render()
         .unwrap();
         assert!(visible.contains("environment-isolation-tier"));
-    }
-
-    #[test]
-    fn confidential_choice_is_disabled_while_it_is_refused() {
-        let organization = test_organization();
-        let mut form = default_create_form("csrf".into(), true);
-        form.show_confidential_controls = true;
-        form.confidential_available = false;
-        let html = EnvironmentCreateFormTemplate {
-            organization: &organization,
-            form: &form,
-        }
-        .render()
-        .unwrap();
-        assert!(html.contains(
-            r#"<option value="confidential" disabled>Confidential isolation is temporarily unavailable</option>"#
-        ));
     }
 
     #[test]

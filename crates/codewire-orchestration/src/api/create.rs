@@ -985,7 +985,6 @@ pub(crate) async fn create_environment_core(
             ));
         }
     };
-    crate::confidential_storage::refuse_confidential_isolation(isolation_tier)?;
     require_confidential_access(
         pool,
         state.confidential_storage_flags,

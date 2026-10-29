@@ -124,11 +124,6 @@ refused with `CONFIDENTIAL_NOT_ENABLED` or `CONFIDENTIAL_MEMBERSHIP_REQUIRED`.
 Stop, delete and reconciliation never consult the opt-in, so withdrawing it
 never strands an environment.
 
-For now every confidential create and start is refused with
-`CONFIDENTIAL_ISOLATION_UNAVAILABLE` ("confidential isolation is temporarily
-unavailable"), whatever the switch and the opt-in say, until a Dev negative
-proves that key release is bound to a registered launch measurement (#2497).
-
 A hosted create that names no disk gets 80 GiB, with 2 vCPU and 8 GiB of
 memory (owner, 2026-10-27; #3554); a confidential one gets 50 GiB, its own
 limit. Create and resize accept a disk up to 200 GiB and refuse more with

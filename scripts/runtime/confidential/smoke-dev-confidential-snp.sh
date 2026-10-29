@@ -598,14 +598,6 @@ run_product_command() {
       "$ROOT/scripts/runtime/dev/smoke-dev-commodity.sh" "${smoke_args[@]}"
 }
 
-# Refused pending #2497: the product phase creates a confidential
-# environment, and the API refuses those with "confidential isolation is
-# temporarily unavailable" until a pre-registration negative passes. The
-# phase is skipped explicitly and the run never reports a pass while it is
-# skipped.
-COCO_PRODUCT_REFUSED=1
-COCO_PRODUCT_SKIPPED=0
-
 run_coco_product() {
   local product_log="$EVIDENCE_DIR/coco-product.log"
 
@@ -613,11 +605,6 @@ run_coco_product() {
     log "skipping Codewire product CoCo smoke"
     return 0
   }
-  if [[ "$COCO_PRODUCT_REFUSED" == "1" ]]; then
-    log "SKIPPED pending #2497: the Codewire product CoCo smoke creates a confidential environment, and confidential isolation is temporarily unavailable"
-    COCO_PRODUCT_SKIPPED=1
-    return 0
-  fi
   log "running Codewire product smoke against the Flux-promoted confidential profile"
   if run_product_command >"$product_log" 2>&1; then
     [[ "$COCO_EXPECT_REFUSAL" == "0" ]] || \
@@ -639,10 +626,6 @@ main() {
   run_raw_jobs
   run_guest_attestation
   run_coco_product
-  if [[ "$COCO_PRODUCT_SKIPPED" == "1" ]]; then
-    log "confidential SNP smoke NOT PASSED: platform checks completed; the product CoCo phase is skipped pending #2497 (rerun with --skip-coco to accept the platform checks alone)"
-    exit 77
-  fi
   log "confidential SNP smoke passed"
   log "restore the commodity Dev profile in codewire/deploy and the baseline smoke Kustomization through reviewed commits"
 }
