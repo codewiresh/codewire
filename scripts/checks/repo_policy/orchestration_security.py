@@ -221,6 +221,41 @@ WARM_POOL_ENVIRONMENT = (
     "CODEWIRE_DOCKER_DATA_ROOT", "CODEWIRE_DOCKER_DATA_SIZE", "CODEWIRE_DOCKER_MOUNT_MODE",
 )
 WARM_POOL_AUDIENCES = ("codewire.internal.workspace-binding.v1", "codewire.internal.credential-workspace.v1")
+# codewire#3626: the pool template's ingress, pinned whole. The controller
+# manages the policy (outside the OR: Unmanaged admits all ingress), and the
+# ingress is either absent or an empty list (the rollout arm, for templates
+# an older orchestration replica writes; removed in #3640) or exactly one
+# rule, orchestration's namespace AND its Pod labels in one peer, each
+# selector exactly its labels, on exactly TCP 7777 and 2222 (integer ports).
+WARM_POOL_MANAGED_POLICY = (
+    "(!has(object.spec.networkPolicyManagement) || object.spec.networkPolicyManagement == 'Managed') && "
+    "has(object.spec.networkPolicy) && "
+)
+WARM_POOL_NO_INGRESS_ARM = (
+    "(!has(object.spec.networkPolicy.ingress) || size(object.spec.networkPolicy.ingress) == 0 || "
+)
+WARM_POOL_EXACT_RULE_ARM = (
+    "(size(object.spec.networkPolicy.ingress) == 1 && "
+    "object.spec.networkPolicy.ingress.all(r, dyn(r).all(k, k in ['from', 'ports']) && "
+    "has(r.from) && size(r.from) == 1 && "
+    "r.from.all(f, dyn(f).all(k, k in ['namespaceSelector', 'podSelector']) && "
+    "has(f.namespaceSelector) && dyn(f.namespaceSelector).all(k, k == 'matchLabels') && "
+    "has(f.namespaceSelector.matchLabels) && size(f.namespaceSelector.matchLabels) == 1 && "
+    "'kubernetes.io/metadata.name' in f.namespaceSelector.matchLabels && "
+    "f.namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == variables.serverNamespace && "
+    "has(f.podSelector) && dyn(f.podSelector).all(k, k == 'matchLabels') && "
+    "has(f.podSelector.matchLabels) && size(f.podSelector.matchLabels) == 2 && "
+    "'app.kubernetes.io/name' in f.podSelector.matchLabels && "
+    "f.podSelector.matchLabels['app.kubernetes.io/name'] == 'codewire' && "
+    "'app.kubernetes.io/component' in f.podSelector.matchLabels && "
+    "f.podSelector.matchLabels['app.kubernetes.io/component'] == 'orchestration') && "
+    "has(r.ports) && size(r.ports) == 2 && "
+    "r.ports.all(q, dyn(q).all(k, k in ['port', 'protocol']) && has(q.port) && has(q.protocol) && "
+    "q.protocol == 'TCP' && type(q.port) == int) && "
+    "r.ports.exists(q, q.port == 7777) && r.ports.exists(q, q.port == 2222)))) "
+    "message: unclaimed warm-pool members admit no ingress, or only orchestration's identity, in one peer, on TCP 7777 and 2222"
+)
+WARM_POOL_INGRESS_RULE = WARM_POOL_MANAGED_POLICY + WARM_POOL_NO_INGRESS_ARM + WARM_POOL_EXACT_RULE_ARM
 CREDENTIAL_SELF_TEST_TARGETS = ("deployments/k8s/overlays/local-kind",)
 WARM_POOL_KIND_TARGETS = ("deployments/k8s/overlays/local-kind", "deployments/k8s/overlays/local-kind-static", "tests/e2e/kind")
 # Images without a registry digest a pool template may still run: only the
@@ -313,7 +348,12 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             "(!has(t.spec.volumeMode) || t.spec.volumeMode != 'Block')",
             "(!has(t.spec.accessModes) || !('ReadWriteOncePod' in t.spec.accessModes))",
             "object.spec.networkPolicyManagement == 'Managed'",
-            "size(object.spec.networkPolicy.ingress) == 0",
+            # codewire#3626: the template ingress is exactly orchestration's
+            # identity, in one AND-ed peer, on TCP 7777 and 2222.
+            WARM_POOL_MANAGED_POLICY,
+            WARM_POOL_NO_INGRESS_ARM,
+            WARM_POOL_EXACT_RULE_ARM,
+            WARM_POOL_INGRESS_RULE,
             # codewire#3318: egress is the renderer's allowlist.
             "expression: request.userInfo.username.split(':')[2] name: serverNamespace",
             "has(object.spec.networkPolicy.egress) && object.spec.networkPolicy.egress.all(r, dyn(r).all(k, k in ['to', 'ports'])",
@@ -960,7 +1000,21 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             # C4: only the Kind e2e overlay admits a local image.
             (WARM_POOL_TEMPLATE_POLICY, "- expression: '[]'", "- expression: '[''codewire-daemon:e2e'']'"),
             (WARM_POOL_TEMPLATE_POLICY, "variables.pod.runtimeClassName != 'confidential'", "true"),
-            (WARM_POOL_TEMPLATE_POLICY, "size(object.spec.networkPolicy.ingress) == 0", "true"),
+            # codewire#3626: every term of the ingress rule is load-bearing.
+            (WARM_POOL_TEMPLATE_POLICY, "(size(object.spec.networkPolicy.ingress) == 1 &&", "(size(object.spec.networkPolicy.ingress) >= 1 &&"),
+            (WARM_POOL_TEMPLATE_POLICY, "size(object.spec.networkPolicy.ingress) == 0 ||", "true ||"),
+            (WARM_POOL_TEMPLATE_POLICY, "object.spec.networkPolicyManagement == 'Managed') &&", "true) &&"),
+            (WARM_POOL_TEMPLATE_POLICY, "(!has(object.spec.networkPolicy.ingress) ||", "(true ||"),
+            (WARM_POOL_TEMPLATE_POLICY, "has(r.from) && size(r.from) == 1", "has(r.from)"),
+            (WARM_POOL_TEMPLATE_POLICY, "dyn(f).all(k, k in ['namespaceSelector', 'podSelector'])", "dyn(f).all(k, k in ['namespaceSelector', 'podSelector', 'ipBlock'])"),
+            (WARM_POOL_TEMPLATE_POLICY, "== variables.serverNamespace &&", "!= '' &&"),
+            (WARM_POOL_TEMPLATE_POLICY, "has(f.podSelector) &&", "true &&"),
+            (WARM_POOL_TEMPLATE_POLICY, "size(f.podSelector.matchLabels) == 2", "size(f.podSelector.matchLabels) >= 1"),
+            (WARM_POOL_TEMPLATE_POLICY, "f.podSelector.matchLabels['app.kubernetes.io/name'] == 'codewire'", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "has(r.ports) && size(r.ports) == 2", "has(r.ports)"),
+            (WARM_POOL_TEMPLATE_POLICY, "dyn(q).all(k, k in ['port', 'protocol'])", "dyn(q).all(k, k in ['port', 'protocol', 'endPort'])"),
+            (WARM_POOL_TEMPLATE_POLICY, "q.protocol == 'TCP' && type(q.port) == int", "type(q.port) == int"),
+            (WARM_POOL_TEMPLATE_POLICY, "q.port == 2222", "q.port == 38081"),
             (WARM_POOL_TEMPLATE_POLICY, "variables.pod.automountServiceAccountToken == false", "true"),
             # Review M2: every allowlist and host rule is load-bearing.
             (WARM_POOL_TEMPLATE_POLICY, "e.name in variables.environment &&", "true &&"),

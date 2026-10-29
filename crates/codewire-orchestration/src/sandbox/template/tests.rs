@@ -1047,6 +1047,7 @@ mod tests {
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
                 disk_gib: 40,
                 support_image: TEST_SUPPORT_IMAGE.into(),
+                server_namespace: "dev".into(),
                 ..Default::default()
             },
         );
@@ -1063,9 +1064,11 @@ mod tests {
                 .is_none(),
             "reusable SandboxTemplates must not pin an empty environment-id label"
         );
-        assert!(
-            rendered["spec"]["networkPolicy"].get("ingress").is_none(),
-            "workspace daemon ingress is owned by the per-environment companion NetworkPolicy"
+        // The shared template admits exactly orchestration on the daemon and
+        // SSH ports (codewire#3626); everything else stays per environment.
+        assert_eq!(
+            rendered["spec"]["networkPolicy"]["ingress"],
+            orchestration_only_template_ingress("dev")
         );
         assert_eq!(
             annotations.get(WORKSPACE_ANNOTATION_KEY).unwrap().as_str(),
@@ -3551,4 +3554,112 @@ mod tests {
         }
     }
 
+
+    // ------------------------------- template ingress (codewire#3626)
+
+    /// The one ingress rule a non-confidential template carries from a
+    /// member's birth: orchestration's identity (its namespace AND its Pod
+    /// labels, in one peer) on TCP 7777 and 2222, and nothing else.
+    fn orchestration_only_template_ingress(server_namespace: &str) -> Value {
+        json!([{
+            "from": [{
+                "namespaceSelector": {
+                    "matchLabels": { "kubernetes.io/metadata.name": server_namespace },
+                },
+                "podSelector": {
+                    "matchLabels": {
+                        "app.kubernetes.io/name": "codewire",
+                        "app.kubernetes.io/component": "orchestration",
+                    },
+                },
+            }],
+            "ports": [
+                { "protocol": "TCP", "port": 7777 },
+                { "protocol": "TCP", "port": 2222 },
+            ],
+        }])
+    }
+
+    #[test]
+    fn non_confidential_templates_admit_only_orchestration_on_daemon_and_ssh() {
+        let runc = TemplateOpts {
+            runtime_profile: RUNTIME_PROFILE_RUNC.into(),
+            ..identity_free_opts()
+        };
+        for (label, opts) in [
+            ("commodity", commodity_opts()),
+            ("identity-free commodity", identity_free_opts()),
+            ("identity-free runc", runc),
+        ] {
+            let policy = &render_sandbox_template("dev-sandboxes", &opts)["spec"]["networkPolicy"];
+            assert_eq!(
+                policy["ingress"],
+                orchestration_only_template_ingress("dev"),
+                "{label}"
+            );
+            // The peer is the per-environment policy's orchestration peer.
+            let daemon = render_workspace_daemon_network_policy("dev-sandboxes", &opts);
+            assert_eq!(
+                policy["ingress"][0]["from"], daemon["spec"]["ingress"][0]["from"],
+                "{label}"
+            );
+            let text = policy["ingress"].to_string();
+            for absent in ["endPort", "UDP", "ipBlock", "31000"] {
+                assert!(!text.contains(absent), "{label}: template ingress has {absent}");
+            }
+        }
+        // No server namespace names no peer, so no rule.
+        let unplaced = TemplateOpts {
+            server_namespace: String::new(),
+            ..commodity_opts()
+        };
+        assert!(
+            render_sandbox_template("dev-sandboxes", &unplaced)["spec"]["networkPolicy"]
+                .get("ingress")
+                .is_none()
+        );
+    }
+
+    /// Confidential is never pooled and keeps no template ingress: its
+    /// access stays in its per-environment policy alone.
+    #[test]
+    fn confidential_template_keeps_no_ingress() {
+        let rendered = render_sandbox_template("dev-sandboxes", &confidential_golden_opts());
+        assert!(rendered["spec"]["networkPolicy"].get("ingress").is_none());
+    }
+
+    /// The pool rule is in addition to the per-environment policies, which
+    /// keep previews and the tailnet's world UDP (codewire#3626 condition 6).
+    #[test]
+    fn per_environment_policies_keep_previews_and_world_udp() {
+        let opts = identity_free_opts();
+        let daemon = render_workspace_daemon_network_policy("dev-sandboxes", &opts);
+        let ingress = daemon["spec"]["ingress"].as_array().unwrap();
+        assert_eq!(ingress.len(), 2);
+        assert_eq!(
+            ingress[0]["ports"],
+            json!([
+                { "protocol": "TCP", "port": 7777 },
+                { "protocol": "TCP", "port": 2222 },
+                { "protocol": "TCP", "port": APP_PREVIEW_MIN_PORT, "endPort": APP_PREVIEW_MAX_PORT },
+            ])
+        );
+        assert_eq!(
+            ingress[1]["ports"],
+            json!([{
+                "protocol": "UDP",
+                "port": i64::from(codewire_daemon_proto::WORKSPACE_TAILNET_UDP_PORT),
+            }])
+        );
+        let bridge = render_warm_member_bridge(
+            "dev-sandboxes",
+            &TemplateOpts {
+                environment_id: "3d6bb495-efac-419f-bf3a-91696e7c7ca4".into(),
+                ..opts.clone()
+            },
+            "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",
+        )
+        .unwrap();
+        assert_eq!(bridge["spec"]["ingress"], daemon["spec"]["ingress"]);
+    }
 }

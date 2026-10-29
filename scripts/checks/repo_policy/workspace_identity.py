@@ -49,6 +49,7 @@ import json
 import re
 from typing import Any
 
+from . import pool_ingress
 from .shared import ROOT, argparse
 
 FIXTURES = [
@@ -249,6 +250,9 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
         for component in sorted(components & TAILNET_EGRESS.keys()):
             if rule.get("ports") != TAILNET_EGRESS[component] or len(components) != 1:
                 output.append(f"{label}: template egress reaches {component} beyond its public UDP port")
+    # codewire#3626: the one ingress rule is orchestration's identity on the
+    # daemon and SSH ports, nothing wider.
+    output.extend(pool_ingress.ingress_violations(template, label))
     return output
 
 
@@ -351,6 +355,9 @@ def confidential_violations(template: dict[str, Any], label: str) -> list[str]:
     if "CODEWIRE_DAEMON_AUTH_TOKEN" in init_data:
         output.append(f"{label}: init-data names the environment token")
     output.extend(binding_egress_violations(template, label))
+    # Confidential is never pooled and keeps no template ingress (#3626).
+    if "ingress" in ((template.get("spec") or {}).get("networkPolicy") or {}):
+        output.append(f"{label}: a confidential template carries ingress")
     return output
 
 
@@ -409,6 +416,8 @@ def confidential_self_test(base: dict[str, Any]) -> None:
         KATA_INIT_DATA, "not base64"))
     rejected("second binding egress", lambda f: f["spec"]["networkPolicy"]["egress"].append(
         {"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"protocol": "TCP", "port": 8087}]}))
+    rejected("template ingress", lambda f: f["spec"]["networkPolicy"].__setitem__(
+        "ingress", pool_ingress.expected_ingress("dev")))
 
 
 TAILNET_EGRESS = {
@@ -612,6 +621,7 @@ def pool_self_test(template: dict[str, Any], pool: dict[str, Any]) -> None:
         KATA_INIT_DATA, "not base64"))
     rejected("stale member reuse", lambda f: f["pool"]["spec"].__setitem__("updateStrategy", {"type": "OnReplenish"}))
     rejected("negative replicas", lambda f: f["pool"]["spec"].__setitem__("replicas", -1))
+    pool_ingress.self_test(template, "warm-pool template ingress")
 
 
 def self_test(base: dict[str, Any]) -> None:
@@ -654,6 +664,11 @@ def self_test(base: dict[str, Any]) -> None:
     rejected("second binding egress", lambda f: f["spec"]["networkPolicy"]["egress"].append(
         {"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"protocol": "TCP", "port": 8087}]}))
     rejected("Secret volume", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append({"name": "env", "secret": {"secretName": "env"}}))
+    # codewire#3626: the renderer emits exactly orchestration on TCP 7777 and
+    # 2222. Admission also admits no ingress, for the rollout only; both
+    # shapes are positive fixtures, and every widening fails here.
+    pool_ingress.self_test(base, "identity-free template ingress")
+    rejected("no template ingress", lambda f: f["spec"]["networkPolicy"].pop("ingress"))
     rejected("environment import", lambda f: workspace(f).__setitem__("envFrom", [{"configMapRef": {"name": "environment"}}]))
 
     def volume(fixture: dict[str, Any], name: str) -> dict[str, Any]:

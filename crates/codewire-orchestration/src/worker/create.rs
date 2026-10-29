@@ -606,7 +606,9 @@ pub fn shape_template_opts(
     let image_command = if is_first_party_workspace_image(image_ref) {
         Vec::new()
     } else {
-        vec!["sleep".to_string(), "infinity".to_string()]
+        crate::sandbox::template::WORKSPACE_KEEPALIVE_COMMAND
+            .map(str::to_owned)
+            .to_vec()
     };
 
     let uses_runtime_transport_registry = !cfg.runtime_transport_zones_json.trim().is_empty();

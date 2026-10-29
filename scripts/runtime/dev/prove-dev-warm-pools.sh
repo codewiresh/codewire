@@ -12,6 +12,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
+# Orchestration's namespace: the one peer a pool template admits (#3626).
+SERVER_NAMESPACE="${SERVER_NAMESPACE:-dev}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
 PROOF_IMAGE="${PROOF_IMAGE:-workspace}"
 # One of the Dev pool shapes (1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2).
@@ -100,7 +102,8 @@ Journeys (default: preflight hits miss off-shape invariants, then stats when
   off-shape   a shape no pool holds goes cold through its own shadow pool;
               its first SSH is timed like a hit's
   invariants  unbound members: no environment label or token, no API token,
-              only workspace audiences, a current pool revision, no ingress,
+              only workspace audiences, a current pool revision, ingress
+              from orchestration alone on TCP 7777 and 2222,
               younger than 24 h, not on a cordoned node; with --sql-cmd, no
               open billing session without a live binding and no destroyed
               environment with a live binding
@@ -131,6 +134,7 @@ Environment:
   KUBE_CONTEXT                 Defaults to codewire-dev
   PROOF_CPU/PROOF_MEMORY/PROOF_DISK  Pool shape (default 1000/4096/10)
   OFF_SHAPE_CPU                CPU of the off-shape create (default 1500)
+  SERVER_NAMESPACE             Orchestration's namespace, the pool ingress peer (default dev)
 USAGE
 }
 
@@ -865,13 +869,23 @@ members_on_schedulable_nodes() {
   done < <(jq -r '.items[].spec.nodeName // empty' <"$1" | sort -u)
 }
 
-pool_policies_deny_ingress() {
+# codewire#3626: a pool template's NetworkPolicy admits exactly
+# orchestration's identity (its namespace AND its Pod labels, in one peer) on
+# TCP 7777 and 2222, nothing more, from a member's birth.
+pool_policies_admit_only_orchestration() {
   local name
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
     kubectl_ro get networkpolicy -n "$SANDBOX_NAMESPACE" "${name}-network-policy" -o json |
-      jq -e '(.spec.policyTypes | index("Ingress")) != null and ((.spec.ingress // []) | length) == 0' >/dev/null ||
-      { log "pool $name: template NetworkPolicy admits ingress or is missing"; return 1; }
+      jq -e --arg ns "$SERVER_NAMESPACE" '(.spec.policyTypes | index("Ingress")) != null and .spec.ingress == [{
+        "from": [{
+          "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": $ns } },
+          "podSelector": { "matchLabels": {
+            "app.kubernetes.io/component": "orchestration", "app.kubernetes.io/name": "codewire" } }
+        }],
+        "ports": [{ "port": 7777, "protocol": "TCP" }, { "port": 2222, "protocol": "TCP" }]
+      }]' >/dev/null ||
+      { log "pool $name: template NetworkPolicy is missing or admits more than orchestration on TCP 7777 and 2222"; return 1; }
   done < <(kubectl_ro get sandboxwarmpool -n "$SANDBOX_NAMESPACE" -o json |
     jq -r --arg prefix "$POOL_PREFIX" '.items[] | select(.metadata.name | startswith($prefix)) | .metadata.name')
 }
@@ -903,7 +917,8 @@ journey_invariants() {
   check "invariants: every member carries one current pool revision" members_at_pool_revision "$members"
   check "invariants: no member is older than 24 h" members_young "$members"
   check "invariants: no member runs on a cordoned node" members_on_schedulable_nodes "$members"
-  check "invariants: every shared pool's template NetworkPolicy admits no ingress" pool_policies_deny_ingress
+  check "invariants: every shared pool's template NetworkPolicy admits exactly orchestration's identity on TCP 7777 and 2222 in one AND-ed peer" \
+    pool_policies_admit_only_orchestration
   if [[ -n "$SQL_CMD" ]]; then
     check "invariants: no open billing session without a live binding" \
       test "$(open_sessions_without_binding)" = 0

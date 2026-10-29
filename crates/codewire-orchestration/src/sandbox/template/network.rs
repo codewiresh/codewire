@@ -186,6 +186,44 @@ fn kata_coco_kbs_egress_rule(kbs_url: &str) -> Option<Value> {
     }))
 }
 
+/// Orchestration's own identity, and nothing wider: its namespace AND its
+/// Pod labels in one peer. Two peers would be an OR, admitting the whole
+/// server namespace or any Pod with those labels.
+fn orchestration_peer(opts: &TemplateOpts) -> Value {
+    json!({
+        "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": opts.server_namespace } },
+        "podSelector": {
+            "matchLabels": {
+                "app.kubernetes.io/name": "codewire",
+                "app.kubernetes.io/component": "orchestration",
+            },
+        },
+    })
+}
+
+/// The shared template's one ingress rule (codewire#3626): orchestration's
+/// identity on the daemon and SSH ports, from a member's birth. A bind then
+/// needs no policy change before orchestration's access probe connects.
+/// Before the bind nothing in a member listens on either port, so the probe
+/// meets a reset. Previews and the tailnet UDP port stay in the
+/// per-environment policy and the warm-member bridge, so they open only once
+/// the binding committed. Confidential workspaces are never pooled and keep
+/// no template ingress.
+pub(super) fn identity_free_workspace_ingress_rules(opts: &TemplateOpts) -> Vec<Value> {
+    if opts.server_namespace.is_empty()
+        || opts.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL
+    {
+        return Vec::new();
+    }
+    vec![json!({
+        "from": [orchestration_peer(opts)],
+        "ports": [
+            { "protocol": "TCP", "port": WORKSPACE_DAEMON_PORT },
+            { "protocol": "TCP", "port": i64::from(codewire_daemon_proto::WORKSPACE_SSH_PORT) },
+        ],
+    })]
+}
+
 /// Who may reach a workspace (design §5): orchestration in the server
 /// namespace on the daemon, preview and SSH ports, and the world, never a
 /// cluster or Pod address (N1), on the tailnet UDP port.
@@ -193,17 +231,7 @@ fn workspace_daemon_ingress_rules(opts: &TemplateOpts) -> Vec<Value> {
     let mut ingress = Vec::new();
     if !opts.server_namespace.is_empty() {
         ingress.push(json!({
-            "from": [
-                {
-                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": opts.server_namespace } },
-                    "podSelector": {
-                        "matchLabels": {
-                            "app.kubernetes.io/name": "codewire",
-                            "app.kubernetes.io/component": "orchestration",
-                        },
-                    },
-                },
-            ],
+            "from": [orchestration_peer(opts)],
             "ports": [
                 { "protocol": "TCP", "port": WORKSPACE_DAEMON_PORT },
                 { "protocol": "TCP", "port": i64::from(codewire_daemon_proto::WORKSPACE_SSH_PORT) },

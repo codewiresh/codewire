@@ -147,6 +147,10 @@ pub fn sandbox_egress_bandwidth(value: Option<&str>) -> Result<String, String> {
 const APP_PREVIEW_MIN_PORT: i64 = 1;
 const APP_PREVIEW_MAX_PORT: i64 = 65535;
 
+/// The workload a non-first-party image runs beside the managed daemon: a
+/// keepalive, never the image's own entrypoint.
+pub const WORKSPACE_KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
+
 /// Inputs for rendering one environment-scoped sandbox template.
 #[derive(Clone, Default)]
 pub struct TemplateOpts {

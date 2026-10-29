@@ -97,25 +97,71 @@ fn only_an_exact_canonical_standard_binding_shape_is_a_pool_candidate() {
             "{cpu}/{memory}/{disk}"
         );
     }
-    let mut confidential = small.clone();
-    confidential.isolation_tier = "confidential".into();
-    assert_eq!(
-        pool_candidate(
-            &cfg,
-            &confidential,
-            canonical_workspace_runtime_image(),
-            &opts(&cfg, &small, canonical_workspace_runtime_image()),
-            NAMESPACE
-        ),
-        Err(ColdReason::Tier)
+    // Only the standard tier pools (codewire#3626 condition 4): any other
+    // tier, spelled any way, goes cold before anything else is read.
+    for tier in [
+        "confidential",
+        "",
+        "Standard",
+        "standard ",
+        " standard",
+        "dedicated",
+        "premium",
+    ] {
+        let mut other = small.clone();
+        other.isolation_tier = tier.into();
+        assert_eq!(
+            pool_candidate(
+                &cfg,
+                &other,
+                canonical_workspace_runtime_image(),
+                &opts(&cfg, &small, canonical_workspace_runtime_image()),
+                NAMESPACE
+            ),
+            Err(ColdReason::Tier),
+            "{tier:?}"
+        );
+    }
+    // Only exactly the canonical image pools: never its public mirror,
+    // another digest or tag of a first-party repository, or a custom image,
+    // whose entrypoint would start beside the unbound daemon and could
+    // listen on 7777 or 2222 before the bind (codewire#3626 condition 4).
+    let canonical = canonical_workspace_runtime_image();
+    let (repository, _) = canonical
+        .split_once('@')
+        .expect("canonical image is digest-pinned");
+    let other_digest = format!(
+        "{repository}@sha256:5555555555555555555555555555555555555555555555555555555555555555"
     );
+    let tagged = format!("{repository}:latest");
+    let suffixed = format!("{canonical}-custom");
     for image in [
         crate::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE,
         "registry.example.invalid/custom/workspace@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "ghcr.io/codewiresh/workspace-node@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        other_digest.as_str(),
+        tagged.as_str(),
+        suffixed.as_str(),
+        "",
     ] {
+        assert_ne!(image, canonical);
         assert_eq!(
             pool_candidate(&cfg, &small, image, &opts(&cfg, &small, image), NAMESPACE),
-            Err(ColdReason::Image)
+            Err(ColdReason::Image),
+            "{image:?}"
+        );
+        // Whatever its own opts, a non-canonical image is refused even when
+        // paired with the canonical rendering.
+        assert_eq!(
+            pool_candidate(
+                &cfg,
+                &small,
+                image,
+                &opts(&cfg, &small, canonical),
+                NAMESPACE
+            ),
+            Err(ColdReason::Image),
+            "{image:?}"
         );
     }
     // A rendering that is not identity-free (a configuration without the

@@ -15,6 +15,10 @@ use codewire_tls::test_support::SyntheticPki;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 use tempfile::TempDir;
 
+#[cfg(target_os = "linux")]
+#[path = "nothing_listens.rs"]
+mod nothing_listens;
+
 const POD: &str = "7e7b20f6-0bd2-4f11-8b16-9c239851eb52";
 const OTHER_POD: &str = "a1560db3-8899-40c9-b521-500f223b04fb";
 const ENVIRONMENT: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -44,6 +48,7 @@ fn synthetic_access(generation: i64) -> WorkspaceAccess {
 }
 
 /// One scripted answer of the fake listener.
+#[derive(Clone, Copy)]
 enum Answer {
     Bound,
     BoundFor(&'static str),
@@ -51,6 +56,12 @@ enum Answer {
     BoundWithAccess(i64),
     /// Bound, with an already-expired access grant.
     BoundWithExpiredAccess,
+    /// A response no daemon accepts: no environment, no credential.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Malformed,
+    /// Accept the call and never answer it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Hang,
     Error(ErrorCode),
 }
 
@@ -69,6 +80,8 @@ struct Recorded {
 
 struct ScriptedService {
     answers: Mutex<VecDeque<Answer>>,
+    /// Answered in turn once `answers` runs out; empty answers `Bound`.
+    then: Vec<Answer>,
     recorded: Arc<Mutex<Recorded>>,
 }
 
@@ -91,12 +104,13 @@ impl WorkspaceBindingService for ScriptedService {
             recorded.waits.push(request.wait_seconds);
             recorded.at.push(tokio::time::Instant::now());
         }
-        let answer = self
-            .answers
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or(Answer::Bound);
+        let answer = self.answers.lock().unwrap().pop_front().unwrap_or_else(|| {
+            let calls = self.recorded.lock().unwrap().at.len();
+            self.then
+                .get(calls % self.then.len().max(1))
+                .copied()
+                .unwrap_or(Answer::Bound)
+        });
         let (pod_uid, access) = match answer {
             Answer::Bound => (POD, None),
             Answer::BoundFor(pod) => (pod, None),
@@ -108,6 +122,15 @@ impl WorkspaceBindingService for ScriptedService {
                     ..synthetic_access(4)
                 }),
             ),
+            Answer::Malformed => {
+                return connectrpc::Response::ok(BindWorkspaceResponse {
+                    environment_id: "not-an-environment".into(),
+                    pod_uid: POD.into(),
+                    managed_credential_clients: "v1:none".into(),
+                    ..Default::default()
+                });
+            }
+            Answer::Hang => std::future::pending().await,
             Answer::Error(code) => return Err(ConnectError::new(code, "scripted")),
         };
         connectrpc::Response::ok(BindWorkspaceResponse {
@@ -243,10 +266,16 @@ async fn fixture(answers: Vec<Answer>) -> Fixture {
     fixture_with(answers, timing()).await
 }
 
-async fn fixture_with(answers: Vec<Answer>, timing: BindTiming) -> Fixture {
+/// A fake TLS binding listener on loopback, answering `answers` and then
+/// `then` in turn. It serves until the runtime ends.
+async fn scripted_listener(
+    answers: Vec<Answer>,
+    then: Vec<Answer>,
+) -> (Arc<Mutex<Recorded>>, SyntheticPki, String) {
     let recorded = Arc::new(Mutex::new(Recorded::default()));
     let service = Arc::new(ScriptedService {
         answers: Mutex::new(answers.into()),
+        then,
         recorded: recorded.clone(),
     });
     let versions = recorded.clone();
@@ -262,10 +291,15 @@ async fn fixture_with(answers: Vec<Answer>, timing: BindTiming) -> Fixture {
     // The listener serves TLS only, as in production.
     let pki = SyntheticPki::new("localhost");
     let address = pki.serve(app).await;
+    let url = format!("https://localhost:{}", address.port());
+    (recorded, pki, url)
+}
+
+async fn fixture_with(answers: Vec<Answer>, timing: BindTiming) -> Fixture {
+    let (recorded, pki, url) = scripted_listener(answers, Vec::new()).await;
     let directory = tempfile::tempdir().unwrap();
     let token = directory.path().join("token");
     std::fs::write(&token, SYNTHETIC_PROJECTED_TOKEN).unwrap();
-    let url = format!("https://localhost:{}", address.port());
     let values = [
         (
             WORKSPACE_BINDING_URL_ENV,

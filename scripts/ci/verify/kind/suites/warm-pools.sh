@@ -539,12 +539,59 @@ PROBE
     echo "::error::unclaimed member ${member} has a binding row"
     return 1
   fi
-  # The controller's template-owned policy admits no ingress to members.
+  # The controller's template-owned policy admits exactly orchestration's
+  # identity, in one AND-ed peer, on TCP 7777 and 2222 (codewire#3626).
   if ! kubectl -n "$SANDBOX_NS" get networkpolicy "${WP_POOL}-network-policy" -o json |
-      jq -e '(.spec.policyTypes | index("Ingress")) != null and ((.spec.ingress // []) | length) == 0' >/dev/null; then
-    echo "::error::the pool's template NetworkPolicy is missing or admits ingress"
+      jq -e --arg ns "$NS" '(.spec.policyTypes | index("Ingress")) != null and .spec.ingress == [{
+        "from": [{
+          "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": $ns } },
+          "podSelector": { "matchLabels": {
+            "app.kubernetes.io/component": "orchestration", "app.kubernetes.io/name": "codewire" } }
+        }],
+        "ports": [{ "port": 7777, "protocol": "TCP" }, { "port": 2222, "protocol": "TCP" }]
+      }]' >/dev/null; then
+    echo "::error::the pool's template NetworkPolicy is missing or admits more than orchestration on TCP 7777 and 2222"
     return 1
   fi
+  warm_pool_template_ingress_admission
+}
+
+# codewire#3626: the template admission policy admits exactly two ingress
+# shapes under a managed policy, the one rule and (for the rollout, until
+# #3640) none, and refuses every widening and an Unmanaged policy.
+# Each fixture (scripts/checks/repo_policy/pool_ingress.py) is the live
+# template under a fresh cw-pool- name, sent as a server-side dry run with
+# orchestration's identity, so the API server's own CEL decides and nothing
+# is written.
+warm_pool_template_ingress_admission() {
+  local template fixtures name object output refused=0 admitted=0
+  template="$(kubectl -n "$SANDBOX_NS" get sandboxtemplate "$WP_POOL" -o json |
+    jq --arg name "${WP_POOL%-*}-00000000" 'del(.status) |
+      .metadata = (.metadata | {name: $name, namespace, labels, annotations})')"
+  fixtures="$(python3 -I "$ROOT/scripts/checks/repo_policy/pool_ingress.py" <<<"$template")"
+  while IFS= read -r line; do
+    name="$(jq -r '.name' <<<"$line")"
+    object="$(jq -c '.object' <<<"$line")"
+    if output="$(kubectl create --dry-run=server -o name -f - \
+        --as "system:serviceaccount:${NS}:codewire-orchestration" <<<"$object" 2>&1)"; then
+      if [[ "$name" != accepted* ]]; then
+        echo "::error::the template admission policy admitted ${name}"
+        return 1
+      fi
+      admitted=$((admitted + 1))
+    elif [[ "$name" == accepted* ]]; then
+      echo "::error::the template admission policy refused the pool template (${name}): ${output}"
+      return 1
+    elif ! grep -Fq "admit no ingress, or only orchestration's identity" <<<"$output"; then
+      echo "::error::${name} was refused for another reason: ${output}"
+      return 1
+    else
+      refused=$((refused + 1))
+    fi
+  done <<<"$fixtures"
+  [ "$admitted" -eq 3 ] || { echo "::error::${admitted} of 3 pool ingress shapes were admitted"; return 1; }
+  [ "$refused" -eq 16 ] || { echo "::error::${refused} of 16 pool ingress fixtures were refused"; return 1; }
+  log "template admission admitted all ${admitted} pool ingress shapes and refused all ${refused} fixtures"
 }
 
 warm_pool_stop_start_destroy() {

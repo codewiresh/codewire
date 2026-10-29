@@ -546,11 +546,23 @@ fn quantity_path(path: &str) -> bool {
 }
 
 /// Refuse shape inputs that carry any environment state, no binding
-/// listener, or the confidential runtime.
+/// listener, the confidential runtime, or a workload entrypoint.
 pub fn validate_pool_template_opts(opts: &TemplateOpts) -> anyhow::Result<()> {
     anyhow::ensure!(
         opts.runtime_profile_spec().profile != RUNTIME_PROFILE_CONFIDENTIAL,
         "confidential workspaces are never pooled"
+    );
+    // The template admits orchestration to a member's 7777 and 2222 from
+    // birth (codewire#3626). That is safe only while nothing in an unbound
+    // member listens: a pool runs the canonical first-party image under the
+    // managed supervisor, beside at most the platform keepalive (`sleep
+    // infinity`, which a deployment whose workspace repository is not a
+    // `codewiresh/` one renders), never a workload entrypoint that could
+    // listen on either port before the bind.
+    anyhow::ensure!(
+        opts.image_command.is_empty()
+            || opts.image_command == super::template::WORKSPACE_KEEPALIVE_COMMAND,
+        "warm pools run only the managed supervisor and the platform keepalive, never a workload entrypoint"
     );
     anyhow::ensure!(
         !opts.workspace_binding_url.trim().is_empty(),

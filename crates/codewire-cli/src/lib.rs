@@ -1101,13 +1101,36 @@ async fn run_hosted_daemon() -> anyhow::Result<()> {
 }
 
 /// Identity-free Pod (Program #2238 B2): mark local readiness, bind, install
-/// the bound credential, then prepare Codex's home and listen. Nothing listens
-/// before an accepted binding.
+/// the bound credential, then prepare Codex's home and listen.
+///
+/// Nothing listens before an accepted binding: no TCP listener (the daemon's
+/// 7777, SSH's 2222, the bridge's loopback 38081) and no UDP socket (the
+/// tailnet's 31000). SSH on 2222 has `none` auth, so its NetworkPolicy is its
+/// only authorization. The warm-pool template's NetworkPolicy admits
+/// orchestration's identity to unbound members on TCP 7777 and 2222 from
+/// birth (#3626). A listener there before the bind would hand a shell to
+/// anyone holding that identity. `hosted_binding`'s `nothing_listens` tests
+/// pin this.
 #[cfg(unix)]
 async fn run_bound_hosted_daemon(
     config: codewire_daemon::WorkspaceBindingConfig,
 ) -> anyhow::Result<()> {
-    let paths = codewire_daemon::hosted_state::HostedStatePaths::default();
+    run_bound_hosted_daemon_with(
+        config,
+        codewire_daemon::hosted_state::HostedStatePaths::default(),
+        hosted_binding::BindTiming::default(),
+    )
+    .await
+}
+
+/// [`run_bound_hosted_daemon`] with its state paths and binding pacing given,
+/// so a test runs it unprivileged and fast. Production passes the defaults.
+#[cfg(unix)]
+async fn run_bound_hosted_daemon_with(
+    config: codewire_daemon::WorkspaceBindingConfig,
+    paths: codewire_daemon::hosted_state::HostedStatePaths,
+    timing: hosted_binding::BindTiming,
+) -> anyhow::Result<()> {
     paths
         .mark_ready()
         .context("write hosted daemon readiness marker")?;
@@ -1126,7 +1149,7 @@ async fn run_bound_hosted_daemon(
             config.binding_url(),
             roots,
             config.token_path(),
-            hosted_binding::BindTiming::default(),
+            timing,
         )
         .context("configure workspace binding client")?,
     );
@@ -1196,6 +1219,8 @@ async fn run_bound_hosted_daemon(
     .await
 }
 
+/// Binding mode needs a Unix daemon. This one refuses before any effect, so
+/// it never listens, bound or not (#3626).
 #[cfg(not(unix))]
 async fn run_bound_hosted_daemon(
     _config: codewire_daemon::WorkspaceBindingConfig,

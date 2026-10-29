@@ -125,6 +125,35 @@
             }
           ]
         }
+      ],
+      "ingress": [
+        {
+          "from": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "orchestration",
+                  "app.kubernetes.io/name": "codewire"
+                }
+              }
+            }
+          ],
+          "ports": [
+            {
+              "port": 7777,
+              "protocol": "TCP"
+            },
+            {
+              "port": 2222,
+              "protocol": "TCP"
+            }
+          ]
+        }
       ]
     },
     "podTemplate": {

@@ -554,10 +554,24 @@ fn the_admission_policy_pins_the_renderer() {
         rendered.template["spec"]["podTemplate"]["spec"]["automountServiceAccountToken"],
         false
     );
-    assert!(
-        rendered.template["spec"]["networkPolicy"]
-            .get("ingress")
-            .is_none()
+    // codewire#3626: exactly one rule, orchestration's identity in one AND-ed
+    // peer, on TCP 7777 and 2222 only. Previews and world UDP stay in the
+    // per-environment policies.
+    assert_eq!(
+        rendered.template["spec"]["networkPolicy"]["ingress"],
+        serde_json::json!([{
+            "from": [{
+                "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "dev" } },
+                "podSelector": { "matchLabels": {
+                    "app.kubernetes.io/name": "codewire",
+                    "app.kubernetes.io/component": "orchestration",
+                } },
+            }],
+            "ports": [
+                { "protocol": "TCP", "port": 7777 },
+                { "protocol": "TCP", "port": 2222 },
+            ],
+        }])
     );
     // Review M2: the template policy is an allowlist, so everything the
     // renderer emits must be on it.

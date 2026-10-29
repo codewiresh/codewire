@@ -37,8 +37,10 @@
 //! nothing is replaced, scaled or deleted; on a cluster with no
 //! SandboxWarmPool at all, where no pool could show it, the first configured
 //! pool is created empty ([`bootstrap_writes`]). The unbound members'
-//! deny-all ingress is the template-owned NetworkPolicy the controller
-//! manages from the template's `networkPolicy`, which renders no ingress rule.
+//! ingress is the template-owned NetworkPolicy the controller manages from
+//! the template's `networkPolicy`: orchestration's identity alone on the
+//! daemon and SSH ports, where nothing listens before the bind
+//! (codewire#3626).
 //!
 //! Metrics carry the shape (`<cpu>m-<mem>mi-<disk>gi`), never an environment.
 

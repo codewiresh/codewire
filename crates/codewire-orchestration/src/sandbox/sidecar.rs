@@ -165,25 +165,6 @@ impl russh::client::Handler for PinnedHostKey {
     }
 }
 
-struct AcceptAllKeys;
-
-impl russh::client::Handler for AcceptAllKeys {
-    type Error = russh::Error;
-
-    async fn check_server_key(
-        &mut self,
-        server_public_key: &russh::keys::PublicKeyOrCertificate,
-    ) -> Result<bool, Self::Error> {
-        // Workspace daemons have per-generation public host keys, and only
-        // orchestration reaches this port. Host certificates
-        // remain unsupported when the library exposes both identity types.
-        Ok(matches!(
-            server_public_key,
-            russh::keys::PublicKeyOrCertificate::PublicKey { .. }
-        ))
-    }
-}
-
 fn sidecar_ssh_config() -> Arc<russh::client::Config> {
     Arc::new(russh::client::Config::default())
 }
@@ -418,71 +399,6 @@ impl SandboxClient {
             .disconnect(russh::Disconnect::ByApplication, "", "en")
             .await;
         Ok(())
-    }
-
-    /// Connect to the workspace daemon's SSH server, none-auth as
-    /// `codewire`, open the `sftp` subsystem, and return a live
-    /// [`russh_sftp`] session. The returned [`SidecarSftp`] owns the
-    /// stream and SSH handle, so the caller must keep it alive for the
-    /// duration of the transfer (dropping it tears down the connection).
-    pub async fn connect_sidecar_sftp(
-        &self,
-        env_id: &str,
-        port: u16,
-    ) -> anyhow::Result<SidecarSftp> {
-        let stream = self
-            .workspace_ssh_stream(env_id, port)
-            .await
-            .map_err(|e| anyhow::anyhow!("sftp connect: {e}"))?;
-        let (stream, pf) = stream.into_parts();
-
-        let mut handle = russh::client::connect_stream(sidecar_ssh_config(), stream, AcceptAllKeys)
-            .await
-            .map_err(|e| anyhow::anyhow!("sftp ssh handshake: {e}"))?;
-
-        let authenticated = handle
-            .authenticate_none("codewire")
-            .await
-            .map(|r| matches!(r, russh::client::AuthResult::Success))
-            .unwrap_or(false);
-        if !authenticated {
-            anyhow::bail!("sftp ssh handshake: none-auth rejected");
-        }
-
-        let channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| anyhow::anyhow!("sftp open session: {e}"))?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(|e| anyhow::anyhow!("sftp subsystem: {e}"))?;
-
-        let session = russh_sftp::client::SftpSession::new(channel.into_stream())
-            .await
-            .map_err(|e| anyhow::anyhow!("sftp session init: {e}"))?;
-
-        Ok(SidecarSftp {
-            session,
-            _handle: handle,
-            _pf: pf,
-        })
-    }
-}
-
-/// A live SFTP session over a sidecar port-forward. Holds the SSH handle
-/// and port-forwarder so the tunnel stays open for the session's
-/// lifetime; drop it to tear everything down (Go: the `cleanup` closure).
-pub struct SidecarSftp {
-    session: russh_sftp::client::SftpSession,
-    _handle: russh::client::Handle<AcceptAllKeys>,
-    _pf: Option<kube::api::Portforwarder>,
-}
-
-impl SidecarSftp {
-    /// The underlying russh-sftp session for file operations.
-    pub fn session(&self) -> &russh_sftp::client::SftpSession {
-        &self.session
     }
 }
 
@@ -726,7 +642,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sidecar_accepts_public_keys_and_rejects_host_certificates() {
+    /// The only orchestration SSH client trusts exactly the recorded key:
+    /// never another public key, and never a host certificate, even one
+    /// over the recorded key (codewire#3626 condition 7).
+    async fn the_pinned_key_accepts_only_the_recorded_public_key() {
         use russh::keys::ssh_key::{
             PrivateKey,
             certificate::{Builder, CertType},
@@ -734,9 +653,19 @@ mod tests {
         };
 
         let key = PrivateKey::from(Ed25519Keypair::from_seed(&[7; 32]));
+        let mut pinned = PinnedHostKey(key.public_key().clone());
         let public_key = key.public_key().clone().into();
         assert!(
-            russh::client::Handler::check_server_key(&mut AcceptAllKeys, &public_key)
+            russh::client::Handler::check_server_key(&mut pinned, &public_key)
+                .await
+                .unwrap()
+        );
+        let other = PrivateKey::from(Ed25519Keypair::from_seed(&[8; 32]))
+            .public_key()
+            .clone()
+            .into();
+        assert!(
+            !russh::client::Handler::check_server_key(&mut pinned, &other)
                 .await
                 .unwrap()
         );
@@ -752,7 +681,7 @@ mod tests {
         builder.valid_principal("sidecar.test").unwrap();
         let certificate = builder.sign(&key).unwrap().into();
         assert!(
-            !russh::client::Handler::check_server_key(&mut AcceptAllKeys, &certificate)
+            !russh::client::Handler::check_server_key(&mut pinned, &certificate)
                 .await
                 .unwrap()
         );

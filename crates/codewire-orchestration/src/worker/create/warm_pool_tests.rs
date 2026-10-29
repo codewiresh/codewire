@@ -262,6 +262,87 @@ fn unbindable_and_unmanaged_runtimes_render_no_pool() {
     assert!(error.to_string().contains("digest-pinned"), "{error}");
 }
 
+/// codewire#3626 condition 4: the template admits orchestration to a
+/// member's 7777 and 2222 from birth, which is safe only while nothing in an
+/// unbound member listens. So every pool renders exactly the canonical
+/// first-party image under the managed supervisor, beside at most the
+/// platform keepalive (this test configuration's canonical repository, like
+/// Dev's and Production's, is not a `codewiresh/` one, so it renders the
+/// keepalive), and a workload entrypoint is refused outright.
+#[test]
+fn every_warm_pool_runs_only_the_canonical_image_and_the_platform_keepalive() {
+    let keepalive = crate::sandbox::template::WORKSPACE_KEEPALIVE_COMMAND.map(str::to_owned);
+    let diagnostic = SandboxWorkerCfg {
+        runtime_profile: RUNTIME_PROFILE_RUNC.into(),
+        allow_diagnostic_runtime: true,
+        ..dev_cfg()
+    };
+    let mut rendered = 0;
+    for cfg in [dev_cfg(), diagnostic] {
+        for shape in shapes() {
+            let opts = warm_pool_template_opts(&cfg, shape).unwrap();
+            assert_eq!(opts.image, canonical_workspace_runtime_image());
+            assert!(
+                opts.image_command.is_empty() || opts.image_command == keepalive,
+                "{shape:?}: {:?}",
+                opts.image_command
+            );
+            let objects = render_configured_warm_pool(&cfg, shape, 1).unwrap();
+            let containers = objects.template["spec"]["podTemplate"]["spec"]["containers"]
+                .as_array()
+                .unwrap()
+                .clone();
+            let workspace = containers
+                .iter()
+                .find(|container| container["name"] == "workspace")
+                .unwrap();
+            assert_eq!(workspace["image"], canonical_workspace_runtime_image());
+            let command = workspace["command"][2].as_str().unwrap();
+            assert!(command.contains("/codewire/bin/cw __hosted-daemon"));
+            if opts.image_command.is_empty() {
+                assert!(!command.contains("workload_pid"), "{shape:?}: {command}");
+            } else {
+                assert!(
+                    command.contains("(exec 'sleep' 'infinity')"),
+                    "{shape:?}: {command}"
+                );
+            }
+            rendered += 1;
+        }
+    }
+    assert_eq!(rendered, 4);
+
+    // A custom image never pools, and neither does any workload entrypoint.
+    let cfg = dev_cfg();
+    let custom = shape_template_opts(
+        &cfg,
+        "registry.example.invalid/custom/workspace@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        &standard_runtime_profile_spec(&cfg),
+        shapes()[0],
+    );
+    assert_eq!(custom.image_command, keepalive);
+    for command in [
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "nc -l 2222".to_owned(),
+        ],
+        vec!["sleep".to_owned()],
+        vec!["sleep".to_owned(), "infinity".to_owned(), "&".to_owned()],
+        vec!["/usr/sbin/sshd".to_owned(), "-D".to_owned()],
+    ] {
+        let entrypoint = TemplateOpts {
+            image_command: command.clone(),
+            ..warm_pool_template_opts(&cfg, shapes()[0]).unwrap()
+        };
+        let error = render_warm_pool(&cfg.sandbox_namespace, &entrypoint, 1, false).unwrap_err();
+        assert!(
+            error.to_string().contains("never a workload entrypoint"),
+            "{command:?}: {error}"
+        );
+    }
+}
+
 #[test]
 fn warm_pool_matches_golden_files() {
     let cfg = dev_cfg();

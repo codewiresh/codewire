@@ -18,9 +18,11 @@
 #   only volumes; the commodity
 #   runtime (Kind overlays add their diagnostic runtimes); no host namespace,
 #   host alias or node pin; its revision in the workspace container's
-#   immutable environment; no environment identity label; no ingress
-#   before adoption (the controller's template-owned NetworkPolicy then denies
-#   all ingress to unclaimed members); and egress that is exactly the
+#   immutable environment; no environment identity label; ingress that is
+#   none (during the rollout, see the rule) or exactly orchestration's own identity (its namespace AND its Pod labels, in
+#   one peer) on TCP 7777 and 2222, nothing more, so a bind needs no policy
+#   change before orchestration reaches the member (codewire#3626; nothing in
+#   an unbound member listens on either port); and egress that is exactly the
 #   renderer's allowlist: the world outside every private range, plus named
 #   in-cluster peers on their exact ports (codewire#3318). The Kind e2e
 #   overlay also admits its one side-loaded daemon image, which has no
@@ -255,11 +257,42 @@ spec:
         ((!has(t.spec.volumeMode) || t.spec.volumeMode != 'Block') &&
         (!has(t.spec.accessModes) || !('ReadWriteOncePod' in t.spec.accessModes)))))
       message: confidential workspaces are never pooled
+    # codewire#3626: the template's one ingress rule admits orchestration's
+    # identity, and nothing wider, on the daemon and SSH ports. One peer
+    # carries both selectors (two peers would be an OR: the whole server
+    # namespace, or any Pod with those labels), each exactly its labels.
+    # Previews and the tailnet's world UDP stay in the per-environment
+    # policies, which open only after the bind.
+    # The controller must manage the policy (Unmanaged would admit all
+    # ingress), and then exactly two ingress shapes are admitted: that one
+    # rule, or ingress absent or an empty list. The no-ingress arm is for the
+    # rollout and old templates: an orchestration replica of the previous
+    # release still writes its ingress-free template until it is replaced. It
+    # admits strictly less. Remove it in #3640 once every pool template
+    # carries the rule.
     - expression: >-
         (!has(object.spec.networkPolicyManagement) || object.spec.networkPolicyManagement == 'Managed') &&
-        (!has(object.spec.networkPolicy) || !has(object.spec.networkPolicy.ingress) ||
-        size(object.spec.networkPolicy.ingress) == 0)
-      message: unclaimed warm-pool members admit no ingress before adoption
+        has(object.spec.networkPolicy) &&
+        (!has(object.spec.networkPolicy.ingress) || size(object.spec.networkPolicy.ingress) == 0 ||
+        (size(object.spec.networkPolicy.ingress) == 1 &&
+        object.spec.networkPolicy.ingress.all(r, dyn(r).all(k, k in ['from', 'ports']) &&
+        has(r.from) && size(r.from) == 1 &&
+        r.from.all(f, dyn(f).all(k, k in ['namespaceSelector', 'podSelector']) &&
+        has(f.namespaceSelector) && dyn(f.namespaceSelector).all(k, k == 'matchLabels') &&
+        has(f.namespaceSelector.matchLabels) && size(f.namespaceSelector.matchLabels) == 1 &&
+        'kubernetes.io/metadata.name' in f.namespaceSelector.matchLabels &&
+        f.namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == variables.serverNamespace &&
+        has(f.podSelector) && dyn(f.podSelector).all(k, k == 'matchLabels') &&
+        has(f.podSelector.matchLabels) && size(f.podSelector.matchLabels) == 2 &&
+        'app.kubernetes.io/name' in f.podSelector.matchLabels &&
+        f.podSelector.matchLabels['app.kubernetes.io/name'] == 'codewire' &&
+        'app.kubernetes.io/component' in f.podSelector.matchLabels &&
+        f.podSelector.matchLabels['app.kubernetes.io/component'] == 'orchestration') &&
+        has(r.ports) && size(r.ports) == 2 &&
+        r.ports.all(q, dyn(q).all(k, k in ['port', 'protocol']) && has(q.port) && has(q.protocol) &&
+        q.protocol == 'TCP' && type(q.port) == int) &&
+        r.ports.exists(q, q.port == 7777) && r.ports.exists(q, q.port == 2222))))
+      message: unclaimed warm-pool members admit no ingress, or only orchestration's identity, in one peer, on TCP 7777 and 2222
     # codewire#3318: the egress is Codewire's allowlist. Each rule is either
     # the world rule (0.0.0.0/0 and ::/0, all ports, excepting at least every
     # non-world range) or names only allowlisted namespace, Pod and port

@@ -3,7 +3,7 @@
   "kind": "SandboxTemplate",
   "metadata": {
     "annotations": {
-      "codewire.sh/pool-revision": "f042eb7955bf15a86e84a66fccdbbe3746979fbe1e3a731f538b9f9d2e930227"
+      "codewire.sh/pool-revision": "7f735c9b425acaa4e7b4fec8244fe961fc708f3d3422f104761d58dd2d62244c"
     },
     "labels": {
       "app.kubernetes.io/managed-by": "codewire",
@@ -131,6 +131,35 @@
             }
           ]
         }
+      ],
+      "ingress": [
+        {
+          "from": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "orchestration",
+                  "app.kubernetes.io/name": "codewire"
+                }
+              }
+            }
+          ],
+          "ports": [
+            {
+              "port": 7777,
+              "protocol": "TCP"
+            },
+            {
+              "port": 2222,
+              "protocol": "TCP"
+            }
+          ]
+        }
       ]
     },
     "podTemplate": {
@@ -230,7 +259,7 @@
               },
               {
                 "name": "CODEWIRE_WORKSPACE_POOL_REVISION",
-                "value": "f042eb7955bf15a86e84a66fccdbbe3746979fbe1e3a731f538b9f9d2e930227"
+                "value": "7f735c9b425acaa4e7b4fec8244fe961fc708f3d3422f104761d58dd2d62244c"
               }
             ],
             "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
