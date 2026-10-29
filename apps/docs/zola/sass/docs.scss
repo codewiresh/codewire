@@ -1135,7 +1135,7 @@ html {
   }
 }
 
-@media (max-width: 48rem) {
+@media (max-width: 639px), (max-width: 48rem) and (pointer: coarse) {
   :root {
     --docs-topbar-height: 3.75rem;
   }

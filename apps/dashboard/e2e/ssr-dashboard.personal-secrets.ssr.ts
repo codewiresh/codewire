@@ -46,7 +46,7 @@ test("Settings uses one subtitle-free heading and personal destinations independ
   await expect(organization.getByRole("link", { name: "API keys", exact: true })).toHaveAttribute("href", "/example-org/api-keys/");
   await expect(organization.locator('[aria-current="page"]')).toHaveText("Secrets");
   await expect(org.getByRole("list", { name: "Admin", exact: true }).getByRole("link")).not.toHaveCount(0);
-  if ((page.viewportSize()?.width || 0) <= 768) {
+  if ((page.viewportSize()?.width || 0) < 640) {
     expect(await org.evaluate((node) => node.getBoundingClientRect().height)).toBeLessThan(80);
     for (const label of await org.getByRole("heading", { level: 3 }).all()) {
       expect(await label.evaluate((node) => node.getBoundingClientRect().height)).toBeLessThanOrEqual(28);
@@ -162,7 +162,7 @@ test("empty and unavailable states remain distinct and pagination never implies 
   await expect(page.getByText("No personal secrets yet. Add a secret when a workload needs one.", { exact: true })).toBeVisible();
   await expect(action(page, "Add secret")).toBeVisible();
   await expect(page.locator(".cw-personal-secret-row")).toHaveCount(0);
-  const mobile = (page.viewportSize()?.width || 0) <= 768;
+  const mobile = (page.viewportSize()?.width || 0) < 640;
   if (mobile) await action(page, "Toggle sidebar").click();
   const sidebar = page.locator(mobile ? ".cw-mobile-drawer" : ".cw-sidebar-slot");
   await expect(sidebar.getByText("Choose an organization above to view its Sandboxes.", { exact: true })).toBeVisible();
@@ -179,7 +179,7 @@ test("empty and unavailable states remain distinct and pagination never implies 
   await expect(action(page, "Add secret")).toHaveCount(0);
   await expect(page.locator("form:not([data-sign-out])")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Reload secrets" })).toHaveAttribute("href", "settings-secrets.html");
-  if ((page.viewportSize()?.width || 0) <= 768) {
+  if ((page.viewportSize()?.width || 0) < 640) {
     expect(await page.locator(".cw-context-nav").evaluate((node) => node.getBoundingClientRect().height)).toBeLessThan(200);
   }
   await fits(page);

@@ -1226,7 +1226,9 @@ fieldset.cw-field > legend {
   border: 0;
 }
 
-@media (max-width: 48rem) {
+/* Only a phone gets the menu bar and drawer: a touch screen up to 48rem, or any
+   screen narrower than 640px. A narrow desktop window keeps the sidebar. */
+@media (max-width: 639px), (max-width: 48rem) and (pointer: coarse) {
   .cw-sidebar-slot {
     display: none;
   }

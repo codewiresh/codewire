@@ -230,7 +230,7 @@
   margin-left: 0;
 }
 
-@media (max-width: 48rem) {
+@media (max-width: 639px), (max-width: 48rem) and (pointer: coarse) {
   .gallery-shell-stage .cw-main {
     flex-basis: 100%;
   }

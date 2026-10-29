@@ -12,7 +12,7 @@
 /* A collapsed sidebar keeps a rail holding only the button that expands it;
    the page takes the rest. Phones use the drawer instead. */
 .cw-console-brand-row > .cw-sidebar-expand { display: none; }
-@media (width > 48rem) {
+@media (width > 48rem), (width > 639px) and (not (pointer: coarse)) {
   .cw-app[data-sidebar-collapsed="true"] { --sidebar-width: var(--sidebar-rail-width); }
   .cw-app[data-sidebar-collapsed="true"] .cw-sidebar-slot .cw-sidebar > :not(.cw-console-brand-row),
   .cw-app[data-sidebar-collapsed="true"] .cw-sidebar-slot .cw-console-brand-row > :not(.cw-sidebar-expand) { display: none; }
@@ -94,7 +94,7 @@
 .cw-sandbox-terminal { min-height: 0; background: var(--bg-base); }
 .cw-sandbox-terminal .cw-terminal-panel { min-width: 0; height: 100%; overflow: hidden; }
 
-@media (max-width: 48rem) {
+@media (max-width: 639px), (max-width: 48rem) and (pointer: coarse) {
   .cw-console-header { display: none; }
   .cw-sandbox-detail-main { padding-top: var(--mobile-bar); }
 }

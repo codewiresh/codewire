@@ -74,7 +74,7 @@ test("one inventory lists every key with its organization, status and permitted 
   await expect(page.getByRole("navigation", { name: "Organization pages" }).getByRole("link", { name: "Next page" })).toHaveAttribute("href", "settings-api-keys.html?cursor=fixture-next");
   await fits(page);
   await page.screenshot({ path: test.info().outputPath("personal-api-keys.png"), fullPage: true });
-  if ((page.viewportSize()?.width || 0) <= 768) {
+  if ((page.viewportSize()?.width || 0) < 640) {
     for (const section of ["security", "sessions"]) {
       await page.goto(`${process.env.CODEWIRE_DESIGN_ORIGIN}/reference/fixtures/settings-account.html#${section}`);
       const target = page.locator(`#${section}`);

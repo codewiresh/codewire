@@ -220,16 +220,16 @@ test("the workspace keeps the terminal between its tab bar and status bar, with 
       });
       const context = `${viewport.width}×${viewport.height}, lifecycle alert ${showAlert ? "visible" : "hidden"}: ${JSON.stringify(layout.sections)}`;
       // The window never scrolls; the output fills the main column beside the
-      // sidebar (under the menu bar at 768 px and below) from the tab bar down to the
+      // sidebar (under the menu bar below 640 px) from the tab bar down to the
       // status bar.
       expect(layout.horizontal, context).toBeLessThanOrEqual(0);
       expect(layout.page, context).toBeLessThanOrEqual(0);
       expect(Math.abs(layout.output.top - layout.tabs.bottom), context).toBeLessThanOrEqual(1);
       expect(Math.abs(layout.output.bottom - layout.status.top), context).toBeLessThanOrEqual(1);
-      expect(Math.abs(layout.output.left - (viewport.width > 768 ? layout.sidebar.right : 0)), context).toBeLessThanOrEqual(1);
-      if (viewport.width > 768) expect(layout.sidebar.width, context).toBeGreaterThan(0);
+      expect(Math.abs(layout.output.left - (viewport.width >= 640 ? layout.sidebar.right : 0)), context).toBeLessThanOrEqual(1);
+      if (viewport.width >= 640) expect(layout.sidebar.width, context).toBeGreaterThan(0);
       expect(Math.abs(layout.output.right - viewport.width), context).toBeLessThanOrEqual(1);
-      expect(layout.status.height, context).toBeLessThan(viewport.width > 768 ? 40 : 100);
+      expect(layout.status.height, context).toBeLessThan(viewport.width >= 640 ? 40 : 100);
       if (viewport.height >= 844) expect(layout.main, context).toBeLessThanOrEqual(1);
       // A short screen keeps the output and scrolls below the header instead.
       await statusBar.scrollIntoViewIfNeeded();
