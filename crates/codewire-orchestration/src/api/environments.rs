@@ -1256,6 +1256,7 @@ pub(crate) async fn start_environment_core(
     )
     .await?;
     let env = fetch_env_summary(&state.pool, org_id, env_id).await?;
+    crate::confidential_storage::refuse_confidential_isolation(&env.isolation_tier)?;
     require_confidential_access(
         &state.pool,
         state.confidential_storage_flags,

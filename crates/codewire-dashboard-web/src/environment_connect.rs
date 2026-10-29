@@ -32,6 +32,11 @@ use crate::{
 
 const UNARY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Confidential environments are refused until a pre-registration negative
+/// passes (#2497): the server answers "confidential isolation is temporarily
+/// unavailable", so the create form keeps the choice visible but disabled.
+pub(crate) const CONFIDENTIAL_ISOLATION_AVAILABLE: bool = false;
+
 pub(crate) struct EnvironmentCreateOptions {
     pub(crate) presets: Vec<EnvironmentPresetOption>,
     pub(crate) preview_base_domain: String,
@@ -338,6 +343,7 @@ pub(crate) async fn create_options(
         }
         _ => (false, String::new()),
     };
+    let confidential_available = confidential_available && CONFIDENTIAL_ISOLATION_AVAILABLE;
 
     let presets = setup
         .presets
