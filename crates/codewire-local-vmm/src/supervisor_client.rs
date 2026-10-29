@@ -701,6 +701,29 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    /// Restore `source` (the checkpoint's own environment, stopped) to VM
+    /// checkpoint `checkpoint`, reporting the Start operation's progress.
+    pub async fn restore_checkpoint_observed(
+        &mut self,
+        checkpoint: &str,
+        source: &str,
+        account: Option<v1::PlatformAccount>,
+        observe: &mut (dyn FnMut(&v1::Operation) + Send),
+    ) -> Result<v1::Environment, Status> {
+        let operation = self
+            .checkpoint_client()
+            .await?
+            .restore_checkpoint(v1::RestoreCheckpointRequest {
+                checkpoint: checkpoint.to_owned(),
+                account,
+                request_id: Uuid::new_v4().to_string(),
+            })
+            .await?
+            .into_inner();
+        self.follow_environment_operation(operation, source, observe)
+            .await
+    }
+
     pub async fn delete_checkpoint(&self, checkpoint: &str) -> Result<v1::Checkpoint, Status> {
         Ok(self
             .checkpoint_client()

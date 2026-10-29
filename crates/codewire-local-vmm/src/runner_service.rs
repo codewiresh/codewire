@@ -1162,6 +1162,8 @@ impl EnvironmentRunnerService for RunnerRpc {
                 .map_err(|_| {
                     Status::invalid_argument("invalid managed credential client selection")
                 })?;
+        #[cfg(target_os = "linux")]
+        let checkpoint = checkpoint::parse_checkpoint_boot(&request)?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
         let started = std::time::Instant::now();
         let mut state = self.state.lock().await;
@@ -1213,6 +1215,8 @@ impl EnvironmentRunnerService for RunnerRpc {
                 managed_credential_clients,
                 cw_runtime_catalog_generation,
                 network_policy,
+                #[cfg(target_os = "linux")]
+                checkpoint,
             })
             .await
         {
@@ -1279,6 +1283,8 @@ impl EnvironmentRunnerService for RunnerRpc {
                 return Err(map_start_error(error));
             }
         };
+        #[cfg(target_os = "linux")]
+        self.log_restore(environment_id, request.generation, &running);
         // Publish only after the exact VMM process is owned. If this future is
         // cancelled, its local guard revokes access before RunningVm drops.
         let generation_access = match self.generation_access.publish(&running) {

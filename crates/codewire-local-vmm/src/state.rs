@@ -170,13 +170,16 @@ impl VmPaths {
             }
             vm.remove_empty_private_directory(Path::new("fs"))?;
         }
-        // A capture an earlier run left unfinished, and the VM checkpoint an
-        // earlier boot restored from: no VMM maps it any more (#3046 R4).
+        // A capture an earlier run left unfinished (#3046 R4). The `in` tree
+        // stays: a restoring boot reads the one its Start just placed, and
+        // any other boot removes it (`remove_restored_input`).
         if let Some(checkpoints) =
             optional_private_directory(&vm, Path::new(CHECKPOINTS_DIRECTORY))?
         {
             for name in checkpoint_tree_names(&checkpoints)? {
-                remove_checkpoint_tree(&checkpoints, &name)?;
+                if name.starts_with(CHECKPOINT_OUT_PREFIX) {
+                    remove_checkpoint_tree(&checkpoints, &name)?;
+                }
             }
         }
         Ok(())
@@ -889,6 +892,8 @@ pub(crate) fn remove_checkpoint_tree(
     };
     if name == CHECKPOINT_IN {
         remove_checkpoint_files(&tree, &CHECKPOINT_VMM_FILES)?;
+        // A restore's empty stand-in for the captured boot's setup disk.
+        remove_checkpoint_files(&tree, &["setup.raw"])?;
     } else {
         if let Some(vmm) = optional_private_directory(&tree, Path::new("vmm"))? {
             remove_checkpoint_files(&vmm, &CHECKPOINT_VMM_FILES)?;
@@ -1308,6 +1313,28 @@ mod tests {
             paths.direct_share_socket(MAX_DIRECT_SHARES),
             Err(StateError::InvalidDirectShareIndex(MAX_DIRECT_SHARES))
         ));
+    }
+
+    #[test]
+    fn clearing_stale_endpoints_keeps_a_placed_restore_input() {
+        let (_parent, root) = private_root();
+        let paths = VmPaths::create(&root, Uuid::new_v4()).unwrap();
+        fs::create_dir_all(paths.checkpoints_dir.join(CHECKPOINT_IN)).unwrap();
+        let unfinished = paths
+            .checkpoints_dir
+            .join(format!("{CHECKPOINT_OUT_PREFIX}{}", Uuid::new_v4()));
+        fs::create_dir(&unfinished).unwrap();
+        for directory in [
+            paths.checkpoints_dir.join(CHECKPOINT_IN),
+            unfinished.clone(),
+        ] {
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        paths.clear_stale_runtime_endpoints().unwrap();
+
+        assert!(paths.checkpoints_dir.join(CHECKPOINT_IN).is_dir());
+        assert!(!unfinished.exists());
     }
 
     #[test]

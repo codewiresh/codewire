@@ -4564,7 +4564,9 @@ impl Supervisor {
             skill_snapshot_sha256: workspace.skill_snapshot_sha256,
             environment_projection_sha256,
             managed_credential_clients: managed_credential_clients.encode().to_owned(),
+            checkpoint: None,
         };
+        let start_request = checkpoints::attach_boot(self, operation_id, start_request)?;
         let runner_events = client
             .watch(environment.id)
             .await
@@ -4798,7 +4800,24 @@ impl Supervisor {
                 }
                 LifecycleEffect::StageWorkspaceGeneration => {
                     let _writer = self.begin_staging(name).await?;
-                    let generation = self.stage_workspace_generation(name).await?;
+                    let restore = operation
+                        .payload
+                        .as_object()
+                        .map(checkpoints::start_payload_checkpoint)
+                        .transpose()?
+                        .flatten();
+                    let generation = match restore {
+                        Some(checkpoint) => {
+                            checkpoints::place_in_place(
+                                self,
+                                name,
+                                checkpoint,
+                                operation.operation_id,
+                            )
+                            .await?
+                        }
+                        None => self.stage_workspace_generation(name).await?,
+                    };
                     operation = self.commit_operation(&operation, |next_state| {
                         record_staged_workspace_generation(next_state, name, generation)
                     })?;
@@ -9129,7 +9148,11 @@ fn start_operation_generation(operation: &OperationRecord) -> Result<u64, Superv
     let fields = operation
         .payload
         .as_object()
-        .filter(|fields| fields.len() == 2)
+        .filter(|fields| {
+            fields.len() == 2
+                || (fields.len() == 3
+                    && checkpoints::start_payload_checkpoint(fields).is_ok_and(|id| id.is_some()))
+        })
         .ok_or(SupervisorError::InvalidState)?;
     fields
         .get("name")

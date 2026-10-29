@@ -29,8 +29,26 @@ pub(crate) enum CheckpointCommand {
     Ls(CheckpointListArgs),
     #[command(about = "Show one VM checkpoint: its memory, disks, timings and VMM")]
     Inspect(CheckpointTargetArgs),
+    #[command(
+        about = "Put a local VM back at a VM checkpoint's instant",
+        after_help = "Examples:\n  cw checkpoint restore before-refactor\n  cw checkpoint restore before-refactor --yes\n\nThe VM checkpoint's own environment goes back: its running processes and every disk change since the checkpoint are discarded. To keep it and run the checkpoint beside it, fork it with `cw create --local --checkpoint NAME`."
+    )]
+    Restore(CheckpointRestoreArgs),
     #[command(about = "Remove a VM checkpoint")]
     Rm(CheckpointTargetArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CheckpointRestoreArgs {
+    #[arg(help = "The VM checkpoint, by name or ID")]
+    pub(crate) checkpoint: String,
+    #[arg(
+        long,
+        help = "Stop the running environment without asking; its running state and disk changes since the checkpoint are discarded"
+    )]
+    pub(crate) yes: bool,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -94,7 +112,7 @@ async fn handle_local_checkpoint_command(
     let status = |action: &'static str| {
         move |status: tonic::Status| anyhow::anyhow!("{action}: {}", status.message())
     };
-    let client = native_client().await?;
+    let mut client = native_client().await?;
     match command {
         CheckpointCommand::Create(args) => {
             // The supervisor names it by the UTC time when none is given.
@@ -150,6 +168,60 @@ async fn handle_local_checkpoint_command(
                 }
             }
         }
+        CheckpointCommand::Restore(args) => {
+            let checkpoint = client
+                .get_checkpoint(&args.checkpoint)
+                .await
+                .map_err(status("checkpoint restore"))?;
+            let source = checkpoint.source_name.clone();
+            let started = std::time::Instant::now();
+            let environment = client
+                .get(&source)
+                .await
+                .map_err(status("checkpoint restore"))?;
+            let mut stopped = None;
+            if environment.state != v1::EnvironmentState::Stopped as i32 {
+                if !confirm_restore(&source, &checkpoint.name, args.yes)? {
+                    anyhow::bail!("restore cancelled; {source} is unchanged");
+                }
+                let stopping = std::time::Instant::now();
+                client
+                    .stop(&source)
+                    .await
+                    .map_err(status("checkpoint restore: stop"))?;
+                stopped = Some(stopping.elapsed());
+            }
+            let restoring = std::time::Instant::now();
+            let account = native_signed_in_account(globals);
+            let environment = client
+                .restore_checkpoint_observed(&checkpoint.name, &source, account, &mut |_| {})
+                .await
+                .map_err(status("checkpoint restore"))?;
+            let restored = restoring.elapsed();
+            match args.output {
+                OutputFormat::Json => print_json(&serde_json::json!({
+                    "checkpoint": CheckpointView::from(&checkpoint),
+                    "environment": environment.name,
+                    "generation": environment.generation,
+                    "stop_ms": stopped.map(|elapsed| elapsed.as_millis() as u64),
+                    "restore_ms": restored.as_millis() as u64,
+                    "total_ms": started.elapsed().as_millis() as u64,
+                })),
+                OutputFormat::Text => {
+                    println!(
+                        "Restored {} to VM checkpoint {}{} restore {:.2} s, total {:.2} s",
+                        terminal_text(&environment.name),
+                        terminal_text(&checkpoint.name),
+                        stopped
+                            .map(|elapsed| format!(": stop {:.2} s,", elapsed.as_secs_f64()))
+                            .unwrap_or_else(|| ":".to_owned()),
+                        restored.as_secs_f64(),
+                        started.elapsed().as_secs_f64()
+                    );
+                    Ok(())
+                }
+            }
+        }
         CheckpointCommand::Rm(args) => {
             let checkpoint = client
                 .delete_checkpoint(&args.checkpoint)
@@ -172,6 +244,27 @@ use codewire_local_vmm::control::v1;
 fn print_json(value: &impl Serialize) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+/// Ask before discarding a running environment's state, unless `yes`.
+fn confirm_restore(source: &str, checkpoint: &str, yes: bool) -> anyhow::Result<bool> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+    if yes {
+        return Ok(true);
+    }
+    anyhow::ensure!(
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
+        "{source} is running; restoring discards its running state and every disk change since {checkpoint}: pass --yes to do it noninteractively"
+    );
+    let mut stderr = std::io::stderr().lock();
+    write!(
+        stderr,
+        "Restore discards {source}'s running state and every disk change since {checkpoint}. Continue? [y/N]: "
+    )?;
+    stderr.flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
 }
 
 fn print_warnings(checkpoint: &v1::Checkpoint) {
@@ -470,6 +563,11 @@ mod tests {
                 .command,
             CheckpointCommand::Rm(_)
         ));
+        assert!(matches!(
+            Probe::try_parse_from(["checkpoint", "restore", "c1", "--yes"]).unwrap().command,
+            CheckpointCommand::Restore(CheckpointRestoreArgs { checkpoint, yes: true, .. }) if checkpoint == "c1"
+        ));
+        assert!(Probe::try_parse_from(["checkpoint", "restore"]).is_err());
         assert!(Probe::try_parse_from(["checkpoint", "create"]).is_err());
     }
 

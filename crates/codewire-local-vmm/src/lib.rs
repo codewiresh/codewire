@@ -15,6 +15,8 @@ pub mod broker_control;
 pub mod ch_api;
 #[cfg(target_os = "linux")]
 pub mod cloud_hypervisor;
+#[cfg(target_os = "linux")]
+mod cloud_hypervisor_restore;
 pub mod control;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod cw_runtime;

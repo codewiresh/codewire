@@ -1646,7 +1646,10 @@ mod linux {
         })
     }
 
-    fn require_vmm_dead(paths: &VmPaths, vm_id: Uuid) -> Result<(), Status> {
+    pub(in crate::supervisor) fn require_vmm_dead(
+        paths: &VmPaths,
+        vm_id: Uuid,
+    ) -> Result<(), Status> {
         let state = match crate::state::PersistedVmState::read(&paths.state_file) {
             Ok(state) => state,
             Err(error) if error.is_not_found() => return Ok(()),
@@ -3512,6 +3515,6 @@ mod linux {
 use linux::{capture, delete, get, list, place_snapshot_tree, ready_snapshot, reconcile};
 #[cfg(target_os = "linux")]
 pub(in crate::supervisor) use linux::{
-    delete_ready, find_ready, list_ready, publish, remove_snapshot_tree, settle, snapshot_proto,
-    source_inputs,
+    delete_ready, find_ready, list_ready, publish, remove_snapshot_tree, require_vmm_dead, settle,
+    snapshot_proto, source_inputs,
 };

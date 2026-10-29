@@ -1310,6 +1310,7 @@ mod linux {
         CreateVmRequest {
             cw_runtime_catalog_generation: None,
             network_policy: codewire_egress_policy::CompiledPolicy::developer_baseline(),
+            checkpoint: None,
             vm_id: arguments.vm_id,
             generation,
             vsock_cid: cid_for(arguments.vm_id),

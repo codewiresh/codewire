@@ -136,3 +136,148 @@ fn map_checkpoint_error(error: RunnerError) -> Status {
         other => Status::internal(format!("VM checkpoint failed: {other}")),
     }
 }
+
+/// `StartVmRequest.checkpoint`, parsed and validated, or none.
+pub(super) fn parse_checkpoint_boot(
+    request: &v1::StartVmRequest,
+) -> Result<Option<crate::runner::RestoreBoot>, Status> {
+    let Some(boot) = request.checkpoint.as_ref() else {
+        return Ok(None);
+    };
+    let invalid = || Status::invalid_argument("invalid VM checkpoint boot");
+    let id = |value: &str| {
+        Uuid::parse_str(value)
+            .ok()
+            .filter(|id| !id.is_nil() && id.to_string() == value)
+            .ok_or_else(invalid)
+    };
+    let digest = |value: &str| {
+        crate::supervisor_metadata::valid_sha256(value)
+            .then(|| value.to_owned())
+            .ok_or_else(invalid)
+    };
+    let optional_digest = |value: &str| {
+        if value.is_empty() {
+            Ok(None)
+        } else {
+            Sha256Value::parse_hex(value)
+                .map(Some)
+                .map_err(|_| invalid())
+        }
+    };
+    let bindings = boot.boot.as_ref().ok_or_else(invalid)?;
+    if boot.memory_bytes == 0 || boot.source_generation == 0 {
+        return Err(invalid());
+    }
+    Ok(Some(crate::runner::RestoreBoot {
+        checkpoint_id: id(&boot.checkpoint_id)?,
+        source_environment_id: id(&boot.source_environment_id)?,
+        config_sha256: digest(&boot.config_sha256)?,
+        state_sha256: digest(&boot.state_sha256)?,
+        memory_bytes: boot.memory_bytes,
+        setup_disk_bytes: (boot.setup_disk_bytes != 0).then_some(boot.setup_disk_bytes),
+        vmm_sha256: digest(&boot.vmm_sha256)?,
+        source_generation: boot.source_generation,
+        skill_snapshot_sha256: optional_digest(&bindings.skill_snapshot_sha256)?,
+        environment_projection_sha256: optional_digest(&bindings.environment_projection_sha256)?,
+        managed_credential_clients: codewire_access::ManagedCredentialClients::decode(
+            &bindings.managed_credential_clients,
+        )
+        .map_err(|_| invalid())?,
+        docker: bindings.docker,
+        cw_runtime_catalog_generation: (!bindings.cw_runtime_catalog_generation.is_empty())
+            .then(|| digest(&bindings.cw_runtime_catalog_generation))
+            .transpose()?,
+        daemon_vsock_port: bindings.daemon_vsock_port,
+    }))
+}
+
+impl RunnerRpc {
+    /// Record how a restored boot resumed: the guest reseeded before the
+    /// workload thawed.
+    pub(super) fn log_restore(&self, environment_id: Uuid, generation: u64, running: &RunningVm) {
+        let Some(report) = running.restore_report() else {
+            return;
+        };
+        if let Some(log) = &self.log {
+            log.record(
+                "vm_restored",
+                &[
+                    ("environment", LogField::Id(environment_id)),
+                    ("generation", LogField::Count(generation)),
+                    ("reseeded", LogField::Name(bool_text(report.reseeded))),
+                    (
+                        "vmgenid_driver",
+                        LogField::Name(bool_text(report.vmgenid_driver)),
+                    ),
+                    (
+                        "removed_logins",
+                        LogField::Name(bool_text(report.removed_logins)),
+                    ),
+                    (
+                        "resume_ms",
+                        LogField::Count(report.resume.as_millis() as u64),
+                    ),
+                    ("thaw_ms", LogField::Count(report.thaw.as_millis() as u64)),
+                ],
+            );
+        }
+    }
+}
+
+fn bool_text(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn boot() -> v1::CheckpointBoot {
+        v1::CheckpointBoot {
+            checkpoint_id: Uuid::new_v4().to_string(),
+            source_environment_id: Uuid::new_v4().to_string(),
+            config_sha256: "a".repeat(64),
+            state_sha256: "b".repeat(64),
+            memory_bytes: 512 * 1024 * 1024,
+            setup_disk_bytes: 0,
+            vmm_sha256: "c".repeat(64),
+            boot: Some(v1::CheckpointBootBindings {
+                managed_credential_clients: codewire_access::ManagedCredentialClients::default()
+                    .encode()
+                    .to_owned(),
+                daemon_vsock_port: 7777,
+                ..Default::default()
+            }),
+            source_generation: 3,
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_boot_parses_exactly() {
+        let request = |checkpoint| v1::StartVmRequest {
+            checkpoint,
+            ..Default::default()
+        };
+        assert_eq!(parse_checkpoint_boot(&request(None)).unwrap(), None);
+        let parsed = parse_checkpoint_boot(&request(Some(boot())))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.source_generation, 3);
+        assert_eq!(parsed.setup_disk_bytes, None);
+        assert_eq!(parsed.cw_runtime_catalog_generation, None);
+        let broken: [fn(&mut v1::CheckpointBoot); 6] = [
+            |boot| boot.checkpoint_id = "nope".into(),
+            |boot| boot.config_sha256 = "short".into(),
+            |boot| boot.memory_bytes = 0,
+            |boot| boot.source_generation = 0,
+            |boot| boot.boot = None,
+            |boot| boot.boot.as_mut().unwrap().managed_credential_clients = "bogus".into(),
+        ];
+        for change in broken {
+            let mut boot = boot();
+            change(&mut boot);
+            assert!(parse_checkpoint_boot(&request(Some(boot))).is_err());
+        }
+    }
+}

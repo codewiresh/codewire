@@ -94,6 +94,8 @@ use crate::state::{
 
 #[cfg(target_os = "linux")]
 mod checkpoint;
+#[cfg(target_os = "linux")]
+pub use checkpoint::{RestoreBoot, RestoreReport};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 // Guest cleanup can drain daemon, workspace, Docker and network for five
@@ -147,6 +149,10 @@ pub struct CreateVmRequest {
     pub cw_runtime_catalog_generation: Option<String>,
     /// The network policy this boot's egress broker enforces (#2537).
     pub network_policy: CompiledPolicy,
+    /// Restore this boot from the VM checkpoint placed in
+    /// `checkpoints/in` instead of booting it (#3046 R4).
+    #[cfg(target_os = "linux")]
+    pub checkpoint: Option<RestoreBoot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +233,10 @@ impl CloudHypervisorRunner {
         preflight()?;
         validate_request(&request)?;
         self.artifacts.require_current_guest_seed_abi()?;
+        #[cfg(target_os = "linux")]
+        if let Some(restore) = &request.checkpoint {
+            self.admit_restore(&request, restore)?;
+        }
         let cw_runtime_disk = request
             .cw_runtime_catalog_generation
             .as_deref()
@@ -250,6 +260,10 @@ impl CloudHypervisorRunner {
         let _ = root_disk_path;
         let setup_disk = admit_setup_disk(&paths, &request)?;
         paths.clear_stale_runtime_endpoints()?;
+        #[cfg(target_os = "linux")]
+        if request.checkpoint.is_none() {
+            checkpoint::remove_restored_input(&paths)?;
+        }
 
         let direct_shares = self.prepare_direct_shares(&request, &paths)?;
         let direct_share_plan = direct_share_plan(&request.direct_shares)?;
@@ -334,7 +348,10 @@ impl CloudHypervisorRunner {
                 .collect(),
         )?;
         #[cfg(target_os = "linux")]
-        let command = config.command()?;
+        let command = match &request.checkpoint {
+            Some(restore) => self.restore_command(&paths, &config, restore)?,
+            None => config.command()?,
+        };
         Ok(PreparedVm {
             request,
             paths,
@@ -656,6 +673,20 @@ impl CloudHypervisorRunner {
             )
             .await?;
             api.ping().await?;
+            // A restored VM resumes frozen: it moves to this boot's identity
+            // and thaws before anything else reaches it (#3046 R4).
+            let restored = match &prepared.request.checkpoint {
+                Some(_) => Some(
+                    checkpoint::resume_restored(
+                        &prepared.paths.vsock_socket,
+                        &prepared.token,
+                        prepared.request.vm_id,
+                        prepared.request.generation,
+                    )
+                    .await?,
+                ),
+                None => None,
+            };
             if let Some(disk) = &prepared.cw_runtime_disk {
                 validate_live_cw_runtime_disk(&api.info().await?, disk)?;
             }
@@ -677,10 +708,10 @@ impl CloudHypervisorRunner {
                 vsock_socket: Some(set_socket_private(&prepared.paths.vsock_socket)?),
             };
             persisted.write_atomic(&prepared.paths.state_file)?;
-            Ok::<_, RunnerError>((api, hybrid))
+            Ok::<_, RunnerError>((api, hybrid, restored))
         }
         .await;
-        let (api, hybrid) = match finalized {
+        let (api, hybrid, restored) = match finalized {
             Ok(value) => value,
             Err(error) => {
                 startup.terminate_admitted().await?;
@@ -708,6 +739,7 @@ impl CloudHypervisorRunner {
             hybrid,
             network_worker: None,
             host_port_listeners: prepared.host_port_listeners,
+            restored,
             _lock: prepared.lock,
         })
     }
@@ -1238,6 +1270,9 @@ pub struct RunningVm {
     /// The bindings this generation publishes now: the boot set, then each
     /// applied `set_host_ports`.
     host_ports: Vec<HostPortBinding>,
+    /// What the guest reported when this boot resumed from a VM checkpoint.
+    #[cfg(target_os = "linux")]
+    restored: Option<RestoreReport>,
     _lock: VmLock,
 }
 
@@ -5743,6 +5778,7 @@ mod tests {
     fn request(vcpus: u8, memory_mib: u32) -> CreateVmRequest {
         CreateVmRequest {
             cw_runtime_catalog_generation: None,
+            checkpoint: None,
             network_policy: CompiledPolicy::developer_baseline(),
             vm_id: Uuid::new_v4(),
             generation: 1,

@@ -114,6 +114,11 @@ mod linux {
     }
 
     pub(super) fn run(arguments: impl IntoIterator<Item = String>) -> ProbeResult<()> {
+        let mut arguments = arguments.into_iter().peekable();
+        if arguments.peek().map(String::as_str) == Some("daemon-capability") {
+            arguments.next();
+            return daemon_capability::run(arguments);
+        }
         let args = Args::parse(arguments)?;
         let database = ProbeDatabase::open(&args.state_root)?;
         match args.action {
@@ -128,6 +133,76 @@ mod linux {
             }
         }
         Ok(())
+    }
+
+    /// `daemon-capability record|present` (#3046 R4 journey): record the
+    /// running environment's daemon capability, or present a recorded one
+    /// to its daemon now and say whether the daemon accepts it. Synthetic
+    /// test environments only: `record` prints the capability.
+    mod daemon_capability {
+        use super::*;
+        use codewire_local_vmm::supervisor_client::NativeSupervisorClient;
+        use codewire_local_vmm::supervisor_config::NativeRuntimeConfig;
+
+        pub(super) fn run(arguments: impl Iterator<Item = String>) -> ProbeResult<()> {
+            let mut arguments = arguments;
+            let action = arguments.next().ok_or_else(failed)?;
+            let mut flags = std::collections::BTreeMap::new();
+            while let Some(flag) = arguments.next() {
+                let value = arguments.next().ok_or_else(failed)?;
+                if flags.insert(flag, value).is_some() {
+                    return Err(failed());
+                }
+            }
+            let mut take = |flag: &str| flags.remove(flag).ok_or_else(failed);
+            let config = NativeRuntimeConfig {
+                root: PathBuf::from(take("--root")?),
+                artifact_root: PathBuf::from(take("--artifact-root")?),
+                artifact_lock: PathBuf::from(take("--artifact-lock")?),
+                mesh_data_dir: PathBuf::from(take("--mesh-data-dir")?),
+                platform_config_dir: PathBuf::from(take("--platform-config-dir")?),
+                credential_authority_root: PathBuf::from(take("--credential-authority-root")?),
+                executable: PathBuf::from(take("--cw-bin")?),
+            };
+            let name = take("--name")?;
+            let capability_file = match action.as_str() {
+                "record" => None,
+                "present" => Some(PathBuf::from(take("--capability-file")?)),
+                _ => return Err(failed()),
+            };
+            if !flags.is_empty() {
+                return Err(failed());
+            }
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async move {
+                let mut supervisor = NativeSupervisorClient::connect_runtime(&config).await?;
+                let access = supervisor.daemon_access(&name).await?;
+                match capability_file {
+                    None => println!("{}", access.generation_capability),
+                    Some(file) => {
+                        let presented = fs::read_to_string(file)?.trim().to_owned();
+                        let daemon = codewire_local_vmm::hybrid_vsock::connect_daemon(
+                            Path::new(&access.hybrid_socket),
+                            access.guest_port,
+                            &presented,
+                        )
+                        .await?;
+                        match daemon.get_capabilities(&[]).await {
+                            Ok(_) => println!("accepted"),
+                            Err(codewire_daemon::client::SessionClientError::Status(status))
+                                if status.code() == tonic::Code::Unauthenticated =>
+                            {
+                                println!("refused: Unauthenticated");
+                            }
+                            Err(error) => return Err(Box::new(error) as Box<_>),
+                        }
+                    }
+                }
+                Ok::<_, Box<dyn Error + Send + Sync>>(())
+            })
+        }
     }
 
     impl Args {

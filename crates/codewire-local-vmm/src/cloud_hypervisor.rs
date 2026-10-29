@@ -539,6 +539,18 @@ impl CommandSpec {
         &self.arguments
     }
 
+    /// `cloud-hypervisor --restore` of a VM checkpoint (#3046 R4): the
+    /// device set comes from its admitted configuration, never from flags.
+    pub(crate) fn restore(program: PathBuf, arguments: Vec<OsString>) -> Self {
+        Self {
+            program,
+            arguments,
+            expected_disk_count: 0,
+            expected_fs_count: 0,
+            landlock_rule: None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(program: PathBuf) -> Self {
         Self {

@@ -325,6 +325,19 @@ service LocalCheckpointService {
   rpc ListCheckpoints(ListCheckpointsRequest) returns (ListCheckpointsResponse);
   rpc GetCheckpoint(CheckpointSelector) returns (Checkpoint);
   rpc DeleteCheckpoint(CheckpointSelector) returns (Checkpoint);
+  // Put the stopped source environment back at the VM checkpoint's instant:
+  // a Start operation that places the checkpoint's disks and restores its
+  // memory. Every disk change since the checkpoint is discarded.
+  rpc RestoreCheckpoint(RestoreCheckpointRequest) returns (Operation);
+}
+
+message RestoreCheckpointRequest {
+  // The VM checkpoint, by name or ID.
+  string checkpoint = 1;
+  // The platform account the restoring cw is signed in to, or absent. A
+  // checkpoint captured under another account is refused.
+  PlatformAccount account = 2;
+  string request_id = 3;
 }
 
 message CreateCheckpointRequest {
@@ -1010,6 +1023,28 @@ message StartVmRequest {
   // The selected network policy's canonical document for this boot (#2537):
   // the revision the egress broker enforces. Empty means the built-in `open`.
   bytes network_policy_document = 24;
+  // Restore this boot from the VM checkpoint the supervisor placed in
+  // vms/<id>/checkpoints/in instead of booting it (#3046 R4, runner
+  // protocol 10). vsock_cid is then the checkpoint's.
+  CheckpointBoot checkpoint = 25;
+}
+
+message CheckpointBoot {
+  string checkpoint_id = 1;
+  // The environment the checkpoint captured: its paths name that VM.
+  string source_environment_id = 2;
+  // The VMM files placed in checkpoints/in, as captured.
+  string config_sha256 = 3;
+  string state_sha256 = 4;
+  uint64 memory_bytes = 5;
+  // The captured boot's setup disk, when it had one; zero otherwise.
+  uint64 setup_disk_bytes = 6;
+  // The VMM the checkpoint restores only into.
+  string vmm_sha256 = 7;
+  // What the captured guest applied at boot; this boot's must be the same.
+  CheckpointBootBindings boot = 8;
+  // The captured boot's generation: the restored guest moves past it.
+  uint64 source_generation = 9;
 }
 
 message DirectShareAttachment {

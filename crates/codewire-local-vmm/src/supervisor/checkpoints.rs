@@ -226,6 +226,126 @@ pub(super) async fn retire_for_environment(
 }
 
 // ---------------------------------------------------------------------------
+// Supervisor hooks for an in-place restore: a Start whose payload names the
+// VM checkpoint (supervisor.rs calls each once).
+
+/// The VM checkpoint a Start operation restores, if any: its payload's
+/// optional third key.
+pub(super) fn start_payload_checkpoint(
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<Uuid>, SupervisorError> {
+    match fields.get("checkpoint") {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .and_then(super::snapshots::canonical_id)
+            .map(Some)
+            .ok_or(SupervisorError::InvalidState),
+    }
+}
+
+/// A restoring Start's StageWorkspaceGeneration: place the checkpoint's
+/// disks and VMM files for the stopped source. Nothing is staged.
+pub(super) async fn place_in_place(
+    supervisor: &Supervisor,
+    name: &str,
+    checkpoint_id: Uuid,
+    operation_id: Uuid,
+) -> Result<Option<WorkspaceGenerationRecord>, SupervisorError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (supervisor, name, checkpoint_id, operation_id);
+        Err(SupervisorError::InvalidRequest)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let environment = supervisor.environment(name)?;
+        let config = supervisor.config.clone();
+        tokio::task::spawn_blocking(move || {
+            linux::place(&config, &environment, checkpoint_id, operation_id)
+        })
+        .await
+        .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
+        Ok(None)
+    }
+}
+
+/// A restoring Start's StartVm request: the checkpoint to restore, and its
+/// vsock CID, which the restored guest cached at probe.
+pub(super) fn attach_boot(
+    supervisor: &Supervisor,
+    operation_id: Uuid,
+    request: v1::StartVmRequest,
+) -> Result<v1::StartVmRequest, SupervisorError> {
+    // The Start being applied is pending until it completes.
+    let operation = supervisor
+        .core()
+        .store
+        .pending_operations()?
+        .into_iter()
+        .find(|operation| operation.operation_id == operation_id)
+        .ok_or(SupervisorError::InvalidState)?;
+    if operation.kind != OperationKind::Start {
+        return Ok(request);
+    }
+    let fields = operation
+        .payload
+        .as_object()
+        .ok_or(SupervisorError::InvalidState)?;
+    let Some(checkpoint_id) = start_payload_checkpoint(fields)? else {
+        return Ok(request);
+    };
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = checkpoint_id;
+        Err(SupervisorError::InvalidRequest)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut request = request;
+        let (_, manifest) =
+            super::snapshots::find_ready(&supervisor.config, &checkpoint_id.to_string(), true)
+                .map_err(|_| SupervisorError::NotFound(checkpoint_id.to_string()))?;
+        let checkpoint = manifest
+            .checkpoint
+            .as_ref()
+            .ok_or(SupervisorError::InvalidState)?;
+        request.vsock_cid = checkpoint.vsock_cid;
+        request.checkpoint = Some(v1::CheckpointBoot {
+            checkpoint_id: checkpoint_id.to_string(),
+            source_environment_id: manifest.source.environment_id.to_string(),
+            config_sha256: checkpoint.config_sha256.clone(),
+            state_sha256: checkpoint.state_sha256.clone(),
+            memory_bytes: checkpoint.memory_bytes,
+            setup_disk_bytes: checkpoint.setup_disk_bytes.unwrap_or_default(),
+            vmm_sha256: checkpoint.vmm.sha256.clone(),
+            boot: Some(v1::CheckpointBootBindings {
+                skill_snapshot_sha256: checkpoint
+                    .boot
+                    .skill_snapshot_sha256
+                    .clone()
+                    .unwrap_or_default(),
+                environment_projection_sha256: checkpoint
+                    .boot
+                    .environment_projection_sha256
+                    .clone()
+                    .unwrap_or_default(),
+                managed_credential_clients: checkpoint.boot.managed_credential_clients.clone(),
+                docker: checkpoint.boot.docker,
+                cw_runtime_catalog_generation: checkpoint
+                    .boot
+                    .cw_runtime_catalog_generation
+                    .clone()
+                    .unwrap_or_default(),
+                daemon_vsock_port: checkpoint.boot.daemon_vsock_port,
+            }),
+            source_generation: checkpoint.source_generation,
+        });
+        Ok(request)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The VM checkpoint RPCs.
 
 #[tonic::async_trait]
@@ -281,6 +401,24 @@ impl LocalCheckpointService for SupervisorRpc {
             .await
             .map_err(|_| Status::internal("VM checkpoint inspection task failed"))?
             .map(Response::new)
+    }
+
+    async fn restore_checkpoint(
+        &self,
+        request: Request<v1::RestoreCheckpointRequest>,
+    ) -> Result<Response<v1::Operation>, Status> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = request;
+            Err(Status::unimplemented(LINUX_ONLY))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.start_drains()?;
+            linux::restore(self, request.into_inner())
+                .await
+                .map(Response::new)
+        }
     }
 
     async fn delete_checkpoint(
@@ -574,6 +712,318 @@ mod linux {
             ));
         }
         Ok(proto)
+    }
+
+    /// `RestoreCheckpoint`: every refusable check, then a Start operation
+    /// whose payload names the checkpoint. The source must be stopped.
+    pub(super) async fn restore(
+        rpc: &SupervisorRpc,
+        request: v1::RestoreCheckpointRequest,
+    ) -> Result<v1::Operation, Status> {
+        let supervisor = &rpc.supervisor;
+        let request_id = Uuid::parse_str(&request.request_id)
+            .ok()
+            .filter(|id| !id.is_nil())
+            .ok_or_else(|| Status::invalid_argument("a restore needs a request id"))?;
+        let config = supervisor.config.clone();
+        let selector = request.checkpoint.clone();
+        let (row, manifest) =
+            tokio::task::spawn_blocking(move || find_ready(&config, &selector, true))
+                .await
+                .map_err(|_| Status::internal("VM checkpoint lookup task failed"))??;
+        let checkpoint = manifest
+            .checkpoint
+            .clone()
+            .ok_or_else(|| status(SupervisorError::InvalidState))?;
+        let name = supervisor
+            .core()
+            .state
+            .environments
+            .values()
+            .find(|environment| environment.id == manifest.source.environment_id)
+            .map(|environment| environment.name.clone())
+            .ok_or_else(|| {
+                Status::failed_precondition(format!(
+                    "VM checkpoint {}'s environment {} no longer exists",
+                    row.name, manifest.source.name
+                ))
+            })?;
+        let lease = supervisor.quiet_lease(&name).await.map_err(status)?;
+        supervisor.reconcile(&name).await.map_err(status)?;
+        let environment = supervisor.environment(&name).map_err(status)?;
+        let fork = || {
+            format!(
+                "fork it instead: `cw create --local --checkpoint {}`",
+                row.name
+            )
+        };
+        if environment.state != StoredEnvironmentState::Stopped {
+            return Err(Status::failed_precondition(format!(
+                "{name} is {}; stop it first (`cw stop {name}`), or let `cw checkpoint restore` stop it",
+                environment.state.as_str()
+            )));
+        }
+        let artifact_generation = manifest
+            .root_generation
+            .artifact_generation()
+            .map_err(|error| status(error.into()))?
+            .to_owned();
+        if environment.active_workspace_generation.as_ref() != Some(&manifest.root_generation)
+            || environment.active_artifact_generation.as_deref()
+                != Some(artifact_generation.as_str())
+            || environment.staging_workspace_generation.is_some()
+            || environment.staging_artifact_generation.is_some()
+            || environment.workspace_plan != manifest.workspace_plan
+            || environment.vcpus != manifest.resources.vcpus
+            || environment.memory_mib != manifest.resources.memory_mib
+            || environment.disk_bytes != manifest.resources.disk_bytes
+            || environment.docker_disk_bytes != manifest.resources.docker_disk_bytes
+        {
+            return Err(Status::failed_precondition(format!(
+                "{name}'s workspace, runtime or resources changed since VM checkpoint {}; {}",
+                row.name,
+                fork()
+            )));
+        }
+        let host = host_identity();
+        if host.cpu != checkpoint.host.cpu {
+            return Err(Status::failed_precondition(format!(
+                "VM checkpoint {} was taken on another CPU ({}; this host has {}); it cannot be restored here",
+                row.name, checkpoint.host.cpu, host.cpu
+            )));
+        }
+        let fresh = PlatformAccount::from_proto(request.account.as_ref())?;
+        if let (Some(recorded), Some(fresh)) = (manifest.platform_account.as_ref(), fresh.as_ref())
+            && recorded != fresh
+        {
+            return Err(Status::permission_denied(format!(
+                "VM checkpoint {} was captured while signed in to another platform account; sign in as that account (`cw login`) to restore it",
+                row.name
+            )));
+        }
+        let engine = PrivateRoot::open(&supervisor.config.engine_root())
+            .map_err(|error| status(SupervisorError::from(error)))?;
+        let artifacts = RuntimeArtifactStore::create(&engine)
+            .map_err(artifact_store_error)
+            .map_err(status)?
+            .open_generation(&artifact_generation)
+            .await
+            .map_err(|_| {
+                Status::failed_precondition(format!(
+                    "VM checkpoint {} is unrestorable: the runtime it was taken with is gone",
+                    row.name
+                ))
+            })?;
+        if artifacts.cloud_hypervisor.sha256() != checkpoint.vmm.sha256 {
+            return Err(Status::failed_precondition(format!(
+                "VM checkpoint {} is unrestorable: its Cloud Hypervisor build changed",
+                row.name
+            )));
+        }
+        artifacts.require_guest_checkpoint_abi().map_err(|_| {
+            Status::failed_precondition(format!(
+                "VM checkpoint {}'s guest has no checkpoint hook",
+                row.name
+            ))
+        })?;
+        let generation = environment
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| Status::internal("local generation overflow"))?;
+        let payload = serde_json::json!({
+            "name": name,
+            "generation": generation,
+            "checkpoint": row.id.to_string(),
+        });
+        // Bind the lookup first: a `match` on `core()` would hold the core
+        // lock through its arms, and `None` takes it again.
+        let recorded = supervisor
+            .core()
+            .store
+            .operation_by_request(request_id)
+            .map_err(SupervisorError::from)
+            .map_err(status)?;
+        let operation = match recorded {
+            Some(operation) if operation.payload == payload => operation,
+            Some(_) => return Err(Status::aborted("local lifecycle request ID collision")),
+            None => supervisor
+                .core()
+                .store
+                .begin_operation(
+                    request_id,
+                    Some(environment.id),
+                    OperationKind::Start,
+                    &payload,
+                )
+                .map_err(SupervisorError::from)
+                .map_err(status)?,
+        };
+        let response = operation_proto(&operation)?;
+        if !operation.phase.terminal() {
+            supervisor.admit(&operation);
+        }
+        drop(lease);
+        if !operation.phase.terminal() {
+            rpc.spawn_drain(&name);
+        }
+        Ok(response)
+    }
+
+    /// Place VM checkpoint `checkpoint_id` for its stopped source: its disks
+    /// over the environment's, its VMM files in `checkpoints/in`, and the
+    /// persisted VM state's disk identities updated to them. Under the VM's
+    /// lock with its VMM proven dead, and the checkpoint's shared lock, so
+    /// the checkpoint is not removed meanwhile. A replay places it again.
+    pub(super) fn place(
+        config: &NativeRuntimeConfig,
+        environment: &EnvironmentRecord,
+        checkpoint_id: Uuid,
+        operation_id: Uuid,
+    ) -> Result<(), SupervisorError> {
+        let engine_root = config.engine_root();
+        let engine = PrivateRoot::open(&engine_root)?;
+        let paths = VmPaths::create(&engine, environment.id)?;
+        let _lock = paths.lock().map_err(|_| SupervisorError::InvalidState)?;
+        super::super::snapshots::require_vmm_dead(&paths, environment.id)
+            .map_err(|_| SupervisorError::InvalidState)?;
+        let snapshots = snapshots_root(&engine_root)?;
+        let source =
+            snapshots.open_private_directory(Path::new(&checkpoint_id.to_string()), 0o700)?;
+        let held = fs::File::open(source.path()).map_err(|error| SupervisorError::Io {
+            path: source.path().to_owned(),
+            source: error,
+        })?;
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockShared)
+            .map_err(|_| SupervisorError::InvalidState)?;
+        let (_, manifest) = find_ready(config, &checkpoint_id.to_string(), true)
+            .map_err(|_| SupervisorError::NotFound(checkpoint_id.to_string()))?;
+        if manifest.source.environment_id != environment.id {
+            return Err(SupervisorError::InvalidState);
+        }
+        let storage = manifest.storage_generation()?;
+        let checkpoints = PrivateRoot::open(&paths.checkpoints_dir)?;
+        for name in crate::state::checkpoint_tree_names(&checkpoints)? {
+            crate::state::remove_checkpoint_tree(&checkpoints, &name)?;
+        }
+        let out_name = format!("{CHECKPOINT_OUT_PREFIX}{operation_id}");
+        let out_path = checkpoints.create_dir(Path::new(&out_name), 0o700)?;
+        let result = (|| {
+            let out = PrivateRoot::open(&out_path)?;
+            out.create_dir(Path::new("vmm"), 0o700)?;
+            out.create_dir(Path::new("disks"), 0o700)?;
+            PrivateRoot::open(&out.create_dir(Path::new("root"), 0o700)?)?
+                .create_dir(Path::new(&storage), 0o700)?;
+            for name in CHECKPOINT_VMM_FILES {
+                let relative = format!("vmm/{name}");
+                clone_file(
+                    &source.path().join(&relative),
+                    &out_path.join(&relative),
+                    0o400,
+                )?;
+            }
+            let mut disks = vec![("disks/state.raw", paths.state_disk.clone())];
+            if environment.docker_disk_bytes != 0 {
+                disks.push(("disks/docker.raw", paths.docker_disk.clone()));
+            }
+            let root = format!("root/{storage}/root.raw");
+            let root_target =
+                crate::state::RootGenerationPaths::create(&paths, &storage)?.root_disk;
+            disks.push((root.as_str(), root_target));
+            for (relative, _) in &disks {
+                clone_file(
+                    &source.path().join(relative),
+                    &out_path.join(relative),
+                    0o600,
+                )?;
+            }
+            for disk in &manifest.disks {
+                let relative = match disk.role {
+                    DiskRole::State => "disks/state.raw".to_owned(),
+                    DiskRole::Docker => "disks/docker.raw".to_owned(),
+                    DiskRole::Root => root.clone(),
+                };
+                let identity = crate::state::StateDiskIdentity::capture(&out_path.join(&relative))?;
+                if identity.file.size != disk.bytes
+                    || identity.filesystem_uuid != disk.filesystem_uuid
+                {
+                    return Err(SupervisorError::InvalidState);
+                }
+            }
+            // The VMM files first: a crash after it leaves an `in` the next
+            // boot of any kind removes.
+            out.move_private_directory_to(
+                Path::new("vmm"),
+                &checkpoints,
+                Path::new(crate::state::CHECKPOINT_IN),
+            )?;
+            for (relative, target) in &disks {
+                fs::rename(out_path.join(relative), target).map_err(|error| {
+                    SupervisorError::Io {
+                        path: target.clone(),
+                        source: error,
+                    }
+                })?;
+                if let Some(parent) = target.parent() {
+                    fs::File::open(parent)
+                        .and_then(|directory| directory.sync_all())
+                        .map_err(|error| SupervisorError::Io {
+                            path: parent.to_owned(),
+                            source: error,
+                        })?;
+                }
+            }
+            // The runner admits disks against the persisted VM state.
+            match crate::state::PersistedVmState::read(&paths.state_file) {
+                Ok(mut persisted) => {
+                    persisted.state_disk =
+                        crate::state::StateDiskIdentity::capture(&paths.state_disk)?;
+                    if persisted.docker_disk.is_some() {
+                        persisted.docker_disk = Some(crate::state::StateDiskIdentity::capture(
+                            &paths.docker_disk,
+                        )?);
+                    }
+                    if persisted.root_generation.as_deref() == Some(storage.as_str()) {
+                        persisted.root_disk = Some(crate::state::StateDiskIdentity::capture(
+                            &crate::state::RootGenerationPaths::create(&paths, &storage)?.root_disk,
+                        )?);
+                    }
+                    persisted.write_atomic(&paths.state_file)?;
+                }
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+            Ok(())
+        })();
+        let _ = crate::state::remove_checkpoint_tree(&checkpoints, &out_name);
+        drop(held);
+        result
+    }
+
+    /// Reflink `source` into the new `destination` with `mode`.
+    fn clone_file(source: &Path, destination: &Path, mode: u32) -> Result<(), SupervisorError> {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let io_error = |path: &Path, error: io::Error| SupervisorError::Io {
+            path: path.to_owned(),
+            source: error,
+        };
+        let from = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(source)
+            .map_err(|error| io_error(source, error))?;
+        let to = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(destination)
+            .map_err(|error| io_error(destination, error))?;
+        crate::fs_clone::reflink(&from, &to).map_err(|error| io_error(destination, error))?;
+        to.sync_all()
+            .map_err(|error| io_error(destination, error))?;
+        to.set_permissions(fs::Permissions::from_mode(mode))
+            .map_err(|error| io_error(destination, error))
     }
 
     /// Removes a staging tree unless its path was taken.
@@ -1025,6 +1475,29 @@ use linux::{capture, delete, get, list};
 #[cfg(test)]
 mod name_tests {
     use super::*;
+
+    #[test]
+    fn a_start_names_at_most_one_canonical_checkpoint() {
+        let fields = |value: serde_json::Value| value.as_object().unwrap().clone();
+        let id = Uuid::new_v4();
+        assert_eq!(
+            start_payload_checkpoint(&fields(serde_json::json!({"name": "app"}))).unwrap(),
+            None
+        );
+        assert_eq!(
+            start_payload_checkpoint(&fields(serde_json::json!({"checkpoint": id.to_string()})))
+                .unwrap(),
+            Some(id)
+        );
+        for invalid in [
+            serde_json::json!({"checkpoint": "c1"}),
+            serde_json::json!({"checkpoint": Uuid::nil().to_string()}),
+            serde_json::json!({"checkpoint": 7}),
+            serde_json::json!({"checkpoint": id.to_string().to_uppercase()}),
+        ] {
+            assert!(start_payload_checkpoint(&fields(invalid)).is_err());
+        }
+    }
 
     #[test]
     fn default_names_take_the_utc_time_and_fit() {
