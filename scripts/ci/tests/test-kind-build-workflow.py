@@ -31,18 +31,20 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / "scripts/ci/tests"))
 import ci_runner_fixtures as runners  # noqa: E402
 
-CHECKOUT = (
-    "noel/actions-checkout@"
-    "3d3c42e5aac5ba805825da76410c181273ba90b1"
-)
-UPLOAD = (
-    "noel/actions-upload-artifact@"
-    "c6a366c94c3e0affe28c06c8df20a878f24da3cf"
-)
-DOWNLOAD = (
-    "noel/actions-download-artifact@"
-    "a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59"
-)
+
+
+def pinned_action(name):
+    """The commit ci.yaml pins NAME to; test-ci-workflow-structure.py owns that
+    every use of an action shares one pin."""
+    match = re.search(rf"{re.escape(name)}@[0-9a-f]{{40}}", WORKFLOW.read_text())
+    if match is None:
+        raise SystemExit(f"ci.yaml does not pin {name} to a commit")
+    return match.group(0)
+
+
+CHECKOUT = pinned_action("noel/actions-checkout")
+UPLOAD = pinned_action("noel/actions-upload-artifact")
+DOWNLOAD = pinned_action("noel/actions-download-artifact")
 PRODUCERS = {
     "kind-workspace": "workspace",
     "kind-product": "product",

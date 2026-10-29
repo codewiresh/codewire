@@ -29,7 +29,25 @@ and with what, never the text of a step:
   metal, build or Kind runner has a timeout within the 90-minute cleanup margin, and
   no matrix comes from another job's output (an empty matrix skips its job).
 
-Each property rejects a mutation of the real workflow (MUTATIONS below).
+Every workflow under .gitea/workflows is held to the properties that do not
+depend on what it delivers:
+
+- its job graph resolves as above;
+- every `runs-on` is a repository-variable runner expression;
+- no workflow reads `secrets.` or declares `permissions:`: credentials come
+  from OpenBao through job-scoped OIDC, and Forgejo ignores permissions;
+- every action is pinned to a commit, the same one wherever it is used, so
+  each action's pin has one owner;
+- every OpenBao role names its own audience (`openbao-<role>`);
+- a job that can log in to OpenBao (OIDC with a role in scope, or a
+  `fetch-openbao-` step) runs only on a
+  trusted runner, in a workflow that only a push to main or a tag, a dispatch
+  or a schedule starts: never a pull request; workflow-wide OIDC likewise;
+- ci.yaml runs Kind on the workspace image kind/common.sh approves, so that
+  digest has one owner.
+
+Each property rejects a mutation of the real workflows (MUTATIONS and
+WORKFLOW_MUTATIONS below).
 """
 
 import re
@@ -43,7 +61,8 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_runner_fixtures as runners  # noqa: E402
 
-CI = ROOT / ".gitea/workflows/ci.yaml"
+WORKFLOWS = ROOT / ".gitea/workflows"
+CI = WORKFLOWS / "ci.yaml"
 SELECTION = "verification-selection"
 REQUIRED = "required-verification"
 TRUSTED_POLICY = ".trusted-ci-policy/"
@@ -90,7 +109,7 @@ def groups(jobs):
             for name, job in jobs.items() if EXPECTED.search(str(job.get("if", "")))}
 
 
-def graph_errors(jobs):
+def graph_errors(jobs, ci=True):
     errors = []
     for name, job in jobs.items():
         needs = needs_of(job)
@@ -110,8 +129,10 @@ def graph_errors(jobs):
             for ref in STEPS_REF.findall(str(value)):
                 if ref not in seen:
                     errors.append(f"{name} output {output} reads a step it does not have: {ref}")
-        if name != SELECTION and SELECTION not in needs:
+        if ci and name != SELECTION and SELECTION not in needs:
             errors.append(f"{name} does not need {SELECTION}, so it could run for a closed pull request")
+    if not ci:
+        return errors
     required = set(needs_of(jobs.get(REQUIRED, {})))
     required_text = dump(jobs.get(REQUIRED, {}))
     for name, expectation in sorted(groups(jobs).items()):
@@ -246,6 +267,104 @@ def check(text):
             + closed_errors(workflow) + runner_errors(jobs) + control_errors(text, jobs))
 
 
+RUNNER_EXPRESSION = re.compile(
+    r"\$\{\{ (?:" + re.escape(runners.MAIN_PUSH) + r" && \(vars\.(CODEWIRE_CI_RUNNER_TRUSTED_[A-Z_]+) "
+    r"\|\| 'unset-\1'\) \|\| \(vars\.(CODEWIRE_CI_RUNNER_UNTRUSTED_[A-Z_]+) \|\| 'unset-\2'\)"
+    r"|vars\.(CODEWIRE_CI_RUNNER_[A-Z_]+) \|\| 'unset-\3') \}\}")
+# Runners only protected work reaches: the trusted pool and the protected Mac.
+TRUSTED_ONLY = {runners.TRUSTED_LIGHT, runners.MACOS}
+PINNED_ACTION = re.compile(r"[^@\s]+@[0-9a-f]{40}")
+ROLE_KEY = re.compile(r"OPENBAO_([A-Z]*_?)ROLE")
+SAFE_TRIGGERS = {"push", "workflow_dispatch", "schedule"}
+
+
+def audience_for(role):
+    """The audience a role's login must name: each role name prefixed openbao-."""
+    if "${{" in role:
+        return re.sub(r"'(codewire-[a-z0-9-]+)'", r"'openbao-\1'", role)
+    return "openbao-" + role
+
+
+def roles_in_scope(workflow, job):
+    """OPENBAO_*ROLE values the job's environment carries (workflow, job, steps)."""
+    envs = [workflow.get("env") or {}, job.get("env") or {}]
+    envs += [step.get("env") or {} for step in job.get("steps") or []]
+    return [env for env in envs if any(ROLE_KEY.fullmatch(key) for key in env)]
+
+
+def workflow_errors(name, text):
+    """The properties every workflow keeps, whatever it delivers."""
+    errors = []
+    workflow = load(text)
+    jobs = workflow["jobs"]
+    errors += [f"{name}: {error}" for error in graph_errors(jobs, ci=False)]
+    if "secrets." in text:
+        errors.append(f"{name} reads a repository secret instead of an OpenBao credential")
+    if re.search(r"^\s*permissions:", text, re.M):
+        errors.append(f"{name} declares GitHub-only permissions that Forgejo ignores")
+    triggers = workflow["on"] if isinstance(workflow["on"], dict) else {key: None for key in workflow["on"]}
+    push = triggers.get("push") or {}
+    unsafe = sorted(set(triggers) - SAFE_TRIGGERS)
+    if set(push.get("branches", [])) - {"main"}:
+        unsafe.append(f"push to {sorted(push['branches'])}")
+    for job_name, job in jobs.items():
+        runner = job.get("runs-on")
+        if not isinstance(runner, str) or not RUNNER_EXPRESSION.fullmatch(runner):
+            errors.append(f"{name} {job_name} runs on {runner!r}, not a repository-variable runner expression")
+        for step in job.get("steps") or []:
+            uses = step.get("uses")
+            if uses and not PINNED_ACTION.fullmatch(uses):
+                errors.append(f"{name} {job_name} uses an action not pinned to a commit: {uses}")
+        for env in roles_in_scope(workflow, job):
+            for key, role in env.items():
+                match = ROLE_KEY.fullmatch(key)
+                if match and env.get(f"OPENBAO_{match.group(1)}AUDIENCE") != audience_for(role):
+                    errors.append(f"{name} {job_name} {key} does not name its own audience")
+        reads_openbao = roles_in_scope(workflow, job) or any(
+            "fetch-openbao-" in str(step.get("run", "")) for step in job.get("steps") or [])
+        if job.get("enable-openid-connect") and reads_openbao:
+            if runner not in TRUSTED_ONLY:
+                errors.append(f"{name} {job_name} can log in to OpenBao on an untrusted runner")
+            if unsafe:
+                errors.append(f"{name} {job_name} can log in to OpenBao in a run started by {unsafe}")
+    # Workflow-wide OIDC reaches every job: only runs no pull request starts.
+    if workflow.get("enable-openid-connect") and unsafe:
+        errors.append(f"{name} grants every job OIDC in a run started by {unsafe}")
+    return errors
+
+
+KIND_COMMON = ROOT / "scripts/ci/verify/kind/common.sh"
+KIND_DIGEST = re.compile(r"oci-approved/codewire/workspace@sha256:([0-9a-f]{64})")
+
+
+def kind_image_errors(ci_text, common_text):
+    """ci.yaml's Kind workspace image is the approved one common.sh owns."""
+    owned = set(KIND_DIGEST.findall(common_text))
+    used = set(KIND_DIGEST.findall(ci_text))
+    if len(owned) != 1:
+        return [f"kind/common.sh approves {len(owned)} Kind workspace images, not one"]
+    return [f"ci.yaml runs Kind on {digest}, not the approved {next(iter(owned))}" for digest in sorted(used - owned)]
+
+
+def action_pin_errors(texts):
+    """Each action has one pin, wherever it is used."""
+    pins = {}
+    for name, text in texts.items():
+        for action, ref in re.findall(r"uses: ([^@\s]+)@(\S+)", text):
+            pins.setdefault(action, {}).setdefault(ref, []).append(name)
+    return [f"{action} is pinned to {len(refs)} commits: "
+            + "; ".join(f"{ref} in {', '.join(sorted(set(names)))}" for ref, names in sorted(refs.items()))
+            for action, refs in pins.items() if len(refs) > 1]
+
+
+def all_workflow_errors(texts, common_text=None):
+    errors = []
+    for name, text in sorted(texts.items()):
+        errors += workflow_errors(name, text)
+    common_text = KIND_COMMON.read_text() if common_text is None else common_text
+    return errors + action_pin_errors(texts) + kind_image_errors(texts.get("ci.yaml", ""), common_text)
+
+
 def in_job(text, job, old, new):
     """TEXT with OLD replaced by NEW once, inside JOB only."""
     start = text.index(f"\n  {job}:\n")
@@ -346,9 +465,51 @@ MUTATIONS = {
 }
 
 
+CHECKOUT = "noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+# Each mutation of one workflow file is a failure an earlier text pin caught,
+# or one it missed.
+WORKFLOW_MUTATIONS = {
+    "the Dev publisher runs on the untrusted runner": ("deploy-dev.yaml", lambda t: in_job(
+        t, "publish-runtime-images", f"runs-on: {runners.TRUSTED_LIGHT}", f"runs-on: {runners.UNTRUSTED_LIGHT}")),
+    "a support publisher starts on a pull request": ("support-images.yaml", lambda t: t.replace(
+        "on:\n  push:\n    branches: [main]\n", "on:\n  pull_request:\n  push:\n    branches: [main]\n", 1)),
+    "Dev delivery starts from another branch": ("deploy-dev.yaml", lambda t: t.replace(
+        "    branches: [main]\n", "    branches: [main, dev]\n", 1)),
+    "a Prod role names another audience": ("deploy-prod.yaml", lambda t: t.replace(
+        "  OPENBAO_GHCR_AUDIENCE: ${{ github.event_name == 'schedule' && 'openbao-codewire-source-prod-publisher-schedule'",
+        "  OPENBAO_GHCR_AUDIENCE: ${{ github.event_name == 'schedule' && 'openbao-codewire-source-dev-publisher'", 1)),
+    "the CLI release reads a repository secret": ("cli-release.yaml", lambda t: t.replace(
+        "  OPENBAO_GITHUB_ROLE:", "  GH_TOKEN: ${{ secrets.GH_TOKEN }}\n  OPENBAO_GITHUB_ROLE:", 1)),
+    "support images declare permissions": ("support-images.yaml", lambda t: t.replace(
+        "\njobs:\n", "\npermissions:\n  contents: read\njobs:\n", 1)),
+    "the mirror names a literal runner label": ("mirror-github.yaml", lambda t: t.replace(
+        f"runs-on: {runners.TRUSTED_LIGHT}", "runs-on: ubuntu-latest", 1)),
+    "the mirror moves its checkout to another commit": ("mirror-github.yaml", lambda t: t.replace(
+        CHECKOUT, CHECKOUT[:-40] + "0" * 40, 1)),
+    "an action follows a tag": ("deploy-dev.yaml", lambda t: t.replace(CHECKOUT, CHECKOUT[:-40] + "v4", 1)),
+    "Dev signs before its descent check": ("deploy-dev.yaml", lambda t: move_step(
+        t, "publish-runtime-images", "Sign the exact runtime set",
+        "Require this commit to move Dev forward before signing")),
+    "ci.yaml runs Kind on an unapproved workspace image": ("ci.yaml", lambda t: re.sub(
+        r"(oci-approved/codewire/workspace@sha256:)[0-9a-f]{64}", r"\g<1>" + "1" * 64, t, count=1)),
+    "the release schedule's workflow grants OIDC to a pull request": ("deploy-prod.yaml", lambda t: t.replace(
+        "\non:\n", "\non:\n  pull_request:\n", 1)),
+    "the workspace-pin bot token is read on the untrusted runner": ("support-images.yaml", lambda t: in_job(
+        t, "propose-workspace-image-pin", f"runs-on: {runners.TRUSTED_LIGHT}", f"runs-on: {runners.UNTRUSTED_LIGHT}")),
+    "a Dev build drops the selection it reads": ("deploy-dev.yaml", lambda t: in_job(
+        t, "build-service-images", "    needs: [deploy-selection]\n", "")),
+}
+
+
+def workflow_texts():
+    return {path.name: path.read_text() for path in sorted(WORKFLOWS.glob("*.y*ml"))}
+
+
 def main():
     text = CI.read_text()
     errors = check(text)
+    texts = workflow_texts()
+    errors += all_workflow_errors(texts)
     if errors:
         print("test-ci-workflow-structure: FAIL\n  " + "\n  ".join(errors), file=sys.stderr)
         return 1
@@ -360,7 +521,16 @@ def main():
         if not check(mutated):
             print(f"test-ci-workflow-structure: FAIL mutation {name!r} was not rejected", file=sys.stderr)
             return 1
-    print(f"test-ci-workflow-structure: PASS jobs={len(load(text)['jobs'])} mutations_rejected={len(MUTATIONS)}")
+    for name, (workflow, mutate) in WORKFLOW_MUTATIONS.items():
+        mutated = mutate(texts[workflow])
+        if mutated == texts[workflow]:
+            print(f"test-ci-workflow-structure: FAIL mutation {name!r} changed nothing", file=sys.stderr)
+            return 1
+        if not all_workflow_errors(texts | {workflow: mutated}):
+            print(f"test-ci-workflow-structure: FAIL mutation {name!r} was not rejected", file=sys.stderr)
+            return 1
+    print(f"test-ci-workflow-structure: PASS workflows={len(texts)} ci_jobs={len(load(text)['jobs'])} "
+          f"mutations_rejected={len(MUTATIONS) + len(WORKFLOW_MUTATIONS)}")
     return 0
 
 

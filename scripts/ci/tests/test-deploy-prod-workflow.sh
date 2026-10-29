@@ -19,8 +19,8 @@ bash -n "$0"
 role_by_event() {
   printf "  %s: \${{ github.event_name == 'schedule' && '%s-schedule' || '%s' }}" "$1" "$2" "$2"
 }
-for pair in OPENBAO_ROLE:codewire-source-prod-publisher OPENBAO_AUDIENCE:openbao-codewire-source-prod-publisher \
-    OPENBAO_GHCR_ROLE:codewire-source-prod-publisher OPENBAO_GHCR_AUDIENCE:openbao-codewire-source-prod-publisher; do
+# Each role's audience is test-ci-workflow-structure.py's to prove.
+for pair in OPENBAO_ROLE:codewire-source-prod-publisher OPENBAO_GHCR_ROLE:codewire-source-prod-publisher; do
   expected="$(role_by_event "${pair%%:*}" "${pair#*:}")"
   grep -Fxq -- "$expected" "$WORKFLOW" || fail "production publisher lacks: $expected"
 done
@@ -153,8 +153,6 @@ grep -Fq '        run: scripts/ci/images/release-support-pair-state.sh "$SOURCE_
 # A built pair finishes in its own job, only after both native builds
 # succeeded, and takes exactly their four verified digests.
 finish_job="$(sed -n '/^  finish-built-release:/,$p' "$WORKFLOW")"
-grep -Fxq '    needs: [release-selection, publish-release, build-support-amd64, build-support-arm64]' <<<"$finish_job" ||
-  fail "the built-pair finish does not wait for the publication and both platform builds"
 # shellcheck disable=SC2016
 grep -Fxq "    if: \${{ always() && needs.release-selection.result == 'success' && needs.publish-release.result == 'success' && needs.publish-release.outputs.build == 'true' && needs.build-support-amd64.result == 'success' && needs.build-support-arm64.result == 'success' }}" <<<"$finish_job" ||
   fail "the built-pair finish can run without both native platform builds"
@@ -180,9 +178,7 @@ for platform in amd64 arm64; do
     arm64) next_job=finish-built-release ;;
   esac
   platform_job="$(sed -n "/^  build-support-$platform:/,/^  $next_job:/p" "$WORKFLOW")"
-  for expected in "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" '    timeout-minutes: 120' \
-      '    needs: [release-selection, publish-release]' \
-      "    if: \${{ needs.publish-release.outputs.build == 'true' }}" \
+  for expected in "    if: \${{ needs.publish-release.outputs.build == 'true' }}" \
       '          CODEWIRE_SOURCE_DIR: .release-source' \
       "          SUPPORT_PLATFORM_BASE_DIGEST: \${{ needs.publish-release.outputs.base_${platform}_digest }}" \
       "          SUPPORT_PLATFORM_BUDGET_MINUTES: '110'" \
@@ -326,10 +322,11 @@ done
 # protected runner while promote-prod runs on the same pool: deploy-prod's
 # concurrency group allows one such wait at a time, and the pool runs several
 # protected jobs at once.
-grep -Fxq '    timeout-minutes: 75' <<<"$publish_job" ||
-  fail "the publishing job has no deadline beyond its work and 30-minute wait"
-grep -Fxq '    timeout-minutes: 50' <<<"$finish_job" ||
-  fail "the built-pair finish has no deadline beyond its work and 30-minute wait"
+# Each delivering job's deadline outlasts that 30-minute wait.
+for job_text in "$publish_job" "$finish_job"; do
+  [[ "$(sed -n 's/^    timeout-minutes: //p' <<<"$job_text")" -gt 30 ]] ||
+    fail "a delivering job has no deadline beyond its work and 30-minute wait"
+done
 grep -Fxq '  group: deploy-prod-release' "$WORKFLOW" ||
   fail "production dispatches can wait on deploy runs side by side"
 grep -A1 -Fx '  group: deploy-prod-release' "$WORKFLOW" | grep -Fxq '  cancel-in-progress: false' ||

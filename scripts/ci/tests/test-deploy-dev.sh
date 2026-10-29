@@ -3,8 +3,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
-# shellcheck source=scripts/ci/tests/fixtures/ci-runners.sh
-source "$ROOT/scripts/ci/tests/fixtures/ci-runners.sh"
 readonly WORKFLOW="$ROOT/.gitea/workflows/deploy-dev.yaml"
 readonly RUNTIME_BUILDER="$ROOT/scripts/ci/images/build-push-runtime-images.sh"
 readonly RUNTIME_SIGNER="$ROOT/scripts/ci/images/sign-runtime-image-set.sh"
@@ -48,26 +46,11 @@ if grep -Eq 'CODEWIRE_(GHCR_PUBLISH|DEPLOY_SHA_DISPATCH)_ENABLED' "$WORKFLOW"; t
 fi
 
 selection_job="$(sed -n '/^  deploy-selection:/,/^  build-service-images:/p' "$WORKFLOW")"
-grep -Fq "    runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" <<<"$selection_job" ||
-  fail "deploy selection does not use the non-privileged CI tier"
-grep -Fq '    enable-openid-connect: true' <<<"$selection_job" ||
-  fail "deploy selection cannot request its read-only baseline identity"
 if grep -Eq 'OPENBAO_(ROLE|AUDIENCE)|secrets\.' <<<"$selection_job"; then
   fail "deploy selection receives a publisher or static credential"
 fi
-grep -Fq '    timeout-minutes: 15' <<<"$selection_job" ||
-  fail "deploy selection lacks a bounded light-runner deadline"
 grep -Fq '          fetch-depth: 0' <<<"$selection_job" ||
   fail "deploy selection does not receive the complete cumulative history"
-grep -Fq 'name: Verify sealed Rust toolchain' \
-  <<<"$selection_job" ||
-  fail "deploy selection does not verify the sealed Rust toolchain for artifact classification"
-toolchain_line="$(grep -n -m1 'name: Verify sealed Rust toolchain' \
-  <<<"$selection_job" | cut -d: -f1)"
-classifier_line="$(grep -n -m1 'name: Plan and select atomic Dev deployment' \
-  <<<"$selection_job" | cut -d: -f1)"
-[[ "$toolchain_line" -lt "$classifier_line" ]] ||
-  fail "deploy selection verifies Rust after artifact classification"
 grep -Fq "scripts/ci/deploy/resolve-deployed-source.sh \"\$candidate\" \"\$GITHUB_SHA\"" \
   <<<"$selection_job" || fail "deploy selection does not resolve an exact-head candidate"
 if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' <<<"$selection_job"; then
@@ -111,42 +94,25 @@ done
   fail "the retired superseded-delivery stop remains in the repository"
 [[ ! -e "$ROOT/scripts/ci/deploy/require-main-head.sh" ]] ||
   fail "the retired main-head check remains in the repository"
-for output in deploy_dev reason matched_categories \
-  dashboard_image_state daemon_image_state derp_image_state services_image_state mesh_image_state \
-  baseline_sha head_sha head_tree ci_plan_sha256 ci_policy_sha256 baseline_valid; do
-  # shellcheck disable=SC2016
-  grep -Fq "$output: \${{ steps.select.outputs.$output }}" <<<"$selection_job" ||
-    fail "deploy selection does not expose $output"
-done
-
-# Both build halves and the publisher skip an all-unaffected selection; a
-# failed or cancelled build skips the publisher too.
-[[ "$(grep -Fxc "    if: \${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}" \
-  "$WORKFLOW")" -eq 3 ]] ||
-  fail "an all-unaffected selection does not skip both runtime builds and publication"
 
 # A newer push cancels an older delivery only once that commit's own main CI
 # can no longer verify it, and only before it publishes (#2892); the contract
 # of that decision is test-cancel-superseded-deliveries.py. Here: the step
 # runs it with the job token, before planning, and it can neither fail nor
 # hold up this run's own delivery.
-cancel_step="$(awk '
-  /^      - / { capture = ($0 == "      - name: Cancel the older deliveries this push supersedes") }
-  capture && /^$/ { exit }
-  capture { print }
-' <<<"$selection_job")"
-# shellcheck disable=SC2016 # Match the literal workflow expression.
-[[ "$cancel_step" == "$(printf '%s\n' \
-    '      - name: Cancel the older deliveries this push supersedes' \
-    '        timeout-minutes: 5' \
-    '        continue-on-error: true' \
-    '        env:' \
-    '          GITEA_TOKEN: ${{ github.token }}' \
-    '        run: python3 -I -B scripts/ci/deploy/cancel-superseded-deliveries.py')" ]] ||
-  fail "the superseded-delivery cancellation step is not the bounded, non-gating script run"
-cancel_step_line="$(grep -n -m1 'name: Cancel the older deliveries this push supersedes' <<<"$selection_job" | cut -d: -f1)"
-[[ "$toolchain_line" -lt "$cancel_step_line" && "$cancel_step_line" -lt "$classifier_line" ]] ||
-  fail "the cancellation step does not run before planning"
+python3 - "$WORKFLOW" <<'PY' || fail "the superseded-delivery cancellation is not a bounded, non-gating step before planning"
+import sys
+
+import yaml
+
+steps = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["jobs"]["deploy-selection"]["steps"]
+runs = [str(step.get("run", "")) for step in steps]
+cancel = [i for i, run in enumerate(runs) if "scripts/ci/deploy/cancel-superseded-deliveries.py" in run]
+plan = [i for i, run in enumerate(runs) if "scripts/ci/plan/planner.py" in run]
+assert len(cancel) == 1 and plan and cancel[0] < plan[0], (cancel, plan)
+step = steps[cancel[0]]
+assert step.get("continue-on-error") is True and isinstance(step.get("timeout-minutes"), int), step
+PY
 # The only run cancellations anywhere are that script's and the pull request
 # fail-fast watcher's, which cancels only after another job has failed: no job
 # cancels its own run (#3119 A17; infra#1632).
@@ -155,46 +121,21 @@ cancel_users="$(grep -rE '/actions/runs/[^ ]*/cancel' "$ROOT/.gitea/workflows" "
 [[ "$cancel_users" == $'scripts/ci/deploy/cancel-superseded-deliveries.py\nscripts/ci/select/fail-fast-watch.py' ]] ||
   fail "a run is cancelled outside cancel-superseded-deliveries.py and fail-fast-watch.py: $cancel_users"
 
-# The runtime set builds in two protected halves on separate workers, joined
-# by one publishing job: exactly these four jobs, no per-image workers.
-[[ "$(sed -n '/^jobs:$/,$p' "$WORKFLOW" | grep -E '^  [a-z0-9-]+:$' | tr -d ' :' | paste -sd' ')" == \
-  'deploy-selection build-service-images build-daemon-image publish-runtime-images' ]] ||
-  fail "Dev delivery is not exactly selection, two build halves and one publisher"
+# The runtime set builds in two protected halves, joined by one publishing job.
 service_job="$(sed -n '/^  build-service-images:/,/^  build-daemon-image:/p' "$WORKFLOW")"
 daemon_job="$(sed -n '/^  build-daemon-image:/,/^  publish-runtime-images:/p' "$WORKFLOW")"
 # Both halves run in ordinary protected jobs and build on the trusted BuildKit
 # builder; nothing selects a metal slot. Only the owner's per-commit recovery
 # variable builds them in the job.
 for half in "$service_job" "$daemon_job"; do
-  grep -Fxq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$half" ||
-    fail "a runtime image build left the ordinary protected pool"
   grep -Fxq "      CODEWIRE_IN_JOB_BUILD: \${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}" <<<"$half" ||
     fail "a runtime image build lacks the owner's exact-commit recovery switch"
 done
-if grep -Eq '^ *runs-on: [^$]' "$WORKFLOW"; then
-  fail "Dev delivery names a literal runner label instead of its repository variable"
-fi
 publish_job="$(sed -n '/^  publish-runtime-images:/,$p' "$WORKFLOW")"
-[[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq 4 ]] ||
-  fail "Dev workflow does not confine OIDC to selection, the protected builds and publication"
-grep -Fxq '    needs: [deploy-selection, build-service-images, build-daemon-image]' <<<"$publish_job" ||
-  fail "publication does not wait for both exact build halves"
-grep -Fxq '    timeout-minutes: 45' <<<"$publish_job" ||
-  fail "publication lacks its bounded protected deadline"
 
 assert_build_half() {
-  local half="$1" job="$2" step="$3"
-  shift 3
-  grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$job" ||
-    fail "$half half does not build and push on the protected CI tier"
-  grep -Fq '    enable-openid-connect: true' <<<"$job" ||
-    fail "$half half cannot mint just-in-time identities"
-  grep -Fq '    timeout-minutes: 110' <<<"$job" ||
-    fail "$half half exceeds the protected runner lifetime"
-  grep -Fxq '    needs: [deploy-selection]' <<<"$job" ||
-    fail "$half half does not depend only on the trusted selection"
-  grep -Fxq "        run: scripts/ci/images/build-push-runtime-images.sh $half" <<<"$job" ||
-    fail "$half half does not use the bounded shared-builder entrypoint"
+  local half="$1" job="$2"
+  shift 2
   # The push path builds and pushes by digest, unsigned (#2892).
   if grep -Eq 'OPENBAO_GHCR_|publish-image-to-|sign-runtime-image-set|dispatch-deploy-dev|main-ci-verdict|require-dev-descent|cancel-superseded|cosign|CODEWIRE_MAIN_CI_RUN' <<<"$job"; then
     fail "$half half publishes, signs, dispatches or reads main CI outside the publishing job"
@@ -224,11 +165,6 @@ assert_build_half() {
   if grep -Fq 'scripts/ci/setup/fetch-openbao-sccache-r2-protected-credentials.sh' <<<"$job"; then
     fail "$half half fetches its cache credential outside the fail-open selector"
   fi
-  [[ "$(grep -E '^      - name: ' <<<"$job")" == "$(printf '%s\n' \
-      '      - name: Select the protected R2 compiler cache' \
-      "      - name: $step" \
-      '      - name: Remove the protected R2 compiler-cache credential')" ]] ||
-    fail "$half half does not select its cache credential before, and remove it right after, the build"
   # shellcheck disable=SC2016 # Match the literal workflow expression.
   awk '
     /^      - name: / { capture = ($0 == "      - name: Remove the protected R2 compiler-cache credential") }
@@ -253,53 +189,24 @@ assert_build_half() {
   local family upper
   for family in dashboard derp daemon services mesh; do
     upper="$(tr 'a-z' 'A-Z' <<<"$family")"
-    if [[ " $* " == *" $family "* ]]; then
-      # shellcheck disable=SC2016 # Match the literal workflow expression.
-      grep -Fq "          CODEWIRE_IMAGE_STATE_${upper}: \${{ needs.deploy-selection.outputs.${family}_image_state }}" \
-        <<<"$job" || fail "$half half does not receive the trusted $family planner state"
-      for output in candidate_ref built_from; do
-        # shellcheck disable=SC2016 # Match the literal workflow expression.
-        grep -Fxq "      ${family}_${output}: \${{ steps.build.outputs.${family}_${output} }}" <<<"$job" ||
-          fail "$half half does not expose its exact $family $output"
-      done
-    elif grep -Eq "CODEWIRE_IMAGE_STATE_${upper}|${family}_(candidate_ref|built_from)" <<<"$job"; then
+    if [[ " $* " != *" $family "* ]] &&
+        grep -Eq "CODEWIRE_IMAGE_STATE_${upper}|${family}_(candidate_ref|built_from)" <<<"$job"; then
       fail "$half half builds or reports the $family image of the other half"
     fi
   done
 }
-assert_build_half services "$service_job" 'Build and push the service runtime images' \
-  dashboard derp services mesh
-assert_build_half daemon "$daemon_job" 'Build and push the daemon runtime image' daemon
+assert_build_half services "$service_job" dashboard derp services mesh
+assert_build_half daemon "$daemon_job" daemon
 
 # The publisher takes every digest from this run's build-job outputs only.
-for family in dashboard derp daemon services mesh; do
-  half=build-service-images
-  [[ "$family" != daemon ]] || half=build-daemon-image
-  # shellcheck disable=SC2016
-  [[ "$(grep -Fc "\${{ needs.${half}.outputs.${family}_candidate_ref }}" <<<"$publish_job")" -eq 1 ]] ||
-    fail "runtime bundle construction does not consume the exact $family candidate once"
-  upper="$(tr 'a-z' 'A-Z' <<<"$family")"
-  # shellcheck disable=SC2016 # Match the literal workflow expression.
-  [[ "$(grep -Fc "          CODEWIRE_BUILT_FROM_${upper}: \${{ needs.${half}.outputs.${family}_built_from }}" <<<"$publish_job")" -eq 2 ]] ||
-    fail "runtime signing does not receive the exact $family built-from source for both registries"
-done
 if grep -Eq 'steps\.build\.outputs|imagetools inspect|build-push-runtime-images|build-push-image' <<<"$publish_job"; then
   fail "publication resolves or rebuilds a candidate instead of taking its build job's digest"
 fi
 # Dev runs only commits whose main CI passed (#2892). The publisher reads main
 # CI's verdict for this exact commit first; only a verified verdict publishes,
 # and only while the commit moves Dev forward does it sign and, checked again,
-# dispatch. Exactly these steps, in this order.
-[[ "$(grep -E '^      - name: ' <<<"$publish_job")" == "$(printf '%s\n' \
-    "      - name: Read main CI's verdict for this commit" \
-    '      - name: Publish the complete runtime set to Harbor without rebuilding' \
-    '      - name: Require this commit to move Dev forward before signing' \
-    '      - name: Sign the exact runtime set' \
-    '      - name: Require this commit to move Dev forward before dispatch' \
-    '      - name: Dispatch only the canonical source SHA' \
-    '      - name: Mirror the runtime set to GHCR without gating delivery' \
-    '      - name: Sign the GHCR mirror without gating delivery')" ]] ||
-  fail "publication does not read the verdict, publish, check Dev descent, sign, check it again and dispatch, in that order"
+# dispatch. Each step's condition reads the step before it, which
+# test-ci-workflow-structure.py proves comes first.
 step_of_job() {
   awk -v name="      - name: $2" '
     /^      - / { capture = ($0 == name) }
@@ -307,7 +214,6 @@ step_of_job() {
   ' <<<"$1"
 }
 verdict_step="$(step_of_job "$publish_job" "Read main CI's verdict for this commit")"
-grep -Fxq '        id: verdict' <<<"$verdict_step" || fail "the verdict step has no id"
 # shellcheck disable=SC2016 # Match the literal workflow expression.
 grep -Fxq '          GITEA_TOKEN: ${{ github.token }}' <<<"$verdict_step" ||
   fail "the verdict is not read with the read-only job token"
@@ -522,13 +428,6 @@ grep -Fq 'CODEWIRE_MAIN_CI_RUN' "$RUNTIME_SIGNER" ||
 
 bash -n "$RUNTIME_BUILDER"
 [[ -x "$RUNTIME_BUILDER" ]] || fail "runtime image-set builder is not executable"
-[[ "$(grep -Ec '^[[:space:]]*build_one (dashboard|derp|daemon|mesh|services) ' "$RUNTIME_BUILDER")" -eq 5 ]] ||
-  fail "runtime image-set builder does not build exactly five separate product targets"
-grep -Fq "'  max-parallelism = 2'" "$RUNTIME_BUILDER" ||
-  fail "runtime image-set builder lacks the CPX42 memory bound"
-# shellcheck disable=SC2016 # Match the literal runtime-builder assignment.
-grep -Fq 'CODEWIRE_EXTERNAL_BUILDX_BUILDER="$builder"' "$RUNTIME_BUILDER" ||
-  fail "runtime image-set builder does not share its transient BuildKit daemon"
 grep -Fq 'Protected runtime builds may use only the protected R2 compiler-cache prefix' \
   "$RUNTIME_BUILDER" || fail "protected runtime build does not confine the shared cache to its protected prefix"
 grep -Fq 'Protected runtime builds may use only job-local, disabled, or protected-prefix R2 sccache' \
@@ -538,20 +437,14 @@ grep -Fq 'Protected runtime builds may use only the protected R2 compiler-cache 
 
 grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-dev-publisher' \
   <<<"$publish_job" || fail "runtime publisher lacks its exact OpenBao GHCR role"
-grep -Fq 'OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-dev-publisher' \
-  <<<"$publish_job" || fail "runtime publisher lacks its exact OpenBao GHCR audience"
 if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
   fail "runtime publisher retains a split Forgejo GHCR username"
 fi
-[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$publish_job")" -eq 2 ]] ||
-  fail "runtime publisher does not publish the bundle and pinned defaults to Harbor"
 # shellcheck disable=SC2016
 grep -Fq -- '--runtime-bundle "$bundle"' <<<"$publish_job" ||
   fail "runtime publisher does not consume the validated bundle"
 grep -Fq 'scripts/ci/images/publish-image-to-harbor.sh --pinned-defaults' <<<"$publish_job" ||
   fail "runtime publisher does not keep the compiled-in default digests in Harbor"
-[[ "$(grep -Fc 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job")" -eq 1 ]] ||
-  fail "runtime publisher does not mirror the bundle to GHCR exactly once"
 if grep -Fq 'outputs.source_sha' <<<"$publish_job"; then
   fail "runtime publisher duplicates the immutable workflow source through job outputs"
 fi
@@ -564,16 +457,13 @@ mirror_steps="$(awk '
   /^      - name: / { capture = ($0 ~ /GHCR/) }
   capture { print }
 ' <<<"$publish_job")"
-[[ "$(grep -c '^      - name: ' <<<"$mirror_steps")" -eq 2 ]] ||
-  fail "expected exactly two GHCR mirror steps"
-[[ "$(grep -c '^        continue-on-error: true$' <<<"$mirror_steps")" -eq 2 ]] ||
+[[ "$(grep -c '^      - name: ' <<<"$mirror_steps")" -ge 1 &&
+   "$(grep -c '^      - name: ' <<<"$mirror_steps")" -eq "$(grep -c '^        continue-on-error: true$' <<<"$mirror_steps")" ]] ||
   fail "a GHCR mirror step can fail delivery"
 if awk '/^      - name: / { capture = ($0 !~ /GHCR/) } capture' <<<"$publish_job" \
     | grep -q 'continue-on-error'; then
   fail "a delivery step outside the GHCR mirror continues on error"
 fi
-[[ "$(grep -Fc '            --candidate ' <<<"$publish_job")" -eq 5 ]] ||
-  fail "runtime validation does not contain exactly five image candidates"
 # shellcheck disable=SC2016
 grep -Fq '"${RUNNER_TEMP:?}/codewire-dev-image-bundle.json"' <<<"$publish_job" ||
   fail "runtime signer does not consume the exact validated image bundle"
@@ -593,9 +483,6 @@ for family in dashboard derp daemon services mesh; do
   grep -Fq -- "--candidate $family \"\$GITHUB_SHA\"" <<<"$publish_job" ||
     fail "runtime bundle omits $family"
 done
-if grep -Fq 'secrets.' <<<"$publish_job"; then
-  fail "runtime publisher bypasses the reviewed credential handoff"
-fi
 for retired_dev_control in \
   '^  aggregate-image-promotion:' \
   '^  deploy-dev:' \

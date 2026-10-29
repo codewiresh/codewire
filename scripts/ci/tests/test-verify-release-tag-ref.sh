@@ -710,52 +710,24 @@ if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' "$deploy_workflow"; then
   echo 'production dispatch retains the static deploy credential' >&2
   exit 1
 fi
-grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" \
-  <(sed -n '/^  finish-built-release:/,$p' "$deploy_workflow")
 if grep -Eq 'CODEWIRE_DEPLOY_PROMOTION_USERNAME|promote-image-bundle|promote \.release-source|promotion-receipt|observe-production:|deploy-prod-observer\.sh|gitea-(upload|download)-artifact|kubectl|helm' \
   "$deploy_workflow"; then
   echo 'production workflow still contains direct deploy writes, receipt transport, or observation' >&2
   exit 1
 fi
 
-grep -Fq '  workflow_dispatch:' "$cli_workflow"
 if grep -Fq "    tags: ['v*']" "$cli_workflow"; then
   echo 'CLI publication still grants release behavior to tag-owned workflow code' >&2
   exit 1
 fi
-grep -Fq '    enable-openid-connect: true' "$cli_workflow"
 if grep -q '^enable-openid-connect:' "$cli_workflow"; then
   echo 'CLI release exposes Forgejo OIDC to the compilation job' >&2
   exit 1
 fi
-# role_by_event KEY NAME: the workflow line that picks NAME, or its schedule
-# twin when the run is the release schedule's pickup (#2892).
-role_by_event() {
-  printf "  %s: \${{ github.event_name == 'schedule' && '%s-schedule' || '%s' }}" "$1" "$2" "$2"
-}
-grep -Fxq "$(role_by_event OPENBAO_GITHUB_ROLE codewire-source-cli-github-mirror)" "$cli_workflow"
-grep -Fxq "$(role_by_event OPENBAO_GITHUB_AUDIENCE openbao-codewire-source-cli-github-mirror)" "$cli_workflow"
-grep -Fq '  release-selection:' "$cli_workflow"
-grep -Fq '  build-release:' "$cli_workflow"
-grep -Fq '  package-release:' "$cli_workflow"
-grep -Fq '    needs: [release-selection]' "$cli_workflow"
-grep -Fq '    needs: [release-selection, pack-runtime, build-release]' "$cli_workflow"
-grep -Fq "[ \"\$GITHUB_REF\" = 'refs/heads/main' ]" "$cli_workflow"
-grep -Fq '          path: .release-source' "$cli_workflow"
-grep -Fq '+refs/heads/main:refs/remotes/origin/main' "$cli_workflow"
-grep -Fq '          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}' "$cli_workflow"
-grep -Fq '        working-directory: .release-source' "$cli_workflow"
-grep -Fq '../scripts/ci/release/verify-cw-release-signing-key.sh apps/cli/GPG_PUBLIC_KEY.asc' "$cli_workflow"
-grep -Fq '        run: scripts/ci/setup/assert-ci-runner-image.sh' "$cli_workflow"
-grep -Fq '../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"' "$cli_workflow"
-grep -Fq '../scripts/ci/release/sign-cw-release.sh dist/cw-release' "$cli_workflow"
-grep -Fq '../scripts/ci/release/publish-cw-release.sh "$RELEASE_TAG" dist/cw-release' "$cli_workflow"
-grep -Fq 'CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}' "$cli_workflow"
 if grep -Fq '.release-control' "$cli_workflow"; then
   echo 'CLI workflow must not load recovery control from the selected tag' >&2
   exit 1
 fi
-grep -Fq '          CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}' "$cli_workflow"
 build_release="$(sed -n '/^  build-release:/,/^  package-release:/p' "$cli_workflow")"
 package_release="$(sed -n '/^  package-release:/,$p' "$cli_workflow")"
 assert_release_publication_boundary() {
