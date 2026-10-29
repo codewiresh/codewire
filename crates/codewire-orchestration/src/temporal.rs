@@ -88,6 +88,23 @@ pub struct EnvironmentClaimInput {
     pub trace_context: TraceContext,
 }
 
+/// A create's first activity when no generation is claimed yet (#3630): it
+/// claims authority exactly as [`EnvironmentActivities::claim_authority`]
+/// does, from its own scheduling, then runs the create under that
+/// generation, saving one activity dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentClaimAndCreateInput {
+    pub environment_id: String,
+    pub requested_by: String,
+    #[serde(default, skip_serializing_if = "TraceContext::is_empty")]
+    pub trace_context: TraceContext,
+}
+
+/// The workflow patch under which a first create claims inside its own
+/// activity. Histories recorded before it replay the separate claim.
+const CLAIM_WITH_CREATE_PATCH: &str = "claim-authority-with-create-3630";
+
 /// Internal activity payload created only after the workflow claims authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,14 +118,28 @@ pub struct EnvironmentActivityCommand {
 
 impl EnvironmentActivityCommand {
     fn from_signal(cmd: &EnvironmentCommand, operation_generation: i64) -> anyhow::Result<Self> {
-        if cmd.environment_id.trim().is_empty() || operation_generation <= 0 {
+        Self::claimed(
+            &cmd.environment_id,
+            &cmd.requested_by,
+            &cmd.trace_context,
+            operation_generation,
+        )
+    }
+
+    fn claimed(
+        environment_id: &str,
+        requested_by: &str,
+        trace_context: &TraceContext,
+        operation_generation: i64,
+    ) -> anyhow::Result<Self> {
+        if environment_id.trim().is_empty() || operation_generation <= 0 {
             return Err(AuthorityLost.into());
         }
         Ok(Self {
-            environment_id: cmd.environment_id.clone(),
-            requested_by: cmd.requested_by.clone(),
+            environment_id: environment_id.to_owned(),
+            requested_by: requested_by.to_owned(),
             operation_generation,
-            trace_context: cmd.trace_context.clone(),
+            trace_context: trace_context.clone(),
         })
     }
 }
@@ -308,6 +339,58 @@ impl EnvironmentActivities {
                 ),
             )
             .await
+        }
+        .instrument(span)
+        .await
+    }
+
+    /// #3630: claim, then create, in one activity. A retry claims again with
+    /// the same run and scheduled time, which returns the same generation, as
+    /// a retried claim activity does; a create that lost authority is a no-op,
+    /// as in [`Self::create`], and the generation still goes back to the
+    /// workflow for setup.
+    #[activity(name = "EnvironmentClaimAndCreateActivity")]
+    pub async fn claim_and_create(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        input: EnvironmentClaimAndCreateInput,
+    ) -> Result<i64, ActivityError> {
+        let span = activity_span(
+            "EnvironmentClaimAndCreateActivity",
+            &input.environment_id,
+            &input.trace_context,
+            &ctx,
+        );
+        async move {
+            let (workflow_run_id, scheduled_at_unix_nanos) = claim_authority_metadata(&ctx)?;
+            let generation = run_claim_activity(
+                ctx.clone(),
+                ActivityAuthority::claim(
+                    &self.wctx.pool,
+                    &input.environment_id,
+                    &workflow_run_id,
+                    scheduled_at_unix_nanos,
+                ),
+            )
+            .await?;
+            let cmd = EnvironmentActivityCommand::claimed(
+                &input.environment_id,
+                &input.requested_by,
+                &input.trace_context,
+                generation,
+            )?;
+            if let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? {
+                run_environment_activity(
+                    ctx,
+                    create::handle_environment_create_without_setup_publish(
+                        &self.wctx,
+                        &job_payload(&cmd, "environment.create"),
+                        &authority,
+                    ),
+                )
+                .await?;
+            }
+            Ok(generation)
         }
         .instrument(span)
         .await
@@ -666,8 +749,26 @@ impl EnvironmentWorkflow {
             }
 
             ensure_workflow_environment(&mut environment_id, &cmd)?;
+            // Whether this command's create already ran with its claim.
+            let mut created = false;
             let generation = match operation_generation {
                 Some(generation) => generation,
+                None if cmd.action == "create" && ctx.patched(CLAIM_WITH_CREATE_PATCH) => {
+                    let generation = ctx
+                        .start_activity(
+                            EnvironmentActivities::claim_and_create,
+                            EnvironmentClaimAndCreateInput {
+                                environment_id: cmd.environment_id.clone(),
+                                requested_by: cmd.requested_by.clone(),
+                                trace_context: cmd.trace_context.clone(),
+                            },
+                            environment_activity_opts(),
+                        )
+                        .await?;
+                    operation_generation = Some(generation);
+                    created = true;
+                    generation
+                }
                 None => {
                     let generation = ctx
                         .start_activity(
@@ -687,12 +788,14 @@ impl EnvironmentWorkflow {
 
             match cmd.action.as_str() {
                 "create" => {
-                    ctx.start_activity(
-                        EnvironmentActivities::create,
-                        activity_cmd.clone(),
-                        environment_activity_opts(),
-                    )
-                    .await?;
+                    if !created {
+                        ctx.start_activity(
+                            EnvironmentActivities::create,
+                            activity_cmd.clone(),
+                            environment_activity_opts(),
+                        )
+                        .await?;
+                    }
                     ctx.start_activity(
                         EnvironmentActivities::setup,
                         activity_cmd,
@@ -1492,6 +1595,44 @@ mod tests {
             ..Default::default()
         };
         assert!(EnvironmentActivityCommand::from_signal(&signal, 0).is_err());
+    }
+
+    /// #3630: the merged first create's input carries no generation, since
+    /// the activity claims it, and refuses unknown fields like every other
+    /// workflow payload; the command it builds keeps the claim's checks.
+    #[test]
+    fn claim_and_create_input_carries_no_authority() {
+        let input: EnvironmentClaimAndCreateInput =
+            serde_json::from_str(r#"{"environment_id":"env-1","requested_by":"alice"}"#).unwrap();
+        assert_eq!(input.environment_id, "env-1");
+        assert!(
+            serde_json::from_str::<EnvironmentClaimAndCreateInput>(
+                r#"{"environment_id":"env-1","requested_by":"","operation_generation":7}"#
+            )
+            .is_err()
+        );
+        let cmd = EnvironmentActivityCommand::claimed(
+            &input.environment_id,
+            &input.requested_by,
+            &input.trace_context,
+            7,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                cmd.environment_id.as_str(),
+                cmd.requested_by.as_str(),
+                cmd.operation_generation
+            ),
+            ("env-1", "alice", 7)
+        );
+        assert!(
+            EnvironmentActivityCommand::claimed("env-1", "alice", &TraceContext::default(), 0)
+                .is_err()
+        );
+        assert!(
+            EnvironmentActivityCommand::claimed(" ", "alice", &TraceContext::default(), 7).is_err()
+        );
     }
 
     #[test]

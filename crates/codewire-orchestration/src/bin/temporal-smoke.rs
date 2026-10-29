@@ -23,8 +23,8 @@ use temporalio_common::data_converters::{DataConverter, SerializationContextData
 use temporalio_common::protos::temporal::api::history::v1::history_event::Attributes;
 
 use codewire_orchestration::temporal::{
-    DEFAULT_TASK_QUEUE, EnvironmentActivityCommand, EnvironmentClaimInput, EnvironmentCommand,
-    EnvironmentWorkflow, environment_workflow_id,
+    DEFAULT_TASK_QUEUE, EnvironmentActivityCommand, EnvironmentClaimAndCreateInput,
+    EnvironmentClaimInput, EnvironmentCommand, EnvironmentWorkflow, environment_workflow_id,
 };
 
 fn activity_name(attributes: &Attributes) -> Option<&str> {
@@ -59,6 +59,14 @@ async fn verify_activity_input(
             .await?;
         if input.environment_id != env_id {
             anyhow::bail!("claim input environment mismatch: {input:?}");
+        }
+    } else if name == "EnvironmentClaimAndCreateActivity" {
+        // It claims the generation itself, so its input carries none (#3630).
+        let input: EnvironmentClaimAndCreateInput = converter
+            .from_payloads(&SerializationContextData::Activity, payloads)
+            .await?;
+        if input.environment_id != env_id || input.requested_by != "temporal-smoke" {
+            anyhow::bail!("claim-and-create input mismatch: {input:?}");
         }
     } else {
         let input: EnvironmentActivityCommand = converter
@@ -141,9 +149,9 @@ async fn verify_final_protocol<W: HasWorkflowDefinition>(
             })
             .collect();
 
+        // A first create claims inside its own activity (#3630).
         let expected_names = [
-            "EnvironmentClaimAuthorityActivity",
-            "EnvironmentCreateActivity",
+            "EnvironmentClaimAndCreateActivity",
             "EnvironmentSetupActivity",
         ];
         let names_match = scheduled.len() == expected_names.len()

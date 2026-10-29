@@ -200,9 +200,9 @@ async fn assert_connect_create_drives_workflow(
                     _ => None,
                 })
                 .collect();
+            // A first create claims inside its own activity (#3630).
             let expected = [
-                "EnvironmentClaimAuthorityActivity",
-                "EnvironmentCreateActivity",
+                "EnvironmentClaimAndCreateActivity",
                 "EnvironmentSetupActivity",
             ];
             if scheduled
