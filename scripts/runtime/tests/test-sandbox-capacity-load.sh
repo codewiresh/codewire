@@ -236,6 +236,22 @@ STUB
 [[ "$(kubectl_case $'connect\nconnect\nok')" == 'partial|1|2' ]] || fail 'a second connection failure is retried'
 refuses 'read-only kubectl refused verb delete' bash -c "$ro_helpers"'; die() { echo "$1"; exit 3; }; source "$1"; kubectl_ro delete pod x' _ "$work/kubectl_ro.sh"
 
+# At a scheduler refusal only sandboxes with no node stop being waited for;
+# a scheduled one is still starting. An unreadable Pod list stops them all.
+mkdir -p "$work/refusal"
+printf '%s\n' \
+  '{"id":"a","pod":"sandbox-a","volumes":[]}' \
+  '{"id":"b","pod":"sandbox-b","volumes":[]}' \
+  '{"id":"c","pod":"","volumes":[]}' >"$work/refusal/objects.jsonl"
+pods='{"items":[{"metadata":{"name":"sandbox-a"},"spec":{"nodeName":"n1"}},{"metadata":{"name":"sandbox-b"},"spec":{}}]}'
+result="$(bash -c 'source "$1"; RUN_DIR="$2"; SANDBOX_NAMESPACE=ns; PODS="$3"; kubectl_ro() { printf "%s" "$PODS"; }
+  unscheduled_ids a b c d | paste -sd,' _ "$work/functions.sh" "$work/refusal" "$pods")"
+[[ "$result" == b,c,d ]] || fail "a refusal stops waiting for a scheduled sandbox: $result"
+result="$(bash -c 'source "$1"; RUN_DIR="$2"; SANDBOX_NAMESPACE=ns; kubectl_ro() { return 1; }
+  unscheduled_ids a b | paste -sd,' _ "$work/functions.sh" "$work/refusal")"
+[[ "$result" == a,b ]] || fail "an unreadable Pod list does not stop every waiter: $result"
+grep -qF 'done < <(unscheduled_ids "${STEP_IDS[@]}")' "$LOAD" || fail 'a refusal does not use unscheduled_ids'
+
 # A step past its wall-clock limit records why and signals the run.
 mkdir -p "$work/watchdog"
 result="$(bash -c 'source "$1"; MAIN_PID=$$; RUN_DIR="$2"; MAX_STEP_MINUTES=0

@@ -645,6 +645,19 @@ nodes_state() {
   done | aggregate_nodes "$definitions"
 }
 
+# Of the given environments, those whose sandbox Pod has no node yet: the
+# ones a scheduler refusal leaves waiting. A Pod that is scheduled is still
+# starting and becomes ready on its own.
+unscheduled_ids() { # IDS...
+  local pods
+  pods="$(kubectl_ro get pods -n "$SANDBOX_NAMESPACE" -o json 2>/dev/null |
+    jq -c '[.items[] | select(.spec.nodeName != null) | .metadata.name]')" || pods=""
+  [[ -n "$pods" ]] || { printf '%s\n' "$@"; return; }
+  jq -rn --argjson scheduled "$pods" --slurpfile objects "$RUN_DIR/objects.jsonl" '
+    [$objects[] | .pod as $pod | select($pod != "" and ($scheduled | index($pod) != null)) | .id] as $placed
+    | $ARGS.positional[] | select(. as $id | $placed | index($id) == null)' --args "$@"
+}
+
 # The run's scheduled sandbox pods per node, as {"node": count}.
 run_placement() {
   kubectl_ro get pods -n "$SANDBOX_NAMESPACE" -o json 2>/dev/null |
@@ -1172,9 +1185,13 @@ for target in "${STEP_COUNTS[@]}"; do
       if [[ -n "$refusal" ]]; then
         log "step $step: scheduler refused a sandbox: $refusal"
         STOP_REASON="scheduler refusal: $refusal"
-        for pending_id in "${STEP_IDS[@]}"; do
+        # Stop waiting only for sandboxes with no node; scheduled ones are
+        # still starting and count once ready (#3583: Prod large showed 29
+        # ready of 37 placed when every waiter stopped here).
+        while IFS= read -r pending_id; do
+          [[ -n "$pending_id" ]] || continue
           kill "${WAITER_PIDS[$pending_id]}" "${SSH_PIDS[$pending_id]:-}" 2>/dev/null || true
-        done
+        done < <(unscheduled_ids "${STEP_IDS[@]}")
         break 2
       fi
       pause 5
