@@ -10,6 +10,7 @@ pub mod catalog;
 pub mod catalog_admin;
 pub mod checkout_sessions;
 pub mod connect;
+pub mod credit;
 pub mod email;
 pub mod metering;
 pub mod overview;

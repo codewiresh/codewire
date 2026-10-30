@@ -5,7 +5,9 @@
 //!
 //! These live in the billing service because they are billing-domain
 //! crons, not orchestration. `BILLING_LOOPS` is the allow-list of crons
-//! to run (`env-usage-metering`, `env-overage-billing`, `trials`). The
+//! to run (`env-usage-metering`, `credit-metering`, `env-overage-billing`,
+//! `trials`); `credit-metering` draws prepaid credit (#3381) and replaces
+//! `env-overage-billing` among the defaults. The
 //! billing service elects its own leader under a distinct pg advisory
 //! lock, so its replicas never double-meter.
 
@@ -74,6 +76,43 @@ pub fn start_loops(deps: Arc<MeteringDeps>, loops: &[String]) {
                     .await;
                 });
                 tracing::info!(interval = ?USAGE_METERING_INTERVAL, "env billing: started");
+            }
+            "credit-metering" => {
+                if dry_run {
+                    tracing::info!("credit metering: disabled (dry run)");
+                    continue;
+                }
+                let deps = deps.clone();
+                let is_leader = is_leader.clone();
+                tokio::spawn(async move {
+                    interval_loop(
+                        crate::credit::CREDIT_METERING_INTERVAL,
+                        is_leader,
+                        move || {
+                            let deps = deps.clone();
+                            async move {
+                                match crate::credit::draw_due_usage(&deps.pool).await {
+                                    Ok(summary)
+                                        if summary.organizations > 0 || summary.failed > 0 =>
+                                    {
+                                        tracing::info!(
+                                            organizations = summary.organizations,
+                                            failed = summary.failed,
+                                            drawn_nano_eur = summary.drawn_nano_eur,
+                                            "credit metering: drew usage"
+                                        );
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        tracing::error!(error = %e, "credit metering: draw failed")
+                                    }
+                                }
+                            }
+                        },
+                    )
+                    .await;
+                });
+                tracing::info!(interval = ?crate::credit::CREDIT_METERING_INTERVAL, "credit metering: started");
             }
             "env-overage-billing" => {
                 if deps.stripe.enabled().is_none() {

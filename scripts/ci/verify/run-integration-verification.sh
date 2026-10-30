@@ -788,6 +788,11 @@ database_lane_core() {
     cargo test -p codewire-billing --lib 'billing_teardown::tests::db_' \
       -- --nocapture
 
+  counted_suite "credit metering matrix" credit-metering \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-billing --lib 'credit::tests::db_' \
+      -- --nocapture
+
   counted_suite "Mesh migration ledger" mesh-migration-ledger \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-mesh --lib 'store::migration_tests::' \
