@@ -23,7 +23,7 @@ use stripe_checkout::checkout_session::{
 };
 use stripe_client_core::{RequestBuilder, StripeMethod};
 use stripe_core::customer::{
-    CreateCustomer, RetrieveCustomer, UpdateCustomer, UpdateCustomerInvoiceSettings,
+    CreateCustomer, DeleteCustomer, RetrieveCustomer, UpdateCustomer, UpdateCustomerInvoiceSettings,
 };
 use stripe_core::setup_intent::RetrieveSetupIntent;
 
@@ -643,6 +643,23 @@ impl StripeHandle {
             ));
         }
         Ok(())
+    }
+
+    /// Delete a customer when its account is deleted (#3679). Stripe keeps
+    /// the customer's invoices and payments and removes its payment methods.
+    /// A customer that is already deleted, or never existed, is a success.
+    pub async fn delete_customer(&self, id: &str) -> Result<(), AppError> {
+        let Some(client) = &self.client else {
+            return Ok(());
+        };
+        let customer = id
+            .parse::<stripe_shared::CustomerId>()
+            .map_err(stripe_err)?;
+        match DeleteCustomer::new(customer).send(client.as_ref()).await {
+            Ok(_) => Ok(()),
+            Err(error) if stripe_not_found(&error) => Ok(()),
+            Err(error) => Err(stripe_err(error)),
+        }
     }
 
     /// Mirrors `bc.Client.V1SubscriptionItems.Update` in the subscription

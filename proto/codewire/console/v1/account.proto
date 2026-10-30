@@ -2,7 +2,8 @@ syntax = "proto3";
 
 package codewire.console.v1;
 
-// AccountService manages account-global Git author identity.
+// AccountService manages account-global Git author identity and deletes the
+// account.
 //
 // Organization-scoped API keys cannot call this service. Callers must use a
 // browser session or an OAuth-issued native-app bearer credential.
@@ -15,6 +16,18 @@ service AccountService {
   // UpdateGitIdentity replaces the optional Git author overrides. An absent
   // field clears that override, restoring the account-derived fallback.
   rpc UpdateGitIdentity(UpdateGitIdentityRequest) returns (UpdateGitIdentityResponse);
+
+  // GetAccountDeletionPlan returns what deleting the caller's account would
+  // delete, keep and refuse.
+  rpc GetAccountDeletionPlan(GetAccountDeletionPlanRequest) returns (GetAccountDeletionPlanResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // DeleteAccount disables the caller's account at once and starts its
+  // deletion. It fails with FAILED_PRECONDITION while the caller is the only
+  // owner of an organization that has other members. Repeating it while a
+  // deletion is in progress returns that deletion.
+  rpc DeleteAccount(DeleteAccountRequest) returns (DeleteAccountResponse);
 }
 
 // GitIdentity is the resolved author identity after applying account
@@ -39,4 +52,44 @@ message UpdateGitIdentityRequest {
 
 message UpdateGitIdentityResponse {
   GitIdentity git_identity = 1;
+}
+
+// AccountDeletionOrganization is one organization the caller belongs to.
+message AccountDeletionOrganization {
+  string id = 1;
+  string name = 2;
+  string slug = 3;
+  // The caller's role: owner, admin or member.
+  string role = 4;
+  int64 member_count = 5;
+  // Environments that are not destroyed.
+  int64 environment_count = 6;
+}
+
+message GetAccountDeletionPlanRequest {}
+
+message GetAccountDeletionPlanResponse {
+  // The address the caller types to confirm, and where the confirmation
+  // mail goes.
+  string email = 1;
+  // Organizations the caller is the only member of, deleted with the
+  // account together with their environments, secrets and credentials.
+  repeated AccountDeletionOrganization personal_organizations = 2;
+  // Organizations with other members; the caller's membership is removed.
+  repeated AccountDeletionOrganization shared_organizations = 3;
+  // Organizations the caller is the only owner of while others are members.
+  // The account cannot be deleted until these are transferred or deleted.
+  repeated AccountDeletionOrganization blocking_organizations = 4;
+  // Remaining credit of the personal organizations, forfeited, in
+  // nano-euros.
+  int64 forfeited_credit_nano_eur = 5;
+}
+
+message DeleteAccountRequest {
+  // The account's email address, typed by the user to confirm.
+  string confirm_email = 1;
+}
+
+message DeleteAccountResponse {
+  string operation_id = 1;
 }

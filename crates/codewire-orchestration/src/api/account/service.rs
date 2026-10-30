@@ -4,6 +4,7 @@
 //! authorization and persistence behavior live here so every Connect procedure
 //! uses the same policy.
 
+use codewire_server_core::account_deletion::{self, AccountDeletionOperation, AccountDeletionPlan};
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::{AppError, AppResult};
 use sqlx::Row;
@@ -111,6 +112,28 @@ pub(crate) async fn update_git_identity(
     Ok(resolved_git_identity(
         load_git_identity(state, user_id).await?,
     ))
+}
+
+/// What deleting the caller's account would do, and the address they type
+/// to confirm it (#3679).
+pub(crate) async fn account_deletion_plan(
+    state: &ApiState,
+    user: &AuthUser,
+) -> AppResult<(String, AccountDeletionPlan)> {
+    let user_id = account_user_id(user)?;
+    let row = load_git_identity(state, user_id).await?;
+    let plan = account_deletion::account_deletion_plan(&state.pool, user_id).await?;
+    Ok((row.email, plan))
+}
+
+/// Disable the caller's account and start its deletion (#3679).
+pub(crate) async fn delete_account(
+    state: &ApiState,
+    user: &AuthUser,
+    confirm_email: &str,
+) -> AppResult<AccountDeletionOperation> {
+    let user_id = account_user_id(user)?;
+    account_deletion::begin_account_deletion(&state.pool, user_id, confirm_email).await
 }
 
 #[cfg(test)]

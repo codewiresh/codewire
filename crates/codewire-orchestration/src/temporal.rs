@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+use codewire_server_core::account_deletion::{self, AccountDeletionWorkflowInput};
 use codewire_server_core::obs::TraceContext;
 use serde::{Deserialize, Serialize};
 use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions};
@@ -1181,6 +1182,150 @@ impl OrganizationDeletionWorkflow {
     }
 }
 
+/// Local activities of the account deletion workflow (#3679). The Stripe and
+/// mail phases are owned by the billing worker and scheduled onto its queue.
+pub struct AccountDeletionActivities {
+    pub wctx: Arc<WorkerContext>,
+}
+
+fn account_deletion_activity_error(error: codewire_server_core::AppError) -> ActivityError {
+    ActivityError::from(anyhow::anyhow!("account deletion activity failed: {error}"))
+}
+
+#[activities]
+impl AccountDeletionActivities {
+    /// Fails, and so is retried, until every personal organization's own
+    /// deletion has completed.
+    #[activity(name = "AwaitAccountOrganizationsDeletedActivity")]
+    pub async fn await_organizations(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        input: AccountDeletionWorkflowInput,
+    ) -> Result<(), ActivityError> {
+        account_deletion::mark_account_deletion_started(&self.wctx.pool, &input.operation_id)
+            .await
+            .map_err(account_deletion_activity_error)?;
+        let done =
+            account_deletion::advance_personal_organizations(&self.wctx.pool, &input.operation_id)
+                .await
+                .map_err(account_deletion_activity_error)?;
+        if !done {
+            return Err(ActivityError::from(anyhow::anyhow!(
+                "personal organizations are still being deleted"
+            )));
+        }
+        Ok(())
+    }
+
+    #[activity(name = "FinalizeAccountDatabaseActivity")]
+    pub async fn finalize_database(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        input: AccountDeletionWorkflowInput,
+    ) -> Result<(), ActivityError> {
+        account_deletion::finalize_account_deletion_database(&self.wctx.pool, &input.operation_id)
+            .await
+            .map_err(account_deletion_activity_error)?;
+        Ok(())
+    }
+}
+
+/// Name-only declarations for the activities implemented by codewire-billing.
+/// Temporal routes them to `codewire-billing`; this implementation is never
+/// registered by the orchestration worker.
+pub struct ExternalAccountDeletionBillingActivities;
+
+#[activities]
+impl ExternalAccountDeletionBillingActivities {
+    #[activity(name = "DeleteAccountStripeCustomersActivity")]
+    pub async fn delete_stripe_customers(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        _input: AccountDeletionWorkflowInput,
+    ) -> Result<(), ActivityError> {
+        unreachable!("external billing activity is not registered locally")
+    }
+
+    #[activity(name = "SendAccountDeletedMailActivity")]
+    pub async fn send_deleted_mail(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        _input: AccountDeletionWorkflowInput,
+    ) -> Result<(), ActivityError> {
+        unreachable!("external billing activity is not registered locally")
+    }
+}
+
+/// Every account deletion phase retries until it succeeds: the account is
+/// already disabled, and stopping part way would leave it neither usable nor
+/// deleted. The backoff tops out at five minutes.
+fn account_deletion_retry_policy() -> RetryPolicy {
+    RetryPolicy {
+        initial_interval: Duration::from_secs(10).try_into().ok(),
+        backoff_coefficient: 2.0,
+        maximum_interval: Duration::from_secs(5 * 60).try_into().ok(),
+        maximum_attempts: 0,
+        ..Default::default()
+    }
+}
+
+fn account_deletion_activity_opts() -> ActivityOptions {
+    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(10 * 60))
+        .cancellation_type(ActivityCancellationType::WaitCancellationCompleted)
+        .retry_policy(account_deletion_retry_policy())
+        .build()
+}
+
+fn account_deletion_billing_activity_opts() -> ActivityOptions {
+    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(10 * 60))
+        .task_queue(BILLING_TASK_QUEUE)
+        .cancellation_type(ActivityCancellationType::WaitCancellationCompleted)
+        .retry_policy(account_deletion_retry_policy())
+        .build()
+}
+
+/// Deletes an account after its request disabled it (#3679). Started only
+/// from the durable outbox reconciler; each activity resumes from the phase
+/// the operation records.
+#[workflow(name = "AccountDeletionWorkflow")]
+#[derive(Default)]
+pub struct AccountDeletionWorkflow {}
+
+#[workflow_methods]
+impl AccountDeletionWorkflow {
+    #[run]
+    pub async fn run(
+        ctx: &mut WorkflowContext<Self>,
+        input: AccountDeletionWorkflowInput,
+    ) -> WorkflowResult<()> {
+        ctx.start_activity(
+            AccountDeletionActivities::await_organizations,
+            input.clone(),
+            account_deletion_activity_opts(),
+        )
+        .await?;
+        ctx.start_activity(
+            ExternalAccountDeletionBillingActivities::delete_stripe_customers,
+            input.clone(),
+            account_deletion_billing_activity_opts(),
+        )
+        .await?;
+        ctx.start_activity(
+            AccountDeletionActivities::finalize_database,
+            input.clone(),
+            account_deletion_activity_opts(),
+        )
+        .await?;
+        ctx.start_activity(
+            ExternalAccountDeletionBillingActivities::send_deleted_mail,
+            input,
+            account_deletion_billing_activity_opts(),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
 #[activities]
 impl PortDnsActivities {
     #[activity(name = "PortDnsCreateActivity")]
@@ -1407,6 +1552,32 @@ impl TemporalTrigger {
     }
 }
 
+impl TemporalTrigger {
+    /// Start or recover the one durable workflow for an account deletion.
+    /// `UseExisting` makes a start repeated after a crash a recovery, never
+    /// a second execution.
+    pub async fn trigger_account_deletion(
+        &self,
+        input: AccountDeletionWorkflowInput,
+    ) -> anyhow::Result<()> {
+        use temporalio_client::WorkflowStartOptions;
+        use temporalio_common::protos::temporal::api::enums::v1::WorkflowIdConflictPolicy;
+
+        if !input.operation_id.starts_with("account-deletion/") {
+            anyhow::bail!("account deletion workflow identity is invalid");
+        }
+        let options =
+            WorkflowStartOptions::new(self.task_queue.as_str(), input.operation_id.clone())
+                .id_conflict_policy(WorkflowIdConflictPolicy::UseExisting)
+                .build();
+        self.client
+            .start_workflow(AccountDeletionWorkflow::run, input, options)
+            .await
+            .map_err(|error| anyhow::anyhow!("start account deletion workflow: {error}"))?;
+        Ok(())
+    }
+}
+
 /// The Temporal worker thread's stack. Every activity is polled on this one
 /// thread, nested inside the SDK's own futures. In an unoptimised build the
 /// create activity's poll frames alone take about 1.75 MiB (the create loop's
@@ -1487,9 +1658,11 @@ pub async fn run_temporal_worker(
         .register_workflow::<EnvironmentWorkflow>()?
         .register_workflow::<PortDnsWorkflow>()?
         .register_workflow::<OrganizationDeletionWorkflow>()?
+        .register_workflow::<AccountDeletionWorkflow>()?
         .register_activities(EnvironmentActivities { wctx: wctx.clone() })
         .register_activities(PortDnsActivities { wctx: wctx.clone() })
-        .register_activities(OrganizationDeletionActivities { wctx })
+        .register_activities(OrganizationDeletionActivities { wctx: wctx.clone() })
+        .register_activities(AccountDeletionActivities { wctx })
         .build();
 
     let mut worker = Worker::new(&runtime, client, worker_options)
@@ -1547,6 +1720,32 @@ mod tests {
         let opts = organization_deletion_failure_opts();
         assert_eq!(opts.heartbeat_timeout, Some(Duration::from_secs(15)));
         assert_eq!(opts.retry_policy.as_ref().unwrap().maximum_attempts, 0);
+    }
+
+    #[test]
+    fn account_deletion_phases_retry_until_done_and_billing_runs_on_its_queue() {
+        let local = account_deletion_activity_opts();
+        let billing = account_deletion_billing_activity_opts();
+        for opts in [&local, &billing] {
+            assert_eq!(opts.retry_policy.as_ref().unwrap().maximum_attempts, 0);
+        }
+        assert_eq!(local.task_queue, None);
+        assert_eq!(billing.task_queue.as_deref(), Some(BILLING_TASK_QUEUE));
+    }
+
+    #[test]
+    fn account_deletion_payload_matches_the_billing_contract() {
+        let input = AccountDeletionWorkflowInput {
+            operation_id: "account-deletion/abc".into(),
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        assert_eq!(json, r#"{"operation_id":"account-deletion/abc"}"#);
+        assert!(
+            serde_json::from_str::<AccountDeletionWorkflowInput>(
+                r#"{"operation_id":"account-deletion/abc","user_id":"u"}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

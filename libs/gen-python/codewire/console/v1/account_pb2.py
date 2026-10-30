@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!codewire/console/v1/account.proto\x12\x13\x63odewire.console.v1\"E\n\x0bGitIdentity\x12\x19\n\x08git_name\x18\x01 \x01(\tR\x07gitName\x12\x1b\n\tgit_email\x18\x02 \x01(\tR\x08gitEmail\"\x17\n\x15GetGitIdentityRequest\"]\n\x16GetGitIdentityResponse\x12\x43\n\x0cgit_identity\x18\x01 \x01(\x0b\x32 .codewire.console.v1.GitIdentityR\x0bgitIdentity\"w\n\x18UpdateGitIdentityRequest\x12\x1e\n\x08git_name\x18\x01 \x01(\tH\x00R\x07gitName\x88\x01\x01\x12 \n\tgit_email\x18\x02 \x01(\tH\x01R\x08gitEmail\x88\x01\x01\x42\x0b\n\t_git_nameB\x0c\n\n_git_email\"`\n\x19UpdateGitIdentityResponse\x12\x43\n\x0cgit_identity\x18\x01 \x01(\x0b\x32 .codewire.console.v1.GitIdentityR\x0bgitIdentity2\xf4\x01\n\x0e\x41\x63\x63ountService\x12n\n\x0eGetGitIdentity\x12*.codewire.console.v1.GetGitIdentityRequest\x1a+.codewire.console.v1.GetGitIdentityResponse\"\x03\x90\x02\x01\x12r\n\x11UpdateGitIdentity\x12-.codewire.console.v1.UpdateGitIdentityRequest\x1a..codewire.console.v1.UpdateGitIdentityResponseB\xdf\x01\n\x17\x63om.codewire.console.v1B\x0c\x41\x63\x63ountProtoP\x01ZHgithub.com/codewiresh/codewire/libs/gen-go/codewire/console/v1;consolev1\xa2\x02\x03\x43\x43X\xaa\x02\x13\x43odewire.Console.V1\xca\x02\x13\x43odewire\\Console\\V1\xe2\x02\x1f\x43odewire\\Console\\V1\\GPBMetadata\xea\x02\x15\x43odewire::Console::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!codewire/console/v1/account.proto\x12\x13\x63odewire.console.v1\"E\n\x0bGitIdentity\x12\x19\n\x08git_name\x18\x01 \x01(\tR\x07gitName\x12\x1b\n\tgit_email\x18\x02 \x01(\tR\x08gitEmail\"\x17\n\x15GetGitIdentityRequest\"]\n\x16GetGitIdentityResponse\x12\x43\n\x0cgit_identity\x18\x01 \x01(\x0b\x32 .codewire.console.v1.GitIdentityR\x0bgitIdentity\"w\n\x18UpdateGitIdentityRequest\x12\x1e\n\x08git_name\x18\x01 \x01(\tH\x00R\x07gitName\x88\x01\x01\x12 \n\tgit_email\x18\x02 \x01(\tH\x01R\x08gitEmail\x88\x01\x01\x42\x0b\n\t_git_nameB\x0c\n\n_git_email\"`\n\x19UpdateGitIdentityResponse\x12\x43\n\x0cgit_identity\x18\x01 \x01(\x0b\x32 .codewire.console.v1.GitIdentityR\x0bgitIdentity\"\xb9\x01\n\x1b\x41\x63\x63ountDeletionOrganization\x12\x0e\n\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n\x04slug\x18\x03 \x01(\tR\x04slug\x12\x12\n\x04role\x18\x04 \x01(\tR\x04role\x12!\n\x0cmember_count\x18\x05 \x01(\x03R\x0bmemberCount\x12+\n\x11\x65nvironment_count\x18\x06 \x01(\x03R\x10\x65nvironmentCount\"\x1f\n\x1dGetAccountDeletionPlanRequest\"\xa8\x03\n\x1eGetAccountDeletionPlanResponse\x12\x14\n\x05\x65mail\x18\x01 \x01(\tR\x05\x65mail\x12g\n\x16personal_organizations\x18\x02 \x03(\x0b\x32\x30.codewire.console.v1.AccountDeletionOrganizationR\x15personalOrganizations\x12\x63\n\x14shared_organizations\x18\x03 \x03(\x0b\x32\x30.codewire.console.v1.AccountDeletionOrganizationR\x13sharedOrganizations\x12g\n\x16\x62locking_organizations\x18\x04 \x03(\x0b\x32\x30.codewire.console.v1.AccountDeletionOrganizationR\x15\x62lockingOrganizations\x12\x39\n\x19\x66orfeited_credit_nano_eur\x18\x05 \x01(\x03R\x16\x66orfeitedCreditNanoEur\";\n\x14\x44\x65leteAccountRequest\x12#\n\rconfirm_email\x18\x01 \x01(\tR\x0c\x63onfirmEmail\":\n\x15\x44\x65leteAccountResponse\x12!\n\x0coperation_id\x18\x01 \x01(\tR\x0boperationId2\xe5\x03\n\x0e\x41\x63\x63ountService\x12n\n\x0eGetGitIdentity\x12*.codewire.console.v1.GetGitIdentityRequest\x1a+.codewire.console.v1.GetGitIdentityResponse\"\x03\x90\x02\x01\x12r\n\x11UpdateGitIdentity\x12-.codewire.console.v1.UpdateGitIdentityRequest\x1a..codewire.console.v1.UpdateGitIdentityResponse\x12\x86\x01\n\x16GetAccountDeletionPlan\x12\x32.codewire.console.v1.GetAccountDeletionPlanRequest\x1a\x33.codewire.console.v1.GetAccountDeletionPlanResponse\"\x03\x90\x02\x01\x12\x66\n\rDeleteAccount\x12).codewire.console.v1.DeleteAccountRequest\x1a*.codewire.console.v1.DeleteAccountResponseB\xdf\x01\n\x17\x63om.codewire.console.v1B\x0c\x41\x63\x63ountProtoP\x01ZHgithub.com/codewiresh/codewire/libs/gen-go/codewire/console/v1;consolev1\xa2\x02\x03\x43\x43X\xaa\x02\x13\x43odewire.Console.V1\xca\x02\x13\x43odewire\\Console\\V1\xe2\x02\x1f\x43odewire\\Console\\V1\\GPBMetadata\xea\x02\x15\x43odewire::Console::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,6 +34,8 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'\n\027com.codewire.console.v1B\014AccountProtoP\001ZHgithub.com/codewiresh/codewire/libs/gen-go/codewire/console/v1;consolev1\242\002\003CCX\252\002\023Codewire.Console.V1\312\002\023Codewire\\Console\\V1\342\002\037Codewire\\Console\\V1\\GPBMetadata\352\002\025Codewire::Console::V1'
   _globals['_ACCOUNTSERVICE'].methods_by_name['GetGitIdentity']._loaded_options = None
   _globals['_ACCOUNTSERVICE'].methods_by_name['GetGitIdentity']._serialized_options = b'\220\002\001'
+  _globals['_ACCOUNTSERVICE'].methods_by_name['GetAccountDeletionPlan']._loaded_options = None
+  _globals['_ACCOUNTSERVICE'].methods_by_name['GetAccountDeletionPlan']._serialized_options = b'\220\002\001'
   _globals['_GITIDENTITY']._serialized_start=58
   _globals['_GITIDENTITY']._serialized_end=127
   _globals['_GETGITIDENTITYREQUEST']._serialized_start=129
@@ -44,6 +46,16 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_UPDATEGITIDENTITYREQUEST']._serialized_end=368
   _globals['_UPDATEGITIDENTITYRESPONSE']._serialized_start=370
   _globals['_UPDATEGITIDENTITYRESPONSE']._serialized_end=466
-  _globals['_ACCOUNTSERVICE']._serialized_start=469
-  _globals['_ACCOUNTSERVICE']._serialized_end=713
+  _globals['_ACCOUNTDELETIONORGANIZATION']._serialized_start=469
+  _globals['_ACCOUNTDELETIONORGANIZATION']._serialized_end=654
+  _globals['_GETACCOUNTDELETIONPLANREQUEST']._serialized_start=656
+  _globals['_GETACCOUNTDELETIONPLANREQUEST']._serialized_end=687
+  _globals['_GETACCOUNTDELETIONPLANRESPONSE']._serialized_start=690
+  _globals['_GETACCOUNTDELETIONPLANRESPONSE']._serialized_end=1114
+  _globals['_DELETEACCOUNTREQUEST']._serialized_start=1116
+  _globals['_DELETEACCOUNTREQUEST']._serialized_end=1175
+  _globals['_DELETEACCOUNTRESPONSE']._serialized_start=1177
+  _globals['_DELETEACCOUNTRESPONSE']._serialized_end=1235
+  _globals['_ACCOUNTSERVICE']._serialized_start=1238
+  _globals['_ACCOUNTSERVICE']._serialized_end=1723
 # @@protoc_insertion_point(module_scope)

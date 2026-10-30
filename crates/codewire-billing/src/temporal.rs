@@ -28,10 +28,15 @@ use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use temporalio_sdk::{ActivityOptions, Worker, WorkerOptions, WorkflowContext, WorkflowResult};
 use temporalio_sdk_core::{CoreRuntime, RuntimeOptions};
 
+use codewire_server_core::account_deletion::{
+    self, AccountDeletionPhase, AccountDeletionWorkflowInput,
+};
+
 use crate::billing_teardown::{
     OrganizationBillingTeardownInput, OrganizationBillingTeardownResult,
-    finalize_organization_billing,
+    delete_account_stripe_customers, finalize_organization_billing,
 };
+use crate::email::EmailClient;
 use crate::stripe_client::StripeHandle;
 
 pub const BILLING_TASK_QUEUE: &str = "codewire-billing";
@@ -107,6 +112,72 @@ impl OrgTeardownActivities {
     }
 }
 
+/// The billing phases of the account deletion workflow (#3679), scheduled
+/// onto this queue by orchestration's `AccountDeletionWorkflow`. Each one
+/// resumes from the phase the operation records.
+pub struct AccountDeletionBillingActivities {
+    pub pool: PgPool,
+    pub stripe: StripeHandle,
+    pub email: EmailClient,
+}
+
+fn account_deletion_error(error: impl std::fmt::Display) -> ActivityError {
+    ActivityError::from(anyhow::anyhow!(
+        "account deletion billing activity failed: {error}"
+    ))
+}
+
+#[activities]
+impl AccountDeletionBillingActivities {
+    /// Delete the personal organizations' Stripe customers, once their own
+    /// deletions have completed.
+    #[activity(name = "DeleteAccountStripeCustomersActivity")]
+    pub async fn delete_stripe_customers(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        input: AccountDeletionWorkflowInput,
+    ) -> Result<(), ActivityError> {
+        delete_account_stripe_customers(&self.pool, &self.stripe, &input.operation_id)
+            .await
+            .map_err(account_deletion_error)
+    }
+
+    /// Send the confirmation mail and complete the operation, which clears
+    /// the address. Without mail delivery the account is still deleted: the
+    /// operation completes and the missing mail is logged.
+    #[activity(name = "SendAccountDeletedMailActivity")]
+    pub async fn send_deleted_mail(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        input: AccountDeletionWorkflowInput,
+    ) -> Result<(), ActivityError> {
+        let operation =
+            account_deletion::account_deletion_operation(&self.pool, &input.operation_id)
+                .await
+                .map_err(account_deletion_error)?;
+        match operation.phase().map_err(account_deletion_error)? {
+            AccountDeletionPhase::UserDeleted => {}
+            AccountDeletionPhase::Completed => return Ok(()),
+            _ => return Err(account_deletion_error("the user is not deleted yet")),
+        }
+        match operation.email.as_deref() {
+            Some(address) if self.email.is_configured() => self
+                .email
+                .send_account_deleted(address)
+                .await
+                .map_err(account_deletion_error)?,
+            Some(_) => tracing::warn!(
+                operation_id = operation.id,
+                "account deleted without a confirmation mail: delivery is not configured"
+            ),
+            None => {}
+        }
+        account_deletion::complete_account_deletion(&self.pool, &input.operation_id)
+            .await
+            .map_err(account_deletion_error)
+    }
+}
+
 /// Mirrors the orchestration worker's activity options: StartToClose
 /// 30m, retry 2s initial, ×2 backoff, 30s max interval, 3 attempts.
 fn activity_opts() -> ActivityOptions {
@@ -150,6 +221,7 @@ impl OrgTeardownWorkflow {
 pub fn spawn_org_teardown_worker(
     pool: PgPool,
     stripe: StripeHandle,
+    email: EmailClient,
     host_port: String,
     namespace: String,
 ) {
@@ -166,6 +238,7 @@ pub fn spawn_org_teardown_worker(
                     match run_org_teardown_worker(
                         pool.clone(),
                         stripe.clone(),
+                        email.clone(),
                         &host_port,
                         &namespace,
                     )
@@ -189,6 +262,7 @@ pub fn spawn_org_teardown_worker(
 pub async fn run_org_teardown_worker(
     pool: PgPool,
     stripe: StripeHandle,
+    email: EmailClient,
     host_port: &str,
     namespace: &str,
 ) -> anyhow::Result<()> {
@@ -212,7 +286,15 @@ pub async fn run_org_teardown_worker(
 
     let worker_options = WorkerOptions::new(BILLING_TASK_QUEUE.to_string())
         .register_workflow::<OrgTeardownWorkflow>()?
-        .register_activities(OrgTeardownActivities { pool, stripe })
+        .register_activities(OrgTeardownActivities {
+            pool: pool.clone(),
+            stripe: stripe.clone(),
+        })
+        .register_activities(AccountDeletionBillingActivities {
+            pool,
+            stripe,
+            email,
+        })
         .build();
 
     let mut worker = Worker::new(&runtime, client, worker_options)

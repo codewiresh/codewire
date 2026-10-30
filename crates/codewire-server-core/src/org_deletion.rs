@@ -955,7 +955,40 @@ pub async fn begin_organization_deletion(
     }
 
     let mut tx = pool.begin().await.map_err(AppError::from)?;
-    let locked = sqlx::query_as::<_, LockedOrganization>(
+    let locked = lock_organization_for_deletion(&mut tx, org_id, &user.user_id).await?;
+    let role = locked
+        .role
+        .as_deref()
+        .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
+    if role != "owner" {
+        return Err(AppError::Forbidden);
+    }
+    let operation =
+        begin_locked_organization_deletion(&mut tx, org_id, &user.user_id, &locked, initial_phase)
+            .await?;
+    tx.commit().await.map_err(AppError::from)?;
+    Ok(operation)
+}
+
+/// Begin deleting an organization inside an account deletion's transaction.
+/// The account deletion has already established that the user is the
+/// organization's only member, so no role is required here.
+pub(crate) async fn begin_organization_deletion_in(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    requested_by: &str,
+) -> Result<OrganizationDeletionOperation, AppError> {
+    let initial_phase = require_safe_deletion_phase(INITIAL_PHASE)?;
+    let locked = lock_organization_for_deletion(tx, org_id, requested_by).await?;
+    begin_locked_organization_deletion(tx, org_id, requested_by, &locked, initial_phase).await
+}
+
+async fn lock_organization_for_deletion(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    user_id: &str,
+) -> Result<LockedOrganization, AppError> {
+    sqlx::query_as::<_, LockedOrganization>(
         r#"
         SELECT o.deletion_state,
                o.deletion_generation,
@@ -969,29 +1002,29 @@ pub async fn begin_organization_deletion(
         "#,
     )
     .bind(org_id)
-    .bind(&user.user_id)
-    .fetch_optional(&mut *tx)
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(AppError::from)?
-    .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
+    .ok_or_else(|| AppError::NotFound("organization not found".into()))
+}
 
-    let role = locked
-        .role
-        .as_deref()
-        .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
-    if role != "owner" {
-        return Err(AppError::Forbidden);
-    }
-
+/// Fence the locked organization and record its deletion operation. An
+/// organization already being deleted returns its current operation.
+async fn begin_locked_organization_deletion(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    requested_by: &str,
+    locked: &LockedOrganization,
+    initial_phase: &str,
+) -> Result<OrganizationDeletionOperation, AppError> {
     if locked.deletion_state == "deleting" {
-        let operation_id = locked.deletion_operation_id.ok_or_else(|| {
+        let operation_id = locked.deletion_operation_id.clone().ok_or_else(|| {
             AppError::Internal(anyhow::anyhow!(
                 "deleting organization {org_id} has no operation id"
             ))
         })?;
-        let operation = load_operation(&mut tx, &operation_id).await?;
-        tx.commit().await.map_err(AppError::from)?;
-        return Ok(operation);
+        return load_operation(tx, &operation_id).await;
     }
 
     if !matches!(locked.deletion_state.as_str(), "active" | "delete_failed") {
@@ -1021,10 +1054,10 @@ pub async fn begin_organization_deletion(
     .bind(&operation_id)
     .bind(org_id)
     .bind(generation)
-    .bind(&user.user_id)
+    .bind(requested_by)
     .bind(&workflow_id)
     .bind(initial_phase)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(AppError::from)?;
 
@@ -1045,11 +1078,11 @@ pub async fn begin_organization_deletion(
     )
     .bind(org_id)
     .bind(generation)
-    .bind(&user.user_id)
+    .bind(requested_by)
     .bind(&operation_id)
     .bind(&workflow_id)
     .bind(initial_phase)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(AppError::from)?;
 
@@ -1057,7 +1090,7 @@ pub async fn begin_organization_deletion(
         r#"UPDATE api_keys SET disabled_at = COALESCE(disabled_at, NOW()) WHERE org_id = $1"#,
     )
     .bind(org_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(AppError::from)?;
 
@@ -1077,15 +1110,13 @@ pub async fn begin_organization_deletion(
     )
     .bind(Uuid::new_v4().to_string())
     .bind(audit_action)
-    .bind(&user.user_id)
+    .bind(requested_by)
     .bind(metadata)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(AppError::from)?;
 
-    let operation = load_operation(&mut tx, &operation_id).await?;
-    tx.commit().await.map_err(AppError::from)?;
-    Ok(operation)
+    load_operation(tx, &operation_id).await
 }
 
 /// Recover committed operations whose deterministic Temporal workflow has

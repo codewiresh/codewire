@@ -1,6 +1,7 @@
 //! Billing emails via the shared transactional-email provider.
 //!
-//! Owns payment receipt, payment-failed, and trial-ending messages.
+//! Owns payment receipt, payment-failed, trial-ending and account-deleted
+//! messages.
 
 use codewire_email::EmailClient as DeliveryEmailClient;
 
@@ -137,6 +138,13 @@ impl EmailClient {
             "<div style=\"font-family: sans-serif; max-width: 480px; margin: 0 auto;\">\n\t<h2>Your trial is ending soon</h2>\n\t<p>Your Codewire free trial ends in <strong>{days_str}</strong>.</p>\n\t<p>Upgrade now to keep your resources running and avoid any disruption.</p>\n\t<p><a href=\"https://codewire.sh/dashboard\" style=\"display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;\">Upgrade Now</a></p>\n\t<p style=\"color: #666; font-size: 14px;\">If you have any questions, please contact support.</p>\n</div>"
         );
         self.send(to, "Your Codewire trial ends soon", &html).await
+    }
+
+    /// The confirmation that an account was deleted (#3679).
+    pub async fn send_account_deleted(&self, to: &str) -> anyhow::Result<()> {
+        let html = "<div style=\"font-family: sans-serif; max-width: 480px; margin: 0 auto;\">\n\t<h2>Your account was deleted</h2>\n\t<p>Your Codewire account has been deleted, together with the organizations only you belonged to and their environments, secrets and credentials. Your memberships in other organizations were removed.</p>\n\t<p>You can sign up again with this address at any time.</p>\n\t<p style=\"color: #666; font-size: 14px;\">If you did not ask for this, please contact support.</p>\n</div>";
+        self.send(to, "Your Codewire account was deleted", html)
+            .await
     }
 }
 

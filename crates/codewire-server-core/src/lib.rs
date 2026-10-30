@@ -29,6 +29,7 @@
 //! Each module is documented at its own level; this crate root just
 //! re-exports the most common entry points.
 
+pub mod account_deletion;
 pub mod auth;
 pub mod bounded_http1;
 pub mod config;

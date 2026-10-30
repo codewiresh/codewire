@@ -1305,9 +1305,11 @@ run_paths_case orchestration_seed_fixture pull_request refs/pull/603/head false 
 run_paths_case application_schema_fingerprint pull_request refs/pull/60/head false \
   'database policy rust rust_pkg_codewire_server_core service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   crates/codewire-server-core/tests/data/application_schema_fingerprint.sql
-run_paths_case server_core_lifecycle_test pull_request refs/pull/6010/head false \
-  'database policy rust rust_pkg_codewire_server_core' \
-  crates/codewire-server-core/tests/org_deletion_lifecycle.rs
+for lifecycle_input in tests/org_deletion_lifecycle.rs tests/org_deletion_lifecycle/account_deletion.rs; do
+  run_paths_case server_core_lifecycle_test pull_request refs/pull/6010/head false \
+    'database policy rust rust_pkg_codewire_server_core' \
+    "crates/codewire-server-core/$lifecycle_input"
+done
 run_paths_case server_core_migration_database_test pull_request refs/pull/6010/head false \
   'database policy rust rust_pkg_codewire_server_core' \
   crates/codewire-server-core/src/migrate/tests/session_mutation.rs

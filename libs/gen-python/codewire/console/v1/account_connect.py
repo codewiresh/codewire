@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .account_pb2 import GetGitIdentityRequest, GetGitIdentityResponse, UpdateGitIdentityRequest, UpdateGitIdentityResponse
+from .account_pb2 import DeleteAccountRequest, DeleteAccountResponse, GetAccountDeletionPlanRequest, GetAccountDeletionPlanResponse, GetGitIdentityRequest, GetGitIdentityResponse, UpdateGitIdentityRequest, UpdateGitIdentityResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -39,6 +39,12 @@ class AccountService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def update_git_identity(self, request: UpdateGitIdentityRequest, ctx: RequestContext[UpdateGitIdentityRequest, UpdateGitIdentityResponse]) -> UpdateGitIdentityResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def get_account_deletion_plan(self, request: GetAccountDeletionPlanRequest, ctx: RequestContext[GetAccountDeletionPlanRequest, GetAccountDeletionPlanResponse]) -> GetAccountDeletionPlanResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def delete_account(self, request: DeleteAccountRequest, ctx: RequestContext[DeleteAccountRequest, DeleteAccountResponse]) -> DeleteAccountResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -74,6 +80,26 @@ class AccountServiceASGIApplication(ConnectASGIApplication[AccountService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.update_git_identity,
+                ),
+                "/codewire.console.v1.AccountService/GetAccountDeletionPlan": Endpoint.unary(
+                    method=MethodInfo(
+                        name="GetAccountDeletionPlan",
+                        service_name="codewire.console.v1.AccountService",
+                        input=GetAccountDeletionPlanRequest,
+                        output=GetAccountDeletionPlanResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.get_account_deletion_plan,
+                ),
+                "/codewire.console.v1.AccountService/DeleteAccount": Endpoint.unary(
+                    method=MethodInfo(
+                        name="DeleteAccount",
+                        service_name="codewire.console.v1.AccountService",
+                        input=DeleteAccountRequest,
+                        output=DeleteAccountResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.delete_account,
                 ),
             },
             interceptors=interceptors,
@@ -155,11 +181,59 @@ class AccountServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def get_account_deletion_plan(
+        self,
+        request: GetAccountDeletionPlanRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetAccountDeletionPlanResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetAccountDeletionPlan",
+                service_name="codewire.console.v1.AccountService",
+                input=GetAccountDeletionPlanRequest,
+                output=GetAccountDeletionPlanResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def delete_account(
+        self,
+        request: DeleteAccountRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> DeleteAccountResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="DeleteAccount",
+                service_name="codewire.console.v1.AccountService",
+                input=DeleteAccountRequest,
+                output=DeleteAccountResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class AccountServiceSync(Protocol):
     def get_git_identity(self, request: GetGitIdentityRequest, ctx: RequestContext[GetGitIdentityRequest, GetGitIdentityResponse]) -> GetGitIdentityResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def update_git_identity(self, request: UpdateGitIdentityRequest, ctx: RequestContext[UpdateGitIdentityRequest, UpdateGitIdentityResponse]) -> UpdateGitIdentityResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def get_account_deletion_plan(self, request: GetAccountDeletionPlanRequest, ctx: RequestContext[GetAccountDeletionPlanRequest, GetAccountDeletionPlanResponse]) -> GetAccountDeletionPlanResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def delete_account(self, request: DeleteAccountRequest, ctx: RequestContext[DeleteAccountRequest, DeleteAccountResponse]) -> DeleteAccountResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -193,6 +267,26 @@ class AccountServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.update_git_identity,
+                ),
+                "/codewire.console.v1.AccountService/GetAccountDeletionPlan": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="GetAccountDeletionPlan",
+                        service_name="codewire.console.v1.AccountService",
+                        input=GetAccountDeletionPlanRequest,
+                        output=GetAccountDeletionPlanResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.get_account_deletion_plan,
+                ),
+                "/codewire.console.v1.AccountService/DeleteAccount": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="DeleteAccount",
+                        service_name="codewire.console.v1.AccountService",
+                        input=DeleteAccountRequest,
+                        output=DeleteAccountResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.delete_account,
                 ),
             },
             interceptors=interceptors,
@@ -267,6 +361,46 @@ class AccountServiceClientSync(ConnectClientSync):
                 service_name="codewire.console.v1.AccountService",
                 input=UpdateGitIdentityRequest,
                 output=UpdateGitIdentityResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def get_account_deletion_plan(
+        self,
+        request: GetAccountDeletionPlanRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetAccountDeletionPlanResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetAccountDeletionPlan",
+                service_name="codewire.console.v1.AccountService",
+                input=GetAccountDeletionPlanRequest,
+                output=GetAccountDeletionPlanResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def delete_account(
+        self,
+        request: DeleteAccountRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> DeleteAccountResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="DeleteAccount",
+                service_name="codewire.console.v1.AccountService",
+                input=DeleteAccountRequest,
+                output=DeleteAccountResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

@@ -39,6 +39,12 @@ const (
 	// AccountServiceUpdateGitIdentityProcedure is the fully-qualified name of the AccountService's
 	// UpdateGitIdentity RPC.
 	AccountServiceUpdateGitIdentityProcedure = "/codewire.console.v1.AccountService/UpdateGitIdentity"
+	// AccountServiceGetAccountDeletionPlanProcedure is the fully-qualified name of the AccountService's
+	// GetAccountDeletionPlan RPC.
+	AccountServiceGetAccountDeletionPlanProcedure = "/codewire.console.v1.AccountService/GetAccountDeletionPlan"
+	// AccountServiceDeleteAccountProcedure is the fully-qualified name of the AccountService's
+	// DeleteAccount RPC.
+	AccountServiceDeleteAccountProcedure = "/codewire.console.v1.AccountService/DeleteAccount"
 )
 
 // AccountServiceClient is a client for the codewire.console.v1.AccountService service.
@@ -48,6 +54,14 @@ type AccountServiceClient interface {
 	// UpdateGitIdentity replaces the optional Git author overrides. An absent
 	// field clears that override, restoring the account-derived fallback.
 	UpdateGitIdentity(context.Context, *connect.Request[v1.UpdateGitIdentityRequest]) (*connect.Response[v1.UpdateGitIdentityResponse], error)
+	// GetAccountDeletionPlan returns what deleting the caller's account would
+	// delete, keep and refuse.
+	GetAccountDeletionPlan(context.Context, *connect.Request[v1.GetAccountDeletionPlanRequest]) (*connect.Response[v1.GetAccountDeletionPlanResponse], error)
+	// DeleteAccount disables the caller's account at once and starts its
+	// deletion. It fails with FAILED_PRECONDITION while the caller is the only
+	// owner of an organization that has other members. Repeating it while a
+	// deletion is in progress returns that deletion.
+	DeleteAccount(context.Context, *connect.Request[v1.DeleteAccountRequest]) (*connect.Response[v1.DeleteAccountResponse], error)
 }
 
 // NewAccountServiceClient constructs a client for the codewire.console.v1.AccountService service.
@@ -74,13 +88,28 @@ func NewAccountServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(accountServiceMethods.ByName("UpdateGitIdentity")),
 			connect.WithClientOptions(opts...),
 		),
+		getAccountDeletionPlan: connect.NewClient[v1.GetAccountDeletionPlanRequest, v1.GetAccountDeletionPlanResponse](
+			httpClient,
+			baseURL+AccountServiceGetAccountDeletionPlanProcedure,
+			connect.WithSchema(accountServiceMethods.ByName("GetAccountDeletionPlan")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		deleteAccount: connect.NewClient[v1.DeleteAccountRequest, v1.DeleteAccountResponse](
+			httpClient,
+			baseURL+AccountServiceDeleteAccountProcedure,
+			connect.WithSchema(accountServiceMethods.ByName("DeleteAccount")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // accountServiceClient implements AccountServiceClient.
 type accountServiceClient struct {
-	getGitIdentity    *connect.Client[v1.GetGitIdentityRequest, v1.GetGitIdentityResponse]
-	updateGitIdentity *connect.Client[v1.UpdateGitIdentityRequest, v1.UpdateGitIdentityResponse]
+	getGitIdentity         *connect.Client[v1.GetGitIdentityRequest, v1.GetGitIdentityResponse]
+	updateGitIdentity      *connect.Client[v1.UpdateGitIdentityRequest, v1.UpdateGitIdentityResponse]
+	getAccountDeletionPlan *connect.Client[v1.GetAccountDeletionPlanRequest, v1.GetAccountDeletionPlanResponse]
+	deleteAccount          *connect.Client[v1.DeleteAccountRequest, v1.DeleteAccountResponse]
 }
 
 // GetGitIdentity calls codewire.console.v1.AccountService.GetGitIdentity.
@@ -93,6 +122,16 @@ func (c *accountServiceClient) UpdateGitIdentity(ctx context.Context, req *conne
 	return c.updateGitIdentity.CallUnary(ctx, req)
 }
 
+// GetAccountDeletionPlan calls codewire.console.v1.AccountService.GetAccountDeletionPlan.
+func (c *accountServiceClient) GetAccountDeletionPlan(ctx context.Context, req *connect.Request[v1.GetAccountDeletionPlanRequest]) (*connect.Response[v1.GetAccountDeletionPlanResponse], error) {
+	return c.getAccountDeletionPlan.CallUnary(ctx, req)
+}
+
+// DeleteAccount calls codewire.console.v1.AccountService.DeleteAccount.
+func (c *accountServiceClient) DeleteAccount(ctx context.Context, req *connect.Request[v1.DeleteAccountRequest]) (*connect.Response[v1.DeleteAccountResponse], error) {
+	return c.deleteAccount.CallUnary(ctx, req)
+}
+
 // AccountServiceHandler is an implementation of the codewire.console.v1.AccountService service.
 type AccountServiceHandler interface {
 	// GetGitIdentity returns the resolved Git author name and email.
@@ -100,6 +139,14 @@ type AccountServiceHandler interface {
 	// UpdateGitIdentity replaces the optional Git author overrides. An absent
 	// field clears that override, restoring the account-derived fallback.
 	UpdateGitIdentity(context.Context, *connect.Request[v1.UpdateGitIdentityRequest]) (*connect.Response[v1.UpdateGitIdentityResponse], error)
+	// GetAccountDeletionPlan returns what deleting the caller's account would
+	// delete, keep and refuse.
+	GetAccountDeletionPlan(context.Context, *connect.Request[v1.GetAccountDeletionPlanRequest]) (*connect.Response[v1.GetAccountDeletionPlanResponse], error)
+	// DeleteAccount disables the caller's account at once and starts its
+	// deletion. It fails with FAILED_PRECONDITION while the caller is the only
+	// owner of an organization that has other members. Repeating it while a
+	// deletion is in progress returns that deletion.
+	DeleteAccount(context.Context, *connect.Request[v1.DeleteAccountRequest]) (*connect.Response[v1.DeleteAccountResponse], error)
 }
 
 // NewAccountServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -122,12 +169,29 @@ func NewAccountServiceHandler(svc AccountServiceHandler, opts ...connect.Handler
 		connect.WithSchema(accountServiceMethods.ByName("UpdateGitIdentity")),
 		connect.WithHandlerOptions(opts...),
 	)
+	accountServiceGetAccountDeletionPlanHandler := connect.NewUnaryHandler(
+		AccountServiceGetAccountDeletionPlanProcedure,
+		svc.GetAccountDeletionPlan,
+		connect.WithSchema(accountServiceMethods.ByName("GetAccountDeletionPlan")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	accountServiceDeleteAccountHandler := connect.NewUnaryHandler(
+		AccountServiceDeleteAccountProcedure,
+		svc.DeleteAccount,
+		connect.WithSchema(accountServiceMethods.ByName("DeleteAccount")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.console.v1.AccountService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case AccountServiceGetGitIdentityProcedure:
 			accountServiceGetGitIdentityHandler.ServeHTTP(w, r)
 		case AccountServiceUpdateGitIdentityProcedure:
 			accountServiceUpdateGitIdentityHandler.ServeHTTP(w, r)
+		case AccountServiceGetAccountDeletionPlanProcedure:
+			accountServiceGetAccountDeletionPlanHandler.ServeHTTP(w, r)
+		case AccountServiceDeleteAccountProcedure:
+			accountServiceDeleteAccountHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -143,4 +207,12 @@ func (UnimplementedAccountServiceHandler) GetGitIdentity(context.Context, *conne
 
 func (UnimplementedAccountServiceHandler) UpdateGitIdentity(context.Context, *connect.Request[v1.UpdateGitIdentityRequest]) (*connect.Response[v1.UpdateGitIdentityResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.UpdateGitIdentity is not implemented"))
+}
+
+func (UnimplementedAccountServiceHandler) GetAccountDeletionPlan(context.Context, *connect.Request[v1.GetAccountDeletionPlanRequest]) (*connect.Response[v1.GetAccountDeletionPlanResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.GetAccountDeletionPlan is not implemented"))
+}
+
+func (UnimplementedAccountServiceHandler) DeleteAccount(context.Context, *connect.Request[v1.DeleteAccountRequest]) (*connect.Response[v1.DeleteAccountResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.DeleteAccount is not implemented"))
 }

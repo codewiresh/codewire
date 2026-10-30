@@ -257,6 +257,7 @@ async fn retire_legacy_shared_warm_pools(ctx: &WorkerContext) -> bool {
 async fn run_reconciliation(ctx: &WorkerContext) {
     tracing::debug!("reconciler: running reconciliation cycle");
     reconcile_pending_organization_deletions(ctx).await;
+    reconcile_pending_account_deletions(ctx).await;
     evict_expired_environments(ctx).await;
     process_graced_deletions(ctx).await;
     warn_expiring_environments(ctx).await;
@@ -493,6 +494,7 @@ async fn reconcile_stuck_environments(ctx: &WorkerContext) {
 /// Mirrors `recoverOnStartup` + `recoverInterruptedEnvironments`.
 async fn recover_on_startup(ctx: &WorkerContext) {
     reconcile_pending_organization_deletions(ctx).await;
+    reconcile_pending_account_deletions(ctx).await;
 
     let kinds: Vec<String> = RECOVERY_JOURNAL_KINDS
         .iter()
@@ -611,6 +613,57 @@ async fn reconcile_pending_organization_deletions(ctx: &WorkerContext) {
                 generation = operation.generation,
                 error = %error,
                 "reconciler: organization deletion workflow start acknowledgement remains pending"
+            ),
+        }
+    }
+}
+
+/// Recover the transactionally committed account-deletion outbox (#3679), as
+/// for organization deletions: record the attempt, start the deterministic
+/// workflow, then acknowledge it.
+async fn reconcile_pending_account_deletions(ctx: &WorkerContext) {
+    use codewire_server_core::account_deletion::{
+        AccountDeletionWorkflowInput, mark_account_deletion_started,
+        pending_account_deletion_operations, record_account_deletion_start_attempt,
+    };
+
+    let operations = match pending_account_deletion_operations(&ctx.pool, 100).await {
+        Ok(operations) => operations,
+        Err(error) => {
+            tracing::error!(error = %error, "reconciler: query pending account deletions");
+            return;
+        }
+    };
+
+    for operation in operations {
+        if let Err(error) = record_account_deletion_start_attempt(&ctx.pool, &operation.id).await {
+            tracing::warn!(
+                operation_id = operation.id,
+                error = %error,
+                "reconciler: account deletion start attempt was not recorded"
+            );
+            continue;
+        }
+        let input = AccountDeletionWorkflowInput {
+            operation_id: operation.id.clone(),
+        };
+        if let Err(error) = ctx.temporal_trigger.trigger_account_deletion(input).await {
+            tracing::warn!(
+                operation_id = operation.id,
+                error = %error,
+                "reconciler: account deletion workflow start remains pending"
+            );
+            continue;
+        }
+        match mark_account_deletion_started(&ctx.pool, &operation.id).await {
+            Ok(()) => tracing::info!(
+                operation_id = operation.id,
+                "reconciler: account deletion workflow started"
+            ),
+            Err(error) => tracing::warn!(
+                operation_id = operation.id,
+                error = %error,
+                "reconciler: account deletion workflow start acknowledgement remains pending"
             ),
         }
     }

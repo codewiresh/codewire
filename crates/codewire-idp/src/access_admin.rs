@@ -7,6 +7,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::NaiveDateTime;
 use codewire_email::EmailClient;
+use codewire_server_core::account_deletion::DELETED_USER_ID;
 use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth};
 use codewire_server_core::{AppError, ValidatedJson};
 use schemars::JsonSchema;
@@ -74,11 +75,13 @@ async fn list_accounts(
                   access_reason,
                   COALESCE(created_at, NOW()::timestamp) AS created_at
            FROM users
+           WHERE id <> $1
            ORDER BY enabled ASC,
                     (access_reason IS NOT NULL) DESC,
                     created_at DESC NULLS LAST
            LIMIT 500"#,
     )
+    .bind(DELETED_USER_ID)
     .fetch_all(&state.pool)
     .await
     .map_err(|error| {
@@ -96,6 +99,13 @@ async fn set_account_enabled(
     ValidatedJson(request): ValidatedJson<SetAccountEnabledRequest>,
 ) -> Result<Json<SetAccountEnabledResponse>, AppError> {
     actor.require_global_admin()?;
+    if user_id == DELETED_USER_ID {
+        return Err(AppError::Coded {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            detail: "Account not found".into(),
+        });
+    }
     if !request.enabled && actor.user_id == user_id {
         return Err(AppError::BadRequest(
             "You cannot disable your own account".into(),
@@ -129,6 +139,23 @@ async fn set_account_enabled(
         detail: "Account not found".into(),
     })?;
 
+    // An account being deleted stays disabled until its deletion completes
+    // (#3679); the user row lock above orders this after the request.
+    if request.enabled {
+        let deleting: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM account_deletion_operations WHERE user_id = $1)",
+        )
+        .bind(&user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to check account deletion state");
+            AppError::InternalMsg("Failed to update account".into())
+        })?;
+        if deleting {
+            return Err(AppError::Conflict("This account is being deleted".into()));
+        }
+    }
     if request.enabled && account.access_reason.is_some() && !account.email_verified {
         return Err(AppError::BadRequest(
             "Verify the account email before enabling access".into(),

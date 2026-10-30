@@ -86,8 +86,14 @@ async fn billing_rate_cards_upgrade_keeps_uncharged_organizations_free_and_the_l
         let previous = fingerprint(&pool).await?;
         anyhow::ensure!(previous != ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
 
-        ensure_schema(&db.url).await?;
-        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
+        // Through 0006 only, so its rollback restores the 0005 shape; later
+        // migrations prove their own upgrade and rollback.
+        let through_0006 = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(MIGRATOR.iter().take(6).cloned().collect()),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        through_0006.run(&pool).await?;
+        anyhow::ensure!(fingerprint(&pool).await? != previous);
 
         let cards: Vec<(String, i64, i64, i64)> = sqlx::query_as(
             "SELECT rate_card, cpu_nano_eur_per_vcpu_hour, memory_nano_eur_per_gib_hour, \

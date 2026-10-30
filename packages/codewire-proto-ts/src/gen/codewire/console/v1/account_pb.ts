@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/console/v1/account.proto.
  */
 export const file_codewire_console_v1_account: GenFile = /*@__PURE__*/
-  fileDesc("CiFjb2Rld2lyZS9jb25zb2xlL3YxL2FjY291bnQucHJvdG8SE2NvZGV3aXJlLmNvbnNvbGUudjEiMgoLR2l0SWRlbnRpdHkSEAoIZ2l0X25hbWUYASABKAkSEQoJZ2l0X2VtYWlsGAIgASgJIhcKFUdldEdpdElkZW50aXR5UmVxdWVzdCJQChZHZXRHaXRJZGVudGl0eVJlc3BvbnNlEjYKDGdpdF9pZGVudGl0eRgBIAEoCzIgLmNvZGV3aXJlLmNvbnNvbGUudjEuR2l0SWRlbnRpdHkiZAoYVXBkYXRlR2l0SWRlbnRpdHlSZXF1ZXN0EhUKCGdpdF9uYW1lGAEgASgJSACIAQESFgoJZ2l0X2VtYWlsGAIgASgJSAGIAQFCCwoJX2dpdF9uYW1lQgwKCl9naXRfZW1haWwiUwoZVXBkYXRlR2l0SWRlbnRpdHlSZXNwb25zZRI2CgxnaXRfaWRlbnRpdHkYASABKAsyIC5jb2Rld2lyZS5jb25zb2xlLnYxLkdpdElkZW50aXR5MvQBCg5BY2NvdW50U2VydmljZRJuCg5HZXRHaXRJZGVudGl0eRIqLmNvZGV3aXJlLmNvbnNvbGUudjEuR2V0R2l0SWRlbnRpdHlSZXF1ZXN0GisuY29kZXdpcmUuY29uc29sZS52MS5HZXRHaXRJZGVudGl0eVJlc3BvbnNlIgOQAgEScgoRVXBkYXRlR2l0SWRlbnRpdHkSLS5jb2Rld2lyZS5jb25zb2xlLnYxLlVwZGF0ZUdpdElkZW50aXR5UmVxdWVzdBouLmNvZGV3aXJlLmNvbnNvbGUudjEuVXBkYXRlR2l0SWRlbnRpdHlSZXNwb25zZULfAQoXY29tLmNvZGV3aXJlLmNvbnNvbGUudjFCDEFjY291bnRQcm90b1ABWkhnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvY29uc29sZS92MTtjb25zb2xldjGiAgNDQ1iqAhNDb2Rld2lyZS5Db25zb2xlLlYxygITQ29kZXdpcmVcQ29uc29sZVxWMeICH0NvZGV3aXJlXENvbnNvbGVcVjFcR1BCTWV0YWRhdGHqAhVDb2Rld2lyZTo6Q29uc29sZTo6VjFiBnByb3RvMw");
+  fileDesc("CiFjb2Rld2lyZS9jb25zb2xlL3YxL2FjY291bnQucHJvdG8SE2NvZGV3aXJlLmNvbnNvbGUudjEiMgoLR2l0SWRlbnRpdHkSEAoIZ2l0X25hbWUYASABKAkSEQoJZ2l0X2VtYWlsGAIgASgJIhcKFUdldEdpdElkZW50aXR5UmVxdWVzdCJQChZHZXRHaXRJZGVudGl0eVJlc3BvbnNlEjYKDGdpdF9pZGVudGl0eRgBIAEoCzIgLmNvZGV3aXJlLmNvbnNvbGUudjEuR2l0SWRlbnRpdHkiZAoYVXBkYXRlR2l0SWRlbnRpdHlSZXF1ZXN0EhUKCGdpdF9uYW1lGAEgASgJSACIAQESFgoJZ2l0X2VtYWlsGAIgASgJSAGIAQFCCwoJX2dpdF9uYW1lQgwKCl9naXRfZW1haWwiUwoZVXBkYXRlR2l0SWRlbnRpdHlSZXNwb25zZRI2CgxnaXRfaWRlbnRpdHkYASABKAsyIC5jb2Rld2lyZS5jb25zb2xlLnYxLkdpdElkZW50aXR5IoQBChtBY2NvdW50RGVsZXRpb25Pcmdhbml6YXRpb24SCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRzbHVnGAMgASgJEgwKBHJvbGUYBCABKAkSFAoMbWVtYmVyX2NvdW50GAUgASgDEhkKEWVudmlyb25tZW50X2NvdW50GAYgASgDIh8KHUdldEFjY291bnREZWxldGlvblBsYW5SZXF1ZXN0IsYCCh5HZXRBY2NvdW50RGVsZXRpb25QbGFuUmVzcG9uc2USDQoFZW1haWwYASABKAkSUAoWcGVyc29uYWxfb3JnYW5pemF0aW9ucxgCIAMoCzIwLmNvZGV3aXJlLmNvbnNvbGUudjEuQWNjb3VudERlbGV0aW9uT3JnYW5pemF0aW9uEk4KFHNoYXJlZF9vcmdhbml6YXRpb25zGAMgAygLMjAuY29kZXdpcmUuY29uc29sZS52MS5BY2NvdW50RGVsZXRpb25Pcmdhbml6YXRpb24SUAoWYmxvY2tpbmdfb3JnYW5pemF0aW9ucxgEIAMoCzIwLmNvZGV3aXJlLmNvbnNvbGUudjEuQWNjb3VudERlbGV0aW9uT3JnYW5pemF0aW9uEiEKGWZvcmZlaXRlZF9jcmVkaXRfbmFub19ldXIYBSABKAMiLQoURGVsZXRlQWNjb3VudFJlcXVlc3QSFQoNY29uZmlybV9lbWFpbBgBIAEoCSItChVEZWxldGVBY2NvdW50UmVzcG9uc2USFAoMb3BlcmF0aW9uX2lkGAEgASgJMuUDCg5BY2NvdW50U2VydmljZRJuCg5HZXRHaXRJZGVudGl0eRIqLmNvZGV3aXJlLmNvbnNvbGUudjEuR2V0R2l0SWRlbnRpdHlSZXF1ZXN0GisuY29kZXdpcmUuY29uc29sZS52MS5HZXRHaXRJZGVudGl0eVJlc3BvbnNlIgOQAgEScgoRVXBkYXRlR2l0SWRlbnRpdHkSLS5jb2Rld2lyZS5jb25zb2xlLnYxLlVwZGF0ZUdpdElkZW50aXR5UmVxdWVzdBouLmNvZGV3aXJlLmNvbnNvbGUudjEuVXBkYXRlR2l0SWRlbnRpdHlSZXNwb25zZRKGAQoWR2V0QWNjb3VudERlbGV0aW9uUGxhbhIyLmNvZGV3aXJlLmNvbnNvbGUudjEuR2V0QWNjb3VudERlbGV0aW9uUGxhblJlcXVlc3QaMy5jb2Rld2lyZS5jb25zb2xlLnYxLkdldEFjY291bnREZWxldGlvblBsYW5SZXNwb25zZSIDkAIBEmYKDURlbGV0ZUFjY291bnQSKS5jb2Rld2lyZS5jb25zb2xlLnYxLkRlbGV0ZUFjY291bnRSZXF1ZXN0GiouY29kZXdpcmUuY29uc29sZS52MS5EZWxldGVBY2NvdW50UmVzcG9uc2VC3wEKF2NvbS5jb2Rld2lyZS5jb25zb2xlLnYxQgxBY2NvdW50UHJvdG9QAVpIZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL2NvbnNvbGUvdjE7Y29uc29sZXYxogIDQ0NYqgITQ29kZXdpcmUuQ29uc29sZS5WMcoCE0NvZGV3aXJlXENvbnNvbGVcVjHiAh9Db2Rld2lyZVxDb25zb2xlXFYxXEdQQk1ldGFkYXRh6gIVQ29kZXdpcmU6OkNvbnNvbGU6OlYxYgZwcm90bzM");
 
 /**
  * GitIdentity is the resolved author identity after applying account
@@ -111,7 +111,156 @@ export const UpdateGitIdentityResponseSchema: GenMessage<UpdateGitIdentityRespon
   messageDesc(file_codewire_console_v1_account, 4);
 
 /**
- * AccountService manages account-global Git author identity.
+ * AccountDeletionOrganization is one organization the caller belongs to.
+ *
+ * @generated from message codewire.console.v1.AccountDeletionOrganization
+ */
+export type AccountDeletionOrganization = Message<"codewire.console.v1.AccountDeletionOrganization"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string name = 2;
+   */
+  name: string;
+
+  /**
+   * @generated from field: string slug = 3;
+   */
+  slug: string;
+
+  /**
+   * The caller's role: owner, admin or member.
+   *
+   * @generated from field: string role = 4;
+   */
+  role: string;
+
+  /**
+   * @generated from field: int64 member_count = 5;
+   */
+  memberCount: bigint;
+
+  /**
+   * Environments that are not destroyed.
+   *
+   * @generated from field: int64 environment_count = 6;
+   */
+  environmentCount: bigint;
+};
+
+/**
+ * Describes the message codewire.console.v1.AccountDeletionOrganization.
+ * Use `create(AccountDeletionOrganizationSchema)` to create a new message.
+ */
+export const AccountDeletionOrganizationSchema: GenMessage<AccountDeletionOrganization> = /*@__PURE__*/
+  messageDesc(file_codewire_console_v1_account, 5);
+
+/**
+ * @generated from message codewire.console.v1.GetAccountDeletionPlanRequest
+ */
+export type GetAccountDeletionPlanRequest = Message<"codewire.console.v1.GetAccountDeletionPlanRequest"> & {
+};
+
+/**
+ * Describes the message codewire.console.v1.GetAccountDeletionPlanRequest.
+ * Use `create(GetAccountDeletionPlanRequestSchema)` to create a new message.
+ */
+export const GetAccountDeletionPlanRequestSchema: GenMessage<GetAccountDeletionPlanRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_console_v1_account, 6);
+
+/**
+ * @generated from message codewire.console.v1.GetAccountDeletionPlanResponse
+ */
+export type GetAccountDeletionPlanResponse = Message<"codewire.console.v1.GetAccountDeletionPlanResponse"> & {
+  /**
+   * The address the caller types to confirm, and where the confirmation
+   * mail goes.
+   *
+   * @generated from field: string email = 1;
+   */
+  email: string;
+
+  /**
+   * Organizations the caller is the only member of, deleted with the
+   * account together with their environments, secrets and credentials.
+   *
+   * @generated from field: repeated codewire.console.v1.AccountDeletionOrganization personal_organizations = 2;
+   */
+  personalOrganizations: AccountDeletionOrganization[];
+
+  /**
+   * Organizations with other members; the caller's membership is removed.
+   *
+   * @generated from field: repeated codewire.console.v1.AccountDeletionOrganization shared_organizations = 3;
+   */
+  sharedOrganizations: AccountDeletionOrganization[];
+
+  /**
+   * Organizations the caller is the only owner of while others are members.
+   * The account cannot be deleted until these are transferred or deleted.
+   *
+   * @generated from field: repeated codewire.console.v1.AccountDeletionOrganization blocking_organizations = 4;
+   */
+  blockingOrganizations: AccountDeletionOrganization[];
+
+  /**
+   * Remaining credit of the personal organizations, forfeited, in
+   * nano-euros.
+   *
+   * @generated from field: int64 forfeited_credit_nano_eur = 5;
+   */
+  forfeitedCreditNanoEur: bigint;
+};
+
+/**
+ * Describes the message codewire.console.v1.GetAccountDeletionPlanResponse.
+ * Use `create(GetAccountDeletionPlanResponseSchema)` to create a new message.
+ */
+export const GetAccountDeletionPlanResponseSchema: GenMessage<GetAccountDeletionPlanResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_console_v1_account, 7);
+
+/**
+ * @generated from message codewire.console.v1.DeleteAccountRequest
+ */
+export type DeleteAccountRequest = Message<"codewire.console.v1.DeleteAccountRequest"> & {
+  /**
+   * The account's email address, typed by the user to confirm.
+   *
+   * @generated from field: string confirm_email = 1;
+   */
+  confirmEmail: string;
+};
+
+/**
+ * Describes the message codewire.console.v1.DeleteAccountRequest.
+ * Use `create(DeleteAccountRequestSchema)` to create a new message.
+ */
+export const DeleteAccountRequestSchema: GenMessage<DeleteAccountRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_console_v1_account, 8);
+
+/**
+ * @generated from message codewire.console.v1.DeleteAccountResponse
+ */
+export type DeleteAccountResponse = Message<"codewire.console.v1.DeleteAccountResponse"> & {
+  /**
+   * @generated from field: string operation_id = 1;
+   */
+  operationId: string;
+};
+
+/**
+ * Describes the message codewire.console.v1.DeleteAccountResponse.
+ * Use `create(DeleteAccountResponseSchema)` to create a new message.
+ */
+export const DeleteAccountResponseSchema: GenMessage<DeleteAccountResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_console_v1_account, 9);
+
+/**
+ * AccountService manages account-global Git author identity and deletes the
+ * account.
  *
  * Organization-scoped API keys cannot call this service. Callers must use a
  * browser session or an OAuth-issued native-app bearer credential.
@@ -139,6 +288,30 @@ export const AccountService: GenService<{
     methodKind: "unary";
     input: typeof UpdateGitIdentityRequestSchema;
     output: typeof UpdateGitIdentityResponseSchema;
+  },
+  /**
+   * GetAccountDeletionPlan returns what deleting the caller's account would
+   * delete, keep and refuse.
+   *
+   * @generated from rpc codewire.console.v1.AccountService.GetAccountDeletionPlan
+   */
+  getAccountDeletionPlan: {
+    methodKind: "unary";
+    input: typeof GetAccountDeletionPlanRequestSchema;
+    output: typeof GetAccountDeletionPlanResponseSchema;
+  },
+  /**
+   * DeleteAccount disables the caller's account at once and starts its
+   * deletion. It fails with FAILED_PRECONDITION while the caller is the only
+   * owner of an organization that has other members. Repeating it while a
+   * deletion is in progress returns that deletion.
+   *
+   * @generated from rpc codewire.console.v1.AccountService.DeleteAccount
+   */
+  deleteAccount: {
+    methodKind: "unary";
+    input: typeof DeleteAccountRequestSchema;
+    output: typeof DeleteAccountResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_codewire_console_v1_account, 0);

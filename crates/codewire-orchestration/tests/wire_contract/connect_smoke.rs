@@ -83,6 +83,13 @@ async fn assert_json_connect_routes(harness: &Harness) {
             Some("gitIdentity"),
         ),
         (
+            ACCOUNT_SERVICE,
+            "GetAccountDeletionPlan",
+            json!({}),
+            Auth::Admin,
+            Some("email"),
+        ),
+        (
             ENVIRONMENT_SETUP_SERVICE,
             "GetEnvironmentCreateOptions",
             json!({"orgId": PRIMARY_ORG}),

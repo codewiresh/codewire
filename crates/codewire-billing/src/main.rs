@@ -46,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
     let auth = AuthState { pool: pool.clone() };
     let email = EmailClient::from_env().await?;
+    let worker_email = email.clone();
 
     let state = BillingState {
         pool: pool.clone(),
@@ -94,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
             codewire_billing::temporal::spawn_org_teardown_worker(
                 pool.clone(),
                 StripeHandle::from_env(),
+                worker_email,
                 host_port,
                 namespace,
             );

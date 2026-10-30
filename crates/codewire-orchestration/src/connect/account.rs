@@ -6,16 +6,18 @@
 use std::sync::Arc;
 
 use codewire_proto::codewire::console::v1::{
-    AccountService, GetGitIdentityRequest, GetGitIdentityResponse, GitIdentity,
-    UpdateGitIdentityRequest, UpdateGitIdentityResponse,
+    AccountDeletionOrganization, AccountService, DeleteAccountRequest, DeleteAccountResponse,
+    GetAccountDeletionPlanRequest, GetAccountDeletionPlanResponse, GetGitIdentityRequest,
+    GetGitIdentityResponse, GitIdentity, UpdateGitIdentityRequest, UpdateGitIdentityResponse,
 };
+use codewire_server_core::account_deletion::AccountOrganization;
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 
 use crate::api::ApiState;
 use crate::api::account::service::{self, GitIdentityRecord, UpdateGitIdentityParams};
 
-/// Registers the two AccountService RPCs on their generated Connect routes.
+/// Registers the AccountService RPCs on their generated Connect routes.
 pub fn router(state: ApiState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(AccountConnectService { state }))
 }
@@ -60,6 +62,58 @@ impl AccountService for AccountConnectService {
             ..Default::default()
         })
     }
+
+    async fn get_account_deletion_plan(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, GetAccountDeletionPlanRequest>,
+    ) -> ServiceResult<GetAccountDeletionPlanResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let (email, plan) = service::account_deletion_plan(&self.state, &user)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(GetAccountDeletionPlanResponse {
+            email,
+            personal_organizations: proto_organizations(plan.personal),
+            shared_organizations: proto_organizations(plan.shared),
+            blocking_organizations: proto_organizations(plan.blocking),
+            forfeited_credit_nano_eur: plan.forfeited_credit_nano_eur,
+            ..Default::default()
+        })
+    }
+
+    async fn delete_account(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, DeleteAccountRequest>,
+    ) -> ServiceResult<DeleteAccountResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let operation = service::delete_account(&self.state, &user, request.confirm_email)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(DeleteAccountResponse {
+            operation_id: operation.id,
+            ..Default::default()
+        })
+    }
+}
+
+fn proto_organizations(
+    organizations: Vec<AccountOrganization>,
+) -> Vec<AccountDeletionOrganization> {
+    organizations
+        .into_iter()
+        .map(|organization| AccountDeletionOrganization {
+            id: organization.id,
+            name: organization.name,
+            slug: organization.slug,
+            role: organization.role,
+            member_count: organization.member_count,
+            environment_count: organization.environment_count,
+            ..Default::default()
+        })
+        .collect()
 }
 
 fn update_git_identity_params(

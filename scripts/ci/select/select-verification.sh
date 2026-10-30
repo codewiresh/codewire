@@ -1649,6 +1649,7 @@ if [ "$event_selected" = false ]; then
         select_token database
         ;;
       crates/codewire-server-core/tests/org_deletion_lifecycle.rs|\
+      crates/codewire-server-core/tests/org_deletion_lifecycle/*|\
       crates/codewire-server-core/tests/oauth_bearer_auth.rs|\
       crates/codewire-server-core/tests/oauth_bearer_auth/*)
         # This PostgreSQL-backed lifecycle test exercises no service process,

@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 use chrono::Datelike;
 use codewire_server_core::AppError;
+use codewire_server_core::account_deletion::{self, AccountDeletionPhase};
 use codewire_server_core::org_deletion::{
     mark_organization_mutation_resolution_required, resolve_organization_mutation_lease,
 };
@@ -568,6 +569,38 @@ fn idempotency_key(kind: &str, parts: &[&str]) -> String {
         hasher.update(part.as_bytes());
     }
     format!("cw-{kind}-{:x}", hasher.finalize())
+}
+
+/// The Stripe phase of an account deletion (#3679). It runs only after every
+/// personal organization's own deletion has completed, and deletes exactly the
+/// customers recorded for those organizations: never a namespace sweep. A
+/// customer that is already deleted counts as deleted, so a retry after a
+/// partial run repeats nothing that matters, and a recorded phase is skipped.
+pub async fn delete_account_stripe_customers(
+    pool: &PgPool,
+    stripe: &StripeHandle,
+    operation_id: &str,
+) -> Result<(), AppError> {
+    let operation = account_deletion::account_deletion_operation(pool, operation_id).await?;
+    match operation.phase()? {
+        AccountDeletionPhase::OrganizationsDeleted => {}
+        AccountDeletionPhase::Requested => {
+            return Err(AppError::Precondition(
+                "personal organizations are not deleted yet".into(),
+            ));
+        }
+        _ => return Ok(()),
+    }
+    let customers = account_deletion::account_stripe_customer_ids(pool, operation_id).await?;
+    if !customers.is_empty() && !stripe.is_configured() {
+        return Err(AppError::ServiceUnavailable(
+            "Stripe is not configured but the account has customers to delete".into(),
+        ));
+    }
+    for customer in &customers {
+        stripe.delete_customer(customer).await?;
+    }
+    account_deletion::record_stripe_customers_deleted(pool, operation_id).await
 }
 
 #[cfg(test)]
@@ -1208,5 +1241,143 @@ mod tests {
 
         task.abort();
         cleanup(&pool, &fixture).await;
+    }
+
+    // ── Account deletion's Stripe phase (#3679) ───────────────────────────
+
+    struct FakeCustomers {
+        missing: String,
+        failing: bool,
+        deleted: std::sync::Mutex<Vec<String>>,
+    }
+
+    async fn delete_customer(
+        State(state): State<Arc<FakeCustomers>>,
+        Path(id): Path<String>,
+    ) -> Response {
+        if state.failing {
+            return stripe_error(StatusCode::INTERNAL_SERVER_ERROR, "injected failure");
+        }
+        if id == state.missing {
+            return stripe_error(StatusCode::NOT_FOUND, "No such customer");
+        }
+        state.deleted.lock().unwrap().push(id.clone());
+        Json(json!({"id": id, "object": "customer", "deleted": true})).into_response()
+    }
+
+    async fn fake_customers(
+        missing: &str,
+        failing: bool,
+    ) -> (StripeHandle, Arc<FakeCustomers>, JoinHandle<()>) {
+        let state = Arc::new(FakeCustomers {
+            missing: missing.to_string(),
+            failing,
+            deleted: std::sync::Mutex::new(Vec::new()),
+        });
+        let app = Router::new()
+            .route("/v1/customers/{id}", axum::routing::delete(delete_customer))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            StripeHandle::for_test(&format!("http://{address}")),
+            state,
+            task,
+        )
+    }
+
+    /// An operation whose personal organizations are already gone, as phase 1
+    /// leaves it, with two recorded customers.
+    async fn seed_account_operation(pool: &PgPool, phase: &str) -> (String, [String; 2]) {
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let operation_id = format!("account-deletion/{namespace}");
+        let customers = [format!("cus_a_{namespace}"), format!("cus_b_{namespace}")];
+        sqlx::query(
+            r#"INSERT INTO account_deletion_operations
+                   (id, user_id, workflow_id, phase, email, personal_organization_ids,
+                    stripe_customer_ids)
+               VALUES ($1, $2, $1, $3, 'gone@example.test', ARRAY[$4], $5)"#,
+        )
+        .bind(&operation_id)
+        .bind(format!("u_billdel_{namespace}"))
+        .bind(phase)
+        .bind(format!("org_billdel_{namespace}"))
+        .bind(customers.as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+        (operation_id, customers)
+    }
+
+    async fn account_phase(pool: &PgPool, operation_id: &str) -> String {
+        sqlx::query_scalar("SELECT phase FROM account_deletion_operations WHERE id = $1")
+            .bind(operation_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn db_account_customers_wait_for_the_organization_deletions() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let (operation_id, _) = seed_account_operation(&pool, "requested").await;
+        let (stripe, state, task) = fake_customers("", false).await;
+        let error = delete_account_stripe_customers(&pool, &stripe, &operation_id)
+            .await
+            .expect_err("customers are not deleted before the organizations");
+        assert!(matches!(error, AppError::Precondition(_)), "{error:?}");
+        assert!(state.deleted.lock().unwrap().is_empty());
+        assert_eq!(account_phase(&pool, &operation_id).await, "requested");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn db_account_customers_are_deleted_once_and_a_gone_one_counts() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let (operation_id, customers) =
+            seed_account_operation(&pool, "organizations_deleted").await;
+        let (stripe, state, task) = fake_customers(&customers[1], false).await;
+
+        delete_account_stripe_customers(&pool, &stripe, &operation_id)
+            .await
+            .unwrap();
+        assert_eq!(*state.deleted.lock().unwrap(), [customers[0].clone()]);
+        assert_eq!(
+            account_phase(&pool, &operation_id).await,
+            "stripe_customers_deleted"
+        );
+
+        // A retry after the phase is recorded calls Stripe for nothing.
+        delete_account_stripe_customers(&pool, &stripe, &operation_id)
+            .await
+            .unwrap();
+        assert_eq!(state.deleted.lock().unwrap().len(), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn db_account_customers_provider_failure_keeps_the_phase() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let (operation_id, _) = seed_account_operation(&pool, "organizations_deleted").await;
+        let (stripe, _state, task) = fake_customers("", true).await;
+        assert!(
+            delete_account_stripe_customers(&pool, &stripe, &operation_id)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            account_phase(&pool, &operation_id).await,
+            "organizations_deleted"
+        );
+        task.abort();
     }
 }
