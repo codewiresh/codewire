@@ -103,7 +103,9 @@ ghcr_steps="$(awk '/^      - name: / { capture = ($0 ~ /GHCR/) } capture' "$WORK
   fail "a production GHCR copy is outside a named mirror step"
 [[ "$(grep -c '^      - name: ' <<<"$ghcr_steps")" -eq "$(grep -c '^        continue-on-error: true$' <<<"$ghcr_steps")" ]] ||
   fail "a production GHCR mirror step can fail release"
-if awk '/^      - name: / { capture = ($0 !~ /GHCR/) } capture' "$WORKFLOW" | grep -q continue-on-error; then
+# Never piped into `grep -q`: its early exit would kill the writer, and pipefail
+# would then pass the violation it just found.
+if grep -q continue-on-error <<<"$(awk '/^      - name: / { capture = ($0 !~ /GHCR/) } capture' "$WORKFLOW")"; then
   fail "a required production step continues on error"
 fi
 
@@ -168,7 +170,7 @@ for expected in "          BUILD_SUPPORT_PAIR: 'true'" '        run: scripts/ci/
 done
 [[ "$(grep -Fc 'run: scripts/ci/release/finish-prod-release.sh' "$WORKFLOW")" -eq 2 ]] ||
   fail "the release finishes from other than the two finishing steps"
-if grep -v '^ *#' "$WORKFLOW" | grep -Fq 'dispatch-deploy-prod.sh'; then
+if grep -Fq 'dispatch-deploy-prod.sh' <<<"$(grep -v '^ *#' "$WORKFLOW")"; then
   fail "the workflow dispatches outside the finishing script"
 fi
 

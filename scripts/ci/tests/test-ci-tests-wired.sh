@@ -22,15 +22,16 @@ fail() {
 # unwired_tests REPO: the test scripts in REPO's tree that no other file names.
 unwired_tests() {
   local repo="$1" test
-  local selector_test=scripts/ci/tests/test-select-verification.sh name
+  local selector_test=scripts/ci/tests/test-select-verification.sh name selector_runs=''
+  [ -f "$repo/$selector_test" ] &&
+    selector_runs="$(grep -E '^[[:space:]]*defer_(slow_)?check ' "$repo/$selector_test" || true)"
   while IFS= read -r test; do
     name="$(basename "$test")"
     git -C "$repo" grep -q -F "$name" -- . ':!*.md' \
       ':!scripts/ci/select/select-verification.sh' \
       ":!$selector_test" \
       ':!scripts/ci/tests/test-ci-tests-wired.sh' ":!$test" && continue
-    [ -f "$repo/$selector_test" ] &&
-      grep -E '^[[:space:]]*defer_(slow_)?check ' "$repo/$selector_test" | grep -qF "/$name" && continue
+    grep -qF "/$name" <<<"$selector_runs" && continue
     printf '%s\n' "$test"
   done < <(git -C "$repo" ls-files 'scripts/**/tests/test-*')
 }
@@ -62,6 +63,15 @@ self_test() {
   git -C "$repo" add -A
   found="$(unwired_tests "$repo")"
   [ -z "$found" ] || fail "self-test: a runner named the test, still unwired: $found"
+  # A test named early in a run list longer than a pipe holds still counts.
+  # Piped into `grep -q`, the list's reader dies of SIGPIPE once the match is
+  # found, and pipefail would call the test unwired.
+  for filler in $(seq 1 2000); do
+    printf 'defer_check scripts/ci/tests/filler-%s-of-a-long-run-list\n' "$filler"
+  done >> "$repo/scripts/ci/tests/test-select-verification.sh"
+  git -C "$repo" add -A
+  found="$(unwired_tests "$repo")"
+  [ -z "$found" ] || fail "self-test: a long run list hid a test it runs: $found"
   rm -rf -- "$work"
   printf '[test-ci-tests-wired] self-test: an unrun test fails, a run one passes\n'
 }

@@ -460,8 +460,9 @@ mirror_steps="$(awk '
 [[ "$(grep -c '^      - name: ' <<<"$mirror_steps")" -ge 1 &&
    "$(grep -c '^      - name: ' <<<"$mirror_steps")" -eq "$(grep -c '^        continue-on-error: true$' <<<"$mirror_steps")" ]] ||
   fail "a GHCR mirror step can fail delivery"
-if awk '/^      - name: / { capture = ($0 !~ /GHCR/) } capture' <<<"$publish_job" \
-    | grep -q 'continue-on-error'; then
+# Never piped into `grep -q`: its early exit would kill the writer, and pipefail
+# would then pass the violation it just found.
+if grep -q 'continue-on-error' <<<"$(awk '/^      - name: / { capture = ($0 !~ /GHCR/) } capture' <<<"$publish_job")"; then
   fail "a delivery step outside the GHCR mirror continues on error"
 fi
 # shellcheck disable=SC2016
