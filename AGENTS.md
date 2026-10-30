@@ -33,15 +33,18 @@ authority. Preserve unrelated changes and worktrees; never commit known-bad
 work, weaken a gate for momentum, or use destructive Git or filesystem
 operations without an explicit request.
 
-**Tier 3: releases, recovery, Production mutation and direct credential
-access need explicit, action-scoped authority from the owner.** Ordinary merge
+**Tier 3: recovery, unusual Production mutation and direct credential access
+need explicit, action-scoped authority from the owner.** Ordinary merge
 consequences already declared at the canonical base (CI, support-image
 publication, Dev delivery, GitHub mirroring) inherit merge authority; new
-destinations, workflow changes, releases, recovery and Production actions do
-not. A pushed `v*` tag is a Production action: within five minutes the
-scheduled `deploy-prod` verifies and delivers it and `cli-release` publishes
-the CLI (owner, 2026-10-23, #2892), so pushing one needs the owner's explicit
-authority for that tag. A tag not picked up within 24 hours, or a release that
+destinations, workflow changes, recovery and unusual Production actions do not.
+**Releases are cut without per-release approval** (owner, 2026-10-30: "Releases
+can get cut automatically. I don't need to approve."; cited on #3013): the
+orchestrator pushes a `v*` tag on a commit with green `main` CI, Dev acceptance,
+a green dry run and its support pair. A pushed `v*` tag is a Production action:
+within five minutes the scheduled `deploy-prod` verifies and delivers it and
+`cli-release` publishes the CLI (owner, 2026-10-23, #2892). A tag not picked up
+within 24 hours, or a release that
 failed, is recovered only by dispatching `deploy-prod` then `cli-release` for
 it; a rerun of a scheduled run reads no release credential.
 
@@ -54,7 +57,7 @@ comparisons; Secrets when a local process can access secret material.
 Protocols add procedure, not permission. Risk tiers: **1** read-only or
 reversible single-repository work; **2** shared contracts, auth or data
 boundaries, migrations, workflows, selectors, dependencies, generated or deploy
-inputs, destructive edits; **3** releases, recovery, Production mutation,
+inputs, destructive edits; **3** recovery, unusual Production mutation,
 direct credentials. Risk selects safeguards, not unrelated tests.
 
 ## Done means observed working
