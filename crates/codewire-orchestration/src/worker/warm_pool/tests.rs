@@ -416,10 +416,10 @@ fn an_invalid_configuration_drains_and_none_is_inert() {
     }
 }
 
-/// #3572: a starting replica warms, and holds `/readyz` for, only the shapes a
-/// release is rotating: its own pool is absent beside another revision's of
-/// the same shape. A restart beside its own pools, a fresh cluster and a newly
-/// configured shape are ready at once, since `/readyz` gates all traffic.
+/// #3572: a starting replica warms, and holds `/readyz` and its Temporal
+/// worker for, only the shapes a release is rotating: its own pool is absent
+/// beside another revision's of the same shape. A restart beside its own
+/// pools, a fresh cluster and a newly configured shape are ready at once.
 #[test]
 fn only_a_rotating_shape_holds_readiness() {
     let shapes = "1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2";
@@ -475,4 +475,138 @@ fn only_a_rotating_shape_holds_readiness() {
         object.metadata.labels = None;
     }
     assert!(rotating(&unlabelled).is_empty());
+}
+
+/// #3572: the gate a starting replica's `/readyz` and Temporal worker wait on
+/// (one create missed on Dev, 2026-10-30, while a new replica's worker ran it
+/// from a pool still warming). A start that does not rotate is warm at once
+/// and warms nothing; a rotating start is held until its pools have a member.
+/// The warm-up bound, a failed or slow rotation check, a failed warm-up and a
+/// dropped sender all release it.
+#[tokio::test(start_paused = true)]
+async fn only_a_rotating_start_holds_the_temporal_worker() {
+    use std::sync::atomic::AtomicBool;
+    use tokio::time::timeout;
+
+    const DECIDE: Duration = Duration::from_secs(15);
+    const WARM: Duration = Duration::from_secs(180);
+
+    // A crash restart, a scale-up or a release without a template change.
+    let (ready, mut worker) = watch::channel(false);
+    let warmed = AtomicBool::new(false);
+    hold_until_warm(
+        &ready,
+        async { Ok(None::<()>) },
+        |()| async {
+            warmed.store(true, Ordering::SeqCst);
+            Ok(())
+        },
+        DECIDE,
+        WARM,
+    )
+    .await;
+    assert!(!warmed.load(Ordering::SeqCst));
+    timeout(Duration::ZERO, pools_warmed(&mut worker))
+        .await
+        .expect("a start that does not rotate is never held");
+
+    // A release rotating a pool: held until the pool has a member.
+    let (ready, mut worker) = watch::channel(false);
+    let (member_ready, member) = tokio::sync::oneshot::channel::<()>();
+    let gate = tokio::spawn(async move {
+        hold_until_warm(
+            &ready,
+            async { Ok(Some(())) },
+            |()| async move {
+                let _ = member.await;
+                Ok(())
+            },
+            DECIDE,
+            WARM,
+        )
+        .await;
+    });
+    assert!(
+        timeout(Duration::from_secs(60), pools_warmed(&mut worker))
+            .await
+            .is_err(),
+        "a rotating start holds its worker while its pools warm"
+    );
+    member_ready.send(()).unwrap();
+    timeout(Duration::from_secs(1), pools_warmed(&mut worker))
+        .await
+        .expect("released once its pools have a member");
+    gate.await.unwrap();
+
+    // A pool that never warms: released at the bound.
+    let (ready, mut worker) = watch::channel(false);
+    let gate = tokio::spawn(async move {
+        hold_until_warm(
+            &ready,
+            async { Ok(Some(())) },
+            |()| std::future::pending::<anyhow::Result<()>>(),
+            DECIDE,
+            WARM,
+        )
+        .await;
+    });
+    assert!(
+        timeout(WARM - Duration::from_secs(1), pools_warmed(&mut worker))
+            .await
+            .is_err()
+    );
+    timeout(Duration::from_secs(2), pools_warmed(&mut worker))
+        .await
+        .expect("released at the warm-up bound");
+    gate.await.unwrap();
+
+    // A warm-up that fails, and a rotation check that fails: released at once.
+    let (ready, mut worker) = watch::channel(false);
+    hold_until_warm(
+        &ready,
+        async { Ok(Some(())) },
+        |()| async { Err(anyhow::anyhow!("pool create refused")) },
+        DECIDE,
+        WARM,
+    )
+    .await;
+    timeout(Duration::ZERO, pools_warmed(&mut worker))
+        .await
+        .expect("a failed warm-up releases the worker");
+    let (ready, mut worker) = watch::channel(false);
+    hold_until_warm(
+        &ready,
+        async { Err::<Option<()>, _>(anyhow::anyhow!("API unreachable")) },
+        |()| async { Ok(()) },
+        DECIDE,
+        WARM,
+    )
+    .await;
+    timeout(Duration::ZERO, pools_warmed(&mut worker))
+        .await
+        .expect("a failed rotation check releases the worker");
+
+    // A rotation check that hangs: released at its own, shorter bound.
+    let (ready, mut worker) = watch::channel(false);
+    let gate = tokio::spawn(async move {
+        hold_until_warm(
+            &ready,
+            std::future::pending::<anyhow::Result<Option<()>>>(),
+            |()| async { Ok(()) },
+            DECIDE,
+            WARM,
+        )
+        .await;
+    });
+    timeout(DECIDE + Duration::from_secs(1), pools_warmed(&mut worker))
+        .await
+        .expect("released at the rotation-check bound");
+    gate.await.unwrap();
+
+    // A sender that is gone holds nothing.
+    let (ready, mut worker) = watch::channel(false);
+    drop(ready);
+    timeout(Duration::ZERO, pools_warmed(&mut worker))
+        .await
+        .expect("a dropped sender releases the worker");
 }

@@ -69,6 +69,7 @@ use kube::core::GroupVersionKind;
 use prometheus::{IntCounterVec, IntGauge, IntGaugeVec, Opts};
 use prometheus::{register_int_counter_vec, register_int_gauge, register_int_gauge_vec};
 use serde_json::Value;
+use tokio::sync::watch;
 
 use super::WorkerContext;
 use super::create::{SandboxWorkerCfg, render_configured_warm_pool};
@@ -93,6 +94,10 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 /// reports ready anyway, so a release never stalls on a pool (#3572).
 pub const WARM_UP_BOUND: Duration = Duration::from_secs(3 * 60);
 const WARM_UP_POLL: Duration = Duration::from_secs(2);
+/// How long a starting replica may take to tell whether a release is rotating
+/// its pools. Past it, the start is treated as not rotating, so a slow API
+/// never holds a start that has nothing to warm.
+const ROTATION_CHECK_BOUND: Duration = Duration::from_secs(15);
 
 /// What this replica reconciles toward.
 #[derive(Clone, Debug, PartialEq)]
@@ -260,34 +265,88 @@ pub async fn warm_pool_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>)
 /// template and pool, with one member, and wait. The leader then sizes it to
 /// the node cap and drains the older revision (`plan`). Not leader-gated.
 ///
-/// `/readyz` gates all of orchestration's traffic, so anything else is ready
-/// at once and left to the leader: a restart beside its own pools, even empty
-/// ones, a fresh cluster and a newly configured shape. `ready` is also set
-/// after [`WARM_UP_BOUND`] and on any error.
-pub async fn warm_own_pools(ctx: Arc<WorkerContext>, ready: Arc<AtomicBool>) {
-    match tokio::time::timeout(WARM_UP_BOUND, warm_up(&ctx)).await {
-        Ok(Ok(true)) => tracing::info!("warm pools: this revision's pools have ready members"),
-        Ok(Ok(false)) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(error = %format!("{error:#}"), "warm pools: warm-up failed; ready without it")
-        }
-        Err(_) => tracing::warn!(
-            bound_seconds = WARM_UP_BOUND.as_secs(),
-            "warm pools: this revision's pools are not ready yet; ready without them"
-        ),
-    }
-    ready.store(true, Ordering::SeqCst);
+/// `ready` gates both of orchestration's ways in: `/readyz`, which holds its
+/// HTTP traffic, and the start of its Temporal worker ([`pools_warmed`]), which
+/// would otherwise run workflow and activity tasks, a create among them, from
+/// the still-empty pool (#3572: one create missed so on Dev, 2026-10-30).
+/// Anything else is ready at once and left to the leader: a restart beside its
+/// own pools, even empty ones, a scale-up, a release that changes no template,
+/// a fresh cluster and a newly configured shape. So stops, starts and deletes
+/// wait only when a release rotates a pool, and then for at most
+/// [`WARM_UP_BOUND`]. `ready` is also set on any error, and when telling
+/// whether this start rotates takes longer than [`ROTATION_CHECK_BOUND`].
+pub async fn warm_own_pools(ctx: Arc<WorkerContext>, ready: watch::Sender<bool>) {
+    hold_until_warm(
+        &ready,
+        rotation(&ctx),
+        warm,
+        ROTATION_CHECK_BOUND,
+        WARM_UP_BOUND,
+    )
+    .await;
 }
 
-/// `Ok(false)` when there is nothing to warm.
-async fn warm_up(ctx: &WorkerContext) -> anyhow::Result<bool> {
+/// Waits until `ready` holds, or its sender is gone: the start of a replica's
+/// Temporal worker during a release ([`warm_own_pools`]).
+pub async fn pools_warmed(ready: &mut watch::Receiver<bool>) {
+    let _ = ready.wait_for(|warm| *warm).await;
+}
+
+/// [`warm_own_pools`]'s gate: `decide` tells whether this start rotates, and
+/// only a rotating start waits for `warm`, each within its bound.
+async fn hold_until_warm<R, D, W, F>(
+    ready: &watch::Sender<bool>,
+    decide: D,
+    warm: W,
+    decide_bound: Duration,
+    warm_bound: Duration,
+) where
+    D: std::future::Future<Output = anyhow::Result<Option<R>>>,
+    W: FnOnce(R) -> F,
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
+    match tokio::time::timeout(decide_bound, decide).await {
+        Ok(Ok(Some(rotation))) => match tokio::time::timeout(warm_bound, warm(rotation)).await {
+            Ok(Ok(())) => tracing::info!("warm pools: this revision's pools have ready members"),
+            Ok(Err(error)) => tracing::warn!(
+                error = %format!("{error:#}"),
+                "warm pools: warm-up failed; ready, and starting the Temporal worker, without it"
+            ),
+            Err(_) => tracing::warn!(
+                bound_seconds = warm_bound.as_secs(),
+                "warm pools: this revision's pools have no ready member within the bound; \
+                 ready, and starting the Temporal worker, without them"
+            ),
+        },
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => tracing::warn!(
+            error = %format!("{error:#}"),
+            "warm pools: could not tell whether this start rotates its pools; ready at once"
+        ),
+        Err(_) => tracing::warn!(
+            bound_seconds = decide_bound.as_secs(),
+            "warm pools: could not tell in time whether this start rotates its pools; ready at once"
+        ),
+    }
+    ready.send_replace(true);
+}
+
+/// The pools a release is rotating, with the APIs to warm them.
+struct Rotation {
+    templates: Api<DynamicObject>,
+    pools: Api<DynamicObject>,
+    rotating: Vec<DesiredPool>,
+}
+
+/// `None` when there is nothing to warm.
+async fn rotation(ctx: &WorkerContext) -> anyhow::Result<Option<Rotation>> {
     let image_cache_enabled =
         ImageCacheConfig::from_env(&ctx.sandbox_cfg).map(|config| config.is_some());
     let Startup::Reconcile(config) = startup(&ctx.sandbox_cfg, image_cache_enabled) else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(client) = ctx.kube.clone() else {
-        return Ok(false);
+        return Ok(None);
     };
     let wanted: Vec<&DesiredPool> = config
         .pools
@@ -295,7 +354,7 @@ async fn warm_up(ctx: &WorkerContext) -> anyhow::Result<bool> {
         .filter(|pool| pool.configured.members > 0)
         .collect();
     if config.draining || wanted.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let namespace = config.namespace.as_str();
     let templates = dynamic(
@@ -314,7 +373,7 @@ async fn warm_up(ctx: &WorkerContext) -> anyhow::Result<bool> {
     );
     // Only beside a controller that shows claim safety, as the leader writes.
     if !controller_capable(&pools.list(&ListParams::default()).await?.items) {
-        return Ok(false);
+        return Ok(None);
     }
     let live = by_name(
         pools
@@ -322,10 +381,28 @@ async fn warm_up(ctx: &WorkerContext) -> anyhow::Result<bool> {
             .await?
             .items,
     );
-    let rotating = rotating_shapes(&wanted, &live);
+    let rotating: Vec<DesiredPool> = rotating_shapes(&wanted, &live)
+        .into_iter()
+        .cloned()
+        .collect();
     if rotating.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
+    Ok(Some(Rotation {
+        templates,
+        pools,
+        rotating,
+    }))
+}
+
+/// Create each rotating shape's template and one-member pool, then wait until
+/// every one has a ready member.
+async fn warm(rotation: Rotation) -> anyhow::Result<()> {
+    let Rotation {
+        templates,
+        pools,
+        rotating,
+    } = rotation;
     for pool in &rotating {
         tracing::info!(pool = %pool.objects.name, "warm pools: warming this revision's pool before taking traffic");
         create_if_absent(&templates, &pool.objects.template).await?;
@@ -344,7 +421,7 @@ async fn warm_up(ctx: &WorkerContext) -> anyhow::Result<bool> {
             warm &= ready >= 1;
         }
         if warm {
-            return Ok(true);
+            return Ok(());
         }
         tokio::time::sleep(WARM_UP_POLL).await;
     }

@@ -521,27 +521,31 @@ async fn main() -> anyhow::Result<()> {
     if !loops.is_empty() {
         worker::loops::start_loops(ctx.clone(), cfg.database_url.clone(), &loops);
     }
-    // #3572: a replica that runs the warm-pool loop reports ready only once
+    // #3572: a replica that runs the warm-pool loop, starting while a release
+    // rotates its pools, reports ready and starts its Temporal worker only once
     // its own revision's pools have a ready member (bounded), so a release
-    // hands over from full pools.
-    let pools_warm = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    // hands over from full pools. Any other start is warm at once.
+    let (pools_warm_sender, pools_warm) = tokio::sync::watch::channel(true);
     if loops.iter().any(|name| name == "warm-pool") {
-        pools_warm.store(false, std::sync::atomic::Ordering::SeqCst);
+        pools_warm_sender.send_replace(false);
         let ctx = ctx.clone();
-        let pools_warm = pools_warm.clone();
         tokio::spawn(async move {
-            worker::warm_pool::warm_own_pools(ctx, pools_warm).await;
+            worker::warm_pool::warm_own_pools(ctx, pools_warm_sender).await;
         });
     }
 
     // Temporal worker (#36): runs the EnvironmentWorkflow + PortDnsWorkflow
     // and their activities on the shared handlers.
-    codewire_orchestration::temporal::spawn_temporal_worker(
-        ctx.clone(),
-        host_port,
-        namespace,
-        task_queue,
-    );
+    {
+        let ctx = ctx.clone();
+        let mut pools_warm = pools_warm.clone();
+        tokio::spawn(async move {
+            worker::warm_pool::pools_warmed(&mut pools_warm).await;
+            codewire_orchestration::temporal::spawn_temporal_worker(
+                ctx, host_port, namespace, task_queue,
+            );
+        });
+    }
 
     // Environments surface (#38): reads (slice 1) + lifecycle intents
     // (slice 2), served behind the same auth stack as billing; edge
@@ -688,8 +692,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let app = AppBuilder::new("codewire-orchestration")
         .with_health_and_db_probe(pool.clone(), move || {
-            let ready =
-                secret_readiness.is_ready() && pools_warm.load(std::sync::atomic::Ordering::SeqCst);
+            let ready = secret_readiness.is_ready() && *pools_warm.borrow();
             async move { ready }
         })
         .with_unary_connect_routes_auth(
