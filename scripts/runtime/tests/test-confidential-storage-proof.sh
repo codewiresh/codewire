@@ -74,7 +74,7 @@ grep -F 'readonly LUKS2_METADATA_MIB=16' "$PROOF" >/dev/null || die_test "the sc
     die_test "a run with no release was accepted"
   fi
 
-  # Only a positively absent recovery copy passes; a denied read is unobserved.
+  # Only a copy read as absent passes. A present copy and a refused read fail.
   bao() { return 0; }
   [[ "$(recovery_copy_state)" == present ]] || die_test "a present copy was not reported"
   if recovery_copy_is_gone 2>/dev/null; then die_test "a present copy counted as gone"; fi
@@ -83,4 +83,11 @@ grep -F 'readonly LUKS2_METADATA_MIB=16' "$PROOF" >/dev/null || die_test "the sc
   bao() { printf 'permission denied\n' >&2; return 2; }
   [[ "$(recovery_copy_state)" == unobserved ]] || die_test "a denied read was not unobserved"
   if recovery_copy_is_gone 2>/dev/null; then die_test "a denied read counted as gone"; fi
+
+  # It reads the mount the recovery copies are really in, by the metadata path.
+  [[ "$OPENBAO_RECOVERY_MOUNT" == apps ]] || die_test "the proof reads the wrong recovery mount"
+  grep -F 'bao kv metadata get' "$PROOF" >/dev/null || die_test "the proof does not read metadata"
+  if grep -nE 'bao kv (get|put|patch|delete|destroy)' "$PROOF" >/dev/null; then
+    die_test "the proof reads or changes a recovery value"
+  fi
 )

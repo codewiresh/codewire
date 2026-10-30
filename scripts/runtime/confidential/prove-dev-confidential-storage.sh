@@ -31,7 +31,7 @@ SNP_NODE=""
 STORAGE_NAMESPACE="${STORAGE_NAMESPACE:-piraeus-datastore}"
 TRUSTEE_NAMESPACE="${TRUSTEE_NAMESPACE:-codewire-trustee}"
 LINSTOR_VG="${LINSTOR_VG:-linstor_nvme}"
-OPENBAO_RECOVERY_MOUNT="${OPENBAO_RECOVERY_MOUNT:-codewire-confidential-dev}"
+OPENBAO_RECOVERY_MOUNT="${OPENBAO_RECOVERY_MOUNT:-apps}"
 PROOF_MEMORY="${PROOF_MEMORY:-16GB}"
 PROOF_DISK="${PROOF_DISK:-20GB}"
 PROOF_TIMEOUT_SECONDS="${PROOF_TIMEOUT_SECONDS:-1800}"
@@ -222,8 +222,7 @@ kbs_holds_environment() {
     ls /opt/confidential-containers/kbs/repository/repository 2>/dev/null | grep -Fq "$ENV_ID"
 }
 
-# Metadata only, never a value. A session that may not read this mount reports
-# the copy as unobserved, which fails the proof rather than passing it silently.
+# Metadata only, never a value: the human session may read this mount's metadata.
 recovery_copy_state() {
   local err="$TMPDIR_PROOF/bao.err"
   if bao kv metadata get -mount="$OPENBAO_RECOVERY_MOUNT" -format=json \
@@ -236,6 +235,8 @@ recovery_copy_state() {
   fi
 }
 
+# Only a direct read that finds nothing passes. A refused or failed read proves
+# nothing about the copy, so it fails.
 recovery_copy_is_gone() {
   local state
   state="$(recovery_copy_state)"
