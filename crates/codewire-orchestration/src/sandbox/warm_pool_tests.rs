@@ -53,10 +53,13 @@ fn key(shape: WorkspaceShape, storage_class: &str, sandbox: &str, server: &str) 
     WarmPoolKey::new(shape, storage_class, sandbox, server).unwrap()
 }
 
+/// Any template revision; the name hashes it with the placement.
+const REVISION: &str = "24783b75950cd80a796fab88ea9514f59f8d2753fb7de7158998739b76e09c73";
+
 #[test]
-fn pool_names_are_the_exact_shape_and_a_placement_hash() {
+fn pool_names_are_the_exact_shape_and_a_placement_and_revision_hash() {
     let [small, large] = owner_shapes();
-    let name = key(small, "linstor-local", NAMESPACE, "dev").name();
+    let name = key(small, "linstor-local", NAMESPACE, "dev").name(REVISION);
     let suffix = name
         .strip_prefix("cw-pool-1000m-4096mi-10gi-")
         .expect("shape in the name");
@@ -67,19 +70,24 @@ fn pool_names_are_the_exact_shape_and_a_placement_hash() {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     );
     assert!(is_warm_pool_name(&name));
-    assert_eq!(name, key(small, "linstor-local", NAMESPACE, "dev").name());
+    assert_eq!(
+        name,
+        key(small, "linstor-local", NAMESPACE, "dev").name(REVISION)
+    );
     assert!(
         key(large, "linstor-local", NAMESPACE, "dev")
-            .name()
+            .name(REVISION)
             .starts_with("cw-pool-2000m-8192mi-10gi-")
     );
 
-    // Each placement input changes the hash; the shape alone does not.
+    // Each placement input and the revision change the hash; the shape alone
+    // does not (#3572).
     let placements = [
-        key(small, "linstor-local", NAMESPACE, "dev").name(),
-        key(small, "local-path", NAMESPACE, "dev").name(),
-        key(small, "linstor-local", "prod-sandboxes", "dev").name(),
-        key(small, "linstor-local", NAMESPACE, "prod").name(),
+        key(small, "linstor-local", NAMESPACE, "dev").name("another revision"),
+        key(small, "linstor-local", NAMESPACE, "dev").name(REVISION),
+        key(small, "local-path", NAMESPACE, "dev").name(REVISION),
+        key(small, "linstor-local", "prod-sandboxes", "dev").name(REVISION),
+        key(small, "linstor-local", NAMESPACE, "prod").name(REVISION),
     ];
     let hashes: std::collections::BTreeSet<_> = placements
         .iter()
@@ -88,13 +96,13 @@ fn pool_names_are_the_exact_shape_and_a_placement_hash() {
     assert_eq!(hashes.len(), placements.len());
     let hash = |name: String| name[name.len() - 8..].to_owned();
     assert_eq!(
-        hash(key(small, "linstor-local", NAMESPACE, "dev").name()),
-        hash(key(large, "linstor-local", NAMESPACE, "dev").name()),
+        hash(key(small, "linstor-local", NAMESPACE, "dev").name(REVISION)),
+        hash(key(large, "linstor-local", NAMESPACE, "dev").name(REVISION)),
     );
 
     // The longest valid name fits a Kubernetes label value.
     let max = i64::from(i32::MAX);
-    let longest = key(shape(max, max, max), "linstor-local", NAMESPACE, "dev").name();
+    let longest = key(shape(max, max, max), "linstor-local", NAMESPACE, "dev").name(REVISION);
     assert!(longest.len() <= 63, "{longest}");
     assert!(is_warm_pool_name(&longest));
 }
@@ -132,7 +140,7 @@ fn pool_shapes_and_placements_are_validated() {
 #[test]
 fn pool_names_are_disjoint_from_shadow_and_legacy_pools() {
     for shape in owner_shapes() {
-        let name = key(shape, "linstor-local", NAMESPACE, "dev").name();
+        let name = key(shape, "linstor-local", NAMESPACE, "dev").name(REVISION);
         assert!(!name.starts_with("shadow-pool-"));
         assert!(!name.starts_with("sandbox-warmpool-"));
         assert!(!is_warm_pool_name(&shadow_warm_pool_name(&name)));
@@ -167,7 +175,7 @@ fn pool_names_are_disjoint_from_shadow_and_legacy_pools() {
 fn pool_objects_share_one_name_revision_and_identity_free_labels() {
     let objects = render(&pool_opts());
     let [template, pool] = [&objects.template, &objects.pool];
-    assert_eq!(objects.name, objects.key.name());
+    assert_eq!(objects.name, objects.key.name(&objects.revision));
     assert_eq!(template["kind"], "SandboxTemplate");
     assert_eq!(pool["kind"], "SandboxWarmPool");
     for object in [template, pool] {
@@ -271,9 +279,14 @@ fn each_image_digest_changes_the_revision() {
     for opts in changed {
         let objects = render(&opts);
         assert_ne!(objects.revision, base);
-        // The name is the shape and placement only: a new release updates
-        // the same pool in place.
-        assert_eq!(objects.name, render(&pool_opts()).name);
+        // A new revision is a new pool beside the old one, of the same shape
+        // (#3572).
+        let previous = render(&pool_opts());
+        assert_ne!(objects.name, previous.name);
+        assert_eq!(
+            warm_pool_name_shape(&objects.name),
+            warm_pool_name_shape(&previous.name)
+        );
         revisions.insert(objects.revision);
     }
     assert_eq!(revisions.len(), 4);
@@ -464,7 +477,7 @@ fn shape_labels_and_pool_names_round_trip() {
     let [small, large] = owner_shapes();
     assert_eq!(shape_label(small), "1000m-4096mi-10gi");
     for shape in [small, large] {
-        let name = key(shape, "linstor-local", NAMESPACE, "dev").name();
+        let name = key(shape, "linstor-local", NAMESPACE, "dev").name(REVISION);
         assert_eq!(warm_pool_name_shape(&name), Some(shape));
     }
     assert_eq!(warm_pool_name_shape("shadow-pool-workspace-env"), None);
@@ -527,7 +540,7 @@ fn the_admission_policy_pins_the_renderer() {
     let pattern = "^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$";
     assert!(policy.contains(pattern));
     for shape in owner_shapes() {
-        let name = key(shape, "linstor-local", NAMESPACE, "dev").name();
+        let name = key(shape, "linstor-local", NAMESPACE, "dev").name(REVISION);
         assert!(is_warm_pool_name(&name));
         let (_, hash) = name.rsplit_once('-').unwrap();
         assert_eq!(hash.len(), 8);

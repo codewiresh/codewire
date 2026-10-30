@@ -415,3 +415,64 @@ fn an_invalid_configuration_drains_and_none_is_inert() {
         Startup::Inert => panic!("a valid configuration reconciles"),
     }
 }
+
+/// #3572: a starting replica warms, and holds `/readyz` for, only the shapes a
+/// release is rotating: its own pool is absent beside another revision's of
+/// the same shape. A restart beside its own pools, a fresh cluster and a newly
+/// configured shape are ready at once, since `/readyz` gates all traffic.
+#[test]
+fn only_a_rotating_shape_holds_readiness() {
+    let shapes = "1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2";
+    let current = WarmPoolConfig::from_cfg(&dev_cfg(shapes), true)
+        .unwrap()
+        .unwrap()
+        .pools;
+    let mut previous_cfg = dev_cfg(shapes);
+    previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
+    let previous = WarmPoolConfig::from_cfg(&previous_cfg, true)
+        .unwrap()
+        .unwrap()
+        .pools;
+    let wanted: Vec<&DesiredPool> = current.iter().collect();
+    let live = |pools: &[&DesiredPool]| -> BTreeMap<String, DynamicObject> {
+        pools
+            .iter()
+            .map(|pool| {
+                (
+                    pool.objects.name.clone(),
+                    serde_json::from_value(pool.objects.pool.clone()).unwrap(),
+                )
+            })
+            .collect()
+    };
+    let rotating = |live: &BTreeMap<String, DynamicObject>| -> Vec<String> {
+        rotating_shapes(&wanted, live)
+            .into_iter()
+            .map(|pool| pool.objects.name.clone())
+            .collect()
+    };
+
+    // A fresh cluster, and a restart beside this revision's own pools.
+    assert!(rotating(&BTreeMap::new()).is_empty());
+    assert!(rotating(&live(&[&current[0], &current[1]])).is_empty());
+    // A release: the outgoing revision's pools are live and these are not.
+    assert_eq!(
+        rotating(&live(&[&previous[0], &previous[1]])),
+        [
+            current[0].objects.name.clone(),
+            current[1].objects.name.clone()
+        ]
+    );
+    // Only the shape that rotates; a newly configured shape is the leader's.
+    assert_eq!(
+        rotating(&live(&[&previous[0], &current[1]])),
+        [current[0].objects.name.clone()]
+    );
+    assert!(rotating(&live(&[&previous[1], &current[1]])).is_empty());
+    // An unlabelled object of a pool's name is not a pool.
+    let mut unlabelled = live(&[&previous[0]]);
+    for object in unlabelled.values_mut() {
+        object.metadata.labels = None;
+    }
+    assert!(rotating(&unlabelled).is_empty());
+}

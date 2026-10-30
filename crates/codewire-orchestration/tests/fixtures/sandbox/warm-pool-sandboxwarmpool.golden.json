@@ -9,13 +9,13 @@
       "app.kubernetes.io/managed-by": "codewire",
       "codewire.sh/type": "workspace-pool"
     },
-    "name": "cw-pool-1000m-4096mi-10gi-78909fe3",
+    "name": "cw-pool-1000m-4096mi-10gi-c0d6c007",
     "namespace": "dev-sandboxes"
   },
   "spec": {
     "replicas": 2,
     "sandboxTemplateRef": {
-      "name": "cw-pool-1000m-4096mi-10gi-78909fe3"
+      "name": "cw-pool-1000m-4096mi-10gi-c0d6c007"
     },
     "updateStrategy": {
       "type": "Recreate"

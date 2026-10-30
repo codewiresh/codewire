@@ -566,6 +566,104 @@ fn unconfigured_pools_drain_and_are_removed_only_when_no_claim_names_them() {
     assert!(fixture.plan().writes.is_empty());
 }
 
+/// `object` as created at `second`.
+fn created(object: DynamicObject, second: i64) -> DynamicObject {
+    let mut value = serde_json::to_value(object).unwrap();
+    value["metadata"]["creationTimestamp"] =
+        json!(Timestamp::from_second(second).unwrap().to_string());
+    serde_json::from_value(value).unwrap()
+}
+
+/// #3572: a configured shape's pool at another revision keeps serving the
+/// replicas that rendered it until this leader's own pool of the shape has a
+/// ready member. A newer one is the next release's and is left alone, until
+/// it is older than [`SUPERSEDED_GRACE`] (a rolled-back release).
+#[test]
+fn another_revision_of_a_configured_shape_drains_only_behind_a_ready_own_pool() {
+    let mut previous_cfg = dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2");
+    previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
+    let previous = WarmPoolConfig::from_cfg(&previous_cfg, true)
+        .unwrap()
+        .unwrap()
+        .pools
+        .remove(0);
+    let mut fixture = Fixture::settled();
+    let own = fixture.desired[0].clone();
+    assert_eq!(previous.configured.shape, own.configured.shape);
+    assert_ne!(previous.objects.name, own.objects.name);
+    let old = previous.objects.name.clone();
+    fixture.templates.insert(
+        old.clone(),
+        live(&previous.objects.template, "template-previous"),
+    );
+    let pool_at = |pool: &DesiredPool, uid: &str, ready: i64, second: i64| {
+        created(live_pool(pool, uid, 2, ready), second)
+    };
+
+    // The old revision's pool is older, but this leader's own pool has no
+    // ready member yet: nothing touches the old one.
+    fixture.pools.insert(
+        old.clone(),
+        pool_at(&previous, "pool-previous", 2, NOW - 3600),
+    );
+    fixture.pools.insert(
+        own.objects.name.clone(),
+        pool_at(&own, "pool-0", 0, NOW - 120),
+    );
+    let plan = fixture.plan();
+    assert!(plan.superseded_kept.contains(&old), "{plan:?}");
+    assert!(!plan.unconfigured.contains(&old));
+    assert!(
+        names(&plan.writes)
+            .iter()
+            .all(|write| !write.contains(&old))
+    );
+
+    // Once it has one, the older revision drains like an unconfigured pool,
+    // and its report never replaces the own pool's.
+    fixture.pools.insert(
+        own.objects.name.clone(),
+        pool_at(&own, "pool-0", 1, NOW - 120),
+    );
+    let plan = fixture.plan();
+    assert_eq!(names(&plan.writes), [format!("replace-pool {old}")]);
+    assert!(plan.unconfigured.contains(&old));
+    assert_eq!(plan.reports[&own.label()].ready, 1);
+
+    // A newer revision is the next release's: kept while this leader serves.
+    fixture.pools.insert(
+        old.clone(),
+        pool_at(&previous, "pool-previous", 2, NOW - 60),
+    );
+    let plan = fixture.plan();
+    assert!(plan.superseded_kept.contains(&old));
+    assert!(
+        names(&plan.writes)
+            .iter()
+            .all(|write| !write.contains(&old))
+    );
+
+    // Past the grace it drains, newer or not.
+    fixture.pools.insert(
+        own.objects.name.clone(),
+        pool_at(&own, "pool-0", 1, NOW - 7200),
+    );
+    let grace = SUPERSEDED_GRACE.as_secs() as i64;
+    fixture.pools.insert(
+        old.clone(),
+        pool_at(&previous, "pool-previous", 2, NOW - grace + 1),
+    );
+    assert!(fixture.plan().superseded_kept.contains(&old));
+    fixture.pools.insert(
+        old.clone(),
+        pool_at(&previous, "pool-previous", 2, NOW - grace),
+    );
+    assert_eq!(
+        names(&fixture.plan().writes),
+        [format!("replace-pool {old}")]
+    );
+}
+
 #[test]
 fn terminating_pool_objects_are_never_written() {
     let mut fixture = Fixture::empty();
@@ -903,4 +1001,76 @@ fn a_template_is_current_only_when_its_spec_is() {
         [format!("replace-template {}", small.objects.name)]
     );
     assert!(!plan.reports[&small.label()].template_current);
+}
+
+/// #3572: while two revisions of a shape are live, the other revision's
+/// members count against the node cap, so a rotation never reserves more than
+/// steady state on a busy node. A draining pool counts the members it still
+/// has; pools of unconfigured shapes and unlabelled objects do not count.
+#[test]
+fn another_revisions_members_count_against_the_node_cap() {
+    let mut previous_cfg = dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2");
+    previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
+    let previous = WarmPoolConfig::from_cfg(&previous_cfg, true)
+        .unwrap()
+        .unwrap()
+        .pools;
+    let fixture = Fixture::settled();
+    let reservations = [
+        Some(Reservation {
+            cpu_millis: 1_500,
+            memory_bytes: 5 << 30,
+        }),
+        Some(Reservation {
+            cpu_millis: 2_500,
+            memory_bytes: 9 << 30,
+        }),
+    ];
+    let mut pools = fixture.pools.clone();
+    // Only this replica's own pools: nothing is held.
+    assert_eq!(
+        superseded_reservation(&fixture.desired, &reservations, &pools),
+        Reservation::default()
+    );
+    // The small shape's older revision, draining: spec 0, two members left.
+    let mut draining = live_pool(&previous[0], "pool-previous", 0, 0);
+    draining.data["status"]["replicas"] = json!(2);
+    pools.insert(previous[0].objects.name.clone(), draining);
+    let held = superseded_reservation(&fixture.desired, &reservations, &pools);
+    assert_eq!(
+        held,
+        Reservation {
+            cpu_millis: 3_000,
+            memory_bytes: 10 << 30,
+        }
+    );
+    let budget = Budget {
+        cpu_millis: 5_000,
+        memory_bytes: 64 << 30,
+    };
+    let left = budget_after(budget, held);
+    assert_eq!((left.cpu_millis, left.memory_bytes), (2_000, 54 << 30));
+    // The large shape can then hold fewer members than it is configured for.
+    assert_eq!(
+        clamp_members(&fixture.desired[1..], &reservations[1..], left),
+        [0]
+    );
+    // Never below zero.
+    let none = budget_after(
+        Budget {
+            cpu_millis: 1_000,
+            memory_bytes: 1 << 30,
+        },
+        held,
+    );
+    assert_eq!((none.cpu_millis, none.memory_bytes), (0, 0));
+    // An unlabelled object of a pool's name is not a pool.
+    let mut unlabelled = fixture.pools.clone();
+    let mut object = live_pool(&previous[1], "pool-other", 2, 2);
+    object.metadata.labels = None;
+    unlabelled.insert(previous[1].objects.name.clone(), object);
+    assert_eq!(
+        superseded_reservation(&fixture.desired, &reservations, &unlabelled),
+        Reservation::default()
+    );
 }

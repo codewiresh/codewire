@@ -26,6 +26,14 @@
 //! - **Removal.** A pool that is no longer configured is drained to zero
 //!   members and removed, with its template, only when no SandboxClaim names
 //!   it (pool-born environments keep naming theirs).
+//! - **Rotation (#3572).** A pool's name includes its revision, so a release
+//!   that changes the template adds a pool beside the old one. A starting
+//!   replica warms its own pool of each rotating shape before it reports
+//!   ready ([`warm_own_pools`]), while the outgoing replicas keep claiming
+//!   from theirs. The leader drains a configured shape's pool at another
+//!   revision only once its own pool of the shape has a ready member, and
+//!   only when the other pool is older than its own, or older than
+//!   `plan::SUPERSEDED_GRACE`. A newer one belongs to the next release.
 //!
 //! Inert by default: with `SANDBOX_WARM_POOL_SHAPES` empty or unset the loop
 //! logs once and returns before it builds a Kubernetes API, so it reads and
@@ -75,12 +83,16 @@ use crate::sandbox::warm_pool::{
 use crate::sandbox::{CRD_VERSION, EXTENSIONS_GROUP, SANDBOX_GROUP};
 pub use plan::{
     Budget, DeleteReason, DesiredPool, Observed, Placement, Plan, Reservation, Write,
-    bootstrap_writes, clamp_members, controller_capable, image_cache_warm, member_reservation,
-    node_budget, node_unfit, pool_observed_by_capable_controller, settle_budget,
-    template_spec_current,
+    bootstrap_writes, budget_after, clamp_members, controller_capable, image_cache_warm,
+    member_reservation, node_budget, node_unfit, pool_observed_by_capable_controller,
+    settle_budget, superseded_reservation, template_spec_current,
 };
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+/// How long a starting replica waits for its own revision's pools before it
+/// reports ready anyway, so a release never stalls on a pool (#3572).
+pub const WARM_UP_BOUND: Duration = Duration::from_secs(3 * 60);
+const WARM_UP_POLL: Duration = Duration::from_secs(2);
 
 /// What this replica reconciles toward.
 #[derive(Clone, Debug, PartialEq)]
@@ -237,6 +249,141 @@ pub async fn warm_pool_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>)
                 tracing::warn!(error = %format!("{error:#}"), "warm pools: reconcile failed; retrying");
             }
         }
+    }
+}
+
+/// #3572: during a release, this replica reports ready only once its own
+/// revision's pool of each rotating shape has a ready member, so the outgoing
+/// replicas keep serving from their full pools meanwhile and no create misses.
+/// A shape rotates when this revision's pool is missing and a pool of the
+/// shape at another revision exists: only then does this create the missing
+/// template and pool, with one member, and wait. The leader then sizes it to
+/// the node cap and drains the older revision (`plan`). Not leader-gated.
+///
+/// `/readyz` gates all of orchestration's traffic, so anything else is ready
+/// at once and left to the leader: a restart beside its own pools, even empty
+/// ones, a fresh cluster and a newly configured shape. `ready` is also set
+/// after [`WARM_UP_BOUND`] and on any error.
+pub async fn warm_own_pools(ctx: Arc<WorkerContext>, ready: Arc<AtomicBool>) {
+    match tokio::time::timeout(WARM_UP_BOUND, warm_up(&ctx)).await {
+        Ok(Ok(true)) => tracing::info!("warm pools: this revision's pools have ready members"),
+        Ok(Ok(false)) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %format!("{error:#}"), "warm pools: warm-up failed; ready without it")
+        }
+        Err(_) => tracing::warn!(
+            bound_seconds = WARM_UP_BOUND.as_secs(),
+            "warm pools: this revision's pools are not ready yet; ready without them"
+        ),
+    }
+    ready.store(true, Ordering::SeqCst);
+}
+
+/// `Ok(false)` when there is nothing to warm.
+async fn warm_up(ctx: &WorkerContext) -> anyhow::Result<bool> {
+    let image_cache_enabled =
+        ImageCacheConfig::from_env(&ctx.sandbox_cfg).map(|config| config.is_some());
+    let Startup::Reconcile(config) = startup(&ctx.sandbox_cfg, image_cache_enabled) else {
+        return Ok(false);
+    };
+    let Some(client) = ctx.kube.clone() else {
+        return Ok(false);
+    };
+    let wanted: Vec<&DesiredPool> = config
+        .pools
+        .iter()
+        .filter(|pool| pool.configured.members > 0)
+        .collect();
+    if config.draining || wanted.is_empty() {
+        return Ok(false);
+    }
+    let namespace = config.namespace.as_str();
+    let templates = dynamic(
+        &client,
+        namespace,
+        EXTENSIONS_GROUP,
+        "SandboxTemplate",
+        "sandboxtemplates",
+    );
+    let pools = dynamic(
+        &client,
+        namespace,
+        EXTENSIONS_GROUP,
+        "SandboxWarmPool",
+        "sandboxwarmpools",
+    );
+    // Only beside a controller that shows claim safety, as the leader writes.
+    if !controller_capable(&pools.list(&ListParams::default()).await?.items) {
+        return Ok(false);
+    }
+    let live = by_name(
+        pools
+            .list(&ListParams::default().labels(&pool_label_selector()))
+            .await?
+            .items,
+    );
+    let rotating = rotating_shapes(&wanted, &live);
+    if rotating.is_empty() {
+        return Ok(false);
+    }
+    for pool in &rotating {
+        tracing::info!(pool = %pool.objects.name, "warm pools: warming this revision's pool before taking traffic");
+        create_if_absent(&templates, &pool.objects.template).await?;
+        let mut body = pool.objects.pool.clone();
+        body["spec"]["replicas"] = Value::from(1);
+        create_if_absent(&pools, &body).await?;
+    }
+    loop {
+        let mut warm = true;
+        for pool in &rotating {
+            let ready = pools
+                .get_opt(&pool.objects.name)
+                .await?
+                .and_then(|live| live.data.pointer("/status/readyReplicas")?.as_i64())
+                .unwrap_or(0);
+            warm &= ready >= 1;
+        }
+        if warm {
+            return Ok(true);
+        }
+        tokio::time::sleep(WARM_UP_POLL).await;
+    }
+}
+
+/// The configured pools a release is rotating: this revision's pool is absent
+/// and a labelled pool of the same shape at another revision is live.
+fn rotating_shapes<'a>(
+    wanted: &[&'a DesiredPool],
+    live: &BTreeMap<String, DynamicObject>,
+) -> Vec<&'a DesiredPool> {
+    wanted
+        .iter()
+        .copied()
+        .filter(|pool| {
+            !live.contains_key(&pool.objects.name)
+                && live.iter().any(|(name, object)| {
+                    has_pool_labels(object.metadata.labels.as_ref())
+                        && warm_pool_name_shape(name) == Some(pool.configured.shape)
+                })
+        })
+        .collect()
+}
+
+/// Create `body` unless an object of its name exists; an existing one is the
+/// leader's, or another starting replica's, and is left as it is.
+async fn create_if_absent(api: &Api<DynamicObject>, body: &Value) -> anyhow::Result<()> {
+    let object: DynamicObject = serde_json::from_value(body.clone())?;
+    let name = object.metadata.name.clone().unwrap_or_default();
+    if api.get_opt(&name).await?.is_some() {
+        return Ok(());
+    }
+    match api.create(&PostParams::default(), &object).await {
+        Ok(_) => {
+            tracing::info!(%name, "warm pools: created this revision's pool object");
+            Ok(())
+        }
+        Err(kube::Error::Api(response)) if response.code == 409 => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -449,7 +596,25 @@ async fn reconcile_once(
             )
         })
         .collect();
-    let allowed = clamp_members(&config.pools, &reservations, budget);
+    // #3572: another revision's pools of the same shapes count against the
+    // cap while they hold members.
+    let budget = budget_after(
+        budget,
+        superseded_reservation(&config.pools, &reservations, &pools),
+    );
+    let mut allowed = clamp_members(&config.pools, &reservations, budget);
+    // A rotating shape keeps its own pool's warm-up member: the older
+    // revision drains only behind it (`plan`), so clamping it away would hold
+    // both. At most one member per shape over the cap, until the old pool's
+    // members are deleted.
+    for (pool, allowed) in config.pools.iter().zip(allowed.iter_mut()) {
+        let rotating = pools.keys().any(|name| {
+            *name != pool.objects.name && warm_pool_name_shape(name) == Some(pool.configured.shape)
+        });
+        if rotating && pool.configured.members > 0 {
+            *allowed = (*allowed).max(1);
+        }
+    }
     for ((pool, reservation), allowed) in config.pools.iter().zip(&reservations).zip(&allowed) {
         let label = pool.label();
         if *allowed < pool.configured.members

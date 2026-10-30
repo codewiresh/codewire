@@ -7389,7 +7389,7 @@ mod tests {
                     "dev",
                 )
                 .unwrap()
-                .name()
+                .name("revision")
             })
             .collect()
     }

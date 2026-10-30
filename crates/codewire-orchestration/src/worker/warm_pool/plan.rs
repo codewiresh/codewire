@@ -33,6 +33,12 @@ pub const NODE_RESERVATION_PERCENT: i128 = 25;
 /// pool refills. A rotation that has not settled by then stops blocking the
 /// next shape, so one stuck shape cannot freeze every other pool.
 pub const ROTATION_SETTLE: Duration = Duration::from_secs(10 * 60);
+/// A pool of a configured shape at another revision that is newer than this
+/// leader's own pool is the next release's, warming while this replica still
+/// serves (#3572), and is left alone; once it is this old it is drained like
+/// an older one, so a rolled-back release never leaves it running. A rollout
+/// replaces this replica within the readiness bound of its warm-up.
+pub const SUPERSEDED_GRACE: Duration = Duration::from_secs(15 * 60);
 /// The fork removes this from an adopted Sandbox; it never marks staleness.
 const SAFE_TO_EVICT_ANNOTATION: &str = "cluster-autoscaler.kubernetes.io/safe-to-evict";
 
@@ -356,6 +362,63 @@ pub fn clamp_members(
         .collect()
 }
 
+/// #3572: what the pools of configured shapes at other revisions still hold,
+/// so the node cap counts them. While two revisions of a shape are live, the
+/// outgoing leader shrinks its own pools for the incoming replica's warm-up
+/// member, and the incoming leader grows its pool only as the old one drains.
+/// A rotation therefore never reserves more than the cap, which keeps the room
+/// customer creates need on a busy node. Members of the same shape reserve
+/// what this replica's member of that shape does. A pool holds the larger of
+/// its desired and its observed replicas, since a draining pool's members
+/// remain until deleted.
+pub fn superseded_reservation(
+    desired: &[DesiredPool],
+    reservations: &[Option<Reservation>],
+    pools: &BTreeMap<String, DynamicObject>,
+) -> Reservation {
+    let mut held = Reservation::default();
+    for (name, pool) in pools {
+        if !has_pool_labels(pool.metadata.labels.as_ref())
+            || desired.iter().any(|desired| desired.objects.name == *name)
+        {
+            continue;
+        }
+        let Some(shape) = warm_pool_name_shape(name) else {
+            continue;
+        };
+        let Some(Some(reservation)) = desired
+            .iter()
+            .zip(reservations)
+            .find(|(desired, _)| desired.configured.shape == shape)
+            .map(|(_, reservation)| *reservation)
+        else {
+            continue;
+        };
+        let replicas = |pointer: &str| {
+            pool.data
+                .pointer(pointer)
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+        };
+        let members = i128::from(
+            replicas("/spec/replicas")
+                .max(replicas("/status/replicas"))
+                .max(0),
+        );
+        held.cpu_millis += members * reservation.cpu_millis;
+        held.memory_bytes += members * reservation.memory_bytes;
+    }
+    held
+}
+
+/// The node cap left after `held`, never below zero.
+pub fn budget_after(budget: Budget, held: Reservation) -> Budget {
+    Budget {
+        cpu_millis: (budget.cpu_millis - held.cpu_millis).max(0),
+        memory_bytes: (budget.memory_bytes - held.memory_bytes).max(0),
+    }
+}
+
 /// The image-cache gate (A2b): every image the pools run that the cache can
 /// hold is held in its current or previous set, and the DaemonSet rollout of
 /// that spec is complete on every eligible node. Images the cache never
@@ -497,6 +560,10 @@ pub struct Plan {
     pub reports: BTreeMap<String, PoolReport>,
     /// Unconfigured pools still present.
     pub unconfigured: BTreeSet<String>,
+    /// Pools of a configured shape at another revision that this pass keeps
+    /// (#3572): this leader's own pool is not ready yet, or they are a newer
+    /// release's.
+    pub superseded_kept: BTreeSet<String>,
 }
 
 fn revision(object: &DynamicObject) -> Option<&str> {
@@ -654,6 +721,28 @@ fn pool_matches(live: &DynamicObject, desired: &Value) -> bool {
                         .and_then(Value::as_str)
                 })
         && has_pool_labels(live.metadata.labels.as_ref())
+}
+
+fn created_at(object: &DynamicObject) -> Option<Timestamp> {
+    object
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|created| created.0)
+}
+
+/// #3572: whether `pool`, a configured shape's pool at another revision than
+/// this leader's `own`, may drain. Only once `own` has a ready member, and only
+/// when `pool` is older than `own` or older than [`SUPERSEDED_GRACE`].
+fn superseded_drains(pool: &DynamicObject, own: Option<&DynamicObject>, now: Timestamp) -> bool {
+    let Some(own) = own.filter(|own| !deleting(own) && ready_replicas(own) >= 1) else {
+        return false;
+    };
+    let (Some(created), Some(own_created)) = (created_at(pool), created_at(own)) else {
+        return false;
+    };
+    created < own_created
+        || now.as_second().saturating_sub(created.as_second()) >= SUPERSEDED_GRACE.as_secs() as i64
 }
 
 fn ready_replicas(pool: &DynamicObject) -> i64 {
@@ -843,9 +932,26 @@ pub fn plan(observed: &Observed<'_>) -> Plan {
         {
             continue;
         }
+        // #3572: a configured shape's pool at another revision keeps serving
+        // the replicas that rendered it until this leader's own pool of that
+        // shape is ready, and a newer one is the next release's.
+        let own = warm_pool_name_shape(name).and_then(|shape| {
+            observed
+                .desired
+                .iter()
+                .find(|desired| desired.configured.shape == shape)
+        });
+        if let Some(own) = own
+            && !superseded_drains(pool, observed.pools.get(&own.objects.name), observed.now)
+        {
+            plan.superseded_kept.insert(name.clone());
+            continue;
+        }
         plan.unconfigured.insert(name.clone());
         let owned = owned_members(name, pool, observed.members);
-        if let Some(shape) = warm_pool_name_shape(name) {
+        if own.is_none()
+            && let Some(shape) = warm_pool_name_shape(name)
+        {
             plan.reports.insert(
                 shape_label(shape),
                 PoolReport {

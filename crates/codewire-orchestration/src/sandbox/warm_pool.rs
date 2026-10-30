@@ -10,9 +10,12 @@
 //! is a pool miss (invariant 10).
 //!
 //! Names are `cw-pool-<cpu>m-<mem>mi-<disk>gi-<h8>`. `h8` hashes the storage
-//! class and both namespaces (the sandbox namespace that holds the pool and the
-//! orchestration namespace its members bind through), so a different placement
-//! is a different pool. The prefix is disjoint from the per-environment
+//! class, both namespaces (the sandbox namespace that holds the pool and the
+//! orchestration namespace its members bind through) and the template
+//! revision, so a different placement or revision is a different pool. A
+//! release that changes the revision therefore adds a pool beside the old one
+//! instead of replacing its template, and the old pool keeps serving the
+//! outgoing replicas until the new one has members (#3572). The prefix is disjoint from the per-environment
 //! `shadow-pool-` objects and from the `sandbox-warmpool-` objects that
 //! `retire_legacy_shared_warm_pools` deletes.
 //!
@@ -42,8 +45,9 @@ pub const POOL_REVISION_ANNOTATION: &str = "codewire.sh/pool-revision";
 /// `codewire.sh/type` of a warm pool and its template.
 pub const WARM_POOL_TYPE: &str = "workspace-pool";
 const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
-/// Domain separation for the placement hash; bump it only with a migration of
-/// existing pool names.
+/// Domain separation for the name hash; bump it only with a migration of
+/// existing pool names. (#3572 added the revision to the hashed parts, so its
+/// release renamed every pool once, through the rotation it introduced.)
 const PLACEMENT_HASH_DOMAIN: &str = "codewire.sh/warm-pool/placement/v1";
 const PLACEMENT_HASH_HEX: usize = 8;
 /// The agent-sandbox fork labels each member Sandbox, and its Pod, with the
@@ -225,8 +229,9 @@ impl WarmPoolKey {
         self.shape
     }
 
-    /// `cw-pool-<cpu>m-<mem>mi-<disk>gi-<h8>`, at most 54 characters.
-    pub fn name(&self) -> String {
+    /// `cw-pool-<cpu>m-<mem>mi-<disk>gi-<h8>` at `revision`, at most 54
+    /// characters.
+    pub fn name(&self, revision: &str) -> String {
         let WorkspaceShape {
             cpu_millicores,
             memory_mib,
@@ -234,17 +239,18 @@ impl WarmPoolKey {
         } = self.shape;
         format!(
             "{WARM_POOL_NAME_PREFIX}{cpu_millicores}m-{memory_mib}mi-{disk_gib}gi-{}",
-            self.placement_hash()
+            self.placement_hash(revision)
         )
     }
 
-    fn placement_hash(&self) -> String {
+    fn placement_hash(&self, revision: &str) -> String {
         let mut hasher = Sha256::new();
         for part in [
             PLACEMENT_HASH_DOMAIN,
             self.storage_class.as_str(),
             self.sandbox_namespace.as_str(),
             self.server_namespace.as_str(),
+            revision,
         ] {
             hasher.update(part.as_bytes());
             hasher.update([0]);
@@ -255,7 +261,7 @@ impl WarmPoolKey {
 
 /// Whether `name` is exactly a warm pool name: the prefix, three positive
 /// decimal dimensions without leading zeros, and an eight-digit lowercase hex
-/// placement hash.
+/// placement and revision hash.
 pub fn is_warm_pool_name(name: &str) -> bool {
     let Some(rest) = name.strip_prefix(WARM_POOL_NAME_PREFIX) else {
         return false;
@@ -366,12 +372,9 @@ pub fn render_warm_pool(
         namespace,
         &opts.server_namespace,
     )?;
-    let name = key.name();
-    let named = TemplateOpts {
-        name: name.clone(),
-        ..opts.clone()
-    };
-    let mut template = render_sandbox_template(namespace, &named);
+    // The spec never names its template, so the revision is computed before
+    // the name it is part of.
+    let mut template = render_sandbox_template(namespace, opts);
     if !allow_unpinned_images {
         for image in pod_template_images(&template["spec"]["podTemplate"]["spec"]) {
             anyhow::ensure!(
@@ -381,6 +384,8 @@ pub fn render_warm_pool(
         }
     }
     let revision = pool_revision(&template["spec"]);
+    let name = key.name(&revision);
+    template["metadata"]["name"] = Value::from(name.clone());
     let workspace = template["spec"]["podTemplate"]["spec"]["containers"]
         .as_array_mut()
         .and_then(|containers| {

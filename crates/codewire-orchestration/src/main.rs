@@ -521,6 +521,18 @@ async fn main() -> anyhow::Result<()> {
     if !loops.is_empty() {
         worker::loops::start_loops(ctx.clone(), cfg.database_url.clone(), &loops);
     }
+    // #3572: a replica that runs the warm-pool loop reports ready only once
+    // its own revision's pools have a ready member (bounded), so a release
+    // hands over from full pools.
+    let pools_warm = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    if loops.iter().any(|name| name == "warm-pool") {
+        pools_warm.store(false, std::sync::atomic::Ordering::SeqCst);
+        let ctx = ctx.clone();
+        let pools_warm = pools_warm.clone();
+        tokio::spawn(async move {
+            worker::warm_pool::warm_own_pools(ctx, pools_warm).await;
+        });
+    }
 
     // Temporal worker (#36): runs the EnvironmentWorkflow + PortDnsWorkflow
     // and their activities on the shared handlers.
@@ -676,7 +688,8 @@ async fn main() -> anyhow::Result<()> {
     );
     let app = AppBuilder::new("codewire-orchestration")
         .with_health_and_db_probe(pool.clone(), move || {
-            let ready = secret_readiness.is_ready();
+            let ready =
+                secret_readiness.is_ready() && pools_warm.load(std::sync::atomic::Ordering::SeqCst);
             async move { ready }
         })
         .with_unary_connect_routes_auth(

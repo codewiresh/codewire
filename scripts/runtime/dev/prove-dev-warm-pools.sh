@@ -520,12 +520,15 @@ wait_pool_members() { # MIN -> waits until the pool holds MIN ready members
 }
 
 discover_pool() {
+  # A pool's name includes its template revision (#3572), so a rotation leaves
+  # an older pool of the shape at zero replicas while pool-born claims name it.
+  # The proof follows the newest pool that holds members.
   local prefix="${POOL_PREFIX}${PROOF_CPU}m-${PROOF_MEMORY}mi-${PROOF_DISK}gi-" names
   names="$(kubectl_ro get sandboxwarmpool -n "$SANDBOX_NAMESPACE" -o json |
-    jq -r --arg prefix "$prefix" '.items[] | select(.metadata.name | startswith($prefix)) | .metadata.name')"
+    jq -r --arg prefix "$prefix" '[.items[] | select((.metadata.name | startswith($prefix))
+      and ((.spec.replicas // 0) > 0))] | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty')"
   [[ -n "$names" ]] ||
-    die "no warm pool ${prefix}* in ${SANDBOX_NAMESPACE}; is SANDBOX_WARM_POOL_SHAPES configured for this shape?"
-  [[ "$(wc -l <<<"$names")" -eq 1 ]] || die "more than one pool matches ${prefix}*: $(tr '\n' ' ' <<<"$names")"
+    die "no warm pool ${prefix}* with members in ${SANDBOX_NAMESPACE}; is SANDBOX_WARM_POOL_SHAPES configured for this shape?"
   POOL_NAME="$names"
   POOL_REVISION="$(pool_json | jq -r --arg key "$REVISION_ANNOTATION" '.metadata.annotations[$key] // ""')"
   POOL_MEMBERS="$(pool_json | jq -r '.spec.replicas // 0')"
