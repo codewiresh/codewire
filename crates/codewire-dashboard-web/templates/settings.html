@@ -117,6 +117,10 @@
             {% if !settings.current_session_listed %}<form id="sign-out" method="post" action="/settings/_actions/sign-out"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline" type="submit">Sign out of this browser</button></form>{% endif %}
           </div>
         </section>
+        <section id="delete-account" class="cw-card cw-card--danger cw-settings-card" aria-labelledby="delete-account-title">
+          <header class="cw-card-header"><h2 id="delete-account-title" class="cw-card-title">Delete account</h2><p class="cw-card-description">Delete your account, the organizations only you belong to, and their environments, secrets and credentials. This cannot be undone.</p></header>
+          <div class="cw-card-content"><a class="cw-button cw-danger-button" href="/settings/delete-account/">Delete account</a></div>
+        </section>
           </div>
         </div>
       </div></main>

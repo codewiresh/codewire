@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
 };
+use connectrpc::ErrorCode;
 use serde::Deserialize;
 
 use crate::{
@@ -17,12 +18,16 @@ use crate::{
         request_has_same_origin, valid_csrf_token, with_csrf_cookie, with_response_cookie,
     },
     state::AppState,
-    templates::SettingsTemplate,
-    view::{AccountSessionRowView, DashboardView, SettingsPageView, TwoFactorDialogView},
+    templates::{AccountDeletionTemplate, AuthStatusTemplate, SettingsTemplate},
+    view::{
+        AccountDeletionOrganizationView, AccountDeletionPageView, AccountSessionRowView,
+        DashboardView, SettingsPageView, TwoFactorDialogView,
+    },
 };
 
 const SETTINGS_PATH: &str = "/settings/";
 const SECURITY_PATH: &str = "/settings/#security";
+const DELETE_ACCOUNT_PATH: &str = "/settings/delete-account/";
 // Dialog identifiers. Only the two proof dialogs open from a URL; the others
 // carry one-time values and exist only in the POST response that made them.
 const REPLACE_DIALOG: &str = "replace-authenticator";
@@ -628,6 +633,241 @@ async fn section_redirect(
     private(redirect(format!("{SETTINGS_PATH}#{section}"), headers))
 }
 
+// ── Delete account (#3679) ────────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct DeleteAccountQuery {
+    #[serde(default)]
+    org: String,
+    #[serde(default)]
+    error: String,
+}
+
+/// The confirmation page: what deleting the account deletes and keeps, or the
+/// organizations that must be transferred or deleted first.
+pub(super) async fn delete_account_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DeleteAccountQuery>,
+) -> Response {
+    let continuation = DELETE_ACCOUNT_PATH.to_owned();
+    if !account_sessions::cookie_authority_is_unique(&headers) {
+        return private(login_redirect(&continuation, &headers));
+    }
+    let identity = match authenticated_identity(&state, &headers).await {
+        Ok(identity) => identity,
+        Err(WebError::Unauthorized) => return private(login_redirect(&continuation, &headers)),
+        Err(error) => return private(error_page(error)),
+    };
+    if enforce_two_factor(&identity).is_err() {
+        return private(two_factor_redirect(&continuation, &headers));
+    }
+    let cookie = match canonical_cookie(&headers) {
+        Ok(cookie) => cookie,
+        Err(()) => return private(login_redirect(&continuation, &headers)),
+    };
+    let dashboard = match super::dashboard::personal_settings_shell_view_from_identity(
+        &state,
+        &headers,
+        &identity,
+        cookie.clone(),
+        &query.org,
+    )
+    .await
+    {
+        Ok(view) => view,
+        Err(WebError::Unauthorized) => return private(login_redirect(&continuation, &headers)),
+        Err(WebError::TwoFactorRequired) => {
+            return private(two_factor_redirect(&continuation, &headers));
+        }
+        Err(error) => return private(error_page(error)),
+    };
+    let plan = match crate::connect::account_deletion_plan(&state, cookie).await {
+        Ok(plan) => plan,
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            return private(login_redirect(&continuation, &headers));
+        }
+        Err(error) => return private(error_page(WebError::Connect(error))),
+    };
+    let page = AccountDeletionPageView {
+        account_id: identity.id.clone(),
+        email_pattern: exact_pattern(&plan.email),
+        email: plan.email,
+        csrf_token: page_csrf_token(&headers),
+        personal: plan
+            .personal_organizations
+            .iter()
+            .map(|organization| AccountDeletionOrganizationView {
+                name: organization.name.clone(),
+                url: format!("/{}/", organization.slug),
+                detail: count(
+                    organization.environment_count,
+                    "environment",
+                    "environments",
+                ) + " deleted with it",
+            })
+            .collect(),
+        shared: plan
+            .shared_organizations
+            .iter()
+            .map(|organization| AccountDeletionOrganizationView {
+                name: organization.name.clone(),
+                url: format!("/{}/", organization.slug),
+                detail: format!(
+                    "You are {}; the organization stays",
+                    article(&organization.role)
+                ),
+            })
+            .collect(),
+        blocking: plan
+            .blocking_organizations
+            .iter()
+            .map(|organization| AccountDeletionOrganizationView {
+                name: organization.name.clone(),
+                url: format!("/{}/members/", organization.slug),
+                detail: count(organization.member_count, "member", "members"),
+            })
+            .collect(),
+        forfeited_credit: euros(plan.forfeited_credit_nano_eur),
+        error: approved_delete_account_error(&query.error).to_owned(),
+    };
+    private(with_csrf_cookie(
+        render_template(
+            StatusCode::OK,
+            AccountDeletionTemplate {
+                view: &dashboard,
+                page: &page,
+            },
+        ),
+        csrf_cookie(&state.public_origin, &page.csrf_token),
+    ))
+}
+
+// No Debug: the CSRF field is request authority.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DeleteAccountForm {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    account_id: String,
+    confirm_email: String,
+}
+
+/// Disable the account and start its deletion. The account's sessions end in
+/// the same request, so the answer is a page that needs none.
+pub(super) async fn delete_account_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    form: Result<Form<DeleteAccountForm>, axum::extract::rejection::FormRejection>,
+) -> Response {
+    let Ok(Form(form)) = form else {
+        return private(error_page(WebError::Forbidden));
+    };
+    if !account_sessions::cookie_authority_is_unique(&headers) {
+        return private(login_redirect(DELETE_ACCOUNT_PATH, &headers));
+    }
+    if !account_sessions::mutation_origin_is_exact(&headers, &state.public_origin) {
+        return private(error_page(WebError::CsrfRejected));
+    }
+    let identity = match authenticated_identity(&state, &headers).await {
+        Ok(identity) => identity,
+        Err(WebError::Unauthorized) => {
+            return private(login_redirect(DELETE_ACCOUNT_PATH, &headers));
+        }
+        Err(error) => return private(error_page(error)),
+    };
+    if identity.id != form.account_id || !account_sessions::valid_id(&form.account_id) {
+        return private(delete_account_redirect("account-changed", &headers));
+    }
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, DELETE_ACCOUNT_PATH).await {
+        Ok(cookie) => cookie,
+        Err(response) => return private(response),
+    };
+    let confirm_email = form.confirm_email.trim();
+    if confirm_email.is_empty() || confirm_email.len() > 320 {
+        return private(delete_account_redirect("email-mismatch", &headers));
+    }
+    match crate::connect::delete_account(&state, cookie, confirm_email.to_owned()).await {
+        Ok(()) => private(with_response_cookie(
+            render_template(
+                StatusCode::OK,
+                AuthStatusTemplate {
+                    title: "Your account is being deleted",
+                    description: "It is disabled and signed out everywhere. Its organizations and data are being deleted now, and a confirmation mail arrives when that is done.",
+                    primary_label: "Go to Codewire",
+                    primary_url: "/",
+                },
+            ),
+            clear_scoped_cookie(
+                &state.public_origin,
+                codewire_server_core::auth::SESSION_COOKIE_NAME,
+                "/",
+            ),
+        )),
+        // The refreshed page lists the organizations to transfer or delete.
+        Err(error) if error.code == ErrorCode::FailedPrecondition => {
+            private(redirect(DELETE_ACCOUNT_PATH.into(), &headers))
+        }
+        Err(error) if error.code == ErrorCode::InvalidArgument => {
+            private(delete_account_redirect("email-mismatch", &headers))
+        }
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            private(login_redirect(DELETE_ACCOUNT_PATH, &headers))
+        }
+        Err(_) => private(delete_account_redirect("request-failed", &headers)),
+    }
+}
+
+fn delete_account_redirect(code: &str, headers: &HeaderMap) -> Response {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("error", code);
+    redirect(format!("{DELETE_ACCOUNT_PATH}?{}", query.finish()), headers)
+}
+
+fn approved_delete_account_error(code: &str) -> &'static str {
+    match code {
+        "email-mismatch" => "The address you typed is not your account's. Nothing was deleted.",
+        "account-changed" => {
+            "Your account changed in another tab. Review this page again. Nothing was deleted."
+        }
+        "request-failed" => "The account could not be deleted. Nothing changed; try again.",
+        _ => "",
+    }
+}
+
+/// An HTML `pattern` that matches exactly `value`. The attribute is compiled
+/// with the `v` flag, so every syntax character is escaped.
+fn exact_pattern(value: &str) -> String {
+    let mut pattern = String::with_capacity(value.len() * 2);
+    for character in value.chars() {
+        if "\\^$.|?*+()[]{}/".contains(character) {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern
+}
+
+fn count(value: i64, one: &str, many: &str) -> String {
+    format!("{value} {}", if value == 1 { one } else { many })
+}
+
+fn article(role: &str) -> String {
+    match role {
+        "owner" | "admin" => format!("an {role}"),
+        role => format!("a {role}"),
+    }
+}
+
+/// Nano-euros as euros and cents, empty when there is nothing to forfeit.
+fn euros(nano_eur: i64) -> String {
+    let cents = nano_eur / 10_000_000;
+    if cents <= 0 {
+        return String::new();
+    }
+    format!("€{}.{:02}", cents / 100, cents % 100)
+}
+
 #[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(super) async fn mutation_cookie(
     state: &AppState,
@@ -1086,8 +1326,121 @@ mod tests {
         assert_eq!(body.matches("id=\"sign-out\"").count(), 1);
         assert!(!body.contains("Session controls are unavailable"));
     }
+
+    fn deletion_organization(
+        name: &str,
+        url: &str,
+        detail: &str,
+    ) -> AccountDeletionOrganizationView {
+        AccountDeletionOrganizationView {
+            name: name.into(),
+            url: url.into(),
+            detail: detail.into(),
+        }
+    }
+
+    #[test]
+    fn the_account_page_ends_with_the_delete_account_card() {
+        let settings = SettingsPageView {
+            csrf_token: "csrf".into(),
+            ..Default::default()
+        };
+        let body = SettingsTemplate {
+            view: &dashboard_view(),
+            settings: &settings,
+        }
+        .render()
+        .expect("render account settings");
+        let card = body.find("cw-card cw-card--danger").expect("danger card");
+        assert!(card > body.find("id=\"sessions\"").expect("sessions card"));
+        assert!(body.contains("href=\"/settings/delete-account/\""));
+    }
+
+    #[test]
+    fn the_delete_account_page_lists_what_goes_and_needs_the_typed_email() {
+        let page = AccountDeletionPageView {
+            account_id: "synthetic-account".into(),
+            email: "a.b+c@example.test".into(),
+            email_pattern: exact_pattern("a.b+c@example.test"),
+            csrf_token: "csrf".into(),
+            personal: vec![deletion_organization(
+                "Solo",
+                "/solo/",
+                "2 environments deleted with it",
+            )],
+            shared: vec![deletion_organization(
+                "Team",
+                "/team/",
+                "You are a member; the organization stays",
+            )],
+            forfeited_credit: euros(12_340_000_000),
+            ..Default::default()
+        };
+        let body = AccountDeletionTemplate {
+            view: &dashboard_view(),
+            page: &page,
+        }
+        .render()
+        .expect("render delete account");
+        for text in [
+            "Solo",
+            "2 environments deleted with it",
+            "Team",
+            "The remaining credit of €12.34 is forfeited.",
+            "action=\"/settings/_actions/delete-account\"",
+            "name=\"_csrf\" value=\"csrf\"",
+            "name=\"account_id\" value=\"synthetic-account\"",
+            "pattern=\"a\\.b\\+c@example\\.test\"",
+        ] {
+            assert!(body.contains(text), "missing {text}");
+        }
+        assert!(!body.contains("Transfer or delete these organizations first"));
+    }
+
+    #[test]
+    fn a_sole_owner_sees_the_organizations_to_transfer_and_no_form() {
+        let page = AccountDeletionPageView {
+            account_id: "synthetic-account".into(),
+            email: "owner@example.test".into(),
+            blocking: vec![deletion_organization("Team", "/team/members/", "3 members")],
+            ..Default::default()
+        };
+        let body = AccountDeletionTemplate {
+            view: &dashboard_view(),
+            page: &page,
+        }
+        .render()
+        .expect("render refused delete account");
+        assert!(body.contains("Transfer or delete these organizations first"));
+        assert!(body.contains("href=\"/team/members/\""));
+        assert!(!body.contains("/settings/_actions/delete-account"));
+    }
+
+    #[test]
+    fn deletion_helpers_escape_the_pattern_and_round_credit_down_to_cents() {
+        assert_eq!(
+            exact_pattern("a.b+c(d)@x.test"),
+            "a\\.b\\+c\\(d\\)@x\\.test"
+        );
+        assert_eq!(
+            exact_pattern("plain-name_1@example.test"),
+            "plain-name_1@example\\.test"
+        );
+        assert_eq!(euros(0), "");
+        assert_eq!(euros(9_999_999), "");
+        assert_eq!(euros(10_000_000), "€0.01");
+        assert_eq!(euros(50_000_000_000), "€50.00");
+        assert_eq!(count(1, "member", "members"), "1 member");
+        assert_eq!(article("owner"), "an owner");
+        assert_eq!(article("member"), "a member");
+        assert_eq!(approved_delete_account_error("unknown"), "");
+    }
 }
 
 #[cfg(test)]
 #[path = "account_two_factor_tests.rs"]
 mod account_two_factor_tests;
+
+#[cfg(test)]
+#[path = "account_deletion_tests.rs"]
+mod account_deletion_tests;

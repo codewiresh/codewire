@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Delete account fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/settings.css">
+  <script src="../../dashboard.js" defer></script><script src="../../organizations.js" defer></script>
+</head>
+<body class="cw-body" data-dashboard-app>
+<main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>settings</span><span>/</span><strong>delete account</strong></div><div class="cw-console-account"><a class="cw-console-support" href="#docs">Support</a><details class="cw-menu cw-user-menu"><summary class="cw-button cw-button--outline cw-button--small cw-button--pill"><span>Example user</span><svg class="cw-icon cw-user-chevrons" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevrons-up-down"/></svg></summary><div class="cw-menu-panel cw-menu-panel--end"><div class="cw-user-menu-identity"><strong>Example user</strong><span>Authenticated account</span></div><a href="settings-account.html">Settings</a><a href="#docs">Docs</a><form data-sign-out><button class="cw-menu-item" type="button">Sign Out</button></form></div></details></div></header><div class="cw-page cw-settings-page"><div class="cw-settings-layout">
+  <aside class="cw-context-nav"><header class="cw-context-nav-heading"><h2>Settings</h2></header>
+<nav class="cw-context-nav-links" aria-label="Settings">
+  <h3 id="settings-personal-title" class="cw-section-label">Personal</h3>
+  <ul aria-labelledby="settings-personal-title"><li><a class="cw-nav-link" href="settings-account.html" aria-current="page">Account</a></li><li><a class="cw-nav-link" href="settings-credentials.html">Credentials</a></li><li><a class="cw-nav-link" href="settings-secrets.html">Secrets</a></li><li><a class="cw-nav-link" href="settings-api-keys.html">API keys</a></li></ul>
+
+</nav></aside>
+  <div class="cw-settings-content cw-account-page">
+    <header class="cw-page-header"><div><h1 class="cw-page-title">Delete account</h1><p class="cw-page-description">Deleting your account cannot be undone.</p></div></header>
+    <section id="delete-account" class="cw-card cw-card--danger cw-settings-card" aria-labelledby="delete-account-title">
+      <header class="cw-card-header"><h2 id="delete-account-title" class="cw-card-title">Delete your account</h2><p class="cw-card-description">Your sessions, API keys and CLI sign-ins stop working at once. A confirmation is sent to owner@example.test when the deletion is done, and you can sign up again with this address later.</p></header>
+      <div class="cw-card-content">
+        <h3 class="cw-section-label">Deleted with your account</h3>
+        <ul class="cw-row-list"><li><strong>Owner's sandbox lab</strong><p class="cw-muted">2 environments deleted with it</p></li></ul>
+        <h3 class="cw-section-label">You leave</h3>
+        <ul class="cw-row-list"><li><strong>Acme Platform</strong><p class="cw-muted">You are a member; the organization stays</p></li><li><strong>Design Guild</strong><p class="cw-muted">You are an owner; the organization stays</p></li></ul>
+        <p class="cw-alert cw-alert--warning">The remaining credit of €37.50 is forfeited.</p>
+        <form class="cw-form cw-confirm-form" method="post" action="/settings/_actions/delete-account"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account">
+          <div class="cw-field"><label class="cw-label" for="delete-account-email">Type <strong>owner@example.test</strong> to confirm</label><input class="cw-input" id="delete-account-email" name="confirm_email" type="email" required pattern="owner@example\.test" maxlength="320" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
+          <div class="cw-form-actions"><a class="cw-button cw-button--outline" href="settings-account.html">Cancel</a><button class="cw-button cw-danger-button" type="submit">Delete account</button></div>
+        </form>
+      </div>
+    </section>
+  </div>
+</div></div></main>
+</body>
+</html>

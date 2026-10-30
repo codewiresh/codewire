@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use axum::http::HeaderValue;
 use codewire_proto::codewire::{
-    console::v1::{AccountServiceClient, GetGitIdentityRequest, UpdateGitIdentityRequest},
+    console::v1::{
+        AccountServiceClient, DeleteAccountRequest, GetAccountDeletionPlanRequest,
+        GetAccountDeletionPlanResponse, GetGitIdentityRequest, UpdateGitIdentityRequest,
+    },
     v1::{
         AcceptInvitationRequest, CreateOrganizationRequest, GetInvitationByTokenRequest,
         ListOrganizationsRequest, OrganizationServiceClient,
@@ -161,6 +164,34 @@ pub(crate) async fn update_git_identity(
         .update_git_identity(UpdateGitIdentityRequest {
             git_name: Some(git_name),
             git_email: Some(git_email),
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+/// What deleting the caller's account would delete, keep and refuse (#3679).
+pub(crate) async fn account_deletion_plan(
+    state: &AppState,
+    cookie: HeaderValue,
+) -> Result<GetAccountDeletionPlanResponse, ConnectError> {
+    Ok(
+        AccountServiceClient::new(transport(state, Some(cookie)), client_config(state))
+            .get_account_deletion_plan(GetAccountDeletionPlanRequest::default())
+            .await?
+            .into_owned(),
+    )
+}
+
+/// Disable the caller's account and start its deletion (#3679).
+pub(crate) async fn delete_account(
+    state: &AppState,
+    cookie: HeaderValue,
+    confirm_email: String,
+) -> Result<(), ConnectError> {
+    AccountServiceClient::new(transport(state, Some(cookie)), client_config(state))
+        .delete_account(DeleteAccountRequest {
+            confirm_email,
             ..Default::default()
         })
         .await?;

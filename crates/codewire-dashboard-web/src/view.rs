@@ -351,6 +351,29 @@ pub(crate) struct TwoFactorDialogView {
     pub(crate) backup_codes: Vec<String>,
 }
 
+/// The page that confirms deleting the account (#3679), or refuses it while
+/// the account is the only owner of an organization with other members.
+#[derive(Default)]
+pub(crate) struct AccountDeletionPageView {
+    pub(crate) account_id: String,
+    pub(crate) email: String,
+    /// The email as an exact-match HTML `pattern`.
+    pub(crate) email_pattern: String,
+    pub(crate) csrf_token: String,
+    pub(crate) personal: Vec<AccountDeletionOrganizationView>,
+    pub(crate) shared: Vec<AccountDeletionOrganizationView>,
+    pub(crate) blocking: Vec<AccountDeletionOrganizationView>,
+    /// The personal organizations' remaining credit, empty when there is none.
+    pub(crate) forfeited_credit: String,
+    pub(crate) error: String,
+}
+
+pub(crate) struct AccountDeletionOrganizationView {
+    pub(crate) name: String,
+    pub(crate) url: String,
+    pub(crate) detail: String,
+}
+
 #[derive(Default)]
 pub(crate) struct AccountSessionRowView {
     pub(crate) id: String,

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Delete account · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/settings-v1.css">
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+    <script src="/assets/codewire/organizations-v1.js" defer></script>
+  </head>
+  <body class="cw-body" data-route="dashboard-settings-delete-account">
+    <div class="cw-app" data-dashboard-app data-mobile-open="false" data-sidebar-collapsed="{{ view.sidebar_collapsed }}">
+      <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
+      <header class="cw-mobile-bar">
+        <button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button>
+        <a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span class="cw-sr-only">Codewire</span></a>
+      </header>
+      <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+      <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
+      <main class="cw-main">{% let crumb_scope = "settings" %}{% let crumb_page = "delete account" %}{% include "console-header.html" %}<div class="cw-page cw-settings-page">
+        <div class="cw-settings-layout">
+          {% let settings_section = "account" %}{% include "settings-nav.html" %}
+          <div class="cw-settings-content cw-account-page">
+        <header class="cw-page-header"><div><h1 class="cw-page-title">Delete account</h1><p class="cw-page-description">Deleting your account cannot be undone.</p></div></header>
+        {% if !page.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.error }}</p>{% endif %}
+        {% if page.blocking.is_empty() %}
+        <section id="delete-account" class="cw-card cw-card--danger cw-settings-card" aria-labelledby="delete-account-title">
+          <header class="cw-card-header"><h2 id="delete-account-title" class="cw-card-title">Delete your account</h2><p class="cw-card-description">Your sessions, API keys and CLI sign-ins stop working at once. A confirmation is sent to {{ page.email }} when the deletion is done, and you can sign up again with this address later.</p></header>
+          <div class="cw-card-content">
+            <h3 class="cw-section-label">Deleted with your account</h3>
+            {% if page.personal.is_empty() %}<p class="cw-muted">No organizations. Only your own account data is deleted.</p>{% else %}<ul class="cw-row-list">{% for organization in page.personal %}<li><strong>{{ organization.name }}</strong><p class="cw-muted">{{ organization.detail }}</p></li>{% endfor %}</ul>{% endif %}
+            {% if !page.shared.is_empty() %}<h3 class="cw-section-label">You leave</h3>
+            <ul class="cw-row-list">{% for organization in page.shared %}<li><strong>{{ organization.name }}</strong><p class="cw-muted">{{ organization.detail }}</p></li>{% endfor %}</ul>{% endif %}
+            {% if !page.forfeited_credit.is_empty() %}<p class="cw-alert cw-alert--warning">The remaining credit of {{ page.forfeited_credit }} is forfeited.</p>{% endif %}
+            <form class="cw-form cw-confirm-form" method="post" action="/settings/_actions/delete-account"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="account_id" value="{{ page.account_id }}">
+              <div class="cw-field"><label class="cw-label" for="delete-account-email">Type <strong>{{ page.email }}</strong> to confirm</label><input class="cw-input" id="delete-account-email" name="confirm_email" type="email" required pattern="{{ page.email_pattern }}" maxlength="320" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
+              <div class="cw-form-actions"><a class="cw-button cw-button--outline" href="/settings/">Cancel</a><button class="cw-button cw-danger-button" type="submit">Delete account</button></div>
+            </form>
+          </div>
+        </section>
+        {% else %}
+        <section id="delete-account" class="cw-card cw-settings-card" aria-labelledby="delete-account-blocked-title">
+          <header class="cw-card-header"><h2 id="delete-account-blocked-title" class="cw-card-title">Transfer or delete these organizations first</h2><p class="cw-card-description">You are the only owner of these organizations and others are members. Make another member an owner, or delete the organization, then come back.</p></header>
+          <div class="cw-card-content">
+            <ul class="cw-row-list">{% for organization in page.blocking %}<li><a href="{{ organization.url }}">{{ organization.name }}</a><p class="cw-muted">{{ organization.detail }}</p></li>{% endfor %}</ul>
+            <div class="cw-form-actions"><a class="cw-button cw-button--outline" href="/settings/">Back to account</a></div>
+          </div>
+        </section>
+        {% endif %}
+          </div>
+        </div>
+      </div></main>
+    </div>
+  </body>
+</html>

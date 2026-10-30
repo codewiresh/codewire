@@ -57,6 +57,10 @@
       </div>
     </section>
     <dialog class="cw-dialog" data-dialog id="revoke-session-other" aria-labelledby="revoke-title-other"><header class="cw-dialog-header"><h2 id="revoke-title-other">Sign out session?</h2></header><div class="cw-dialog-body"><p>Sign out <code>session-other</code>? Sandbox terminals keep running. Already-established connections may remain until they reconnect.</p></div><form method="post" action="/settings/_actions/sessions/revoke"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account"><input type="hidden" name="session_id" value="session-other"><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Sign out session</button></footer></form></dialog>
+    <section id="delete-account" class="cw-card cw-card--danger cw-settings-card" aria-labelledby="delete-account-title">
+      <header class="cw-card-header"><h2 id="delete-account-title" class="cw-card-title">Delete account</h2><p class="cw-card-description">Delete your account, the organizations only you belong to, and their environments, secrets and credentials. This cannot be undone.</p></header>
+      <div class="cw-card-content"><a class="cw-button cw-danger-button" href="settings-delete-account.html">Delete account</a></div>
+    </section>
   </div>
 </div></div></main>
 </body>

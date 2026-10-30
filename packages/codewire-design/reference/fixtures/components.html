@@ -233,6 +233,16 @@
     </div>
   </section>
 
+  <section class="cw-card cw-card--danger" aria-labelledby="danger-card-title">
+    <header class="cw-card-header"><h2 id="danger-card-title" class="cw-card-title">Danger card</h2><p class="cw-card-description">An action that cannot be undone gets its own card with the destructive border. Its button stays unavailable until the typed confirmation matches.</p></header>
+    <div class="cw-card-content">
+      <form class="cw-form cw-confirm-form" action="#danger-card-title">
+        <div class="cw-field"><label class="cw-label" for="danger-card-confirm">Type <strong>delete</strong> to confirm</label><input class="cw-input" id="danger-card-confirm" name="confirm" required pattern="delete" autocomplete="off"></div>
+        <div class="cw-form-actions"><button class="cw-button cw-danger-button" type="submit">Delete</button></div>
+      </form>
+    </div>
+  </section>
+
   <section class="cw-card" aria-labelledby="row-list-title">
     <header class="cw-card-header"><h2 id="row-list-title" class="cw-card-title">Row list</h2><p class="cw-card-description">Repeated records inside a card share one inset and are separated by hairlines, never boxes inside the box.</p></header>
     <div class="cw-card-content">

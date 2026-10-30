@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Delete account, refused fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/settings.css">
+  <script src="../../dashboard.js" defer></script><script src="../../organizations.js" defer></script>
+</head>
+<body class="cw-body" data-dashboard-app>
+<main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>settings</span><span>/</span><strong>delete account</strong></div><div class="cw-console-account"><a class="cw-console-support" href="#docs">Support</a><details class="cw-menu cw-user-menu"><summary class="cw-button cw-button--outline cw-button--small cw-button--pill"><span>Example user</span><svg class="cw-icon cw-user-chevrons" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevrons-up-down"/></svg></summary><div class="cw-menu-panel cw-menu-panel--end"><div class="cw-user-menu-identity"><strong>Example user</strong><span>Authenticated account</span></div><a href="settings-account.html">Settings</a><a href="#docs">Docs</a><form data-sign-out><button class="cw-menu-item" type="button">Sign Out</button></form></div></details></div></header><div class="cw-page cw-settings-page"><div class="cw-settings-layout">
+  <aside class="cw-context-nav"><header class="cw-context-nav-heading"><h2>Settings</h2></header>
+<nav class="cw-context-nav-links" aria-label="Settings">
+  <h3 id="settings-personal-title" class="cw-section-label">Personal</h3>
+  <ul aria-labelledby="settings-personal-title"><li><a class="cw-nav-link" href="settings-account.html" aria-current="page">Account</a></li><li><a class="cw-nav-link" href="settings-credentials.html">Credentials</a></li><li><a class="cw-nav-link" href="settings-secrets.html">Secrets</a></li><li><a class="cw-nav-link" href="settings-api-keys.html">API keys</a></li></ul>
+
+</nav></aside>
+  <div class="cw-settings-content cw-account-page">
+    <header class="cw-page-header"><div><h1 class="cw-page-title">Delete account</h1><p class="cw-page-description">Deleting your account cannot be undone.</p></div></header>
+    <section id="delete-account" class="cw-card cw-settings-card" aria-labelledby="delete-account-blocked-title">
+      <header class="cw-card-header"><h2 id="delete-account-blocked-title" class="cw-card-title">Transfer or delete these organizations first</h2><p class="cw-card-description">You are the only owner of these organizations and others are members. Make another member an owner, or delete the organization, then come back.</p></header>
+      <div class="cw-card-content">
+        <ul class="cw-row-list"><li><a href="/acme-platform/members/">Acme Platform</a><p class="cw-muted">4 members</p></li></ul>
+        <div class="cw-form-actions"><a class="cw-button cw-button--outline" href="settings-account.html">Back to account</a></div>
+      </div>
+    </section>
+  </div>
+</div></div></main>
+</body>
+</html>

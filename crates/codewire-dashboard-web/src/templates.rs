@@ -7,11 +7,12 @@ use crate::admin_connect::{
 use crate::billing_connect::BillingPageView;
 use crate::view::EnvironmentCreateFormView;
 use crate::view::{
-    AccountAccessView, ApiKeysPageView, AuthFormView, CredentialSettingsView, DashboardView,
-    DevicePageView, EnvironmentsPageView, InvitationPageView, MembersPageView, OrganizationContext,
-    OrganizationFormView, OrganizationRow, PersonalApiKeysPageView, PersonalSecretsPageView,
-    PresetsPageView, SecretBucketPageView, SecretProjectsPageView, SettingsPageView,
-    SetupTwoFactorView, TerminalPageView, TwoFactorRecoveryView,
+    AccountAccessView, AccountDeletionPageView, ApiKeysPageView, AuthFormView,
+    CredentialSettingsView, DashboardView, DevicePageView, EnvironmentsPageView,
+    InvitationPageView, MembersPageView, OrganizationContext, OrganizationFormView,
+    OrganizationRow, PersonalApiKeysPageView, PersonalSecretsPageView, PresetsPageView,
+    SecretBucketPageView, SecretProjectsPageView, SettingsPageView, SetupTwoFactorView,
+    TerminalPageView, TwoFactorRecoveryView,
 };
 
 #[derive(Template)]
@@ -99,6 +100,13 @@ pub(crate) struct AdminBillingTemplate<'a> {
 #[template(path = "auth-form.html")]
 pub(crate) struct AuthFormTemplate<'a> {
     pub(crate) view: &'a AuthFormView,
+}
+
+#[derive(Template)]
+#[template(path = "settings-delete-account.html")]
+pub(crate) struct AccountDeletionTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) page: &'a AccountDeletionPageView,
 }
 
 #[derive(Template)]

@@ -544,6 +544,17 @@
   padding: var(--space-5);
 }
 
+/* Danger card: an action that cannot be undone, such as deleting an account,
+   in its own card with the destructive border and title. Its form keeps the
+   destructive button looking unavailable until the typed confirmation is
+   valid; the browser's own validation refuses the submit meanwhile. */
+.cw-card--danger { border-color: var(--destructive-border); }
+.cw-card--danger > .cw-card-header .cw-card-title { color: var(--destructive); }
+.cw-confirm-form:has(:invalid) .cw-danger-button {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .cw-mono { font-family: var(--font-mono); }
 .cw-muted { color: var(--fg-tertiary); }
 

@@ -1,7 +1,7 @@
 ---
 title: Account and organization
-description: Request access, sign in with two-factor authentication, and create the organization that owns your hosted sandboxes.
-updated: 2026-10-26
+description: Request access, sign in with two-factor authentication, create the organization that owns your hosted sandboxes, and delete your account.
+updated: 2026-10-29
 weight: 1
 aliases: ["/getting-started/account", "/guides/account"]
 ---
@@ -73,6 +73,28 @@ From the CLI: `cw org create NAME --slug SLUG`, or
 
 See [Organizations](@/organizations/_index.md) for roles, and
 [Members and sharing](@/organizations/members.md) to invite your team.
+
+## Delete your account
+
+**Settings → Account → Delete account** opens a page that lists what goes.
+Type your account's email address to confirm. Deleting your account:
+
+- deletes every organization **only you** belong to, with its environments,
+  their storage, its secrets and credentials, and its Stripe customer and
+  payment methods. Remaining credit in those organizations is forfeited;
+- removes you from organizations that have other members. Environments you
+  created there stay with the organization;
+- signs you out everywhere at once and stops your API keys and CLI sign-ins;
+- deletes your personal secrets, credentials and access profiles.
+
+When the deletion is done, Codewire emails a confirmation. You can then sign
+up again with the same address.
+
+{% aside(kind="caution") %}
+  Deleting your account cannot be undone. While you are the only owner of an
+  organization with other members, the page lists it instead: make another
+  member an owner in **Members**, or delete the organization, first.
+{% end %}
 
 ## Next
 

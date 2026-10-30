@@ -161,3 +161,50 @@ test.describe("without JavaScript", () => {
     await expect(cancel).toHaveAttribute("action", "settings-account.html#security");
   });
 });
+
+test("Account deletion is a danger card, confirmed by typing the email, and refused for a sole owner", { tag: "@mobile" }, async ({ page }) => {
+  test.skip(!process.env.CODEWIRE_DESIGN_ORIGIN, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
+  const posts: string[] = [];
+  await page.route("**/settings/_actions/delete-account", async (route) => {
+    posts.push(route.request().postData() || "");
+    await route.fulfill({ status: 200, contentType: "text/plain", body: "Synthetic deletion started" });
+  });
+
+  await page.goto(fixture("settings-account.html"));
+  const card = page.getByRole("region", { name: "Delete account", exact: true });
+  await expect(card).toBeVisible();
+  await expect(card.getByRole("link", { name: "Delete account", exact: true })).toHaveAttribute("href", "settings-delete-account.html");
+
+  await page.goto(fixture("settings-delete-account.html"));
+  const confirm = page.getByRole("region", { name: "Delete your account", exact: true });
+  await expect(confirm).toContainText("Owner's sandbox lab");
+  await expect(confirm).toContainText("You leave");
+  await expect(confirm).toContainText("The remaining credit of €37.50 is forfeited.");
+  const email = confirm.getByLabel("Type owner@example.test to confirm");
+  const submit = confirm.getByRole("button", { name: "Delete account", exact: true });
+  const opacity = () => submit.evaluate((button) => Number(getComputedStyle(button).opacity));
+  // Empty and wrong addresses leave the button unavailable, and the browser
+  // refuses the submit.
+  for (const value of ["", "someone@example.test"]) {
+    await email.fill(value);
+    expect(await opacity()).toBeLessThan(1);
+    await submit.click();
+    expect(posts).toEqual([]);
+  }
+  await email.fill("owner@example.test");
+  expect(await opacity()).toBe(1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await submit.click();
+  await expect(page.getByText("Synthetic deletion started", { exact: true })).toBeVisible();
+  expect(posts).toHaveLength(1);
+  expect(Object.fromEntries(new URLSearchParams(posts[0]))).toEqual({
+    _csrf: "design-fixture-only",
+    account_id: "fixture-account",
+    confirm_email: "owner@example.test",
+  });
+
+  await page.goto(fixture("settings-delete-account-blocked.html"));
+  const blocked = page.getByRole("region", { name: "Transfer or delete these organizations first", exact: true });
+  await expect(blocked.getByRole("link", { name: "Acme Platform", exact: true })).toHaveAttribute("href", "/acme-platform/members/");
+  await expect(page.locator('form[action="/settings/_actions/delete-account"]')).toHaveCount(0);
+});

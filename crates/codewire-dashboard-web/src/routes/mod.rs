@@ -467,6 +467,15 @@ pub(crate) fn router() -> Router<AppState> {
             "/settings/_actions/sign-out",
             post(authentication::sign_out_action),
         )
+        .route("/settings/delete-account", get(slash_redirect))
+        .route(
+            "/settings/delete-account/",
+            get(settings::delete_account_page),
+        )
+        .route(
+            "/settings/_actions/delete-account",
+            post(settings::delete_account_action).layer(DefaultBodyLimit::max(2048)),
+        )
         .route("/settings/security", get(slash_redirect))
         .route("/settings/security/", get(settings::security))
         .route("/settings/sessions", get(slash_redirect))
