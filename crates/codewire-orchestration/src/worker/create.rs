@@ -1110,11 +1110,15 @@ pub(super) async fn reconcile_confidential_runtime_before_replacement(
 /// Mirrors `RunEnvironmentCreateWithoutSetupPublish` — the create
 /// activity never publishes the setup job: the Temporal workflow chains
 /// the Setup activity explicitly (D3 retired the env-setup NATS path).
+///
+/// When it ends by handing over to setup (`publish_setup`), it returns the
+/// runtime this attempt reconciled for that last ready action, so a setup in
+/// the same activity can tell whether anything changed since (#3684).
 pub async fn handle_environment_create_without_setup_publish(
     ctx: &WorkerContext,
     payload: &JobPayload,
     authority: &ActivityAuthority,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<ReconciledRuntime>> {
     run_environment_create(ctx, payload, authority).await
 }
 
@@ -1123,7 +1127,7 @@ async fn run_environment_create(
     ctx: &WorkerContext,
     payload: &JobPayload,
     authority: &ActivityAuthority,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<ReconciledRuntime>> {
     let env_id = &payload.environment_id;
     tracing::info!(environment_id = env_id, "environment.create received");
     let svc = Service::<PgLifecycleStore>::for_activity(ctx.pool.clone(), authority.clone());
@@ -1148,7 +1152,7 @@ async fn run_environment_create(
                 desired = env.desired_state,
                 "create cancelled: desired state changed"
             );
-            return Ok(());
+            return Ok(None);
         }
 
         let profile = start_profile(cfg, &env.isolation_tier);
@@ -1247,7 +1251,7 @@ async fn run_environment_create(
         }
 
         match action {
-            CreateAction::Done => return Ok(()),
+            CreateAction::Done => return Ok(None),
 
             CreateAction::ResumeWorkspace => {
                 let backend = backend.as_ref().expect("resume_workspace requires backend");
@@ -1883,12 +1887,13 @@ async fn run_environment_create(
             }
 
             CreateAction::PublishSetup => {
-                // D3: the create activity never publishes setup — the
-                // Temporal workflow (and the reconcile recovery path)
-                // chain the Setup activity explicitly. The log entry
+                // D3: the create handler never publishes setup. Its caller
+                // runs it: the workflow's Setup activity, the claim-and-create
+                // activity itself for an environment with no setup work
+                // (#3684), or the reconcile recovery path. The log entry
                 // marks the create handler complete.
                 emit_running_log(authority, "publish_setup", "completed", "", None).await?;
-                return Ok(());
+                return Ok(reconciled_runtime);
             }
         }
     }
@@ -1954,7 +1959,7 @@ const ACCESS_READY_STARTED_MESSAGE: &str = "Waiting for SSH access";
 /// `mark_running` committed; every later write still checks authority for
 /// its own states.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct ReconciledRuntime {
+pub struct ReconciledRuntime {
     environment: EnvironmentRow,
     namespace: String,
     claim_name: String,
@@ -1984,6 +1989,19 @@ impl ReconciledRuntime {
     /// Record the state transition this attempt itself just committed.
     fn entered_running(&mut self) {
         self.environment.state = "running".to_string();
+    }
+
+    /// A later observation sees exactly this runtime, and the backend's
+    /// bound-Pod pointer, which a release clears, still names its Pod: the
+    /// same test as [`FreshWarmBind::matches`].
+    pub(super) fn unchanged(
+        &self,
+        environment: &EnvironmentRow,
+        backend: &BackendRow,
+        probe: &ProbeResult,
+    ) -> bool {
+        *self == Self::observe(environment, backend, probe)
+            && backend.pod_uid.as_deref() == Some(probe.pod_uid.as_str())
     }
 }
 

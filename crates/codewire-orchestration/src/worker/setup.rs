@@ -16,6 +16,7 @@ use temporalio_sdk::activities::ActivityContext;
 
 use super::activity_authority::{ActivityAuthority, is_authority_lost};
 use super::agents::agent_definition;
+use super::create::ReconciledRuntime;
 use super::env_data::{BackendRow, EnvironmentRow, load_backend_row, load_environment};
 #[cfg(feature = "kind-e2e")]
 use super::fencing_evidence::{FencingEvidence as SetupFencingEvidence, emit};
@@ -2168,6 +2169,65 @@ pub async fn handle_environment_setup(
     setup_identity: SetupActivityIdentity,
     activity_ctx: ActivityContext,
 ) -> anyhow::Result<()> {
+    run_setup(ctx, payload, authority, setup_identity, activity_ctx, None)
+        .await
+        .map(|_| ())
+}
+
+/// What [`handle_environment_setup_after_create`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SetupAfterCreate {
+    /// Nothing: the environment has setup work, so the workflow's separate
+    /// setup activity runs it as before. Also what an activity that lost its
+    /// authority reports, so that activity decides as it always has.
+    #[default]
+    Deferred,
+    /// Setup ran in the create activity, to completion or to its recorded
+    /// error, exactly as the separate setup activity would have.
+    Ran,
+}
+
+/// Setup in the create activity, straight after its `publish_setup` (#3684),
+/// for an environment with no setup work: the health check and
+/// `configure_environment`, then the final runtime reconcile. `confirmed` is
+/// the runtime the create attempt reconciled for that last ready action. When
+/// the observation after setup is exactly that runtime, with the backend still
+/// naming its Pod as bound, the final reconcile is skipped: it would repeat,
+/// in the same activity and with only setup's own steps in between, what the
+/// create pass just did ([`ReconciledRuntime`]'s rule, #3637). What that equality
+/// does not cover is the gap #3637 accepted within one activity: the preset's
+/// template configuration, the worker configuration, the Claim's labels, and
+/// the Services and policies the access stack re-applies. Any other
+/// observation runs the full reconcile. The health check always runs: it
+/// alone proves the SSH login, a session and the SFTP subsystem.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %payload.environment_id))]
+pub async fn handle_environment_setup_after_create(
+    ctx: &WorkerContext,
+    payload: &JobPayload,
+    authority: &ActivityAuthority,
+    setup_identity: SetupActivityIdentity,
+    activity_ctx: ActivityContext,
+    confirmed: &ReconciledRuntime,
+) -> anyhow::Result<SetupAfterCreate> {
+    run_setup(
+        ctx,
+        payload,
+        authority,
+        setup_identity,
+        activity_ctx,
+        Some(confirmed),
+    )
+    .await
+}
+
+async fn run_setup(
+    ctx: &WorkerContext,
+    payload: &JobPayload,
+    authority: &ActivityAuthority,
+    setup_identity: SetupActivityIdentity,
+    activity_ctx: ActivityContext,
+    after_create: Option<&ReconciledRuntime>,
+) -> anyhow::Result<SetupAfterCreate> {
     let env_id = &payload.environment_id;
     tracing::info!(environment_id = env_id, "environment.setup received");
 
@@ -2179,7 +2239,7 @@ pub async fn handle_environment_setup(
             desired = env.desired_state,
             "setup cancelled: desired state changed"
         );
-        return Ok(());
+        return Ok(SetupAfterCreate::Ran);
     }
 
     let backend = match load_backend_row(&ctx.pool, env_id).await {
@@ -2195,10 +2255,13 @@ pub async fn handle_environment_setup(
             super::create::reconcile_runtime_identity(ctx, &env, &backend, authority, &["running"])
                 .await?;
         }
-        return Ok(());
+        return Ok(SetupAfterCreate::Ran);
     }
 
     let mut input = to_setup_inputs(&env, &backend);
+    if after_create.is_some() && input.has_setup {
+        return Ok(SetupAfterCreate::Deferred);
+    }
     let phase_authority = SetupPhaseAuthority::new(authority.clone(), setup_identity)?;
     let mut runner = Runner {
         store: PgSetupStore {
@@ -2231,52 +2294,102 @@ pub async fn handle_environment_setup(
             tracing::warn!(env = env_id, error = %record_error, "setup: failed to record setup error");
         }
         tracing::error!(env = env_id, error = %err, "setup failed");
-        return Ok(()); // environment is still usable — don't retry
+        return Ok(SetupAfterCreate::Ran); // environment is still usable — don't retry
     }
-    if let Some(since) = runner.store.completed_since_accepted.get().copied() {
-        record_setup_complete(ctx, &runner.ops.env, &input.namespace, since).await;
+    let since = runner.store.completed_since_accepted.get().copied();
+    // One read of the runtime after setup serves both the milestone and the
+    // final reconcile's check; a setup that completed earlier and is not
+    // checking create's runtime reads nothing, as before.
+    let probe = if since.is_some() || after_create.is_some() {
+        probe_after_setup(ctx, &input.namespace, env_id).await
+    } else {
+        None
+    };
+    if let Some(since) = since {
+        record_setup_complete(ctx, &runner.ops.env, probe.as_ref(), since);
     }
 
     let environment = load_environment(&ctx.pool, env_id).await?;
     let backend = load_backend_row(&ctx.pool, env_id).await?;
-    super::create::reconcile_runtime_identity(ctx, &environment, &backend, authority, &["running"])
+    if final_reconcile_needed(after_create, &environment, &backend, probe.as_ref()) {
+        super::create::reconcile_runtime_identity(
+            ctx,
+            &environment,
+            &backend,
+            authority,
+            &["running"],
+        )
         .await?;
+    } else {
+        tracing::info!(
+            environment_id = env_id,
+            "setup: the runtime is the one create just reconciled; no final reconcile"
+        );
+    }
     tracing::info!(environment_id = env_id, "environment.setup completed");
-    Ok(())
+    Ok(SetupAfterCreate::Ran)
+}
+
+/// Whether setup's last step, the runtime reconcile, has to run: always,
+/// unless setup runs in the create activity and the observation after it is
+/// exactly the runtime that create reconciled
+/// ([`handle_environment_setup_after_create`]).
+fn final_reconcile_needed(
+    after_create: Option<&ReconciledRuntime>,
+    environment: &EnvironmentRow,
+    backend: &BackendRow,
+    probe: Option<&ProbeResult>,
+) -> bool {
+    match (after_create, probe) {
+        (Some(confirmed), Some(probe)) => !confirmed.unchanged(environment, backend, probe),
+        _ => true,
+    }
+}
+
+async fn probe_after_setup(
+    ctx: &WorkerContext,
+    namespace: &str,
+    env_id: &str,
+) -> Option<ProbeResult> {
+    let kube = ctx.kube.as_ref()?;
+    match SandboxClient::new(kube.clone(), namespace)
+        .probe_environment(env_id)
+        .await
+    {
+        Ok(probe) => Some(probe),
+        Err(error) => {
+            tracing::warn!(
+                environment_id = env_id,
+                error = %error,
+                "setup: the Sandbox read after setup failed"
+            );
+            None
+        }
+    }
 }
 
 /// Observe the `setup_complete` create milestone after its row committed.
 /// Setup completes once per environment, as the last step of its create. It
 /// does not know the start path, so it reads the Sandbox's launch type as
-/// `access_ready` does; without it the observation is skipped rather than
-/// guessed.
-async fn record_setup_complete(
+/// `access_ready` does; without that read the observation is skipped rather
+/// than guessed.
+fn record_setup_complete(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
-    namespace: &str,
+    probe: Option<&ProbeResult>,
     since_accepted: Duration,
 ) {
-    let Some(kube) = ctx.kube.as_ref() else {
+    // Timing is observational; the row still carries the time.
+    let Some(probe) = probe else {
         return;
     };
-    match SandboxClient::new(kube.clone(), namespace)
-        .probe_environment(&env.id)
-        .await
-    {
-        Ok(probe) => record_create_milestone(
-            &env.id,
-            CreateMilestone::SetupComplete,
-            StartPath::from_launch_type(Some(probe.launch_type.as_str())),
-            start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
-            since_accepted,
-        ),
-        // Timing is observational; the row still carries the time.
-        Err(error) => tracing::warn!(
-            environment_id = env.id,
-            error = %error,
-            "setup: skip the setup_complete milestone after a failed Sandbox read"
-        ),
-    }
+    record_create_milestone(
+        &env.id,
+        CreateMilestone::SetupComplete,
+        StartPath::from_launch_type(Some(probe.launch_type.as_str())),
+        start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+        since_accepted,
+    );
 }
 
 /// Reapply Git author metadata and run the current startup script after a
@@ -3367,6 +3480,126 @@ mod tests {
                 "uid-old",
                 &probe
             ));
+        }
+    }
+
+    fn running_environment() -> EnvironmentRow {
+        EnvironmentRow {
+            id: "env-1".into(),
+            org_id: "org-1".into(),
+            preset_id: None,
+            env_type: "sandbox".into(),
+            state: "running".into(),
+            desired_state: "started".into(),
+            isolation_tier: "standard".into(),
+            external_cleanup_completed_at: None,
+            cpu_millicores: 2000,
+            memory_mb: 4096,
+            disk_gb: 80,
+            ttl_seconds: Some(1800),
+            project_spec: codewire_project::ProjectSpec::default(),
+            operation_generation: 7,
+            projection_selection: Ok(None),
+            managed_credential_clients: Ok(Default::default()),
+        }
+    }
+
+    /// #3684: setup in the create activity skips its final reconcile only
+    /// when the runtime after setup is exactly the one create reconciled, and
+    /// the backend still names its Pod as bound. Every change since then, and
+    /// every setup that has no such runtime or could not read one, reconciles.
+    #[test]
+    fn the_final_reconcile_is_skipped_only_for_the_runtime_create_reconciled() {
+        let env = running_environment();
+        let backend = BackendRow {
+            namespace: "ns".into(),
+            claim_name: "sandbox-env-1".into(),
+            claim_uid: "claim-1".into(),
+            pod_uid: Some("pod-1".into()),
+            ..Default::default()
+        };
+        let probe = ProbeResult {
+            pod_name: "cw-pool-member".into(),
+            pod_uid: "pod-1".into(),
+            pod_ip: "10.0.0.1".into(),
+            ..Default::default()
+        };
+        let confirmed = ReconciledRuntime::observe(&env, &backend, &probe);
+        assert!(!final_reconcile_needed(
+            Some(&confirmed),
+            &env,
+            &backend,
+            Some(&probe)
+        ));
+        assert!(final_reconcile_needed(None, &env, &backend, Some(&probe)));
+        assert!(final_reconcile_needed(
+            Some(&confirmed),
+            &env,
+            &backend,
+            None
+        ));
+
+        let mut republished = env.clone();
+        republished.projection_selection =
+            Ok(Some(codewire_project::PlatformProjectionSelection {
+                creator: "usr-1".into(),
+                organization: "org-1".into(),
+                organization_selected: true,
+                project_id: None,
+                user_selected: false,
+                profile: None,
+                ordinary_keys: ["API_URL".to_string()].into(),
+                reserved_keys: Default::default(),
+            }));
+        let mut regenerated = env.clone();
+        regenerated.operation_generation = 8;
+        let mut failed = env.clone();
+        failed.state = "error".into();
+        for (case, changed) in [
+            ("a republished projection selection", republished),
+            ("a new generation", regenerated),
+            ("another state", failed),
+        ] {
+            assert!(
+                final_reconcile_needed(Some(&confirmed), &changed, &backend, Some(&probe)),
+                "{case}"
+            );
+        }
+
+        let released = BackendRow {
+            pod_uid: None,
+            ..backend.clone()
+        };
+        let reclaimed = BackendRow {
+            claim_uid: "claim-2".into(),
+            ..backend.clone()
+        };
+        for (case, changed) in [
+            ("a released binding", released),
+            ("another Claim", reclaimed),
+        ] {
+            assert!(
+                final_reconcile_needed(Some(&confirmed), &env, &changed, Some(&probe)),
+                "{case}"
+            );
+        }
+
+        let replaced = ProbeResult {
+            pod_uid: "pod-2".into(),
+            ..probe.clone()
+        };
+        let readdressed = ProbeResult {
+            pod_ip: "10.0.0.2".into(),
+            ..probe.clone()
+        };
+        for (case, changed) in [
+            ("a replaced Pod", replaced),
+            ("a new Pod address", readdressed),
+        ] {
+            assert!(
+                final_reconcile_needed(Some(&confirmed), &env, &backend, Some(&changed)),
+                "{case}"
+            );
         }
     }
 }

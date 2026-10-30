@@ -1354,8 +1354,9 @@ pub async fn handle_environment_reconcile(
         }
         Action::Create => {
             // D3 (Temporal-only): create chains setup inline rather than
-            // publishing an env-setup NATS job. The primary create path
-            // chains these as two workflow activities; the reconcile
+            // publishing an env-setup NATS job. The primary create path runs
+            // setup in the claim-and-create activity when there is no setup
+            // work (#3684), and as a second activity otherwise; the reconcile
             // recovery path is a single activity, so it runs both here.
             await_reconcile_or_cancel(
                 &activity_ctx,

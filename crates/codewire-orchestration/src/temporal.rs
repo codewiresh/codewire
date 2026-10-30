@@ -106,6 +106,43 @@ pub struct EnvironmentClaimAndCreateInput {
 /// activity. Histories recorded before it replay the separate claim.
 const CLAIM_WITH_CREATE_PATCH: &str = "claim-authority-with-create-3630";
 
+/// What [`EnvironmentActivities::claim_and_create`] returns. Histories
+/// recorded before #3684 hold the bare generation, which decodes as
+/// [`Self::Generation`]: setup still to run, as those workflows expect. No
+/// patch is needed, since the workflow reads the recorded result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ClaimAndCreateResult {
+    Generation(i64),
+    Outcome {
+        operation_generation: i64,
+        /// Setup ran in the same activity, so the workflow skips its own.
+        setup_completed: bool,
+    },
+}
+
+impl ClaimAndCreateResult {
+    fn operation_generation(self) -> i64 {
+        match self {
+            Self::Generation(generation)
+            | Self::Outcome {
+                operation_generation: generation,
+                ..
+            } => generation,
+        }
+    }
+
+    fn setup_completed(self) -> bool {
+        matches!(
+            self,
+            Self::Outcome {
+                setup_completed: true,
+                ..
+            }
+        )
+    }
+}
+
 /// Internal activity payload created only after the workflow claims authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -350,12 +387,19 @@ impl EnvironmentActivities {
     /// a retried claim activity does; a create that lost authority is a no-op,
     /// as in [`Self::create`], and the generation still goes back to the
     /// workflow for setup.
+    ///
+    /// #3684: when the create hands over to setup and the environment has no
+    /// setup work, setup runs here too, after the create and under its own
+    /// wrapper, as the reconcile recovery path composes them: the create's
+    /// readiness waits stop when the activity is cancelled, and setup fences
+    /// its workspace processes before it acknowledges a cancellation. Its
+    /// lease is this activity's identity, which a retry takes over.
     #[activity(name = "EnvironmentClaimAndCreateActivity")]
     pub async fn claim_and_create(
         self: Arc<Self>,
         ctx: ActivityContext,
         input: EnvironmentClaimAndCreateInput,
-    ) -> Result<i64, ActivityError> {
+    ) -> Result<ClaimAndCreateResult, ActivityError> {
         let span = activity_span(
             "EnvironmentClaimAndCreateActivity",
             &input.environment_id,
@@ -380,9 +424,10 @@ impl EnvironmentActivities {
                 &input.trace_context,
                 generation,
             )?;
+            let mut setup_completed = false;
             if let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? {
-                run_environment_activity(
-                    ctx,
+                let confirmed = run_environment_activity(
+                    ctx.clone(),
                     create::handle_environment_create_without_setup_publish(
                         &self.wctx,
                         &job_payload(&cmd, "environment.create"),
@@ -390,8 +435,27 @@ impl EnvironmentActivities {
                     ),
                 )
                 .await?;
+                if let Some(confirmed) = confirmed {
+                    let setup_identity = setup_activity_identity(&ctx, &cmd)?;
+                    let setup = run_cleanup_aware_environment_activity(
+                        ctx.clone(),
+                        Box::pin(setup::handle_environment_setup_after_create(
+                            &self.wctx,
+                            &job_payload(&cmd, "environment.setup"),
+                            &authority,
+                            setup_identity,
+                            ctx,
+                            &confirmed,
+                        )),
+                    )
+                    .await?;
+                    setup_completed = setup == setup::SetupAfterCreate::Ran;
+                }
             }
-            Ok(generation)
+            Ok(ClaimAndCreateResult::Outcome {
+                operation_generation: generation,
+                setup_completed,
+            })
         }
         .instrument(span)
         .await
@@ -422,6 +486,7 @@ impl EnvironmentActivities {
                 ),
             )
             .await
+            .map(|_| ())
         }
         .instrument(span)
         .await
@@ -750,12 +815,14 @@ impl EnvironmentWorkflow {
             }
 
             ensure_workflow_environment(&mut environment_id, &cmd)?;
-            // Whether this command's create already ran with its claim.
+            // Whether this command's create already ran with its claim, and
+            // its setup with it (#3684).
             let mut created = false;
+            let mut setup_completed = false;
             let generation = match operation_generation {
                 Some(generation) => generation,
                 None if cmd.action == "create" && ctx.patched(CLAIM_WITH_CREATE_PATCH) => {
-                    let generation = ctx
+                    let result = ctx
                         .start_activity(
                             EnvironmentActivities::claim_and_create,
                             EnvironmentClaimAndCreateInput {
@@ -766,8 +833,10 @@ impl EnvironmentWorkflow {
                             environment_activity_opts(),
                         )
                         .await?;
+                    let generation = result.operation_generation();
                     operation_generation = Some(generation);
                     created = true;
+                    setup_completed = result.setup_completed();
                     generation
                 }
                 None => {
@@ -797,12 +866,14 @@ impl EnvironmentWorkflow {
                         )
                         .await?;
                     }
-                    ctx.start_activity(
-                        EnvironmentActivities::setup,
-                        activity_cmd,
-                        environment_activity_opts(),
-                    )
-                    .await?;
+                    if !setup_completed {
+                        ctx.start_activity(
+                            EnvironmentActivities::setup,
+                            activity_cmd,
+                            environment_activity_opts(),
+                        )
+                        .await?;
+                    }
                 }
                 "start" => {
                     ctx.start_activity(
@@ -1963,5 +2034,49 @@ mod tests {
         };
         ensure_workflow_environment(&mut expected, &first).unwrap();
         assert!(ensure_workflow_environment(&mut expected, &other).is_err());
+    }
+
+    /// #3684: a history recorded before setup moved into the create activity
+    /// holds claim-and-create's bare generation. Through the SDK's converter
+    /// it still decodes, as "setup still to run", and the new outcome
+    /// round-trips.
+    #[tokio::test]
+    async fn a_recorded_bare_generation_still_runs_setup() {
+        use temporalio_common::data_converters::{DataConverter, SerializationContextData};
+
+        let converter = DataConverter::default();
+        let recorded = converter
+            .to_payloads(&SerializationContextData::Activity, &7_i64)
+            .await
+            .unwrap();
+        let result: ClaimAndCreateResult = converter
+            .from_payloads(&SerializationContextData::Activity, recorded)
+            .await
+            .unwrap();
+        assert_eq!(result, ClaimAndCreateResult::Generation(7));
+        assert_eq!(
+            (result.operation_generation(), result.setup_completed()),
+            (7, false)
+        );
+
+        for setup_completed in [false, true] {
+            let outcome = ClaimAndCreateResult::Outcome {
+                operation_generation: 7,
+                setup_completed,
+            };
+            let payloads = converter
+                .to_payloads(&SerializationContextData::Activity, &outcome)
+                .await
+                .unwrap();
+            let decoded: ClaimAndCreateResult = converter
+                .from_payloads(&SerializationContextData::Activity, payloads)
+                .await
+                .unwrap();
+            assert_eq!(decoded, outcome);
+            assert_eq!(
+                (decoded.operation_generation(), decoded.setup_completed()),
+                (7, setup_completed)
+            );
+        }
     }
 }
