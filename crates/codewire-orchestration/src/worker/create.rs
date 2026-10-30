@@ -592,6 +592,14 @@ pub fn environment_template_opts(
         codex_login_check_period_seconds: cfg.codex_login_check_period_seconds,
         ..shape_template_opts(cfg, image_ref, &runtime_spec, shape)
     };
+    let opts = if env.dedicated_cpu {
+        TemplateOpts {
+            cpu_sharing: crate::sandbox::template::CpuSharingRatio::NONE,
+            ..opts
+        }
+    } else {
+        opts
+    };
     // Its binding listener is one of the measured anchors: a confidential
     // rendering without one is refused here, never rendered.
     anyhow::ensure!(
@@ -3073,6 +3081,7 @@ mod tests {
             state: "creating".into(),
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
+            dedicated_cpu: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 2000,
             memory_mb: 4096,
@@ -3278,6 +3287,7 @@ mod tests {
         // own roots; without them it renders nothing at all.
         let confidential = EnvironmentRow {
             isolation_tier: "confidential".into(),
+            dedicated_cpu: false,
             ..identity_mode_env()
         };
         let measured_cfg = SandboxWorkerCfg {
@@ -3439,6 +3449,7 @@ mod tests {
             state: state.into(),
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
+            dedicated_cpu: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,
@@ -4171,6 +4182,7 @@ mod tests {
             state: "pending".into(),
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
+            dedicated_cpu: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,
@@ -4236,6 +4248,7 @@ mod tests {
             state: "pending".into(),
             desired_state: "started".into(),
             isolation_tier: "confidential".into(),
+            dedicated_cpu: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 2000,
             memory_mb: 16384,
@@ -4311,6 +4324,7 @@ mod tests {
             state: "pending".into(),
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
+            dedicated_cpu: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 2000,
             memory_mb: 4096,
@@ -4385,6 +4399,7 @@ mod tests {
             state: "pending".into(),
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
+            dedicated_cpu: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,
@@ -4510,6 +4525,7 @@ mod tests {
             state: "pending".into(),
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
+            dedicated_cpu: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,
@@ -4572,6 +4588,7 @@ mod tests {
             state: "pending".into(),
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
+            dedicated_cpu: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,

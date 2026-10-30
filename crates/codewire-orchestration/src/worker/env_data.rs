@@ -23,6 +23,9 @@ pub struct EnvironmentRow {
     pub memory_mb: i32,
     pub disk_gb: i32,
     pub isolation_tier: String,
+    /// The organization's sandboxes reserve a CPU per vCPU instead of sharing,
+    /// read each time a Sandbox is rendered (#3635).
+    pub dedicated_cpu: bool,
     pub ttl_seconds: Option<i32>,
     pub project_spec: ProjectSpec,
     /// Existing lifecycle authority captured with this exact metadata read.
@@ -100,6 +103,9 @@ fn decode_environment(row: sqlx::postgres::PgRow) -> anyhow::Result<EnvironmentR
         memory_mb: row.try_get("memory_mb")?,
         disk_gb: row.try_get("disk_gb")?,
         isolation_tier: row.try_get("isolation_tier")?,
+        dedicated_cpu: row
+            .try_get::<Option<bool>, _>("dedicated_cpu")?
+            .unwrap_or(false),
         ttl_seconds: row.try_get("ttl_seconds")?,
         project_spec,
         operation_generation,

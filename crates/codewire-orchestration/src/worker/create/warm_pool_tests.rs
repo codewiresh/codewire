@@ -56,6 +56,7 @@ fn environment(shape: WorkspaceShape) -> EnvironmentRow {
         state: "creating".into(),
         desired_state: "started".into(),
         isolation_tier: "standard".into(),
+        dedicated_cpu: false,
         external_cleanup_completed_at: None,
         cpu_millicores: i32::try_from(shape.cpu_millicores).unwrap(),
         memory_mb: i32::try_from(shape.memory_mib).unwrap(),

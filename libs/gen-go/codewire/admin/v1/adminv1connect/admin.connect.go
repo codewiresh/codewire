@@ -71,6 +71,9 @@ const (
 	// AdminServiceSetOrganizationRateCardProcedure is the fully-qualified name of the AdminService's
 	// SetOrganizationRateCard RPC.
 	AdminServiceSetOrganizationRateCardProcedure = "/codewire.admin.v1.AdminService/SetOrganizationRateCard"
+	// AdminServiceSetOrganizationDedicatedCpuProcedure is the fully-qualified name of the
+	// AdminService's SetOrganizationDedicatedCpu RPC.
+	AdminServiceSetOrganizationDedicatedCpuProcedure = "/codewire.admin.v1.AdminService/SetOrganizationDedicatedCpu"
 	// AdminServiceAdjustOrganizationCreditProcedure is the fully-qualified name of the AdminService's
 	// AdjustOrganizationCredit RPC.
 	AdminServiceAdjustOrganizationCreditProcedure = "/codewire.admin.v1.AdminService/AdjustOrganizationCredit"
@@ -120,6 +123,11 @@ type AdminServiceClient interface {
 	// discounted or unlimited. A change writes an audit entry; assigning the
 	// card it already has changes nothing.
 	SetOrganizationRateCard(context.Context, *connect.Request[v1.SetOrganizationRateCardRequest]) (*connect.Response[v1.SetOrganizationRateCardResponse], error)
+	// SetOrganizationDedicatedCpu sets whether one organization's new sandboxes
+	// reserve a CPU per vCPU instead of sharing, and writes an audit entry. A
+	// sandbox it already runs keeps its reservation until it is replaced. Setting
+	// the value it already has changes nothing.
+	SetOrganizationDedicatedCpu(context.Context, *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error)
 	// AdjustOrganizationCredit adds or removes compute credit with a reason,
 	// as a ledger entry naming the administrator, and writes an audit entry.
 	// A repeated idempotency key for the organization changes nothing.
@@ -224,6 +232,12 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(adminServiceMethods.ByName("SetOrganizationRateCard")),
 			connect.WithClientOptions(opts...),
 		),
+		setOrganizationDedicatedCpu: connect.NewClient[v1.SetOrganizationDedicatedCpuRequest, v1.SetOrganizationDedicatedCpuResponse](
+			httpClient,
+			baseURL+AdminServiceSetOrganizationDedicatedCpuProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("SetOrganizationDedicatedCpu")),
+			connect.WithClientOptions(opts...),
+		),
 		adjustOrganizationCredit: connect.NewClient[v1.AdjustOrganizationCreditRequest, v1.AdjustOrganizationCreditResponse](
 			httpClient,
 			baseURL+AdminServiceAdjustOrganizationCreditProcedure,
@@ -248,6 +262,7 @@ type adminServiceClient struct {
 	getDefaultEnvironmentQuota        *connect.Client[v1.GetDefaultEnvironmentQuotaRequest, v1.GetDefaultEnvironmentQuotaResponse]
 	setDefaultEnvironmentQuota        *connect.Client[v1.SetDefaultEnvironmentQuotaRequest, v1.SetDefaultEnvironmentQuotaResponse]
 	setOrganizationRateCard           *connect.Client[v1.SetOrganizationRateCardRequest, v1.SetOrganizationRateCardResponse]
+	setOrganizationDedicatedCpu       *connect.Client[v1.SetOrganizationDedicatedCpuRequest, v1.SetOrganizationDedicatedCpuResponse]
 	adjustOrganizationCredit          *connect.Client[v1.AdjustOrganizationCreditRequest, v1.AdjustOrganizationCreditResponse]
 }
 
@@ -320,6 +335,11 @@ func (c *adminServiceClient) SetOrganizationRateCard(ctx context.Context, req *c
 	return c.setOrganizationRateCard.CallUnary(ctx, req)
 }
 
+// SetOrganizationDedicatedCpu calls codewire.admin.v1.AdminService.SetOrganizationDedicatedCpu.
+func (c *adminServiceClient) SetOrganizationDedicatedCpu(ctx context.Context, req *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error) {
+	return c.setOrganizationDedicatedCpu.CallUnary(ctx, req)
+}
+
 // AdjustOrganizationCredit calls codewire.admin.v1.AdminService.AdjustOrganizationCredit.
 func (c *adminServiceClient) AdjustOrganizationCredit(ctx context.Context, req *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error) {
 	return c.adjustOrganizationCredit.CallUnary(ctx, req)
@@ -369,6 +389,11 @@ type AdminServiceHandler interface {
 	// discounted or unlimited. A change writes an audit entry; assigning the
 	// card it already has changes nothing.
 	SetOrganizationRateCard(context.Context, *connect.Request[v1.SetOrganizationRateCardRequest]) (*connect.Response[v1.SetOrganizationRateCardResponse], error)
+	// SetOrganizationDedicatedCpu sets whether one organization's new sandboxes
+	// reserve a CPU per vCPU instead of sharing, and writes an audit entry. A
+	// sandbox it already runs keeps its reservation until it is replaced. Setting
+	// the value it already has changes nothing.
+	SetOrganizationDedicatedCpu(context.Context, *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error)
 	// AdjustOrganizationCredit adds or removes compute credit with a reason,
 	// as a ledger entry naming the administrator, and writes an audit entry.
 	// A repeated idempotency key for the organization changes nothing.
@@ -469,6 +494,12 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(adminServiceMethods.ByName("SetOrganizationRateCard")),
 		connect.WithHandlerOptions(opts...),
 	)
+	adminServiceSetOrganizationDedicatedCpuHandler := connect.NewUnaryHandler(
+		AdminServiceSetOrganizationDedicatedCpuProcedure,
+		svc.SetOrganizationDedicatedCpu,
+		connect.WithSchema(adminServiceMethods.ByName("SetOrganizationDedicatedCpu")),
+		connect.WithHandlerOptions(opts...),
+	)
 	adminServiceAdjustOrganizationCreditHandler := connect.NewUnaryHandler(
 		AdminServiceAdjustOrganizationCreditProcedure,
 		svc.AdjustOrganizationCredit,
@@ -503,6 +534,8 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 			adminServiceSetDefaultEnvironmentQuotaHandler.ServeHTTP(w, r)
 		case AdminServiceSetOrganizationRateCardProcedure:
 			adminServiceSetOrganizationRateCardHandler.ServeHTTP(w, r)
+		case AdminServiceSetOrganizationDedicatedCpuProcedure:
+			adminServiceSetOrganizationDedicatedCpuHandler.ServeHTTP(w, r)
 		case AdminServiceAdjustOrganizationCreditProcedure:
 			adminServiceAdjustOrganizationCreditHandler.ServeHTTP(w, r)
 		default:
@@ -564,6 +597,10 @@ func (UnimplementedAdminServiceHandler) SetDefaultEnvironmentQuota(context.Conte
 
 func (UnimplementedAdminServiceHandler) SetOrganizationRateCard(context.Context, *connect.Request[v1.SetOrganizationRateCardRequest]) (*connect.Response[v1.SetOrganizationRateCardResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.SetOrganizationRateCard is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) SetOrganizationDedicatedCpu(context.Context, *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.SetOrganizationDedicatedCpu is not implemented"))
 }
 
 func (UnimplementedAdminServiceHandler) AdjustOrganizationCredit(context.Context, *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error) {

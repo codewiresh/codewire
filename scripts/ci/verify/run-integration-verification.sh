@@ -1012,6 +1012,12 @@ database_lane_orchestration_workspaces() {
       'api::admin::credit_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "admin organization dedicated CPU matrix" admin-organization-dedicated-cpu \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::admin::dedicated_cpu_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "workspace binding recorder matrix" workspace-binding-recorder \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

@@ -25,7 +25,8 @@ use codewire_admin_proto::codewire::admin::v1::{
     OrganizationEnvironmentUsage as ProtoOrganizationEnvironmentUsage,
     OrganizationMember as ProtoOrganizationMember,
     OrganizationSubscription as ProtoOrganizationSubscription, SetDefaultEnvironmentQuotaRequest,
-    SetDefaultEnvironmentQuotaResponse, SetOrganizationEnvironmentQuotaRequest,
+    SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest,
+    SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest,
     SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest,
     SetOrganizationRateCardResponse, StartupPhaseSummary,
 };
@@ -42,7 +43,8 @@ use crate::api::admin::{
 };
 
 /// Registers the nine AdminService reads, the three audited quota writes and
-/// the audited rate card and credit writes on their generated Connect routes.
+/// the audited rate card, dedicated CPU and credit writes on their generated
+/// Connect routes.
 pub fn router(state: ApiState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(AdminConnectService { state }))
 }
@@ -335,6 +337,31 @@ impl AdminService for AdminConnectService {
         })
     }
 
+    async fn set_organization_dedicated_cpu(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetOrganizationDedicatedCpuRequest>,
+    ) -> ServiceResult<SetOrganizationDedicatedCpuResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let organization_id = required_organization_id(request.organization_id)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let previous = admin::set_organization_dedicated_cpu_core(
+            &self.state.pool,
+            &actor.user_id,
+            organization_id,
+            request.dedicated_cpu,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(SetOrganizationDedicatedCpuResponse {
+            organization_id: organization_id.to_owned(),
+            dedicated_cpu: request.dedicated_cpu,
+            previous_dedicated_cpu: previous,
+            ..Default::default()
+        })
+    }
+
     async fn adjust_organization_credit(
         &self,
         ctx: RequestContext,
@@ -414,6 +441,7 @@ fn proto_organization(value: AdminOrg) -> AppResult<ProtoOrganization> {
         created_at: Some(proto_timestamp(&value.created_at)?).into(),
         billing_plan: value.billing_plan,
         billing_status: value.billing_status,
+        dedicated_cpu: value.dedicated_cpu,
         ..Default::default()
     })
 }
@@ -446,6 +474,7 @@ fn proto_organization_overview(
             created_at: value.created_at.map(proto_naive_timestamp).into(),
             billing_plan: value.billing.billing_plan.clone(),
             billing_status: value.billing.billing_status.clone(),
+            dedicated_cpu: value.dedicated_cpu,
             ..Default::default()
         })
         .into(),

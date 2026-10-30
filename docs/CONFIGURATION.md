@@ -147,6 +147,8 @@ A workspace's CPU request can be lower than its vCPUs, so more sandboxes fit on 
 
 The setting applies to sandboxes created after it changes, and a change rotates the warm pools like a release. An existing sandbox keeps the ratio it runs at, through a stop, a start or a resize, until it is replaced. Confidential environments are always 1:1.
 
+A global administrator can give an organization dedicated CPU (`SetOrganizationDedicatedCpu`): its new sandboxes are 1:1 whatever this setting says. While the deployment shares, they start cold, because the warm pools share.
+
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
 | `CODEWIRE_SANDBOX_CPU_SHARING_RATIO` | No | How many vCPUs share one reserved CPU: a whole number from 1 to 8. A workspace requests its vCPUs divided by this, rounded up. Unset, empty or `1` means off, one reserved CPU per vCPU. Any other form stops orchestration at startup. | `2` |

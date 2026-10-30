@@ -1,7 +1,8 @@
 //! Routing a create to a shared warm pool (Program #2238 C3).
 //!
 //! A create claims from a pool only when every condition holds: the standard
-//! tier, exactly the canonical workspace image, a binding listener, an
+//! tier, exactly the canonical workspace image, no dedicated CPU the pools do
+//! not give (#3635), a binding listener, an
 //! exact configured shape with members, an own identity-free rendering equal
 //! to the pool's (design invariant 10, which covers CPU, memory, disk,
 //! storage class, runtime and images), a controller that shows C0's claim
@@ -24,7 +25,7 @@ use serde_json::Value;
 use super::{SandboxWorkerCfg, render_configured_warm_pool};
 use crate::sandbox::canonical_workspace_runtime_image;
 use crate::sandbox::client::SandboxClient;
-use crate::sandbox::template::{TemplateOpts, render_sandbox_template};
+use crate::sandbox::template::{CpuSharingRatio, TemplateOpts, render_sandbox_template};
 use crate::sandbox::warm_pool::{
     POOL_REVISION_ANNOTATION, WarmPoolObjects, WorkspaceShape, has_pool_labels,
     parse_warm_pool_shapes, pod_spec_pool_revision, pool_revision,
@@ -51,6 +52,8 @@ pub(crate) enum ColdReason {
     Tier,
     /// Not exactly the canonical workspace image.
     Image,
+    /// The organization has dedicated CPU and the pools share (#3635).
+    DedicatedCpu,
     /// No binding listener to render the workspace against.
     Identity,
     /// No configured shape with members equals this environment's shape.
@@ -78,6 +81,7 @@ impl ColdReason {
             Self::Unconfigured => "cold_unconfigured",
             Self::Tier => "cold_tier",
             Self::Image => "cold_image",
+            Self::DedicatedCpu => "cold_dedicated_cpu",
             Self::Identity => "cold_identity",
             Self::Shape => "cold_shape",
             Self::Rendering => "cold_rendering",
@@ -108,6 +112,9 @@ pub(crate) fn pool_candidate(
     }
     if image_ref.trim() != canonical_workspace_runtime_image() {
         return Err(ColdReason::Image);
+    }
+    if env.dedicated_cpu && cfg.cpu_sharing_ratio != CpuSharingRatio::NONE {
+        return Err(ColdReason::DedicatedCpu);
     }
     if opts.workspace_binding_url.trim().is_empty() {
         return Err(ColdReason::Identity);

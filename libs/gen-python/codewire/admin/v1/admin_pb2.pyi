@@ -30,20 +30,22 @@ class GetStatsResponse(_message.Message):
     def __init__(self, total_environments: _Optional[int] = ..., active_environments: _Optional[int] = ..., monthly_cpu_hours: _Optional[float] = ..., monthly_memory_gb_hours: _Optional[float] = ..., monthly_cost_cents: _Optional[int] = ...) -> None: ...
 
 class Organization(_message.Message):
-    __slots__ = ("id", "name", "slug", "created_at", "billing_plan", "billing_status")
+    __slots__ = ("id", "name", "slug", "created_at", "billing_plan", "billing_status", "dedicated_cpu")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     SLUG_FIELD_NUMBER: _ClassVar[int]
     CREATED_AT_FIELD_NUMBER: _ClassVar[int]
     BILLING_PLAN_FIELD_NUMBER: _ClassVar[int]
     BILLING_STATUS_FIELD_NUMBER: _ClassVar[int]
+    DEDICATED_CPU_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
     slug: str
     created_at: _timestamp_pb2.Timestamp
     billing_plan: str
     billing_status: str
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., slug: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., billing_plan: _Optional[str] = ..., billing_status: _Optional[str] = ...) -> None: ...
+    dedicated_cpu: bool
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., slug: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., billing_plan: _Optional[str] = ..., billing_status: _Optional[str] = ..., dedicated_cpu: _Optional[bool] = ...) -> None: ...
 
 class ListOrganizationsRequest(_message.Message):
     __slots__ = ()
@@ -410,6 +412,24 @@ class SetOrganizationRateCardResponse(_message.Message):
     rate_card: str
     previous_rate_card: str
     def __init__(self, organization_id: _Optional[str] = ..., rate_card: _Optional[str] = ..., previous_rate_card: _Optional[str] = ...) -> None: ...
+
+class SetOrganizationDedicatedCpuRequest(_message.Message):
+    __slots__ = ("organization_id", "dedicated_cpu")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    DEDICATED_CPU_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    dedicated_cpu: bool
+    def __init__(self, organization_id: _Optional[str] = ..., dedicated_cpu: _Optional[bool] = ...) -> None: ...
+
+class SetOrganizationDedicatedCpuResponse(_message.Message):
+    __slots__ = ("organization_id", "dedicated_cpu", "previous_dedicated_cpu")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    DEDICATED_CPU_FIELD_NUMBER: _ClassVar[int]
+    PREVIOUS_DEDICATED_CPU_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    dedicated_cpu: bool
+    previous_dedicated_cpu: bool
+    def __init__(self, organization_id: _Optional[str] = ..., dedicated_cpu: _Optional[bool] = ..., previous_dedicated_cpu: _Optional[bool] = ...) -> None: ...
 
 class AdjustOrganizationCreditRequest(_message.Message):
     __slots__ = ("organization_id", "amount_nano_eur", "reason", "idempotency_key")

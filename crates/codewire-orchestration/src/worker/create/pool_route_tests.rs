@@ -46,6 +46,7 @@ fn environment(cpu: i32, memory: i32, disk: i32) -> EnvironmentRow {
         state: "creating".into(),
         desired_state: "started".into(),
         isolation_tier: "standard".into(),
+        dedicated_cpu: false,
         external_cleanup_completed_at: None,
         cpu_millicores: cpu,
         memory_mb: memory,
@@ -199,6 +200,56 @@ fn live(objects: &WarmPoolObjects) -> (DynamicObject, DynamicObject) {
         serde_json::from_value(pool).unwrap(),
         serde_json::from_value(template).unwrap(),
     )
+}
+
+/// #3635: while the deployment shares, a dedicated organization renders 1:1 and
+/// goes cold under its own label. With sharing off, its rendering equals the
+/// pool's, so it claims from the pool like any other.
+#[test]
+fn a_dedicated_organization_goes_cold_only_while_the_pools_share() {
+    let shared = SandboxWorkerCfg {
+        cpu_sharing_ratio: CpuSharingRatio::parse(Some("2")).unwrap(),
+        ..dev_cfg(SHAPES)
+    };
+    let sharing = environment(1000, 4096, 10);
+    let dedicated = EnvironmentRow {
+        dedicated_cpu: true,
+        ..environment(1000, 4096, 10)
+    };
+    assert!(candidate(&shared, &sharing).is_ok());
+    assert_eq!(
+        candidate(&shared, &dedicated).unwrap_err(),
+        ColdReason::DedicatedCpu
+    );
+    assert_eq!(ColdReason::DedicatedCpu.as_str(), "cold_dedicated_cpu");
+
+    let off = dev_cfg(SHAPES);
+    assert!(candidate(&off, &dedicated).is_ok());
+
+    let workspace_cpu = |opts: &TemplateOpts| {
+        let rendered = render_sandbox_template(NAMESPACE, opts);
+        let containers = rendered["spec"]["podTemplate"]["spec"]["containers"].clone();
+        let workspace = containers
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|container| container["name"] == "workspace")
+            .unwrap()
+            .clone();
+        (
+            workspace["resources"]["requests"]["cpu"].clone(),
+            workspace["resources"]["limits"]["cpu"].clone(),
+        )
+    };
+    let image = canonical_workspace_runtime_image();
+    assert_eq!(
+        workspace_cpu(&opts(&shared, &dedicated, image)),
+        (json!("1000m"), json!("1000m"))
+    );
+    assert_eq!(
+        workspace_cpu(&opts(&shared, &sharing, image)),
+        (json!("500m"), json!("1000m"))
+    );
 }
 
 #[test]

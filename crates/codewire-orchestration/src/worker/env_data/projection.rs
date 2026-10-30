@@ -28,6 +28,7 @@ pub(super) const ENVIRONMENT_QUERY: &str = r#"
            e.external_cleanup_completed_at,
            e.cpu_millicores, e.memory_mb, e.disk_gb, e.isolation_tier, e.ttl_seconds,
            e.project_spec, e.created_by, e.environment_operation_generation,
+           (SELECT o.dedicated_cpu FROM organizations AS o WHERE o.id = e.org_id) AS dedicated_cpu,
            b.profile_id, b.profile_revision,
            r.profile_id IS NOT NULL AS profile_revision_exists,
            ARRAY(

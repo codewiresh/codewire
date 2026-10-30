@@ -94,6 +94,13 @@ service AdminService {
   rpc SetOrganizationRateCard(SetOrganizationRateCardRequest)
       returns (SetOrganizationRateCardResponse);
 
+  // SetOrganizationDedicatedCpu sets whether one organization's new sandboxes
+  // reserve a CPU per vCPU instead of sharing, and writes an audit entry. A
+  // sandbox it already runs keeps its reservation until it is replaced. Setting
+  // the value it already has changes nothing.
+  rpc SetOrganizationDedicatedCpu(SetOrganizationDedicatedCpuRequest)
+      returns (SetOrganizationDedicatedCpuResponse);
+
   // AdjustOrganizationCredit adds or removes compute credit with a reason,
   // as a ledger entry naming the administrator, and writes an audit entry.
   // A repeated idempotency key for the organization changes nothing.
@@ -119,6 +126,8 @@ message Organization {
   // organizations.billing_plan and billing_status, "none" when unset.
   string billing_plan = 5;
   string billing_status = 6;
+  // New sandboxes reserve a CPU per vCPU instead of sharing.
+  bool dedicated_cpu = 7;
 }
 
 message ListOrganizationsRequest {}
@@ -372,6 +381,17 @@ message SetOrganizationRateCardResponse {
   string organization_id = 1;
   string rate_card = 2;
   string previous_rate_card = 3;
+}
+
+message SetOrganizationDedicatedCpuRequest {
+  string organization_id = 1;
+  bool dedicated_cpu = 2;
+}
+
+message SetOrganizationDedicatedCpuResponse {
+  string organization_id = 1;
+  bool dedicated_cpu = 2;
+  bool previous_dedicated_cpu = 3;
 }
 
 message AdjustOrganizationCreditRequest {

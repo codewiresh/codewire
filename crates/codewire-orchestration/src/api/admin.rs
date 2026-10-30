@@ -27,6 +27,8 @@ pub mod credit;
 #[cfg(test)]
 mod credit_database_tests;
 #[cfg(test)]
+mod dedicated_cpu_database_tests;
+#[cfg(test)]
 mod quota_database_tests;
 #[cfg(test)]
 mod startup_database_tests;
@@ -120,12 +122,13 @@ pub struct AdminOrg {
     pub created_at: String,
     pub billing_plan: String,
     pub billing_status: String,
+    pub dedicated_cpu: bool,
 }
 
 /// Shared global organization query used by AdminService.
 pub(crate) async fn list_admin_organizations_core(state: &ApiState) -> AppResult<Vec<AdminOrg>> {
     let rows = sqlx::query(
-        r#"SELECT id, name, slug, created_at, billing_plan, billing_status
+        r#"SELECT id, name, slug, created_at, billing_plan, billing_status, dedicated_cpu
            FROM organizations
            ORDER BY name ASC"#,
     )
@@ -146,6 +149,7 @@ pub(crate) async fn list_admin_organizations_core(state: &ApiState) -> AppResult
             created_at: format_time(created_at),
             billing_plan: r.try_get("billing_plan").map_err(AppError::from)?,
             billing_status: r.try_get("billing_status").map_err(AppError::from)?,
+            dedicated_cpu: r.try_get("dedicated_cpu").map_err(AppError::from)?,
         });
     }
 
@@ -810,6 +814,59 @@ async fn audit_quota_change(
     Ok(())
 }
 
+/// Sets whether an organization's new sandboxes reserve a CPU per vCPU, and
+/// records a change in the audit log, in one transaction. Setting the value it
+/// already has changes nothing. Returns the previous value. A sandbox it already
+/// runs keeps its reservation until it is replaced (#3635).
+pub(crate) async fn set_organization_dedicated_cpu_core(
+    pool: &sqlx::PgPool,
+    actor_user_id: &str,
+    organization_id: &str,
+    dedicated_cpu: bool,
+) -> AppResult<bool> {
+    let failure = |action: &'static str| {
+        move |error| {
+            tracing::error!(error = %error, action, "admin: organization dedicated CPU");
+            AppError::InternalMsg("failed to update the organization's dedicated CPU".into())
+        }
+    };
+    let mut transaction = pool.begin().await.map_err(failure("start the update"))?;
+    let previous: Option<bool> =
+        sqlx::query_scalar("SELECT dedicated_cpu FROM organizations WHERE id = $1 FOR UPDATE")
+            .bind(organization_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(failure("read the organization"))?;
+    let previous = previous.ok_or_else(|| AppError::NotFound("organization not found".into()))?;
+    if previous == dedicated_cpu {
+        return Ok(previous);
+    }
+    sqlx::query("UPDATE organizations SET dedicated_cpu = $2, updated_at = NOW() WHERE id = $1")
+        .bind(organization_id)
+        .bind(dedicated_cpu)
+        .execute(&mut *transaction)
+        .await
+        .map_err(failure("update the organization"))?;
+    sqlx::query(
+        r#"INSERT INTO audit_logs (id, timestamp, action, user_id, metadata, severity)
+           VALUES (gen_random_uuid()::text, NOW(), 'admin.organization.dedicated_cpu_set', $1, $2, 'warn')"#,
+    )
+    .bind(actor_user_id)
+    .bind(serde_json::json!({
+        "organization_id": organization_id,
+        "previous": previous,
+        "dedicated_cpu": dedicated_cpu,
+    }))
+    .execute(&mut *transaction)
+    .await
+    .map_err(failure("record the audit entry"))?;
+    transaction
+        .commit()
+        .await
+        .map_err(failure("commit the update"))?;
+    Ok(previous)
+}
+
 /// Shared quota read used by AdminService.
 pub(crate) async fn get_organization_environment_quota_core(
     pool: &sqlx::PgPool,
@@ -1100,6 +1157,7 @@ pub struct AdminOrganizationOverview {
     pub name: String,
     pub slug: String,
     pub created_at: Option<chrono::NaiveDateTime>,
+    pub dedicated_cpu: bool,
     pub members: Vec<AdminOrganizationMember>,
     pub billing: AdminOrganizationBilling,
     /// The rate card, credit balance and newest ledger entries (#3381).
@@ -1123,17 +1181,27 @@ pub(crate) async fn get_organization_overview_core(
         String,
         String,
         bool,
+        bool,
     );
     let organization: Option<OrganizationRow> = sqlx::query_as(
-        r#"SELECT id, name, slug, created_at, billing_plan, billing_status, billing_exempt
+        r#"SELECT id, name, slug, created_at, billing_plan, billing_status, billing_exempt,
+                  dedicated_cpu
            FROM organizations WHERE id = $1"#,
     )
     .bind(organization_id)
     .fetch_optional(pool)
     .await
     .map_err(failure("read organization"))?;
-    let Some((id, name, slug, created_at, billing_plan, billing_status, billing_exempt)) =
-        organization
+    let Some((
+        id,
+        name,
+        slug,
+        created_at,
+        billing_plan,
+        billing_status,
+        billing_exempt,
+        dedicated_cpu,
+    )) = organization
     else {
         return Err(AppError::NotFound("organization not found".into()));
     };
@@ -1226,6 +1294,7 @@ pub(crate) async fn get_organization_overview_core(
         name,
         slug,
         created_at,
+        dedicated_cpu,
         members,
         billing: AdminOrganizationBilling {
             billing_plan,

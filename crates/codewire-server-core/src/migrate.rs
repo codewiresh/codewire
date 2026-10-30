@@ -50,6 +50,7 @@ mod tests {
     mod environment_mesh;
     mod environment_quota_defaults;
     mod organization_confidential_environments;
+    mod organization_dedicated_cpu;
     mod owner_sources;
     mod preview_browser;
     mod runtime_dispatch_scope;
@@ -66,9 +67,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced) and 0002 to 0007.
+    // (which equals the 41-migration history it replaced) and 0002 to 0008.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "3b0c1287d58abf3a509443690eea5f280b89e958a7b22d9e8d618dfdd42e2a43";
+        "7c94d76aaa7e5575645d0373d7626ac5327fce6a45103b5e3a6865489919468d";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -85,6 +86,9 @@ mod tests {
     const APPLIED_BILLING_RATE_CARDS_CHECKSUM: &str = "c8ff676f48fe8ce0b9b9a60070996cfeb9e43bdb065532fe54564bbb2b738a52629af8ab4602079737181ba7c0be9a49";
     // SHA-384 of 0007_account_deletion.sql (#3679).
     const APPLIED_ACCOUNT_DELETION_CHECKSUM: &str = "2b75e286fd87195ac1637b18f50b8d5dc602ee3eafcf09b7c2e4497cc3147ac5221ec9265aad6f46ced75501df0e0ce5";
+
+    // SHA-384 of 0008_organization_dedicated_cpu.sql (#3635).
+    const APPLIED_ORGANIZATION_DEDICATED_CPU_CHECKSUM: &str = "60d10bbbe5d559f31ee792693b94e71c78677cdcc4ef39768281655486ffedfcfad95a30145208e1f2c9ad6627263fe8";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1173,6 +1177,7 @@ mod tests {
             (5, APPLIED_ORGANIZATION_CONFIDENTIAL_CHECKSUM),
             (6, APPLIED_BILLING_RATE_CARDS_CHECKSUM),
             (7, APPLIED_ACCOUNT_DELETION_CHECKSUM),
+            (8, APPLIED_ORGANIZATION_DEDICATED_CPU_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1203,11 +1208,11 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 7
+                first.len() == 8
                     && first
                         .iter()
                         .map(|migration| migration.0)
-                        .eq([1, 2, 3, 4, 5, 6, 7])
+                        .eq([1, 2, 3, 4, 5, 6, 7, 8])
                     && first.iter().all(|migration| migration.2)
             );
             let fingerprint: String = sqlx::query_scalar(include_str!(

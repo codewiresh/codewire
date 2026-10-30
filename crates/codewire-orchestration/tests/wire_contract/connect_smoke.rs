@@ -216,6 +216,10 @@ async fn assert_auth_boundary(harness: &Harness) {
     // Nor may one switch a rate card or move credit (#3381).
     for (method, body) in [
         (
+            "SetOrganizationDedicatedCpu",
+            json!({"organizationId": PRIMARY_ORG, "dedicatedCpu": true}),
+        ),
+        (
             "SetOrganizationRateCard",
             json!({"organizationId": PRIMARY_ORG, "rateCard": "unlimited"}),
         ),

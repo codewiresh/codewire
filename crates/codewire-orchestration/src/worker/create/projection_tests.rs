@@ -16,6 +16,7 @@ fn environment() -> EnvironmentRow {
         memory_mb: 2048,
         disk_gb: 10,
         isolation_tier: "standard".into(),
+        dedicated_cpu: false,
         ttl_seconds: None,
         project_spec: ProjectSpec::default(),
         operation_generation: 7,
