@@ -56,12 +56,12 @@ mod tests {
     };
     use super::codewire::internal::v1::{
         BindWorkspaceResponse, COORDINATOR_SERVICE_SERVICE_NAME, CoordinateNode,
-        ENVIRONMENT_MESH_SERVICE_SERVICE_NAME, IssueMeshEnrollmentResponse,
+        ENVIRONMENT_MESH_SERVICE_SERVICE_NAME, GitIdentity, IssueMeshEnrollmentResponse,
         MESH_AUTHORIZATION_SERVICE_SERVICE_NAME, MESH_COORDINATOR_SERVICE_SERVICE_NAME,
         MeshAuthorizationContext, MeshAuthorizationCredentialKind, MeshAuthorizationPrincipalKind,
         MeshCoordinateHello, MeshCoordinateRole, MeshCoordinatorServiceCoordinateRequest,
         RedeemEnvironmentEnrollmentRequest, ResolveMeshAuthorizationResponse,
-        WORKSPACE_BINDING_SERVICE_SERVICE_NAME,
+        WORKSPACE_BINDING_SERVICE_SERVICE_NAME, WorkspaceDefaults,
     };
     use super::codewire::v1::{
         AcceptInvitationRequest, ApiKey, ApplicationPort, CreateApiKeyResponse,
@@ -858,6 +858,33 @@ mod tests {
             assert!(!rendered.contains(MARKER), "secret leaked through Debug");
             assert!(rendered.contains("[REDACTED]"));
         }
+    }
+
+    #[test]
+    fn the_binding_defaults_never_print_through_debug() {
+        const KEY: &str = "do-not-print-this-key";
+        const VALUE: &str = "do-not-print-this-value";
+        const EMAIL: &str = "do-not-print-this-email";
+        const NAME: &str = "do-not-print-this-name";
+        let response = BindWorkspaceResponse {
+            defaults: WorkspaceDefaults {
+                environment: [(KEY.to_owned(), VALUE.to_owned())].into_iter().collect(),
+                git: GitIdentity {
+                    email: EMAIL.into(),
+                    name: NAME.into(),
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        };
+        let rendered = format!("{response:?}");
+        for marker in [KEY, VALUE, EMAIL, NAME] {
+            assert!(!rendered.contains(marker), "{marker} leaked through Debug");
+        }
+        assert!(rendered.contains("[REDACTED]"));
     }
 
     #[test]

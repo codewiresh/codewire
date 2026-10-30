@@ -73,6 +73,27 @@ message BindWorkspaceResponse {
   // The environment's declared working directory, or empty. Sessions launched
   // without a working directory start here when it exists.
   string working_directory = 8;
+  // The environment's saved project defaults and its creator's Git author,
+  // which the daemon writes on every bind (#3684). Absent from a server that
+  // doesn't send them; setup then writes them as before.
+  WorkspaceDefaults defaults = 9;
+}
+
+// WorkspaceDefaults is the configuration the bound daemon writes into the
+// workspace before it serves: the single source of truth for both, so a
+// workspace edit to either does not survive the next bind.
+message WorkspaceDefaults {
+  // The project's declared environment defaults, written to
+  // `~/.codewire/environment.json`. Not the environment projection.
+  map<string, string> environment = 1 [debug_redact = true];
+  // The creator's Git author for `git config --global`, or absent when it
+  // could not be resolved.
+  GitIdentity git = 2;
+}
+
+message GitIdentity {
+  string email = 1 [debug_redact = true];
+  string name = 2 [debug_redact = true];
 }
 
 // WorkspaceAccess is everything the bound daemon needs to serve its

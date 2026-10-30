@@ -14,10 +14,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::http::HeaderMap;
 use codewire_proto::codewire::internal::v1::{
     AllocatePeerRelayRequest, AllocatePeerRelayResponse, BindWorkspaceRequest,
-    BindWorkspaceResponse, IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse,
+    BindWorkspaceResponse, GitIdentity, IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse,
     MeshAttachmentReport as ProtoMeshAttachmentReport, RecordHostKeyRequest, RecordHostKeyResponse,
     RefreshAccessRequest, RefreshAccessResponse, ReportMeshAttachmentRequest,
-    ReportMeshAttachmentResponse, WorkspaceAccess, WorkspaceBindingService,
+    ReportMeshAttachmentResponse, WorkspaceAccess, WorkspaceBindingService, WorkspaceDefaults,
     WorkspaceMeshAttachment,
 };
 use codewire_server_core::bounded_http1::PeerAddr;
@@ -39,7 +39,7 @@ use super::authorize::{self, SandboxOwner, canonical_uid};
 use super::limits::{PodSlot, RequestLimits};
 use super::metrics;
 use super::store::{
-    BindingNotifications, BindingStore, HostKeyRecord, LiveBinding, MeshAttachment,
+    BindDefaults, BindingNotifications, BindingStore, HostKeyRecord, LiveBinding, MeshAttachment,
     MeshAttachmentReport, MeshIssueOutcome,
 };
 use super::{BINDING_REQUERY_INTERVAL, MAX_BIND_WAIT};
@@ -685,8 +685,25 @@ fn respond(
         managed_credential_clients: binding.managed_credential_clients,
         access: Some(access).into(),
         working_directory: binding.working_directory,
+        defaults: binding.defaults.map(workspace_defaults).into(),
         ..Default::default()
     })
+}
+
+/// The bind response's form of the saved project defaults and Git author.
+fn workspace_defaults(defaults: BindDefaults) -> WorkspaceDefaults {
+    WorkspaceDefaults {
+        environment: defaults.environment.into_iter().collect(),
+        git: defaults
+            .git
+            .map(|(email, name)| GitIdentity {
+                email,
+                name,
+                ..Default::default()
+            })
+            .into(),
+        ..Default::default()
+    }
 }
 
 /// The stored form of a daemon's report; `None` for an unknown value.

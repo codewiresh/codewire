@@ -29,8 +29,8 @@ use super::access::{
 use super::limits::RequestLimits;
 use super::service::{BindError, WorkspaceBindingState};
 use super::store::{
-    BindingNotifications, BindingStore, BindingStoreUnavailable, HostKeyRecord, LiveBinding,
-    MeshAttachment, MeshAttachmentReport, MeshIssueOutcome,
+    BindDefaults, BindingNotifications, BindingStore, BindingStoreUnavailable, HostKeyRecord,
+    LiveBinding, MeshAttachment, MeshAttachmentReport, MeshIssueOutcome,
 };
 use super::{app, workspace_binding_router};
 use crate::runtime_transport::{PeerRelayTransport, RuntimeTransportZone, TRANSPORT_ZONE_LABEL};
@@ -247,6 +247,7 @@ fn binding(scope: WorkspaceCredentialScope) -> LiveBinding {
         credential_scope: scope,
         environment_generation: ENVIRONMENT_GENERATION,
         working_directory: "/workspace/app".into(),
+        defaults: None,
     }
 }
 
@@ -692,6 +693,34 @@ async fn a_bound_pod_gets_its_binding_and_a_pod_scoped_credential() {
     assert_eq!(fixture.reviews(), 1);
     // The lookup, then the re-check after the live re-reads.
     assert_eq!(fixture.store.queries(), 2);
+}
+
+#[tokio::test]
+async fn a_bound_pod_gets_its_saved_project_defaults_and_git_author() {
+    let mut live = binding(WorkspaceCredentialScope::Pod);
+    live.defaults = Some(BindDefaults {
+        environment: [("REGION".to_owned(), "synthetic-region".to_owned())]
+            .into_iter()
+            .collect(),
+        git: Some(("dev@example.test".into(), "Synthetic Dev".into())),
+    });
+    let with_defaults = fixture(
+        FakeCluster::valid(),
+        FakeStore::returning(vec![Ok(Some(live))]),
+    );
+    let response = with_defaults.bind(20).await.unwrap();
+    let defaults = response.defaults.as_option().expect("defaults");
+    assert_eq!(defaults.environment["REGION"], "synthetic-region");
+    let git = defaults.git.as_option().expect("a Git author");
+    assert_eq!(git.email, "dev@example.test");
+    assert_eq!(git.name, "Synthetic Dev");
+    // Unreadable defaults send nothing, and setup writes them as before.
+    let without = fixture(
+        FakeCluster::valid(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    let response = without.bind(20).await.unwrap();
+    assert!(response.defaults.as_option().is_none());
 }
 
 #[tokio::test]

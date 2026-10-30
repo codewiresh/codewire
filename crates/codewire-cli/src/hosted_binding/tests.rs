@@ -7,9 +7,9 @@ use axum::Router;
 use codewire_daemon::HostedDaemonMode;
 use codewire_daemon::config::{WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV};
 use codewire_proto::codewire::internal::v1::{
-    IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse, RecordHostKeyResponse,
+    GitIdentity, IssueMeshEnrollmentRequest, IssueMeshEnrollmentResponse, RecordHostKeyResponse,
     RefreshAccessResponse, ReportMeshAttachmentRequest, ReportMeshAttachmentResponse,
-    WorkspaceBindingService,
+    WorkspaceBindingService, WorkspaceDefaults,
 };
 use codewire_tls::test_support::SyntheticPki;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
@@ -25,6 +25,10 @@ const ENVIRONMENT: &str = "550e8400-e29b-41d4-a716-446655440000";
 const SYNTHETIC_CREDENTIAL: &str = "synthetic-workspace-daemon-credential";
 const SYNTHETIC_PROJECTED_TOKEN: &str = "synthetic.projected.workspace-binding";
 const SYNTHETIC_PEER_TOKEN: &str = "synthetic.peer.token";
+const SYNTHETIC_DEFAULT_KEY: &str = "SYNTHETIC_DEFAULT_KEY";
+const SYNTHETIC_DEFAULT_VALUE: &str = "synthetic-default-value";
+const SYNTHETIC_GIT_EMAIL: &str = "synthetic-git@example.test";
+const SYNTHETIC_GIT_NAME: &str = "Synthetic Git Name";
 const HOST_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
 const OTHER_HOST_KEY: &str =
@@ -56,6 +60,9 @@ enum Answer {
     BoundWithAccess(i64),
     /// Bound, with an already-expired access grant.
     BoundWithExpiredAccess,
+    /// Bound, with the saved project defaults and a Git author.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    BoundWithDefaults,
     /// A response no daemon accepts: no environment, no credential.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Malformed,
@@ -122,6 +129,32 @@ impl WorkspaceBindingService for ScriptedService {
                     ..synthetic_access(4)
                 }),
             ),
+            Answer::BoundWithDefaults => {
+                return connectrpc::Response::ok(BindWorkspaceResponse {
+                    environment_id: ENVIRONMENT.into(),
+                    pod_uid: POD.into(),
+                    operation_generation: 4,
+                    daemon_credential: SYNTHETIC_CREDENTIAL.into(),
+                    managed_credential_clients: "v1:none".into(),
+                    defaults: WorkspaceDefaults {
+                        environment: [(
+                            SYNTHETIC_DEFAULT_KEY.into(),
+                            SYNTHETIC_DEFAULT_VALUE.into(),
+                        )]
+                        .into_iter()
+                        .collect(),
+                        git: GitIdentity {
+                            email: SYNTHETIC_GIT_EMAIL.into(),
+                            name: SYNTHETIC_GIT_NAME.into(),
+                            ..Default::default()
+                        }
+                        .into(),
+                        ..Default::default()
+                    }
+                    .into(),
+                    ..Default::default()
+                });
+            }
             Answer::Malformed => {
                 return connectrpc::Response::ok(BindWorkspaceResponse {
                     environment_id: "not-an-environment".into(),
@@ -366,6 +399,38 @@ async fn an_accepted_binding_carries_the_credential_and_requested_wait() {
     );
     // The tenant-reachable listener accepts HTTP/1.1 only.
     assert_eq!(recorded.versions, [http::Version::HTTP_11]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_bound_workspace_carries_its_defaults_and_prints_none_of_them() {
+    let fixture = fixture(vec![Answer::BoundWithDefaults]).await;
+    let bound = fixture.client.attempt(&fixture.config).await.unwrap();
+    let rendered = format!("{bound:?}");
+    for marker in [
+        SYNTHETIC_DEFAULT_KEY,
+        SYNTHETIC_DEFAULT_VALUE,
+        SYNTHETIC_GIT_EMAIL,
+        SYNTHETIC_GIT_NAME,
+    ] {
+        assert!(!rendered.contains(marker), "{marker} leaked through Debug");
+    }
+    let defaults = bound.defaults.expect("defaults");
+    assert_eq!(
+        defaults.environment[SYNTHETIC_DEFAULT_KEY],
+        SYNTHETIC_DEFAULT_VALUE
+    );
+    let git = defaults.git.expect("a Git author");
+    assert_eq!(git.email, SYNTHETIC_GIT_EMAIL);
+    assert_eq!(git.name, SYNTHETIC_GIT_NAME);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_binding_without_defaults_leaves_them_to_setup() {
+    let fixture = fixture(vec![Answer::Bound]).await;
+    let bound = fixture.client.attempt(&fixture.config).await.unwrap();
+    assert!(bound.defaults.is_none());
 }
 
 #[tokio::test]

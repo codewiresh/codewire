@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n,codewire/internal/v1/workspace_binding.proto\x12\x14\x63odewire.internal.v1\"9\n\x14\x42indWorkspaceRequest\x12!\n\x0cwait_seconds\x18\x01 \x01(\rR\x0bwaitSeconds\"\xa6\x03\n\x15\x42indWorkspaceResponse\x12%\n\x0e\x65nvironment_id\x18\x01 \x01(\tR\renvironmentId\x12\x17\n\x07pod_uid\x18\x02 \x01(\tR\x06podUid\x12\x31\n\x14operation_generation\x18\x03 \x01(\x03R\x13operationGeneration\x12\x30\n\x11\x64\x61\x65mon_credential\x18\x04 \x01(\tB\x03\x80\x01\x01R\x10\x64\x61\x65monCredential\x12>\n\x1bprojection_selection_sha256\x18\x05 \x01(\tR\x19projectionSelectionSha256\x12<\n\x1amanaged_credential_clients\x18\x06 \x01(\tR\x18managedCredentialClients\x12=\n\x06\x61\x63\x63\x65ss\x18\x07 \x01(\x0b\x32%.codewire.internal.v1.WorkspaceAccessR\x06\x61\x63\x63\x65ss\x12+\n\x11working_directory\x18\x08 \x01(\tR\x10workingDirectory\"\x88\x03\n\x0fWorkspaceAccess\x12\"\n\npeer_token\x18\x01 \x01(\tB\x03\x80\x01\x01R\tpeerToken\x12\x31\n\x15peer_token_expires_at\x18\x02 \x01(\x03R\x12peerTokenExpiresAt\x12\x31\n\x14operation_generation\x18\x03 \x01(\x03R\x13operationGeneration\x12\'\n\x0f\x63oordinator_url\x18\x04 \x01(\tR\x0e\x63oordinatorUrl\x12\x30\n\x14\x64irect_udp_endpoints\x18\x05 \x03(\tR\x12\x64irectUdpEndpoints\x12\x30\n\x14peer_relay_endpoints\x18\x06 \x03(\tR\x12peerRelayEndpoints\x12\x1b\n\tapp_ports\x18\x07 \x03(\x05R\x08\x61ppPorts\x12\x41\n\x04mesh\x18\x08 \x01(\x0b\x32-.codewire.internal.v1.WorkspaceMeshAttachmentR\x04mesh\"\x87\x01\n\x17WorkspaceMeshAttachment\x12\x19\n\x08mesh_url\x18\x01 \x01(\tR\x07meshUrl\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x03 \x01(\tR\tnetworkId\x12\x1b\n\tnode_name\x18\x04 \x01(\tR\x08nodeName\"\x16\n\x14RefreshAccessRequest\"V\n\x15RefreshAccessResponse\x12=\n\x06\x61\x63\x63\x65ss\x18\x01 \x01(\x0b\x32%.codewire.internal.v1.WorkspaceAccessR\x06\x61\x63\x63\x65ss\"D\n\x14RecordHostKeyRequest\x12,\n\x12public_key_openssh\x18\x01 \x01(\tR\x10publicKeyOpenssh\"\x17\n\x15RecordHostKeyResponse\"d\n\x18\x41llocatePeerRelayRequest\x12\x1d\n\ndisco_keys\x18\x01 \x03(\tR\tdiscoKeys\x12)\n\x10relay_generation\x18\x02 \x01(\rR\x0frelayGeneration\"\xc2\x02\n\x19\x41llocatePeerRelayResponse\x12)\n\x10relay_generation\x18\x01 \x01(\rR\x0frelayGeneration\x12(\n\x10server_disco_key\x18\x02 \x01(\tR\x0eserverDiscoKey\x12\x1d\n\ndisco_keys\x18\x03 \x03(\tR\tdiscoKeys\x12\x1d\n\nlamport_id\x18\x04 \x01(\x04R\tlamportId\x12\x10\n\x03vni\x18\x05 \x01(\rR\x03vni\x12(\n\x10\x62ind_lifetime_ns\x18\x06 \x01(\x04R\x0e\x62indLifetimeNs\x12\x37\n\x18steady_state_lifetime_ns\x18\x07 \x01(\x04R\x15steadyStateLifetimeNs\x12\x1d\n\naddr_ports\x18\x08 \x03(\tR\taddrPorts\"\x1c\n\x1aIssueMeshEnrollmentRequest\"\xb9\x01\n\x1bIssueMeshEnrollmentResponse\x12,\n\x0f\x65nrollment_code\x18\x01 \x01(\tB\x03\x80\x01\x01R\x0e\x65nrollmentCode\x12\x1d\n\nexpires_at\x18\x02 \x01(\x03R\texpiresAt\x12M\n\nattachment\x18\x03 \x01(\x0b\x32-.codewire.internal.v1.WorkspaceMeshAttachmentR\nattachment\"a\n\x1bReportMeshAttachmentRequest\x12\x42\n\x06report\x18\x01 \x01(\x0e\x32*.codewire.internal.v1.MeshAttachmentReportR\x06report\"\x1e\n\x1cReportMeshAttachmentResponse*\xdb\x02\n\x14MeshAttachmentReport\x12&\n\"MESH_ATTACHMENT_REPORT_UNSPECIFIED\x10\x00\x12#\n\x1fMESH_ATTACHMENT_REPORT_ATTACHED\x10\x01\x12+\n\'MESH_ATTACHMENT_REPORT_MESH_UNREACHABLE\x10\x02\x12,\n(MESH_ATTACHMENT_REPORT_NETWORK_NOT_FOUND\x10\x03\x12\'\n#MESH_ATTACHMENT_REPORT_NOT_A_MEMBER\x10\x04\x12*\n&MESH_ATTACHMENT_REPORT_NODE_NAME_TAKEN\x10\x05\x12\"\n\x1eMESH_ATTACHMENT_REPORT_REVOKED\x10\x06\x12\"\n\x1eMESH_ATTACHMENT_REPORT_REFUSED\x10\x07\x32\xdd\x05\n\x17WorkspaceBindingService\x12m\n\rBindWorkspace\x12*.codewire.internal.v1.BindWorkspaceRequest\x1a+.codewire.internal.v1.BindWorkspaceResponse\"\x03\x90\x02\x02\x12m\n\rRefreshAccess\x12*.codewire.internal.v1.RefreshAccessRequest\x1a+.codewire.internal.v1.RefreshAccessResponse\"\x03\x90\x02\x01\x12m\n\rRecordHostKey\x12*.codewire.internal.v1.RecordHostKeyRequest\x1a+.codewire.internal.v1.RecordHostKeyResponse\"\x03\x90\x02\x02\x12t\n\x11\x41llocatePeerRelay\x12..codewire.internal.v1.AllocatePeerRelayRequest\x1a/.codewire.internal.v1.AllocatePeerRelayResponse\x12z\n\x13IssueMeshEnrollment\x12\x30.codewire.internal.v1.IssueMeshEnrollmentRequest\x1a\x31.codewire.internal.v1.IssueMeshEnrollmentResponse\x12\x82\x01\n\x14ReportMeshAttachment\x12\x31.codewire.internal.v1.ReportMeshAttachmentRequest\x1a\x32.codewire.internal.v1.ReportMeshAttachmentResponse\"\x03\x90\x02\x02\x42\xef\x01\n\x18\x63om.codewire.internal.v1B\x15WorkspaceBindingProtoP\x01ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\xa2\x02\x03\x43IX\xaa\x02\x14\x43odewire.Internal.V1\xca\x02\x14\x43odewire\\Internal\\V1\xe2\x02 Codewire\\Internal\\V1\\GPBMetadata\xea\x02\x16\x43odewire::Internal::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n,codewire/internal/v1/workspace_binding.proto\x12\x14\x63odewire.internal.v1\"9\n\x14\x42indWorkspaceRequest\x12!\n\x0cwait_seconds\x18\x01 \x01(\rR\x0bwaitSeconds\"\xeb\x03\n\x15\x42indWorkspaceResponse\x12%\n\x0e\x65nvironment_id\x18\x01 \x01(\tR\renvironmentId\x12\x17\n\x07pod_uid\x18\x02 \x01(\tR\x06podUid\x12\x31\n\x14operation_generation\x18\x03 \x01(\x03R\x13operationGeneration\x12\x30\n\x11\x64\x61\x65mon_credential\x18\x04 \x01(\tB\x03\x80\x01\x01R\x10\x64\x61\x65monCredential\x12>\n\x1bprojection_selection_sha256\x18\x05 \x01(\tR\x19projectionSelectionSha256\x12<\n\x1amanaged_credential_clients\x18\x06 \x01(\tR\x18managedCredentialClients\x12=\n\x06\x61\x63\x63\x65ss\x18\x07 \x01(\x0b\x32%.codewire.internal.v1.WorkspaceAccessR\x06\x61\x63\x63\x65ss\x12+\n\x11working_directory\x18\x08 \x01(\tR\x10workingDirectory\x12\x43\n\x08\x64\x65\x66\x61ults\x18\t \x01(\x0b\x32\'.codewire.internal.v1.WorkspaceDefaultsR\x08\x64\x65\x66\x61ults\"\xe9\x01\n\x11WorkspaceDefaults\x12_\n\x0b\x65nvironment\x18\x01 \x03(\x0b\x32\x38.codewire.internal.v1.WorkspaceDefaults.EnvironmentEntryB\x03\x80\x01\x01R\x0b\x65nvironment\x12\x33\n\x03git\x18\x02 \x01(\x0b\x32!.codewire.internal.v1.GitIdentityR\x03git\x1a>\n\x10\x45nvironmentEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\"A\n\x0bGitIdentity\x12\x19\n\x05\x65mail\x18\x01 \x01(\tB\x03\x80\x01\x01R\x05\x65mail\x12\x17\n\x04name\x18\x02 \x01(\tB\x03\x80\x01\x01R\x04name\"\x88\x03\n\x0fWorkspaceAccess\x12\"\n\npeer_token\x18\x01 \x01(\tB\x03\x80\x01\x01R\tpeerToken\x12\x31\n\x15peer_token_expires_at\x18\x02 \x01(\x03R\x12peerTokenExpiresAt\x12\x31\n\x14operation_generation\x18\x03 \x01(\x03R\x13operationGeneration\x12\'\n\x0f\x63oordinator_url\x18\x04 \x01(\tR\x0e\x63oordinatorUrl\x12\x30\n\x14\x64irect_udp_endpoints\x18\x05 \x03(\tR\x12\x64irectUdpEndpoints\x12\x30\n\x14peer_relay_endpoints\x18\x06 \x03(\tR\x12peerRelayEndpoints\x12\x1b\n\tapp_ports\x18\x07 \x03(\x05R\x08\x61ppPorts\x12\x41\n\x04mesh\x18\x08 \x01(\x0b\x32-.codewire.internal.v1.WorkspaceMeshAttachmentR\x04mesh\"\x87\x01\n\x17WorkspaceMeshAttachment\x12\x19\n\x08mesh_url\x18\x01 \x01(\tR\x07meshUrl\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x03 \x01(\tR\tnetworkId\x12\x1b\n\tnode_name\x18\x04 \x01(\tR\x08nodeName\"\x16\n\x14RefreshAccessRequest\"V\n\x15RefreshAccessResponse\x12=\n\x06\x61\x63\x63\x65ss\x18\x01 \x01(\x0b\x32%.codewire.internal.v1.WorkspaceAccessR\x06\x61\x63\x63\x65ss\"D\n\x14RecordHostKeyRequest\x12,\n\x12public_key_openssh\x18\x01 \x01(\tR\x10publicKeyOpenssh\"\x17\n\x15RecordHostKeyResponse\"d\n\x18\x41llocatePeerRelayRequest\x12\x1d\n\ndisco_keys\x18\x01 \x03(\tR\tdiscoKeys\x12)\n\x10relay_generation\x18\x02 \x01(\rR\x0frelayGeneration\"\xc2\x02\n\x19\x41llocatePeerRelayResponse\x12)\n\x10relay_generation\x18\x01 \x01(\rR\x0frelayGeneration\x12(\n\x10server_disco_key\x18\x02 \x01(\tR\x0eserverDiscoKey\x12\x1d\n\ndisco_keys\x18\x03 \x03(\tR\tdiscoKeys\x12\x1d\n\nlamport_id\x18\x04 \x01(\x04R\tlamportId\x12\x10\n\x03vni\x18\x05 \x01(\rR\x03vni\x12(\n\x10\x62ind_lifetime_ns\x18\x06 \x01(\x04R\x0e\x62indLifetimeNs\x12\x37\n\x18steady_state_lifetime_ns\x18\x07 \x01(\x04R\x15steadyStateLifetimeNs\x12\x1d\n\naddr_ports\x18\x08 \x03(\tR\taddrPorts\"\x1c\n\x1aIssueMeshEnrollmentRequest\"\xb9\x01\n\x1bIssueMeshEnrollmentResponse\x12,\n\x0f\x65nrollment_code\x18\x01 \x01(\tB\x03\x80\x01\x01R\x0e\x65nrollmentCode\x12\x1d\n\nexpires_at\x18\x02 \x01(\x03R\texpiresAt\x12M\n\nattachment\x18\x03 \x01(\x0b\x32-.codewire.internal.v1.WorkspaceMeshAttachmentR\nattachment\"a\n\x1bReportMeshAttachmentRequest\x12\x42\n\x06report\x18\x01 \x01(\x0e\x32*.codewire.internal.v1.MeshAttachmentReportR\x06report\"\x1e\n\x1cReportMeshAttachmentResponse*\xdb\x02\n\x14MeshAttachmentReport\x12&\n\"MESH_ATTACHMENT_REPORT_UNSPECIFIED\x10\x00\x12#\n\x1fMESH_ATTACHMENT_REPORT_ATTACHED\x10\x01\x12+\n\'MESH_ATTACHMENT_REPORT_MESH_UNREACHABLE\x10\x02\x12,\n(MESH_ATTACHMENT_REPORT_NETWORK_NOT_FOUND\x10\x03\x12\'\n#MESH_ATTACHMENT_REPORT_NOT_A_MEMBER\x10\x04\x12*\n&MESH_ATTACHMENT_REPORT_NODE_NAME_TAKEN\x10\x05\x12\"\n\x1eMESH_ATTACHMENT_REPORT_REVOKED\x10\x06\x12\"\n\x1eMESH_ATTACHMENT_REPORT_REFUSED\x10\x07\x32\xdd\x05\n\x17WorkspaceBindingService\x12m\n\rBindWorkspace\x12*.codewire.internal.v1.BindWorkspaceRequest\x1a+.codewire.internal.v1.BindWorkspaceResponse\"\x03\x90\x02\x02\x12m\n\rRefreshAccess\x12*.codewire.internal.v1.RefreshAccessRequest\x1a+.codewire.internal.v1.RefreshAccessResponse\"\x03\x90\x02\x01\x12m\n\rRecordHostKey\x12*.codewire.internal.v1.RecordHostKeyRequest\x1a+.codewire.internal.v1.RecordHostKeyResponse\"\x03\x90\x02\x02\x12t\n\x11\x41llocatePeerRelay\x12..codewire.internal.v1.AllocatePeerRelayRequest\x1a/.codewire.internal.v1.AllocatePeerRelayResponse\x12z\n\x13IssueMeshEnrollment\x12\x30.codewire.internal.v1.IssueMeshEnrollmentRequest\x1a\x31.codewire.internal.v1.IssueMeshEnrollmentResponse\x12\x82\x01\n\x14ReportMeshAttachment\x12\x31.codewire.internal.v1.ReportMeshAttachmentRequest\x1a\x32.codewire.internal.v1.ReportMeshAttachmentResponse\"\x03\x90\x02\x02\x42\xef\x01\n\x18\x63om.codewire.internal.v1B\x15WorkspaceBindingProtoP\x01ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\xa2\x02\x03\x43IX\xaa\x02\x14\x43odewire.Internal.V1\xca\x02\x14\x43odewire\\Internal\\V1\xe2\x02 Codewire\\Internal\\V1\\GPBMetadata\xea\x02\x16\x43odewire::Internal::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,6 +34,14 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'\n\030com.codewire.internal.v1B\025WorkspaceBindingProtoP\001ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\242\002\003CIX\252\002\024Codewire.Internal.V1\312\002\024Codewire\\Internal\\V1\342\002 Codewire\\Internal\\V1\\GPBMetadata\352\002\026Codewire::Internal::V1'
   _globals['_BINDWORKSPACERESPONSE'].fields_by_name['daemon_credential']._loaded_options = None
   _globals['_BINDWORKSPACERESPONSE'].fields_by_name['daemon_credential']._serialized_options = b'\200\001\001'
+  _globals['_WORKSPACEDEFAULTS_ENVIRONMENTENTRY']._loaded_options = None
+  _globals['_WORKSPACEDEFAULTS_ENVIRONMENTENTRY']._serialized_options = b'8\001'
+  _globals['_WORKSPACEDEFAULTS'].fields_by_name['environment']._loaded_options = None
+  _globals['_WORKSPACEDEFAULTS'].fields_by_name['environment']._serialized_options = b'\200\001\001'
+  _globals['_GITIDENTITY'].fields_by_name['email']._loaded_options = None
+  _globals['_GITIDENTITY'].fields_by_name['email']._serialized_options = b'\200\001\001'
+  _globals['_GITIDENTITY'].fields_by_name['name']._loaded_options = None
+  _globals['_GITIDENTITY'].fields_by_name['name']._serialized_options = b'\200\001\001'
   _globals['_WORKSPACEACCESS'].fields_by_name['peer_token']._loaded_options = None
   _globals['_WORKSPACEACCESS'].fields_by_name['peer_token']._serialized_options = b'\200\001\001'
   _globals['_ISSUEMESHENROLLMENTRESPONSE'].fields_by_name['enrollment_code']._loaded_options = None
@@ -46,36 +54,42 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_WORKSPACEBINDINGSERVICE'].methods_by_name['RecordHostKey']._serialized_options = b'\220\002\002'
   _globals['_WORKSPACEBINDINGSERVICE'].methods_by_name['ReportMeshAttachment']._loaded_options = None
   _globals['_WORKSPACEBINDINGSERVICE'].methods_by_name['ReportMeshAttachment']._serialized_options = b'\220\002\002'
-  _globals['_MESHATTACHMENTREPORT']._serialized_start=2071
-  _globals['_MESHATTACHMENTREPORT']._serialized_end=2418
+  _globals['_MESHATTACHMENTREPORT']._serialized_start=2443
+  _globals['_MESHATTACHMENTREPORT']._serialized_end=2790
   _globals['_BINDWORKSPACEREQUEST']._serialized_start=70
   _globals['_BINDWORKSPACEREQUEST']._serialized_end=127
   _globals['_BINDWORKSPACERESPONSE']._serialized_start=130
-  _globals['_BINDWORKSPACERESPONSE']._serialized_end=552
-  _globals['_WORKSPACEACCESS']._serialized_start=555
-  _globals['_WORKSPACEACCESS']._serialized_end=947
-  _globals['_WORKSPACEMESHATTACHMENT']._serialized_start=950
-  _globals['_WORKSPACEMESHATTACHMENT']._serialized_end=1085
-  _globals['_REFRESHACCESSREQUEST']._serialized_start=1087
-  _globals['_REFRESHACCESSREQUEST']._serialized_end=1109
-  _globals['_REFRESHACCESSRESPONSE']._serialized_start=1111
-  _globals['_REFRESHACCESSRESPONSE']._serialized_end=1197
-  _globals['_RECORDHOSTKEYREQUEST']._serialized_start=1199
-  _globals['_RECORDHOSTKEYREQUEST']._serialized_end=1267
-  _globals['_RECORDHOSTKEYRESPONSE']._serialized_start=1269
-  _globals['_RECORDHOSTKEYRESPONSE']._serialized_end=1292
-  _globals['_ALLOCATEPEERRELAYREQUEST']._serialized_start=1294
-  _globals['_ALLOCATEPEERRELAYREQUEST']._serialized_end=1394
-  _globals['_ALLOCATEPEERRELAYRESPONSE']._serialized_start=1397
-  _globals['_ALLOCATEPEERRELAYRESPONSE']._serialized_end=1719
-  _globals['_ISSUEMESHENROLLMENTREQUEST']._serialized_start=1721
-  _globals['_ISSUEMESHENROLLMENTREQUEST']._serialized_end=1749
-  _globals['_ISSUEMESHENROLLMENTRESPONSE']._serialized_start=1752
-  _globals['_ISSUEMESHENROLLMENTRESPONSE']._serialized_end=1937
-  _globals['_REPORTMESHATTACHMENTREQUEST']._serialized_start=1939
-  _globals['_REPORTMESHATTACHMENTREQUEST']._serialized_end=2036
-  _globals['_REPORTMESHATTACHMENTRESPONSE']._serialized_start=2038
-  _globals['_REPORTMESHATTACHMENTRESPONSE']._serialized_end=2068
-  _globals['_WORKSPACEBINDINGSERVICE']._serialized_start=2421
-  _globals['_WORKSPACEBINDINGSERVICE']._serialized_end=3154
+  _globals['_BINDWORKSPACERESPONSE']._serialized_end=621
+  _globals['_WORKSPACEDEFAULTS']._serialized_start=624
+  _globals['_WORKSPACEDEFAULTS']._serialized_end=857
+  _globals['_WORKSPACEDEFAULTS_ENVIRONMENTENTRY']._serialized_start=795
+  _globals['_WORKSPACEDEFAULTS_ENVIRONMENTENTRY']._serialized_end=857
+  _globals['_GITIDENTITY']._serialized_start=859
+  _globals['_GITIDENTITY']._serialized_end=924
+  _globals['_WORKSPACEACCESS']._serialized_start=927
+  _globals['_WORKSPACEACCESS']._serialized_end=1319
+  _globals['_WORKSPACEMESHATTACHMENT']._serialized_start=1322
+  _globals['_WORKSPACEMESHATTACHMENT']._serialized_end=1457
+  _globals['_REFRESHACCESSREQUEST']._serialized_start=1459
+  _globals['_REFRESHACCESSREQUEST']._serialized_end=1481
+  _globals['_REFRESHACCESSRESPONSE']._serialized_start=1483
+  _globals['_REFRESHACCESSRESPONSE']._serialized_end=1569
+  _globals['_RECORDHOSTKEYREQUEST']._serialized_start=1571
+  _globals['_RECORDHOSTKEYREQUEST']._serialized_end=1639
+  _globals['_RECORDHOSTKEYRESPONSE']._serialized_start=1641
+  _globals['_RECORDHOSTKEYRESPONSE']._serialized_end=1664
+  _globals['_ALLOCATEPEERRELAYREQUEST']._serialized_start=1666
+  _globals['_ALLOCATEPEERRELAYREQUEST']._serialized_end=1766
+  _globals['_ALLOCATEPEERRELAYRESPONSE']._serialized_start=1769
+  _globals['_ALLOCATEPEERRELAYRESPONSE']._serialized_end=2091
+  _globals['_ISSUEMESHENROLLMENTREQUEST']._serialized_start=2093
+  _globals['_ISSUEMESHENROLLMENTREQUEST']._serialized_end=2121
+  _globals['_ISSUEMESHENROLLMENTRESPONSE']._serialized_start=2124
+  _globals['_ISSUEMESHENROLLMENTRESPONSE']._serialized_end=2309
+  _globals['_REPORTMESHATTACHMENTREQUEST']._serialized_start=2311
+  _globals['_REPORTMESHATTACHMENTREQUEST']._serialized_end=2408
+  _globals['_REPORTMESHATTACHMENTRESPONSE']._serialized_start=2410
+  _globals['_REPORTMESHATTACHMENTRESPONSE']._serialized_end=2440
+  _globals['_WORKSPACEBINDINGSERVICE']._serialized_start=2793
+  _globals['_WORKSPACEBINDINGSERVICE']._serialized_end=3526
 # @@protoc_insertion_point(module_scope)

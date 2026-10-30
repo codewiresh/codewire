@@ -108,6 +108,30 @@ impl AttemptError {
 pub(crate) struct BoundWorkspace {
     pub binding: WorkspaceBinding,
     pub access: Option<WorkspaceAccessGrant>,
+    /// What to write before serving (#3684). Its `Debug` shows no value.
+    #[cfg(unix)]
+    pub defaults: Option<codewire_daemon::workspace_defaults::WorkspaceDefaults>,
+}
+
+/// The daemon's form of the binding's saved project defaults and Git author.
+#[cfg(unix)]
+fn workspace_defaults(
+    defaults: &codewire_proto::codewire::internal::v1::WorkspaceDefaults,
+) -> codewire_daemon::workspace_defaults::WorkspaceDefaults {
+    codewire_daemon::workspace_defaults::WorkspaceDefaults {
+        environment: defaults
+            .environment
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+        git: defaults
+            .git
+            .as_option()
+            .map(|git| codewire_daemon::workspace_defaults::GitAuthor {
+                email: git.email.clone(),
+                name: git.name.clone(),
+            }),
+    }
 }
 
 /// The Connect client for one daemon's binding exchange.
@@ -216,6 +240,8 @@ impl BindingClient {
         Ok(BoundWorkspace {
             binding,
             access: access?,
+            #[cfg(unix)]
+            defaults: response.defaults.as_option().map(workspace_defaults),
         })
     }
 

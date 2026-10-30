@@ -325,6 +325,7 @@ pub async fn serve_bound_hosted_grpc_with_incoming<I, IO, IE, F>(
     pod_uid: &str,
     codex_home: crate::codex_home::CodexHome,
     app_ports: crate::app_ports::AppPortsSender,
+    defaults: Option<crate::workspace_defaults::DefaultsOutcome>,
     incoming: I,
     shutdown: F,
 ) -> Result<()>
@@ -337,7 +338,7 @@ where
     let logins = HostedLogins::from_env(codex_home)?;
     serve(
         config,
-        DaemonRuntimeState::ready(),
+        DaemonRuntimeState::ready_with_defaults(defaults),
         Some(logins),
         None,
         Some((app_ports, pod_uid)),

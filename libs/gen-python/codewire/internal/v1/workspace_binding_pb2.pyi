@@ -33,7 +33,7 @@ class BindWorkspaceRequest(_message.Message):
     def __init__(self, wait_seconds: _Optional[int] = ...) -> None: ...
 
 class BindWorkspaceResponse(_message.Message):
-    __slots__ = ("environment_id", "pod_uid", "operation_generation", "daemon_credential", "projection_selection_sha256", "managed_credential_clients", "access", "working_directory")
+    __slots__ = ("environment_id", "pod_uid", "operation_generation", "daemon_credential", "projection_selection_sha256", "managed_credential_clients", "access", "working_directory", "defaults")
     ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
     POD_UID_FIELD_NUMBER: _ClassVar[int]
     OPERATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
@@ -42,6 +42,7 @@ class BindWorkspaceResponse(_message.Message):
     MANAGED_CREDENTIAL_CLIENTS_FIELD_NUMBER: _ClassVar[int]
     ACCESS_FIELD_NUMBER: _ClassVar[int]
     WORKING_DIRECTORY_FIELD_NUMBER: _ClassVar[int]
+    DEFAULTS_FIELD_NUMBER: _ClassVar[int]
     environment_id: str
     pod_uid: str
     operation_generation: int
@@ -50,7 +51,31 @@ class BindWorkspaceResponse(_message.Message):
     managed_credential_clients: str
     access: WorkspaceAccess
     working_directory: str
-    def __init__(self, environment_id: _Optional[str] = ..., pod_uid: _Optional[str] = ..., operation_generation: _Optional[int] = ..., daemon_credential: _Optional[str] = ..., projection_selection_sha256: _Optional[str] = ..., managed_credential_clients: _Optional[str] = ..., access: _Optional[_Union[WorkspaceAccess, _Mapping]] = ..., working_directory: _Optional[str] = ...) -> None: ...
+    defaults: WorkspaceDefaults
+    def __init__(self, environment_id: _Optional[str] = ..., pod_uid: _Optional[str] = ..., operation_generation: _Optional[int] = ..., daemon_credential: _Optional[str] = ..., projection_selection_sha256: _Optional[str] = ..., managed_credential_clients: _Optional[str] = ..., access: _Optional[_Union[WorkspaceAccess, _Mapping]] = ..., working_directory: _Optional[str] = ..., defaults: _Optional[_Union[WorkspaceDefaults, _Mapping]] = ...) -> None: ...
+
+class WorkspaceDefaults(_message.Message):
+    __slots__ = ("environment", "git")
+    class EnvironmentEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    ENVIRONMENT_FIELD_NUMBER: _ClassVar[int]
+    GIT_FIELD_NUMBER: _ClassVar[int]
+    environment: _containers.ScalarMap[str, str]
+    git: GitIdentity
+    def __init__(self, environment: _Optional[_Mapping[str, str]] = ..., git: _Optional[_Union[GitIdentity, _Mapping]] = ...) -> None: ...
+
+class GitIdentity(_message.Message):
+    __slots__ = ("email", "name")
+    EMAIL_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    email: str
+    name: str
+    def __init__(self, email: _Optional[str] = ..., name: _Optional[str] = ...) -> None: ...
 
 class WorkspaceAccess(_message.Message):
     __slots__ = ("peer_token", "peer_token_expires_at", "operation_generation", "coordinator_url", "direct_udp_endpoints", "peer_relay_endpoints", "app_ports", "mesh")

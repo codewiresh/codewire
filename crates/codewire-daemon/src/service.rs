@@ -74,6 +74,20 @@ impl DaemonRuntimeState {
     pub fn ready() -> Self {
         Self::new(v1::DaemonState::Ready, "daemon ready", Vec::new())
     }
+
+    /// [`Self::ready`], also reporting what a bound daemon wrote before it
+    /// served (#3684). The diagnostic never changes the daemon's state: a
+    /// failed write falls back to setup's own.
+    #[cfg(unix)]
+    pub fn ready_with_defaults(
+        outcome: Option<crate::workspace_defaults::DefaultsOutcome>,
+    ) -> Self {
+        Self::new(
+            v1::DaemonState::Ready,
+            "daemon ready",
+            outcome.map(|outcome| outcome.0).into_iter().collect(),
+        )
+    }
 }
 
 impl DaemonServiceImpl {
@@ -1763,6 +1777,54 @@ mod tests {
                 .insert(DAEMON_AUTH_TOKEN_HEADER, token.parse().unwrap());
         }
         request
+    }
+
+    #[tokio::test]
+    async fn the_defaults_report_reaches_health_and_never_changes_the_daemons_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: temp.path().to_path_buf(),
+            home_root: temp.path().to_path_buf(),
+            auth_token: DaemonAuthToken::new(TEST_AUTH_TOKEN).unwrap(),
+            process_execution: crate::execution::ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            host: None,
+            launch_projection: None,
+            session_working_dir: None,
+        };
+        let health = |outcome| {
+            let service = DaemonServiceImpl::with_runtime_state(
+                config.clone(),
+                DaemonRuntimeState::ready_with_defaults(outcome),
+            );
+            async move {
+                let mut request = Request::new(v1::GetHealthRequest {});
+                request
+                    .metadata_mut()
+                    .insert(DAEMON_AUTH_TOKEN_HEADER, TEST_AUTH_TOKEN.parse().unwrap());
+                service.get_health(request).await.unwrap().into_inner()
+            }
+        };
+        let report = |healthy| v1::HealthDiagnostic {
+            name: codewire_daemon_proto::WORKSPACE_DEFAULTS_DIAGNOSTIC.to_owned(),
+            healthy,
+            message: "synthetic".to_owned(),
+        };
+        // A write that failed leaves the daemon ready: setup writes them.
+        for healthy in [true, false] {
+            let response = health(Some(crate::workspace_defaults::DefaultsOutcome(report(
+                healthy,
+            ))))
+            .await;
+            assert_eq!(response.state, v1::DaemonState::Ready as i32);
+            assert_eq!(response.diagnostics, [report(healthy)]);
+        }
+        // No defaults, as from an older server: nothing is reported.
+        let response = health(None).await;
+        assert_eq!(response.state, v1::DaemonState::Ready as i32);
+        assert!(response.diagnostics.is_empty());
     }
 
     #[tokio::test]

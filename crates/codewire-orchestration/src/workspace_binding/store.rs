@@ -47,6 +47,19 @@ pub struct LiveBinding {
     /// The environment's declared working directory, or empty. Read on every
     /// bind, so a restarted Pod gets the current value.
     pub working_directory: String,
+    /// The saved project defaults and Git author the daemon writes on every
+    /// bind (#3684), read in the same statement. `None` when the stored
+    /// environment is not a string map, so setup writes them as before.
+    pub defaults: Option<BindDefaults>,
+}
+
+/// What [`LiveBinding::defaults`] carries. No `Debug`: the values are the
+/// project's own environment defaults and its creator's identity.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BindDefaults {
+    pub environment: std::collections::BTreeMap<String, String>,
+    /// `(email, name)`, resolved as setup resolves it; `None` without a user.
+    pub git: Option<(String, String)>,
 }
 
 impl std::fmt::Debug for LiveBinding {
@@ -181,20 +194,27 @@ impl PgBindingStore {
     }
 }
 
-type LiveBindingRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    i64,
-    Option<String>,
-    String,
-    String,
-    i64,
-    String,
-);
+/// One row of the bind statement, named so it reads like the columns.
+#[derive(sqlx::FromRow)]
+struct LiveBindingRow {
+    environment_id: String,
+    pod_uid: String,
+    namespace: String,
+    pod_name: String,
+    claim_uid: String,
+    sandbox_uid: String,
+    operation_generation: i64,
+    projection_selection_sha256: Option<String>,
+    managed_credential_clients: String,
+    credential_scope: String,
+    environment_generation: i64,
+    working_directory: String,
+    environment: Option<serde_json::Value>,
+    git_name: Option<String>,
+    git_email: Option<String>,
+    account_name: Option<String>,
+    email: Option<String>,
+}
 
 #[async_trait]
 impl BindingStore for PgBindingStore {
@@ -215,13 +235,19 @@ impl BindingStore for PgBindingStore {
                       w.projection_selection_sha256,
                       w.managed_credential_clients,
                       w.credential_scope,
-                      e.environment_operation_generation,
-                      COALESCE(e.project_spec->>'working_directory', '')
+                      e.environment_operation_generation AS environment_generation,
+                      COALESCE(e.project_spec->>'working_directory', '') AS working_directory,
+                      e.project_spec->'environment' AS environment,
+                      u.git_name,
+                      u.git_email,
+                      u.name AS account_name,
+                      u.email
                  FROM sandbox_workspace_bindings w
                  JOIN sandbox_environment_backend b
                    ON b.environment_id = w.environment_id
                   AND b.pod_uid = w.pod_uid
                  JOIN environments e ON e.id = w.environment_id
+            LEFT JOIN users u ON u.id = e.created_by
                 WHERE w.pod_uid = $1
                   AND w.namespace = $2
                   AND w.pod_name = $3
@@ -419,7 +445,7 @@ pub async fn current_host_key(
 }
 
 fn live_binding_from_row(
-    (
+    LiveBindingRow {
         environment_id,
         pod_uid,
         namespace,
@@ -432,7 +458,12 @@ fn live_binding_from_row(
         credential_scope,
         environment_generation,
         working_directory,
-    ): LiveBindingRow,
+        environment,
+        git_name,
+        git_email,
+        account_name,
+        email,
+    }: LiveBindingRow,
 ) -> Result<LiveBinding, BindingStoreUnavailable> {
     // The schema constrains the scope; anything else is a broken store.
     let credential_scope =
@@ -450,7 +481,36 @@ fn live_binding_from_row(
         credential_scope,
         environment_generation,
         working_directory,
+        defaults: bind_defaults(environment, git_name, git_email, account_name, email),
     })
+}
+
+/// The daemon's defaults from the bind statement's columns. A missing or
+/// null `environment` is the empty map, as setup writes it; anything that is
+/// not a string map sends no defaults at all.
+fn bind_defaults(
+    environment: Option<serde_json::Value>,
+    git_name: Option<String>,
+    git_email: Option<String>,
+    account_name: Option<String>,
+    email: Option<String>,
+) -> Option<BindDefaults> {
+    let environment = match environment {
+        None | Some(serde_json::Value::Null) => Default::default(),
+        Some(value) => serde_json::from_value(value).ok()?,
+    };
+    let git = email.map(|email| {
+        let name = crate::worker::setup::resolve_git_field(
+            git_name.as_deref(),
+            account_name.as_deref(),
+            &email,
+        );
+        let email = git_email
+            .filter(|git_email| !git_email.is_empty())
+            .unwrap_or(email);
+        (email, name)
+    });
+    Some(BindDefaults { environment, git })
 }
 
 /// Fan-out from the one process-wide listener to the waiter for a Pod UID.
@@ -581,20 +641,25 @@ mod tests {
     #[test]
     fn rows_with_an_unknown_scope_are_refused() {
         let row = |scope: &str| -> LiveBindingRow {
-            (
-                "550e8400-e29b-41d4-a716-446655440000".into(),
-                POD.into(),
-                "sandboxes".into(),
-                "workspace".into(),
-                "c0ffee00-0bd2-4f11-8b16-9c239851eb52".into(),
-                "5a4db0c5-0bd2-4f11-8b16-9c239851eb52".into(),
-                3,
-                None,
-                String::new(),
-                scope.into(),
-                7,
-                "/workspace/app".into(),
-            )
+            LiveBindingRow {
+                environment_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+                pod_uid: POD.into(),
+                namespace: "sandboxes".into(),
+                pod_name: "workspace".into(),
+                claim_uid: "c0ffee00-0bd2-4f11-8b16-9c239851eb52".into(),
+                sandbox_uid: "5a4db0c5-0bd2-4f11-8b16-9c239851eb52".into(),
+                operation_generation: 3,
+                projection_selection_sha256: None,
+                managed_credential_clients: String::new(),
+                credential_scope: scope.into(),
+                environment_generation: 7,
+                working_directory: "/workspace/app".into(),
+                environment: None,
+                git_name: None,
+                git_email: None,
+                account_name: None,
+                email: None,
+            }
         };
         assert_eq!(
             live_binding_from_row(row("pod")).unwrap().credential_scope,
@@ -604,5 +669,56 @@ mod tests {
             live_binding_from_row(row("node")),
             Err(BindingStoreUnavailable)
         );
+    }
+    /// #3684: what the daemon is told to write on every bind.
+    #[test]
+    fn bind_defaults_follow_the_saved_project_and_the_creators_git_author() {
+        let defaults = |environment,
+                        git_name: Option<&str>,
+                        git_email: Option<&str>,
+                        name: Option<&str>,
+                        email: Option<&str>| {
+            bind_defaults(
+                environment,
+                git_name.map(str::to_owned),
+                git_email.map(str::to_owned),
+                name.map(str::to_owned),
+                email.map(str::to_owned),
+            )
+        };
+        // No declared environment is the empty map, as setup writes it.
+        let empty = defaults(None, None, None, None, None).expect("defaults");
+        assert!(empty.environment.is_empty());
+        assert_eq!(empty.git, None);
+        assert_eq!(
+            defaults(Some(serde_json::Value::Null), None, None, None, None)
+                .expect("defaults")
+                .environment
+                .len(),
+            0
+        );
+        // The Git author resolves as setup resolves it.
+        let set = defaults(
+            Some(serde_json::json!({"APP_MODE": "test"})),
+            Some("Git Name"),
+            Some("git@example.invalid"),
+            Some("Account"),
+            Some("account@example.invalid"),
+        )
+        .expect("defaults");
+        assert_eq!(set.environment["APP_MODE"], "test");
+        assert_eq!(
+            set.git,
+            Some(("git@example.invalid".into(), "Git Name".into()))
+        );
+        assert_eq!(
+            defaults(None, Some(""), Some(""), None, Some("user@example.invalid"))
+                .expect("defaults")
+                .git,
+            Some(("user@example.invalid".into(), "user".into()))
+        );
+        // Anything that is not a string map sends no defaults: setup writes them.
+        assert!(defaults(Some(serde_json::json!({"A": 1})), None, None, None, None).is_none());
+        assert!(defaults(Some(serde_json::json!("A")), None, None, None, None).is_none());
     }
 }

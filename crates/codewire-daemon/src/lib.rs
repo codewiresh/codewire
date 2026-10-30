@@ -38,6 +38,8 @@ pub mod session;
 #[cfg(target_os = "linux")]
 pub mod ssh_known_hosts;
 pub mod stop_evidence;
+#[cfg(unix)]
+pub mod workspace_defaults;
 
 pub use codewire_daemon_proto::{DaemonAuthToken, HOSTED_EXEC_AMBIGUOUS_EXIT_CODE};
 pub use config::{

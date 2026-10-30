@@ -238,6 +238,10 @@ pub trait SetupStore {
 pub struct DaemonReadiness {
     pub state: &'static str,
     pub message: String,
+    /// The binding generation the daemon reports having written the saved
+    /// project defaults and Git author for (`workspace_defaults`), when that
+    /// write succeeded.
+    pub defaults_generation: Option<i64>,
 }
 
 /// How long setup waits for the daemon's status beside the health check. A
@@ -876,6 +880,10 @@ pub struct WorkerSetupOps<'a> {
     /// Create's full access proof reached the Pod this setup runs on, inside
     /// the same activity (#3684), so the health check would repeat it.
     pub health_proven: bool,
+    /// That Pod's daemon reports having written the saved project defaults
+    /// and Git author for its live binding (#3684), so setup's exec would
+    /// repeat it.
+    pub defaults_written: bool,
 }
 
 impl WorkerSetupOps<'_> {
@@ -1833,6 +1841,13 @@ impl SetupOps for WorkerSetupOps<'_> {
         self.phase_authority
             .ensure_active(self.active_phase)
             .await?;
+        if self.defaults_written {
+            tracing::info!(
+                environment_id = input.environment_id,
+                "setup: the daemon wrote the project defaults and Git author at its bind"
+            );
+            return Ok(());
+        }
         self.publish_defaults_and_git_identity(&input.namespace)
             .await
     }
@@ -2143,7 +2158,11 @@ impl SetupOps for WorkerSetupOps<'_> {
 }
 
 /// Mirrors `resolveGitField`.
-fn resolve_git_field(git_name: Option<&str>, account_name: Option<&str>, email: &str) -> String {
+pub(crate) fn resolve_git_field(
+    git_name: Option<&str>,
+    account_name: Option<&str>,
+    email: &str,
+) -> String {
     if let Some(n) = git_name
         && !n.is_empty()
     {
@@ -2237,6 +2256,22 @@ async fn daemon_readiness(
     .await
 }
 
+/// The binding generation the daemon says it wrote the defaults for: only a
+/// healthy report counts, so a failed write leaves them to setup's exec.
+fn reported_defaults_generation(
+    diagnostics: &[crate::api::environment_daemon::EnvironmentDaemonDiagnostic],
+) -> Option<i64> {
+    diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.healthy
+                && diagnostic.name == codewire_daemon_proto::WORKSPACE_DEFAULTS_DIAGNOSTIC
+        })
+        .and_then(|diagnostic| {
+            codewire_daemon_proto::workspace_defaults_generation(&diagnostic.message)
+        })
+}
+
 /// [`daemon_readiness`] from owned parts, for a task that outlives the
 /// caller's borrow: create's read beside its own tail (#3684).
 pub(super) async fn read_daemon_readiness(
@@ -2262,6 +2297,7 @@ pub(super) async fn read_daemon_readiness(
     match status {
         Ok(Ok(status)) => Some(DaemonReadiness {
             state: crate::api::environment_daemon::daemon_state_token(status.state),
+            defaults_generation: reported_defaults_generation(&status.diagnostics),
             message: status.message,
         }),
         Ok(Err(error)) => {
@@ -2366,8 +2402,9 @@ async fn run_setup(
     after_create: Option<&CreateHandover>,
 ) -> anyhow::Result<SetupAfterCreate> {
     let env_id = &payload.environment_id;
-    let health_proven = after_create.is_some_and(CreateHandover::proved_its_runtime);
-    let after_create = after_create.map(CreateHandover::runtime);
+    let handover = after_create;
+    let health_proven = handover.is_some_and(CreateHandover::proved_its_runtime);
+    let after_create = handover.map(CreateHandover::runtime);
     tracing::info!(environment_id = env_id, "environment.setup received");
 
     let env = load_environment(&ctx.pool, env_id).await?;
@@ -2401,6 +2438,21 @@ async fn run_setup(
     if after_create.is_some() && input.has_setup {
         return Ok(SetupAfterCreate::Deferred);
     }
+    // A database error here only costs the shortcut: setup's exec writes them.
+    let defaults_written = match handover {
+        Some(handover) => {
+            let binding = super::workspace_binding::live_environment_binding(&ctx.pool, env_id)
+                .await
+                .ok()
+                .flatten();
+            handover.daemon_wrote_defaults(
+                binding
+                    .as_ref()
+                    .map(|binding| (binding.pod_uid.as_str(), binding.operation_generation)),
+            )
+        }
+        None => false,
+    };
     let phase_authority = SetupPhaseAuthority::new(authority.clone(), setup_identity)?;
     let mut runner = Runner {
         store: PgSetupStore {
@@ -2418,6 +2470,7 @@ async fn run_setup(
             launch_group_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             launch_group_reaping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             health_proven,
+            defaults_written,
         },
     };
     if let Err(err) = runner.run(&mut input).await {
@@ -2557,6 +2610,7 @@ pub async fn handle_post_start_configuration(
         launch_group_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         launch_group_reaping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         health_proven: false,
+        defaults_written: false,
     };
     match phase_authority.prepare_post_start_mutation(phase).await? {
         PhasePreparation::Ready(PhaseAcquire::Acquired) => {}
@@ -3147,6 +3201,7 @@ mod tests {
         mock.0.lock().unwrap().daemon = Some(DaemonReadiness {
             state: "ready",
             message: String::new(),
+            defaults_generation: None,
         });
         let mut runner = Runner {
             store: mock.clone(),
@@ -3415,6 +3470,35 @@ mod tests {
             ..Default::default()
         })
         .unwrap_err()
+    }
+
+    #[test]
+    fn only_a_healthy_defaults_report_names_a_generation() {
+        let diagnostic = |name: &str, healthy, message: &str| {
+            crate::api::environment_daemon::EnvironmentDaemonDiagnostic {
+                name: name.to_owned(),
+                healthy,
+                message: message.to_owned(),
+            }
+        };
+        let written = codewire_daemon_proto::workspace_defaults_message(7);
+        let name = codewire_daemon_proto::WORKSPACE_DEFAULTS_DIAGNOSTIC;
+        assert_eq!(
+            reported_defaults_generation(&[
+                diagnostic("session-store", true, "fine"),
+                diagnostic(name, true, &written),
+            ]),
+            Some(7)
+        );
+        for refused in [
+            vec![],
+            vec![diagnostic(name, false, &written)],
+            vec![diagnostic(name, false, "project defaults failed")],
+            vec![diagnostic(name, true, "something else")],
+            vec![diagnostic("session-store", true, &written)],
+        ] {
+            assert_eq!(reported_defaults_generation(&refused), None, "{refused:?}");
+        }
     }
 
     #[test]

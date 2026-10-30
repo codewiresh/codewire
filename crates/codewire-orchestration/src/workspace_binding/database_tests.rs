@@ -203,6 +203,33 @@ async fn db_the_live_binding_carries_the_environment_generation() -> Result<()> 
             .await?
             .expect("a live binding");
         ensure!(binding.environment_generation == 6);
+        // Nothing saved: an empty environment, and the creator's account as
+        // the Git author.
+        let defaults = binding.defaults.expect("defaults");
+        ensure!(defaults.environment.is_empty());
+        ensure!(defaults.git.is_some());
+        // The saved project and the creator's own Git author, read on the
+        // next bind.
+        sqlx::query(
+            "UPDATE environments SET project_spec = project_spec || \
+             '{\"environment\":{\"REGION\":\"synthetic-region\"}}'::jsonb WHERE id = $1",
+        )
+        .bind(ENV)
+        .execute(&db.pool)
+        .await?;
+        sqlx::query("UPDATE users SET git_name = 'Synthetic Dev', git_email = $2 WHERE id = $1")
+            .bind(CREATOR)
+            .bind("dev@example.test")
+            .execute(&db.pool)
+            .await?;
+        let defaults = store
+            .live_binding(POD, NAMESPACE, &pod_name)
+            .await?
+            .expect("a live binding")
+            .defaults
+            .expect("defaults");
+        ensure!(defaults.environment["REGION"] == "synthetic-region");
+        ensure!(defaults.git == Some(("dev@example.test".into(), "Synthetic Dev".into())));
         Ok(())
     }
     .await;

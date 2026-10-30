@@ -88,7 +88,9 @@ namespace, filesystem view, UID/GID, and environment:
 - own durable session lifecycle, attach/detach, output cursors, health, and
   capability/version diagnostics
 - build process environment from session input plus
-  `/home/codewire/.codewire/environment.json`
+  `/home/codewire/.codewire/environment.json`, which it writes from the saved
+  project on every bind; it is not a file to edit by hand, and an edit lasts
+  only until the next bind
 - default workspace paths to `/workspace` and `/home/codewire`
 
 The daemon RPC listener is `0.0.0.0:7777` inside the workspace Pod. Kubernetes

@@ -129,6 +129,24 @@ pub const HOSTED_DAEMON_ACCESS_READY_FILE: &str = "/codewire/run/daemon/access-r
 /// The bound daemon's SSH listener in the workspace Pod. Only orchestration
 /// (its SSH proxy and setup health check) may reach it.
 pub const WORKSPACE_SSH_PORT: u16 = 2222;
+
+/// The health diagnostic in which a bound daemon reports the saved project
+/// defaults and Git author it wrote for its binding (#3684). Healthy, its
+/// message names the binding's generation; setup skips its own write only then.
+pub const WORKSPACE_DEFAULTS_DIAGNOSTIC: &str = "workspace_defaults";
+
+/// A healthy [`WORKSPACE_DEFAULTS_DIAGNOSTIC`]'s message for `generation`.
+pub fn workspace_defaults_message(generation: u64) -> String {
+    format!("written for generation {generation}")
+}
+
+/// The generation in a healthy [`WORKSPACE_DEFAULTS_DIAGNOSTIC`]'s message.
+pub fn workspace_defaults_generation(message: &str) -> Option<i64> {
+    message
+        .strip_prefix("written for generation ")?
+        .parse()
+        .ok()
+}
 /// The bound daemon's tailnet direct-UDP port in the workspace Pod: the
 /// target of the environment's direct-UDP LoadBalancer, reachable from the
 /// world only.

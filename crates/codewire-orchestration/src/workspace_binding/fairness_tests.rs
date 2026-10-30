@@ -228,6 +228,7 @@ impl TwoPodStore {
                 credential_scope: WorkspaceCredentialScope::Pod,
                 environment_generation: 3,
                 working_directory: String::new(),
+                defaults: None,
             },
         );
     }

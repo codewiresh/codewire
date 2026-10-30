@@ -1102,7 +1102,7 @@ async fn run_hosted_daemon() -> anyhow::Result<()> {
         .try_init();
     match codewire_daemon::HostedDaemonMode::from_env()? {
         codewire_daemon::HostedDaemonMode::EnvironmentToken(config) => {
-            serve_hosted_daemon(*config, false, None, None, None).await
+            serve_hosted_daemon(*config, false, None, None, None, None).await
         }
         codewire_daemon::HostedDaemonMode::Binding(config) => run_bound_hosted_daemon(config).await,
     }
@@ -1171,6 +1171,21 @@ async fn run_bound_hosted_daemon_with(
     // The binding was accepted for exactly this Pod.
     let pod_uid = config.pod_uid().to_owned();
     let daemon_config = config.into_config(&bound.binding);
+    // The saved project defaults and Git author (#3684), before the access
+    // task can record the host key: orchestration's access proof therefore
+    // comes after this write. No defaults, as from an older server, reports
+    // nothing, and setup writes them itself.
+    let defaults = match &bound.defaults {
+        Some(defaults) => Some(
+            codewire_daemon::workspace_defaults::apply(
+                &daemon_config,
+                bound.binding.operation_generation(),
+                defaults,
+            )
+            .await,
+        ),
+        None => None,
+    };
     // Workspace access (#2460): the daemon serves SSH itself, reaching its
     // own gRPC service in-process, and the environment's application ports
     // on its tailnet address.
@@ -1223,6 +1238,7 @@ async fn run_bound_hosted_daemon_with(
         Some(local),
         Some(app_ports),
         Some(pod_uid),
+        defaults,
     )
     .await
 }
@@ -1236,12 +1252,19 @@ async fn run_bound_hosted_daemon(
     anyhow::bail!("workspace binding requires a Unix hosted daemon")
 }
 
+/// What a bound daemon wrote before it served; no such thing without Unix.
+#[cfg(unix)]
+type HostedDefaultsOutcome = codewire_daemon::workspace_defaults::DefaultsOutcome;
+#[cfg(not(unix))]
+type HostedDefaultsOutcome = std::convert::Infallible;
+
 async fn serve_hosted_daemon(
     config: codewire_daemon::Config,
     bound: bool,
     local: Option<codewire_daemon::local_transport::LocalDaemonIncoming>,
     app_ports: Option<codewire_daemon::app_ports::AppPortsSender>,
     pod_uid: Option<String>,
+    defaults: Option<HostedDefaultsOutcome>,
 ) -> anyhow::Result<()> {
     use tokio_stream::wrappers::TcpListenerStream;
 
@@ -1308,6 +1331,7 @@ async fn serve_hosted_daemon(
                 &pod_uid,
                 codewire_daemon::codex_home::CodexHome::default(),
                 app_ports,
+                defaults,
                 incoming,
                 hosted_daemon_shutdown_signal(),
             )
@@ -1324,7 +1348,7 @@ async fn serve_hosted_daemon(
         }
     };
     #[cfg(not(target_os = "linux"))]
-    let _ = (app_ports, pod_uid);
+    let _ = (app_ports, pod_uid, defaults);
     #[cfg(not(target_os = "linux"))]
     codewire_daemon::serve_grpc_with_incoming(config, incoming, hosted_daemon_shutdown_signal())
         .await

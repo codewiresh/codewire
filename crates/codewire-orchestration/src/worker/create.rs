@@ -1158,6 +1158,7 @@ async fn run_environment_create(
     // SFTP too), and the daemon status read beside create's tail since.
     let mut proven_pod_uid: Option<String> = None;
     let mut daemon_read: Option<DaemonRead> = None;
+    let mut defaults_generation: Option<i64> = None;
     // Program #2238 C3: after a pool-born Claim failed its first bind and
     // was re-claimed, this attempt claims cold.
     let mut reclaimed_cold = false;
@@ -1925,6 +1926,7 @@ async fn run_environment_create(
                     Some(read) => read.finish().await,
                     None => None,
                 } {
+                    defaults_generation = daemon.defaults_generation;
                     let (message, metadata) = super::setup::daemon_ready_log(&daemon);
                     emit_running_log(
                         authority,
@@ -1939,6 +1941,7 @@ async fn run_environment_create(
                 return Ok(reconciled_runtime.map(|runtime| CreateHandover {
                     runtime,
                     proven_pod_uid: proven_pod_uid.take(),
+                    defaults_generation,
                 }));
             }
         }
@@ -2058,6 +2061,9 @@ impl ReconciledRuntime {
 pub struct CreateHandover {
     runtime: ReconciledRuntime,
     proven_pod_uid: Option<String>,
+    /// The generation the proven daemon reports having written the saved
+    /// project defaults and Git author for.
+    defaults_generation: Option<i64>,
 }
 
 impl CreateHandover {
@@ -2071,6 +2077,17 @@ impl CreateHandover {
         self.proven_pod_uid
             .as_deref()
             .is_some_and(|proven| !proven.is_empty() && proven == self.runtime.pod_uid)
+    }
+
+    /// The proven daemon wrote the defaults for exactly the live binding
+    /// `(pod_uid, operation_generation)` of the runtime handed over. The
+    /// binding's generation, not the environment's: it is the one the daemon
+    /// was bound with, and the environment's may move on after it.
+    pub(super) fn daemon_wrote_defaults(&self, binding: Option<(&str, i64)>) -> bool {
+        self.proved_its_runtime()
+            && binding.is_some_and(|(pod_uid, generation)| {
+                pod_uid == self.runtime.pod_uid && self.defaults_generation == Some(generation)
+            })
     }
 }
 
@@ -3765,11 +3782,41 @@ mod tests {
         let handover = |proven: Option<&str>| CreateHandover {
             runtime: runtime.clone(),
             proven_pod_uid: proven.map(str::to_owned),
+            defaults_generation: None,
         };
         assert!(handover(Some(BOUND_POD)).proved_its_runtime());
         assert!(!handover(Some("another-pod")).proved_its_runtime());
         assert!(!handover(None).proved_its_runtime());
         assert!(!handover(Some("")).proved_its_runtime());
+    }
+
+    /// #3684: setup skips its exec only when the proven daemon reports the
+    /// write for exactly the live binding of the runtime handed over.
+    #[test]
+    fn setup_trusts_the_daemons_defaults_only_for_its_live_binding() {
+        let env = environment("running");
+        let stored = backend("ns", "sandbox-env", "10.0.0.5", false);
+        let mut ready = probe(true, true);
+        ready.pod_uid = BOUND_POD.into();
+        let runtime = ReconciledRuntime::observe(&env, &stored, &ready);
+        let handover = |proven: Option<&str>, written: Option<i64>| CreateHandover {
+            runtime: runtime.clone(),
+            proven_pod_uid: proven.map(str::to_owned),
+            defaults_generation: written,
+        };
+        let live = Some((BOUND_POD, 7));
+        assert!(handover(Some(BOUND_POD), Some(7)).daemon_wrote_defaults(live));
+        // An older daemon, or a failed write, reports no generation.
+        assert!(!handover(Some(BOUND_POD), None).daemon_wrote_defaults(live));
+        // Another generation's write, or another Pod's binding.
+        assert!(!handover(Some(BOUND_POD), Some(6)).daemon_wrote_defaults(live));
+        assert!(
+            !handover(Some(BOUND_POD), Some(7)).daemon_wrote_defaults(Some(("another-pod", 7)))
+        );
+        // No binding read, or no access proof of this Pod.
+        assert!(!handover(Some(BOUND_POD), Some(7)).daemon_wrote_defaults(None));
+        assert!(!handover(Some("another-pod"), Some(7)).daemon_wrote_defaults(live));
+        assert!(!handover(None, Some(7)).daemon_wrote_defaults(live));
     }
 
     /// #3627: right after this attempt bound the warm member and reached it,
