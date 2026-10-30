@@ -1329,3 +1329,94 @@ fn a_pod_phase_without_a_pod_uid_is_an_ordinary_stage() {
     )];
     assert_eq!(stored(&rows), "  ✓ Workspace pod scheduled  4.0s\n");
 }
+
+/// The fixture's rows with setup's `daemon_ready` row (#3684) just before
+/// `complete`.
+fn rows_with_daemon(state: &str, message: &str) -> Vec<LogFeedEvent> {
+    let mut rows = fixture_rows();
+    let complete = rows
+        .iter()
+        .position(|row| row.phase == "complete")
+        .expect("the fixture completes");
+    let created_at = rows[complete].created_at.clone();
+    rows.insert(
+        complete,
+        row(
+            "daemon-ready",
+            "daemon_ready",
+            "completed",
+            "",
+            &created_at,
+            Some(serde_json::json!({ "state": state, "message": message })),
+        ),
+    );
+    rows.into_iter().map(log_event).collect()
+}
+
+async fn create_with_rows(rows: Vec<LogFeedEvent>) -> (anyhow::Result<()>, bool) {
+    let feed = ScriptedFeed::new(vec![connection(rows, ConnectionEnd::Hang)]);
+    let mut view = plain_view(Instant::now());
+    let asked = Cell::new(false);
+    let result = await_environment_setup(
+        &feed,
+        &mut view.progress,
+        &fast_policy(),
+        "env-fixture",
+        std::future::pending(),
+        || async {
+            asked.set(true);
+            Ok(())
+        },
+    )
+    .await;
+    (result, asked.get())
+}
+
+/// #3684: a `ready` daemon status from setup ends `cw create` at `complete`,
+/// without asking the API again.
+#[tokio::test]
+async fn create_returns_at_complete_when_setup_saw_the_daemon_ready() {
+    let (result, asked) = create_with_rows(rows_with_daemon("ready", "")).await;
+    result.unwrap();
+    assert!(!asked, "a ready row needs no API daemon check");
+}
+
+/// The row's state is judged by the API's rule, with the same messages.
+#[tokio::test]
+async fn a_daemon_status_from_setup_fails_create_as_the_api_answer_would() {
+    for (state, message, expected) in [
+        (
+            "upgrade_required",
+            "",
+            "environment daemon requires an upgrade; run `cw daemon repair`",
+        ),
+        (
+            "unsupported",
+            "",
+            "environment daemon requires an upgrade; run `cw daemon repair`",
+        ),
+        (
+            "unhealthy",
+            "docker is not running",
+            "environment daemon is unhealthy (docker is not running); run `cw daemon status` or `cw daemon repair`",
+        ),
+    ] {
+        let (result, asked) = create_with_rows(rows_with_daemon(state, message)).await;
+        assert_eq!(format!("{:#}", result.unwrap_err()), expected, "{state}");
+        assert!(!asked, "{state}: decided from the row");
+    }
+}
+
+/// A daemon still starting when setup looked, and a server that wrote no
+/// row, fall back to the API's daemon check.
+#[tokio::test]
+async fn create_asks_the_api_when_setup_saw_no_ready_daemon() {
+    let (result, asked) = create_with_rows(rows_with_daemon("starting", "")).await;
+    result.unwrap();
+    assert!(asked, "a starting daemon is checked again");
+
+    let rows = fixture_rows().into_iter().map(log_event).collect();
+    let (result, asked) = create_with_rows(rows).await;
+    result.unwrap();
+    assert!(asked, "no row: the API is asked as before");
+}

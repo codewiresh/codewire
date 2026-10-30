@@ -263,6 +263,35 @@ pub async fn list_environment_daemon_sessions_core(
         .sessions)
 }
 
+/// Worker-only daemon status: what `GetEnvironmentDaemonStatus` reports, read
+/// by setup in-cluster (#3684) so `cw create` needn't ask again after setup.
+/// The caller owns durable environment activity authority, as for
+/// [`list_environment_daemon_sessions_for_worker`].
+pub(crate) async fn environment_daemon_status_for_worker(
+    pool: &PgPool,
+    kube: Option<&kube::Client>,
+    session_secret: &str,
+    namespace: &str,
+    environment_id: &str,
+) -> AppResult<EnvironmentDaemonStatus> {
+    let (channel, token) =
+        daemon_channel_for_runtime(pool, kube, session_secret, namespace, environment_id).await?;
+    query_daemon(channel, token, "").await
+}
+
+/// The CLI's name for a daemon state, as `cw` renders the public
+/// `EnvironmentDaemonState`. Setup's `daemon_ready` row carries it.
+pub(crate) fn daemon_state_token(state: v1::DaemonState) -> &'static str {
+    match state {
+        v1::DaemonState::Unspecified => "unspecified",
+        v1::DaemonState::Unsupported => "unsupported",
+        v1::DaemonState::Starting => "starting",
+        v1::DaemonState::Ready => "ready",
+        v1::DaemonState::Unhealthy => "unhealthy",
+        v1::DaemonState::UpgradeRequired => "upgrade_required",
+    }
+}
+
 /// Worker-only daemon session path. The caller already owns durable
 /// environment activity authority, so this resolves the same private daemon
 /// service without manufacturing a public user identity.

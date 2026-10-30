@@ -38,6 +38,22 @@
 //!
 //! The fixture `tests/fixtures/environment-log-clone-progress-v1.json` in this
 //! crate is the reference stream for this contract.
+//!
+//! # The daemon status setup read (#3684)
+//!
+//! Setup reads the workspace daemon's status in-cluster beside its health
+//! check and reports it, before `complete`, as one row:
+//!
+//! - `phase`: `daemon_ready`; `status`: `completed`.
+//! - `metadata.state`: the state token `cw daemon status` prints (`ready`,
+//!   `starting`, `upgrade_required`, `unsupported`, `unhealthy`,
+//!   `unspecified`); `metadata.message`: the daemon's message.
+//!
+//! `cw create` judges it with the rule it applies to the API's answer:
+//! `ready` ends the create at `complete`, and a refused state fails it with
+//! the same message. A daemon still starting, or a server that writes no such
+//! row, is asked through the API as before. That fallback exists for version
+//! skew and goes once Production writes the row (#3705).
 
 use std::future::Future;
 use std::io::Write;
@@ -54,7 +70,7 @@ use crate::environment_client::{
     EnvironmentClient, EnvironmentLogStreamEvent, EnvironmentLogStreamFailure, LogStreamRecovery,
 };
 use crate::output::{Capabilities, Motion, OutputMode, Status, StatusLine};
-use crate::presentation::{Environment, EnvironmentLog};
+use crate::presentation::{Environment, EnvironmentDaemonStatus, EnvironmentLog};
 
 /// The server sends a heartbeat every 15 seconds; three missed heartbeats
 /// mean the connection is gone even when the transport has not noticed.
@@ -260,6 +276,8 @@ pub(crate) struct StartProgress<W: Write> {
     /// The Pod whose start timing rows are on screen, so their header is
     /// drawn once per Pod.
     pod_breakdown: Option<String>,
+    /// The daemon status setup read in-cluster: its latest `daemon_ready` row.
+    daemon: Option<EnvironmentDaemonStatus>,
 }
 
 impl<W: Write> StartProgress<W> {
@@ -286,6 +304,7 @@ impl<W: Write> StartProgress<W> {
             idle_label,
             open: Vec::new(),
             pod_breakdown: None,
+            daemon: None,
         }
     }
 
@@ -302,6 +321,9 @@ impl<W: Write> StartProgress<W> {
         received: Instant,
     ) -> std::io::Result<Option<StageFailure>> {
         self.set_now(received);
+        if let Some(daemon) = daemon_ready_status(event) {
+            self.daemon = Some(daemon);
+        }
         let repo = repository_scope(event.metadata.as_ref());
         let key = stage_key(&event.phase, repo);
         let pod_timing = pod_timing_uid(event);
@@ -689,7 +711,42 @@ where
             return Err(stage_error(error, stage));
         }
     }
+    // Setup read the daemon's status in-cluster (#3684): the same rule as the
+    // API's answer decides, and only a daemon still starting, or a server
+    // that wrote no row, is asked again.
+    if let Some(daemon) = view.daemon.clone() {
+        match super::environment_daemon_readiness(&daemon) {
+            Ok(true) => {
+                view.finish()?;
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(error) => {
+                view.finish()?;
+                return Err(error);
+            }
+        }
+    }
     await_daemon_ready(view, policy, daemon_ready()).await
+}
+
+/// The daemon status in a setup `daemon_ready` row (#3684), whose metadata
+/// carries the CLI's state token and the daemon's message.
+fn daemon_ready_status(event: &EnvironmentLog) -> Option<EnvironmentDaemonStatus> {
+    if event.phase != "daemon_ready" {
+        return None;
+    }
+    let metadata = event.metadata.as_ref()?;
+    let state = metadata.get("state")?.as_str()?;
+    Some(EnvironmentDaemonStatus {
+        state: state.to_owned(),
+        message: metadata
+            .get("message")
+            .and_then(|message| message.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        ..Default::default()
+    })
 }
 
 /// `cw start`: shows the rows the start produces after `cursor` while

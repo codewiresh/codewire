@@ -27,6 +27,7 @@ pub fn env_phase_label(phase: &str) -> &str {
         "mark_running" => "Marking running",
         "publish_setup" => "Starting setup",
         "health_check" => "Checking sidecar readiness",
+        "daemon_ready" => "Workspace daemon ready",
         "configure_environment" => "Configuring environment",
         "git_clone" => "Cloning repositories",
         "install" => "Running install command",

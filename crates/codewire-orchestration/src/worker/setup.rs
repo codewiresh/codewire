@@ -229,6 +229,21 @@ pub trait SetupStore {
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 }
 
+/// The workspace daemon's own status, read by setup in-cluster beside its
+/// health check (#3684): `state` is the CLI's token for it (`ready`,
+/// `starting`, `upgrade_required`, `unsupported`, `unhealthy`,
+/// `unspecified`). `cw create` applies its usual readiness rule to it from the
+/// `daemon_ready` row instead of asking the API after setup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DaemonReadiness {
+    pub state: &'static str,
+    pub message: String,
+}
+
+/// How long setup waits for the daemon's status beside the health check. A
+/// slower or failed read writes no row, and `cw create` asks as before.
+const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Mirrors `environmentsetup.Ops`.
 pub trait SetupOps {
     fn prepare_phase(
@@ -246,10 +261,12 @@ pub trait SetupOps {
         data: Option<serde_json::Value>,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
     fn ensure_can_commit(&self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+    /// The daemon's SSH and SFTP proof. It also returns the daemon's own
+    /// status when it could be read alongside, for the `daemon_ready` row.
     fn health_check(
         &mut self,
         input: &Inputs,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<DaemonReadiness>>> + Send;
     fn configure_environment(
         &mut self,
         input: &Inputs,
@@ -304,21 +321,43 @@ impl<S: SetupStore, O: SetupOps> Runner<S, O> {
             self.ops
                 .emit_log(&env_id, phase, "health_check", "started", "", None)
                 .await?;
-            if let Err(e) = self.ops.health_check(input).await {
-                if is_setup_control_flow(&e) {
-                    return Err(e);
+            let daemon = match self.ops.health_check(input).await {
+                Ok(daemon) => daemon,
+                Err(e) => {
+                    if is_setup_control_flow(&e) {
+                        return Err(e);
+                    }
+                    self.ops
+                        .emit_log(
+                            &env_id,
+                            phase,
+                            "health_check",
+                            "failed",
+                            &format!("{e:#}"),
+                            duration_ms_meta(started),
+                        )
+                        .await?;
+                    return Err(anyhow::anyhow!("health check: {e:#}"));
                 }
+            };
+            if let Some(daemon) = daemon {
+                let message = match daemon.state {
+                    "ready" => String::new(),
+                    state => format!("Workspace daemon {state}: {}", daemon.message),
+                };
                 self.ops
                     .emit_log(
                         &env_id,
                         phase,
-                        "health_check",
-                        "failed",
-                        &format!("{e:#}"),
-                        duration_ms_meta(started),
+                        "daemon_ready",
+                        "completed",
+                        &message,
+                        Some(serde_json::json!({
+                            "state": daemon.state,
+                            "message": daemon.message,
+                        })),
                     )
                     .await?;
-                return Err(anyhow::anyhow!("health check: {e:#}"));
             }
             self.finish_phase(
                 input,
@@ -1736,16 +1775,38 @@ impl SetupOps for WorkerSetupOps<'_> {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %input.environment_id))]
-    async fn health_check(&mut self, input: &Inputs) -> anyhow::Result<()> {
-        await_setup_or_cancel(
+    async fn health_check(&mut self, input: &Inputs) -> anyhow::Result<Option<DaemonReadiness>> {
+        let proof = await_setup_or_cancel(
             &self.activity_ctx,
             self.authority.run_while_authoritative(wait_for_sidecar(
                 self.ctx,
                 &input.namespace,
                 &input.environment_id,
             )),
-        )
-        .await
+        );
+        // The status read runs beside the proof and is dropped when the proof
+        // fails or is cancelled; after a proof it is waited for, bounded.
+        let daemon = daemon_readiness(self.ctx, &input.namespace, &input.environment_id);
+        tokio::pin!(proof);
+        tokio::pin!(daemon);
+        let mut status = None;
+        let mut read = false;
+        loop {
+            tokio::select! {
+                result = &mut proof => {
+                    result?;
+                    break;
+                }
+                observed = &mut daemon, if !read => {
+                    status = observed;
+                    read = true;
+                }
+            }
+        }
+        if !read {
+            status = daemon.await;
+        }
+        Ok(status)
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %input.environment_id))]
@@ -2140,6 +2201,41 @@ pub(crate) async fn wait_for_sidecar(
     )
 }
 
+/// The daemon's status over its control channel, as `GetEnvironmentDaemonStatus`
+/// reads it, or `None` when it can't be read within [`DAEMON_STATUS_TIMEOUT`].
+async fn daemon_readiness(
+    ctx: &WorkerContext,
+    namespace: &str,
+    env_id: &str,
+) -> Option<DaemonReadiness> {
+    ctx.kube.as_ref()?;
+    let status = tokio::time::timeout(
+        DAEMON_STATUS_TIMEOUT,
+        crate::api::environment_daemon::environment_daemon_status_for_worker(
+            &ctx.pool,
+            ctx.kube.as_ref(),
+            &ctx.sandbox_cfg.session_secret,
+            namespace,
+            env_id,
+        ),
+    )
+    .await;
+    match status {
+        Ok(Ok(status)) => Some(DaemonReadiness {
+            state: crate::api::environment_daemon::daemon_state_token(status.state),
+            message: status.message,
+        }),
+        Ok(Err(error)) => {
+            tracing::debug!(environment_id = env_id, error = %error, "setup: daemon status unavailable");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(environment_id = env_id, "setup: daemon status timed out");
+            None
+        }
+    }
+}
+
 fn sidecar_ready_timeout() -> Duration {
     std::env::var(SIDECAR_READY_TIMEOUT_ENV)
         .ok()
@@ -2491,6 +2587,7 @@ mod tests {
         recovery_failure_step: Option<&'static str>,
         cancellation_step: Option<&'static str>,
         cancel_before_commit: bool,
+        daemon: Option<DaemonReadiness>,
     }
 
     #[derive(Clone)]
@@ -2607,8 +2704,12 @@ mod tests {
             }
             Ok(())
         }
-        async fn health_check(&mut self, _input: &Inputs) -> anyhow::Result<()> {
-            self.call("health_check")
+        async fn health_check(
+            &mut self,
+            _input: &Inputs,
+        ) -> anyhow::Result<Option<DaemonReadiness>> {
+            self.call("health_check")?;
+            Ok(self.0.lock().unwrap().daemon.clone())
         }
         async fn configure_environment(&mut self, _input: &Inputs) -> anyhow::Result<()> {
             self.call("configure_environment")
@@ -2989,6 +3090,51 @@ mod tests {
             !state
                 .calls
                 .contains(&"log:health_check:completed".to_string())
+        );
+    }
+
+    /// #3684: the daemon status read beside the health check becomes a
+    /// `daemon_ready` row inside phase 0, before setup completes; with no
+    /// status read, no row is written and `cw create` asks the API as before.
+    #[tokio::test]
+    async fn the_daemon_status_read_beside_the_health_check_is_logged_before_complete() {
+        let mock = Mock::new();
+        mock.0.lock().unwrap().daemon = Some(DaemonReadiness {
+            state: "ready",
+            message: String::new(),
+        });
+        let mut runner = Runner {
+            store: mock.clone(),
+            ops: mock.clone(),
+        };
+        let mut input = full_inputs();
+        runner.run(&mut input).await.unwrap();
+        let calls = mock.state().calls;
+        let at = |entry: &str| calls.iter().position(|call| call == entry);
+        let daemon = at("log:daemon_ready:completed").expect("a daemon_ready row");
+        assert!(at("health_check").is_some_and(|check| check < daemon));
+        assert!(
+            calls[daemon..]
+                .iter()
+                .any(|call| call == "log:git_clone:started"),
+            "the row is written in phase 0, before the later phases"
+        );
+        assert!(mock.state().complete);
+
+        let mock = Mock::new();
+        let mut runner = Runner {
+            store: mock.clone(),
+            ops: mock.clone(),
+        };
+        let mut input = full_inputs();
+        runner.run(&mut input).await.unwrap();
+        assert!(
+            !mock
+                .state()
+                .calls
+                .iter()
+                .any(|call| call.starts_with("log:daemon_ready")),
+            "no status read, no row"
         );
     }
 
