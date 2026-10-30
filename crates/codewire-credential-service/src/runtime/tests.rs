@@ -830,6 +830,20 @@ async fn database_backend(pool: &PgPool) -> Result<i32> {
         .await?)
 }
 
+/// Waits until the last statement's connection is back in the pool. sqlx
+/// returns it from a spawned task that pings it first and discards it if the
+/// ping fails, so a backend terminated before then is discarded unseen and no
+/// statement ever meets the dead connection.
+async fn database_connection_released(pool: &PgPool) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while pool.num_idle() != 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .context("connection did not return to the pool")
+}
+
 /// A pooled connection whose backend died is used by at most one failing
 /// statement and then replaced. Past the reprove threshold it is replaced
 /// before any statement uses it.
@@ -850,6 +864,7 @@ async fn dead_pooled_database_connection_fails_at_most_one_statement() -> Result
             .connect_with(options.clone())
             .await?;
         let dead = database_backend(&pool).await?;
+        database_connection_released(&pool).await?;
         ensure!(
             sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1, 5000)")
                 .bind(dead)
