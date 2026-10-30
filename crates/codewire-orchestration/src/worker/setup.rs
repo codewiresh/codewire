@@ -664,10 +664,12 @@ pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
         setup_phase: backend.setup_phase,
         setup_complete: backend.setup_complete,
         ttl_seconds: env.ttl_seconds,
+        // Work after `configure_environment`. The saved environment isn't:
+        // that phase writes it, and a later phase uses it only with its own
+        // work (#3684).
         has_setup: !spec.repositories.is_empty()
             || !spec.install_command.is_empty()
             || !spec.startup_script.is_empty()
-            || !spec.environment.is_empty()
             || !spec.agents.is_empty()
             || !spec.application_ports.is_empty(),
         working_directory: spec.working_directory.clone(),
@@ -3361,7 +3363,12 @@ mod tests {
         assert_eq!(input.setup_phase, 2);
         assert_eq!(input.ttl_seconds, Some(3600));
 
+        // #3684: saved variables alone are written by `configure_environment`,
+        // which runs either way, so they leave no work for a later phase.
         let mut env = env;
+        env.project_spec.environment = BTreeMap::from([("APP_MODE".into(), "test".into())]);
+        assert!(!to_setup_inputs(&env, &backend).has_setup);
+
         env.project_spec = codewire_project::ProjectSpec {
             repositories: vec![codewire_project::RepositorySpec {
                 source: "https://g/o/r.git".into(),
