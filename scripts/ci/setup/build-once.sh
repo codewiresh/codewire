@@ -18,7 +18,7 @@
 #   build-once.sh build OUT         run every wanted leg (LEGS below) at once;
 #                                   each writes its test archives to
 #                                   OUT/<leg>.<ext>; with BUILD_ONCE_CHECKS=true
-#                                   (a main push) the Rust checks run beside
+#                                   (every CI run) the Rust checks run beside
 #                                   them, under the same jobserver
 #   build-once.sh leg NAME OUT      run one leg
 #   build-once.sh legs              list the wanted legs
@@ -27,9 +27,7 @@
 #                                   output <leg>_sha256
 #   build-once.sh checks            run the Rust checks (run-rust-checks.sh)
 #                                   at once under one jobserver, each in its
-#                                   own target folder: in the Rust checks job
-#                                   after prepare (every run but a main
-#                                   push), or within build
+#                                   own target folder, within build
 #
 # The build folder, /ci-cache/main or /ci-cache/pr:
 # - src: a persistent clone. The job's checkout is fetched into it, so git
@@ -589,7 +587,7 @@ run_checks_beside_legs() {
 
 run_legs() {
   # run_legs OUT LOGS: every wanted leg at once, under the jobserver build
-  # started, and on a main push the Rust checks beside them (infra#1534
+  # started, and the Rust checks beside them (infra#1534
   # lever 3: they started only after the whole build, 51-177 s later, and
   # took about as long as the test jobs after it); it fails when any of them
   # failed.
@@ -677,8 +675,7 @@ publish() {
 
 checks() {
   # The Rust checks (run-rust-checks.sh) from src, in their own warm target
-  # folders, on the build runner: after this run's archives in the Rust
-  # checks job, or beside the legs on a main push (build). A check that read a corrupt output in one of them wipes the folders
+  # folders, on the build runner, beside the legs (build). A check that read a corrupt output in one of them wipes the folders
   # its log names (clippy when it names none) and runs once more, as a leg
   # does (rebuild_corrupt_leg).
   local log folder folders=() status=0

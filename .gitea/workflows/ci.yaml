@@ -686,10 +686,17 @@ jobs:
     # runner, whose persistent build disk keeps a warm build folder. It runs
     # build-once.sh's legs, every test archive at once under one jobserver,
     # and publishes each leg's archive to an archive store; the test jobs run
-    # from those archives and compile nothing. The checks that build no
-    # archive run in Rust checks, after this job; on a main push they run in
-    # this job instead, beside the legs and under the same jobserver
-    # (BUILD_ONCE_CHECKS; infra#1534 lever 3). A main push uses the main
+    # from those archives and compile nothing. The Rust checks, which build no
+    # archive, run in this job too, beside the legs and under the same
+    # jobserver (BUILD_ONCE_CHECKS; infra#1534 lever 3): compile-all-targets
+    # (clippy over every target with default and all features, and the curated
+    # image workspaces), the feature graphs' lints and dependency checks, the
+    # local-vmm shard's checks (its Darwin cross-check, the static guest's
+    # reproducibility proof, the desktop check and package) and the cw Darwin
+    # cross-check (run-rust-checks.sh). A build runner takes one job at a time,
+    # so a separate job could only start after the build, and held the runner
+    # from the next run. The test jobs start when this job ends, so they wait
+    # for the checks too. A main push uses the main
     # build runner, its build folder /ci-cache/main and the main archive
     # store, which only main's guests reach; every other run uses the pull
     # request build runner, /ci-cache/pr and the pull request archive store.
@@ -718,12 +725,11 @@ jobs:
       # its artifact-selected desktop package (build-once.sh).
       BUILD_ONCE_LOCAL_VMM: ${{ contains(needs.verification-selection.outputs.selection, '|transport|') || contains(needs.verification-selection.outputs.selection, '|rust_pkg_codewire_desktop|') || needs.verification-selection.outputs.desktop_package_selected == 'true' }}
       DESKTOP_PACKAGE_SELECTED: ${{ needs.verification-selection.outputs.desktop_package_selected }}
-      # On a main push the Rust checks run beside the legs (build-once.sh
-      # build), from the same prepared src and their own warm target folders;
-      # every other run keeps them in Rust checks. They started 51-177 s after
-      # the build there, and the checks were shorter than the legs in every
-      # measured main run (2026-10-28).
-      BUILD_ONCE_CHECKS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # The Rust checks run beside the legs (build-once.sh build), from the
+      # same prepared src and their own warm target folders. As their own job
+      # they started 51-177 s after the build, and the checks were shorter than
+      # the legs in every measured main run (2026-10-28).
+      BUILD_ONCE_CHECKS: 'true'
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -746,84 +752,10 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/setup/build-once.sh prepare "$GITHUB_WORKSPACE" build
 
-      # The Rust checks' Darwin tools, when they run here (a main push); as
-      # in Rust checks.
-      - name: Set up pinned Darwin C cross-check tools
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.verification-selection.outputs.cw_package_selected == 'true' || contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_local_vmm|')) }}
-        run: |
-          set -euo pipefail
-          zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          curl -fsSLo zig.tar.xz "$zig_url"
-          echo "${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -
-          tar -xf zig.tar.xz
-          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
-          cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
-          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
-
-      # The legs build-once.sh lists; a leg wanted only for a selected family
-      # (selected:TOKEN) reads the selection. On a main push the Rust checks
-      # run here too (BUILD_ONCE_CHECKS).
-      - name: Run the build legs
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        env:
-          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-          CW_PACKAGE_SELECTED: ${{ needs.verification-selection.outputs.cw_package_selected }}
-        run: scripts/ci/setup/build-once.sh build "$RUNNER_TEMP/build-once-out"
-
-      - name: Publish the test archives
-        id: publish
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        run: scripts/ci/setup/build-once.sh publish "$RUNNER_TEMP/build-once-out"
-
-  rust-checks:
-    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job requests no identity and reads no protected credential: it checks in its build runner's own warm folder, never the shared cache.
-    # Compile once (infra#1632): the Rust checks that build no test archive,
-    # on the build runner that just built this run's archives (main's for a
-    # main push), all at once under one jobserver, each in its own warm target
-    # folder of the build folder (build-once.sh checks):
-    # compile-all-targets (clippy over every target with default and all
-    # features, and the curated image workspaces), the feature graphs' lints
-    # and dependency checks, the local-vmm shard's checks (its Darwin
-    # cross-check, the static guest's reproducibility proof, the desktop check
-    # and package) and the cw Darwin cross-check (run-rust-checks.sh). One
-    # after another they used 6.6 of the runner's cores (run 24112, #3494). It
-    # starts once Build test archives ends; the test jobs do not wait for it,
-    # and Required verification does. On a medium guest with only the shared
-    # compiler cache it took about 12 min, against 52 s warm here.
-    # On a main push the checks run in Build test archives instead, beside the
-    # legs (infra#1534 lever 3): main's build runner takes one job at a time,
-    # so this job could only start after the build there.
-    name: Rust checks
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_BUILD') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD') }}
-    timeout-minutes: 45
-    needs: [verification-selection, rust-compile]
-    if: ${{ needs.verification-selection.outputs.rust_compile_expected == 'true' && !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    env:
-      # The build runner's warm build folder (build-once.sh prepare).
-      BUILD_ONCE_TREE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '/ci-cache/main' || '/ci-cache/pr' }}
-      CARGO_HOME: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '/ci-cache/main/cargo-home' || '/ci-cache/pr/cargo-home' }}
-    steps:
-      - name: Reuse exact PR-head content verification
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
-        run: echo 'Rust checks inherited from the exact tested PR-head tree'
-
-      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        with:
-          ref: ${{ needs.verification-selection.outputs.source_sha }}
-
-      - name: Verify sealed Rust toolchain
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        run: scripts/ci/setup/assert-ci-runner-image.sh
-
-      - name: Bring the warm build folder to this commit
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
-        run: scripts/ci/setup/build-once.sh prepare "$GITHUB_WORKSPACE" checks
-
       # The macOS cw and the local VMM link Apple frameworks, so only the
       # protected Mac runner links them (cli-release.yaml and
-      # cw-release-dry-run.yaml). Here they are compiled for the Mac targets
-      # without the SDK (#3119 A13), with these pinned tools.
+      # cw-release-dry-run.yaml). The Rust checks compile them for the Mac
+      # targets without the SDK (#3119 A13), with these pinned tools.
       - name: Set up pinned Darwin C cross-check tools
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (needs.verification-selection.outputs.cw_package_selected == 'true' || contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_local_vmm|')) }}
         run: |
@@ -836,14 +768,20 @@ jobs:
           cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Run the Rust checks
+      # The legs build-once.sh lists; a leg wanted only for a selected family
+      # (selected:TOKEN) reads the selection. The Rust checks run here too
+      # (BUILD_ONCE_CHECKS).
+      - name: Run the build legs
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
           CW_PACKAGE_SELECTED: ${{ needs.verification-selection.outputs.cw_package_selected }}
-          BUILD_ONCE_LOCAL_VMM: ${{ contains(needs.verification-selection.outputs.selection, '|transport|') || contains(needs.verification-selection.outputs.selection, '|rust_pkg_codewire_desktop|') || needs.verification-selection.outputs.desktop_package_selected == 'true' }}
-          DESKTOP_PACKAGE_SELECTED: ${{ needs.verification-selection.outputs.desktop_package_selected }}
-        run: scripts/ci/setup/build-once.sh checks
+        run: scripts/ci/setup/build-once.sh build "$RUNNER_TEMP/build-once-out"
+
+      - name: Publish the test archives
+        id: publish
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/build-once.sh publish "$RUNNER_TEMP/build-once-out"
 
   rust-packages:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
@@ -2207,7 +2145,6 @@ jobs:
       - standard
       - tooling
       - rust-compile
-      - rust-checks
       - rust-packages
       - rust-features
       - rust-transport
@@ -2241,8 +2178,8 @@ jobs:
           VERIFICATION_RUST_TRANSPORT_RESULT: ${{ needs.rust-transport.result }}
           VERIFICATION_RUST_COMPILE_EXPECTED: ${{ needs.verification-selection.outputs.rust_compile_expected }}
           VERIFICATION_RUST_COMPILE_RESULT: ${{ needs.rust-compile.result }}
-          # On a main push the Rust checks run in Build test archives.
-          VERIFICATION_RUST_CHECKS_RESULT: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.rust-compile.result || needs.rust-checks.result }}
+          # The Rust checks run in Build test archives.
+          VERIFICATION_RUST_CHECKS_RESULT: ${{ needs.rust-compile.result }}
           VERIFICATION_RUST_SHARDS_EXPECTED: ${{ needs.verification-selection.outputs.rust_shards_expected }}
           VERIFICATION_RUST_PACKAGES_RESULT: ${{ needs.rust-packages.result }}
           VERIFICATION_RUST_FEATURES_RESULT: ${{ needs.rust-features.result }}

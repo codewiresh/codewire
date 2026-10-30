@@ -178,26 +178,21 @@ else:
     # Rust checks runs the --cli check when the cw package changes (#3119
     # A13), and the local VMM's Darwin check, with the installed
     # cargo-zigbuild on PATH from the build folder's Cargo home (infra#1632:
-    # the checks run in their own job on the build runner, after the
-    # archives, each Darwin check in its own target folder and cargo-zigbuild
-    # wrapper folder, since the checks run at once (#3494).
-    # On a main push the same checks run in Build test archives, beside the
-    # legs (BUILD_ONCE_CHECKS, infra#1534 lever 3), with the same tools set up
-    # under the same selection, and only there.
+    # the checks run in Build test archives, beside the legs (BUILD_ONCE_CHECKS,
+    # infra#1534 lever 3), each Darwin check in its own target folder and
+    # cargo-zigbuild wrapper folder, since the checks run at once (#3494).
     assert '\n  cw-release-assets:\n' not in ci
-    compile_job = ci.split('\n  rust-compile:\n', 1)[1].split('\n  rust-checks:\n', 1)[0]
+    compile_job = ci.split('\n  rust-compile:\n', 1)[1].split('\n  rust-packages:\n', 1)[0]
     assert 'check-darwin-cross.sh' not in compile_job
-    checks_job = ci.split('\n  rust-checks:\n', 1)[1].split('\n  rust-packages:\n', 1)[0]
+    assert '\n  rust-checks:\n' not in ci
     cw_selected = "needs.verification-selection.outputs.cw_package_selected == 'true'"
     main_push = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
-    assert f"      BUILD_ONCE_CHECKS: ${{{{ {main_push} }}}}\n" in compile_job
-    assert f"!({main_push})" in checks_job.split('    steps:\n', 1)[0]
-    for job, run_name, command in ((checks_job, 'Run the Rust checks', 'build-once.sh checks'),
-                                   (compile_job, 'Run the build legs', 'build-once.sh build')):
+    assert "      BUILD_ONCE_CHECKS: 'true'\n" in compile_job
+    for job, run_name, command in ((compile_job, 'Run the build legs', 'build-once.sh build'),):
         setup = job.split('      - name: Set up pinned Darwin C cross-check tools\n', 1)[1].split('      - name:', 1)[0]
         assert "tested_tree_receipt != 'accepted'" in setup and cw_selected in setup
         assert "contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_local_vmm|')" in setup
-        assert (main_push in setup) == (job is compile_job)
+        assert main_push not in setup
         assert install in setup and export in setup and setup.index(install) < setup.index(export)
         assert '"${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -' in setup
         run = job.split(f'      - name: {run_name}\n', 1)[1].split('      - name:', 1)[0]
