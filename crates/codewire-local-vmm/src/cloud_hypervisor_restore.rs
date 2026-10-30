@@ -27,9 +27,8 @@ const MIB: u64 = 1024 * 1024;
 
 /// Devices the local VM command never creates. Each must be absent, null or
 /// empty in an admitted configuration.
-const ABSENT_DEVICES: [&str; 11] = [
+const ABSENT_DEVICES: [&str; 10] = [
     "net",
-    "fs",
     "pmem",
     "devices",
     "user_devices",
@@ -105,6 +104,9 @@ pub(crate) struct RestoreTarget {
     pub(crate) checkpoint_dir: PathBuf,
     pub(crate) kernel: PathBuf,
     pub(crate) initramfs: PathBuf,
+    /// Each direct share's tag and the restoring VM's virtiofsd socket for
+    /// it, in the order the VM was made with.
+    pub(crate) virtiofs: Vec<(String, PathBuf)>,
 }
 
 impl RestoreTarget {
@@ -145,17 +147,38 @@ pub(crate) fn admit_and_rewrite(
             Some(_) => return refuse("it has a device the local VM never has"),
         }
     }
-    // Memory: private, no hugepages or zones, exactly the recorded size.
+    // Memory: no hugepages or zones, exactly the recorded size; shared
+    // exactly when direct shares need it, as the local VM command makes it.
     let memory = root
         .get("memory")
         .and_then(Value::as_object)
         .ok_or(RestoreConfigError::Refused("no memory"))?;
     if memory.get("size").and_then(Value::as_u64) != Some(u64::from(target.memory_mib) * MIB)
-        || memory.get("shared").and_then(Value::as_bool) != Some(false)
+        || memory.get("shared").and_then(Value::as_bool) != Some(!target.virtiofs.is_empty())
         || memory.get("hugepages").and_then(Value::as_bool) != Some(false)
         || !matches!(memory.get("zones"), None | Some(Value::Null))
     {
-        return refuse("its memory is not plain private memory of the recorded size");
+        return refuse("its memory is not the local VM's memory of the recorded size");
+    }
+    // Direct shares: exactly the recorded virtio-fs devices, by tag, each
+    // rewritten to the restoring VM's own virtiofsd socket.
+    match root.get_mut("fs") {
+        None | Some(Value::Null) if target.virtiofs.is_empty() => {}
+        Some(Value::Array(devices)) if devices.is_empty() && target.virtiofs.is_empty() => {}
+        Some(Value::Array(devices)) if devices.len() == target.virtiofs.len() => {
+            for (device, (tag, socket)) in devices.iter_mut().zip(&target.virtiofs) {
+                let device = device.as_object_mut().ok_or(RestoreConfigError::Refused(
+                    "a filesystem device is not an object",
+                ))?;
+                if device.get("tag").and_then(Value::as_str) != Some(tag.as_str())
+                    || !device.get("socket").is_some_and(Value::is_string)
+                {
+                    return refuse("a filesystem device is not a recorded direct share");
+                }
+                device.insert("socket".to_owned(), path_value(socket)?);
+            }
+        }
+        _ => return refuse("its filesystem devices are not the recorded direct shares"),
     }
     if root
         .get("cpus")
@@ -276,6 +299,9 @@ pub(crate) fn admit_and_rewrite(
     for (_, path) in target.disks.values() {
         allowed.insert(path_text(path)?);
     }
+    for (_, socket) in &target.virtiofs {
+        allowed.insert(path_text(socket)?);
+    }
     if !only_allowed_paths(&value, &allowed) {
         return refuse("it names a host path the restoring VM does not own");
     }
@@ -342,6 +368,7 @@ mod tests {
             checkpoint_dir: "/state/vms/new/checkpoints".into(),
             kernel: "/artifacts/kernel".into(),
             initramfs: "/artifacts/initramfs".into(),
+            virtiofs: Vec::new(),
         }
         .with_disk(RestoreDisk::State, "/state/vms/new/disks/state.raw".into())
         .with_disk(
@@ -455,6 +482,31 @@ mod tests {
         }
         assert!(admit_and_rewrite(b"[]", &target()).is_err());
         assert!(admit_and_rewrite(&vec![b' '; MAXIMUM_CONFIG_BYTES + 1], &target()).is_err());
+    }
+
+    #[test]
+    fn direct_shares_are_rewritten_to_the_restoring_vms_virtiofsd() {
+        let mut target = target();
+        target.virtiofs = vec![("cw-direct-00".to_owned(), "/sock/new/fs/00.sock".into())];
+        let mut config = captured();
+        config["memory"]["shared"] = true.into();
+        config["fs"] = serde_json::json!([{
+            "tag": "cw-direct-00", "socket": "/sock/old/fs/00.sock",
+            "num_queues": 1, "queue_size": 1024, "id": "cw-fs-00", "pci_segment": 0
+        }]);
+        let admitted: Value = serde_json::from_slice(
+            &admit_and_rewrite(&serde_json::to_vec(&config).unwrap(), &target).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(admitted["fs"][0]["socket"], "/sock/new/fs/00.sock");
+        // Private memory with a share, another tag, or a missing share are refused.
+        let mut private = config.clone();
+        private["memory"]["shared"] = false.into();
+        assert!(admit_and_rewrite(&serde_json::to_vec(&private).unwrap(), &target).is_err());
+        let mut tagged = config.clone();
+        tagged["fs"][0]["tag"] = "other".into();
+        assert!(admit_and_rewrite(&serde_json::to_vec(&tagged).unwrap(), &target).is_err());
+        assert!(admit_and_rewrite(&serde_json::to_vec(&captured()).unwrap(), &target).is_err());
     }
 
     #[test]

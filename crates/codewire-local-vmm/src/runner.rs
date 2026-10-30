@@ -5151,6 +5151,11 @@ fn direct_share_process_with_domain(
         .arg(format!("squash-guest:0:{host_gid}:{}", u32::MAX))
         .arg("--log-level")
         .arg("off")
+        // A VM restored from a VM checkpoint hands a fresh virtiofsd the
+        // saved one's inode and handle table, found again by path (#3046
+        // R4b). A path gone since fails only the guest's requests on it.
+        .arg("--migration-on-error")
+        .arg("guest-error")
         .arg("--preserve-noatime")
         .arg("--rlimit-nofile")
         .arg("65536")

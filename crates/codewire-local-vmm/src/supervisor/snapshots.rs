@@ -981,16 +981,6 @@ fn admit_restore_request(
                 manifest.resources.vcpus, manifest.resources.memory_mib
             )));
         }
-        if manifest
-            .workspace_plan
-            .inputs
-            .iter()
-            .any(|input| matches!(input, WorkspaceInput::Direct { .. }))
-        {
-            return Err(Status::failed_precondition(format!(
-                "VM checkpoint {name}'s source mounts host folders directly, which forks do not support yet"
-            )));
-        }
     }
     // The built root accepts only its own project, sources aside.
     manifest

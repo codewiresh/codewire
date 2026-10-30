@@ -1294,16 +1294,6 @@ pub(in crate::supervisor) mod linux {
                 "{name} has never finished starting"
             )));
         }
-        if environment
-            .workspace_plan
-            .inputs
-            .iter()
-            .any(|input| matches!(input, WorkspaceInput::Direct { .. }))
-        {
-            return Err(Status::failed_precondition(format!(
-                "{name} mounts host folders directly (`--path-mode mount`), which VM checkpoints do not support yet; create it with `--path-mode copy` to checkpoint it"
-            )));
-        }
         Ok(environment)
     }
 

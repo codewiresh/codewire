@@ -80,11 +80,6 @@ impl RunningVm {
         &mut self,
         operation_id: Uuid,
     ) -> Result<CheckpointCapture, RunnerError> {
-        if !self.direct_shares.is_empty() {
-            return Err(RunnerError::Checkpoint(
-                "a VM with direct mounts cannot be checkpointed yet",
-            ));
-        }
         if !matches!(self.try_exit()?, ExitClass::StillRunning) {
             return Err(RunnerError::Checkpoint("the VM is not running"));
         }
@@ -431,10 +426,8 @@ impl CloudHypervisorRunner {
                 "the VM checkpoint was taken by another Cloud Hypervisor build; it restores only into its own",
             ));
         }
-        if !request.direct_shares.is_empty() || request.setup.is_some() {
-            return Err(RunnerError::Checkpoint(
-                "a restored VM has no direct shares or setup pack",
-            ));
+        if request.setup.is_some() {
+            return Err(RunnerError::Checkpoint("a restored VM has no setup pack"));
         }
         if request.skill_snapshot_sha256 != restore.skill_snapshot_sha256
             || request.environment_projection_sha256 != restore.environment_projection_sha256
@@ -508,6 +501,13 @@ impl CloudHypervisorRunner {
             checkpoint_dir: paths.checkpoints_dir.clone(),
             kernel: config.kernel.clone(),
             initramfs: config.initramfs.clone(),
+            // Each direct share's fresh virtiofsd, which Cloud Hypervisor
+            // gives the saved filesystem state to (R4b).
+            virtiofs: config
+                .virtiofs
+                .iter()
+                .map(|share| (share.tag.clone(), share.socket.clone()))
+                .collect(),
         }
         .with_disk(RestoreDisk::State, config.state_disk.clone())
         .with_disk(RestoreDisk::Root, config.root_disk.clone())
