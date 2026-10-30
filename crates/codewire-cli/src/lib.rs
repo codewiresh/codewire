@@ -459,7 +459,7 @@ enum Command {
     Policy(PolicyArgs),
     #[command(
         about = "Save, list and remove disk snapshots of stopped environments",
-        long_about = "Save, list and remove disk snapshots.\n\nWith --platform, a snapshot is a hosted environment's workspace disk, kept on the platform and private to you; Codewire's delivered sign-ins are cleared from it.\n\nLocally, a disk snapshot is a reusable copy of a stopped local VM's disks on this host (Linux), made in about a second where the filesystem shares blocks between files. Start environments from one with `cw create --local --snapshot NAME [--count N]`; each gets fresh identity.\n\n  cw stop app\n  cw snapshot create app --name good-toolchain\n  cw create --local --snapshot good-toolchain --count 3\n  cw snapshot ls\n  cw snapshot rm good-toolchain"
+        long_about = "Save, list and remove disk snapshots.\n\nWith --cloud, a snapshot is a hosted environment's workspace disk, kept on the platform and private to you; Codewire's delivered sign-ins are cleared from it.\n\nLocally, a disk snapshot is a reusable copy of a stopped local VM's disks on this host (Linux), made in about a second where the filesystem shares blocks between files. Start environments from one with `cw create --local --snapshot NAME [--count N]`; each gets fresh identity.\n\n  cw stop app\n  cw snapshot create app --name good-toolchain\n  cw create --local --snapshot good-toolchain --count 3\n  cw snapshot ls\n  cw snapshot rm good-toolchain"
     )]
     Snapshot(SnapshotArgs),
     #[command(

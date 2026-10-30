@@ -1,4 +1,4 @@
-//! `cw --platform snapshot`: hosted disk snapshots (#3046). Capture runs in the
+//! `cw --cloud snapshot`: hosted disk snapshots (#3046). Capture runs in the
 //! background on the platform; `create` waits for it, because a snapshot is
 //! useful only once it is ready.
 
@@ -64,7 +64,7 @@ fn failure_text(code: Option<&str>) -> &'static str {
 
 fn list_text(snapshots: &[Snapshot]) -> String {
     if snapshots.is_empty() {
-        return "No snapshots. Create one with: cw --platform snapshot create ENV".to_owned();
+        return "No snapshots. Create one with: cw --cloud snapshot create ENV".to_owned();
     }
     let mut lines = vec![format!(
         "{:<36}  {:<10}  {:>8}  NAME",
@@ -143,7 +143,7 @@ async fn wait_for_capture(
         .map_err(|_| {
             anyhow::anyhow!(
                 "snapshot {snapshot_id} is still being captured; check it with: \
-                 cw --platform snapshot inspect {snapshot_id}"
+                 cw --cloud snapshot inspect {snapshot_id}"
             )
         })?
 }
@@ -239,12 +239,23 @@ mod tests {
     }
 
     #[test]
+    fn the_flag_the_help_names_selects_the_platform() {
+        use clap::Parser as _;
+        let cli =
+            crate::Cli::try_parse_from(["cw", "--cloud", "snapshot", "create", "app"]).unwrap();
+        assert_eq!(
+            cli.placement().unwrap(),
+            Some(EnvironmentPlacement::Platform)
+        );
+    }
+
+    #[test]
     fn a_list_names_each_snapshots_state_and_size() {
         let text = list_text(&[snapshot(SnapshotState::Ready)]);
         assert!(text.contains("good-toolchain"), "{text}");
         assert!(text.contains("ready"), "{text}");
         assert!(text.contains("80.0"), "{text}");
-        assert!(list_text(&[]).contains("cw --platform snapshot create"));
+        assert!(list_text(&[]).contains("cw --cloud snapshot create"));
     }
 
     #[test]

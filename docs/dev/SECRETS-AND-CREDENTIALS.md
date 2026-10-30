@@ -1160,7 +1160,7 @@ login saved before this record existed records no account until the next
 `cw login`, and a re-login with an older `cw`, which does not know the file,
 can leave a stale one beside the new login; `cw logout` removes it.
 
-A hosted disk snapshot (`cw --platform snapshot create`) is a kept copy of a
+A hosted disk snapshot (`cw --cloud snapshot create`) is a kept copy of a
 stopped hosted environment's workspace volume, private to its creator. Capture
 never edits the source. It restores a raw snapshot of the volume into a clearing
 Sandbox, a Kata VM with no network, credentials, service-account token or

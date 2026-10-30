@@ -139,7 +139,7 @@ disk less 2 GiB) online with `resize2fs` at the next Pod start.
 
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
-| `SANDBOX_VOLUME_SNAPSHOT_CLASS` | No | VolumeSnapshotClass of hosted disk snapshots (`cw --platform snapshot`). Empty, the default, refuses them. |
+| `SANDBOX_VOLUME_SNAPSHOT_CLASS` | No | VolumeSnapshotClass of hosted disk snapshots (`cw --cloud snapshot`). Empty, the default, refuses them. |
 | `SANDBOX_WARM_POOL_SHAPES` | No | Comma-separated warm pools, `<cpu>m/<memory>Mi/<disk>Gi=<members>` with 0 to 16 members each. A create of exactly a pool's shape adopts a prestarted member. The default create shape is `2000m/8192Mi/80Gi`, so a pool of that shape serves default creates. Empty means no pools. | `2000m/8192Mi/80Gi=2` |
 
 ## Workspace CPU

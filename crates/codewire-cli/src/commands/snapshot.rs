@@ -24,7 +24,7 @@ pub(crate) struct SnapshotArgs {
 pub(crate) enum SnapshotCommand {
     #[command(
         about = "Save a stopped environment's disks as a snapshot",
-        after_help = "Examples:\n  cw stop app\n  cw snapshot create app --name good-toolchain\n  cw --platform snapshot create app\n  cw create --local --snapshot good-toolchain --count 3\n\nThe VM must be stopped. Codewire's delivered sign-ins are removed from the copy; anything else on the disks, such as a .env file or shell history, is kept."
+        after_help = "Examples:\n  cw stop app\n  cw snapshot create app --name good-toolchain\n  cw --cloud snapshot create app\n  cw create --local --snapshot good-toolchain --count 3\n\nThe VM must be stopped. Codewire's delivered sign-ins are removed from the copy; anything else on the disks, such as a .env file or shell history, is kept."
     )]
     Create(SnapshotCreateArgs),
     #[command(visible_alias = "list", about = "List this host's snapshots")]
