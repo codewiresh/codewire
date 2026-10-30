@@ -607,6 +607,10 @@ fn valid_restore_resources(vcpus: u32, memory_mib: u32) -> bool {
 /// generation, the requested vCPUs and memory, and the snapshot's disk sizes.
 pub(super) struct RestoreRecord {
     pub(super) artifact_generation: String,
+    /// A VM checkpoint fork's recorded cw runtime catalog: `Some(None)` when
+    /// the captured boot had none. `None` for a disk snapshot, which admits
+    /// the installed runtime as a plain create does.
+    pub(super) checkpoint_cw_runtime: Option<Option<String>>,
     pub(super) vcpus: u8,
     pub(super) memory_mib: u32,
     pub(super) disk_bytes: u64,
@@ -677,12 +681,27 @@ pub(super) async fn record_inputs(
         crate::linux::preflight::preflight().map_err(RunnerError::from)?;
         Ok(Some(RestoreRecord {
             artifact_generation,
+            checkpoint_cw_runtime: manifest
+                .checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.boot.cw_runtime_catalog_generation.clone()),
             vcpus: u8::try_from(restore.vcpus).map_err(|_| SupervisorError::InvalidRequest)?,
             memory_mib: restore.memory_mib,
             disk_bytes: manifest.resources.disk_bytes,
             docker_disk_bytes: manifest.resources.docker_disk_bytes,
         }))
     }
+}
+
+/// Open a VM checkpoint's recorded cw runtime catalog from the private store,
+/// as a start opens its environment's binding. Never the installed runtime.
+pub(super) fn open_recorded_cw_runtime_catalog(
+    config: &NativeRuntimeConfig,
+    generation: &str,
+) -> Result<String, SupervisorError> {
+    let engine = PrivateRoot::open(&config.engine_root())?;
+    crate::cw_runtime::CwRuntimeStore::create(&engine)?.open_catalog(generation)?;
+    Ok(generation.to_owned())
 }
 
 /// What garbage collection keeps for every snapshot: its artifact generation
@@ -893,6 +912,27 @@ pub(super) async fn restore_plan(
                 other => status(other),
             })?;
         admit_restore_request(&row, &manifest, request)?;
+        // A fork boots the cw runtime catalog its VM checkpoint's memory was
+        // booted with, never the installed one; refuse here, with the
+        // checkpoint's name, if that catalog is gone (#3046).
+        if let Some(generation) = manifest
+            .checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.boot.cw_runtime_catalog_generation.clone())
+        {
+            let config = supervisor.config.clone();
+            let present = tokio::task::spawn_blocking(move || {
+                open_recorded_cw_runtime_catalog(&config, &generation).is_ok()
+            })
+            .await
+            .map_err(|_| Status::internal("snapshot admission task failed"))?;
+            if !present {
+                return Err(Status::failed_precondition(format!(
+                    "VM checkpoint {}'s cw runtime is no longer in the local store; it cannot be forked",
+                    row.name
+                )));
+            }
+        }
         Ok((
             manifest.workspace_plan,
             DirectShareDiscriminators::decode(&manifest.direct_share_discriminators),

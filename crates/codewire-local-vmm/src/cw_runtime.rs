@@ -457,6 +457,11 @@ impl CwRuntimeStore {
         Ok(admitted)
     }
 
+    /// Catalogs are never collected: the store only adds them, up to
+    /// `MAXIMUM_STORE_OBJECTS`. A collector must keep every generation an
+    /// environment's binding or a ready VM checkpoint's manifest
+    /// (`boot.cw_runtime_catalog_generation`) references, because a fork
+    /// boots the checkpoint's recorded catalog and never another (#3046).
     pub fn open_catalog(&self, generation: &str) -> Result<AdmittedCwRuntimeDisk, CwRuntimeError> {
         self.open_catalog_until(generation, Instant::now() + PREPARATION_TIMEOUT)
     }

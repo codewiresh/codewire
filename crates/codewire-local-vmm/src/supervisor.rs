@@ -2708,15 +2708,34 @@ impl Supervisor {
                         };
                         self.require_vm_only_guest_for_plan(&artifact_generation, workspace_plan)
                             .await?;
-                        let cw_runtime =
-                            self.admit_installed_cw_runtime().await?.map(|generation| {
-                                CwRuntimeBinding {
-                                    schema_version: 1,
-                                    active_catalog_generation: generation,
-                                    staging_catalog_generation: None,
-                                    rollback_catalog_generation: None,
-                                }
-                            });
+                        // A VM checkpoint fork boots its recorded catalog,
+                        // never the installed runtime (#3046).
+                        let cw_runtime = match restore
+                            .as_ref()
+                            .and_then(|restore| restore.checkpoint_cw_runtime.clone())
+                        {
+                            Some(Some(generation)) => {
+                                let config = self.config.clone();
+                                Some(
+                                    tokio::task::spawn_blocking(move || {
+                                        snapshots::open_recorded_cw_runtime_catalog(
+                                            &config,
+                                            &generation,
+                                        )
+                                    })
+                                    .await
+                                    .map_err(|_| SupervisorError::CwRuntimeProvisionTask)??,
+                                )
+                            }
+                            Some(None) => None,
+                            None => self.admit_installed_cw_runtime().await?,
+                        }
+                        .map(|generation| CwRuntimeBinding {
+                            schema_version: 1,
+                            active_catalog_generation: generation,
+                            staging_catalog_generation: None,
+                            rollback_catalog_generation: None,
+                        });
                         Some(EnvironmentRecord {
                             cw_runtime,
                             id: environment_id,

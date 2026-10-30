@@ -1780,6 +1780,15 @@ async fn keeping_everything_fails_when_it_cannot_list_what_is_on_disk() {
 /// Publish a VM checkpoint of the source, made from disk snapshot
 /// `snapshot`'s files plus `vmm/` files a VMM would have written.
 async fn publish_checkpoint(source: &Source, snapshot: &v1::Snapshot, name: &str) -> SnapshotRow {
+    publish_checkpoint_with_catalog(source, snapshot, name, None).await
+}
+
+async fn publish_checkpoint_with_catalog(
+    source: &Source,
+    snapshot: &v1::Snapshot,
+    name: &str,
+    cw_runtime_catalog_generation: Option<String>,
+) -> SnapshotRow {
     let config = config(source);
     let engine = config.engine_root();
     let (_, disk) = ready_snapshot(&config, canonical_id(&snapshot.id).unwrap()).unwrap();
@@ -1844,7 +1853,7 @@ async fn publish_checkpoint(source: &Source, snapshot: &v1::Snapshot, name: &str
                 .encode()
                 .to_owned(),
             docker: false,
-            cw_runtime_catalog_generation: None,
+            cw_runtime_catalog_generation,
             daemon_vsock_port: 7777,
         },
         timings: crate::supervisor::checkpoints::Timings::default(),
@@ -1952,6 +1961,34 @@ async fn a_checkpoint_survives_the_loss_of_the_store_only_with_its_own_vmm_files
         row
     });
     assert!(adopted[0].0.kind.is_checkpoint());
+}
+
+#[tokio::test]
+async fn a_fork_needs_its_checkpoints_recorded_cw_runtime_and_never_another() {
+    let source = source(StoredEnvironmentState::Stopped);
+    let config = config(&source);
+    let snapshot = capture_named(&source, "s1").await.unwrap();
+    // The checkpoint's memory was booted with a catalog the store no longer
+    // has; the installed runtime is never a substitute.
+    let missing = "e".repeat(64);
+    let row = publish_checkpoint_with_catalog(&source, &snapshot, "c1", Some(missing)).await;
+    let (_, manifest) = find_ready(&config, &row.id.to_string(), true).unwrap();
+    let mut request = restore_request(&manifest);
+    let restore = request.snapshot.as_mut().unwrap();
+    restore.vcpus = u32::from(manifest.resources.vcpus);
+    restore.memory_mib = manifest.resources.memory_mib;
+    let refused = restore_plan(&source.service.supervisor, &request)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        refused.message(),
+        "VM checkpoint c1's cw runtime is no longer in the local store; it cannot be forked"
+    );
+    assert!(
+        crate::supervisor::snapshots::open_recorded_cw_runtime_catalog(&config, &"e".repeat(64))
+            .is_err()
+    );
 }
 
 #[tokio::test]
