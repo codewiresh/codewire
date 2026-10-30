@@ -139,6 +139,39 @@ result="$(bash -c 'source "$1"; aggregate_nodes "$2" <"$3"' _ "$work/functions.s
 expected='{"node_condition":"b: MemoryPressure=True","allocatable_cpu_m":2000,"allocatable_memory_mib":200,"allocatable_pods":20,"requested_cpu_m":600,"requested_memory_mib":100,"pods":8,"node_cpu_pct":60,"node_memory_pct":40,"node_memory_total_gib":20,"node_memory_used_gib":5,"psi_cpu_some_pct":null,"psi_memory_some_pct":3,"psi_memory_full_pct":null,"psi_io_some_pct":null,"thin_pool":"t","thin_total_gib":200,"thin_used_gib":60,"thin_used_pct":50,"provisioned_gib":200,"overcommit":1,"resource_definitions":1}'
 [[ "$result" == "$expected" ]] || fail "unexpected cluster view: $result"
 
+# A sandbox reserves its vCPUs over the ratio a live pool member shows (#3635),
+# for any shape; DinD and Kata keep theirs, and with no pool nothing is assumed
+# shared.
+reservation() { # POOL_PODS_JSON CPU_M
+  bash -c '
+    source "$1"
+    SANDBOX_NAMESPACE=ns CPU_M="$3" MEMORY_MIB=8192
+    kubectl_ro() { case "$2" in pods) printf "%s" "$POOL_PODS" ;; *) printf "%s" "{\"overhead\":{\"podFixed\":{\"cpu\":\"250m\",\"memory\":\"130Mi\"}}}" ;; esac; }
+    POOL_PODS="$2" sandbox_request
+  ' _ "$work/functions.sh" "$1" "$2" | jq -c '[.workspace.cpu_m, .workspace.cpu_sharing_ratio, .dind.cpu_m, .kata.cpu_m, .cpu_m]'
+}
+pool_pod() { # REQUEST LIMIT
+  printf '{"items":[{"metadata":{"name":"sandbox-other"},"spec":{"containers":[]}},{"metadata":{"name":"cw-pool-2000m-x"},"spec":{"containers":[{"name":"workspace","resources":{"requests":{"cpu":"%s"},"limits":{"cpu":"%s"}}},{"name":"dind","resources":{"requests":{"cpu":"500m","memory":"1Gi"}}}]}}]}' "$1" "$2"
+}
+[[ "$(reservation "$(pool_pod 2000m 2000m)" 2000)" == '[2000,1,500,250,2750]' ]] || fail 'a 1:1 pool member changed the reservation'
+[[ "$(reservation "$(pool_pod 1 2)" 2000)" == '[1000,2,500,250,1750]' ]] || fail '2:1 does not halve the reservation, in canonical quantities'
+[[ "$(reservation "$(pool_pod 1000m 2000m)" 32000)" == '[16000,2,500,250,16750]' ]] || fail 'a shape without a pool does not share at the pool ratio'
+[[ "$(reservation "$(pool_pod 1000m 2000m)" 1001)" == '[501,2,500,250,1251]' ]] || fail 'the request does not round up'
+[[ "$(reservation '{"items":[]}' 2000)" == '[2000,1,500,250,2750]' ]] || fail 'no pool member assumed sharing'
+# During a rotation: an outgoing member counts for nothing, and live members at
+# two ratios refuse rather than predict from whichever comes first.
+member() { # NAME REQUEST LIMIT DELETION_TIMESTAMP_FIELD
+  printf '{"metadata":{"name":"%s"%s},"spec":{"containers":[{"name":"workspace","resources":{"requests":{"cpu":"%s"},"limits":{"cpu":"%s"}}},{"name":"dind","resources":{"requests":{"cpu":"500m","memory":"1Gi"}}}]}}' "$1" "${4:-}" "$2" "$3"
+}
+terminating=',"deletionTimestamp":"2026-10-30T00:00:00Z"'
+outgoing="$(member cw-pool-2000m-old 2000m 2000m "$terminating")"
+[[ "$(reservation "{\"items\":[$outgoing,$(member cw-pool-2000m-new 1000m 2000m)]}" 2000)" == '[1000,2,500,250,1750]' ]] ||
+  fail 'a terminating pool member decided the ratio'
+if reservation "{\"items\":[$(member cw-pool-2000m-old 2000m 2000m),$(member cw-pool-2000m-new 1000m 2000m)]}" 2000 >"$work/rotating" 2>&1; then
+  fail 'pool members at two ratios did not refuse'
+fi
+grep -qF 'wait for the rotation to finish' "$work/rotating" || fail 'the rotation refusal does not say why'
+
 # The prediction floors each node on its own, names what runs out first
 # (ties included), and auto steps climb to two past the total.
 printf '%s' '{"nodes":[{"node":"cpu-bound","allocatable_cpu_m":64000,"allocatable_memory_mib":1000000,"allocatable_pods":110,"requested_cpu_m":4000,"requested_memory_mib":15000,"pods":20},{"node":"memory-bound","allocatable_cpu_m":128000,"allocatable_memory_mib":500000,"allocatable_pods":110,"requested_cpu_m":4000,"requested_memory_mib":15000,"pods":20},{"node":"tie","allocatable_cpu_m":3500,"allocatable_memory_mib":67844,"allocatable_pods":110,"requested_cpu_m":0,"requested_memory_mib":0,"pods":0}]}' >"$work/base.json"

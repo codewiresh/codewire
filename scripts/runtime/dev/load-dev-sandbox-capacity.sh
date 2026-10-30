@@ -119,7 +119,9 @@ Options:
                          small (1 vCPU/4 GiB), default (2 vCPU/8 GiB),
                          large (4 vCPU/16 GiB), xlarge (8 vCPU/32 GiB),
                          memory (1 vCPU/32 GiB), max (32 vCPU/64 GiB, the
-                         default organization quota)
+                         default organization quota), cpu (16 vCPU/8 GiB, which
+                         runs out of CPU requests first even on a node short of
+                         memory)
   --steps LIST           cumulative sandbox counts, or auto (the default):
                          25, 50, 75 and 100% of the predicted limit, then two past it
   --max-sandboxes N      hard cap on the total created (default 200)
@@ -279,7 +281,8 @@ case "$SHAPE" in
   xlarge) CPU_M=8000; MEMORY_MIB=32768 ;;
   memory) CPU_M=1000; MEMORY_MIB=32768 ;;
   max) CPU_M=32000; MEMORY_MIB=65536 ;;
-  *) die "--shape must be small, default, large, xlarge, memory or max" ;;
+  cpu) CPU_M=16000; MEMORY_MIB=8192 ;;
+  *) die "--shape must be small, default, large, xlarge, memory, max or cpu" ;;
 esac
 DISK_GIB=80
 if ! [[ "$MAX_SANDBOXES" =~ ^[1-9][0-9]*$ ]] || (( MAX_SANDBOXES > 500 )); then
@@ -567,20 +570,32 @@ node_requests() { # NODE
     }'
 }
 
-# What one sandbox of this shape reserves: the workspace's request (equal to
-# the shape), DinD's request read from a live pool member (the same for every
-# shape), and the commodity RuntimeClass's fixed Pod overhead.
+# What one sandbox of this shape reserves: the workspace's memory and its vCPUs
+# over the CPU sharing ratio (#3635), DinD's request (the same for every shape),
+# both read from the live pool members, and the commodity RuntimeClass's fixed
+# Pod overhead. A shape without a pool shares at the same ratio. Members that
+# disagree are a rotation in progress, whose outgoing members would also count
+# against the prediction, so it refuses until the rotation has finished.
 sandbox_request() {
-  local dind kata
-  dind="$(kubectl_ro get pods -n "$SANDBOX_NAMESPACE" -o json 2>/dev/null | jq -c '
-    [.items[] | select(.metadata.name | startswith("cw-pool-")) | .spec.containers[]
-      | select(.name == "dind") | .resources.requests][0] // empty' || true)"
+  local members kata
+  members="$(kubectl_ro get pods -n "$SANDBOX_NAMESPACE" -o json 2>/dev/null | jq -c '
+    [.items[] | select((.metadata.name | startswith("cw-pool-")) and .metadata.deletionTimestamp == null)
+      | .spec.containers]' || true)"
   kata="$(kubectl_ro get runtimeclass commodity -o json 2>/dev/null | jq -c '.overhead.podFixed // empty' || true)"
-  jq -nc --argjson cpu "$CPU_M" --argjson mem "$MEMORY_MIB" --argjson dind "${dind:-null}" --argjson kata "${kata:-null}" '
+  jq -nc --argjson cpu "$CPU_M" --argjson mem "$MEMORY_MIB" --argjson members "${members:-[]}" --argjson kata "${kata:-null}" '
     def cpu: if . == null then 0 elif endswith("m") then (.[:-1] | tonumber) else (tonumber * 1000) end;
     def mib: if . == null then 0 elif endswith("Mi") then (.[:-2] | tonumber)
       elif endswith("Gi") then (.[:-2] | tonumber * 1024) else (tonumber / 1048576) end;
-    {workspace: {cpu_m: $cpu, memory_mib: $mem},
+    def resources($name): map(select(.name == $name) | .resources)[0];
+    def ratio: resources("workspace") | [.requests.cpu, .limits.cpu] | map(cpu)
+      | if .[0] > 0 and .[1] > 0 then (.[1] / .[0] | round | if . < 1 then 1 else . end) else 1 end;
+    ($members | map(ratio) | unique) as $ratios
+    | if ($ratios | length) > 1 then
+        error("warm pool members run different CPU sharing ratios \($ratios); wait for the rotation to finish")
+      else . end
+    | ($ratios[0] // 1) as $ratio
+    | ($members[0] // [] | resources("dind").requests) as $dind
+    | {workspace: {cpu_m: ($cpu / $ratio | ceil), memory_mib: $mem, cpu_sharing_ratio: $ratio},
      dind: (if $dind == null then {cpu_m: 500, memory_mib: 1024, source: "template default"}
        else {cpu_m: ($dind.cpu | cpu), memory_mib: ($dind.memory | mib), source: "pool member"} end),
      kata: (if $kata == null then {cpu_m: 250, memory_mib: 130, source: "template default"}
@@ -1057,7 +1072,7 @@ preflight() { # -> base JSON
   others="$(list_envs)" || die "cannot list the smoke organization's environments"
   others="$(awk -F'\t' -v p="$NAME_PREFIX" 'NF && index($2, p) != 1' <<<"$others" | wc -l)"
   [[ "$others" == 0 ]] || die "the smoke organization has $others live environments this tool did not create; wait for them to finish"
-  request="$(sandbox_request)"
+  request="$(sandbox_request)" || die "cannot work out what one sandbox reserves"
   base="$(nodes_state)"
   [[ "$(jq -r .node_condition <<<"$base")" == ok ]] ||
     die "a runtime node is degraded before the run: $(jq -r .node_condition <<<"$base")"
@@ -1077,7 +1092,7 @@ write_summary() {
       def gib: . / 1024 * 10 | round / 10 | tostring;
       def cores: . / 1000 * 100 | round / 100 | tostring;
       .sandbox_request as $s
-      | "Each sandbox reserves \($s.cpu_m | cores) CPU and \($s.memory_mib | gib) GiB: workspace \($s.workspace.cpu_m | cores) CPU / \($s.workspace.memory_mib | gib) GiB, DinD \($s.dind.cpu_m | cores) / \($s.dind.memory_mib | gib), Kata \($s.kata.cpu_m | cores) / \($s.kata.memory_mib | gib).\n",
+      | "Each sandbox reserves \($s.cpu_m | cores) CPU and \($s.memory_mib | gib) GiB: workspace \($s.workspace.cpu_m | cores) CPU\(if ($s.workspace.cpu_sharing_ratio // 1) > 1 then " (\($s.workspace.cpu_sharing_ratio):1)" else "" end) / \($s.workspace.memory_mib | gib) GiB, DinD \($s.dind.cpu_m | cores) / \($s.dind.memory_mib | gib), Kata \($s.kata.cpu_m | cores) / \($s.kata.memory_mib | gib).\n",
         "Prediction before the run, from requests (\(.predicted_total) in all):\n",
         "| Node | Allocatable CPU / GiB / pods | Requested before | Fit by CPU / memory / pods | Fits | First limit |",
         "|---|---|---|---|---|---|",
