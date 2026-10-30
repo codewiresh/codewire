@@ -1480,6 +1480,47 @@ test("disconnect retains output, reload replays from zero, and Close requires co
   expect(state.launches).toBe(1);
 });
 
+// Disconnect is offered when the socket opens and the replay follows it, so a
+// click can overtake the replay. It leaves the screen short, never the session:
+// Reconnect resumes from the last rendered byte.
+test("a Disconnect that overtakes a restored terminal's replay loses no output", async ({ page }) => {
+  const state = await transport(page);
+  await openFixture(page);
+  await automaticTerminal(page, state);
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect.poll(() => state.connections.length).toBe(2);
+  await reloadFixture(page);
+  await expect.poll(() => state.connections.length).toBe(4);
+  await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
+  const panel = page.getByRole("tabpanel");
+  const disconnect = page.getByRole("button", { name: "Disconnect", exact: true });
+  const reconnect = page.getByRole("button", { name: "Reconnect", exact: true });
+  const latest = () => attached(state, sessionId(1)).at(-1)!;
+
+  // No replay frame has arrived.
+  await expect(disconnect).toBeEnabled();
+  await disconnect.click();
+  await expect(reconnect).toBeEnabled();
+  await expect(panel).not.toContainText("restored-first");
+  await reconnect.click();
+  await expect.poll(() => attached(state, sessionId(1)).length).toBe(3);
+  expect(latest().url.searchParams.get("output_offset")).toBe("0");
+
+  // Only the first replay frame has arrived.
+  const cursor = output(latest(), "restored-first\r\n");
+  await expect(panel).toContainText("restored-first");
+  await expect.poll(() => latest().frames.some((frame) => frame.type === "ack" && frame.offset === String(cursor))).toBe(true);
+  await disconnect.click();
+  await expect(reconnect).toBeEnabled();
+  await reconnect.click();
+  await expect.poll(() => attached(state, sessionId(1)).length).toBe(4);
+  expect(latest().url.searchParams.get("output_offset")).toBe(String(cursor));
+
+  output(latest(), "restored-second\r\n", cursor);
+  await expect(panel).toContainText("restored-first");
+  await expect(panel).toContainText("restored-second");
+});
+
 test("reconnect drains old render callbacks and never ACKs them on the replacement socket", async ({ page }) => {
   await holdRenderCallbacks(page);
   const state = await transport(page);

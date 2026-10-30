@@ -574,9 +574,12 @@ export async function runDevUxWalkthrough(page: Page, options: {
   await stage("terminal-tabs-reconnect-select", async () => {
     await page.getByRole("tab", { name: "UX shell", exact: true }).click();
   });
-  // A restored tab may still be attaching after the reload.
+  // A restored tab may still be attaching after the reload. Disconnect is
+  // offered when the socket opens and the replay follows it; a click before
+  // the replay leaves nothing on screen for the next step to find retained.
   await stage("terminal-tabs-reconnect-attached", async () => {
     await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+    await expect(rows).toContainText(`__UX_PID__${pid}__`);
   });
   await stage("terminal-tabs-reconnect-disconnect", async () => {
     await button(page, "Disconnect").click();
