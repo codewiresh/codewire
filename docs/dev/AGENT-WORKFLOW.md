@@ -123,7 +123,8 @@ green on its exact head, `CI / Required verification (pull_request)` and
 `Supply-chain scan / Supply-chain scan (pull_request_target)`, and its product
 journey has run (the merge rule in `AGENTS.md`). Forgejo checks the head, not
 the merged tree; `main` CI verifies the landed tree after merge, and a failure
-is fixed forward. Never cancel a `main` run by hand.
+is fixed forward. Never cancel a `main` run by hand; cancels and reruns are
+the orchestrator's call under the `ci` skill.
 
 Pull-request CI runs every family the change's paths select, as the push to
 `main` does: policy, the crate tests of the changed Rust packages and their
@@ -142,13 +143,12 @@ fj pr -R origin edit 456 labels --add ci-full
 
 Add it only when a hosted-only claim (credentials, permissions, scheduling,
 cache or timing) needs hosted evidence before merge. It applies to every later
-push until removed. Hosted Kind runs only on the four-hourly schedule, on a
-dispatched release candidate and on a `ci-full` pull request; the retired
-`kind-e2e` label and `[kind-e2e]` marker do nothing. Adding or removing a label
-starts a fresh run that supersedes the current one. While
-`scripts/ci/select/main-push-switch.sh` defers them (AGENTS.md, owner decision
-2026-10-20), the Kind gate and the release dry run run on the four-hourly
-schedule and on a dispatched release candidate instead of on each push.
+push until removed. Hosted Kind is off on the schedule and on dispatch until
+the owner revisits it (owner, 2026-10-25); it runs only on a `ci-full` pull
+request. The retired `kind-e2e` label and `[kind-e2e]` marker do nothing.
+Adding or removing a label starts a fresh run that supersedes the current one.
+`scripts/ci/select/main-push-switch.sh` documents what a push to `main` runs
+and the conditions for restoring Kind and the release dry run to every push.
 
 To run the same families locally first, when that is faster than waiting:
 

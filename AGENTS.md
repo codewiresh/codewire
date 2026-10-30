@@ -1,503 +1,183 @@
 # Agent Operating Rules
 
 This file is authoritative for Codewire. `CLAUDE.md` is its compatibility
-symlink. Commands live in [`docs/dev/AGENT-WORKFLOW.md`](docs/dev/AGENT-WORKFLOW.md).
+symlink. Commands live in [`docs/dev/AGENT-WORKFLOW.md`](docs/dev/AGENT-WORKFLOW.md);
+cross-repository rules, decision placement and the orchestrator are in the
+root `AGENTS.md` (`/home/user/src/codewire/AGENTS.md` on the owner workstation).
+Every rule here has one home; when a doc, skill or script is named, it is the
+home and this file only points at it.
 
 ## Authority and safety
 
 Codewire uses direct authority. Conversation may authorize normal repository
 work through merge and closure. Read-only work needs no tracker or claim. Carry
 an authorized landing objective through its safe in-scope steps unless the
-owner asks to stop or checkpoint.
+owner asks to stop or checkpoint. A complaint, a question or frustration is not
+approval: propose and wait for an explicit choice (owner, 2026-10-29).
 
-An authorized landing objective includes repository-selected checked-in
-verification and regeneration of intended derived or golden artifacts,
-including Kind, renderer-specific browser snapshots, and exact-head CI when
-selected; these are not separate authority gates. An explicit named exclusion
-applies only to the exact run or effect it names and must not be generalized to
-adjacent verification. This inheritance never authorizes access to real
-secrets or credentials or bypassing a selected gate: use synthetic credentials
-for verification unless direct access is separately authorized, and preserve
-the checked-in topology and assertions.
+Routine developer work on owner-designated machines, including Macs, has
+standing authority within an authorized task: checked-in verification and
+regeneration of derived artifacts, source transfer, tool setup, builds and
+tests, ad-hoc development signing, disposable VM lifecycle, checked-in test
+networking, retries of existing verification after a diagnosis, and cleanup of
+the task's own processes and artifacts. Do not invent one-shot gates because a
+command runs remotely, uses real hardware or needs a diagnosed retry. It never
+covers real credentials or unrelated user data, release signing or publication,
+shared or production infrastructure mutation, or ad-hoc topology changes to
+make a gate pass. Use synthetic credentials for verification; checked-in
+tooling such as `make kind-credentials-real` may load the owner's development
+credentials into the local Kind cluster through pipes into Kubernetes Secrets,
+never printed, logged, written to disk or held by the agent. Never ask the
+owner to paste a secret; reading or displaying a secret value needs explicit
+authority. Preserve unrelated changes and worktrees; never commit known-bad
+work, weaken a gate for momentum, or use destructive Git or filesystem
+operations without an explicit request.
 
-Checked-in local development tooling, such as `make kind-credentials-real`, may load the
-owner's development credentials from OpenBao into the local Kind cluster
-without asking, provided the values flow only through pipes into Kubernetes
-Secrets and are never printed, logged, written to disk, or held by the agent.
-Never ask the owner to paste a secret or place one in a file. Reading,
-exporting, or displaying a secret value still needs explicit authority.
-
-Routine developer work on owner-designated local or remote machines, including
-Macs, has standing authority within an authorized task. Run developer commands
-without per-operation approval: source/artifact transfer, dependency and tool
-setup, builds/tests, ad-hoc development signing, disposable VM lifecycle,
-checked-in test networking and synthetic workspace shares, and cleanup of the
-test's identified processes and disposable artifacts. These are ordinary
-build-loop operations, not separate hardware or destructive-action gates.
-Bound runtime and resources, preserve unrelated user state and checked-in
-topology, and diagnose failures before rerunning. Do not invent one-shot gates
-merely because a command runs remotely, uses real hardware, signs a development
-helper, or needs a diagnosed retry.
-
-This standing permission does not authorize access to real credentials or
-unrelated user data, release signing/publication, shared/production
-infrastructure mutation, or ad-hoc topology changes to make a gate pass.
-Explicit owner exclusions and checkpoints still apply; reuse valid evidence
-and preserve selected gates. Routine VM networking is not an ad-hoc host change.
-
-Preserve unrelated changes and worktrees. Never commit known-bad work, weaken a
-gate for momentum, or use destructive Git/filesystem operations without an
-explicit request. A Forgejo outage permits only collision-free local work until
-canonical state is reconciled.
-
-Release tags, manual publication/recovery, production or unusual live mutation,
-and direct credential access require explicit action-scoped authority. Ordinary
-merge consequences already declared at the canonical base—CI, support-image
-publication, standard Dev delivery, and GitHub mirroring—inherit merge
-authority. New destinations, workflow changes, releases, recovery, and
-production actions do not. Routine retries or reruns of existing verification
-within an already-authorized task inherit that authority and need no separate
-approval. First diagnose why the prior attempt did not produce reusable
-evidence, preserve the selected gate, and honor any explicit named exclusion
-for the exact run it names.
-
-A pushed `v*` tag is a Production action. Within five minutes the scheduled
-`deploy-prod` picks it up, verifies it from main's code and delivers it to
-Production, and `cli-release` then publishes the CLI (owner, 2026-10-23,
-#2892). Pushing one still needs the owner's explicit, action-scoped authority.
-The schedule takes only the newest release tag signed by the release tagger,
-and only within 24 hours of its signing: a tag that was not picked up within
-24 hours of tagging is delivered only by dispatching the workflow for it. A
-release that fails or does not finish is not retried by the schedule, and a
-rerun of a scheduled run's jobs reads no release credential; recover it by
-dispatching `deploy-prod`, then `cli-release`, for that tag, which stays
-explicit.
+**Tier 3: releases, recovery, Production mutation and direct credential
+access need explicit, action-scoped authority from the owner.** Ordinary merge
+consequences already declared at the canonical base (CI, support-image
+publication, Dev delivery, GitHub mirroring) inherit merge authority; new
+destinations, workflow changes, releases, recovery and Production actions do
+not. A pushed `v*` tag is a Production action: within five minutes the
+scheduled `deploy-prod` verifies and delivers it and `cli-release` publishes
+the CLI (owner, 2026-10-23, #2892), so pushing one needs the owner's explicit
+authority for that tag. A tag not picked up within 24 hours, or a release that
+failed, is recovered only by dispatching `deploy-prod` then `cli-release` for
+it; a rerun of a scheduled run reads no release credential.
 
 ## Method and risk
 
-Use Noel Method v0.11.0, exact merged commit
-`19c516e95a1c610cdd7891605ef6be7b044d5390`, manifest
-`34004264cd7a55dc0bb86a135212bdfba9944329f89680b7d0d5cc77ac26ffa5`.
-Direct mode is normal. Use Program only for persistent dependent work across
-sessions, repositories, or operational gates; Experiment for controlled
-comparisons; Secrets when a local process can access secret material. Protocols
-add procedure, not permission.
-
-- **Tier 1:** read-only or reversible single-repository work.
-- **Tier 2:** shared contracts, auth/data boundaries, migrations, workflows,
-  selectors, dependencies, generated/deploy inputs, destructive edits, or real
-  collisions.
-- **Tier 3:** releases, recovery, production mutation, or direct credentials.
-
-Risk selects safeguards, not unrelated tests. Inspect only facts that can alter
-the next mutation. Reuse accepted evidence and replan only for a material change
-to scope, dependencies, contracts, effects, recovery, authority, or acceptance.
+Use Noel Method v0.11.0, commit `19c516e95a1c610cdd7891605ef6be7b044d5390`
+(the root `AGENTS.md` has the pin and the Program rules). Direct mode is normal;
+Program only for persistent dependent work; Experiment for controlled
+comparisons; Secrets when a local process can access secret material.
+Protocols add procedure, not permission. Risk tiers: **1** read-only or
+reversible single-repository work; **2** shared contracts, auth or data
+boundaries, migrations, workflows, selectors, dependencies, generated or deploy
+inputs, destructive edits; **3** releases, recovery, Production mutation,
+direct credentials. Risk selects safeguards, not unrelated tests.
 
 ## Done means observed working
 
 A change that affects anything a user or operator can see or do is not done
-until it has run in the product and been observed working. Tests, checks, and
-CI are necessary evidence; they are never proof of behavior.
+until it has run in the product and been observed working. Tests, checks and
+CI are necessary evidence; they are never proof of behaviour.
 
 - Walk each user-visible change's acceptance journey where it runs: dashboard
-  and platform changes on Dev once delivered, or on the retained local Kind
-  cluster before merge when Dev is impractical; CLI and host changes with a
-  built `cw` on the host. Include the empty, failure, and recovery states it
-  touches. Record what was run and what was observed.
-- Kind is never a merge requirement (owner, 2026-10-21: "Remove the pre-flight
-  gate that says to run a kind cluster. We can't be doing this stuff anymore."
-  and "Keep it out of the merge gate, but keep it working so that locally it
-  can be used for things that are tricky to test or time consuming to test on
-  Dev."). It stays a maintained local tool for behaviour that is tricky or
-  slow to test on Dev.
-- Every workstream and handoff names a mandatory local acceptance journey. If
-  it depends on tooling that does not exist yet, that tooling lands first; a
-  journey is never "optional if available".
-- When a real provider step needs the owner, such as a GitHub authorization,
-  prepare everything else first and ask once for exactly that step.
-- Until the journey has run, report the change as "not yet observed working".
+  and platform changes on Dev once delivered (a Dev observation counts only on
+  the source `promote-dev` in codewire/deploy actually rolled out), or on the
+  retained local Kind cluster before merge when Dev is impractical; CLI and host
+  changes with a built `cw` on the host. Include the empty, failure and recovery
+  states it touches. Record what was run and what was observed.
+- Kind is never a merge requirement (owner, 2026-10-21). It stays a maintained
+  local tool for behaviour that is tricky or slow to test on Dev; the commands
+  are in `AGENT-WORKFLOW.md`. Never recreate the retained cluster to test a
+  change; deploy into it.
+- Every workstream and handoff names a mandatory local acceptance journey; if
+  it depends on tooling that does not exist yet, that tooling lands first.
+- When a real provider step needs the owner, prepare everything else and ask
+  once for exactly that step. Until the journey has run, report the change as
+  "not yet observed working". Report merged, on Dev and live in Production
+  separately.
 
-## Local development loop
+## Plans and worktrees
 
-When behaviour is tricky or slow to test on Dev, iterate on one retained local
-Kind cluster; commands live in `docs/dev/AGENT-WORKFLOW.md`.
-
-- Never recreate the cluster to test a change. Create it once (`make kind-up`,
-  or keep the gate's cluster), then deploy changed services into it
-  (`make kind-deploy`) and serve UI from source (`make kind-watch`).
-- Run only the Kind suites a change needs (`make kind-test`). It maps the
-  repository classifier's selection to retained suites, deploys only the
-  services whose source differs from what the cluster runs, and removes what a
-  failed suite created. If a narrow change asks for the full gate only because
-  a mapping is missing, add the mapping and its suite instead of running the
-  full gate.
-- No Kind run is a landing gate, `make e2e-kind` included. Land on the merge
-  rule in "Delivery and verification"; post-merge CI runs Kind and a failure
-  there is fixed forward. Run the full Kind gate only when the owner asks,
-  never as an iteration step, and never twice for an unchanged tree.
-- Switch the credential-service to `real` only for journeys that need a real
-  provider; the synthetic fixture remains the gate's default.
-
-## Program control
-
-A Program has one canonical Forgejo issue body and one coordinator. Use the
-pinned Method header plus `Goal`, `Done when`, `Current`, `Next`, `Needs from
-human`, `Boundaries`, and `Evidence`. Only the coordinator edits it, after a
-reread, incrementing `control_revision` for material control changes. Comments,
-commits, PRs, receipts, plans, worktrees, and host goals are evidence, not
-control. Keep the body compact and replace superseded state.
-
-Bind collision-prone work once; routine implementation, repair, verification,
-push, and review inherit it. Continue independent authorized work while passive
-gates run; future gates are not current blockers. `STOPPED_FOR_REPLAN` stops
-Program mutation except read-only diagnosis and control repair.
-
-For long-running work, use one staged proof loop: confirm canonical control and
-risk; get an independent design/security read before broad implementation;
-build the smallest coherent slice; run focused checks and review the diff before
-committing a credible candidate. Then push it, and merge once its required
-statuses are green on the exact head. Each PR
-states one bounded
-outcome, its dependencies, affected contracts, and acceptance; keep generated
-contracts and their consumers atomic. Update Program control at admissions and
-material transitions, with evidence labeled accurately. Parallelize read-only
-audits and disjoint edits, with one owner for each mutation surface. If review
-invalidates a trust boundary, remove or defer that slice before spending the
-expensive gate. Keep the main checkout clean, investigate unexpected dirt before
-changing it, and reconcile `origin/main` immediately before landing.
-
-## Plans
-
-Designs, plans, proposals, handoffs, research and design history live in
-the sibling `codewire/private-docs` repository, checked out at
-`../private-docs` (`/home/user/src/codewire/private-docs` on the owner
-workstation), never in this repository. Its `AGENTS.md` says where each
-kind goes: `designs/` for living designs and specifications, `plans/` for
-dated plans and handoffs (`YYYY-MM-DD-<slug>.md`), `research/` for dated
-findings. Commit and push to its `main` from your own worktree. Link from
-issues by file name (`private-docs: designs/<name>`): file names there are
-stable, folders are not. It holds no control and no decisions: where a
-workstream stands is its Program's Forgejo body; standing rules are this
-file; a Program-scoped decision is that Program's `Boundaries`. Check both
-before asking the owner a question. Stable, shipped-behavior documentation
-stays under `docs/`.
-
-## Worktree and artifact lifecycle
-
-On the owner workstation, keep the canonical checkout at
-`/home/user/src/codewire/codewire` and put every new linked worktree under
-`/home/user/src/worktrees/codewire/codewire/<task-slug>`. Do not create new
-worktrees in `/home/user/t`, `/tmp`, cache directories, or beside the canonical
-checkout. On another machine, use its dedicated worktree root with the same
-`<owner>/<repository>/<task-slug>` organization. Begin each task from current
-`origin/main` and use one stable, readable task slug for its branch and path.
-
-The agent that creates a worktree owns its automatic cleanup. After the task is
-merged, closed, or explicitly abandoned, stop its processes; remove its
-disposable runtime, cache, and build artifacts; prove the worktree is clean and
-its commits are merged, pushed, or intentionally preserved; then remove it from
-the canonical checkout and prune stale worktree metadata. Delete the local task
-branch only after proving it contains no unique work. Never force-remove a dirty
-worktree or delete shared caches, toolchains, or paths used by another live
-task. If safe cleanup cannot finish, retain the exact path and report the reason.
+Designs, plans, handoffs and research live in the sibling `codewire/private-docs`
+repository, never here; its `AGENTS.md` says where each kind goes. A plan's
+control is a Forgejo issue; private-docs holds evidence. Shipped-behaviour
+documentation stays under `docs/`. Worktrees follow the workstation rule
+(`/home/user/src/worktrees/codewire/codewire/<task-slug>`, from a freshly
+fetched `origin/main`, cleaned up by the agent that created it); the commands
+are in `AGENT-WORKFLOW.md` "Hygiene".
 
 ## Delivery and verification
 
-Forgejo `origin` is canonical; GitHub is a mirror. Branch from current
-`origin/main`, and reconcile main, PR head, ownership, and required evidence
-immediately before merge.
+Forgejo `origin` is canonical; GitHub is a mirror. Use the installed `fj` CLI,
+never `tea`. Local checks are the development loop: use the smallest check that
+catches the affected failure class, plus the product journey above.
+`scripts/dev/preflight.sh --all` runs the hosted families locally when that is
+faster than waiting; it records nothing and qualifies nothing. The pre-push
+hook runs only the fast push check; do not bypass it. A push is never a long
+gate.
 
-Use the installed `fj` CLI for Forgejo issues, PRs, Actions, and merges. The
-legacy `tea` CLI is not part of the supported agent workflow.
-
-Use the smallest check that can catch the affected failure class, plus the
-product journey that "Done means observed working" requires. Local checks
-are the development loop.
-
-A push is never a long gate. The pre-push hook runs only the fast push check:
-formatting, lints and unit tests for the changed crates, and quick checks for
-the changed file types. Do not bypass the hook.
-
-Each pull request merges alone. Never bundle pull requests into a train or an
-integration branch: one failure then hides in several changes. A pull request
-that merges cleanly merges without a rebase, even when it is behind `main`
-(owner, 2026-10-21: "if pr doesnt need rebase dont force rebase"). On a
-conflict, bring it up to date in whichever way suits that branch; this is
-judgment, not a fixed rule (owner, 2026-10-27, cited on #3013). Squash-merging
-means the branch's own history never reaches `main`, so judge by who else
-relies on the branch:
-
-- merge `main` in when another session or agent works on the branch, or
-  someone has already reviewed it: a rebase rewrites the commits they read or
-  built on;
-- rebase when the branch is yours alone and a short linear history helps you
-  read the conflict;
-- never force-push a branch another session drives.
-
-A coordinator may hold its own agents to a stricter rule. Pull-request CI is
-the merge gate (#3119 step 2). A pull request merges on:
-
-- its required statuses, green on its exact head: `CI / Required verification
-  (pull_request)` and `Supply-chain scan / Supply-chain scan
-  (pull_request_target)`. Branch protection enforces both
-  (infra's `forgejo-codewire-branch-protection.json`). Local evidence never
-  replaces them; CI-only fixes merge on them too;
-- its product journey where "Done means observed working" places it.
-
-The one exception is the advisory and expiry break-glass (#3119 P3 (a)): on an
-advisory or expiry day, one infra pull request lifts the `Supply-chain scan`
-context for the one reviewed exception pull request, and a second restores it
-straight after. Exception-only pull requests never read their own exceptions,
-and the advisory and expiry checks stay blocking.
-
-Forgejo checks the head, not the merged tree. When `main` moves after the
-statuses passed, a clean merge stands; `main` CI verifies the landed tree, and
-a failure there is fixed forward (#3119 P1).
-
-Pull-request CI runs every family the change's paths select, as `main` does,
-except Kind. Label the pull request `ci-full` to add Kind when a hosted-only
-claim needs it. Local checks are the development loop:
-`scripts/dev/preflight.sh --all` runs the same families locally, in parallel
-and on the shared compiler cache, when that is faster than waiting; it records
-nothing and qualifies nothing.
-
-Kind is never part of the merge gate: Kind on the schedule, on release
-candidates and on `ci-full` runs it, and a failure is fixed forward. A
-CLI-only change still needs its host journey with a built `cw` (owner,
-2026-10-20, cited on #2940).
-
-Prefer the faster build or CI option. State a binary-size or cost trade-off in
-one line; do not gate on it or add measurement rounds before a speed change,
-and measure afterwards on the real pipeline (owner, 2026-10-15, cited on
-#3013).
-
-Never build arm64 under emulation when the native arm64 builder exists; an
-emulated cross-architecture build in a pipeline is a defect. A release reuses
-its commit's published support images or builds them natively, and a release
-tag never points at a commit without them. When a protected build fails for an
-infrastructure reason, rerun it for that commit before the commit can become a
-release (owner, 2026-10-15, cited on #2892).
-
-`main` CI confirms the landed tree after merge. Never cancel a `main` run by
-hand, and fix forward when one fails. `main` CI and
-release publication always finish; a newer `main` push cancels the superseded
-support-image and release dry-run runs itself.
-Dev runs only commits whose main CI passed, and every green `main` commit
-newer than Dev's source is delivered (owner, 2026-10-24, cited on #3013).
-Build and deliver Dev signs and dispatches a commit only after its own `main`
-CI run's verdict, and only while it descends from the source Dev runs. A newer
-push cancels an older delivery before it publishes only once a newer commit's
-`main` CI has passed, or once the older commit's own `main` CI can no longer
-verify it; a delivery cancelled before its commit turned green is restarted
-by `main` CI's final job. At most two deliveries build at once (owner,
-2026-10-21, cited on infra#1594; #2892), briefly three for a protected green
-or restarted delivery. A run that has started publishing is never cancelled,
-so a cancelled run never signs or dispatches.
-Temporary rule (owner decision, 2026-10-20): a push to `main` runs no Kind and
-no release dry run. Both still run on a dispatched release candidate, on a pull
-request labelled `ci-full`, and every four hours on a schedule against the
-latest `main` when their inputs changed. A release tag's receipt needs green
-`main` CI, a green dry run and Dev acceptance of the exact candidate commit.
-It needs no Kind run while Kind CI is off (owner, 2026-10-25: "Yes, we're
-waiving KIND for now."; cited on #3013). The switch is `RELEASE_REQUIRES_KIND`
-in `scripts/ci/receipts/verify-release-tag-receipt.sh`; set it back to `true`
-when Kind CI runs again, and the receipt again needs a green Kind run of the
-exact candidate. Dispatch the dry run (and, while Kind is required, Kind) on
-`main` naming the candidate, so `main` never stops for a cut:
-
-```sh
-fj actions dispatch -R origin cw-release-dry-run.yaml main -I source_sha=<candidate>
-fj actions dispatch -R origin ci.yaml main -I verification=edge_kind -I source_sha=<candidate>  # only while RELEASE_REQUIRES_KIND=true
-```
-
-The candidate must be on `main`'s first-parent history with the same
-workflow file as `main`'s head (`scripts/ci/select/dispatch-source.sh`);
-after a workflow change, take a later candidate.
-
-The switch is `MAIN_PUSH_RUNS_KIND_AND_DRY_RUN` in
-`scripts/ci/select/main-push-switch.sh`. Set it back to `true` once #2949 is
-fixed, #2970 to #2975 have landed, and the metal CI capacity (infra#1534) is
-live. That restores both on every push to `main` and leaves the schedules
-idle.
-
-Local and hosted policy checks share one checked-in core. Never maintain a
-separate local subset; preserve capability-selected expensive checks. A failing
-guard must fail its run.
-
-Do not run the same exact-tree verification twice. Reuse a green run of the same
-head or an already-running owner. If an obviously narrow path selects the full product or
-Kind suite only because classification is missing, repair the classifier and
-its fixtures; do not use an expensive unrelated suite as the classifier. An
-unknown result blocks the affected mutation, not unrelated work.
-
-CI never substitutes for the local product journey. The frontend iteration
-checkpoint still requires an explicit landing instruction.
-
-Bind a hosted run once and use a transition watcher; never spend turns polling
-unchanged CI. Inspect component logs after failure before proposing a mechanism.
-Verify how terminal events reach the coordinating session. Starting a watcher
-is not proof of notification delivery; record a bounded fallback when the host
-has no supported wake interface. Keep observer failure distinct from CI failure.
-
-The watcher owns the passive wait, not the model. Continue independent authorized
-work; when only passive gates remain, hand off once and resume only for a watcher
-transition, owner input, or the recorded fallback. Never turn a heartbeat,
-commentary cadence, or short tool timeout into repeated model turns, one-minute
-sleep calls, status narration, or unchanged-state reads. If automatic host
-goal continuations keep waking the model and no event-driven wake is available,
-report that scheduling mismatch once and ask the owner to pause those
-continuations; the watcher and canonical Program remain active. Do not cancel CI,
-mark a running gate blocked, or repeatedly end and restart turns to simulate a
-pause. Instructions do not themselves provide scheduler enforcement.
-
-Record actual commands, exit status and required test counts. Distinguish full
-runs, composed component proof, pending checks and unchanged inherited results.
-Reuse evidence only while its relevant source, dependencies/features, fixtures,
-toolchain, topology, selector and entrypoint inputs still match. Missing,
-interrupted or stale proof is not success.
-
-Use only checked-in verification topology. Never add an ad-hoc proxy, relay,
-tunnel, port-forward, route, hosts entry, firewall rule, or fixture rewrite to
-make a gate pass. Do not bypass a selected gate. Verification-policy changes
-must prove old and new behavior with focused fixtures and cannot waive their own
-chosen proof.
-
-When the repository owner explicitly commands an OpenSnitch rule for checked-in
-local VM verification, the agent must add the narrowest rule that permits it and
-record the rule's identity and scope. This permits no broader firewall access or
-weakening of the required local hardware gate.
+- **Merge rule.** Pull-request CI is the merge gate (#3119). A pull request
+  merges on its required statuses green on its exact head, `CI / Required
+  verification (pull_request)` and `Supply-chain scan / Supply-chain scan
+  (pull_request_target)`, which branch protection enforces, plus its product
+  journey. Local evidence never replaces them. Each pull request merges alone,
+  never in a train. One that merges cleanly merges without a rebase (owner,
+  2026-10-21). On a conflict, bringing it up to date is judgment (owner,
+  2026-10-27, #3013): merge `main` in when someone else works on or has
+  reviewed the branch; rebase when it is yours alone; never force-push a branch
+  another session drives. The one exception to the statuses is the advisory and
+  expiry break-glass (#3119 P3 (a)): one infra PR lifts the `Supply-chain scan`
+  context for one reviewed exception PR and a second restores it; advisory and
+  expiry checks otherwise stay blocking (owner, 2026-10-21).
+- **Forgejo checks the head, not the merged tree.** `main` CI verifies the
+  landed tree after merge and a failure there is fixed forward; never cancel a
+  `main` run by hand. Cancelling and rerunning runs is the orchestrator's call
+  under the `ci` skill (owner, 2026-10-29: cancel only what we don't need to
+  finish, after looking), and `main` CI and release publication always finish.
+- **Pull-request CI** runs every family the change's paths select, as `main`
+  does, except Kind; label the PR `ci-full` to add Kind when a hosted-only
+  claim needs it. Kind CI is off on the schedule and on dispatch until the
+  owner revisits it (owner, 2026-10-25); where it will run is infra
+  `docs/ci/runners.md` and `private-docs: designs/ci-vm-model.md`.
+- **Dev** runs only commits whose `main` CI passed, and every green `main`
+  commit newer than Dev's source is delivered (owner, 2026-10-24); a newer
+  green commit cancels an older delivery that has not started publishing, and
+  a run that has started publishing is never cancelled. The mechanism is
+  `docs/dev/CI-CONFIGURATION.md` and codewire/deploy.
+- **Release candidates.** A release tag's receipt needs green `main` CI, a
+  green dry run and Dev acceptance of the exact candidate commit
+  (`scripts/ci/receipts/verify-release-tag-receipt.sh`; what a push to `main`
+  runs, and the conditions for restoring Kind and the dry run to every push,
+  are in `scripts/ci/select/main-push-switch.sh`). Dispatch the dry run on
+  `main` naming the candidate (`fj actions dispatch -R origin
+  cw-release-dry-run.yaml main -I source_sha=<candidate>`) so `main` never
+  stops for a cut. Never build arm64 under emulation when the native builder
+  exists; a tag never points at a commit without its published support images.
+- Every CI change follows the `ci` skill. Prefer the faster build or CI option
+  and measure afterwards (owner, 2026-10-15). A failing guard fails its run;
+  repair the classifier and its fixtures when a narrow path selects an
+  expensive suite. Record actual commands, exit status and test counts; reuse
+  evidence only while its inputs still match. Use only checked-in verification
+  topology, never an ad-hoc proxy, tunnel, port-forward, hosts entry, firewall
+  rule or fixture rewrite to make a gate pass; OpenSnitch blocks follow the
+  workstation `AGENTS.md`. Bind a hosted run once and let a watcher own the
+  passive wait (`AGENT-WORKFLOW.md` "Forgejo"); never poll unchanged CI.
 
 ## HTML and frontend
 
-- Never inject disposable diagnostic JavaScript, inline browser probes,
-  temporary data attributes, console logging, forced scrolling, or similar
-  instrumentation into tracked product templates or editable design fixtures,
-  even when the plan is to remove it before handoff. Diagnose from external
-  browser or repository-owned test tooling. If that tooling is unavailable,
-  use static evidence and existing checks or report the verification gap;
-  tracked JavaScript must implement intentional product behavior or a durable
-  repository-owned test.
-- Use native semantic HTML throughout the product and editable design fixtures.
-  Landmarks, headings, sections, navigation, lists, tables, forms, labels,
-  links, and buttons must describe their actual purpose. Use a `div` or `span`
-  only when no native element conveys meaning and the element is strictly for
-  layout or text styling.
-- Links navigate; buttons perform actions. Navigation collections and repeated
-  rows use lists with list items. Every section has a real heading or an
-  accessible name, every form control has a label, and table headers declare
-  their scope. Prefer native semantics over recreating them with ARIA.
-- A container owns its outside gutter. Repeated controls own one shared inside
-  padding through a reusable row primitive. Align related content with that
-  common inset instead of per-element margins, negative offsets, transparent
-  border compensation, or independent wrappers.
-- Keep production templates and editable `packages/codewire-design` fixtures on
-  the same tokens, components, and route CSS. A fidelity change is incomplete
-  when only the fixture or only the production template changes.
-- “UI iteration checkpoint” gates landing, not ordinary local development.
-  Edit locally, run focused checks, and rebuild local images or update scoped
-  development services as needed to review the real application. Image
-  rebuilds do not require separate approval. Do not commit, push, open a PR,
-  run hosted CI, or recreate Kind until the owner says “land it.” Preserve
-  unrelated state and the existing production and credential boundaries.
-- During active iteration use `make kind-watch` against the retained local
-  cluster; use `make design-system` only for fixture-only work. Run `scripts/dev/preflight.sh --explain` before
-  the final landing gate. If an obviously UI-only change is unclassified or
-  selects integration, Kind, or full verification solely because classification
-  is missing, repair the classifier or split the unrelated change before
-  proceeding.
-- Stop the Kind-backed dashboard watcher before Kind verification so its exit
-  handler releases repository-managed forwards. Reuse existing visual coverage
-  and add only the smallest behavioral or accessibility assertion that protects
-  a real regression.
+The `codewire-design` skill (`.agents/skills/codewire-design/SKILL.md`) is the
+home of the dashboard rules: semantic HTML, no diagnostic instrumentation in
+tracked templates, container-owned gutters, token and fixture parity. The UI
+iteration checkpoint gates landing, not local development: edit locally, review
+the real application, and do not commit, push, open a PR or run hosted CI until
+the owner says "land it".
 
 ## Repository invariants
 
-- Migrations require compatibility, database proof, and rollback.
-- Applied migration bytes are immutable. Upgrade fixtures bind accepted prior
-  bytes/checksums, not a historical ledger derived from the edited branch.
-  Historical migration files do not imply legacy runtime support.
-- Local and Kind databases are disposable. Deploying to them applies new
-  migrations; a migration is never a reason to skip a local or Kind run. To
-  reset one, recreate it and rerun every migration (plus the checked-in
-  fixtures). A backup before upgrading a retained cluster is a convenience, not
-  a gate. Only a downgrade, where a cluster's database is newer than the tree,
-  is refused (owner, 2026-10-15, cited on #3013). Hosted Dev and Production
-  data are not disposable: they move only forward through the reviewed
-  migration path.
-- Public/generated contracts ship generated clients, wrappers, and tests
-  together.
-- Search existing users before adding global identifiers; send new packages and
-  build inputs to every consumer.
+- Migrations require compatibility, database proof and rollback. Applied
+  migration bytes are immutable; upgrade fixtures bind accepted prior bytes,
+  never a ledger derived from the edited branch (`docs/dev/DATABASE-MIGRATIONS.md`).
+  Local and Kind databases are disposable and move forward on deploy; only a
+  downgrade is refused (owner, 2026-10-15). Dev and Production data move only
+  forward through the reviewed migration path.
+- Public and generated contracts ship generated clients, wrappers and tests
+  together. Search existing users before adding global identifiers; send new
+  packages and build inputs to every consumer.
 - Never add PAT or SSH deploy-key credentials for the GitHub mirror.
 - The cargo-hakari workspace-hack is a dev-dependency only, so shipped
-  binaries keep exactly their own dependency graph. Never move it to
-  `[dependencies]` without the owner (owner, 2026-10-12, cited on #3013;
-  landed in #2588).
-- A managed agent in a local VM qualifies and routes credentials exactly as in
-  a hosted Sandbox, from a platform profile or a local one, with the same
-  in-VM setup for every slot. When a VM lacks a placement's setup, port and
-  share the hosted code; never narrow what the VM accepts below the platform
-  (owner, 2026-10-15, cited on #2880).
-- In product language and public APIs, use `snapshot` only for saved state that
-  can be reused or restored. Call child-visible values assembled for one
-  process launch an `environment projection`. Call saved running-VM execution
-  state a `VM checkpoint`.
-- Application secrets and provider credentials are separate product concepts.
-  Storing either does not attach it to an environment. Selecting an application
-  secret source authorizes ordinary child-visible environment projection under
-  the original names; selecting a credential profile authorizes its typed
-  proxy, signer, or executor, never raw provider material except the listed
-  direct delivery exceptions. Never infer the category from a key name or
-  value. Profiles contain provider identities only, not secret mappings or
-  exposure policies. Reuse the owning environment operation identity; do not
-  create a separate secret generation.
-- Provider credential delivery keeps private material outside the sandbox. A
-  sandbox may receive endpoints, public trust material, placeholders, and a
-  bounded runtime capability, but not a provider credential or general
-  secret-read API, except a listed direct delivery exception. Application
-  secrets are intentionally visible to their receiving workload and root; do
-  not promise secrecy from those processes. Keep resolved launch values out of
-  durable configuration, control events and session metadata. Credential
-  non-disclosure is not enforced egress mediation; claim the latter only where
-  the placement proves direct provider bypass is denied.
-- Direct delivery of provider material into a sandbox is allowed only where the
-  proxy cannot work, with owner approval, listed with its reason in
-  docs/dev/SECRETS-AND-CREDENTIALS.md "Direct delivery exceptions" and cited at
-  the delivering code. The only exceptions are the environment creator's own
-  personal sign-ins for Codex and Claude Code, in a hosted Sandbox and in the
-  creator's own local VM: the Codex ChatGPT access token and ID token, written
-  as Codex's `auth.json`, and the Claude access token, written as Claude
-  Code's `~/.claude/.credentials.json` (`claudeAiOauth`), each with a
-  non-empty placeholder refresh token, because each agent enables `/usage` and
-  its plan and account features only with its own login. The Claude token
-  carries exactly the six scopes Claude Code's own login has (`user:inference`,
-  `user:profile`, `user:sessions:claude_code`, `user:mcp_servers`,
-  `user:file_upload`, `user:plugins`) and never a scope beyond them; the owner
-  accepted that on 2026-10-14 so Claude Code in a Sandbox behaves like their
-  own login. Refresh tokens, API keys, Claude setup tokens, GitHub and SSH
-  material and organization-owned credentials are never delivered. A delivered
-  token is a bearer token for the creator's account, usable from anywhere, and
-  stays valid at the provider until it expires (about 8 hours for Claude); every
-  process in the Sandbox or VM, and anyone who can open its terminal, can read
-  it, and a stopped local VM keeps it on its state disk until its next boot's
-  check removes it or it expires.
-- A hosted platform broker bridge epoch may reuse one authority decision (its
-  runtime session and derived grants, never material) for at most 60 seconds,
-  and releases nothing under an older one. Only epoch admission creates it, and
-  a lease evaluates it again inline, one evaluation at a time. Every lease of a
-  granted slot rereads its credential's record by id and owner, and evaluates
-  again at once when that record is missing, inactive or of another revocation
-  generation than its grant. A refused slot is answered from the decision unless
-  its withheld credential is usable again or the GitHub connection it follows
-  changed. So a credential change applies to the next request, and a membership,
-  organization, environment, binding, personal-credential confirmation or Pod
-  lineage change within 60 seconds. Decrypted provider material may be reused
-  only within one bridge epoch (hosted or owner-local delegation), for at most
-  two minutes, for exactly the record that lease admitted. Codex and Claude
-  login delivery, owner-local delegation leases, SSH signing, OAuth refresh
-  admission and keep-alive, and environment projection keep full per-call
-  authority checks.
-  SSH signing, OAuth keep-alive refresh and direct delivery never reuse
-  material; an on-demand OAuth refresh uses the request's own lease, whose exact
-  generation refresh admission rechecks. Do not add a process-wide or persistent
-  material or decision cache.
+  binaries keep exactly their own dependency graph; never move it to
+  `[dependencies]` without the owner (owner, 2026-10-12, #2588).
+- Product vocabulary (`snapshot`, `environment projection`, `VM checkpoint`)
+  is defined in `docs/GLOSSARY.md`; use it in product language and public APIs.
+- Secrets and credentials: the product model, the runtime boundaries, the
+  direct-delivery exceptions and the bridge-epoch reuse limits are specified in
+  `docs/dev/SECRETS-AND-CREDENTIALS.md`, whose "Invariants" section is the one
+  home of those rules. Private provider material never enters a sandbox except
+  a listed exception; a local VM qualifies and routes credentials exactly as a
+  hosted Sandbox; never add a process-wide or persistent material or decision
+  cache. The policy checks under `scripts/checks/repo_policy/` enforce the
+  reuse boundary.

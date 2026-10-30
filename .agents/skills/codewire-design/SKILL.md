@@ -5,11 +5,41 @@ description: Codewire dashboard design and frontend patterns, with the proof eac
 
 # Codewire Design
 
-`AGENTS.md` "HTML and frontend" is authoritative: semantic HTML, links navigate
-and buttons act, containers own gutters, repeated controls share one inset,
-production and fixture parity, no diagnostic JavaScript in tracked markup, and
-the UI iteration checkpoint. Read it first. This skill names the concrete
-patterns and proofs that keep those rules true; do not restate them elsewhere.
+This skill is the one home of the dashboard rules (moved here from
+`AGENTS.md` "HTML and frontend" on 2026-10-29); `AGENTS.md` keeps only the UI
+iteration checkpoint, which gates landing. Do not restate these elsewhere.
+
+- Never inject disposable diagnostic JavaScript, inline browser probes,
+  temporary data attributes, console logging, forced scrolling or similar
+  instrumentation into tracked product templates or editable design fixtures,
+  even to remove it before handoff. Diagnose from external browser or
+  repository-owned test tooling; if that is unavailable, use static evidence
+  and existing checks or report the verification gap. Tracked JavaScript
+  implements intentional product behaviour or a durable repository-owned test.
+- Use native semantic HTML throughout the product and editable design
+  fixtures. Landmarks, headings, sections, navigation, lists, tables, forms,
+  labels, links and buttons describe their actual purpose; a `div` or `span`
+  only when no native element conveys meaning and the element is strictly for
+  layout or text styling. Links navigate; buttons perform actions. Navigation
+  collections and repeated rows use lists. Every section has a real heading or
+  an accessible name, every form control has a label, and table headers declare
+  their scope. Prefer native semantics over recreating them with ARIA.
+- A container owns its outside gutter. Repeated controls own one shared inside
+  padding through a reusable row primitive. Align related content with that
+  common inset, never per-element margins, negative offsets, transparent border
+  compensation or independent wrappers.
+- Keep production templates and editable `packages/codewire-design` fixtures
+  on the same tokens, components and route CSS. A fidelity change is incomplete
+  when only the fixture or only the production template changes.
+- During active iteration use `make kind-watch` against the retained local
+  cluster; use `make design-system` only for fixture-only work. Image rebuilds
+  need no separate approval. Run `scripts/dev/preflight.sh --explain` before
+  the landing gate; if a UI-only change is unclassified or selects integration,
+  Kind or full verification only because classification is missing, repair the
+  classifier or split the unrelated change. Stop the Kind-backed dashboard
+  watcher before Kind verification so its exit handler releases the forwards.
+  Reuse existing visual coverage and add only the smallest behavioural or
+  accessibility assertion that protects a real regression.
 
 ## Where things live
 

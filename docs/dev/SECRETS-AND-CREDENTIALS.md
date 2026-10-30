@@ -29,6 +29,77 @@ VMs consume local sources and profiles; see
 [macOS local storage](#macos-local-storage). Docker and Compose inside
 environments are supported.
 
+## Invariants
+
+These rules bind every change to secrets, credentials and their delivery. They
+were the "Repository invariants" of `AGENTS.md` until 2026-10-29; this section
+is now their one home, and `AGENTS.md` points here.
+
+- A managed agent in a local VM qualifies and routes credentials exactly as in
+  a hosted Sandbox, from a platform profile or a local one, with the same
+  in-VM setup for every slot. When a VM lacks a placement's setup, port and
+  share the hosted code; never narrow what the VM accepts below the platform
+  (owner, 2026-10-15, cited on #2880).
+- Application secrets and provider credentials are separate product concepts.
+  Storing either does not attach it to an environment. Selecting an application
+  secret source authorizes ordinary child-visible environment projection under
+  the original names; selecting a credential profile authorizes its typed
+  proxy, signer, or executor, never raw provider material except the listed
+  direct delivery exceptions. Never infer the category from a key name or
+  value. Profiles contain provider identities only, not secret mappings or
+  exposure policies. Reuse the owning environment operation identity; do not
+  create a separate secret generation.
+- Provider credential delivery keeps private material outside the sandbox. A
+  sandbox may receive endpoints, public trust material, placeholders, and a
+  bounded runtime capability, but not a provider credential or general
+  secret-read API, except a listed direct delivery exception. Application
+  secrets are intentionally visible to their receiving workload and root; do
+  not promise secrecy from those processes. Keep resolved launch values out of
+  durable configuration, control events and session metadata. Credential
+  non-disclosure is not enforced egress mediation; claim the latter only where
+  the placement proves direct provider bypass is denied.
+- Direct delivery of provider material into a sandbox is allowed only where the
+  proxy cannot work, with owner approval, listed with its reason under
+  [Direct delivery exceptions](#direct-delivery-exceptions) and cited at the
+  delivering code. The only exceptions are the environment creator's own
+  personal sign-ins for Codex and Claude Code, in a hosted Sandbox and in the
+  creator's own local VM: the Codex ChatGPT access token and ID token, written
+  as Codex's `auth.json`, and the Claude access token, written as Claude
+  Code's `~/.claude/.credentials.json` (`claudeAiOauth`), each with a
+  non-empty placeholder refresh token, because each agent enables `/usage` and
+  its plan and account features only with its own login. The Claude token
+  carries exactly the six scopes Claude Code's own login has (`user:inference`,
+  `user:profile`, `user:sessions:claude_code`, `user:mcp_servers`,
+  `user:file_upload`, `user:plugins`) and never a scope beyond them; the owner
+  accepted that on 2026-10-14 so Claude Code in a Sandbox behaves like their
+  own login. Refresh tokens, API keys, Claude setup tokens, GitHub and SSH
+  material and organization-owned credentials are never delivered. A delivered
+  token is a bearer token for the creator's account, usable from anywhere, and
+  stays valid at the provider until it expires (about 8 hours for Claude); every
+  process in the Sandbox or VM, and anyone who can open its terminal, can read
+  it, and a stopped local VM keeps it on its state disk until its next boot's
+  check removes it or it expires.
+- A hosted platform broker bridge epoch may reuse one authority decision (its
+  runtime session and derived grants, never material) for at most 60 seconds,
+  and releases nothing under an older one. Only epoch admission creates it, and
+  a lease evaluates it again inline, one evaluation at a time. Every lease of a
+  granted slot rereads its credential's record by id and owner, and evaluates
+  again at once when that record is missing, inactive or of another revocation
+  generation than its grant. A refused slot is answered from the decision unless
+  its withheld credential is usable again or the GitHub connection it follows
+  changed. So a credential change applies to the next request, and a membership,
+  organization, environment, binding, personal-credential confirmation or Pod
+  lineage change within 60 seconds. Decrypted provider material may be reused
+  only within one bridge epoch (hosted or owner-local delegation), for at most
+  two minutes, for exactly the record that lease admitted. Codex and Claude
+  login delivery, owner-local delegation leases, SSH signing, OAuth refresh
+  admission and keep-alive, and environment projection keep full per-call
+  authority checks. SSH signing, OAuth keep-alive refresh and direct delivery
+  never reuse material; an on-demand OAuth refresh uses the request's own
+  lease, whose exact generation refresh admission rechecks. Do not add a
+  process-wide or persistent material or decision cache
+  (`scripts/checks/repo_policy/material_cache.py` guards it).
+
 ## CLI
 
 Secret and credential management choose exactly one store, `--local` or
