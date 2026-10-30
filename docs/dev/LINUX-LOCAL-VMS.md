@@ -244,9 +244,10 @@ files: deleting or changing the source never affects it.
 **Sign-ins.** Capture removes Codewire's delivered Codex and Claude Code
 sign-ins from its copy, never from the source, by the daemon's own rules,
 zeroes their blocks, and punches every free block, unwritten extent and block
-past a file's end out of the copy, checking each reads back as zeros. A state
-disk with the fs-verity feature, which Codewire never enables, is refused. The first boot of an
-environment made from a snapshot clears them again before anything runs. A
+past a file's end out of the copy, checking each reads back as zeros. An
+fs-verity file's Merkle tree, which ext4 keeps past its end, is kept. The first
+boot of an environment made from a snapshot clears them again before anything
+runs. A
 Claude Code credentials file that holds Codewire's sign-in is removed whole, so
 another sign-in Claude Code kept in it is not in the snapshot either. Anything
 else the VM wrote, such as a `.env` file or shell history, is kept; a snapshot

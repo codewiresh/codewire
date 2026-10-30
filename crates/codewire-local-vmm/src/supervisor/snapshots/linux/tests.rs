@@ -1413,6 +1413,41 @@ fn stat_records_yield_unwritten_extents_and_blocks_past_the_end() {
 }
 
 #[test]
+fn a_verity_files_merkle_tree_starts_at_its_size_rounded_up_to_64_kib() {
+    let mut parser = InodeBlocks::new(4096);
+    for line in [
+        "debugfs:  Inode: 12   Type: regular    Mode:  0444   Flags: 0x180000",
+        "User:     0   Group:     0   Project:     0   Size: 8192",
+        "EXTENTS:",
+        "(0-1):1000-1001, (2-3):1002-1003, (4-7[u]):1004-1007, (16-18):1016-1018",
+        "debugfs:  Inode: 13   Type: regular    Mode:  0444   Flags: 0x180000",
+        "User:     0   Group:     0   Project:     0   Size: 65537",
+        "EXTENTS:",
+        "(0[u]):2000, (1-17):2001-2017, (31-33):2031-2033",
+    ] {
+        parser.line(line);
+    }
+    // The tree starts at block 16 of the first file and 32 of the second.
+    // Every unwritten extent, and every block past the end before the tree,
+    // still goes.
+    assert_eq!(
+        parser.finish(&[12, 13]).unwrap(),
+        [
+            (1002, 1003),
+            (1004, 1007),
+            (2000, 2000),
+            (2017, 2017),
+            (2031, 2031)
+        ]
+    );
+    // An inode line must say its flags.
+    let mut flagless = InodeBlocks::new(4096);
+    flagless.line("debugfs:  Inode: 12   Type: regular    Mode:  0444");
+    flagless.line("User:     0   Group:     0   Project:     0   Size: 0");
+    assert!(flagless.finish(&[12]).is_err());
+}
+
+#[test]
 fn stat_records_must_answer_each_inode_once_and_say_a_files_size() {
     let record = |inode: u64| {
         [
@@ -1551,40 +1586,149 @@ async fn blocks_past_the_end_of_an_indirect_mapped_file_are_punched() {
     assert!(contains(&after, token.as_bytes()));
 }
 
-#[tokio::test]
-async fn capture_refuses_a_state_disk_with_the_verity_feature() {
-    let source = source(StoredEnvironmentState::Stopped);
-    let state = &source.paths.state_disk;
-    assert!(
-        !crate::state::read_ext4_superblock(&File::open(state).unwrap(), state)
-            .unwrap()
-            .verity,
-        "Codewire's format never enables verity"
-    );
-    fs::remove_file(state).unwrap();
+/// Make an ext4 image with the verity feature at `image`, of `bytes`.
+fn verity_image(image: &Path, bytes: u64) {
     let file = OpenOptions::new()
         .create_new(true)
         .write(true)
         .mode(0o600)
-        .open(state)
+        .open(image)
         .unwrap();
-    file.set_len(source.environment.disk_bytes).unwrap();
+    file.set_len(bytes).unwrap();
     drop(file);
     let status = ProcessCommand::new(tool("mkfs.ext4"))
         .args(crate::host::EXT4_FORMAT)
         .args(["-q", "-F", "-O", "verity"])
-        .arg(state)
+        .arg(image)
         .env_clear()
         .env("LC_ALL", "C")
         .status()
         .unwrap();
     assert!(status.success());
+    assert!(
+        crate::state::read_ext4_superblock(&File::open(image).unwrap(), image)
+            .unwrap()
+            .verity
+    );
+}
 
-    let error = capture_named(&source, "s1").await.unwrap_err();
+/// Plant at `path` a file of 20 blocks holding `token`, cut to one block,
+/// optionally marked as an fs-verity file; its blocks past that end, logical
+/// and physical. A verity file's tree would start at logical block 16.
+fn plant_past_its_end(
+    image: &Path,
+    scratch: &Path,
+    path: &str,
+    token: &str,
+    verity: bool,
+) -> Vec<(u64, u64)> {
+    let mut written = Vec::new();
+    while written.len() < 20 * 4096 {
+        written.extend_from_slice(token.as_bytes());
+        written.push(b'\n');
+    }
+    written.truncate(20 * 4096);
+    plant(image, scratch, path, &written);
+    debugfs_setup(image, &format!("sif {path} size 4096"));
+    let stat = String::from_utf8(debugfs_setup(image, &format!("stat {path}"))).unwrap();
+    if verity {
+        let flags = stat
+            .split_whitespace()
+            .skip_while(|word| *word != "Flags:")
+            .nth(1)
+            .and_then(|flags| flags.strip_prefix("0x"))
+            .map(|flags| u64::from_str_radix(flags, 16).unwrap())
+            .unwrap();
+        debugfs_setup(
+            image,
+            &format!("sif {path} flags {:#x}", flags | 0x0010_0000),
+        );
+    }
+    let past_end: Vec<(u64, u64)> = stat
+        .lines()
+        .skip_while(|line| *line != "EXTENTS:")
+        .nth(1)
+        .unwrap()
+        .split(", ")
+        .filter_map(|entry| parse_extent(entry.trim()).unwrap())
+        .flat_map(|extent| {
+            (extent.logical..extent.logical + extent.length)
+                .zip(extent.physical..)
+                .filter(|(logical, _)| *logical >= 1)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(past_end.len(), 19, "{stat}");
+    past_end
+}
 
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-    assert!(error.message().contains("fs-verity"), "{}", error.message());
-    assert!(list(&config(&source)).unwrap().is_empty());
+fn disk_block(image: &[u8], physical: u64) -> &[u8] {
+    let start = usize::try_from(physical * 4096).unwrap();
+    &image[start..start + 4096]
+}
+
+#[tokio::test]
+async fn a_verity_files_merkle_tree_is_kept_and_a_plain_files_tail_punched() {
+    let scratch = tempfile::tempdir().unwrap();
+    let image = scratch.path().join("verity.raw");
+    verity_image(&image, 64 * MIB);
+    let token = format!("cw-snapshot-test-verity-{}", Uuid::new_v4().simple());
+    let verity = plant_past_its_end(&image, scratch.path(), "/verity", &token, true);
+    let plain = plant_past_its_end(&image, scratch.path(), "/plain", &token, false);
+    let before = fs::read(&image).unwrap();
+
+    punch_unreadable_blocks(&image, 4096).await.unwrap();
+
+    let after = fs::read(&image).unwrap();
+    assert_verity_tail(&verity, &before, &after, &token);
+    for (_, physical) in plain {
+        assert!(
+            disk_block(&after, physical).iter().all(|byte| *byte == 0),
+            "block {physical} past the end kept data"
+        );
+    }
+}
+
+/// Of a verity file's blocks past its end, those before its tree at logical
+/// block 16 were punched and the tree is unchanged.
+fn assert_verity_tail(blocks: &[(u64, u64)], before: &[u8], after: &[u8], token: &str) {
+    for &(logical, physical) in blocks {
+        assert!(contains(disk_block(before, physical), token.as_bytes()));
+        if logical < 16 {
+            assert!(
+                disk_block(after, physical).iter().all(|byte| *byte == 0),
+                "block {physical} before the tree kept data"
+            );
+        } else {
+            assert_eq!(
+                disk_block(after, physical),
+                disk_block(before, physical),
+                "tree block {physical} changed"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_state_disk_with_the_verity_feature_is_captured_with_its_merkle_trees() {
+    let source = source(StoredEnvironmentState::Stopped);
+    let state = &source.paths.state_disk;
+    fs::remove_file(state).unwrap();
+    verity_image(state, source.environment.disk_bytes);
+    let token = format!("cw-snapshot-test-verity-{}", Uuid::new_v4().simple());
+    let verity = plant_past_its_end(state, source.scratch.path(), "/verity", &token, true);
+    let original = fs::read(state).unwrap();
+
+    let snapshot = capture_named(&source, "s1").await.unwrap();
+
+    let copy_path = snapshot_dir(&source, &snapshot).join("disks/state.raw");
+    let stat = String::from_utf8(debugfs_setup(&copy_path, "stat /verity")).unwrap();
+    assert!(
+        stat.contains("Flags: 0x180000") && stat.contains("Size: 4096"),
+        "{stat}"
+    );
+    let copy = fs::read(&copy_path).unwrap();
+    assert_verity_tail(&verity, &original, &copy, &token);
 }
 
 #[tokio::test]

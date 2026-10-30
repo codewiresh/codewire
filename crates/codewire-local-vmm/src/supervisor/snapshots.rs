@@ -1880,6 +1880,10 @@ mod linux {
     const ENVIRONMENT_BOUND_TREES: [&[&str]; 1] = [&["codewire", "cw-runtime"]];
     /// The most entries one removed tree may hold.
     const MAXIMUM_TREE_ENTRIES: usize = 4096;
+    /// ext4's inode flag for an fs-verity file (`EXT4_VERITY_FL`).
+    const EXT4_VERITY_FL: u64 = 0x0010_0000;
+    /// ext4 places a verity file's metadata at its size rounded up to this.
+    const VERITY_METADATA_ALIGNMENT: u64 = 64 * 1024;
     /// How many blocks of each punched free range are read back.
     const PUNCH_SAMPLES: u64 = 3;
 
@@ -1968,10 +1972,6 @@ mod linux {
         NotRemoved,
         #[error("a free block of the copy still held data after it was punched")]
         NotPunched,
-        #[error(
-            "the state disk's filesystem has the fs-verity feature, which Codewire never enables: the scrub would destroy verity files' Merkle trees, so it cannot be snapshotted"
-        )]
-        Verity,
 
         #[error("writing the copy failed: {0}")]
         Io(#[from] io::Error),
@@ -1994,11 +1994,6 @@ mod linux {
     ///
     /// Returns how many logins it removed.
     pub(crate) async fn scrub_state_disk(disk: &Path) -> Result<u32, ScrubError> {
-        // Refused before any change: punching past a verity file's end
-        // would destroy its Merkle tree.
-        if crate::state::read_ext4_superblock(&File::open(disk)?, disk)?.verity {
-            return Err(ScrubError::Verity);
-        }
         e2fsck(disk).await?;
         let block_size = {
             let file = File::open(disk)?;
@@ -2529,6 +2524,8 @@ mod linux {
     struct InodeBlocks {
         block_size: u64,
         regular: bool,
+        /// `EXT4_VERITY_FL`: the file's Merkle tree lives past its end.
+        verity: bool,
         size: Option<u64>,
         extents: Vec<FileExtent>,
         in_map: bool,
@@ -2543,6 +2540,7 @@ mod linux {
             Self {
                 block_size,
                 regular: false,
+                verity: false,
                 size: None,
                 extents: Vec::new(),
                 in_map: false,
@@ -2572,6 +2570,16 @@ mod linux {
                     .skip_while(|word| *word != "Type:")
                     .nth(1)
                     == Some("regular");
+                match rest
+                    .split_whitespace()
+                    .skip_while(|word| *word != "Flags:")
+                    .nth(1)
+                    .and_then(|flags| flags.strip_prefix("0x"))
+                    .and_then(|flags| u64::from_str_radix(flags, 16).ok())
+                {
+                    Some(flags) => self.verity = flags & EXT4_VERITY_FL != 0,
+                    None => self.malformed = true,
+                }
                 return;
             }
             if line.starts_with("User:") {
@@ -2615,17 +2623,34 @@ mod linux {
                 && let Some(size) = self.size
             {
                 let end = size.div_ceil(self.block_size);
+                // A verity file's Merkle tree and descriptor start at its
+                // size rounded up to 64 KiB (`ext4_verity_metadata_pos`), and
+                // the kernel reads them to verify every page, so they stay.
+                let kept = if self.verity {
+                    size.next_multiple_of(VERITY_METADATA_ALIGNMENT) / self.block_size
+                } else {
+                    u64::MAX
+                };
                 for extent in &self.extents {
-                    let last = extent.physical + extent.length - 1;
+                    let next = extent.logical + extent.length;
+                    // An unwritten extent reads as zeros wherever it lies.
                     if extent.unwritten {
-                        self.ranges.push((extent.physical, last));
-                    } else if extent.logical + extent.length > end {
-                        let skipped = end.saturating_sub(extent.logical);
-                        self.ranges.push((extent.physical + skipped, last));
+                        self.ranges
+                            .push((extent.physical, extent.physical + extent.length - 1));
+                        continue;
+                    }
+                    let first = extent.logical.max(end);
+                    let after = next.min(kept);
+                    if first < after {
+                        self.ranges.push((
+                            extent.physical + (first - extent.logical),
+                            extent.physical + (after - extent.logical) - 1,
+                        ));
                     }
                 }
             }
             self.regular = false;
+            self.verity = false;
             self.size = None;
             self.extents.clear();
             self.in_map = false;

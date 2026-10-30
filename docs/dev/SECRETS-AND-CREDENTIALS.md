@@ -1130,9 +1130,10 @@ to that one copy:
   block, even one since given to another file without being written, is gone
   too. Every file is read from one confined debugfs session, which must answer
   each in-use inode exactly once; a file mapped by indirect blocks is handled
-  as one mapped by extents. A filesystem with the fs-verity feature, which
-  Codewire never enables, is refused: punching past a verity file's end would
-  destroy its Merkle tree.
+  as one mapped by extents. An fs-verity file keeps its Merkle tree and
+  descriptor from its size rounded up to 64 KiB, where ext4 puts them and the
+  kernel reads them to verify every page; its blocks between its end and
+  there, and its unwritten extents, are punched like any file's.
 
 A recognised Claude Code store is removed whole: any other member Claude Code
 kept in it, such as an MCP sign-in, is not in the snapshot. The user's own
