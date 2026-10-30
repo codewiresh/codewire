@@ -50,6 +50,22 @@ grep -F 'export CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY"' "$PROOF" >/dev/n
   fail "the proof does not act as the smoke identity"
 grep -F 'export CW_CONFIG_DIR="$TMPDIR_PROOF/cw-config"' "$PROOF" >/dev/null ||
   fail "the proof could reuse a saved login instead of the smoke identity"
+# An API key is not an OAuth access token, so `cw whoami` (OAuth userinfo)
+# always refuses it; the identity check lists the key's organizations instead.
+if grep -nE '\bcw whoami\b' "$PROOF" >/dev/null; then
+  fail "the proof checks the API key with cw whoami, which never accepts one"
+fi
+grep -F 'cw org list --output json' "$PROOF" >/dev/null ||
+  fail "the proof does not verify the smoke organization"
+# `cw run` names its environment with --in (a bare argument is an agent), and
+# cloud environments are SSH hosts `cw-cloud-<id>`, as `cw setup ssh` writes.
+if grep -nE 'run --no-tty "\$ENV_ID"|cw-\$ENV_ID' "$PROOF" >/dev/null; then
+  fail "the proof uses the pre-v0.4 run or SSH host form"
+fi
+grep -F 'run --no-tty --in "$ENV_ID"' "$PROOF" >/dev/null ||
+  fail "the proof does not run commands with cw run --in"
+grep -F '"cw-cloud-$ENV_ID" "$@"' "$PROOF" >/dev/null ||
+  fail "the proof does not reach the environment as cw-cloud-<id>"
 # The key reaches cw through the environment, never an argument or a file.
 if grep -nE -- '--api-key|API_KEY[^"]*"? *>' "$PROOF" >/dev/null; then
   fail "the proof passes the API key as an argument or writes it to a file"

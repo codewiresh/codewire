@@ -43,6 +43,7 @@ PROOF_TIMEOUT_SECONDS="${PROOF_TIMEOUT_SECONDS:-1800}"
 PROOF_SSH_TIMEOUT="${PROOF_SSH_TIMEOUT:-180}"
 PROOF_TMP_PARENT="${PROOF_TMP_PARENT:-$ROOT/.tmp}"
 CW_BIN="${CW_BIN:-}"
+SMOKE_ORG_SLUG="codewire-dev-smoke"
 CREDENTIAL_PROFILE=""
 PRIVATE_REPO=""
 HOLD_MINUTES=0
@@ -93,9 +94,9 @@ Run it as the smoke identity:
     scripts/runtime/confidential/prove-dev-confidential-binding.sh [options]
 
 Environment:
-  CODEWIRE_DEV_SMOKE_API_KEY          Set by with-dev-smoke-auth.sh; required
-  EXPECTED_CODEWIRE_SMOKE_USER_EMAIL  Set by with-dev-smoke-auth.sh; checked
-                                      against `cw whoami`
+  CODEWIRE_DEV_SMOKE_API_KEY          Set by with-dev-smoke-auth.sh; required.
+                                      It must own exactly the
+                                      codewire-dev-smoke organization.
   CODEWIRE_SERVER_URL   Defaults to https://codewire-dev.sh
   KUBECONFIG            Read-only access to the Dev cluster
   KUBE_CONTEXT          Defaults to codewire-dev
@@ -184,12 +185,15 @@ use_smoke_identity() {
   export CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY"
   export CW_CONFIG_DIR="$TMPDIR_PROOF/cw-config"
   mkdir -p "$CW_CONFIG_DIR"
-  local whoami="$TMPDIR_PROOF/whoami.out"
-  cw whoami >"$whoami" 2>/dev/null || die "the smoke identity cannot sign in to $CODEWIRE_SERVER_URL"
-  if [[ -n "${EXPECTED_CODEWIRE_SMOKE_USER_EMAIL:-}" ]]; then
-    grep -Fq -- "$EXPECTED_CODEWIRE_SMOKE_USER_EMAIL" "$whoami" ||
-      die "cw is not signed in as the smoke identity"
-  fi
+  # The CLI's whoami asks the OAuth userinfo endpoint, which accepts only OAuth
+  # access tokens, never an API key. Verify the key the way the commodity
+  # smoke does: it owns exactly the dedicated smoke organization.
+  local orgs="$TMPDIR_PROOF/organizations.json"
+  cw org list --output json >"$orgs" 2>/dev/null ||
+    die "the smoke identity cannot sign in to $CODEWIRE_SERVER_URL"
+  jq -e --arg slug "$SMOKE_ORG_SLUG" '
+    type == "array" and length == 1 and .[0].slug == $slug and .[0].role == "owner"
+  ' "$orgs" >/dev/null || die "the API key does not own exactly the $SMOKE_ORG_SLUG organization"
 }
 
 # --------------------------------------------------------------- lifecycle
@@ -358,7 +362,7 @@ sandbox_carries_the_pods_init_data() {
 # ------------------------------------------------------------------ access
 
 daemon_answers() {
-  timeout 180 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --no-tty "$ENV_ID" -- true \
+  timeout 180 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --no-tty --in "$ENV_ID" -- true \
     >/dev/null 2>&1
 }
 
@@ -366,7 +370,7 @@ guest_sees_its_measured_environment() {
   local seen
   # The workspace shell expands it, not this one.
   # shellcheck disable=SC2016
-  seen="$(timeout 180 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --no-tty "$ENV_ID" -- \
+  seen="$(timeout 180 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --no-tty --in "$ENV_ID" -- \
     sh -c 'printf %s "${CODEWIRE_MEASURED_ENVIRONMENT_ID:-}"' 2>/dev/null)" || return 1
   [[ "$seen" == "$ENV_ID" ]]
 }
@@ -386,7 +390,7 @@ user_ssh() { # TRANSPORT ARGS...
   config="$(ssh_config)"
   env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" CW_SSH_TRANSPORT="$transport" \
     timeout "$PROOF_SSH_TIMEOUT" ssh -F "$config" -T -o BatchMode=yes -o ConnectTimeout=120 \
-    "cw-$ENV_ID" "$@"
+    "cw-cloud-$ENV_ID" "$@"
 }
 
 user_scp() { # TRANSPORT ARGS...
@@ -409,13 +413,13 @@ ssh_runs_a_command_line() { # TRANSPORT
 scp_round_trips() { # TRANSPORT
   local up="$TMPDIR_PROOF/scp-up-$1" down="$TMPDIR_PROOF/scp-down-$1"
   head -c 1048576 /dev/urandom >"$up"
-  user_scp "$1" "$up" "cw-$ENV_ID:b2c-proof-$1.bin" </dev/null 2>/dev/null || return 1
-  user_scp "$1" "cw-$ENV_ID:b2c-proof-$1.bin" "$down" </dev/null 2>/dev/null || return 1
+  user_scp "$1" "$up" "cw-cloud-$ENV_ID:b2c-proof-$1.bin" </dev/null 2>/dev/null || return 1
+  user_scp "$1" "cw-cloud-$ENV_ID:b2c-proof-$1.bin" "$down" </dev/null 2>/dev/null || return 1
   cmp -s "$up" "$down"
 }
 
 recorded_host_key() {
-  timeout 60 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" ssh known-hosts "cw-$ENV_ID" 2>/dev/null
+  timeout 60 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" ssh known-hosts "cw-cloud-$ENV_ID" 2>/dev/null
 }
 
 # OpenSSH with a pinned known_hosts file in place of the block's
@@ -428,14 +432,14 @@ ssh_with_pinned_key() { # LABEL KNOWN_HOSTS
     -o PubkeyAuthentication=no -o StrictHostKeyChecking=yes \
     -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no \
     -o "UserKnownHostsFile=$2" -o ConnectTimeout=120 \
-    -o "ProxyCommand=$cw_command shell --stdio %h" \
-    "codewire@cw-$ENV_ID" true </dev/null >/dev/null 2>"$TMPDIR_PROOF/ssh-pinned-$1.err"
+    -o "ProxyCommand=$cw_command --cloud shell --stdio %n" \
+    "codewire@cw-cloud-$ENV_ID" true </dev/null >/dev/null 2>"$TMPDIR_PROOF/ssh-pinned-$1.err"
 }
 
 host_key_is_recorded_and_served() {
   local recorded pinned="$TMPDIR_PROOF/known_hosts.recorded"
   recorded="$(recorded_host_key)" || return 1
-  [[ "$recorded" =~ ^cw-$ENV_ID\ ssh-ed25519\ [A-Za-z0-9+/]+=*$ ]] || return 1
+  [[ "$recorded" =~ ^cw-cloud-$ENV_ID\ ssh-ed25519\ [A-Za-z0-9+/]+=*$ ]] || return 1
   printf '%s\n' "$recorded" >"$pinned"
   ssh_with_pinned_key recorded "$pinned"
 }
