@@ -1216,6 +1216,7 @@ run_confidential_script_tests() {
   scripts/runtime/tests/test-resolve-coco-support-lock.sh
   scripts/runtime/tests/test-confidential-snp-smoke-contract.sh
   scripts/runtime/tests/test-confidential-binding-proof.sh
+  scripts/runtime/tests/test-confidential-storage-proof.sh
 }
 
 # The Dev smoke script tests are independent once the dashboard's
