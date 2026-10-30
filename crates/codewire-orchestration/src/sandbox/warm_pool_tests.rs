@@ -1,8 +1,8 @@
 use super::*;
 use crate::sandbox::shadow_warm_pool_name;
 use crate::sandbox::template::{
-    CredentialRuntimeTemplateConfig, DOCKER_MODE_GUEST_DIND, RUNTIME_PROFILE_COMMODITY,
-    RUNTIME_PROFILE_RUNC,
+    CpuSharingRatio, CredentialRuntimeTemplateConfig, DOCKER_MODE_GUEST_DIND,
+    RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_RUNC,
 };
 
 const NAMESPACE: &str = "dev-sandboxes";
@@ -43,6 +43,25 @@ fn pool_opts() -> TemplateOpts {
         kata_agent_policy_enabled: true,
         ..Default::default()
     }
+}
+
+/// #3635: a ratio change is a new revision, and with it a new pool beside the
+/// old one (#3572), for the same shape.
+#[test]
+fn a_cpu_sharing_change_is_a_new_pool_revision_of_the_same_shape() {
+    let dedicated = pool_opts();
+    let shared = TemplateOpts {
+        cpu_sharing: CpuSharingRatio::parse(Some("2")).unwrap(),
+        ..pool_opts()
+    };
+    assert_eq!(WorkspaceShape::of(&dedicated), WorkspaceShape::of(&shared));
+    let (dedicated, shared) = (render(&dedicated), render(&shared));
+    assert_ne!(dedicated.revision, shared.revision);
+    assert_ne!(dedicated.name, shared.name);
+    let workspace = &shared.template["spec"]["podTemplate"]["spec"]["containers"][0];
+    assert_eq!(workspace["name"], "workspace");
+    assert_eq!(workspace["resources"]["requests"]["cpu"], "500m");
+    assert_eq!(workspace["resources"]["limits"]["cpu"], "1000m");
 }
 
 fn render(opts: &TemplateOpts) -> WarmPoolObjects {

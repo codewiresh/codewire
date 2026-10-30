@@ -144,6 +144,65 @@ pub fn sandbox_egress_bandwidth(value: Option<&str>) -> Result<String, String> {
         ))
     }
 }
+
+/// How many of a workspace's vCPUs share one CPU reserved on its node. A
+/// whole number from 1 to [`MAX_CPU_SHARING_RATIO`]; unset, empty or 1 is off.
+pub const CPU_SHARING_RATIO_ENV: &str = "CODEWIRE_SANDBOX_CPU_SHARING_RATIO";
+const MAX_CPU_SHARING_RATIO: i64 = 8;
+
+/// CPU sharing (#3635): the workspace container's CPU request is its vCPUs
+/// divided by this ratio. Its limit stays the full vCPUs, which is what the VM
+/// is sized from and what quota, billing and the shape users see count. Only
+/// the workspace shares: DinD and the Kata overhead keep their requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CpuSharingRatio(i64);
+
+impl Default for CpuSharingRatio {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
+impl CpuSharingRatio {
+    /// One reserved CPU per vCPU.
+    pub const NONE: Self = Self(1);
+
+    /// [`CPU_SHARING_RATIO_ENV`]. Anything else than a whole number in range
+    /// is refused, so a typo stops orchestration instead of overcommitting
+    /// every new sandbox's CPU.
+    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+        let value = match value.map(str::trim) {
+            None | Some("") => return Ok(Self::NONE),
+            Some(value) => value,
+        };
+        value
+            .parse()
+            .ok()
+            .filter(|ratio| (1..=MAX_CPU_SHARING_RATIO).contains(ratio))
+            .map(Self)
+            .ok_or_else(|| {
+                format!(
+                    "{CPU_SHARING_RATIO_ENV} must be a whole number from 1 (off) to {MAX_CPU_SHARING_RATIO}; got {value:?}"
+                )
+            })
+    }
+
+    /// The ratio a live workspace runs at, from its CPU request and limit: the
+    /// nearest whole number, because the request was rounded up. Without a
+    /// positive request and limit there is nothing to share.
+    pub fn observed(request_millicores: i64, limit_millicores: i64) -> Self {
+        if request_millicores <= 0 || limit_millicores <= 0 {
+            return Self::NONE;
+        }
+        Self(((limit_millicores + request_millicores / 2) / request_millicores).max(1))
+    }
+
+    /// The CPU request of `vcpu_millicores`, rounded up.
+    pub fn request_millicores(self, vcpu_millicores: i64) -> i64 {
+        (vcpu_millicores + self.0 - 1) / self.0
+    }
+}
+
 const APP_PREVIEW_MIN_PORT: i64 = 1;
 const APP_PREVIEW_MAX_PORT: i64 = 65535;
 
@@ -215,6 +274,8 @@ pub struct TemplateOpts {
     pub udp_relay_bind_addrs: String,
     pub udp_relay_allocator_egress_enabled: bool,
     pub cpu_millicores: i64,
+    /// What `cpu_millicores` is divided by for the CPU request.
+    pub cpu_sharing: CpuSharingRatio,
     pub memory_mib: i64,
     pub disk_gib: i64,
     pub workspace_storage_class: String,
@@ -285,6 +346,7 @@ impl fmt::Debug for TemplateOpts {
                 &self.udp_relay_allocator_egress_enabled,
             )
             .field("cpu_millicores", &self.cpu_millicores)
+            .field("cpu_sharing", &self.cpu_sharing)
             .field("memory_mib", &self.memory_mib)
             .field("disk_gib", &self.disk_gib)
             .field("workspace_storage_class", &self.workspace_storage_class)

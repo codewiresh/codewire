@@ -1008,6 +1008,81 @@ mod tests {
     }
 
     #[test]
+    fn cpu_sharing_divides_the_workspace_request_and_nothing_else() {
+        let opts = TemplateOpts {
+            cpu_millicores: 2000,
+            memory_mib: 8192,
+            dind_enabled: true,
+            ..commodity_opts()
+        };
+        let resources_of = |opts: &TemplateOpts, name: &str| {
+            render_sandbox_template("dev-sandboxes", opts)["spec"]["podTemplate"]["spec"]
+                ["containers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|container| container["name"] == name)
+                .map(|container| container["resources"].clone())
+        };
+        let shared = TemplateOpts {
+            cpu_sharing: CpuSharingRatio::parse(Some("2")).unwrap(),
+            ..opts.clone()
+        };
+
+        let dedicated = resources_of(&opts, "workspace").unwrap();
+        assert_eq!(dedicated["requests"]["cpu"], "2000m");
+        assert_eq!(dedicated["limits"]["cpu"], "2000m");
+
+        let workspace = resources_of(&shared, "workspace").unwrap();
+        assert_eq!(workspace["requests"]["cpu"], "1000m");
+        assert_eq!(workspace["limits"]["cpu"], "2000m", "the VM keeps its vCPUs");
+        assert_eq!(workspace["requests"]["memory"], "8192Mi");
+        assert_eq!(workspace["limits"]["memory"], "8192Mi");
+
+        assert_eq!(
+            resources_of(&shared, "dind"),
+            resources_of(&opts, "dind"),
+            "only the workspace shares"
+        );
+    }
+
+    #[test]
+    fn cpu_sharing_ratio_defaults_to_off_and_refuses_malformed_values() {
+        for off in [None, Some(""), Some(" "), Some("1")] {
+            assert_eq!(CpuSharingRatio::parse(off).unwrap(), CpuSharingRatio::NONE);
+        }
+        assert_eq!(CpuSharingRatio::default(), CpuSharingRatio::NONE);
+        let ratio = |value| CpuSharingRatio::parse(Some(value)).unwrap();
+        assert_eq!(ratio(" 2 ").request_millicores(2000), 1000);
+        assert_eq!(ratio("8").request_millicores(8000), 1000);
+        for refused in ["0", "-1", "9", "1.5", "2:1", "on"] {
+            let error = CpuSharingRatio::parse(Some(refused)).unwrap_err();
+            assert!(error.contains(CPU_SHARING_RATIO_ENV), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_cpu_request_rounds_up_and_the_observed_ratio_survives_it() {
+        let ratio = |value| CpuSharingRatio::parse(Some(value)).unwrap();
+        assert_eq!(ratio("2").request_millicores(1500), 750);
+        assert_eq!(ratio("2").request_millicores(1001), 501);
+        assert_eq!(ratio("3").request_millicores(1000), 334);
+        assert_eq!(CpuSharingRatio::NONE.request_millicores(1234), 1234);
+        for value in ["1", "2", "3", "4", "8"] {
+            for vcpus in [250, 500, 1000, 1500, 2000, 3000, 32000] {
+                let request = ratio(value).request_millicores(vcpus);
+                assert_eq!(
+                    CpuSharingRatio::observed(request, vcpus),
+                    ratio(value),
+                    "{vcpus}m at {value}:1"
+                );
+            }
+        }
+        assert_eq!(CpuSharingRatio::observed(0, 2000), CpuSharingRatio::NONE);
+        assert_eq!(CpuSharingRatio::observed(2000, 0), CpuSharingRatio::NONE);
+    }
+
+    #[test]
     fn egress_bandwidth_defaults_to_100m_and_refuses_malformed_values() {
         assert_eq!(sandbox_egress_bandwidth(None).unwrap(), "100M");
         assert_eq!(sandbox_egress_bandwidth(Some("")).unwrap(), "100M");

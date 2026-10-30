@@ -164,7 +164,12 @@ pub fn declared_resources(sb: &Value) -> Resources {
     {
         for c in containers {
             let requests = c.pointer("/resources/requests");
-            if let Some(cpu) = requests.and_then(|r| r.get("cpu")).and_then(Value::as_str) {
+            let cpu = if c.get("name").and_then(Value::as_str) == Some("workspace") {
+                workspace_billed_cpu(c)
+            } else {
+                requests.and_then(|r| r.get("cpu")).and_then(Value::as_str)
+            };
+            if let Some(cpu) = cpu {
                 out.cpu_millicores += parse_quantity_millicores(cpu);
             }
             if let Some(mem) = requests
@@ -201,6 +206,15 @@ pub fn declared_resources(sb: &Value) -> Resources {
     out
 }
 
+/// A workspace is billed for its vCPUs: its CPU limit, which stays the full
+/// shape when CPU sharing lowers its request (#3635).
+fn workspace_billed_cpu(workspace: &Value) -> Option<&str> {
+    workspace
+        .pointer("/resources/limits/cpu")
+        .or_else(|| workspace.pointer("/resources/requests/cpu"))
+        .and_then(Value::as_str)
+}
+
 fn workspace_declared_resources(sb: &Value) -> Resources {
     let mut out = Resources::default();
     if let Some(workspace) = sb
@@ -213,10 +227,7 @@ fn workspace_declared_resources(sb: &Value) -> Resources {
         })
     {
         let requests = workspace.pointer("/resources/requests");
-        if let Some(cpu) = requests
-            .and_then(|value| value.get("cpu"))
-            .and_then(Value::as_str)
-        {
+        if let Some(cpu) = workspace_billed_cpu(workspace) {
             out.cpu_millicores = parse_quantity_millicores(cpu);
         }
         if let Some(memory) = requests
@@ -962,6 +973,37 @@ mod tests {
         assert_eq!(got.memory_mib, 2560);
         assert_eq!(got.disk_gib, 20);
         assert_eq!(got.runtime_class.as_deref(), Some("commodity"));
+    }
+
+    #[test]
+    fn a_shared_workspace_is_billed_for_its_full_vcpus() {
+        let sandbox = json!({
+            "spec": {
+                "podTemplate": { "spec": {
+                    "containers": [
+                        { "name": "workspace", "resources": {
+                            "requests": { "cpu": "1000m", "memory": "8Gi" },
+                            "limits": { "cpu": "2000m", "memory": "8Gi" } } },
+                        { "name": "dind", "resources": {
+                            "requests": { "cpu": "500m", "memory": "1Gi" },
+                            "limits": { "cpu": "2", "memory": "4Gi" } } }
+                    ]
+                } },
+                "volumeClaimTemplates": [{
+                    "metadata": { "name": "workspace" },
+                    "spec": { "resources": { "requests": { "storage": "80Gi" } } }
+                }]
+            }
+        });
+        let declared = declared_resources(&sandbox);
+        assert_eq!(declared.cpu_millicores, 2500);
+
+        let resized =
+            replace_workspace_billing_resources(&sandbox, declared.clone(), 4000, 16384, 80);
+        assert_eq!(resized.cpu_millicores, 4500);
+
+        let unchanged = bill_applied_workspace_disk(&sandbox, declared, Some(80));
+        assert_eq!(unchanged.cpu_millicores, 2500);
     }
 
     #[test]

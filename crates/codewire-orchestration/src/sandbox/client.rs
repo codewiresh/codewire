@@ -27,11 +27,12 @@ use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 use serde_json::Value;
 
 use super::template::{
-    DOCKER_DATA_INIT_CONTAINER, DOCKER_DATA_INIT_ENV, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
-    KATA_CONFIDENTIAL_VOLUME_ANNOTATION, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    LEGACY_DIND_BOOTSTRAP_SCRIPT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts,
-    dind_bootstrap_script, direct_udp_service_name, docker_data_init_container,
-    docker_data_size_gib, eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
+    CpuSharingRatio, DOCKER_DATA_INIT_CONTAINER, DOCKER_DATA_INIT_ENV,
+    KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
+    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, LEGACY_DIND_BOOTSTRAP_SCRIPT,
+    RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts, dind_bootstrap_script,
+    direct_udp_service_name, docker_data_init_container, docker_data_size_gib,
+    eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
     pre_growth_dind_bootstrap_script, render_direct_udp_service, render_sandbox_shadow_pool,
     render_sandbox_template, render_warm_member_bridge, render_workspace_daemon_network_policy,
     render_workspace_daemon_service, warm_member_daemon_bridge_name,
@@ -246,9 +247,32 @@ pub struct WorkspacePodResizeState {
 struct AcceptedPodResize {
     /// The observation the request was conditioned on.
     before: WorkspacePodResizeState,
+    /// What was requested.
+    compute: WorkspaceCompute,
     /// `metadata.generation` of the accepted spec, when the API server
     /// reports Pod generations.
     generation: Option<i64>,
+}
+
+/// The workspace container's CPU and memory at one size. A resize keeps the
+/// CPU sharing the workspace already runs at, whatever the deployment or its
+/// organization would give a new one, so an existing sandbox keeps its request
+/// ratio until it is replaced (#3635).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceCompute {
+    cpu_request: String,
+    cpu_limit: String,
+    memory: String,
+}
+
+impl WorkspaceCompute {
+    fn new(cpu_millicores: i32, memory_mb: i32, sharing: CpuSharingRatio) -> Self {
+        Self {
+            cpu_request: format!("{}m", sharing.request_millicores(i64::from(cpu_millicores))),
+            cpu_limit: format!("{cpu_millicores}m"),
+            memory: format!("{memory_mb}Mi"),
+        }
+    }
 }
 
 /// Bound on re-resolving the workspace Pod after the API server refuses a
@@ -1566,13 +1590,10 @@ impl SandboxClient {
         if cpu_millicores <= 0 || memory_mb <= 0 {
             anyhow::bail!("workspace CPU and memory must be greater than zero");
         }
-        let cpu = format!("{cpu_millicores}m");
-        let memory = format!("{memory_mb}Mi");
         let accepted = self
-            .submit_workspace_pod_resize(env_id, expected_uid, &cpu, &memory)
+            .submit_workspace_pod_resize(env_id, expected_uid, cpu_millicores, memory_mb)
             .await?;
-        self.wait_for_workspace_pod_resize(&accepted, &cpu, &memory, timeout)
-            .await
+        self.wait_for_workspace_pod_resize(&accepted, timeout).await
     }
 
     /// Submit a `/resize` request bound to the exact Pod incarnation the
@@ -1583,13 +1604,15 @@ impl SandboxClient {
         &self,
         env_id: &str,
         expected_uid: &str,
-        cpu: &str,
-        memory: &str,
+        cpu_millicores: i32,
+        memory_mb: i32,
     ) -> anyhow::Result<AcceptedPodResize> {
         for _ in 0..POD_RESIZE_SUBMIT_ATTEMPTS {
             let pod = self.current_workspace_pod_object(env_id).await?;
+            let compute =
+                WorkspaceCompute::new(cpu_millicores, memory_mb, workspace_pod_cpu_sharing(&pod));
             if let Some(accepted) = self
-                .submit_pod_resize_once(&pod, expected_uid, cpu, memory)
+                .submit_pod_resize_once(&pod, expected_uid, &compute)
                 .await?
             {
                 return Ok(accepted);
@@ -1608,8 +1631,7 @@ impl SandboxClient {
         &self,
         pod: &Pod,
         expected_uid: &str,
-        cpu: &str,
-        memory: &str,
+        compute: &WorkspaceCompute,
     ) -> anyhow::Result<Option<AcceptedPodResize>> {
         let before = workspace_pod_resize_state(pod, "")?;
         if before.identity.uid != expected_uid {
@@ -1633,7 +1655,7 @@ impl SandboxClient {
             .as_deref()
             .filter(|version| !version.is_empty())
             .ok_or_else(|| anyhow::anyhow!("workspace Pod has no resourceVersion"))?;
-        let patch = pod_resize_patch(expected_uid, resource_version, cpu, memory);
+        let patch = pod_resize_patch(expected_uid, resource_version, compute);
         match self
             .pods()
             .patch_resize(
@@ -1645,6 +1667,7 @@ impl SandboxClient {
         {
             Ok(accepted) => Ok(Some(AcceptedPodResize {
                 before,
+                compute: compute.clone(),
                 generation: accepted.metadata.generation.filter(|value| *value > 0),
             })),
             Err(kube::Error::Api(error)) if error.code == 409 => Ok(None),
@@ -1663,11 +1686,10 @@ impl SandboxClient {
     async fn wait_for_workspace_pod_resize(
         &self,
         accepted: &AcceptedPodResize,
-        cpu: &str,
-        memory: &str,
         timeout: Duration,
     ) -> anyhow::Result<WorkspacePodResizeState> {
         let before = &accepted.before;
+        let compute = &accepted.compute;
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let pod = self
@@ -1697,11 +1719,11 @@ impl SandboxClient {
             }
             let infeasible = infeasible_pod_resize(&pod, accepted.generation);
             if let Some((message, true)) = &infeasible
-                && workspace_spec_resources_match(&pod, cpu, memory)
+                && workspace_spec_resources_match(&pod, compute)
             {
                 return Err(PodResizeInfeasible(message.clone()).into());
             }
-            if workspace_resources_match(&pod, cpu, memory)
+            if workspace_resources_match(&pod, compute)
                 && pod_resize_acknowledged(&pod, accepted.generation)
             {
                 return Ok(observed);
@@ -1736,7 +1758,6 @@ impl SandboxClient {
         requested: (i32, i32),
         timeout: Duration,
     ) -> FailedLiveResize {
-        let (cpu, memory) = (format!("{}m", previous.0), format!("{}Mi", previous.1));
         let mut withdrawal = None;
         for _ in 0..POD_RESIZE_SUBMIT_ATTEMPTS {
             let pod = match self.observe_failed_live_resize(env_id, expected_uid).await {
@@ -1751,8 +1772,10 @@ impl SandboxClient {
                     "withdrawing the pending request did not settle: {error:#}"
                 ));
             }
+            let compute =
+                WorkspaceCompute::new(previous.0, previous.1, workspace_pod_cpu_sharing(&pod));
             let accepted = match self
-                .submit_pod_resize_once(&pod, expected_uid, &cpu, &memory)
+                .submit_pod_resize_once(&pod, expected_uid, &compute)
                 .await
             {
                 Ok(Some(accepted)) => accepted,
@@ -1762,10 +1785,7 @@ impl SandboxClient {
                     continue;
                 }
             };
-            match self
-                .wait_for_workspace_pod_resize(&accepted, &cpu, &memory, timeout)
-                .await
-            {
+            match self.wait_for_workspace_pod_resize(&accepted, timeout).await {
                 Ok(_) => return FailedLiveResize::Settled,
                 Err(error) => withdrawal = Some(error),
             }
@@ -3090,9 +3110,19 @@ impl SandboxClient {
         if cpu_millicores <= 0 || memory_mb <= 0 || disk_gb <= 0 {
             anyhow::bail!("resize resources must be greater than zero");
         }
-        let cpu = format!("{cpu_millicores}m");
-        let memory = format!("{memory_mb}Mi");
         let storage = format!("{disk_gb}Gi");
+
+        let sandbox_name = self.bound_sandbox_name(env_id).await?;
+        let sandboxes = self.sandboxes();
+        let mut sandbox = sandboxes
+            .get(&sandbox_name)
+            .await
+            .map_err(|error| anyhow::anyhow!("get Sandbox {sandbox_name}: {error}"))?;
+        let compute = WorkspaceCompute::new(
+            cpu_millicores,
+            memory_mb,
+            runtime_object_cpu_sharing(&sandbox.data),
+        );
 
         let claim = claim_name(env_id);
         let claim_patch = serde_json::json!({
@@ -3100,8 +3130,8 @@ impl SandboxClient {
                 "workspaceResources": [{
                     "containerName": "workspace",
                     "resources": {
-                        "requests": { "cpu": cpu, "memory": memory },
-                        "limits": { "cpu": cpu, "memory": memory },
+                        "requests": { "cpu": compute.cpu_request, "memory": compute.memory },
+                        "limits": { "cpu": compute.cpu_limit, "memory": compute.memory },
                     },
                 }],
             },
@@ -3111,13 +3141,7 @@ impl SandboxClient {
             .await
             .map_err(|error| anyhow::anyhow!("patch SandboxClaim {claim}: {error}"))?;
 
-        let sandbox_name = self.bound_sandbox_name(env_id).await?;
-        let sandboxes = self.sandboxes();
-        let mut sandbox = sandboxes
-            .get(&sandbox_name)
-            .await
-            .map_err(|error| anyhow::anyhow!("get Sandbox {sandbox_name}: {error}"))?;
-        set_workspace_resources(&mut sandbox.data, &cpu, &memory)?;
+        set_workspace_resources(&mut sandbox.data, &compute)?;
         set_docker_data_size(&mut sandbox.data, disk_gb)?;
         sandboxes
             .replace(&sandbox_name, &PostParams::default(), &sandbox)
@@ -3136,7 +3160,7 @@ impl SandboxClient {
                 .get(&template_name)
                 .await
                 .map_err(|error| anyhow::anyhow!("get SandboxTemplate {template_name}: {error}"))?;
-            set_workspace_resources(&mut template.data, &cpu, &memory)?;
+            set_workspace_resources(&mut template.data, &compute)?;
             set_workspace_volume_request(&mut template.data, &storage)?;
             set_docker_data_size(&mut template.data, disk_gb)?;
             templates
@@ -5015,23 +5039,22 @@ fn workspace_pod_resize_state(
     })
 }
 
-/// The kubelet reports `cpu` and `memory` as the workspace container's
-/// actual requests and limits.
-fn workspace_resources_match(pod: &Pod, cpu: &str, memory: &str) -> bool {
+/// The kubelet reports `compute` as the workspace container's actual requests
+/// and limits.
+fn workspace_resources_match(pod: &Pod, compute: &WorkspaceCompute) -> bool {
     resources_match(
         pod.status
             .as_ref()
             .and_then(|status| status.container_statuses.as_deref())
             .and_then(|statuses| statuses.iter().find(|status| status.name == "workspace"))
             .and_then(|status| status.resources.as_ref()),
-        cpu,
-        memory,
+        compute,
     )
 }
 
-/// The Pod spec asks for `cpu` and `memory` as the workspace container's
-/// requests and limits.
-fn workspace_spec_resources_match(pod: &Pod, cpu: &str, memory: &str) -> bool {
+/// The Pod spec asks for `compute` as the workspace container's requests and
+/// limits.
+fn workspace_spec_resources_match(pod: &Pod, compute: &WorkspaceCompute) -> bool {
     resources_match(
         pod.spec
             .as_ref()
@@ -5041,27 +5064,81 @@ fn workspace_spec_resources_match(pod: &Pod, cpu: &str, memory: &str) -> bool {
                     .find(|container| container.name == "workspace")
             })
             .and_then(|container| container.resources.as_ref()),
-        cpu,
-        memory,
+        compute,
     )
 }
 
-fn resources_match(resources: Option<&ResourceRequirements>, cpu: &str, memory: &str) -> bool {
+fn resources_match(resources: Option<&ResourceRequirements>, compute: &WorkspaceCompute) -> bool {
     let Some(resources) = resources else {
         return false;
     };
-    [resources.requests.as_ref(), resources.limits.as_ref()]
-        .into_iter()
-        .all(|class| {
-            class.is_some_and(|values| {
-                values
-                    .get("cpu")
-                    .is_some_and(|value| quantities_equal(&value.0, cpu))
-                    && values
-                        .get("memory")
-                        .is_some_and(|value| quantities_equal(&value.0, memory))
-            })
+    [
+        (resources.requests.as_ref(), &compute.cpu_request),
+        (resources.limits.as_ref(), &compute.cpu_limit),
+    ]
+    .into_iter()
+    .all(|(class, cpu)| {
+        class.is_some_and(|values| {
+            values
+                .get("cpu")
+                .is_some_and(|value| quantities_equal(&value.0, cpu))
+                && values
+                    .get("memory")
+                    .is_some_and(|value| quantities_equal(&value.0, &compute.memory))
         })
+    })
+}
+
+/// The CPU sharing a workspace Pod runs at, from its spec.
+fn workspace_pod_cpu_sharing(pod: &Pod) -> CpuSharingRatio {
+    let resources = pod
+        .spec
+        .as_ref()
+        .and_then(|spec| {
+            spec.containers
+                .iter()
+                .find(|container| container.name == "workspace")
+        })
+        .and_then(|container| container.resources.as_ref());
+    let request = resources
+        .and_then(|resources| resources.requests.as_ref())
+        .and_then(|requests| requests.get("cpu"));
+    let limit = resources
+        .and_then(|resources| resources.limits.as_ref())
+        .and_then(|limits| limits.get("cpu"));
+    observed_cpu_sharing(
+        request.map(|quantity| quantity.0.as_str()),
+        limit.map(|quantity| quantity.0.as_str()),
+    )
+}
+
+/// The CPU sharing a Sandbox or SandboxTemplate renders its workspace at.
+fn runtime_object_cpu_sharing(data: &Value) -> CpuSharingRatio {
+    let workspace = data
+        .pointer("/spec/podTemplate/spec/containers")
+        .and_then(Value::as_array)
+        .and_then(|containers| {
+            containers.iter().find(|container| {
+                container.get("name").and_then(Value::as_str) == Some("workspace")
+            })
+        });
+    let cpu = |path| {
+        workspace
+            .and_then(|workspace| workspace.pointer(path))
+            .and_then(Value::as_str)
+    };
+    observed_cpu_sharing(cpu("/resources/requests/cpu"), cpu("/resources/limits/cpu"))
+}
+
+fn observed_cpu_sharing(request: Option<&str>, limit: Option<&str>) -> CpuSharingRatio {
+    let millicores = |quantity: Option<&str>| {
+        parse_quantity_ratio(quantity?)
+            .and_then(|(numerator, denominator)| i64::try_from(numerator * 1000 / denominator).ok())
+    };
+    match (millicores(request), millicores(limit)) {
+        (Some(request), Some(limit)) => CpuSharingRatio::observed(request, limit),
+        _ => CpuSharingRatio::NONE,
+    }
 }
 
 /// Compare Kubernetes quantities by value rather than serialized form.
@@ -5188,15 +5265,15 @@ fn parse_decimal_ratio(number: &str) -> Option<(i128, i128)> {
 /// to the observed incarnation. The API server refuses the patch when the Pod
 /// no longer has this UID (the field is immutable) or this resourceVersion
 /// (optimistic concurrency), so it can never apply to a replacement.
-fn pod_resize_patch(uid: &str, resource_version: &str, cpu: &str, memory: &str) -> Value {
+fn pod_resize_patch(uid: &str, resource_version: &str, compute: &WorkspaceCompute) -> Value {
     serde_json::json!({
         "metadata": { "uid": uid, "resourceVersion": resource_version },
         "spec": {
             "containers": [{
                 "name": "workspace",
                 "resources": {
-                    "requests": { "cpu": cpu, "memory": memory },
-                    "limits": { "cpu": cpu, "memory": memory },
+                    "requests": { "cpu": compute.cpu_request, "memory": compute.memory },
+                    "limits": { "cpu": compute.cpu_limit, "memory": compute.memory },
                 },
             }],
         },
@@ -5253,10 +5330,10 @@ fn failed_live_resize_outcome(
     previous: (i32, i32),
     requested: (i32, i32),
 ) -> Option<FailedLiveResize> {
+    let sharing = workspace_pod_cpu_sharing(pod);
     let runs = |(cpu, memory): (i32, i32)| {
-        let (cpu, memory) = (format!("{cpu}m"), format!("{memory}Mi"));
-        workspace_spec_resources_match(pod, &cpu, &memory)
-            && workspace_resources_match(pod, &cpu, &memory)
+        let compute = WorkspaceCompute::new(cpu, memory, sharing);
+        workspace_spec_resources_match(pod, &compute) && workspace_resources_match(pod, &compute)
     };
     if runs(requested) {
         Some(FailedLiveResize::Applied)
@@ -5267,7 +5344,7 @@ fn failed_live_resize_outcome(
     }
 }
 
-fn set_workspace_resources(data: &mut Value, cpu: &str, memory: &str) -> anyhow::Result<()> {
+fn set_workspace_resources(data: &mut Value, compute: &WorkspaceCompute) -> anyhow::Result<()> {
     let containers = data
         .pointer_mut("/spec/podTemplate/spec/containers")
         .and_then(Value::as_array_mut)
@@ -5276,7 +5353,10 @@ fn set_workspace_resources(data: &mut Value, cpu: &str, memory: &str) -> anyhow:
         .iter_mut()
         .find(|container| container.get("name").and_then(Value::as_str) == Some("workspace"))
         .ok_or_else(|| anyhow::anyhow!("runtime object has no workspace container"))?;
-    for class in ["requests", "limits"] {
+    for (class, cpu) in [
+        ("requests", &compute.cpu_request),
+        ("limits", &compute.cpu_limit),
+    ] {
         let resources = workspace
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("workspace container is not an object"))?
@@ -5290,8 +5370,8 @@ fn set_workspace_resources(data: &mut Value, cpu: &str, memory: &str) -> anyhow:
         let class_values = class_values
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("workspace resource {class} are not an object"))?;
-        class_values.insert("cpu".to_string(), Value::String(cpu.to_string()));
-        class_values.insert("memory".to_string(), Value::String(memory.to_string()));
+        class_values.insert("cpu".to_string(), Value::String(cpu.clone()));
+        class_values.insert("memory".to_string(), Value::String(compute.memory.clone()));
     }
     Ok(())
 }
@@ -6349,7 +6429,10 @@ mod tests {
         assert_eq!(observed.identity.uid, "uid-1");
         assert_eq!(observed.restart_count, 3);
         assert!(observed.live_resize_compatible);
-        assert!(workspace_resources_match(&pod, "500m", "512Mi"));
+        assert!(workspace_resources_match(
+            &pod,
+            &WorkspaceCompute::new(500, 512, CpuSharingRatio::NONE)
+        ));
         // No observedGeneration: the condition cannot be attributed to a
         // request, whatever generation that request was accepted at.
         for generation in [None, Some(1), Some(7)] {
@@ -6384,9 +6467,15 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(workspace_resources_match(&pod, "3000m", "5120Mi"));
-        assert!(!workspace_resources_match(&pod, "2999m", "5120Mi"));
-        assert!(!workspace_resources_match(&pod, "3000m", "5119Mi"));
+        let matches = |cpu, memory| {
+            workspace_resources_match(
+                &pod,
+                &WorkspaceCompute::new(cpu, memory, CpuSharingRatio::NONE),
+            )
+        };
+        assert!(matches(3000, 5120));
+        assert!(!matches(2999, 5120));
+        assert!(!matches(3000, 5119));
         assert!(quantities_equal("1500000u", "1500m"));
         assert!(quantities_equal("1.5Gi", "1536Mi"));
         assert!(!quantities_equal("invalid", "3000m"));
@@ -6413,7 +6502,10 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(!workspace_resources_match(&pod, "3000m", "5120Mi"));
+        assert!(!workspace_resources_match(
+            &pod,
+            &WorkspaceCompute::new(3000, 5120, CpuSharingRatio::NONE)
+        ));
     }
 
     #[test]
@@ -6504,6 +6596,48 @@ mod tests {
     }
 
     #[test]
+    fn a_resize_of_a_shared_runtime_object_keeps_its_ratio() {
+        let workspace = |request: &str, limit: &str| {
+            json!({"spec": {"podTemplate": {"spec": {"containers": [
+                {"name": "dind", "resources": {"requests": {"cpu": "500m"}, "limits": {"cpu": "2"}}},
+                {"name": "workspace", "resources": {
+                    "requests": {"cpu": request, "memory": "8Gi"},
+                    "limits": {"cpu": limit, "memory": "8Gi"}
+                }}
+            ]}}}})
+        };
+        // The controller may store a quantity canonicalized.
+        let sharing = |request, limit| runtime_object_cpu_sharing(&workspace(request, limit));
+        assert_eq!(sharing("2000m", "2000m"), CpuSharingRatio::NONE);
+        assert_eq!(sharing("2", "2000m"), CpuSharingRatio::NONE);
+        assert_eq!(
+            sharing("1", "2"),
+            CpuSharingRatio::observed(1000, 2000),
+            "1 CPU reserved for 2 vCPUs"
+        );
+        assert_eq!(
+            runtime_object_cpu_sharing(&json!({"spec": {}})),
+            CpuSharingRatio::NONE
+        );
+
+        let mut runtime = workspace("1", "2");
+        let compute = WorkspaceCompute::new(4000, 16384, runtime_object_cpu_sharing(&runtime));
+        set_workspace_resources(&mut runtime, &compute).unwrap();
+        let resources = runtime
+            .pointer("/spec/podTemplate/spec/containers/1/resources")
+            .unwrap();
+        assert_eq!(resources["requests"]["cpu"], "2000m");
+        assert_eq!(resources["limits"]["cpu"], "4000m");
+        assert_eq!(resources["requests"]["memory"], "16384Mi");
+        assert_eq!(resources["limits"]["memory"], "16384Mi");
+        assert_eq!(
+            runtime.pointer("/spec/podTemplate/spec/containers/0/resources/limits/cpu"),
+            Some(&json!("2")),
+            "DinD keeps its own"
+        );
+    }
+
+    #[test]
     fn resize_mutates_only_workspace_resources_and_preserves_runtime_identity() {
         let mut runtime = json!({
             "metadata": {"labels": {"codewire.sh/isolation-tier": "future-tier"}},
@@ -6526,7 +6660,11 @@ mod tests {
                 }}]
             }
         });
-        set_workspace_resources(&mut runtime, "1500m", "2048Mi").unwrap();
+        set_workspace_resources(
+            &mut runtime,
+            &WorkspaceCompute::new(1500, 2048, CpuSharingRatio::NONE),
+        )
+        .unwrap();
         set_workspace_volume_request(&mut runtime, "20Gi").unwrap();
         assert_eq!(
             runtime.pointer("/spec/podTemplate/spec/containers/0/image"),
@@ -8220,6 +8358,70 @@ mod tests {
                 })
             );
             assert_eq!(actual_of(&fake), &quantities(REQUESTED));
+        }
+
+        /// A Pod running at 2:1: half its CPU reserved, all of its memory.
+        fn shared_quantities((cpu, memory): (i32, i32)) -> Value {
+            json!({
+                "requests": {"cpu": format!("{}m", cpu / 2), "memory": format!("{memory}Mi")},
+                "limits": {"cpu": format!("{cpu}m"), "memory": format!("{memory}Mi")}
+            })
+        }
+
+        fn shared_pod(uid: &str, spec: (i32, i32), actual: (i32, i32)) -> Value {
+            let mut pod = pod(uid, spec, actual);
+            pod["spec"]["containers"][0]["resources"] = shared_quantities(spec);
+            pod["status"]["containerStatuses"][0]["resources"] = shared_quantities(actual);
+            pod
+        }
+
+        /// #3635: a resize keeps the ratio the Pod runs at, and converges on it.
+        #[tokio::test]
+        async fn a_resize_keeps_the_cpu_sharing_the_pod_runs_at() {
+            let (client, fake) = api(Fake::new(
+                shared_pod(UID, PREVIOUS, PREVIOUS),
+                Kubelet::Applies,
+                Race::None,
+            ));
+            resize(&client).await.unwrap();
+            let fake = fake.lock().unwrap();
+            assert_eq!(fake.accepted.len(), 1);
+            assert_eq!(
+                fake.accepted[0]["spec"]["containers"][0]["resources"],
+                shared_quantities(REQUESTED)
+            );
+            assert_eq!(actual_of(&fake), &shared_quantities(REQUESTED));
+        }
+
+        /// #3635: a failed resize of a shared Pod is recognized as applied, and
+        /// never rewritten at 1:1.
+        #[tokio::test]
+        async fn a_failed_resize_of_a_shared_pod_settles_at_its_ratio() {
+            let mut fake = Fake::new(
+                shared_pod(UID, PREVIOUS, PREVIOUS),
+                Kubelet::Applies,
+                Race::None,
+            );
+            fake.failing_reads = 1;
+            let (client, fake) = api(fake);
+            resize(&client).await.unwrap_err();
+            assert_eq!(settle(&client).await, FailedLiveResize::Applied);
+            let fake = fake.lock().unwrap();
+            assert_eq!(fake.accepted.len(), 1, "no withdrawal");
+            assert_eq!(actual_of(&fake), &shared_quantities(REQUESTED));
+        }
+
+        /// #3635: a withdrawal goes back to the previous size at the Pod's ratio.
+        #[tokio::test]
+        async fn a_withdrawn_resize_of_a_shared_pod_returns_to_its_ratio() {
+            let mut pending = pending(UID, REQUESTED, PREVIOUS, "Deferred");
+            pending["spec"]["containers"][0]["resources"] = shared_quantities(REQUESTED);
+            pending["status"]["containerStatuses"][0]["resources"] = shared_quantities(PREVIOUS);
+            let (client, fake) = api(Fake::new(pending, Kubelet::Applies, Race::None));
+            assert_eq!(settle(&client).await, FailedLiveResize::Settled);
+            let fake = fake.lock().unwrap();
+            assert_eq!(spec_of(&fake), &shared_quantities(PREVIOUS));
+            assert_eq!(actual_of(&fake), &shared_quantities(PREVIOUS));
         }
 
         /// #2475: an Infeasible condition from an earlier generation does not

@@ -141,6 +141,16 @@ disk less 2 GiB) online with `resize2fs` at the next Pod start.
 |---|---|---|---|
 | `SANDBOX_WARM_POOL_SHAPES` | No | Comma-separated warm pools, `<cpu>m/<memory>Mi/<disk>Gi=<members>` with 0 to 16 members each. A create of exactly a pool's shape adopts a prestarted member. The default create shape is `2000m/8192Mi/80Gi`, so a pool of that shape serves default creates. Empty means no pools. | `2000m/8192Mi/80Gi=2` |
 
+## Workspace CPU
+
+A workspace's CPU request can be lower than its vCPUs, so more sandboxes fit on a node while each VM keeps the vCPUs it was asked for. Only the scheduler's reservation changes: the CPU limit, quota, billing and the shape users see stay on full vCPUs, and the workspace's memory request and the requests of DinD and the Kata overhead do not change. Under contention, a sandbox gets CPU in proportion to its request.
+
+The setting applies to sandboxes created after it changes, and a change rotates the warm pools like a release. An existing sandbox keeps the ratio it runs at, through a stop, a start or a resize, until it is replaced. Confidential environments are always 1:1.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `CODEWIRE_SANDBOX_CPU_SHARING_RATIO` | No | How many vCPUs share one reserved CPU: a whole number from 1 to 8. A workspace requests its vCPUs divided by this, rounded up. Unset, empty or `1` means off, one reserved CPU per vCPU. Any other form stops orchestration at startup. | `2` |
+
 ## Browser origins
 
 Every Codewire service the browser calls is served from the dashboard's own origin, so by default no service answers cross-origin (CORS) requests at all.

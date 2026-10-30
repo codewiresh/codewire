@@ -134,18 +134,24 @@ fn confidential_tier_settings_leave_commodity_pools_unchanged() {
 
 #[test]
 fn pool_template_equals_the_environment_rendering_of_its_shape() {
-    let cfg = dev_cfg();
-    for shape in shapes() {
-        let pool = render_configured_warm_pool(&cfg, shape, 2).unwrap();
-        for env in [environment(shape), environment_with_selection(shape)] {
-            let opts = environment_opts(&cfg, &env);
-            assert!(!opts.workspace_binding_url.is_empty());
-            let rendered = render_sandbox_template(SANDBOX_NAMESPACE, &opts);
-            assert_eq!(
-                rendered["spec"],
-                crate::sandbox::warm_pool::without_revision_marker(&pool.template["spec"]),
-                "{shape:?}"
-            );
+    for ratio in ["1", "2"] {
+        let cfg = SandboxWorkerCfg {
+            cpu_sharing_ratio: crate::sandbox::template::CpuSharingRatio::parse(Some(ratio))
+                .unwrap(),
+            ..dev_cfg()
+        };
+        for shape in shapes() {
+            let pool = render_configured_warm_pool(&cfg, shape, 2).unwrap();
+            for env in [environment(shape), environment_with_selection(shape)] {
+                let opts = environment_opts(&cfg, &env);
+                assert!(!opts.workspace_binding_url.is_empty());
+                let rendered = render_sandbox_template(SANDBOX_NAMESPACE, &opts);
+                assert_eq!(
+                    rendered["spec"],
+                    crate::sandbox::warm_pool::without_revision_marker(&pool.template["spec"]),
+                    "{shape:?} at {ratio}:1"
+                );
+            }
         }
     }
 }

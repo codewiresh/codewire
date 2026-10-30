@@ -120,7 +120,7 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
         ],
         "resources": {
             "requests": {
-                "cpu": format!("{}m", opts.cpu_millicores),
+                "cpu": format!("{}m", opts.cpu_sharing.request_millicores(opts.cpu_millicores)),
                 "memory": format!("{}Mi", opts.memory_mib),
                 "ephemeral-storage": format!("{WORKSPACE_EPHEMERAL_STORAGE_GI}Gi"),
             },

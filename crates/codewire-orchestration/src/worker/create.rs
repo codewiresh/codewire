@@ -281,6 +281,9 @@ pub struct SandboxWorkerCfg {
     /// Every workspace Pod's egress rate cap
     /// ([`crate::sandbox::template::EGRESS_BANDWIDTH_ENV`]).
     pub egress_bandwidth: String,
+    /// CPU sharing of standard-tier workspaces
+    /// ([`crate::sandbox::template::CPU_SHARING_RATIO_ENV`]).
+    pub cpu_sharing_ratio: crate::sandbox::template::CpuSharingRatio,
     /// How often an environment's workspace daemon checks its delivered Codex
     /// login. Only the Kind test deployment sets it
     /// ([`KIND_CODEX_LOGIN_CHECK_PERIOD_ENV`], read only when built with
@@ -392,6 +395,12 @@ impl SandboxWorkerCfg {
                 .as_deref(),
         )
         .unwrap_or_else(|error| panic!("{error}"));
+        let cpu_sharing_ratio = crate::sandbox::template::CpuSharingRatio::parse(
+            std::env::var(crate::sandbox::template::CPU_SHARING_RATIO_ENV)
+                .ok()
+                .as_deref(),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         Self {
             session_secret: getenv("SESSION_SECRET", ""),
             sandbox_namespace,
@@ -448,6 +457,7 @@ impl SandboxWorkerCfg {
             ingress_namespace: getenv("SANDBOX_INGRESS_NAMESPACE", ""),
             ingress_pod_name: getenv("SANDBOX_INGRESS_POD_NAME", ""),
             egress_bandwidth,
+            cpu_sharing_ratio,
             codex_login_check_period_seconds: kind_codex_login_check_period_seconds(
                 std::env::var_os(KIND_CODEX_LOGIN_CHECK_PERIOD_ENV),
             ),
@@ -698,6 +708,12 @@ pub fn shape_template_opts(
         },
         udp_relay_allocator_egress_enabled: uses_runtime_transport_registry,
         cpu_millicores: shape.cpu_millicores,
+        // Nothing has measured a confidential VM under sharing.
+        cpu_sharing: if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
+            crate::sandbox::template::CpuSharingRatio::NONE
+        } else {
+            cfg.cpu_sharing_ratio
+        },
         memory_mib: shape.memory_mib,
         disk_gib: shape.disk_gib,
         workspace_storage_class: if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
@@ -3164,6 +3180,46 @@ mod tests {
         };
         let pool = warm_pool_template_opts(&cfg, shape).unwrap();
         assert_eq!(pool.egress_bandwidth, "100M");
+    }
+
+    /// #3635: a pool member and an environment of its shape render the same
+    /// ratio, so a create still claims from the pool, and a confidential
+    /// environment stays 1:1.
+    #[test]
+    fn standard_templates_carry_the_cpu_sharing_ratio_and_confidential_ones_do_not() {
+        let shared = crate::sandbox::template::CpuSharingRatio::parse(Some("2")).unwrap();
+        let cfg = SandboxWorkerCfg {
+            runtime_profile: "commodity".into(),
+            pod_namespace: "dev".into(),
+            api_base_url: "https://codewire-dev.sh".into(),
+            cpu_sharing_ratio: shared,
+            ..Default::default()
+        };
+        let shape = WorkspaceShape {
+            cpu_millicores: 500,
+            memory_mib: 1024,
+            disk_gib: 5,
+        };
+        let standard = standard_runtime_profile_spec(&cfg);
+        assert_eq!(
+            shape_template_opts(&cfg, "ghcr.io/codewiresh/workspace:1", &standard, shape)
+                .cpu_sharing,
+            shared
+        );
+        assert_eq!(
+            warm_pool_template_opts(&cfg, shape).unwrap().cpu_sharing,
+            shared
+        );
+        let confidential = runtime_profile_spec(
+            RUNTIME_PROFILE_CONFIDENTIAL,
+            &cfg.docker_mode,
+            cfg.dind_enabled,
+        );
+        assert_eq!(
+            shape_template_opts(&cfg, "ghcr.io/codewiresh/workspace:1", &confidential, shape)
+                .cpu_sharing,
+            crate::sandbox::template::CpuSharingRatio::NONE
+        );
     }
 
     /// Every workspace renders against its binding listener, confidential
