@@ -1955,6 +1955,125 @@ async fn a_checkpoint_survives_the_loss_of_the_store_only_with_its_own_vmm_files
 }
 
 #[tokio::test]
+async fn a_stop_for_restore_needs_the_checkpoint_files_the_restore_will_use() {
+    let source = source(StoredEnvironmentState::Stopped);
+    let config = config(&source);
+    let snapshot = capture_named(&source, "s1").await.unwrap();
+    let intact = |row: &SnapshotRow| {
+        let (_, manifest) = find_ready(&config, &row.id.to_string(), true).unwrap();
+        let checkpoint = manifest.checkpoint.clone().unwrap();
+        crate::supervisor::checkpoints::linux::stored_files_intact(
+            &config,
+            row.id,
+            &manifest,
+            &checkpoint,
+        )
+    };
+    let stored = |row: &SnapshotRow, relative: &str| {
+        config
+            .engine_root()
+            .join("snapshots")
+            .join(row.id.to_string())
+            .join(relative)
+    };
+    let kept = publish_checkpoint(&source, &snapshot, "c1").await;
+    intact(&kept).unwrap();
+
+    // A changed VMM state file.
+    let state_changed = publish_checkpoint(&source, &snapshot, "c2").await;
+    let state = stored(&state_changed, "vmm/state.json");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&state, b"{\"changed\":true}").unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o400)).unwrap();
+    assert!(intact(&state_changed).is_err());
+
+    // A stored disk that is no longer its recorded size.
+    let disk_changed = publish_checkpoint(&source, &snapshot, "c3").await;
+    let disk = stored(&disk_changed, "disks/state.raw");
+    let length = fs::metadata(&disk).unwrap().len();
+    File::options()
+        .write(true)
+        .open(&disk)
+        .unwrap()
+        .set_len(length + 4096)
+        .unwrap();
+    assert!(intact(&disk_changed).is_err());
+
+    // A memory file that is no longer the recorded size.
+    let memory_changed = publish_checkpoint(&source, &snapshot, "c4").await;
+    let memory = stored(&memory_changed, "vmm/memory-ranges");
+    fs::set_permissions(&memory, fs::Permissions::from_mode(0o600)).unwrap();
+    File::options()
+        .write(true)
+        .open(&memory)
+        .unwrap()
+        .set_len(4096)
+        .unwrap();
+    fs::set_permissions(&memory, fs::Permissions::from_mode(0o400)).unwrap();
+    assert!(intact(&memory_changed).is_err());
+
+    // The intact one is unaffected by its siblings' damage.
+    intact(&kept).unwrap();
+}
+
+#[tokio::test]
+async fn a_restore_after_a_stop_for_it_that_fails_leaves_the_stopped_source_on_its_own_disks() {
+    // The state after a Stop for a restore: the source is stopped. Its
+    // checkpoint is then found damaged, so the restore must refuse before it
+    // places anything.
+    let source = source(StoredEnvironmentState::Stopped);
+    let config = config(&source);
+    let snapshot = capture_named(&source, "s1").await.unwrap();
+    let damaged = publish_checkpoint(&source, &snapshot, "c1").await;
+    let state = config
+        .engine_root()
+        .join("snapshots")
+        .join(damaged.id.to_string())
+        .join("vmm/state.json");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&state, b"{\"changed\":true}").unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o400)).unwrap();
+    let disk_before = fs::read(&source.paths.state_disk).unwrap();
+    let inode_before = fs::metadata(&source.paths.state_disk).unwrap().ino();
+
+    use crate::control::v1::local_checkpoint_service_server::LocalCheckpointService as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let refused = source
+        .service
+        .restore_checkpoint(Request::new(v1::RestoreCheckpointRequest {
+            checkpoint: "c1".to_owned(),
+            account: None,
+            request_id: Uuid::new_v4().to_string(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        refused.message().contains("VM checkpoint c1 is damaged"),
+        "{}",
+        refused.message()
+    );
+
+    let environment = source.service.supervisor.environment("dev").unwrap();
+    assert_eq!(environment.state, StoredEnvironmentState::Stopped);
+    assert_eq!(
+        fs::metadata(&source.paths.state_disk).unwrap().ino(),
+        inode_before
+    );
+    assert!(fs::read(&source.paths.state_disk).unwrap() == disk_before);
+    assert!(
+        source
+            .service
+            .supervisor
+            .core()
+            .store
+            .pending_operations()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn a_deleted_environment_takes_its_checkpoints_with_it() {
     let source = source(StoredEnvironmentState::Stopped);
     let config = config(&source);

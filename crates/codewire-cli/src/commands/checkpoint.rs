@@ -185,8 +185,16 @@ async fn handle_local_checkpoint_command(
                     anyhow::bail!("restore cancelled; {source} is unchanged");
                 }
                 let stopping = std::time::Instant::now();
+                // The restore discards the running state, so the source stops
+                // without a graceful guest poweroff, once the supervisor has
+                // checked the checkpoint as the restore will (#3046).
                 client
-                    .stop(&source)
+                    .stop_for_restore_observed(
+                        &checkpoint.name,
+                        &source,
+                        native_signed_in_account(globals),
+                        &mut |_| {},
+                    )
                     .await
                     .map_err(status("checkpoint restore: stop"))?;
                 stopped = Some(stopping.elapsed());

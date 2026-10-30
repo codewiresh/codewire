@@ -329,6 +329,22 @@ service LocalCheckpointService {
   // a Start operation that places the checkpoint's disks and restores its
   // memory. Every disk change since the checkpoint is discarded.
   rpc RestoreCheckpoint(RestoreCheckpointRequest) returns (Operation);
+  // Stop the running source of a VM checkpoint for a restore: a Stop
+  // operation that skips the guest's graceful poweroff, because the restore
+  // discards its state. Refused unless the checkpoint passes every check the
+  // restore makes of it, so a restore after it fails only where one after a
+  // graceful stop would. A plain StopEnvironment is unchanged.
+  rpc StopForRestore(StopForRestoreRequest) returns (Operation);
+}
+
+message StopForRestoreRequest {
+  // The VM checkpoint the restore will use, by name or ID; its source is
+  // the environment stopped.
+  string checkpoint = 1;
+  // The platform account the restoring cw is signed in to, or absent, as for
+  // RestoreCheckpoint.
+  PlatformAccount account = 2;
+  string request_id = 3;
 }
 
 message RestoreCheckpointRequest {
@@ -1065,7 +1081,13 @@ message DirectShareAttachment {
   repeated string vm_only = 10;
 }
 
-message StopVmRequest {}
+message StopVmRequest {
+  // Skip the guest's graceful poweroff and shut the VMM down directly; the
+  // disks are still released when the VMM exits. Set only by a Stop the
+  // supervisor admitted for a VM checkpoint restore, which discards the
+  // guest's state (#3046).
+  bool discard_guest_state = 1;
+}
 message GrowStateDiskRequest {
   string environment_id = 1;
   uint64 disk_bytes = 2;

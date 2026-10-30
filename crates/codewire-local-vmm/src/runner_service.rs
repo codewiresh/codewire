@@ -140,7 +140,22 @@ impl RunnerClient {
     }
 
     pub async fn stop(&mut self) -> Result<v1::RunnerInfo, Status> {
-        Ok(self.inner.stop_vm(v1::StopVmRequest {}).await?.into_inner())
+        self.stop_vm(false).await
+    }
+
+    /// Stop for a VM checkpoint restore: no graceful guest poweroff (#3046).
+    pub async fn stop_discarding_guest_state(&mut self) -> Result<v1::RunnerInfo, Status> {
+        self.stop_vm(true).await
+    }
+
+    async fn stop_vm(&mut self, discard_guest_state: bool) -> Result<v1::RunnerInfo, Status> {
+        Ok(self
+            .inner
+            .stop_vm(v1::StopVmRequest {
+                discard_guest_state,
+            })
+            .await?
+            .into_inner())
     }
 
     pub async fn grow_state_disk(
@@ -1473,8 +1488,9 @@ impl EnvironmentRunnerService for RunnerRpc {
 
     async fn stop_vm(
         &self,
-        _request: Request<v1::StopVmRequest>,
+        request: Request<v1::StopVmRequest>,
     ) -> Result<Response<v1::RunnerInfo>, Status> {
+        let discard_guest_state = request.into_inner().discard_guest_state;
         let mut state = self.state.lock().await;
         state.retirement.require_active()?;
         state.generation_access = None;
@@ -1491,9 +1507,12 @@ impl EnvironmentRunnerService for RunnerRpc {
             state.cw_runtime_catalog_generation(),
         )?;
         if let Some(running) = state.running.as_mut() {
-            match running
-                .stop()
-                .await
+            let stopped = if discard_guest_state {
+                running.stop_discarding_guest_state().await
+            } else {
+                running.stop().await
+            };
+            match stopped
                 .map_err(|_| Status::internal("bounded stop of the owned VMM process failed"))?
             {
                 ExitClass::StillRunning => {
@@ -2772,7 +2791,7 @@ mod tests {
             rpc.start_vm(Request::new(stopped_start_request(id)))
                 .await
                 .map(drop),
-            rpc.stop_vm(Request::new(v1::StopVmRequest {}))
+            rpc.stop_vm(Request::new(v1::StopVmRequest::default()))
                 .await
                 .map(drop),
             rpc.grow_state_disk(Request::new(v1::GrowStateDiskRequest {
@@ -3245,7 +3264,7 @@ mod tests {
                 );
             } else {
                 assert!(
-                    rpc.stop_vm(Request::new(v1::StopVmRequest {}))
+                    rpc.stop_vm(Request::new(v1::StopVmRequest::default()))
                         .await
                         .is_err()
                 );

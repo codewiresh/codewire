@@ -1879,7 +1879,19 @@ impl RunningVm {
     }
 
     pub async fn stop(&mut self) -> Result<ExitClass, RunnerError> {
-        let vmm = self.stop_vmm().await;
+        self.stop_with(false).await
+    }
+
+    /// Stop for a VM checkpoint restore, which discards the guest's state:
+    /// no graceful guest poweroff, straight to the VMM's own shutdown. The
+    /// disks are released when the VMM exits, and the network worker and
+    /// direct shares stop as in [`Self::stop`] (#3046).
+    pub async fn stop_discarding_guest_state(&mut self) -> Result<ExitClass, RunnerError> {
+        self.stop_with(true).await
+    }
+
+    async fn stop_with(&mut self, discard_guest_state: bool) -> Result<ExitClass, RunnerError> {
+        let vmm = self.stop_vmm(discard_guest_state).await;
         let worker = self.stop_network_worker().await;
         let shares = self.stop_direct_shares().await;
         match (vmm, worker, shares) {
@@ -1888,24 +1900,31 @@ impl RunningVm {
         }
     }
 
-    async fn stop_vmm(&mut self) -> Result<ExitClass, RunnerError> {
+    async fn stop_vmm(&mut self, discard_guest_state: bool) -> Result<ExitClass, RunnerError> {
         // Credential access is already revoked. The fixed private lifecycle
         // RPC must not need a workload projection to reach trusted guest init.
         // A successful poweroff can close gRPC before the ACK: always observe
         // the exact VMM exit before escalating, even after dispatch ambiguity.
         let process = &self.process;
-        if observe_guest_poweroff(
-            self.request_guest_poweroff(),
-            |remaining| async move { process.wait_exited(remaining).await.map_err(Into::into) },
-            GUEST_POWEROFF_TIMEOUT,
-            GUEST_POWEROFF_DISPATCH_TIMEOUT,
-        )
-        .await?
+        if !discard_guest_state
+            && observe_guest_poweroff(
+                self.request_guest_poweroff(),
+                |remaining| async move { process.wait_exited(remaining).await.map_err(Into::into) },
+                GUEST_POWEROFF_TIMEOUT,
+                GUEST_POWEROFF_DISPATCH_TIMEOUT,
+            )
+            .await?
         {
             return self.wait_reaped().await;
         }
+        // A restore's stop ends the VMM itself: `vm.shutdown` would leave the
+        // process up until GRACEFUL_STOP_TIMEOUT. The disks close as it exits.
         #[cfg(target_os = "linux")]
-        let _ = self.api.shutdown().await;
+        let _ = if discard_guest_state {
+            self.api.shutdown_vmm().await
+        } else {
+            self.api.shutdown().await
+        };
         if self.process.wait_exited(GRACEFUL_STOP_TIMEOUT).await? {
             return self.wait_reaped().await;
         }

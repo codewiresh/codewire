@@ -4731,6 +4731,16 @@ impl SupervisorCore {
 
 impl Supervisor {
     async fn ensure_vm_stopped(&self, name: &str) -> Result<(), SupervisorError> {
+        self.ensure_vm_stopped_with(name, false).await
+    }
+
+    /// `discard_guest_state` skips the guest's graceful poweroff; only a Stop
+    /// admitted for a VM checkpoint restore sets it (#3046).
+    async fn ensure_vm_stopped_with(
+        &self,
+        name: &str,
+        discard_guest_state: bool,
+    ) -> Result<(), SupervisorError> {
         self.reconcile(name).await?;
         if self.environment(name)?.state == StoredEnvironmentState::Orphaned {
             return Err(SupervisorError::Orphaned);
@@ -4748,7 +4758,12 @@ impl Supervisor {
         }
         let socket = self.config.runner_socket(environment.id);
         let mut client = RunnerClient::connect(&socket).await?;
-        let info = client.stop().await.map_err(|_| SupervisorError::VmStop)?;
+        let info = if discard_guest_state {
+            client.stop_discarding_guest_state().await
+        } else {
+            client.stop().await
+        }
+        .map_err(|_| SupervisorError::VmStop)?;
         if info.environment_id != environment.id.to_string()
             || info.state != v1::EnvironmentState::Stopped as i32
         {
@@ -4878,10 +4893,13 @@ impl Supervisor {
         let environment_id = operation
             .environment_id
             .ok_or(SupervisorError::InvalidState)?;
-        if operation.kind != OperationKind::Stop
-            || operation.payload != serde_json::json!({"name": name})
-            || self.environment(name)?.id != environment_id
-        {
+        // A Stop for a VM checkpoint restore records the checkpoint it was
+        // admitted for, so a replay stops the same way (#3046).
+        let discard_guest_state = match stop_payload_checkpoint(&operation.payload, name) {
+            Some(discard) => discard,
+            None => return Err(SupervisorError::InvalidState),
+        };
+        if operation.kind != OperationKind::Stop || self.environment(name)?.id != environment_id {
             return Err(SupervisorError::InvalidState);
         }
         let mut operation = operation.clone();
@@ -4890,7 +4908,8 @@ impl Supervisor {
             let effect_started = std::time::Instant::now();
             match effect {
                 LifecycleEffect::StopVm => {
-                    self.ensure_vm_stopped(name).await?;
+                    self.ensure_vm_stopped_with(name, discard_guest_state)
+                        .await?;
                     operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordStopped => {
@@ -10141,6 +10160,26 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
 /// [`MAXIMUM_LIFECYCLE_CAUSE_BYTES`], so `<operation prefix>_<cause>` stays a
 /// valid journal error code. The match is exhaustive: a new error variant must
 /// be named here.
+/// A Stop payload is exactly `{"name"}`, or `{"name", "discard_for_checkpoint"}`
+/// for one the checkpoint service admitted for a restore (#3046): `Some` with
+/// whether the guest's state is discarded, `None` for any other shape.
+fn stop_payload_checkpoint(payload: &serde_json::Value, name: &str) -> Option<bool> {
+    let fields = payload.as_object()?;
+    if fields.get("name").and_then(serde_json::Value::as_str) != Some(name) {
+        return None;
+    }
+    match fields.len() {
+        1 => Some(false),
+        2 => fields
+            .get("discard_for_checkpoint")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .filter(|id| !id.is_nil())
+            .map(|_| true),
+        _ => None,
+    }
+}
+
 /// Logs how long one lifecycle effect took, so a slow create, start, restore
 /// or fork shows which effect spent the time (#3046). Closed names and a
 /// duration only.
@@ -18940,6 +18979,30 @@ mod tests {
             ),
             "environment_sources_not_running"
         );
+    }
+
+    #[test]
+    fn a_stop_discards_the_guest_state_only_when_admitted_for_a_restore() {
+        let id = Uuid::new_v4().to_string();
+        let payload = |value: serde_json::Value| stop_payload_checkpoint(&value, "dev");
+        assert_eq!(payload(serde_json::json!({"name": "dev"})), Some(false));
+        assert_eq!(
+            payload(serde_json::json!({"name": "dev", "discard_for_checkpoint": id})),
+            Some(true)
+        );
+        for refused in [
+            serde_json::json!({"name": "other"}),
+            serde_json::json!({"name": "other", "discard_for_checkpoint": id}),
+            serde_json::json!({"name": "dev", "discard_for_checkpoint": Uuid::nil().to_string()}),
+            serde_json::json!({"name": "dev", "discard_for_checkpoint": "c1"}),
+            serde_json::json!({"name": "dev", "discard_for_checkpoint": true}),
+            serde_json::json!({"name": "dev", "discard": id}),
+            serde_json::json!({"name": "dev", "discard_for_checkpoint": id, "extra": 1}),
+            serde_json::json!({}),
+            serde_json::json!("dev"),
+        ] {
+            assert_eq!(payload(refused.clone()), None, "{refused}");
+        }
     }
 
     #[tokio::test]

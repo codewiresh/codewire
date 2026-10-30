@@ -138,6 +138,14 @@ impl ChApiClient {
             .map(|_| ())
     }
 
+    /// Shuts the VM down and ends the VMM process, which closes its disks.
+    /// The process may exit before it answers.
+    pub async fn shutdown_vmm(&self) -> Result<(), ChApiError> {
+        self.expect_success(Method::Put, Endpoint::VmmShutdown, &[])
+            .await
+            .map(|_| ())
+    }
+
     /// Stops every vCPU and drains in-flight block requests (#3046 R4).
     pub async fn pause(&self) -> Result<(), ChApiError> {
         self.expect_success(Method::Put, Endpoint::VmPause, &[])
@@ -289,6 +297,7 @@ impl Method {
 #[derive(Debug, Clone, Copy)]
 enum Endpoint {
     VmmPing,
+    VmmShutdown,
     VmInfo,
     VmShutdown,
     VmAddDisk,
@@ -301,6 +310,7 @@ impl Endpoint {
     fn path(self) -> &'static str {
         match self {
             Self::VmmPing => "/api/v1/vmm.ping",
+            Self::VmmShutdown => "/api/v1/vmm.shutdown",
             Self::VmInfo => "/api/v1/vm.info",
             Self::VmShutdown => "/api/v1/vm.shutdown",
             Self::VmAddDisk => "/api/v1/vm.add-disk",

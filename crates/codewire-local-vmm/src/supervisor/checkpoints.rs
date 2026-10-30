@@ -435,6 +435,24 @@ impl LocalCheckpointService for SupervisorRpc {
             .map(Response::new)
     }
 
+    async fn stop_for_restore(
+        &self,
+        request: Request<v1::StopForRestoreRequest>,
+    ) -> Result<Response<v1::Operation>, Status> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = request;
+            Err(Status::unimplemented(LINUX_ONLY))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.start_drains()?;
+            linux::stop_for_restore(self, request.into_inner())
+                .await
+                .map(Response::new)
+        }
+    }
+
     async fn restore_checkpoint(
         &self,
         request: Request<v1::RestoreCheckpointRequest>,
@@ -493,7 +511,7 @@ fn delete(_config: &NativeRuntimeConfig, _selector: &str) -> Result<v1::Checkpoi
 }
 
 #[cfg(target_os = "linux")]
-mod linux {
+pub(in crate::supervisor) mod linux {
     use std::io::Read as _;
     use std::time::Instant;
 
@@ -748,6 +766,234 @@ mod linux {
 
     /// `RestoreCheckpoint`: every refusable check, then a Start operation
     /// whose payload names the checkpoint. The source must be stopped.
+    /// Everything a restore requires of a VM checkpoint and its source,
+    /// other than the source being stopped: the same workspace, resources,
+    /// CPU, platform account, runtime and Cloud Hypervisor build, and stored
+    /// files that still match the manifest. A restore runs it, and so does a
+    /// Stop for a restore before it discards the guest's state (#3046).
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_restorable(
+        supervisor: &Supervisor,
+        name: &str,
+        environment: &EnvironmentRecord,
+        row: &crate::snapshot_store::SnapshotRow,
+        manifest: &Manifest,
+        checkpoint: &CheckpointManifest,
+        account: Option<&v1::PlatformAccount>,
+    ) -> Result<(), Status> {
+        // The checkpoint itself first: intact stored files, or nothing else
+        // about it matters.
+        let config = supervisor.config.clone();
+        let (row_id, row_name, stored_manifest, stored_checkpoint) = (
+            row.id,
+            row.name.clone(),
+            manifest.clone(),
+            checkpoint.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            stored_files_intact(&config, row_id, &stored_manifest, &stored_checkpoint)
+        })
+            .await
+            .map_err(|_| Status::internal("VM checkpoint check task failed"))?
+            .map_err(|_| {
+                Status::failed_precondition(format!(
+                    "VM checkpoint {row_name} is damaged: its stored files no longer match its manifest; it cannot be restored"
+                ))
+            })?;
+        let fork = || {
+            format!(
+                "fork it instead: `cw create --local --checkpoint {}`",
+                row.name
+            )
+        };
+        let artifact_generation = manifest
+            .root_generation
+            .artifact_generation()
+            .map_err(|error| status(error.into()))?
+            .to_owned();
+        if environment.active_workspace_generation.as_ref() != Some(&manifest.root_generation)
+            || environment.active_artifact_generation.as_deref()
+                != Some(artifact_generation.as_str())
+            || environment.staging_workspace_generation.is_some()
+            || environment.staging_artifact_generation.is_some()
+            || environment.workspace_plan != manifest.workspace_plan
+            || environment.vcpus != manifest.resources.vcpus
+            || environment.memory_mib != manifest.resources.memory_mib
+            || environment.disk_bytes != manifest.resources.disk_bytes
+            || environment.docker_disk_bytes != manifest.resources.docker_disk_bytes
+        {
+            return Err(Status::failed_precondition(format!(
+                "{name}'s workspace, runtime or resources changed since VM checkpoint {}; {}",
+                row.name,
+                fork()
+            )));
+        }
+        let host = host_identity();
+        if host.cpu != checkpoint.host.cpu {
+            return Err(Status::failed_precondition(format!(
+                "VM checkpoint {} was taken on another CPU ({}; this host has {}); it cannot be restored here",
+                row.name, checkpoint.host.cpu, host.cpu
+            )));
+        }
+        let fresh = PlatformAccount::from_proto(account)?;
+        if let (Some(recorded), Some(fresh)) = (manifest.platform_account.as_ref(), fresh.as_ref())
+            && recorded != fresh
+        {
+            return Err(Status::permission_denied(format!(
+                "VM checkpoint {} was captured while signed in to another platform account; sign in as that account (`cw login`) to restore it",
+                row.name
+            )));
+        }
+        let engine = PrivateRoot::open(&supervisor.config.engine_root())
+            .map_err(|error| status(SupervisorError::from(error)))?;
+        let artifacts = RuntimeArtifactStore::create(&engine)
+            .map_err(artifact_store_error)
+            .map_err(status)?
+            .open_generation(&artifact_generation)
+            .await
+            .map_err(|_| {
+                Status::failed_precondition(format!(
+                    "VM checkpoint {} is unrestorable: the runtime it was taken with is gone",
+                    row.name
+                ))
+            })?;
+        if artifacts.cloud_hypervisor.sha256() != checkpoint.vmm.sha256 {
+            return Err(Status::failed_precondition(format!(
+                "VM checkpoint {} is unrestorable: its Cloud Hypervisor build changed",
+                row.name
+            )));
+        }
+        artifacts.require_guest_checkpoint_abi().map_err(|_| {
+            Status::failed_precondition(format!(
+                "VM checkpoint {}'s guest has no checkpoint hook",
+                row.name
+            ))
+        })?;
+        Ok(())
+    }
+
+    /// The checkpoint's stored VMM files hash to the recorded digests, its
+    /// memory is the recorded size, and each stored disk keeps its recorded
+    /// size and filesystem.
+    pub(in crate::supervisor) fn stored_files_intact(
+        config: &NativeRuntimeConfig,
+        checkpoint_id: Uuid,
+        manifest: &Manifest,
+        checkpoint: &CheckpointManifest,
+    ) -> Result<(), SupervisorError> {
+        let snapshots = snapshots_root(&config.engine_root())?;
+        let source =
+            snapshots.open_private_directory(Path::new(&checkpoint_id.to_string()), 0o700)?;
+        if !checkpoint.files_match(source.path()) {
+            return Err(SupervisorError::InvalidState);
+        }
+        let storage = manifest.storage_generation()?;
+        for disk in &manifest.disks {
+            let stored = match disk.role {
+                DiskRole::State => PathBuf::from("disks/state.raw"),
+                DiskRole::Docker => PathBuf::from("disks/docker.raw"),
+                DiskRole::Root => Path::new("root").join(&storage).join("root.raw"),
+            };
+            let identity = crate::state::StateDiskIdentity::capture(&source.path().join(stored))?;
+            if identity.file.size != disk.bytes || identity.filesystem_uuid != disk.filesystem_uuid
+            {
+                return Err(SupervisorError::InvalidState);
+            }
+        }
+        Ok(())
+    }
+
+    /// Stop a VM checkpoint's running source for a restore of it: a Stop
+    /// that discards the guest's state instead of powering it off. It is
+    /// admitted only after every check the restore makes, so that a restore
+    /// after it fails only where one after a graceful stop would (#3046).
+    pub(super) async fn stop_for_restore(
+        rpc: &SupervisorRpc,
+        request: v1::StopForRestoreRequest,
+    ) -> Result<v1::Operation, Status> {
+        let supervisor = &rpc.supervisor;
+        let request_id = Uuid::parse_str(&request.request_id)
+            .ok()
+            .filter(|id| !id.is_nil())
+            .ok_or_else(|| Status::invalid_argument("a stop for a restore needs a request id"))?;
+        let config = supervisor.config.clone();
+        let selector = request.checkpoint.clone();
+        let (row, manifest) =
+            tokio::task::spawn_blocking(move || find_ready(&config, &selector, true))
+                .await
+                .map_err(|_| Status::internal("VM checkpoint lookup task failed"))??;
+        let checkpoint = manifest
+            .checkpoint
+            .clone()
+            .ok_or_else(|| status(SupervisorError::InvalidState))?;
+        let name = supervisor
+            .core()
+            .state
+            .environments
+            .values()
+            .find(|environment| environment.id == manifest.source.environment_id)
+            .map(|environment| environment.name.clone())
+            .ok_or_else(|| {
+                Status::failed_precondition(format!(
+                    "VM checkpoint {}'s environment {} no longer exists",
+                    row.name, manifest.source.name
+                ))
+            })?;
+        let lease = supervisor.quiet_lease(&name).await.map_err(status)?;
+        supervisor.reconcile(&name).await.map_err(status)?;
+        let environment = supervisor.environment(&name).map_err(status)?;
+        if environment.state != StoredEnvironmentState::Running {
+            return Err(Status::failed_precondition(format!(
+                "{name} is {}, not running; restore it without stopping it",
+                environment.state.as_str()
+            )));
+        }
+        admit_restorable(
+            supervisor,
+            &name,
+            &environment,
+            &row,
+            &manifest,
+            &checkpoint,
+            request.account.as_ref(),
+        )
+        .await?;
+        let payload = serde_json::json!({
+            "name": name,
+            "discard_for_checkpoint": row.id.to_string(),
+        });
+        let recorded = supervisor
+            .core()
+            .store
+            .operation_by_request(request_id)
+            .map_err(SupervisorError::from)
+            .map_err(status)?;
+        let operation = match recorded {
+            Some(operation) if operation.payload == payload => operation,
+            Some(_) => return Err(Status::aborted("local lifecycle request ID collision")),
+            None => supervisor
+                .core()
+                .store
+                .begin_operation(
+                    request_id,
+                    Some(environment.id),
+                    OperationKind::Stop,
+                    &payload,
+                )
+                .map_err(SupervisorError::from)
+                .map_err(status)?,
+        };
+        let response = operation_proto(&operation)?;
+        if !operation.phase.terminal() {
+            supervisor.admit(&operation);
+        }
+        drop(lease);
+        if !operation.phase.terminal() {
+            rpc.spawn_drain(&name);
+        }
+        Ok(response)
+    }
+
     pub(super) async fn restore(
         rpc: &SupervisorRpc,
         request: v1::RestoreCheckpointRequest,
@@ -783,81 +1029,22 @@ mod linux {
         let lease = supervisor.quiet_lease(&name).await.map_err(status)?;
         supervisor.reconcile(&name).await.map_err(status)?;
         let environment = supervisor.environment(&name).map_err(status)?;
-        let fork = || {
-            format!(
-                "fork it instead: `cw create --local --checkpoint {}`",
-                row.name
-            )
-        };
         if environment.state != StoredEnvironmentState::Stopped {
             return Err(Status::failed_precondition(format!(
                 "{name} is {}; stop it first (`cw stop {name}`), or let `cw checkpoint restore` stop it",
                 environment.state.as_str()
             )));
         }
-        let artifact_generation = manifest
-            .root_generation
-            .artifact_generation()
-            .map_err(|error| status(error.into()))?
-            .to_owned();
-        if environment.active_workspace_generation.as_ref() != Some(&manifest.root_generation)
-            || environment.active_artifact_generation.as_deref()
-                != Some(artifact_generation.as_str())
-            || environment.staging_workspace_generation.is_some()
-            || environment.staging_artifact_generation.is_some()
-            || environment.workspace_plan != manifest.workspace_plan
-            || environment.vcpus != manifest.resources.vcpus
-            || environment.memory_mib != manifest.resources.memory_mib
-            || environment.disk_bytes != manifest.resources.disk_bytes
-            || environment.docker_disk_bytes != manifest.resources.docker_disk_bytes
-        {
-            return Err(Status::failed_precondition(format!(
-                "{name}'s workspace, runtime or resources changed since VM checkpoint {}; {}",
-                row.name,
-                fork()
-            )));
-        }
-        let host = host_identity();
-        if host.cpu != checkpoint.host.cpu {
-            return Err(Status::failed_precondition(format!(
-                "VM checkpoint {} was taken on another CPU ({}; this host has {}); it cannot be restored here",
-                row.name, checkpoint.host.cpu, host.cpu
-            )));
-        }
-        let fresh = PlatformAccount::from_proto(request.account.as_ref())?;
-        if let (Some(recorded), Some(fresh)) = (manifest.platform_account.as_ref(), fresh.as_ref())
-            && recorded != fresh
-        {
-            return Err(Status::permission_denied(format!(
-                "VM checkpoint {} was captured while signed in to another platform account; sign in as that account (`cw login`) to restore it",
-                row.name
-            )));
-        }
-        let engine = PrivateRoot::open(&supervisor.config.engine_root())
-            .map_err(|error| status(SupervisorError::from(error)))?;
-        let artifacts = RuntimeArtifactStore::create(&engine)
-            .map_err(artifact_store_error)
-            .map_err(status)?
-            .open_generation(&artifact_generation)
-            .await
-            .map_err(|_| {
-                Status::failed_precondition(format!(
-                    "VM checkpoint {} is unrestorable: the runtime it was taken with is gone",
-                    row.name
-                ))
-            })?;
-        if artifacts.cloud_hypervisor.sha256() != checkpoint.vmm.sha256 {
-            return Err(Status::failed_precondition(format!(
-                "VM checkpoint {} is unrestorable: its Cloud Hypervisor build changed",
-                row.name
-            )));
-        }
-        artifacts.require_guest_checkpoint_abi().map_err(|_| {
-            Status::failed_precondition(format!(
-                "VM checkpoint {}'s guest has no checkpoint hook",
-                row.name
-            ))
-        })?;
+        admit_restorable(
+            supervisor,
+            &name,
+            &environment,
+            &row,
+            &manifest,
+            &checkpoint,
+            request.account.as_ref(),
+        )
+        .await?;
         let generation = environment
             .generation
             .checked_add(1)
