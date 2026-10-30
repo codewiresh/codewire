@@ -381,6 +381,7 @@ pub(crate) fn env_create_request_from_init_args(
         write_preset: false,
         save_preset: None,
         snapshot: None,
+        checkpoint: None,
         count: 1,
         name_prefix: None,
         share_mounts: false,

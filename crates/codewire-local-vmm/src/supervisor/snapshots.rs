@@ -655,6 +655,12 @@ pub(super) async fn record_inputs(
     {
         let id = canonical_id(&restore.snapshot_id).ok_or(SupervisorError::InvalidRequest)?;
         let (_, manifest) = ready_snapshot(&supervisor.config, id)?;
+        if manifest.checkpoint.is_some()
+            && (restore.vcpus != u32::from(manifest.resources.vcpus)
+                || restore.memory_mib != manifest.resources.memory_mib)
+        {
+            return Err(SupervisorError::InvalidRequest);
+        }
         let artifact_generation = manifest.root_generation.artifact_generation()?.to_owned();
         supervisor
             .require_guest_seed_abi_for_generation(&artifact_generation)
@@ -905,12 +911,18 @@ fn admit_restore_request(
         .as_ref()
         .ok_or_else(|| Status::invalid_argument("the create names no snapshot"))?;
     let name = &row.name;
+    // A fork of a VM checkpoint creates through this path too.
+    let (kind, flag) = if manifest.checkpoint.is_some() {
+        ("VM checkpoint", "--checkpoint")
+    } else {
+        ("snapshot", "--snapshot")
+    };
     let native = crate::oci::OciArchitecture::native()
         .map(|architecture| architecture.as_str())
         .unwrap_or("unknown");
     if manifest.architecture != native {
         return Err(Status::failed_precondition(format!(
-            "snapshot {name} holds {} disks, and this host runs {native}",
+            "{kind} {name} holds {} disks, and this host runs {native}",
             manifest.architecture
         )));
     }
@@ -919,25 +931,46 @@ fn admit_restore_request(
             "a restore takes 1 to 32 vCPUs and 128 to 65536 MiB of memory",
         ));
     }
+    if manifest.checkpoint.is_some() {
+        // A memory image cannot change shape.
+        if restore.vcpus != u32::from(manifest.resources.vcpus)
+            || restore.memory_mib != manifest.resources.memory_mib
+        {
+            return Err(Status::invalid_argument(format!(
+                "a fork of VM checkpoint {name} has its {} vCPUs and {} MiB of memory",
+                manifest.resources.vcpus, manifest.resources.memory_mib
+            )));
+        }
+        if manifest
+            .workspace_plan
+            .inputs
+            .iter()
+            .any(|input| matches!(input, WorkspaceInput::Direct { .. }))
+        {
+            return Err(Status::failed_precondition(format!(
+                "VM checkpoint {name}'s source mounts host folders directly, which forks do not support yet"
+            )));
+        }
+    }
     // The built root accepts only its own project, sources aside.
     manifest
         .root_generation
         .validate_for_project_intent(&request.project_spec_json, &request.project_spec_sha256)
         .map_err(|_| {
             Status::failed_precondition(format!(
-                "the create does not name snapshot {name}'s project; create from it with `cw create --local --snapshot {name}`"
+                "the create does not name {kind} {name}'s project; create from it with `cw create --local {flag} {name}`"
             ))
         })?;
     let project: codewire_project::ProjectSpec = serde_json::from_slice(&request.project_spec_json)
         .map_err(|_| Status::invalid_argument("the project is not valid JSON"))?;
     validate_request_workspace_plan(request, &project, &manifest.workspace_plan).map_err(|_| {
         Status::failed_precondition(format!(
-            "the create does not name snapshot {name}'s workspace inputs exactly"
+            "the create does not name {kind} {name}'s workspace inputs exactly"
         ))
     })?;
     if request.docker_disk_bytes != manifest.resources.docker_disk_bytes {
         return Err(Status::failed_precondition(format!(
-            "snapshot {name}'s Docker disk is {} bytes; a restore keeps it",
+            "{kind} {name}'s Docker disk is {} bytes; a restore keeps it",
             manifest.resources.docker_disk_bytes
         )));
     }
@@ -954,7 +987,7 @@ fn admit_restore_request(
         .collect::<Vec<_>>();
     if !direct.is_empty() && !restore.share_mounts {
         return Err(Status::failed_precondition(format!(
-            "snapshot {name}'s source mounts host folders directly ({}); an environment made from it mounts the same folders live, shared with every other one that does. Pass --share-mounts to accept that",
+            "{kind} {name}'s source mounts host folders directly ({}); an environment made from it mounts the same folders live, shared with every other one that does. Pass --share-mounts to accept that",
             direct.join(", ")
         )));
     }
@@ -965,7 +998,7 @@ fn admit_restore_request(
         && recorded != fresh
     {
         return Err(Status::permission_denied(format!(
-            "snapshot {name} was captured while signed in to {} as user {} in organization {}, and this cw is signed in to {} as user {} in organization {}; sign in as the snapshot's account (`cw login`) to create from it",
+            "{kind} {name} was captured while signed in to {} as user {} in organization {}, and this cw is signed in to {} as user {} in organization {}; sign in as its account (`cw login`) to create from it",
             recorded.server_url,
             recorded.user_id,
             recorded.organization_id,
@@ -1130,7 +1163,10 @@ mod linux {
 
     use super::*;
 
-    /// The ready snapshot `id` and its verified manifest.
+    /// The ready snapshot or VM checkpoint `id` and its verified manifest:
+    /// a create from a VM checkpoint is a live fork (#3046 R4), which places
+    /// the checkpoint's disks as a restore places a snapshot's, plus its VMM
+    /// files.
     pub(super) fn ready_snapshot(
         config: &NativeRuntimeConfig,
         id: Uuid,
@@ -1138,7 +1174,7 @@ mod linux {
         let row = store(config)?
             .find(&id.to_string())
             .map_err(store_error)?
-            .filter(|row| row.state == SnapshotState::Ready && row.kind == SnapshotKind::Disk)
+            .filter(|row| row.state == SnapshotState::Ready)
             .ok_or_else(|| SupervisorError::NotFound(id.to_string()))?;
         let manifest = read_manifest(&config.engine_root(), &row)?;
         Ok((row, manifest))
@@ -2740,6 +2776,11 @@ mod linux {
         let files = placement_files(&manifest, &storage);
         if optional_directory(&vms, &name)?.is_some() {
             verify_placement(&vms_path.join(&name), &files)?;
+            if let Some(checkpoint) = &manifest.checkpoint
+                && !checkpoint.files_match_in(&vms_path.join(&name))
+            {
+                return Err(SupervisorError::InvalidState);
+            }
             return Ok(manifest.root_generation);
         }
         let staging_name = format!("{RESTORE_STAGING_PREFIX}{operation_id}");
@@ -2769,6 +2810,28 @@ mod linux {
                 return Err(SupervisorError::InvalidState);
             }
         }
+        // A fork of a VM checkpoint restores from its own reflinks of the
+        // VMM files, which its VMM maps for as long as it runs.
+        if let Some(checkpoint) = &manifest.checkpoint {
+            let checkpoints =
+                tree_root.create_dir(Path::new(crate::state::CHECKPOINTS_DIRECTORY), 0o700)?;
+            let input = PrivateRoot::open(&checkpoints)?
+                .create_dir(Path::new(crate::state::CHECKPOINT_IN), 0o700)?;
+            for name in crate::state::CHECKPOINT_VMM_FILES {
+                clone_sealed(&source.path().join("vmm").join(name), &input.join(name))?;
+            }
+            if !checkpoint.files_match_in(&tree) {
+                return Err(SupervisorError::InvalidState);
+            }
+            for directory in [&input, &checkpoints] {
+                File::open(directory)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|source| SupervisorError::Io {
+                        path: directory.clone(),
+                        source,
+                    })?;
+            }
+        }
         for directory in [
             generations.join(&storage),
             generations.clone(),
@@ -2785,6 +2848,31 @@ mod linux {
         staging_root.move_private_directory_to(Path::new("vm"), &vms, Path::new(&name))?;
         drop(lock);
         Ok(manifest.root_generation)
+    }
+
+    /// Reflink `source` into the new `destination`, sealed 0400.
+    fn clone_sealed(source: &Path, destination: &Path) -> Result<(), SupervisorError> {
+        let io_error = |path: &Path, error: io::Error| SupervisorError::Io {
+            path: path.to_owned(),
+            source: error,
+        };
+        let from = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(source)
+            .map_err(|error| io_error(source, error))?;
+        let to = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(destination)
+            .map_err(|error| io_error(destination, error))?;
+        fs_clone::reflink(&from, &to).map_err(|error| io_error(destination, error))?;
+        to.sync_all()
+            .and_then(|()| to.set_permissions(fs::Permissions::from_mode(0o400)))
+            .map_err(|error| io_error(destination, error))
     }
 
     struct PlacedFile {
@@ -3435,6 +3523,15 @@ mod linux {
         if let Some(vm) = optional_member_directory(&root, "vm")? {
             remove_disks(&vm)?;
             remove_generations(&vm, "generations")?;
+            if let Some(checkpoints) =
+                optional_member_directory(&vm, crate::state::CHECKPOINTS_DIRECTORY)?
+            {
+                crate::state::remove_checkpoint_tree(&checkpoints, crate::state::CHECKPOINT_IN)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                drop(checkpoints);
+                vm.remove_empty_private_directory(Path::new(crate::state::CHECKPOINTS_DIRECTORY))
+                    .map_err(path_io)?;
+            }
             drop(vm);
             root.remove_empty_private_directory(Path::new("vm"))
                 .map_err(path_io)?;

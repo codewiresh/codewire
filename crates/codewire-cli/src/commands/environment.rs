@@ -1437,7 +1437,7 @@ async fn handle_unified_environment_create(
         #[cfg(not(unix))]
         anyhow::bail!("trusted host environments are currently qualified only on Linux");
     }
-    if args.snapshot.is_some() {
+    if args.snapshot.is_some() || args.checkpoint.is_some() {
         // A disk snapshot lives on this host, so its environments do too.
         if placement == Some(EnvironmentPlacement::Platform) {
             anyhow::bail!(

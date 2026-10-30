@@ -152,6 +152,26 @@ impl CheckpointManifest {
         Ok(())
     }
 
+    /// Whether a VM tree's `checkpoints/in` files are this checkpoint's.
+    pub(in crate::supervisor) fn files_match_in(&self, vm: &Path) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            linux::read_vmm_files(
+                &vm.join(crate::state::CHECKPOINTS_DIRECTORY)
+                    .join(crate::state::CHECKPOINT_IN),
+                self.memory_bytes,
+            )
+            .is_ok_and(|files| {
+                files.config_sha256 == self.config_sha256 && files.state_sha256 == self.state_sha256
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = vm;
+            false
+        }
+    }
+
     /// Whether `directory`'s `vmm/` files are the ones this manifest names.
     pub(in crate::supervisor) fn files_match(&self, directory: &Path) -> bool {
         #[cfg(target_os = "linux")]
@@ -285,14 +305,26 @@ pub(super) fn attach_boot(
         .into_iter()
         .find(|operation| operation.operation_id == operation_id)
         .ok_or(SupervisorError::InvalidState)?;
-    if operation.kind != OperationKind::Start {
-        return Ok(request);
-    }
     let fields = operation
         .payload
         .as_object()
         .ok_or(SupervisorError::InvalidState)?;
-    let Some(checkpoint_id) = start_payload_checkpoint(fields)? else {
+    let checkpoint_id = match operation.kind {
+        OperationKind::Start => start_payload_checkpoint(fields)?,
+        // A create from a VM checkpoint's id is a live fork; one from a disk
+        // snapshot boots.
+        OperationKind::Create => match super::snapshots::from_payload(fields)? {
+            Some(restore) => super::snapshots::canonical_id(&restore.snapshot_id).filter(|id| {
+                super::snapshots::store(&supervisor.config)
+                    .ok()
+                    .and_then(|store| store.find(&id.to_string()).ok().flatten())
+                    .is_some_and(|row| row.kind.is_checkpoint())
+            }),
+            None => None,
+        },
+        _ => None,
+    };
+    let Some(checkpoint_id) = checkpoint_id else {
         return Ok(request);
     };
     #[cfg(not(target_os = "linux"))]
@@ -1415,6 +1447,7 @@ mod linux {
             .as_ref()
             .ok_or(SupervisorError::InvalidState)?;
         let snapshot = snapshot_proto(engine_root, row, manifest, measure_sharing)?;
+        let described = snapshot.clone();
         let memory = snapshots_root(engine_root)?
             .path()
             .join(row.id.to_string())
@@ -1465,6 +1498,7 @@ mod linux {
             warnings,
             account: snapshot.account,
             source_generation: checkpoint.source_generation,
+            snapshot: Some(described),
         })
     }
 }

@@ -782,20 +782,47 @@ async fn create_from_snapshot_on_linux(
 ) -> anyhow::Result<()> {
     host_support::require_local_vm_host()?;
     reject_snapshot_create_options(&args)?;
-    let selector = args
-        .snapshot
-        .as_deref()
-        .and_then(trimmed_str)
-        .context("name the snapshot to create from: --snapshot NAME")?
-        .to_owned();
     let client = native_boot_client().await?;
-    client
-        .require_local_snapshots()
-        .map_err(|status| anyhow::anyhow!("{}", status.message()))?;
-    let snapshot = client
-        .get_snapshot(&selector)
-        .await
-        .map_err(|status| anyhow::anyhow!("{}", status.message()))?;
+    // A fork of a VM checkpoint is created as a restore of its disk half,
+    // which the supervisor resumes with the checkpoint's memory (#3046 R4).
+    let fork = args.checkpoint.is_some();
+    let snapshot = if let Some(selector) = args.checkpoint.as_deref().and_then(trimmed_str) {
+        client
+            .require_local_checkpoints()
+            .map_err(|status| anyhow::anyhow!("{}", status.message()))?;
+        anyhow::ensure!(
+            args.cpu.is_none() && args.memory.is_none(),
+            "a fork has its VM checkpoint's vCPUs and memory; a memory image cannot change shape"
+        );
+        let checkpoint = client
+            .get_checkpoint(selector)
+            .await
+            .map_err(|status| anyhow::anyhow!("{}", status.message()))?;
+        anyhow::ensure!(
+            checkpoint.unrestorable_reason.is_empty(),
+            "VM checkpoint {} cannot be forked: {}",
+            terminal_text(&checkpoint.name),
+            terminal_text(&checkpoint.unrestorable_reason)
+        );
+        checkpoint
+            .snapshot
+            .context("the supervisor described no VM checkpoint source")?
+    } else {
+        let selector = args
+            .snapshot
+            .as_deref()
+            .and_then(trimmed_str)
+            .context("name the snapshot to create from: --snapshot NAME")?
+            .to_owned();
+        client
+            .require_local_snapshots()
+            .map_err(|status| anyhow::anyhow!("{}", status.message()))?;
+        client
+            .get_snapshot(&selector)
+            .await
+            .map_err(|status| anyhow::anyhow!("{}", status.message()))?
+    };
+    let source_kind = if fork { "VM checkpoint" } else { "snapshot" };
     let existing = native_names().await;
     let names = snapshot_restore_names(
         &snapshot.name,
@@ -807,15 +834,15 @@ async fn create_from_snapshot_on_linux(
     if snapshot.direct_mounts {
         if !args.share_mounts {
             anyhow::bail!(
-                "snapshot {} was taken from a VM that mounts host folders directly; an environment made from it mounts the same folders live, shared with every other one that does. Pass --share-mounts to accept that",
+                "{source_kind} {} was taken from a VM that mounts host folders directly; an environment made from it mounts the same folders live, shared with every other one that does. Pass --share-mounts to accept that",
                 terminal_text(&snapshot.name)
             );
         }
         eprintln!(
-            "Warning: these environments mount the snapshot source's host folders directly and share them live."
+            "Warning: these environments mount the {source_kind} source's host folders directly and share them live."
         );
     }
-    if snapshot.consistency == "crash" {
+    if snapshot.consistency == "crash" && !fork {
         eprintln!(
             "Note: snapshot {} holds what a power loss would have left (its VM was not shut down cleanly).",
             terminal_text(&snapshot.name)
@@ -949,7 +976,7 @@ async fn create_from_snapshot_on_linux(
     }
     if matches!(args.output, OutputFormat::Text) {
         eprintln!(
-            "Creating {} from snapshot {} ({}, {} vCPU, {} MiB)...",
+            "Creating {} from {source_kind} {} ({}, {} vCPU, {} MiB)...",
             names
                 .iter()
                 .map(|name| terminal_text(name))
@@ -985,7 +1012,7 @@ async fn create_from_snapshot_on_linux(
                 sources::validate_created_environment(&environment, &request)?;
                 if matches!(args.output, OutputFormat::Text) {
                     println!(
-                        "Created {} from snapshot {} in {:.1} s",
+                        "Created {} from {source_kind} {} in {:.1} s",
                         terminal_text(&environment.name),
                         terminal_text(&snapshot_name),
                         elapsed.as_secs_f64()
@@ -1014,7 +1041,7 @@ async fn create_from_snapshot_on_linux(
     match args.output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&created)?),
         OutputFormat::Text if created.len() > 1 => println!(
-            "{} environments from snapshot {} in {:.1} s",
+            "{} environments from {source_kind} {} in {:.1} s",
             created.len(),
             terminal_text(&snapshot_name),
             started.elapsed().as_secs_f64()

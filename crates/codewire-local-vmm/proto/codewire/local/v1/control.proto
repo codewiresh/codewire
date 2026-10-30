@@ -412,6 +412,9 @@ message Checkpoint {
   PlatformAccount account = 23;
   // The source's boot generation at capture.
   uint64 source_generation = 24;
+  // What a fork recreates the source's request from: the checkpoint's disk
+  // half, described as a disk snapshot is. Its ID is the checkpoint's.
+  Snapshot snapshot = 25;
 }
 
 service EnvironmentRunnerService {

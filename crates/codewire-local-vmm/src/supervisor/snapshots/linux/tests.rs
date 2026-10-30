@@ -1897,11 +1897,14 @@ async fn checkpoints_and_snapshots_share_the_store_but_not_their_commands() {
             .message()
             .contains("is a disk snapshot")
     );
-    // A snapshot restore never takes a checkpoint.
-    assert!(matches!(
-        ready_snapshot(&config, row.id),
-        Err(SupervisorError::NotFound(_))
-    ));
+    // A create from the checkpoint's id is a fork: it finds the checkpoint.
+    assert!(
+        ready_snapshot(&config, row.id)
+            .unwrap()
+            .1
+            .checkpoint
+            .is_some()
+    );
     assert_eq!(
         store(&config)
             .unwrap()
