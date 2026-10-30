@@ -16,7 +16,7 @@ use temporalio_sdk::activities::ActivityContext;
 
 use super::activity_authority::{ActivityAuthority, is_authority_lost};
 use super::agents::agent_definition;
-use super::create::ReconciledRuntime;
+use super::create::{CreateHandover, ReconciledRuntime};
 use super::env_data::{BackendRow, EnvironmentRow, load_backend_row, load_environment};
 #[cfg(feature = "kind-e2e")]
 use super::fencing_evidence::{FencingEvidence as SetupFencingEvidence, emit};
@@ -244,6 +244,19 @@ pub struct DaemonReadiness {
 /// slower or failed read writes no row, and `cw create` asks as before.
 const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The `daemon_ready` row's message and metadata for `daemon`, written by
+/// setup or, after create's full access proof, by create (#3684).
+pub(super) fn daemon_ready_log(daemon: &DaemonReadiness) -> (String, serde_json::Value) {
+    let message = match daemon.state {
+        "ready" => String::new(),
+        state => format!("Workspace daemon {state}: {}", daemon.message),
+    };
+    (
+        message,
+        serde_json::json!({ "state": daemon.state, "message": daemon.message }),
+    )
+}
+
 /// Mirrors `environmentsetup.Ops`.
 pub trait SetupOps {
     fn prepare_phase(
@@ -341,10 +354,7 @@ impl<S: SetupStore, O: SetupOps> Runner<S, O> {
                 }
             };
             if let Some(daemon) = daemon {
-                let message = match daemon.state {
-                    "ready" => String::new(),
-                    state => format!("Workspace daemon {state}: {}", daemon.message),
-                };
+                let (message, metadata) = daemon_ready_log(&daemon);
                 self.ops
                     .emit_log(
                         &env_id,
@@ -352,10 +362,7 @@ impl<S: SetupStore, O: SetupOps> Runner<S, O> {
                         "daemon_ready",
                         "completed",
                         &message,
-                        Some(serde_json::json!({
-                            "state": daemon.state,
-                            "message": daemon.message,
-                        })),
+                        Some(metadata),
                     )
                     .await?;
             }
@@ -866,6 +873,9 @@ pub struct WorkerSetupOps<'a> {
     pub recovery_lock: std::sync::Arc<tokio::sync::Mutex<bool>>,
     pub launch_group_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub launch_group_reaping: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Create's full access proof reached the Pod this setup runs on, inside
+    /// the same activity (#3684), so the health check would repeat it.
+    pub health_proven: bool,
 }
 
 impl WorkerSetupOps<'_> {
@@ -1776,6 +1786,15 @@ impl SetupOps for WorkerSetupOps<'_> {
 
     #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %input.environment_id))]
     async fn health_check(&mut self, input: &Inputs) -> anyhow::Result<Option<DaemonReadiness>> {
+        if self.health_proven {
+            // Create's full access proof covered this exact Pod moments ago,
+            // and wrote the daemon's status (#3684).
+            tracing::info!(
+                environment_id = input.environment_id,
+                "setup: health check proven by create's access proof"
+            );
+            return Ok(None);
+        }
         let proof = await_setup_or_cancel(
             &self.activity_ctx,
             self.authority.run_while_authoritative(wait_for_sidecar(
@@ -2208,14 +2227,34 @@ async fn daemon_readiness(
     namespace: &str,
     env_id: &str,
 ) -> Option<DaemonReadiness> {
-    ctx.kube.as_ref()?;
+    read_daemon_readiness(
+        ctx.pool.clone(),
+        ctx.kube.clone(),
+        ctx.sandbox_cfg.session_secret.clone(),
+        namespace.to_owned(),
+        env_id.to_owned(),
+    )
+    .await
+}
+
+/// [`daemon_readiness`] from owned parts, for a task that outlives the
+/// caller's borrow: create's read beside its own tail (#3684).
+pub(super) async fn read_daemon_readiness(
+    pool: sqlx::PgPool,
+    kube: Option<kube::Client>,
+    session_secret: String,
+    namespace: String,
+    env_id: String,
+) -> Option<DaemonReadiness> {
+    let env_id = env_id.as_str();
+    kube.as_ref()?;
     let status = tokio::time::timeout(
         DAEMON_STATUS_TIMEOUT,
         crate::api::environment_daemon::environment_daemon_status_for_worker(
-            &ctx.pool,
-            ctx.kube.as_ref(),
-            &ctx.sandbox_cfg.session_secret,
-            namespace,
+            &pool,
+            kube.as_ref(),
+            &session_secret,
+            &namespace,
             env_id,
         ),
     )
@@ -2294,8 +2333,10 @@ pub enum SetupAfterCreate {
 /// does not cover is the gap #3637 accepted within one activity: the preset's
 /// template configuration, the worker configuration, the Claim's labels, and
 /// the Services and policies the access stack re-applies. Any other
-/// observation runs the full reconcile. The health check always runs: it
-/// alone proves the SSH login, a session and the SFTP subsystem.
+/// observation runs the full reconcile. The health check, the one proof of
+/// the SSH login, a session and the SFTP subsystem, is skipped only when
+/// create's `access_ready` already made that proof on this runtime's Pod, in
+/// the same activity ([`CreateHandover::proved_its_runtime`]).
 #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %payload.environment_id))]
 pub async fn handle_environment_setup_after_create(
     ctx: &WorkerContext,
@@ -2303,7 +2344,7 @@ pub async fn handle_environment_setup_after_create(
     authority: &ActivityAuthority,
     setup_identity: SetupActivityIdentity,
     activity_ctx: ActivityContext,
-    confirmed: &ReconciledRuntime,
+    handover: &CreateHandover,
 ) -> anyhow::Result<SetupAfterCreate> {
     run_setup(
         ctx,
@@ -2311,7 +2352,7 @@ pub async fn handle_environment_setup_after_create(
         authority,
         setup_identity,
         activity_ctx,
-        Some(confirmed),
+        Some(handover),
     )
     .await
 }
@@ -2322,9 +2363,11 @@ async fn run_setup(
     authority: &ActivityAuthority,
     setup_identity: SetupActivityIdentity,
     activity_ctx: ActivityContext,
-    after_create: Option<&ReconciledRuntime>,
+    after_create: Option<&CreateHandover>,
 ) -> anyhow::Result<SetupAfterCreate> {
     let env_id = &payload.environment_id;
+    let health_proven = after_create.is_some_and(CreateHandover::proved_its_runtime);
+    let after_create = after_create.map(CreateHandover::runtime);
     tracing::info!(environment_id = env_id, "environment.setup received");
 
     let env = load_environment(&ctx.pool, env_id).await?;
@@ -2374,6 +2417,7 @@ async fn run_setup(
             recovery_lock: std::sync::Arc::new(tokio::sync::Mutex::new(false)),
             launch_group_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             launch_group_reaping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            health_proven,
         },
     };
     if let Err(err) = runner.run(&mut input).await {
@@ -2512,6 +2556,7 @@ pub async fn handle_post_start_configuration(
         recovery_lock: std::sync::Arc::new(tokio::sync::Mutex::new(false)),
         launch_group_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         launch_group_reaping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        health_proven: false,
     };
     match phase_authority.prepare_post_start_mutation(phase).await? {
         PhasePreparation::Ready(PhaseAcquire::Acquired) => {}

@@ -1118,7 +1118,7 @@ pub async fn handle_environment_create_without_setup_publish(
     ctx: &WorkerContext,
     payload: &JobPayload,
     authority: &ActivityAuthority,
-) -> anyhow::Result<Option<ReconciledRuntime>> {
+) -> anyhow::Result<Option<CreateHandover>> {
     run_environment_create(ctx, payload, authority).await
 }
 
@@ -1127,7 +1127,7 @@ async fn run_environment_create(
     ctx: &WorkerContext,
     payload: &JobPayload,
     authority: &ActivityAuthority,
-) -> anyhow::Result<Option<ReconciledRuntime>> {
+) -> anyhow::Result<Option<CreateHandover>> {
     let env_id = &payload.environment_id;
     tracing::info!(environment_id = env_id, "environment.create received");
     let svc = Service::<PgLifecycleStore>::for_activity(ctx.pool.clone(), authority.clone());
@@ -1138,6 +1138,10 @@ async fn run_environment_create(
     // #3627: the warm member this attempt's `create_claim` pass just bound
     // and reached, until the first ready action observes it.
     let mut fresh_warm_bind: Option<FreshWarmBind> = None;
+    // #3684: the Pod this attempt's `access_ready` fully proved (login and
+    // SFTP too), and the daemon status read beside create's tail since.
+    let mut proven_pod_uid: Option<String> = None;
+    let mut daemon_read: Option<DaemonRead> = None;
     // Program #2238 C3: after a pool-born Claim failed its first bind and
     // was re-claimed, this attempt claims cold.
     let mut reclaimed_cold = false;
@@ -1769,7 +1773,7 @@ async fn run_environment_create(
                     CREATE_MUTATION_STATES,
                     authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
-                        readiness_wait(client.wait_for_workspace_access_ready(
+                        readiness_wait(client.prove_workspace_access(
                             env_id,
                             ready_timeout_for_isolation(&env.isolation_tier),
                             &RecordedHostKeys(&ctx.pool),
@@ -1777,33 +1781,42 @@ async fn run_environment_create(
                     ),
                 )
                 .await
-                .map(|((), early)| {
+                .map(|(pod_uid, early)| {
                     // #3627: this wait bound the warm member and then reached
                     // its bound daemon, so the next ready action need not
                     // bind, apply the access stack or probe it again.
                     fresh_warm_bind = early.and_then(FreshWarmBind::from_early_bind);
+                    pod_uid
                 });
                 let gateway_elapsed = gateway_started.elapsed();
                 let gateway_meta = Some(serde_json::json!({
                     "duration_ms": duration_ms(gateway_elapsed),
                     "namespace": backend.namespace,
                 }));
-                if let Err(e) = gateway_result {
-                    emit_create_log(
-                        authority,
-                        "access_ready",
-                        "failed",
-                        &format!("{e:#}"),
-                        gateway_meta,
-                    )
-                    .await?;
-                    if reclaim_cold(ctx, &env, authority, &e).await {
-                        reclaimed_cold = true;
-                        continue;
+                let proven = match gateway_result {
+                    Ok(pod_uid) => pod_uid,
+                    Err(e) => {
+                        emit_create_log(
+                            authority,
+                            "access_ready",
+                            "failed",
+                            &format!("{e:#}"),
+                            gateway_meta,
+                        )
+                        .await?;
+                        if reclaim_cold(ctx, &env, authority, &e).await {
+                            reclaimed_cold = true;
+                            continue;
+                        }
+                        record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}"))
+                            .await?;
+                        return Err(e);
                     }
-                    record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
-                    return Err(e);
-                }
+                };
+                // #3684: the daemon's status is read beside the rest of
+                // create, and written before setup's `complete`.
+                daemon_read = Some(DaemonRead::spawn(ctx, &backend.namespace, env_id));
+                proven_pod_uid = Some(proven);
                 // Program #2238: a create's `access_ready` milestone, timed
                 // from the accepted request. A resume that re-creates its
                 // Claim is not a create.
@@ -1892,8 +1905,25 @@ async fn run_environment_create(
                 // activity itself for an environment with no setup work
                 // (#3684), or the reconcile recovery path. The log entry
                 // marks the create handler complete.
+                if let Some(daemon) = match daemon_read.take() {
+                    Some(read) => read.finish().await,
+                    None => None,
+                } {
+                    let (message, metadata) = super::setup::daemon_ready_log(&daemon);
+                    emit_running_log(
+                        authority,
+                        "daemon_ready",
+                        "completed",
+                        &message,
+                        Some(metadata),
+                    )
+                    .await?;
+                }
                 emit_running_log(authority, "publish_setup", "completed", "", None).await?;
-                return Ok(reconciled_runtime);
+                return Ok(reconciled_runtime.map(|runtime| CreateHandover {
+                    runtime,
+                    proven_pod_uid: proven_pod_uid.take(),
+                }));
             }
         }
     }
@@ -2002,6 +2032,55 @@ impl ReconciledRuntime {
     ) -> bool {
         *self == Self::observe(environment, backend, probe)
             && backend.pod_uid.as_deref() == Some(probe.pod_uid.as_str())
+    }
+}
+
+/// What a create that handed over at `publish_setup` tells a setup in the
+/// same activity (#3684): the runtime it reconciled for that last ready
+/// action, and the Pod its `access_ready` fully proved, if any.
+#[derive(Debug, Clone)]
+pub struct CreateHandover {
+    runtime: ReconciledRuntime,
+    proven_pod_uid: Option<String>,
+}
+
+impl CreateHandover {
+    pub(super) fn runtime(&self) -> &ReconciledRuntime {
+        &self.runtime
+    }
+
+    /// The full access proof reached exactly the Pod of the runtime handed
+    /// over, so setup's own health check would repeat it.
+    pub(super) fn proved_its_runtime(&self) -> bool {
+        self.proven_pod_uid
+            .as_deref()
+            .is_some_and(|proven| !proven.is_empty() && proven == self.runtime.pod_uid)
+    }
+}
+
+/// The daemon status read that runs beside create's tail after its full
+/// access proof (#3684). Dropping it aborts the read.
+struct DaemonRead(tokio::task::JoinHandle<Option<super::setup::DaemonReadiness>>);
+
+impl DaemonRead {
+    fn spawn(ctx: &WorkerContext, namespace: &str, env_id: &str) -> Self {
+        Self(tokio::spawn(super::setup::read_daemon_readiness(
+            ctx.pool.clone(),
+            ctx.kube.clone(),
+            ctx.sandbox_cfg.session_secret.clone(),
+            namespace.to_owned(),
+            env_id.to_owned(),
+        )))
+    }
+
+    async fn finish(mut self) -> Option<super::setup::DaemonReadiness> {
+        (&mut self.0).await.ok().flatten()
+    }
+}
+
+impl Drop for DaemonRead {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -3616,6 +3695,25 @@ mod tests {
                 other => panic!("unexpected create action {other}"),
             }
         }
+    }
+
+    /// #3684: setup skips its health check only when create's full access
+    /// proof reached exactly the Pod of the runtime it handed over.
+    #[test]
+    fn setup_trusts_the_access_proof_only_for_the_pod_it_reached() {
+        let env = environment("running");
+        let stored = backend("ns", "sandbox-env", "10.0.0.5", false);
+        let mut ready = probe(true, true);
+        ready.pod_uid = BOUND_POD.into();
+        let runtime = ReconciledRuntime::observe(&env, &stored, &ready);
+        let handover = |proven: Option<&str>| CreateHandover {
+            runtime: runtime.clone(),
+            proven_pod_uid: proven.map(str::to_owned),
+        };
+        assert!(handover(Some(BOUND_POD)).proved_its_runtime());
+        assert!(!handover(Some("another-pod")).proved_its_runtime());
+        assert!(!handover(None).proved_its_runtime());
+        assert!(!handover(Some("")).proved_its_runtime());
     }
 
     /// #3627: right after this attempt bound the warm member and reached it,

@@ -130,6 +130,16 @@ enum ProbeFailure {
     Transport(anyhow::Error),
 }
 
+/// What one access attempt proves after the pinned key exchange.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccessProof {
+    /// The key exchange alone: the bound daemon serves its recorded key.
+    KeyExchange,
+    /// Also the none-auth login, a session, the SFTP subsystem and
+    /// `realpath`: everything setup's health check proves (#3684).
+    LoginAndSftp,
+}
+
 /// Attempts in the first [`ACCESS_DIRECT_ONLY_WINDOW`] of the wait use the
 /// Pod network only: a slow port-forward there would hide a SYN the
 /// member's not-yet-regenerated policy dropped. Later attempts may forward.
@@ -219,26 +229,6 @@ impl SandboxClient {
         self.forwarded_stream(&pod_name, port, direct_error).await
     }
 
-    /// The current workspace Pod's `port` over the Pod network only, with an
-    /// access readiness attempt's short connect.
-    async fn workspace_direct_stream(
-        &self,
-        env_id: &str,
-        port: u16,
-        connect_timeout: Duration,
-    ) -> anyhow::Result<TcpStream> {
-        let pod = self
-            .current_workspace_pod_object(env_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("workspace SSH: {e}"))?;
-        let pod_name = pod
-            .metadata
-            .name
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("workspace SSH: the Pod has no name"))?;
-        direct_stream_within(&pod, &pod_name, port, connect_timeout).await
-    }
-
     async fn port_forward_pod_stream(
         &self,
         pod_name: &str,
@@ -303,6 +293,31 @@ impl SandboxClient {
             timeout,
             ACCESS_DIRECT_CONNECT_TIMEOUT,
             host_keys,
+            AccessProof::KeyExchange,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Create's `access_ready` stage with setup's health check in the same
+    /// connection (#3684): the pinned key exchange, then the none-auth login,
+    /// a session, the SFTP subsystem and `realpath`, retried as
+    /// [`Self::wait_for_workspace_access_ready`] retries. Returns the UID of
+    /// the Pod it proved, so setup can tell that its own check would repeat it.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
+    pub async fn prove_workspace_access(
+        &self,
+        env_id: &str,
+        timeout: Duration,
+        host_keys: &dyn HostKeyStore,
+    ) -> anyhow::Result<String> {
+        self.wait_for_workspace_access_ready_on(
+            env_id,
+            WORKSPACE_SSH_PORT,
+            timeout,
+            ACCESS_DIRECT_CONNECT_TIMEOUT,
+            host_keys,
+            AccessProof::LoginAndSftp,
         )
         .await
     }
@@ -317,7 +332,8 @@ impl SandboxClient {
         timeout: Duration,
         connect_timeout: Duration,
         host_keys: &dyn HostKeyStore,
-    ) -> anyhow::Result<()> {
+        proof: AccessProof,
+    ) -> anyhow::Result<String> {
         // The last host-key failure, and any transport failure since it. A
         // probe that never reached the daemon says nothing about its key, so
         // it never hides the key failure from the timeout's reason.
@@ -329,7 +345,7 @@ impl SandboxClient {
                 let path = access_probe_path(started.elapsed());
                 let attempt = tokio::time::timeout(
                     ACCESS_HANDSHAKE_TIMEOUT,
-                    self.pinned_key_exchange(env_id, port, connect_timeout, host_keys, path),
+                    self.pinned_key_exchange(env_id, port, connect_timeout, host_keys, path, proof),
                 )
                 .await
                 .unwrap_or_else(|_| {
@@ -338,7 +354,7 @@ impl SandboxClient {
                     )))
                 });
                 match attempt {
-                    Ok(()) => return,
+                    Ok(pod_uid) => return pod_uid,
                     Err(ProbeFailure::Key(error)) => {
                         key = Some(error);
                         transport = None;
@@ -367,35 +383,54 @@ impl SandboxClient {
         connect_timeout: Duration,
         host_keys: &dyn HostKeyStore,
         path: AccessProbePath,
-    ) -> Result<(), ProbeFailure> {
+        proof: AccessProof,
+    ) -> Result<String, ProbeFailure> {
         let pinned = PinnedHostKey::current(env_id, host_keys)
             .await
             .map_err(ProbeFailure::Key)?;
+        // One Pod for the whole attempt, so the UID returned is the Pod proved.
+        let pod = self
+            .current_workspace_pod_object(env_id)
+            .await
+            .map_err(|e| ProbeFailure::Transport(anyhow::anyhow!("workspace SSH: {e}")))?;
+        let pod_name = pod.metadata.name.clone().ok_or_else(|| {
+            ProbeFailure::Transport(anyhow::anyhow!("workspace SSH: the Pod has no name"))
+        })?;
+        let pod_uid = pod.metadata.uid.clone().unwrap_or_default();
         let (stream, _pf) = match path {
             AccessProbePath::DirectOnly => {
-                let stream = self
-                    .workspace_direct_stream(env_id, port, connect_timeout)
+                let stream = direct_stream_within(&pod, &pod_name, port, connect_timeout)
                     .await
                     .map_err(ProbeFailure::Transport)?;
                 (Box::new(stream) as Box<dyn AsyncReadWrite>, None)
             }
-            AccessProbePath::DirectThenForward => self
-                .workspace_ssh_stream(env_id, port)
-                .await
-                .map_err(ProbeFailure::Transport)?
-                .into_parts(),
+            AccessProbePath::DirectThenForward => {
+                match direct_stream(&pod, &pod_name, port).await {
+                    Ok(stream) => (Box::new(stream) as Box<dyn AsyncReadWrite>, None),
+                    Err(direct_error) => self
+                        .forwarded_stream(&pod_name, port, direct_error)
+                        .await
+                        .map_err(ProbeFailure::Transport)?
+                        .into_parts(),
+                }
+            }
         };
-        let handle = russh::client::connect_stream(sidecar_ssh_config(), stream, pinned)
+        let mut handle = russh::client::connect_stream(sidecar_ssh_config(), stream, pinned)
             .await
             .map_err(|e| {
                 ProbeFailure::Key(anyhow::anyhow!(
                     "SSH key exchange with the recorded host key: {e}"
                 ))
             })?;
+        if proof == AccessProof::LoginAndSftp {
+            login_and_sftp(&mut handle, "workspace access")
+                .await
+                .map_err(ProbeFailure::Transport)?;
+        }
         let _ = handle
             .disconnect(russh::Disconnect::ByApplication, "", "en")
             .await;
-        Ok(())
+        Ok(pod_uid)
     }
 
     /// The workspace daemon's SSH server, presenting the host key recorded
@@ -419,38 +454,47 @@ impl SandboxClient {
         let mut handle = russh::client::connect_stream(sidecar_ssh_config(), stream, pinned)
             .await
             .map_err(|e| anyhow::anyhow!("sidecar readiness ssh handshake: {e}"))?;
-
-        let authenticated = handle
-            .authenticate_none("codewire")
-            .await
-            .map(|r| matches!(r, russh::client::AuthResult::Success))
-            .unwrap_or(false);
-        if !authenticated {
-            anyhow::bail!("sidecar readiness ssh handshake: none-auth rejected");
-        }
-
-        let channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| anyhow::anyhow!("sidecar readiness sftp init: open session: {e}"))?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(|e| anyhow::anyhow!("sidecar readiness sftp init: subsystem: {e}"))?;
-        let session = russh_sftp::client::SftpSession::new(channel.into_stream())
-            .await
-            .map_err(|e| anyhow::anyhow!("sidecar readiness sftp init: {e}"))?;
-        session
-            .canonicalize(".")
-            .await
-            .map_err(|e| anyhow::anyhow!("sidecar readiness sftp realpath: {e}"))?;
-        let _ = session.close().await;
-
+        login_and_sftp(&mut handle, "sidecar readiness").await?;
         let _ = handle
             .disconnect(russh::Disconnect::ByApplication, "", "en")
             .await;
         Ok(())
     }
+}
+
+/// On a connection whose key exchange presented the recorded key: the
+/// none-auth login, a session, the SFTP subsystem and `realpath`. Errors name
+/// `context` and the step that failed.
+async fn login_and_sftp<H: russh::client::Handler>(
+    handle: &mut russh::client::Handle<H>,
+    context: &str,
+) -> anyhow::Result<()> {
+    let authenticated = handle
+        .authenticate_none("codewire")
+        .await
+        .map(|r| matches!(r, russh::client::AuthResult::Success))
+        .unwrap_or(false);
+    if !authenticated {
+        anyhow::bail!("{context} ssh handshake: none-auth rejected");
+    }
+
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| anyhow::anyhow!("{context} sftp init: open session: {e}"))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| anyhow::anyhow!("{context} sftp init: subsystem: {e}"))?;
+    let session = russh_sftp::client::SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| anyhow::anyhow!("{context} sftp init: {e}"))?;
+    session
+        .canonicalize(".")
+        .await
+        .map_err(|e| anyhow::anyhow!("{context} sftp realpath: {e}"))?;
+    let _ = session.close().await;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -570,6 +614,91 @@ mod tests {
         type Error = russh::Error;
     }
 
+    /// Accepts the none-auth login and serves SFTP's `realpath`, as a bound
+    /// daemon does: what create's full access proof needs (#3684).
+    #[derive(Default)]
+    struct Serving {
+        channels: std::collections::HashMap<russh::ChannelId, russh::Channel<russh::server::Msg>>,
+    }
+
+    impl russh::server::Handler for Serving {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _user: &str) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: russh::Channel<russh::server::Msg>,
+            reply: russh::server::ChannelOpenHandle,
+            _session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            self.channels.insert(channel.id(), channel);
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn subsystem_request(
+            &mut self,
+            channel: russh::ChannelId,
+            name: &str,
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            let Some(open) = self.channels.remove(&channel).filter(|_| name == "sftp") else {
+                session.channel_failure(channel)?;
+                return Ok(());
+            };
+            session.channel_success(channel)?;
+            tokio::spawn(russh_sftp::server::run(open.into_stream(), Realpath));
+            Ok(())
+        }
+    }
+
+    struct Realpath;
+
+    impl russh_sftp::server::Handler for Realpath {
+        type Error = russh_sftp::protocol::StatusCode;
+
+        fn unimplemented(&self) -> Self::Error {
+            russh_sftp::protocol::StatusCode::OpUnsupported
+        }
+
+        async fn realpath(
+            &mut self,
+            id: u32,
+            _path: String,
+        ) -> Result<russh_sftp::protocol::Name, Self::Error> {
+            Ok(russh_sftp::protocol::Name {
+                id,
+                files: vec![russh_sftp::protocol::File::dummy("/workspace")],
+            })
+        }
+    }
+
+    /// An SSH server on `listener` presenting `key` that logs in and serves
+    /// SFTP, for every connection.
+    fn serving_ssh_server(listener: tokio::net::TcpListener, key: russh::keys::PrivateKey) {
+        let config = Arc::new(russh::server::Config {
+            keys: vec![key],
+            auth_rejection_time: Duration::ZERO,
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            ..Default::default()
+        });
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let config = config.clone();
+                tokio::spawn(async move {
+                    if let Ok(session) =
+                        russh::server::run_stream(config, stream, Serving::default()).await
+                    {
+                        let _ = session.await;
+                    }
+                });
+            }
+        });
+    }
+
     fn host_key(seed: u8) -> russh::keys::PrivateKey {
         use russh::keys::ssh_key::private::Ed25519Keypair;
         russh::keys::PrivateKey::from(Ed25519Keypair::from_seed(&[seed; 32]))
@@ -612,6 +741,68 @@ mod tests {
                 Duration::from_secs(10),
                 TEST_CONNECT_TIMEOUT,
                 &Recorded(Some(openssh(&host_key(1)))),
+                AccessProof::KeyExchange,
+            )
+            .await
+            .unwrap();
+    }
+
+    /// #3684: create's full proof logs in and opens SFTP on the one
+    /// connection, and returns the UID of the Pod it reached.
+    #[tokio::test]
+    async fn the_full_access_proof_logs_in_opens_sftp_and_names_the_pod() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        serving_ssh_server(listener, host_key(1));
+        let (client, _) = workspace_chain("127.0.0.1", SANDBOX_UID);
+        let pod_uid = client
+            .wait_for_workspace_access_ready_on(
+                ENVIRONMENT,
+                port,
+                Duration::from_secs(10),
+                TEST_CONNECT_TIMEOUT,
+                &Recorded(Some(openssh(&host_key(1)))),
+                AccessProof::LoginAndSftp,
+            )
+            .await
+            .unwrap();
+        assert!(!pod_uid.is_empty(), "the proved Pod's UID");
+    }
+
+    /// A daemon that completes the key exchange but refuses the login is not
+    /// proven, while the key-exchange-only wait still accepts it.
+    #[tokio::test]
+    async fn the_full_access_proof_needs_the_login_the_key_exchange_does_not() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        ssh_server(listener, host_key(1));
+        let (client, _) = workspace_chain("127.0.0.1", SANDBOX_UID);
+        let keys = Recorded(Some(openssh(&host_key(1))));
+        let error = client
+            .wait_for_workspace_access_ready_on(
+                ENVIRONMENT,
+                port,
+                Duration::from_millis(1_500),
+                TEST_CONNECT_TIMEOUT,
+                &keys,
+                AccessProof::LoginAndSftp,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("workspace access ssh handshake: none-auth rejected"),
+            "{error}"
+        );
+        client
+            .wait_for_workspace_access_ready_on(
+                ENVIRONMENT,
+                port,
+                Duration::from_secs(10),
+                TEST_CONNECT_TIMEOUT,
+                &keys,
+                AccessProof::KeyExchange,
             )
             .await
             .unwrap();
@@ -635,6 +826,7 @@ mod tests {
                     Duration::from_millis(1_500),
                     TEST_CONNECT_TIMEOUT,
                     &store,
+                    AccessProof::KeyExchange,
                 )
                 .await
                 .unwrap_err();
@@ -651,6 +843,7 @@ mod tests {
                 Duration::from_millis(600),
                 TEST_CONNECT_TIMEOUT,
                 &Recorded(Some(openssh(&host_key(1)))),
+                AccessProof::KeyExchange,
             )
             .await
             .unwrap_err();
