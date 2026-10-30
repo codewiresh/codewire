@@ -428,7 +428,7 @@ impl EnvironmentActivities {
             if let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? {
                 let confirmed = run_environment_activity(
                     ctx.clone(),
-                    create::handle_environment_create_without_setup_publish(
+                    create::handle_environment_create_before_setup(
                         &self.wctx,
                         &job_payload(&cmd, "environment.create"),
                         &authority,

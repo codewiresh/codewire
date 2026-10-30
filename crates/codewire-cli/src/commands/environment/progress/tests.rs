@@ -1196,6 +1196,38 @@ fn pod_start_timing_renders_inside_access_ready() {
     );
 }
 
+/// #3684: a warm member's start marks are written after setup commits, so
+/// they come after `complete` in the saved logs, and still show there.
+#[test]
+fn a_warm_members_start_timing_written_after_complete_still_shows_in_saved_logs() {
+    let rendered = stored(&[
+        row(
+            "log-1",
+            "complete",
+            "completed",
+            "Setup complete",
+            "2026-10-27T10:00:12Z",
+            None,
+        ),
+        row(
+            "log-2",
+            "pod_scheduled",
+            "completed",
+            "Workspace pod scheduled",
+            "2026-10-27T10:00:13Z",
+            Some(json!({"duration_ms": 4_000, "pod_uid": "pod-1", "start_path": "warm"})),
+        ),
+    ]);
+    assert!(
+        rendered.contains("Warm pool member, started before this create:"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Workspace pod scheduled  4.0s"),
+        "{rendered}"
+    );
+}
+
 #[test]
 fn pod_start_timing_header_is_drawn_once_per_pod_on_a_terminal() {
     let t0 = Instant::now();

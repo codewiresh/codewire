@@ -1014,7 +1014,7 @@ pub async fn handle_environment_start(
             // failed `mark_started` above leaves unset, and a failed write
             // must not fail a start that has already resumed the Pod.
             if let Err(error) = super::create::record_pod_start_marks(
-                ctx,
+                &ctx.pool,
                 authority,
                 Some(&client),
                 &probe,

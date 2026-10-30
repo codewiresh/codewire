@@ -2384,7 +2384,7 @@ pub async fn handle_environment_setup_after_create(
     activity_ctx: ActivityContext,
     handover: &CreateHandover,
 ) -> anyhow::Result<SetupAfterCreate> {
-    run_setup(
+    let outcome = run_setup(
         ctx,
         payload,
         authority,
@@ -2392,7 +2392,10 @@ pub async fn handle_environment_setup_after_create(
         activity_ctx,
         Some(handover),
     )
-    .await
+    .await;
+    // After setup committed, so the user never waits on them (#3684).
+    handover.record_pod_start_marks(ctx, authority).await;
+    outcome
 }
 
 async fn run_setup(

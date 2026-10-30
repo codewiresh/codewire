@@ -48,6 +48,9 @@ mod warm_bridge;
 mod projection_tests;
 
 #[cfg(test)]
+mod pod_marks_database_tests;
+
+#[cfg(test)]
 mod projection_database_tests;
 
 #[cfg(test)]
@@ -1143,6 +1146,22 @@ pub async fn handle_environment_create_without_setup_publish(
     payload: &JobPayload,
     authority: &ActivityAuthority,
 ) -> anyhow::Result<Option<CreateHandover>> {
+    let handover = run_environment_create(ctx, payload, authority).await?;
+    if let Some(handover) = &handover {
+        handover.record_pod_start_marks(ctx, authority).await;
+    }
+    Ok(handover)
+}
+
+/// [`handle_environment_create_without_setup_publish`] for a caller that runs
+/// setup next through
+/// [`handle_environment_setup_after_create`](super::setup::handle_environment_setup_after_create),
+/// which writes the start marks this create left for after "ready" (#3684).
+pub async fn handle_environment_create_before_setup(
+    ctx: &WorkerContext,
+    payload: &JobPayload,
+    authority: &ActivityAuthority,
+) -> anyhow::Result<Option<CreateHandover>> {
     run_environment_create(ctx, payload, authority).await
 }
 
@@ -1166,6 +1185,8 @@ async fn run_environment_create(
     // SFTP too), and the daemon status read beside create's tail since.
     let mut proven_pod_uid: Option<String> = None;
     let mut daemon_read: Option<DaemonRead> = None;
+    // #3684: a warm member's start marks, written after "ready".
+    let mut deferred_pod_marks: Option<DeferredPodMarks> = None;
     let mut defaults_generation: Option<i64> = None;
     // Program #2238 C3: after a pool-born Claim failed its first bind and
     // was re-claimed, this attempt claims cold.
@@ -1280,7 +1301,13 @@ async fn run_environment_create(
         }
 
         match action {
-            CreateAction::Done => return Ok(None),
+            CreateAction::Done => {
+                // Setup completed earlier, so nothing else comes after this.
+                if let Some(marks) = &deferred_pod_marks {
+                    marks.record_in(ctx, authority).await;
+                }
+                return Ok(None);
+            }
 
             CreateAction::ResumeWorkspace => {
                 let backend = backend.as_ref().expect("resume_workspace requires backend");
@@ -1907,18 +1934,28 @@ async fn run_environment_create(
                         reconciled.entered_running();
                     }
                     if records_pod_start_marks(action) {
-                        let client = backend
-                            .as_ref()
-                            .and_then(|backend| require_client(ctx, &backend.namespace).ok());
-                        record_pod_start_marks(
-                            ctx,
-                            authority,
-                            client.as_ref(),
-                            &probe,
-                            start_path,
-                            profile,
-                        )
-                        .await?;
+                        let namespace = backend.as_ref().map(|backend| backend.namespace.clone());
+                        if defers_pod_start_marks(start_path) {
+                            deferred_pod_marks = Some(DeferredPodMarks {
+                                namespace,
+                                probe: probe.clone(),
+                                path: start_path,
+                                profile,
+                            });
+                        } else {
+                            let client = namespace
+                                .as_deref()
+                                .and_then(|namespace| require_client(ctx, namespace).ok());
+                            record_pod_start_marks(
+                                &ctx.pool,
+                                authority,
+                                client.as_ref(),
+                                &probe,
+                                start_path,
+                                profile,
+                            )
+                            .await?;
+                        }
                     }
                 }
                 emit_running_log(authority, "mark_running", "completed", "", None).await?;
@@ -1946,10 +1983,17 @@ async fn run_environment_create(
                     .await?;
                 }
                 emit_running_log(authority, "publish_setup", "completed", "", None).await?;
-                return Ok(reconciled_runtime.map(|runtime| CreateHandover {
+                let Some(runtime) = reconciled_runtime else {
+                    if let Some(marks) = &deferred_pod_marks {
+                        marks.record_in(ctx, authority).await;
+                    }
+                    return Ok(None);
+                };
+                return Ok(Some(CreateHandover {
                     runtime,
                     proven_pod_uid: proven_pod_uid.take(),
                     defaults_generation,
+                    pod_marks: deferred_pod_marks,
                 }));
             }
         }
@@ -2072,9 +2116,22 @@ pub struct CreateHandover {
     /// The generation the proven daemon reports having written the saved
     /// project defaults and Git author for.
     defaults_generation: Option<i64>,
+    /// A warm member's start marks, not yet written.
+    pod_marks: Option<DeferredPodMarks>,
 }
 
 impl CreateHandover {
+    /// Writes the start marks this create left for after "ready".
+    pub(super) async fn record_pod_start_marks(
+        &self,
+        ctx: &WorkerContext,
+        authority: &ActivityAuthority,
+    ) {
+        if let Some(marks) = &self.pod_marks {
+            marks.record_in(ctx, authority).await;
+        }
+    }
+
     pub(super) fn runtime(&self) -> &ReconciledRuntime {
         &self.runtime
     }
@@ -2241,12 +2298,65 @@ fn records_pod_start_marks(action: CreateAction) -> bool {
     action == CreateAction::MarkRunning
 }
 
+/// A warm member's start marks wait until after "ready" (#3684): it booted
+/// before this create claimed it, so they are not part of this create's time,
+/// and the user should not wait on writing them. A cold or resumed Pod's marks
+/// are this start's own breakdown, which the CLI shows before it returns.
+fn defers_pod_start_marks(path: StartPath) -> bool {
+    path == StartPath::Warm
+}
+
+/// What [`record_pod_start_marks`] needs later, read at `mark_running`.
+#[derive(Debug, Clone)]
+struct DeferredPodMarks {
+    namespace: Option<String>,
+    probe: ProbeResult,
+    path: StartPath,
+    profile: StartProfile,
+}
+
+impl DeferredPodMarks {
+    async fn record_in(&self, ctx: &WorkerContext, authority: &ActivityAuthority) {
+        let client = self
+            .namespace
+            .as_deref()
+            .and_then(|namespace| require_client(ctx, namespace).ok());
+        self.record(&ctx.pool, client.as_ref(), authority).await;
+    }
+
+    /// Timing is observational: the environment is ready by now, so a failed
+    /// write, or a crash before this, only leaves the rows missing.
+    async fn record(
+        &self,
+        pool: &sqlx::PgPool,
+        client: Option<&SandboxClient>,
+        authority: &ActivityAuthority,
+    ) {
+        if let Err(error) = record_pod_start_marks(
+            pool,
+            authority,
+            client,
+            &self.probe,
+            self.path,
+            self.profile,
+        )
+        .await
+        {
+            tracing::warn!(
+                environment_id = authority.environment_id(),
+                error = %error,
+                "create: skip Pod start marks after a failed write"
+            );
+        }
+    }
+}
+
 /// Rows carry the Pod UID and are written once per Pod, even when an error
 /// retry reaches `mark_running` again for the same Pod. They are not journal
 /// checkpoints. Only an unrecorded Pod reads its workspace volume's creation
 /// (`client`), so a Pod costs that read once.
 pub(super) async fn record_pod_start_marks(
-    ctx: &WorkerContext,
+    pool: &sqlx::PgPool,
     authority: &ActivityAuthority,
     client: Option<&SandboxClient>,
     probe: &ProbeResult,
@@ -2267,7 +2377,7 @@ pub(super) async fn record_pod_start_marks(
     .bind(authority.environment_id())
     .bind(&POD_STAGE_PHASES[..])
     .bind(&probe.pod_uid)
-    .fetch_one(&ctx.pool)
+    .fetch_one(pool)
     .await;
     match recorded {
         Ok(false) => {}
@@ -3525,6 +3635,31 @@ mod tests {
         }
     }
 
+    /// #3684: only a warm member's marks wait for "ready". A cold or resumed
+    /// Pod's are the breakdown the CLI shows before it returns.
+    #[test]
+    fn only_a_warm_members_start_marks_wait_until_after_ready() {
+        assert!(defers_pod_start_marks(StartPath::Warm));
+        assert!(!defers_pod_start_marks(StartPath::Cold));
+        assert!(!defers_pod_start_marks(StartPath::Resume));
+    }
+
+    /// #3684: a crash after setup committed loses only the deferred marks.
+    /// The retry finds nothing to do, so it neither runs setup again nor
+    /// reaches `mark_running`.
+    #[test]
+    fn a_retry_after_ready_has_nothing_left_to_do() {
+        assert_eq!(
+            next_create_action(
+                "running",
+                Some(&backend("ns", "sandbox-env", "10.0.0.5", true)),
+                true,
+                &probe(true, true),
+            ),
+            CreateAction::Done
+        );
+    }
+
     #[test]
     fn pod_start_marks_are_recorded_on_the_path_dev_takes() {
         use CreateAction::*;
@@ -3794,6 +3929,7 @@ mod tests {
             runtime: runtime.clone(),
             proven_pod_uid: proven.map(str::to_owned),
             defaults_generation: None,
+            pod_marks: None,
         };
         assert!(handover(Some(BOUND_POD)).proved_its_runtime());
         assert!(!handover(Some("another-pod")).proved_its_runtime());
@@ -3814,6 +3950,7 @@ mod tests {
             runtime: runtime.clone(),
             proven_pod_uid: proven.map(str::to_owned),
             defaults_generation: written,
+            pod_marks: None,
         };
         let live = Some((BOUND_POD, 7));
         assert!(handover(Some(BOUND_POD), Some(7)).daemon_wrote_defaults(live));
