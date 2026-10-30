@@ -1251,10 +1251,17 @@ async fn daemon_channel_for_endpoint(
         .connect()
         .await
         .map_err(|error| {
+            let error = daemon_connect_failure(error);
             tracing::warn!(environment_id, %endpoint, %error, "connect environment daemon failed");
             AppError::Upstream("environment daemon is unavailable".into())
         })?;
     Ok((channel, token))
+}
+
+/// A failed connection's whole cause. The transport's own message is only
+/// "transport error", which can't tell DNS from a refused connection (#3684).
+fn daemon_connect_failure(error: tonic::transport::Error) -> String {
+    format!("{:#}", anyhow::Error::new(error))
 }
 
 async fn require_ready_daemon(
@@ -1438,6 +1445,22 @@ mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
+
+    /// #3684: the log must tell a refused connection from a DNS failure.
+    #[tokio::test]
+    async fn a_failed_connection_reports_its_cause() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let error = Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .expect_err("nothing listens");
+        assert_eq!(error.to_string(), "transport error");
+        let failure = daemon_connect_failure(error);
+        assert!(failure.contains("refused"), "{failure}");
+    }
 
     #[test]
     fn launch_deadline_accounts_for_projection_without_relaxing_control_or_connect() {
