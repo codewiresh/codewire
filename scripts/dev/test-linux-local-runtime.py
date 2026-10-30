@@ -116,7 +116,7 @@ class Inputs:
         self.pins = copy.deepcopy(runtime.sources.load_pins())
         self.directory = base / "inputs"
         self.directory.mkdir()
-        self.kernel = self.write("vmlinuz-6.18.48-codewire2", bzimage())
+        self.kernel = self.write("vmlinuz-6.18.48-codewire3", bzimage())
         self.initramfs = self.write("initramfs.cpio", guest_root())
         self.set_cloud_hypervisor(elf(tag=b"cloud-hypervisor"))
         self.set_virtiofsd(elf(tag=b"virtiofsd"))
@@ -271,7 +271,7 @@ class PackTests(unittest.TestCase):
         arm64 = bytearray(4096)
         arm64[0x38:0x3C] = b"ARM\x64"
         for data, message in ((bytes(arm64), "is not an x86 bzImage"),
-                              (bzimage("6.18.48-codewire1"), "is not the 6.18.48-codewire2 kernel")):
+                              (bzimage("6.18.48-codewire2"), "is not the 6.18.48-codewire3 kernel")):
             with self.subTest(message=message):
                 self.refused(message, kernel=self.inputs.write("kernel", data))
 

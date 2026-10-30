@@ -32,6 +32,9 @@ class Configuration(unittest.TestCase):
                 baseline = kernel.configuration(config, self.pins[arch])
                 self.assertIn(b"# CONFIG_PROC_CHILDREN is not set\n", baseline)
                 self.assertEqual(len(config.split(b"CONFIG_PROC_CHILDREN=y\n")), 2)
+                self.assertIn(b"# CONFIG_FS_VERITY is not set\n", baseline)
+                self.assertNotIn(b"CONFIG_CRYPTO_HASH_INFO", baseline)
+                self.assertEqual(len(config.split(b"CONFIG_FS_VERITY=y\n")), 2)
 
     def test_exact_old_qualified_config_is_refused(self):
         for arch, config in self.configs.items():
@@ -39,11 +42,23 @@ class Configuration(unittest.TestCase):
             with self.subTest(arch=arch), self.assertRaisesRegex(ValueError, "config differs"):
                 kernel.configuration(baseline, self.pins[arch])
 
+    def test_the_previous_codewire2_config_without_fs_verity_is_refused(self):
+        for arch, config in self.configs.items():
+            codewire2 = config.replace(
+                b"CONFIG_FS_VERITY=y\n# CONFIG_FS_VERITY_BUILTIN_SIGNATURES is not set\n",
+                b"# CONFIG_FS_VERITY is not set\n").replace(b"CONFIG_CRYPTO_HASH_INFO=y\n", b"")
+            with self.subTest(arch=arch), self.assertRaisesRegex(ValueError, "config differs"):
+                kernel.configuration(codewire2, self.pins[arch])
+
     def test_unadmitted_kernel_surface_and_duplicate_flag_are_refused(self):
         for arch, config in self.configs.items():
             for changed in [config + b"CONFIG_PROC_CHILDREN=y\n",
                             config.replace(b"# CONFIG_CHECKPOINT_RESTORE is not set\n", b"CONFIG_CHECKPOINT_RESTORE=y\n"),
-                            config.replace(b"CONFIG_PROC_FS=y\n", b"# CONFIG_PROC_FS is not set\n")]:
+                            config.replace(b"CONFIG_PROC_FS=y\n", b"# CONFIG_PROC_FS is not set\n"),
+                            config.replace(b"# CONFIG_FS_VERITY_BUILTIN_SIGNATURES is not set\n",
+                                           b"CONFIG_FS_VERITY_BUILTIN_SIGNATURES=y\n"),
+                            config.replace(b"CONFIG_CRYPTO_HASH_INFO=y\n", b""),
+                            config + b"CONFIG_FS_VERITY=y\n"]:
                 with self.subTest(arch=arch, size=len(changed)), self.assertRaises(ValueError):
                     kernel.configuration(changed, self.pins[arch])
 
@@ -63,7 +78,7 @@ class Configuration(unittest.TestCase):
 
     def test_x86_64_pins_are_unchanged(self):
         x86 = self.pins["x86_64"]
-        self.assertEqual(x86["config_sha256"], "c02a08863f75099b9a18389cf0518134c94b1fe9f499a2566e4891251699274e")
+        self.assertEqual(x86["config_sha256"], "49eec5ec520088e3a969b490e9c422e2c03956ccb2a4e2c6df13c3e4c6e3435d")
         self.assertEqual(x86["baseline_config_sha256"], "f4c7056b7b1622e3939179521280db1bbc5ce21355685dc9e455fd83add9a4f3")
         self.assertEqual((x86["gcc_version"], x86["ld_version"], x86["pahole_version"]),
                          ("gcc (GCC) 16.1.1 20260728", "GNU ld (GNU Binutils) 2.47", None))
@@ -93,18 +108,18 @@ class Configuration(unittest.TestCase):
         for arch, pins in self.pins.items():
             with self.subTest(arch=arch):
                 self.assertEqual(kernel.digest(kernel.INPUTS / "dax.patch"), pins["patch_sha256"])
-                self.assertEqual(pins["release"], "6.18.48-codewire2")
+                self.assertEqual(pins["release"], "6.18.48-codewire3")
 
     def test_image_release_checks(self):
-        banner = b"Linux version 6.18.48-codewire2 (codewire@codewire) "
+        banner = b"Linux version 6.18.48-codewire3 (codewire@codewire) "
         arm64 = bytearray(0x40); arm64[0x38:0x3c] = b"ARM\x64"
         kernel.check_image(bytes(arm64) + banner, self.pins["arm64"])
-        for bad in (bytes(0x40) + banner, bytes(arm64) + banner.replace(b"codewire2", b"codewire1")):
+        for bad in (bytes(0x40) + banner, bytes(arm64) + banner.replace(b"codewire3", b"codewire2")):
             with self.assertRaisesRegex(ValueError, "arm64 kernel image"):
                 kernel.check_image(bad, self.pins["arm64"])
-        kernel.check_image(bytes(512) + b"6.18.48-codewire2", self.pins["x86_64"])
+        kernel.check_image(bytes(512) + b"6.18.48-codewire3", self.pins["x86_64"])
         with self.assertRaisesRegex(ValueError, "release"):
-            kernel.check_image(bytes(65536) + b"6.18.48-codewire2", self.pins["x86_64"])
+            kernel.check_image(bytes(65536) + b"6.18.48-codewire3", self.pins["x86_64"])
 
 
 class FileCustody(unittest.TestCase):

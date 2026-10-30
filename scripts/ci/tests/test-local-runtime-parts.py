@@ -190,14 +190,14 @@ class CacheTest(unittest.TestCase):
         recipe = "e" * 64
         built = self.base / "kernel"
         built.mkdir()
-        (built / "vmlinuz-6.18.48-codewire2").write_bytes(b"synthetic bzImage\n")
+        (built / "vmlinuz-6.18.48-codewire3").write_bytes(b"synthetic bzImage\n")
         self.fake.store(parts.record_key(recipe), parts.record("kernel-x86_64", recipe, built))
-        data = (built / "vmlinuz-6.18.48-codewire2").read_bytes()
+        data = (built / "vmlinuz-6.18.48-codewire3").read_bytes()
         self.fake.store(release.blob_key(fx.digest(data)), data)
         out = self.base / "out"
         self.assertTrue(parts.fetch(self.origin, "kernel-x86_64", recipe, out))
-        self.assertEqual(sorted(path.name for path in out.iterdir()), ["vmlinuz-6.18.48-codewire2"])
-        self.assertEqual((out / "vmlinuz-6.18.48-codewire2").stat().st_mode & 0o777, 0o644)
+        self.assertEqual(sorted(path.name for path in out.iterdir()), ["vmlinuz-6.18.48-codewire3"])
+        self.assertEqual((out / "vmlinuz-6.18.48-codewire3").stat().st_mode & 0o777, 0o644)
         for name, shape in parts.PARTS.items():
             with self.subTest(part=name):
                 self.assertLessEqual(set(shape["executables"]), set(shape["outputs"]))

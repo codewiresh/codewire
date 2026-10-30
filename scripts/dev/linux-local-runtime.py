@@ -51,7 +51,7 @@ PLATFORM = "linux-x86_64"
 ARCHITECTURE = "x86_64"
 CW_TARGET = "x86_64-unknown-linux-musl"
 CW_TARGETS = ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl")
-KERNEL_RELEASE = "6.18.48-codewire2"
+KERNEL_RELEASE = "6.18.48-codewire3"
 KERNEL_LIMIT = 64 * 1024 * 1024
 ZIP_LIMIT = 64 * 1024 * 1024
 # Lock key and installed file name; cw installs executables 0500 and data 0400

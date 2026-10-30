@@ -8,11 +8,11 @@
   "patched_dax_sha256": "54ecbd2961f1f8e1c8d51ff9df43414350f68410389fa0f72d6ae34b1f5faeee",
   "bc_sha256": "36cb337928452e9379f349f11a3095e36a9b3aed8cefc50e2ae060bf9c6cf70f",
   "build_timestamp": "2026-08-28 06:22:54 +0000",
-  "release": "6.18.48-codewire2",
+  "release": "6.18.48-codewire3",
   "architectures": {
     "x86_64": {
       "baseline_config_sha256": "f4c7056b7b1622e3939179521280db1bbc5ce21355685dc9e455fd83add9a4f3",
-      "config_sha256": "c02a08863f75099b9a18389cf0518134c94b1fe9f499a2566e4891251699274e",
+      "config_sha256": "49eec5ec520088e3a969b490e9c422e2c03956ccb2a4e2c6df13c3e4c6e3435d",
       "config_origin": "qualified codewire1 configuration generated from Kata 894e1956bb340752b30f7ad49879972234a0098c",
       "gcc_version": "gcc (GCC) 16.1.1 20260728",
       "ld_version": "GNU ld (GNU Binutils) 2.47",
@@ -20,7 +20,7 @@
     },
     "arm64": {
       "baseline_config_sha256": "34ac00e19ea5e9973bc36eec4f8a96ef15ec79e1267103c07ecfe687c3e20716",
-      "config_sha256": "a7245d02da6f63e3a8726c1df985d60c6c244f0d4fd23ef56e35a0be2469c056",
+      "config_sha256": "d2e5dfe6d51d92e67a73147aaf2f4b32ae57c6564157dd3b0b8a211d1bbccec6",
       "config_origin": "qualified codewire1 arm64 configuration merged from Kata 894e1956bb340752b30f7ad49879972234a0098c fragments common/* and arm64/*",
       "baseline_image_sha256": "0ca947c1470bc8036494184b51debb89e7527fe0b29c9d6b0b5c7c5233bea317",
       "gcc_version": "aarch64-linux-gnu-gcc (GCC) 16.1.0",

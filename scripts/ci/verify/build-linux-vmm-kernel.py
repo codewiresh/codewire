@@ -3,7 +3,9 @@
 
 Each architecture's baseline configuration came from its qualified codewire1
 build: x86_64 for Cloud Hypervisor, arm64 for Virtualization.framework. The
-sole configuration change is PROC_CHILDREN, required by managed-agent custody.
+admitted configuration changes are PROC_CHILDREN, required by managed-agent
+custody, and FS_VERITY (with the CRYPTO_HASH_INFO it selects), which the cw
+runtime publisher's verity-measured cache needs (codewire#3694).
 Both architectures share the pinned source, DAX compatibility patch, bc and
 build identity. Recorded build metadata is reconstructed; this command does not
 claim to reproduce the original kernel or verify its historical signing
@@ -123,10 +125,19 @@ def architecture_pins(document, architecture):
 
 def configuration(raw, pins):
     require(hashlib.sha256(raw).hexdigest() == pins["config_sha256"], "kernel config differs from its pin")
-    before = raw.replace(b"CONFIG_PROC_CHILDREN=y\n", b"# CONFIG_PROC_CHILDREN is not set\n")
-    require(raw.count(b"CONFIG_PROC_CHILDREN=y\n") == 1
-            and hashlib.sha256(before).hexdigest() == pins["baseline_config_sha256"],
-            "kernel config has more than the admitted child-listing change")
+    # Each admitted change, as olddefconfig writes it, against the baseline.
+    admitted = (
+        (b"CONFIG_PROC_CHILDREN=y\n", b"# CONFIG_PROC_CHILDREN is not set\n"),
+        (b"CONFIG_FS_VERITY=y\n# CONFIG_FS_VERITY_BUILTIN_SIGNATURES is not set\n",
+         b"# CONFIG_FS_VERITY is not set\n"),
+        (b"CONFIG_CRYPTO_HASH_INFO=y\n", b""),
+    )
+    before = raw
+    for change, baseline in admitted:
+        require(raw.count(change) == 1, "kernel config lacks an admitted change")
+        before = before.replace(change, baseline)
+    require(hashlib.sha256(before).hexdigest() == pins["baseline_config_sha256"],
+            "kernel config has more than the admitted child-listing and fs-verity changes")
     require(b"CONFIG_PROC_FS=y\n" in raw and b"# CONFIG_CHECKPOINT_RESTORE is not set\n" in raw,
             "kernel process-listing prerequisites differ")
     # pahole only reports its version to Kconfig: no BTF is generated.
@@ -406,7 +417,7 @@ def build(args):
     environment.update({"PATH": str(tools) + ":/usr/bin:/bin", "KBUILD_BUILD_USER": "codewire",
                         "KBUILD_BUILD_HOST": "codewire", "KBUILD_BUILD_VERSION": "1",
                         "KBUILD_BUILD_TIMESTAMP": pins["build_timestamp"]})
-    make = ["make", *shape["make"], "LOCALVERSION=-codewire2", pahole_setting]
+    make = ["make", *shape["make"], "LOCALVERSION=-codewire3", pahole_setting]
     run([*make, "olddefconfig"], "configure", tree)
     require(regular(tree / ".config") == config, "processed kernel config drifted")
     run([*make, "-j" + str(args.jobs), shape["target"]], "compile", tree)

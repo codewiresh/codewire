@@ -441,7 +441,7 @@ Codewire guest root, beside the Darwin artifact lock that `cw` reads.
 2. On an x86_64 Linux host, build the kernel and guest root from a checkout,
    then copy both files to the Mac (for example with `scp`). The kernel build
    needs the pinned `aarch64-linux-gnu` GCC and binutils cross toolchain and
-   publishes `Image-6.18.48-codewire2`; the guest-root build accepts only the
+   publishes `Image-6.18.48-codewire3`; the guest-root build accepts only the
    reviewed Alpine arm64 `busybox.static` and the official runc 1.5.1
    `runc.arm64`, whose digests the script names:
 
@@ -480,7 +480,7 @@ Codewire guest root, beside the Darwin artifact lock that `cw` reads.
 3. On the Mac, from a checkout:
 
    ```sh
-   make macos-local-runtime KERNEL=/abs/Image-6.18.48-codewire2 \
+   make macos-local-runtime KERNEL=/abs/Image-6.18.48-codewire3 \
      INITRAMFS=/abs/initramfs-arm64.cpio E2FSPROGS=/abs/private/e2fsprogs/bundle \
      GIT_BUNDLE=/abs/private/git/bundle \
      CW_RUNTIME=/abs/fresh/cw-runtime
