@@ -1319,12 +1319,12 @@ pass
 # #3132: every failed run names its stage and a value-blind class in exactly
 # one EXIT-handler line. The deploy relay repeats only this closed stage set.
 SMOKE_SOURCE="$REPO_ROOT/scripts/runtime/dev/smoke-dev-commodity.sh"
-expected_stages='setup principal oauth-login oauth-principal oauth-cleanup app-prepare app-create app-source-a app-source-b app-source-clear app-cleanup provider-ssh-prepare provider-ssh-cleanup create-environment wait-environment kube-assertions cw-run kube exec coco docker doctor ssh direct-udp tailnet-ssh derp-ssh websocket-ssh host-key app-preview resize-guest application-secrets application-secrets-all-scopes provider-ssh'
+expected_stages='setup principal oauth-login oauth-principal oauth-cleanup app-prepare app-create app-source-a app-source-b app-source-clear app-cleanup provider-ssh-prepare provider-ssh-cleanup create-environment wait-environment kube-assertions cw-run kube exec coco docker doctor ssh direct-udp tailnet-ssh derp-ssh websocket-ssh host-key ssh-burst app-preview resize-guest application-secrets application-secrets-all-scopes provider-ssh'
 declared_stages="$(awk '/^smoke_stage\(\) \{/,/^}/' "$SMOKE_SOURCE" | sed -n 's/^ *\([a-z][a-z|-]*\))$/\1/p' | tr '|' ' ')"
 [[ "$declared_stages" == "$expected_stages" ]] || fail 'acceptance stage set changed without its relay contract'
 # Every literal stage, every selectable phase and each source phase is declared.
 selectable_phases="$(sed -n '/^    --only)$/,/;;/p' "$SMOKE_SOURCE" | sed -n 's/^ *\([a-z][a-z|-]*\))$/\1/p' | tr '|' ' ')"
-[[ "$(wc -w <<<"$selectable_phases")" == 15 ]] || fail 'selectable smoke phases were not read'
+[[ "$(wc -w <<<"$selectable_phases")" == 16 ]] || fail 'selectable smoke phases were not read'
 for stage in $(grep -oE 'smoke_stage [a-z][a-z-]*' "$SMOKE_SOURCE" | cut -d ' ' -f 2 | sort -u) \
     $selectable_phases app-source-a app-source-b app-source-clear; do
   [[ " $expected_stages " == *" $stage "* ]] || fail "stage or phase $stage is outside the closed stage set"

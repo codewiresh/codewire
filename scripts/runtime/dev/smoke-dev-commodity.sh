@@ -28,6 +28,9 @@ SMOKE_EXEC_TIMEOUT="${SMOKE_EXEC_TIMEOUT:-900}"
 SMOKE_SSH_TIMEOUT="${SMOKE_SSH_TIMEOUT:-90}"
 SMOKE_SSH_CONNECT_TIMEOUT="${SMOKE_SSH_CONNECT_TIMEOUT:-60}"
 SMOKE_SSH_LOG_LEVEL="${SMOKE_SSH_LOG_LEVEL:-ERROR}"
+SMOKE_SSH_BURST_LINES="${SMOKE_SSH_BURST_LINES:-3000}"
+SMOKE_SSH_BURST_TIMEOUT="${SMOKE_SSH_BURST_TIMEOUT:-180}"
+SMOKE_SSH_BURST_BUSY_SECONDS="${SMOKE_SSH_BURST_BUSY_SECONDS:-5}"
 SMOKE_TAILNET_DOCTOR_TIMEOUT="${SMOKE_TAILNET_DOCTOR_TIMEOUT:-180}"
 SMOKE_DOCKER_STRESS="${SMOKE_DOCKER_STRESS:-0}"
 SMOKE_DOCKER_STRESS_ITERATIONS="${SMOKE_DOCKER_STRESS_ITERATIONS:-3}"
@@ -123,6 +126,8 @@ APP_WORKSPACE_MARKER_SHA256=""
 APP_RESTART_WITNESS_SESSION_ID=""
 GUEST_NPROC=""
 GUEST_MEMTOTAL_KIB=""
+SSH_BURST_DIR=""
+SSH_BURST_PIDS=()
 SMOKE_OAUTH_LOGIN_ATTEMPTED=0
 SMOKE_OAUTH_LOGIN_DIR=""
 SMOKE_OAUTH_RUNTIME_PARENT=""
@@ -156,10 +161,13 @@ Options:
   --only PHASE             Run only one smoke phase; repeatable. Phases:
                            kube, exec, coco, docker, doctor, ssh,
                            tailnet-ssh, derp-ssh, websocket-ssh,
-                           host-key, app-preview, resize-guest,
+                           host-key, ssh-burst, app-preview, resize-guest,
                            host-key proves the daemon presents the host
                            key the platform recorded, refuses a changed
                            key, and rotates it on stop and start.
+                           ssh-burst pastes SMOKE_SSH_BURST_LINES lines
+                           into a busy terminal while a second session on
+                           the same environment keeps answering.
                            application-secrets,
                            application-secrets-all-scopes, provider-ssh
                            resize-guest requires a fresh disposable env; see
@@ -373,7 +381,7 @@ die() {
 # new stage needs its closed set there as well.
 smoke_stage() {
   case "$1" in
-    setup|principal|oauth-login|oauth-principal|oauth-cleanup|app-prepare|app-create|app-source-a|app-source-b|app-source-clear|app-cleanup|provider-ssh-prepare|provider-ssh-cleanup|create-environment|wait-environment|kube-assertions|cw-run|kube|exec|coco|docker|doctor|ssh|direct-udp|tailnet-ssh|derp-ssh|websocket-ssh|host-key|app-preview|resize-guest|application-secrets|application-secrets-all-scopes|provider-ssh)
+    setup|principal|oauth-login|oauth-principal|oauth-cleanup|app-prepare|app-create|app-source-a|app-source-b|app-source-clear|app-cleanup|provider-ssh-prepare|provider-ssh-cleanup|create-environment|wait-environment|kube-assertions|cw-run|kube|exec|coco|docker|doctor|ssh|direct-udp|tailnet-ssh|derp-ssh|websocket-ssh|host-key|ssh-burst|app-preview|resize-guest|application-secrets|application-secrets-all-scopes|provider-ssh)
       SMOKE_STAGE="$1" ;;
     *) die 'unknown acceptance stage' ;;
   esac
@@ -484,7 +492,7 @@ while (($# > 0)); do
     --only)
       [[ $# -ge 2 ]] || die "--only requires a phase"
       case "$2" in
-        kube|exec|coco|docker|doctor|ssh|tailnet-ssh|derp-ssh|websocket-ssh|host-key|app-preview|resize-guest|application-secrets|application-secrets-all-scopes|provider-ssh)
+        kube|exec|coco|docker|doctor|ssh|tailnet-ssh|derp-ssh|websocket-ssh|host-key|ssh-burst|app-preview|resize-guest|application-secrets|application-secrets-all-scopes|provider-ssh)
           SMOKE_ONLY_PHASES+=("$2")
           ;;
         *)
@@ -5177,6 +5185,131 @@ run_host_key_smoke() {
   log "the host key rotated with the Pod; the previous Pod's key is refused"
 }
 
+# OpenSSH with a terminal through the managed block, as a person types into
+# `ssh cw-<env>`. The first argument is the alias, the rest its command.
+user_ssh_tty() {
+  local alias="$1" config
+  shift
+  config="$(user_ssh_config)" || return
+  env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" CW_SSH_TRANSPORT=websocket \
+    timeout "$SMOKE_SSH_BURST_TIMEOUT" ssh -F "$config" -tt \
+    -o BatchMode=yes \
+    -o "LogLevel=$SMOKE_SSH_LOG_LEVEL" \
+    -o ConnectTimeout="$SMOKE_SSH_CONNECT_TIMEOUT" \
+    "$alias" "$@"
+}
+
+# What is pasted: a busy foreground command that keeps four CPUs busy for
+# BUSY seconds, as a build does, so the environment's daemon competes for
+# CPU while the paste arrives; then LINES lines of about 70 bytes each,
+# which the shell answers with B<100000 + line> once it is free.
+ssh_burst_paste() {
+  awk -v lines="$1" -v busy="$2" 'BEGIN {
+    printf "end=$(( $(date +%%s) + %d )); for i in 1 2 3 4; do ( while [ \"$(date +%%s)\" -lt \"$end\" ]; do :; done ) & done; wait\n", busy
+    for (n = 1; n <= lines; n++)
+      printf "echo B$((100000+%d)) # pasted while the terminal is busy, in order\n", n
+    print "exit"
+  }'
+}
+
+# The answers marked MARKER on SCREEN, one number per line, in order. The
+# typed lines echo as MARKER$((...)), which never matches.
+ssh_burst_answers() {
+  grep -ao "$1[0-9]\{6\}" "$2" | cut -c2- || true
+}
+
+# Wait up to SECONDS for SESSION's screen to show ANSWER.
+ssh_burst_wait_answer() {
+  local screen="$1" answer="$2" deadline
+  deadline=$(( "$(seconds_now)" + $3 ))
+  while (( "$(seconds_now)" < deadline )); do
+    grep -aq "$answer" "$screen" && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+# Name how a burst failed, from a closed set the deploy relay repeats: an
+# HTTP/2 GOAWAY (too_many_data_frames, #3688, or another), else CLASS.
+ssh_burst_fail() {
+  local class="$1" evidence
+  shift
+  evidence="$(grep -ahi -m1 'goaway\|session failed' "$SSH_BURST_DIR"/*.out "$SSH_BURST_DIR"/*.err 2>/dev/null |
+    tr -cd '[:print:]' | cut -c1-400 || true)"
+  if grep -aqs 'too_many_data_frames' "$SSH_BURST_DIR"/*.out "$SSH_BURST_DIR"/*.err; then
+    class=goaway_data
+  elif grep -aqis 'goaway' "$SSH_BURST_DIR"/*.out "$SSH_BURST_DIR"/*.err; then
+    class=goaway
+  fi
+  ((${#SSH_BURST_PIDS[@]} == 0)) || kill "${SSH_BURST_PIDS[@]}" 2>/dev/null || true
+  [[ -z "$evidence" ]] || log "ssh-burst session error: $evidence"
+  SMOKE_FAILURE_CLASS="$class"
+  die "ssh-burst: $*; evidence in $SSH_BURST_DIR"
+}
+
+# One line to the watching session, answered within LIMIT seconds. It uses
+# run_ssh_burst_smoke's ping count and watcher_fd. A write to a session
+# that has gone fails in its own subshell.
+ssh_burst_ping() {
+  ping=$((ping + 1))
+  # shellcheck disable=SC2016 # The remote shell expands it.
+  ( printf 'echo P$((200000+%d))\n' "$ping" >&"$watcher_fd" ) 2>/dev/null &&
+    ssh_burst_wait_answer "$SSH_BURST_DIR/watcher.out" "P$((200000 + ping))" "$1"
+}
+
+# A fast paste into a busy terminal keeps its session and every other
+# session on the daemon's connection (#3688): one session pastes thousands
+# of lines while its shell sleeps, and every line is answered once, in
+# order, while a second session on the same environment answers throughout.
+run_ssh_burst_smoke() {
+  local alias="cw-cloud-$ENV_ID" lines="$SMOKE_SSH_BURST_LINES"
+  local burst_pid watcher_pid watcher_fd ping=0 burst_status=0 watcher_status=0 answered
+  require_uint SMOKE_SSH_BURST_LINES "$lines"
+  ((lines >= 1)) || die 'SMOKE_SSH_BURST_LINES must be at least 1'
+  require_uint SMOKE_SSH_BURST_TIMEOUT "$SMOKE_SSH_BURST_TIMEOUT"
+  SSH_BURST_DIR="$TMPDIR_SMOKE/ssh-burst"
+  SSH_BURST_PIDS=()
+  mkdir -p "$SSH_BURST_DIR"
+  require_uint SMOKE_SSH_BURST_BUSY_SECONDS "$SMOKE_SSH_BURST_BUSY_SECONDS"
+  ssh_burst_paste "$lines" "$SMOKE_SSH_BURST_BUSY_SECONDS" >"$SSH_BURST_DIR/paste.txt"
+  mkfifo "$SSH_BURST_DIR/watcher.in"
+
+  user_ssh_tty "$alias" 'exec /bin/sh -i' \
+    <"$SSH_BURST_DIR/watcher.in" >"$SSH_BURST_DIR/watcher.out" 2>"$SSH_BURST_DIR/watcher.err" &
+  watcher_pid=$!
+  SSH_BURST_PIDS=("$watcher_pid")
+  exec {watcher_fd}>"$SSH_BURST_DIR/watcher.in"
+  ssh_burst_ping "$((SMOKE_SSH_CONNECT_TIMEOUT + 30))" ||
+    ssh_burst_fail dropped 'the watching session never answered'
+
+  log "pasting $lines lines into a busy terminal while a second session answers"
+  user_ssh_tty "$alias" 'exec /bin/sh -i' \
+    <"$SSH_BURST_DIR/paste.txt" >"$SSH_BURST_DIR/burst.out" 2>"$SSH_BURST_DIR/burst.err" &
+  burst_pid=$!
+  SSH_BURST_PIDS=("$watcher_pid" "$burst_pid")
+  while kill -0 "$burst_pid" 2>/dev/null; do
+    ssh_burst_ping 30 || ssh_burst_fail dropped "the watching session stopped answering during the paste (ping $ping)"
+    sleep 1
+  done
+  wait "$burst_pid" || burst_status=$?
+  SSH_BURST_PIDS=("$watcher_pid")
+  ssh_burst_ping 30 || ssh_burst_fail dropped 'the watching session did not outlive the paste'
+  ( printf 'exit\n' >&"$watcher_fd" ) 2>/dev/null || true
+  exec {watcher_fd}>&-
+  wait "$watcher_pid" || watcher_status=$?
+  SSH_BURST_PIDS=()
+
+  [[ "$burst_status" == 0 ]] ||
+    ssh_burst_fail dropped "the pasting session ended with status $burst_status"
+  [[ "$watcher_status" == 0 ]] ||
+    ssh_burst_fail dropped "the watching session ended with status $watcher_status"
+  answered="$(ssh_burst_answers B "$SSH_BURST_DIR/burst.out" | wc -l)"
+  if [[ "$(ssh_burst_answers B "$SSH_BURST_DIR/burst.out")" != "$(seq 100001 $((100000 + lines)))" ]]; then
+    ssh_burst_fail lost_line "$answered answers for $lines pasted lines, or out of order"
+  fi
+  log "ssh-burst: $lines pasted lines answered in order; the second session answered $ping times throughout"
+}
+
 run_ssh_smoke() {
   local initial_expected_transport
 
@@ -5209,6 +5342,8 @@ run_ssh_smoke() {
     EXPECTED_TAILNET_PATH_TRANSPORT="$initial_expected_transport"
   fi
   run_host_key_smoke
+  smoke_stage ssh-burst
+  run_ssh_burst_smoke
 }
 
 run_selected_phase() {
@@ -5265,6 +5400,13 @@ run_selected_phase() {
       assert_pod_shape
       require_cmd ssh
       run_host_key_smoke
+      ;;
+    ssh-burst)
+      # Dev acceptance runs it without Kubernetes, as the SSH phase does.
+      [[ "$SMOKE_SKIP_KUBE" == "1" ]] || discover_runtime_objects
+      require_cmd ssh
+      wait_for_host_key_probe recorded
+      run_ssh_burst_smoke
       ;;
     app-preview)
       wait_for_cw_run

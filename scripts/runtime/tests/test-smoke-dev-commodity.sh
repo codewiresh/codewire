@@ -574,11 +574,54 @@ EOF
     require_cmd() { :; }
     run_ssh_transport_smoke() { :; }
     run_host_key_smoke() { :; }
+    run_ssh_burst_smoke() { :; }
     kubectl_dev() {
       fail "application-only smoke used Kubernetes"
     }
     run_ssh_smoke
   )
+}
+
+# One ssh-burst run against local shells (#3688). The watching session reads
+# a FIFO and the pasting one a file; WATCHER and PASTER stand in for each.
+run_ssh_burst_case() {
+  local name="$1" watcher="$2" paster="$3" case_dir="$TEST_TMP/ssh-burst-$1"
+  mkdir -p "$case_dir"
+  (
+    # The smoke reads its options from the positional parameters.
+    set --
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    declare TMPDIR_SMOKE="$case_dir" ENV_ID=0123456789abcdef SMOKE_SSH_BURST_LINES=300 \
+      SMOKE_SSH_BURST_BUSY_SECONDS=1 SMOKE_SSH_CONNECT_TIMEOUT=5
+    trap 'printf "class=%s\n" "${SMOKE_FAILURE_CLASS:-none}" >&2' EXIT
+    user_ssh_tty() {
+      [[ "$1" == cw-cloud-0123456789abcdef && "$2" == 'exec /bin/sh -i' ]] || exit 97
+      if [[ -p /dev/stdin ]]; then eval "$watcher"; else eval "$paster"; fi
+    }
+    run_ssh_burst_smoke
+  ) >"$case_dir/out" 2>"$case_dir/err" || true
+  sed -n 's/^class=//p' "$case_dir/err"
+}
+
+run_ssh_burst_cases() {
+  local shell='/bin/sh -i 2>/dev/null' class
+  class="$(run_ssh_burst_case answered "$shell" "$shell")"
+  [[ "$class" == none ]] || fail "an answered burst failed with class $class"
+  grep -F 'ssh-burst: 300 pasted lines answered in order' "$TEST_TMP/ssh-burst-answered/err" >/dev/null ||
+    fail "an answered burst did not report its lines"
+  class="$(run_ssh_burst_case goaway "$shell" \
+    "cat >/dev/null; printf '%s\n' 'workspace session failed: daemon session stream failed: code: '\''Some resource has been exhausted'\'', source: hyper::Error(Body, Error { kind: GoAway(b\"too_many_data_frames\", ENHANCE_YOUR_CALM, Library) })' >&2; exit 1")"
+  [[ "$class" == goaway_data ]] || fail "a burst ended by too_many_data_frames was class $class"
+  grep -F 'ssh-burst session error: workspace session failed' "$TEST_TMP/ssh-burst-goaway/err" >/dev/null ||
+    fail "the GOAWAY reason is missing from the burst's evidence"
+  class="$(run_ssh_burst_case lost-line "$shell" "grep -v 'B\$((100000+7))' | $shell")"
+  [[ "$class" == lost_line ]] || fail "a burst missing a line was class $class"
+  class="$(run_ssh_burst_case dropped-watcher "head -n 1 | $shell" "sleep 3; $shell")"
+  [[ "$class" == dropped ]] || fail "a burst whose second session ended was class $class"
+  class="$(run_ssh_burst_case dropped-paster "$shell" "head -c 2000 | $shell; exit 255")"
+  [[ "$class" == dropped ]] || fail "a burst whose session ended was class $class"
 }
 
 run_missing_server_namespace_case() {
@@ -1388,6 +1431,7 @@ assert_static_contract
 run_coco_rest_isolation_classifier_cases
 run_workspace_crashloop_fail_fast_case
 run_application_only_boundary_case
+run_ssh_burst_cases
 run_missing_server_namespace_case
 run_docker_socket_contract_cases
 run_explicit_isolation_tier_case
