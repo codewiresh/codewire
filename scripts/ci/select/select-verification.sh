@@ -1735,9 +1735,11 @@ if [ "$event_selected" = false ]; then
       crates/codewire-billing/src/credit.rs|\
       crates/codewire-orchestration/src/api/create.rs|\
       crates/codewire-orchestration/src/api/presets.rs|\
+      crates/codewire-orchestration/src/api/snapshots.rs|\
       crates/codewire-orchestration/src/confidential_storage.rs|\
       crates/codewire-orchestration/src/worker/activity_authority.rs|\
       crates/codewire-orchestration/src/worker/setup_lease.rs|\
+      crates/codewire-orchestration/src/worker/snapshots.rs|\
       crates/codewire-orchestration/src/api/cw_runtime/owner.rs|\
       crates/codewire-orchestration/src/api/environment_daemon/session_mutation/tests.rs|\
       crates/codewire-orchestration/src/api/environment_resize.rs|\

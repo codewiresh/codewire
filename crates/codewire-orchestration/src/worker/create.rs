@@ -234,6 +234,9 @@ pub struct SandboxWorkerCfg {
     pub docker_mode: String,
     pub allow_diagnostic_runtime: bool,
     pub workspace_storage_class: String,
+    /// The VolumeSnapshotClass of hosted disk snapshots. Empty refuses them
+    /// (`SANDBOX_VOLUME_SNAPSHOT_CLASS`, #3046).
+    pub volume_snapshot_class: String,
     /// The class a confidential environment's raw Block claim uses
     /// (`SANDBOX_CONFIDENTIAL_WORKSPACE_STORAGE_CLASS`). Empty refuses
     /// confidential templates.
@@ -414,6 +417,7 @@ impl SandboxWorkerCfg {
             docker_mode: getenv("SANDBOX_DOCKER_MODE", "profile-default"),
             allow_diagnostic_runtime: getenv("SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME", "false") == "true",
             workspace_storage_class,
+            volume_snapshot_class: getenv("SANDBOX_VOLUME_SNAPSHOT_CLASS", ""),
             confidential_workspace_storage_class,
             network_policy_management: getenv("SANDBOX_NETWORK_POLICY_MANAGEMENT", "Managed"),
             dind_enabled: getenv("SANDBOX_DIND_ENABLED", "false") == "true",

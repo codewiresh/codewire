@@ -106,6 +106,10 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "patch", "delete"]
+  # Hosted disk snapshots: a raw and a kept VolumeSnapshot per snapshot.
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "create", "delete"]
   # The environment's access objects: the workspace daemon Service, the
   # direct-UDP LoadBalancer and the workspace NetworkPolicies.
   - apiGroups: [""]

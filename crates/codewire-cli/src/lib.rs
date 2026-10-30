@@ -458,8 +458,8 @@ enum Command {
     )]
     Policy(PolicyArgs),
     #[command(
-        about = "Save, list and remove local disk snapshots of stopped VMs",
-        long_about = "Save, list and remove local disk snapshots.\n\nA disk snapshot is a reusable copy of a stopped local VM's disks on this host (Linux), made in about a second where the filesystem shares blocks between files. Start environments from one with `cw create --local --snapshot NAME [--count N]`; each gets fresh identity.\n\n  cw stop app\n  cw snapshot create app --name good-toolchain\n  cw create --local --snapshot good-toolchain --count 3\n  cw snapshot ls\n  cw snapshot rm good-toolchain"
+        about = "Save, list and remove disk snapshots of stopped environments",
+        long_about = "Save, list and remove disk snapshots.\n\nWith --platform, a snapshot is a hosted environment's workspace disk, kept on the platform and private to you; Codewire's delivered sign-ins are cleared from it.\n\nLocally, a disk snapshot is a reusable copy of a stopped local VM's disks on this host (Linux), made in about a second where the filesystem shares blocks between files. Start environments from one with `cw create --local --snapshot NAME [--count N]`; each gets fresh identity.\n\n  cw stop app\n  cw snapshot create app --name good-toolchain\n  cw create --local --snapshot good-toolchain --count 3\n  cw snapshot ls\n  cw snapshot rm good-toolchain"
     )]
     Snapshot(SnapshotArgs),
     #[command(
@@ -1087,6 +1087,31 @@ fn validate_placement_scope(
         );
     anyhow::ensure!(reads, "{flag} does not apply to `cw {name}`");
     Ok(())
+}
+
+/// A snapshot's clearing Sandbox runs this as its only process (`__snapshot-clear
+/// ROOT`). It runs before any CLI setup, and prints only counts and an error,
+/// never a path or a file's contents. Any failure exits non-zero, so the capture
+/// keeps nothing.
+#[cfg(target_os = "linux")]
+pub fn run_snapshot_clear_from(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> i32 {
+    let (Some(root), None) = (arguments.next(), arguments.next()) else {
+        eprintln!("usage: cw __snapshot-clear ROOT");
+        return 2;
+    };
+    match codewire_daemon::snapshot_clearing::clear_workspace_volume(std::path::Path::new(&root)) {
+        Ok(report) => {
+            println!(
+                "cleared logins={} trees={}",
+                report.logins_removed, report.trees_removed
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("clearing failed: {error}");
+            1
+        }
+    }
 }
 
 async fn run_hosted_daemon() -> anyhow::Result<()> {

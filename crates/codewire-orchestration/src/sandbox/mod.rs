@@ -10,6 +10,7 @@ pub mod host_keys;
 pub mod image_cache;
 pub mod runtime_images;
 pub mod sidecar;
+pub mod snapshots;
 pub mod template;
 pub mod warm_pool;
 

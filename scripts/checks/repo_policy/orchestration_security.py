@@ -62,6 +62,7 @@ SANDBOX_ROLE_RULES = (
     '- apiGroups: - "" resources: - pods/log verbs: - get '
     '- apiGroups: - "" resources: - pods/exec - pods/portforward verbs: - create - get '
     '- apiGroups: - "" resources: - persistentvolumeclaims verbs: - get - list - patch - delete '
+    '- apiGroups: - snapshot.storage.k8s.io resources: - volumesnapshots verbs: - get - create - delete '
     '- apiGroups: - "" resources: - services verbs: - get - list - create - update - delete '
     '- apiGroups: - networking.k8s.io resources: - networkpolicies verbs: - get - create - update - delete '
     '- apiGroups: - agents.x-k8s.io resources: - sandboxes verbs: - get - list - patch - update - delete '

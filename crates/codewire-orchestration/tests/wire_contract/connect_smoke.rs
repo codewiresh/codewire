@@ -16,6 +16,7 @@ const ORGANIZATION_SERVICE: &str = "codewire.v1.OrganizationService";
 const SECRET_SERVICE: &str = "codewire.v1.SecretService";
 const PRESET_SERVICE: &str = "codewire.v1.PresetService";
 const PORT_SERVICE: &str = "codewire.v1.PortService";
+const SNAPSHOT_SERVICE: &str = "codewire.v1.SnapshotService";
 const ENVIRONMENT_SERVICE: &str = "codewire.v1.EnvironmentService";
 
 pub(super) async fn run(harness: &Harness) {
@@ -118,6 +119,13 @@ async fn assert_json_connect_routes(harness: &Harness) {
             None,
         ),
         (
+            SNAPSHOT_SERVICE,
+            "ListSnapshots",
+            json!({"orgId": PRIMARY_ORG}),
+            Auth::Admin,
+            None,
+        ),
+        (
             PORT_SERVICE,
             "ListPorts",
             json!({"orgId": PRIMARY_ORG, "environmentId": "env_port_contract_operator"}),
@@ -178,6 +186,38 @@ async fn assert_proto_connect_route(harness: &Harness) {
 }
 
 async fn assert_auth_boundary(harness: &Harness) {
+    for (method, body) in [
+        ("ListSnapshots", json!({"orgId": PRIMARY_ORG})),
+        (
+            "CreateSnapshot",
+            json!({"orgId": PRIMARY_ORG, "environmentId": "env", "name": "one"}),
+        ),
+    ] {
+        let response = harness
+            .connect_json(SNAPSHOT_SERVICE, method, body, Auth::None)
+            .await;
+        assert_connect_error(
+            &response,
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "unauthorized",
+        );
+    }
+    let missing = harness
+        .connect_json(
+            SNAPSHOT_SERVICE,
+            "GetSnapshot",
+            json!({"orgId": PRIMARY_ORG, "snapshotId": "no-such-snapshot"}),
+            Auth::Admin,
+        )
+        .await;
+    assert_connect_error(
+        &missing,
+        StatusCode::NOT_FOUND,
+        "not_found",
+        "snapshot not found",
+    );
+
     let response = harness
         .connect_json(
             ORGANIZATION_SERVICE,

@@ -46,6 +46,7 @@ cd "$ROOT/proto"
   --path codewire/v1/port.proto \
   --path codewire/v1/preset.proto \
   --path codewire/v1/secret.proto \
+  --path codewire/v1/snapshot.proto \
   --path codewire/testing/v1/ping.proto \
   --path google/rpc/error_details.proto \
   -o ../crates/codewire-proto/codewire_descriptor.bin

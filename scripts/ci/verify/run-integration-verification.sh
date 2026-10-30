@@ -1096,6 +1096,18 @@ database_lane_orchestration_workspaces() {
       'api::presets::tests::db_' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "hosted snapshot API matrix" hosted-snapshots-api \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::snapshots::tests::db_' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "hosted snapshot worker matrix" hosted-snapshots-worker \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::snapshots::tests::db_' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "confidential environment access matrix" confidential-environment-access \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

@@ -12,6 +12,8 @@ use serde::Serialize;
 
 use super::*;
 
+mod platform;
+
 #[derive(Debug, Args)]
 pub(crate) struct SnapshotArgs {
     #[command(subcommand)]
@@ -21,8 +23,8 @@ pub(crate) struct SnapshotArgs {
 #[derive(Debug, Subcommand)]
 pub(crate) enum SnapshotCommand {
     #[command(
-        about = "Save a stopped local VM's disks as a snapshot",
-        after_help = "Examples:\n  cw stop app\n  cw snapshot create app --name good-toolchain\n  cw create --local --snapshot good-toolchain --count 3\n\nThe VM must be stopped. Codewire's delivered sign-ins are removed from the copy; anything else on the disks, such as a .env file or shell history, is kept."
+        about = "Save a stopped environment's disks as a snapshot",
+        after_help = "Examples:\n  cw stop app\n  cw snapshot create app --name good-toolchain\n  cw --platform snapshot create app\n  cw create --local --snapshot good-toolchain --count 3\n\nThe VM must be stopped. Codewire's delivered sign-ins are removed from the copy; anything else on the disks, such as a .env file or shell history, is kept."
     )]
     Create(SnapshotCreateArgs),
     #[command(visible_alias = "list", about = "List this host's snapshots")]
@@ -35,7 +37,7 @@ pub(crate) enum SnapshotCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct SnapshotCreateArgs {
-    #[arg(help = "The stopped local environment to snapshot")]
+    #[arg(help = "The stopped environment to snapshot")]
     pub(crate) environment: String,
     #[arg(
         long,
@@ -65,10 +67,9 @@ pub(crate) async fn handle_snapshot_command(
     globals: &Globals,
     args: SnapshotArgs,
 ) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        globals.placement != Some(EnvironmentPlacement::Platform),
-        "disk snapshots are local only for now; cloud environments cannot be snapshotted yet"
-    );
+    if globals.placement == Some(EnvironmentPlacement::Platform) {
+        return platform::handle_platform_snapshot_command(globals, args.command).await;
+    }
     #[cfg(target_os = "linux")]
     {
         handle_local_snapshot_command(globals, args.command).await

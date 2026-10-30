@@ -38,6 +38,7 @@ fn main() {
         "codewire/v1/port.proto",
         "codewire/v1/preset.proto",
         "codewire/v1/secret.proto",
+        "codewire/v1/snapshot.proto",
         "codewire/testing/v1/ping.proto",
         // Vendored google.rpc error-detail types (01 WI-1): typed carriers
         // for Connect error `details` (BadRequest, ErrorInfo, RetryInfo).

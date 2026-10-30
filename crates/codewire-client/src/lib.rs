@@ -28,7 +28,7 @@ use codewire_proto::codewire::v1::{
     CredentialServiceClient, EnvironmentServiceClient, EnvironmentSessionServiceClient,
     ExecServiceClient, FileServiceClient, GithubRepositoryServiceClient, MeshInviteServiceClient,
     MeshNetworkServiceClient, MeshNodeServiceClient, OrganizationServiceClient, PortServiceClient,
-    PresetServiceClient, SecretServiceClient,
+    PresetServiceClient, SecretServiceClient, SnapshotServiceClient,
 };
 use connectrpc::ConnectError;
 use connectrpc::client::{BoxFuture, CallOptions, ClientBody, ClientTransport};
@@ -156,6 +156,11 @@ pub use codewire_proto::codewire::v1::{
     watch_environment_create_response,
 };
 pub use codewire_proto::codewire::v1::{
+    CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest, DeleteSnapshotResponse,
+    GetSnapshotRequest, GetSnapshotResponse, ListSnapshotsRequest, ListSnapshotsResponse, Snapshot,
+    SnapshotState,
+};
+pub use codewire_proto::codewire::v1::{
     CredentialDelegationKeepalive, CredentialDelegationOpen, CredentialDelegationProfile,
     DelegateCredentialsRequest, DelegateCredentialsResponse, delegate_credentials_request,
     delegate_credentials_response,
@@ -195,6 +200,7 @@ pub struct CodewireClient {
     presets: PresetServiceClient<ReqwestConnectTransport>,
     ports: PortServiceClient<ReqwestConnectTransport>,
     secrets: SecretServiceClient<ReqwestConnectTransport>,
+    snapshots: SnapshotServiceClient<ReqwestConnectTransport>,
     access_profiles: AccessProfileServiceClient<ReqwestConnectTransport>,
     credentials: CredentialServiceClient<ReqwestConnectTransport>,
     credential_mutations: CredentialMutationServiceClient<ReqwestConnectTransport>,
@@ -396,6 +402,7 @@ impl CodewireClient {
         let preset_config = config.connect_config()?;
         let port_config = config.connect_config()?;
         let secret_config = config.connect_config()?;
+        let snapshot_config = config.connect_config()?;
         let access_profile_config = config.connect_config()?;
         let credential_config = config.connect_config()?;
         let credential_mutation_config = config.connect_config()?;
@@ -429,6 +436,10 @@ impl CodewireClient {
             presets: PresetServiceClient::new(ReqwestConnectTransport(http.clone()), preset_config),
             ports: PortServiceClient::new(ReqwestConnectTransport(http.clone()), port_config),
             secrets: SecretServiceClient::new(ReqwestConnectTransport(http.clone()), secret_config),
+            snapshots: SnapshotServiceClient::new(
+                ReqwestConnectTransport(http.clone()),
+                snapshot_config,
+            ),
             access_profiles: AccessProfileServiceClient::new(
                 ReqwestConnectTransport(http.clone()),
                 access_profile_config,
@@ -654,6 +665,50 @@ impl CodewireClient {
     ) -> Result<DeletePortResponse, ClientError> {
         self.ports
             .delete_port_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn create_snapshot(
+        &self,
+        request: CreateSnapshotRequest,
+    ) -> Result<CreateSnapshotResponse, ClientError> {
+        self.snapshots
+            .create_snapshot_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn list_snapshots(
+        &self,
+        request: ListSnapshotsRequest,
+    ) -> Result<ListSnapshotsResponse, ClientError> {
+        self.snapshots
+            .list_snapshots_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn get_snapshot(
+        &self,
+        request: GetSnapshotRequest,
+    ) -> Result<GetSnapshotResponse, ClientError> {
+        self.snapshots
+            .get_snapshot_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn delete_snapshot(
+        &self,
+        request: DeleteSnapshotRequest,
+    ) -> Result<DeleteSnapshotResponse, ClientError> {
+        self.snapshots
+            .delete_snapshot_with_options(request, self.auth_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)

@@ -36,6 +36,8 @@ pub mod server;
 pub mod service;
 pub mod session;
 #[cfg(target_os = "linux")]
+pub mod snapshot_clearing;
+#[cfg(target_os = "linux")]
 pub mod ssh_known_hosts;
 pub mod stop_evidence;
 #[cfg(unix)]

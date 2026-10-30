@@ -545,6 +545,80 @@ impl EnvironmentClient {
         })
     }
 
+    pub async fn create_snapshot(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+        name: &str,
+    ) -> anyhow::Result<rpc::Snapshot> {
+        let response = self
+            .inner
+            .create_snapshot(rpc::CreateSnapshotRequest {
+                org_id: org_id.to_string(),
+                environment_id: environment_id.to_string(),
+                name: name.to_string(),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        response
+            .snapshot
+            .into_option()
+            .ok_or_else(|| anyhow::anyhow!("CreateSnapshot returned no snapshot"))
+    }
+
+    pub async fn list_snapshots(&self, org_id: &str) -> anyhow::Result<Vec<rpc::Snapshot>> {
+        let response = self
+            .inner
+            .list_snapshots(rpc::ListSnapshotsRequest {
+                org_id: org_id.to_string(),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        Ok(response.snapshots)
+    }
+
+    pub async fn get_snapshot(
+        &self,
+        org_id: &str,
+        snapshot_id: &str,
+    ) -> anyhow::Result<rpc::Snapshot> {
+        let response = self
+            .inner
+            .get_snapshot(rpc::GetSnapshotRequest {
+                org_id: org_id.to_string(),
+                snapshot_id: snapshot_id.to_string(),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        response
+            .snapshot
+            .into_option()
+            .ok_or_else(|| anyhow::anyhow!("GetSnapshot returned no snapshot"))
+    }
+
+    pub async fn delete_snapshot(
+        &self,
+        org_id: &str,
+        snapshot_id: &str,
+    ) -> anyhow::Result<rpc::Snapshot> {
+        let response = self
+            .inner
+            .delete_snapshot(rpc::DeleteSnapshotRequest {
+                org_id: org_id.to_string(),
+                snapshot_id: snapshot_id.to_string(),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        response
+            .snapshot
+            .into_option()
+            .ok_or_else(|| anyhow::anyhow!("DeleteSnapshot returned no snapshot"))
+    }
+
     pub async fn stop_environment(
         &self,
         org_id: &str,

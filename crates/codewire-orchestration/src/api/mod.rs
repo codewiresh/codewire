@@ -30,6 +30,7 @@ pub mod proxy;
 mod runtime_lease_test_support;
 pub mod secret_projects;
 pub mod secrets;
+pub mod snapshots;
 pub mod ssh_proxy;
 pub mod terminal;
 pub mod trust_report;

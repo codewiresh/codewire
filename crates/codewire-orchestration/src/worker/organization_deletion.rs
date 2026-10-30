@@ -173,6 +173,19 @@ pub async fn destroy_organization_environments(
         "environment_runtime_dispatch",
     )
     .await?;
+    // The drain fences new captures, so this enumeration is complete. The
+    // organization's foreign key has no cascade, so a snapshot left here fails
+    // the deletion rather than leaving a volume nothing can find.
+    super::snapshots::delete_organization_snapshots(ctx, &input.organization_id)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                organization_id = input.organization_id,
+                error = %error,
+                "organization deletion could not delete its snapshots"
+            );
+            AppError::ServiceUnavailable("organization snapshots are not deleted yet".into())
+        })?;
     advance_organization_deletion_phase(
         &ctx.pool,
         &input.operation_id,

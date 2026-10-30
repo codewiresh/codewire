@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// SnapshotService manages hosted disk snapshots: a stopped environment's
+// workspace disk, saved for reuse and private to the user who created it.
+// Capture runs in the background; a snapshot is usable once it is READY.
+service SnapshotService {
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+}
+
+// SnapshotState is where one snapshot's capture or deletion stands.
+enum SnapshotState {
+  SNAPSHOT_STATE_UNSPECIFIED = 0;
+  SNAPSHOT_STATE_CAPTURING = 1;
+  SNAPSHOT_STATE_READY = 2;
+  // Nothing was kept. failure_code says why.
+  SNAPSHOT_STATE_FAILED = 3;
+  SNAPSHOT_STATE_DELETING = 4;
+}
+
+// Snapshot is one saved disk. size_bytes is the disk's capacity, set once the
+// snapshot is READY.
+message Snapshot {
+  string id = 1;
+  string org_id = 2;
+  string name = 3;
+  string source_environment_id = 4;
+  SnapshotState state = 5;
+  // Stable reason for SNAPSHOT_STATE_FAILED: environment_not_stopped,
+  // clearing_failed or capture_failed.
+  optional string failure_code = 6;
+  optional int64 size_bytes = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp last_used_at = 9;
+}
+
+message CreateSnapshotRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string name = 3;
+}
+
+message CreateSnapshotResponse {
+  Snapshot snapshot = 1;
+}
+
+message ListSnapshotsRequest {
+  string org_id = 1;
+}
+
+message ListSnapshotsResponse {
+  repeated Snapshot snapshots = 1;
+}
+
+message GetSnapshotRequest {
+  string org_id = 1;
+  string snapshot_id = 2;
+}
+
+message GetSnapshotResponse {
+  Snapshot snapshot = 1;
+}
+
+message DeleteSnapshotRequest {
+  string org_id = 1;
+  string snapshot_id = 2;
+}
+
+message DeleteSnapshotResponse {
+  Snapshot snapshot = 1;
+}

@@ -378,12 +378,15 @@ fn legacy_shared_warm_pool_name_matches(name: &str, template_name: &str) -> bool
         })
 }
 
+#[path = "client/snapshots.rs"]
+mod snapshots;
 #[path = "client/workspace_binding.rs"]
 mod workspace_binding;
 pub(crate) use workspace_binding::sandbox_name_hash;
 
 #[path = "client/warm_pool.rs"]
 mod warm_pool;
+pub use snapshots::{ClearingProgress, KeptSnapshot, VolumeSnapshotProgress};
 pub use warm_pool::PoolBornClaim;
 pub use workspace_binding::{BindableRuntime, WorkspacePvc, WorkspacePvcAnchor};
 

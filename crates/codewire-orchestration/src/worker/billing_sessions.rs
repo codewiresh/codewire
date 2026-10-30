@@ -507,6 +507,11 @@ async fn resolve_identity(
     runtime_uid: &str,
     labels: &serde_json::Map<String, Value>,
 ) -> anyhow::Result<IdentityResolution> {
+    // A snapshot's clearing Sandbox has a claim but no environment, and bills
+    // nothing.
+    if crate::sandbox::snapshots::is_clearing_sandbox(runtime_name) {
+        return Ok(IdentityResolution::NotManaged);
+    }
     let mut env_id = labels
         .get(LABEL_ENV_ID)
         .and_then(Value::as_str)

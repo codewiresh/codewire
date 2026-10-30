@@ -35,6 +35,7 @@ pub mod secret_readiness;
 pub mod secrets;
 pub mod setup;
 pub mod setup_lease;
+pub mod snapshots;
 mod start_timing;
 pub mod tenant_secret_teardown;
 pub mod warm_pool;

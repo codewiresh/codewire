@@ -25,6 +25,7 @@ pub mod organizations;
 pub mod ports;
 pub mod presets;
 pub mod secrets;
+pub mod snapshots;
 
 /// Shared D12 renderer for sandbox-gated RPCs. ExecService and FileService
 /// both call the same target gate, so state/access/upstream failures must keep

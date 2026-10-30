@@ -264,6 +264,9 @@ async fn run_reconciliation(ctx: &WorkerContext) {
     reconcile_incomplete_external_cleanup(ctx).await;
     recover_pending_creates(ctx).await;
     reconcile_stuck_environments(ctx).await;
+    if let Err(error) = super::snapshots::reconcile_snapshots(ctx).await {
+        tracing::warn!(error = %error, "reconciler: hosted snapshot reconcile failed");
+    }
     // Trial expiry checks stay with the Go reconciler until the
     // billing-usage port (billing concern, not orchestration).
 }

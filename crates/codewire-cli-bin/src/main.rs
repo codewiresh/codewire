@@ -34,6 +34,15 @@ fn main() {
     #[cfg(target_os = "linux")]
     if std::env::args_os()
         .nth(1)
+        .is_some_and(|argument| argument == "__snapshot-clear")
+    {
+        std::process::exit(codewire_cli::run_snapshot_clear_from(
+            std::env::args_os().skip(2),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .nth(1)
         .is_some_and(|argument| argument == "__platform-cw-runtime")
     {
         std::process::exit(codewire_cli::run_platform_cw_runtime_from(

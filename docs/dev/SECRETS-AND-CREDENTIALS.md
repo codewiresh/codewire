@@ -1160,6 +1160,48 @@ login saved before this record existed records no account until the next
 `cw login`, and a re-login with an older `cw`, which does not know the file,
 can leave a stale one beside the new login; `cw logout` removes it.
 
+A hosted disk snapshot (`cw --platform snapshot create`) is a kept copy of a
+stopped hosted environment's workspace volume, private to its creator. Capture
+never edits the source. It restores a raw snapshot of the volume into a clearing
+Sandbox, a Kata VM with no network, credentials, service-account token or
+binding, whose only process is a fixed `cw` command. That command recognises
+Codewire's files by the daemon's own rules, as local capture does: in `~/.codex`,
+`auth.json` and `.auth.json.codewire.*`; in `~/.claude`, `.credentials.json` and
+`.credentials.json.codewire.*`. Each is overwritten with zeros, flushed, then
+unlinked, and a recognised Claude Code store goes whole. It also unlinks, without
+zeroing, the source's sessions (`~/.codewire/daemon/sessions`, with their command
+lines and output) and managed agents' books. A symbolic link at any of those paths,
+or at an agent's home, and a login file over 1 MiB, fail the capture: the daemon
+delivers through neither, but clearing can't show that nothing is there. Any error
+fails the capture, and the capture then deletes the raw snapshot, the clearing
+volume and anything else it made, retrying until they are gone. Only after the
+clearing Pod is gone is the kept snapshot taken. Only the environment's creator may
+capture it, because the exception below assumes the snapshotter owns the
+credentials on the disk. A created environment's own selection delivers fresh
+logins under its own authority.
+
+**Exception, owner, 2026-10-30 (#3046):** unlike local capture, which punches every
+free range, hosted capture clears the current token files only, so an older copy
+of a delivered token that an earlier rewrite left in a free block of the volume
+stays in the kept snapshot and in every environment made from it, and so may the
+blocks of the unlinked sessions and books. The owner's
+reason: "if someone's snapshotting something, then they should expect for those
+credentials to be in it. I don't think that we need to spend, like, super long
+time to zero it out." This holds because of three properties, and a change to any
+of them reopens the decision:
+
+- a guest reaches a commodity volume only over virtio-fs, as files, so it can't
+  read a free block;
+- the snapshot stays on its volume's own LUKS key at rest, private to its creator
+  (its fork shares that key);
+- no copy of it leaves as raw blocks: the planned R2 copy copies files, and block
+  backups (#2238) aren't enabled for it.
+
+A left-over copy stays valid at the provider until it expires: about 8 hours for
+Claude. OpenAI publishes no lifetime for the Codex token, and the code reads each
+token's own `exp` rather than assuming one. Neither is shortened by this path.
+Confidential environments are never snapshotted.
+
 A VM checkpoint (`cw checkpoint create`, Linux) is a running local VM's
 memory, device state and disks at one instant. Memory cannot be cleared the
 way a disk copy is, so a checkpoint may hold the creator's own delivered Codex
