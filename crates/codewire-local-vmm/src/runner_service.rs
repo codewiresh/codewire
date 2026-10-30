@@ -1283,6 +1283,8 @@ impl EnvironmentRunnerService for RunnerRpc {
                 return Err(map_start_error(error));
             }
         };
+        // Stage timings for the vm_started line (#3046): logging only.
+        let launch_ms = elapsed_ms(started);
         #[cfg(target_os = "linux")]
         self.log_restore(environment_id, request.generation, &running);
         // Publish only after the exact VMM process is owned. If this future is
@@ -1340,6 +1342,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 return Err(Status::internal("resolve network worker executable failed"));
             }
         };
+        let network_started = std::time::Instant::now();
         if let Err(error) = running
             .start_network_worker_with_mesh_credentials(
                 &worker_executable,
@@ -1379,6 +1382,8 @@ impl EnvironmentRunnerService for RunnerRpc {
             None,
             running.cw_runtime_catalog_generation(),
         )?;
+        let network_ms = elapsed_ms(network_started);
+        let guest_started = std::time::Instant::now();
         if let Err(failure) =
             wait_for_guest_daemon(&mut running, daemon_ready_timeout, &self.events).await
         {
@@ -1450,6 +1455,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             state.error_code = Some("daemon_access_failed");
             return Err(error);
         }
+        let guest_ms = elapsed_ms(guest_started);
         diagnostic_log::record(
             self.log.as_deref(),
             "vm_started",
@@ -1457,6 +1463,9 @@ impl EnvironmentRunnerService for RunnerRpc {
                 ("environment", LogField::Id(environment_id)),
                 ("generation", LogField::Count(request.generation)),
                 ("elapsed_ms", LogField::Count(elapsed_ms(started))),
+                ("launch_ms", LogField::Count(launch_ms)),
+                ("network_ms", LogField::Count(network_ms)),
+                ("guest_ms", LogField::Count(guest_ms)),
             ],
         );
         Ok(Response::new(state.info()))

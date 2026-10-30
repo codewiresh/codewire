@@ -404,6 +404,12 @@ pub struct RestoreReport {
     pub vmgenid_driver: bool,
     pub removed_logins: bool,
     pub clock_skew_ms: i64,
+    /// Admitting and rewriting the checkpoint's VMM configuration.
+    pub admit: Duration,
+    /// Starting the direct shares' virtiofsd processes.
+    pub shares: Duration,
+    /// From spawning Cloud Hypervisor with `--restore` until its API answers.
+    pub vmm: Duration,
     pub resume: Duration,
     pub thaw: Duration,
 }
@@ -622,6 +628,9 @@ pub(super) async fn resume_restored(
         vmgenid_driver: resumed.resume.vmgenid_driver,
         removed_logins: resumed.resume.removed_logins,
         clock_skew_ms: resumed.clock_skew_ms,
+        admit: Duration::ZERO,
+        shares: Duration::ZERO,
+        vmm: Duration::ZERO,
         resume,
         thaw: started.elapsed(),
     })

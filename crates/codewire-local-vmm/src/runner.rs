@@ -348,10 +348,16 @@ impl CloudHypervisorRunner {
                 .collect(),
         )?;
         #[cfg(target_os = "linux")]
+        let admitting = std::time::Instant::now();
+        #[cfg(target_os = "linux")]
         let command = match &request.checkpoint {
             Some(restore) => self.restore_command(&paths, &config, restore)?,
             None => config.command()?,
         };
+        // How long admitting and rewriting a VM checkpoint's configuration
+        // took; logged with the restore (#3046).
+        #[cfg(target_os = "linux")]
+        let restore_admit = request.checkpoint.as_ref().map(|_| admitting.elapsed());
         Ok(PreparedVm {
             request,
             paths,
@@ -364,6 +370,8 @@ impl CloudHypervisorRunner {
             token,
             #[cfg(target_os = "linux")]
             command,
+            #[cfg(target_os = "linux")]
+            restore_admit,
             host_port_listeners,
             lock,
         })
@@ -609,6 +617,7 @@ impl CloudHypervisorRunner {
 
     #[cfg(target_os = "linux")]
     async fn launch(&self, prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
+        let launching = std::time::Instant::now();
         let mut direct_share_startup = DirectShareStartup::start(
             self.artifacts
                 .virtiofsd
@@ -618,6 +627,8 @@ impl CloudHypervisorRunner {
             &prepared.paths.vm_dir,
         )
         .await?;
+        let shares_started = launching.elapsed();
+        let spawning = std::time::Instant::now();
         // Arm cancellation cleanup in the same synchronous span as spawn. An
         // aborted start future must never drop the VM lock while leaving a VMM
         // alive, including before a pidfd identity has been admitted.
@@ -673,18 +684,23 @@ impl CloudHypervisorRunner {
             )
             .await?;
             api.ping().await?;
+            let vmm_ready = spawning.elapsed();
             // A restored VM resumes frozen: it moves to this boot's identity
             // and thaws before anything else reaches it (#3046 R4).
             let restored = match &prepared.request.checkpoint {
-                Some(_) => Some(
-                    checkpoint::resume_restored(
+                Some(_) => {
+                    let mut report = checkpoint::resume_restored(
                         &prepared.paths.vsock_socket,
                         &prepared.token,
                         prepared.request.vm_id,
                         prepared.request.generation,
                     )
-                    .await?,
-                ),
+                    .await?;
+                    report.admit = prepared.restore_admit.unwrap_or_default();
+                    report.shares = shares_started;
+                    report.vmm = vmm_ready;
+                    Some(report)
+                }
                 None => None,
             };
             if let Some(disk) = &prepared.cw_runtime_disk {
@@ -1186,6 +1202,8 @@ pub struct PreparedVm {
     token: Zeroizing<String>,
     #[cfg(target_os = "linux")]
     command: CommandSpec,
+    #[cfg(target_os = "linux")]
+    restore_admit: Option<Duration>,
     host_port_listeners: Vec<ReservedHostPort>,
     lock: VmLock,
 }

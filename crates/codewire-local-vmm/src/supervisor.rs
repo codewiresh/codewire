@@ -2645,6 +2645,8 @@ impl Supervisor {
         let expected_access_profile = expected_access.map(|(_, reference)| reference);
         let mut operation = operation.clone();
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
+            let effect_name = effect.name();
+            let effect_started = std::time::Instant::now();
             match effect {
                 LifecycleEffect::RecordEnvironment => {
                     // A restore records its snapshot's pinned artifact
@@ -2859,6 +2861,7 @@ impl Supervisor {
                 }
                 _ => return Err(SupervisorError::InvalidState),
             }
+            log_effect_timing(self.log.as_deref(), &operation, effect_name, effect_started);
         }
         Ok((
             self.environment(&request.name)?
@@ -4782,6 +4785,8 @@ impl Supervisor {
         }
         let mut operation = operation.clone();
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
+            let effect_name = effect.name();
+            let effect_started = std::time::Instant::now();
             match effect {
                 LifecycleEffect::RequireEnvironmentAccess => {
                     self.require_environment_access(name).await?;
@@ -4857,6 +4862,7 @@ impl Supervisor {
                 }
                 _ => return Err(SupervisorError::InvalidState),
             }
+            log_effect_timing(self.log.as_deref(), &operation, effect_name, effect_started);
         }
         Ok((
             self.environment(name)?.proto(self.core().selected(name)),
@@ -4880,6 +4886,8 @@ impl Supervisor {
         }
         let mut operation = operation.clone();
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
+            let effect_name = effect.name();
+            let effect_started = std::time::Instant::now();
             match effect {
                 LifecycleEffect::StopVm => {
                     self.ensure_vm_stopped(name).await?;
@@ -4897,6 +4905,7 @@ impl Supervisor {
                 }
                 _ => return Err(SupervisorError::InvalidState),
             }
+            log_effect_timing(self.log.as_deref(), &operation, effect_name, effect_started);
         }
         Ok((
             self.environment(name)?.proto(self.core().selected(name)),
@@ -10132,6 +10141,30 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
 /// [`MAXIMUM_LIFECYCLE_CAUSE_BYTES`], so `<operation prefix>_<cause>` stays a
 /// valid journal error code. The match is exhaustive: a new error variant must
 /// be named here.
+/// Logs how long one lifecycle effect took, so a slow create, start, restore
+/// or fork shows which effect spent the time (#3046). Closed names and a
+/// duration only.
+fn log_effect_timing(
+    log: Option<&DiagnosticLog>,
+    operation: &OperationRecord,
+    effect: &'static str,
+    started: std::time::Instant,
+) {
+    let mut fields = vec![
+        ("kind", LogField::Name(operation.kind.as_str())),
+        ("operation", LogField::Id(operation.operation_id)),
+        ("effect", LogField::Name(effect)),
+    ];
+    if let Some(environment_id) = operation.environment_id {
+        fields.push(("environment", LogField::Id(environment_id)));
+    }
+    fields.push((
+        "elapsed_ms",
+        LogField::Count(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+    ));
+    diagnostic_log::record(log, "operation_effect", &fields);
+}
+
 fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
     match error {
         SupervisorError::InvalidConfiguration => "invalid_configuration",
@@ -18907,6 +18940,56 @@ mod tests {
             ),
             "environment_sources_not_running"
         );
+    }
+
+    #[tokio::test]
+    async fn effect_timing_log_names_the_effect_and_its_duration_only() {
+        let environment = project_environment();
+        let environment_id = environment.id;
+        let (_parent, core) = test_supervisor_core(environment);
+        let log = DiagnosticLog::adopt(
+            diagnostic_log::open_child_log(&core.root, diagnostic_log::SUPERVISOR_LOG).unwrap(),
+        )
+        .unwrap();
+        let operation = begin_and_advance_test_operation(
+            &core.store,
+            environment_id,
+            OperationKind::Start,
+            &serde_json::json!({ "name": "dev" }),
+            2,
+        );
+        let started = std::time::Instant::now() - std::time::Duration::from_millis(1_250);
+        log_effect_timing(
+            Some(&log),
+            &operation,
+            "stage_workspace_generation",
+            started,
+        );
+        log_effect_timing(None, &operation, "start_vm", started);
+        let text = std::fs::read_to_string(
+            core.root
+                .path()
+                .join(diagnostic_log::LOG_DIRECTORY)
+                .join(diagnostic_log::SUPERVISOR_LOG),
+        )
+        .unwrap();
+        let line = text
+            .lines()
+            .find(|line| line.contains("event=operation_effect"))
+            .unwrap();
+        assert!(line.contains(" kind=start "));
+        assert!(line.contains(&format!(" operation={} ", operation.operation_id)));
+        assert!(line.contains(" effect=stage_workspace_generation "));
+        assert!(line.contains(&format!(" environment={environment_id} ")));
+        let elapsed: u64 = line
+            .rsplit("elapsed_ms=")
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!((1_250..60_000).contains(&elapsed));
+        assert_eq!(text.matches("event=operation_effect").count(), 1);
     }
 
     #[tokio::test]

@@ -214,6 +214,12 @@ impl RunnerRpc {
                         "removed_logins",
                         LogField::Name(bool_text(report.removed_logins)),
                     ),
+                    ("admit_ms", LogField::Count(report.admit.as_millis() as u64)),
+                    (
+                        "shares_ms",
+                        LogField::Count(report.shares.as_millis() as u64),
+                    ),
+                    ("vmm_ms", LogField::Count(report.vmm.as_millis() as u64)),
                     (
                         "resume_ms",
                         LogField::Count(report.resume.as_millis() as u64),
