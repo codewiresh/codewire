@@ -60,6 +60,7 @@ MODE=run
 # The cluster named by --confirm-production; empty for Dev.
 PRODUCTION=""
 readonly PRODUCTION_CLUSTER="cw-prod-hz-eu-1"
+readonly DEV_CLUSTER="cw-dev-hz-eu-1"
 
 # Every environment this tool creates is named NAME_PREFIX<run>-<n>; nothing
 # else is ever deleted.
@@ -144,7 +145,8 @@ Options:
 Environment:
   CODEWIRE_DEV_SMOKE_API_KEY   Dev: required (set by with-dev-smoke-auth.sh)
   CODEWIRE_PROD_SMOKE_API_KEY  Production: required (set by with-prod-smoke-auth.sh)
-  KUBECONFIG                   Dev: defaults to ~/src/infra/kubeconfig-oidc.yaml;
+  KUBECONFIG                   Dev: the one kube-access renders for cw-dev-hz-eu-1,
+                               or by default ~/src/infra/kubeconfig-oidc.yaml;
                                Production: the one kube-access renders
   PROM_URL                     required: the System Prometheus that scrapes the cluster
 
@@ -248,12 +250,15 @@ done
 case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
 if [[ -z "$PRODUCTION" ]]; then
   : "${CODEWIRE_SERVER_URL:=https://codewire-dev.sh}" "${KUBE_CONTEXT:=codewire-dev}"
-  : "${SANDBOX_NAMESPACE:=dev-sandboxes}" "${ORCHESTRATION_NAMESPACE:=dev}" "${PROM_CLUSTER:=cw-dev-hz-eu-1}"
+  : "${SANDBOX_NAMESPACE:=dev-sandboxes}" "${ORCHESTRATION_NAMESPACE:=dev}" "${PROM_CLUSTER:=$DEV_CLUSTER}"
   : "${MAX_NODE_MEMORY_PCT:=90}" "${MAX_NODE_CPU_PCT:=90}" "${MAX_PSI_MEMORY_PCT:=10}"
   : "${MAX_PSI_CPU_PCT:=50}" "${MAX_THIN_POOL_PCT:=80}" "${LOAD_TMP_PARENT:=$ROOT/.tmp/sandbox-capacity}"
   [[ "$CODEWIRE_SERVER_URL" == "https://codewire-dev.sh" ]] ||
     die "this load runs only against Dev unless --confirm-production $PRODUCTION_CLUSTER"
-  [[ "$KUBE_CONTEXT" == "codewire-dev" ]] || die "this load runs only against the codewire-dev context in Dev mode"
+  # kube-access exports the context with a temporary kubeconfig and marks it.
+  [[ "$KUBE_CONTEXT" == "codewire-dev" ||
+    ("$KUBE_CONTEXT" == "$DEV_CLUSTER" && -n "${KUBECONFIG:-}" && "${INFRA_TRANSIENT_KUBE_AUTH:-}" == 1) ]] ||
+    die "this load runs only against the codewire-dev context, or through scripts/kube-access $DEV_CLUSTER, in Dev mode"
   [[ -n "${CODEWIRE_DEV_SMOKE_API_KEY:-}" ]] ||
     die "CODEWIRE_DEV_SMOKE_API_KEY is required; run through scripts/runtime/dev/with-dev-smoke-auth.sh"
   SMOKE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY"

@@ -49,6 +49,14 @@ refuses 'unknown argument' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --keep
 # Dev mode never takes the Prod key or kube-access's Prod context.
 refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' env CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD"
 refuses 'only against the codewire-dev context' env KUBE_CONTEXT=cw-prod-hz-eu-1 CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
+# Dev's own cluster context counts only as kube-access exports it: past the
+# context check, the next refusal is the missing key. Prod's marked context
+# stays refused in Dev mode.
+refuses 'only against the codewire-dev context' env KUBE_CONTEXT=cw-dev-hz-eu-1 CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
+refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' env KUBE_CONTEXT=cw-dev-hz-eu-1 KUBECONFIG=/nonexistent/kubeconfig \
+  INFRA_TRANSIENT_KUBE_AUTH=1 "$LOAD"
+refuses 'only against the codewire-dev context' env KUBE_CONTEXT=cw-prod-hz-eu-1 KUBECONFIG=/nonexistent/kubeconfig \
+  INFRA_TRANSIENT_KUBE_AUTH=1 CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
 # Production mode needs the exact confirmation, server, kube-access context
 # and Prod smoke key, each checked before any network or build step.
 prod_access=(KUBE_CONTEXT=cw-prod-hz-eu-1 KUBECONFIG=/nonexistent/kubeconfig INFRA_TRANSIENT_KUBE_AUTH=1)
