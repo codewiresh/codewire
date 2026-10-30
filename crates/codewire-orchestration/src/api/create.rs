@@ -860,6 +860,10 @@ async fn lock_organization_row(
 const DEFAULT_CPU_MILLICORES: u32 = 2_000;
 const DEFAULT_MEMORY_MIB: u64 = 8_192;
 const DEFAULT_DISK_GIB: u64 = 80;
+/// A confidential guest unpacks its images into RAM-backed storage, and the
+/// workspace image does not fit at [`DEFAULT_MEMORY_MIB`] (owner, 2026-10-30;
+/// #2497).
+const CONFIDENTIAL_DEFAULT_MEMORY_MIB: u64 = 16_384;
 
 /// The disk a create gets when nothing names one: [`DEFAULT_DISK_GIB`], or
 /// for a confidential create its own limit, so the default never exceeds
@@ -872,6 +876,15 @@ fn default_disk_gib(isolation_tier: &str) -> u64 {
     }
 }
 
+/// The memory a create gets when nothing names any.
+fn default_memory_mib(isolation_tier: &str) -> u64 {
+    if isolation_tier == "confidential" {
+        CONFIDENTIAL_DEFAULT_MEMORY_MIB
+    } else {
+        DEFAULT_MEMORY_MIB
+    }
+}
+
 fn apply_environment_resource_defaults(
     spec: &mut codewire_project::ProjectSpec,
     isolation_tier: &str,
@@ -879,7 +892,9 @@ fn apply_environment_resource_defaults(
     spec.resources
         .cpu_millicores
         .get_or_insert(DEFAULT_CPU_MILLICORES);
-    spec.resources.memory_mib.get_or_insert(DEFAULT_MEMORY_MIB);
+    spec.resources
+        .memory_mib
+        .get_or_insert(default_memory_mib(isolation_tier));
     spec.resources
         .disk_gib
         .get_or_insert(default_disk_gib(isolation_tier));
@@ -2455,6 +2470,12 @@ credentials: {profile: user/work}
         apply_environment_resource_defaults(&mut confidential, "confidential");
         assert_eq!(confidential.resources.disk_gib, Some(50));
         validate_confidential_storage_size("confidential", 50).unwrap();
+        // Its images unpack into guest RAM, so it defaults to 16 GiB, and a
+        // caller's own memory is kept.
+        assert_eq!(confidential.resources.memory_mib, Some(16_384));
+        let mut confidential_memory = image_project_spec("workspace", None, Some(32_768), None);
+        apply_environment_resource_defaults(&mut confidential_memory, "confidential");
+        assert_eq!(confidential_memory.resources.memory_mib, Some(32_768));
         let mut confidential_explicit = image_project_spec("workspace", None, None, Some(80));
         apply_environment_resource_defaults(&mut confidential_explicit, "confidential");
         assert_eq!(confidential_explicit.resources.disk_gib, Some(80));

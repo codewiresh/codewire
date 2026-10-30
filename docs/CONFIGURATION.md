@@ -126,7 +126,9 @@ never strands an environment.
 
 A hosted create that names no disk gets 80 GiB, with 2 vCPU and 8 GiB of
 memory (owner, 2026-10-27; #3554); a confidential one gets 50 GiB, its own
-limit. Create and resize accept a disk up to 200 GiB and refuse more with
+limit, and 16 GiB of memory, because its guest unpacks images into RAM-backed
+storage and the workspace image does not fit in 8 GiB (owner, 2026-10-30;
+#2497). Create and resize accept a disk up to 200 GiB and refuse more with
 `disk_limit_exceeded`; a disk never shrinks. These limits are in the code
 (`crates/codewire-orchestration/src/api/create.rs`), not configuration. The
 class's thin capacity must hold every pool member and live workspace at its

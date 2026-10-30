@@ -34,7 +34,7 @@ KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
 SNP_NODE_LABEL="${SNP_NODE_LABEL:-node.codewire.sh/confidential-snp=true}"
 PROOF_IMAGE="${PROOF_IMAGE:-workspace}"
 PROOF_CPU="${PROOF_CPU:-2}"
-PROOF_MEMORY="${PROOF_MEMORY:-8GB}"
+PROOF_MEMORY="${PROOF_MEMORY:-16GB}"
 PROOF_DISK="${PROOF_DISK:-20GB}"
 PROOF_TTL="${PROOF_TTL:-3h}"
 # A confidential guest attests and opens its encrypted storage before its
