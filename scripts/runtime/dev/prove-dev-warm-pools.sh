@@ -16,10 +16,11 @@ SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
 SERVER_NAMESPACE="${SERVER_NAMESPACE:-dev}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
 PROOF_IMAGE="${PROOF_IMAGE:-workspace}"
-# One of the Dev pool shapes (1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2).
+# One of the Dev pool shapes. Unset, the disk is the one Dev's live pools of
+# this CPU and memory are configured with (resolve_proof_disk).
 PROOF_CPU="${PROOF_CPU:-1000}"
 PROOF_MEMORY="${PROOF_MEMORY:-4096}"
-PROOF_DISK="${PROOF_DISK:-10}"
+PROOF_DISK="${PROOF_DISK:-}"
 # A shape no pool holds: it must go cold through its own shadow pool.
 OFF_SHAPE_CPU="${OFF_SHAPE_CPU:-1500}"
 PROOF_TTL="${PROOF_TTL:-1h}"
@@ -132,7 +133,8 @@ Environment:
   CODEWIRE_DEV_SMOKE_API_KEY   Required (set by with-dev-smoke-auth.sh)
   KUBECONFIG                   Defaults to ~/src/infra/kubeconfig-oidc.yaml
   KUBE_CONTEXT                 Defaults to codewire-dev
-  PROOF_CPU/PROOF_MEMORY/PROOF_DISK  Pool shape (default 1000/4096/10)
+  PROOF_CPU/PROOF_MEMORY/PROOF_DISK  Pool shape (default 1000/4096, and the
+                               disk of Dev's live pools of that shape)
   OFF_SHAPE_CPU                CPU of the off-shape create (default 1500)
   SERVER_NAMESPACE             Orchestration's namespace, the pool ingress peer (default dev)
 USAGE
@@ -226,6 +228,7 @@ if ! [[ "$PROOF_MIN_HITS" =~ ^[0-9]+$ ]] || (( PROOF_MIN_HITS > PROOF_HITS )); t
   die "--min-hits must be 0-${PROOF_HITS}"
 fi
 for dimension in PROOF_CPU PROOF_MEMORY PROOF_DISK OFF_SHAPE_CPU; do
+  [[ "$dimension" == PROOF_DISK && -z "$PROOF_DISK" ]] && continue
   [[ "${!dimension}" =~ ^[1-9][0-9]*$ ]] || die "$dimension must be a positive integer"
 done
 [[ "$OFF_SHAPE_CPU" != "$PROOF_CPU" ]] || die "OFF_SHAPE_CPU must differ from PROOF_CPU"
@@ -517,6 +520,23 @@ wait_pool_members() { # MIN -> waits until the pool holds MIN ready members
     sleep 2
   done
   return 1
+}
+
+# A pool's name is its configured shape and revision,
+# cw-pool-<cpu>m-<memory>mi-<disk>gi-<hash> (WarmPoolKey::name), so the live
+# pools of this CPU and memory say which disk Dev configures for it.
+resolve_proof_disk() {
+  [[ -z "$PROOF_DISK" ]] || return 0
+  local prefix="${POOL_PREFIX}${PROOF_CPU}m-${PROOF_MEMORY}mi-" disks
+  disks="$(kubectl_ro get sandboxwarmpool -n "$SANDBOX_NAMESPACE" -o json |
+    jq -r --arg prefix "$prefix" '[.items[] | select((.metadata.name | startswith($prefix))
+      and ((.spec.replicas // 0) > 0)) | .metadata.name | ltrimstr($prefix)
+      | capture("^(?<disk>[1-9][0-9]*)gi-").disk] | unique | .[]')"
+  case "$(grep -c . <<<"$disks" || true)" in
+    1) PROOF_DISK="$disks"; log "proof shape: ${PROOF_CPU}m/${PROOF_MEMORY}Mi/${PROOF_DISK}Gi" ;;
+    0) die "no warm pool ${prefix}* with members in ${SANDBOX_NAMESPACE}; is SANDBOX_WARM_POOL_SHAPES configured for this shape?" ;;
+    *) die "pools ${prefix}* hold several disks ($(echo $disks)); set PROOF_DISK" ;;
+  esac
 }
 
 discover_pool() {
@@ -998,6 +1018,7 @@ target_check() {
   fi
 }
 
+resolve_proof_disk
 for journey in "${JOURNEYS[@]}"; do
   log "journey: $journey"
   case "$journey" in
