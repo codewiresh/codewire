@@ -922,6 +922,15 @@ async fn raw_response(
     )
 }
 
+/// The fake server's end. A client that gave up before it connected leaves
+/// the server in `accept`, so this fails the test instead of hanging the run.
+async fn server_finished(task: tokio::task::JoinHandle<()>) {
+    tokio::time::timeout(Duration::from_secs(60), task)
+        .await
+        .expect("the fake server never finished: the client gave up before connecting")
+        .unwrap();
+}
+
 #[tokio::test]
 async fn actual_wire_refuses_redirect_status_encoding_length_and_stream_overflow() {
     let key = "cw/v1/releases/v1.2.3/release.json";
@@ -937,18 +946,19 @@ async fn actual_wire_refuses_redirect_status_encoding_length_and_stream_overflow
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n21\r\n012345678901234567890123456789012\r\n0\r\n\r\n".to_vec(),
     ];
     for response in cases {
-        let (http, task) = raw_response(response, Duration::from_secs(2), Duration::ZERO).await;
+        // Long enough that only the response is refused, on a loaded machine too.
+        let (http, task) = raw_response(response, Duration::from_secs(30), Duration::ZERO).await;
         assert!(http.read(key, 32, None).await.is_err());
-        task.await.unwrap();
+        server_finished(task).await;
     }
     let (http, task) = raw_response(
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ndata\r\n0\r\n\r\n".to_vec(),
-        Duration::from_secs(2),
+        Duration::from_secs(30),
         Duration::ZERO,
     )
     .await;
     assert_eq!(http.read(key, 4, None).await.unwrap(), b"data");
-    task.await.unwrap();
+    server_finished(task).await;
     let (http, task) = raw_response(
         b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata".to_vec(),
         Duration::from_millis(40),
@@ -984,7 +994,7 @@ async fn executable_unknown_length_is_bounded_by_signed_size_and_exact_eof() {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
         let http =
-            http::FixedHttp::synthetic(&format!("http://{address}/"), Duration::from_secs(2))
+            http::FixedHttp::synthetic(&format!("http://{address}/"), Duration::from_secs(30))
                 .unwrap();
         let reference = ObjectRef {
             key: format!("cw/v1/blobs/sha256/{}", "a".repeat(64)),
@@ -997,7 +1007,7 @@ async fn executable_unknown_length_is_bounded_by_signed_size_and_exact_eof() {
             http.executable(&reference, &mut file).await.is_ok(),
             accepted
         );
-        task.await.unwrap();
+        server_finished(task).await;
         scratch.cleanup().unwrap();
     }
 }
