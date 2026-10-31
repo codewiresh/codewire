@@ -46,8 +46,13 @@ KUBECTL_TIMEOUT_SECONDS="${KUBECTL_TIMEOUT_SECONDS:-60}"
 # A step that runs longer than this stops the run, which then cleans up.
 MAX_STEP_MINUTES=45
 SSH_SAMPLE=10
+WORKLOAD=synthetic
+HOLD_SECONDS_SET=0
 WORKLOAD_CPU=0.5
-WORKLOAD_MEMORY=0.5
+WORKLOAD_MEMORY=
+# Pulled and run by the real workload. Docker Hub limits anonymous pulls per
+# address, and every sandbox pulls this.
+DOCKER_IMAGE=public.ecr.aws/docker/library/node:22
 # Stop thresholds, checked on every node before every step; empty ones take
 # the Dev or the more conservative Production default.
 LATENCY_FACTOR=3
@@ -126,9 +131,19 @@ Options:
   --steps LIST           cumulative sandbox counts, or auto (the default):
                          25, 50, 75 and 100% of the predicted limit, then two past it
   --max-sandboxes N      hard cap on the total created (default 200)
-  --hold-seconds N       time under load before each measurement (default 180)
-  --workload-cpu F       fraction of each sandbox's vCPUs kept busy (default 0.5)
-  --workload-memory F    fraction of each sandbox's memory allocated and touched (default 0.5)
+  --hold-seconds N       time under load before each measurement (default 180,
+                         or 600 for the real workload)
+  --workload W           synthetic (the default), or real: what fills every
+                         container at once, as a real sandbox can (#3718). The
+                         workspace holds memory, writes to disk and compiles a
+                         Go app; Docker pulls --docker-image and runs it,
+                         writing to disk past its memory limit. A part that
+                         never worked stops the run: its load wasn't there
+  --docker-image IMAGE   what the real workload pulls and runs
+                         (default public.ecr.aws/docker/library/node:22)
+  --workload-cpu F       synthetic: fraction of each sandbox's vCPUs kept busy (default 0.5)
+  --workload-memory F    fraction of each sandbox's memory allocated and touched
+                         (default 0.5, or 0.95 for real)
   --ssh-sample N         new sandboxes per step timed to first SSH (default 10)
   --max-step-minutes N   stop and clean up when one step runs longer (default 45)
   --latency-factor F     stop when ready p95 > F x the first step's p50 (default 3)
@@ -227,7 +242,9 @@ while (($# > 0)); do
     --shape) [[ $# -ge 2 ]] || die "--shape requires a value"; SHAPE="$2"; shift 2 ;;
     --steps) [[ $# -ge 2 ]] || die "--steps requires a value"; STEPS="$2"; shift 2 ;;
     --max-sandboxes) [[ $# -ge 2 ]] || die "--max-sandboxes requires a value"; MAX_SANDBOXES="$2"; shift 2 ;;
-    --hold-seconds) [[ $# -ge 2 ]] || die "--hold-seconds requires a value"; HOLD_SECONDS="$2"; shift 2 ;;
+    --hold-seconds) HOLD_SECONDS_SET=1; [[ $# -ge 2 ]] || die "--hold-seconds requires a value"; HOLD_SECONDS="$2"; shift 2 ;;
+    --workload) [[ $# -ge 2 ]] || die "--workload requires a value"; WORKLOAD="$2"; shift 2 ;;
+    --docker-image) [[ $# -ge 2 ]] || die "--docker-image requires a value"; DOCKER_IMAGE="$2"; shift 2 ;;
     --workload-cpu) [[ $# -ge 2 ]] || die "--workload-cpu requires a value"; WORKLOAD_CPU="$2"; shift 2 ;;
     --workload-memory) [[ $# -ge 2 ]] || die "--workload-memory requires a value"; WORKLOAD_MEMORY="$2"; shift 2 ;;
     --ssh-sample) [[ $# -ge 2 ]] || die "--ssh-sample requires a value"; SSH_SAMPLE="$2"; shift 2 ;;
@@ -313,11 +330,23 @@ done
 for value in MAX_NODE_MEMORY_PCT MAX_NODE_CPU_PCT MAX_PSI_MEMORY_PCT MAX_PSI_CPU_PCT MAX_THIN_POOL_PCT; do
   (( ${!value} >= 1 && ${!value} <= 100 )) || die "$value must be 1-100"
 done
-for value in WORKLOAD_CPU WORKLOAD_MEMORY; do
-  if ! is_number "${!value}" || ! awk -v v="${!value}" 'BEGIN {exit !(v >= 0 && v <= 0.9)}'; then
-    die "$value must be between 0 and 0.9"
-  fi
-done
+case "$WORKLOAD" in
+  synthetic) : "${WORKLOAD_MEMORY:=0.5}"; MAX_WORKLOAD_MEMORY=0.9 ;;
+  real)
+    : "${WORKLOAD_MEMORY:=0.95}"
+    MAX_WORKLOAD_MEMORY=0.95
+    # A cold pull and six 1 GiB writes, on a busy node, must fit in a hold.
+    if [[ "$HOLD_SECONDS_SET" == 0 ]]; then HOLD_SECONDS=600; fi
+    ;;
+  *) die "--workload must be synthetic or real" ;;
+esac
+[[ "$DOCKER_IMAGE" =~ ^[a-zA-Z0-9][a-zA-Z0-9./:@_-]*$ ]] || die "--docker-image is not an image reference"
+if ! is_number "$WORKLOAD_CPU" || ! awk -v v="$WORKLOAD_CPU" 'BEGIN {exit !(v >= 0 && v <= 0.9)}'; then
+  die "WORKLOAD_CPU must be between 0 and 0.9"
+fi
+if ! is_number "$WORKLOAD_MEMORY" || ! awk -v v="$WORKLOAD_MEMORY" -v m="$MAX_WORKLOAD_MEMORY" 'BEGIN {exit !(v >= 0 && v <= m)}'; then
+  die "WORKLOAD_MEMORY must be between 0 and $MAX_WORKLOAD_MEMORY"
+fi
 if ! is_number "$LATENCY_FACTOR" || ! awk -v v="$LATENCY_FACTOR" 'BEGIN {exit !(v >= 1)}'; then
   die "--latency-factor must be at least 1"
 fi
@@ -801,20 +830,135 @@ for p in procs:
     p.join()
 '
 
+# What a real sandbox can do, all at once: every container near its limit while
+# writing to disk is what gets a VM killed (#3718). Each part keeps going past a
+# failure and logs it to /workspace/cap-load/log. The disk it uses is bounded:
+# one workspace file and six Docker files, rewritten.
+read -r -d '' REAL_WORKLOAD_SH <<'SCRIPT' || true
+seconds="$1" bytes="$2" image="$3"
+end=$((SECONDS + seconds))
+root=/workspace/cap-load
+mkdir -p "$root/app/src" "$root/docker"
+log() { printf '%s %s\n' "$(date -u +%T)" "$*" >>"$root/log"; }
+
+# What every process is doing, in memory rather than on the disk under test, so a
+# blocked disk can't stop its own evidence. Bounded: one sample a minute, the
+# last 40 kept.
+(
+  samples=/tmp/cap-load-samples
+  while ((SECONDS < end)); do
+    {
+      echo "=== $(date -u +%T)"
+      ps -eo stat,rss,etimes,wchan:18,comm --sort=-rss | head -14
+      grep -E '^(MemFree|MemAvailable|Cached|Dirty|Writeback):' /proc/meminfo
+      for pressure in cpu memory io; do
+        printf '%s %s\n' "$pressure" "$(head -1 /proc/pressure/$pressure 2>/dev/null)"
+      done
+      cat /sys/fs/cgroup/memory.events 2>/dev/null | tr '\n' ' '
+      echo
+      # A stuck shared volume blocks every writer while other paths still answer.
+      started=$SECONDS
+      timeout 5 sh -c "echo x >/workspace/cap-load/probe"
+      printf 'workspace write: status %s in %s s\n' "$?" "$((SECONDS - started))"
+      started=$SECONDS
+      timeout 5 stat /workspace/cap-load/log >/dev/null
+      printf 'workspace stat: status %s in %s s\n' "$?" "$((SECONDS - started))"
+      started=$SECONDS
+      timeout 5 sh -c "echo x >/tmp/cap-load-probe"
+      printf 'tmp write: status %s in %s s\n' "$?" "$((SECONDS - started))"
+      ps -eo stat,wchan:24,comm | grep -E '^D' | head -8
+      dmesg 2>/dev/null | grep -iE 'oom|killed process|hung task' | tail -3
+    } >>"$samples.new"
+    tail -n 1000 "$samples.new" >"$samples"
+    cp "$samples" "$samples.new"
+    sleep 60
+  done
+) &
+
+(
+  python3 -c '
+import sys, time
+block = bytearray(int(sys.argv[1]))
+block[::4096] = b"\x01" * len(range(0, len(block), 4096))
+time.sleep(int(sys.argv[2]))
+' "$bytes" "$seconds"
+  log "memory hold ended with status $?"
+) &
+
+(
+  while ((SECONDS < end)); do
+    dd if=/dev/urandom of="$root/workspace-file" bs=1M count=1024 status=none || log "workspace write failed"
+  done
+) &
+
+(
+  cat >"$root/app/go.mod" <<'GOMOD'
+module capload
+
+go 1.21
+GOMOD
+  cat >"$root/app/main.go" <<'GO'
+package main
+
+import (
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"net/http"
+)
+
+func main() {
+	out, _ := json.Marshal(map[string]any{"status": http.StatusOK, "tls": tls.VersionTLS13})
+	fmt.Println(string(out))
+}
+GO
+  cd "$root/app" || exit 1
+  export GOCACHE="$root/gocache"
+  while ((SECONDS < end)); do
+    rm -rf "$GOCACHE"
+    if go build -a -o "$root/app/app" . >>"$root/build.log" 2>&1 && "$root/app/app" >/dev/null; then
+      log "app built"
+    else
+      log "app build failed"
+      sleep 30
+    fi
+  done
+) &
+
+(
+  for _ in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 5; done
+  while ((SECONDS < end)); do
+    docker pull -q "$image" >>"$root/docker.log" 2>&1 && log "image pulled" || { log "image pull failed"; sleep 30; continue; }
+    docker run --rm -v "$root/docker:/w" "$image" sh -c \
+      'for i in 1 2 3 4 5 6; do dd if=/dev/urandom of=/w/f$i bs=1M count=1024 2>/dev/null; done' \
+      >>"$root/docker.log" 2>&1 && log "image ran" || log "image run failed"
+    docker rmi -f "$image" >/dev/null 2>&1
+  done
+) &
+
+wait
+SCRIPT
+
 # The workload runs as its own detached session (`cw run --detach`), bounded
 # by timeout; a short follow-up run checks that it is alive. A plain run that
 # backgrounds it does not return until its session ends.
 start_workload() { # ID SECONDS
-  local id="$1" seconds="$2" workers bytes encoded attempt
+  local id="$1" seconds="$2" workers bytes encoded attempt command
   workers=$(( (CPU_M + 999) / 1000 ))
   bytes="$(awk -v m="$MEMORY_MIB" -v f="$WORKLOAD_MEMORY" 'BEGIN {printf "%d", m * f * 1048576}')"
-  encoded="$(printf '%s' "$WORKLOAD_PY" | base64 -w0)"
+  if [[ "$WORKLOAD" == real ]]; then
+    encoded="$(printf '%s' "$REAL_WORKLOAD_SH" | base64 -w0)"
+    command="printf '%s' '$encoded' | base64 -d >/tmp/cap-load.sh && exec timeout $((seconds + 60)) bash /tmp/cap-load.sh $seconds $bytes $DOCKER_IMAGE"
+  else
+    encoded="$(printf '%s' "$WORKLOAD_PY" | base64 -w0)"
+    command="printf '%s' '$encoded' | base64 -d >/tmp/cap-load.py && exec timeout $((seconds + 60)) python3 /tmp/cap-load.py $seconds $workers $WORKLOAD_CPU $bytes"
+  fi
   timeout 120 "$CW_BIN" --cloud --server "$CODEWIRE_SERVER_URL" run --detach --in "$id" --name cap-load -- \
-    bash -c "printf '%s' '$encoded' | base64 -d >/tmp/cap-load.py && exec timeout $((seconds + 60)) python3 /tmp/cap-load.py $seconds $workers $WORKLOAD_CPU $bytes" \
+    bash -c "$command" \
     >/dev/null 2>&1 || return 1
   for attempt in 1 2 3 4 5; do
     if timeout 60 "$CW_BIN" --cloud --server "$CODEWIRE_SERVER_URL" run --no-tty --in "$id" -- \
-      pgrep -f cap-load.py </dev/null >/dev/null 2>&1; then
+      pgrep -f '/tmp/cap-load[.]' </dev/null >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -958,12 +1102,114 @@ refresh_objects() { # all|missing
   mv "$tmp" "$RUN_DIR/objects.jsonl"
 }
 
+# The Pods the workloads started in. A killed VM's replacement has the same name
+# and 0 restarts, and looks healthy once it runs (#3718), so only its UID tells.
+record_pod_uids() {
+  kubectl_ro get pods -n "$SANDBOX_NAMESPACE" -o json 2>/dev/null |
+    jq -c --slurpfile objects "$RUN_DIR/objects.jsonl" '
+      ([$objects[] | .pod | select(. != "")]) as $mine
+      | [.items[] | select(.metadata.name as $n | $mine | index($n) != null) | {key: .metadata.name, value: .metadata.uid}]
+      | from_entries' >"$RUN_DIR/pod-uids.json.new"
+  if [[ -s "$RUN_DIR/pod-uids.json" ]]; then
+    # A UID recorded earlier stays the one to compare with.
+    jq -sc '.[0] * .[1]' "$RUN_DIR/pod-uids.json.new" "$RUN_DIR/pod-uids.json" >"$RUN_DIR/pod-uids.json.merged" &&
+      mv "$RUN_DIR/pod-uids.json.merged" "$RUN_DIR/pod-uids.json"
+  else
+    mv "$RUN_DIR/pod-uids.json.new" "$RUN_DIR/pod-uids.json"
+  fi
+}
+
+# Whether what was started is still running: a killed VM refuses nothing, and
+# every other number here can look fine. Read fresh, with null for what can't be
+# read, so an outage of the reads never reads as nothing lost.
+sandbox_health() { # -> JSON
+  # In files: a namespace's Pods are too big for one command-line argument.
+  local listing="$RUN_DIR/health-listing.json" pods="$RUN_DIR/health-pods.json"
+  cw ls --output json >"$listing" 2>/dev/null || echo null >"$listing"
+  kubectl_ro get pods -n "$SANDBOX_NAMESPACE" -o json >"$pods" 2>/dev/null || echo null >"$pods"
+  [[ -s "$RUN_DIR/pod-uids.json" ]] || echo '{}' >"$RUN_DIR/pod-uids.json"
+  jq -cn --slurpfile listings "$listing" --slurpfile all_pods "$pods" \
+    --slurpfile objects "$RUN_DIR/objects.jsonl" --slurpfile recorded "$RUN_DIR/pod-uids.json" --args '
+    ($ARGS.positional) as $ready
+    | $listings[0] as $listing
+    | $all_pods[0] as $pods
+    | ([$objects[] | .pod | select(. != "")]) as $mine
+    | (if $pods == null then null else
+        [$pods.items[] | select(.metadata.name as $n | $mine | index($n) != null) | .status.containerStatuses[]?]
+       end) as $containers
+    | (if $pods == null then null else
+        [$pods.items[] | select($recorded[0][.metadata.name] as $uid | $uid != null and $uid != .metadata.uid) | .metadata.name]
+       end) as $replaced
+    | {sandboxes_lost:
+         (if $listing == null then null else
+            [(if ($listing | type) == "array" then $listing else ($listing.environments // []) end)[]
+             | select((.id as $id | $ready | index($id) != null) and .state != "running")
+             | {id, state}]
+          end),
+       pods_replaced: $replaced,
+       containers_restarted: (if $containers == null then null else [$containers[].restartCount] | add // 0 end),
+       containers_oom_killed: (if $containers == null then null else
+            [$containers[] | select(.lastState.terminated.reason == "OOMKilled" or .state.terminated.reason == "OOMKilled")] | length
+          end)}' "$@"
+}
+
+# Whether the real workload's parts did their work in one sandbox: a sandbox
+# that stays up proves nothing about a load that never ran. Null when it can't
+# be read, because the sandbox may be the thing that was lost.
+workload_proof() { # ID -> JSON
+  local log
+  if ! log="$(timeout 60 "$CW_BIN" --cloud --server "$CODEWIRE_SERVER_URL" run --no-tty --in "$1" -- \
+    cat /workspace/cap-load/log </dev/null 2>/dev/null)"; then
+    echo null
+    return
+  fi
+  # Kept, because cleanup removes the sandbox they came from.
+  printf '%s\n' "$log" >"$RUN_DIR/workload-$1.log"
+  local kept
+  for kept in /tmp/cap-load-samples /workspace/cap-load/build.log /workspace/cap-load/docker.log; do
+    timeout 60 "$CW_BIN" --cloud --server "$CODEWIRE_SERVER_URL" run --no-tty --in "$1" -- \
+      tail -n 1000 "$kept" </dev/null >"$RUN_DIR/workload-$1-$(basename "$kept")" 2>/dev/null || true
+  done
+  jq -Rsc 'split("\n") as $lines
+    | def count($text): [$lines[] | select(endswith($text))] | length;
+    {built: count(" app built"), build_failed: count(" app build failed"),
+     pulled: count(" image pulled"), pull_failed: count(" image pull failed"),
+     ran: count(" image ran"), run_failed: count(" image run failed"),
+     hold_ended: [$lines[] | select(contains(" memory hold ended with status "))] | length}' <<<"$log"
+}
+
+# Each lost sandbox's own reason. `cw ls` rows don't carry it, and cleanup removes
+# the sandbox, so it's read and logged here.
+log_lost_reasons() { # METRICS_JSON
+  local id reason
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    reason="$(cw info "$id" --output json 2>/dev/null | jq -r '.error_reason // "no reason recorded"' || echo "reason not readable")"
+    log "lost sandbox $id: $reason"
+  done < <(jq -r '.health.sandboxes_lost[]?.id' <<<"$1")
+}
+
 # ------------------------------------------------------------ steps
 
 stop_check() { # METRICS_JSON -> sets STOP_REASON
   local m="$1" v
   v="$(jq -r '.node_condition' <<<"$m")"
   [[ "$v" == ok ]] || { STOP_REASON="node condition degraded: $v"; return; }
+  v="$(jq -r 'if .health.sandboxes_lost == null then "" else (.health.sandboxes_lost | length | tostring) end' <<<"$m")"
+  if [[ -n "$v" && "$v" != 0 ]]; then
+    STOP_REASON="$v sandbox(es) lost under load: $(jq -c '.health.sandboxes_lost[0:3]' <<<"$m")"
+    return
+  fi
+  v="$(jq -r '.health.pods_replaced // [] | length' <<<"$m")"
+  [[ "$v" == 0 ]] || { STOP_REASON="$v sandbox Pod(s) replaced under load, so their VMs died: $(jq -c '.health.pods_replaced[0:3]' <<<"$m")"; return; }
+  v="$(jq -r '.health.containers_oom_killed // 0' <<<"$m")"
+  [[ "$v" == 0 ]] || { STOP_REASON="$v container(s) OOM-killed under load"; return; }
+  v="$(jq -r 'if .workload_proof == null then "" else .workload_proof
+      | [if .built == 0 then "no app built" else empty end,
+         if .ran == 0 then "no image ran" else empty end,
+         if .hold_ended > 0 then "the memory hold ended early" else empty end]
+      | join(", ") end' <<<"$m")"
+  [[ -z "$v" ]] || { STOP_REASON="the real workload did not run as meant: $v: $(jq -c .workload_proof <<<"$m")"; return; }
   v="$(jq -r '.scheduler_refusal // ""' <<<"$m")"
   [[ -z "$v" ]] || { STOP_REASON="scheduler refusal: $v"; return; }
   v="$(jq -r '.failed_creates' <<<"$m")"
@@ -1094,8 +1340,13 @@ write_summary() {
   # shellcheck disable=SC2016 # Backticks are Markdown code spans.
   {
     printf '# Sandbox capacity: %s, shape %s (%s m CPU, %s MiB, %s GiB)\n\n' "${NODES[*]}" "$SHAPE" "$CPU_M" "$MEMORY_MIB" "$DISK_GIB"
-    printf 'Run `%s`. Workload: %s of each vCPU busy, %s of memory touched. Hold %s s per step.\n\n' \
-      "$RUN_ID" "$WORKLOAD_CPU" "$WORKLOAD_MEMORY" "$HOLD_SECONDS"
+    if [[ "$WORKLOAD" == real ]]; then
+      printf 'Run `%s`. Real workload: %s of memory held, a Go build, disk writes, and %s pulled and run by Docker. Hold %s s per step.\n\n' \
+        "$RUN_ID" "$WORKLOAD_MEMORY" "$DOCKER_IMAGE" "$HOLD_SECONDS"
+    else
+      printf 'Run `%s`. Workload: %s of each vCPU busy, %s of memory touched. Hold %s s per step.\n\n' \
+        "$RUN_ID" "$WORKLOAD_CPU" "$WORKLOAD_MEMORY" "$HOLD_SECONDS"
+    fi
     jq -r '
       def gib: . / 1024 * 10 | round / 10 | tostring;
       def cores: . / 1000 * 100 | round / 100 | tostring;
@@ -1129,6 +1380,10 @@ write_summary() {
     if [[ -s "$RUN_DIR/create-retries" ]]; then
       printf '\nCreates retried once after a client-side deadline: %s\n' "$(grep -c . "$RUN_DIR/create-retries")"
     fi
+    jq -rs 'map(select(.health != null)) | if length == 0 then empty else
+      "\nAfter each hold, sandboxes lost / Pods replaced / containers restarted / OOM-killed: " +
+      (map("\(.created): \(.health.sandboxes_lost | if . == null then "?" else length end) / \(.health.pods_replaced | if . == null then "?" else length end) / \(.health.containers_restarted // "?") / \(.health.containers_oom_killed // "?")") | join(", "))
+      end' "$RUN_DIR/steps.jsonl" 2>/dev/null || true
     printf '\nStopped: %s\n' "${STOP_REASON:-every step completed}"
   } >"$RUN_DIR/summary.md"
 }
@@ -1173,6 +1428,7 @@ log "steps: $STEPS"
 SSH_CONFIG="$(managed_ssh_config)" || die "no managed SSH configuration"
 WORKLOAD_SECONDS=$(( (${#STEP_COUNTS[@]} + 1) * (HOLD_SECONDS + READY_TIMEOUT_SECONDS) ))
 : >"$RUN_DIR/steps.jsonl"
+READY_IDS=()
 step=0
 for target in "${STEP_COUNTS[@]}"; do
   step=$((step + 1))
@@ -1226,10 +1482,12 @@ for target in "${STEP_COUNTS[@]}"; do
     unset "WAITER_PIDS[$id]"
     if [[ "$(cut -d' ' -f1 "$RUN_DIR/ready-$id" 2>/dev/null)" == ready ]]; then
       classify "$id" >"$RUN_DIR/class-$id"
+      READY_IDS+=("$id")
       start_workload "$id" "$WORKLOAD_SECONDS" || log "step $step: workload did not start in $id"
     fi
   done
   refresh_objects all
+  record_pod_uids
   # Every sandbox must run on a measured node.
   elsewhere="$(run_placement | jq -r --args 'keys[] | select(. as $n | $ARGS.positional | index($n) == null)' "${NODES[@]}")"
   [[ -z "$elsewhere" ]] || { STOP_REASON="sandboxes scheduled off the runtime nodes, on: $elsewhere"; }
@@ -1238,8 +1496,13 @@ for target in "${STEP_COUNTS[@]}"; do
   milestone_snapshot >"$RUN_DIR/milestones-$step.after"
   metrics="$(measure "$step" "$target" "$RUN_DIR/new-$step" "$RUN_DIR/milestones-$step.before" \
     "$RUN_DIR/milestones-$step.after" "$BASE")"
+  metrics="$(jq -c --argjson health "$(sandbox_health "${READY_IDS[@]}")" '. + {health: $health}' <<<"$metrics")"
+  log_lost_reasons "$metrics"
+  if [[ "$WORKLOAD" == real && ${#READY_IDS[@]} -gt 0 ]]; then
+    metrics="$(jq -c --argjson proof "$(workload_proof "${READY_IDS[0]}")" '. + {workload_proof: $proof}' <<<"$metrics")"
+  fi
   printf '%s\n' "$metrics" >>"$RUN_DIR/steps.jsonl"
-  log "step $step: $(jq -c '{created, ready_sandboxes, failed_creates, warm_hits, ready_p50_ms, ready_p95_ms, first_ssh_p50_ms, node_memory_pct, node_cpu_pct, psi_memory_some_pct, thin_used_pct, pods}' <<<"$metrics")"
+  log "step $step: $(jq -c '{created, ready_sandboxes, health, workload_proof, failed_creates, warm_hits, ready_p50_ms, ready_p95_ms, first_ssh_p50_ms, node_memory_pct, node_cpu_pct, psi_memory_some_pct, thin_used_pct, pods}' <<<"$metrics")"
   if [[ -z "$BASELINE_READY_MS" ]]; then
     BASELINE_READY_MS="$(jq -r '.ready_p50_ms // empty' <<<"$metrics")"
   fi

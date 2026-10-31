@@ -41,6 +41,9 @@ refuses '--steps exceeds --max-sandboxes' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOA
 refuses '--max-sandboxes must be 1-500' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --max-sandboxes 501
 refuses 'WORKLOAD_CPU must be between 0 and 0.9' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --workload-cpu 1
 refuses 'WORKLOAD_MEMORY must be between 0 and 0.9' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --workload-memory 0.95
+refuses 'WORKLOAD_MEMORY must be between 0 and 0.95' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --workload real --workload-memory 0.99
+refuses '--workload must be synthetic or real' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --workload other
+refuses '--docker-image is not an image reference' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --workload real --docker-image 'a;b'
 refuses '--latency-factor must be at least 1' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --latency-factor 0.5
 refuses 'MAX_NODE_MEMORY_PCT must be 1-100' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --max-node-memory-pct 0
 refuses 'shell tracing is enabled' env CODEWIRE_DEV_SMOKE_API_KEY=x bash -x "$LOAD"
@@ -99,6 +102,7 @@ grep -qF 'nuke' "$LOAD" && fail 'the load must never nuke environments'
 # Every environment is bounded twice: a TTL and a bounded workload.
 grep -qF -- '--ttl "$LOAD_TTL"' "$LOAD" || fail 'creates carry no TTL'
 grep -qF 'exec timeout $((seconds + 60)) python3' "$LOAD" || fail 'the workload is not bounded by timeout'
+grep -qF 'exec timeout $((seconds + 60)) bash /tmp/cap-load.sh' "$LOAD" || fail 'the real workload is not bounded by timeout'
 grep -qF 'run --detach --in "$id" --name cap-load' "$LOAD" || fail 'the workload does not run as a detached session'
 
 # Run records are kept per environment, and start-up cleanup skips a run of
@@ -146,6 +150,86 @@ result="$(bash -c 'source "$1"; aggregate_nodes "$2" <"$3"' _ "$work/functions.s
   '[{"volume_definitions":[{"size_kib":209715200}]}]' "$work/nodes.jsonl" | jq -c 'del(.nodes)')"
 expected='{"node_condition":"b: MemoryPressure=True","allocatable_cpu_m":2000,"allocatable_memory_mib":200,"allocatable_pods":20,"requested_cpu_m":600,"requested_memory_mib":100,"pods":8,"node_cpu_pct":60,"node_memory_pct":40,"node_memory_total_gib":20,"node_memory_used_gib":5,"psi_cpu_some_pct":null,"psi_memory_some_pct":3,"psi_memory_full_pct":null,"psi_io_some_pct":null,"thin_pool":"t","thin_total_gib":200,"thin_used_gib":60,"thin_used_pct":50,"provisioned_gib":200,"overcommit":1,"resource_definitions":1}'
 [[ "$result" == "$expected" ]] || fail "unexpected cluster view: $result"
+
+# The real workload is valid shell, fills every container, and runs under stubs:
+# memory held, the workspace writing, a build, and Docker writing past its limit.
+bash -c 'source "$1"; printf "%s" "$REAL_WORKLOAD_SH"' _ "$work/functions.sh" >"$work/real-workload.sh"
+bash -n "$work/real-workload.sh" || fail 'the real workload is not valid shell'
+for needed in 'bytearray' 'of="$root/workspace-file"' 'go build -a' 'docker pull' 'docker run' 'for i in 1 2 3 4 5 6'; do
+  grep -qF -- "$needed" "$work/real-workload.sh" || fail "the real workload lacks: $needed"
+done
+
+# What was started and has gone is the result, not a detail. A read that fails
+# is unknown, never nothing lost.
+health_case() { # LISTING_OUTCOME PODS_OUTCOME -> JSON
+  bash -c '
+    source "$1"; RUN_DIR="$2"; SANDBOX_NAMESPACE=ns
+    ok_listing() { printf "%s" "{\"environments\":[{\"id\":\"a\",\"state\":\"running\"},{\"id\":\"b\",\"state\":\"error\"},{\"id\":\"other\",\"state\":\"error\"}]}"; }
+    fail_listing() { return 1; }
+    ok_pods() { printf "%s" "{\"items\":[{\"metadata\":{\"name\":\"pa\",\"uid\":\"new\"},\"status\":{\"containerStatuses\":[{\"restartCount\":2,\"lastState\":{\"terminated\":{\"reason\":\"OOMKilled\"}}},{\"restartCount\":0}]}},{\"metadata\":{\"name\":\"notmine\"},\"status\":{\"containerStatuses\":[{\"restartCount\":9}]}}]}"; }
+    fail_pods() { return 1; }
+    cw() { "$CW_FN"; }
+    kubectl_ro() { "$KUBE_FN"; }
+    CW_FN="$4_listing" KUBE_FN="$5_pods"
+    sandbox_health a b
+  ' _ "$work/functions.sh" "$work/health" x "$1" "$2"
+}
+mkdir -p "$work/health"
+printf '%s\n' '{"id":"a","pod":"pa","volumes":[]}' '{"id":"b","pod":"","volumes":[]}' >"$work/health/objects.jsonl"
+# The replacement Pod has the same name, 0 restarts and a new UID (#3718).
+echo '{"pa":"old"}' >"$work/health/pod-uids.json"
+result="$(health_case ok ok)"
+expected='{"sandboxes_lost":[{"id":"b","state":"error"}],"pods_replaced":["pa"],"containers_restarted":2,"containers_oom_killed":1}'
+[[ "$result" == "$expected" ]] || fail "unexpected health: $result"
+# A real namespace's Pods are bigger than one command-line argument may be.
+{
+  printf '{"items":[{"metadata":{"name":"'
+  head -c 300000 /dev/zero | tr '\0' x
+  printf '"},"status":{}}]}'
+} >"$work/big-pods.json"
+result="$(bash -c '
+  source "$1"; RUN_DIR="$2"; SANDBOX_NAMESPACE=ns
+  cw() { printf "%s" "{\"environments\":[]}"; }
+  BIG_PODS="$3"
+  kubectl_ro() { cat "$BIG_PODS"; }
+  sandbox_health a
+' _ "$work/functions.sh" "$work/health" "$work/big-pods.json" 2>&1)"
+[[ "$result" == '{"sandboxes_lost":[],"pods_replaced":[],"containers_restarted":0,"containers_oom_killed":0}' ]] || fail "a Pod list over the argument limit: ${result:0:200}"
+result="$(health_case fail fail)"
+expected='{"sandboxes_lost":null,"pods_replaced":null,"containers_restarted":null,"containers_oom_killed":null}'
+[[ "$result" == "$expected" ]] || fail "a failed read must be unknown: $result"
+
+# A lost sandbox's reason comes from its own record, which `cw ls` rows lack.
+result="$(bash -c '
+  source "$1"
+  cw() { printf "%s" "{\"error_reason\":\"pod failed\"}"; }
+  log() { printf "%s\n" "$*"; }
+  log_lost_reasons "{\"health\":{\"sandboxes_lost\":[{\"id\":\"b\",\"state\":\"error\"}]}}"
+' _ "$work/functions.sh")"
+[[ "$result" == 'lost sandbox b: pod failed' ]] || fail "lost reason: $result"
+
+# A lost sandbox or an OOM kill stops the ramp; an unknown read doesn't invent one.
+stop_case() { # METRICS -> STOP_REASON
+  bash -c 'source "$1"; STOP_REASON=""; stop_check "$2"; printf "%s" "$STOP_REASON"' _ "$work/functions.sh" "$1"
+}
+result="$(stop_case '{"node_condition":"ok","health":{"sandboxes_lost":[{"id":"b","state":"error"}]}}')"
+[[ "$result" == '1 sandbox(es) lost under load: [{"id":"b","state":"error"}]' ]] || fail "lost sandbox: $result"
+result="$(stop_case '{"node_condition":"ok","health":{"sandboxes_lost":[],"pods_replaced":["pa"]}}')"
+[[ "$result" == '1 sandbox Pod(s) replaced under load, so their VMs died: ["pa"]' ]] || fail "replaced Pod: $result"
+result="$(stop_case '{"node_condition":"ok","health":{"sandboxes_lost":[],"containers_oom_killed":3}}')"
+[[ "$result" == '3 container(s) OOM-killed under load' ]] || fail "OOM kill: $result"
+
+# The workload's own proof: a part that never worked stops the run, because its
+# load wasn't there. One that can't be read says nothing either way.
+proof='{"built":3,"build_failed":0,"pulled":1,"pull_failed":0,"ran":1,"run_failed":0,"hold_ended":0}'
+result="$(stop_case "{\"node_condition\":\"ok\",\"workload_proof\":${proof//\"built\":3/\"built\":0}}")"
+[[ "$result" == 'the real workload did not run as meant: no app built:'* ]] || fail "no build: $result"
+result="$(stop_case "{\"node_condition\":\"ok\",\"workload_proof\":${proof//\"ran\":1/\"ran\":0}}")"
+[[ "$result" == 'the real workload did not run as meant: no image ran:'* ]] || fail "no image: $result"
+result="$(stop_case "{\"node_condition\":\"ok\",\"workload_proof\":${proof//\"hold_ended\":0/\"hold_ended\":1}}")"
+[[ "$result" == 'the real workload did not run as meant: the memory hold ended early:'* ]] || fail "hold: $result"
+result="$(bash -c 'source "$1"; STOP_REASON=""; BASELINE_READY_MS=""; exceeds() { return 1; }; stop_check "$2"; printf "%s" "$STOP_REASON"' _ "$work/functions.sh" "{\"node_condition\":\"ok\",\"workload_proof\":null,\"failed_creates\":0}")"
+[[ "$result" != *'did not run as meant'* ]] || fail "an unread proof must not stop the run: $result"
 
 # A sandbox reserves its vCPUs over the ratio a live pool member shows (#3635),
 # for any shape; DinD and Kata keep theirs, and with no pool nothing is assumed
