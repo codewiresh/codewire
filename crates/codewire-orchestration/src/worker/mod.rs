@@ -31,6 +31,8 @@ pub mod organization_deletion;
 pub mod port_dns;
 pub mod postgres_secrets;
 pub mod resize;
+#[cfg(test)]
+mod sandbox_stopped_database_tests;
 pub mod scripts;
 pub mod secret_readiness;
 pub mod secrets;

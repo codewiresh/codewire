@@ -1419,6 +1419,9 @@ pub(crate) struct UnifiedEnvironmentListEntry {
     pub(crate) placement: String,
     pub(crate) selected: bool,
     pub(crate) state: String,
+    /// Running again after its Pod failed, with every process lost (#3772).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) restarted: bool,
     pub(crate) daemon_health: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) id: String,
@@ -3767,7 +3770,13 @@ pub(crate) fn format_env_info_text(environment: &Environment) -> String {
         output.push_str(&format!("TTL:           {ttl_seconds}s\n"));
     }
     if let Some(error_reason) = environment.error_reason.as_deref().and_then(trimmed_str) {
-        output.push_str(&format!("ErrorReason:   {error_reason}\n"));
+        // Once it's running again this is a notice, not a current fault.
+        let label = if environment.error_code.as_deref() == Some("sandbox_restarted") {
+            "Notice:        "
+        } else {
+            "ErrorReason:   "
+        };
+        output.push_str(&format!("{label}{error_reason}\n"));
     }
     output.push_str(&format!("Recoverable:   {}\n", environment.recoverable));
     output.push_str(&format!(

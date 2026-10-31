@@ -924,7 +924,11 @@ async fn reconcile_single_sandbox_liveness(
     }
 
     if let Some(reason) = sandbox_liveness_reason(now, &row, &probe) {
-        mark_sandbox_env_error(ctx, &row, &reason).await;
+        if sandbox_pod_failed_on_its_node(&row, &probe) {
+            mark_sandbox_stopped(ctx, &row, &reason).await;
+        } else {
+            mark_sandbox_env_error(ctx, &row, &reason).await;
+        }
         return;
     }
 
@@ -1061,6 +1065,14 @@ fn sandbox_liveness_reason(
     }
 }
 
+/// A running sandbox's Pod failed while its node stayed, which leaves its volume
+/// and its way back. Whatever killed it isn't known here (#3772).
+fn sandbox_pod_failed_on_its_node(row: &LivenessRow, probe: &ProbeResult) -> bool {
+    row.state == "running"
+        && !matches!(probe.claim_reason.as_str(), "NodeLost" | "NodeDeleted")
+        && (probe.pod_phase == "Failed" || probe.claim_reason == "PodFailed")
+}
+
 async fn sync_sandbox_backend_pod_info(
     ctx: &WorkerContext,
     row: &LivenessRow,
@@ -1106,6 +1118,39 @@ async fn sync_sandbox_backend_pod_info(
             return;
         }
         tracing::warn!(environment_id = row.id, error = %e, "sandbox liveness: sync pod info failed");
+    }
+}
+
+/// The internal reason stays in the worker's log; the user gets the plain message.
+async fn mark_sandbox_stopped(ctx: &WorkerContext, row: &LivenessRow, reason: &str) {
+    let authority = match ActivityAuthority::capture_required(
+        &ctx.pool,
+        &row.id,
+        &row.desired_state,
+        row.operation_generation,
+    )
+    .await
+    {
+        Ok(authority) => authority,
+        Err(error) if is_authority_lost(&error) => return,
+        Err(error) => {
+            tracing::error!(environment_id = row.id, error = %error, "sandbox liveness: capture stopped authority failed");
+            return;
+        }
+    };
+    let svc = Service::<PgLifecycleStore>::for_activity(ctx.pool.clone(), authority);
+    match svc.mark_sandbox_stopped(&row.id).await {
+        Err(e) => {
+            tracing::error!(environment_id = row.id, error = %e, "sandbox liveness: mark stopped failed");
+        }
+        Ok(true) => {
+            tracing::warn!(
+                environment_id = row.id,
+                reason,
+                "sandbox liveness: running sandbox stopped unexpectedly"
+            );
+        }
+        Ok(false) => {}
     }
 }
 
@@ -1300,6 +1345,32 @@ mod tests {
         let mut failed = replaced.clone();
         failed.pod_phase = "Failed".into();
         assert!(!running_runtime_recovery_required(&running, &failed));
+    }
+
+    #[test]
+    fn only_a_failed_pod_on_a_live_node_counts_as_stopped_unexpectedly() {
+        let running = row("running", 300);
+        for (probe, expected) in [
+            (probe(true, false, "PodFailed", true, "Failed", ""), true),
+            (probe(true, false, "PodFailed", false, "", ""), true),
+            (probe(true, true, "", true, "Failed", "10.0.0.1"), true),
+            // The node went, and the volume may have with it.
+            (probe(true, false, "NodeLost", true, "Failed", ""), false),
+            (probe(true, false, "NodeDeleted", false, "", ""), false),
+            // Not a failed Pod.
+            (probe(false, false, "", false, "", ""), false),
+            (probe(true, true, "", true, "Succeeded", "10.0.0.1"), false),
+        ] {
+            assert_eq!(
+                sandbox_pod_failed_on_its_node(&running, &probe),
+                expected,
+                "{probe:?}"
+            );
+        }
+        // A create that never ran has no files or processes to speak of.
+        let creating = row("creating", 300);
+        let failed = probe(true, false, "PodFailed", true, "Failed", "");
+        assert!(!sandbox_pod_failed_on_its_node(&creating, &failed));
     }
 
     #[test]

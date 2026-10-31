@@ -448,6 +448,7 @@ pub(crate) fn local_entry(
             selected: selection
                 .is_some_and(|selected| selected.is_local_vm(&environment.id, &environment.name)),
             state: native_state_label(environment.state).to_owned(),
+            restarted: false,
             daemon_health: if environment.state == EnvironmentState::Running as i32 {
                 "ready".into()
             } else {
@@ -483,6 +484,7 @@ pub(crate) fn cloud_entry(
                 selected.location == SelectionLocation::Cloud && selected.id == environment.id
             }),
             state: environment.state.clone(),
+            restarted: environment.error_code.as_deref() == Some("sandbox_restarted"),
             daemon_health: daemon_health.to_owned(),
             id: environment.id.clone(),
         },
@@ -536,6 +538,7 @@ fn host_entry(
                 selected.location == SelectionLocation::Host && selected.id == environment.id
             }),
             state: environment.state,
+            restarted: false,
             daemon_health,
             id: environment.id,
         },
@@ -717,7 +720,7 @@ pub(crate) fn picker_rows(
         let cells = vec![
             entry.name().to_owned(),
             entry.location.label().to_owned(),
-            display_str(entry.state()).to_owned(),
+            state_cell(&entry.list),
             cpu.unwrap_or_else(|| dash.to_owned()),
             memory.unwrap_or_else(|| dash.to_owned()),
             disk.unwrap_or_else(|| dash.to_owned()),
@@ -977,7 +980,7 @@ fn format_environment_inventory(
             [
                 terminal_text(&row.entry.name),
                 row.location.label().to_owned(),
-                terminal_text(display_str(&row.entry.state)),
+                terminal_text(&state_cell(&row.entry)),
                 sessions,
                 network,
             ]
@@ -1057,6 +1060,16 @@ fn format_environment_inventory(
     out
 }
 
+/// A listing's STATE cell. A sandbox that came back after its Pod failed says so,
+/// because its processes went with the old Pod (#3772).
+fn state_cell(entry: &UnifiedEnvironmentListEntry) -> String {
+    if entry.restarted {
+        format!("{} (restarted)", display_str(&entry.state))
+    } else {
+        display_str(&entry.state).to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,6 +1086,7 @@ mod tests {
             placement: placement.into(),
             selected: name == "app",
             state: state.into(),
+            restarted: false,
             daemon_health: String::new(),
             id: format!(
                 "{name}-{}-id",
@@ -1622,6 +1636,21 @@ mod tests {
                 "  app   cloud     stopped  4     8 GiB  80 GiB  none",
             ]
         );
+    }
+
+    #[test]
+    fn a_restarted_sandbox_says_so_in_the_state_cell_and_json() {
+        let mut restarted = list("app", "platform", "sandbox", "running");
+        assert_eq!(state_cell(&restarted), "running");
+        let quiet = serde_json::to_value(&restarted).unwrap();
+        assert!(quiet.get("restarted").is_none(), "{quiet}");
+
+        restarted.restarted = true;
+        assert_eq!(state_cell(&restarted), "running (restarted)");
+        let json = serde_json::to_value(&restarted).unwrap();
+        // Scripts reading the state still see the state.
+        assert_eq!(json["state"], "running");
+        assert_eq!(json["restarted"], true);
     }
 
     #[test]

@@ -123,6 +123,10 @@ pub trait LifecycleStore {
         reason: &str,
         states: &[&str],
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+    fn mark_sandbox_stopped(
+        &self,
+        env_id: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
     fn refuse_for_no_capacity(
         &self,
         env_id: &str,
@@ -220,7 +224,7 @@ impl Service<PgLifecycleStore> {
         .await?;
         let entry = if isolation_tier == "confidential" {
             let changed = sqlx::query(
-                "UPDATE environments SET desired_state = 'started', error_reason = CASE WHEN error_code = 'no_capacity' THEN NULL ELSE error_reason END, error_code = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2 AND state = 'stopped'",
+                "UPDATE environments SET desired_state = 'started', error_reason = CASE WHEN error_code IN ('no_capacity', 'sandbox_stopped', 'sandbox_restarted') THEN NULL ELSE error_reason END, error_code = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2 AND state = 'stopped'",
             )
             .bind(env_id)
             .bind(org_id)
@@ -237,7 +241,7 @@ impl Service<PgLifecycleStore> {
             }
         } else {
             let changed = sqlx::query(
-                "UPDATE environments SET desired_state = 'started', error_reason = CASE WHEN error_code = 'no_capacity' THEN NULL ELSE error_reason END, error_code = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2",
+                "UPDATE environments SET desired_state = 'started', error_reason = CASE WHEN error_code IN ('no_capacity', 'sandbox_stopped', 'sandbox_restarted') THEN NULL ELSE error_reason END, error_code = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2",
             )
             .bind(env_id)
             .bind(org_id)
@@ -418,6 +422,15 @@ impl<S: LifecycleStore> Service<S> {
             .map_err(|e| anyhow::anyhow!("mark error for states {states:?}: {e:#}"))
     }
 
+    /// A running sandbox's Pod failed: tell its user, with the code the next
+    /// return to running turns into a notice (#3772).
+    pub async fn mark_sandbox_stopped(&self, env_id: &str) -> anyhow::Result<bool> {
+        self.store
+            .mark_sandbox_stopped(env_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("mark sandbox stopped: {e:#}"))
+    }
+
     /// Ends a create or a start the cluster has no room for, with its code and
     /// message, and states the next step: the next reconcile destroys a create
     /// and stops a start. Nothing retries it (#3635).
@@ -549,6 +562,17 @@ impl<S: LifecycleStore> Service<S> {
         }
     }
 }
+
+/// `environments.error_code` of a running sandbox whose Pod failed, until it runs
+/// again (#3772). Says nothing of why: that isn't known here.
+pub const SANDBOX_STOPPED_ERROR_CODE: &str = "sandbox_stopped";
+/// The user's message for [`SANDBOX_STOPPED_ERROR_CODE`]. A failed Pod leaves its
+/// volume, and reconcile brings the sandbox back on it, so this is true of this
+/// path only: a lost node is not this path.
+pub const SANDBOX_STOPPED_MESSAGE: &str = "This sandbox stopped unexpectedly and is restarting. Its files are safe; running processes were lost.";
+/// `environments.error_code` of a sandbox running again after that, until its
+/// next start or stop: nothing else would tell its user their processes went.
+pub const SANDBOX_RESTARTED_ERROR_CODE: &str = "sandbox_restarted";
 
 /// `environments.error_code` of a create or start the cluster had no room for.
 pub const NO_CAPACITY_ERROR_CODE: &str = "no_capacity";
@@ -782,7 +806,8 @@ impl LifecycleStore for PgLifecycleStore {
         self.exec_logged(
             env_id,
             sqlx::query(
-                r#"UPDATE environments SET state = 'error', error_reason = $1, state_changed_at = NOW()
+                r#"UPDATE environments SET state = 'error', error_reason = $1, error_code = NULL,
+                   state_changed_at = NOW()
                    WHERE id = $2"#,
             )
             .bind(reason)
@@ -802,10 +827,18 @@ impl LifecycleStore for PgLifecycleStore {
         self.exec_logged(
             env_id,
             sqlx::query(
-                "UPDATE environments SET started_at = NOW(), stopped_at = NULL
+                "UPDATE environments SET started_at = NOW(), stopped_at = NULL,
+                   error_reason = CASE error_code
+                     WHEN $2 THEN 'Restarted at ' || to_char(NOW() AT TIME ZONE 'UTC', 'HH24:MI')
+                       || ' UTC after stopping unexpectedly. Running processes were lost.'
+                     WHEN $3 THEN error_reason
+                   END,
+                   error_code = CASE error_code WHEN $2 THEN $3 WHEN $3 THEN $3 END
                   WHERE id = $1 AND state = 'running'",
             )
-            .bind(env_id),
+            .bind(env_id)
+            .bind(SANDBOX_STOPPED_ERROR_CODE)
+            .bind(SANDBOX_RESTARTED_ERROR_CODE),
             LogEntry {
                 phase: "lifecycle_checkpoint",
                 status: "completed",
@@ -821,10 +854,13 @@ impl LifecycleStore for PgLifecycleStore {
         self.exec_logged(
             env_id,
             sqlx::query(
-                "UPDATE environments SET stopped_at = NOW()
+                "UPDATE environments SET stopped_at = NOW(),
+                   error_reason = CASE WHEN error_code = $2 THEN NULL ELSE error_reason END,
+                   error_code = CASE WHEN error_code = $2 THEN NULL ELSE error_code END
                   WHERE id = $1 AND state = 'stopped'",
             )
-            .bind(env_id),
+            .bind(env_id)
+            .bind(SANDBOX_RESTARTED_ERROR_CODE),
             LogEntry {
                 phase: "lifecycle_checkpoint",
                 status: "completed",
@@ -1104,7 +1140,8 @@ impl LifecycleStore for PgLifecycleStore {
             .exec_logged(
                 env_id,
                 sqlx::query(
-                    r#"UPDATE environments SET state = 'error', error_reason = $1, state_changed_at = NOW()
+                    r#"UPDATE environments SET state = 'error', error_reason = $1, error_code = NULL,
+                       state_changed_at = NOW()
                        WHERE id = $2 AND state = ANY($3)"#,
                 )
                 .bind(reason)
@@ -1153,6 +1190,29 @@ impl LifecycleStore for PgLifecycleStore {
                         "state": refusal.state,
                         "desired_state": refusal.desired_state,
                     }),
+                },
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    async fn mark_sandbox_stopped(&self, env_id: &str) -> anyhow::Result<bool> {
+        let rows = self
+            .exec_logged(
+                env_id,
+                sqlx::query(
+                    r#"UPDATE environments
+                       SET state = 'error', error_code = $1, error_reason = $2, state_changed_at = NOW()
+                       WHERE id = $3 AND state = 'running'"#,
+                )
+                .bind(SANDBOX_STOPPED_ERROR_CODE)
+                .bind(SANDBOX_STOPPED_MESSAGE)
+                .bind(env_id),
+                LogEntry {
+                    phase: "lifecycle_error",
+                    status: "failed",
+                    message: SANDBOX_STOPPED_MESSAGE.to_string(),
+                    metadata: serde_json::json!({ "kind": "error", "code": SANDBOX_STOPPED_ERROR_CODE, "from": ["running"] }),
                 },
             )
             .await?;
@@ -1335,6 +1395,9 @@ mod tests {
             _: &str,
             _: &[&str],
         ) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn mark_sandbox_stopped(&self, _: &str) -> anyhow::Result<bool> {
             Ok(true)
         }
         async fn refuse_for_no_capacity(

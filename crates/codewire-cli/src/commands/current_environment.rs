@@ -485,6 +485,7 @@ mod tests {
                 placement: "local".into(),
                 selected: false,
                 state: state.into(),
+                restarted: false,
                 daemon_health: String::new(),
                 id: VM_ID.into(),
             },

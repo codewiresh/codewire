@@ -961,6 +961,12 @@ database_lane_orchestration() {
       'worker::create::projection_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "stopped sandbox notice matrix" sandbox-stopped-notice \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::sandbox_stopped_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "no capacity outcome matrix" no-capacity-outcome \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
