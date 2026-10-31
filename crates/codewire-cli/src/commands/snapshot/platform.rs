@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use codewire_client::{Snapshot, SnapshotState};
+use codewire_client::{ClientError, Snapshot, SnapshotState};
 use serde::Serialize;
 
 use super::super::*;
@@ -124,16 +124,37 @@ async fn resolve_snapshot(
         .ok_or_else(|| anyhow::anyhow!("no snapshot named {}", terminal_text(target)))
 }
 
+/// Whether a failed poll says nothing about the capture. Capture is its own
+/// workflow, so restarting the API, for a rollout or after a crash, interrupts
+/// this wait and not the snapshot (observed on Dev, #3046).
+fn poll_interrupted(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ClientError>()
+        .is_some_and(ClientError::is_retryable_transport_interruption)
+}
+
 async fn wait_for_capture(
     client: &EnvironmentClient,
     org_id: &str,
     snapshot_id: &str,
 ) -> anyhow::Result<Snapshot> {
+    poll_capture(snapshot_id, || client.get_snapshot(org_id, snapshot_id)).await
+}
+
+async fn poll_capture<Poll, Polled>(snapshot_id: &str, mut poll: Poll) -> anyhow::Result<Snapshot>
+where
+    Poll: FnMut() -> Polled,
+    Polled: std::future::Future<Output = anyhow::Result<Snapshot>>,
+{
     let wait = async {
         loop {
-            let snapshot = client.get_snapshot(org_id, snapshot_id).await?;
-            if snapshot.state.as_known() != Some(SnapshotState::Capturing) {
-                return anyhow::Ok(snapshot);
+            match poll().await {
+                Ok(snapshot) if snapshot.state.as_known() != Some(SnapshotState::Capturing) => {
+                    return anyhow::Ok(snapshot);
+                }
+                Ok(_) => {}
+                Err(error) if poll_interrupted(&error) => {}
+                Err(error) => return Err(error),
             }
             tokio::time::sleep(CAPTURE_POLL).await;
         }
@@ -226,6 +247,7 @@ pub(super) async fn handle_platform_snapshot_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codewire_client::ErrorCode;
 
     fn snapshot(state: SnapshotState) -> Snapshot {
         Snapshot {
@@ -236,6 +258,64 @@ mod tests {
             size_bytes: Some(80 * 1024 * 1024 * 1024),
             ..Default::default()
         }
+    }
+
+    fn scripted(
+        script: Vec<anyhow::Result<Snapshot>>,
+    ) -> impl FnMut() -> std::future::Ready<anyhow::Result<Snapshot>> {
+        let mut script = script.into_iter();
+        move || std::future::ready(script.next().expect("polled past the script"))
+    }
+
+    fn failure(code: ErrorCode) -> anyhow::Error {
+        ClientError::new(code, "HTTP error").into()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_outlasts_an_api_restart() {
+        let done = poll_capture(
+            "s",
+            scripted(vec![
+                Ok(snapshot(SnapshotState::Capturing)),
+                Err(failure(ErrorCode::Unavailable)),
+                Err(failure(ErrorCode::Unavailable)),
+                Ok(snapshot(SnapshotState::Ready)),
+            ]),
+        )
+        .await
+        .expect("an interrupted poll isn't a failed capture");
+        assert_eq!(done.state.as_known(), Some(SnapshotState::Ready));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_stops_at_an_error_that_is_not_an_interruption() {
+        for code in [
+            ErrorCode::NotFound,
+            ErrorCode::Unauthenticated,
+            ErrorCode::PermissionDenied,
+            ErrorCode::Internal,
+        ] {
+            let error = poll_capture(
+                "s",
+                scripted(vec![
+                    Ok(snapshot(SnapshotState::Capturing)),
+                    Err(failure(code)),
+                ]),
+            )
+            .await
+            .expect_err("this says something about the snapshot or the caller");
+            assert!(!poll_interrupted(&error));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_api_that_stays_down_ends_the_wait_at_its_limit() {
+        let error = poll_capture("s", || {
+            std::future::ready(Err(failure(ErrorCode::Unavailable)))
+        })
+        .await
+        .expect_err("the wait is bounded");
+        assert!(error.to_string().contains("still being captured"));
     }
 
     #[test]
