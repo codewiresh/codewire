@@ -50,9 +50,10 @@ WORKLOAD=synthetic
 HOLD_SECONDS_SET=0
 WORKLOAD_CPU=0.5
 WORKLOAD_MEMORY=
-# Pulled and run by the real workload. Docker Hub limits anonymous pulls per
-# address, and every sandbox pulls this.
-DOCKER_IMAGE=public.ecr.aws/docker/library/node:22
+# Pulled and run by the real workload; empty is the workspace image the repository
+# pins. Every sandbox pulls this from one address, and public registries limit
+# that: public ECR refused 2 of 10 pulls with a single sandbox.
+DOCKER_IMAGE=
 # Stop thresholds, checked on every node before every step; empty ones take
 # the Dev or the more conservative Production default.
 LATENCY_FACTOR=3
@@ -140,7 +141,7 @@ Options:
                          writing to disk past its memory limit. A part that
                          never worked stops the run: its load wasn't there
   --docker-image IMAGE   what the real workload pulls and runs
-                         (default public.ecr.aws/docker/library/node:22)
+                         (default the pinned workspace image, about 2 GiB)
   --workload-cpu F       synthetic: fraction of each sandbox's vCPUs kept busy (default 0.5)
   --workload-memory F    fraction of each sandbox's memory allocated and touched
                          (default 0.5, or 0.95 for real)
@@ -340,6 +341,9 @@ case "$WORKLOAD" in
     ;;
   *) die "--workload must be synthetic or real" ;;
 esac
+if [[ -z "$DOCKER_IMAGE" ]]; then
+  DOCKER_IMAGE="$(sed -n 's/^pub const PUBLIC_IMAGE: &str = "\(.*\)";$/\1/p' "$ROOT/crates/codewire-workspace-image/src/pin.rs")"
+fi
 [[ "$DOCKER_IMAGE" =~ ^[a-zA-Z0-9][a-zA-Z0-9./:@_-]*$ ]] || die "--docker-image is not an image reference"
 if ! is_number "$WORKLOAD_CPU" || ! awk -v v="$WORKLOAD_CPU" 'BEGIN {exit !(v >= 0 && v <= 0.9)}'; then
   die "WORKLOAD_CPU must be between 0 and 0.9"
@@ -928,8 +932,17 @@ GO
 (
   for _ in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 5; done
   while ((SECONDS < end)); do
-    docker pull -q "$image" >>"$root/docker.log" 2>&1 && log "image pulled" || { log "image pull failed"; sleep 30; continue; }
-    docker run --rm -v "$root/docker:/w" "$image" sh -c \
+    if ! pull_output="$(docker pull -q "$image" 2>&1)"; then
+      printf '%s\n' "$pull_output" >>"$root/docker.log"
+      case "$pull_output" in
+        *toomanyrequests*|*"Rate exceeded"*|*"rate limit"*) log "image pull throttled" ;;
+        *) log "image pull failed" ;;
+      esac
+      sleep 30
+      continue
+    fi
+    log "image pulled"
+    docker run --rm --entrypoint sh -v "$root/docker:/w" "$image" -c \
       'for i in 1 2 3 4 5 6; do dd if=/dev/urandom of=/w/f$i bs=1M count=1024 2>/dev/null; done' \
       >>"$root/docker.log" 2>&1 && log "image ran" || log "image run failed"
     docker rmi -f "$image" >/dev/null 2>&1
@@ -1174,6 +1187,7 @@ workload_proof() { # ID -> JSON
     | def count($text): [$lines[] | select(endswith($text))] | length;
     {built: count(" app built"), build_failed: count(" app build failed"),
      pulled: count(" image pulled"), pull_failed: count(" image pull failed"),
+     pull_throttled: count(" image pull throttled"),
      ran: count(" image ran"), run_failed: count(" image run failed"),
      hold_ended: [$lines[] | select(contains(" memory hold ended with status "))] | length}' <<<"$log"
 }
@@ -1187,6 +1201,26 @@ log_lost_reasons() { # METRICS_JSON
     reason="$(cw info "$id" --output json 2>/dev/null | jq -r '.error_reason // "no reason recorded"' || echo "reason not readable")"
     log "lost sandbox $id: $reason"
   done < <(jq -r '.health.sandboxes_lost[]?.id' <<<"$1")
+}
+
+# The proof across a sample of a run's sandboxes, because a throttled registry or a
+# stuck part may hit only some. A sandbox that can't be read isn't counted, and the
+# count says how many were. Null when none could be.
+PROOF_SAMPLE=5
+workload_proof_sample() { # IDS... -> JSON
+  local id proof proofs=()
+  for id in "${@:1:$PROOF_SAMPLE}"; do
+    proof="$(workload_proof "$id")"
+    [[ "$proof" == null ]] || proofs+=("$proof")
+  done
+  ((${#proofs[@]} > 0)) || { echo null; return; }
+  printf '%s\n' "${proofs[@]}" | jq -sc '
+    def total($key): map(.[$key]) | add;
+    {sandboxes_read: length, without_build: (map(select(.built == 0)) | length),
+       without_image_run: (map(select(.ran == 0)) | length),
+       built: total("built"), build_failed: total("build_failed"),
+       pulled: total("pulled"), pull_failed: total("pull_failed"), pull_throttled: total("pull_throttled"),
+       ran: total("ran"), run_failed: total("run_failed"), hold_ended: total("hold_ended")}'
 }
 
 # ------------------------------------------------------------ steps
@@ -1205,9 +1239,9 @@ stop_check() { # METRICS_JSON -> sets STOP_REASON
   v="$(jq -r '.health.containers_oom_killed // 0' <<<"$m")"
   [[ "$v" == 0 ]] || { STOP_REASON="$v container(s) OOM-killed under load"; return; }
   v="$(jq -r 'if .workload_proof == null then "" else .workload_proof
-      | [if .built == 0 then "no app built" else empty end,
-         if .ran == 0 then "no image ran" else empty end,
-         if .hold_ended > 0 then "the memory hold ended early" else empty end]
+      | [if .without_build > 0 then "no app built in \(.without_build) of \(.sandboxes_read)" else empty end,
+         if .without_image_run > 0 then "no image ran in \(.without_image_run) of \(.sandboxes_read)" else empty end,
+         if .hold_ended > 0 then "the memory hold ended early in \(.hold_ended)" else empty end]
       | join(", ") end' <<<"$m")"
   [[ -z "$v" ]] || { STOP_REASON="the real workload did not run as meant: $v: $(jq -c .workload_proof <<<"$m")"; return; }
   v="$(jq -r '.scheduler_refusal // ""' <<<"$m")"
@@ -1384,6 +1418,11 @@ write_summary() {
       "\nAfter each hold, sandboxes lost / Pods replaced / containers restarted / OOM-killed: " +
       (map("\(.created): \(.health.sandboxes_lost | if . == null then "?" else length end) / \(.health.pods_replaced | if . == null then "?" else length end) / \(.health.containers_restarted // "?") / \(.health.containers_oom_killed // "?")") | join(", "))
       end' "$RUN_DIR/steps.jsonl" 2>/dev/null || true
+    jq -rs 'map(select(.workload_proof != null)) | if length == 0 then empty else
+      "\nReal workload, sampled sandboxes (read / built / images run / pulls throttled / pulls failed): " +
+      (map("\(.created): \(.workload_proof | "\(.sandboxes_read) / \(.built) / \(.ran) / \(.pull_throttled) / \(.pull_failed)")") | join(", ")) +
+      (if (map(.workload_proof.pull_throttled) | add) > 0 then "\n\nPulls were throttled, so this run had less load than intended." else "" end)
+      end' "$RUN_DIR/steps.jsonl" 2>/dev/null || true
     printf '\nStopped: %s\n' "${STOP_REASON:-every step completed}"
   } >"$RUN_DIR/summary.md"
 }
@@ -1499,7 +1538,12 @@ for target in "${STEP_COUNTS[@]}"; do
   metrics="$(jq -c --argjson health "$(sandbox_health "${READY_IDS[@]}")" '. + {health: $health}' <<<"$metrics")"
   log_lost_reasons "$metrics"
   if [[ "$WORKLOAD" == real && ${#READY_IDS[@]} -gt 0 ]]; then
-    metrics="$(jq -c --argjson proof "$(workload_proof "${READY_IDS[0]}")" '. + {workload_proof: $proof}' <<<"$metrics")"
+    metrics="$(jq -c --argjson proof "$(workload_proof_sample "${READY_IDS[@]}")" '. + {workload_proof: $proof}' <<<"$metrics")"
+    # Fewer pulls and writes than intended is a weaker test, so it's said, not hidden.
+    throttled="$(jq -r '.workload_proof.pull_throttled // 0' <<<"$metrics")"
+    if [[ "$throttled" != 0 ]]; then
+      log "step $step: LESS LOAD THAN INTENDED: $throttled pull(s) throttled in the sampled sandboxes"
+    fi
   fi
   printf '%s\n' "$metrics" >>"$RUN_DIR/steps.jsonl"
   log "step $step: $(jq -c '{created, ready_sandboxes, health, workload_proof, failed_creates, warm_hits, ready_p50_ms, ready_p95_ms, first_ssh_p50_ms, node_memory_pct, node_cpu_pct, psi_memory_some_pct, thin_used_pct, pods}' <<<"$metrics")"

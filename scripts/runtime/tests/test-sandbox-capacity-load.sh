@@ -221,13 +221,43 @@ result="$(stop_case '{"node_condition":"ok","health":{"sandboxes_lost":[],"conta
 
 # The workload's own proof: a part that never worked stops the run, because its
 # load wasn't there. One that can't be read says nothing either way.
-proof='{"built":3,"build_failed":0,"pulled":1,"pull_failed":0,"ran":1,"run_failed":0,"hold_ended":0}'
-result="$(stop_case "{\"node_condition\":\"ok\",\"workload_proof\":${proof//\"built\":3/\"built\":0}}")"
-[[ "$result" == 'the real workload did not run as meant: no app built:'* ]] || fail "no build: $result"
-result="$(stop_case "{\"node_condition\":\"ok\",\"workload_proof\":${proof//\"ran\":1/\"ran\":0}}")"
-[[ "$result" == 'the real workload did not run as meant: no image ran:'* ]] || fail "no image: $result"
+proof='{"sandboxes_read":5,"without_build":0,"without_image_run":0,"built":9,"pulled":5,"pull_throttled":0,"ran":5,"hold_ended":0}'
+result="$(stop_case "{\"node_condition\":\"ok\",\"workload_proof\":${proof//\"without_build\":0/\"without_build\":2}}")"
+[[ "$result" == 'the real workload did not run as meant: no app built in 2 of 5:'* ]] || fail "no build: $result"
+result="$(stop_case "{\"node_condition\":\"ok\",\"workload_proof\":${proof//\"without_image_run\":0/\"without_image_run\":1}}")"
+[[ "$result" == 'the real workload did not run as meant: no image ran in 1 of 5:'* ]] || fail "no image: $result"
 result="$(stop_case "{\"node_condition\":\"ok\",\"workload_proof\":${proof//\"hold_ended\":0/\"hold_ended\":1}}")"
-[[ "$result" == 'the real workload did not run as meant: the memory hold ended early:'* ]] || fail "hold: $result"
+[[ "$result" == 'the real workload did not run as meant: the memory hold ended early in 1:'* ]] || fail "hold: $result"
+
+# Proof is summed across a sample, says how many it read, and doesn't count one it
+# couldn't read as a failure. A throttled pull is counted apart from a failed one.
+result="$(bash -c '
+  source "$1"
+  workload_proof() {
+    case "$1" in
+      unread) echo null ;;
+      idle) echo "{\"built\":0,\"build_failed\":0,\"pulled\":0,\"pull_failed\":0,\"pull_throttled\":2,\"ran\":0,\"run_failed\":0,\"hold_ended\":0}" ;;
+      *) echo "{\"built\":3,\"build_failed\":0,\"pulled\":1,\"pull_failed\":1,\"pull_throttled\":0,\"ran\":1,\"run_failed\":0,\"hold_ended\":0}" ;;
+    esac
+  }
+  workload_proof_sample a unread idle
+' _ "$work/functions.sh")"
+expected='{"sandboxes_read":2,"without_build":1,"without_image_run":1,"built":3,"build_failed":0,"pulled":1,"pull_failed":1,"pull_throttled":2,"ran":1,"run_failed":0,"hold_ended":0}'
+[[ "$result" == "$expected" ]] || fail "proof sample: $result"
+result="$(bash -c 'source "$1"; workload_proof() { echo null; }; workload_proof_sample a b' _ "$work/functions.sh")"
+[[ "$result" == null ]] || fail "no readable proof: $result"
+# Only a sample is read, however big the run.
+result="$(bash -c 'source "$1"; COUNT="$2"; workload_proof() { echo x >>"$COUNT"; echo null; }; workload_proof_sample 1 2 3 4 5 6 7 8 >/dev/null; wc -l <"$COUNT"' _ "$work/functions.sh" "$work/proof-count")"
+[[ "$result" == 5 ]] || fail "proof sample size: $result"
+
+# The default image is the one the repository pins, not a second copy of it.
+pinned="$(sed -n 's/^pub const PUBLIC_IMAGE: &str = "\(.*\)";$/\1/p' "$(dirname "$LOAD")/../../../crates/codewire-workspace-image/src/pin.rs")"
+[[ "$pinned" =~ ^ghcr\.io/codewiresh/workspace@sha256:[0-9a-f]{64}$ ]] || fail "the pinned image doesn't resolve: $pinned"
+
+# The real workload tells a throttled pull from a failed one, and runs any image's sh.
+grep -qF 'log "image pull throttled"' "$work/real-workload.sh" || fail 'a throttled pull is not told apart'
+grep -qF -- '--entrypoint sh' "$work/real-workload.sh" || fail 'the image entrypoint would run instead of the writes'
+
 result="$(bash -c 'source "$1"; STOP_REASON=""; BASELINE_READY_MS=""; exceeds() { return 1; }; stop_check "$2"; printf "%s" "$STOP_REASON"' _ "$work/functions.sh" "{\"node_condition\":\"ok\",\"workload_proof\":null,\"failed_creates\":0}")"
 [[ "$result" != *'did not run as meant'* ]] || fail "an unread proof must not stop the run: $result"
 
