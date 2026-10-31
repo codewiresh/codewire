@@ -23,8 +23,6 @@ concurrency:
   group: deploy-prod-release
   cancel-in-progress: false
 
-enable-openid-connect: true
-
 env:
   CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
   EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE: ${{ vars.EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE }}
@@ -154,6 +152,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Publish the release and deliver it to Production
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
     # Aliases and publication take minutes; the delivery then waits up to 30
     # minutes for promote-prod's verdict, so the work keeps 45 of its own.
     timeout-minutes: 75
@@ -296,6 +295,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Build the release support pair (linux/amd64)
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
     timeout-minutes: 120
     needs: [release-selection, publish-release]
     if: ${{ needs.publish-release.outputs.build == 'true' }}
@@ -355,6 +355,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Build the release support pair (linux/arm64)
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
     timeout-minutes: 120
     needs: [release-selection, publish-release]
     if: ${{ needs.publish-release.outputs.build == 'true' }}
@@ -394,6 +395,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Publish the built support pair and deliver the release to Production
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
     # The join and publication take minutes; the delivery then waits up to 30
     # minutes for promote-prod's verdict.
     timeout-minutes: 50

@@ -39,8 +39,8 @@ depend on what it delivers:
 - every action is pinned to a commit, the same one wherever it is used, so
   each action's pin has one owner;
 - every OpenBao role names its own audience (`openbao-<role>`);
-- a job that can log in to OpenBao (OIDC with a role in scope, or a
-  `fetch-openbao-` step) runs only on a
+- a job that can log in to OpenBao (OIDC, its own or the workflow's, with a
+  role in scope, or a `fetch-openbao-` step) runs only on a
   trusted runner, in a workflow that only a push to main or a tag, a dispatch
   or a schedule starts: never a pull request; workflow-wide OIDC likewise;
 - ci.yaml runs Kind on the workspace image kind/common.sh approves, so that
@@ -322,7 +322,9 @@ def workflow_errors(name, text):
                     errors.append(f"{name} {job_name} {key} does not name its own audience")
         reads_openbao = roles_in_scope(workflow, job) or any(
             "fetch-openbao-" in str(step.get("run", "")) for step in job.get("steps") or [])
-        if job.get("enable-openid-connect") and reads_openbao:
+        # Forgejo's resolution: a job's own setting wins over the workflow's.
+        holds_oidc = job.get("enable-openid-connect", workflow.get("enable-openid-connect"))
+        if holds_oidc and reads_openbao:
             if runner not in TRUSTED_ONLY:
                 errors.append(f"{name} {job_name} can log in to OpenBao on an untrusted runner")
             if unsafe:
@@ -494,6 +496,11 @@ WORKFLOW_MUTATIONS = {
         r"(oci-approved/codewire/workspace@sha256:)[0-9a-f]{64}", r"\g<1>" + "1" * 64, t, count=1)),
     "the release schedule's workflow grants OIDC to a pull request": ("deploy-prod.yaml", lambda t: t.replace(
         "\non:\n", "\non:\n  pull_request:\n", 1)),
+    "Prod's workflow grants OIDC to its untrusted jobs": ("deploy-prod.yaml", lambda t: t.replace(
+        "\nenv:\n", "\nenable-openid-connect: true\n\nenv:\n", 1)),
+    "Prod's release selection holds OIDC": ("deploy-prod.yaml", lambda t: in_job(
+        t, "release-selection", f"    runs-on: {runners.UNTRUSTED_LIGHT}\n",
+        f"    runs-on: {runners.UNTRUSTED_LIGHT}\n    enable-openid-connect: true\n")),
     "the workspace-pin bot token is read on the untrusted runner": ("support-images.yaml", lambda t: in_job(
         t, "propose-workspace-image-pin", f"runs-on: {runners.TRUSTED_LIGHT}", f"runs-on: {runners.UNTRUSTED_LIGHT}")),
     "a Dev build drops the selection it reads": ("deploy-dev.yaml", lambda t: in_job(

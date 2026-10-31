@@ -1,5 +1,36 @@
 from .shared import *
 
+# The deploy-prod jobs that use an OIDC token: each logs in to OpenBao or mints
+# the Deploy dispatch token. Those identities bind the workflow, not the job or
+# runner, so any other job holding OIDC could obtain them (#3674).
+PRODUCTION_OIDC_JOBS = frozenset(
+    {"publish-release", "build-support-amd64", "build-support-arm64", "finish-built-release"}
+)
+
+
+def production_oidc_errors(workflow: str) -> list[str]:
+    """OIDC grants in deploy-prod that differ from PRODUCTION_OIDC_JOBS."""
+    header, _, jobs = workflow.partition("\njobs:\n")
+    errors = []
+    if re.search(r"^enable-openid-connect:", header, re.M):
+        errors.append("source production workflow grants OIDC to every job")
+    granted = set()
+    job = ""
+    for line in jobs.splitlines():
+        name = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+        if name:
+            job = name.group(1)
+        elif line.startswith("    enable-openid-connect:"):
+            granted.add(job)
+    unused = sorted(granted - PRODUCTION_OIDC_JOBS)
+    if unused:
+        errors.append(f"source production workflow grants OIDC to a job that does not use it: {unused}")
+    missing = sorted(PRODUCTION_OIDC_JOBS - granted)
+    if missing:
+        errors.append(f"source production publishing job lost its OIDC: {missing}")
+    return errors
+
+
 def check_production_source_ownership(args: argparse.Namespace) -> int:
     try:
         files = load_production_source_files(Path(args.root).resolve())
@@ -88,10 +119,12 @@ def validate_production_source(files: dict[str, Any]) -> None:
         "publish-image-to-harbor.sh",
         "publish-image-to-ghcr.sh",
         "run: scripts/ci/release/finish-prod-release.sh",
-        "enable-openid-connect: true",
     ]:
         if required not in files["production_workflow"]:
             raise RuntimeError(f"source production workflow lost required boundary: {required}")
+    oidc_errors = production_oidc_errors(files["production_workflow"])
+    if oidc_errors:
+        raise RuntimeError("; ".join(oidc_errors))
     # The workflow delivers through finish-prod-release.sh, which dispatches.
     if "scripts/ci/deploy/dispatch-deploy-prod.sh" not in files["production_finish"]:
         raise RuntimeError("production release finish lost its deploy-prod dispatch")
@@ -158,6 +191,31 @@ def production_source_self_test(files: dict[str, Any]) -> None:
         "run: scripts/ci/release/finish-prod-release.sh", "run: true"
     )
     expect_rejected("workflow without release finish", fixture, "source production workflow lost required boundary")
+
+    # The shape before #3674: one workflow-level grant reaching every job.
+    fixture = dict(files)
+    fixture["production_workflow"] = files["production_workflow"].replace(
+        "\nenv:\n", "\nenable-openid-connect: true\n\nenv:\n", 1
+    )
+    expect_rejected("workflow-wide OIDC", fixture, "grants OIDC to every job")
+
+    for job in ("pending", "release-selection"):
+        fixture = dict(files)
+        fixture["production_workflow"] = files["production_workflow"].replace(
+            f"\n  {job}:\n", f"\n  {job}:\n    enable-openid-connect: true\n", 1
+        )
+        expect_rejected(f"OIDC on {job}", fixture, "grants OIDC to a job that does not use it")
+
+    for job in sorted(PRODUCTION_OIDC_JOBS):
+        fixture = dict(files)
+        fixture["production_workflow"] = re.sub(
+            rf"(^  {job}:\n(?:    .*\n)*?)    enable-openid-connect: true\n",
+            r"\1",
+            files["production_workflow"],
+            count=1,
+            flags=re.M,
+        )
+        expect_rejected(f"{job} without OIDC", fixture, "publishing job lost its OIDC")
 
     fixture = dict(files)
     fixture["retired_control_paths_present"] = ["scripts/ci/retired-observer.sh"]
