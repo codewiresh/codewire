@@ -19,11 +19,23 @@ defense-in-depth runtime classes used by the Codewire Guard umbrella:
   path and schedules only onto nodes labelled
   `node.codewire.sh/confidential-snp=true`.
 
-Each RuntimeClass also carries the matching Kata runtime-rs `podFixed`
-accounting. Kubernetes adds this VM/runtime overhead to workload requests and
-limits before scheduling and cgroup enforcement. Keep these values aligned
-with the corresponding upstream Kata shim defaults; omitting them can make a
-small workload fail before VM startup even when the node has ample memory.
+Each RuntimeClass also carries Kata runtime-rs `podFixed` accounting. Kubernetes
+adds this VM/runtime overhead to workload requests and limits before scheduling
+and cgroup enforcement. Omitting it can make a small workload fail before VM
+startup even when the node has ample memory.
+
+These values are measured, not copied from upstream's chart defaults: Kata's
+sizing guide says `podFixed` must cover guest- and host-side overhead, and that
+operators tune it for their own deployment. When a Pod's containers all reach
+their limits while writing to disk, its guest RAM is full and only this margin is
+left for the VMM, virtiofsd and their host page cache. Below it the host OOM-kills
+the VM. Re-measure with `scripts/runtime/dev/prove-dev-runtime-memory-fill.sh`
+before changing a value or supporting a larger shape.
+
+`overhead` can change in place, but a Pod keeps the value it was admitted with: a
+running sandbox gets the new value at its next start, and unclaimed warm-pool
+members within a day, when age replaces them. The warm-pool node cap and the
+scheduler use the live value.
 
 Do not add a confidential node selector by node name. Infra owns the host SNP
 gate and publishes the scheduling capability label.

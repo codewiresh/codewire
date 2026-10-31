@@ -295,8 +295,8 @@ check_runtime_contract() {
   assert_jq "RuntimeClass/commodity handler is not kata-clh" \
     '.items[] | select(.metadata.name == "commodity") | .handler == "kata-clh"' \
     "$runtimeclasses_json"
-  assert_jq "RuntimeClass/commodity pod overhead is not the kata-clh contract" \
-    '.items[] | select(.metadata.name == "commodity") | .overhead.podFixed == {"cpu":"250m","memory":"130Mi"}' \
+  assert_jq "RuntimeClass/commodity pod overhead is not the measured contract" \
+    '.items[] | select(.metadata.name == "commodity") | .overhead.podFixed == {"cpu":"250m","memory":"1Gi"}' \
     "$runtimeclasses_json"
   assert_jq "RuntimeClass/confidential handler is not kata-qemu-snp" \
     '.items[] | select(.metadata.name == "confidential") | .handler == "kata-qemu-snp"' \

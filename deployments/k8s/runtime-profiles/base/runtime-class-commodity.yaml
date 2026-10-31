@@ -8,12 +8,17 @@ metadata:
     codewire.sh/runtime-tier: commodity
     codewire.sh/runtime-handler: kata-clh
 handler: kata-clh
-# Match Kata's clh-runtime-rs RuntimeClass accounting. Without PodOverhead,
-# kubelet constrains the VM/runtime processes to the workload-only cgroup limit.
+# Kata's sizing guide (docs/how-to/how-to-size-sandbox-overhead-runtime-rs.md):
+# podFixed must cover guest- and host-side overhead, and operators measure it.
+# A guest with full RAM leaves the Pod cgroup only this margin for the VMM,
+# virtiofsd and the host page cache of their writes; past it the host kills the
+# VM. Measured with scripts/runtime/dev/prove-dev-runtime-memory-fill.sh on 4+2
+# and 16+4 GiB shapes (#3718): 130 and 512 MiB are killed, 1 GiB survives.
+# Larger VMs are not measured.
 overhead:
   podFixed:
     cpu: 250m
-    memory: 130Mi
+    memory: 1Gi
 scheduling:
   nodeSelector:
     katacontainers.io/kata-runtime: "true"

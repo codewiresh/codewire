@@ -1232,6 +1232,7 @@ run_dev_smoke_script_tests() {
   scripts/runtime/tests/test-workspace-binding-proof.sh
   scripts/runtime/tests/test-warm-pool-proof.sh
   scripts/runtime/tests/test-sandbox-capacity-load.sh
+  scripts/runtime/tests/test-runtime-memory-fill-proof.sh
   scripts/runtime/tests/test-local-platform-sources-smoke.sh
   scripts/runtime/tests/test-private-checkout-smoke.sh
   scripts/runtime/tests/test-dev-initial-private-checkout.sh
