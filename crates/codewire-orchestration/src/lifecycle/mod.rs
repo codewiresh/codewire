@@ -123,6 +123,12 @@ pub trait LifecycleStore {
         reason: &str,
         states: &[&str],
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+    fn refuse_for_no_capacity(
+        &self,
+        env_id: &str,
+        refusal: NoCapacityRefusal,
+        states: &[&str],
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
     fn protect(
         &self,
         env_id: &str,
@@ -212,7 +218,7 @@ impl Service<PgLifecycleStore> {
         .await?;
         let entry = if isolation_tier == "confidential" {
             let changed = sqlx::query(
-                "UPDATE environments SET desired_state = 'started', state_changed_at = NOW() WHERE id = $1 AND org_id = $2 AND state = 'stopped'",
+                "UPDATE environments SET desired_state = 'started', error_reason = CASE WHEN error_code = 'no_capacity' THEN NULL ELSE error_reason END, error_code = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2 AND state = 'stopped'",
             )
             .bind(env_id)
             .bind(org_id)
@@ -229,7 +235,7 @@ impl Service<PgLifecycleStore> {
             }
         } else {
             let changed = sqlx::query(
-                "UPDATE environments SET desired_state = 'started', state_changed_at = NOW() WHERE id = $1 AND org_id = $2",
+                "UPDATE environments SET desired_state = 'started', error_reason = CASE WHEN error_code = 'no_capacity' THEN NULL ELSE error_reason END, error_code = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2",
             )
             .bind(env_id)
             .bind(org_id)
@@ -255,7 +261,7 @@ impl Service<PgLifecycleStore> {
     pub async fn retry_confidential_start(&self, env_id: &str, org_id: &str) -> anyhow::Result<()> {
         let mut tx = self.store.pool.begin().await?;
         let changed = sqlx::query(
-            r#"UPDATE environments SET state = 'pending', desired_state = 'started', error_reason = NULL,
+            r#"UPDATE environments SET state = 'pending', desired_state = 'started', error_reason = NULL, error_code = NULL,
                retry_count = retry_count + 1, state_changed_at = NOW()
                WHERE id = $1 AND org_id = $2 AND state = 'error'"#,
         )
@@ -410,6 +416,21 @@ impl<S: LifecycleStore> Service<S> {
             .map_err(|e| anyhow::anyhow!("mark error for states {states:?}: {e:#}"))
     }
 
+    /// Ends a create or a start the cluster has no room for, with its code and
+    /// message, and states the next step: the next reconcile destroys a create
+    /// and stops a start. Nothing retries it (#3635).
+    pub async fn refuse_for_no_capacity(
+        &self,
+        env_id: &str,
+        refusal: NoCapacityRefusal,
+        states: &[&str],
+    ) -> anyhow::Result<bool> {
+        self.store
+            .refuse_for_no_capacity(env_id, refusal, states)
+            .await
+            .map_err(|e| anyhow::anyhow!("refuse for no capacity from {states:?}: {e:#}"))
+    }
+
     /// Mirrors `Protect`: Ok(true) → a live row was protected.
     pub async fn protect(&self, env_id: &str) -> anyhow::Result<bool> {
         self.store
@@ -527,6 +548,40 @@ impl<S: LifecycleStore> Service<S> {
     }
 }
 
+/// `environments.error_code` of a create or start the cluster had no room for.
+pub const NO_CAPACITY_ERROR_CODE: &str = "no_capacity";
+
+/// How a create or a start ends when the cluster has no room for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoCapacityRefusal {
+    pub message: &'static str,
+    pub state: &'static str,
+    pub desired_state: &'static str,
+}
+
+impl NoCapacityRefusal {
+    /// The create handler also resumes a start and retries an errored sandbox,
+    /// so only one that never ran may be destroyed; any other keeps its files.
+    pub fn for_create(never_ran: bool) -> Self {
+        if never_ran { Self::CREATE } else { Self::START }
+    }
+
+    /// A create leaves nothing behind: the next reconcile destroys it through
+    /// the normal destroy, and it stops counting against quota now.
+    pub const CREATE: Self = Self {
+        message: "No capacity right now. Try again shortly.",
+        state: "error",
+        desired_state: "destroyed",
+    };
+    /// A stopped sandbox's volume cannot leave its node, so it goes back to
+    /// stopped, through the normal stop, with its files untouched.
+    pub const START: Self = Self {
+        message: "The node holding this sandbox is full. Its files are safe. Try again shortly.",
+        state: "stopping",
+        desired_state: "stopped",
+    };
+}
+
 // ── Postgres store (port of pgstore.go, worker-used slice) ─────────────
 
 #[derive(Clone)]
@@ -635,7 +690,7 @@ impl LifecycleStore for PgLifecycleStore {
         self.exec_logged(
             env_id,
             sqlx::query(
-                r#"UPDATE environments SET state = 'pending', error_reason = NULL,
+                r#"UPDATE environments SET state = 'pending', error_reason = NULL, error_code = NULL,
                    retry_count = retry_count + 1, state_changed_at = NOW()
                    WHERE id = $1 AND state = 'error'"#,
             )
@@ -1064,6 +1119,44 @@ impl LifecycleStore for PgLifecycleStore {
         Ok(rows > 0)
     }
 
+    async fn refuse_for_no_capacity(
+        &self,
+        env_id: &str,
+        refusal: NoCapacityRefusal,
+        states: &[&str],
+    ) -> anyhow::Result<bool> {
+        let states_vec: Vec<String> = states.iter().map(|s| s.to_string()).collect();
+        let rows = self
+            .exec_logged(
+                env_id,
+                sqlx::query(
+                    r#"UPDATE environments
+                       SET state = $1, desired_state = $2, error_code = $3, error_reason = $4,
+                           state_changed_at = NOW()
+                       WHERE id = $5 AND state = ANY($6) AND desired_state = 'started'"#,
+                )
+                .bind(refusal.state)
+                .bind(refusal.desired_state)
+                .bind(NO_CAPACITY_ERROR_CODE)
+                .bind(refusal.message)
+                .bind(env_id)
+                .bind(states_vec.clone()),
+                LogEntry {
+                    phase: "lifecycle_no_capacity",
+                    status: "failed",
+                    message: refusal.message.to_string(),
+                    metadata: serde_json::json!({
+                        "kind": "no_capacity",
+                        "from": states_vec,
+                        "state": refusal.state,
+                        "desired_state": refusal.desired_state,
+                    }),
+                },
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
     async fn protect(&self, env_id: &str) -> anyhow::Result<bool> {
         let rows = self
             .exec_logged(
@@ -1238,6 +1331,14 @@ mod tests {
             &self,
             _: &str,
             _: &str,
+            _: &[&str],
+        ) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn refuse_for_no_capacity(
+            &self,
+            _: &str,
+            _: NoCapacityRefusal,
             _: &[&str],
         ) -> anyhow::Result<bool> {
             Ok(true)

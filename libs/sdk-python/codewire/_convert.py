@@ -24,6 +24,7 @@ _ENVIRONMENT_DESCRIPTOR_FIELDS = {
     28: "deletion_grace_until", 29: "preset_name", 30: "network",
     31: "ports", 32: "isolation_tier", 33: "operation_generation",
     34: "source_selection", 35: "network_state", 36: "network_failure",
+    37: "error_code",
 }
 
 _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {

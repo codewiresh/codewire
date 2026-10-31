@@ -18,6 +18,7 @@ fn environment() -> EnvironmentRow {
         source_snapshot_id: None,
         isolation_tier: "standard".into(),
         dedicated_cpu: false,
+        never_ran: false,
         ttl_seconds: None,
         project_spec: ProjectSpec::default(),
         operation_generation: 7,

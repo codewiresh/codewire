@@ -1088,6 +1088,21 @@ fn setup_failure_reports_states_that_cannot_finish_setup() {
     for state in ["pending", "creating", "starting", "running"] {
         assert!(setup_failure(&environment(state)).is_none(), "{state}");
     }
+    // No room says so plainly, at every state on the way out and not only "error".
+    for state in ["error", "destroying", "destroyed", "stopping", "stopped"] {
+        let refused = Environment {
+            error_code: Some("no_capacity".to_owned()),
+            error_reason: Some("No capacity right now. Try again shortly.".to_owned()),
+            ..environment(state)
+        };
+        assert_eq!(
+            setup_failure(&refused).unwrap().to_string(),
+            "No capacity right now. Try again shortly.",
+            "{state}"
+        );
+        assert!(no_capacity_failure(&refused).is_some(), "{state}");
+    }
+    assert!(no_capacity_failure(&environment("error")).is_none());
     assert_eq!(
         setup_failure(&Environment {
             error_reason: Some("claim: quota exceeded\n".to_owned()),

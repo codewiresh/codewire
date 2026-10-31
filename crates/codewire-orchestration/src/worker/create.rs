@@ -24,7 +24,7 @@ use super::workspace_binding::{
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::sandbox::client::{
-    ProbeResult, RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity,
+    NoCapacity, ProbeResult, RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity,
     WorkspaceSandboxIdentity,
 };
 use crate::sandbox::host_keys::RecordedHostKeys;
@@ -46,6 +46,9 @@ mod warm_bridge;
 
 #[cfg(test)]
 mod projection_tests;
+
+#[cfg(test)]
+mod no_capacity_database_tests;
 
 #[cfg(test)]
 mod pod_marks_database_tests;
@@ -1450,10 +1453,26 @@ async fn run_environment_create(
                         CREATE_MUTATION_STATES,
                         "wait_for_ready",
                         "failed",
-                        &format!("{e:#}"),
+                        &wait_failure_log(
+                            &e,
+                            crate::lifecycle::NoCapacityRefusal::for_create(env.never_ran),
+                        ),
                         duration_meta(started),
                     )
                     .await?;
+                    if let Some(refusal) = no_capacity_refusal(&e) {
+                        refuse_for_no_capacity(
+                            ctx,
+                            &svc,
+                            authority,
+                            env_id,
+                            crate::lifecycle::NoCapacityRefusal::for_create(env.never_ran),
+                            CREATE_MUTATION_STATES,
+                            refusal,
+                        )
+                        .await?;
+                        return Ok(None);
+                    }
                     if reclaim_cold(ctx, &env, authority, &e).await {
                         reclaimed_cold = true;
                         continue;
@@ -1892,10 +1911,26 @@ async fn run_environment_create(
                             authority,
                             "access_ready",
                             "failed",
-                            &format!("{e:#}"),
+                            &wait_failure_log(
+                                &e,
+                                crate::lifecycle::NoCapacityRefusal::for_create(env.never_ran),
+                            ),
                             gateway_meta,
                         )
                         .await?;
+                        if let Some(refusal) = no_capacity_refusal(&e) {
+                            refuse_for_no_capacity(
+                                ctx,
+                                &svc,
+                                authority,
+                                env_id,
+                                crate::lifecycle::NoCapacityRefusal::for_create(env.never_ran),
+                                CREATE_MUTATION_STATES,
+                                refusal,
+                            )
+                            .await?;
+                            return Ok(None);
+                        }
                         if reclaim_cold(ctx, &env, authority, &e).await {
                             reclaimed_cold = true;
                             continue;
@@ -3093,6 +3128,57 @@ async fn readiness_wait<T>(
     })
 }
 
+/// The scheduler's refusal, when the readiness wait ended for lack of room.
+pub(super) fn no_capacity_refusal(error: &anyhow::Error) -> Option<&NoCapacity> {
+    error.downcast_ref::<NoCapacity>().or_else(|| {
+        error
+            .downcast_ref::<ReadinessWaitFailed>()
+            .and_then(|failed| failed.0.downcast_ref::<NoCapacity>())
+    })
+}
+
+/// A failed wait's line in the environment's log, which its user reads. The
+/// scheduler's words describe the cluster's nodes, so a refusal says what the
+/// user can do; [`refuse_for_no_capacity`] keeps them in the worker's log.
+pub(super) fn wait_failure_log(
+    error: &anyhow::Error,
+    outcome: crate::lifecycle::NoCapacityRefusal,
+) -> String {
+    match no_capacity_refusal(error) {
+        Some(_) => outcome.message.to_owned(),
+        None => format!("{error:#}"),
+    }
+}
+
+/// End a create or a start the cluster has no room for, in place of an error
+/// that would retry: this activity finishes, and the reconcile it queues does
+/// the normal destroy or stop (#3635). The count and the log line are per
+/// refusal, so how often it happens is visible.
+pub(super) async fn refuse_for_no_capacity(
+    ctx: &WorkerContext,
+    svc: &Service<PgLifecycleStore>,
+    authority: &ActivityAuthority,
+    env_id: &str,
+    outcome: crate::lifecycle::NoCapacityRefusal,
+    states: &[&str],
+    refusal: &NoCapacity,
+) -> anyhow::Result<()> {
+    authority.ensure().await?;
+    if !svc.refuse_for_no_capacity(env_id, outcome, states).await? {
+        return Ok(());
+    }
+    crate::start_metrics::record_no_capacity(outcome.desired_state);
+    tracing::warn!(
+        environment_id = env_id,
+        outcome = outcome.desired_state,
+        refusal = %refusal.0,
+        "no capacity for the workspace Pod"
+    );
+    ctx.temporal_trigger
+        .trigger_environment(env_id, "reconcile")
+        .await
+}
+
 /// Whether a create failure may re-claim cold: a definitive bind-check
 /// refusal, or a readiness wait that failed (review M3).
 fn reclaim_eligible(error: &anyhow::Error) -> bool {
@@ -3222,6 +3308,23 @@ fn _claim_name_used(env_id: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_refusal_logs_the_users_message_not_the_schedulers() {
+        let outcome = crate::lifecycle::NoCapacityRefusal::CREATE;
+        let scheduler = "0/2 nodes are available: 2 Insufficient cpu.";
+        for error in [
+            anyhow::Error::from(NoCapacity(scheduler.to_owned())),
+            ReadinessWaitFailed(NoCapacity(scheduler.to_owned()).into()).into(),
+        ] {
+            assert_eq!(wait_failure_log(&error, outcome), outcome.message);
+        }
+        let other = anyhow::anyhow!("pod sandbox: ImagePullBackOff");
+        assert_eq!(
+            wait_failure_log(&other, outcome),
+            "pod sandbox: ImagePullBackOff"
+        );
+    }
+
     fn identity_mode_env() -> EnvironmentRow {
         EnvironmentRow {
             id: "550e8400-e29b-41d4-a716-446655440000".into(),
@@ -3232,6 +3335,7 @@ mod tests {
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
             dedicated_cpu: false,
+            never_ran: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 2000,
             memory_mb: 4096,
@@ -3439,6 +3543,7 @@ mod tests {
         let confidential = EnvironmentRow {
             isolation_tier: "confidential".into(),
             dedicated_cpu: false,
+            never_ran: false,
             ..identity_mode_env()
         };
         let measured_cfg = SandboxWorkerCfg {
@@ -3601,6 +3706,7 @@ mod tests {
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
             dedicated_cpu: false,
+            never_ran: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,
@@ -4362,6 +4468,7 @@ mod tests {
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
             dedicated_cpu: false,
+            never_ran: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,
@@ -4429,6 +4536,7 @@ mod tests {
             desired_state: "started".into(),
             isolation_tier: "confidential".into(),
             dedicated_cpu: false,
+            never_ran: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 2000,
             memory_mb: 16384,
@@ -4506,6 +4614,7 @@ mod tests {
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
             dedicated_cpu: false,
+            never_ran: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 2000,
             memory_mb: 4096,
@@ -4582,6 +4691,7 @@ mod tests {
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
             dedicated_cpu: false,
+            never_ran: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,
@@ -4709,6 +4819,7 @@ mod tests {
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
             dedicated_cpu: false,
+            never_ran: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,
@@ -4773,6 +4884,7 @@ mod tests {
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
             dedicated_cpu: false,
+            never_ran: false,
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,

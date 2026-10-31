@@ -904,10 +904,22 @@ pub async fn handle_environment_start(
             authority,
             "wait_for_ready",
             "failed",
-            &format!("{e:#}"),
+            &super::create::wait_failure_log(&e, crate::lifecycle::NoCapacityRefusal::START),
             Some(stage_meta(ready_elapsed)),
         )
         .await?;
+        if let Some(refusal) = super::create::no_capacity_refusal(&e) {
+            return super::create::refuse_for_no_capacity(
+                ctx,
+                &svc,
+                authority,
+                env_id,
+                crate::lifecycle::NoCapacityRefusal::START,
+                START_MUTATION_STATES,
+                refusal,
+            )
+            .await;
+        }
         record_environment_error(&svc, authority, env_id, &format!("{e:#}")).await?;
         return Err(anyhow::anyhow!("wait for sandbox ready: {e:#}"));
     }

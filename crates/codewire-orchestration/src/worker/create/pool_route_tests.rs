@@ -47,6 +47,7 @@ fn environment(cpu: i32, memory: i32, disk: i32) -> EnvironmentRow {
         desired_state: "started".into(),
         isolation_tier: "standard".into(),
         dedicated_cpu: false,
+        never_ran: false,
         external_cleanup_completed_at: None,
         cpu_millicores: cpu,
         memory_mb: memory,
@@ -215,6 +216,7 @@ fn a_dedicated_organization_goes_cold_only_while_the_pools_share() {
     let sharing = environment(1000, 4096, 10);
     let dedicated = EnvironmentRow {
         dedicated_cpu: true,
+        never_ran: false,
         ..environment(1000, 4096, 10)
     };
     assert!(candidate(&shared, &sharing).is_ok());

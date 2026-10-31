@@ -861,7 +861,25 @@ pub(crate) async fn watch_setup_failure(
     }
 }
 
+/// The message when the cluster had no room for this environment. It is written
+/// for the user, whatever state the environment has reached on the way out.
+pub(crate) fn no_capacity_failure(environment: &Environment) -> Option<anyhow::Error> {
+    if environment.error_code.as_deref() != Some("no_capacity") {
+        return None;
+    }
+    let message = environment
+        .error_reason
+        .as_deref()
+        .map(terminal_text)
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or_else(|| "No capacity right now. Try again shortly.".to_owned());
+    Some(anyhow::anyhow!(message))
+}
+
 pub(crate) fn setup_failure(environment: &Environment) -> Option<anyhow::Error> {
+    if let Some(failure) = no_capacity_failure(environment) {
+        return Some(failure);
+    }
     let id = &environment.id;
     match environment.state.as_str() {
         "build_failed" | "error" | "failed" | "stopping" | "stopped" | "destroying"

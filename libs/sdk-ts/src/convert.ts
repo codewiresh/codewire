@@ -730,6 +730,7 @@ export function fromProtoEnvironment(value: ProtoEnvironment): EnvironmentData {
     desired_state: mapDesiredState(value.desiredState),
     destroyed_at: timestampString(value.destroyedAt),
     disk_gb: value.diskGb,
+    error_code: optionalString(value.errorCode),
     error_reason: optionalString(value.errorReason),
     id: value.id,
     isolation_tier: mapIsolationTier(value.isolationTier),
@@ -1185,7 +1186,7 @@ export function assertRuntimeConverterCoverage(): void {
     [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [18, "credentials"],
   ]));
   assertDescriptorCoverage("environment", EnvironmentSchema.fields, new Map([
-    [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"], [33, "operation_generation"], [34, "source_selection"], [35, "network_state"], [36, "network_failure"],
+    [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"], [33, "operation_generation"], [34, "source_selection"], [35, "network_state"], [36, "network_failure"], [37, "error_code"],
   ]));
   assertDescriptorCoverage("create environment request", CreateEnvironmentRequestSchema.fields, new Map([
     [1, "org_id"], [2, "preset_id"], [3, "name"], [7, "ttl_seconds"], [24, "isolation_tier"], [25, "project_spec"], [26, "expected_profile_revision"], [27, "confirm_personal_credentials"], [28, "confirm_personal_secrets"], [29, "omit_application_previews"], [30, "network"], [31, "source_snapshot_id"],

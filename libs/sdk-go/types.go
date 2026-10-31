@@ -94,12 +94,14 @@ type EnvironmentData struct {
 	DesiredState        string  `json:"desired_state"`
 	DestroyedAt         *string `json:"destroyed_at,omitempty"`
 	DiskGb              int64   `json:"disk_gb"`
-	ErrorReason         *string `json:"error_reason,omitempty"`
-	Id                  string  `json:"id"`
-	IsolationTier       string  `json:"isolation_tier"`
-	MemoryMb            int64   `json:"memory_mb"`
-	Name                *string `json:"name,omitempty"`
-	Network             *string `json:"network,omitempty"`
+	// ErrorCode names a failure a program can act on: no_capacity when no node had room.
+	ErrorCode     *string `json:"error_code,omitempty"`
+	ErrorReason   *string `json:"error_reason,omitempty"`
+	Id            string  `json:"id"`
+	IsolationTier string  `json:"isolation_tier"`
+	MemoryMb      int64   `json:"memory_mb"`
+	Name          *string `json:"name,omitempty"`
+	Network       *string `json:"network,omitempty"`
 	// NetworkState is pending, attached, failed or revoked when Network is set.
 	NetworkState *string `json:"network_state,omitempty"`
 	// NetworkFailure says why joining Network failed when NetworkState is failed.

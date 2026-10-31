@@ -316,6 +316,26 @@ func TestEnvironmentNetworkAttachmentRoundTrips(t *testing.T) {
 	}
 }
 
+func TestEnvironmentErrorCodeRoundTrips(t *testing.T) {
+	refused, err := fromProtoEnvironment(&codewirev1.Environment{
+		ErrorCode:   "no_capacity",
+		ErrorReason: "No capacity right now. Try again shortly.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if valueOrEmpty(refused.ErrorCode) != "no_capacity" {
+		t.Fatalf("error code changed: %+v", refused)
+	}
+	healthy, err := fromProtoEnvironment(&codewirev1.Environment{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healthy.ErrorCode != nil {
+		t.Fatalf("an environment without a failure reports no code: %+v", healthy)
+	}
+}
+
 func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	empty := ""
 	zero := int64(0)

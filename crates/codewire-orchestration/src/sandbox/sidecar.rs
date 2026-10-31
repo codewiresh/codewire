@@ -311,15 +311,17 @@ impl SandboxClient {
         timeout: Duration,
         host_keys: &dyn HostKeyStore,
     ) -> anyhow::Result<String> {
-        self.wait_for_workspace_access_ready_on(
-            env_id,
-            WORKSPACE_SSH_PORT,
-            timeout,
-            ACCESS_DIRECT_CONNECT_TIMEOUT,
-            host_keys,
-            AccessProof::LoginAndSftp,
-        )
-        .await
+        tokio::select! {
+            proven = self.wait_for_workspace_access_ready_on(
+                env_id,
+                WORKSPACE_SSH_PORT,
+                timeout,
+                ACCESS_DIRECT_CONNECT_TIMEOUT,
+                host_keys,
+                AccessProof::LoginAndSftp,
+            ) => proven,
+            refusal = Box::pin(self.refused_for_no_capacity(env_id)) => Err(refusal.into()),
+        }
     }
 
     /// `connect_timeout` bounds each direct attempt's connect:

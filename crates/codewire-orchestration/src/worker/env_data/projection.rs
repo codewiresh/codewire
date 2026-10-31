@@ -26,6 +26,8 @@ use codewire_project::{
 pub(super) const ENVIRONMENT_QUERY: &str = r#"
     SELECT e.id, e.org_id, e.preset_id, e.type, e.state, e.desired_state,
            e.external_cleanup_completed_at,
+           e.state IN ('pending', 'creating') AND e.retry_count = 0
+               AND e.started_at IS NULL AND e.stopped_at IS NULL AS never_ran,
            e.cpu_millicores, e.memory_mb, e.disk_gb, e.source_snapshot_id,
            e.isolation_tier, e.ttl_seconds,
            e.project_spec, e.created_by, e.environment_operation_generation,

@@ -28,6 +28,10 @@ pub struct EnvironmentRow {
     /// The organization's sandboxes reserve a CPU per vCPU instead of sharing,
     /// read each time a Sandbox is rendered (#3635).
     pub dedicated_cpu: bool,
+    /// This is its first attempt and it has never been running or stopped, so
+    /// it can hold nothing of the user's. `started_at` alone doesn't prove it:
+    /// a failed write leaves that unset on a sandbox that ran.
+    pub never_ran: bool,
     pub ttl_seconds: Option<i32>,
     pub project_spec: ProjectSpec,
     /// Existing lifecycle authority captured with this exact metadata read.
@@ -109,6 +113,7 @@ fn decode_environment(row: sqlx::postgres::PgRow) -> anyhow::Result<EnvironmentR
         dedicated_cpu: row
             .try_get::<Option<bool>, _>("dedicated_cpu")?
             .unwrap_or(false),
+        never_ran: row.try_get("never_ran")?,
         ttl_seconds: row.try_get("ttl_seconds")?,
         project_spec,
         operation_generation,

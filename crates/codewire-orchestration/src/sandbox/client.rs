@@ -284,6 +284,29 @@ const POD_RESIZE_SUBMIT_ATTEMPTS: usize = 5;
 #[derive(Debug)]
 pub struct PodResizeInfeasible(pub String);
 
+/// How long the scheduler must keep refusing a workspace Pod for lack of
+/// resources before the wait calls the cluster full (#3635). Long enough for a
+/// terminating Kata Pod to give its reservation back, which the scheduler then
+/// sees by itself; a worker restart only restarts this clock.
+pub const NO_CAPACITY_GRACE: Duration = Duration::from_secs(60);
+
+/// How often [`SandboxClient::refused_for_no_capacity`] reads the Pod.
+const NO_CAPACITY_POLL: Duration = Duration::from_secs(5);
+
+/// The scheduler refused the workspace Pod for lack of resources for
+/// [`NO_CAPACITY_GRACE`]. There is no autoscaler to wait for, so more waiting
+/// only delays the answer.
+#[derive(Debug)]
+pub struct NoCapacity(pub String);
+
+impl std::fmt::Display for NoCapacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no capacity for the workspace Pod: {}", self.0)
+    }
+}
+
+impl std::error::Error for NoCapacity {}
+
 impl std::fmt::Display for PodResizeInfeasible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -4208,8 +4231,32 @@ impl SandboxClient {
     /// missed or failed watch only falls back to the old 2-second re-read.
     #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
     pub async fn wait_for_ready(&self, env_id: &str, timeout: Duration) -> anyhow::Result<()> {
-        self.wait_for_ready_with_fallback(env_id, timeout, CLAIM_READY_FALLBACK_POLL)
-            .await
+        tokio::select! {
+            result = self.wait_for_ready_with_fallback(env_id, timeout, CLAIM_READY_FALLBACK_POLL) => result,
+            refusal = Box::pin(self.refused_for_no_capacity(env_id)) => Err(refusal.into()),
+        }
+    }
+
+    /// Ends once the scheduler has refused the environment's workspace Pod for
+    /// lack of resources for [`NO_CAPACITY_GRACE`] without a break, and never
+    /// otherwise, so each wait for a new Pod races it (#3635). An unreadable Pod
+    /// breaks the run, so only an unbroken refusal counts.
+    pub(super) async fn refused_for_no_capacity(&self, env_id: &str) -> NoCapacity {
+        let name = claim_name(env_id);
+        let mut refused_since = None;
+        loop {
+            let pod = self.claim_workspace_pod(&name).await;
+            match pod.as_ref().and_then(capacity_refusal) {
+                Some(refusal) => {
+                    let since = *refused_since.get_or_insert_with(tokio::time::Instant::now);
+                    if since.elapsed() >= NO_CAPACITY_GRACE {
+                        return NoCapacity(refusal);
+                    }
+                }
+                None => refused_since = None,
+            }
+            tokio::time::sleep(NO_CAPACITY_POLL).await;
+        }
     }
 
     async fn wait_for_ready_with_fallback(
@@ -4233,8 +4280,10 @@ impl SandboxClient {
             // Pod failure check after the same 10s scheduling grace
             // period Go's pollPodFailures uses.
             if started.elapsed() >= Duration::from_secs(10)
-                && let Some(err) = self.pod_terminal_failure(&name).await
+                && let Some(pod) = self.claim_workspace_pod(&name).await
+                && let Some((reason, message)) = terminal_pod_failure_reason(&pod)
             {
+                let err = anyhow::anyhow!("pod {name}: {reason}: {message}");
                 tracing::warn!(claim = name, error = %err, "pod terminal failure detected");
                 return Err(err);
             }
@@ -4265,7 +4314,7 @@ impl SandboxClient {
 
     /// Mirrors `pollPodFailures`' per-tick check: resolve the pod
     /// behind the claim, then look for terminal waiting reasons.
-    async fn pod_terminal_failure(&self, claim: &str) -> Option<anyhow::Error> {
+    async fn claim_workspace_pod(&self, claim: &str) -> Option<Pod> {
         // No Claim-name fallback: an unbound Claim has no Pod to inspect yet.
         let sandbox_name = match self.claims.get(claim).await {
             Ok(c) => claim_bound_sandbox_name(&c)?.to_string(),
@@ -4275,16 +4324,26 @@ impl SandboxClient {
             Ok(sandbox) => sandbox_pod_name(&sandbox, &sandbox_name).to_owned(),
             Err(_) => sandbox_name.clone(),
         };
-        let pod = match self.pods().get(&pod_name).await {
-            Ok(p) => p,
-            Err(_) => return None, // pod not scheduled yet
-        };
-        let (reason, message) = terminal_pod_failure_reason(&pod)?;
-        Some(anyhow::anyhow!(
-            "pod {}: {reason}: {message}",
-            pod.metadata.name.as_deref().unwrap_or(&pod_name)
-        ))
+        // No Pod yet: not scheduled either.
+        self.pods().get(&pod_name).await.ok()
     }
+}
+
+/// The scheduler's message when it refused `pod` for lack of a resource, not for
+/// a taint, a selector or a volume alone: those are not "full".
+fn capacity_refusal(pod: &Pod) -> Option<String> {
+    let condition = pod
+        .status
+        .as_ref()?
+        .conditions
+        .as_deref()?
+        .iter()
+        .find(|condition| condition.type_ == "PodScheduled")?;
+    let message = condition.message.as_deref().unwrap_or_default();
+    (condition.status == "False"
+        && condition.reason.as_deref() == Some("Unschedulable")
+        && (message.contains("Insufficient ") || message.contains("Too many pods")))
+    .then(|| message.to_owned())
 }
 
 fn delete_params_for_observed_uid(uid: &str) -> DeleteParams {
@@ -6638,6 +6697,51 @@ mod tests {
             Some(&json!("2")),
             "DinD keeps its own"
         );
+    }
+
+    #[test]
+    fn only_a_resource_refusal_counts_as_no_capacity() {
+        let pending = |status: &str, reason: &str, message: &str| -> Pod {
+            serde_json::from_value(json!({
+                "metadata": {"name": "workspace"},
+                "status": {"conditions": [{
+                    "type": "PodScheduled", "status": status, "reason": reason, "message": message
+                }]}
+            }))
+            .unwrap()
+        };
+        let full = "0/4 nodes are available: 1 Insufficient cpu, 1 node(s) had untolerated taint(s), 2 node(s) didn't match Pod's node affinity/selector.";
+        assert_eq!(
+            capacity_refusal(&pending("False", "Unschedulable", full)).as_deref(),
+            Some(full)
+        );
+        for message in [
+            "0/1 nodes are available: 1 Insufficient memory.",
+            "0/1 nodes are available: 1 Too many pods.",
+        ] {
+            assert_eq!(
+                capacity_refusal(&pending("False", "Unschedulable", message)).as_deref(),
+                Some(message)
+            );
+        }
+        // A volume on another node or a taint alone is not "full".
+        for message in [
+            "0/4 nodes are available: 1 node(s) had volume node affinity conflict, 3 node(s) didn't match Pod's node affinity/selector.",
+            "0/1 nodes are available: 1 node(s) had untolerated taint(s).",
+        ] {
+            assert_eq!(
+                capacity_refusal(&pending("False", "Unschedulable", message)),
+                None
+            );
+        }
+        // Scheduled, or not refused by the scheduler, is not "full" either.
+        assert_eq!(capacity_refusal(&pending("True", "", full)), None);
+        assert_eq!(
+            capacity_refusal(&pending("False", "SchedulingGated", full)),
+            None
+        );
+        let no_status: Pod = serde_json::from_value(json!({"metadata": {"name": "p"}})).unwrap();
+        assert_eq!(capacity_refusal(&no_status), None);
     }
 
     #[test]

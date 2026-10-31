@@ -44,6 +44,7 @@ pub struct Environment {
     pub desired_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_reason: Option<String>,
+    pub error_code: Option<String>,
     pub recoverable: bool,
     pub state_changed_at: String,
     pub retry_count: i32,
@@ -147,7 +148,7 @@ pub(crate) fn compute_preview_url(
 /// Mirrors `envSelectCols` (environment_db.go) — columns only, so the
 /// create handler's `WITH ins AS (...)` CTE can reuse them.
 pub(crate) const ENV_SELECT_COLS: &str = r#"e.id, e.org_id, e.created_by, e.preset_id, e.type, e.name,
-    e.state, e.desired_state, e.error_reason, e.recoverable, e.state_changed_at, e.retry_count,
+    e.state, e.desired_state, e.error_reason, e.error_code, e.recoverable, e.state_changed_at, e.retry_count,
     e.environment_operation_generation,
     jsonb_build_object('secrets',COALESCE(e.project_spec->'secrets','{}'::jsonb),
                        'credentials',e.project_spec->'credentials') AS source_spec,
@@ -197,6 +198,7 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
         state: row.try_get("state")?,
         desired_state: row.try_get("desired_state")?,
         error_reason: row.try_get("error_reason")?,
+        error_code: row.try_get("error_code")?,
         recoverable: row.try_get("recoverable")?,
         state_changed_at: format_time(row.try_get("state_changed_at")?),
         retry_count: row.try_get("retry_count")?,
@@ -1625,6 +1627,7 @@ mod tests {
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
             error_reason: None,
+            error_code: None,
             recoverable: true,
             state_changed_at: "2026-06-12T00:00:00Z".into(),
             retry_count: 0,

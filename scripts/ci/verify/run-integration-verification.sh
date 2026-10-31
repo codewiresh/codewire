@@ -961,6 +961,12 @@ database_lane_orchestration() {
       'worker::create::projection_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "no capacity outcome matrix" no-capacity-outcome \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::create::no_capacity_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "warm Pod start marks matrix" warm-pod-start-marks \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

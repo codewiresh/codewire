@@ -158,6 +158,9 @@ message Environment {
   NetworkAttachmentState network_state = 35;
   // Why joining `network` failed; set only with NETWORK_ATTACHMENT_STATE_FAILED.
   NetworkAttachmentFailure network_failure = 36;
+  // Why error_reason was set, when it has a stable name: no_capacity means the
+  // cluster had no room. error_reason is its message, written for the user.
+  string error_code = 37;
 }
 
 // NetworkAttachmentState is how far an environment's Mesh network

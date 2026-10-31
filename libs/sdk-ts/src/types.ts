@@ -94,6 +94,8 @@ export interface EnvironmentData {
   desired_state: string;
   destroyed_at?: string | null;
   disk_gb: number;
+  /** A failure a program can act on: `no_capacity` when no node had room. */
+  error_code?: string | null;
   error_reason?: string | null;
   id: string;
   isolation_tier: IsolationTier;

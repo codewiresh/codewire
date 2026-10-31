@@ -153,6 +153,8 @@ The setting applies to sandboxes created after it changes, and a change rotates 
 
 A global administrator can give an organization dedicated CPU (`SetOrganizationDedicatedCpu`): its new sandboxes are 1:1 whatever this setting says. While the deployment shares, they start cold, because the warm pools share.
 
+When the scheduler refuses a workspace Pod for lack of a resource for 60 seconds without a break, a create or start ends there instead of waiting out its timeout, with the error code `no_capacity` and a message for the user. A sandbox that has never run is removed; any other goes back to stopped, with its files. A resize that replaces the Pod still waits out its timeout. `codewire_environment_no_capacity_total` counts refusals by `outcome`: `destroyed` or `stopped`.
+
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
 | `CODEWIRE_SANDBOX_CPU_SHARING_RATIO` | No | How many vCPUs share one reserved CPU: a whole number from 1 to 8. A workspace requests its vCPUs divided by this, rounded up. Unset, empty or `1` means off, one reserved CPU per vCPU. Any other form stops orchestration at startup. | `2` |

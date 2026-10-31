@@ -146,6 +146,134 @@ async fn claim_readiness_fails_once_the_deadline_passes() {
     assert_eq!(requests.lock().unwrap().len(), 3);
 }
 
+/// A Kubernetes API on the paused clock: the Claim is bound and turns Ready at
+/// `ready_at`, and `refusal` gives the workspace Pod's scheduler message at each
+/// moment since the wait began.
+fn scheduling_client(
+    ready_at: Option<Duration>,
+    refusal: impl Fn(Duration) -> Option<&'static str> + Clone + Send + Sync + 'static,
+) -> SandboxClient {
+    let started = tokio::time::Instant::now();
+    let service = Router::new().fallback(move |request: Request<Body>| {
+        let refusal = refusal.clone();
+        async move {
+            let now = started.elapsed();
+            let path = request.uri().path_and_query().unwrap().as_str().to_owned();
+            let body = if path.contains("watch=true") {
+                String::new()
+            } else if path.contains("/sandboxclaims/") {
+                let ready = ready_at.is_some_and(|at| now >= at);
+                let mut object = claim("20", ready);
+                object["status"]["sandbox"] = json!({"name": "workspace-sandbox"});
+                object.to_string()
+            } else if path.contains("/sandboxes/") {
+                json!({
+                    "apiVersion": "agents.x-k8s.io/v1alpha1",
+                    "kind": "Sandbox",
+                    "metadata": {"name": "workspace-sandbox", "namespace": NS},
+                })
+                .to_string()
+            } else {
+                let conditions = refusal(now).map_or_else(Vec::new, |message| {
+                    vec![json!({
+                        "type": "PodScheduled",
+                        "status": "False",
+                        "reason": "Unschedulable",
+                        "message": message,
+                    })]
+                });
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {"name": "workspace-sandbox", "namespace": NS},
+                    "status": {"phase": "Pending", "conditions": conditions},
+                })
+                .to_string()
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        }
+    });
+    SandboxClient::new(Client::new(service, "default"), NS)
+}
+
+const FULL: &str = "0/2 nodes are available: 2 Insufficient cpu.";
+const TAINTED: &str = "0/2 nodes are available: 2 node(s) had untolerated taint.";
+/// Longer than any outcome below, so only the deadline test can reach it.
+const LONG_WAIT: Duration = Duration::from_secs(600);
+
+#[tokio::test(start_paused = true)]
+async fn a_full_cluster_ends_the_wait_soon_after_the_grace() {
+    let client = scheduling_client(None, |_| Some(FULL));
+    let started = tokio::time::Instant::now();
+    let error = client.wait_for_ready(ENV, LONG_WAIT).await.unwrap_err();
+    assert_eq!(error.downcast_ref::<NoCapacity>().unwrap().0, FULL);
+    let waited = started.elapsed();
+    assert!(
+        (NO_CAPACITY_GRACE..NO_CAPACITY_GRACE + Duration::from_secs(15)).contains(&waited),
+        "{waited:?}"
+    );
+}
+
+/// No key is recorded, as for a Pod that never started.
+struct NoHostKey;
+
+#[async_trait::async_trait]
+impl crate::sandbox::host_keys::HostKeyStore for NoHostKey {
+    async fn current_host_key(&self, _: &str) -> Result<Option<(i64, String)>, sqlx::Error> {
+        Ok(None)
+    }
+}
+
+/// A cold create waits here rather than on the Claim.
+#[tokio::test(start_paused = true)]
+async fn a_full_cluster_ends_the_access_wait_too() {
+    let client = scheduling_client(None, |_| Some(FULL));
+    let started = tokio::time::Instant::now();
+    let error = client
+        .prove_workspace_access(ENV, LONG_WAIT, &NoHostKey)
+        .await
+        .unwrap_err();
+    assert_eq!(error.downcast_ref::<NoCapacity>().unwrap().0, FULL);
+    assert!(started.elapsed() < NO_CAPACITY_GRACE + Duration::from_secs(15));
+}
+
+#[tokio::test(start_paused = true)]
+async fn room_freed_during_the_grace_restarts_it() {
+    let client = scheduling_client(None, |now| {
+        let free = (Duration::from_secs(40)..Duration::from_secs(50)).contains(&now);
+        (!free).then_some(FULL)
+    });
+    let started = tokio::time::Instant::now();
+    let error = client.wait_for_ready(ENV, LONG_WAIT).await.unwrap_err();
+    assert!(error.downcast_ref::<NoCapacity>().is_some(), "{error:#}");
+    assert!(
+        started.elapsed() >= Duration::from_secs(50) + NO_CAPACITY_GRACE,
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pod_placed_during_the_grace_is_ready() {
+    let client = scheduling_client(Some(Duration::from_secs(30)), |_| Some(FULL));
+    client.wait_for_ready(ENV, LONG_WAIT).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refusal_that_is_not_for_a_resource_waits_for_the_deadline() {
+    let client = scheduling_client(None, |_| Some(TAINTED));
+    let started = tokio::time::Instant::now();
+    let timeout = NO_CAPACITY_GRACE * 2;
+    let error = client.wait_for_ready(ENV, timeout).await.unwrap_err();
+    assert!(error.downcast_ref::<NoCapacity>().is_none(), "{error:#}");
+    assert!(error.to_string().contains("timeout waiting"), "{error:#}");
+    assert!(started.elapsed() >= timeout);
+}
+
 fn workspace_pod(uid: &str, resource_version: &str) -> Value {
     json!({
         "apiVersion": "v1",

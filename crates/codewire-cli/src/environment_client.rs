@@ -1419,6 +1419,7 @@ fn environment_from_proto(value: rpc::Environment) -> anyhow::Result<Environment
         state: state.to_string(),
         desired_state: desired_state.to_string(),
         error_reason: empty_to_none(value.error_reason),
+        error_code: empty_to_none(value.error_code),
         recoverable: value.recoverable,
         state_changed_at: value
             .state_changed_at

@@ -21,6 +21,8 @@ pub struct Environment {
     pub state: String,
     pub desired_state: String,
     pub error_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     pub recoverable: bool,
     pub state_changed_at: String,
     pub retry_count: i32,

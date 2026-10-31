@@ -266,6 +266,7 @@ const ENVIRONMENT_FIELDS: &[FieldSemantics] = &[
     // attachment state stays absent (#3350).
     field(35, "network_state", ZERO),
     field(36, "network_failure", ZERO),
+    field(37, "error_code", ZERO),
 ];
 
 const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[

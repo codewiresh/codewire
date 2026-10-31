@@ -43,6 +43,7 @@ export class Environment implements EnvironmentData {
   readonly network: string | undefined;
   readonly state: string;
   readonly desired_state: string;
+  readonly error_code: string | undefined;
   readonly error_reason: string | undefined;
   readonly isolation_tier: IsolationTier;
   readonly protected: boolean;
@@ -88,6 +89,7 @@ export class Environment implements EnvironmentData {
     this.network = data.network ?? undefined;
     this.state = data.state;
     this.desired_state = data.desired_state;
+    this.error_code = data.error_code ?? undefined;
     this.error_reason = data.error_reason ?? undefined;
     this.isolation_tier = data.isolation_tier;
     this.protected = data.protected;

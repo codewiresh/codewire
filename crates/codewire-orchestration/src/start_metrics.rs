@@ -21,7 +21,10 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use prometheus::{HistogramOpts, HistogramVec, register_histogram_vec};
+use prometheus::{
+    HistogramOpts, HistogramVec, IntCounterVec, Opts, register_histogram_vec,
+    register_int_counter_vec,
+};
 
 use crate::sandbox::template::{
     RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_NONE,
@@ -30,6 +33,25 @@ use crate::sandbox::template::{
 
 static STAGE_SECONDS: OnceLock<HistogramVec> = OnceLock::new();
 static CREATE_MILESTONE_SECONDS: OnceLock<HistogramVec> = OnceLock::new();
+static NO_CAPACITY_REFUSALS: OnceLock<IntCounterVec> = OnceLock::new();
+
+/// Count one create or start refused because the cluster had no room, by what
+/// it does next: `destroyed` for a create, `stopped` for a start (#3635).
+pub fn record_no_capacity(outcome: &str) {
+    NO_CAPACITY_REFUSALS
+        .get_or_init(|| {
+            register_int_counter_vec!(
+                Opts::new(
+                    "codewire_environment_no_capacity_total",
+                    "Environment creates and starts refused because the cluster had no room.",
+                ),
+                &["outcome"]
+            )
+            .expect("no capacity metric registration must be unique")
+        })
+        .with_label_values(&[outcome])
+        .inc();
+}
 
 /// Sub-second API stages through multi-minute image pulls. The top bucket is
 /// the commodity create readiness timeout; slower confidential starts fall in

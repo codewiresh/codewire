@@ -776,6 +776,13 @@ async function runTests() {
   assert(convertedEnvironment.source_selection?.profile_revision === 9_007_199_254_741_009n, "environment profile revisions remain lossless");
   assert(convertedEnvironment.network_state === undefined && convertedEnvironment.network_failure === undefined,
     "an unspecified network attachment is absent");
+  const refusedEnvironment = fromProtoEnvironment(create(EnvironmentSchema, {
+    ...environment("env_refused", EnvironmentState.DESTROYED),
+    errorCode: "no_capacity",
+  }));
+  assert(refusedEnvironment.error_code === "no_capacity", "environment error codes are retained");
+  assert(convertedEnvironment.error_code === undefined, "an environment without a failure has no error code");
+
   const attachedEnvironment = fromProtoEnvironment(create(EnvironmentSchema, {
     ...environment("env_attached", EnvironmentState.RUNNING),
     network: "work",
@@ -1545,7 +1552,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 176;
+  const expectedAssertions = 178;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(
