@@ -159,7 +159,7 @@ reservation() { # POOL_PODS_JSON CPU_M
   ' _ "$work/functions.sh" "$1" "$2" | jq -c '[.workspace.cpu_m, .workspace.cpu_sharing_ratio, .dind.cpu_m, .kata.cpu_m, .cpu_m]'
 }
 pool_pod() { # REQUEST LIMIT
-  printf '{"items":[{"metadata":{"name":"sandbox-other"},"spec":{"containers":[]}},{"metadata":{"name":"cw-pool-2000m-x"},"spec":{"containers":[{"name":"workspace","resources":{"requests":{"cpu":"%s"},"limits":{"cpu":"%s"}}},{"name":"dind","resources":{"requests":{"cpu":"500m","memory":"1Gi"}}}]}}]}' "$1" "$2"
+  printf '{"items":[{"metadata":{"name":"sandbox-other"},"spec":{"containers":[]}},{"metadata":{"name":"cw-pool-2000m-x","labels":{"agents.x-k8s.io/warm-pool-sandbox":"pool"}},"spec":{"containers":[{"name":"workspace","resources":{"requests":{"cpu":"%s"},"limits":{"cpu":"%s"}}},{"name":"dind","resources":{"requests":{"cpu":"500m","memory":"1Gi"}}}]}}]}' "$1" "$2"
 }
 [[ "$(reservation "$(pool_pod 2000m 2000m)" 2000)" == '[2000,1,500,250,2750]' ]] || fail 'a 1:1 pool member changed the reservation'
 [[ "$(reservation "$(pool_pod 1 2)" 2000)" == '[1000,2,500,250,1750]' ]] || fail '2:1 does not halve the reservation, in canonical quantities'
@@ -169,7 +169,7 @@ pool_pod() { # REQUEST LIMIT
 # During a rotation: an outgoing member counts for nothing, and live members at
 # two ratios refuse rather than predict from whichever comes first.
 member() { # NAME REQUEST LIMIT DELETION_TIMESTAMP_FIELD
-  printf '{"metadata":{"name":"%s"%s},"spec":{"containers":[{"name":"workspace","resources":{"requests":{"cpu":"%s"},"limits":{"cpu":"%s"}}},{"name":"dind","resources":{"requests":{"cpu":"500m","memory":"1Gi"}}}]}}' "$1" "${4:-}" "$2" "$3"
+  printf '{"metadata":{"name":"%s","labels":{"agents.x-k8s.io/warm-pool-sandbox":"pool"}%s},"spec":{"containers":[{"name":"workspace","resources":{"requests":{"cpu":"%s"},"limits":{"cpu":"%s"}}},{"name":"dind","resources":{"requests":{"cpu":"500m","memory":"1Gi"}}}]}}' "$1" "${4:-}" "$2" "$3"
 }
 terminating=',"deletionTimestamp":"2026-10-30T00:00:00Z"'
 outgoing="$(member cw-pool-2000m-old 2000m 2000m "$terminating")"
@@ -179,6 +179,11 @@ if reservation "{\"items\":[$(member cw-pool-2000m-old 2000m 2000m),$(member cw-
   fail 'pool members at two ratios did not refuse'
 fi
 grep -qF 'wait for the rotation to finish' "$work/rotating" || fail 'the rotation refusal does not say why'
+# A sandbox adopted from a pool keeps the cw-pool- name but loses the member
+# label: running at another ratio, it is neither a pool member nor a rotation.
+adopted='{"metadata":{"name":"cw-pool-2000m-adopted","labels":{"codewire.sh/environment-id":"env"}},"spec":{"containers":[{"name":"workspace","resources":{"requests":{"cpu":"1000m"},"limits":{"cpu":"2000m"}}}]}}'
+[[ "$(reservation "{\"items\":[$adopted,$(member cw-pool-2000m-new 2000m 2000m)]}" 2000)" == '[2000,1,500,250,2750]' ]] ||
+  fail 'an adopted sandbox counted as a pool member'
 
 # The prediction floors each node on its own, names what runs out first
 # (ties included), and auto steps climb to two past the total.

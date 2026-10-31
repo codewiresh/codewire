@@ -392,10 +392,11 @@ linstor_get() { # PATH
 # ------------------------------------------------------------ cleanup
 
 remove_env_ids() { # IDS...
-  local id attempt
+  local id attempt error
   for id in "$@"; do
     for attempt in 1 2 3; do
-      if cw rm --yes "$id" >/dev/null 2>&1; then break; fi
+      if error="$(cw rm --yes "$id" 2>&1 >/dev/null)"; then break; fi
+      log "cleanup: removing $id failed, attempt $attempt: ${error:0:200}"
       cw info "$id" --output json >/dev/null 2>&1 || break
       sleep 2
     done
@@ -580,11 +581,13 @@ node_requests() { # NODE
 # both read from the live pool members, and the commodity RuntimeClass's fixed
 # Pod overhead. A shape without a pool shares at the same ratio. Members that
 # disagree are a rotation in progress, whose outgoing members would also count
-# against the prediction, so it refuses until the rotation has finished.
+# against the prediction, so it refuses until the rotation has finished. The
+# fork labels an unclaimed member's Pod and adoption removes the label; an adopted
+# Pod keeps its cw-pool- name, so the name alone would count a user's sandbox.
 sandbox_request() {
   local members kata
   members="$(kubectl_ro get pods -n "$SANDBOX_NAMESPACE" -o json 2>/dev/null | jq -c '
-    [.items[] | select((.metadata.name | startswith("cw-pool-")) and .metadata.deletionTimestamp == null)
+    [.items[] | select(.metadata.labels["agents.x-k8s.io/warm-pool-sandbox"] != null and .metadata.deletionTimestamp == null)
       | .spec.containers]' || true)"
   kata="$(kubectl_ro get runtimeclass commodity -o json 2>/dev/null | jq -c '.overhead.podFixed // empty' || true)"
   jq -nc --argjson cpu "$CPU_M" --argjson mem "$MEMORY_MIB" --argjson members "${members:-[]}" --argjson kata "${kata:-null}" '
