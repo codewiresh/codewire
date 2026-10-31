@@ -61,8 +61,18 @@ on macOS 26:
   rcodesign-signed build with a throwaway Developer ID-shaped certificate
   behaved the same). It holds `/dev/null` for
   standard I/O, its `vz.json`, the VM's `vm.lock` and three Unix sockets. It
-  holds no internet socket and no other file, and writes no log of its own. It
-  has no Seatbelt profile.
+  holds no internet socket and no other file, and writes no log of its own.
+- The helper confines itself with Seatbelt (`sandbox_init`, the mechanism the
+  packet worker uses) once its listener is bound and before the VM starts, and
+  exits if the profile is not applied. Everything is denied except: reading the
+  OS's own files (`/System`, `/usr/lib`, `/dev/null`) and sysctls; reading the
+  kernel, the initial ramdisk and read-only disks; reading and writing writable
+  disks; the granted shares, with the rights their mode gives; removing the
+  socket it bound; and looking up the `com.apple.Virtualization.VirtualMachine`
+  XPC service. A VM with shares may also issue what Virtualization.framework
+  gives its service to serve them: a file extension for each share and the
+  `com.apple.virtualization.extension.fuse` class. Without those the VM boots
+  and the guest gets `EPERM` on every share.
 - Virtualization.framework runs the VM in Apple's
   `com.apple.Virtualization.VirtualMachine` XPC service. That process is
   sandboxed by Apple, has the hardened runtime and holds exactly:

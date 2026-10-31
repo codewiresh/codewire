@@ -33,6 +33,13 @@ import Foundation
       }
       defer { removeSocket(configuration.vsockSocket, bound: identity) }
 
+      // From here on the helper handles bytes a guest can influence, so it
+      // keeps only this VM's own files. A profile that cannot be applied stops
+      // the helper before the VM starts (#1905).
+      guard cw_vz_apply_sandbox(configuration.sandboxProfile()) == 0 else {
+        throw RuntimeError.sandboxNotApplied
+      }
+
       // Virtualization.framework shares a directory by path, so require the
       // admitted directory again once the VM has started; a replacement in
       // between stops the VM.

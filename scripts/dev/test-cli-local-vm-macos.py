@@ -16,8 +16,8 @@ It proves, on this Mac's macOS version:
   restores egress (#1905 condition 3);
 - a VM that stops running (as in host sleep) resumes with its clock repaired
   and a streaming session intact;
-- the VZ helper holds no internet socket and is signed as the packer requires,
-  and VZ's own VM process is sandboxed;
+- the VZ helper holds no internet socket, is signed as the packer requires and
+  is confined to this VM's own files, and VZ's own VM process is sandboxed;
 - removing the environment ends VZ's VM process.
 
 Everything runs under a private root with its own HOME and a throwaway
@@ -277,6 +277,32 @@ class LocalVmJourney:
         libsystem.sandbox_check.restype = ctypes.c_int
         libsystem.sandbox_check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
         assert libsystem.sandbox_check(vm, None, 0) != 0, "VZ's VM process is not sandboxed"
+        # The helper confines itself to this VM's own files (#1905). A path is
+        # sandbox_check's variadic argument, past the three fixed ones above;
+        # SANDBOX_FILTER_PATH is 1. A disk is the control: the same query must
+        # report what the helper may do, so the refusals below mean something.
+        assert libsystem.sandbox_check(helper, None, 0) != 0, "the VZ helper is not sandboxed"
+        config = json.loads(next(self.home.rglob("vz.json")).read_text())
+        disk = next(d["path"] for d in config["disks"] if not d["readOnly"])
+
+        def denied(operation, path):
+            return libsystem.sandbox_check(helper, operation, 1, path.encode()) != 0
+
+        # The project is this VM's one direct share, so the helper keeps it too.
+        assert [share["path"] for share in config["shares"]] == [str(self.project)], config["shares"]
+        for operation, path in ((b"file-read-data", disk), (b"file-write-data", disk),
+                                (b"file-read-data", self.project / "README"),
+                                (b"file-write-data", self.project / "README")):
+            assert not denied(operation, str(path)), f"the helper lost {operation} on {path}"
+        secret = self.home / "unrelated-host-file"
+        secret.write_text("not this VM's\n")
+        for operation, path in ((b"file-read-data", secret), (b"file-write-data", secret),
+                                (b"file-read-data", self.keychain),
+                                (b"file-write-data", Path(config["kernel"])),
+                                (b"process-exec", Path("/bin/sh"))):
+            assert denied(operation, str(path)), f"the helper may {operation} {path}"
+        for operation in (b"process-fork", b"network-outbound", b"network-bind"):
+            assert libsystem.sandbox_check(helper, operation, 0) != 0, f"the helper may {operation}"
         self.check("helper posture")
 
     def remove_environment(self):

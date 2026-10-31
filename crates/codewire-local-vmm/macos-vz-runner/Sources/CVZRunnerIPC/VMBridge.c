@@ -173,3 +173,24 @@ int cw_vz_verify_shared_directory(const char *path, uint32_t device, uint64_t in
     return -1;
 #endif
 }
+
+#if defined(__APPLE__)
+// Custom profiles need sandbox_init, deprecated since macOS 10.8; the owner
+// accepted that risk for direct-download builds (2026-10-11, #1905). Declared
+// here because sandbox.h marks it deprecated and warnings fail this build.
+extern int sandbox_init(const char *profile, uint64_t flags, char **errorbuf);
+extern void sandbox_free_error(char *errorbuf);
+#endif
+
+int cw_vz_apply_sandbox(const char *profile) {
+#if defined(__APPLE__)
+    if (profile == NULL) { return -1; }
+    char *error = NULL;
+    int result = sandbox_init(profile, 0, &error);
+    if (error != NULL) { sandbox_free_error(error); }
+    return result == 0 ? 0 : -1;
+#else
+    (void)profile;
+    return -1;
+#endif
+}

@@ -111,6 +111,25 @@ for required in (
 ):
     if required not in vm_runtime:
         fail(f"product VM lost exact shared-directory topology: {required}")
+for required in (
+    "cw_vz_apply_sandbox(configuration.sandboxProfile()) == 0",
+    "throw RuntimeError.sandboxNotApplied",
+):
+    if required not in vm_runtime:
+        fail(f"product VM lost its fail-closed confinement: {required}")
+if not vm_runtime.index("cw_vz_apply_sandbox(") < vm_runtime.index("machine.start()"):
+    fail("product VM must be confined before it starts")
+profile = source("Sources/CodewireVZRunnerProtocol/VMSandboxProfile.swift")
+for required in (
+    '"(version 1)", "(deny default)"',
+    'xpc-service-name \\"com.apple.Virtualization.VirtualMachine\\"',
+    'extension-class \\"com.apple.virtualization.extension.fuse\\"',
+):
+    if required not in profile:
+        fail(f"helper Seatbelt profile lost: {required}")
+for forbidden in ("network", "process-", "(allow default)", "mach-register", "iokit-"):
+    if forbidden in profile:
+        fail(f"helper Seatbelt profile gained: {forbidden}")
 if vm_runtime.count("VZSharedDirectory(") != 1:
     fail("product VM must share only the admitted request directories")
 for forbidden in ("VZMultipleDirectoryShare", "VZLinuxRosettaDirectoryShare", "Process("):

@@ -97,4 +97,8 @@ int cw_vz_splice(int a, int b);
 // st_ino), still named exactly `path`. Returns 0 on a match and -1 otherwise.
 int cw_vz_verify_shared_directory(const char *path, uint32_t device, uint64_t inode);
 
+// Irreversibly confine this whole process with one inline Seatbelt profile.
+// Returns 0, or -1 when the profile was not applied.
+int cw_vz_apply_sandbox(const char *profile);
+
 #endif

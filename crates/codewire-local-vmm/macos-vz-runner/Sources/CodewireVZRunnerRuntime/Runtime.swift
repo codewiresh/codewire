@@ -17,6 +17,7 @@ import Foundation
     case bootControlCopyFailed
     case virtualMachineConfigurationInvalid
     case sharedDirectoryChanged
+    case sandboxNotApplied
 
     var description: String {
       switch self {
@@ -31,6 +32,7 @@ import Foundation
       case .virtualMachineConfigurationInvalid:
         "Virtualization.framework rejected the fixed topology"
       case .sharedDirectoryChanged: "an admitted shared directory changed"
+      case .sandboxNotApplied: "the helper's Seatbelt profile was not applied"
       }
     }
   }

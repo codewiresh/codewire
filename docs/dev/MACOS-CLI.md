@@ -556,6 +556,9 @@ It installs the runtime and creates an `alpine:3.22` VM, then checks:
   session intact;
 - the posture holds:
   - the helper holds no internet socket and has the hardened runtime;
+  - the helper is confined by Seatbelt to this VM's own files: `sandbox_check`
+    reports its disk as allowed, and an unrelated host file, exec, fork and
+    the network as denied;
   - VZ's VM process is sandboxed.
 
 It needs network egress and leaves no process or file behind.
