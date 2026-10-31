@@ -476,9 +476,9 @@ impl server::Handler for Peer {
     async fn auth_publickey_offered(
         &mut self,
         user: &str,
-        key: &ssh_key::PublicKey,
+        offer: server::PublicKeyOffer<'_>,
     ) -> std::result::Result<server::Auth, Self::Error> {
-        if user == "synthetic" && key == self.expected.as_ref() {
+        if user == "synthetic" && offer.public_key == self.expected.as_ref() {
             Ok(server::Auth::Accept)
         } else {
             self.count(|count| count.denied += 1)?;
@@ -490,9 +490,9 @@ impl server::Handler for Peer {
     async fn auth_publickey(
         &mut self,
         user: &str,
-        key: &ssh_key::PublicKey,
+        verified: server::VerifiedPublicKey<'_>,
     ) -> std::result::Result<server::Auth, Self::Error> {
-        if user == "synthetic" && key == self.expected.as_ref() {
+        if user == "synthetic" && verified.public_key == self.expected.as_ref() {
             self.count(|count| count.authenticated += 1)?;
             Ok(server::Auth::Accept)
         } else {
