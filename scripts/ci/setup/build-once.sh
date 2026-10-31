@@ -25,6 +25,10 @@
 #   build-once.sh publish OUT       upload every OUT/<leg>.* to the archive
 #                                   store and report its SHA-256 as the job
 #                                   output <leg>_sha256
+#   build-once.sh finish            put this job's writes on disk, then remove
+#                                   the mark prepare left (job-running); runs
+#                                   whether the build passed, failed or was
+#                                   cancelled
 #   build-once.sh checks            run the Rust checks (run-rust-checks.sh)
 #                                   at once under one jobserver, each in its
 #                                   own target folder, within build
@@ -61,6 +65,13 @@
 # reads one wipes the target folder its error names and rebuilds once
 # (rebuild_corrupt_leg). Wiping every folder after any cancel instead cost a
 # full cold build each time (main run 22574, over 30 min).
+# A dead guest can also leave an output no compiler ever reads: a test binary
+# of the right size whose start is zeros, which Cargo calls fresh and the
+# archive then carries (run 30126, "Exec format error"). So prepare writes
+# job-running, on disk before any compiler starts, and finish removes it once
+# the job's writes are on disk. A prepare that finds one deletes only the files
+# newer than it, under targets and cargo-home: exactly what the interrupted
+# job wrote. Cargo rebuilds those; everything else stays warm.
 # Anything else under /ci-cache is removed first: a previous job could have
 # left Cargo configuration in a parent directory of src. The guest itself
 # wipes the whole folder weekly (infra dispatcher, metal_build_disk_prelude).
@@ -149,13 +160,14 @@ prepare() {
   : "${GITHUB_PATH:?a Forgejo job path file is required}"
 
   mkdir -p "$work"
+  remove_interrupted_writes
   shopt -s dotglob nullglob
   for entry in "$cache_root"/*; do
     [ "$entry" = "$work" ] || [ "$entry" = "$cache_root/lost+found" ] || rm -rf -- "$entry"
   done
   for entry in "$work"/*; do
     case "${entry##*/}" in
-      src|targets|cargo-home|tools|layout) ;;
+      src|targets|cargo-home|tools|layout|job-running) ;;
       *) rm -rf -- "$entry" ;;
     esac
   done
@@ -200,6 +212,7 @@ prepare() {
     esac
   done
   bound_targets "$job"
+  mark_job_running
   # Tests stop here, before the pinned tools; never on a build runner's disk.
   if [ -n "${BUILD_ONCE_ROOT:-}" ] && [ "${BUILD_ONCE_TEST_STOP_AFTER_TARGETS:-}" = 1 ]; then
     return 0
@@ -237,6 +250,42 @@ prepare() {
     echo "$bin"
   } >> "$GITHUB_PATH"
   echo "build-once: $src is at $commit; targets $(du -sh "$work/targets" | cut -f1); cold=$cold"
+}
+
+remove_interrupted_writes() {
+  # A job that never reached finish: delete what it wrote (see job-running in
+  # the header). Its mark's time is when it started writing.
+  local mark="$work/job-running" count
+  local -a roots=()
+  [ -f "$mark" ] || return 0
+  [ ! -d "$work/targets" ] || roots+=("$work/targets")
+  [ ! -d "$work/cargo-home" ] || roots+=("$work/cargo-home")
+  count=0
+  if [ "${#roots[@]}" -gt 0 ]; then
+    count="$(find "${roots[@]}" -type f -newer "$mark" | wc -l)"
+    find "${roots[@]}" -type f -newer "$mark" -delete
+  fi
+  rm -f -- "$mark"
+  echo "build-once: the last job here did not finish (cancelled, or its guest died); deleted the $count files it wrote, which Cargo rebuilds"
+}
+
+mark_job_running() {
+  # On disk before any compiler starts, so no output can outlive its mark.
+  local mark="$work/job-running"
+  : > "$mark.new"
+  mv -f -- "$mark.new" "$mark"
+  sync -f "$work"
+}
+
+finish() {
+  # The writes reach the disk before the mark goes, and its removal after them,
+  # so a missing mark always means this job's outputs are durable.
+  local mark="$work/job-running" started=$SECONDS
+  [ -f "$mark" ] || return 0
+  sync -f "$work"
+  rm -f -- "$mark"
+  sync -f "$work"
+  echo "build-once: this job's writes are on disk; sync took $((SECONDS - started)) s"
 }
 
 disk_usage() {
@@ -735,11 +784,12 @@ run_checks() {
 
 case "${1:-}" in
   checks) [ "$#" -eq 1 ] || die 'usage: build-once.sh checks'; checks ;;
+  finish) [ "$#" -eq 1 ] || die 'usage: build-once.sh finish'; finish ;;
   prepare) [ "$#" -eq 3 ] || die 'usage: build-once.sh prepare CHECKOUT build|checks'; prepare "$2" "$3" ;;
   build) [ "$#" -eq 2 ] || die 'usage: build-once.sh build OUT'; build "$2" ;;
   legs) [ "$#" -eq 1 ] || die 'usage: build-once.sh legs'; wanted_legs ;;
   run-legs) [ "$#" -eq 3 ] || die 'usage: build-once.sh run-legs OUT LOGS'; run_legs "$2" "$3" ;;
   leg) [ "$#" -eq 3 ] || die 'usage: build-once.sh leg NAME OUT'; run_leg "$2" "$3" ;;
   publish) [ "$#" -eq 2 ] || die 'usage: build-once.sh publish OUT'; publish "$2" ;;
-  *) die 'usage: build-once.sh prepare|build|legs|leg|run-legs|publish|checks ...' ;;
+  *) die 'usage: build-once.sh prepare|build|legs|leg|run-legs|publish|checks|finish ...' ;;
 esac

@@ -778,6 +778,13 @@ jobs:
           CW_PACKAGE_SELECTED: ${{ needs.verification-selection.outputs.cw_package_selected }}
         run: scripts/ci/setup/build-once.sh build "$RUNNER_TEMP/build-once-out"
 
+      # Passed, failed or cancelled: the guest is alive, so its writes can reach
+      # the disk. Only a job that never gets here has its writes deleted by the
+      # next prepare (build-once.sh, job-running).
+      - name: Put the build folder on disk
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/build-once.sh finish
+
       - name: Publish the test archives
         id: publish
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}

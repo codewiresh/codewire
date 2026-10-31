@@ -192,6 +192,8 @@ targets_prepare() {
     GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
     "$SCRIPT" prepare "$work/lock-checkout" "${PREPARE_JOB:-build}" > "$work/prepare.log" 2>&1 ||
     fail "prepare failed: $(cat "$work/prepare.log")"
+  # These cases are about the folders; job-running has its own below.
+  [ "${KEEP_JOB_RUNNING:-}" = 1 ] || rm -f "$marker_root/job-running"
 }
 marker_root="$work/marker-root/pr"
 targets_prepare
@@ -346,7 +348,56 @@ kept $CHECK_FOLDERS archive
 GITHUB_RUN_ID=700 PREPARE_JOB=build FAKE_DF_PER_LEG=16 targets_prepare
 [ "$(removals)" -gt 0 ] || fail 'a build without the Rust checks kept their folders over 80 %'
 kept archive
-if "$SCRIPT" finish >/dev/null 2>&1; then fail 'the retired finish subcommand was accepted'; fi
+
+# job-running: a job that never reached finish has what it wrote deleted, and
+# nothing else: the folder stays warm (owner, 2026-10-25: "Always warm. No
+# whole-folder wipe"). A job that finished leaves everything.
+finish_folder() {
+  BUILD_ONCE_ROOT="$work/marker-root" "$SCRIPT" finish > "$work/finish.log" 2>&1 ||
+    fail "finish failed: $(cat "$work/finish.log")"
+}
+interrupted='did not finish (cancelled, or its guest died)'
+rm -rf "$marker_root/targets" "$marker_root/cargo-home"
+mkdir -p "$marker_root/targets/archive/debug/deps" "$marker_root/cargo-home/registry"
+old_bin="$marker_root/targets/archive/debug/deps/old-test"
+old_crate="$marker_root/cargo-home/registry/old.crate"
+: > "$old_bin"; : > "$old_crate"
+touch -d '1 hour ago' "$old_bin" "$old_crate"
+KEEP_JOB_RUNNING=1 targets_prepare
+[ -f "$marker_root/job-running" ] || fail 'prepare wrote no job-running mark'
+# The guest dies here: a zero-filled test binary Cargo would call fresh.
+zero_bin="$marker_root/targets/archive/debug/deps/credentials-6c0e981d19666fc8"
+zero_crate="$marker_root/cargo-home/registry/new.crate"
+head -c 4096 /dev/zero > "$zero_bin"; : > "$zero_crate"
+touch -d '+1 minute' "$zero_bin" "$zero_crate"
+KEEP_JOB_RUNNING=1 targets_prepare
+grep -qF "$interrupted" "$work/prepare.log" || fail 'a kept mark was not logged'
+grep -qF 'deleted the 2 files it wrote' "$work/prepare.log" || fail "the deleted count is wrong: $(cat "$work/prepare.log")"
+[ ! -e "$zero_bin" ] || fail "the interrupted job's output survived"
+[ ! -e "$zero_crate" ] || fail "the interrupted job's download survived"
+[ -f "$old_bin" ] || fail "an older output was deleted; the folder must stay warm"
+[ -f "$old_crate" ] || fail 'an older download was deleted; the folder must stay warm'
+[ -f "$marker_root/job-running" ] || fail 'the next job wrote no mark of its own'
+# A job that finished, whether it passed, failed or was cancelled, keeps its work.
+finished_bin="$marker_root/targets/archive/debug/deps/finished-test"
+: > "$finished_bin"; touch -d '+1 minute' "$finished_bin"
+finish_folder
+[ ! -e "$marker_root/job-running" ] || fail 'finish left the mark'
+grep -qE 'writes are on disk; sync took [0-9]+ s' "$work/finish.log" || fail 'finish did not report the sync time'
+KEEP_JOB_RUNNING=1 targets_prepare
+if grep -qF "$interrupted" "$work/prepare.log"; then fail 'a finished job was treated as interrupted'; fi
+[ -f "$finished_bin" ] || fail "a finished job's output was deleted"
+# Finish removes the mark only after the writes are on disk.
+fake_sync="$work/fake-sync"; mkdir -p "$fake_sync"
+printf '#!/bin/sh\nexit 1\n' > "$fake_sync/sync"; chmod +x "$fake_sync/sync"
+if PATH="$fake_sync:$PATH" BUILD_ONCE_ROOT="$work/marker-root" "$SCRIPT" finish > "$work/finish.log" 2>&1; then
+  fail 'finish passed although its sync failed'
+fi
+[ -f "$marker_root/job-running" ] || fail 'finish removed the mark before its writes were on disk'
+finish_folder
+# No mark: nothing to do (the job inherited its tree, or its prepare never ran).
+finish_folder
+if "$SCRIPT" nonsense >/dev/null 2>&1; then fail 'an unknown subcommand was accepted'; fi
 
 # A leg that reads a corrupt output from its warm target folder wipes the
 # folder its error names and builds once more in the same job; any other
