@@ -358,9 +358,10 @@ fn process_gone(pid: u32) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_successor_runs_before_its_predecessor_stops_and_no_request_meets_a_gap() {
     let lifecycle = Lifecycle::start_with(RenewalSpawner::new(BTreeSet::new()), SLOW_SLOT_RENEWAL);
-    // Two renewals: children 0 to 1 and 1 to 2, each predecessor stopped.
+    // Two renewals: children 0 to 1 and 1 to 2, each predecessor stopped, and
+    // the child after each of those spawned, which is the witness of the stop.
     lifecycle
-        .until(|spawner| spawner.ready_count() >= 3 && spawner.closed(1))
+        .until(|spawner| spawner.ready_count() >= 4 && spawner.closed(1))
         .await;
     let (children, states) = lifecycle.stop().await;
 
@@ -385,15 +386,21 @@ async fn a_successor_runs_before_its_predecessor_stops_and_no_request_meets_a_ga
             predecessor.answered.unwrap() > successor_ready,
             "child {index} stopped serving at its successor's start: {children:?}"
         );
-        // It drained until its lifetime ended, and no longer.
+        // It drained until its lifetime ended.
         let lifetime_end = predecessor.spawned.unwrap() + SLOW_SLOT_RENEWAL.lifetime;
         assert!(
             closed + Duration::from_millis(100) >= lifetime_end,
             "child {index} stopped before its lifetime ended: {children:?}"
         );
-        assert!(
-            closed <= lifetime_end + Duration::from_secs(1),
-            "child {index} outlived its drain: {children:?}"
+        // And no longer: the lifecycle stops and reaps it before it spawns the
+        // next child, so only that child's predecessor was still running then.
+        // The probe's close time is no witness of that, as in the fail-closed
+        // test below: it is late by however long the probe waited to run
+        // (#3785).
+        assert_eq!(
+            children[index + 2].predecessors_alive,
+            Some(1),
+            "child {index} was still running when a later child spawned: {children:?}"
         );
         assert!(process_gone(predecessor.pid.unwrap()));
     }
