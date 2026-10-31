@@ -245,6 +245,7 @@ async fn db_no_capacity_never_overrides_a_newer_intent() -> Result<()> {
 
 fn start_quota() -> StartQuota<'static> {
     StartQuota {
+        credit_enforcement: Default::default(),
         quota: OrgQuota {
             max_concurrent_environments: -1,
             max_concurrent_sandbox: -1,
