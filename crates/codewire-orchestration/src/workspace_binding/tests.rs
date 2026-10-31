@@ -695,6 +695,106 @@ async fn a_bound_pod_gets_its_binding_and_a_pod_scoped_credential() {
     assert_eq!(fixture.store.queries(), 2);
 }
 
+/// A fork from a hosted snapshot (#3046 H2) is a new environment that binds
+/// its own Pod, so its daemon serves only the credential issued for that
+/// binding. The source's credential never travels with the disk (the daemon
+/// keeps it under the Pod's `/codewire/run`), and presented to the fork's
+/// daemon it is refused. The fixture's bound Pod is the fork.
+#[tokio::test]
+async fn a_forks_daemon_refuses_the_credential_its_source_was_bound_with() {
+    use std::ffi::OsString;
+
+    use codewire_daemon::config::{
+        BindResponseFields, HOME_ROOT_ENV, HostedDaemonMode, WORKSPACE_ROOT_ENV,
+    };
+    use codewire_daemon_proto::daemon::v1;
+    use codewire_daemon_proto::{
+        DAEMON_AUTH_TOKEN_HEADER, WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV,
+    };
+
+    const SOURCE_ENVIRONMENT_ID: &str = "3d0b2c7e-58a1-4c2f-9e6d-1f4b8a7c6e50";
+    // A binding as the store holds it: an exact private client encoding the
+    // daemon accepts, not the shorthand the other fixtures carry.
+    let mut fork_binding = binding(WorkspaceCredentialScope::Pod);
+    fork_binding.managed_credential_clients = "v1:none".into();
+    let fixture = fixture(
+        FakeCluster::valid(),
+        FakeStore::returning(vec![Ok(Some(fork_binding))]),
+    );
+    let fork = fixture.bind(20).await.unwrap();
+    // What the source's daemon was bound with: its own environment and Pod.
+    let source_credential =
+        issue_workspace_daemon_credential(SECRET, SOURCE_ENVIRONMENT_ID, OTHER_POD_UID).unwrap();
+    assert_ne!(source_credential, fork.daemon_credential);
+
+    let roots = tempfile::tempdir().unwrap();
+    let lookup = |name: &str| -> Option<OsString> {
+        match name {
+            WORKSPACE_BINDING_URL_ENV => Some("https://codewire-orchestration.dev:8087".into()),
+            WORKSPACE_POD_UID_ENV => Some(POD_UID.into()),
+            WORKSPACE_ROOT_ENV | HOME_ROOT_ENV => Some(roots.path().into()),
+            _ => None,
+        }
+    };
+    let HostedDaemonMode::Binding(config) = HostedDaemonMode::from_lookup(lookup).unwrap() else {
+        panic!("an identity-free Pod binds");
+    };
+    // The source's own bind response is refused by the fork's Pod outright.
+    assert!(
+        config
+            .validate(&BindResponseFields {
+                environment_id: SOURCE_ENVIRONMENT_ID,
+                pod_uid: OTHER_POD_UID,
+                operation_generation: 7,
+                daemon_credential: &source_credential,
+                projection_selection_sha256: "",
+                managed_credential_clients: "",
+                working_directory: "",
+            })
+            .is_err()
+    );
+    let binding = config
+        .validate(&BindResponseFields {
+            environment_id: &fork.environment_id,
+            pod_uid: &fork.pod_uid,
+            operation_generation: fork.operation_generation,
+            daemon_credential: &fork.daemon_credential,
+            projection_selection_sha256: &fork.projection_selection_sha256,
+            managed_credential_clients: &fork.managed_credential_clients,
+            working_directory: &fork.working_directory,
+        })
+        .unwrap();
+
+    // The fork's daemon, served exactly as the bound entrypoint configures it.
+    let daemon = codewire_daemon::service::DaemonServiceImpl::new(config.into_config(&binding));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(
+        tonic::transport::Server::builder()
+            .add_service(v1::daemon_service_server::DaemonServiceServer::new(daemon))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+    );
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let capabilities = |credential: String| {
+        let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel.clone());
+        async move {
+            let mut request = tonic::Request::new(v1::GetCapabilitiesRequest::default());
+            request
+                .metadata_mut()
+                .insert(DAEMON_AUTH_TOKEN_HEADER, credential.parse().unwrap());
+            client.get_capabilities(request).await
+        }
+    };
+    let refused = capabilities(source_credential).await.unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::Unauthenticated);
+    // The control: the fork's own credential works.
+    capabilities(fork.daemon_credential.clone()).await.unwrap();
+}
+
 #[tokio::test]
 async fn a_bound_pod_gets_its_saved_project_defaults_and_git_author() {
     let mut live = binding(WorkspaceCredentialScope::Pod);
