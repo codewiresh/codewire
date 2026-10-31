@@ -1198,8 +1198,11 @@ of them reopens the decision:
   backups (#2238) aren't enabled for it.
 
 A left-over copy stays valid at the provider until it expires: about 8 hours for
-Claude. OpenAI publishes no lifetime for the Codex token, and the code reads each
-token's own `exp` rather than assuming one. Neither is shortened by this path.
+Claude. OpenAI publishes no lifetime for the Codex token. One measured token lived
+10 days (`exp - iat` = 864000 s), read on 2026-10-31 from a workstation Codex CLI
+sign-in whose file was last written on 2026-10-24. It was not a Codewire-delivered
+token, whose lifetime may differ, so the code reads each token's own `exp` rather
+than assuming one. Neither is shortened by this path.
 Confidential environments are never snapshotted.
 
 A VM checkpoint (`cw checkpoint create`, Linux) is a running local VM's
