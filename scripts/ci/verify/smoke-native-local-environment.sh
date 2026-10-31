@@ -2582,6 +2582,54 @@ raise SystemExit(1 if found else 0)
   [[ ! -s "$report" ]] || die "$label canary scanner emitted unexpected output"
 }
 
+# The live packet worker, general egress broker and runner have just served the
+# protected routes, and no synthetic provider value may be in their memory
+# (#1911). The worker and broker make themselves non-dumpable or are confined,
+# so reading them needs root. A child holding one value first proves the scan
+# finds what is there; no output names a value.
+scan_serving_processes_for_credential_canaries() {
+  local report="$SMOKE_ROOT/network-memory-scan-processes.json"
+  local scanner="$SOURCE_ROOT/scripts/dev/scan-process-memory.py"
+  local canaries
+  canaries="$(printf '%s\n' "$CREDENTIAL_CANARY" "$CREDENTIAL_REFRESH_CANARY" \
+    "$GITHUB_CREDENTIAL_CANARY" "$OPENAI_CREDENTIAL_CANARY" "$ANTHROPIC_CREDENTIAL_CANARY")"
+  local control control_pid control_status=0
+  control="$SMOKE_ROOT/memory-scan-control.fifo"
+  mkfifo -m 600 "$control" || die 'memory scan control FIFO failed'
+  /usr/bin/python3 -I -c 'import signal, sys
+held = sys.stdin.readline()
+open(sys.argv[1], "w").close()
+signal.pause()
+' "$control" <<<"$OPENAI_CREDENTIAL_CANARY" &
+  control_pid="$!"
+  : <"$control"
+  # shellcheck disable=SC2024 # The report belongs to this user, not to root.
+  printf '%s\n' "$OPENAI_CREDENTIAL_CANARY" | sudo -n /usr/bin/python3 -I "$scanner" "$control_pid" \
+    >>"$TRANSCRIPT" 2>&1 || control_status="$?"
+  kill -TERM "$control_pid" 2>/dev/null || true
+  wait "$control_pid" 2>/dev/null || true
+  rm -f -- "$control"
+  [[ "$control_status" == 1 ]] ||
+    die "memory scan did not find a value a control process holds (exit $control_status)"
+
+  network_process_report >"$report" || die 'memory scan process report failed'
+  local -a pids
+  mapfile -t pids < <(jq -r --argjson runner "$RUNNER_PID" '
+    [$runner] + [.processes[] | select(.role == "__native-network-worker" or
+      .role == "__native-egress-broker") | .pid] | unique | .[]' "$report")
+  [[ "${#pids[@]}" -ge 3 ]] || die "memory scan found ${#pids[@]} serving processes ($report)"
+  local status=0
+  # shellcheck disable=SC2024 # The report belongs to this user, not to root.
+  printf '%s\n' "$canaries" | sudo -n /usr/bin/python3 -I "$scanner" "${pids[@]}" \
+    >"$SMOKE_ROOT/network-memory-scan.report" 2>&1 || status="$?"
+  cat "$SMOKE_ROOT/network-memory-scan.report" >>"$TRANSCRIPT"
+  case "$status" in
+    0) log "network: no synthetic provider value in the memory of ${#pids[@]} serving processes" ;;
+    1) die 'a synthetic provider value is in the memory of a serving process (see the report)' ;;
+    *) die "the serving processes' memory could not be scanned (exit $status)" ;;
+  esac
+}
+
 wait_for_environment_state() {
   local expected="$1"
   for _attempt in {1..100}; do
@@ -3388,6 +3436,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     fi
     log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
     run_managed_credential_broker_smoke
+    scan_serving_processes_for_credential_canaries
     run_cw credentials --local get "id:$CREDENTIAL_ID" --output json
     jq -e '
       length == 1 and

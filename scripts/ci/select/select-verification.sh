@@ -1517,7 +1517,7 @@ if [ "$event_selected" = false ]; then
       scripts/dev/test-cli-local-vm-macos.py|scripts/dev/test-cli-local-vm-docker-macos.py|\
       scripts/dev/test-cli-local-vm-inputs-macos.py|\
       scripts/dev/test-local-vm-hostile-guest-macos.py|scripts/dev/hostile-guest-probe.py|\
-      scripts/dev/test-local-vm-hostile-guest.py)
+      scripts/dev/test-local-vm-hostile-guest.py|scripts/dev/scan-process-memory.py)
         # Developer-only local VM journeys and the hostile-guest battery: they
         # run against real local VMs and never in CI.
         select_token policy

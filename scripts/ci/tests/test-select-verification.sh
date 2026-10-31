@@ -2102,7 +2102,7 @@ run_present_paths_case macos_local_vm_journeys pull_request refs/pull/20660/head
   scripts/dev/test-cli-local-vm-macos.py scripts/dev/test-cli-local-vm-docker-macos.py \
   scripts/dev/test-cli-local-vm-inputs-macos.py \
   scripts/dev/test-local-vm-hostile-guest-macos.py scripts/dev/hostile-guest-probe.py \
-  scripts/dev/test-local-vm-hostile-guest.py
+  scripts/dev/test-local-vm-hostile-guest.py scripts/dev/scan-process-memory.py
 run_present_paths_case macos_local_vm_journey_unknown pull_request refs/pull/20661/head false \
   "$all_product_pr" scripts/dev/test-local-vm-future-macos.py
 run_paths_case macos_workload_network_native pull_request refs/pull/20650/head true \
