@@ -18,6 +18,7 @@ pub mod billing_sessions;
 pub mod cloudflare;
 pub mod create;
 pub mod credential_relay;
+pub mod credit_stop;
 pub mod env_data;
 pub mod env_log;
 pub mod environment_auth;
@@ -91,6 +92,8 @@ pub struct WorkerContext {
     /// Lifecycle trigger: the reconciler SignalWithStarts the
     /// environment workflow (D3 — Temporal is the only trigger path).
     pub temporal_trigger: std::sync::Arc<crate::temporal::TemporalTrigger>,
+    /// Whether this deployment stops sandboxes that ran out of credit.
+    pub credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
 }
 
 #[cfg(test)]

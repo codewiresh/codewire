@@ -1733,6 +1733,7 @@ if [ "$event_selected" = false ]; then
       crates/*/src/*/database_tests/*|\
       crates/codewire-billing/src/billing_teardown.rs|\
       crates/codewire-billing/src/credit.rs|\
+      crates/codewire-orchestration/src/worker/credit_stop.rs|\
       crates/codewire-orchestration/src/api/create.rs|\
       crates/codewire-orchestration/src/api/presets.rs|\
       crates/codewire-orchestration/src/api/snapshots.rs|\

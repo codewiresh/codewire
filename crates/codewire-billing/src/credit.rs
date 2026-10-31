@@ -13,6 +13,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use codewire_server_core::credit_enforcement::CreditEnforcement;
 use sqlx::PgPool;
 
 /// How often the leader draws usage.
@@ -201,6 +202,349 @@ pub async fn draw_organization(pool: &PgPool, organization_id: &str) -> anyhow::
     .await?;
     transaction.commit().await?;
     Ok(amount)
+}
+
+/// The free credit a card grants: EUR 50 (owner, 2026-10-24).
+pub const CARD_GRANT_NANO_EUR: i64 = 50 * NANO_EUR_PER_EURO;
+
+const NANO_EUR_PER_EURO: i64 = 1_000_000_000;
+const NANO_EUR_PER_CENT: i64 = 10_000_000;
+
+/// What adding a card did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardGrant {
+    /// EUR 50 was credited.
+    Granted,
+    /// This organization already had its grant.
+    OrganizationAlreadyGranted,
+    /// This card already granted, to this or another organization.
+    CardAlreadyGranted,
+    /// The payment method is not a card, so there is no fingerprint.
+    NotACard,
+}
+
+/// Credits EUR 50 when an organization adds a card: once per organization
+/// and once per card fingerprint, in one transaction under the organization
+/// row lock. A card that already granted, anywhere, grants nothing.
+pub async fn grant_card_credit(
+    pool: &PgPool,
+    organization_id: &str,
+    card_fingerprint: Option<&str>,
+    setup_intent_id: &str,
+) -> anyhow::Result<CardGrant> {
+    let Some(fingerprint) = card_fingerprint.filter(|value| !value.is_empty()) else {
+        return Ok(CardGrant::NotACard);
+    };
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT id FROM organizations WHERE id = $1 FOR UPDATE")
+        .bind(organization_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+    let granted: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM billing_credit_ledger \
+         WHERE organization_id = $1 AND idempotency_key = 'card_grant')",
+    )
+    .bind(organization_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if granted {
+        transaction.commit().await?;
+        return Ok(CardGrant::OrganizationAlreadyGranted);
+    }
+    let card_is_new = sqlx::query_scalar::<_, String>(
+        r#"INSERT INTO billing_card_grants (card_fingerprint, organization_id, setup_intent_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (card_fingerprint) DO NOTHING
+           RETURNING card_fingerprint"#,
+    )
+    .bind(fingerprint)
+    .bind(organization_id)
+    .bind(setup_intent_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .is_some();
+    if !card_is_new {
+        transaction.commit().await?;
+        return Ok(CardGrant::CardAlreadyGranted);
+    }
+    sqlx::query(
+        r#"INSERT INTO billing_credit_ledger
+               (organization_id, entry_kind, amount_nano_eur, idempotency_key, provider_object_id)
+           VALUES ($1, 'grant', $2, 'card_grant', $3)"#,
+    )
+    .bind(organization_id)
+    .bind(CARD_GRANT_NANO_EUR)
+    .bind(setup_intent_id)
+    .execute(&mut *transaction)
+    .await?;
+    clear_exhausted_if_funded(&mut transaction, organization_id).await?;
+    transaction.commit().await?;
+    Ok(CardGrant::Granted)
+}
+
+async fn clear_exhausted_if_funded(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"UPDATE organizations o SET credit_exhausted_at = NULL
+           WHERE o.id = $1 AND o.credit_exhausted_at IS NOT NULL
+             AND (o.rate_card = 'unlimited' OR EXISTS (
+                 SELECT 1 FROM billing_credit_balances b
+                 WHERE b.organization_id = o.id AND b.balance_nano_eur > 0))"#,
+    )
+    .bind(organization_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn mark_exhausted(pool: &PgPool, organization_id: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE organizations SET credit_exhausted_at = COALESCE(credit_exhausted_at, now()) \
+         WHERE id = $1",
+    )
+    .bind(organization_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Records a paid top-up and its credit, once, whether the charge or its
+/// `invoice.paid` webhook gets here first.
+pub async fn complete_top_up(
+    pool: &PgPool,
+    top_up_id: &str,
+    invoice_id: &str,
+) -> anyhow::Result<bool> {
+    let mut transaction = pool.begin().await?;
+    let top_up: Option<(String, i32)> = sqlx::query_as(
+        r#"UPDATE billing_top_ups SET state = 'paid', stripe_invoice_id = $2,
+               completed_at = now(), failure_code = NULL
+           WHERE id = $1 AND state <> 'paid'
+           RETURNING organization_id, amount_cents"#,
+    )
+    .bind(top_up_id)
+    .bind(invoice_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let Some((organization_id, amount_cents)) = top_up else {
+        transaction.commit().await?;
+        return Ok(false);
+    };
+    sqlx::query(
+        r#"INSERT INTO billing_credit_ledger
+               (organization_id, entry_kind, amount_nano_eur, idempotency_key, provider_object_id)
+           VALUES ($1, 'top_up', $2, $3, $4)
+           ON CONFLICT (organization_id, idempotency_key) DO NOTHING"#,
+    )
+    .bind(&organization_id)
+    .bind(i64::from(amount_cents) * NANO_EUR_PER_CENT)
+    .bind(format!("top_up:{top_up_id}"))
+    .bind(invoice_id)
+    .execute(&mut *transaction)
+    .await?;
+    clear_exhausted_if_funded(&mut transaction, &organization_id).await?;
+    transaction.commit().await?;
+    Ok(true)
+}
+
+/// Records a declined top-up, and that the organization has no credit and
+/// no way to get it, which starts the 24-hour clock on its running
+/// sandboxes.
+pub async fn fail_top_up(
+    pool: &PgPool,
+    top_up_id: &str,
+    invoice_id: Option<&str>,
+    code: &str,
+) -> anyhow::Result<()> {
+    let organization_id: Option<String> = sqlx::query_scalar(
+        r#"UPDATE billing_top_ups SET state = 'failed', completed_at = now(),
+               failure_code = $2, stripe_invoice_id = COALESCE(stripe_invoice_id, $3)
+           WHERE id = $1 AND state = 'pending'
+           RETURNING organization_id"#,
+    )
+    .bind(top_up_id)
+    .bind(crate::stripe_client::failure_code(Some(code)))
+    .bind(invoice_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(organization_id) = organization_id {
+        mark_exhausted(pool, &organization_id).await?;
+    }
+    Ok(())
+}
+
+/// Where an organization's credit stands after settling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Settlement {
+    /// Unlimited, or a positive balance.
+    Funded,
+    /// The card was charged.
+    ToppedUp,
+    /// A charge is under way; the next run resumes it.
+    Pending,
+    /// No credit and no way to get it: no card, top-up off, or a refusal.
+    Exhausted,
+    /// This deployment does not enforce credit, so nothing was done.
+    NotEnforced,
+}
+
+/// Settles one organization: tops it up from its card when it charges, has
+/// no credit and allows it, else records it as exhausted. `after_new_card`
+/// tries again even after a recent refusal.
+pub async fn settle_organization(
+    pool: &PgPool,
+    stripe: &crate::stripe_client::StripeHandle,
+    enforcement: CreditEnforcement,
+    organization_id: &str,
+    after_new_card: bool,
+) -> anyhow::Result<Settlement> {
+    if !enforcement.is_on() {
+        return Ok(Settlement::NotEnforced);
+    }
+    type State = (String, i64, bool, i32, Option<String>);
+    let Some((rate_card, balance, auto_top_up, top_up_cents, customer)): Option<State> =
+        sqlx::query_as(
+            r#"SELECT o.rate_card, COALESCE(b.balance_nano_eur, 0), o.auto_top_up_enabled,
+                      o.auto_top_up_cents, o.stripe_customer_id
+               FROM organizations o
+               LEFT JOIN billing_credit_balances b ON b.organization_id = o.id
+               WHERE o.id = $1"#,
+        )
+        .bind(organization_id)
+        .fetch_optional(pool)
+        .await?
+    else {
+        return Ok(Settlement::Funded);
+    };
+    let pending: Option<(String, i32)> = sqlx::query_as(
+        "SELECT id, amount_cents FROM billing_top_ups WHERE organization_id = $1 AND state = 'pending'",
+    )
+    .bind(organization_id)
+    .fetch_optional(pool)
+    .await?;
+    if pending.is_none() && (rate_card == UNLIMITED_RATE_CARD || balance > 0) {
+        let mut transaction = pool.begin().await?;
+        clear_exhausted_if_funded(&mut transaction, organization_id).await?;
+        transaction.commit().await?;
+        return Ok(Settlement::Funded);
+    }
+    let customer = customer.filter(|customer| !customer.is_empty());
+    let (top_up_id, amount_cents) = match pending {
+        Some(pending) => pending,
+        None => {
+            let recently_refused: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM billing_top_ups WHERE organization_id = $1 \
+                 AND state = 'failed' AND completed_at > now() - interval '24 hours')",
+            )
+            .bind(organization_id)
+            .fetch_one(pool)
+            .await?;
+            if customer.is_none()
+                || !auto_top_up
+                || stripe.enabled().is_none()
+                || (recently_refused && !after_new_card)
+                || !stripe.org_has_payment_method(pool, organization_id).await
+            {
+                mark_exhausted(pool, organization_id).await?;
+                return Ok(Settlement::Exhausted);
+            }
+            let created: Option<String> = sqlx::query_scalar(
+                r#"INSERT INTO billing_top_ups (organization_id, amount_cents)
+                   VALUES ($1, $2)
+                   ON CONFLICT (organization_id) WHERE state = 'pending' DO NOTHING
+                   RETURNING id"#,
+            )
+            .bind(organization_id)
+            .bind(top_up_cents)
+            .fetch_optional(pool)
+            .await?;
+            match created {
+                Some(id) => (id, top_up_cents),
+                // Another settle created it first; it charges.
+                None => return Ok(Settlement::Pending),
+            }
+        }
+    };
+    let Some(customer) = customer else {
+        fail_top_up(pool, &top_up_id, None, "no_customer").await?;
+        return Ok(Settlement::Exhausted);
+    };
+    match stripe
+        .charge_top_up(
+            &customer,
+            organization_id,
+            &top_up_id,
+            i64::from(amount_cents),
+        )
+        .await
+    {
+        Ok(crate::stripe_client::TopUpCharge::Paid { invoice_id }) => {
+            complete_top_up(pool, &top_up_id, &invoice_id).await?;
+            Ok(Settlement::ToppedUp)
+        }
+        Ok(crate::stripe_client::TopUpCharge::Declined { invoice_id, code }) => {
+            fail_top_up(pool, &top_up_id, invoice_id.as_deref(), &code).await?;
+            Ok(Settlement::Exhausted)
+        }
+        Err(error) => {
+            tracing::warn!(
+                organization_id,
+                top_up_id,
+                ?error,
+                "credit top-up: charge unconfirmed; resuming next run"
+            );
+            Ok(Settlement::Pending)
+        }
+    }
+}
+
+/// Settles every organization that charges and has no credit, has a charge
+/// under way, or was exhausted and is funded again.
+pub async fn settle_due(
+    pool: &PgPool,
+    stripe: &crate::stripe_client::StripeHandle,
+    enforcement: CreditEnforcement,
+) -> anyhow::Result<usize> {
+    if !enforcement.is_on() {
+        return Ok(0);
+    }
+    let organizations: Vec<String> = sqlx::query_scalar(
+        r#"SELECT b.organization_id FROM billing_credit_balances b
+           JOIN organizations o ON o.id = b.organization_id
+           WHERE o.rate_card <> 'unlimited' AND b.balance_nano_eur <= 0
+             AND o.credit_exhausted_at IS NULL
+           UNION
+           SELECT organization_id FROM billing_top_ups WHERE state = 'pending'
+           UNION
+           SELECT o.id FROM organizations o
+           LEFT JOIN billing_credit_balances b ON b.organization_id = o.id
+           WHERE o.credit_exhausted_at IS NOT NULL
+             AND (o.rate_card = 'unlimited' OR COALESCE(b.balance_nano_eur, 0) > 0
+                  -- A refused card is tried again a day later. One that was
+                  -- never charged (no card) waits for a new card, which
+                  -- settles at once, so nothing asks Stripe every minute.
+                  OR (o.auto_top_up_enabled AND o.stripe_customer_id IS NOT NULL
+                      AND EXISTS (
+                          SELECT 1 FROM billing_top_ups t WHERE t.organization_id = o.id
+                            AND t.state = 'failed')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM billing_top_ups t WHERE t.organization_id = o.id
+                            AND t.state = 'failed'
+                            AND t.completed_at > now() - interval '24 hours')))"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let count = organizations.len();
+    for organization_id in organizations {
+        if let Err(error) =
+            settle_organization(pool, stripe, enforcement, &organization_id, false).await
+        {
+            tracing::error!(organization_id, %error, "credit settlement failed");
+        }
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -531,6 +875,289 @@ mod tests {
                 .iter()
                 .all(|entry| entry.2.as_deref() == Some("discounted"))
         );
+        cleanup(&pool, fixture).await;
+    }
+
+    async fn balance(pool: &PgPool, fixture: &Fixture) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COALESCE((SELECT balance_nano_eur FROM billing_credit_balances \
+             WHERE organization_id = $1), 0)",
+        )
+        .bind(&fixture.organization_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn exhausted(pool: &PgPool, fixture: &Fixture) -> bool {
+        sqlx::query_scalar(
+            "SELECT credit_exhausted_at IS NOT NULL FROM organizations WHERE id = $1",
+        )
+        .bind(&fixture.organization_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn db_a_card_grants_fifty_euros_once_per_organization_and_once_per_card() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let first = seed(&pool, "regular").await;
+        let second = seed(&pool, "regular").await;
+        let card = format!("fp_{}", first.organization_id);
+        let other_card = format!("fp_other_{}", first.organization_id);
+
+        let grant = |fixture: &Fixture, card: Option<String>, intent: &str| {
+            let (pool, organization, intent) = (
+                pool.clone(),
+                fixture.organization_id.clone(),
+                intent.to_owned(),
+            );
+            async move { grant_card_credit(&pool, &organization, card.as_deref(), &intent).await }
+        };
+        assert_eq!(
+            grant(&first, None, "seti_bank").await.unwrap(),
+            CardGrant::NotACard
+        );
+        assert_eq!(
+            grant(&first, Some(card.clone()), "seti_1").await.unwrap(),
+            CardGrant::Granted
+        );
+        assert_eq!(balance(&pool, &first).await, CARD_GRANT_NANO_EUR);
+        // A second card on the same organization, or a retried webhook,
+        // grants nothing.
+        assert_eq!(
+            grant(&first, Some(other_card.clone()), "seti_2")
+                .await
+                .unwrap(),
+            CardGrant::OrganizationAlreadyGranted
+        );
+        assert_eq!(
+            grant(&first, Some(card.clone()), "seti_1").await.unwrap(),
+            CardGrant::OrganizationAlreadyGranted
+        );
+        // The same card on another organization grants nothing.
+        assert_eq!(
+            grant(&second, Some(card.clone()), "seti_3").await.unwrap(),
+            CardGrant::CardAlreadyGranted
+        );
+        assert_eq!(balance(&pool, &first).await, CARD_GRANT_NANO_EUR);
+        assert_eq!(balance(&pool, &second).await, 0);
+        // A different card grants the second organization.
+        assert_eq!(
+            grant(&second, Some(other_card.clone()), "seti_4")
+                .await
+                .unwrap(),
+            CardGrant::Granted
+        );
+        // Deleting the organization keeps the card from granting again.
+        cleanup(&pool, first).await;
+        let third = seed(&pool, "regular").await;
+        assert_eq!(
+            grant(&third, Some(card.clone()), "seti_5").await.unwrap(),
+            CardGrant::CardAlreadyGranted
+        );
+        for fixture in [second, third] {
+            cleanup(&pool, fixture).await;
+        }
+        sqlx::query("DELETE FROM billing_card_grants WHERE card_fingerprint IN ($1, $2)")
+            .bind(&card)
+            .bind(&other_card)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_enforcement_off_settling_does_nothing_at_all() {
+        // Neither the database nor Stripe is reachable, so anything but
+        // returning at once would fail.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgres://codewire@127.0.0.1:1/codewire")
+            .unwrap();
+        let stripe = crate::stripe_client::StripeHandle::for_test("http://127.0.0.1:1");
+        assert_eq!(
+            settle_due(&pool, &stripe, CreditEnforcement::Off)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            settle_organization(&pool, &stripe, CreditEnforcement::Off, "org", true)
+                .await
+                .unwrap(),
+            Settlement::NotEnforced
+        );
+        settle_due(&pool, &stripe, CreditEnforcement::On)
+            .await
+            .unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn db_with_enforcement_off_an_empty_balance_with_a_card_is_left_alone() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let stripe = crate::stripe_client::StripeHandle::for_test("http://127.0.0.1:1");
+        let fixture = seed(&pool, "regular").await;
+        session(&pool, &fixture, "ended", "2 hours", Some("1 hour")).await;
+        draw_organization(&pool, &fixture.organization_id)
+            .await
+            .unwrap();
+        assert!(balance(&pool, &fixture).await < 0);
+        sqlx::query("UPDATE organizations SET stripe_customer_id = 'cus_off' WHERE id = $1")
+            .bind(&fixture.organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        settle_due(&pool, &stripe, CreditEnforcement::Off)
+            .await
+            .unwrap();
+        let top_ups: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM billing_top_ups WHERE organization_id = $1")
+                .bind(&fixture.organization_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(top_ups, 0);
+        assert!(!exhausted(&pool, &fixture).await);
+
+        // The same organization with enforcement on is marked out of credit:
+        // the unreachable Stripe cannot confirm a card.
+        assert_eq!(
+            settle_organization(
+                &pool,
+                &stripe,
+                CreditEnforcement::On,
+                &fixture.organization_id,
+                false
+            )
+            .await
+            .unwrap(),
+            Settlement::Exhausted
+        );
+        assert!(exhausted(&pool, &fixture).await);
+        cleanup(&pool, fixture).await;
+    }
+
+    #[tokio::test]
+    async fn db_top_ups_credit_once_and_a_refusal_or_no_card_exhausts() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let stripe = crate::stripe_client::StripeHandle::default();
+        let fixture = seed(&pool, "regular").await;
+        // Usage overran: with no card, settling records the exhaustion.
+        session(&pool, &fixture, "ended", "2 hours", Some("1 hour")).await;
+        draw_organization(&pool, &fixture.organization_id)
+            .await
+            .unwrap();
+        assert!(balance(&pool, &fixture).await < 0);
+        assert!(
+            settle_due(&pool, &stripe, CreditEnforcement::On)
+                .await
+                .unwrap()
+                >= 1
+        );
+        assert!(exhausted(&pool, &fixture).await);
+
+        // A pending top-up whose charge cannot be confirmed stays pending.
+        let top_up: String = sqlx::query_scalar(
+            "INSERT INTO billing_top_ups (organization_id, amount_cents) VALUES ($1, 2000) \
+             RETURNING id",
+        )
+        .bind(&fixture.organization_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE organizations SET stripe_customer_id = 'cus_test' WHERE id = $1")
+            .bind(&fixture.organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            settle_organization(
+                &pool,
+                &stripe,
+                CreditEnforcement::On,
+                &fixture.organization_id,
+                false
+            )
+            .await
+            .unwrap(),
+            Settlement::Pending
+        );
+
+        // Its invoice is paid (here, by the webhook): EUR 20 once, and the
+        // organization is no longer exhausted once the balance is positive.
+        let before = balance(&pool, &fixture).await;
+        assert!(complete_top_up(&pool, &top_up, "in_test").await.unwrap());
+        assert!(!complete_top_up(&pool, &top_up, "in_test").await.unwrap());
+        assert_eq!(
+            balance(&pool, &fixture).await,
+            before + 20 * NANO_EUR_PER_EURO
+        );
+        assert!(!exhausted(&pool, &fixture).await);
+        assert_eq!(
+            settle_organization(
+                &pool,
+                &stripe,
+                CreditEnforcement::On,
+                &fixture.organization_id,
+                false
+            )
+            .await
+            .unwrap(),
+            Settlement::Funded
+        );
+
+        // A refused charge exhausts the organization.
+        let refused: String = sqlx::query_scalar(
+            "INSERT INTO billing_top_ups (organization_id, amount_cents) VALUES ($1, 2000) \
+             RETURNING id",
+        )
+        .bind(&fixture.organization_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        fail_top_up(&pool, &refused, Some("in_declined"), "Insufficient Funds")
+            .await
+            .unwrap();
+        let state: (String, Option<String>) =
+            sqlx::query_as("SELECT state, failure_code FROM billing_top_ups WHERE id = $1")
+                .bind(&refused)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            state,
+            ("failed".to_owned(), Some("insufficientfunds".to_owned()))
+        );
+        assert!(exhausted(&pool, &fixture).await);
+
+        // Unlimited is never exhausted.
+        sqlx::query("UPDATE organizations SET rate_card = 'unlimited' WHERE id = $1")
+            .bind(&fixture.organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            settle_organization(
+                &pool,
+                &stripe,
+                CreditEnforcement::On,
+                &fixture.organization_id,
+                false
+            )
+            .await
+            .unwrap(),
+            Settlement::Funded
+        );
+        assert!(!exhausted(&pool, &fixture).await);
         cleanup(&pool, fixture).await;
     }
 }

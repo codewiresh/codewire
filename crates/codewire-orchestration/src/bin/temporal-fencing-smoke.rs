@@ -1710,6 +1710,7 @@ mod enabled {
             sandbox_cfg: worker::create::SandboxWorkerCfg::from_env(),
             confidential_storage: None,
             temporal_trigger: trigger,
+            credit_enforcement: Default::default(),
         });
         codewire_orchestration::temporal::run_temporal_worker(
             context,

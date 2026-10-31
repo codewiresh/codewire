@@ -513,6 +513,8 @@ async fn main() -> anyhow::Result<()> {
         sandbox_cfg,
         confidential_storage: confidential_storage.clone(),
         temporal_trigger: temporal_trigger.clone(),
+        credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement::from_env(
+        )?,
     });
 
     // Leader-gated background loops: the orchestration replicas elect a

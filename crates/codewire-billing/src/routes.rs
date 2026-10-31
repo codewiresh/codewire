@@ -19,6 +19,7 @@ pub struct BillingState {
     pub pool: PgPool,
     pub stripe: StripeHandle,
     pub email: EmailClient,
+    pub credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
     pub frontend_origin: FrontendOrigin,
 }
 

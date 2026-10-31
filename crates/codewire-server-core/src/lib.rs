@@ -36,6 +36,7 @@ pub mod config;
 pub mod connect;
 pub mod connect_error;
 pub mod connect_testing;
+pub mod credit_enforcement;
 pub mod db;
 pub mod error;
 pub mod health;

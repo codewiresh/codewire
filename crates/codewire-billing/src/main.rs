@@ -48,6 +48,16 @@ async fn main() -> anyhow::Result<()> {
     let email = EmailClient::from_env().await?;
     let worker_email = email.clone();
 
+    codewire_billing::stripe_client::check_test_key_requirement(
+        std::env::var(codewire_billing::stripe_client::REQUIRE_TEST_KEY_ENV)
+            .ok()
+            .as_deref(),
+        std::env::var("STRIPE_SECRET_KEY").ok().as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let credit_enforcement =
+        codewire_server_core::credit_enforcement::CreditEnforcement::from_env()?;
+
     let state = BillingState {
         pool: pool.clone(),
         // Stripe configuration is required for a billing deployment. Keep the
@@ -55,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
         // not a BillingCatalogService wire outcome.
         stripe: StripeHandle::from_env(),
         email: email.clone(),
+        credit_enforcement,
         frontend_origin: FrontendOrigin::parse(
             &std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:5173".to_string()),
         )?,
@@ -79,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
             pool: pool.clone(),
             stripe: Arc::new(StripeHandle::from_env()),
             email: Arc::new(email),
+            credit_enforcement,
             database_url: cfg.database_url.clone(),
         });
         codewire_billing::metering::start_loops(deps, &loops);

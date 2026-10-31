@@ -37,6 +37,7 @@ pub struct MeteringDeps {
     pub stripe: Arc<StripeHandle>,
     pub email: Arc<EmailClient>,
     pub database_url: String,
+    pub credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
 }
 
 pub fn start_loops(deps: Arc<MeteringDeps>, loops: &[String]) {
@@ -106,6 +107,13 @@ pub fn start_loops(deps: Arc<MeteringDeps>, loops: &[String]) {
                                     Err(e) => {
                                         tracing::error!(error = %e, "credit metering: draw failed")
                                     }
+                                }
+                                // Then top up, or record as exhausted, every
+                                // organization left without credit.
+                                if let Err(e) =
+                                    crate::credit::settle_due(&deps.pool, &deps.stripe, deps.credit_enforcement).await
+                                {
+                                    tracing::error!(error = %e, "credit metering: settlement failed");
                                 }
                             }
                         },

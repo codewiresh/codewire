@@ -259,6 +259,7 @@ async fn run_reconciliation(ctx: &WorkerContext) {
     reconcile_pending_organization_deletions(ctx).await;
     reconcile_pending_account_deletions(ctx).await;
     evict_expired_environments(ctx).await;
+    stop_credit_exhausted_environments(ctx).await;
     process_graced_deletions(ctx).await;
     warn_expiring_environments(ctx).await;
     reconcile_incomplete_external_cleanup(ctx).await;
@@ -301,6 +302,37 @@ async fn evict_expired_environments(ctx: &WorkerContext) {
         }
         if let Err(e) = enqueue_environment_reconcile(ctx, &id, false, "ttl eviction").await {
             tracing::error!(environment_id = id, error = %e, "reconciler: failed to enqueue reconcile for expired environment");
+        }
+    }
+}
+
+/// Stops the running sandboxes of organizations that have had no compute
+/// credit, and no way to get it, for 24 hours (#3381). Storage is kept.
+async fn stop_credit_exhausted_environments(ctx: &WorkerContext) {
+    let svc = Service::<PgLifecycleStore>::for_pool(ctx.pool.clone());
+    let ids = match super::credit_stop::credit_exhausted_environment_ids(
+        &ctx.pool,
+        ctx.credit_enforcement,
+    )
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::error!(error = %e, "reconciler: query credit-exhausted environments");
+            return;
+        }
+    };
+    for id in ids {
+        tracing::info!(
+            environment_id = id,
+            "reconciler: stopping a sandbox whose organization ran out of credit"
+        );
+        if let Err(e) = svc.set_desired_state(&id, "stopped").await {
+            tracing::error!(environment_id = id, error = %e, "reconciler: set desired_state=stopped for credit exhaustion");
+            continue;
+        }
+        if let Err(e) = enqueue_environment_reconcile(ctx, &id, false, "credit exhausted").await {
+            tracing::error!(environment_id = id, error = %e, "reconciler: failed to enqueue reconcile for credit exhaustion");
         }
     }
 }

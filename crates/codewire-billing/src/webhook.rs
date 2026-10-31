@@ -229,6 +229,7 @@ async fn handle_checkout_completed(
                         tracing::error!(error = ?e, "billing: failed to set default payment method from setup")
                     }
                 }
+                credit_for_new_card(state, &org_id, si.id.as_str()).await?;
             }
         }
         return Ok(());
@@ -363,6 +364,43 @@ async fn handle_checkout_completed(
     )
     .await;
     tracing::info!(org_id, plan = plan_name, sub_id = %sub.id, "billing: checkout completed");
+    Ok(())
+}
+
+/// A new card grants EUR 50 once per organization and once per card, then
+/// tops up a balance that ran out (#3381), where this deployment enforces
+/// credit. An error fails the delivery, so Stripe retries; both steps are
+/// idempotent.
+async fn credit_for_new_card(
+    state: &BillingState,
+    org_id: &str,
+    setup_intent_id: &str,
+) -> anyhow::Result<()> {
+    if !state.credit_enforcement.is_on() {
+        return Ok(());
+    }
+    let pool = &state.pool;
+    let fingerprint = state
+        .stripe
+        .setup_intent_card_fingerprint(setup_intent_id)
+        .await?;
+    let grant =
+        crate::credit::grant_card_credit(pool, org_id, fingerprint.as_deref(), setup_intent_id)
+            .await?;
+    tracing::info!(org_id, ?grant, "billing: card credit grant");
+    let settlement = crate::credit::settle_organization(
+        pool,
+        &state.stripe,
+        state.credit_enforcement,
+        org_id,
+        true,
+    )
+    .await?;
+    tracing::info!(
+        org_id,
+        ?settlement,
+        "billing: credit settled after a new card"
+    );
     Ok(())
 }
 
@@ -627,25 +665,27 @@ fn provider_idempotency_key(kind: &str, parts: &[&str]) -> String {
     format!("cw-{kind}-{:x}", hasher.finalize())
 }
 
+/// The top-up an invoice charges, when it is an automatic credit top-up.
+fn top_up_id(inv: &stripe_shared::Invoice) -> Option<&str> {
+    let metadata = inv.metadata.as_ref()?;
+    (metadata.get("kind").map(String::as_str) == Some("credit_top_up"))
+        .then(|| metadata.get("top_up_id").map(String::as_str))
+        .flatten()
+        .filter(|id| !id.is_empty())
+}
+
 async fn handle_invoice_paid(
     state: &BillingState,
     inv: &stripe_shared::Invoice,
 ) -> anyhow::Result<()> {
     let pool = &state.pool;
     upsert_invoice(pool, inv).await?;
+    if let (Some(top_up_id), Some(invoice_id)) = (top_up_id(inv), inv.id.as_deref()) {
+        crate::credit::complete_top_up(pool, top_up_id, invoice_id).await?;
+    }
 
     let invoice_id = inv.id.as_deref().unwrap_or_default();
     let org_id = resolve_invoice_org_id(pool, inv).await;
-    log_billing_event(
-        pool,
-        "invoice_paid",
-        &org_id,
-        Some(inv.amount_paid as i32),
-        &inv.currency.to_string(),
-        invoice_id,
-        serde_json::json!({"invoice_number": inv.number.clone().unwrap_or_default()}),
-    )
-    .await;
 
     if state.email.is_configured() {
         let receipt_sent: bool = sqlx::query_scalar(
@@ -670,25 +710,34 @@ async fn handle_invoice_paid(
                 credit_reasons: invoice_line_descriptions(inv, true),
                 ..Default::default()
             };
-            if inv.period_start > 0 {
+            // A one-off invoice, such as a top-up, covers no period.
+            if inv.period_start > 0 && inv.period_end > inv.period_start {
                 data.period_start = format_go_date(inv.period_start, "short");
-            }
-            if inv.period_end > 0 {
                 data.period_end = format_go_date(inv.period_end, "short");
             }
-            match state.email.send_payment_receipt(&org_email, &data).await {
-                Err(e) => tracing::error!(error = ?e, "billing: failed to send receipt email"),
-                Ok(()) => {
-                    let _ = sqlx::query(
-                            r#"UPDATE stripe_invoices SET receipt_sent_at = NOW() WHERE stripe_invoice_id = $1"#,
-                        )
-                        .bind(invoice_id)
-                        .execute(pool)
-                        .await;
-                }
-            }
+            // A failed send fails the delivery, so Stripe retries it: paying
+            // never ends without a receipt. Everything above is idempotent,
+            // and the event below is logged once, after the receipt.
+            state.email.send_payment_receipt(&org_email, &data).await?;
+            let _ = sqlx::query(
+                r#"UPDATE stripe_invoices SET receipt_sent_at = NOW() WHERE stripe_invoice_id = $1"#,
+            )
+            .bind(invoice_id)
+            .execute(pool)
+            .await;
         }
     }
+
+    log_billing_event(
+        pool,
+        "invoice_paid",
+        &org_id,
+        Some(inv.amount_paid as i32),
+        &inv.currency.to_string(),
+        invoice_id,
+        serde_json::json!({"invoice_number": inv.number.clone().unwrap_or_default()}),
+    )
+    .await;
 
     Ok(())
 }
@@ -699,6 +748,10 @@ async fn handle_invoice_payment_failed(
 ) -> anyhow::Result<()> {
     let pool = &state.pool;
     upsert_invoice(pool, inv).await?;
+    if let Some(top_up_id) = top_up_id(inv) {
+        crate::credit::fail_top_up(pool, top_up_id, inv.id.as_deref(), "invoice_payment_failed")
+            .await?;
+    }
 
     let invoice_id = inv.id.as_deref().unwrap_or_default();
     let org_id = resolve_invoice_org_id(pool, inv).await;
@@ -963,6 +1016,7 @@ mod tests {
     use super::*;
     use crate::checkout_sessions::FrontendOrigin;
     use crate::stripe_client::StripeHandle;
+    use codewire_server_core::credit_enforcement::CreditEnforcement;
 
     // The event shape async-stripe's own tests construct; Codewire does not
     // handle this type, so an accepted delivery goes on to the idempotency
@@ -975,6 +1029,7 @@ mod tests {
             pool: PgPool::connect_lazy("postgres://codewire@127.0.0.1:1/codewire").unwrap(),
             stripe,
             email: EmailClient::disabled(),
+            credit_enforcement: Default::default(),
             frontend_origin: FrontendOrigin::parse("https://app.codewire.test").unwrap(),
         }
     }
@@ -1021,6 +1076,20 @@ mod tests {
         let (status, body) = deliver(stripe, "").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid signature");
+    }
+
+    #[tokio::test]
+    async fn with_enforcement_off_a_new_card_grants_and_charges_nothing() {
+        // Neither the database nor Stripe is reachable, so doing anything
+        // at all would fail.
+        let mut billing = state(StripeHandle::for_test("http://127.0.0.1:1"));
+        credit_for_new_card(&billing, "org_off", "seti_off")
+            .await
+            .unwrap();
+        billing.credit_enforcement = CreditEnforcement::On;
+        credit_for_new_card(&billing, "org_on", "seti_on")
+            .await
+            .unwrap_err();
     }
 
     #[test]

@@ -11,6 +11,9 @@ use std::time::Duration;
 use sqlx::PgPool;
 use stripe::{IdempotencyKey, RequestStrategy, StripeRequest};
 use stripe_billing::billing_portal_session::CreateBillingPortalSession;
+use stripe_billing::invoice::{
+    CreateInvoice, CreateInvoicePendingInvoiceItemsBehavior, FinalizeInvoiceInvoice, PayInvoice,
+};
 use stripe_billing::invoice_item::{CreateInvoiceItem, UpdateInvoiceItem};
 use stripe_billing::subscription::{CancelSubscription, ListSubscription, RetrieveSubscription};
 use stripe_billing::subscription_item::{
@@ -28,6 +31,29 @@ use stripe_core::customer::{
 use stripe_core::setup_intent::RetrieveSetupIntent;
 
 use codewire_server_core::AppError;
+
+/// `on` makes billing refuse to start with anything but a test key, so a
+/// test environment can never charge a real card. Unset, empty or `off`
+/// accepts any key. Anything else is refused.
+pub const REQUIRE_TEST_KEY_ENV: &str = "CODEWIRE_STRIPE_REQUIRE_TEST_KEY";
+
+/// Applies [`REQUIRE_TEST_KEY_ENV`] to the configured key. No key means
+/// billing is disabled, which charges nothing. The error never holds the key.
+pub fn check_test_key_requirement(required: Option<&str>, key: Option<&str>) -> Result<(), String> {
+    match required.map(str::trim) {
+        None | Some("" | "off") => Ok(()),
+        Some("on") => match key {
+            None | Some("") => Ok(()),
+            Some(key) if key.starts_with("sk_test_") || key.starts_with("rk_test_") => Ok(()),
+            Some(_) => Err(format!(
+                "{REQUIRE_TEST_KEY_ENV} is on, but STRIPE_SECRET_KEY is not a test key"
+            )),
+        },
+        Some(value) => Err(format!(
+            "{REQUIRE_TEST_KEY_ENV} must be \"on\" or \"off\"; got {value:?}"
+        )),
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct StripeHandle {
@@ -722,5 +748,191 @@ impl StripeHandle {
         .await
         .map_err(stripe_err)?;
         Ok(())
+    }
+}
+
+/// How an automatic top-up charge ended (#3381).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopUpCharge {
+    /// The card was charged; the invoice is paid.
+    Paid { invoice_id: String },
+    /// Stripe refused the charge for a reason a retry will not fix (a
+    /// declined card, no payment method). The code is Stripe's, made safe
+    /// for storage.
+    Declined {
+        invoice_id: Option<String>,
+        code: String,
+    },
+}
+
+/// A Stripe error code as a stored failure code: lower-case letters, digits
+/// and '_', at most 128 characters, or `card_declined` when there is none.
+pub fn failure_code(code: Option<&str>) -> String {
+    let code: String = code
+        .unwrap_or("card_declined")
+        .chars()
+        .map(|c| c.to_ascii_lowercase())
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(128)
+        .collect();
+    if code.is_empty() {
+        "card_declined".to_owned()
+    } else {
+        code
+    }
+}
+
+/// A refusal no retry fixes: Stripe answers a declined card with 402.
+fn declined(error: &stripe::StripeError) -> Option<String> {
+    match error {
+        stripe::StripeError::Stripe(errors, 402) => Some(failure_code(
+            errors
+                .decline_code
+                .as_deref()
+                .or(errors.code.as_ref().map(|code| code.as_str())),
+        )),
+        _ => None,
+    }
+}
+
+impl StripeHandle {
+    /// The fingerprint of the card a setup intent saved, when it saved one.
+    /// A fingerprint is the same for one card number across customers.
+    pub async fn setup_intent_card_fingerprint(
+        &self,
+        setup_intent_id: &str,
+    ) -> Result<Option<String>, AppError> {
+        let client = self.client()?;
+        let intent = RetrieveSetupIntent::new(
+            setup_intent_id
+                .parse::<stripe_shared::SetupIntentId>()
+                .map_err(stripe_err)?,
+        )
+        .expand(vec!["payment_method".to_owned()])
+        .send(client)
+        .await
+        .map_err(stripe_err)?;
+        Ok(intent.payment_method.and_then(|method| match method {
+            stripe_types::Expandable::Object(method) => {
+                method.card.and_then(|card| card.fingerprint)
+            }
+            stripe_types::Expandable::Id(_) => None,
+        }))
+    }
+
+    /// Charges an automatic top-up to the customer's default payment method
+    /// as its own EUR invoice, paid at once. Every call is idempotent on the
+    /// top-up id, so a retry after a crash resumes the same charge.
+    pub(crate) async fn charge_top_up(
+        &self,
+        customer_id: &str,
+        organization_id: &str,
+        top_up_id: &str,
+        amount_cents: i64,
+    ) -> Result<TopUpCharge, AppError> {
+        let client = self.client()?;
+        let key = |step: &str| IdempotencyKey::new(format!("cw-top-up-{step}-{top_up_id}"));
+        let metadata = std::collections::HashMap::from([
+            ("kind".to_owned(), "credit_top_up".to_owned()),
+            ("org_id".to_owned(), organization_id.to_owned()),
+            ("top_up_id".to_owned(), top_up_id.to_owned()),
+        ]);
+        let invoice = CreateInvoice::new()
+            .customer(customer_id)
+            .currency(stripe_types::Currency::EUR)
+            .auto_advance(false)
+            .collection_method(stripe_shared::InvoiceCollectionMethod::ChargeAutomatically)
+            .pending_invoice_items_behavior(CreateInvoicePendingInvoiceItemsBehavior::Exclude)
+            .description("Codewire compute credit top-up")
+            .metadata(metadata)
+            .customize()
+            .request_strategy(RequestStrategy::Idempotent(
+                key("invoice").map_err(stripe_err)?,
+            ))
+            .send(client)
+            .await
+            .map_err(stripe_err)?;
+        let invoice_id = invoice
+            .id
+            .map(|id| id.to_string())
+            .ok_or_else(|| AppError::InternalMsg("stripe invoice create returned no id".into()))?;
+        CreateInvoiceItem::new()
+            .customer(customer_id)
+            .invoice(invoice_id.clone())
+            .amount(amount_cents)
+            .currency(stripe_types::Currency::EUR)
+            .description("Compute credit")
+            .customize()
+            .request_strategy(RequestStrategy::Idempotent(
+                key("item").map_err(stripe_err)?,
+            ))
+            .send(client)
+            .await
+            .map_err(stripe_err)?;
+        FinalizeInvoiceInvoice::new(invoice_id.as_str())
+            .customize()
+            .request_strategy(RequestStrategy::Idempotent(
+                key("finalize").map_err(stripe_err)?,
+            ))
+            .send(client)
+            .await
+            .map_err(stripe_err)?;
+        match PayInvoice::new(invoice_id.as_str())
+            .off_session(true)
+            .customize()
+            .request_strategy(RequestStrategy::Idempotent(key("pay").map_err(stripe_err)?))
+            .send(client)
+            .await
+        {
+            Ok(paid) if paid.status == Some(stripe_shared::InvoiceStatus::Paid) => {
+                Ok(TopUpCharge::Paid { invoice_id })
+            }
+            Ok(other) => Err(AppError::InternalMsg(
+                format!("stripe top-up invoice is {:?}, not paid", other.status).into(),
+            )),
+            Err(error) => match declined(&error) {
+                Some(code) => Ok(TopUpCharge::Declined {
+                    invoice_id: Some(invoice_id),
+                    code,
+                }),
+                None => Err(stripe_err(error)),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod top_up_tests {
+    use super::{REQUIRE_TEST_KEY_ENV, check_test_key_requirement, failure_code};
+
+    #[test]
+    fn a_live_key_is_refused_where_a_test_key_is_required() {
+        for required in [Some("on"), Some(" on ")] {
+            for key in ["sk_live_synthetic", "rk_live_synthetic", "synthetic"] {
+                let error = check_test_key_requirement(required, Some(key)).unwrap_err();
+                assert!(error.contains(REQUIRE_TEST_KEY_ENV), "{error}");
+                assert!(!error.contains(key), "{error}");
+            }
+            for key in ["sk_test_synthetic", "rk_test_synthetic", ""] {
+                check_test_key_requirement(required, Some(key)).unwrap();
+            }
+            check_test_key_requirement(required, None).unwrap();
+        }
+        for required in [None, Some(""), Some("off")] {
+            check_test_key_requirement(required, Some("sk_live_synthetic")).unwrap();
+        }
+        check_test_key_requirement(Some("yes"), Some("sk_test_synthetic")).unwrap_err();
+    }
+
+    #[test]
+    fn stripe_codes_become_safe_failure_codes() {
+        assert_eq!(
+            failure_code(Some("insufficient_funds")),
+            "insufficient_funds"
+        );
+        assert_eq!(failure_code(Some("Card-Declined!")), "carddeclined");
+        assert_eq!(failure_code(Some("")), "card_declined");
+        assert_eq!(failure_code(None), "card_declined");
+        assert_eq!(failure_code(Some(&"x".repeat(300))).len(), 128);
     }
 }
