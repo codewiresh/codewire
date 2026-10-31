@@ -29,6 +29,28 @@
               <div class="cw-stat"><dt>CPU</dt><dd>{{ organization.used_cpu }} <small>of {{ organization.effective_quota.cpu_millicores.display }}</small></dd></div>
               <div class="cw-stat"><dt>Memory</dt><dd>{{ organization.used_memory }} <small>of {{ organization.effective_quota.memory_mb.display }}</small></dd></div>
             </dl>
+            <ul class="cw-organization-settings" aria-label="Organization settings">
+              <li>{% match organization.confidential_environments %}{% when Some(enabled) %}<form class="cw-organization-toggle" method="post" action="/admin/organizations/_actions/confidential/set">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="organization_id" value="{{ organization.id }}">
+                <input type="hidden" name="organization_slug" value="{{ organization.slug }}">
+                {% if enabled %}<input type="hidden" name="enabled" value="false">
+                <p>Confidential environments <span class="cw-badge" data-tone="success">Opted in</span></p>
+                <button class="cw-button cw-button--outline" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for confidential environments</span></button>{% else %}<input type="hidden" name="enabled" value="true">
+                <p>Confidential environments <span class="cw-badge">Not opted in</span></p>
+                <button class="cw-button cw-button--outline" type="submit"><span>Opt in</span><span class="cw-sr-only"> to confidential environments</span></button>{% endif %}
+              </form>{% when None %}<p>Confidential environments <span class="cw-muted">cannot be read right now</span></p>{% endmatch %}</li>
+              <li><form class="cw-organization-toggle" method="post" action="/admin/organizations/_actions/dedicated-cpu/set">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="organization_id" value="{{ organization.id }}">
+                {% if organization.dedicated_cpu %}<input type="hidden" name="dedicated_cpu" value="false">
+                <p>CPU reservation <span class="cw-badge" data-tone="info">Dedicated</span></p>
+                <button class="cw-button cw-button--outline" type="submit">Return to shared CPU</button>{% else %}<input type="hidden" name="dedicated_cpu" value="true">
+                <p>CPU reservation <span class="cw-badge">Shared</span></p>
+                <button class="cw-button cw-button--outline" type="submit">Give dedicated CPU</button>{% endif %}
+              </form></li>
+            </ul>
+            <p class="cw-muted">Each change writes an audit entry. A CPU change applies to new sandboxes; while the deployment shares CPU, dedicated ones start cold.</p>
             <form class="cw-catalog-form" method="post" action="/admin/organizations/_actions/quota/set" aria-label="Set this organization's quota">
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">
               <input type="hidden" name="organization_id" value="{{ organization.id }}">
@@ -86,22 +108,6 @@
             <div class="cw-table-wrap"><table class="cw-table"><caption class="cw-sr-only">Live subscriptions</caption><thead><tr><th scope="col">Subscription</th><th scope="col">Plan</th><th scope="col">Status</th><th scope="col">Updated</th></tr></thead><tbody>
               {% for subscription in organization.subscriptions %}<tr><th scope="row">{{ subscription.kind }}</th><td>{{ subscription.plan }}</td><td>{{ subscription.status }}</td><td>{{ subscription.updated }}</td></tr>{% endfor %}
             </tbody></table></div>{% endif %}
-          </div>
-        </section>
-
-        <section class="cw-card" aria-labelledby="confidential-heading">
-          <header class="cw-card-header"><div><h2 id="confidential-heading">Confidential environments</h2><p>Members of an opted-in organization can create confidential environments where the deployment enables them, within the organization's environment quota.</p></div></header>
-          <div class="cw-card-body cw-admin-section">
-            {% match organization.confidential_environments %}{% when Some(enabled) %}<form class="cw-confidential-organization" method="post" action="/admin/organizations/_actions/confidential/set">
-              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-              <input type="hidden" name="organization_id" value="{{ organization.id }}">
-              <input type="hidden" name="organization_slug" value="{{ organization.slug }}">
-              {% if enabled %}<input type="hidden" name="enabled" value="false">
-              <p><span class="cw-badge" data-tone="success">Opted in</span> Changing it writes an audit entry.</p>
-              <button class="cw-button cw-button--outline" type="submit">Remove opt-in</button>{% else %}<input type="hidden" name="enabled" value="true">
-              <p><span class="cw-badge">Not opted in</span> Changing it writes an audit entry.</p>
-              <button class="cw-button" type="submit">Opt in</button>{% endif %}
-            </form>{% when None %}<p class="cw-muted">Whether this organization is opted in cannot be read right now.</p>{% endmatch %}
           </div>
         </section>
 

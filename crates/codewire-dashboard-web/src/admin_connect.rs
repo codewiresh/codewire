@@ -9,9 +9,9 @@ use codewire_admin_proto::codewire::admin::v1::{
     ListConfidentialOrganizationsRequest, ListOrganizationsRequest,
     ListSubscriptionMigrationsRequest, PlanSpec, PreviewSubscriptionMigrationRequest,
     RunSubscriptionMigrationRequest, SetDefaultEnvironmentQuotaRequest,
-    SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationEnvironmentQuotaRequest,
-    SetOrganizationRateCardRequest, SetPlanArchivedRequest, SetPriceArchivedRequest,
-    UpdatePlanRequest, UpdatePriceRequest, UpdateSettingRequest,
+    SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationDedicatedCpuRequest,
+    SetOrganizationEnvironmentQuotaRequest, SetOrganizationRateCardRequest, SetPlanArchivedRequest,
+    SetPriceArchivedRequest, UpdatePlanRequest, UpdatePriceRequest, UpdateSettingRequest,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
@@ -230,6 +230,8 @@ pub(crate) struct AdminOrganizationView {
     pub(crate) billing_exempt: bool,
     pub(crate) effective_plan: String,
     pub(crate) subscriptions: Vec<AdminSubscriptionRow>,
+    /// New sandboxes reserve a CPU per vCPU instead of sharing (#3635).
+    pub(crate) dedicated_cpu: bool,
     /// The card's name, as the page shows it.
     pub(crate) rate_card: String,
     pub(crate) rate_cards: Vec<RateCardOption>,
@@ -692,6 +694,7 @@ pub(crate) async fn organization(
     let quota = response.quota.into_option().unwrap_or_default();
     let usage = response.usage.into_option().unwrap_or_default();
     Ok(AdminOrganizationView {
+        dedicated_cpu: organization.dedicated_cpu,
         confidential_environments: confidential
             .as_ref()
             .map(|ids| ids.contains(&organization.id)),
@@ -805,6 +808,22 @@ pub(crate) async fn set_organization_rate_card(
         .set_organization_rate_card(SetOrganizationRateCardRequest {
             organization_id: organization_id.to_owned(),
             rate_card: rate_card.to_owned(),
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn set_organization_dedicated_cpu(
+    state: &AppState,
+    cookie: HeaderValue,
+    organization_id: &str,
+    dedicated_cpu: bool,
+) -> Result<(), ConnectError> {
+    admin_client(state, cookie)
+        .set_organization_dedicated_cpu(SetOrganizationDedicatedCpuRequest {
+            organization_id: organization_id.to_owned(),
+            dedicated_cpu,
             ..Default::default()
         })
         .await?;

@@ -120,6 +120,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(admin::set_organization_rate_card),
         )
         .route(
+            "/admin/organizations/_actions/dedicated-cpu/set",
+            post(admin::set_organization_dedicated_cpu),
+        )
+        .route(
             "/admin/organizations/_actions/credit/adjust",
             post(admin::adjust_organization_credit),
         )

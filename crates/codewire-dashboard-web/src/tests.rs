@@ -474,6 +474,7 @@ fn unsafe_organization(has_explicit_quota: bool) -> AdminOrganizationView {
             status: "active".into(),
             updated: "2026-10-28".into(),
         }],
+        dedicated_cpu: false,
         rate_card: "Discounted".into(),
         rate_cards: crate::admin_connect::RATE_CARDS
             .iter()
@@ -620,6 +621,7 @@ fn admin_organization_template_shows_billing_quota_usage_and_escapes_upstream_da
             r#"<dt>Credit balance</dt><dd><span class="cw-badge" data-tone="warning">-€0.003385</span></dd>"#
         ));
         assert!(body.contains(r#"action="/admin/organizations/_actions/rate-card/set""#));
+        assert!(body.contains(r#"action="/admin/organizations/_actions/dedicated-cpu/set""#));
         assert!(body.contains(
             r#"<select class="cw-select" name="rate_card"><option value="regular">Regular</option><option value="discounted" selected>Discounted</option><option value="unlimited">Unlimited</option></select>"#
         ));
@@ -640,6 +642,41 @@ fn admin_organization_template_shows_billing_quota_usage_and_escapes_upstream_da
             !has_explicit_quota
         );
     }
+}
+
+/// Dedicated CPU is one button whose verb follows the state, posting the
+/// opposite state (#3635).
+#[test]
+fn admin_organization_dedicated_cpu_toggle_follows_the_setting() {
+    let view = admin_view();
+    let render = |dedicated_cpu: bool| {
+        let organization = AdminOrganizationView {
+            dedicated_cpu,
+            ..unsafe_organization(false)
+        };
+        AdminOrganizationTemplate {
+            view: &view,
+            organization: &organization,
+            csrf_token: "csrf-safe",
+            credit_key: "credit-key-1",
+            message: "",
+            error: "",
+        }
+        .render()
+        .expect("render admin organization page")
+    };
+    let shared = render(false);
+    assert!(shared.contains(r#"<p>CPU reservation <span class="cw-badge">Shared</span></p>"#));
+    assert!(shared.contains(r#"<input type="hidden" name="dedicated_cpu" value="true">"#));
+    assert!(shared.contains(">Give dedicated CPU</button>"));
+    assert!(!shared.contains(">Return to shared CPU</button>"));
+    let dedicated = render(true);
+    assert!(dedicated.contains(
+        r#"<p>CPU reservation <span class="cw-badge" data-tone="info">Dedicated</span></p>"#
+    ));
+    assert!(dedicated.contains(r#"<input type="hidden" name="dedicated_cpu" value="false">"#));
+    assert!(dedicated.contains(">Return to shared CPU</button>"));
+    assert!(!dedicated.contains(">Give dedicated CPU</button>"));
 }
 
 /// The confidential opt-in is one button whose verb follows the state, posting
@@ -666,24 +703,33 @@ fn admin_organization_confidential_toggle_follows_the_opt_in() {
     };
     let action = r#"action="/admin/organizations/_actions/confidential/set""#;
     let ids = r#"<input type="hidden" name="organization_id" value="org_safe-1">
-              <input type="hidden" name="organization_slug" value="safe-org">"#;
+                <input type="hidden" name="organization_slug" value="safe-org">"#;
 
     let off = render(Some(false));
-    assert!(off.contains(r#"<h2 id="confidential-heading">Confidential environments</h2>"#));
+    assert!(
+        off.contains(r#"<ul class="cw-organization-settings" aria-label="Organization settings">"#)
+    );
+    assert!(!off.contains("confidential-heading"));
     assert!(off.contains(action) && off.contains(ids));
     assert!(off.contains(r#"<input type="hidden" name="enabled" value="true">"#));
-    assert!(off.contains(r#"<span class="cw-badge">Not opted in</span>"#));
-    assert!(off.contains(r#"<button class="cw-button" type="submit">Opt in</button>"#));
+    assert!(off.contains(
+        r#"<p>Confidential environments <span class="cw-badge">Not opted in</span></p>"#
+    ));
+    assert!(off.contains(
+        r#"<button class="cw-button cw-button--outline" type="submit"><span>Opt in</span><span class="cw-sr-only"> to confidential environments</span></button>"#
+    ));
 
     let on = render(Some(true));
     assert!(on.contains(action) && on.contains(ids));
     assert!(on.contains(r#"<input type="hidden" name="enabled" value="false">"#));
-    assert!(on.contains(r#"<span class="cw-badge" data-tone="success">Opted in</span>"#));
+    assert!(on.contains(r#"<p>Confidential environments <span class="cw-badge" data-tone="success">Opted in</span></p>"#));
     assert!(on.contains(
-        r#"<button class="cw-button cw-button--outline" type="submit">Remove opt-in</button>"#
+        r#"<button class="cw-button cw-button--outline" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for confidential environments</span></button>"#
     ));
 
     let unknown = render(None);
     assert!(!unknown.contains(action));
-    assert!(unknown.contains("Whether this organization is opted in cannot be read right now."));
+    assert!(unknown.contains(
+        r#"<p>Confidential environments <span class="cw-muted">cannot be read right now</span></p>"#
+    ));
 }

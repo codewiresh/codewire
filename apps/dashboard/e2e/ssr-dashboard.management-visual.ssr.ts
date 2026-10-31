@@ -173,15 +173,19 @@ test.describe.serial("rounded management interface", () => {
     await expectNoPageOverflow(page);
 
     // A click on the row's slug cell, not its name, opens the organization;
-    // the name link stays the row's only focusable element.
+    // the name link stays the row's only focusable element. The link's overlay
+    // covers the row by design, so the pointer lands on it at the slug's position.
     const row = page.locator("tbody tr").filter({ has: page.locator("code", { hasText: slug }) });
     await expect(row.locator("a, button, input, [tabindex]")).toHaveCount(1);
-    await row.locator("code", { hasText: slug }).click();
+    await row.locator("code", { hasText: slug }).click({ force: true });
     await expect(page).toHaveURL(/\/admin\/organizations\/[A-Za-z0-9_-]+\/$/);
     await expect(page.getByRole("heading", { name: "Management Visual", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Environment quota and usage" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Billing" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Confidential environments" })).toBeVisible();
+    const settings = page.getByRole("list", { name: "Organization settings" });
+    await expect(settings.getByRole("listitem")).toHaveCount(2);
+    await expect(settings.getByRole("button", { name: "Opt in to confidential environments" })).toBeVisible();
+    await expect(settings.getByRole("button", { name: "Give dedicated CPU" })).toBeVisible();
     await expect(page.getByLabel("Memory (MiB)")).toBeVisible();
     await expectNoPageOverflow(page);
   });

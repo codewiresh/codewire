@@ -47,9 +47,12 @@ dl.cw-stat-grid { margin: 0; }
 .cw-setting-row + .cw-setting-row { border-top: 1px solid var(--border-subtle); }
 .cw-setting-row .cw-field { flex: 1; }
 .cw-setting-row .cw-input { width: var(--control-width-sm); }
-/* Confidential environments: an organization's opt-in state and its toggle. */
-.cw-confidential-organization { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
-.cw-confidential-organization > p { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+/* An organization's settings: side by side, each its state and the button that changes it. */
+.cw-organization-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+.cw-organization-settings > li { min-width: 0; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-base); }
+.cw-organization-settings > li > p { margin: 0; }
+.cw-organization-toggle { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.cw-organization-toggle > p { min-width: 0; margin: 0; }
 
 /* Account access requests. */
 .cw-access-table td > strong, .cw-access-email { display: block; }
@@ -59,7 +62,8 @@ dl.cw-stat-grid { margin: 0; }
 
 @media (max-width: 48rem) {
   .cw-plan-row { align-items: stretch; flex-direction: column; }
-  .cw-stat-grid, .cw-stat-grid--three { grid-template-columns: minmax(0, 1fr); }
+  .cw-stat-grid, .cw-stat-grid--three, .cw-organization-settings { grid-template-columns: minmax(0, 1fr); }
+  .cw-organization-toggle { flex-wrap: nowrap; }
   .cw-admin-heading, .cw-filter-form, .cw-setting-row { align-items: stretch; flex-direction: column; }
   .cw-admin-heading > .cw-badge { align-self: flex-start; }
   .cw-filter-form .cw-field:nth-child(n), .cw-setting-row .cw-input { width: 100%; }

@@ -122,6 +122,14 @@ pub(super) struct RateCardSubmission {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct DedicatedCpuSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    organization_id: String,
+    dedicated_cpu: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct CreditSubmission {
     #[serde(rename = "_csrf")]
     csrf: String,
@@ -523,6 +531,39 @@ pub(super) async fn set_organization_rate_card(
     )
     .await;
     quota_response(&state, result, &path, "rate-card-saved", &headers)
+}
+
+/// Give an organization dedicated CPU, or return it to sharing (#3635).
+pub(super) async fn set_organization_dedicated_cpu(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+    Form(submission): Form<DedicatedCpuSubmission>,
+) -> Response {
+    if !valid_organization_id(&submission.organization_id) {
+        return error_page(WebError::NotFound);
+    }
+    let path = organization_path(&submission.organization_id);
+    let cookie =
+        match admin_action_page_context_for(&state, &headers, &submission.csrf, &query.org, &path)
+            .await
+        {
+            Ok((_, cookie)) => cookie,
+            Err(response) => return response,
+        };
+    let result = admin_connect::set_organization_dedicated_cpu(
+        &state,
+        cookie,
+        &submission.organization_id,
+        submission.dedicated_cpu,
+    )
+    .await;
+    let message = if submission.dedicated_cpu {
+        "dedicated-cpu-set"
+    } else {
+        "dedicated-cpu-cleared"
+    };
+    quota_response(&state, result, &path, message, &headers)
 }
 
 pub(super) async fn adjust_organization_credit(
@@ -1259,6 +1300,8 @@ fn quota_message(value: &str) -> &'static str {
         "confidential-enabled" => "Organization opted in to confidential environments.",
         "confidential-disabled" => "Organization removed from confidential environments.",
         "rate-card-saved" => "Rate card saved.",
+        "dedicated-cpu-set" => "New sandboxes of this organization get dedicated CPU.",
+        "dedicated-cpu-cleared" => "New sandboxes of this organization share CPU.",
         "credit-adjusted" => "Credit adjusted.",
         _ => "",
     }
