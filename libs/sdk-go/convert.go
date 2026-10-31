@@ -650,6 +650,7 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 		ConfirmPersonalCredentials: body.ConfirmPersonalCredentials, ConfirmPersonalSecrets: body.ConfirmPersonalSecrets,
 		OmitApplicationPreviews: body.OmitApplicationPreviews,
 		Network:                 valueOrEmpty(body.Network),
+		SourceSnapshotId:        valueOrEmpty(body.SourceSnapshotId),
 	}, nil
 }
 
@@ -1179,7 +1180,7 @@ func ensureEnvironmentConverterCoverage() error {
 			return
 		}
 		environmentCoverageErr = ensureDescriptorCoverage("create environment request", messages.ByName("CreateEnvironmentRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
-			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision", 27: "confirm_personal_credentials", 28: "confirm_personal_secrets", 29: "omit_application_previews", 30: "network",
+			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision", 27: "confirm_personal_credentials", 28: "confirm_personal_secrets", 29: "omit_application_previews", 30: "network", 31: "source_snapshot_id",
 		})
 		if environmentCoverageErr != nil {
 			return

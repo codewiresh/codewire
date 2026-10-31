@@ -13,6 +13,7 @@ use serde::Serialize;
 use super::*;
 
 mod platform;
+pub(crate) use platform::create_environments_from_platform_snapshot;
 
 #[derive(Debug, Args)]
 pub(crate) struct SnapshotArgs {

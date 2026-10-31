@@ -1196,6 +1196,11 @@ async fn run_bound_hosted_daemon_with(
     // The binding was accepted for exactly this Pod.
     let pod_uid = config.pod_uid().to_owned();
     let daemon_config = config.into_config(&bound.binding);
+    #[cfg(target_os = "linux")]
+    codewire_daemon::login_cleanup::clear_logins_for_bound_environment(
+        &daemon_config,
+        bound.binding.environment_id(),
+    );
     // The saved project defaults and Git author (#3684), before the access
     // task can record the host key: orchestration's access proof therefore
     // comes after this write. No defaults, as from an older server, reports

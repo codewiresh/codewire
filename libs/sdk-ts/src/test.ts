@@ -818,6 +818,9 @@ async function runTests() {
   assert(createEnvironment.confirmPersonalCredentials && createEnvironment.confirmPersonalSecrets, "create environment preserves explicit personal-source confirmations");
   assert(createEnvironment.omitApplicationPreviews === false, "create preview omission defaults false");
   assert(createEnvironment.network === "", "create joins no network unless asked");
+  assert(createEnvironment.sourceSnapshotId === "", "create starts empty unless given a snapshot");
+  assert(toProtoCreateEnvironmentRequest("org_test", { project_spec: { schema_version: 1, working_directory: "/workspace" }, source_snapshot_id: "snapshot_1" }).sourceSnapshotId === "snapshot_1",
+    "create preserves the source snapshot");
   assert(toProtoCreateEnvironmentRequest("org_test", { project_spec: { schema_version: 1, working_directory: "/workspace" }, network: "work" }).network === "work",
     "create preserves the requested network");
   for (const invalid of ["", 1]) {
@@ -1542,7 +1545,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 174;
+  const expectedAssertions = 176;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

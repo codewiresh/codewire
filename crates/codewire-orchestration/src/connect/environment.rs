@@ -737,6 +737,8 @@ fn create_body(request: proto::CreateEnvironmentRequest) -> AppResult<CreateEnvi
         confirm_personal_secrets: request.confirm_personal_secrets,
         omit_application_previews: request.omit_application_previews,
         network: (!request.network.is_empty()).then_some(request.network),
+        source_snapshot_id: (!request.source_snapshot_id.is_empty())
+            .then_some(request.source_snapshot_id),
     })
 }
 

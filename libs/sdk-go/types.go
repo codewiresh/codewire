@@ -192,6 +192,9 @@ type CreateEnvironmentBody struct {
 	// Network joins this hosted Codewire Mesh network, by name, in the
 	// organization. The creating user must be a member of it.
 	Network *string `json:"network,omitempty"`
+	// SourceSnapshotId starts from this hosted disk snapshot, which the caller
+	// created in the organization. Not with a repository or the confidential tier.
+	SourceSnapshotId *string `json:"source_snapshot_id,omitempty"`
 }
 
 // UpdateEnvironmentSourcesRequest replaces only an environment's complete

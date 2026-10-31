@@ -169,6 +169,93 @@ where
         })?
 }
 
+/// `--count` at most this many, as for a local snapshot.
+const MAXIMUM_ENVIRONMENTS: u32 = 16;
+
+fn platform_environment_names(
+    snapshot: &str,
+    name: Option<&str>,
+    prefix: Option<&str>,
+    count: u32,
+) -> anyhow::Result<Vec<String>> {
+    anyhow::ensure!(
+        (1..=MAXIMUM_ENVIRONMENTS).contains(&count),
+        "--count is 1 to {MAXIMUM_ENVIRONMENTS}"
+    );
+    if let Some(name) = name.and_then(trimmed_str) {
+        anyhow::ensure!(
+            count == 1,
+            "--name names one environment; use --name-prefix with --count"
+        );
+        return Ok(vec![name.to_owned()]);
+    }
+    let prefix = prefix.and_then(trimmed_str).unwrap_or(snapshot);
+    Ok((1..=count)
+        .map(|index| format!("{prefix}-{index}"))
+        .collect())
+}
+
+/// `cw --cloud create --snapshot S [--count N]`: each environment is an
+/// ordinary create on a disk restored from the snapshot, with its own identity
+/// and sign-ins. A snapshot holds a disk and no image, so one starts on the
+/// workspace image unless told otherwise.
+pub(crate) async fn create_environments_from_platform_snapshot(
+    globals: &Globals,
+    mut args: EnvCreateArgs,
+) -> anyhow::Result<()> {
+    reject_local_create_options(&args)?;
+    anyhow::ensure!(
+        args.repo_urls.is_empty()
+            && args.repo_flags.is_empty()
+            && args.branch.is_none()
+            && args.file.is_none()
+            && !args.share_mounts,
+        "--snapshot takes its files from the snapshot: it can't be used with a repository, \
+         --branch, --file or --share-mounts"
+    );
+    let (org_id, _, client) = resolve_platform_context(globals).await?;
+    let selector = args
+        .snapshot
+        .as_deref()
+        .and_then(trimmed_str)
+        .context("name the snapshot to create from: --snapshot NAME")?;
+    let snapshot = resolve_snapshot(&client, &org_id, selector).await?;
+    anyhow::ensure!(
+        snapshot.state.as_known() == Some(SnapshotState::Ready),
+        "snapshot {} is not ready",
+        terminal_text(&snapshot.name)
+    );
+    let names = platform_environment_names(
+        &snapshot.name,
+        args.name.as_deref(),
+        args.name_prefix.as_deref(),
+        args.count,
+    )?;
+    args.snapshot = Some(snapshot.id);
+    args.name_prefix = None;
+    args.count = 1;
+    args.no_file = true;
+    args.image.get_or_insert_with(|| "workspace".to_owned());
+    let mut created: Vec<&str> = Vec::new();
+    for name in &names {
+        let mut one = args.clone();
+        one.name = Some(name.clone());
+        let result = Box::pin(handle_platform_env_command(
+            globals,
+            EnvCommand::Create(Box::new(one)),
+        ))
+        .await;
+        if let Err(error) = result {
+            if !created.is_empty() {
+                eprintln!("Already created: {}.", created.join(", "));
+            }
+            return Err(error);
+        }
+        created.push(name);
+    }
+    Ok(())
+}
+
 pub(super) async fn handle_platform_snapshot_command(
     globals: &Globals,
     command: SnapshotCommand,
@@ -316,6 +403,20 @@ mod tests {
         .await
         .expect_err("the wait is bounded");
         assert!(error.to_string().contains("still being captured"));
+    }
+
+    #[test]
+    fn environments_from_a_snapshot_are_named_as_for_a_local_one() {
+        let names =
+            |name, prefix, count| platform_environment_names("toolchain", name, prefix, count);
+        assert_eq!(
+            names(None, None, 2).unwrap(),
+            ["toolchain-1", "toolchain-2"]
+        );
+        assert_eq!(names(None, Some("pr"), 2).unwrap(), ["pr-1", "pr-2"]);
+        assert_eq!(names(Some("one"), None, 1).unwrap(), ["one"]);
+        assert!(names(Some("one"), None, 2).is_err());
+        assert!(names(None, None, 17).is_err());
     }
 
     #[test]

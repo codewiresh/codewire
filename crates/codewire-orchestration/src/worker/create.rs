@@ -597,6 +597,10 @@ pub fn environment_template_opts(
         projection_selection_sha256,
         managed_credential_clients,
         codex_login_check_period_seconds: cfg.codex_login_check_period_seconds,
+        workspace_source_snapshot: env
+            .source_snapshot_id
+            .as_deref()
+            .map(crate::sandbox::snapshots::kept_snapshot_name),
         ..shape_template_opts(cfg, image_ref, &runtime_spec, shape)
     };
     let opts = if env.dedicated_cpu {
@@ -731,6 +735,7 @@ pub fn shape_template_opts(
         },
         memory_mib: shape.memory_mib,
         disk_gib: shape.disk_gib,
+        workspace_source_snapshot: None,
         workspace_storage_class: if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
             cfg.confidential_workspace_storage_class.clone()
         } else {
@@ -3200,6 +3205,7 @@ mod tests {
             cpu_millicores: 2000,
             memory_mb: 4096,
             disk_gb: 10,
+            source_snapshot_id: None,
             ttl_seconds: None,
             project_spec: codewire_project::ProjectSpec::default(),
             operation_generation: 7,
@@ -3568,6 +3574,7 @@ mod tests {
             cpu_millicores: 1000,
             memory_mb: 2048,
             disk_gb: 10,
+            source_snapshot_id: None,
             ttl_seconds: None,
             project_spec: codewire_project::ProjectSpec::default(),
             operation_generation: 7,
@@ -4328,6 +4335,7 @@ mod tests {
             cpu_millicores: 1000,
             memory_mb: 2048,
             disk_gb: 10,
+            source_snapshot_id: None,
             ttl_seconds: None,
             project_spec: codewire_project::ProjectSpec::default(),
             operation_generation: 7,
@@ -4394,6 +4402,7 @@ mod tests {
             cpu_millicores: 2000,
             memory_mb: 16384,
             disk_gb: 50,
+            source_snapshot_id: None,
             ttl_seconds: None,
             project_spec: codewire_project::ProjectSpec::default(),
             operation_generation: 7,
@@ -4470,6 +4479,7 @@ mod tests {
             cpu_millicores: 2000,
             memory_mb: 4096,
             disk_gb: 10,
+            source_snapshot_id: None,
             ttl_seconds: None,
             project_spec: codewire_project::ProjectSpec::default(),
             operation_generation: 7,
@@ -4545,6 +4555,7 @@ mod tests {
             cpu_millicores: 1000,
             memory_mb: 2048,
             disk_gb: 10,
+            source_snapshot_id: None,
             ttl_seconds: None,
             project_spec: codewire_project::ProjectSpec::default(),
             operation_generation: 7,
@@ -4671,6 +4682,7 @@ mod tests {
             cpu_millicores: 1000,
             memory_mb: 2048,
             disk_gb: 10,
+            source_snapshot_id: None,
             ttl_seconds: None,
             project_spec: codewire_project::ProjectSpec::default(),
             operation_generation: 7,
@@ -4734,6 +4746,7 @@ mod tests {
             cpu_millicores: 1000,
             memory_mb: 2048,
             disk_gb: 10,
+            source_snapshot_id: None,
             ttl_seconds: None,
             project_spec: codewire_project::ProjectSpec::default(),
             operation_generation: 7,

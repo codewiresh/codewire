@@ -15,6 +15,7 @@ fn environment() -> EnvironmentRow {
         cpu_millicores: 1000,
         memory_mb: 2048,
         disk_gb: 10,
+        source_snapshot_id: None,
         isolation_tier: "standard".into(),
         dedicated_cpu: false,
         ttl_seconds: None,

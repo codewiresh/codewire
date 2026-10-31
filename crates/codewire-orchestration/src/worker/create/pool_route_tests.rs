@@ -51,6 +51,7 @@ fn environment(cpu: i32, memory: i32, disk: i32) -> EnvironmentRow {
         cpu_millicores: cpu,
         memory_mb: memory,
         disk_gb: disk,
+        source_snapshot_id: None,
         ttl_seconds: None,
         project_spec: ProjectSpec::default(),
         operation_generation: 7,
@@ -685,4 +686,17 @@ async fn only_a_definitive_refusal_or_a_failed_readiness_wait_reclaims() {
             .unwrap(),
         7
     );
+}
+
+#[test]
+fn a_create_from_a_snapshot_never_takes_a_pool_member() {
+    let cfg = dev_cfg(SHAPES);
+    let mut env = environment(1000, 4096, 10);
+    assert!(candidate(&cfg, &env).is_ok());
+    env.source_snapshot_id = Some("11266ba6-274b-4e2b-b0ce-ff236d0cf2a3".into());
+    assert_eq!(
+        candidate(&cfg, &env).err(),
+        Some(ColdReason::SourceSnapshot)
+    );
+    assert_eq!(ColdReason::SourceSnapshot.as_str(), "cold_source_snapshot");
 }

@@ -226,6 +226,10 @@ message CreateEnvironmentRequest {
   // the environment's node only while the creating user is a member of the
   // network. Empty joins none.
   string network = 30;
+  // Start from this hosted disk snapshot, which the caller created in org_id:
+  // the new environment's workspace disk is a copy of it. Empty starts with an
+  // empty disk. Not with a repository or the confidential tier.
+  string source_snapshot_id = 31;
 }
 
 // Complete selection. Empty means no sources and no provider profile.

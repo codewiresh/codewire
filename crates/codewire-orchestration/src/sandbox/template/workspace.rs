@@ -323,6 +323,13 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
         if confidential {
             claim_spec["volumeMode"] = "Block".into();
         }
+        if let Some(snapshot) = &opts.workspace_source_snapshot {
+            claim_spec["dataSource"] = json!({
+                "apiGroup": "snapshot.storage.k8s.io",
+                "kind": "VolumeSnapshot",
+                "name": snapshot,
+            });
+        }
         spec.insert(
             "volumeClaimTemplates".into(),
             json!([{

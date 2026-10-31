@@ -1235,6 +1235,7 @@ fn proto_create_environment_request(
         confirm_personal_secrets: request.confirm_personal_secrets,
         omit_application_previews: request.omit_application_previews,
         network: request.network.clone().unwrap_or_default(),
+        source_snapshot_id: request.source_snapshot_id.clone().unwrap_or_default(),
         ..Default::default()
     }
 }
@@ -1313,6 +1314,7 @@ fn create_environment_request_from_proto(
         confirm_personal_secrets: value.confirm_personal_secrets,
         omit_application_previews: value.omit_application_previews,
         network: empty_to_none(value.network),
+        source_snapshot_id: empty_to_none(value.source_snapshot_id),
     })
 }
 

@@ -215,6 +215,8 @@ export interface CreateEnvironmentRequest {
   omit_application_previews?: boolean;
   /** Join this hosted Codewire Mesh network, by name, in the organization. */
   network?: string | null;
+  /** Start from this hosted disk snapshot, which the caller created in the organization. */
+  source_snapshot_id?: string | null;
 }
 
 export type NetworkAttachmentState = "pending" | "attached" | "failed" | "revoked" | "unknown";

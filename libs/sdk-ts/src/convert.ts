@@ -1005,7 +1005,18 @@ export function toProtoCreateEnvironmentRequest(
       body.omit_application_previews,
     ),
     network: optionalNetwork(body.network),
+    sourceSnapshotId: optionalSourceSnapshot(body.source_snapshot_id),
   };
+}
+
+function optionalSourceSnapshot(value: string | null | undefined): string {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error("codewire: source_snapshot_id must be a nonempty snapshot id");
+  }
+  return value;
 }
 
 function optionalNetwork(value: string | null | undefined): string {
@@ -1177,7 +1188,7 @@ export function assertRuntimeConverterCoverage(): void {
     [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"], [33, "operation_generation"], [34, "source_selection"], [35, "network_state"], [36, "network_failure"],
   ]));
   assertDescriptorCoverage("create environment request", CreateEnvironmentRequestSchema.fields, new Map([
-    [1, "org_id"], [2, "preset_id"], [3, "name"], [7, "ttl_seconds"], [24, "isolation_tier"], [25, "project_spec"], [26, "expected_profile_revision"], [27, "confirm_personal_credentials"], [28, "confirm_personal_secrets"], [29, "omit_application_previews"], [30, "network"],
+    [1, "org_id"], [2, "preset_id"], [3, "name"], [7, "ttl_seconds"], [24, "isolation_tier"], [25, "project_spec"], [26, "expected_profile_revision"], [27, "confirm_personal_credentials"], [28, "confirm_personal_secrets"], [29, "omit_application_previews"], [30, "network"], [31, "source_snapshot_id"],
   ]));
   assertDescriptorCoverage("environment source selection", EnvironmentSourceSelectionSchema.fields, new Map([
     [1, "secrets"], [2, "credentials"], [3, "profile_revision"],

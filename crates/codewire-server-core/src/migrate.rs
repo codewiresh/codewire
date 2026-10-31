@@ -49,6 +49,7 @@ mod tests {
     mod default_access_profile;
     mod environment_mesh;
     mod environment_quota_defaults;
+    mod environment_source_snapshot;
     mod hosted_snapshots;
     mod organization_confidential_environments;
     mod organization_dedicated_cpu;
@@ -68,9 +69,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced) and 0002 to 0009.
+    // (which equals the 41-migration history it replaced) and 0002 to 0010.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "bf1c895d35e6d93b85f253291ec7cdea180d6be07adedcdb13d1c89f87c0f581";
+        "59ae87f7ceadade7e3de86a468041815bdab2d265c99fd38929044818cbeda8e";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -93,6 +94,9 @@ mod tests {
 
     // SHA-384 of 0009_hosted_snapshots.sql (#3046).
     const APPLIED_HOSTED_SNAPSHOTS_CHECKSUM: &str = "ca4e72846fc159e91a1fafb505a6253ba211790b8acc665fbe04e675dd727dadfd98cd06e560a216cae8deab9d8ed5bf";
+
+    // SHA-384 of 0010_environment_source_snapshot.sql (#3046).
+    const APPLIED_ENVIRONMENT_SOURCE_SNAPSHOT_CHECKSUM: &str = "757bd0253e49b76952d2b54ed3a7f9af32adcb454661aed33042a24c2e05e039a5d5be2c18f3eff954100154142766c3";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1183,6 +1187,7 @@ mod tests {
             (7, APPLIED_ACCOUNT_DELETION_CHECKSUM),
             (8, APPLIED_ORGANIZATION_DEDICATED_CPU_CHECKSUM),
             (9, APPLIED_HOSTED_SNAPSHOTS_CHECKSUM),
+            (10, APPLIED_ENVIRONMENT_SOURCE_SNAPSHOT_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1213,11 +1218,11 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 9
+                first.len() == 10
                     && first
                         .iter()
                         .map(|migration| migration.0)
-                        .eq([1, 2, 3, 4, 5, 6, 7, 8, 9])
+                        .eq([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
                     && first.iter().all(|migration| migration.2)
             );
             let fingerprint: String = sqlx::query_scalar(include_str!(

@@ -61,6 +61,7 @@ fn environment(shape: WorkspaceShape) -> EnvironmentRow {
         cpu_millicores: i32::try_from(shape.cpu_millicores).unwrap(),
         memory_mb: i32::try_from(shape.memory_mib).unwrap(),
         disk_gb: i32::try_from(shape.disk_gib).unwrap(),
+        source_snapshot_id: None,
         ttl_seconds: None,
         project_spec: ProjectSpec::default(),
         operation_generation: 7,

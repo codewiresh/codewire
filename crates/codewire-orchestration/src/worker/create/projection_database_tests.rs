@@ -106,6 +106,22 @@ async fn database_capture_distinguishes_no_sources_from_app_only_metadata() -> R
         seed_environment(&db).await?;
 
         let empty = load_environment(&db.pool, ENVIRONMENT).await?;
+        assert_eq!(empty.source_snapshot_id, None);
+        sqlx::query("UPDATE environments SET source_snapshot_id = 'snapshot-one' WHERE id = $1")
+            .bind(ENVIRONMENT)
+            .execute(&db.pool)
+            .await?;
+        assert_eq!(
+            load_environment(&db.pool, ENVIRONMENT)
+                .await?
+                .source_snapshot_id
+                .as_deref(),
+            Some("snapshot-one")
+        );
+        sqlx::query("UPDATE environments SET source_snapshot_id = NULL WHERE id = $1")
+            .bind(ENVIRONMENT)
+            .execute(&db.pool)
+            .await?;
         ensure!(empty.projection_selection == Ok(None));
 
         let project = app_project();

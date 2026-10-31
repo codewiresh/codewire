@@ -10,6 +10,29 @@ mod tests {
     const CONTENT_ADDRESSED_MANIFEST_URI: &str = "kbs:///default/codewire-storage-manifests/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
+    fn a_workspace_claim_restores_only_from_the_snapshot_it_names() {
+        let claim = |source: Option<&str>| {
+            let rendered = render_sandbox_template(
+                "dev-sandboxes",
+                &TemplateOpts {
+                    name: "tmpl-from-snapshot".into(),
+                    disk_gib: 80,
+                    workspace_storage_class: "example-workspace-class".into(),
+                    workspace_source_snapshot: source.map(str::to_owned),
+                    ..Default::default()
+                },
+            );
+            rendered["spec"]["volumeClaimTemplates"][0]["spec"].clone()
+        };
+        assert!(claim(None)["dataSource"].is_null());
+        let restored = claim(Some("cw-snap-one"));
+        assert_eq!(restored["dataSource"]["kind"], "VolumeSnapshot");
+        assert_eq!(restored["dataSource"]["apiGroup"], "snapshot.storage.k8s.io");
+        assert_eq!(restored["dataSource"]["name"], "cw-snap-one");
+        assert_eq!(restored["storageClassName"], "example-workspace-class");
+    }
+
+    #[test]
     fn the_environment_shadow_pool_names_its_label_free_template() {
         let opts = TemplateOpts {
             environment_id: "env-test".into(),

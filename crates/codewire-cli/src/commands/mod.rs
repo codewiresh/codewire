@@ -1088,7 +1088,7 @@ fn parse_runtime_request_id(value: &str) -> Result<uuid::Uuid, String> {
         .ok_or_else(|| "runtime request ID must be a non-nil UUID".into())
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub(crate) struct EnvCreateArgs {
     #[arg(long = "type", value_enum, default_value_t = EnvironmentTypeArg::Sandbox,
         help = "Sandbox or explicitly trusted host execution")]
@@ -1258,7 +1258,7 @@ pub(crate) struct EnvCreateArgs {
         long,
         value_name = "SNAPSHOT",
         group = "restore_source",
-        help = "Start from a local disk snapshot (`cw snapshot`) instead of provisioning: its image, workspace and disks, with fresh identity; local VMs on Linux"
+        help = "Start from a disk snapshot (`cw snapshot`; with --cloud, a hosted one and its disk only) instead of provisioning: its image, workspace and disks, with fresh identity; local VMs on Linux"
     )]
     snapshot: Option<String>,
     #[arg(

@@ -79,6 +79,10 @@ pub struct CreateEnvironmentBody {
     /// it; Mesh admits the node only while they are a member of the network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
+    /// The hosted disk snapshot to start from. The caller must have created it
+    /// in this organization; the workspace disk is restored from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_snapshot_id: Option<String>,
 }
 
 /// Mirrors `api.Preset` (the slice the create flow consumes; the full
@@ -669,16 +673,17 @@ async fn insert_environment(
     };
 
     let preset_id = (!p.preset_id.is_empty()).then_some(p.preset_id);
+    let source_snapshot_id = p.body.source_snapshot_id.as_deref();
 
     let sql = format!(
         r#"WITH ins AS (
             INSERT INTO environments
                 (org_id, created_by, preset_id, type, name,
                  cpu_millicores, memory_mb, disk_gb, isolation_tier, ttl_seconds,
-                 shutdown_at, project_spec)
+                 shutdown_at, project_spec, source_snapshot_id)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                  CASE WHEN $11::int IS NOT NULL THEN NOW() + make_interval(secs => $11::int) END,
-                 $12)
+                 $12, $13)
              RETURNING *
          )
          SELECT {ENV_SELECT_COLS}
@@ -705,6 +710,16 @@ async fn insert_environment(
         },
     )
     .await?;
+    if let Some(snapshot_id) = source_snapshot_id {
+        admit_source_snapshot(
+            &mut transaction,
+            p.org_id,
+            &p.user.user_id,
+            snapshot_id,
+            p.disk_gb,
+        )
+        .await?;
+    }
     let row = sqlx::query(&sql)
         .bind(p.org_id)
         .bind(&p.user.user_id)
@@ -718,6 +733,7 @@ async fn insert_environment(
         .bind(p.ttl_seconds)
         .bind(p.ttl_seconds)
         .bind(project_spec)
+        .bind(source_snapshot_id)
         .fetch_one(&mut *transaction)
         .await?;
     let environment_id: String = row.try_get("id")?;
@@ -759,6 +775,96 @@ async fn insert_environment(
     let environment = scan_environment(&row)?;
     transaction.commit().await?;
     Ok(environment)
+}
+
+/// What a create from a snapshot can't be, checked before anything is written.
+/// Confidential environments never have snapshots (owner, 2026-10-29). A
+/// repository would be cloned over the restored checkout, which fails.
+fn validate_source_snapshot_request(
+    body: &CreateEnvironmentBody,
+    isolation_tier: &str,
+    volume_snapshot_class: &str,
+) -> AppResult<()> {
+    let Some(snapshot_id) = body.source_snapshot_id.as_deref() else {
+        return Ok(());
+    };
+    if snapshot_id.trim().is_empty() {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_source_snapshot",
+            "source_snapshot_id must name a snapshot",
+        ));
+    }
+    if volume_snapshot_class.is_empty() {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "snapshots_unavailable",
+            "this deployment does not offer hosted snapshots",
+        ));
+    }
+    if isolation_tier == "confidential" {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "snapshot_source_confidential",
+            "a confidential environment cannot start from a snapshot",
+        ));
+    }
+    if !body.project_spec.repositories.is_empty() {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "snapshot_source_repository",
+            "an environment started from a snapshot takes its files from the snapshot, not a repository",
+        ));
+    }
+    Ok(())
+}
+
+/// A snapshot is private to its creator, so another member's reads as absent.
+/// The share lock holds off a delete until this create commits, and a use of a
+/// snapshot counts toward its expiry in the transaction that authorizes it.
+pub(crate) async fn admit_source_snapshot(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: &str,
+    user_id: &str,
+    snapshot_id: &str,
+    disk_gib: i32,
+) -> AppResult<()> {
+    let row: Option<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT state, size_bytes FROM hosted_snapshots
+          WHERE id = $1 AND org_id = $2 AND created_by = $3
+          FOR SHARE",
+    )
+    .bind(snapshot_id)
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some((snapshot_state, size_bytes)) = row else {
+        return Err(coded(
+            StatusCode::NOT_FOUND,
+            "snapshot_not_found",
+            "no such snapshot",
+        ));
+    };
+    if snapshot_state != "ready" {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "snapshot_not_ready",
+            "this snapshot is not ready",
+        ));
+    }
+    if size_bytes.unwrap_or(0) > i64::from(disk_gib) * (1 << 30) {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "snapshot_disk_too_small",
+            "the disk must be at least as large as the snapshot",
+        ));
+    }
+    sqlx::query("UPDATE hosted_snapshots SET last_used_at = now() WHERE id = $1")
+        .bind(snapshot_id)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
 }
 
 /// A network on create must be a hosted Mesh network name, and this platform
@@ -1119,6 +1225,11 @@ pub(crate) async fn create_environment_core(
 
             validate_environment_resources(Some(cpu), Some(memory_mib), Some(disk_gib), ttl)?;
             validate_confidential_storage_size(isolation_tier, disk_gib)?;
+            validate_source_snapshot_request(
+                &body,
+                isolation_tier,
+                &state.sandbox_cfg.volume_snapshot_class,
+            )?;
             let cpu = resource_i32(u64::from(cpu), "cpu_millicores")?;
             let memory_mib = resource_i32(memory_mib, "memory_mib")?;
             let disk_gib = resource_i32(disk_gib, "disk_gib")?;
@@ -1183,6 +1294,47 @@ pub(crate) async fn create_environment_core(
 mod tests {
     use super::*;
     use crate::api::environments::get_org_quota;
+
+    #[test]
+    fn a_create_from_a_snapshot_refuses_what_it_cannot_be() {
+        let code =
+            |body: &CreateEnvironmentBody, tier, class| match validate_source_snapshot_request(
+                body, tier, class,
+            ) {
+                Ok(()) => "ok",
+                Err(AppError::Coded { code, .. }) => code,
+                Err(_) => "other",
+            };
+        let plain = CreateEnvironmentBody::default();
+        assert_eq!(code(&plain, "confidential", ""), "ok", "no snapshot named");
+        let from = CreateEnvironmentBody {
+            source_snapshot_id: Some("s".into()),
+            ..Default::default()
+        };
+        assert_eq!(code(&from, "standard", "linstor-local"), "ok");
+        assert_eq!(code(&from, "standard", ""), "snapshots_unavailable");
+        assert_eq!(
+            code(&from, "confidential", "linstor-local"),
+            "snapshot_source_confidential"
+        );
+        let blank = CreateEnvironmentBody {
+            source_snapshot_id: Some(" ".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            code(&blank, "standard", "linstor-local"),
+            "invalid_source_snapshot"
+        );
+        let mut with_repository = from.clone();
+        with_repository
+            .project_spec
+            .repositories
+            .push(Default::default());
+        assert_eq!(
+            code(&with_repository, "standard", "linstor-local"),
+            "snapshot_source_repository"
+        );
+    }
     use codewire_server_core::AppError;
     use codewire_server_core::validation::validate_value;
     use sqlx::postgres::PgPoolOptions;
@@ -2258,6 +2410,7 @@ credentials: {profile: user/work}
                 "omit_application_previews",
                 "preset_id",
                 "project_spec",
+                "source_snapshot_id",
                 "ttl_seconds"
             ]
         );

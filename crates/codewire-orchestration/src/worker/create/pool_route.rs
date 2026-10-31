@@ -73,6 +73,8 @@ pub(crate) enum ColdReason {
     Unavailable,
     /// A pool-born Claim failed its first bind and was re-claimed.
     Reclaimed,
+    /// It starts from a hosted snapshot, and a pool member already has a disk.
+    SourceSnapshot,
 }
 
 impl ColdReason {
@@ -90,6 +92,7 @@ impl ColdReason {
             Self::StaleMembers => "cold_stale_members",
             Self::Unavailable => "cold_unavailable",
             Self::Reclaimed => "cold_reclaimed",
+            Self::SourceSnapshot => "cold_source_snapshot",
         }
     }
 }
@@ -109,6 +112,9 @@ pub(crate) fn pool_candidate(
     };
     if env.isolation_tier != "standard" {
         return Err(ColdReason::Tier);
+    }
+    if env.source_snapshot_id.is_some() {
+        return Err(ColdReason::SourceSnapshot);
     }
     if image_ref.trim() != canonical_workspace_runtime_image() {
         return Err(ColdReason::Image);

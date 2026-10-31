@@ -1177,8 +1177,18 @@ fails the capture, and the capture then deletes the raw snapshot, the clearing
 volume and anything else it made, retrying until they are gone. Only after the
 clearing Pod is gone is the kept snapshot taken. Only the environment's creator may
 capture it, because the exception below assumes the snapshotter owns the
-credentials on the disk. A created environment's own selection delivers fresh
-logins under its own authority.
+credentials on the disk.
+
+`cw --cloud create --snapshot` makes a new environment from a kept snapshot, and
+only the snapshot's creator may. Its disk is restored from the snapshot, its guest
+starts identity-free and binds as any cold create does, so its environment id,
+daemon token and Mesh node are its own, and its credential profile and sources
+come from its own create request. Before any login writer starts, a bound hosted
+daemon reads the environment id recorded in `~/.codewire/login-environment`. When
+that isn't its own, it removes both agents' Codewire logins by the daemon's own
+rules, as a local guest does at its first boot as another environment, then records
+its id. The environment's own selection delivers fresh logins under its own
+authority.
 
 **Exception, owner, 2026-10-30 (#3046):** unlike local capture, which punches every
 free range, hosted capture clears the current token files only, so an older copy

@@ -289,6 +289,9 @@ pub struct CreateEnvironmentRequest {
     /// The hosted Mesh network to join, by name, in the organization.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
+    /// The hosted disk snapshot to start from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_snapshot_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]

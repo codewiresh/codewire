@@ -300,25 +300,54 @@ async fn creators_snapshot(
 }
 
 /// Mark a settled snapshot for deletion. A capture in progress isn't matched, so
-/// its own cleanup can't race the delete.
+/// its own cleanup can't race the delete. Nor is one an environment is still
+/// being created from, whose volume may not exist yet to hold the snapshot in
+/// place: the row lock waits out a create in flight, and the next statement
+/// sees it.
 async fn mark_deleting(
     pool: &PgPool,
     user_id: &str,
     org_id: &str,
     snapshot_id: &str,
 ) -> AppResult<SnapshotRow> {
-    sqlx::query_as::<_, SnapshotRow>(&format!(
-        "UPDATE hosted_snapshots SET state = 'deleting', updated_at = now()
+    let mut transaction = pool.begin().await?;
+    sqlx::query_scalar::<_, String>(
+        "SELECT id FROM hosted_snapshots
           WHERE id = $1 AND org_id = $2 AND created_by = $3
             AND state IN ('ready', 'failed', 'deleting')
-          RETURNING {COLUMNS}"
-    ))
+          FOR UPDATE",
+    )
     .bind(snapshot_id)
     .bind(org_id)
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *transaction)
     .await?
-    .ok_or_else(not_found)
+    .ok_or_else(not_found)?;
+    let in_use: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM environments
+                         WHERE source_snapshot_id = $1
+                           AND state IN ('pending', 'creating'))",
+    )
+    .bind(snapshot_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if in_use {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "snapshot_in_use",
+            "an environment is being created from this snapshot; try again when it has started",
+        ));
+    }
+    let row = sqlx::query_as::<_, SnapshotRow>(&format!(
+        "UPDATE hosted_snapshots SET state = 'deleting', updated_at = now()
+          WHERE id = $1
+          RETURNING {COLUMNS}"
+    ))
+    .bind(snapshot_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(row)
 }
 
 pub async fn list_snapshots_core(
@@ -425,6 +454,149 @@ mod tests {
         .await
         .unwrap();
         (creator, other, org)
+    }
+
+    fn is_code(error: AppError, want: &str) -> bool {
+        matches!(error, AppError::Coded { code, .. } if code == want)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_only_its_creator_starts_from_a_ready_snapshot_that_fits() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("ignored DB test requires TEST_DATABASE_URL");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let (creator, other, org) = seed(&pool).await;
+        let admit = |user: String, id: String, disk: i32| {
+            let pool = pool.clone();
+            let org = org.clone();
+            async move {
+                let mut transaction = pool.begin().await.unwrap();
+                let result = crate::api::create::admit_source_snapshot(
+                    &mut transaction,
+                    &org,
+                    &user,
+                    &id,
+                    disk,
+                )
+                .await;
+                transaction.commit().await.unwrap();
+                result
+            }
+        };
+        let row = insert_snapshot(&pool, &creator, &org, "env-gone", "source")
+            .await
+            .unwrap();
+        assert!(is_code(
+            admit(creator.clone(), row.id.clone(), 80)
+                .await
+                .unwrap_err(),
+            "snapshot_not_ready"
+        ));
+        sqlx::query(
+            "UPDATE hosted_snapshots
+                SET state = 'ready', size_bytes = $2,
+                    last_used_at = now() - interval '1 day'
+              WHERE id = $1",
+        )
+        .bind(&row.id)
+        .bind(80_i64 << 30)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(is_code(
+            admit(other.clone(), row.id.clone(), 80).await.unwrap_err(),
+            "snapshot_not_found"
+        ));
+        assert!(is_code(
+            admit(creator.clone(), "no-such-snapshot".into(), 80)
+                .await
+                .unwrap_err(),
+            "snapshot_not_found"
+        ));
+        assert!(is_code(
+            admit(creator.clone(), row.id.clone(), 79)
+                .await
+                .unwrap_err(),
+            "snapshot_disk_too_small"
+        ));
+        let used = || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT last_used_at > now() - interval '1 minute'
+                   FROM hosted_snapshots WHERE id = $1",
+            )
+            .bind(&row.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        assert!(!used().await, "a refused create is not a use");
+        admit(creator.clone(), row.id.clone(), 80).await.unwrap();
+        assert!(used().await, "a create counts as a use");
+
+        // While an environment is being created from it, its volume may not
+        // exist yet to hold the snapshot, so it can't be deleted.
+        let environment = format!("env-fork-{}", uuid::Uuid::new_v4().simple());
+        const PROJECT_SPEC: &str = r#"{"schema_version":1,"working_directory":"/workspace"}"#;
+        sqlx::query(
+            "INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
+             VALUES ($1, $2, 'Fork test', $1, $3::jsonb)",
+        )
+        .bind(&environment)
+        .bind(&org)
+        .bind(PROJECT_SPEC)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO environments
+               (id, org_id, created_by, type, preset_id, project_spec, state, source_snapshot_id)
+             VALUES ($1, $2, $3, 'sandbox', $1, $4::jsonb, 'creating', $5)",
+        )
+        .bind(&environment)
+        .bind(&org)
+        .bind(&creator)
+        .bind(PROJECT_SPEC)
+        .bind(&row.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(is_code(
+            mark_deleting(&pool, &creator, &org, &row.id)
+                .await
+                .unwrap_err(),
+            "snapshot_in_use"
+        ));
+        assert_eq!(
+            creators_snapshot(&pool, &creator, &org, &row.id)
+                .await
+                .unwrap()
+                .state,
+            "ready"
+        );
+        sqlx::query("UPDATE environments SET state = 'running' WHERE id = $1")
+            .bind(&environment)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            mark_deleting(&pool, &creator, &org, &row.id)
+                .await
+                .unwrap()
+                .state,
+            "deleting"
+        );
+        assert!(is_code(
+            admit(creator.clone(), row.id.clone(), 80)
+                .await
+                .unwrap_err(),
+            "snapshot_not_ready"
+        ));
     }
 
     #[tokio::test]

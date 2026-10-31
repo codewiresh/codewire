@@ -139,6 +139,14 @@ class EnvironmentSourcesTestCase(unittest.TestCase):
         self.assertEqual(environment.source_selection, SELECTION)
         self.assertEqual(self.paths, ["/codewire.v1.EnvironmentService/CreateEnvironment"])
 
+    def test_create_carries_its_source_snapshot(self):
+        self.cw.environments.create(project_spec={})
+        self.assertEqual(self.fixture.calls[-1][1].source_snapshot_id, "")
+        self.cw.environments.create(project_spec={}, source_snapshot_id="snapshot_1")
+        self.assertEqual(self.fixture.calls[-1][1].source_snapshot_id, "snapshot_1")
+        with self.assertRaises(ValueError):
+            self.cw.environments.create(project_spec={}, source_snapshot_id="")
+
     def test_create_preview_omission_is_explicit_and_boolean(self):
         self.cw.environments.create(project_spec={})
         self.assertFalse(self.fixture.calls[-1][1].omit_application_previews)

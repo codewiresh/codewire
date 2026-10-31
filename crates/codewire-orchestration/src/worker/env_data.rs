@@ -22,6 +22,8 @@ pub struct EnvironmentRow {
     pub cpu_millicores: i32,
     pub memory_mb: i32,
     pub disk_gb: i32,
+    /// The hosted disk snapshot its workspace disk is restored from.
+    pub source_snapshot_id: Option<String>,
     pub isolation_tier: String,
     /// The organization's sandboxes reserve a CPU per vCPU instead of sharing,
     /// read each time a Sandbox is rendered (#3635).
@@ -102,6 +104,7 @@ fn decode_environment(row: sqlx::postgres::PgRow) -> anyhow::Result<EnvironmentR
         cpu_millicores: row.try_get("cpu_millicores")?,
         memory_mb: row.try_get("memory_mb")?,
         disk_gb: row.try_get("disk_gb")?,
+        source_snapshot_id: row.try_get("source_snapshot_id")?,
         isolation_tier: row.try_get("isolation_tier")?,
         dedicated_cpu: row
             .try_get::<Option<bool>, _>("dedicated_cpu")?

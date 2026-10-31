@@ -267,6 +267,21 @@ func TestCreateEnvironmentPreviewOmissionIsExplicitAndBoolean(t *testing.T) {
 	}
 }
 
+func TestCreateEnvironmentCarriesItsSourceSnapshot(t *testing.T) {
+	snapshot := "snapshot_1"
+	request, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{SourceSnapshotId: &snapshot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.GetSourceSnapshotId() != snapshot {
+		t.Fatalf("source snapshot = %q", request.GetSourceSnapshotId())
+	}
+	request, err = createEnvironmentRequest("org_1", CreateEnvironmentBody{})
+	if err != nil || request.GetSourceSnapshotId() != "" {
+		t.Fatalf("an omitted source snapshot must start empty: %q %v", request.GetSourceSnapshotId(), err)
+	}
+}
+
 func TestEnvironmentNetworkAttachmentRoundTrips(t *testing.T) {
 	network := "work"
 	request, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{Network: &network})

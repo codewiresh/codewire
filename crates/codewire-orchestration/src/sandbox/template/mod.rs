@@ -279,6 +279,9 @@ pub struct TemplateOpts {
     pub memory_mib: i64,
     pub disk_gib: i64,
     pub workspace_storage_class: String,
+    /// The `VolumeSnapshot` a new workspace PVC restores from. Only a create
+    /// from a hosted snapshot has one; such a claim never comes from a pool.
+    pub workspace_source_snapshot: Option<String>,
     pub network_policy_management: String,
     pub dind_enabled: bool,
     pub kata_agent_policy_enabled: bool,

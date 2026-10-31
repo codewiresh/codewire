@@ -89,6 +89,7 @@ class Environments:
         confirm_personal_secrets: bool = False,
         omit_application_previews: bool = False,
         network: str | None = None,
+        source_snapshot_id: str | None = None,
         wait: bool = False,
         wait_timeout: float = 300,
     ) -> Environment:
@@ -117,6 +118,11 @@ class Environments:
             request.name = name
         if ttl_seconds is not None:
             request.ttl_seconds = ttl_seconds
+        if source_snapshot_id is not None:
+            # A hosted disk snapshot the caller created in the organization.
+            if not isinstance(source_snapshot_id, str) or not source_snapshot_id:
+                raise ValueError("codewire: source_snapshot_id must be a non-empty string")
+            request.source_snapshot_id = source_snapshot_id
         if network is not None:
             # A hosted Codewire Mesh network, by name, in the organization.
             if not isinstance(network, str) or not network:

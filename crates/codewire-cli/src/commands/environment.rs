@@ -548,6 +548,7 @@ pub(crate) async fn handle_platform_env_command(
             let (mut request, provenance) = prepared_create
                 .take()
                 .context("the create request was not prepared")?;
+            request.source_snapshot_id = args.snapshot.clone();
             if let Some(mesh) = resolve_env_create_mesh_bootstrap(
                 &paths,
                 &env,
@@ -1437,12 +1438,16 @@ async fn handle_unified_environment_create(
         #[cfg(not(unix))]
         anyhow::bail!("trusted host environments are currently qualified only on Linux");
     }
+    if args.snapshot.is_some() && placement == Some(EnvironmentPlacement::Platform) {
+        return Box::pin(snapshot::create_environments_from_platform_snapshot(
+            globals, *args,
+        ))
+        .await;
+    }
     if args.snapshot.is_some() || args.checkpoint.is_some() {
-        // A disk snapshot lives on this host, so its environments do too.
+        // A local disk snapshot lives on this host, so its environments do too.
         if placement == Some(EnvironmentPlacement::Platform) {
-            anyhow::bail!(
-                "--snapshot names a local disk snapshot; a cloud environment cannot start from one yet"
-            );
+            anyhow::bail!("a cloud environment cannot start from a VM checkpoint yet");
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         return Box::pin(create_native_environments_from_snapshot(globals, *args)).await;
