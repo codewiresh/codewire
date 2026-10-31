@@ -20,7 +20,6 @@ mod newc;
 mod progress;
 mod seed;
 mod setup;
-mod vz_inode_probe;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod skill_snapshot;
@@ -90,10 +89,4 @@ pub use skill_snapshot::{
     SKILL_SNAPSHOT_CONTENT_RELATIVE_PATH, SKILL_SNAPSHOT_PLAN_PATH,
     SKILL_SNAPSHOT_PLAN_RELATIVE_PATH, SkillProjection, SkillProjectionRoot, SkillSnapshot,
     SkillSnapshotError, SkillSnapshotMode, SkillSnapshotPlan, SkillSnapshotSource,
-};
-pub use vz_inode_probe::{
-    VZ_INODE_PROBE_CHALLENGE_LEN, VZ_INODE_PROBE_FRAME_LEN, VZ_INODE_PROBE_SEED_LEN,
-    VZ_INODE_PROBE_VSOCK_PORT, VzInodeProbeError, VzInodeProbeStage,
-    decode_vz_inode_probe_stage_frame, encode_vz_inode_probe_frame,
-    encode_vz_inode_probe_stage_frame, verify_vz_inode_probe_frame,
 };

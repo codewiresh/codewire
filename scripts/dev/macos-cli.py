@@ -413,7 +413,6 @@ def worker(root, run):
                 scratch = root / "target" / scratch_name
                 command(["xcrun", "swift", "--version"])
                 command(["xcrun", "--show-sdk-version"])
-                command([str(package / "Tests/test_ipc_system.sh")])
                 command(["xcrun", "swift-format", "lint", "--strict", "--recursive", str(package)])
                 swift = ["--package-path", str(package), "--scratch-path", str(scratch),
                          "-Xswiftc", "-warnings-as-errors", "-Xcc", "-Werror"]

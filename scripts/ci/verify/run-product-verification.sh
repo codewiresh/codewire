@@ -1444,8 +1444,6 @@ run_transport() {
   fi
   if selected transport_pkg_codewire_local_vmm; then
     if shard_stage tests; then
-      # A C test of the runner's IPC, compiled with the host's cc in seconds.
-      crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh
       python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py
     fi
     if shard_stage checks; then

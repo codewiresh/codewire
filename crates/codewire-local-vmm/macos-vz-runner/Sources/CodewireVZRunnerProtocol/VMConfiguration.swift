@@ -1,5 +1,17 @@
 import Foundation
 
+public enum ConfigurationError: Error, Equatable {
+  case malformed
+  case unknownFields
+  case unsupportedSchema
+  case invalidCPUCount
+  case invalidMemory
+  case invalidVsockPort
+  case invalidArtifact
+  case invalidDataDisk
+  case invalidShare
+}
+
 /// Product VM request for `codewire-vz-runner vm --config FILE`.
 ///
 /// It carries what the Linux runner passes on the Cloud Hypervisor command

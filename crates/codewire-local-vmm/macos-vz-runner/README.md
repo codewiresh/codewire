@@ -1,6 +1,4 @@
-# macOS VZ runner feasibility slice
-
-## Product VM mode
+# macOS VZ helper
 
 `codewire-vz-runner vm --config FILE` is the macOS counterpart of the Cloud
 Hypervisor process that the Linux runner owns. The JSON configuration
@@ -93,19 +91,7 @@ must be rebuilt with the matching packer and their reviewed digest/size
 manifests refreshed. Canonical admission rejects mixing old and new layouts;
 saved state-disk contents do not change.
 
-## Developer fixture subcommands
-
-The helper still carries the earlier fixed-topology developer subcommands
-(`validate`, `inode-probe`, `inode-probe-path-control`,
-`production-init-fixture`, `console-pair-fixture` and
-`workload-network-fixture`, each with `--control-fd FD`). Nothing in the
-product invokes them, and the service-VM networking topology some of them used
-is superseded for the product by the #1905 decision (host packet worker and
-egress broker under Seatbelt). Their Linux and Python parents, and the
-developer features that built them, were removed (#3119). The subcommands go
-with the helper's next notarized change, together with the guest probe's
-`vz-inode-probe` mode that answers `inode-probe`. Until then the static guard
-below still holds each of them to its fixed topology.
+## Tests
 
 Run the portable protocol tests and boundary guard with:
 

@@ -6,12 +6,19 @@ import Foundation
   import Darwin
   import Virtualization
 
+  enum RuntimeError: Error, Equatable {
+    case unsupportedHost
+    case listenerFailed
+    case virtualMachineConfigurationInvalid
+    case sharedDirectoryChanged
+    case sandboxNotApplied
+  }
+
   /// The product VM process: the macOS counterpart of the Cloud Hypervisor
   /// process the Linux runner owns. It boots one guest, serves the guest's
   /// vsock ports on one hybrid-vsock Unix socket, serves each admitted host
   /// directory through virtio-fs (Linux's virtiofsd), stops the VM on SIGTERM
   /// or SIGINT, and exits once the VM has stopped.
-  @available(macOS 15.0, *)
   public enum VMRuntime {
     public enum Exit: Int32 {
       /// The guest powered off, or a requested stop completed.
@@ -21,15 +28,15 @@ import Foundation
     }
 
     public static func run(configuration: VMConfiguration) throws -> Exit {
-      try RuntimeAdmission.validateHost()
+      try validateHost()
       let vmConfiguration = try buildConfiguration(configuration)
       let listener = cw_vz_listen_unix(configuration.vsockSocket)
-      guard listener >= 0 else { throw RuntimeError.descriptorInvalid }
+      guard listener >= 0 else { throw RuntimeError.listenerFailed }
       // A socket descriptor's fstat does not name the filesystem node, so
       // record the path's identity right after this process bound it.
       var identity = stat()
       guard lstat(configuration.vsockSocket, &identity) == 0 else {
-        throw RuntimeError.descriptorInvalid
+        throw RuntimeError.listenerFailed
       }
       defer { removeSocket(configuration.vsockSocket, bound: identity) }
 
@@ -71,6 +78,18 @@ import Foundation
       return machine.waitForExit()
     }
 
+    static func validateHost() throws {
+      #if arch(arm64)
+        guard ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26,
+          VZVirtualMachine.isSupported
+        else {
+          throw RuntimeError.unsupportedHost
+        }
+      #else
+        throw RuntimeError.unsupportedHost
+      #endif
+    }
+
     static func buildConfiguration(_ request: VMConfiguration) throws
       -> VZVirtualMachineConfiguration
     {
@@ -82,8 +101,8 @@ import Foundation
       guard request.cpuCount >= VZVirtualMachineConfiguration.minimumAllowedCPUCount,
         request.cpuCount <= VZVirtualMachineConfiguration.maximumAllowedCPUCount
       else { throw ConfigurationError.invalidCPUCount }
-      let memory = try RuntimeAdmission.multiplied(request.memoryMiB, by: 1024 * 1024)
-      guard memory >= VZVirtualMachineConfiguration.minimumAllowedMemorySize,
+      let (memory, overflow) = request.memoryMiB.multipliedReportingOverflow(by: 1024 * 1024)
+      guard !overflow, memory >= VZVirtualMachineConfiguration.minimumAllowedMemorySize,
         memory <= VZVirtualMachineConfiguration.maximumAllowedMemorySize
       else { throw ConfigurationError.invalidMemory }
       result.cpuCount = request.cpuCount
@@ -165,7 +184,36 @@ import Foundation
     }
   }
 
-  @available(macOS 15.0, *)
+  /// One guest connection attempt. A connection that completes after its
+  /// waiter gave up is closed, never leaked.
+  final class ConnectionCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private let signal = DispatchSemaphore(value: 0)
+    private var connection: VZVirtioSocketConnection?
+    private var finished = false
+
+    func complete(_ result: Result<VZVirtioSocketConnection, any Error>) {
+      lock.lock()
+      if finished {
+        lock.unlock()
+        if case .success(let late) = result { late.close() }
+        return
+      }
+      finished = true
+      if case .success(let connected) = result { connection = connected }
+      lock.unlock()
+      signal.signal()
+    }
+
+    func wait(seconds: TimeInterval) -> VZVirtioSocketConnection? {
+      _ = signal.wait(timeout: .now() + seconds)
+      lock.lock()
+      defer { lock.unlock() }
+      finished = true
+      return connection
+    }
+  }
+
   final class VMMachine: NSObject, VZVirtualMachineDelegate, @unchecked Sendable {
     let queue = DispatchQueue(label: "dev.codewire.vz-vm")
     private let machine: VZVirtualMachine
@@ -221,18 +269,17 @@ import Foundation
     }
 
     func connect(toPort port: UInt32) -> VZVirtioSocketConnection? {
-      let pending = FixtureConnectionCompletion()
+      let pending = ConnectionCompletion()
       queue.async {
         guard self.machine.state == .running,
           let device = self.machine.socketDevices.first as? VZVirtioSocketDevice
         else {
-          pending.complete(.failure(RuntimeError.descriptorInvalid))
+          pending.complete(.failure(RuntimeError.listenerFailed))
           return
         }
         device.connect(toPort: port) { pending.complete($0) }
       }
-      let deadline = ProcessInfo.processInfo.systemUptime + 2
-      return try? pending.wait(deadline: deadline, cancelled: { false })
+      return pending.wait(seconds: 2)
     }
 
     func waitForExit() -> VMRuntime.Exit {

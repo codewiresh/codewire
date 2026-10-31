@@ -630,16 +630,15 @@ print("cooperative cancellation: no adopted children")
         commands = [item["argv"] for item in result["commands"]]
         self.assertEqual(commands[0][:2], ["xcrun", "swift"])
         self.assertEqual(commands[1][:2], ["xcrun", "--show-sdk-version"])
-        self.assertTrue(commands[2][0].endswith("/Tests/test_ipc_system.sh"))
-        self.assertEqual([argv[:2] for argv in commands[3:6]], [
+        self.assertEqual([argv[:2] for argv in commands[2:5]], [
             ["xcrun", "swift-format"], ["xcrun", "swift"], ["xcrun", "swift"],
         ])
-        for argv in commands[4:6]:
+        for argv in commands[3:5]:
             self.assertIn("-warnings-as-errors", argv)
             self.assertIn("-Werror", argv)
-        self.assertNotIn("-load-plugin-library", commands[4])
-        self.assertIn("-load-plugin-library", commands[5])
-        self.assertTrue(commands[5][-1].endswith(
+        self.assertNotIn("-load-plugin-library", commands[3])
+        self.assertIn("-load-plugin-library", commands[4])
+        self.assertTrue(commands[4][-1].endswith(
             "/lib/swift/host/plugins/testing/libTestingMacros.dylib"))
         self.assertNotIn("cargo", [argv[0] for argv in commands])
         self.assertEqual(set(result["artifacts"]), {"codewire-vz-runner-arm64"})

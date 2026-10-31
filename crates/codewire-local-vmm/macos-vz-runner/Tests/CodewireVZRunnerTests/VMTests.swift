@@ -1,5 +1,4 @@
 import CVZRunnerIPC
-import CVZRunnerIPCTestSupport
 import CodewireVZRunnerProtocol
 import Dispatch
 import Foundation
@@ -172,7 +171,7 @@ extension CodewireVZRunnerTests {
     @Test
     func testConnectLeavesPayloadUnread() throws {
       var sockets: [Int32] = [-1, -1]
-      try #require(cw_vz_fixture_socketpair(&sockets) == 0)
+      try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
       defer { for socket in sockets { _ = close(socket) } }
       let bytes = Array("CONNECT 9\nPRI".utf8)
       try #require(cw_vz_write_all(sockets[0], bytes, bytes.count) == 0)
@@ -188,8 +187,8 @@ extension CodewireVZRunnerTests {
     func testSpliceCopiesBothDirectionsAndForwardsHalfClose() throws {
       var client: [Int32] = [-1, -1]
       var guest: [Int32] = [-1, -1]
-      try #require(cw_vz_fixture_socketpair(&client) == 0)
-      try #require(cw_vz_fixture_socketpair(&guest) == 0)
+      try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &client) == 0)
+      try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &guest) == 0)
       defer { for socket in client + guest { _ = close(socket) } }
       // A regression fails within the timeout instead of hanging the run.
       var timeout = timeval(tv_sec: 10, tv_usec: 0)
@@ -237,7 +236,7 @@ extension CodewireVZRunnerTests {
 
     static func readConnect(_ line: String) throws -> UInt32? {
       var sockets: [Int32] = [-1, -1]
-      try #require(cw_vz_fixture_socketpair(&sockets) == 0)
+      try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
       defer { for socket in sockets { _ = close(socket) } }
       let bytes = Array(line.utf8)
       try #require(cw_vz_write_all(sockets[0], bytes, bytes.count) == 0)

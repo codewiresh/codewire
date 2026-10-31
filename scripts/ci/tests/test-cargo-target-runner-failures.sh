@@ -176,7 +176,6 @@ for helper in ('scripts/ci/tests/test-openbao-only-secret-authority.sh',
                'scripts/dev/test-cli-native-managed.py',
                'scripts/dev/test-cli-native-update.py',
                'scripts/ci/tests/test-native-managed-update-entrypoint.py',
-               'crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh',
                'crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py',
                'scripts/ci/verify/build-local-vmm-initramfs.sh',
                'scripts/ci/verify/run-in-public-netns.sh',
@@ -285,7 +284,6 @@ assert comparable(sharded) == comparable(records), 'Rust/transport shards diverg
 _, invalid_shard_output = run(special, shard='everything', status=2)
 assert sum(r['tool'] == 'package-codewire-desktop.sh' for r in records) == 1
 assert sum(r['tool'] == 'build-local-vmm-initramfs.sh' for r in records) == 1
-assert sum(r['tool'] == 'test_ipc_system.sh' for r in records) == 1
 assert sum(r['tool'] == 'test_static_contract.py' for r in records) == 1
 darwin_check = ['clippy', '--locked', '-p', 'codewire-local-vmm',
                 '-p', 'codewire-vmm-guest-probe', '--target', 'aarch64-apple-darwin',

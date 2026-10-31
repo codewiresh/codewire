@@ -21,7 +21,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn is_fatal_vm_init_failure(command: Option<&OsStr>, pid: libc::pid_t) -> bool {
-    pid == 1 && (command.is_none() || command == Some(OsStr::new("vz-inode-probe")))
+    pid == 1 && command.is_none()
 }
 
 #[cfg(target_os = "linux")]
@@ -69,13 +69,6 @@ fn entrypoint() -> anyhow::Result<()> {
                 .build()
                 .context("create guest network-agent Tokio runtime")?;
             runtime.block_on(guest::run_network_agent())
-        }
-        Some("vz-inode-probe") => {
-            ensure!(
-                arguments.next().is_none(),
-                "VZ inode probe accepts no arguments"
-            );
-            guest::run_vz_inode_probe()
         }
         Some("identity") => {
             ensure!(arguments.next().is_none(), "identity accepts no arguments");
@@ -221,17 +214,9 @@ mod tests {
     #[test]
     fn only_initial_vm_modes_halt_after_pid_one_failure() {
         assert!(is_fatal_vm_init_failure(None, 1));
-        assert!(is_fatal_vm_init_failure(
-            Some(OsStr::new("vz-inode-probe")),
-            1
-        ));
         for command in ["workspace-init", "daemon", "network-agent", "identity"] {
             assert!(!is_fatal_vm_init_failure(Some(OsStr::new(command)), 1));
         }
         assert!(!is_fatal_vm_init_failure(None, 2));
-        assert!(!is_fatal_vm_init_failure(
-            Some(OsStr::new("vz-inode-probe")),
-            2
-        ));
     }
 }

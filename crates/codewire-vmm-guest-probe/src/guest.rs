@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
@@ -65,9 +64,7 @@ use crate::{
     PROGRESS_REQUEST_LEN, ProgressFrame, ProgressRequest, ROOT_DISK_SERIAL, SEED_DISK_SERIAL,
     SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN, SKILL_SNAPSHOT_CONTENT_PATH,
     SKILL_SNAPSHOT_PLAN_PATH, STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding,
-    SetupHeader, Sha256Value, SkillProjectionRoot, SkillSnapshotPlan, VZ_INODE_PROBE_CHALLENGE_LEN,
-    VZ_INODE_PROBE_SEED_LEN, VZ_INODE_PROBE_VSOCK_PORT, VzInodeProbeStage,
-    encode_vz_inode_probe_frame, encode_vz_inode_probe_stage_frame,
+    SetupHeader, Sha256Value, SkillProjectionRoot, SkillSnapshotPlan,
 };
 
 mod bootstrap;
@@ -251,8 +248,6 @@ const DEV_PATH: &str = "/dev";
 const DISK_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const PROGRESS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-const VZ_INODE_PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const VZ_INODE_PROBE_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(20);
 const HOST_ONLY_REJECTION_BUDGET: usize = 32;
 const NONCE_MAX_LEN: usize = 256;
 const READ_LIMIT: usize = 4097;
@@ -529,168 +524,6 @@ pub fn run_init() -> Result<()> {
     record_boot_stage("daemon-started")?;
     let daemon = daemon.0.take().expect("daemon start child is present");
     supervise_guest(daemon, workspace, network, docker, poweroff, vm_only)
-}
-
-/// Run only the entitlement-gated macOS `/dev/fd` hardware fixture.
-///
-/// This is deliberately not production guest readiness: it admits only the
-/// synthetic seed and state identities needed to prove that VZ consumed the
-/// already-open kernel, initramfs and disk inodes after their pathnames were
-/// replaced. The production init path above still requires state, root and
-/// seed disks and remains unchanged.
-pub fn run_vz_inode_probe() -> Result<()> {
-    ensure!(
-        unsafe { libc::getpid() } == 1,
-        "VZ inode probe must run as PID 1"
-    );
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("create VZ inode probe runtime")?;
-    runtime.block_on(async move {
-        let mut stream = connect_vz_inode_probe_to_host()
-            .await
-            .context("connect VZ inode probe to host before deadline")?;
-        let mut challenge = [0_u8; VZ_INODE_PROBE_CHALLENGE_LEN];
-        tokio::time::timeout(
-            PROGRESS_REQUEST_TIMEOUT,
-            AsyncReadExt::read_exact(&mut stream, &mut challenge),
-        )
-        .await
-        .context("VZ inode probe challenge timed out")??;
-        write_vz_inode_probe_stage(&mut stream, VzInodeProbeStage::Started).await?;
-
-        mount_minimal_filesystems()?;
-        write_vz_inode_probe_stage(&mut stream, VzInodeProbeStage::FilesystemsMounted).await?;
-        let seed_device = wait_for_disk_by_serial(
-            Path::new(SYS_BLOCK_PATH),
-            Path::new(DEV_PATH),
-            SEED_DISK_SERIAL,
-            DISK_DISCOVERY_TIMEOUT,
-        )?;
-        validate_block_device(&seed_device)?;
-        let seed = read_bounded(&seed_device, VZ_INODE_PROBE_SEED_LEN)
-            .context("read VZ inode probe seed")?;
-        ensure!(
-            seed.len() == VZ_INODE_PROBE_SEED_LEN,
-            "VZ inode probe seed has invalid length"
-        );
-        write_vz_inode_probe_stage(&mut stream, VzInodeProbeStage::SeedRead).await?;
-
-        let state_device = wait_for_disk_by_serial(
-            Path::new(SYS_BLOCK_PATH),
-            Path::new(DEV_PATH),
-            STATE_DISK_SERIAL,
-            DISK_DISCOVERY_TIMEOUT,
-        )?;
-        ensure!(seed_device != state_device, "probe disks must be distinct");
-        validate_block_device(&state_device)?;
-        let filesystem_uuid = read_ext4_uuid_bytes(&state_device)?;
-        write_vz_inode_probe_stage(&mut stream, VzInodeProbeStage::DataIdentified).await?;
-
-        let frame = encode_vz_inode_probe_frame(&seed, filesystem_uuid, challenge)
-            .context("encode VZ inode probe readiness")?;
-        AsyncWriteExt::write_all(&mut stream, &frame)
-            .await
-            .context("write VZ inode probe readiness")?;
-        AsyncWriteExt::flush(&mut stream)
-            .await
-            .context("flush VZ inode probe readiness")?;
-
-        // The helper owns this connection and the VM. An authenticated frame
-        // is readiness, not permission for PID 1 to exit; remain alive until
-        // helper death tears down the VZ process boundary.
-        let mut unexpected = [0_u8; 1];
-        let count = AsyncReadExt::read(&mut stream, &mut unexpected)
-            .await
-            .context("wait for VZ inode probe helper ownership")?;
-        ensure!(count != 0, "VZ inode probe helper connection closed");
-        bail!("VZ inode probe received an unexpected post-readiness byte");
-    })
-}
-
-async fn connect_vz_inode_probe_to_host() -> io::Result<VsockStream> {
-    let deadline = tokio::time::Instant::now() + VZ_INODE_PROBE_CONNECT_TIMEOUT;
-    // Retry only completed failures. An independent timeout per attempt could
-    // cancel a connection while the host is consuming its one-shot admission.
-    retry_async_connect_until(deadline, VZ_INODE_PROBE_CONNECT_RETRY_DELAY, || {
-        VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, VZ_INODE_PROBE_VSOCK_PORT))
-    })
-    .await
-}
-
-async fn retry_async_connect_until<T, Connect, ConnectFuture>(
-    deadline: tokio::time::Instant,
-    retry_delay: Duration,
-    mut connect: Connect,
-) -> io::Result<T>
-where
-    Connect: FnMut() -> ConnectFuture,
-    ConnectFuture: Future<Output = io::Result<T>>,
-{
-    let mut last_error = None;
-    loop {
-        match tokio::time::timeout_at(deadline, connect()).await {
-            Ok(Ok(value)) => return Ok(value),
-            Ok(Err(error)) => last_error = Some(error),
-            Err(_) => break,
-        }
-
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            break;
-        }
-        tokio::time::sleep_until((now + retry_delay).min(deadline)).await;
-    }
-
-    Err(last_error.unwrap_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            "VZ inode probe connection deadline elapsed",
-        )
-    }))
-}
-
-async fn write_vz_inode_probe_stage(
-    stream: &mut VsockStream,
-    stage: VzInodeProbeStage,
-) -> Result<()> {
-    let frame = encode_vz_inode_probe_stage_frame(stage);
-    AsyncWriteExt::write_all(stream, &frame)
-        .await
-        .context("write VZ inode probe diagnostic stage")?;
-    AsyncWriteExt::flush(stream)
-        .await
-        .context("flush VZ inode probe diagnostic stage")
-}
-
-fn read_ext4_uuid_bytes(path: &Path) -> Result<[u8; 16]> {
-    const EXT4_SUPERBLOCK_OFFSET: u64 = 1_024;
-    const EXT4_MAGIC_OFFSET: u64 = 0x38;
-    const EXT4_UUID_OFFSET: u64 = 0x68;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .with_context(|| format!("open ext4 identity device {}", path.display()))?;
-    let mut magic = [0_u8; 2];
-    read_exact_at(
-        &file,
-        &mut magic,
-        EXT4_SUPERBLOCK_OFFSET + EXT4_MAGIC_OFFSET,
-    )?;
-    ensure!(magic == [0x53, 0xef], "probe data disk is not ext4");
-    let mut uuid = [0_u8; 16];
-    read_exact_at(&file, &mut uuid, EXT4_SUPERBLOCK_OFFSET + EXT4_UUID_OFFSET)?;
-    ensure!(uuid.iter().any(|byte| *byte != 0), "probe ext4 UUID is nil");
-    Ok(uuid)
-}
-
-fn read_exact_at(file: &File, output: &mut [u8], offset: u64) -> Result<()> {
-    use std::os::unix::fs::FileExt;
-
-    file.read_exact_at(output, offset)
-        .context("read probe disk identity")
 }
 
 fn require_persisted_workspace_plan(plan: Option<WorkspacePlan>) -> Result<WorkspacePlan> {
@@ -6598,52 +6431,6 @@ mod tests {
             startup_script: String::new(),
             skills_selected: false,
         }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn vz_inode_probe_connect_retries_before_absolute_deadline() {
-        let attempts = Arc::new(AtomicU64::new(0));
-        let recorded = Arc::clone(&attempts);
-        let value = retry_async_connect_until(
-            tokio::time::Instant::now() + Duration::from_secs(1),
-            Duration::from_millis(1),
-            move || {
-                let attempt = recorded.fetch_add(1, Ordering::Relaxed);
-                async move {
-                    if attempt < 2 {
-                        Err(io::Error::new(
-                            io::ErrorKind::ConnectionRefused,
-                            "listener is not ready",
-                        ))
-                    } else {
-                        Ok(7_u8)
-                    }
-                }
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(value, 7);
-        assert_eq!(attempts.load(Ordering::Relaxed), 3);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn vz_inode_probe_connect_stops_at_one_absolute_deadline() {
-        let attempts = Arc::new(AtomicU64::new(0));
-        let recorded = Arc::clone(&attempts);
-        let result = retry_async_connect_until(
-            tokio::time::Instant::now(),
-            Duration::from_millis(1),
-            move || {
-                recorded.fetch_add(1, Ordering::Relaxed);
-                std::future::pending::<io::Result<()>>()
-            },
-        )
-        .await;
-
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
-        assert_eq!(attempts.load(Ordering::Relaxed), 1);
     }
 
     #[test]

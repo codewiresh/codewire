@@ -35,10 +35,12 @@
         #expect(rules.contains("(allow file-read* (literal \"/vm/seed.raw\"))"))
         #expect(rules.contains("(allow file-read* file-write* (literal \"/vm/state.raw\"))"))
         #expect(
-          rules.contains("(allow file-read* file-write* file-issue-extension (subpath \"/work/rw\"))"))
+          rules.contains(
+            "(allow file-read* file-write* file-issue-extension (subpath \"/work/rw\"))"))
         #expect(rules.contains("(allow file-read* file-issue-extension (subpath \"/work/ro\"))"))
         #expect(
-          rules.contains("(allow file-read-metadata file-write-unlink (literal \"/tmp/vm/vsock/v\"))"))
+          rules.contains(
+            "(allow file-read-metadata file-write-unlink (literal \"/tmp/vm/vsock/v\"))"))
         let writes = rules.filter { $0.contains("file-write") }
         #expect(writes.count == 3)
       }
@@ -52,7 +54,10 @@
           #expect(!profile.contains(forbidden), "\(forbidden)")
         }
         let mach = profile.split(separator: "\n").filter { $0.contains("mach-") }
-        #expect(mach == ["(allow mach-lookup (xpc-service-name \"com.apple.Virtualization.VirtualMachine\"))"])
+        #expect(
+          mach == [
+            "(allow mach-lookup (xpc-service-name \"com.apple.Virtualization.VirtualMachine\"))"
+          ])
       }
 
       @Test
