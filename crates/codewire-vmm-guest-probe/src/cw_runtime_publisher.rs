@@ -21,6 +21,15 @@ use crate::cw_runtime::{
 use crate::cw_runtime_live::*;
 
 const SELECTOR: &str = "selection.json";
+const FS_IOC_ENABLE_VERITY: u32 = 0x4080_6685;
+const FS_IOC_MEASURE_VERITY: u32 = 0xc004_6686;
+const FS_VERITY_HASH_ALG_SHA256: u16 = 1;
+/// A member's fs-verity digest, set by the publisher once it has read the
+/// sealed file back against the payload's SHA-256. It is an attribute and not
+/// a member entry, so a publisher that predates it still reads the member. In
+/// the `user` namespace because the launcher reads it as the workload; only
+/// root can write it, since the file is root's and mode 0555.
+const VERITY_RECORD: &std::ffi::CStr = c"user.codewire.verity";
 
 pub struct RuntimeCache {
     root: PathBuf,
@@ -128,6 +137,23 @@ impl RuntimeCache {
         Ok(cache)
     }
 
+    /// Seals a staged `cw` with fs-verity where its filesystem can. The digest
+    /// is recorded only after the sealed file reads back as the payload, so a
+    /// recorded digest always stands for the provenance's bytes.
+    fn seal_member(&self, cw: &Path, provenance: &CwRuntimeProvenance) -> Result<()> {
+        let Some(digest) = enable_verity(cw)? else {
+            return Ok(());
+        };
+        let binary = read_sealed(cw, self.uid, 0o555, CW_RUNTIME_MAX_BYTES)?;
+        provenance
+            .validate_payload(&binary)
+            .map_err(anyhow::Error::msg)?;
+        let file = File::open(cw)?;
+        record_verity(&file, &digest)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
     /// Moves the publisher to a restored boot's identity (#3046 R4). A new
     /// generation of this environment only changes the binding. A fork is a
     /// new environment: the selection keeps its runtimes and revision, takes
@@ -185,6 +211,8 @@ impl RuntimeCache {
             Instant::now() + Duration::from_secs(LIVE_RUNTIME_TIMEOUT_SECONDS),
         )
     }
+    /// A member sealed with fs-verity is measured: the kernel checks every
+    /// page against that digest as it is read. Any other is read in full.
     fn verify_member_until(&self, member: &CwRuntimeProvenance, deadline: Instant) -> Result<()> {
         let path = self.view.join(&member.payload.sha256);
         ensure_directory(&path, self.uid, Some(0o555))?;
@@ -211,6 +239,9 @@ impl RuntimeCache {
             CwRuntimeProvenance::decode(&provenance).map_err(anyhow::Error::msg)? == *member,
             "runtime member provenance changed"
         );
+        if verity_sealed(&path.join("cw"), self.uid)? {
+            return Ok(());
+        }
         let binary = read_sealed_until(
             &path.join("cw"),
             self.uid,
@@ -316,6 +347,7 @@ impl RuntimeCache {
         create_directory(&stage, self.uid, 0o700)?;
         let result = (|| {
             write_new(&stage.join("cw"), binary, 0o555)?;
+            self.seal_member(&stage.join("cw"), provenance)?;
             write_new(
                 &stage.join("provenance.json"),
                 &serde_json::to_vec(provenance)?,
@@ -670,13 +702,7 @@ fn read_sealed(path: &Path, uid: u32, mode: u32, limit: usize) -> Result<Vec<u8>
         Instant::now() + Duration::from_secs(LIVE_RUNTIME_TIMEOUT_SECONDS),
     )
 }
-fn read_sealed_until(
-    path: &Path,
-    uid: u32,
-    mode: u32,
-    limit: usize,
-    deadline: Instant,
-) -> Result<Vec<u8>> {
+fn open_sealed(path: &Path, uid: u32, mode: u32, limit: usize) -> Result<(File, fs::Metadata)> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -692,6 +718,37 @@ fn read_sealed_until(
             && before.len() <= limit as u64,
         "invalid sealed runtime file"
     );
+    Ok((file, before))
+}
+fn ensure_sealed_unchanged(path: &Path, file: &File, before: &fs::Metadata) -> Result<()> {
+    let after = file.metadata()?;
+    let live = fs::symlink_metadata(path)?;
+    ensure!(
+        [after, live]
+            .iter()
+            .all(|metadata| metadata.dev() == before.dev()
+                && metadata.ino() == before.ino()
+                && metadata.len() == before.len()
+                && metadata.uid() == before.uid()
+                && metadata.gid() == before.gid()
+                && metadata.mode() == before.mode()
+                && metadata.nlink() == 1
+                && metadata.mtime() == before.mtime()
+                && metadata.mtime_nsec() == before.mtime_nsec()
+                && metadata.ctime() == before.ctime()
+                && metadata.ctime_nsec() == before.ctime_nsec()),
+        "sealed runtime file changed"
+    );
+    Ok(())
+}
+fn read_sealed_until(
+    path: &Path,
+    uid: u32,
+    mode: u32,
+    limit: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    let (file, before) = open_sealed(path, uid, mode, limit)?;
     let mut bytes = Vec::new();
     let mut reader = (&file).take(limit as u64 + 1);
     let mut chunk = [0; 64 * 1024];
@@ -703,26 +760,146 @@ fn read_sealed_until(
         }
         bytes.extend_from_slice(&chunk[..count]);
     }
-    let after = file.metadata()?;
-    let live = fs::symlink_metadata(path)?;
     ensure!(
-        bytes.len() as u64 == before.len()
-            && [after, live]
-                .iter()
-                .all(|metadata| metadata.dev() == before.dev()
-                    && metadata.ino() == before.ino()
-                    && metadata.len() == before.len()
-                    && metadata.uid() == before.uid()
-                    && metadata.gid() == before.gid()
-                    && metadata.mode() == before.mode()
-                    && metadata.nlink() == 1
-                    && metadata.mtime() == before.mtime()
-                    && metadata.mtime_nsec() == before.mtime_nsec()
-                    && metadata.ctime() == before.ctime()
-                    && metadata.ctime_nsec() == before.ctime_nsec()),
+        bytes.len() as u64 == before.len(),
         "sealed runtime file changed"
     );
+    ensure_sealed_unchanged(path, &file, &before)?;
     Ok(bytes)
+}
+
+/// Whether `path` is sealed with the fs-verity digest recorded for it. A
+/// recorded digest the kernel does not measure is a changed member.
+fn verity_sealed(path: &Path, uid: u32) -> Result<bool> {
+    let (file, before) = open_sealed(path, uid, 0o555, CW_RUNTIME_MAX_BYTES)?;
+    let Some(recorded) = recorded_verity(&file)? else {
+        return Ok(false);
+    };
+    ensure!(
+        measure_verity(&file)? == Some(recorded),
+        "runtime member verity digest changed"
+    );
+    ensure_sealed_unchanged(path, &file, &before)?;
+    Ok(true)
+}
+
+/// Seal `path`, returning its digest, or `None` where the filesystem cannot:
+/// a state disk made before it had the `verity` feature, or another filesystem.
+fn enable_verity(path: &Path) -> Result<Option<[u8; 32]>> {
+    #[repr(C)]
+    struct EnableArguments {
+        version: u32,
+        hash_algorithm: u32,
+        block_size: u32,
+        salt_size: u32,
+        salt_pointer: u64,
+        signature_size: u32,
+        reserved1: u32,
+        signature_pointer: u64,
+        reserved2: [u64; 11],
+    }
+    let arguments = EnableArguments {
+        version: 1,
+        hash_algorithm: u32::from(FS_VERITY_HASH_ALG_SHA256),
+        block_size: 4096,
+        salt_size: 0,
+        salt_pointer: 0,
+        signature_size: 0,
+        reserved1: 0,
+        signature_pointer: 0,
+        reserved2: [0; 11],
+    };
+    // The kernel requires a read-only descriptor and no writer.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_ENABLE_VERITY as _, &arguments) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::EOPNOTSUPP | libc::ENOTTY)) {
+            return Ok(None);
+        }
+        return Err(error).context("seal runtime member");
+    }
+    Ok(Some(
+        measure_verity(&file)?.context("sealed runtime member has no digest")?,
+    ))
+}
+
+/// The kernel's digest of `file`, or `None` when it is not sealed.
+fn measure_verity(file: &File) -> Result<Option<[u8; 32]>> {
+    #[repr(C)]
+    struct Measurement {
+        algorithm: u16,
+        size: u16,
+        digest: [u8; 32],
+    }
+    let mut measurement = Measurement {
+        algorithm: 0,
+        size: 32,
+        digest: [0; 32],
+    };
+    if unsafe {
+        libc::ioctl(
+            file.as_raw_fd(),
+            FS_IOC_MEASURE_VERITY as _,
+            &mut measurement,
+        )
+    } != 0
+    {
+        let error = std::io::Error::last_os_error();
+        if matches!(
+            error.raw_os_error(),
+            Some(libc::ENODATA | libc::EOPNOTSUPP | libc::ENOTTY)
+        ) {
+            return Ok(None);
+        }
+        return Err(error).context("measure runtime member");
+    }
+    ensure!(
+        measurement.algorithm == FS_VERITY_HASH_ALG_SHA256 && measurement.size == 32,
+        "unexpected runtime member verity digest"
+    );
+    Ok(Some(measurement.digest))
+}
+
+fn recorded_verity(file: &File) -> Result<Option<[u8; 32]>> {
+    let mut digest = [0_u8; 33];
+    let size = unsafe {
+        libc::fgetxattr(
+            file.as_raw_fd(),
+            VERITY_RECORD.as_ptr(),
+            digest.as_mut_ptr().cast(),
+            digest.len(),
+        )
+    };
+    if size < 0 {
+        let error = std::io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::ENODATA | libc::EOPNOTSUPP)) {
+            return Ok(None);
+        }
+        return Err(error).context("read runtime member verity digest");
+    }
+    ensure!(size == 32, "unexpected runtime member verity digest");
+    let mut recorded = [0_u8; 32];
+    recorded.copy_from_slice(&digest[..32]);
+    Ok(Some(recorded))
+}
+
+fn record_verity(file: &File, digest: &[u8; 32]) -> Result<()> {
+    if unsafe {
+        libc::fsetxattr(
+            file.as_raw_fd(),
+            VERITY_RECORD.as_ptr(),
+            digest.as_ptr().cast(),
+            digest.len(),
+            0,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error()).context("record runtime member digest");
+    }
+    Ok(())
 }
 
 fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
@@ -912,10 +1089,12 @@ pub fn launch_default(arguments: Vec<std::ffi::OsString>) -> Result<()> {
         0,
         Some(0o555),
     )?;
-    let bytes = read_sealed(&executable, 0, 0o555, CW_RUNTIME_MAX_BYTES)?;
-    member
-        .validate_payload(&bytes)
-        .map_err(anyhow::Error::msg)?;
+    if !verity_sealed(&executable, 0)? {
+        let bytes = read_sealed(&executable, 0, 0o555, CW_RUNTIME_MAX_BYTES)?;
+        member
+            .validate_payload(&bytes)
+            .map_err(anyhow::Error::msg)?;
+    }
     let error = std::process::Command::new(executable)
         .args(arguments)
         .exec();
@@ -1432,6 +1611,60 @@ mod tests {
                 );
                 assert_eq!(fs::read(&unowned).unwrap(), b"preserve");
             }
+            "verity" => {
+                let path = fixture
+                    .root
+                    .join("view")
+                    .join(&fixture.a.payload.sha256)
+                    .join("cw");
+                let file = File::open(&path).unwrap();
+                let Some(measured) = measure_verity(&file).unwrap() else {
+                    // This fixture's filesystem cannot seal: the full read.
+                    assert_eq!(recorded_verity(&file).unwrap(), None);
+                    assert!(!verity_sealed(&path, 0).unwrap());
+                    assert!(fixture.cache().selection().is_ok());
+                    return;
+                };
+                assert_eq!(recorded_verity(&file).unwrap(), Some(measured));
+                assert!(verity_sealed(&path, 0).unwrap());
+                assert!(fixture.cache().selection().is_ok());
+                assert_eq!(
+                    fs::read(&path).unwrap(),
+                    fixture_binary(&fixture.bootstrap_root, &fixture.a)
+                );
+                // A live publication is sealed the same way.
+                let id = Uuid::new_v4();
+                fixture.publish(id);
+                let published = fixture
+                    .root
+                    .join("view")
+                    .join(&fixture.b.payload.sha256)
+                    .join("cw");
+                assert!(verity_sealed(&published, 0).unwrap());
+                // A digest that is not the file's refuses the member.
+                let mut other = measured;
+                other[0] ^= 1;
+                record_verity(&file, &other).unwrap();
+                assert!(fixture.cache().selection().is_err());
+                // Without a record the member is read in full, and still passes.
+                assert_eq!(
+                    unsafe { libc::fremovexattr(file.as_raw_fd(), VERITY_RECORD.as_ptr()) },
+                    0
+                );
+                assert!(!verity_sealed(&path, 0).unwrap());
+                assert!(fixture.cache().selection().is_ok());
+                record_verity(&file, &measured).unwrap();
+                assert!(fixture.cache().selection().is_ok());
+                // A record on an unsealed file refuses it, even with the
+                // right bytes: the kernel no longer checks its pages.
+                drop(file);
+                let bytes = fs::read(&path).unwrap();
+                fs::remove_file(&path).unwrap();
+                write_new(&path, &bytes, 0o555).unwrap();
+                let file = File::open(&path).unwrap();
+                record_verity(&file, &measured).unwrap();
+                assert!(fixture.cache().selection().is_err());
+            }
             "links" => {
                 let path = fixture
                     .root
@@ -1654,6 +1887,10 @@ mod tests {
             _ => panic!("closed kernel fixture scenario refused"),
         }
     }
+    fn fixture_binary(bootstrap_root: &Path, member: &CwRuntimeProvenance) -> Vec<u8> {
+        fs::read(bootstrap_root.join(&member.payload.sha256).join("cw")).unwrap()
+    }
+
     fn kernel(name: &str) {
         let executable = std::env::current_exe().unwrap();
         let mut child = if unsafe { libc::geteuid() } == 0 {
@@ -1689,6 +1926,10 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed; 0 ignored"));
+    }
+    #[test]
+    fn live_runtime_measures_a_sealed_member_by_its_verity_digest() {
+        kernel("verity");
     }
     #[test]
     fn live_runtime_rebinds_to_a_restored_boot_and_a_fork() {

@@ -344,11 +344,13 @@ updater's VM hand-off (v0.3.389 and earlier) hands the state root to it
 while no local VM runs. While one does, it names them: select the newer cw
 again (`cw upgrade rollback`), stop them, then roll back.
 
-A VM created since cw's guest kernel gained fs-verity (6.18.48-codewire3) has
-ext4's `verity` feature on its state disk; a VM created earlier keeps its disk
-as it was. After a rollback to a cw with an older kernel such a VM still starts
-and its disk is writable, but a file the guest sealed with fs-verity cannot be
-opened (`Operation not supported`). It can be removed.
+A VM keeps the guest kernel and root it was created with, so neither an upgrade
+nor a rollback moves it to another runtime. A VM created since that kernel
+gained fs-verity (6.18.48-codewire3) has ext4's `verity` feature on its state
+disk, and the guest seals its cw runtime there. It keeps starting after a
+rollback, on its own kernel. A kernel without fs-verity cannot open a sealed
+file, and a VM booted on one fails at "Starting the VM". A VM created earlier
+keeps its disk as it was.
 
 A supervisor started by a `cw` that is not an installed version, such as a
 development build run with your own home directory, is one this cw cannot
@@ -379,6 +381,14 @@ for the workspace image (`ghcr.io/codewiresh/workspace`).
 **`your local VMs ... still run on the cw you updated from`**: see
 [After a cw upgrade](#after-a-cw-upgrade). Restart them on this cw with
 `cw upgrade --vms`, or stop them, then rerun the command.
+
+**`Bus error`, or `execute selected workload runtime: I/O error`, from `cw` in a
+VM**, or `session exited with code 135` from the host: part of the guest's `cw`
+is corrupted on the VM's state disk. The kernel refuses to run those bytes. The VM
+still shows `running`, and `cw runtime info` still succeeds, so check the guest's
+kernel log (`dmesg | grep "FILE CORRUPTED"`). Other commands keep working in the
+VM, so copy your work out, then create the VM again; the disk under it may be
+failing, so check that too.
 
 **`this cw is a development build with no pinned local VM runtime`**: install a
 release with the install script, or pass `--from DIR` with a runtime directory

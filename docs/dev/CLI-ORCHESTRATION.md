@@ -610,6 +610,14 @@ retained `<payload_sha256>/{cw,provenance.json}` members. Its selector carries
 the complete catalog, default, previous version, revision and operation
 receipts. The original bootstrap `catalog.json` remains on `/codewire-cw`;
 changing the live default never changes that disk or bootstrap binding.
+On a state disk with ext4's `verity` feature, which a new VM's has, the
+publisher seals each member's `cw` with fs-verity and checks it by the kernel's
+digest, and the kernel verifies every page as it is read. So corrupted bytes
+never run, but the VM still starts, and only what reaches a corrupted block
+fails, with an I/O error (the guest's kernel log says `FILE CORRUPTED`). A member
+on a disk without the feature is read in full and checked against its SHA-256
+at each start, `info` and `cw` launch, which takes longer, and such corruption
+stops the VM's start instead.
 The trusted launcher also has a read-only bind at `/usr/local/bin/cw`, so a
 login shell that resets PATH resolves the same selected default. Existing
 managed helpers continue to execute their original member paths.
