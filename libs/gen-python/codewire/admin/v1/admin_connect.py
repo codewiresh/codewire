@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .admin_pb2 import AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse, ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListOrganizationsRequest, ListOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest, SetOrganizationRateCardResponse
+from .admin_pb2 import AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse, ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetClusterCapacityRequest, GetClusterCapacityResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListOrganizationsRequest, ListOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest, SetOrganizationRateCardResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -72,6 +72,9 @@ class AdminService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def set_organization_rate_card(self, request: SetOrganizationRateCardRequest, ctx: RequestContext[SetOrganizationRateCardRequest, SetOrganizationRateCardResponse]) -> SetOrganizationRateCardResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def get_cluster_capacity(self, request: GetClusterCapacityRequest, ctx: RequestContext[GetClusterCapacityRequest, GetClusterCapacityResponse]) -> GetClusterCapacityResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def set_organization_dedicated_cpu(self, request: SetOrganizationDedicatedCpuRequest, ctx: RequestContext[SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse]) -> SetOrganizationDedicatedCpuResponse:
@@ -223,6 +226,16 @@ class AdminServiceASGIApplication(ConnectASGIApplication[AdminService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.set_organization_rate_card,
+                ),
+                "/codewire.admin.v1.AdminService/GetClusterCapacity": Endpoint.unary(
+                    method=MethodInfo(
+                        name="GetClusterCapacity",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=GetClusterCapacityRequest,
+                        output=GetClusterCapacityResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.get_cluster_capacity,
                 ),
                 "/codewire.admin.v1.AdminService/SetOrganizationDedicatedCpu": Endpoint.unary(
                     method=MethodInfo(
@@ -560,6 +573,28 @@ class AdminServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def get_cluster_capacity(
+        self,
+        request: GetClusterCapacityRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetClusterCapacityResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetClusterCapacity",
+                service_name="codewire.admin.v1.AdminService",
+                input=GetClusterCapacityRequest,
+                output=GetClusterCapacityResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
     async def set_organization_dedicated_cpu(
         self,
         request: SetOrganizationDedicatedCpuRequest,
@@ -638,6 +673,9 @@ class AdminServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def set_organization_rate_card(self, request: SetOrganizationRateCardRequest, ctx: RequestContext[SetOrganizationRateCardRequest, SetOrganizationRateCardResponse]) -> SetOrganizationRateCardResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def get_cluster_capacity(self, request: GetClusterCapacityRequest, ctx: RequestContext[GetClusterCapacityRequest, GetClusterCapacityResponse]) -> GetClusterCapacityResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def set_organization_dedicated_cpu(self, request: SetOrganizationDedicatedCpuRequest, ctx: RequestContext[SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse]) -> SetOrganizationDedicatedCpuResponse:
@@ -787,6 +825,16 @@ class AdminServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.set_organization_rate_card,
+                ),
+                "/codewire.admin.v1.AdminService/GetClusterCapacity": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="GetClusterCapacity",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=GetClusterCapacityRequest,
+                        output=GetClusterCapacityResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.get_cluster_capacity,
                 ),
                 "/codewire.admin.v1.AdminService/SetOrganizationDedicatedCpu": EndpointSync.unary(
                     method=MethodInfo(
@@ -1110,6 +1158,27 @@ class AdminServiceClientSync(ConnectClientSync):
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+        )
+    def get_cluster_capacity(
+        self,
+        request: GetClusterCapacityRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetClusterCapacityResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetClusterCapacity",
+                service_name="codewire.admin.v1.AdminService",
+                input=GetClusterCapacityRequest,
+                output=GetClusterCapacityResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
         )
     def set_organization_dedicated_cpu(
         self,

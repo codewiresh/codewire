@@ -23,6 +23,7 @@ use super::environments::{
     resolve_effective_plan,
 };
 
+pub mod capacity;
 pub mod credit;
 #[cfg(test)]
 mod credit_database_tests;

@@ -94,6 +94,15 @@ service AdminService {
   rpc SetOrganizationRateCard(SetOrganizationRateCardRequest)
       returns (SetOrganizationRateCardResponse);
 
+  // GetClusterCapacity returns, per runtime node, what is reserved and used and
+  // how many more sandboxes of each shape fit. A number this deployment can't
+  // read now is absent, never zero: reservations and usage come from an optional
+  // Prometheus, within a short time limit.
+  rpc GetClusterCapacity(GetClusterCapacityRequest)
+      returns (GetClusterCapacityResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // SetOrganizationDedicatedCpu sets whether one organization's new sandboxes
   // reserve a CPU per vCPU instead of sharing, and writes an audit entry. A
   // sandbox it already runs keeps its reservation until it is replaced. Setting
@@ -381,6 +390,57 @@ message SetOrganizationRateCardResponse {
   string organization_id = 1;
   string rate_card = 2;
   string previous_rate_card = 3;
+}
+
+message GetClusterCapacityRequest {}
+
+message GetClusterCapacityResponse {
+  repeated NodeCapacity nodes = 1;
+  // Sandbox Pods no node has taken yet.
+  int64 unplaced_sandboxes = 2;
+  // Whether this deployment names a Prometheus at all.
+  bool prometheus_configured = 3;
+}
+
+message NodeCapacity {
+  string name = 1;
+  // Ready, not cordoned, and with no taint a sandbox doesn't tolerate.
+  bool schedulable = 2;
+  int64 allocatable_cpu_millicores = 3;
+  int64 allocatable_memory_bytes = 4;
+  int64 allocatable_pods = 5;
+  // What the scheduler counts on this node, absent when not read.
+  NodeReservedCapacity reserved = 6;
+  // What this node really uses, absent when not read.
+  NodeUsedCapacity used = 7;
+  int64 sandboxes = 8;
+  // Warm pool members no sandbox has claimed yet.
+  int64 idle_warm_members = 9;
+  repeated ShapeFit fits = 10;
+}
+
+message NodeReservedCapacity {
+  int64 cpu_millicores = 1;
+  int64 memory_bytes = 2;
+  int64 pods = 3;
+  // When these were measured, for showing their age.
+  google.protobuf.Timestamp read_at = 4;
+}
+
+message NodeUsedCapacity {
+  int64 cpu_millicores = 1;
+  int64 memory_bytes = 2;
+  // When these were measured, for showing their age.
+  google.protobuf.Timestamp read_at = 3;
+}
+
+message ShapeFit {
+  string shape = 1;
+  // How many more of this shape fit, sharing CPU at the deployment's ratio.
+  // Absent when the node's reservations aren't known.
+  optional int64 more = 2;
+  // What runs out first: cpu, memory, pods, or node when it takes no sandboxes.
+  string limit = 3;
 }
 
 message SetOrganizationDedicatedCpuRequest {

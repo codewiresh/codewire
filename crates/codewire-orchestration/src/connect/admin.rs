@@ -12,23 +12,24 @@ use codewire_admin_proto::codewire::admin::v1::{
     AuditLogEntry as ProtoAuditLogEntry, ClearOrganizationEnvironmentQuotaRequest,
     ClearOrganizationEnvironmentQuotaResponse, CreditLedgerEntry as ProtoCreditLedgerEntry,
     EnvironmentLifecycleJournalEntry, EnvironmentQuota as ProtoEnvironmentQuota,
-    EnvironmentStartupTiming, GetDefaultEnvironmentQuotaRequest,
-    GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest,
-    GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest,
-    GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest,
-    GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest,
-    GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest,
-    ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest,
-    ListEnvironmentLifecycleJournalResponse, ListOrganizationsRequest, ListOrganizationsResponse,
-    Organization as ProtoOrganization, OrganizationApiKey as ProtoOrganizationApiKey,
-    OrganizationBilling as ProtoOrganizationBilling,
+    EnvironmentStartupTiming, GetClusterCapacityRequest, GetClusterCapacityResponse,
+    GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse,
+    GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse,
+    GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse,
+    GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse,
+    GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest,
+    GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse,
+    ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse,
+    ListOrganizationsRequest, ListOrganizationsResponse, NodeCapacity, NodeReservedCapacity,
+    NodeUsedCapacity, Organization as ProtoOrganization,
+    OrganizationApiKey as ProtoOrganizationApiKey, OrganizationBilling as ProtoOrganizationBilling,
     OrganizationEnvironmentUsage as ProtoOrganizationEnvironmentUsage,
     OrganizationMember as ProtoOrganizationMember,
     OrganizationSubscription as ProtoOrganizationSubscription, SetDefaultEnvironmentQuotaRequest,
     SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest,
     SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest,
     SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest,
-    SetOrganizationRateCardResponse, StartupPhaseSummary,
+    SetOrganizationRateCardResponse, ShapeFit, StartupPhaseSummary,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
@@ -337,6 +338,17 @@ impl AdminService for AdminConnectService {
         })
     }
 
+    async fn get_cluster_capacity(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, GetClusterCapacityRequest>,
+    ) -> ServiceResult<GetClusterCapacityResponse> {
+        let capacity = admin::capacity::cluster_capacity_core(&self.state)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto_cluster_capacity(capacity))
+    }
+
     async fn set_organization_dedicated_cpu(
         &self,
         ctx: RequestContext,
@@ -458,6 +470,59 @@ fn proto_organization_quota(
 }
 
 /// Database timestamps are UTC without a zone.
+fn proto_cluster_capacity(
+    capacity: admin::capacity::ClusterCapacity,
+) -> GetClusterCapacityResponse {
+    GetClusterCapacityResponse {
+        nodes: capacity
+            .nodes
+            .into_iter()
+            .map(|node| NodeCapacity {
+                name: node.name,
+                schedulable: node.schedulable,
+                allocatable_cpu_millicores: node.allocatable_cpu_millicores,
+                allocatable_memory_bytes: node.allocatable_memory_bytes,
+                allocatable_pods: node.allocatable_pods,
+                reserved: node
+                    .reserved
+                    .map(|reserved| NodeReservedCapacity {
+                        cpu_millicores: reserved.cpu_millicores,
+                        memory_bytes: reserved.memory_bytes,
+                        pods: reserved.pods,
+                        read_at: Some(Timestamp::from_unix(reserved.unix_seconds, 0)).into(),
+                        ..Default::default()
+                    })
+                    .into(),
+                used: node
+                    .used
+                    .map(|used| NodeUsedCapacity {
+                        cpu_millicores: used.cpu_millicores,
+                        memory_bytes: used.memory_bytes,
+                        read_at: Some(Timestamp::from_unix(used.unix_seconds, 0)).into(),
+                        ..Default::default()
+                    })
+                    .into(),
+                sandboxes: node.sandboxes,
+                idle_warm_members: node.idle_warm_members,
+                fits: node
+                    .fits
+                    .into_iter()
+                    .map(|fit| ShapeFit {
+                        shape: fit.shape.to_owned(),
+                        more: fit.more,
+                        limit: fit.limit.to_owned(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .collect(),
+        unplaced_sandboxes: capacity.unplaced_sandboxes,
+        prometheus_configured: capacity.prometheus_configured,
+        ..Default::default()
+    }
+}
+
 fn proto_naive_timestamp(value: chrono::NaiveDateTime) -> Timestamp {
     let value = value.and_utc();
     Timestamp::from_unix(value.timestamp(), value.timestamp_subsec_nanos() as i32)

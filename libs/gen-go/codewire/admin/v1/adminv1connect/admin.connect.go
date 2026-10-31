@@ -71,6 +71,9 @@ const (
 	// AdminServiceSetOrganizationRateCardProcedure is the fully-qualified name of the AdminService's
 	// SetOrganizationRateCard RPC.
 	AdminServiceSetOrganizationRateCardProcedure = "/codewire.admin.v1.AdminService/SetOrganizationRateCard"
+	// AdminServiceGetClusterCapacityProcedure is the fully-qualified name of the AdminService's
+	// GetClusterCapacity RPC.
+	AdminServiceGetClusterCapacityProcedure = "/codewire.admin.v1.AdminService/GetClusterCapacity"
 	// AdminServiceSetOrganizationDedicatedCpuProcedure is the fully-qualified name of the
 	// AdminService's SetOrganizationDedicatedCpu RPC.
 	AdminServiceSetOrganizationDedicatedCpuProcedure = "/codewire.admin.v1.AdminService/SetOrganizationDedicatedCpu"
@@ -123,6 +126,11 @@ type AdminServiceClient interface {
 	// discounted or unlimited. A change writes an audit entry; assigning the
 	// card it already has changes nothing.
 	SetOrganizationRateCard(context.Context, *connect.Request[v1.SetOrganizationRateCardRequest]) (*connect.Response[v1.SetOrganizationRateCardResponse], error)
+	// GetClusterCapacity returns, per runtime node, what is reserved and used and
+	// how many more sandboxes of each shape fit. A number this deployment can't
+	// read now is absent, never zero: reservations and usage come from an optional
+	// Prometheus, within a short time limit.
+	GetClusterCapacity(context.Context, *connect.Request[v1.GetClusterCapacityRequest]) (*connect.Response[v1.GetClusterCapacityResponse], error)
 	// SetOrganizationDedicatedCpu sets whether one organization's new sandboxes
 	// reserve a CPU per vCPU instead of sharing, and writes an audit entry. A
 	// sandbox it already runs keeps its reservation until it is replaced. Setting
@@ -232,6 +240,13 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(adminServiceMethods.ByName("SetOrganizationRateCard")),
 			connect.WithClientOptions(opts...),
 		),
+		getClusterCapacity: connect.NewClient[v1.GetClusterCapacityRequest, v1.GetClusterCapacityResponse](
+			httpClient,
+			baseURL+AdminServiceGetClusterCapacityProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("GetClusterCapacity")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
 		setOrganizationDedicatedCpu: connect.NewClient[v1.SetOrganizationDedicatedCpuRequest, v1.SetOrganizationDedicatedCpuResponse](
 			httpClient,
 			baseURL+AdminServiceSetOrganizationDedicatedCpuProcedure,
@@ -262,6 +277,7 @@ type adminServiceClient struct {
 	getDefaultEnvironmentQuota        *connect.Client[v1.GetDefaultEnvironmentQuotaRequest, v1.GetDefaultEnvironmentQuotaResponse]
 	setDefaultEnvironmentQuota        *connect.Client[v1.SetDefaultEnvironmentQuotaRequest, v1.SetDefaultEnvironmentQuotaResponse]
 	setOrganizationRateCard           *connect.Client[v1.SetOrganizationRateCardRequest, v1.SetOrganizationRateCardResponse]
+	getClusterCapacity                *connect.Client[v1.GetClusterCapacityRequest, v1.GetClusterCapacityResponse]
 	setOrganizationDedicatedCpu       *connect.Client[v1.SetOrganizationDedicatedCpuRequest, v1.SetOrganizationDedicatedCpuResponse]
 	adjustOrganizationCredit          *connect.Client[v1.AdjustOrganizationCreditRequest, v1.AdjustOrganizationCreditResponse]
 }
@@ -335,6 +351,11 @@ func (c *adminServiceClient) SetOrganizationRateCard(ctx context.Context, req *c
 	return c.setOrganizationRateCard.CallUnary(ctx, req)
 }
 
+// GetClusterCapacity calls codewire.admin.v1.AdminService.GetClusterCapacity.
+func (c *adminServiceClient) GetClusterCapacity(ctx context.Context, req *connect.Request[v1.GetClusterCapacityRequest]) (*connect.Response[v1.GetClusterCapacityResponse], error) {
+	return c.getClusterCapacity.CallUnary(ctx, req)
+}
+
 // SetOrganizationDedicatedCpu calls codewire.admin.v1.AdminService.SetOrganizationDedicatedCpu.
 func (c *adminServiceClient) SetOrganizationDedicatedCpu(ctx context.Context, req *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error) {
 	return c.setOrganizationDedicatedCpu.CallUnary(ctx, req)
@@ -389,6 +410,11 @@ type AdminServiceHandler interface {
 	// discounted or unlimited. A change writes an audit entry; assigning the
 	// card it already has changes nothing.
 	SetOrganizationRateCard(context.Context, *connect.Request[v1.SetOrganizationRateCardRequest]) (*connect.Response[v1.SetOrganizationRateCardResponse], error)
+	// GetClusterCapacity returns, per runtime node, what is reserved and used and
+	// how many more sandboxes of each shape fit. A number this deployment can't
+	// read now is absent, never zero: reservations and usage come from an optional
+	// Prometheus, within a short time limit.
+	GetClusterCapacity(context.Context, *connect.Request[v1.GetClusterCapacityRequest]) (*connect.Response[v1.GetClusterCapacityResponse], error)
 	// SetOrganizationDedicatedCpu sets whether one organization's new sandboxes
 	// reserve a CPU per vCPU instead of sharing, and writes an audit entry. A
 	// sandbox it already runs keeps its reservation until it is replaced. Setting
@@ -494,6 +520,13 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(adminServiceMethods.ByName("SetOrganizationRateCard")),
 		connect.WithHandlerOptions(opts...),
 	)
+	adminServiceGetClusterCapacityHandler := connect.NewUnaryHandler(
+		AdminServiceGetClusterCapacityProcedure,
+		svc.GetClusterCapacity,
+		connect.WithSchema(adminServiceMethods.ByName("GetClusterCapacity")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
 	adminServiceSetOrganizationDedicatedCpuHandler := connect.NewUnaryHandler(
 		AdminServiceSetOrganizationDedicatedCpuProcedure,
 		svc.SetOrganizationDedicatedCpu,
@@ -534,6 +567,8 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 			adminServiceSetDefaultEnvironmentQuotaHandler.ServeHTTP(w, r)
 		case AdminServiceSetOrganizationRateCardProcedure:
 			adminServiceSetOrganizationRateCardHandler.ServeHTTP(w, r)
+		case AdminServiceGetClusterCapacityProcedure:
+			adminServiceGetClusterCapacityHandler.ServeHTTP(w, r)
 		case AdminServiceSetOrganizationDedicatedCpuProcedure:
 			adminServiceSetOrganizationDedicatedCpuHandler.ServeHTTP(w, r)
 		case AdminServiceAdjustOrganizationCreditProcedure:
@@ -597,6 +632,10 @@ func (UnimplementedAdminServiceHandler) SetDefaultEnvironmentQuota(context.Conte
 
 func (UnimplementedAdminServiceHandler) SetOrganizationRateCard(context.Context, *connect.Request[v1.SetOrganizationRateCardRequest]) (*connect.Response[v1.SetOrganizationRateCardResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.SetOrganizationRateCard is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) GetClusterCapacity(context.Context, *connect.Request[v1.GetClusterCapacityRequest]) (*connect.Response[v1.GetClusterCapacityResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.GetClusterCapacity is not implemented"))
 }
 
 func (UnimplementedAdminServiceHandler) SetOrganizationDedicatedCpu(context.Context, *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error) {

@@ -157,6 +157,14 @@ A global administrator can give an organization dedicated CPU (`SetOrganizationD
 |---|---|---|---|
 | `CODEWIRE_SANDBOX_CPU_SHARING_RATIO` | No | How many vCPUs share one reserved CPU: a whole number from 1 to 8. A workspace requests its vCPUs divided by this, rounded up. Unset, empty or `1` means off, one reserved CPU per vCPU. Any other form stops orchestration at startup. | `2` |
 
+## Capacity view
+
+The admin capacity page shows, per runtime node, what is reserved and used and how many more sandboxes of each shape fit. It reads the cluster's own Prometheus, which needs kube-state-metrics and node-exporter. A number it can't read within a few seconds shows as not available, never as zero, and each number shows its age.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `CODEWIRE_CAPACITY_PROMETHEUS_URL` | No | The Prometheus that scrapes this cluster: an `http` or `https` URL with no credentials, query or fragment. Unset or empty means reservations and usage are not available on the page. Any other form stops orchestration at startup. | `http://prometheus.monitoring.svc:9090` |
+
 ## Browser origins
 
 Every Codewire service the browser calls is served from the dashboard's own origin, so by default no service answers cross-origin (CORS) requests at all.

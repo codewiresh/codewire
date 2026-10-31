@@ -299,6 +299,10 @@ pub struct SandboxWorkerCfg {
     /// networks on ([`SANDBOX_PUBLIC_MESH_URL_ENV`]). Empty: this platform
     /// offers none, and a create that names a network is refused.
     pub mesh_public_url: String,
+    /// The cluster Prometheus the admin capacity view reads
+    /// ([`CAPACITY_PROMETHEUS_URL_ENV`]). Empty: reservations and usage are
+    /// not available there.
+    pub capacity_prometheus_url: String,
     /// The binding listener's public roots (PEM) that confidential
     /// workspaces measure (B2c): the issuing CA cert-manager publishes beside
     /// orchestration's own internal leaf, loaded and checked against that
@@ -330,6 +334,30 @@ pub fn sandbox_public_mesh_url(value: Option<&str>) -> String {
             && url.query().is_none()
             && url.fragment().is_none(),
         "{SANDBOX_PUBLIC_MESH_URL_ENV} must be an https origin"
+    );
+    value.trim_end_matches('/').to_owned()
+}
+
+/// The Prometheus that scrapes this cluster, without a trailing slash.
+pub const CAPACITY_PROMETHEUS_URL_ENV: &str = "CODEWIRE_CAPACITY_PROMETHEUS_URL";
+
+/// [`CAPACITY_PROMETHEUS_URL_ENV`] as configured: empty, or an http(s) URL with
+/// no credentials, query or fragment. Anything else stops orchestration.
+pub fn capacity_prometheus_url(value: Option<&str>) -> String {
+    let value = value.map(str::trim).unwrap_or_default();
+    if value.is_empty() {
+        return String::new();
+    }
+    let url = url::Url::parse(value)
+        .unwrap_or_else(|_| panic!("{CAPACITY_PROMETHEUS_URL_ENV} must be an http(s) URL"));
+    assert!(
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "{CAPACITY_PROMETHEUS_URL_ENV} must be an http(s) URL with no credentials, query or fragment"
     );
     value.trim_end_matches('/').to_owned()
 }
@@ -470,6 +498,9 @@ impl SandboxWorkerCfg {
             ),
             mesh_public_url: sandbox_public_mesh_url(
                 std::env::var(SANDBOX_PUBLIC_MESH_URL_ENV).ok().as_deref(),
+            ),
+            capacity_prometheus_url: capacity_prometheus_url(
+                std::env::var(CAPACITY_PROMETHEUS_URL_ENV).ok().as_deref(),
             ),
             // Loaded and verified by the process entrypoint, which holds the
             // internal TLS identity.

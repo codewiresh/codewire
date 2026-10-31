@@ -413,6 +413,76 @@ class SetOrganizationRateCardResponse(_message.Message):
     previous_rate_card: str
     def __init__(self, organization_id: _Optional[str] = ..., rate_card: _Optional[str] = ..., previous_rate_card: _Optional[str] = ...) -> None: ...
 
+class GetClusterCapacityRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class GetClusterCapacityResponse(_message.Message):
+    __slots__ = ("nodes", "unplaced_sandboxes", "prometheus_configured")
+    NODES_FIELD_NUMBER: _ClassVar[int]
+    UNPLACED_SANDBOXES_FIELD_NUMBER: _ClassVar[int]
+    PROMETHEUS_CONFIGURED_FIELD_NUMBER: _ClassVar[int]
+    nodes: _containers.RepeatedCompositeFieldContainer[NodeCapacity]
+    unplaced_sandboxes: int
+    prometheus_configured: bool
+    def __init__(self, nodes: _Optional[_Iterable[_Union[NodeCapacity, _Mapping]]] = ..., unplaced_sandboxes: _Optional[int] = ..., prometheus_configured: _Optional[bool] = ...) -> None: ...
+
+class NodeCapacity(_message.Message):
+    __slots__ = ("name", "schedulable", "allocatable_cpu_millicores", "allocatable_memory_bytes", "allocatable_pods", "reserved", "used", "sandboxes", "idle_warm_members", "fits")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    SCHEDULABLE_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATABLE_CPU_MILLICORES_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATABLE_MEMORY_BYTES_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATABLE_PODS_FIELD_NUMBER: _ClassVar[int]
+    RESERVED_FIELD_NUMBER: _ClassVar[int]
+    USED_FIELD_NUMBER: _ClassVar[int]
+    SANDBOXES_FIELD_NUMBER: _ClassVar[int]
+    IDLE_WARM_MEMBERS_FIELD_NUMBER: _ClassVar[int]
+    FITS_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    schedulable: bool
+    allocatable_cpu_millicores: int
+    allocatable_memory_bytes: int
+    allocatable_pods: int
+    reserved: NodeReservedCapacity
+    used: NodeUsedCapacity
+    sandboxes: int
+    idle_warm_members: int
+    fits: _containers.RepeatedCompositeFieldContainer[ShapeFit]
+    def __init__(self, name: _Optional[str] = ..., schedulable: _Optional[bool] = ..., allocatable_cpu_millicores: _Optional[int] = ..., allocatable_memory_bytes: _Optional[int] = ..., allocatable_pods: _Optional[int] = ..., reserved: _Optional[_Union[NodeReservedCapacity, _Mapping]] = ..., used: _Optional[_Union[NodeUsedCapacity, _Mapping]] = ..., sandboxes: _Optional[int] = ..., idle_warm_members: _Optional[int] = ..., fits: _Optional[_Iterable[_Union[ShapeFit, _Mapping]]] = ...) -> None: ...
+
+class NodeReservedCapacity(_message.Message):
+    __slots__ = ("cpu_millicores", "memory_bytes", "pods", "read_at")
+    CPU_MILLICORES_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_BYTES_FIELD_NUMBER: _ClassVar[int]
+    PODS_FIELD_NUMBER: _ClassVar[int]
+    READ_AT_FIELD_NUMBER: _ClassVar[int]
+    cpu_millicores: int
+    memory_bytes: int
+    pods: int
+    read_at: _timestamp_pb2.Timestamp
+    def __init__(self, cpu_millicores: _Optional[int] = ..., memory_bytes: _Optional[int] = ..., pods: _Optional[int] = ..., read_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+
+class NodeUsedCapacity(_message.Message):
+    __slots__ = ("cpu_millicores", "memory_bytes", "read_at")
+    CPU_MILLICORES_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_BYTES_FIELD_NUMBER: _ClassVar[int]
+    READ_AT_FIELD_NUMBER: _ClassVar[int]
+    cpu_millicores: int
+    memory_bytes: int
+    read_at: _timestamp_pb2.Timestamp
+    def __init__(self, cpu_millicores: _Optional[int] = ..., memory_bytes: _Optional[int] = ..., read_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+
+class ShapeFit(_message.Message):
+    __slots__ = ("shape", "more", "limit")
+    SHAPE_FIELD_NUMBER: _ClassVar[int]
+    MORE_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_FIELD_NUMBER: _ClassVar[int]
+    shape: str
+    more: int
+    limit: str
+    def __init__(self, shape: _Optional[str] = ..., more: _Optional[int] = ..., limit: _Optional[str] = ...) -> None: ...
+
 class SetOrganizationDedicatedCpuRequest(_message.Message):
     __slots__ = ("organization_id", "dedicated_cpu")
     ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]

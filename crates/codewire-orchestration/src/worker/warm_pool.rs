@@ -86,7 +86,7 @@ pub use plan::{
     Budget, DeleteReason, DesiredPool, Observed, Placement, Plan, Reservation, Write,
     bootstrap_writes, budget_after, clamp_members, controller_capable, image_cache_warm,
     member_reservation, node_budget, node_unfit, pool_observed_by_capable_controller,
-    settle_budget, superseded_reservation, template_spec_current,
+    quantity_millis, quantity_units, settle_budget, superseded_reservation, template_spec_current,
 };
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
@@ -528,7 +528,7 @@ fn by_name(objects: Vec<DynamicObject>) -> BTreeMap<String, DynamicObject> {
         .collect()
 }
 
-fn selector_of(labels: &BTreeMap<String, String>) -> String {
+pub(crate) fn selector_of(labels: &BTreeMap<String, String>) -> String {
     labels
         .iter()
         .map(|(key, value)| format!("{key}={value}"))
