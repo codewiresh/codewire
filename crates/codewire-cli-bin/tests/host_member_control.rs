@@ -538,6 +538,8 @@ struct Endpoint {
     origin: String,
     expected_path: Option<&'static str>,
     path_witnesses: std::sync::Mutex<Vec<Value>>,
+    /// `cw member`'s report of each request its reply left unsettled (#3774).
+    settle_waits: std::sync::Mutex<Vec<String>>,
     extra_environment: std::collections::BTreeMap<String, String>,
 }
 impl Endpoint {
@@ -577,10 +579,18 @@ impl Endpoint {
                 .await
                 .unwrap();
         }
-        let output = tokio::time::timeout(Duration::from_secs(45), child.wait_with_output())
+        // Past `cw member`'s 60 s wait for a request to settle, plus one 15 s
+        // observation, so a slow request reports its number instead of this.
+        let output = tokio::time::timeout(Duration::from_secs(90), child.wait_with_output())
             .await
             .expect("bounded exact cw command")
             .unwrap();
+        self.settle_waits.lock().unwrap().extend(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .filter(|line| line.starts_with("[cw] member request ") && line.ends_with(" ms"))
+                .map(str::to_owned),
+        );
         self.record_path_witnesses(args, &output);
         output
     }
@@ -836,6 +846,7 @@ fn endpoints(root: &Path, binaries: &Path, origin: &str, direct: bool) -> (Endpo
                 "derp"
             }),
             path_witnesses: std::sync::Mutex::new(Vec::new()),
+            settle_waits: std::sync::Mutex::new(Vec::new()),
             extra_environment: std::collections::BTreeMap::new(),
         });
     }
@@ -1929,8 +1940,9 @@ fn host_member_isolated_kernel_journey() {
             salvaged
         );
     }
-    let (mut report, _target, _caller, helper, daemon) = result.unwrap();
+    let (mut report, _target, caller, helper, daemon) = result.unwrap();
     assert!(terminal(&helper.fd) && terminal(&daemon.fd));
+    report["settle_waits"] = json!(*caller.settle_waits.lock().unwrap());
     report["kernel_echild"] = json!(true);
     report["cleanup_salvage"] = json!(false);
     fs::write(

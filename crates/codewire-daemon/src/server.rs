@@ -253,6 +253,48 @@ where
     .await
 }
 
+/// [`serve_host_control_grpc_within`] with every host session bound at
+/// `host_bound`, and `reply_bound` in place of how long a mutation's reply
+/// waits for its request. For a client's handling of a reply that comes back
+/// before its request settled, which on the product's bound takes a stall.
+#[cfg(target_os = "linux")]
+pub async fn serve_host_control_grpc_replying_within<I, IO, IE, F>(
+    config: Config,
+    binding: crate::host_control::HostControlBinding,
+    incoming: I,
+    shutdown: F,
+    host_bound: Duration,
+    reply_bound: Duration,
+) -> Result<()>
+where
+    I: Stream<Item = std::result::Result<IO, IE>> + Send + 'static,
+    IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
+    IE: Into<Box<dyn Error + Send + Sync>>,
+    F: Future<Output = ()> + Send + 'static,
+{
+    anyhow::ensure!(
+        config.host.is_some(),
+        "host control requires trusted-host configuration"
+    );
+    serve(
+        config,
+        DaemonRuntimeState::ready(),
+        None,
+        Some((
+            binding,
+            crate::durable_session::HostBounds {
+                rpc_join: reply_bound,
+                ..crate::durable_session::HostBounds::all(host_bound)
+            },
+        )),
+        None,
+        None,
+        incoming,
+        shutdown,
+    )
+    .await
+}
+
 /// [`serve_grpc_with_incoming`] with token rotation, as a local guest daemon
 /// serves it, for tests that need no guest homes.
 #[cfg(test)]

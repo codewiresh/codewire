@@ -15,6 +15,8 @@ pub(super) mod terminal;
 #[cfg(test)]
 mod tests;
 mod transport;
+#[cfg(test)]
+pub(in crate::commands) use transport::settle_receipt;
 mod wire;
 
 #[derive(Debug, Args)]
@@ -206,7 +208,7 @@ fn receipt_value(value: &v1::HostControlReceipt) -> serde_json::Value {
         "phase":v1::HostControlRequestPhase::try_from(value.phase).map(|x|x.as_str_name()).unwrap_or("UNKNOWN"),
         "cleanup_unknown":value.cleanup_unknown,"input_acknowledged":value.input_acknowledged,"reason":value.reason})
 }
-fn complete(receipt: &v1::HostControlReceipt) -> anyhow::Result<()> {
+pub(in crate::commands) fn complete(receipt: &v1::HostControlReceipt) -> anyhow::Result<()> {
     ensure!(
         receipt.phase == v1::HostControlRequestPhase::Completed as i32 && !receipt.cleanup_unknown,
         "member request is not confirmed; observe the original request UUID, never reissue"

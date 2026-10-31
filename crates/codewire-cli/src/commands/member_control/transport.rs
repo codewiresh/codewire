@@ -13,6 +13,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long `mutate` follows a request its reply left unsettled. Longer than
+/// the daemon's own longest step (a launch's 40 s, then 5 s of cleanup), so a
+/// request still unsettled after this is stuck rather than slow (#3774).
+const SETTLE_BOUND: Duration = Duration::from_secs(60);
+const SETTLE_POLL: Duration = Duration::from_millis(200);
 const READ_PAGE: u64 = 8 * 1024;
 
 fn admit_info(
@@ -132,6 +137,50 @@ pub(super) async fn retain_receipt(
         );
     }
     Ok(value)
+}
+
+/// The daemon's reply waits only 3 s for its request, which carries on either
+/// way, so a phase of pending or issued means "not finished yet", not failure.
+fn unsettled(receipt: &v1::HostControlReceipt) -> bool {
+    [
+        v1::HostControlRequestPhase::Pending as i32,
+        v1::HostControlRequestPhase::Issued as i32,
+    ]
+    .contains(&receipt.phase)
+}
+
+/// Follows an unsettled request with `observe` until it settles or `bound`
+/// runs out, and returns the last receipt. Observing never sends the request
+/// again, and the caller still judges whatever comes back.
+pub(in crate::commands) async fn settle_receipt(
+    mut receipt: v1::HostControlReceipt,
+    bound: Duration,
+    poll: Duration,
+    mut observe: impl AsyncFnMut() -> anyhow::Result<v1::HostControlReceipt>,
+) -> anyhow::Result<v1::HostControlReceipt> {
+    let deadline = tokio::time::Instant::now() + bound;
+    while unsettled(&receipt) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(poll).await;
+        receipt = observe().await?;
+    }
+    Ok(receipt)
+}
+
+/// The visible record of a wait: a slow request shows a number, not just a
+/// success. The host-member journey reports these lines.
+fn settle_report(id: &str, receipt: &v1::HostControlReceipt, waited: Duration) -> String {
+    let phase = v1::HostControlRequestPhase::try_from(receipt.phase)
+        .map(|phase| phase.as_str_name())
+        .unwrap_or("UNKNOWN");
+    format!(
+        "[cw] member request {id} {} {phase} after {} ms",
+        if unsettled(receipt) {
+            "still"
+        } else {
+            "settled as"
+        },
+        waited.as_millis()
+    )
 }
 
 pub(super) struct Remote {
@@ -406,22 +455,34 @@ impl Remote {
         }
         let (mut record, existing) =
             RequestRecord::prepare(directory, self.alias.binding.clone(), &request).await?;
-        if existing {
-            return self.observe_record(directory, &mut record).await;
+        let receipt = if existing {
+            self.observe_record(directory, &mut record).await?
+        } else {
+            // Durable before the first possible frame write. Cancellation/drop
+            // can never make a duplicate invocation permission to send Mutate
+            // again.
+            record.begin(directory).await?;
+            let value = self
+                .exchange(2, request, Some(&record.id), Some(&record.session_id))
+                .await?;
+            retain_receipt(
+                directory,
+                &mut record,
+                value.value,
+                self.qualify(value.path),
+            )
+            .await?
+        };
+        if !unsettled(&receipt) {
+            return Ok(receipt);
         }
-        // Durable before the first possible frame write. Cancellation/drop can
-        // never make a duplicate invocation permission to send Mutate again.
-        record.begin(directory).await?;
-        let value = self
-            .exchange(2, request, Some(&record.id), Some(&record.session_id))
-            .await?;
-        retain_receipt(
-            directory,
-            &mut record,
-            value.value,
-            self.qualify(value.path),
-        )
-        .await
+        let started = std::time::Instant::now();
+        let receipt = settle_receipt(receipt, SETTLE_BOUND, SETTLE_POLL, async || {
+            self.observe_record(directory, &mut record).await
+        })
+        .await?;
+        eprintln!("{}", settle_report(&record.id, &receipt, started.elapsed()));
+        Ok(receipt)
     }
     pub async fn observe_record(
         &mut self,

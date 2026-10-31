@@ -501,3 +501,101 @@ fn member_exact_host_uuid_never_rebinds_to_uuid_shaped_name() {
     assert!(select_host_from(vec![decoy.clone()], &id).is_err());
     assert!(select_host_from(vec![decoy], &id.to_uppercase()).is_err());
 }
+
+fn phase_receipt(phase: v1::HostControlRequestPhase) -> v1::HostControlReceipt {
+    v1::HostControlReceipt {
+        phase: phase as i32,
+        ..Default::default()
+    }
+}
+
+/// Follows scripted observations, and counts them.
+async fn settled(
+    first: v1::HostControlRequestPhase,
+    then: &[v1::HostControlRequestPhase],
+    bound: std::time::Duration,
+) -> (v1::HostControlReceipt, usize) {
+    let mut observed = 0;
+    let receipt = super::settle_receipt(
+        phase_receipt(first),
+        bound,
+        std::time::Duration::from_millis(1),
+        async || {
+            let phase = then
+                .get(observed)
+                .or(then.last())
+                .copied()
+                .expect("a scripted phase");
+            observed += 1;
+            Ok(phase_receipt(phase))
+        },
+    )
+    .await
+    .unwrap();
+    (receipt, observed)
+}
+
+/// #3774: a reply that came back before its request finished is not a failure.
+#[tokio::test]
+async fn an_unsettled_reply_is_followed_to_its_success() {
+    use v1::HostControlRequestPhase::{Completed, Issued, Pending};
+    let (receipt, observed) = settled(
+        Pending,
+        &[Issued, Issued, Completed],
+        std::time::Duration::from_secs(120),
+    )
+    .await;
+    assert_eq!(observed, 3);
+    complete(&receipt).unwrap();
+}
+
+/// #3774: waiting can't turn a real failure into a success.
+#[tokio::test]
+async fn an_unsettled_reply_is_followed_to_its_failure() {
+    use v1::HostControlRequestPhase::{Issued, Rejected, Unknown};
+    for outcome in [Rejected, Unknown] {
+        let (receipt, _) = settled(
+            Issued,
+            &[Issued, outcome],
+            std::time::Duration::from_secs(120),
+        )
+        .await;
+        assert_eq!(receipt.phase, outcome as i32);
+        assert_eq!(
+            complete(&receipt).unwrap_err().to_string(),
+            "member request is not confirmed; observe the original request UUID, never reissue"
+        );
+    }
+}
+
+/// #3774: a request that never settles still gets today's message, in bounded
+/// time, and a settled reply is never observed at all.
+#[tokio::test]
+async fn a_request_that_never_settles_keeps_todays_message() {
+    use v1::HostControlRequestPhase::{Completed, Issued};
+    let (receipt, observed) =
+        settled(Issued, &[Issued], std::time::Duration::from_millis(20)).await;
+    assert!(observed > 0);
+    assert_eq!(receipt.phase, Issued as i32);
+    assert_eq!(
+        complete(&receipt).unwrap_err().to_string(),
+        "member request is not confirmed; observe the original request UUID, never reissue"
+    );
+    let (receipt, observed) =
+        settled(Completed, &[Issued], std::time::Duration::from_secs(120)).await;
+    assert_eq!((receipt.phase, observed), (Completed as i32, 0));
+}
+
+/// #3774: a failed observation is reported, not mistaken for an outcome.
+#[tokio::test]
+async fn a_failed_observation_is_an_error() {
+    let error = super::settle_receipt(
+        phase_receipt(v1::HostControlRequestPhase::Issued),
+        std::time::Duration::from_secs(120),
+        std::time::Duration::from_millis(1),
+        async || anyhow::bail!("synthetic observation failure"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.to_string(), "synthetic observation failure");
+}

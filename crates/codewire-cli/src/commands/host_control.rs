@@ -377,6 +377,133 @@ mod tests {
         .unwrap()
     }
 
+    /// #3774: the failure from CI, made certain. The real daemon replies before
+    /// its request can settle, the client follows the same request, and a launch
+    /// that succeeded reads as one. It would read as "not confirmed" without
+    /// that. Every other host bound is a hang guard.
+    #[tokio::test]
+    async fn a_reply_before_the_request_settles_still_reports_the_success() {
+        use tokio_stream::wrappers::UnixListenerStream;
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry");
+        private_directory(&registry).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let root = registry.join(&id);
+        private_directory(&root).unwrap();
+        let home = temp.path().join("home");
+        private_directory(&home).unwrap();
+        let workspace = temp.path().join("workspace");
+        private_directory(&workspace).unwrap();
+        let environment = HostEnvironment {
+            id: id.clone(),
+            name: "synthetic-host".into(),
+            path: workspace.clone(),
+            created_at: String::new(),
+            state: "running".into(),
+            runtime_root: Some(root.clone()),
+        };
+        let token = "synthetic-owner-uds-host-control";
+        write_private_json(&root.join("host.json"), &environment).unwrap();
+        write_private_json(&root.join("daemon-token.json"), &token).unwrap();
+        let config = codewire_daemon::Config {
+            listen_addr: String::new(),
+            workspace_root: workspace,
+            home_root: home,
+            auth_token: codewire_daemon::DaemonAuthToken::new(token).unwrap(),
+            process_execution: codewire_daemon::execution::ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            launch_projection: None,
+            host: Some(codewire_daemon::HostConfig {
+                state_root: root.clone(),
+            }),
+            session_working_dir: None,
+        };
+        let socket = root.join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        let (closing, closed) = tokio::sync::oneshot::channel();
+        let binding = codewire_daemon::host_control::HostControlBinding::new(id.clone()).unwrap();
+        let server = tokio::spawn(async move {
+            codewire_daemon::serve_host_control_grpc_replying_within(
+                config,
+                binding,
+                UnixListenerStream::new(listener),
+                async {
+                    let _ = closed.await;
+                },
+                HANG,
+                Duration::ZERO,
+            )
+            .await
+        });
+        let client = host_control_client_within(&environment, HANG)
+            .await
+            .unwrap();
+        let grant = uuid::Uuid::new_v4().to_string();
+        client
+            .put_grant(v1::HostControlPutGrantRequest {
+                expected_book_revision: 0,
+                grant: Some(v1::HostControlGrant {
+                    environment_id: id.clone(),
+                    grant_id: grant.clone(),
+                    org_id: "synthetic-org".into(),
+                    network_id: "synthetic-network".into(),
+                    caller_key: vec![1; 32],
+                    target_key: vec![2; 32],
+                    verbs: vec![1, 2, 3, 4],
+                    revision: 0,
+                    revoked: false,
+                }),
+            })
+            .await
+            .unwrap();
+        let scope = v1::HostControlScope {
+            environment_id: id,
+            org_id: "synthetic-org".into(),
+            network_id: "synthetic-network".into(),
+            caller_key: vec![1; 32],
+            target_key: vec![2; 32],
+            grant_id: grant,
+            expected_grant_revision: 1,
+        };
+        let request = v1::HostControlMutationRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            scope: Some(scope.clone()),
+            operation: Some(v1::host_control_mutation_request::Operation::Launch(
+                v1::HostControlLaunch {
+                    command: vec!["/bin/sh".into(), "-c".into(), "read line".into()],
+                    ..Default::default()
+                },
+            )),
+        };
+        let reply = client.mutate(request.clone()).await.unwrap();
+        let unfinished = [
+            v1::HostControlRequestPhase::Pending as i32,
+            v1::HostControlRequestPhase::Issued as i32,
+        ];
+        assert!(unfinished.contains(&reply.phase), "{}", reply.phase);
+        assert!(super::super::member_control::complete(&reply).is_err());
+        let settled = super::super::member_control::settle_receipt(
+            reply,
+            HANG,
+            Duration::from_millis(5),
+            async || {
+                Ok(client
+                    .observe(v1::HostControlObserveRequest {
+                        request_id: request.request_id.clone(),
+                        scope: request.scope.clone(),
+                    })
+                    .await?)
+            },
+        )
+        .await
+        .unwrap();
+        super::super::member_control::complete(&settled).unwrap();
+        closing.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn host_control_private_socket_round_trip_never_starts_or_replays_an_owner() {
         use tokio_stream::wrappers::UnixListenerStream;

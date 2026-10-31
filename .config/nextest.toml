@@ -46,6 +46,9 @@ path = "junit.xml"
 filter = 'binary_id(codewire-cli-bin::host_member_control) & test(=host_members_two_real_endpoints_direct_and_tls_derp)'
 priority = 100
 threads-required = 16
+# Its report names any wait for a member request to settle (#3774), so a slow
+# run shows a number and not just a pass.
+success-output = "final"
 
 # Each took 15-32 s in main runs 26814 and 26920.
 [[profile.ci.overrides]]
