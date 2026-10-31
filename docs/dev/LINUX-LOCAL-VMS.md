@@ -344,6 +344,12 @@ updater's VM hand-off (v0.3.389 and earlier) hands the state root to it
 while no local VM runs. While one does, it names them: select the newer cw
 again (`cw upgrade rollback`), stop them, then roll back.
 
+A VM created since cw's guest kernel gained fs-verity (6.18.48-codewire3) has
+ext4's `verity` feature on its state disk; a VM created earlier keeps its disk
+as it was. After a rollback to a cw with an older kernel such a VM still starts
+and its disk is writable, but a file the guest sealed with fs-verity cannot be
+opened (`Operation not supported`). It can be removed.
+
 A supervisor started by a `cw` that is not an installed version, such as a
 development build run with your own home directory, is one this cw cannot
 verify, so it never uses or ends it. Every local VM command, `cw --local ls`

@@ -231,7 +231,7 @@ fn provision_workspace(
             source,
         })?;
     drop(disk);
-    format_ext4(&staging_dir, &paths.state_disk)?;
+    format_state_disk(&staging_dir, &paths.state_disk)?;
     File::open(&paths.state_disk)
         .and_then(|file| file.sync_all())
         .and_then(|()| File::open(&paths.disks_dir)?.sync_all())
@@ -692,7 +692,7 @@ fn provision_workspace_plan(
             source,
         })?;
     drop(disk);
-    format_ext4(&staging_dir, &paths.state_disk)?;
+    format_state_disk(&staging_dir, &paths.state_disk)?;
     File::open(&paths.state_disk)
         .and_then(|file| file.sync_all())
         .and_then(|()| File::open(&paths.disks_dir)?.sync_all())
@@ -2123,12 +2123,17 @@ fn bounded_staging_regular_bytes(root: &Path, maximum: u64) -> Result<u64, Works
     Ok(total)
 }
 
-fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
+/// Format a new VM's state disk with the contents of `staging`. It alone has
+/// the ext4 `verity` feature, so the guest can seal files on it; a kernel
+/// without fs-verity mounts such a disk read-only.
+fn format_state_disk(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
     let mut command = Command::new(mkfs);
     command
         .args(crate::host::EXT4_FORMAT)
         .args([
+            OsStr::new("-O"),
+            OsStr::new("verity"),
             OsStr::new("-q"),
             OsStr::new("-F"),
             OsStr::new("-m"),
@@ -2375,6 +2380,29 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
+
+    #[test]
+    fn only_a_state_disk_has_the_verity_feature() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        fs::create_dir(&staging).unwrap();
+        let blank = |name: &str| {
+            let disk = root.path().join(name);
+            File::create(&disk).unwrap().set_len(64 << 20).unwrap();
+            disk
+        };
+        let verity = |disk: &Path| {
+            crate::state::read_ext4_superblock(&File::open(disk).unwrap(), disk)
+                .unwrap()
+                .verity
+        };
+        let state = blank("state.raw");
+        format_state_disk(&staging, &state).unwrap();
+        assert!(verity(&state));
+        let docker = blank("docker.raw");
+        format_empty_ext4(&docker).unwrap();
+        assert!(!verity(&docker));
+    }
 
     fn write_test_ext4(path: &Path, size: u64) {
         let mut disk = OpenOptions::new()
