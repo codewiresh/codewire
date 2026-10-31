@@ -636,6 +636,7 @@ async fn find_or_create_preset_by_image(
 // ── Insert (environment_db.go::insertEnvironment) ───────────────────────
 
 struct InsertEnvironmentParams<'a> {
+    credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
     org_id: &'a str,
     user: &'a AuthUser,
     preset_id: &'a str,
@@ -703,6 +704,7 @@ async fn insert_environment(
         &mut transaction,
         p.org_id,
         CapacityRequest {
+            credit_enforcement: p.credit_enforcement,
             quota: p.quota,
             env_type: p.env_type,
             cpu_millicores: p.cpu_millicores,
@@ -909,6 +911,7 @@ fn invalid_node_name() -> AppError {
 
 /// What one create asks of its organization's capacity.
 struct CapacityRequest<'a> {
+    credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
     quota: OrgQuota,
     env_type: &'a str,
     cpu_millicores: i32,
@@ -931,6 +934,7 @@ async fn reserve_capacity(
     lock_organization_row(transaction, org_id).await?;
     check_quota_in(
         transaction,
+        request.credit_enforcement,
         request.quota,
         org_id,
         request.env_type,
@@ -1250,6 +1254,7 @@ pub(crate) async fn create_environment_core(
             let env = insert_environment(
                 pool,
                 InsertEnvironmentParams {
+                    credit_enforcement: state.credit_enforcement,
                     org_id,
                     user,
                     preset_id: &preset.id,
@@ -1336,6 +1341,7 @@ mod tests {
         );
     }
     use codewire_server_core::AppError;
+    use codewire_server_core::credit_enforcement::CreditEnforcement;
     use codewire_server_core::validation::validate_value;
     use sqlx::postgres::PgPoolOptions;
 
@@ -1873,6 +1879,7 @@ credentials: {profile: user/work}
         .await
         .unwrap();
         let request = |quota| CapacityRequest {
+            credit_enforcement: Default::default(),
             quota,
             env_type: "sandbox",
             cpu_millicores: 0,
@@ -1941,6 +1948,7 @@ credentials: {profile: user/work}
                 &org_id,
                 "confidential",
                 crate::lifecycle::StartQuota {
+                    credit_enforcement: Default::default(),
                     quota,
                     env_type: "sandbox",
                     cpu_millicores: 0,
@@ -2651,6 +2659,7 @@ credentials: {profile: user/work}
     /// One synthetic organization whose explicit quota allows `limit`
     /// concurrent environments, for the capacity database tests.
     struct QuotaFixture {
+        credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
         pool: sqlx::PgPool,
         user: AuthUser,
         org_id: String,
@@ -2724,6 +2733,7 @@ credentials: {profile: user/work}
                 },
                 org_id,
                 preset_id,
+                credit_enforcement: Default::default(),
             }
         }
 
@@ -2732,6 +2742,7 @@ credentials: {profile: user/work}
             insert_environment(
                 &self.pool,
                 InsertEnvironmentParams {
+                    credit_enforcement: self.credit_enforcement,
                     org_id: &self.org_id,
                     user: &self.user,
                     preset_id: &self.preset_id,
@@ -2775,6 +2786,178 @@ credentials: {profile: user/work}
                 sqlx::query(sql).bind(id).execute(&self.pool).await.unwrap();
             }
         }
+    }
+
+    async fn grant_credit(pool: &sqlx::PgPool, org_id: &str, key: &str, amount_nano_eur: i64) {
+        sqlx::query(
+            "INSERT INTO billing_credit_ledger \
+             (organization_id, entry_kind, amount_nano_eur, idempotency_key, actor_user_id, reason) \
+             VALUES ($1, 'adjustment', $2, $3, 'test', 'test credit')",
+        )
+        .bind(org_id)
+        .bind(amount_nano_eur)
+        .bind(key)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn is_credit_exhausted(error: &AppError) -> bool {
+        matches!(
+            error,
+            AppError::Coded {
+                status: StatusCode::PAYMENT_REQUIRED,
+                code: "credit_exhausted",
+                ..
+            }
+        )
+    }
+
+    /// #3381: with no credit left and enforcement on, a Regular or Discounted
+    /// organization's creates and starts are refused and leave nothing
+    /// behind; Unlimited is never refused, and new credit admits again. With
+    /// enforcement off, nothing is refused for credit.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_quota_zero_credit_refuses_creates_and_starts_except_on_unlimited() {
+        let mut fixture = QuotaFixture::new(2, 6).await;
+        fixture
+            .create(&CreateEnvironmentBody::default())
+            .await
+            .expect("with enforcement off, no credit refuses nothing");
+        fixture.credit_enforcement = CreditEnforcement::On;
+        let error = fixture
+            .create(&CreateEnvironmentBody::default())
+            .await
+            .expect_err("a create at zero credit is refused");
+        assert!(is_credit_exhausted(&error), "{error:?}");
+        assert_eq!(fixture.environment_count().await, 1);
+
+        let environment_id = format!("{}_stopped", fixture.org_id);
+        sqlx::query(
+            r#"INSERT INTO environments
+                 (id, org_id, created_by, type, preset_id, state, desired_state,
+                  cpu_millicores, memory_mb, isolation_tier, project_spec)
+               VALUES ($1, $2, $3, 'sandbox', $4, 'stopped', 'stopped', 1000, 1024,
+                       'standard',
+                       '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
+        )
+        .bind(&environment_id)
+        .bind(&fixture.org_id)
+        .bind(&fixture.user.user_id)
+        .bind(&fixture.preset_id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        let start = || async {
+            crate::lifecycle::Service::for_pool(fixture.pool.clone())
+                .admit_start(
+                    &environment_id,
+                    &fixture.org_id,
+                    "standard",
+                    crate::lifecycle::StartQuota {
+                        credit_enforcement: CreditEnforcement::On,
+                        quota: get_org_quota(&fixture.pool, &fixture.org_id).await.unwrap(),
+                        env_type: "sandbox",
+                        cpu_millicores: 1_000,
+                        memory_mb: 1_024,
+                    },
+                )
+                .await
+        };
+        // Usage that outran the credit refuses too.
+        sqlx::query(
+            "INSERT INTO billing_credit_ledger \
+             (organization_id, entry_kind, amount_nano_eur, idempotency_key, rate_card, \
+              usage_started_at, usage_ended_at) \
+             VALUES ($1, 'usage', -1, 'usage-overrun', 'regular', now() - interval '1 minute', now())",
+        )
+        .bind(&fixture.org_id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        let error = start()
+            .await
+            .expect_err("a start below zero credit is refused");
+        let error = error
+            .downcast::<AppError>()
+            .expect("the refusal is an AppError");
+        assert!(is_credit_exhausted(&error), "{error:?}");
+        let desired: String =
+            sqlx::query_scalar("SELECT desired_state FROM environments WHERE id = $1")
+                .bind(&environment_id)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        assert_eq!(desired, "stopped");
+
+        // Discounted draws credit too.
+        sqlx::query("UPDATE organizations SET rate_card = 'discounted' WHERE id = $1")
+            .bind(&fixture.org_id)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        let error = fixture
+            .create(&CreateEnvironmentBody::default())
+            .await
+            .expect_err("Discounted at zero credit is refused");
+        assert!(is_credit_exhausted(&error), "{error:?}");
+
+        // Unlimited is never refused for credit.
+        sqlx::query("UPDATE organizations SET rate_card = 'unlimited' WHERE id = $1")
+            .bind(&fixture.org_id)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        fixture
+            .create(&CreateEnvironmentBody::default())
+            .await
+            .expect("Unlimited creates without credit");
+
+        // Back on Regular, new credit admits the start.
+        sqlx::query("UPDATE organizations SET rate_card = 'regular' WHERE id = $1")
+            .bind(&fixture.org_id)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        grant_credit(&fixture.pool, &fixture.org_id, "top-up", 20_000_000_000).await;
+        start().await.expect("credit admits the start again");
+
+        // A balance that cannot be read refuses, retryably.
+        let quota = get_org_quota(&fixture.pool, &fixture.org_id).await.unwrap();
+        let mut transaction = fixture.pool.begin().await.unwrap();
+        sqlx::query(
+            "CREATE TEMPORARY TABLE billing_credit_balances (organization_id text) ON COMMIT DROP",
+        )
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        let error = reserve_capacity(
+            &mut transaction,
+            &fixture.org_id,
+            CapacityRequest {
+                credit_enforcement: CreditEnforcement::On,
+                quota,
+                env_type: "sandbox",
+                cpu_millicores: 1_000,
+                memory_mb: 1_024,
+            },
+        )
+        .await
+        .expect_err("an unreadable balance must refuse the create");
+        transaction.rollback().await.unwrap();
+        assert!(
+            matches!(
+                error,
+                AppError::Coded {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "credit_unavailable",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        fixture.cleanup().await;
     }
 
     fn is_quota_exceeded(error: &AppError) -> bool {
@@ -2905,6 +3088,7 @@ credentials: {profile: user/work}
                         &org_id,
                         "standard",
                         crate::lifecycle::StartQuota {
+                            credit_enforcement: Default::default(),
                             quota,
                             env_type: "sandbox",
                             cpu_millicores: 1_000,
@@ -3022,6 +3206,7 @@ credentials: {profile: user/work}
             &mut transaction,
             &fixture.org_id,
             CapacityRequest {
+                credit_enforcement: Default::default(),
                 quota,
                 env_type: "sandbox",
                 cpu_millicores: 1_000,

@@ -52,6 +52,8 @@ use kube::Client as KubeClient;
 // State<ApiState> whole.)
 #[derive(Clone)]
 pub struct ApiState {
+    /// Whether creates and starts are refused without compute credit.
+    pub credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
     pub pool: PgPool,
     /// PREVIEW_BASE_DOMAIN, for port preview URLs (Go:
     /// cfg.PreviewBaseDomain).

@@ -226,6 +226,9 @@ fn connect_code_for(status: StatusCode, reason: Option<&str>) -> ConnectCode {
         Some("quota_exceeded" | "resource_limit_exceeded") => {
             return ConnectCode::ResourceExhausted;
         }
+        // No compute credit left (#3381): the organization must add a card
+        // or credit before the request can succeed.
+        Some("credit_exhausted") => return ConnectCode::FailedPrecondition,
         _ => {}
     }
 
@@ -389,6 +392,15 @@ mod tests {
                     "organization resource limit exceeded",
                 ),
                 ConnectCode::ResourceExhausted,
+            ),
+            // No credit left is a precondition, not a quota.
+            (
+                coded(
+                    StatusCode::PAYMENT_REQUIRED,
+                    "credit_exhausted",
+                    "the organization has no compute credit left",
+                ),
+                ConnectCode::FailedPrecondition,
             ),
             // 404 → not_found.
             (

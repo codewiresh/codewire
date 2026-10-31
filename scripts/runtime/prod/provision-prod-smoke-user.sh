@@ -295,14 +295,15 @@ WITH input AS (
 ), smoke_org AS (
   INSERT INTO organizations (
     id, name, slug, created_by, billing_plan, billing_status, billing_exempt,
-    created_at, updated_at
+    rate_card, created_at, updated_at
   )
   SELECT encode(public.gen_random_bytes(16), 'hex'), org_name, org_slug,
-    smoke_user.id, input.plan_key, 'active', true, NOW(), NOW()
+    smoke_user.id, input.plan_key, 'active', true, 'unlimited', NOW(), NOW()
   FROM input, smoke_user
   ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name,
     billing_plan = EXCLUDED.billing_plan, billing_status = EXCLUDED.billing_status,
-    billing_exempt = EXCLUDED.billing_exempt, updated_at = NOW()
+    billing_exempt = EXCLUDED.billing_exempt, rate_card = EXCLUDED.rate_card,
+    updated_at = NOW()
   WHERE organizations.created_by = EXCLUDED.created_by
   RETURNING id
 ), prune_memberships AS (

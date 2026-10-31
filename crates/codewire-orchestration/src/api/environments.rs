@@ -977,19 +977,71 @@ pub(crate) fn quota_unavailable(org_id: &str, error: &sqlx::Error) -> AppError {
     )
 }
 
-/// Mirrors `checkQuota`, with usage counted inside `transaction`. The caller
-/// holds the organization row lock and records the create or start in the
-/// same transaction, so concurrent requests in one organization are counted
-/// one after another, and a refused or failed one leaves nothing behind. A
-/// failed usage count refuses the request (#3256).
+/// Refuses a create or start when the organization's rate card draws credit
+/// and its balance is zero or below (#3381). An organization on the
+/// Unlimited card is never refused. A card or balance that cannot be read
+/// refuses (fail closed); the request is safe to retry.
+fn evaluate_credit(rate_card: &str, balance_nano_eur: i64) -> Result<(), AppError> {
+    if rate_card == UNLIMITED_RATE_CARD || balance_nano_eur > 0 {
+        return Ok(());
+    }
+    Err(coded(
+        StatusCode::PAYMENT_REQUIRED,
+        "credit_exhausted",
+        "this organization has no compute credit left; add a card or credit on its billing page",
+    ))
+}
+
+async fn check_credit_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+) -> Result<(), AppError> {
+    let credit: Option<(String, i64)> = sqlx::query_as(
+        r#"SELECT o.rate_card, COALESCE(b.balance_nano_eur, 0)
+           FROM organizations o
+           LEFT JOIN billing_credit_balances b ON b.organization_id = o.id
+           WHERE o.id = $1"#,
+    )
+    .bind(org_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| {
+        tracing::warn!(org_id, %error, "credit check: failed to read the balance");
+        coded(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "credit_unavailable",
+            "the organization's compute credit could not be checked; retry in a moment",
+        )
+    })?;
+    let Some((rate_card, balance)) = credit else {
+        return Err(coded(
+            StatusCode::NOT_FOUND,
+            "org_not_found",
+            "organization not found",
+        ));
+    };
+    evaluate_credit(&rate_card, balance)
+}
+
+/// Mirrors `checkQuota`, with usage counted inside `transaction`, after the
+/// organization's credit where this deployment enforces it (#3381). The
+/// caller holds the organization row lock
+/// and records the create or start in the same transaction, so concurrent
+/// requests in one organization are counted one after another, and a
+/// refused or failed one leaves nothing behind. A failed usage count or
+/// balance read refuses the request (#3256).
 pub(crate) async fn check_quota_in(
     transaction: &mut Transaction<'_, Postgres>,
+    credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
     quota: OrgQuota,
     org_id: &str,
     env_type: &str,
     cpu: i32,
     mem: i32,
 ) -> Result<(), AppError> {
+    if credit_enforcement.is_on() {
+        check_credit_in(transaction, org_id).await?;
+    }
     let usage = count_active_environments(&mut **transaction, org_id)
         .await
         .map_err(|error| quota_unavailable(org_id, &error))?;
@@ -1314,6 +1366,7 @@ pub(crate) async fn start_environment_core(
                     org_id,
                     &env.isolation_tier,
                     crate::lifecycle::StartQuota {
+                        credit_enforcement: state.credit_enforcement,
                         quota,
                         env_type: &env.env_type,
                         cpu_millicores: env.cpu_millicores,
@@ -1518,6 +1571,30 @@ mod access_database_tests;
 mod tests {
     use super::*;
     use codewire_server_core::validation::validate_value;
+
+    #[test]
+    fn credit_refuses_charging_cards_at_zero_and_never_unlimited() {
+        for card in ["regular", "discounted"] {
+            assert!(evaluate_credit(card, 1).is_ok());
+            for balance in [0, -1, i64::MIN] {
+                let error = evaluate_credit(card, balance).unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        AppError::Coded {
+                            status: StatusCode::PAYMENT_REQUIRED,
+                            code: "credit_exhausted",
+                            ..
+                        }
+                    ),
+                    "{card} {balance}: {error:?}"
+                );
+            }
+        }
+        for balance in [i64::MIN, -1, 0, 1] {
+            assert!(evaluate_credit(UNLIMITED_RATE_CARD, balance).is_ok());
+        }
+    }
 
     #[test]
     fn shutdown_deadline_preserves_source_precision_and_legacy_absence() {

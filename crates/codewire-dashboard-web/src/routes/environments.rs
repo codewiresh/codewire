@@ -1778,7 +1778,8 @@ fn lifecycle_feedback_path(path: &str, message: &str, error: &str) -> String {
         target.query_pairs_mut().append_pair("message", message);
     } else if matches!(
         error,
-        "invalid"
+        "credit"
+            | "invalid"
             | "not-authorized"
             | "not-found"
             | "quota"
@@ -2195,6 +2196,7 @@ fn create_error_message(error: &ConnectError) -> &'static str {
         Some("REPO_NOT_ACCESSIBLE") => {
             return "The repository could not be read. Check its URL and repository access.";
         }
+        Some("CREDIT_EXHAUSTED") => return page_error("credit"),
         _ => {}
     }
     match error.code {
@@ -2372,12 +2374,18 @@ fn allowlisted_state(value: &str) -> &'static str {
 
 fn mutation_error(error: &ConnectError) -> &'static str {
     match error.code {
+        // No compute credit left (#3381) is a precondition with its reason.
+        ErrorCode::FailedPrecondition
+            if connect_error_reason(error).as_deref() == Some("CREDIT_EXHAUSTED") =>
+        {
+            "credit"
+        }
         ErrorCode::InvalidArgument | ErrorCode::FailedPrecondition => "invalid",
         ErrorCode::PermissionDenied => "not-authorized",
         ErrorCode::NotFound => "not-found",
         // Quota refusals carry a reason; a bare ResourceExhausted is a rate limit.
         ErrorCode::ResourceExhausted => match connect_error_reason(error).as_deref() {
-            Some("quota_exceeded" | "resource_limit_exceeded") => "quota",
+            Some("QUOTA_EXCEEDED" | "RESOURCE_LIMIT_EXCEEDED") => "quota",
             _ => "rate-limited",
         },
         // The request may have been applied: never suggest a blind retry.
@@ -2469,6 +2477,9 @@ pub(super) fn page_error(value: &str) -> &'static str {
         "not-found" => "The Sandbox no longer exists.",
         "quota" => {
             "This would exceed your organization's Sandbox quota. Stop or delete a Sandbox, then try again."
+        }
+        "credit" => {
+            "This organization has no compute credit left. Add a card or credit on the Billing page, then try again."
         }
         "rate-limited" => "Too many Sandbox changes at once. Wait a moment, then try again.",
         "unconfirmed" => {
@@ -3887,15 +3898,29 @@ mod tests {
 
     #[test]
     fn lifecycle_failures_name_quota_rate_limits_and_unconfirmed_outcomes() {
-        let quota = codewire_proto::google::rpc::ErrorInfo {
-            reason: "quota_exceeded".to_owned(),
-            domain: "codewire.dev".to_owned(),
-            ..Default::default()
+        // As the server renders them: the wire's reason is upper-case.
+        let wire = |status, code| {
+            codewire_server_core::connect::app_error_to_wire(
+                &codewire_server_core::AppError::Coded {
+                    status,
+                    code,
+                    detail: "untrusted upstream detail".into(),
+                },
+                None,
+            )
         };
-        let quota = ConnectError::resource_exhausted("untrusted upstream detail").with_detail(
-            connectrpc::ErrorDetail::from_message("google.rpc.ErrorInfo", &quota),
-        );
+        let quota = wire(axum::http::StatusCode::CONFLICT, "quota_exceeded");
         assert_eq!(mutation_error(&quota), "quota");
+        let credit = wire(axum::http::StatusCode::PAYMENT_REQUIRED, "credit_exhausted");
+        assert_eq!(mutation_error(&credit), "credit");
+        assert!(page_error("credit").contains("no compute credit left"));
+        // The create form says so too, not the generic precondition message.
+        assert_eq!(create_error_message(&credit), page_error("credit"));
+        // A refused start returns to the page with its reason, not silently.
+        assert_eq!(
+            lifecycle_feedback_path("/org/sandbox/", "", mutation_error(&credit)),
+            "/org/sandbox/?error=credit"
+        );
         assert_eq!(
             mutation_error(&ConnectError::resource_exhausted("slow down")),
             "rate-limited"

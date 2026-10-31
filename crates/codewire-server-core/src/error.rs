@@ -236,11 +236,12 @@ pub fn hint_for_code(code: &str) -> Option<&'static str> {
             "Use a user credential for account-level or global admin operations"
         }
         "preset_in_use" => "Delete all environments using this preset first",
-        "quota_exceeded" => "Destroy unused environments with 'cw rm' or upgrade your plan",
+        "quota_exceeded" => "Destroy unused environments with 'cw rm' or ask for a higher limit",
         // Go's CodeResourceLimit constant carries this wire value.
         "resource_limit_exceeded" => {
-            "Reduce CPU/memory on active environments or upgrade your plan"
+            "Reduce CPU/memory on active environments or ask for a higher limit"
         }
+        "credit_exhausted" => "Add a card or credit on the organization's billing page",
         "rate_limited" => "Wait a moment before creating more environments",
         "environment_protected" => "Unprotect with 'cw unprotect <name>' first",
         "organization_write_blocked" => {
@@ -395,7 +396,7 @@ mod tests {
             ("invalid_state", "Check environment state with 'cw info'"),
             (
                 "quota_exceeded",
-                "Destroy unused environments with 'cw rm' or upgrade your plan",
+                "Destroy unused environments with 'cw rm' or ask for a higher limit",
             ),
             (
                 "environment_protected",

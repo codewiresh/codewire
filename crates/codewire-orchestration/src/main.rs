@@ -504,6 +504,8 @@ async fn main() -> anyhow::Result<()> {
         pool.clone(),
         kube.clone(),
     )?);
+    let credit_enforcement =
+        codewire_server_core::credit_enforcement::CreditEnforcement::from_env()?;
     let ctx = Arc::new(worker::WorkerContext {
         pool: pool.clone(),
         cloudflare: CloudflareClient::from_env(),
@@ -513,8 +515,7 @@ async fn main() -> anyhow::Result<()> {
         sandbox_cfg,
         confidential_storage: confidential_storage.clone(),
         temporal_trigger: temporal_trigger.clone(),
-        credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement::from_env(
-        )?,
+        credit_enforcement,
     });
 
     // Leader-gated background loops: the orchestration replicas elect a
@@ -578,6 +579,7 @@ async fn main() -> anyhow::Result<()> {
         environment_logs.clone(),
     );
     let api_state = codewire_orchestration::api::ApiState {
+        credit_enforcement,
         pool: pool.clone(),
         preview_base_domain: std::env::var("PREVIEW_BASE_DOMAIN").unwrap_or_default(),
         frontend_url: std::env::var("FRONTEND_URL")

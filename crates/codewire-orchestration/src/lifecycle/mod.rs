@@ -151,6 +151,7 @@ pub trait LifecycleStore {
 /// What a start asks of its organization's environment quota: the limits,
 /// read before the admission transaction, and the environment's own shape.
 pub(crate) struct StartQuota<'a> {
+    pub(crate) credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
     pub(crate) quota: crate::api::environments::OrgQuota,
     pub(crate) env_type: &'a str,
     pub(crate) cpu_millicores: i32,
@@ -209,6 +210,7 @@ impl Service<PgLifecycleStore> {
             .await?;
         crate::api::environments::check_quota_in(
             &mut tx,
+            quota.credit_enforcement,
             quota.quota,
             org_id,
             quota.env_type,
