@@ -11,7 +11,7 @@ use codewire_proto::codewire::internal::v1::{
     CoordinatePeerRemove as PeerRemove, CoordinatePeerUpdate as PeerUpdate, CoordinatePing as Ping,
     CoordinateRequest, CoordinateResponse, CoordinatorService, coordinate_request,
 };
-use codewire_server_core::auth::{AuthState, authenticate_headers_with_context};
+use codewire_server_core::auth::{AuthState, AuthUser, authenticate_headers_with_context};
 use codewire_server_core::connect::app_error_to_wire;
 use connectrpc::{ConnectError, InboundStream, RequestContext, ServiceResult, ServiceStream};
 use futures_util::StreamExt;
@@ -20,15 +20,23 @@ use uuid::Uuid;
 
 use crate::peer::{DbPeerVerifier, PEER_RECHECK_INTERVAL, PeerProof, PeerVerifier, ProofError};
 use crate::session::{
-    PeerChecks, SessionInput, SessionOutput, SessionPeer, SessionSink, SessionSource,
-    run_peer_session,
+    ClientAccess, ClientRecheck, PeerChecks, SessionInput, SessionOutput, SessionPeer, SessionSink,
+    SessionSource, run_peer_session,
 };
 use crate::{
     CoordinationPlane, CoordinatorState, PeerEvent, PeerKind, PeerRegistry, Transport,
-    authorize_client, bearer_token,
+    authorize_client, bearer_token, client_environment_access,
 };
 
 pub(crate) fn router(state: CoordinatorState, auth: AuthState) -> axum::Router {
+    production_router(state, auth, PEER_RECHECK_INTERVAL)
+}
+
+fn production_router(
+    state: CoordinatorState,
+    auth: AuthState,
+    recheck: std::time::Duration,
+) -> axum::Router {
     let verifier: Arc<dyn PeerVerifier> = Arc::new(DbPeerVerifier::new(
         state.pool.clone(),
         state.session_secret.clone(),
@@ -40,10 +48,7 @@ pub(crate) fn router(state: CoordinatorState, auth: AuthState) -> axum::Router {
             auth,
             verifier: verifier.clone(),
         }),
-        PeerChecks {
-            verifier,
-            recheck: PEER_RECHECK_INTERVAL,
-        },
+        PeerChecks { verifier, recheck },
     )
 }
 
@@ -64,13 +69,47 @@ fn router_with_authorizer(
     )
 }
 
-#[derive(Clone, Copy)]
 struct AuthorizedPeer {
     peer_id: Uuid,
     sidecar_id: Option<Uuid>,
     kind: PeerKind,
     /// An environment peer's connect-time proof.
     proof: Option<PeerProof>,
+    /// A client's access, re-checked while its session lives.
+    client_access: Option<Box<dyn ClientAccess>>,
+}
+
+/// The message a client reads when a re-check refuses its access.
+const ACCESS_REVOKED: &str = "environment access revoked";
+
+/// A client's identity and target from its hello, re-checked against the
+/// current records with the rule it joined under (#3828). Only access is
+/// re-checked, not the credential: a long session outlives its access token
+/// while the person keeps access (owner, 2026-11-01, on #3827).
+struct DbClientAccess {
+    state: CoordinatorState,
+    user: AuthUser,
+    org_id: String,
+    environment_id: String,
+}
+
+impl ClientAccess for DbClientAccess {
+    fn recheck(&self) -> Pin<Box<dyn Future<Output = ClientRecheck> + Send + '_>> {
+        Box::pin(async move {
+            match client_environment_access(
+                &self.state,
+                &self.user,
+                &self.org_id,
+                &self.environment_id,
+            )
+            .await
+            {
+                Ok(_) => ClientRecheck::Allowed,
+                Err(response) if response.status().is_server_error() => ClientRecheck::Unavailable,
+                Err(_) => ClientRecheck::Refused,
+            }
+        })
+    }
 }
 
 type AuthorizationFuture<'a> =
@@ -135,6 +174,7 @@ impl ProductionAuthorizer {
                 sidecar_id: None,
                 kind: PeerKind::Sidecar,
                 proof: Some(proof),
+                client_access: None,
             });
         }
         // A peer token never authenticates a client session.
@@ -171,6 +211,12 @@ impl ProductionAuthorizer {
             sidecar_id: Some(environment_id),
             kind: PeerKind::Client,
             proof: None,
+            client_access: Some(Box::new(DbClientAccess {
+                state: self.state.clone(),
+                user: authentication.user,
+                org_id: hello.org_id.trim().to_owned(),
+                environment_id: hello.environment_id.trim().to_owned(),
+            })),
         })
     }
 }
@@ -259,6 +305,7 @@ impl CoordinatorService for CoordinateService {
                 proof: peer.proof,
             },
             Some(self.checks.clone()),
+            peer.client_access,
         );
         tokio::spawn(session);
 
@@ -307,10 +354,16 @@ struct ConnectSink {
 
 impl SessionSink for ConnectSink {
     async fn send(&mut self, output: SessionOutput) -> bool {
-        let response = session_output_to_proto(output);
-        if let Err(err) = &response {
-            tracing::warn!(error = ?err, peer_id = %self.peer_id, "coordinator Connect response encode failed");
-        }
+        let response = match output {
+            SessionOutput::AccessRevoked => Err(ConnectError::permission_denied(ACCESS_REVOKED)),
+            output => {
+                let response = session_output_to_proto(output);
+                if let Err(err) = &response {
+                    tracing::warn!(error = ?err, peer_id = %self.peer_id, "coordinator Connect response encode failed");
+                }
+                response
+            }
+        };
         self.tx.send(response).await.is_ok()
     }
 }
@@ -337,6 +390,9 @@ fn session_output_to_proto(output: SessionOutput) -> Result<CoordinateResponse, 
         }
         .into(),
         SessionOutput::Heartbeat => Ping::default().into(),
+        SessionOutput::AccessRevoked => {
+            return Err(ConnectError::permission_denied(ACCESS_REVOKED));
+        }
     };
     Ok(CoordinateResponse {
         msg,
@@ -473,6 +529,7 @@ mod tests {
                             generation: 1,
                             expires_at: crate::peer::unix_now() + 600,
                         }),
+                        client_access: None,
                     })
                 } else {
                     Ok(AuthorizedPeer {
@@ -480,6 +537,7 @@ mod tests {
                         sidecar_id: Some(environment_id),
                         kind: PeerKind::Client,
                         proof: None,
+                        client_access: None,
                     })
                 }
             })
@@ -528,9 +586,16 @@ mod tests {
     async fn start_production_auth_app(
         pool: sqlx::PgPool,
     ) -> (std::net::SocketAddr, JoinHandle<()>) {
+        start_production_auth_app_with_recheck(pool, PEER_RECHECK_INTERVAL).await
+    }
+
+    async fn start_production_auth_app_with_recheck(
+        pool: sqlx::PgPool,
+        recheck: std::time::Duration,
+    ) -> (std::net::SocketAddr, JoinHandle<()>) {
         let state = CoordinatorState::new(pool.clone(), "protocol-parity-secret".into());
         let app = codewire_server_core::AppBuilder::new("coordinator-production-auth-parity-test")
-            .with_routes(router(state, AuthState { pool }))
+            .with_routes(production_router(state, AuthState { pool }, recheck))
             .into_router();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1191,6 +1256,89 @@ mod tests {
         assert_eq!(grpc, connect);
 
         clean_production_auth_fixtures(&pool, &fixtures).await;
+    }
+
+    /// How a client coordinate stream ended, or `None` if it was still open
+    /// at the deadline. Messages that arrive meanwhile (pings, peer updates)
+    /// are read and ignored.
+    async fn stream_end_before(
+        stream: &mut connectrpc::client::BidiStream<
+            <HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
+            CoordinateRequest,
+            codewire_proto::codewire::internal::v1::CoordinateResponseView<'static>,
+        >,
+        within: std::time::Duration,
+    ) -> Option<Result<(), ConnectError>> {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let message: Result<Option<connectrpc::StreamMessage<CoordinateResponse>>, _> =
+                match tokio::time::timeout_at(deadline, stream.message()).await {
+                    Err(_) => return None,
+                    Ok(message) => message,
+                };
+            match message {
+                Ok(Some(_)) => {}
+                Ok(None) => return Some(Ok(())),
+                Err(error) => return Some(Err(error)),
+            }
+        }
+    }
+
+    // #3828: a client is authorized when it joins, and again on every
+    // re-check; losing access ends its session, so the environment drops it.
+    #[tokio::test]
+    async fn production_client_session_ends_when_its_access_is_revoked() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL unset — skipping coordinator client re-check");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+        let fixtures = seed_production_auth_fixtures(&pool).await;
+        let recheck = std::time::Duration::from_millis(100);
+        let (addr, server) = start_production_auth_app_with_recheck(pool.clone(), recheck).await;
+
+        let mut stream = h2c_client_with_protocol_and_headers(
+            addr,
+            Protocol::Connect,
+            session_headers(&fixtures.session_token),
+        )
+        .coordinate()
+        .await
+        .unwrap();
+        stream
+            .send(request(Hello {
+                org_id: fixtures.org_a.clone(),
+                environment_id: fixtures.env_a.to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_response(&mut stream).await.msg,
+            Some(coordinate_response::Msg::DerpMap(_))
+        ));
+
+        // While the member keeps access, re-checks leave the session open.
+        assert!(
+            stream_end_before(&mut stream, recheck * 5).await.is_none(),
+            "a client with access must stay connected across re-checks"
+        );
+
+        sqlx::query("DELETE FROM org_members WHERE org_id = $1 AND user_id = $2")
+            .bind(&fixtures.org_a)
+            .bind(&fixtures.user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let end = stream_end_before(&mut stream, recheck * 30).await;
+        server.abort();
+        clean_production_auth_fixtures(&pool, &fixtures).await;
+        let Some(Err(error)) = end else {
+            panic!("a client removed from the organization kept its session: {end:?}");
+        };
+        assert_eq!(error.code, connectrpc::ErrorCode::PermissionDenied);
+        assert_eq!(error.message.as_deref(), Some("environment access revoked"));
     }
 
     fn headers_with_bearer(token: &str) -> HeaderMap {

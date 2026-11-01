@@ -3,6 +3,8 @@
 //! The generated Connect adapter owns the wire codec. Registry, NATS/KV
 //! fanout, heartbeat cadence, and teardown live here.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,6 +37,25 @@ pub(crate) enum SessionOutput {
     DerpMap(serde_json::Value),
     Peer(PeerEvent),
     Heartbeat,
+    /// The client lost its access to the environment; the session ends.
+    AccessRevoked,
+}
+
+/// The outcome of re-checking a client's access to its environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClientRecheck {
+    Allowed,
+    Refused,
+    /// The records could not be read; the session is kept, as an environment
+    /// peer's is when its proof check is unavailable.
+    Unavailable,
+}
+
+/// Re-checks a client's access while its session lives (#3828). A client is
+/// authorized when it joins; without this, losing access would leave it on
+/// the environment's tailnet for as long as its stream lasts.
+pub(crate) trait ClientAccess: Send + Sync {
+    fn recheck(&self) -> Pin<Box<dyn Future<Output = ClientRecheck> + Send + '_>>;
 }
 
 /// Decoded inbound half of a coordinator transport.
@@ -68,7 +89,7 @@ pub(crate) struct PeerChecks {
     pub(crate) recheck: Duration,
 }
 
-/// Why an environment-peer session ended on its own.
+/// Why a session ended on its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PeerEnd {
     /// No valid proof arrived before the last proven token expired.
@@ -77,6 +98,8 @@ enum PeerEnd {
     Revoked,
     /// The peer presented an invalid proof.
     BadProof,
+    /// A client's re-check refused its access to the environment.
+    AccessRevoked,
 }
 
 /// Run one authorized coordinator peer until its transport closes.
@@ -87,6 +110,7 @@ pub(crate) async fn run_peer_session<Source, Sink>(
     coordination: Option<Arc<CoordinationPlane>>,
     peer: SessionPeer,
     checks: Option<PeerChecks>,
+    client_access: Option<Box<dyn ClientAccess>>,
 ) where
     Source: SessionSource,
     Sink: SessionSink,
@@ -265,18 +289,27 @@ pub(crate) async fn run_peer_session<Source, Sink>(
                     break;
                 }
             }
-            _ = recheck.tick(), if proof.is_some() => {
-                let current = proof.expect("checked above");
-                if current.lapsed(unix_now()) {
-                    ended = Some(PeerEnd::ProofLapsed);
-                    break;
-                }
-                let checks = checks.as_ref().expect("environment peers carry checks");
-                match checks.verifier.is_current(peer_id, current.generation).await {
-                    Ok(true) | Err(ProofError::Unavailable) => {}
-                    Ok(false) | Err(ProofError::Refused) => {
-                        ended = Some(PeerEnd::Revoked);
+            _ = recheck.tick(), if proof.is_some() || client_access.is_some() => {
+                if let Some(current) = proof {
+                    if current.lapsed(unix_now()) {
+                        ended = Some(PeerEnd::ProofLapsed);
                         break;
+                    }
+                    let checks = checks.as_ref().expect("environment peers carry checks");
+                    match checks.verifier.is_current(peer_id, current.generation).await {
+                        Ok(true) | Err(ProofError::Unavailable) => {}
+                        Ok(false) | Err(ProofError::Refused) => {
+                            ended = Some(PeerEnd::Revoked);
+                            break;
+                        }
+                    }
+                } else if let Some(access) = client_access.as_deref() {
+                    match access.recheck().await {
+                        ClientRecheck::Allowed | ClientRecheck::Unavailable => {}
+                        ClientRecheck::Refused => {
+                            ended = Some(PeerEnd::AccessRevoked);
+                            break;
+                        }
                     }
                 }
             }
@@ -330,6 +363,10 @@ pub(crate) async fn run_peer_session<Source, Sink>(
         ended = ?ended,
         "coordinator peer disconnected"
     );
+    if ended == Some(PeerEnd::AccessRevoked) {
+        // Tell the client why before its stream closes; it may already be gone.
+        let _ = sink.send(SessionOutput::AccessRevoked).await;
+    }
     peers.deregister(peer_id, owner);
     node_key.close().await;
     if let (PeerKind::Client, Some(env_id), Some(coordination)) =
@@ -506,6 +543,7 @@ mod tests {
                 proof,
             },
             Some(test_checks(Some(1), Duration::from_secs(3600))),
+            None,
         ));
         (input_tx, output_rx, task)
     }
@@ -588,6 +626,7 @@ mod tests {
                 proof: Some(proof),
             },
             Some(checks),
+            None,
         ));
         (input_tx, output_rx, task)
     }
@@ -783,6 +822,7 @@ mod tests {
                 proof: None,
             },
             Some(test_checks(Some(1), Duration::from_secs(3600))),
+            None,
         )
         .await;
         assert!(output_rx.try_recv().is_err());
@@ -885,6 +925,92 @@ mod tests {
                 .expect("session teardown timed out")
                 .expect("session task panicked");
         }
+    }
+
+    /// A client's access as the test sets it, counting re-checks.
+    struct ScriptedAccess {
+        outcome: std::sync::Mutex<ClientRecheck>,
+        rechecks: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ClientAccess for Arc<ScriptedAccess> {
+        fn recheck(&self) -> Pin<Box<dyn Future<Output = ClientRecheck> + Send + '_>> {
+            self.rechecks.fetch_add(1, Ordering::SeqCst);
+            let outcome = *self.outcome.lock().unwrap();
+            Box::pin(async move { outcome })
+        }
+    }
+
+    /// #3828: a client is re-checked while its session lives. Unreadable
+    /// records keep it; a refusal tells it why and ends its session, and the
+    /// environment peer is told to drop it.
+    #[tokio::test]
+    async fn a_refused_client_recheck_ends_the_session_and_removes_the_client() {
+        let peers = Arc::new(PeerRegistry::default());
+        let sidecar_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let access = Arc::new(ScriptedAccess {
+            outcome: std::sync::Mutex::new(ClientRecheck::Unavailable),
+            rechecks: std::sync::atomic::AtomicUsize::new(0),
+        });
+
+        let (sidecar_tx, mut sidecar_out, sidecar_task) =
+            spawn_session(peers.clone(), sidecar_id, None, PeerKind::Sidecar);
+        let (client_tx, client_rx) = mpsc::unbounded_channel();
+        let (client_out_tx, mut client_out) = mpsc::unbounded_channel();
+        let client_task = tokio::spawn(run_peer_session(
+            ChannelSource { rx: client_rx },
+            ChannelSink { tx: client_out_tx },
+            peers,
+            None,
+            SessionPeer {
+                peer_id: client_id,
+                sidecar_id: Some(sidecar_id),
+                kind: PeerKind::Client,
+                transport: Transport::Connect,
+                proof: None,
+            },
+            Some(test_checks(Some(1), Duration::from_millis(20))),
+            Some(Box::new(access.clone())),
+        ));
+        assert!(matches!(
+            next_output(&mut sidecar_out).await,
+            SessionOutput::DerpMap(_)
+        ));
+        assert!(matches!(
+            next_output(&mut client_out).await,
+            SessionOutput::DerpMap(_)
+        ));
+        client_tx
+            .send(SessionInput::Node(sample_node(client_id, 2)))
+            .unwrap();
+        let nodes = expect_peer_update(next_output(&mut sidecar_out).await);
+        assert_eq!(nodes[0].id, client_id);
+
+        // Records that can't be read keep the session across re-checks.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while access.rechecks.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the client was not re-checked");
+        assert!(!client_task.is_finished());
+
+        *access.outcome.lock().unwrap() = ClientRecheck::Refused;
+        assert!(matches!(
+            next_output(&mut client_out).await,
+            SessionOutput::AccessRevoked
+        ));
+        ends(client_task).await;
+        match next_output(&mut sidecar_out).await {
+            SessionOutput::Peer(PeerEvent::Remove(peer_id)) => assert_eq!(peer_id, client_id),
+            other => panic!("expected the client's removal, got {other:?}"),
+        }
+
+        drop(client_tx);
+        drop(sidecar_tx);
+        ends(sidecar_task).await;
     }
 
     /// #2844: DERP's admission call, made by DERP's own verifier against the

@@ -259,7 +259,20 @@ async fn authorize_client(
     org_id: &str,
     env_id: &str,
 ) -> Result<Uuid, Response> {
-    let user = &authentication.user;
+    client_environment_access(state, &authentication.user, org_id, env_id).await
+}
+
+/// Whether `user` may reach the environment as a client: a member of its
+/// organization (an API key only in its own), with environment access at
+/// operator or above, and the environment a running sandbox. Checked when a
+/// client joins and on every re-check while its session lives (#3828).
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
+pub(crate) async fn client_environment_access(
+    state: &CoordinatorState,
+    user: &AuthUser,
+    org_id: &str,
+    env_id: &str,
+) -> Result<Uuid, Response> {
     let role = match get_user_org_role(&state.pool, org_id, user).await {
         Ok(role) => role,
         Err(sqlx::Error::RowNotFound) => {

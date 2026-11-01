@@ -1624,6 +1624,18 @@ run_coordinator() {
   fi
   assert_passed_count "coordinator protocol auth matrix" "$logfile" 1
 
+  # #3828: a client loses its session when a re-check refuses its access.
+  logfile="$RUN_DIR/coordinator-client-recheck.log"
+  DATABASE_URL="$DATABASE_URL_RUST" cargo_ci test --profile ci \
+    -p codewire-coordinator --lib \
+    connect::tests::production_client_session_ends_when_its_access_is_revoked \
+    -- --exact --nocapture | tee "$logfile"
+  if grep -q 'DATABASE_URL unset' "$logfile"; then
+    echo "::error::coordinator client re-check skipped"
+    return 1
+  fi
+  assert_passed_count "coordinator client re-check" "$logfile" 1
+
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
     -f "$ROOT/tests/fixtures/coordinator/seed.sql"
   start_proc coordinator "$COORDINATOR_PORT" env \
