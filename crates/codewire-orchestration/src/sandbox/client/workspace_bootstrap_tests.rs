@@ -2706,3 +2706,134 @@ async fn a_duplicated_dind_container_fails_the_start_without_writes() {
     assert!(patches(&state).is_empty());
     assert_eq!(state.sandbox, sandbox);
 }
+
+/// #3718: once a Sandbox's live Pod has mounted its Block workspace, a stop or
+/// a Pod replacement turns the rendered `new` into `existing`, so no later
+/// Pod may format the volume. A first Pod whose `mount-workspace` failed
+/// before or during its format leaves `new`, so its replacement can still
+/// format. An `existing` one, a fork's, and a runc workspace are left alone,
+/// and a commodity Filesystem workspace from before the Block workspace is
+/// refused.
+#[test]
+fn a_mounted_block_workspace_becomes_existing_and_a_failed_one_stays_new() {
+    use super::super::template::{MOUNT_WORKSPACE_CONTAINER, RUNTIME_PROFILE_COMMODITY};
+    let sandbox = |spec: Value| -> DynamicObject {
+        serde_json::from_value(json!({
+            "apiVersion":"agents.x-k8s.io/v1beta1","kind":"Sandbox",
+            "metadata":{"name":SANDBOX,"namespace":NS,"uid":"sandbox-incarnation"},
+            "spec":spec,
+        }))
+        .unwrap()
+    };
+    let pod = |init: Value| -> Pod {
+        serde_json::from_value(json!({
+            "apiVersion":"v1","kind":"Pod","metadata":{"name":SANDBOX},
+            "status":{"initContainerStatuses":[
+                {"name":MOUNT_WORKSPACE_CONTAINER,"ready":false,"restartCount":0,"image":"i","imageID":"","state":init}
+            ]},
+        }))
+        .unwrap()
+    };
+    let opts = TemplateOpts {
+        runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
+        disk_gib: 40,
+        ..binding_opts()
+    };
+    let rendered = render_sandbox_template(NS, &opts)["spec"].clone();
+    let new = sandbox(rendered.clone());
+    let index = block_workspace(&new)
+        .unwrap()
+        .expect("a commodity workspace mounts its Block volume");
+    let entry = format!("/spec/podTemplate/spec/initContainers/{index}");
+
+    // Only an exit of 0 is a mounted workspace.
+    assert!(workspace_mounted(&pod(
+        json!({"terminated":{"exitCode":0}})
+    )));
+    for unmounted in [
+        json!({"terminated":{"exitCode":1}}),
+        json!({"running":{}}),
+        json!({"waiting":{"reason":"PodInitializing"}}),
+    ] {
+        assert!(!workspace_mounted(&pod(unmounted.clone())), "{unmounted}");
+    }
+
+    // A first Pod that failed before its format is replaced: still `new`.
+    assert!(
+        workspace_volume_existing(&new, index, false)
+            .unwrap()
+            .is_empty()
+    );
+    let operations = workspace_volume_existing(&new, index, true).unwrap();
+    assert_eq!(
+        operations,
+        [
+            json!({"op":"test","path":format!("{entry}/name"),"value":MOUNT_WORKSPACE_CONTAINER}),
+            json!({"op":"test","path":format!("{entry}/command/4"),"value":"new"}),
+            json!({"op":"replace","path":format!("{entry}/command/4"),"value":"existing"}),
+        ]
+    );
+    let mut stopped = new.data.clone();
+    assert!(apply_patch_fixture(&mut stopped, &json!(operations)));
+    assert_eq!(
+        stopped.pointer(&format!("{entry}/command/4")).unwrap(),
+        "existing"
+    );
+    assert!(
+        workspace_volume_existing(&sandbox(stopped["spec"].clone()), index, true)
+            .unwrap()
+            .is_empty()
+    );
+
+    // A fork restores a snapshot, so it renders `existing` from the start.
+    let fork = render_sandbox_template(
+        NS,
+        &TemplateOpts {
+            workspace_source_snapshot: Some("cw-kept-fork".into()),
+            ..opts.clone()
+        },
+    )["spec"]
+        .clone();
+    assert_eq!(
+        fork["volumeClaimTemplates"][0]["spec"]["volumeMode"],
+        "Block"
+    );
+    assert_eq!(
+        fork["podTemplate"]["spec"]["initContainers"][index]["command"][4],
+        "existing"
+    );
+    let fork = sandbox(fork);
+    assert!(
+        workspace_volume_existing(&fork, block_workspace(&fork).unwrap().unwrap(), true)
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut filesystem = rendered.clone();
+    filesystem["volumeClaimTemplates"][0]["spec"]
+        .as_object_mut()
+        .unwrap()
+        .remove("volumeMode");
+    let refusal = block_workspace(&sandbox(filesystem))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refusal.contains("a Filesystem volume from before the Block workspace"),
+        "{refusal}"
+    );
+
+    let runc = render_sandbox_template(
+        NS,
+        &TemplateOpts {
+            runtime_profile: super::super::template::RUNTIME_PROFILE_RUNC.into(),
+            ..opts
+        },
+    )["spec"]
+        .clone();
+    assert!(
+        runc["volumeClaimTemplates"][0]["spec"]
+            .get("volumeMode")
+            .is_none()
+    );
+    assert!(block_workspace(&sandbox(runc)).unwrap().is_none());
+}

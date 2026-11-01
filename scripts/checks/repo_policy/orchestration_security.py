@@ -346,8 +346,15 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             "!has(variables.pod.hostAliases) && !has(variables.pod.nodeName)",
             "variables.pod.runtimeClassName != 'confidential'",
             "'io.katacontainers.config.hypervisor.kernel_params' in object.spec.podTemplate.metadata.annotations",
-            "(!has(t.spec.volumeMode) || t.spec.volumeMode != 'Block')",
+            # A Block claim is commodity's (codewire#3718); the confidential
+            # claim is ReadWriteOncePod.
             "(!has(t.spec.accessModes) || !('ReadWriteOncePod' in t.spec.accessModes))",
+            # Only the one-shot mount-workspace init container holds the
+            # workspace device (codewire#3718).
+            "variables.pod.containers.all(c, !has(c.volumeDevices))",
+            "(c.name == 'mount-workspace' && size(c.volumeDevices) == 1 &&",
+            "c.command[2] == variables.mountWorkspaceScript && c.command[3] == 'mount-workspace' &&",
+            "v.image.reference == c.image",
             "object.spec.networkPolicyManagement == 'Managed'",
             # codewire#3626: the template ingress is exactly orchestration's
             # identity, in one AND-ed peer, on TCP 7777 and 2222.

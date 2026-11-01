@@ -212,18 +212,20 @@ mod tests {
         }
     }
 
-    /// A Pod spec's only init container is the guest DinD's Docker data init:
-    /// the support image as root, the three data variables, and only the
-    /// workspace volume, so no credential, token or daemon copy reaches it.
+    /// A commodity Pod spec's init containers are `mount-workspace`, then the
+    /// guest DinD's Docker data init: the support image as root, the three
+    /// data variables, and only the mounted workspace, so no credential,
+    /// token or daemon copy reaches it (#3718).
     fn assert_only_docker_data_init(pod_spec: &Value) {
         let inits = pod_spec["initContainers"].as_array().expect("init containers");
-        assert_eq!(inits.len(), 1, "{inits:?}");
-        let init = &inits[0];
+        assert_eq!(inits.len(), 2, "{inits:?}");
+        assert_eq!(inits[0]["name"], MOUNT_WORKSPACE_CONTAINER);
+        let init = &inits[1];
         assert_eq!(init["name"], DOCKER_DATA_INIT_CONTAINER);
         assert_eq!(init["command"], json!(["sh", "-c", docker_data_image_prepare_script()]));
         assert_eq!(
             init["volumeMounts"],
-            json!([{ "name": "workspace", "mountPath": "/workspace" }])
+            json!([{ "name": "wsmnt", "mountPath": "/workspace", "mountPropagation": "HostToContainer" }])
         );
         let names: Vec<_> = init["env"]
             .as_array()
@@ -506,7 +508,8 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|mount| mount == &json!({"name":"workspace","mountPath":"/home/codewire"}))
+                .any(|mount| mount
+                    == &json!({"name":"wsmnt","mountPath":"/home/codewire","mountPropagation":"HostToContainer"}))
         );
         assert!(CODEX_PLATFORM_HOME.starts_with("/home/codewire/"));
         // The bound daemon sets `CODEX_HOME` for the sessions it launches; the
@@ -3511,10 +3514,14 @@ mod tests {
             (
                 RUNTIME_PROFILE_COMMODITY,
                 DOCKER_MODE_GUEST_DIND,
-                &[DOCKER_DATA_INIT_CONTAINER][..],
+                &[MOUNT_WORKSPACE_CONTAINER, DOCKER_DATA_INIT_CONTAINER][..],
             ),
-            (RUNTIME_PROFILE_COMMODITY, DOCKER_MODE_LOCAL_DIND_DIRECT, &[]),
-            (RUNTIME_PROFILE_COMMODITY, DOCKER_MODE_NONE, &[]),
+            (
+                RUNTIME_PROFILE_COMMODITY,
+                DOCKER_MODE_LOCAL_DIND_DIRECT,
+                &[MOUNT_WORKSPACE_CONTAINER],
+            ),
+            (RUNTIME_PROFILE_COMMODITY, DOCKER_MODE_NONE, &[MOUNT_WORKSPACE_CONTAINER]),
             (
                 RUNTIME_PROFILE_RUNC,
                 DOCKER_MODE_GUEST_DIND,

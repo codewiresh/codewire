@@ -29,14 +29,15 @@ use serde_json::Value;
 use super::template::{
     CpuSharingRatio, DOCKER_DATA_INIT_CONTAINER, DOCKER_DATA_INIT_ENV,
     KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
-    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, LEGACY_DIND_BOOTSTRAP_SCRIPT, RUNTIME_CLASS_RUNC,
-    TemplateOpts, dind_bootstrap_script, direct_udp_service_name, docker_data_init_container,
-    docker_data_size_gib, eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
-    is_commodity_runtime_class, pre_growth_dind_bootstrap_script, render_direct_udp_service,
-    render_sandbox_shadow_pool, render_sandbox_template, render_warm_member_bridge,
-    render_workspace_daemon_network_policy, render_workspace_daemon_service,
-    warm_member_daemon_bridge_name, workspace_daemon_network_policy_name,
-    workspace_daemon_service_name,
+    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, LEGACY_DIND_BOOTSTRAP_SCRIPT,
+    MOUNT_WORKSPACE_CONTAINER, RUNTIME_CLASS_RUNC, TemplateOpts, WORKSPACE_MOUNT_VOLUME,
+    WorkspaceVolume, configure_block_workspace_mounts, dind_bootstrap_script,
+    direct_udp_service_name, docker_data_init_container, docker_data_size_gib,
+    eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script, is_commodity_runtime_class,
+    pre_growth_dind_bootstrap_script, render_direct_udp_service, render_sandbox_shadow_pool,
+    render_sandbox_template, render_warm_member_bridge, render_workspace_daemon_network_policy,
+    render_workspace_daemon_service, warm_member_daemon_bridge_name,
+    workspace_daemon_network_policy_name, workspace_daemon_service_name,
 };
 use super::{
     CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_ORG_ID, LABEL_TYPE,
@@ -342,10 +343,13 @@ pub struct WorkspaceStorage {
     pub applied_disk_gb: Option<i32>,
     pub filesystem_resize_pending: bool,
     pub expansion_allowed: bool,
-    /// The claim is a raw `volumeMode: Block` device. Only confidential
-    /// workspaces claim one, and their guest-owned LUKS2/dm-integrity volume
-    /// has no grow path (#860), whatever the StorageClass allows.
+    /// The claim is a raw `volumeMode: Block` device: a commodity workspace
+    /// the guest formats (#3718), or a confidential one.
     pub raw_block: bool,
+    /// The claim is confidential's ReadWriteOncePod one, whose guest-owned
+    /// LUKS2/dm-integrity volume has no grow path (#860), whatever the
+    /// StorageClass allows.
+    pub confidential: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -915,7 +919,20 @@ fn dind_bootstrap_refresh(
         serde_json::json!({"op":"test","path":format!("{path}/command/2"),"value":prior}),
         serde_json::json!({"op":"replace","path":format!("{path}/command/2"),"value":dind_bootstrap_script()}),
     ];
-    let data_init = docker_data_init_container(support_image, init_env);
+    let mut data_init = docker_data_init_container(support_image, init_env);
+    // On a Block workspace the data init sees the mounted filesystem, as a
+    // fresh render gives it (#3718).
+    let block = pod_spec
+        .get("volumes")
+        .and_then(Value::as_array)
+        .is_some_and(|volumes| {
+            volumes.iter().any(|volume| {
+                volume.get("name").and_then(Value::as_str) == Some(WORKSPACE_MOUNT_VOLUME)
+            })
+        });
+    if block {
+        configure_block_workspace_mounts(&mut data_init, false);
+    }
     match inits {
         // Each existing init container keeps its place by name; a daemon
         // re-pin earlier in the same patch changes only its image.
@@ -957,6 +974,115 @@ fn docker_data_init_repin(path: &str, init: &Value, support_image: &str) -> Opti
 }
 
 /// Log a DinD bootstrap refresh an admitted patch carried.
+/// A commodity Sandbox's Block workspace (#3718): the index of its
+/// `mount-workspace` init container, or `None` with no Block workspace.
+///
+/// A commodity Sandbox whose workspace claim is not Block predates the Block
+/// workspace and is refused: there is no second commodity storage path, and
+/// such environments are deleted at cutover (design §6).
+fn block_workspace(sandbox: &DynamicObject) -> anyhow::Result<Option<usize>> {
+    let spec_path = "/spec/podTemplate/spec";
+    let commodity = sandbox
+        .data
+        .pointer(&format!("{spec_path}/runtimeClassName"))
+        .and_then(Value::as_str)
+        .is_some_and(is_commodity_runtime_class);
+    let workspace_mode = sandbox
+        .data
+        .pointer("/spec/volumeClaimTemplates")
+        .and_then(Value::as_array)
+        .and_then(|claims| {
+            claims.iter().find(|claim| {
+                claim.pointer("/metadata/name").and_then(Value::as_str) == Some("workspace")
+            })
+        })
+        .map(|claim| {
+            claim
+                .pointer("/spec/volumeMode")
+                .and_then(Value::as_str)
+                .unwrap_or("Filesystem")
+        });
+    if !commodity || workspace_mode.is_none() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        workspace_mode == Some("Block"),
+        "this environment's workspace is a Filesystem volume from before the Block workspace (#3718); \
+         it cannot start, and must be recreated"
+    );
+    let inits = sandbox
+        .data
+        .pointer(&format!("{spec_path}/initContainers"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut mounts = inits.iter().enumerate().filter(|(_, init)| {
+        init.get("name").and_then(Value::as_str) == Some(MOUNT_WORKSPACE_CONTAINER)
+    });
+    let (Some((index, _)), None) = (mounts.next(), mounts.next()) else {
+        anyhow::bail!(
+            "a Block workspace Sandbox needs exactly one {MOUNT_WORKSPACE_CONTAINER} init container"
+        );
+    };
+    Ok(Some(index))
+}
+
+/// Whether a workspace Pod's `mount-workspace` finished: terminated with
+/// exit 0, so its volume carries the filesystem it mounted.
+fn workspace_mounted(pod: &Pod) -> bool {
+    pod.status
+        .as_ref()
+        .and_then(|status| status.init_container_statuses.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .filter(|status| status.name == MOUNT_WORKSPACE_CONTAINER)
+        .any(|status| {
+            status
+                .state
+                .as_ref()
+                .and_then(|state| state.terminated.as_ref())
+                .is_some_and(|terminated| terminated.exit_code == 0)
+        })
+}
+
+/// The JSON Patch operations that turn `mount-workspace`'s rendered `new`
+/// into `existing`, each fenced by `test`s of the entry's index, name and
+/// argument, so no later Pod of the Sandbox may format its volume. Only
+/// for a Sandbox whose live Pod `mounted` its workspace (#3718): a first Pod
+/// that failed before or during its format leaves `new`, so the next one can
+/// still format the volume. Empty when already `existing`.
+fn workspace_volume_existing(
+    sandbox: &DynamicObject,
+    index: usize,
+    mounted: bool,
+) -> anyhow::Result<Vec<Value>> {
+    let entry = format!("/spec/podTemplate/spec/initContainers/{index}");
+    let init = sandbox
+        .data
+        .pointer(&entry)
+        .expect("block_workspace found this entry");
+    let state = init
+        .pointer("/command/4")
+        .and_then(Value::as_str)
+        .filter(|_| {
+            init.pointer("/command/3").and_then(Value::as_str) == Some(MOUNT_WORKSPACE_CONTAINER)
+        });
+    match state {
+        Some(state) if state == WorkspaceVolume::Existing.as_str() => Ok(Vec::new()),
+        Some(state) if state == WorkspaceVolume::New.as_str() && !mounted => Ok(Vec::new()),
+        Some(state) if state == WorkspaceVolume::New.as_str() => Ok(vec![
+            serde_json::json!({"op":"test","path":format!("{entry}/name"),"value":MOUNT_WORKSPACE_CONTAINER}),
+            serde_json::json!({"op":"test","path":format!("{entry}/command/4"),"value":state}),
+            serde_json::json!({
+                "op":"replace",
+                "path":format!("{entry}/command/4"),
+                "value":WorkspaceVolume::Existing.as_str(),
+            }),
+        ]),
+        _ => anyhow::bail!("{MOUNT_WORKSPACE_CONTAINER} names no workspace volume state"),
+    }
+}
+
 fn log_dind_bootstrap_refresh(name: &str) {
     tracing::info!(
         name,
@@ -1989,6 +2115,47 @@ impl SandboxClient {
     }
 
     /// Whether the workspace Pod named `pod_name` exists with `uid`.
+    /// Whether this exact Sandbox's live Pod mounted its Block workspace
+    /// (#3718): the Pod it published, owned by its UID, whose
+    /// `mount-workspace` exited 0. No such Pod is no evidence.
+    async fn sandbox_pod_mounted_workspace(
+        &self,
+        sandbox: &DynamicObject,
+        sandbox_name: &str,
+    ) -> anyhow::Result<bool> {
+        let Some(uid) = sandbox.metadata.uid.as_deref() else {
+            return Ok(false);
+        };
+        let pod = self
+            .pods()
+            .get_opt(sandbox_pod_name(sandbox, sandbox_name))
+            .await
+            .map_err(|error| anyhow::anyhow!("read workspace Pod of {sandbox_name}: {error}"))?;
+        Ok(pod.as_ref().is_some_and(|pod| {
+            pod.metadata
+                .owner_references
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|owner| owner.uid == uid && owner.controller == Some(true))
+                && workspace_mounted(pod)
+        }))
+    }
+
+    /// The patch that makes a Block workspace `existing` once this Sandbox's
+    /// live Pod has mounted it; empty otherwise.
+    async fn workspace_volume_existing_patch(
+        &self,
+        sandbox: &DynamicObject,
+        sandbox_name: &str,
+        index: usize,
+    ) -> anyhow::Result<Vec<Value>> {
+        let mounted = self
+            .sandbox_pod_mounted_workspace(sandbox, sandbox_name)
+            .await?;
+        workspace_volume_existing(sandbox, index, mounted)
+    }
+
     async fn workspace_pod_has_uid(&self, pod_name: &str, uid: &str) -> anyhow::Result<bool> {
         Ok(self
             .get_workspace_pod_identity_by_name(pod_name)
@@ -2045,7 +2212,16 @@ impl SandboxClient {
                 .ok_or_else(|| anyhow::anyhow!("Sandbox {name} has no resource version"))?;
             let repin = daemon_image_repin(&sandbox, support_image)?;
             let dind = dind_bootstrap_refresh(&sandbox, support_image)?;
-            if repin.is_none() && dind.is_none() {
+            // Once the Pod being replaced has mounted its workspace, the next
+            // one's volume is never new (#3718).
+            let block = match block_workspace(&sandbox)? {
+                Some(index) => {
+                    self.workspace_volume_existing_patch(&sandbox, &name, index)
+                        .await?
+                }
+                None => Vec::new(),
+            };
+            if repin.is_none() && dind.is_none() && block.is_empty() {
                 return Ok(DaemonImageRepinOutcome::Unchanged);
             }
             if let Some((pod_name, pod_uid)) = pod
@@ -2063,6 +2239,7 @@ impl SandboxClient {
                     .flat_map(|repin| repin.operations.iter().cloned()),
             );
             operations.extend(dind.iter().flatten().cloned());
+            operations.extend(block);
             let patch = Patch::Json::<()>(serde_json::from_value(Value::Array(operations))?);
             match sandboxes
                 .patch(&name, &PatchParams::default(), &patch)
@@ -3049,6 +3226,12 @@ impl SandboxClient {
             .spec
             .ok_or_else(|| anyhow::anyhow!("workspace PVC {pvc_name} has no spec"))?;
         let raw_block = spec.volume_mode.as_deref() == Some("Block");
+        // A commodity workspace is Block too (#3718); only the confidential
+        // claim is ReadWriteOncePod.
+        let confidential = spec
+            .access_modes
+            .as_deref()
+            .is_some_and(|modes| modes.iter().any(|mode| mode == "ReadWriteOncePod"));
         let storage_class_name = spec.storage_class_name.unwrap_or_default();
         if storage_class_name.trim().is_empty() {
             anyhow::bail!("workspace PVC {pvc_name} has no explicit StorageClass");
@@ -3092,6 +3275,7 @@ impl SandboxClient {
             filesystem_resize_pending,
             expansion_allowed: storage_class.allow_volume_expansion == Some(true),
             raw_block,
+            confidential,
         })
     }
 
@@ -3111,8 +3295,9 @@ impl SandboxClient {
         }
         // The guest-encrypted confidential raw-block profile cannot expand in
         // place. Reject here so Kubernetes never persists a larger PVC request
-        // before the downstream CSI/CDH refusal.
-        if desired_disk_gb > storage.requested_disk_gb && storage.raw_block {
+        // before the downstream CSI/CDH refusal. A commodity Block workspace
+        // grows: its next Pod's `mount-workspace` grows the filesystem online.
+        if desired_disk_gb > storage.requested_disk_gb && storage.confidential {
             anyhow::bail!("confidential workspace storage expansion is not supported");
         }
         if desired_disk_gb > storage.requested_disk_gb && !storage.expansion_allowed {
@@ -3282,7 +3467,14 @@ impl SandboxClient {
                 .applied_disk_gb
                 .is_some_and(|size| size >= desired_disk_gb)
             {
-                return Ok(WorkspaceStorageResizeOutcome::Applied);
+                // A commodity Block device grows under a running guest, but
+                // its filesystem grows only in the next Pod's
+                // `mount-workspace` (#3718).
+                return Ok(if storage.raw_block && !storage.confidential {
+                    WorkspaceStorageResizeOutcome::RequiresPodRestart
+                } else {
+                    WorkspaceStorageResizeOutcome::Applied
+                });
             }
             if storage.filesystem_resize_pending {
                 return Ok(WorkspaceStorageResizeOutcome::RequiresPodRestart);
@@ -3379,15 +3571,28 @@ impl SandboxClient {
         } else {
             "Running"
         };
-        let (repin, dind) = if replicas > 0 {
+        let (repin, dind, block) = if replicas > 0 {
+            // A start refuses a Filesystem commodity workspace (#3718).
+            block_workspace(&sandbox)
+                .map_err(|e| anyhow::anyhow!("set operatingMode: Sandbox {name}: {e}"))?;
             (
                 daemon_image_repin(&sandbox, support_image)
                     .map_err(|e| anyhow::anyhow!("set operatingMode: Sandbox {name}: {e}"))?,
                 dind_bootstrap_refresh(&sandbox, support_image)
                     .map_err(|e| anyhow::anyhow!("set operatingMode: Sandbox {name}: {e}"))?,
+                Vec::new(),
             )
         } else {
-            (None, None)
+            // A stop, while its Pod still runs, makes a mounted Block
+            // workspace `existing`; it never refuses (#3718).
+            let block = match block_workspace(&sandbox).ok().flatten() {
+                Some(index) => {
+                    self.workspace_volume_existing_patch(&sandbox, &name, index)
+                        .await?
+                }
+                None => Vec::new(),
+            };
+            (None, None, block)
         };
         // Fence the exact incarnation without conditioning the mode change on
         // unrelated controller-owned status/annotation updates. A re-pin
@@ -3397,6 +3602,7 @@ impl SandboxClient {
         )];
         operations.extend(repin.iter().flat_map(|repin| repin.operations.clone()));
         operations.extend(dind.iter().flatten().cloned());
+        operations.extend(block);
         operations.push(serde_json::json!(
             {"op": "add", "path": "/spec/operatingMode", "value": mode}
         ));
@@ -3540,8 +3746,24 @@ impl SandboxClient {
             Some(image) => dind_bootstrap_refresh(sandbox, image)?,
             None => None,
         };
+        let block = if replicas > 0 {
+            // A resume refuses a Filesystem commodity workspace (#3718).
+            block_workspace(sandbox)?;
+            Vec::new()
+        } else {
+            // A suspension, while its Pod still runs, makes a mounted Block
+            // workspace `existing`; it never refuses (#3718).
+            match block_workspace(sandbox).ok().flatten() {
+                Some(index) => {
+                    self.workspace_volume_existing_patch(sandbox, name, index)
+                        .await?
+                }
+                None => Vec::new(),
+            }
+        };
         operations.extend(repin.iter().flat_map(|(_, repin)| repin.operations.clone()));
         operations.extend(dind.iter().flatten().cloned());
+        operations.extend(block);
         operations.push(serde_json::json!({"op":"add","path":"/spec/operatingMode","value":mode}));
         let patch = Patch::Json::<()>(serde_json::from_value(Value::Array(operations))?);
         let updated = self
@@ -6924,6 +7146,41 @@ mod tests {
             .await
             .unwrap();
         assert!(!storage.raw_block);
+    }
+
+    /// #3718: a commodity Block workspace is raw-block but not confidential:
+    /// it grows like any other claim, and only its next Pod's
+    /// `mount-workspace` grows the filesystem, so a running one restarts.
+    #[tokio::test]
+    async fn a_commodity_block_workspace_grows_and_finishes_in_its_next_pod() {
+        let commodity_block = || {
+            let mut responses =
+                storage_lookup_responses_for_claim("linstor-local", true, Some("Block"));
+            for (_, body) in &mut responses {
+                if body["kind"] == "PersistentVolumeClaim" {
+                    body["spec"]["accessModes"] = json!(["ReadWriteOnce"]);
+                }
+            }
+            responses
+        };
+        let (client, _) = sandbox_client_with_secret_responses(commodity_block());
+        let storage = client
+            .require_workspace_storage_resize(&storage_anchor(Some(STORAGE_PVC_UID)), 20)
+            .await
+            .unwrap();
+        assert!(storage.raw_block && !storage.confidential);
+        let (client, _) = sandbox_client_with_secret_responses(commodity_block());
+        assert_eq!(
+            client
+                .wait_for_workspace_storage_resize(
+                    &storage_anchor(Some(STORAGE_PVC_UID)),
+                    10,
+                    Duration::from_secs(1),
+                )
+                .await
+                .unwrap(),
+            WorkspaceStorageResizeOutcome::RequiresPodRestart
+        );
     }
 
     #[tokio::test]

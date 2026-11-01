@@ -207,6 +207,46 @@ A site sets `SANDBOX_WORKSPACE_STORAGE_CLASS` to its own StorageClass for
 `commodity` workspaces; the Kind overlays use Kind's built-in `standard`. A disk resize expands the workspace PVC only when that
 StorageClass advertises volume expansion.
 
+A `commodity` workspace claims a `volumeMode: Block`, `ReadWriteOnce` volume
+that the guest formats and mounts itself, so its writes reach the disk with no
+host page cache (#3718; `kata-clh` opens Block disks with direct I/O). Its
+class must serve Block volumes; on Dev that is `linstor-local`. A runc or Kind
+workspace keeps a Filesystem claim.
+
+- **Mount.** The one-shot init container `mount-workspace` is the only
+  container that ever holds the device, at `/dev/cwws`. It is privileged
+  inside the guest only, and runs from the support image. A Kata container
+  with a `volumeDevice` cannot restart, so it fails closed and is never
+  retried in place; recovery is a new Pod. It mounts the filesystem into a
+  guest-memory emptyDir (`wsmnt`, `Bidirectional`), which the workspace and
+  DinD containers mount at `/workspace` and `/home/codewire`
+  (`HostToContainer`).
+- **Format.** Only a volume the create operation provisioned, rendered as
+  `new`, is formatted, and only if `blkid -p` does not find ext4 on it. A
+  linstor-local volume is LUKS-encrypted, so a new one reads as random bytes
+  that may match a short foreign magic by chance: any other signature is
+  wiped first. Whether a volume is new comes from the create operation, never
+  from its contents. Every other volume is `existing` and must be ext4: a
+  fork's from the start, and every other one from the first stop, suspension
+  or Pod replacement after a Pod's `mount-workspace` exited 0. A first Pod
+  that failed before its format leaves `new`, so its replacement can still
+  format. An `existing` volume with no filesystem or another one, a device
+  that does not read, a failed or ambiguous probe and an `e2fsck -f -p` above
+  1 are refused with one `codewire mount-workspace:` line. The last line of a
+  mount gives `e2fsck_ms` and `total_ms`.
+- **Policy.** The warm-pool template policy admits `mount-workspace` only
+  with its exact rendered script and a `new` or `existing` argument, from the
+  image the workspace daemon's `codewire-bin` volume comes from, and admits a
+  `volumeDevice` on no other container.
+- **Temporary files (R1).** `.codewire/tmp` on the workspace disk is emptied
+  at every boot and mounted at `/tmp` and `/var/tmp`, which takes the heaviest
+  temporary writers off the host-backed root filesystem.
+- **Growth.** A disk resize grows the device under a running guest; the
+  filesystem grows online in the next Pod's `mount-workspace`, so a running
+  environment's resize replaces its Pod.
+- **Before the Block workspace.** A commodity environment whose workspace is
+  still a Filesystem volume cannot start; existing ones are deleted at cutover.
+
 ## Managed Runtime Gates
 
 The normal managed sandbox path is allowed to create `commodity` or
