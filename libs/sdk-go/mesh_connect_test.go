@@ -54,7 +54,8 @@ func TestMeshGeneratedClientsCoverMountedOperations(t *testing.T) {
 		t.Fatalf("nodes = %#v, want two paginated results", nodes)
 	}
 	if got := nodes[0]; got.OrgID != meshTestOrg || got.NetworkID != meshTestNetwork ||
-		got.Name != "node-one" || got.PeerURL != "https://peer.example/node-one" || !got.Connected {
+		got.Name != "node-one" || got.PeerURL != "https://peer.example/node-one" || !got.Connected ||
+		got.LastSeenAt == nil || !got.LastSeenAt.Equal(time.Date(2026, 7, 28, 11, 12, 13, 14, time.UTC)) {
 		t.Fatalf("node = %#v, want every MeshNode field", got)
 	}
 	if err := client.Nodes.Revoke(ctx, meshTestOrg, meshTestNetwork, "node-one"); err != nil {
@@ -553,6 +554,7 @@ func (h *meshCapabilityHandler) node(name string) *codewirev1.MeshNode {
 	return &codewirev1.MeshNode{
 		OrgId: meshTestOrg, NetworkId: meshTestNetwork, Name: name,
 		PeerUrl: "https://peer.example/" + name, Connected: true,
+		LastSeenAt: timestamppb.New(h.updatedAt),
 	}
 }
 

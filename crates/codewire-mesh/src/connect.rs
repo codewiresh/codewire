@@ -299,7 +299,15 @@ async fn list_mesh_nodes(
     connectrpc::Response::ok(ListMeshNodesResponse {
         nodes: nodes
             .into_iter()
-            .map(|node| proto_node(&request.org_id, node))
+            .map(|node| {
+                let session = state
+                    .mesh_coordinate
+                    .node_last_heard(&node.network_id, &node.name)
+                    .map(|last_heard| {
+                        (last_heard, state.mesh_coordinate.heard_recently(last_heard))
+                    });
+                proto_node(&request.org_id, node, session)
+            })
             .collect(),
         ..Default::default()
     })
@@ -368,7 +376,8 @@ async fn redeem_mesh_node_enrollment(
         .await
         .map_err(|e| rpc_app_error(&e, &ctx))?;
     connectrpc::Response::ok(RedeemMeshNodeEnrollmentResponse {
-        node: Some(proto_node(&redeemed.organization_id, redeemed.node)).into(),
+        // Just registered: it connects with its own coordinator session.
+        node: Some(proto_node(&redeemed.organization_id, redeemed.node, None)).into(),
         enrollment: Some(proto_enrollment(
             &redeemed.organization_id,
             redeemed.enrollment,
@@ -774,13 +783,23 @@ fn proto_network(network: Network) -> MeshNetwork {
     }
 }
 
-fn proto_node(org_id: &str, node: NodeRecord) -> MeshNode {
+/// A node is connected only while it holds a live coordinator session that
+/// was heard from recently (#2697). `session` is that session's latest
+/// message and whether it is recent; without a session, the store's
+/// last-seen time stands.
+fn proto_node(
+    org_id: &str,
+    node: NodeRecord,
+    session: Option<(chrono::DateTime<Utc>, bool)>,
+) -> MeshNode {
+    let (last_seen, connected) = session.unwrap_or((node.last_seen_at, false));
     MeshNode {
         org_id: org_id.to_owned(),
         network_id: node.network_id,
         name: node.name,
         peer_url: node.peer_url,
-        connected: true,
+        connected,
+        last_seen_at: Some(timestamp(last_seen)).into(),
         ..Default::default()
     }
 }
@@ -1916,6 +1935,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        task.abort();
+    }
+
+    /// #2697: the network owner revokes any node; a member revokes only the
+    /// node recorded as their own (a local VM they attached), never another
+    /// member's or a hosted environment's; a non-member revokes none.
+    #[tokio::test]
+    async fn a_member_revokes_only_the_node_recorded_as_their_own() {
+        let store = MemoryStore::new();
+        let caller = format!("local-owner:{ORG}");
+        store
+            .network_create_with_owner(NETWORK, ORG, "user-network-owner", Utc::now())
+            .await
+            .unwrap();
+        for (name, owner) in [
+            ("mine", caller.as_str()),
+            ("theirs", "user-other-member"),
+            ("hosted", "environment:env-contract"),
+        ] {
+            store
+                .node_register(NodeRecord {
+                    network_id: NETWORK.to_owned(),
+                    name: name.to_owned(),
+                    peer_url: String::new(),
+                    github_id: None,
+                    owner_subject: owner.to_owned(),
+                    authorized_by: owner.to_owned(),
+                    enrollment_id: String::new(),
+                    authorized_at: Utc::now(),
+                    last_seen_at: Utc::now(),
+                })
+                .await
+                .unwrap();
+        }
+        let (addr, task) = start(store.clone()).await;
+        let client =
+            MeshNodeServiceClient::new(HttpClient::plaintext(), client_config(addr, Some(API_KEY)));
+        let revoke = |name: &str| RevokeMeshNodeRequest {
+            org_id: ORG.to_owned(),
+            network_id: NETWORK.to_owned(),
+            node_name: name.to_owned(),
+            ..Default::default()
+        };
+        let registered = |name: &'static str| {
+            let store = store.clone();
+            async move { store.node_get(NETWORK, name).await.unwrap().is_some() }
+        };
+        let make = |role: &str| crate::store::NetworkMember {
+            network_id: NETWORK.to_owned(),
+            subject: caller.clone(),
+            role: role.to_owned(),
+            created_at: Utc::now(),
+            created_by: "user-network-owner".to_owned(),
+        };
+
+        // Not a member: refused, even for the node recorded as its own.
+        assert_code(
+            client.revoke_mesh_node(revoke("mine")).await.unwrap_err(),
+            ErrorCode::PermissionDenied,
+        );
+        assert!(registered("mine").await);
+
+        store
+            .network_member_upsert(make(NETWORK_ROLE_MEMBER))
+            .await
+            .unwrap();
+        for other in ["theirs", "hosted"] {
+            assert_code(
+                client.revoke_mesh_node(revoke(other)).await.unwrap_err(),
+                ErrorCode::PermissionDenied,
+            );
+            assert!(registered(other).await, "a member revoked {other}");
+        }
+        client.revoke_mesh_node(revoke("mine")).await.unwrap();
+        assert!(!registered("mine").await);
+
+        store
+            .network_member_upsert(make(crate::store::NETWORK_ROLE_OWNER))
+            .await
+            .unwrap();
+        for other in ["theirs", "hosted"] {
+            client.revoke_mesh_node(revoke(other)).await.unwrap();
+            assert!(!registered(other).await, "the network owner kept {other}");
+        }
         task.abort();
     }
 }

@@ -225,6 +225,7 @@ pub(crate) fn format_nodes(
     context: &MeshContext,
     network: Option<&str>,
     nodes: &[Node],
+    now: chrono::DateTime<chrono::Utc>,
 ) -> String {
     let title = network
         .map(terminal_text)
@@ -248,17 +249,24 @@ pub(crate) fn format_nodes(
         return out;
     }
     let show_network = network.is_none() || super::nodes_have_multiple_networks(nodes);
-    let rows: Vec<(String, String, &'static str, String)> = nodes
+    let rows: Vec<(String, String, &'static str, String, String)> = nodes
         .iter()
         .map(|node| {
+            let (status, last_seen) = if node.connected {
+                ("reported online", "now".to_owned())
+            } else if node.last_seen_at.is_empty() {
+                ("reported offline", "-".to_owned())
+            } else {
+                (
+                    "reported offline",
+                    crate::commands::collaboration::time_ago_at(&node.last_seen_at, now),
+                )
+            };
             (
                 trimmed(&node.network_id),
                 terminal_text(&node.name),
-                if node.connected {
-                    "reported online"
-                } else {
-                    "reported offline"
-                },
+                status,
+                last_seen,
                 trimmed(&node.peer_url),
             )
         })
@@ -280,16 +288,16 @@ pub(crate) fn format_nodes(
     out.push('\n');
     if show_network {
         out.push_str(&format!(
-            "  {:<network_width$}  {:<name_width$}  {:<16}  PEER\n",
-            "NETWORK", "NODE", "STATUS"
+            "  {:<network_width$}  {:<name_width$}  {:<16}  {:<9}  PEER\n",
+            "NETWORK", "NODE", "STATUS", "LAST SEEN"
         ));
     } else {
         out.push_str(&format!(
-            "  {:<name_width$}  {:<16}  PEER\n",
-            "NODE", "STATUS"
+            "  {:<name_width$}  {:<16}  {:<9}  PEER\n",
+            "NODE", "STATUS", "LAST SEEN"
         ));
     }
-    for (network, name, status, peer) in &rows {
+    for (network, name, status, last_seen, peer) in &rows {
         let status_text = format!("{status:<16}");
         let status_text = if status.ends_with("online") {
             style.paint(Role::Success, &status_text)
@@ -298,18 +306,20 @@ pub(crate) fn format_nodes(
         };
         if show_network {
             out.push_str(&format!(
-                "  {network:<network_width$}  {name:<name_width$}  {status_text}  {peer}\n"
+                "  {network:<network_width$}  {name:<name_width$}  {status_text}  {last_seen:<9}  {peer}\n"
             ));
         } else {
-            out.push_str(&format!("  {name:<name_width$}  {status_text}  {peer}\n"));
+            out.push_str(&format!(
+                "  {name:<name_width$}  {status_text}  {last_seen:<9}  {peer}\n"
+            ));
         }
     }
     out.push('\n');
     out.push_str(&quiet(
         style,
-        "Every listed node is enrolled. Status is what the node last reported to the Mesh;",
+        "Every listed node is enrolled. Online means it holds a live session with the Mesh now;",
     ));
-    out.push_str(&quiet(style, "connectivity was not checked."));
+    out.push_str(&quiet(style, "peer connectivity was not checked."));
     out
 }
 
@@ -590,17 +600,34 @@ mod tests {
     fn nodes_separate_enrollment_report_and_connectivity() {
         let cloud = mesh(Some(MeshKind::Cloud), "https://mesh.codewire.sh");
         let context = MeshContext::new(&cloud, Some("org-demo"));
-        let nodes = [Node {
-            network_id: "work".into(),
-            name: "laptop".into(),
-            peer_url: String::new(),
-            connected: true,
-        }];
-        let text = format_nodes(plain(), &cloud, &context, Some("work"), &nodes);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let nodes = [
+            Node {
+                network_id: "work".into(),
+                name: "laptop".into(),
+                peer_url: String::new(),
+                connected: true,
+                last_seen_at: "2026-11-01T11:59:58Z".into(),
+            },
+            Node {
+                network_id: "work".into(),
+                name: "vm".into(),
+                peer_url: String::new(),
+                connected: false,
+                last_seen_at: "2026-11-01T11:57:00Z".into(),
+            },
+        ];
+        let text = format_nodes(plain(), &cloud, &context, Some("work"), &nodes, now);
         assert!(text.starts_with("work\n  Mesh          Codewire Cloud Mesh\n"));
-        assert!(text.contains("  NODE    STATUS            PEER\n  laptop  reported online   -\n"));
-        assert!(text.contains("connectivity was not checked."));
-        let empty = format_nodes(plain(), &cloud, &context, Some("work"), &[]);
+        assert!(text.contains(concat!(
+            "  NODE    STATUS            LAST SEEN  PEER\n",
+            "  laptop  reported online   now        -\n",
+            "  vm      reported offline  3m ago     -\n",
+        )));
+        assert!(text.contains("peer connectivity was not checked."));
+        let empty = format_nodes(plain(), &cloud, &context, Some("work"), &[], now);
         assert!(empty.starts_with("No nodes enrolled in work yet.\n"));
         assert!(empty.contains(
             "cw --cloud network enroll create --org org-demo --network work --node-name NAME"

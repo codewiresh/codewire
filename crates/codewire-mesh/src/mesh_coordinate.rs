@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+
 use codewire_proto::codewire::internal::v1::{
     CoordinateDerpMap, CoordinateNode, CoordinatePeerRemove, CoordinatePeerUpdate, CoordinatePing,
     MeshAuthorizationCredentialKind, MeshAuthorizationPrincipalKind, MeshCoordinateHello,
@@ -31,6 +33,14 @@ use crate::mesh_authorization::forwarded_mesh_credential;
 use crate::server::AppState;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
+/// A node whose session has sent nothing for this long lists offline
+/// (#2697). Every Mesh client pings every 15 s, so this is three missed
+/// beats, measured end to end through the ingress proxy. The session itself
+/// is never ended for silence: a local VM's transport cannot rejoin within
+/// its generation, so a node that wakes from a sleep must find its session
+/// still there.
+const OFFLINE_AFTER: Duration = Duration::from_secs(45);
 
 pub(crate) fn router(state: AppState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(MeshCoordinateService { state }))
@@ -75,7 +85,18 @@ impl MeshCoordinatorService for MeshCoordinateService {
 
         let (responses_tx, responses_rx) = mpsc::channel(32);
         let state = self.state.mesh_coordinate.clone();
-        tokio::spawn(run_session(requests, responses_tx, state, peer, derp_map));
+        let product = self.state.product.clone();
+        tokio::spawn(async move {
+            let last_heard = run_session(requests, responses_tx, state, &peer, derp_map).await;
+            // An offline node shows when it was last heard from (#2697).
+            if let Some(node_name) = &peer.node_name
+                && let Err(error) = product
+                    .mark_node_seen(&peer.network_id, node_name, last_heard)
+                    .await
+            {
+                tracing::warn!(%error, "Mesh node last-seen write failed");
+            }
+        });
 
         let output = futures_util::stream::unfold(responses_rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
@@ -87,13 +108,49 @@ impl MeshCoordinatorService for MeshCoordinateService {
 #[derive(Clone)]
 pub(crate) struct MeshCoordinateState {
     inner: Arc<Mutex<Registry>>,
+    offline_after: Duration,
 }
 
 impl MeshCoordinateState {
     pub(crate) fn new() -> Self {
+        Self::offline_after(OFFLINE_AFTER)
+    }
+
+    /// A coordinator that lists a node offline once its session has been
+    /// silent for `offline_after`.
+    pub(crate) fn offline_after(offline_after: Duration) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Registry::default())),
+            offline_after,
         }
+    }
+
+    /// Whether a node last heard at `last_heard` is online now.
+    pub(crate) fn heard_recently(&self, last_heard: DateTime<Utc>) -> bool {
+        Utc::now()
+            .signed_duration_since(last_heard)
+            .to_std()
+            .map_or(true, |silent| silent <= self.offline_after)
+    }
+
+    /// When the live session of this registered node last heard from it, or
+    /// `None` with no live session (#2697).
+    ///
+    /// The registry is this process's memory, which is complete while Mesh
+    /// runs one replica. With more, `ListNodes` on one replica cannot see
+    /// another's sessions, and liveness has to be written to the store.
+    pub(crate) fn node_last_heard(
+        &self,
+        network_id: &str,
+        node_name: &str,
+    ) -> Option<DateTime<Utc>> {
+        let peer_id = stable_peer_id(network_id, "peer", node_name);
+        let registry = self.inner.lock().unwrap();
+        registry
+            .peers
+            .get(&peer_id)
+            .filter(|peer| peer.network_id == network_id)
+            .map(|peer| peer.last_heard)
     }
 
     /// Whether a live session has sent a node with `key`: DERP serves only
@@ -206,6 +263,8 @@ struct Registry {
 struct Peer {
     session_id: Uuid,
     network_id: String,
+    /// When this session last received a message.
+    last_heard: DateTime<Utc>,
     node: Option<Node>,
     tx: mpsc::Sender<CoordinateEvent>,
     /// Ends this session's stream when it is revoked or replaced.
@@ -239,6 +298,8 @@ enum CoordinateEvent {
 struct AuthorizedPeer {
     peer_id: Uuid,
     network_id: String,
+    /// The registered node this session speaks for; a dial session has none.
+    node_name: Option<String>,
     role: MeshCoordinateRole,
     environment: Option<EnvironmentMember>,
 }
@@ -268,19 +329,23 @@ async fn authorize(
         return Ok(AuthorizedPeer {
             peer_id: stable_peer_id(&member.network_id, "peer", &member.node_name),
             network_id: member.network_id.clone(),
+            node_name: Some(member.node_name.clone()),
             role,
             environment: Some(member),
         });
     }
     let node_enrollment = credential.node_enrollment_code().is_some();
-    let peer_id = match role {
+    let (peer_id, node_name) = match role {
         MeshCoordinateRole::Peer if !node_enrollment => return Err(AppError::Forbidden),
         MeshCoordinateRole::Peer => {
             let redeemed = state
                 .product
                 .redeem_coordinate_enrollment(&org_id, &network_id, &credential)
                 .await?;
-            stable_peer_id(&network_id, "peer", &redeemed.node.name)
+            (
+                stable_peer_id(&network_id, "peer", &redeemed.node.name),
+                Some(redeemed.node.name),
+            )
         }
         MeshCoordinateRole::Dial if node_enrollment => return Err(AppError::Forbidden),
         MeshCoordinateRole::Dial => {
@@ -299,13 +364,14 @@ async fn authorize(
             {
                 return Err(AppError::Forbidden);
             }
-            Uuid::new_v4()
+            (Uuid::new_v4(), None)
         }
         MeshCoordinateRole::Unspecified => unreachable!("validated above"),
     };
     Ok(AuthorizedPeer {
         peer_id,
         network_id,
+        node_name,
         role,
         environment: None,
     })
@@ -319,21 +385,24 @@ fn required(value: &str, field: &'static str) -> Result<String, AppError> {
     Ok(value.to_owned())
 }
 
+/// Serves one session until it ends, and returns when it last received a
+/// message.
 async fn run_session(
     mut requests: InboundStream<MeshCoordinatorServiceCoordinateRequest>,
     responses: mpsc::Sender<Result<MeshCoordinatorServiceCoordinateResponse, ConnectError>>,
     state: MeshCoordinateState,
-    peer: AuthorizedPeer,
+    peer: &AuthorizedPeer,
     derp_map: JsonValue,
-) {
+) -> DateTime<Utc> {
+    let mut last_heard = Utc::now();
     let (events_tx, mut events_rx) = mpsc::channel(64);
-    let Some((session_id, close)) = register(&state, &peer, events_tx) else {
+    let Some((session_id, close)) = register(&state, peer, events_tx) else {
         let _ = responses
             .send(Err(ConnectError::permission_denied(
                 "Mesh network was deleted",
             )))
             .await;
-        return;
+        return last_heard;
     };
     let initial = response(CoordinateDerpMap {
         derp_map_json: serde_json::to_vec(&derp_map).unwrap_or_default(),
@@ -341,7 +410,7 @@ async fn run_session(
     });
     if responses.send(Ok(initial)).await.is_err() {
         deregister(&state, peer.peer_id, session_id);
-        return;
+        return last_heard;
     }
 
     let mut heartbeat = tokio::time::interval_at(
@@ -364,6 +433,8 @@ async fn run_session(
                 let Ok(message) = message else {
                     break;
                 };
+                last_heard = Utc::now();
+                heard(&state, peer.peer_id, session_id, last_heard);
                 let message = message.to_owned_message();
                 match message.msg {
                     Some(mesh_coordinator_service_coordinate_request::Msg::Node(node)) => {
@@ -459,6 +530,19 @@ async fn run_session(
         }
     }
     deregister(&state, peer.peer_id, session_id);
+    last_heard
+}
+
+/// Records that this exact session received a message at `at`.
+fn heard(state: &MeshCoordinateState, peer_id: Uuid, session_id: Uuid, at: DateTime<Utc>) {
+    let mut registry = state.inner.lock().unwrap();
+    if let Some(peer) = registry
+        .peers
+        .get_mut(&peer_id)
+        .filter(|peer| peer.session_id == session_id)
+    {
+        peer.last_heard = at;
+    }
 }
 
 fn register(
@@ -477,6 +561,7 @@ fn register(
         Peer {
             session_id,
             network_id: peer.network_id.clone(),
+            last_heard: Utc::now(),
             node: None,
             tx,
             close: close.clone(),
@@ -746,8 +831,8 @@ mod tests {
         MeshCoordinatorServiceClient, mesh_coordinator_service_coordinate_response,
     };
     use codewire_proto::codewire::v1::{
-        JoinMeshNetworkRequest, MeshNetworkServiceClient, MeshNodeServiceClient,
-        RevokeMeshNodeRequest,
+        JoinMeshNetworkRequest, ListMeshNodesRequest, MeshNetworkServiceClient,
+        MeshNodeServiceClient, RevokeMeshNodeRequest,
     };
     use codewire_tailnet::node::{DiscoPublic, NodePublic, prefix_from_uuid};
     use connectrpc::Protocol;
@@ -791,7 +876,10 @@ mod tests {
     async fn start_with_store(
         store: Arc<MemoryStore>,
     ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-        let app = crate::server::router_with_store(config(), store);
+        serve(crate::server::router_with_store(config(), store)).await
+    }
+
+    async fn serve(app: axum::Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
@@ -923,6 +1011,7 @@ mod tests {
         let peer = AuthorizedPeer {
             peer_id: Uuid::new_v4(),
             network_id: "network-test".to_owned(),
+            node_name: None,
             role: MeshCoordinateRole::Peer,
             environment: None,
         };
@@ -957,6 +1046,7 @@ mod tests {
         let peer = AuthorizedPeer {
             peer_id: Uuid::new_v4(),
             network_id: "network-test".to_owned(),
+            node_name: None,
             role: MeshCoordinateRole::Peer,
             environment: None,
         };
@@ -975,6 +1065,7 @@ mod tests {
         let peer = AuthorizedPeer {
             peer_id: Uuid::new_v4(),
             network_id: "deleted".to_owned(),
+            node_name: None,
             role: MeshCoordinateRole::Dial,
             environment: None,
         };
@@ -983,6 +1074,7 @@ mod tests {
         let retained = AuthorizedPeer {
             peer_id: Uuid::new_v4(),
             network_id: "retained".to_owned(),
+            node_name: None,
             role: MeshCoordinateRole::Dial,
             environment: None,
         };
@@ -1011,6 +1103,7 @@ mod tests {
             &AuthorizedPeer {
                 peer_id: dial_id,
                 network_id: network_id.clone(),
+                node_name: None,
                 role: MeshCoordinateRole::Dial,
                 environment: None,
             },
@@ -1021,6 +1114,7 @@ mod tests {
             &AuthorizedPeer {
                 peer_id: target_id,
                 network_id,
+                node_name: None,
                 role: MeshCoordinateRole::Peer,
                 environment: None,
             },
@@ -1223,6 +1317,162 @@ mod tests {
         .expect("revocation did not close the active coordinate stream")
         .expect("revoked coordinate stream returned a transport error");
         assert!(ended.is_none(), "revoked coordinate stream remained active");
+        server.abort();
+    }
+
+    async fn stored_last_seen(store: &MemoryStore) -> chrono::DateTime<chrono::Utc> {
+        store
+            .node_get("network-test", "silent")
+            .await
+            .unwrap()
+            .expect("the silent node stays registered")
+            .last_seen_at
+    }
+
+    /// #2697: a node is online only while its session is live and recently
+    /// heard. A node that goes silent lists offline after the window, with
+    /// when it was last heard, but its session is never ended: once it pings
+    /// again it lists online. A node that keeps pinging stays online. When a
+    /// session ends, its last-heard time is kept in the store.
+    #[tokio::test]
+    async fn a_silent_node_lists_offline_and_comes_back_when_it_pings() {
+        let store = Arc::new(MemoryStore::new());
+        store
+            .network_create_with_owner(
+                "network-test",
+                "org-test",
+                "local-owner:org-test",
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        seed_enrollment(&store, "cw_enr_liveness-live", "live").await;
+        seed_enrollment(&store, "cw_enr_liveness-silent", "silent").await;
+        let offline_after = Duration::from_millis(600);
+        let (address, server) = serve(crate::server::router_with_store_offline_after(
+            config(),
+            Arc::clone(&store) as crate::store::SharedStore,
+            offline_after,
+        ))
+        .await;
+        let list = || async {
+            node_client(address, "cw_test")
+                .list_mesh_nodes(ListMeshNodesRequest {
+                    org_id: "org-test".to_owned(),
+                    network_id: "network-test".to_owned(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_owned()
+                .nodes
+                .into_iter()
+                .map(|node| (node.name.clone(), node))
+                .collect::<HashMap<_, _>>()
+        };
+        let listed_last_seen = |node: &codewire_proto::codewire::v1::MeshNode| {
+            let listed = node.last_seen_at.as_option().expect("last seen");
+            chrono::DateTime::from_timestamp(listed.seconds, listed.nanos as u32).unwrap()
+        };
+
+        let mut live = client(address, "cw_enr_liveness-live")
+            .coordinate()
+            .await
+            .unwrap();
+        live.send(request(hello(MeshCoordinateRole::Peer)))
+            .await
+            .unwrap();
+        response(&mut live).await;
+        let mut silent = client(address, "cw_enr_liveness-silent")
+            .coordinate()
+            .await
+            .unwrap();
+        silent
+            .send(request(hello(MeshCoordinateRole::Peer)))
+            .await
+            .unwrap();
+        response(&mut silent).await;
+        let nodes = list().await;
+        assert!(nodes["live"].connected && nodes["silent"].connected);
+        let registered = stored_last_seen(&store).await;
+
+        // The live node pings faster than the window. The silent one sends
+        // one ping, then nothing, and never closes its stream.
+        let pinger = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                if live.send(request(CoordinatePing::default())).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let pinged_at = chrono::Utc::now();
+        silent
+            .send(request(CoordinatePing::default()))
+            .await
+            .unwrap();
+        tokio::time::sleep(offline_after * 2).await;
+
+        let nodes = list().await;
+        assert!(nodes["live"].connected, "a pinging node went offline");
+        let offline = &nodes["silent"];
+        assert!(!offline.connected, "a silent node still lists online");
+        let heard = listed_last_seen(offline);
+        assert!(
+            registered < pinged_at
+                && heard >= pinged_at
+                && heard <= pinged_at + chrono::Duration::milliseconds(500),
+            "an offline node lists its last message: {heard} vs {pinged_at}"
+        );
+        // Silence never ends the session: nothing arrives, and the stream
+        // stays open.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                silent.message::<MeshCoordinatorServiceCoordinateResponse>(),
+            )
+            .await
+            .is_err(),
+            "a silent session was ended or sent something"
+        );
+
+        // Waking, it pings on the same session and lists online again.
+        let woke_at = chrono::Utc::now();
+        silent
+            .send(request(CoordinatePing::default()))
+            .await
+            .unwrap();
+        let back = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let nodes = list().await;
+                if nodes["silent"].connected {
+                    break nodes;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a node that pinged again did not list online");
+        assert!(listed_last_seen(&back["silent"]) >= woke_at);
+
+        // A session that ends writes its last-heard time to the store.
+        drop(silent);
+        let stored = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let stored = stored_last_seen(&store).await;
+                if stored >= woke_at {
+                    break stored;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the session's end did not record when it was last heard");
+        let nodes = list().await;
+        assert!(!nodes["silent"].connected);
+        assert_eq!(listed_last_seen(&nodes["silent"]), stored);
+        pinger.abort();
         server.abort();
     }
 

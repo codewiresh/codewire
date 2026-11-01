@@ -26,7 +26,11 @@ message MeshNode {
   string network_id = 2;
   string name = 3;
   string peer_url = 4;
+  // Whether the node holds a live coordinator session now.
   bool connected = 5;
+  // When the node's coordinator session last heard from it: now-ish while
+  // connected, its last message once offline.
+  google.protobuf.Timestamp last_seen_at = 6;
 }
 
 // MeshNodeEnrollment is a bounded capability record for registering one named

@@ -78,6 +78,7 @@ const node = (name: string) => ({
   name,
   peerUrl: `https://peer.example/${name}`,
   connected: true,
+  lastSeenAt: createdAt,
 });
 const member = () => ({
   orgId,
@@ -439,6 +440,7 @@ try {
         name: "node-one",
         peer_url: "https://peer.example/node-one",
         connected: true,
+        last_seen_at: "2026-03-31T23:33:20Z",
       }),
     "node conversion preserves every field",
   );

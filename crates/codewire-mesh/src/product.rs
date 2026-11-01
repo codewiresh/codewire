@@ -5,7 +5,7 @@
 //! are reduced to digests before store access and never enter response or
 //! error values.
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use codewire_proto::codewire::internal::v1::MeshAuthorizationContext;
 use codewire_server_core::{AppError, AppResult};
 use rand::RngCore;
@@ -568,7 +568,13 @@ impl MeshProductService {
         node_name: &str,
         credential: ForwardedMeshCredential,
     ) -> AppResult<()> {
-        self.authorize_network(organization_id, network_id, credential, RequiredRole::Owner)
+        let principal = self
+            .authorize_network(
+                organization_id,
+                network_id,
+                credential,
+                RequiredRole::Member,
+            )
             .await?;
         let node_name = required_identifier(node_name, "node_name")?;
         let Some(node) = self
@@ -579,6 +585,16 @@ impl MeshProductService {
         else {
             return Err(AppError::NotFound("Mesh node not found".into()));
         };
+        // A network owner revokes any node. A member revokes only a node
+        // recorded as their own, such as a local VM they attached (#2697);
+        // a hosted environment's node is owned by its environment.
+        if node.owner_subject != principal.principal_id
+            && !self
+                .is_network_owner(network_id, &principal.principal_id)
+                .await?
+        {
+            return Err(AppError::Forbidden);
+        }
         // A revoked environment never registers here again (#3350).
         if let Some(environment_id) = environment_of_owner(&node.owner_subject) {
             self.store
@@ -588,6 +604,28 @@ impl MeshProductService {
         }
         self.store
             .node_delete(network_id, &node_name)
+            .await
+            .map_err(store_error)
+    }
+
+    async fn is_network_owner(&self, network_id: &str, principal_id: &str) -> AppResult<bool> {
+        Ok(self
+            .store
+            .network_member_get(network_id, principal_id)
+            .await
+            .map_err(store_error)?
+            .is_some_and(|member| member.role == NETWORK_ROLE_OWNER))
+    }
+
+    /// Records when a node's coordinator session last heard from it.
+    pub(crate) async fn mark_node_seen(
+        &self,
+        network_id: &str,
+        node_name: &str,
+        at: DateTime<Utc>,
+    ) -> AppResult<()> {
+        self.store
+            .node_mark_seen(network_id, node_name, at)
             .await
             .map_err(store_error)
     }

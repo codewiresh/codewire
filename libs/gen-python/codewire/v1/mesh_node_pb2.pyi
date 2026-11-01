@@ -11,18 +11,20 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class MeshNode(_message.Message):
-    __slots__ = ("org_id", "network_id", "name", "peer_url", "connected")
+    __slots__ = ("org_id", "network_id", "name", "peer_url", "connected", "last_seen_at")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     NETWORK_ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     PEER_URL_FIELD_NUMBER: _ClassVar[int]
     CONNECTED_FIELD_NUMBER: _ClassVar[int]
+    LAST_SEEN_AT_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     network_id: str
     name: str
     peer_url: str
     connected: bool
-    def __init__(self, org_id: _Optional[str] = ..., network_id: _Optional[str] = ..., name: _Optional[str] = ..., peer_url: _Optional[str] = ..., connected: _Optional[bool] = ...) -> None: ...
+    last_seen_at: _timestamp_pb2.Timestamp
+    def __init__(self, org_id: _Optional[str] = ..., network_id: _Optional[str] = ..., name: _Optional[str] = ..., peer_url: _Optional[str] = ..., connected: _Optional[bool] = ..., last_seen_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class MeshNodeEnrollment(_message.Message):
     __slots__ = ("id", "org_id", "network_id", "node_name", "owner_user_id", "issued_by_user_id", "expires_at", "created_at", "redeemed_at")

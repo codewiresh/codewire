@@ -49,7 +49,11 @@ class MeshNode:
     network_id: str
     name: str
     peer_url: str
+    # Whether the node holds a live coordinator session now.
     connected: bool
+    # When its coordinator session last heard from it; None from a server
+    # that does not report it.
+    last_seen_at: str | None = None
 
 
 @dataclass
@@ -226,6 +230,7 @@ def _node_from_proto(node: mesh_node_pb2.MeshNode) -> MeshNode:
         name=node.name,
         peer_url=node.peer_url,
         connected=node.connected,
+        last_seen_at=_optional_timestamp(node, "last_seen_at", "node last_seen_at"),
     )
 
 
@@ -333,7 +338,7 @@ def assert_mesh_converter_coverage() -> None:
     )
     _assert_fields(
         mesh_node_pb2.MeshNode.DESCRIPTOR,
-        ("org_id", "network_id", "name", "peer_url", "connected"),
+        ("org_id", "network_id", "name", "peer_url", "connected", "last_seen_at"),
     )
     _assert_fields(
         mesh_node_pb2.MeshNodeEnrollment.DESCRIPTOR,

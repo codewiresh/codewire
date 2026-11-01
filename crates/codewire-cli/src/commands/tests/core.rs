@@ -1579,12 +1579,14 @@ fn nodes_have_multiple_networks_ignores_blank_networks() {
             name: "legacy".to_string(),
             peer_url: String::new(),
             connected: false,
+            last_seen_at: String::new(),
         },
         Node {
             network_id: "project-alpha".to_string(),
             name: "builder".to_string(),
             peer_url: String::new(),
             connected: true,
+            last_seen_at: String::new(),
         },
     ];
 
@@ -1599,12 +1601,14 @@ fn nodes_have_multiple_networks_detects_distinct_networks() {
             name: "builder".to_string(),
             peer_url: String::new(),
             connected: true,
+            last_seen_at: String::new(),
         },
         Node {
             network_id: "project-beta".to_string(),
             name: "planner".to_string(),
             peer_url: String::new(),
             connected: false,
+            last_seen_at: String::new(),
         },
     ];
 

@@ -15,7 +15,7 @@ pub use config::{
     MESH_AUTHORIZATION_URL_ENV, MESH_URL_ENV, MeshAuthorizationConfig, STUN_SERVERS_ENV,
     StunServerConfig,
 };
-pub use server::{router, router_with_store, serve};
+pub use server::{router, router_with_store, router_with_store_offline_after, serve};
 pub use store::{
     AccessGrant, AccessGrantFilter, GROUP_DEBUG_FULL, GROUP_DEBUG_NONE, GROUP_DEBUG_OBSERVE_ONLY,
     GROUP_MESSAGES_INTERNAL_ONLY, GROUP_MESSAGES_OPEN, Group, GroupBinding, GroupMember,

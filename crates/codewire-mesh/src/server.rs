@@ -109,6 +109,20 @@ pub fn router_with_store(config: Config, store: SharedStore) -> Router {
     router_from_state(AppState::new(config, store))
 }
 
+/// A router that lists a node offline once its session has been silent for
+/// `offline_after`, for tests that cannot wait the production 45 s (#2697).
+#[doc(hidden)]
+pub fn router_with_store_offline_after(
+    config: Config,
+    store: SharedStore,
+    offline_after: std::time::Duration,
+) -> Router {
+    let mut state = AppState::new(config, store);
+    state.mesh_coordinate =
+        crate::mesh_coordinate::MeshCoordinateState::offline_after(offline_after);
+    router_from_state(state)
+}
+
 pub(crate) fn router_from_state(state: AppState) -> Router {
     AppBuilder::new("mesh")
         .with_health()

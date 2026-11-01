@@ -283,7 +283,8 @@ pub(crate) async fn handle_network_command(
                         &mesh,
                         &MeshContext::new(&mesh, Some(org_id)),
                         network_id.as_deref(),
-                        &nodes
+                        &nodes,
+                        chrono::Utc::now(),
                     )
                 ),
             }

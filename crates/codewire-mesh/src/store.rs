@@ -377,6 +377,14 @@ pub trait MeshStore: Send + Sync + 'static {
     ) -> Result<Option<NodeRecord>, StoreError>;
     async fn node_list(&self, network_id: &str) -> Result<Vec<NodeRecord>, StoreError>;
     async fn node_list_all(&self) -> Result<Vec<NodeRecord>, StoreError>;
+    /// Record that the node's coordinator session last heard from it at
+    /// `at`, never moving the time back. An unregistered node stays absent.
+    async fn node_mark_seen(
+        &self,
+        network_id: &str,
+        name: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(), StoreError>;
     /// Delete a node and invalidate every unconsumed enrollment fixed to its
     /// name as one atomic store operation.
     async fn node_delete(&self, network_id: &str, name: &str) -> Result<(), StoreError>;
@@ -1110,6 +1118,22 @@ impl MeshStore for MemoryStore {
                 .then_with(|| a.name.cmp(&b.name))
         });
         Ok(nodes)
+    }
+
+    async fn node_mark_seen(
+        &self,
+        network_id: &str,
+        name: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let mut state = self.state.lock().await;
+        if let Some(node) = state
+            .nodes
+            .get_mut(&(network_id.to_string(), name.to_string()))
+        {
+            node.last_seen_at = node.last_seen_at.max(at);
+        }
+        Ok(())
     }
 
     async fn node_delete(&self, network_id: &str, name: &str) -> Result<(), StoreError> {
@@ -2472,6 +2496,27 @@ impl MeshStore for PostgresMeshStore {
         rows.into_iter().map(row_to_node).collect()
     }
 
+    async fn node_mark_seen(
+        &self,
+        network_id: &str,
+        name: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            UPDATE nodes
+            SET last_seen_at = GREATEST(last_seen_at, $3)
+            WHERE network_id = $1 AND name = $2
+            "#,
+        )
+        .bind(network_id)
+        .bind(name)
+        .bind(at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn node_delete(&self, network_id: &str, name: &str) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
@@ -3336,6 +3381,59 @@ mod migration_tests {
                 .iter()
                 .all(|migration| migration.checksum.len() == 48)
         );
+    }
+
+    /// #2697: a session's end records when the node was last heard from,
+    /// never moving it back, and leaves an unregistered node absent.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn a_node_keeps_its_latest_last_seen_time() -> anyhow::Result<()> {
+        let test_db = TestDatabase::create(&test_database_url()?).await?;
+        let result = async {
+            let store = start(&test_db.url).await?;
+            let registered = Utc::now() - Duration::minutes(5);
+            store
+                .network_create_with_owner("network-seen", "org", "owner", registered)
+                .await?;
+            store
+                .node_register(NodeRecord {
+                    network_id: "network-seen".to_owned(),
+                    name: "laptop".to_owned(),
+                    peer_url: String::new(),
+                    github_id: None,
+                    owner_subject: "owner".to_owned(),
+                    authorized_by: "owner".to_owned(),
+                    enrollment_id: String::new(),
+                    authorized_at: registered,
+                    last_seen_at: registered,
+                })
+                .await?;
+            let seen = registered + Duration::minutes(3);
+            store.node_mark_seen("network-seen", "laptop", seen).await?;
+            // An older session ending later never moves the time back.
+            store
+                .node_mark_seen("network-seen", "laptop", registered + Duration::minutes(1))
+                .await?;
+            let node = store
+                .node_get("network-seen", "laptop")
+                .await?
+                .context("node")?;
+            anyhow::ensure!(
+                (node.last_seen_at - seen).num_milliseconds().abs() < 1,
+                "{} vs {seen}",
+                node.last_seen_at
+            );
+            // A revoked node is not brought back by its session's end.
+            store.node_delete("network-seen", "laptop").await?;
+            store
+                .node_mark_seen("network-seen", "laptop", Utc::now())
+                .await?;
+            anyhow::ensure!(store.node_get("network-seen", "laptop").await?.is_none());
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
     }
 
     #[tokio::test]

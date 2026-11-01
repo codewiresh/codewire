@@ -56,7 +56,10 @@ export interface MeshNode {
   network_id: string;
   name: string;
   peer_url: string;
+  /** Whether the node holds a live coordinator session now. */
   connected: boolean;
+  /** When its coordinator session last heard from it; absent from a server that does not report it. */
+  last_seen_at?: string;
 }
 
 export interface MeshEnrollment {
@@ -260,6 +263,7 @@ function fromProtoNode(node: ProtoMeshNode): MeshNode {
     name: node.name,
     peer_url: node.peerUrl,
     connected: node.connected,
+    last_seen_at: optionalTimestamp(node.lastSeenAt),
   };
 }
 
@@ -387,6 +391,7 @@ export function assertMeshConverterCoverage(): void {
     "name",
     "peer_url",
     "connected",
+    "last_seen_at",
   ]);
   assertDescriptorFields("enrollment", MeshNodeEnrollmentSchema.fields, [
     "id",

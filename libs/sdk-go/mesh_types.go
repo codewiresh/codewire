@@ -17,7 +17,11 @@ type MeshNode struct {
 	NetworkID string `json:"network_id,omitempty"`
 	Name      string `json:"name"`
 	PeerURL   string `json:"peer_url,omitempty"`
-	Connected bool   `json:"connected"`
+	// Connected reports whether the node holds a live coordinator session.
+	Connected bool `json:"connected"`
+	// LastSeenAt is when its coordinator session last heard from it; nil
+	// from a server that does not report it.
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 }
 
 // MeshEnrollment is an enrollment token for registering nodes.

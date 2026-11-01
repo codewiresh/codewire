@@ -241,6 +241,7 @@ fn node(value: rpc::MeshNode) -> Node {
         name: value.name,
         peer_url: value.peer_url,
         connected: value.connected,
+        last_seen_at: timestamp(value.last_seen_at.into_option()),
     }
 }
 
@@ -297,7 +298,11 @@ pub struct Node {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub peer_url: String,
+    /// Whether the node holds a live coordinator session now (#2697).
     pub connected: bool,
+    /// When its coordinator session last heard from it (RFC 3339).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_seen_at: String,
 }
 
 #[derive(Clone, Serialize, PartialEq, Eq)]
@@ -660,6 +665,7 @@ mod tests {
                 name: "builder".into(),
                 peer_url: "wss://builder.example.test".into(),
                 connected: true,
+                last_seen_at: String::new(),
             }]
         );
         client

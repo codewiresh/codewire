@@ -374,6 +374,18 @@ ports listen on `127.0.0.1` only. A local VM joins Codewire Mesh only when a
 network is selected at creation; the host owns the Mesh identity and the VM
 sees only admitted streams for its declared ports.
 
+A Mesh node is online only while it holds a live coordinator session that
+Mesh has heard from in the last 45 s. Every Mesh client pings every 15 s, so a
+node that goes silent shows offline within 45 s; Mesh records when it last
+heard from each node. Silence never ends a session: a local VM's transport
+cannot rejoin within its generation, so a node waking from a sleep keeps its
+session and shows online again. The live sessions are in Mesh's memory, which is
+complete only while Mesh runs one replica; more replicas would need that
+record in the Mesh database. Who may revoke a node (#2697): a network owner,
+any node; a member, only a node recorded as their own, such as a local VM they
+attached. A hosted environment's node belongs to its environment: a member
+cannot revoke it, and it leaves the network when the environment is destroyed.
+
 ### Credentials on the host
 
 The local credential authority (`cw __local-credential-authority`, on

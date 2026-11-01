@@ -564,6 +564,7 @@ class MeshServiceFixture:
             name=name,
             peer_url=f"https://peer.example/{name}",
             connected=True,
+            last_seen_at=MESH_CREATED_AT,
         )
 
     @staticmethod
@@ -955,6 +956,7 @@ class MeshConnectTransportTestCase(unittest.TestCase):
             nodes[0].peer_url, "https://peer.example/node-one"
         )
         self.assertTrue(nodes[0].connected)
+        self.assertEqual(nodes[0].last_seen_at, "2026-04-01T00:00:00Z")
         self.client.nodes.revoke(
             MESH_ORG_ID, MESH_NETWORK_ID, "node-one"
         )

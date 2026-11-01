@@ -39,9 +39,13 @@ func fromProtoMeshNode(node *codewirev1.MeshNode) (MeshNode, error) {
 	if node == nil {
 		return MeshNode{}, nil
 	}
+	lastSeenAt, err := optionalMeshTimestamp("node last_seen_at", node.GetLastSeenAt())
+	if err != nil {
+		return MeshNode{}, err
+	}
 	return MeshNode{
 		OrgID: node.GetOrgId(), NetworkID: node.GetNetworkId(), Name: node.GetName(),
-		PeerURL: node.GetPeerUrl(), Connected: node.GetConnected(),
+		PeerURL: node.GetPeerUrl(), Connected: node.GetConnected(), LastSeenAt: lastSeenAt,
 	}, nil
 }
 
@@ -250,7 +254,7 @@ func ensureMeshConverterCoverage() error {
 			fields     []protoreflect.Name
 		}{
 			{codewirev1.File_codewire_v1_mesh_network_proto.Messages().ByName("MeshNetwork"), []protoreflect.Name{"id", "org_id", "created_at", "node_count", "invite_count"}},
-			{codewirev1.File_codewire_v1_mesh_node_proto.Messages().ByName("MeshNode"), []protoreflect.Name{"org_id", "network_id", "name", "peer_url", "connected"}},
+			{codewirev1.File_codewire_v1_mesh_node_proto.Messages().ByName("MeshNode"), []protoreflect.Name{"org_id", "network_id", "name", "peer_url", "connected", "last_seen_at"}},
 			{codewirev1.File_codewire_v1_mesh_node_proto.Messages().ByName("MeshNodeEnrollment"), []protoreflect.Name{"id", "org_id", "network_id", "node_name", "owner_user_id", "issued_by_user_id", "expires_at", "created_at", "redeemed_at"}},
 			{codewirev1.File_codewire_v1_mesh_group_proto.Messages().ByName("MeshGroup"), []protoreflect.Name{"org_id", "network_id", "name", "created_at", "created_by_user_id", "members", "policy"}},
 			{codewirev1.File_codewire_v1_mesh_group_proto.Messages().ByName("MeshGroupMember"), []protoreflect.Name{"org_id", "network_id", "group_name", "node_name", "session_name", "created_at"}},

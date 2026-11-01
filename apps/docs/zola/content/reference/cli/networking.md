@@ -1,7 +1,7 @@
 ---
 title: Networking
 description: network, mesh, control and member, and the global --member option for driving an enrolled trusted host.
-updated: 2026-10-26
+updated: 2026-11-01
 weight: 6
 aliases: ["/cli/networking"]
 ---
@@ -86,8 +86,12 @@ printf 'GET / HTTP/1.0\r\n\r\n' | cw network connect app-2 8080
 A member serves only its own application ports, and members of other
 networks are never reachable.
 
-`network nodes` lists enrolled nodes and the status each node last reported;
-it does not check connectivity. Deleting a network retires its name for good
+`network nodes` lists enrolled nodes. A node is online while it holds a live
+session with the Mesh, and shows offline within 45 seconds of going silent;
+LAST SEEN says when the Mesh last heard from it. It does not check
+connectivity between members. A network owner can revoke any node; a member
+can revoke only a node they enrolled, such as a local VM they attached.
+Deleting a network retires its name for good
 (old connections must never reach a replacement); stop or detach its
 environments and revoke its nodes first. Deletion shows the exact Mesh,
 endpoint and organization before asking, and reports a saved selection it
