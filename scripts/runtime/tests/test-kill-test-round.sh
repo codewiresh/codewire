@@ -94,7 +94,10 @@ log="printf '%s\n' '[2026-11-01T12:59:00.1Z]: out of memory: Killed process 1 (c
 
 # Every mutating call names this tool's own objects.
 # A whole round against a stand-in cluster: the VM is killed while it fills its RAM,
-# before any write. The round still reports a loss with its peaks, and cleans up.
+# before any write. The round still reports a loss with its peaks, and cleans up. The
+# stand-in sampler runs in the background, so the Pod fails only once it has sampled:
+# otherwise a slow runner kills it before it writes, and the round, rightly, can't read
+# the VM (exit 2).
 # The round calls these stand-ins and reads DMESG.
 # shellcheck disable=SC2329,SC2034
 round_with_kill() (
@@ -103,11 +106,13 @@ round_with_kill() (
     case "$*" in
       *"get pod cw-oom-sampler -o jsonpath={.spec.nodeName}") echo node-a ;;
       *"exec cw-oom-sampler -- cat "*) echo 0x0007 ;;
-      *"exec cw-oom-sampler -- sh -c "*) printf '%s\n' '0 300 0 18000' '0 420 1 19000' ;;
+      *"exec cw-oom-sampler -- sh -c "*) printf '%s\n' '0 300 0 18000' '0 420 1 19000'; : >"$work/sampled" ;;
       "get runtimeclass commodity -o json") echo '{"handler":"kata-clh","overhead":{"podFixed":{"cpu":"250m","memory":"1Gi"}},"scheduling":{}}' ;;
       *"apply -f -") cat >/dev/null ;;
       *"get pod cw-kill-test -o jsonpath={.metadata.uid} {.status.phase}") echo "uid-1 Running" ;;
-      *"get pod cw-kill-test -o jsonpath={.status.phase}") echo Failed ;;
+      *"get pod cw-kill-test -o jsonpath={.status.phase}")
+        for _ in $(seq 1 100); do [[ -e "$work/sampled" ]] && break; command sleep 0.05; done
+        echo Failed ;;
       *" logs cw-kill-test "*) echo "main holding 15GiB" ;;
       *"delete "* | *"annotate "*) echo "$*" >>"$work/cleaned" ;;
     esac
@@ -117,6 +122,7 @@ round_with_kill() (
   round 16 4 1Gi
 )
 : >"$work/cleaned"
+rm -f "$work/sampled"
 set +e
 out="$(round_with_kill 2>"$work/round.err")"
 status=$?
