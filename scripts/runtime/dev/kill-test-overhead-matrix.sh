@@ -46,7 +46,8 @@ ALL_CELLS=0
 KILL_TEST_ROUND="${KILL_TEST_ROUND:-}"
 # Rough round length for planning, as kill-test-round.sh runs one: the writers'
 # time, about 20 s per GiB to fill RAM, and about 90 s to start and remove the Pod.
-WRITE_SECONDS="${KILL_TEST_WRITE_SECONDS:-120}"
+# As the round: the real workload's budget is longer.
+WRITE_SECONDS="${KILL_TEST_WRITE_SECONDS:-$([[ "${KILL_TEST_WORKLOAD:-fill}" == real ]] && echo 2400 || echo 120)}"
 
 log() { printf '[kill-test] %s\n' "$*" >&2; }
 die() { printf '[kill-test] ERROR: %s\n' "$*" >&2; exit 1; }

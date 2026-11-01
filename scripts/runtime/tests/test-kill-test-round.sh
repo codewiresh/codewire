@@ -143,6 +143,37 @@ if grep -nE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|servernet|hz-eu' "$R
   fail "a host name or address is in the tool"
 fi
 
+# The real workload: the product's shape on Block. Only the one-shot mounter holds the
+# device; the workspace and DinD see the disk through propagation at the product's
+# paths; /usr/local stays on the root filesystem; DinD is the pinned product image.
+real="$(KILL_TEST_WORKLOAD=real objects 16 4 1Gi)"
+pod="$(jq '.[2]' <<<"$real")"
+[[ "$(jq -r '.[1].spec.volumeMode' <<<"$real")" == Block ]] || fail "real: not a Block volume"
+[[ "$(jq -c '[.spec.initContainers[] | {name, dev: [.volumeDevices[]?.devicePath], privileged: .securityContext.privileged}]' <<<"$pod")" == '[{"name":"mounter","dev":["/dev/cwws"],"privileged":true}]' ]] ||
+  fail "real: the mounter: $(jq -c .spec.initContainers <<<"$pod")"
+[[ "$(jq '[.spec.containers[] | select(.volumeDevices)] | length' <<<"$pod")" == 0 ]] || fail "real: a workload container holds the device"
+[[ "$(jq -c '[.spec.initContainers[0].volumeMounts[].mountPropagation] | unique' <<<"$pod")" == '["Bidirectional"]' ]] || fail "real: mounter propagation"
+[[ "$(jq -r '[.spec.containers[0].volumeMounts[] | select(.name == "wsmnt" or .name == "wstmp") | "\(.mountPath):\(.mountPropagation)"] | join(" ")' <<<"$pod")" == \
+  "/workspace:HostToContainer /home/codewire:HostToContainer /tmp:HostToContainer /var/tmp:HostToContainer" ]] || fail "real: workspace mounts"
+[[ "$(jq -r '.spec.volumes[] | select(.name == "docker-sock") | .emptyDir.medium' <<<"$pod")" == Memory ]] ||
+  fail "real: the Docker socket is not in guest memory"
+if jq -e '.spec.containers[].volumeMounts[] | select(.mountPath | startswith("/usr"))' <<<"$pod" >/dev/null; then
+  fail "real: /usr is mounted over"
+fi
+[[ "$(jq -c '[.spec.containers[] | {name, privileged: (.securityContext.privileged // false), memory: .resources.limits.memory}]' <<<"$pod")" == \
+  '[{"name":"main","privileged":false,"memory":"16Gi"},{"name":"dind","privileged":true,"memory":"4Gi"}]' ]] || fail "real: containers"
+[[ "$(jq -r '.spec.containers[1].image' <<<"$pod")" =~ ^docker\.io/library/docker:[0-9.]+-dind@sha256:[0-9a-f]{64}$ ]] || fail "real: DinD image not the pin"
+[[ "$(grep -c 'cw-kill-test-held-' <<<"$(real_main_script)")" -ge 2 && "$(grep -c 'cw-kill-test-held-' <<<"$(real_dind_script)")" -ge 2 ]] ||
+  fail "real: the containers free their fills without waiting for each other"
+grep -F 'FILL_SHORT' <<<"$(real_main_script)" >/dev/null || fail "real: a short fill goes unnoticed"
+grep -F 'mount --bind /mnt/ws/.codewire/tmp /mnt/tmp' <<<"$(real_mounter_script)" >/dev/null ||
+  fail "real: /tmp is not the product's temp directory on the workspace disk"
+# shellcheck disable=SC2016
+grep -F 'STEP $name start' <<<"$(real_main_script)" >/dev/null || fail "real: steps don't print their start"
+[[ "$(grep -oE '^step [a-z]+' <<<"$(real_main_script)" | tr '\n' ' ')" == "step go step docker step rust " ]] || fail "real: step order"
+if KILL_TEST_WORKLOAD=real KILL_TEST_VOLUME=virtiofs "$ROUND" 8 4 1Gi >/dev/null 2>&1; then fail "real ran on virtio-fs"; fi
+if KILL_TEST_WORKLOAD=synthetic "$ROUND" 8 4 1Gi >/dev/null 2>&1; then fail "accepted an unknown workload"; fi
+
 # Refusals before touching anything.
 for bad in "1 2 1Gi" "8 4 1G" "8 x 1Gi"; do
   # shellcheck disable=SC2086
