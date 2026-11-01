@@ -2623,6 +2623,10 @@ signal.pause()
   printf '%s\n' "$canaries" | sudo -n /usr/bin/python3 -I "$scanner" "${pids[@]}" \
     >"$SMOKE_ROOT/network-memory-scan.report" 2>&1 || status="$?"
   cat "$SMOKE_ROOT/network-memory-scan.report" >>"$TRANSCRIPT"
+  # The report names processes and counts, never a value.
+  while IFS= read -r line; do
+    log "network: memory scan: $line"
+  done <"$SMOKE_ROOT/network-memory-scan.report"
   case "$status" in
     0) log "network: no synthetic provider value in the memory of ${#pids[@]} serving processes" ;;
     1) die 'a synthetic provider value is in the memory of a serving process (see the report)' ;;
@@ -3500,7 +3504,10 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   wait_for_journal_complete ||
     die 'restarted broker-bound native stop did not finish its journal'
   assert_direct_share_processes_stopped
-  scan_for_credential_canary before-delete-access-token "$CREDENTIAL_CANARY"
+  # The Codex access token is not scanned for here: its delivery into the
+  # environment's persistent Codex home is the listed direct delivery exception
+  # (docs/dev/SECRETS-AND-CREDENTIALS.md). The refresh token never leaves the
+  # broker, and the disk's deletion below is scanned for both.
   scan_for_credential_canary before-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
   scan_for_credential_canary before-delete-github-token "$GITHUB_CREDENTIAL_CANARY"
   scan_for_credential_canary before-delete-openai-key "$OPENAI_CREDENTIAL_CANARY"

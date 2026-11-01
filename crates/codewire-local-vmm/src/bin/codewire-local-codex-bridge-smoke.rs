@@ -40,6 +40,7 @@ mod linux {
         CredentialAuthKind, CredentialId, CredentialStatus, EnvironmentId,
     };
     use codewire_daemon::client::{CredentialBridgeConnection, SessionClient, v1};
+    use codewire_daemon::codex_home::login::CODEX_MANAGED_REFRESH_TOKEN;
     use codewire_daemon_bridge::client::{
         DaemonClient, DaemonClientError, DaemonRunInput, DaemonRunOutput, DaemonRunReceiver,
         DaemonRunSender, DaemonRunStart,
@@ -96,6 +97,10 @@ mod linux {
     const CODEX_BIN: &str = "codex";
     const CODEX_MODEL: &str = "codewire-synthetic";
     const CODEX_PROMPT: &str = "Return the synthetic marker.";
+    /// Guest-local and gone with the VM: the route proof's Codex home.
+    const PROXY_CODEX_HOME: &str = "/tmp/codewire-smoke-codex-home";
+    /// The daemon delivers a login when it starts and checks every two minutes.
+    const CODEX_LOGIN_SETTLE: Duration = Duration::from_secs(150);
     const CODEX_MARKER: &str = "CWCODEX149 synthetic";
     const MANAGED_CODEX_MARKER: &str = "CWCODEX149 broker [REDACTED]";
     const MANAGED_OPENAI_MARKER: &str = "CWOPENAI broker [REDACTED]";
@@ -294,7 +299,7 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
 
         stage("config-check");
         if args.managed_broker {
-            require_codex_projection(&daemon, &environment.working_directory).await?;
+            require_codex_login_delivered(&daemon).await?;
         } else {
             require(environment.access_profile_id.is_empty())?;
             require_unselected_codex_home(&daemon).await?;
@@ -660,6 +665,9 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
             &expected_audit,
         )
         .await?;
+
+        stage("managed-codex-login-removed");
+        require_codex_projection_restored(daemon, &environment.working_directory).await?;
 
         stage("managed-authority-loss-probe-ready");
         let mut probe =
@@ -1652,17 +1660,29 @@ function generalEgress(){
         require(completed)
     }
 
+    /// Stock Codex over the broker route. A delivered login takes Codex's own
+    /// home to its built-in provider, which this smoke must never contact, so
+    /// the route is proved from a private home holding the exact configuration
+    /// the product writes when no login is delivered.
     async fn require_managed_codex(
         client: &SessionClient,
         working_directory: &str,
     ) -> SmokeResult<()> {
-        let output = run_transient(
-            client,
-            codex_command(),
-            working_directory,
-            smoke_environment(),
-        )
-        .await?;
+        let config = CodexProviderProjection::for_loopback_port(CREDENTIAL_BRIDGE_LOOPBACK_PORT)?
+            .into_config_toml()
+            .replace('\'', "'\\''");
+        // The daemon refuses CODEX_HOME in an exec's environment on a local VM,
+        // so the workload sets its own, as any script of the user's can.
+        let mut command = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "umask 077 && mkdir -p {PROXY_CODEX_HOME} && printf %s '{config}' > {PROXY_CODEX_HOME}/config.toml && CODEX_HOME={PROXY_CODEX_HOME} exec \"$@\""
+            ),
+            "sh".to_owned(),
+        ];
+        command.extend(codex_command());
+        let output = run_transient(client, command, working_directory, smoke_environment()).await?;
         require(
             output.exit_code == 0
                 && output.stdout == format!("{MANAGED_CODEX_MARKER}\n").as_bytes()
@@ -2072,21 +2092,77 @@ function generalEgress(){
         require(output.exit_code == 0 && output.stdout.is_empty() && output.stderr.is_empty())
     }
 
-    async fn require_codex_projection(
+    /// Codex's own login is the listed direct delivery exception: it replaces
+    /// the proxy configuration and carries only a placeholder refresh token.
+    async fn require_codex_login_delivered(client: &SessionClient) -> SmokeResult<()> {
+        let command = format!(
+            "test \"$CODEX_HOME\" = '{CODEX_GUEST_HOME_PATH}' && test ! -e \"$CODEX_HOME/config.toml\" && cat -- \"$CODEX_HOME/auth.json\""
+        );
+        let deadline = Instant::now() + CODEX_LOGIN_SETTLE;
+        loop {
+            let output = run_transient(
+                client,
+                vec!["/bin/sh".into(), "-c".into(), command.clone()],
+                "/",
+                Vec::new(),
+            )
+            .await?;
+            if output.exit_code == 0 {
+                return validate_codex_login(&output);
+            }
+            if Instant::now() >= deadline {
+                stage("config-login-not-delivered");
+                return Err(failed());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    fn validate_codex_login(output: &ExecOutput) -> SmokeResult<()> {
+        if output.exit_code != 0 || !output.stderr.is_empty() {
+            stage("config-login-command-failed");
+            return Err(failed());
+        }
+        let login: Value = serde_json::from_slice(&output.stdout).map_err(|_| failed())?;
+        let token = |name: &str| login["tokens"][name].as_str().unwrap_or_default();
+        if login["auth_mode"] != "chatgpt"
+            || token("refresh_token") != CODEX_MANAGED_REFRESH_TOKEN
+            || token("access_token").is_empty()
+        {
+            stage("config-login-invalid");
+            return Err(failed());
+        }
+        Ok(())
+    }
+
+    /// A revoked login is removed and the proxy configuration returns, at the
+    /// daemon's next check at the latest.
+    async fn require_codex_projection_restored(
         client: &SessionClient,
         working_directory: &str,
     ) -> SmokeResult<()> {
+        let deadline = Instant::now() + CODEX_LOGIN_SETTLE;
+        while Instant::now() < deadline {
+            let output = codex_projection_output(client).await?;
+            if output.exit_code == 0 {
+                return validate_codex_projection(&output, working_directory);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        validate_codex_projection(&codex_projection_output(client).await?, working_directory)
+    }
+
+    async fn codex_projection_output(client: &SessionClient) -> SmokeResult<ExecOutput> {
         let command = format!(
             "test \"$CODEX_HOME\" = '{CODEX_GUEST_HOME_PATH}' && test -f \"$CODEX_HOME/config.toml\" && test ! -e \"$CODEX_HOME/auth.json\" && cat -- \"$CODEX_HOME/config.toml\""
         );
-        let output = run_transient(
+        run_transient(
             client,
             vec!["/bin/sh".into(), "-c".into(), command],
             "/",
             Vec::new(),
         )
-        .await?;
-        validate_codex_projection(&output, working_directory)
+        .await
     }
 
     fn validate_codex_projection(output: &ExecOutput, working_directory: &str) -> SmokeResult<()> {
@@ -2518,6 +2594,45 @@ function generalEgress(){
                         .is_err()
                 );
             }
+        }
+
+        fn codex_login_output(login: &Value) -> ExecOutput {
+            ExecOutput {
+                stdout: serde_json::to_vec(login).unwrap(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            }
+        }
+
+        #[test]
+        fn a_delivered_codex_login_holds_only_the_placeholder_refresh_token() {
+            let delivered = serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": "a", "refresh_token": CODEX_MANAGED_REFRESH_TOKEN},
+            });
+            assert!(validate_codex_login(&codex_login_output(&delivered)).is_ok());
+            for invalid in [
+                serde_json::json!({
+                    "auth_mode": "chatgpt",
+                    "tokens": {"access_token": "a", "refresh_token": "a-real-refresh-token"},
+                }),
+                serde_json::json!({
+                    "auth_mode": "apikey",
+                    "tokens": {"access_token": "a", "refresh_token": CODEX_MANAGED_REFRESH_TOKEN},
+                }),
+                serde_json::json!({
+                    "auth_mode": "chatgpt",
+                    "tokens": {"refresh_token": CODEX_MANAGED_REFRESH_TOKEN},
+                }),
+            ] {
+                assert!(validate_codex_login(&codex_login_output(&invalid)).is_err());
+            }
+            let mut failed_command = codex_login_output(&delivered);
+            failed_command.exit_code = 1;
+            assert!(validate_codex_login(&failed_command).is_err());
+            let mut noisy = codex_login_output(&delivered);
+            noisy.stderr = b"warning".to_vec();
+            assert!(validate_codex_login(&noisy).is_err());
         }
 
         #[test]
