@@ -83,9 +83,9 @@ use crate::sandbox::warm_pool::{
 };
 use crate::sandbox::{CRD_VERSION, EXTENSIONS_GROUP, SANDBOX_GROUP};
 pub use plan::{
-    Budget, DeleteReason, DesiredPool, Observed, Placement, Plan, Reservation, Write,
-    bootstrap_writes, budget_after, clamp_members, controller_capable, image_cache_warm,
-    member_reservation, node_budget, node_unfit, pool_observed_by_capable_controller,
+    Budget, ClassOverheads, DeleteReason, DesiredPool, Observed, Placement, Plan, Reservation,
+    Write, bootstrap_writes, budget_after, clamp_members, controller_capable, image_cache_warm,
+    member_reservation, node_budget, node_unfit, pod_overhead, pool_observed_by_capable_controller,
     quantity_millis, quantity_units, settle_budget, superseded_reservation, template_spec_current,
 };
 
@@ -199,17 +199,56 @@ impl WarmPoolConfig {
         images
     }
 
-    /// The RuntimeClass every pool renders (they share this replica's
-    /// runtime profile).
-    pub fn runtime_class(&self) -> Option<&str> {
-        self.pools
-            .first()?
-            .objects
-            .template
-            .pointer("/spec/podTemplate/spec/runtimeClassName")
-            .and_then(Value::as_str)
-            .filter(|name| !name.is_empty())
+    /// The RuntimeClasses the pools render, once each, in configuration
+    /// order. They share this replica's runtime profile; a commodity pool's
+    /// class is its memory tier's.
+    pub fn runtime_classes(&self) -> Vec<&str> {
+        let mut classes: Vec<&str> = Vec::new();
+        for pool in &self.pools {
+            let class = pool
+                .objects
+                .template
+                .pointer("/spec/podTemplate/spec/runtimeClassName")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty());
+            if let Some(class) = class
+                && !classes.contains(&class)
+            {
+                classes.push(class);
+            }
+        }
+        classes
     }
+}
+
+/// The fixed overhead of each named RuntimeClass, and the nodes the first
+/// one schedules to. The commodity tiers differ only in overhead, so the
+/// first class's nodes are every tier's.
+pub(crate) async fn read_runtime_classes(
+    client: &kube::Client,
+    names: &[&str],
+) -> kube::Result<(ClassOverheads, BTreeMap<String, String>)> {
+    let api = Api::<RuntimeClass>::all(client.clone());
+    let mut overheads = ClassOverheads::new();
+    let mut node_selector = None;
+    for name in names {
+        let class = api.get(name).await?;
+        let overhead = class
+            .overhead
+            .and_then(|overhead| overhead.pod_fixed)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(resource, quantity)| (resource, quantity.0))
+            .collect();
+        overheads.insert((*name).to_owned(), overhead);
+        node_selector.get_or_insert_with(|| {
+            class
+                .scheduling
+                .and_then(|scheduling| scheduling.node_selector)
+                .unwrap_or_default()
+        });
+    }
+    Ok((overheads, node_selector.unwrap_or_default()))
 }
 
 /// Leader-gated; runs until the process exits. Inert without configuration.
@@ -634,25 +673,9 @@ async fn reconcile_once(
 
     let cache_warm = image_cache_gate(client, namespace, config).await?;
 
-    // The node cap, from the RuntimeClass the pools render.
-    let (overhead, node_selector) = match config.runtime_class() {
-        Some(name) => {
-            let class = Api::<RuntimeClass>::all(client.clone()).get(name).await?;
-            let overhead: BTreeMap<String, String> = class
-                .overhead
-                .and_then(|overhead| overhead.pod_fixed)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(resource, quantity)| (resource, quantity.0))
-                .collect();
-            let selector = class
-                .scheduling
-                .and_then(|scheduling| scheduling.node_selector)
-                .unwrap_or_default();
-            (overhead, selector)
-        }
-        None => (BTreeMap::new(), BTreeMap::new()),
-    };
+    // The node cap, from the RuntimeClasses the pools render.
+    let (overheads, node_selector) =
+        read_runtime_classes(client, &config.runtime_classes()).await?;
     let nodes = Api::<Node>::all(client.clone())
         .list(&ListParams::default().labels(&selector_of(&node_selector)))
         .await?
@@ -667,10 +690,8 @@ async fn reconcile_once(
         .pools
         .iter()
         .map(|pool| {
-            member_reservation(
-                &pool.objects.template["spec"]["podTemplate"]["spec"],
-                &overhead,
-            )
+            let pod_spec = &pool.objects.template["spec"]["podTemplate"]["spec"];
+            member_reservation(pod_spec, pod_overhead(pod_spec, &overheads)?)
         })
         .collect();
     // #3572: another revision's pools of the same shapes count against the

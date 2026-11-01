@@ -15,9 +15,9 @@ use kube::Api;
 use sqlx::Row;
 
 use crate::sandbox::template::{
-    DAEMON_INIT_CONTAINER, DAEMON_VOLUME, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_CONFIDENTIAL,
-    RUNTIME_CLASS_RUNC, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL,
-    RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC, runtime_profile_spec,
+    DAEMON_INIT_CONTAINER, DAEMON_VOLUME, RUNTIME_CLASS_CONFIDENTIAL, RUNTIME_CLASS_RUNC,
+    RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_NONE,
+    RUNTIME_PROFILE_RUNC, is_commodity_runtime_class, runtime_profile_spec,
 };
 
 use super::ApiState;
@@ -403,19 +403,25 @@ fn status_init_container_image_id(pod: &Pod, name: &str) -> Option<String> {
 }
 
 fn runtime_from_class(runtime_class: &str) -> TrustReportRuntime {
-    let profile = match runtime_class.trim() {
+    let observed = runtime_class.trim();
+    let profile = match observed {
         "" => RUNTIME_PROFILE_NONE,
         RUNTIME_CLASS_RUNC => RUNTIME_PROFILE_RUNC,
-        RUNTIME_CLASS_COMMODITY => RUNTIME_PROFILE_COMMODITY,
+        class if is_commodity_runtime_class(class) => RUNTIME_PROFILE_COMMODITY,
         RUNTIME_CLASS_CONFIDENTIAL => RUNTIME_PROFILE_CONFIDENTIAL,
         other => other,
     };
     let spec = runtime_profile_spec(profile, "profile-default", false);
     let profile = spec.profile;
-    let runtime_class = spec.runtime_class_name;
+    // Each commodity memory tier is its own class; the report names the tier.
+    let runtime_class = if is_commodity_runtime_class(observed) {
+        observed.to_string()
+    } else {
+        spec.runtime_class_name
+    };
     let handler = match runtime_class.as_str() {
         RUNTIME_CLASS_CONFIDENTIAL => "kata-qemu-snp",
-        RUNTIME_CLASS_COMMODITY => "kata-clh",
+        class if is_commodity_runtime_class(class) => "kata-clh",
         RUNTIME_CLASS_RUNC => "runc",
         "" => "unknown",
         other => other,
@@ -552,6 +558,12 @@ mod tests {
         assert_eq!(commodity.profile, "commodity");
         assert_eq!(commodity.handler, "kata-clh");
         assert!(!commodity.confidential);
+        // A memory tier keeps its own class name in the report.
+        let tier = runtime_from_class("commodity-32g");
+        assert_eq!(tier.profile, "commodity");
+        assert_eq!(tier.runtime_class, "commodity-32g");
+        assert_eq!(tier.handler, "kata-clh");
+        assert!(!tier.confidential);
 
         let runc = runtime_from_class("runc");
         assert_eq!(runc.profile, "runc");

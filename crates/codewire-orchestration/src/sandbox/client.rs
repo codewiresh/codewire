@@ -29,14 +29,14 @@ use serde_json::Value;
 use super::template::{
     CpuSharingRatio, DOCKER_DATA_INIT_CONTAINER, DOCKER_DATA_INIT_ENV,
     KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
-    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, LEGACY_DIND_BOOTSTRAP_SCRIPT,
-    RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts, dind_bootstrap_script,
-    direct_udp_service_name, docker_data_init_container, docker_data_size_gib,
-    eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
-    pre_growth_dind_bootstrap_script, render_direct_udp_service, render_sandbox_shadow_pool,
-    render_sandbox_template, render_warm_member_bridge, render_workspace_daemon_network_policy,
-    render_workspace_daemon_service, warm_member_daemon_bridge_name,
-    workspace_daemon_network_policy_name, workspace_daemon_service_name,
+    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, LEGACY_DIND_BOOTSTRAP_SCRIPT, RUNTIME_CLASS_RUNC,
+    TemplateOpts, dind_bootstrap_script, direct_udp_service_name, docker_data_init_container,
+    docker_data_size_gib, eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
+    is_commodity_runtime_class, pre_growth_dind_bootstrap_script, render_direct_udp_service,
+    render_sandbox_shadow_pool, render_sandbox_template, render_warm_member_bridge,
+    render_workspace_daemon_network_policy, render_workspace_daemon_service,
+    warm_member_daemon_bridge_name, workspace_daemon_network_policy_name,
+    workspace_daemon_service_name,
 };
 use super::{
     CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_ORG_ID, LABEL_TYPE,
@@ -634,7 +634,9 @@ fn plan_daemon_image<'a>(
     };
     Ok(if entry.from == support_image {
         DaemonImagePlan::Current
-    } else if !["", RUNTIME_CLASS_RUNC, RUNTIME_CLASS_COMMODITY].contains(&runtime_class) {
+    } else if !(["", RUNTIME_CLASS_RUNC].contains(&runtime_class)
+        || is_commodity_runtime_class(runtime_class))
+    {
         DaemonImagePlan::Kept(DaemonImageKept::ConfidentialRuntime)
     } else if !super::warm_pool::digest_pinned(support_image) {
         DaemonImagePlan::Kept(DaemonImageKept::UnpinnedSupportImage)
@@ -849,7 +851,9 @@ fn dind_bootstrap_refresh(
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("workspace runtime class is malformed"))?,
     };
-    if !["", RUNTIME_CLASS_RUNC, RUNTIME_CLASS_COMMODITY].contains(&runtime_class) {
+    if !(["", RUNTIME_CLASS_RUNC].contains(&runtime_class)
+        || is_commodity_runtime_class(runtime_class))
+    {
         return Ok(None);
     }
     let inits = match pod_spec.get("initContainers") {

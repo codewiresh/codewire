@@ -6,16 +6,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PROOF="$ROOT/scripts/runtime/dev/prove-dev-runtime-memory-fill.sh"
-COMMODITY="$ROOT/deployments/k8s/runtime-profiles/base/runtime-class-commodity.yaml"
+PROFILES="$ROOT/deployments/k8s/runtime-profiles/base"
 
 fail() { printf 'test-runtime-memory-fill-proof: %s\n' "$*" >&2; exit 1; }
 
 bash -n "$PROOF"
 "$PROOF" --help | grep -F 'Dev proof that a Kata commodity Pod survives' >/dev/null || fail "help is missing"
 
-# The measured floor: 130 MiB and 512 MiB are killed on real shapes (#3718).
-memory="$(yq -er '.overhead.podFixed.memory' "$COMMODITY")"
-[[ "$memory" == 1Gi ]] || fail "commodity overhead changed to $memory; re-measure with the fill proof"
+# The measured margin of each commodity memory tier (#3718): up to 16 GiB, 1 GiB is
+# killed and 1.5 GiB survives; 32 GiB held at 4 GiB with peaks at the margin, so 5 GiB.
+for tier in commodity=1536Mi commodity-32g=5Gi; do
+  memory="$(yq -er '.overhead.podFixed.memory' "$PROFILES/runtime-class-${tier%%=*}.yaml")"
+  [[ "$memory" == "${tier#*=}" ]] || fail "${tier%%=*} overhead changed to $memory; re-measure with the fill proof"
+done
 
 # Every mutating call names the tool's own objects, or its applied JSON.
 # shellcheck disable=SC2016

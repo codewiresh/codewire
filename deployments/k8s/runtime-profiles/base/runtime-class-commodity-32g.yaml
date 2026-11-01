@@ -1,0 +1,31 @@
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: commodity-32g
+  labels:
+    app.kubernetes.io/name: codewire-runtime-profile
+    app.kubernetes.io/part-of: codewire
+    codewire.sh/runtime-tier: commodity
+    codewire.sh/runtime-handler: kata-clh
+handler: kata-clh
+# The commodity class for workspaces over 16 GiB (`commodity_runtime_class`);
+# it differs from `commodity` only in overhead, which runtime-class-commodity.yaml
+# explains. Measured on Dev at 32+4 GiB (workspace + DinD), guest RAM forced full
+# and two buffered writers, MGLRU on (#3718): 1 GiB survived 0 of 3, 2 GiB 1 of 3
+# and 3 GiB 2 of 3, with dirty and writeback up to 5.9 GiB; 4 GiB 3 of 3, but
+# with dirty and writeback peaking at 4.24-4.33 GiB, at or past the margin. 5 GiB
+# leaves headroom over that peak. Block workspaces with host direct I/O replace
+# this margin.
+overhead:
+  podFixed:
+    cpu: 250m
+    memory: 5Gi
+scheduling:
+  nodeSelector:
+    katacontainers.io/kata-runtime: "true"
+    node.codewire.sh/runtime-candidate: "true"
+  tolerations:
+    - key: node.codewire.sh/runtime-candidate
+      operator: Equal
+      value: "true"
+      effect: NoSchedule

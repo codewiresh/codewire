@@ -7,6 +7,7 @@ use super::{
 
 pub const RUNTIME_CLASS_RUNC: &str = "runc";
 pub const RUNTIME_CLASS_COMMODITY: &str = "commodity";
+pub const RUNTIME_CLASS_COMMODITY_32G: &str = "commodity-32g";
 pub const RUNTIME_CLASS_CONFIDENTIAL: &str = "confidential";
 pub const RUNTIME_PROFILE_NONE: &str = "none";
 pub const RUNTIME_PROFILE_RUNC: &str = "runc";
@@ -65,6 +66,31 @@ pub fn validate_managed_runtime_profile(
         DOCKER_MODE_NONE | DOCKER_MODE_LOCAL_DIND_DIRECT | DOCKER_MODE_GUEST_DIND => Ok(()),
         other => Err(format!("unsupported managed sandbox Docker mode {other:?}")),
     }
+}
+
+/// The commodity RuntimeClasses by the largest workspace memory each takes,
+/// in MiB. Kubernetes takes Pod overhead only from the RuntimeClass, and the
+/// margin a commodity VM needs grows with its size (#3718), so each tier is
+/// its own class; the last one takes any larger workspace. They differ only
+/// in overhead.
+const COMMODITY_TIERS: [(i64, &str); 2] = [
+    (16 * 1024, RUNTIME_CLASS_COMMODITY),
+    (i64::MAX, RUNTIME_CLASS_COMMODITY_32G),
+];
+
+/// The commodity RuntimeClass of a workspace with `memory_mib` of memory.
+pub fn commodity_runtime_class(memory_mib: i64) -> &'static str {
+    COMMODITY_TIERS
+        .iter()
+        .find(|(largest, _)| memory_mib <= *largest)
+        .map_or(RUNTIME_CLASS_COMMODITY, |(_, class)| class)
+}
+
+/// Whether `runtime_class` is one of the commodity tiers.
+pub fn is_commodity_runtime_class(runtime_class: &str) -> bool {
+    COMMODITY_TIERS
+        .iter()
+        .any(|(_, class)| *class == runtime_class)
 }
 
 fn runtime_class_for_profile(profile: &str) -> String {

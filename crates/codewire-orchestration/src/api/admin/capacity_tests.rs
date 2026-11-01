@@ -321,7 +321,7 @@ fn the_view_says_what_it_does_not_know() {
     let read = ClusterRead {
         nodes: vec![node("two", false), node("one", true), node("three", false)],
         pods: vec![pod("a", Some("three"), "Running", false)],
-        overhead: BTreeMap::new(),
+        overheads: BTreeMap::new(),
         tolerations: Vec::new(),
     };
     let shapes = [("small", Some(reservation(1_000, 1.0)))];

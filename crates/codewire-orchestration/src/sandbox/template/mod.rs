@@ -33,11 +33,11 @@ pub use network::{
 pub(crate) use runtime_policy::docker_data_size_gib;
 pub use runtime_policy::{
     DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, DOCKER_MODE_NONE,
-    DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_CONFIDENTIAL,
-    RUNTIME_CLASS_RUNC, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL,
-    RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC, RuntimeProfileSpec,
-    confidential_workspace_storage_class, required_workspace_storage_class, runtime_profile_spec,
-    validate_managed_runtime_profile,
+    DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_COMMODITY_32G,
+    RUNTIME_CLASS_CONFIDENTIAL, RUNTIME_CLASS_RUNC, RUNTIME_PROFILE_COMMODITY,
+    RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC, RuntimeProfileSpec,
+    commodity_runtime_class, confidential_workspace_storage_class, is_commodity_runtime_class,
+    required_workspace_storage_class, runtime_profile_spec, validate_managed_runtime_profile,
 };
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
@@ -387,8 +387,15 @@ impl fmt::Debug for TemplateOpts {
 }
 
 impl TemplateOpts {
+    /// The runtime this workspace renders: a commodity workspace takes the
+    /// class of its memory tier.
     pub fn runtime_profile_spec(&self) -> RuntimeProfileSpec {
-        runtime_profile_spec(&self.runtime_profile, &self.docker_mode, self.dind_enabled)
+        let mut spec =
+            runtime_profile_spec(&self.runtime_profile, &self.docker_mode, self.dind_enabled);
+        if spec.runtime_class_name == RUNTIME_CLASS_COMMODITY {
+            spec.runtime_class_name = commodity_runtime_class(self.memory_mib).to_string();
+        }
+        spec
     }
 
     /// The measured trust anchors of a confidential workspace (B2c), as the

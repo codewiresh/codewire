@@ -119,9 +119,10 @@ spec:
       expression: request.name.startsWith('cw-pool-')
   variables:
     # Kind overlays replace this first variable with their diagnostic
-    # runtimes; keep it first. '' is a Pod without runtimeClassName.
+    # runtimes; keep it first. '' is a Pod without runtimeClassName. Each
+    # commodity memory tier is its own class (runtime-profiles base).
     - name: runtimeClasses
-      expression: "['commodity']"
+      expression: "['commodity', 'commodity-32g']"
     # The Kind e2e overlay replaces this second variable with its side-loaded
     # daemon image, which has no registry digest; keep it second. Every
     # deployed cluster admits only digest-pinned images.

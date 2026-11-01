@@ -25,7 +25,9 @@ use crate::confidential_storage::require_confidential_access;
 use crate::resize_metrics::{self, RequestOutcome};
 use crate::sandbox::client::WorkspacePodResizeState;
 use crate::sandbox::client::{SandboxClient, WorkspacePvcAnchor};
-use crate::sandbox::template::{RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC};
+use crate::sandbox::template::{
+    RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_COMMODITY_32G, RUNTIME_CLASS_RUNC,
+};
 
 const ACTIVE_OPERATION_STATES: [&str; 3] = ["pending", "applying", "restarting"];
 
@@ -44,7 +46,11 @@ const ACTIVE_OPERATION_STATES: [&str; 3] = ["pending", "applying", "restarting"]
 /// #2266 no longer shows its boot limits. Codewire therefore cannot prove CPU
 /// headroom from the Pod spec: every CPU or memory increase replaces the Pod,
 /// and only CPU decreases stay live.
-const STATIC_VM_RUNTIME_CLASSES: [&str; 2] = [RUNTIME_CLASS_COMMODITY, "kata-clh"];
+const STATIC_VM_RUNTIME_CLASSES: [&str; 3] = [
+    RUNTIME_CLASS_COMMODITY,
+    RUNTIME_CLASS_COMMODITY_32G,
+    "kata-clh",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct EnvironmentResources {

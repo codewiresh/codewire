@@ -609,7 +609,14 @@ fn the_admission_policy_pins_the_renderer() {
     // renderer emits must be on it.
     let pod = &rendered.template["spec"]["podTemplate"]["spec"];
     assert_eq!(pod["runtimeClassName"], "commodity");
-    assert!(policy.contains(r#"expression: "['commodity']""#));
+    // Every commodity memory tier a pool can render.
+    assert!(policy.contains(r#"expression: "['commodity', 'commodity-32g']""#));
+    for (memory_mib, class) in [(16 * 1024, "commodity"), (32 * 1024, "commodity-32g")] {
+        assert_eq!(
+            crate::sandbox::template::commodity_runtime_class(memory_mib),
+            class
+        );
+    }
     let containers = pod["containers"]
         .as_array()
         .unwrap()

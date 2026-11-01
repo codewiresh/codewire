@@ -3,4 +3,5 @@ kind: Kustomization
 
 resources:
   - runtime-class-commodity.yaml
+  - runtime-class-commodity-32g.yaml
   - runtime-class-confidential.yaml

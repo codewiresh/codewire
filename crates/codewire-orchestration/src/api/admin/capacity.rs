@@ -13,7 +13,6 @@ use anyhow::Context;
 use codewire_server_core::{AppError, AppResult};
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{Node, Pod, Toleration};
-use k8s_openapi::api::node::v1::RuntimeClass;
 use kube::Api;
 use kube::api::ListParams;
 use serde_json::Value;
@@ -21,7 +20,8 @@ use serde_json::Value;
 use crate::sandbox::warm_pool::{MEMBER_POOL_LABEL, WorkspaceShape};
 use crate::worker::create::render_configured_warm_pool;
 use crate::worker::warm_pool::{
-    Reservation, member_reservation, node_unfit, quantity_millis, quantity_units, selector_of,
+    ClassOverheads, Reservation, member_reservation, node_unfit, pod_overhead, quantity_millis,
+    quantity_units, read_runtime_classes, selector_of,
 };
 
 use super::ApiState;
@@ -280,7 +280,7 @@ async fn read_prometheus(
 /// pool reconciler counts a member. A shape that can't be rendered has none.
 fn shape_reservations(
     state: &ApiState,
-    overhead: &BTreeMap<String, String>,
+    overheads: &ClassOverheads,
 ) -> Vec<(&'static str, Option<Reservation>)> {
     SHAPES
         .iter()
@@ -296,7 +296,8 @@ fn shape_reservations(
                 })
                 .ok()
                 .and_then(|objects| {
-                    member_reservation(&objects.template["spec"]["podTemplate"]["spec"], overhead)
+                    let pod_spec = &objects.template["spec"]["podTemplate"]["spec"];
+                    member_reservation(pod_spec, pod_overhead(pod_spec, overheads)?)
                 });
             (*name, reservation)
         })
@@ -398,44 +399,41 @@ fn count_sandbox_pods(pods: &[Pod]) -> (BTreeMap<String, (i64, i64)>, i64) {
 struct ClusterRead {
     nodes: Vec<Node>,
     pods: Vec<Pod>,
-    overhead: BTreeMap<String, String>,
+    overheads: ClassOverheads,
     tolerations: Vec<Toleration>,
 }
 
 async fn read_cluster(state: &ApiState, kube: &kube::Client) -> anyhow::Result<ClusterRead> {
     let cfg = &state.sandbox_cfg;
-    // The RuntimeClass the warm pools render says where sandboxes go.
-    let (_, cpu_millicores, memory_mib) = SHAPES[0];
-    let template = render_configured_warm_pool(
-        cfg,
-        WorkspaceShape {
-            cpu_millicores,
-            memory_mib,
-            disk_gib: SHAPE_DISK_GIB,
-        },
-        0,
-    )?
-    .template;
-    let pod_spec = &template["spec"]["podTemplate"]["spec"];
-    let tolerations = serde_json::from_value(pod_spec["tolerations"].clone()).unwrap_or_default();
-    let (overhead, selector) = match pod_spec["runtimeClassName"].as_str() {
-        Some(name) => {
-            let class = Api::<RuntimeClass>::all(kube.clone()).get(name).await?;
-            let overhead = class
-                .overhead
-                .and_then(|overhead| overhead.pod_fixed)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(resource, quantity)| (resource, quantity.0))
-                .collect();
-            let selector = class
-                .scheduling
-                .and_then(|scheduling| scheduling.node_selector)
-                .unwrap_or_default();
-            (overhead, selector)
+    // The RuntimeClasses the shapes render say where sandboxes go and what
+    // each shape's tier adds.
+    let mut tolerations = None;
+    let mut classes: Vec<String> = Vec::new();
+    for (_, cpu_millicores, memory_mib) in SHAPES {
+        let template = render_configured_warm_pool(
+            cfg,
+            WorkspaceShape {
+                cpu_millicores,
+                memory_mib,
+                disk_gib: SHAPE_DISK_GIB,
+            },
+            0,
+        )?
+        .template;
+        let pod_spec = &template["spec"]["podTemplate"]["spec"];
+        tolerations.get_or_insert_with(|| {
+            serde_json::from_value(pod_spec["tolerations"].clone()).unwrap_or_default()
+        });
+        if let Some(class) = pod_spec["runtimeClassName"].as_str()
+            && !class.is_empty()
+            && !classes.iter().any(|known| known == class)
+        {
+            classes.push(class.to_owned());
         }
-        None => (BTreeMap::new(), BTreeMap::new()),
-    };
+    }
+    let tolerations = tolerations.unwrap_or_default();
+    let names: Vec<&str> = classes.iter().map(String::as_str).collect();
+    let (overheads, selector) = read_runtime_classes(kube, &names).await?;
     let node_api = Api::<Node>::all(kube.clone());
     let pod_api = Api::<Pod>::namespaced(kube.clone(), &cfg.sandbox_namespace);
     let node_params = ListParams::default().labels(&selector_of(&selector));
@@ -444,7 +442,7 @@ async fn read_cluster(state: &ApiState, kube: &kube::Client) -> anyhow::Result<C
     Ok(ClusterRead {
         nodes: nodes.items,
         pods: pods.items,
-        overhead,
+        overheads,
         tolerations,
     })
 }
@@ -513,7 +511,7 @@ pub async fn cluster_capacity_core(state: &ApiState) -> AppResult<ClusterCapacit
             tracing::warn!(error = %format!("{error:#}"), "capacity: cluster read failed");
             AppError::Upstream("the cluster could not be read".into())
         })?;
-    let shapes = shape_reservations(state, &read.overhead);
+    let shapes = shape_reservations(state, &read.overheads);
     Ok(assemble(&read, &shapes, &reserved, &used, !base.is_empty()))
 }
 

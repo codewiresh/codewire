@@ -235,7 +235,7 @@ rg -F 'COCO_IMAGE_REGISTRY_AUTH_URI="${COCO_IMAGE_REGISTRY_AUTH_URI:-kbs:///defa
 rg -F 'SANDBOX_NAMESPACE="$SANDBOX_NAMESPACE"' "$SMOKE" >/dev/null
 rg -F 'EXPECTED_KATA_COCO_IMAGE_REGISTRY_AUTH_URI="$COCO_IMAGE_REGISTRY_AUTH_URI"' "$SMOKE" >/dev/null
 [[ "$(yq -er '.overhead.podFixed.cpu' "$RUNTIME_PROFILE_DIR/runtime-class-commodity.yaml")" == "250m" ]]
-[[ "$(yq -er '.overhead.podFixed.memory' "$RUNTIME_PROFILE_DIR/runtime-class-commodity.yaml")" == "1Gi" ]]
+[[ "$(yq -er '.overhead.podFixed.memory' "$RUNTIME_PROFILE_DIR/runtime-class-commodity.yaml")" == "1536Mi" ]]
 [[ "$(yq -er '.overhead.podFixed.cpu' "$RUNTIME_PROFILE_DIR/runtime-class-confidential.yaml")" == "1" ]]
 [[ "$(yq -er '.overhead.podFixed.memory' "$RUNTIME_PROFILE_DIR/runtime-class-confidential.yaml")" == "3968Mi" ]]
 rg -F 'COCO_KBS_URL="${COCO_KBS_URL:-https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080}"' \
@@ -600,7 +600,7 @@ case "$*" in
         confidential_memory=2Gi
       fi
       jq -n --arg confidential_memory "$confidential_memory" '{items: [
-        {metadata: {name: "commodity"}, handler: "kata-clh", overhead: {podFixed: {cpu: "250m", memory: "1Gi"}}},
+        {metadata: {name: "commodity"}, handler: "kata-clh", overhead: {podFixed: {cpu: "250m", memory: "1536Mi"}}},
         {metadata: {name: "confidential"}, handler: "kata-qemu-snp", overhead: {podFixed: {cpu: "1", memory: $confidential_memory}}, scheduling: {nodeSelector: {"node.codewire.sh/confidential-snp": "true"}}}
       ]}'
     fi

@@ -901,6 +901,34 @@ mod tests {
     }
 
     #[test]
+    fn a_commodity_workspace_renders_its_memory_tier_class() {
+        for (memory_mib, class) in [
+            (4096, RUNTIME_CLASS_COMMODITY),
+            (8192, RUNTIME_CLASS_COMMODITY),
+            (16384, RUNTIME_CLASS_COMMODITY),
+            (16385, RUNTIME_CLASS_COMMODITY_32G),
+            (32768, RUNTIME_CLASS_COMMODITY_32G),
+        ] {
+            assert_eq!(commodity_runtime_class(memory_mib), class, "{memory_mib}");
+            let opts = TemplateOpts {
+                memory_mib,
+                ..commodity_opts()
+            };
+            assert_eq!(opts.runtime_profile_spec().runtime_class_name, class);
+            let template = render_sandbox_template("dev-sandboxes", &opts);
+            assert_eq!(
+                template.pointer("/spec/podTemplate/spec/runtimeClassName"),
+                Some(&json!(class)),
+                "{memory_mib}"
+            );
+        }
+        assert!(is_commodity_runtime_class(RUNTIME_CLASS_COMMODITY));
+        assert!(is_commodity_runtime_class(RUNTIME_CLASS_COMMODITY_32G));
+        assert!(!is_commodity_runtime_class(RUNTIME_CLASS_CONFIDENTIAL));
+        assert!(!is_commodity_runtime_class("kata-clh"));
+    }
+
+    #[test]
     fn managed_runtime_validation_rejects_diagnostic_profiles() {
         let commodity = runtime_profile_spec(
             RUNTIME_PROFILE_COMMODITY,

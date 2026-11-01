@@ -100,6 +100,22 @@ fn container_requests(container: &Value) -> Option<Reservation> {
     })
 }
 
+/// Each RuntimeClass's fixed Pod overhead, by class name.
+pub type ClassOverheads = BTreeMap<String, BTreeMap<String, String>>;
+
+/// The fixed overhead the scheduler adds to a Pod of `pod_spec`: its
+/// RuntimeClass's, and none without one. `None` when the class was not read.
+pub fn pod_overhead<'a>(
+    pod_spec: &Value,
+    overheads: &'a ClassOverheads,
+) -> Option<&'a BTreeMap<String, String>> {
+    static NONE: BTreeMap<String, String> = BTreeMap::new();
+    match pod_spec["runtimeClassName"].as_str() {
+        Some(class) if !class.is_empty() => overheads.get(class),
+        _ => Some(&NONE),
+    }
+}
+
 /// The effective requests of a Pod spec (Kubernetes' rule: the larger of
 /// the regular containers plus restartable sidecars, and each init container
 /// plus the sidecars started before it), plus the RuntimeClass overhead.

@@ -225,7 +225,7 @@ patches:
         value: runtimeClasses
       - op: replace
         path: /spec/variables/0/expression
-        value: "['commodity', 'runc', '']"
+        value: "['commodity', 'commodity-32g', 'runc', '']"
       - op: test
         path: /spec/variables/1/name
         value: localImages

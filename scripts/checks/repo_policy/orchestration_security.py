@@ -391,7 +391,8 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             if policy_name == WARM_POOL_TEMPLATE_POLICY:
                 # Only Kind adds diagnostic runtimes; the variable stays first
                 # so the Kind overlays' test-guarded patch replaces it.
-                classes = ["commodity", "runc", ""] if target["path"] in WARM_POOL_KIND_TARGETS else ["commodity"]
+                commodity = ["commodity", "commodity-32g"]
+                classes = [*commodity, "runc", ""] if target["path"] in WARM_POOL_KIND_TARGETS else commodity
                 found = re.search(r"variables: - expression: '?(\[[^\]]*\])'? name: runtimeClasses ", normalized)
                 if not found or found.group(1) != cel_list(classes):
                     output.append(f"{label}: {policy_name} runtime classes must be exactly {cel_list(classes)}, first: "
@@ -1038,7 +1039,8 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             (WARM_POOL_TEMPLATE_POLICY, "s.serviceAccountToken.audience in variables.audiences", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "'codewire.internal.credential-workspace.v1']", "'codewire.internal.credential-workspace.v1', 'https://kubernetes.default.svc']"),
             (WARM_POOL_TEMPLATE_POLICY, "in variables.runtimeClasses", "!= 'confidential'"),
-            (WARM_POOL_TEMPLATE_POLICY, "['commodity']", "['commodity', 'runc']"),
+            (WARM_POOL_TEMPLATE_POLICY, "['commodity', 'commodity-32g']",
+             "['commodity', 'commodity-32g', 'runc']"),
             (WARM_POOL_TEMPLATE_POLICY, "!variables.pod.hostNetwork", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "!variables.pod.hostPID", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "!variables.pod.hostIPC", "true"),

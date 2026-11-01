@@ -746,6 +746,28 @@ fn member_reservations_count_requests_sidecars_and_runtime_overhead() {
 }
 
 #[test]
+fn a_pod_takes_its_own_runtime_class_overhead() {
+    let tier = |memory: &str| BTreeMap::from([("memory".to_owned(), memory.to_owned())]);
+    let overheads = ClassOverheads::from([
+        ("commodity".to_owned(), tier("1536Mi")),
+        ("commodity-32g".to_owned(), tier("4Gi")),
+    ]);
+    let class = |name: &str| json!({ "runtimeClassName": name });
+    assert_eq!(
+        pod_overhead(&class("commodity"), &overheads),
+        Some(&tier("1536Mi"))
+    );
+    assert_eq!(
+        pod_overhead(&class("commodity-32g"), &overheads),
+        Some(&tier("4Gi"))
+    );
+    // No class adds nothing; a class that was not read can't be counted.
+    assert_eq!(pod_overhead(&json!({}), &overheads), Some(&BTreeMap::new()));
+    assert_eq!(pod_overhead(&class(""), &overheads), Some(&BTreeMap::new()));
+    assert_eq!(pod_overhead(&class("confidential"), &overheads), None);
+}
+
+#[test]
 fn members_are_clamped_in_configuration_order() {
     let pools = desired();
     let small = Reservation {

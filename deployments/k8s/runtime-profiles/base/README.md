@@ -13,7 +13,12 @@ defense-in-depth runtime classes used by the Codewire Guard umbrella:
 
 - `commodity`: commodity KVM nodes running Kata + Cloud Hypervisor through
   the `kata-clh` CRI handler. This is VM isolation and defense in depth, not
-  CoCo/SNP-grade cryptographic host-root protection.
+  CoCo/SNP-grade cryptographic host-root protection. It takes workspaces up to
+  16 GiB of memory.
+- `commodity-32g`: the same, for larger workspaces. The commodity classes
+  differ only in overhead, because the margin a VM needs grows with its size
+  (#3718). Orchestration picks the class from the workspace's memory
+  (`commodity_runtime_class`).
 - `confidential`: SNP-capable KVM nodes running Kata + QEMU-SNP through the
   `kata-qemu-snp` CRI handler. This class is for the confidential runtime proof
   path and schedules only onto nodes labelled

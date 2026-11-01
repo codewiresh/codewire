@@ -71,7 +71,15 @@ fn configured_shapes_render_through_the_identity_free_pool_renderer() {
     );
     assert_eq!(config.pools[1].configured.members, 1);
     assert_eq!(config.pools[1].objects.pool["spec"]["replicas"], 1);
-    assert_eq!(config.runtime_class(), Some("commodity"));
+    assert_eq!(config.runtime_classes(), ["commodity"]);
+    // A 32 GiB pool renders its memory tier's class, listed once.
+    let tiers = WarmPoolConfig::from_cfg(
+        &dev_cfg("1000m/4096Mi/10Gi=1,8000m/32768Mi/10Gi=1,16000m/32768Mi/10Gi=1"),
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(tiers.runtime_classes(), ["commodity", "commodity-32g"]);
 
     // Every renderer refusal refuses the whole configuration.
     assert!(WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi"), true).is_err());

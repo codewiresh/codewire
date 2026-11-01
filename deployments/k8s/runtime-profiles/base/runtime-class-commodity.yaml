@@ -12,13 +12,16 @@ handler: kata-clh
 # podFixed must cover guest- and host-side overhead, and operators measure it.
 # A guest with full RAM leaves the Pod cgroup only this margin for the VMM,
 # virtiofsd and the host page cache of their writes; past it the host kills the
-# VM. Measured with scripts/runtime/dev/prove-dev-runtime-memory-fill.sh on 4+2
-# and 16+4 GiB shapes (#3718): 130 and 512 MiB are killed, 1 GiB survives.
-# Larger VMs are not measured.
+# VM. The margin needed grows with the VM, so each memory tier is its own class
+# (`commodity_runtime_class`); this one takes workspaces up to 16 GiB. Measured
+# on Dev with guest RAM forced full and two buffered writers, MGLRU on (#3718):
+# at 1 GiB, 4+2 and 8+4 GiB (workspace + DinD) survived 0 of 3 and 16+4 GiB 2 of
+# 6; at 1.5 GiB each survived 3 of 3. The worst writeback seen was 1.31 GiB
+# (1.5 GiB in one earlier 16+4 round at a smaller margin).
 overhead:
   podFixed:
     cpu: 250m
-    memory: 1Gi
+    memory: 1536Mi
 scheduling:
   nodeSelector:
     katacontainers.io/kata-runtime: "true"
