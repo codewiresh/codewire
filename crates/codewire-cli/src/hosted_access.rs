@@ -158,8 +158,12 @@ pub(crate) async fn serve(
     let platform = codewire_daemon_proto::platform_listeners(bound.daemon_port);
     // The daemon runs in the workload's Pod, so its loopback is the
     // workload's: local port forwards dial it directly (#3045).
+    // `cw shell` attaches to durable sessions over this server, so a
+    // keystroke takes the tailnet's direct path rather than the API (#3827).
+    let sessions = daemon.credential_client();
     let runners = DaemonSshRunners::new(daemon, access_ready_rx, bound.exec_shell.clone())
-        .with_port_forwarding(Arc::new(WorkloadLoopbackDialer), platform.clone());
+        .with_port_forwarding(Arc::new(WorkloadLoopbackDialer), platform.clone())
+        .with_session_attach(sessions, bound.environment_id.to_string());
     let listener = tokio::net::TcpListener::bind(SocketAddr::from((
         Ipv4Addr::UNSPECIFIED,
         WORKSPACE_SSH_PORT,

@@ -147,7 +147,12 @@ struct DaemonSsh {
     ssh: SocketAddr,
     shutdown: watch::Sender<bool>,
     access_ready: watch::Sender<bool>,
+    /// The daemon's own session client, to launch and inspect sessions.
+    sessions: codewire_daemon::client::SessionClient,
 }
+
+/// The environment the fixture's SSH server attaches sessions for.
+const ENVIRONMENT_ID: &str = "11111111-2222-4333-8444-555555555555";
 
 async fn spawn_daemon_ssh() -> DaemonSsh {
     spawn_daemon_ssh_with_access(true).await
@@ -194,10 +199,12 @@ async fn spawn_daemon_ssh_with_access(ready: bool) -> DaemonSsh {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ssh = listener.local_addr().unwrap();
     let (access_ready_tx, access_ready) = watch::channel(ready);
+    let sessions = daemon.credential_client();
     tokio::spawn(serve_ssh_listener(
         listener,
         config,
-        DaemonSshRunners::new(daemon, access_ready, "/bin/sh".into()),
+        DaemonSshRunners::new(daemon, access_ready, "/bin/sh".into())
+            .with_session_attach(sessions.clone(), ENVIRONMENT_ID),
         shutdown_rx,
     ));
     DaemonSsh {
@@ -206,6 +213,7 @@ async fn spawn_daemon_ssh_with_access(ready: bool) -> DaemonSsh {
         ssh,
         shutdown,
         access_ready: access_ready_tx,
+        sessions,
     }
 }
 
@@ -832,6 +840,265 @@ mod process_lifetime {
         let (stdout, _, exit) =
             exec_within(&client, "printf still-serving", Duration::from_secs(20)).await;
         assert_eq!((stdout.as_str(), exit), ("still-serving", Some(0)));
+        let _ = daemon.shutdown.send(true);
+    }
+}
+
+// #3827: `session@codewire.sh` attaches to a durable daemon session over the
+// environment's own SSH server, with the API's public attach messages.
+mod session_attach {
+    use codewire_client::session_wire::{FrameDecoder, SESSION_SUBSYSTEM, encode_frame};
+    use codewire_client::{
+        AttachSessionOpen, AttachSessionRequest, AttachSessionResponse, attach_session_request,
+        attach_session_response,
+    };
+    use codewire_daemon_proto::daemon::v1;
+    use russh::{ChannelMsg, client};
+    use tokio::time::timeout;
+
+    use super::*;
+
+    /// A shell session that prints `hello` and then echoes its input raw.
+    async fn launch_echo(daemon: &DaemonSsh) -> String {
+        daemon
+            .sessions
+            .launch(v1::LaunchSessionRequest {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "stty raw -echo; printf hello; exec cat".into(),
+                ],
+                pty: true,
+                term: "xterm-256color".into(),
+                width: 80,
+                height: 24,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .session_id
+    }
+
+    struct Attached {
+        // Kept so the connection outlives the attachment.
+        _client: client::Handle<AcceptAllKeys>,
+        channel: russh::Channel<client::Msg>,
+        frames: FrameDecoder,
+        output: Vec<u8>,
+        first_offset: Option<u64>,
+        next_offset: u64,
+    }
+
+    enum Ended {
+        Exit { status: u32, stderr: String },
+    }
+
+    async fn attach(
+        daemon: &DaemonSsh,
+        environment_id: &str,
+        session_id: &str,
+        offset: u64,
+    ) -> Attached {
+        let client = connect(daemon.ssh).await;
+        let channel = client.channel_open_session().await.unwrap();
+        channel
+            .request_subsystem(true, SESSION_SUBSYSTEM)
+            .await
+            .unwrap();
+        let open = AttachSessionRequest {
+            input: Some(attach_session_request::Input::Open(Box::new(
+                AttachSessionOpen {
+                    org_id: "org-synthetic".into(),
+                    environment_id: environment_id.into(),
+                    session_id: session_id.into(),
+                    output_offset: offset,
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        };
+        channel
+            .data(&encode_frame(&open).unwrap()[..])
+            .await
+            .unwrap();
+        Attached {
+            _client: client,
+            channel,
+            frames: FrameDecoder::default(),
+            output: Vec::new(),
+            first_offset: None,
+            next_offset: offset,
+        }
+    }
+
+    impl Attached {
+        async fn send(&self, input: attach_session_request::Input) {
+            let request = AttachSessionRequest {
+                input: Some(input),
+                ..Default::default()
+            };
+            self.channel
+                .data(&encode_frame(&request).unwrap()[..])
+                .await
+                .unwrap();
+        }
+
+        /// Read until the output so far contains `needle`.
+        async fn read_until(&mut self, needle: &[u8]) {
+            timeout(Duration::from_secs(20), async {
+                while !self.output.windows(needle.len()).any(|w| w == needle) {
+                    if let Some(response) =
+                        self.frames.next_message::<AttachSessionResponse>().unwrap()
+                    {
+                        if let Some(attach_session_response::Event::Output(chunk)) = response.event
+                        {
+                            self.first_offset.get_or_insert(chunk.offset);
+                            assert_eq!(chunk.offset, self.next_offset, "output is contiguous");
+                            self.next_offset = chunk.next_offset;
+                            self.output.extend_from_slice(&chunk.data);
+                        }
+                        continue;
+                    }
+                    match self.channel.wait().await {
+                        Some(ChannelMsg::Data { data }) => self.frames.push(&data),
+                        Some(
+                            ended @ (ChannelMsg::Eof
+                            | ChannelMsg::Close
+                            | ChannelMsg::ExitStatus { .. }
+                            | ChannelMsg::ExtendedData { .. }
+                            | ChannelMsg::Failure),
+                        ) => panic!("attachment ended early: {ended:?}"),
+                        // The subsystem request's reply and flow control.
+                        Some(_) => {}
+                        None => panic!("attachment closed early"),
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{:?} never arrived; output so far {:?}",
+                    String::from_utf8_lossy(needle),
+                    String::from_utf8_lossy(&self.output)
+                )
+            });
+        }
+
+        async fn ended(mut self) -> Ended {
+            let mut stderr = Vec::new();
+            let mut status = None;
+            timeout(Duration::from_secs(20), async {
+                while let Some(message) = self.channel.wait().await {
+                    match message {
+                        ChannelMsg::ExtendedData { data, ext: 1 } => {
+                            stderr.extend_from_slice(&data)
+                        }
+                        ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                        ChannelMsg::Close => break,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("the attachment ended");
+            Ended::Exit {
+                status: status.expect("an exit status"),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            }
+        }
+    }
+
+    async fn assert_running(daemon: &DaemonSsh, session_id: &str) {
+        let record = daemon.sessions.get(session_id).await.unwrap();
+        assert_eq!(
+            v1::SessionLifecycleState::try_from(record.state),
+            Ok(v1::SessionLifecycleState::Running),
+            "{record:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_attachment_carries_output_and_input_and_closing_it_leaves_the_session_running() {
+        let daemon = spawn_daemon_ssh().await;
+        let session = launch_echo(&daemon).await;
+        let mut attached = attach(&daemon, ENVIRONMENT_ID, &session, 0).await;
+        attached.read_until(b"hello").await;
+        assert_eq!(attached.first_offset, Some(0));
+        attached
+            .send(attach_session_request::Input::Stdin(b"ping".to_vec()))
+            .await;
+        attached.read_until(b"ping").await;
+        attached.channel.close().await.unwrap();
+        drop(attached);
+        assert_running(&daemon, &session).await;
+        let _ = daemon.shutdown.send(true);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reattachment_from_an_offset_gets_only_what_it_missed() {
+        let daemon = spawn_daemon_ssh().await;
+        let session = launch_echo(&daemon).await;
+        let mut first = attach(&daemon, ENVIRONMENT_ID, &session, 0).await;
+        first.read_until(b"hello").await;
+        let resume_at = first.next_offset;
+        first.channel.close().await.unwrap();
+        drop(first);
+
+        // Output produced while nobody is attached.
+        daemon
+            .sessions
+            .send_input(&session, b"while-away".to_vec())
+            .await
+            .unwrap();
+        let mut again = attach(&daemon, ENVIRONMENT_ID, &session, resume_at).await;
+        again.read_until(b"while-away").await;
+        assert_eq!(again.first_offset, Some(resume_at));
+        assert!(
+            !again.output.windows(5).any(|w| w == b"hello"),
+            "a reattachment replays only what it missed"
+        );
+        let _ = daemon.shutdown.send(true);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_attachments_see_the_same_session() {
+        let daemon = spawn_daemon_ssh().await;
+        let session = launch_echo(&daemon).await;
+        let mut laptop = attach(&daemon, ENVIRONMENT_ID, &session, 0).await;
+        let mut phone = attach(&daemon, ENVIRONMENT_ID, &session, 0).await;
+        laptop.read_until(b"hello").await;
+        phone.read_until(b"hello").await;
+        phone
+            .send(attach_session_request::Input::Stdin(
+                b"from-the-phone".to_vec(),
+            ))
+            .await;
+        laptop.read_until(b"from-the-phone").await;
+        phone.read_until(b"from-the-phone").await;
+        let _ = daemon.shutdown.send(true);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn another_environment_or_an_unknown_session_is_refused_with_a_reason() {
+        let daemon = spawn_daemon_ssh().await;
+        let session = launch_echo(&daemon).await;
+
+        let elsewhere = attach(&daemon, "99999999-2222-4333-8444-555555555555", &session, 0).await;
+        let Ended::Exit { status, stderr } = elsewhere.ended().await;
+        assert_eq!(status, 1);
+        assert!(stderr.contains("serves environment"), "{stderr}");
+
+        let unknown = attach(
+            &daemon,
+            ENVIRONMENT_ID,
+            "session-00000000-0000-4000-8000-000000000000",
+            0,
+        )
+        .await;
+        let Ended::Exit { status, stderr } = unknown.ended().await;
+        assert_eq!(status, 1);
+        assert!(!stderr.trim().is_empty(), "the refusal says why");
+        assert_running(&daemon, &session).await;
         let _ = daemon.shutdown.send(true);
     }
 }

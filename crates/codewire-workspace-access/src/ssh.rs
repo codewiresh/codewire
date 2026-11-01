@@ -15,7 +15,9 @@ use crate::daemon::{
     PtyDaemonSessionInput, PtySessionInput, PtyStart, SessionStart,
 };
 use crate::scp::{ScpProtocolRunner, is_scp_command};
+use crate::session_attach::SessionAttachRunner;
 use crate::sftp::DaemonSftpRunner;
+use codewire_client::session_wire::SESSION_SUBSYSTEM;
 
 mod forward;
 #[cfg(all(test, target_os = "linux"))]
@@ -787,6 +789,9 @@ pub struct WorkspaceSshHandler<R> {
     runner: Arc<R>,
     sftp: Option<Arc<dyn SftpSubsystemRunner>>,
     scp: Option<Arc<dyn ScpProtocolRunnerBridge>>,
+    /// The `session@codewire.sh` subsystem; without it the subsystem is
+    /// refused like any unknown one.
+    session_attach: Option<Arc<dyn SessionAttachRunner>>,
     exec_shell: Option<String>,
     /// Local port forwarding; without it every `direct-tcpip` channel is
     /// refused.
@@ -819,6 +824,7 @@ where
             runner,
             sftp,
             scp,
+            session_attach: None,
             exec_shell: None,
             forwarding: None,
             connection: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
@@ -847,6 +853,13 @@ where
         platform: Arc<PlatformListeners>,
     ) -> Self {
         self.forwarding = Some(Forwarding::new(dialer, platform));
+        self
+    }
+
+    /// Serve durable session attachment (`session@codewire.sh`, #3827)
+    /// through `runner`.
+    pub fn with_session_attach(mut self, runner: Arc<dyn SessionAttachRunner>) -> Self {
+        self.session_attach = Some(runner);
         self
     }
 
@@ -947,6 +960,9 @@ enum SshChannelState {
     Process { ended: CancellationToken },
     /// Served by SFTP or SCP, which read the channel themselves.
     FileProtocol { sftp: bool },
+    /// Served by the session subsystem, which reads the channel itself and
+    /// reports its own exit status.
+    SessionAttach,
     /// A forward, dialing or open. Its task owns the channel; `stop` ends it
     /// when the client closes the channel, and is cancelled once it ends.
     Forward { stop: CancellationToken },
@@ -1179,6 +1195,20 @@ where
         name: &str,
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        if name == SESSION_SUBSYSTEM
+            && let Some(attach) = self.session_attach.clone()
+        {
+            let Some(pending) = self.take_pending(channel) else {
+                session.channel_failure(channel)?;
+                return Err(WorkspaceSshError::UnknownChannel(channel));
+            };
+            self.channels
+                .insert(channel, SshChannelState::SessionAttach);
+            session.channel_success(channel)?;
+            let handle = session.handle();
+            tokio::spawn(async move { attach.attach_session(pending.channel, handle).await });
+            return Ok(());
+        }
         if name != "sftp" {
             session.channel_failure(channel)?;
             return Ok(());
@@ -1255,7 +1285,12 @@ where
             // Started: the resize reaches the pump in order, after earlier
             // input.
             Some(SshChannelState::Process { .. }) => {}
-            Some(SshChannelState::FileProtocol { .. } | SshChannelState::Forward { .. }) | None => {
+            Some(
+                SshChannelState::FileProtocol { .. }
+                | SshChannelState::SessionAttach
+                | SshChannelState::Forward { .. },
+            )
+            | None => {
                 session.channel_failure(channel)?;
                 return Err(WorkspaceSshError::UnknownChannel(channel));
             }

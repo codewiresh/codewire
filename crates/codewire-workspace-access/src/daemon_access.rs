@@ -22,6 +22,7 @@ use tokio::sync::watch;
 use crate::daemon::DaemonSessionClient;
 use crate::host_key::generate_ed25519_key;
 use crate::scp::DaemonScpRunner;
+use crate::session_attach::DaemonSessionAttachRunner;
 use crate::sftp::DaemonSftpRunner;
 use crate::ssh::{
     DaemonBackedSshRunner, DaemonSessionStart, ForwardDialer, PlatformListeners, SshChannelOutput,
@@ -249,6 +250,9 @@ pub struct DaemonSshRunners {
     /// never to the platform's own listeners there; without one, every
     /// forward is refused with a reason.
     pub forward: Option<(Arc<dyn ForwardDialer>, Arc<PlatformListeners>)>,
+    /// Durable session attachment (`session@codewire.sh`, #3827); without
+    /// it the subsystem is refused.
+    pub session_attach: Option<Arc<DaemonSessionAttachRunner>>,
 }
 
 impl DaemonSshRunners {
@@ -268,7 +272,22 @@ impl DaemonSshRunners {
             scp: Arc::new(DaemonScpRunner::new(daemon)),
             exec_shell,
             forward: None,
+            session_attach: None,
         }
+    }
+
+    /// Serve attachment to `environment_id`'s durable sessions over SSH,
+    /// through `client`, the daemon's own session client (#3827).
+    pub fn with_session_attach(
+        mut self,
+        client: codewire_daemon::client::SessionClient,
+        environment_id: impl Into<String>,
+    ) -> Self {
+        self.session_attach = Some(Arc::new(DaemonSessionAttachRunner::new(
+            client,
+            environment_id,
+        )));
+        self
     }
 
     /// Serve local port forwards (`ssh -L`, `ssh -W`, VS Code Remote-SSH)
@@ -298,6 +317,10 @@ impl DaemonSshRunners {
             Some((dialer, platform)) => {
                 handler.with_port_forwarding(dialer.clone(), platform.clone())
             }
+            None => handler,
+        };
+        let handler = match &self.session_attach {
+            Some(attach) => handler.with_session_attach(attach.clone()),
             None => handler,
         };
         let connection = handler.connection_id();

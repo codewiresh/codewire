@@ -2374,6 +2374,7 @@ dependencies = [
  "codewire-credential-bridge",
  "codewire-credential-broker",
  "codewire-daemon",
+ "codewire-daemon-bridge",
  "codewire-daemon-proto",
  "codewire-proto",
  "codewire-tailnet",

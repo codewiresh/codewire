@@ -499,7 +499,10 @@ async fn bridge_attachment<B>(
     }
 }
 
-fn private_attach_input(
+/// One public attach request after `open`, as the daemon's attach message.
+/// Shared by the API relay and the daemon's `session@codewire.sh` SSH
+/// subsystem (#3827), so both transports accept exactly the same input.
+pub fn private_attach_input(
     request: proto::AttachSessionRequest,
     session_id: &str,
 ) -> Result<v1::SessionAttachMessage, Vec<FieldViolation>> {
@@ -528,7 +531,10 @@ fn private_attach_input(
     })
 }
 
-async fn public_attach_output<A>(
+/// One daemon attach message as the public response. `attachment` supplies
+/// the session record a status event carries. Shared by the API relay and
+/// the `session@codewire.sh` SSH subsystem (#3827).
+pub async fn public_attach_output<A>(
     output: v1::SessionAttachMessage,
     attachment: &mut A,
     session_id: &str,
@@ -608,7 +614,7 @@ where
 }
 
 #[derive(Debug)]
-enum AttachOutputError {
+pub enum AttachOutputError {
     Backend(connectrpc::ConnectError),
     InvalidFrame,
 }
@@ -653,7 +659,8 @@ fn canonical_session_id(id: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn coordinate_violations(
+/// The coordinate fields a request must carry; empty when they are present.
+pub fn coordinate_violations(
     org_id: &str,
     environment_id: &str,
     session_id: Option<&str>,

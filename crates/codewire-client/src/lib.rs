@@ -16,6 +16,7 @@ mod error;
 pub mod member_tailnet;
 mod mesh;
 pub mod platform_agents;
+pub mod session_wire;
 mod tailnet;
 mod transport_error;
 
