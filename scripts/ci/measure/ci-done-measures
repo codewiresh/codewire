@@ -39,6 +39,7 @@ seconds), "failed" when Required verification did not pass, and "unverified"
 when it printed neither. Main CI speed and green count verified and failed
 runs; the rest are reported apart.
 - Green, Dev smoke: at least 95% of deploy-owned smoke results pass (#3132).
+  A failed promotion ran no smoke (#3820); it is counted apart.
 """
 
 import argparse
@@ -491,7 +492,7 @@ def receipt_rows(forgejo: Forgejo, since: datetime, until: datetime) -> list[dic
             "created_at": iso(parse_time(run.get("created"))),
             "stopped_at": iso(parse_time(run.get("stopped"))), "status": status,
             "source_sha": source if isinstance(source, str) and SHA_RE.fullmatch(source) else None,
-            "smoke_status": smoke if smoke in {"success", "failure"} else None,
+            "smoke_status": smoke if smoke in {"success", "failure", "promotion_failure"} else None,
             # A receipt counts for the window it was created in; later ones
             # only settle deliveries of merges inside the window.
             "in_window": since <= parse_time(run.get("created")) < until,
@@ -615,6 +616,9 @@ def summarize(rows: list[dict]) -> dict:
     smoke_passed = sum(result == "success" for result in results)
     smoke_total = sum(result in {"success", "failure"} for result in results)
     smoke_rate = rate(smoke_passed, smoke_total)
+    # A promotion that committed no release ran no smoke (#3820): it is not a
+    # smoke result, and its merges show as undelivered.
+    promotion_failures = sum(result == "promotion_failure" for result in results)
 
     return {
         "schema_version": 1, "program": "#3144", "since": window.get("since"), "until": window.get("until"),
@@ -645,7 +649,8 @@ def summarize(rows: list[dict]) -> dict:
                 "results": smoke_total, "passes": smoke_passed, "rate": smoke_rate,
                 "threshold": THRESHOLDS["dev_smoke_pass_rate"],
                 "holds": None if smoke_rate is None else smoke_rate >= THRESHOLDS["dev_smoke_pass_rate"],
-                "unknown": len(results) - smoke_total},
+                "promotion_failures": promotion_failures,
+                "unknown": len(results) - smoke_total - promotion_failures},
         },
     }
 

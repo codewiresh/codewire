@@ -61,7 +61,7 @@ progress.
 | Main CI speed | Each main-push `ci.yaml` run that ran its verification (verified or failed), from creation to stop | p50 ≤ 10 min |
 | Merge to Dev | From each push to main to the first passing Dev smoke receipt whose deployed source contains it | p50 ≤ 15 min |
 | Main CI first attempt | Of the main-push `ci.yaml` runs that ran their verification, those verified with every job on its first attempt. Skipped, superseded and unverified runs are excluded and counted apart. | ≥ 95% |
-| Dev smoke | Deploy-owned smoke results of the Dev deployment smoke receipts created in the window | ≥ 95% |
+| Dev smoke | Deploy-owned smoke results of the Dev deployment smoke receipts created in the window; a failed promotion ran no smoke and is counted apart (#3820) | ≥ 95% |
 
 A main run's category comes from its own verdict: the marker its Required
 verification job prints, which `scripts/ci/plan/main-ci-verdict.py` also reads

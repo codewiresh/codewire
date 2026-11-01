@@ -5,11 +5,11 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Exact deployed Codewire source commit
+        description: Exact Codewire source commit the deploy run promoted, or failed to
         required: true
         type: string
       deploy_commit:
-        description: Exact deploy receipt commit
+        description: Exact deploy receipt commit; for promotion_failure, the deploy main commit the failed run started from
         required: true
         type: string
       deploy_run_id:
@@ -17,12 +17,13 @@ on:
         required: true
         type: string
       smoke_status:
-        description: Exact deploy-owned smoke result
+        description: Exact deploy-owned result; promotion_failure means no release was committed (#3820)
         required: true
         type: choice
         options:
           - success
           - failure
+          - promotion_failure
 
 jobs:
   receipt:
@@ -44,12 +45,20 @@ jobs:
           [[ "$DEPLOY_COMMIT" != "0000000000000000000000000000000000000000" ]]
           [[ "$DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           case "$SMOKE_STATUS" in
-            success|failure) ;;
-            *) echo "::error::smoke_status must be success or failure"; exit 2 ;;
+            success|failure|promotion_failure) ;;
+            *) echo "::error::smoke_status must be success, failure or promotion_failure"; exit 2 ;;
           esac
           printf 'Deploy run %s reported %s for source %s at deploy commit %s.\n' \
             "$DEPLOY_RUN_ID" "$SMOKE_STATUS" "$SOURCE_SHA" "$DEPLOY_COMMIT"
-          [[ "$SMOKE_STATUS" == "success" ]] || {
-            echo "::error::deploy-owned dev smoke failed"
-            exit 1
-          }
+          case "$SMOKE_STATUS" in
+            failure)
+              echo "::error::deploy-owned dev smoke failed"
+              exit 1
+              ;;
+            promotion_failure)
+              # The deploy run failed before committing a release, so Dev
+              # still runs its previous source (#3820).
+              echo "::error::deploy run $DEPLOY_RUN_ID did not promote source $SOURCE_SHA; Dev stays on its previous source"
+              exit 1
+              ;;
+          esac

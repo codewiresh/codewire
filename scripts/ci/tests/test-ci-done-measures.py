@@ -328,6 +328,19 @@ class MeasuresTest(unittest.TestCase):
         self.assertEqual((smoke["results"], smoke["passes"], smoke["rate"], smoke["holds"]),
                          (3, 2, 0.6667, False))
 
+    def test_a_failed_promotion_never_delivers_and_is_not_a_smoke_result(self):
+        commits = self.repo.commits
+        self.main_run(1, commits["A"], 0, 8, "success")
+        # #3820: the deploy run failed before committing a release.
+        self.receipt(10, commits["A"], 12, 13, "promotion_failure")
+        self.receipt(11, commits["C"], 18, 20, "success")
+        rows = self.rows()
+        deliveries = {row["sha"]: row for row in rows if row["kind"] == "merge_to_dev"}
+        self.assertEqual(deliveries[commits["A"]]["receipt_run_id"], 11)
+        smoke = self.summary(rows)["green"]["dev_smoke"]
+        self.assertEqual((smoke["results"], smoke["passes"], smoke["promotion_failures"], smoke["unknown"]),
+                         (1, 1, 1, 0))
+
     def test_receipts_after_the_window_settle_deliveries_but_are_not_counted(self):
         commits = self.repo.commits
         self.main_run(1, commits["D"], 7 * 1440 - 5, 7 * 1440 - 1, "success")

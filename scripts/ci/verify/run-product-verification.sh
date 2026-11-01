@@ -733,6 +733,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-cargo-target-runner-failures.sh
   scripts/ci/tests/test-darwin-cross-check.sh
   scripts/ci/tests/test-resolve-deployed-source.sh
+  scripts/ci/tests/test-dev-deployment-smoke-receipt.sh
   scripts/ci/tests/test-run-side-by-side.sh
   scripts/ci/tests/test-standard-families.sh
   scripts/ci/tests/test-warm-rust-cache.sh
