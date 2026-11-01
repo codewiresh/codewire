@@ -199,6 +199,9 @@ struct SessionHandle {
     #[cfg(target_os = "linux")]
     platform_managed: std::sync::atomic::AtomicBool,
     output_index: Mutex<Vec<OutputFrameIndex>>,
+    /// The output end offset, published after each capture is recorded, so
+    /// an attachment reads new output at once instead of on its next poll.
+    output_end: watch::Sender<u64>,
     operation: AsyncMutex<()>,
     launch_cancellation: watch::Sender<bool>,
 }
@@ -210,6 +213,7 @@ impl SessionHandle {
             platform_managed: std::sync::atomic::AtomicBool::new(
                 metadata.platform_managed_origin.is_some(),
             ),
+            output_end: watch::channel(metadata.output_end_offset).0,
             metadata: AsyncMutex::new(metadata),
             output_index: Mutex::new(output_index),
             operation: AsyncMutex::new(()),
@@ -1473,6 +1477,16 @@ impl SessionEngine {
         }
         drop(admission);
         self.start_process(handle.clone(), &cancel).await
+    }
+
+    /// The session's output end offset, changed whenever output is recorded.
+    /// An attachment waits on it so a keystroke's echo is sent as soon as it
+    /// is captured (#3827).
+    pub(crate) fn watch_output(
+        &self,
+        session_id: &str,
+    ) -> Result<watch::Receiver<u64>, SessionError> {
+        Ok(self.handle(session_id)?.output_end.subscribe())
     }
 
     pub async fn read_output(
@@ -4512,6 +4526,7 @@ async fn append_output(
         .checked_add(length)
         .ok_or_else(|| SessionError::Internal("session output offset overflow".into()))?;
     persist_metadata(root, &metadata).await?;
+    handle.output_end.send_replace(metadata.output_end_offset);
     drop(file);
     compact_output(root, handle, &mut metadata).await
 }
@@ -5817,6 +5832,7 @@ mod tests {
             platform_managed: std::sync::atomic::AtomicBool::new(
                 metadata.platform_managed_origin.is_some(),
             ),
+            output_end: watch::channel(metadata.output_end_offset).0,
             metadata: AsyncMutex::new(metadata),
             output_index: Mutex::new(index),
             operation: AsyncMutex::new(()),

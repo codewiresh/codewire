@@ -786,6 +786,11 @@ async fn run_attach_session<S>(
     let mut refresh_due = true;
     let mut refresh = tokio::time::interval(Duration::from_millis(10));
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // New output wakes the attachment at once; the interval stays as the
+    // fallback and still notices state changes. Without this a keystroke's
+    // echo waited for the next tick, about 10 ms (#3827). A session whose
+    // handle is replaced ends the watch, and the interval alone remains.
+    let mut output_grew = engine.watch_output(&session_id).ok();
     let mut heartbeat = tokio::time::interval_at(
         tokio::time::Instant::now() + ATTACH_SESSION_HEARTBEAT_INTERVAL,
         ATTACH_SESSION_HEARTBEAT_INTERVAL,
@@ -974,6 +979,12 @@ async fn run_attach_session<S>(
                 }
             }
             _ = refresh.tick(), if pending_gap.is_none() && chunks.is_empty() && read.is_none() && pending_status.is_none() && !terminal_ready => refresh_due = true,
+            grew = async { output_grew.as_mut().expect("watched").changed().await }, if output_grew.is_some() && pending_gap.is_none() && chunks.is_empty() && read.is_none() && pending_status.is_none() && !terminal_ready => {
+                match grew {
+                    Ok(()) => refresh_due = true,
+                    Err(_) => output_grew = None,
+                }
+            }
         }
     }
 }
@@ -1981,6 +1992,113 @@ mod tests {
     /// as it arrives, so none waits unread in HTTP/2, whose flood guard
     /// would end the connection (#2822); the process then receives every
     /// byte once, in order.
+    #[tokio::test]
+    async fn recorded_output_wakes_a_watching_attachment() {
+        // #3827: an attachment learns of new output when it is recorded, not
+        // on its next poll, so a keystroke's echo is not held for a tick.
+        let (temp, engine) = attach_engine();
+        let session = engine
+            .launch(v1::LaunchSessionRequest {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "printf ready > attach-ready; exec sleep 30".into(),
+                ],
+                pty: true,
+                term: "xterm-256color".into(),
+                width: 80,
+                height: 24,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        wait_attach_fixture_ready(&temp, &engine, &session.session_id).await;
+        let mut output = engine.watch_output(&session.session_id).unwrap();
+        let before = *output.borrow_and_update();
+        engine
+            .append_test_output(&session.session_id, b"echo")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), output.changed())
+            .await
+            .expect("recorded output woke the watcher")
+            .unwrap();
+        assert!(*output.borrow_and_update() >= before + 4);
+    }
+
+    #[tokio::test]
+    #[ignore = "manual measurement: run with --ignored --nocapture"]
+    async fn attach_echo_latency_report() {
+        // Manual measurement (#3827): the daemon's own share of a keystroke's
+        // round trip. One byte goes into `cat` through an attachment and is
+        // timed until its echo comes back out of the same attachment.
+        const ROUNDS: usize = 200;
+        let (temp, engine) = attach_engine();
+        let session = engine
+            .launch(v1::LaunchSessionRequest {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "stty raw -echo; printf ready > attach-ready; exec cat".into(),
+                ],
+                pty: true,
+                term: "xterm-256color".into(),
+                width: 80,
+                height: 24,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        wait_attach_fixture_ready(&temp, &engine, &session.session_id).await;
+        let (input, incoming) = mpsc::channel(8);
+        let (output, mut received) = mpsc::channel(32);
+        let _owner = tokio::spawn(run_attach_session(
+            engine.clone(),
+            ReceiverStream::new(incoming),
+            v1::AttachSessionRequest {
+                session_id: session.session_id.clone(),
+                output_offset: 0,
+            },
+            output,
+        ));
+        let mut samples = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let byte = b'a' + (round % 26) as u8;
+            let started = std::time::Instant::now();
+            input
+                .send(Ok(v1::SessionAttachMessage {
+                    payload: Some(v1::session_attach_message::Payload::Input(
+                        v1::SessionInput { data: vec![byte] },
+                    )),
+                }))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let message = received.recv().await.unwrap().unwrap();
+                    if let Some(v1::session_attach_message::Payload::Output(chunk)) =
+                        message.payload
+                        && chunk.data.contains(&byte)
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("echo arrived");
+            samples.push(started.elapsed());
+        }
+        samples.sort();
+        let at = |q: f64| samples[((samples.len() as f64 - 1.0) * q) as usize];
+        eprintln!(
+            "attach echo over {ROUNDS} rounds: min {:?} median {:?} p95 {:?} max {:?}",
+            samples[0],
+            at(0.5),
+            at(0.95),
+            samples[samples.len() - 1]
+        );
+    }
+
     #[tokio::test]
     async fn attach_reads_input_while_the_terminal_is_busy() {
         const FRAMES: usize = 2000;
