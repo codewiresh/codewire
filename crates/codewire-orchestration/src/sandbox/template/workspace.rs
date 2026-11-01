@@ -320,9 +320,7 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
             "storageClassName": storage_class,
             "resources": { "requests": { "storage": format!("{}Gi", opts.disk_gib) } },
         });
-        // Confidential's device is opened by CoCo's storage handler; a
-        // commodity one by the guest's `mount-workspace` (#3718).
-        if confidential || block_workspace(opts, &runtime_spec) {
+        if confidential {
             claim_spec["volumeMode"] = "Block".into();
         }
         if let Some(snapshot) = &opts.workspace_source_snapshot {
@@ -365,10 +363,6 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     if confidential_block {
         configure_confidential_workspace_device(ws);
     }
-    let block = block_workspace(opts, &runtime_spec);
-    if block {
-        configure_block_workspace_mounts(ws, true);
-    }
     let daemon_image_volume = daemon_from_image_volume(&runtime_spec);
     let daemon_volume = if daemon_image_volume {
         json!({
@@ -388,9 +382,6 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     let mut volumes = vec![daemon_volume, run_volume];
     if opts.disk_gib == 0 {
         volumes.insert(0, json!({ "name": "workspace", "emptyDir": {} }));
-    }
-    if block {
-        volumes.extend(block_workspace_volumes());
     }
     if opts.credential_runtime.is_some() {
         volumes.extend(credentials::workspace_volumes(opts));
@@ -505,9 +496,6 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         if confidential_block {
             configure_confidential_workspace_device(&mut dind);
         }
-        if block {
-            configure_block_workspace_mounts(&mut dind, true);
-        }
         containers.push(dind);
     } else if runtime_spec.docker_mode == DOCKER_MODE_GUEST_DIND {
         ws["env"]
@@ -524,9 +512,6 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         if confidential_block {
             configure_confidential_workspace_device(&mut dind);
         }
-        if block {
-            configure_block_workspace_mounts(&mut dind, true);
-        }
         containers.push(dind);
     } else {
         containers.push(ws.clone());
@@ -538,22 +523,11 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     // reach that protected disk at all. A guest DinD's data image is
     // prepared before DinD mounts it (#3208), last, as a Start re-renders it
     // into an older Sandbox.
-    // A Block workspace is mounted first, by the only container that ever
-    // holds its device (#3718).
     let mut init_containers = Vec::new();
-    if block {
-        init_containers.push(mount_workspace_init_container(
-            support_image,
-            WorkspaceVolume::rendered(opts),
-        ));
-    }
     if !daemon_image_volume {
         init_containers.push(daemon_init_container(support_image, &runtime_spec.profile));
     }
-    if let Some(mut data_init) = docker_data_init(opts, &runtime_spec, support_image) {
-        if block {
-            configure_block_workspace_mounts(&mut data_init, false);
-        }
+    if let Some(data_init) = docker_data_init(opts, &runtime_spec, support_image) {
         init_containers.push(data_init);
     }
     if !init_containers.is_empty() {
@@ -563,201 +537,6 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     spec.insert("volumes".into(), Value::Array(volumes));
     Value::Object(spec)
 }
-
-/// Whether the workspace is a commodity Block volume that the guest formats
-/// and mounts itself, so writes reach the disk with no host page cache
-/// (#3718, design §2). Kind and runc keep a Filesystem claim.
-fn block_workspace(opts: &TemplateOpts, runtime_spec: &RuntimeProfileSpec) -> bool {
-    runtime_spec.profile == RUNTIME_PROFILE_COMMODITY && opts.disk_gib > 0
-}
-
-/// The one-shot container that formats, checks, grows and mounts a Block
-/// workspace (#3718, design §2).
-pub(crate) const MOUNT_WORKSPACE_CONTAINER: &str = "mount-workspace";
-
-/// Where `mount-workspace` sees the workspace device.
-pub(crate) const MOUNT_WORKSPACE_DEVICE_PATH: &str = "/dev/cwws";
-
-/// The guest-memory volume the workspace filesystem is mounted into, and the
-/// one its `.codewire/tmp` is bound into for `/tmp` and `/var/tmp` (R1).
-pub(crate) const WORKSPACE_MOUNT_VOLUME: &str = "wsmnt";
-const WORKSPACE_TMP_VOLUME: &str = "wstmp";
-
-/// What the create operation knows of a Block workspace volume: `New` only
-/// for a fresh claim, which `mount-workspace` may format if it is not
-/// already ext4. Every other volume is `Existing` and never formatted.
-/// Once a Pod's `mount-workspace` has exited 0, the next stop, suspension or
-/// Pod replacement turns `New` into `Existing` (the client's
-/// `workspace_volume_existing`); a first Pod that failed before or during
-/// its format leaves `New`, so its replacement can still format. Until then
-/// the formatted disk's own ext4 signature keeps a rebuilt Pod from
-/// formatting it again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WorkspaceVolume {
-    New,
-    Existing,
-}
-
-impl WorkspaceVolume {
-    /// A fork restores a snapshot, so its volume is never new.
-    fn rendered(opts: &TemplateOpts) -> Self {
-        if opts.workspace_source_snapshot.is_some() {
-            Self::Existing
-        } else {
-            Self::New
-        }
-    }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::New => "new",
-            Self::Existing => "existing",
-        }
-    }
-}
-
-/// The two guest-memory emptyDirs a Block workspace is mounted into. They
-/// hold only mount points, so they use no memory of their own.
-fn block_workspace_volumes() -> [Value; 2] {
-    [
-        json!({ "name": WORKSPACE_MOUNT_VOLUME, "emptyDir": { "medium": "Memory" } }),
-        json!({ "name": WORKSPACE_TMP_VOLUME, "emptyDir": { "medium": "Memory" } }),
-    ]
-}
-
-/// Replaces a container's `workspace` mounts with the mounted filesystem,
-/// seen through `HostToContainer` propagation, and, with `tmp`, mounts the
-/// workspace's temporary directory at `/tmp` and `/var/tmp` (R1). No
-/// long-lived container ever holds the device: a Kata container with a
-/// `volumeDevice` cannot restart (design §2).
-pub(crate) fn configure_block_workspace_mounts(container: &mut Value, tmp: bool) {
-    let mounts = container["volumeMounts"]
-        .as_array_mut()
-        .expect("container volumeMounts array");
-    for mount in mounts.iter_mut() {
-        if mount["name"].as_str() == Some("workspace") {
-            mount["name"] = WORKSPACE_MOUNT_VOLUME.into();
-            mount["mountPropagation"] = "HostToContainer".into();
-        }
-    }
-    if tmp {
-        for path in ["/tmp", "/var/tmp"] {
-            mounts.push(json!({
-                "name": WORKSPACE_TMP_VOLUME,
-                "mountPath": path,
-                "mountPropagation": "HostToContainer",
-            }));
-        }
-    }
-}
-
-/// `mount-workspace`: privileged inside the guest only, the one container
-/// with the workspace device, and done before any other container starts.
-pub(crate) fn mount_workspace_init_container(
-    support_image: &str,
-    volume: WorkspaceVolume,
-) -> Value {
-    json!({
-        "name": MOUNT_WORKSPACE_CONTAINER,
-        "image": support_image,
-        "securityContext": { "privileged": true, "runAsUser": 0, "runAsGroup": 0 },
-        "command": ["sh", "-c", MOUNT_WORKSPACE_SCRIPT, MOUNT_WORKSPACE_CONTAINER, volume.as_str()],
-        "volumeDevices": [{ "name": "workspace", "devicePath": MOUNT_WORKSPACE_DEVICE_PATH }],
-        "volumeMounts": [
-            { "name": WORKSPACE_MOUNT_VOLUME, "mountPath": "/mnt/ws", "mountPropagation": "Bidirectional" },
-            { "name": WORKSPACE_TMP_VOLUME, "mountPath": "/mnt/tmp", "mountPropagation": "Bidirectional" },
-        ],
-        "resources": docker_data_init_resources(),
-    })
-}
-
-/// `mount-workspace`'s shell; its one argument is `new` or `existing`.
-///
-/// It fails closed and is never retried in place: a retried container
-/// cannot re-add the locked disk, so recovery is a new Pod (#3786). Every
-/// refusal prints one `codewire mount-workspace:` line and exits 1.
-///
-/// - The device must read; a volume that fails to read is never probed or
-///   formatted.
-/// - `blkid -p` probes at a low level, so a stale or partial signature also
-///   counts as a signature. A linstor-local volume is LUKS-encrypted, so a
-///   new one reads as random bytes, never zeros: whether it is new comes from
-///   the create operation, never from its contents.
-/// - A volume holds ext4 when `dumpe2fs -h` reads a valid ext4 superblock or
-///   `blkid -p` finds ext4. Such a volume is never wiped or formatted, whatever
-///   else the probe says: the random bytes around a real filesystem may also
-///   match a foreign magic, which makes the probe ambiguous.
-/// - A `new` volume that does not hold ext4 is formatted. Its random bytes
-///   may match a short foreign magic by chance, so any signature is wiped
-///   first.
-/// - An `existing` volume must hold ext4: no signature, another one and a
-///   failed probe are refused.
-/// - `e2fsck -f -p` must exit 0 or 1 (corrected); its time and the whole
-///   step's are in the last line, for the no-slower measurement. The filesystem is then
-///   mounted and grown online to the device, which a grown claim makes
-///   larger; a failed grow keeps the previous size.
-/// - A fresh filesystem's root is the workspace user's: a guest-formatted
-///   volume gets no kubelet `fsGroup`.
-/// - `.codewire/tmp` is emptied at every boot and bound for `/tmp` and
-///   `/var/tmp` (R1). A `.codewire` that is a symbolic link is refused, so
-///   no path the workspace controls is followed as root.
-pub(crate) const MOUNT_WORKSPACE_SCRIPT: &str = r#"set -u
-# The three paths are overridable only for the script's own test; nothing
-# renders them, and the pool policy admits no other variable.
-dev="${CODEWIRE_MOUNT_WORKSPACE_DEVICE:-/dev/cwws}"
-ws="${CODEWIRE_MOUNT_WORKSPACE_ROOT:-/mnt/ws}"
-tmp="${CODEWIRE_MOUNT_WORKSPACE_TMP:-/mnt/tmp}"
-volume="${1:-}"
-began="$(date +%s%N)"
-refuse() {
-  echo "codewire mount-workspace: $*" >&2
-  exit 1
-}
-case "$volume" in
-  new|existing) ;;
-  *) refuse "the volume state must be new or existing, not '$volume'" ;;
-esac
-dd if="$dev" of=/dev/null bs=4096 count=1 2>/dev/null || refuse "the workspace device $dev cannot be read"
-probe=0
-blkid -p "$dev" >/dev/null 2>&1 || probe=$?
-fstype=
-[ "$probe" != 0 ] || fstype="$(blkid -p -s TYPE -o value "$dev" 2>/dev/null || true)"
-ext4=0
-if [ "$fstype" = ext4 ] || dumpe2fs -h "$dev" >/dev/null 2>&1; then ext4=1; fi
-fresh=0
-if [ "$ext4" = 0 ] && [ "$volume" = new ]; then
-  case "$probe" in
-    0|2|8) ;;
-    *) refuse "probing the workspace device failed (blkid exit $probe)" ;;
-  esac
-  [ "$probe" = 2 ] || wipefs -a -q "$dev" || refuse "clearing the new workspace volume's chance signature failed"
-  mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$dev" || refuse "formatting the new workspace volume failed"
-  fresh=1
-elif [ "$ext4" = 0 ]; then
-  case "$probe" in
-    0) refuse "the workspace volume holds '${fstype:-an unknown signature}', not ext4" ;;
-    2) refuse "the existing workspace volume has no filesystem; it is not formatted" ;;
-    *) refuse "probing the workspace device failed (blkid exit $probe)" ;;
-  esac
-fi
-checked="$(date +%s%N)"
-check=0
-e2fsck -f -p "$dev" >/dev/null 2>&1 || check=$?
-[ "$check" -le 1 ] || refuse "checking the workspace filesystem failed (e2fsck exit $check)"
-check_ms=$((($(date +%s%N) - checked) / 1000000))
-mount -t ext4 -o noatime "$dev" "$ws" || refuse "mounting the workspace filesystem failed"
-resize2fs "$dev" >/dev/null 2>&1 || echo "codewire mount-workspace: the workspace filesystem did not grow; it keeps its previous size" >&2
-[ "$fresh" = 0 ] || chown 1000:1000 "$ws" || refuse "the fresh workspace root could not be given to the workspace user"
-[ ! -L "$ws/.codewire" ] || refuse "the workspace's .codewire is a symbolic link"
-if [ ! -d "$ws/.codewire" ]; then
-  mkdir "$ws/.codewire" && chown 1000:1000 "$ws/.codewire" && chmod 0755 "$ws/.codewire" ||
-    refuse "the workspace's .codewire could not be created"
-fi
-rm -rf "$ws/.codewire/tmp" && mkdir "$ws/.codewire/tmp" && chmod 1777 "$ws/.codewire/tmp" ||
-  refuse "the workspace temporary directory could not be emptied"
-mount --bind "$ws/.codewire/tmp" "$tmp" || refuse "binding the workspace temporary directory failed"
-echo "codewire mount-workspace: mounted the $volume workspace volume (formatted=$fresh e2fsck_ms=$check_ms total_ms=$((($(date +%s%N) - began) / 1000000)))"
-"#;
 
 fn configure_confidential_workspace_device(container: &mut Value) {
     container["volumeMounts"]

@@ -549,12 +549,9 @@ fn the_admission_policy_pins_the_renderer() {
             crate::sandbox::template::RUNTIME_CLASS_CONFIDENTIAL
         ),
         // Confidential claims, whatever their class, are never pooled
-        // (codewire#2321); a Block claim is commodity's (codewire#3718).
+        // (codewire#2321).
+        "(!has(t.spec.volumeMode) || t.spec.volumeMode != 'Block')".to_owned(),
         "(!has(t.spec.accessModes) || !('ReadWriteOncePod' in t.spec.accessModes))".to_owned(),
-        format!(
-            "c.name == '{}' && size(c.volumeDevices) == 1",
-            crate::sandbox::template::MOUNT_WORKSPACE_CONTAINER
-        ),
     ] {
         assert!(policy.contains(&fragment), "policy lost {fragment}");
     }
@@ -569,70 +566,18 @@ fn the_admission_policy_pins_the_renderer() {
     }
     let rendered = render(&pool_opts());
     assert_eq!(rendered.pool["spec"]["updateStrategy"]["type"], "Recreate");
-    // A pool claim is never the confidential shape the policy refuses: a
-    // commodity Block volume, ReadWriteOnce (codewire#3718).
+    // A pool claim is never the confidential shape the policy refuses.
     let claims = rendered.template["spec"]["volumeClaimTemplates"]
         .as_array()
         .expect("pool workspace claim");
     assert!(!claims.is_empty());
     for claim in claims {
-        assert_eq!(claim["spec"]["volumeMode"], "Block");
+        assert!(claim["spec"]["volumeMode"].is_null());
         assert_eq!(
             claim["spec"]["accessModes"],
             serde_json::json!(["ReadWriteOnce"])
         );
     }
-    // The policy runs mount-workspace only as its rendered script
-    // (codewire#3718): the two must stay byte-for-byte equal.
-    let script = serde_yaml::Deserializer::from_str(&policy)
-        .map(|document| <serde_yaml::Value as serde::Deserialize>::deserialize(document).unwrap())
-        .filter(|document| {
-            document["kind"] == "ValidatingAdmissionPolicy"
-                && document["metadata"]["name"] == "codewire-orchestration-warm-pool-template"
-        })
-        .flat_map(|document| {
-            document["spec"]["variables"]
-                .as_sequence()
-                .cloned()
-                .unwrap()
-        })
-        .find(|variable| variable["name"] == "mountWorkspaceScript")
-        .and_then(|variable| variable["expression"].as_str().map(str::to_owned))
-        .expect("the policy names mount-workspace's script");
-    assert_eq!(
-        script,
-        format!(
-            "r'''{}'''",
-            crate::sandbox::template::MOUNT_WORKSPACE_SCRIPT
-        )
-    );
-    assert!(policy.contains("c.command[2] == variables.mountWorkspaceScript"));
-    // Only mount-workspace holds the device, as the policy requires.
-    let pod_spec = &rendered.template["spec"]["podTemplate"]["spec"];
-    assert!(
-        pod_spec["containers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|container| container.get("volumeDevices").is_none())
-    );
-    let holders: Vec<_> = pod_spec["initContainers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|init| init.get("volumeDevices").is_some())
-        .map(|init| (init["name"].clone(), init["volumeDevices"].clone()))
-        .collect();
-    assert_eq!(
-        holders,
-        [(
-            serde_json::json!(crate::sandbox::template::MOUNT_WORKSPACE_CONTAINER),
-            serde_json::json!([{
-                "name": "workspace",
-                "devicePath": crate::sandbox::template::MOUNT_WORKSPACE_DEVICE_PATH,
-            }]),
-        )]
-    );
     assert_eq!(
         rendered.template["spec"]["podTemplate"]["spec"]["serviceAccountName"],
         "codewire-sandbox"
