@@ -76,6 +76,16 @@ pub(crate) fn block_count(output: &[u8]) -> Result<u64, Error> {
         .ok_or(Error::Unreadable("dumpe2fs"))
 }
 
+/// The filesystem's block size, one of ext4's: 1, 2, 4 or 64 KiB.
+pub(crate) fn block_size(output: &[u8]) -> Result<u64, Error> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .find_map(|line| line.strip_prefix("Block size:"))
+        .and_then(|size| size.trim().parse().ok())
+        .filter(|size| matches!(size, 1024 | 2048 | 4096 | 65536))
+        .ok_or(Error::Unreadable("dumpe2fs"))
+}
+
 /// Every inode `dumpe2fs` reports in use from the first ordinary one:
 /// each group's inodes but its free ones.
 pub(crate) fn used_inodes(output: &[u8]) -> Result<Vec<u64>, Error> {

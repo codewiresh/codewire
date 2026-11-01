@@ -773,6 +773,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-select-protected-rust-cache.sh
   scripts/ci/tests/test-run-host-rust-build.sh
   scripts/ci/tests/test-check-workspace-hack.sh
+  scripts/ci/tests/test-free-block-probe.sh
   python3 -B scripts/ci/tests/test-integration-lane.py
   scripts/ci/tests/test-ci-tests-wired.sh
   python3 scripts/dev/test-macos-cli.py

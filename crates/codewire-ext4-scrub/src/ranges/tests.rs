@@ -161,3 +161,15 @@ Group 1: (Blocks 32768-65535)\n  Free inodes: 17-20, 23-32\n";
     assert!(used_inodes(b"Inode count: 32\nInodes per group: 16\nFirst inode: 11\nGroup 0: (Blocks 0-9)\n  Free inodes: 14-16\n").is_err());
     assert!(used_inodes(b"Inode count: 16\nInodes per group: 16\nFirst inode: 11\nGroup 0: (Blocks 0-9)\n  Free inodes: 14-40\n").is_err());
 }
+
+#[test]
+fn the_block_size_is_one_ext4_has() {
+    assert_eq!(
+        block_size(b"Block count: 10\nBlock size:               1024\n").unwrap(),
+        1024
+    );
+    assert_eq!(block_size(b"Block size: 4096\n").unwrap(), 4096);
+    assert!(block_size(b"Block size: 512\n").is_err());
+    assert!(block_size(b"Block size: x\n").is_err());
+    assert!(block_size(b"Block count: 10\n").is_err());
+}

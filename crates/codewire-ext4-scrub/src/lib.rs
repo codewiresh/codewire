@@ -7,10 +7,17 @@
 //! The ranges come from e2fsprogs (`dumpe2fs`, `debugfs stat`), run through
 //! the caller's [`Tools`]: a local snapshot runs the host's tools confined to
 //! the disk alone (`codewire-local-vmm`), because they parse a filesystem a
-//! guest wrote.
+//! guest wrote; a hosted clearing Sandbox runs them as they are, inside a VM
+//! that is itself the boundary ([`SystemTools`]).
+//!
+//! There are two backends. An image file has its ranges punched out
+//! ([`punch_unreadable_blocks`]); a block device has them discarded, then
+//! overwritten wherever they still read as data, then read back from the
+//! device ([`wipe_unreadable_blocks`]).
 
 #![cfg(target_os = "linux")]
 
+mod block;
 mod ranges;
 
 use std::fs::{File, OpenOptions};
@@ -21,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+pub use block::{WipeReport, wipe_unreadable_blocks};
 pub use ranges::{FileExtent, parse_extent};
 
 /// How long one e2fsprogs run may take.
@@ -65,6 +73,43 @@ pub trait Tools: Sync {
     ) -> io::Result<tokio::process::Command>;
 }
 
+/// e2fsprogs as they are, for a disk inside a VM that is itself the boundary,
+/// such as a hosted clearing Sandbox's. A tool is taken only from `/usr/sbin`,
+/// `/sbin` or `/usr/bin`, never `PATH`, and only when only root can change it.
+pub struct SystemTools;
+
+impl Tools for SystemTools {
+    fn program(&self, name: &'static str) -> Option<PathBuf> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        if !matches!(name, "e2fsck" | "debugfs" | "dumpe2fs") {
+            return None;
+        }
+        let found = ["/usr/sbin", "/sbin", "/usr/bin"]
+            .iter()
+            .map(|directory| Path::new(directory).join(name))
+            .find(|path| path.is_file())?;
+        let real = std::fs::canonicalize(found).ok()?;
+        real.ancestors()
+            .all(|entry| {
+                std::fs::symlink_metadata(entry)
+                    .is_ok_and(|metadata| metadata.uid() == 0 && metadata.mode() & 0o022 == 0)
+            })
+            .then_some(real)
+    }
+
+    fn command(
+        &self,
+        program: &Path,
+        leading_args: &[&str],
+        disk: &Path,
+    ) -> io::Result<tokio::process::Command> {
+        let mut command = tokio::process::Command::new(program);
+        command.kill_on_drop(true).args(leading_args).arg(disk);
+        Ok(command)
+    }
+}
+
 /// A settling `e2fsck -f -p`: 0 clean, 1 corrected.
 pub async fn e2fsck(tools: &impl Tools, disk: &Path) -> Result<(), Error> {
     let (code, _, _) = run_tool(tools, "e2fsck", &["-f", "-p"], disk).await?;
@@ -103,7 +148,10 @@ pub async fn punch_unreadable_blocks(
     disk: &Path,
     block_size: u64,
 ) -> Result<(), Error> {
-    let ranges = unreadable_ranges(tools, disk, block_size).await?;
+    let (reported, ranges) = unreadable_ranges(tools, disk).await?;
+    if reported != block_size {
+        return Err(Error::Unreadable("dumpe2fs"));
+    }
     let image = OpenOptions::new()
         .read(true)
         .write(true)
@@ -124,19 +172,19 @@ pub async fn punch_unreadable_blocks(
     verify_samples(&image, &ranges, block_size)
 }
 
-/// Every block of `disk` the guest cannot read, as merged inclusive block
-/// ranges: the free ranges `dumpe2fs` reports, and each used regular file's
-/// unwritten extents and blocks past its end.
+/// The block size `dumpe2fs` reports for `disk`, and every block the guest
+/// cannot read, as merged inclusive block ranges: the free ranges, and each
+/// used regular file's unwritten extents and blocks past its end.
 async fn unreadable_ranges(
     tools: &impl Tools,
     disk: &Path,
-    block_size: u64,
-) -> Result<Vec<(u64, u64)>, Error> {
+) -> Result<(u64, Vec<(u64, u64)>), Error> {
     let (code, output, errors) = run_tool(tools, "dumpe2fs", &[], disk).await?;
     if code != Some(0) {
         return Err(Error::Failed("dumpe2fs", code));
     }
     require_quiet("dumpe2fs", &errors)?;
+    let block_size = ranges::block_size(&output)?;
     let mut ranges = ranges::free_ranges(&output)?;
     let inodes = ranges::used_inodes(&output)?;
     let block_count = ranges::block_count(&output)?;
@@ -145,7 +193,7 @@ async fn unreadable_ranges(
         return Err(Error::Unreadable("debugfs"));
     }
     ranges.extend(unreadable);
-    Ok(ranges::merge_ranges(ranges))
+    Ok((block_size, ranges::merge_ranges(ranges)))
 }
 
 /// Every block of a short range, and the first, middle and last of a longer
