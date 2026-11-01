@@ -267,6 +267,39 @@ FAKE_DF_PER_LEG=20 BUILD_ONCE_DISK_PERCENT=35 targets_prepare
 [ -d "$marker_root/targets/archive" ] || fail 'the most recently used leg was removed'
 grep -q '^  mark_used "$work/targets/$name"$' "$SCRIPT" || fail 'a leg does not mark its folder used'
 
+# A build script's directory is one unit (main run 32717): a live unit keeps
+# out/ files no build read, an empty out/ stays, a unit no build read goes with
+# its fingerprint, and one already left without out/ goes so Cargo reruns it.
+profile="$marker_root/targets/darwin/aarch64-apple-darwin/debug"
+for unit in live-1 empty-2 stale-3 broken-4 nested-5; do
+  mkdir -p "$profile/build/$unit" "$profile/.fingerprint/$unit"
+  printf 'cargo:rerun-if-changed=build.rs\n' > "$profile/build/$unit/output"
+  printf '{}' > "$profile/.fingerprint/$unit/run-build-script-build-script-build.json"
+done
+mkdir -p "$profile/build/live-1/out" "$profile/build/empty-2/out" "$profile/build/stale-3/out"
+printf 'generated' > "$profile/build/live-1/out/private.rs"
+printf 'generated' > "$profile/build/stale-3/out/private.rs"
+# A CMake-style script's own build/ under out/ is part of its unit: one read
+# file there keeps the unit, however old its record is.
+mkdir -p "$profile/build/nested-5/out/build"
+printf 'object' > "$profile/build/nested-5/out/build/fresh.o"
+touch -a -d '5 days ago' "$profile/build/live-1/out/private.rs" "$profile/build/stale-3/out/private.rs" \
+  "$profile/build/stale-3/output" "$profile/build/nested-5/output"
+FAKE_DF_PER_LEG=1 targets_prepare
+[ -f "$profile/build/live-1/out/private.rs" ] || fail "a live build script unit lost an out/ file no build read"
+[ -d "$profile/build/empty-2/out" ] || fail 'an empty out/ of a live build script unit was removed'
+[ -d "$profile/.fingerprint/live-1" ] && [ -d "$profile/.fingerprint/empty-2" ] ||
+  fail 'a live build script unit lost its fingerprint'
+[ ! -e "$profile/build/stale-3" ] && [ ! -e "$profile/.fingerprint/stale-3" ] ||
+  fail 'a build script unit no build read was kept, or kept its fingerprint'
+[ -f "$profile/build/nested-5/out/build/fresh.o" ] && [ -d "$profile/.fingerprint/nested-5" ] ||
+  fail 'a unit read only under its out/build/ was swept'
+[ ! -e "$profile/build/broken-4" ] && [ ! -e "$profile/.fingerprint/broken-4" ] ||
+  fail 'a build script unit left without out/ was kept, so Cargo would not rerun it'
+grep -q 'removed 2 build-script units no build read for 3 days or left without their output' "$work/prepare.log" ||
+  fail 'the unit sweep gave no count'
+rm -rf "$marker_root/targets/darwin"
+
 # Live folders stay. A folder is live when this run or the run before it on
 # this disk (the latest mark of another run) used it; idle folders go first,
 # least recently used first. A folder this job is about to use never goes.

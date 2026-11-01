@@ -348,10 +348,44 @@ bound_targets() {
   # incremental sessions. The disk is mounted relatime, so every build that
   # reads an artifact keeps it fresh (cargo-sweep's own signal). A swept unit
   # a later build needs is rebuilt by Cargo.
-  swept="$(find "$work/targets" -xdev -type f -atime +"$(( ${BUILD_ONCE_SWEEP_DAYS:-3} - 1 ))" \
+  #
+  # A build script's directory (build/<unit>) is one unit, swept whole. Cargo
+  # reads its run's `output` record on every build, but the files the script
+  # generated in out/ only when its own crate compiles. A per-file sweep could
+  # take out/ and keep the record, and Cargo would then compile the crate
+  # without its generated sources, since the script's run still looks fresh
+  # (main run 32717, after run 32706's sweep: thiserror's out/private.rs). So
+  # such a directory goes, with its fingerprint, only when none of its files
+  # was read in the period, and one already left without out/ goes the same
+  # way, so Cargo runs its script again.
+  local days="${BUILD_ONCE_SWEEP_DAYS:-3}" unit units=0
+  local -a build_units=()
+  local -A read_units=()
+  swept="$(find "$work/targets" -xdev -type f -atime +"$(( days - 1 ))" -not -path '*/build/*' \
     -print -delete 2>/dev/null | wc -l)"
-  find "$work/targets" -xdev -mindepth 2 -type d -empty -delete 2>/dev/null || true
-  [ "$swept" -eq 0 ] || echo "build-once: removed $swept target files no build read for ${BUILD_ONCE_SWEEP_DAYS:-3} days"
+  # Each build/<unit> directory, by the first build/ under a profile. A unit
+  # was read when any file under it was: one find, started at every unit,
+  # prints the start (%H) each read file is under, so no unit forks its own
+  # and a nested build/ under out/ is never mistaken for a unit.
+  mapfile -d '' build_units < <(find "$work/targets" -xdev -mindepth 2 -type d -path '*/build/*' \
+    -prune -print0 2>/dev/null)
+  if [ "${#build_units[@]}" -gt 0 ]; then
+    # shellcheck disable=SC2016 # the inner sh expands $0 and $@
+    while IFS= read -r -d '' unit; do
+      read_units[$unit]=1
+    done < <(printf '%s\0' "${build_units[@]}" |
+      xargs -0 -r sh -c 'find "$@" -type f -atime -"$0" -printf "%H\0"' "$days" 2>/dev/null | sort -zu)
+  fi
+  for unit in "${build_units[@]}"; do
+    if { [ -f "$unit/output" ] && [ ! -d "$unit/out" ]; } || [ -z "${read_units[$unit]:-}" ]; then
+      rm -rf -- "$unit" "${unit%/build/*}/.fingerprint/${unit##*/}"
+      units=$(( units + 1 ))
+    fi
+  done
+  find "$work/targets" -xdev -mindepth 2 -type d -empty -not -path '*/build/*' -delete 2>/dev/null || true
+  [ "$swept" -eq 0 ] || echo "build-once: removed $swept target files no build read for $days days"
+  [ "$units" -eq 0 ] ||
+    echo "build-once: removed $units build-script units no build read for $days days or left without their output"
   read -r used used_kib size_kib < <(disk_usage) || true
   [[ "$used" =~ ^[0-9]+$ && "$used_kib" =~ ^[0-9]+$ && "$size_kib" =~ ^[0-9]+$ ]] ||
     die "cannot read the build disk's use: ${used:-nothing}"
