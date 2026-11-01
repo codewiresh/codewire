@@ -56,10 +56,6 @@ const COPY_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
 /// The largest login file capture reads from a disk image, as the daemon.
 #[cfg(target_os = "linux")]
 const MAXIMUM_LOGIN_FILE_BYTES: u64 = 1024 * 1024;
-#[cfg(target_os = "linux")]
-const DISK_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
-#[cfg(target_os = "linux")]
-const MAXIMUM_TOOL_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const SPACE_WARNING: &str = "a snapshot and the environments made from it share space only until they change: each copy that diverges takes its own space, and a full host disk can force a running VM's filesystem read-only";
 const COPY_WARNING: &str = "this filesystem cannot share blocks between files, so the snapshot is a full copy and holds its disks' allocated bytes now";
 #[cfg(not(target_os = "linux"))]
@@ -1184,7 +1180,6 @@ fn reconcile(_engine_root: &Path, _store: &SnapshotStore) -> Result<(), Supervis
 #[cfg(target_os = "linux")]
 mod linux {
     use std::fs::OpenOptions;
-    use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::{FileExt as _, OpenOptionsExt as _};
 
     use sha2::Digest as _;
@@ -1880,12 +1875,6 @@ mod linux {
     const ENVIRONMENT_BOUND_TREES: [&[&str]; 1] = [&["codewire", "cw-runtime"]];
     /// The most entries one removed tree may hold.
     const MAXIMUM_TREE_ENTRIES: usize = 4096;
-    /// ext4's inode flag for an fs-verity file (`EXT4_VERITY_FL`).
-    const EXT4_VERITY_FL: u64 = 0x0010_0000;
-    /// ext4 places a verity file's metadata at its size rounded up to this.
-    const VERITY_METADATA_ALIGNMENT: u64 = 64 * 1024;
-    /// How many blocks of each punched free range are read back.
-    const PUNCH_SAMPLES: u64 = 3;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum LoginKind {
@@ -1977,6 +1966,22 @@ mod linux {
         Io(#[from] io::Error),
         #[error(transparent)]
         State(#[from] StateError),
+    }
+
+    impl From<codewire_ext4_scrub::Error> for ScrubError {
+        fn from(error: codewire_ext4_scrub::Error) -> Self {
+            use codewire_ext4_scrub::Error;
+            match error {
+                Error::ToolUnavailable(_) => Self::ToolUnavailable,
+                Error::Confinement(label, error) => Self::Confinement(label, error),
+                Error::Timeout(label) => Self::Timeout(label),
+                Error::Failed(label, code) => Self::Failed(label, code),
+                Error::Reported(label) => Self::Reported(label),
+                Error::Unreadable(label) => Self::Unreadable(label),
+                Error::NotCleared => Self::NotPunched,
+                Error::Io(error) => Self::Io(error),
+            }
+        }
     }
 
     /// Clear the state disk copy at `disk`, which no VM uses, of every
@@ -2217,578 +2222,37 @@ mod linux {
     }
 
     /// Punch out of the file in `disk` every block the guest cannot read,
-    /// then read samples of each range back as zeros: every free range of
-    /// the filesystem, and in each regular file every unwritten extent and
-    /// every block past its end. A token an earlier rewrite left in a freed
-    /// block, even one since reallocated without being written, is gone,
-    /// and nothing the guest reads changes.
+    /// then read samples of each range back as zeros
+    /// ([`codewire_ext4_scrub::punch_unreadable_blocks`]).
     async fn punch_unreadable_blocks(disk: &Path, block_size: u64) -> Result<(), ScrubError> {
-        let program = program("dumpe2fs")?;
-        let (code, output, errors) = run_disk_tool("dumpe2fs", &program, &[], disk).await?;
-        if code != Some(0) {
-            return Err(ScrubError::Failed("dumpe2fs", code));
-        }
-        require_quiet("dumpe2fs", &errors)?;
-        let mut ranges = free_ranges(&output)?;
-        let inodes = used_inodes(&output)?;
-        let block_count = block_count(&output)?;
-        let unreadable = unreadable_file_blocks(disk, &inodes, block_size).await?;
-        if unreadable.iter().any(|(_, last)| *last >= block_count) {
-            return Err(ScrubError::Unreadable("debugfs"));
-        }
-        ranges.extend(unreadable);
-        let ranges = merge_ranges(ranges);
-        let image = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(disk)?;
-        let length = image.metadata()?.len();
-        for &(first, last) in &ranges {
-            let offset = first
-                .checked_mul(block_size)
-                .ok_or(ScrubError::Unreadable("dumpe2fs"))?;
-            let bytes = (last - first + 1)
-                .checked_mul(block_size)
-                .filter(|bytes| offset.saturating_add(*bytes) <= length)
-                .ok_or(ScrubError::Unreadable("dumpe2fs"))?;
-            punch_hole(&image, offset, bytes)?;
-        }
-        image.sync_all()?;
-        let mut sample =
-            vec![0_u8; usize::try_from(block_size).map_err(|_| ScrubError::NotPunched)?];
-        for &(first, last) in &ranges {
-            let samples = if last - first < PUNCH_SAMPLES {
-                (first..=last).collect::<Vec<_>>()
-            } else {
-                vec![first, first + (last - first) / 2, last]
-            };
-            for block in samples {
-                image.read_exact_at(&mut sample, block * block_size)?;
-                if sample.iter().any(|byte| *byte != 0) {
-                    return Err(ScrubError::NotPunched);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn punch_hole(image: &File, offset: u64, bytes: u64) -> io::Result<()> {
-        let (Ok(offset), Ok(bytes)) = (libc::off_t::try_from(offset), libc::off_t::try_from(bytes))
-        else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "range too large",
-            ));
-        };
-        // SAFETY: a plain fallocate on a live descriptor.
-        let result = unsafe {
-            libc::fallocate(
-                image.as_raw_fd(),
-                libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
-                offset,
-                bytes,
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-
-    /// The free block ranges `dumpe2fs` reports, merged where adjacent:
-    /// every group must report its free blocks, and every range must lie in
-    /// the filesystem.
-    fn free_ranges(output: &[u8]) -> Result<Vec<(u64, u64)>, ScrubError> {
-        let unreadable = || ScrubError::Unreadable("dumpe2fs");
-        let text = std::str::from_utf8(output).map_err(|_| unreadable())?;
-        let mut block_count = None;
-        let mut groups = 0_u64;
-        let mut reports = 0_u64;
-        let mut ranges = Vec::new();
-        for line in text.lines() {
-            if let Some(count) = line.strip_prefix("Block count:") {
-                block_count = Some(count.trim().parse::<u64>().map_err(|_| unreadable())?);
-            } else if line.starts_with("Group ") && line.contains(": (Blocks ") {
-                groups += 1;
-            } else if let Some(list) = line.strip_prefix("  Free blocks:") {
-                reports += 1;
-                for item in list
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|item| !item.is_empty())
-                {
-                    let (first, last) = match item.split_once('-') {
-                        Some((first, last)) => (first, last),
-                        None => (item, item),
-                    };
-                    let first = first.parse::<u64>().map_err(|_| unreadable())?;
-                    let last = last.parse::<u64>().map_err(|_| unreadable())?;
-                    if last < first {
-                        return Err(unreadable());
-                    }
-                    ranges.push((first, last));
-                }
-            }
-        }
-        let block_count = block_count.ok_or_else(unreadable)?;
-        if groups == 0 || groups != reports || ranges.iter().any(|(_, last)| *last >= block_count) {
-            return Err(unreadable());
-        }
-        Ok(merge_ranges(ranges))
-    }
-
-    fn merge_ranges(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
-        ranges.sort_unstable();
-        let mut merged: Vec<(u64, u64)> = Vec::new();
-        for (first, last) in ranges {
-            match merged.last_mut() {
-                Some(previous) if first <= previous.1.saturating_add(1) => {
-                    previous.1 = previous.1.max(last);
-                }
-                _ => merged.push((first, last)),
-            }
-        }
-        merged
-    }
-
-    fn block_count(output: &[u8]) -> Result<u64, ScrubError> {
-        String::from_utf8_lossy(output)
-            .lines()
-            .find_map(|line| line.strip_prefix("Block count:"))
-            .and_then(|count| count.trim().parse().ok())
-            .ok_or(ScrubError::Unreadable("dumpe2fs"))
-    }
-
-    /// Every inode `dumpe2fs` reports in use from the first ordinary one:
-    /// each group's inodes but its free ones.
-    fn used_inodes(output: &[u8]) -> Result<Vec<u64>, ScrubError> {
-        let unreadable = || ScrubError::Unreadable("dumpe2fs");
-        let text = std::str::from_utf8(output).map_err(|_| unreadable())?;
-        let header = |name: &str| {
-            text.lines()
-                .find_map(|line| line.strip_prefix(name))
-                .and_then(|value| value.trim().parse::<u64>().ok())
-        };
-        let per_group = header("Inodes per group:")
-            .filter(|count| *count > 0)
-            .ok_or_else(unreadable)?;
-        let first = header("First inode:").ok_or_else(unreadable)?;
-        let count = header("Inode count:").ok_or_else(unreadable)?;
-        let mut group = None;
-        let mut used = Vec::new();
-        let mut reports = 0_u64;
-        for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("Group ")
-                && line.contains(": (Blocks ")
-            {
-                group = Some(
-                    rest.split(':')
-                        .next()
-                        .and_then(|number| number.trim().parse::<u64>().ok())
-                        .ok_or_else(unreadable)?,
-                );
-            } else if let Some(list) = line.strip_prefix("  Free inodes:") {
-                let group = group.take().ok_or_else(unreadable)?;
-                reports += 1;
-                let start = group * per_group + 1;
-                let end = start + per_group - 1;
-                let mut free = Vec::new();
-                for item in list
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|item| !item.is_empty())
-                {
-                    let (low, high) = item.split_once('-').unwrap_or((item, item));
-                    let low = low.parse::<u64>().map_err(|_| unreadable())?;
-                    let high = high.parse::<u64>().map_err(|_| unreadable())?;
-                    if high < low || low < start || high > end {
-                        return Err(unreadable());
-                    }
-                    free.push((low, high));
-                }
-                free.sort_unstable();
-                let mut next = start;
-                for (low, high) in free.into_iter().chain([(end + 1, end + 1)]) {
-                    used.extend((next..low).filter(|inode| *inode >= first));
-                    next = next.max(high + 1);
-                }
-            }
-        }
-        if reports == 0 || reports * per_group != count {
-            return Err(unreadable());
-        }
-        Ok(used)
-    }
-
-    /// The physical blocks of every regular file in `inodes` that the guest
-    /// cannot read: unwritten extents and blocks past the file's end, from
-    /// one confined debugfs session that stats each inode.
-    async fn unreadable_file_blocks(
-        disk: &Path,
-        inodes: &[u64],
-        block_size: u64,
-    ) -> Result<Vec<(u64, u64)>, ScrubError> {
-        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
-
-        if inodes.is_empty() {
-            return Ok(Vec::new());
-        }
-        let program = program("debugfs")?;
-        let mut command = crate::linux::disk_tool::command(&program, &[], disk)
-            .map_err(|error| ScrubError::Confinement("debugfs", error))?;
-        let mut child = command
-            .env_clear()
-            .env("LC_ALL", "C")
-            .env("PAGER", "__none__")
-            .env("DEBUGFS_PAGER", "__none__")
-            .env("SS_READLINE_PATH", "")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| ScrubError::Confinement("debugfs", error))?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or(ScrubError::Unreadable("debugfs"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(ScrubError::Unreadable("debugfs"))?;
-        let mut stderr = child
-            .stderr
-            .take()
-            .ok_or(ScrubError::Unreadable("debugfs"))?;
-        let mut commands = String::with_capacity(inodes.len() * 16);
-        for inode in inodes {
-            commands.push_str(&format!("stat <{inode}>\n"));
-        }
-        let run = async {
-            let write = async {
-                stdin.write_all(commands.as_bytes()).await?;
-                stdin.shutdown().await?;
-                drop(stdin);
-                Ok::<_, io::Error>(())
-            };
-            let read = async {
-                let mut parser = InodeBlocks::new(block_size);
-                let requested = inodes;
-                let mut lines = tokio::io::BufReader::new(stdout);
-                let mut line = Vec::new();
-                loop {
-                    line.clear();
-                    if lines.read_until(b'\n', &mut line).await? == 0 {
-                        break;
-                    }
-                    parser.line(&String::from_utf8_lossy(&line));
-                }
-                Ok::<_, io::Error>(parser.finish(requested))
-            };
-            let errors = async {
-                let mut errors = Vec::new();
-                (&mut stderr)
-                    .take(MAXIMUM_TOOL_OUTPUT_BYTES as u64 + 1)
-                    .read_to_end(&mut errors)
-                    .await?;
-                Ok::<_, io::Error>(errors)
-            };
-            let (written, ranges, errors) = tokio::join!(write, read, errors);
-            written?;
-            let status = child.wait().await?;
-            Ok::<_, io::Error>((status.code(), ranges?, errors?))
-        };
-        let (code, ranges, errors) = tokio::time::timeout(DISK_TOOL_TIMEOUT, run)
-            .await
-            .map_err(|_| ScrubError::Timeout("debugfs"))??;
-        if code != Some(0) {
-            return Err(ScrubError::Failed("debugfs", code));
-        }
-        require_quiet("debugfs", &errors)?;
-        ranges
-    }
-
-    /// One extent of a file, as `debugfs stat` prints it.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct FileExtent {
-        logical: u64,
-        physical: u64,
-        length: u64,
-        unwritten: bool,
-    }
-
-    /// Reads `debugfs stat` records and keeps, of each regular file, the
-    /// physical blocks the guest cannot read. A file's map is either
-    /// `EXTENTS:` or, for a file mapped by indirect blocks, `BLOCKS:`.
-    struct InodeBlocks {
-        block_size: u64,
-        regular: bool,
-        /// `EXT4_VERITY_FL`: the file's Merkle tree lives past its end.
-        verity: bool,
-        size: Option<u64>,
-        extents: Vec<FileExtent>,
-        in_map: bool,
-        ranges: Vec<(u64, u64)>,
-        /// Every record's inode, in order.
-        seen: Vec<u64>,
-        malformed: bool,
-    }
-
-    impl InodeBlocks {
-        fn new(block_size: u64) -> Self {
-            Self {
-                block_size,
-                regular: false,
-                verity: false,
-                size: None,
-                extents: Vec::new(),
-                in_map: false,
-                ranges: Vec::new(),
-                seen: Vec::new(),
-                malformed: false,
-            }
-        }
-
-        fn line(&mut self, line: &str) {
-            let mut line = line.trim_end();
-            while let Some(rest) = line.strip_prefix("debugfs:") {
-                line = rest.trim_start();
-            }
-            if let Some(rest) = line.strip_prefix("Inode: ") {
-                self.end_record();
-                match rest
-                    .split_whitespace()
-                    .next()
-                    .and_then(|inode| inode.parse::<u64>().ok())
-                {
-                    Some(inode) => self.seen.push(inode),
-                    None => self.malformed = true,
-                }
-                self.regular = rest
-                    .split_whitespace()
-                    .skip_while(|word| *word != "Type:")
-                    .nth(1)
-                    == Some("regular");
-                match rest
-                    .split_whitespace()
-                    .skip_while(|word| *word != "Flags:")
-                    .nth(1)
-                    .and_then(|flags| flags.strip_prefix("0x"))
-                    .and_then(|flags| u64::from_str_radix(flags, 16).ok())
-                {
-                    Some(flags) => self.verity = flags & EXT4_VERITY_FL != 0,
-                    None => self.malformed = true,
-                }
-                return;
-            }
-            if line.starts_with("User:") {
-                self.size = line
-                    .rsplit_once("Size:")
-                    .and_then(|(_, size)| size.trim().parse().ok());
-                if self.size.is_none() {
-                    self.malformed = true;
-                }
-                return;
-            }
-            if line == "EXTENTS:" || line == "BLOCKS:" {
-                self.in_map = true;
-                return;
-            }
-            if self.in_map {
-                if !line.starts_with('(') {
-                    self.in_map = false;
-                    return;
-                }
-                for entry in line
-                    .split(", ")
-                    .map(str::trim)
-                    .filter(|entry| !entry.is_empty())
-                {
-                    match parse_extent(entry) {
-                        Some(Some(extent)) => self.extents.push(extent),
-                        Some(None) => {}
-                        None => self.malformed = true,
-                    }
-                }
-            }
-        }
-
-        fn end_record(&mut self) {
-            if self.regular && self.size.is_none() {
-                // A regular file's record always says its size.
-                self.malformed = true;
-            }
-            if self.regular
-                && let Some(size) = self.size
-            {
-                let end = size.div_ceil(self.block_size);
-                // A verity file's Merkle tree and descriptor start at its
-                // size rounded up to 64 KiB (`ext4_verity_metadata_pos`), and
-                // the kernel reads them to verify every page, so they stay.
-                let kept = if self.verity {
-                    size.next_multiple_of(VERITY_METADATA_ALIGNMENT) / self.block_size
-                } else {
-                    u64::MAX
-                };
-                for extent in &self.extents {
-                    let next = extent.logical + extent.length;
-                    // An unwritten extent reads as zeros wherever it lies.
-                    if extent.unwritten {
-                        self.ranges
-                            .push((extent.physical, extent.physical + extent.length - 1));
-                        continue;
-                    }
-                    let first = extent.logical.max(end);
-                    let after = next.min(kept);
-                    if first < after {
-                        self.ranges.push((
-                            extent.physical + (first - extent.logical),
-                            extent.physical + (after - extent.logical) - 1,
-                        ));
-                    }
-                }
-            }
-            self.regular = false;
-            self.verity = false;
-            self.size = None;
-            self.extents.clear();
-            self.in_map = false;
-        }
-
-        /// The ranges, once exactly one record was read for each of
-        /// `requested`, in order.
-        fn finish(mut self, requested: &[u64]) -> Result<Vec<(u64, u64)>, ScrubError> {
-            self.end_record();
-            if self.malformed || self.seen != requested {
-                return Err(ScrubError::Unreadable("debugfs"));
-            }
-            Ok(self.ranges)
-        }
-    }
-
-    /// One `stat` map entry: `(L[-L2][[u]]):P[-P2]`. `Some(None)` for a
-    /// mapping block, an extent index (`(ETBn):P`) or an indirect block
-    /// (`(IND):P`, `(DIND):P`, `(TIND):P`), `None` for anything unreadable.
-    fn parse_extent(entry: &str) -> Option<Option<FileExtent>> {
-        let (logical, physical) = entry.strip_prefix('(')?.split_once("):")?;
-        if logical.starts_with("ETB") || matches!(logical, "IND" | "DIND" | "TIND") {
-            physical.parse::<u64>().ok()?;
-            return Some(None);
-        }
-        let (logical, unwritten) = match logical.strip_suffix("[u]") {
-            Some(logical) => (logical, true),
-            None => (logical, false),
-        };
-        let range = |text: &str| -> Option<(u64, u64)> {
-            let (first, last) = text.split_once('-').unwrap_or((text, text));
-            let (first, last) = (first.parse::<u64>().ok()?, last.parse::<u64>().ok()?);
-            (last >= first).then_some((first, last))
-        };
-        let (logical_first, logical_last) = range(logical)?;
-        let (physical_first, physical_last) = range(physical)?;
-        if logical_last - logical_first != physical_last - physical_first {
-            return None;
-        }
-        Some(Some(FileExtent {
-            logical: logical_first,
-            physical: physical_first,
-            length: logical_last - logical_first + 1,
-            unwritten,
-        }))
-    }
-
-    fn program(name: &'static str) -> Result<PathBuf, ScrubError> {
-        crate::host::e2fsprogs(name).ok_or(ScrubError::ToolUnavailable)
+        Ok(codewire_ext4_scrub::punch_unreadable_blocks(&HostTools, disk, block_size).await?)
     }
 
     async fn debugfs(disk: &Path, write: bool, request: &str) -> Result<Vec<u8>, ScrubError> {
-        let program = program("debugfs")?;
-        let mut arguments = Vec::new();
-        if write {
-            arguments.push("-w");
-        }
-        arguments.extend(["-R", request]);
-        let (code, output, errors) = run_disk_tool("debugfs", &program, &arguments, disk).await?;
-        if code != Some(0) {
-            return Err(ScrubError::Failed("debugfs", code));
-        }
-        // debugfs exits 0 after a failed request and says so only on stderr.
-        require_quiet("debugfs", &errors)?;
-        Ok(output)
+        Ok(codewire_ext4_scrub::debugfs(&HostTools, disk, write, request).await?)
     }
 
-    /// Nothing on a tool's stderr but its version banner.
-    fn require_quiet(label: &'static str, errors: &[u8]) -> Result<(), ScrubError> {
-        let text = String::from_utf8_lossy(errors);
-        let banner = |line: &str| line.starts_with(&format!("{label} ")) && line.ends_with(')');
-        if text
-            .lines()
-            .map(str::trim)
-            .any(|line| !line.is_empty() && !banner(line))
-        {
-            return Err(ScrubError::Reported(label));
-        }
-        Ok(())
-    }
-
-    /// A settling `e2fsck -f -p`: 0 clean, 1 corrected.
     async fn e2fsck(disk: &Path) -> Result<(), ScrubError> {
-        let program = program("e2fsck")?;
-        let (code, _, _) = run_disk_tool("e2fsck", &program, &["-f", "-p"], disk).await?;
-        if !matches!(code, Some(0 | 1)) {
-            return Err(ScrubError::Failed("e2fsck", code));
-        }
-        Ok(())
+        Ok(codewire_ext4_scrub::e2fsck(&HostTools, disk).await?)
     }
 
-    /// Run a host e2fsprogs tool confined to `disk` alone: its exit status,
-    /// stdout and stderr.
-    async fn run_disk_tool(
-        label: &'static str,
-        program: &Path,
-        arguments: &[&str],
-        disk: &Path,
-    ) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), ScrubError> {
-        use tokio::io::AsyncReadExt as _;
+    /// The host's e2fsprogs, each confined to the disk alone
+    /// ([`crate::linux::disk_tool`]).
+    struct HostTools;
 
-        let mut command = crate::linux::disk_tool::command(program, arguments, disk)
-            .map_err(|error| ScrubError::Confinement(label, error))?;
-        let mut child = command
-            .env_clear()
-            .env("LC_ALL", "C")
-            .env("PAGER", "__none__")
-            .env("DEBUGFS_PAGER", "__none__")
-            .env("E2FSCK_CONFIG", "/dev/null")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| ScrubError::Confinement(label, error))?;
-        let mut stdout = child.stdout.take().ok_or(ScrubError::Unreadable(label))?;
-        let mut stderr = child.stderr.take().ok_or(ScrubError::Unreadable(label))?;
-        let run = async {
-            let mut output = Vec::new();
-            let mut errors = Vec::new();
-            let limit = MAXIMUM_TOOL_OUTPUT_BYTES as u64 + 1;
-            let mut stdout = (&mut stdout).take(limit);
-            let mut stderr = (&mut stderr).take(limit);
-            let (out, err) = tokio::join!(
-                stdout.read_to_end(&mut output),
-                stderr.read_to_end(&mut errors),
-            );
-            out?;
-            err?;
-            let status = child.wait().await?;
-            Ok::<_, io::Error>((status.code(), output, errors))
-        };
-        let (code, output, errors) = tokio::time::timeout(DISK_TOOL_TIMEOUT, run)
-            .await
-            .map_err(|_| ScrubError::Timeout(label))??;
-        if output.len() > MAXIMUM_TOOL_OUTPUT_BYTES || errors.len() > MAXIMUM_TOOL_OUTPUT_BYTES {
-            return Err(ScrubError::Unreadable(label));
+    impl codewire_ext4_scrub::Tools for HostTools {
+        fn program(&self, name: &'static str) -> Option<PathBuf> {
+            crate::host::e2fsprogs(name)
         }
-        Ok((code, output, errors))
+
+        fn command(
+            &self,
+            program: &Path,
+            leading_args: &[&str],
+            disk: &Path,
+        ) -> io::Result<tokio::process::Command> {
+            crate::linux::disk_tool::command(program, leading_args, disk)
+        }
     }
 
     // -----------------------------------------------------------------------

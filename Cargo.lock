@@ -1814,6 +1814,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-ext4-scrub"
+version = "0.1.0"
+dependencies = [
+ "codewire-workspace-hack",
+ "libc",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "codewire-idp"
 version = "0.1.0"
 dependencies = [
@@ -1902,6 +1912,7 @@ dependencies = [
  "codewire-daemon-proto",
  "codewire-egress-broker",
  "codewire-egress-policy",
+ "codewire-ext4-scrub",
  "codewire-local-credentials",
  "codewire-netstack",
  "codewire-project",

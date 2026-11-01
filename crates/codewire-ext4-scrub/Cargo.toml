@@ -1,0 +1,16 @@
+[package]
+name = "codewire-ext4-scrub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+description = "Clearing every block of an ext4 disk its guest cannot read through the filesystem."
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+codewire-workspace-hack.workspace = true

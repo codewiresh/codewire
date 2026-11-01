@@ -58,6 +58,7 @@ on:
       - 'crates/codewire-derp/**'
       - 'crates/codewire-egress-broker/**'
       - 'crates/codewire-egress-policy/**'
+      - 'crates/codewire-ext4-scrub/**'
       - 'crates/codewire-local-credentials/**'
       - 'crates/codewire-local-vmm/**'
       - 'crates/codewire-mesh/**'

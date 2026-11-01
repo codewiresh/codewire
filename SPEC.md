@@ -250,6 +250,7 @@ fan-out where a service needs it.
 | Guest init | `crates/codewire-vmm-guest-probe` | The static guest init and daemon probe in the guest root. |
 | Host credential authority | `crates/codewire-local-credentials`, `crates/codewire-credential-bridge`, `crates/codewire-protected-store` | The host-side broker, signer and repository executor for local credential profiles, and the delegation to the platform broker for platform profiles. |
 | Network worker and egress | `crates/codewire-netstack`, `crates/codewire-egress-broker`, `crates/codewire-egress-policy` | The confined packet worker and the egress broker that dials on the guest's behalf under a fixed policy. |
+| Disk scrub | `crates/codewire-ext4-scrub` | Clears every block of an ext4 disk its guest cannot read through the filesystem; a local snapshot's capture runs it on the copy of `state.raw`. |
 
 ### Images
 

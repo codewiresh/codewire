@@ -14,6 +14,7 @@ members = [
     "crates/codewire-derp",
     "crates/codewire-egress-broker",
     "crates/codewire-egress-policy",
+    "crates/codewire-ext4-scrub",
     "crates/codewire-email",
     "crates/codewire-daemon-proto",
     "crates/codewire-idp",
@@ -79,6 +80,7 @@ codewire-daemon-bridge = { path = "crates/codewire-daemon-bridge" }
 codewire-derp = { path = "crates/codewire-derp" }
 codewire-egress-broker = { path = "crates/codewire-egress-broker" }
 codewire-egress-policy = { path = "crates/codewire-egress-policy" }
+codewire-ext4-scrub = { path = "crates/codewire-ext4-scrub" }
 codewire-email = { path = "crates/codewire-email" }
 codewire-netstack = { path = "crates/codewire-netstack" }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
