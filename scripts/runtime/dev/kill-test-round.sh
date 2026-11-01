@@ -43,6 +43,7 @@ STORAGE_CLASS="${KILL_TEST_STORAGE_CLASS:-linstor-local}"
 WRITERS="${KILL_TEST_WRITERS:-/data /tmp /usr/local}"
 WRITE_SECONDS="${KILL_TEST_WRITE_SECONDS:-120}"
 DMESG="${KILL_TEST_DMESG:-}"
+KEEP_TRACE="${KILL_TEST_KEEP_TRACE:-}"
 # The product's workspace image, as the repository pins it: usually already on a
 # runtime node, and it has sh and dd.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -176,12 +177,14 @@ sample_script() {
 C=/host-cgroup/kubepods/burstable/pod$POD_UID
 [ -d "$C" ] || C=/host-cgroup/kubepods/pod$POD_UID
 [ -d "$C" ] || { echo NO_CGROUP; exit 2; }
+echo "MEMORY_MAX $(cat "$C/memory.max")"
 while [ -d "$C" ]; do
   awk -v evs="$(tr '\n' ' ' <"$C/memory.events")" '
     { v[$1] = $2 }
     END { n = split(evs, e, " "); for (i = 1; i < n; i += 2) ev[e[i]] = e[i + 1]
           M = 1048576
-          printf "%d %d %d %d\n", (v["file_dirty"] + v["file_writeback"]) / M, (v["anon"] + v["kernel"]) / M, ev["oom_kill"], v["shmem"] / M }' "$C/memory.stat"
+          printf "%d %d %d %d %d %d %d\n", (v["file_dirty"] + v["file_writeback"]) / M, (v["anon"] + v["kernel"]) / M, ev["oom_kill"], v["shmem"] / M,
+            v["anon"] / M, v["kernel"] / M, v["file"] / M }' "$C/memory.stat"
   sleep 0.5
 done
 echo CGROUP_GONE
@@ -213,14 +216,15 @@ shmem_short() { # TRACE MAIN_GIB SECOND_GIB -> prints a reason when short
 }
 
 round() { # MAIN_GIB SECOND_GIB OVERHEAD
-  local main="$1" second="$2" overhead="$3" node started since uid phase trace sampler_pid
+  local main="$1" second="$2" overhead="$3" node started since uid phase sampler_pid
   local deadline log kills cgroup_kills mglru reason short
   node="$(k -n "$NAMESPACE" get pod "$SAMPLER" -o jsonpath='{.spec.nodeName}')" ||
     die "no sampler Pod $SAMPLER in $NAMESPACE"
   [[ -n "$node" ]] || die "the sampler Pod isn't on a node"
   mglru="$(k -n "$NAMESPACE" exec "$SAMPLER" -- cat /sys/kernel/mm/lru_gen/enabled 2>/dev/null | tail -1)"
+  # Global, so the EXIT trap still sees it after the round returns.
   trace="$(mktemp)"
-  trap 'cleanup; rm -f "$trace"' EXIT
+  trap 'cleanup; [[ -z "$KEEP_TRACE" ]] || cp "${trace:-/dev/null}" "$KEEP_TRACE" 2>/dev/null; rm -f "${trace:-}"' EXIT
   cleanup
   runtime_class_json "$(k get runtimeclass commodity -o json)" "$overhead" | k apply -f - >/dev/null
   volume_json "$main" "$second" | k apply -f - >/dev/null
@@ -233,6 +237,7 @@ round() { # MAIN_GIB SECOND_GIB OVERHEAD
     sleep 3
   done
   phase="${uid#* }" uid="${uid%% *}"
+  echo "pod overhead: $(k -n "$NAMESPACE" get pod "$TEST_NAME" -o jsonpath='{.spec.overhead}' 2>/dev/null || true)" >&2
   [[ "$phase" == Running ]] || { result null "$(( $(date +%s) - started ))" /dev/null "the Pod never ran: $phase"; exit 2; }
   k -n "$NAMESPACE" exec "$SAMPLER" -- sh -c "POD_UID=$uid; $(sample_script)" >"$trace" 2>&1 &
   sampler_pid=$!
@@ -249,7 +254,7 @@ round() { # MAIN_GIB SECOND_GIB OVERHEAD
   wait "$sampler_pid" 2>/dev/null || true
   cgroup_kills="$(awk '$1 ~ /^[0-9]+$/ { k = $3 } END { print k + 0 }' "$trace")"
   kills="$(kernel_vm_kills "$since")"
-  reason="phase=$phase writes_done=$(grep -c WRITES_DONE <<<"${log:-}") pod_oom_kills=$cgroup_kills kernel_vm_kills=${kills:-unread} mglru=${mglru:-unread} volume=$VOLUME writers=[$WRITERS] node_wide=no"
+  reason="phase=$phase writes_done=$(grep -c WRITES_DONE <<<"${log:-}" || true) pod_oom_kills=$cgroup_kills kernel_vm_kills=${kills:-unread} mglru=${mglru:-unread} volume=$VOLUME writers=[$WRITERS] node_wide=no"
   short="$(shmem_short "$trace" "$main" "$second")"
   if [[ -n "$short" ]]; then
     result null "$(( $(date +%s) - started ))" "$trace" "$short: $reason"

@@ -134,6 +134,8 @@ record_round() { # SHAPE STEP ROUND
   set -e
   if line="$(jq -ce 'select(type == "object" and (.survived | type) == "boolean")' <<<"$out" 2>/dev/null)" && ((status == 0 || status == 1)); then
     :
+  elif line="$(jq -ce --argjson status "$status" 'select(type == "object" and .survived == null) | .evidence = "unknown (exit \($status)): \(.evidence)"' <<<"$out" 2>/dev/null)"; then
+    :
   else
     line="$(jq -cn --arg error "$(tail -c 400 "$RESULTS/round.err")" --argjson status "$status" \
       '{survived: null, seconds: null, peak_dirty_writeback_mib: null, peak_host_processes_mib: null,

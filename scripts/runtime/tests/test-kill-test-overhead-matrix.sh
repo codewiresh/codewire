@@ -85,6 +85,17 @@ cp "$work/round" "$work/round-fixed"
 KILL_TEST_ROUND="$work/round-fixed" "$MATRIX" run --shapes 4+2 --steps 1Gi --rounds 2 --results "$work/r3" >/dev/null 2>&1
 [[ "$(jq -s '[.[] | select(.survived == true)] | length' "$work/r3/rounds.jsonl")" == 2 ]] || fail "the unknown round was not retried"
 
+# A round that reports its own unknown keeps its evidence and peaks.
+cat >"$work/round-unknown" <<'SH'
+#!/usr/bin/env bash
+echo '{"survived":null,"seconds":60,"peak_dirty_writeback_mib":0,"peak_host_processes_mib":140,"peak_shmem_mib":9000,"evidence":"shmem peaked short"}'
+exit 2
+SH
+chmod 755 "$work/round-unknown"
+KILL_TEST_ROUND="$work/round-unknown" "$MATRIX" run --shapes 4+2 --steps 1Gi --rounds 1 --results "$work/r4" >/dev/null 2>&1 || true
+[[ "$(jq -c '[.survived, .peak_host_processes_mib]' "$work/r4/rounds.jsonl")" == '[null,140]' ]] || fail "an unknown round lost its peaks"
+grep -F 'unknown (exit 2): shmem peaked short' "$work/r4/rounds.jsonl" >/dev/null || fail "an unknown round lost its evidence"
+
 # Screening: 2 rounds per step while descending, then the smallest step that held runs
 # the full 4. A fake that loses its 3rd round at 512Mi sends the confirm up to 768Mi.
 cat >"$work/round-screen" <<'SH'

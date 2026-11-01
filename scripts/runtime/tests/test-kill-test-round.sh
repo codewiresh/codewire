@@ -93,6 +93,40 @@ log="printf '%s\n' '[2026-11-01T12:59:00.1Z]: out of memory: Killed process 1 (c
 [[ "$(kills_since "echo '[2026-11-01T13:05:00.1Z]: nothing here'")" == 0 ]] || fail "a read log with no kills"
 
 # Every mutating call names this tool's own objects.
+# A whole round against a stand-in cluster: the VM is killed while it fills its RAM,
+# before any write. The round still reports a loss with its peaks, and cleans up.
+# The round calls these stand-ins and reads DMESG.
+# shellcheck disable=SC2329,SC2034
+round_with_kill() (
+  set -euo pipefail # as the round runs on its own
+  k() {
+    case "$*" in
+      *"get pod cw-oom-sampler -o jsonpath={.spec.nodeName}") echo node-a ;;
+      *"exec cw-oom-sampler -- cat "*) echo 0x0007 ;;
+      *"exec cw-oom-sampler -- sh -c "*) printf '%s\n' '0 300 0 18000' '0 420 1 19000' ;;
+      "get runtimeclass commodity -o json") echo '{"handler":"kata-clh","overhead":{"podFixed":{"cpu":"250m","memory":"1Gi"}},"scheduling":{}}' ;;
+      *"apply -f -") cat >/dev/null ;;
+      *"get pod cw-kill-test -o jsonpath={.metadata.uid} {.status.phase}") echo "uid-1 Running" ;;
+      *"get pod cw-kill-test -o jsonpath={.status.phase}") echo Failed ;;
+      *" logs cw-kill-test "*) echo "main holding 15GiB" ;;
+      *"delete "* | *"annotate "*) echo "$*" >>"$work/cleaned" ;;
+    esac
+  }
+  sleep() { :; }
+  DMESG=''
+  round 16 4 1Gi
+)
+: >"$work/cleaned"
+set +e
+out="$(round_with_kill 2>"$work/round.err")"
+status=$?
+set -e
+[[ "$status" == 1 ]] || fail "a killed round exited $status: $(cat "$work/round.err")"
+[[ "$(jq -c '[.survived, .peak_host_processes_mib, .peak_shmem_mib]' <<<"$out")" == '[false,420,19000]' ]] ||
+  fail "a killed round's result: $out"
+grep -F 'writes_done=0 pod_oom_kills=1 kernel_vm_kills=unread' <<<"$out" >/dev/null || fail "a killed round's evidence: $out"
+grep -F 'delete runtimeclass cw-kill-test' "$work/cleaned" >/dev/null || fail "a killed round left its objects"
+
 # shellcheck disable=SC2016
 if grep -nE 'k( -n "\$NAMESPACE")? (delete|annotate|apply)' "$ROUND" | grep -vE 'TEST_NAME|k apply -f -' >/dev/null; then
   fail "it deletes or annotates something other than its own objects"
