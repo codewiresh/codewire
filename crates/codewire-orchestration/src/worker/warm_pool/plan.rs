@@ -750,15 +750,29 @@ fn created_at(object: &DynamicObject) -> Option<Timestamp> {
 /// #3572: whether `pool`, a configured shape's pool at another revision than
 /// this leader's `own`, may drain. Only once `own` has a ready member, and only
 /// when `pool` is older than `own` or older than [`SUPERSEDED_GRACE`].
-fn superseded_drains(pool: &DynamicObject, own: Option<&DynamicObject>, now: Timestamp) -> bool {
-    let Some(own) = own.filter(|own| !deleting(own) && ready_replicas(own) >= 1) else {
+///
+/// #3824: a shape this leader is configured to keep at zero (`wants_none`) has
+/// no ready member to wait for, so `pool` drains by the same age rules; with no
+/// own pool yet, only once it is older than the grace. The node cap's zero is
+/// not this: the operator still wants members, and the old pool keeps serving.
+fn superseded_drains(
+    pool: &DynamicObject,
+    own: Option<&DynamicObject>,
+    wants_none: bool,
+    now: Timestamp,
+) -> bool {
+    let Some(created) = created_at(pool) else {
         return false;
     };
-    let (Some(created), Some(own_created)) = (created_at(pool), created_at(own)) else {
-        return false;
-    };
-    created < own_created
-        || now.as_second().saturating_sub(created.as_second()) >= SUPERSEDED_GRACE.as_secs() as i64
+    let past_grace =
+        now.as_second().saturating_sub(created.as_second()) >= SUPERSEDED_GRACE.as_secs() as i64;
+    match own.filter(|own| !deleting(own)) {
+        Some(own) if wants_none || ready_replicas(own) >= 1 => {
+            created_at(own).is_some_and(|own_created| created < own_created || past_grace)
+        }
+        None if wants_none => past_grace,
+        _ => false,
+    }
 }
 
 fn ready_replicas(pool: &DynamicObject) -> i64 {
@@ -950,7 +964,8 @@ pub fn plan(observed: &Observed<'_>) -> Plan {
         }
         // #3572: a configured shape's pool at another revision keeps serving
         // the replicas that rendered it until this leader's own pool of that
-        // shape is ready, and a newer one is the next release's.
+        // shape is ready, or this leader is configured to keep none of it
+        // (#3824), and a newer one is the next release's.
         let own = warm_pool_name_shape(name).and_then(|shape| {
             observed
                 .desired
@@ -958,7 +973,12 @@ pub fn plan(observed: &Observed<'_>) -> Plan {
                 .find(|desired| desired.configured.shape == shape)
         });
         if let Some(own) = own
-            && !superseded_drains(pool, observed.pools.get(&own.objects.name), observed.now)
+            && !superseded_drains(
+                pool,
+                observed.pools.get(&own.objects.name),
+                own.configured.members == 0,
+                observed.now,
+            )
         {
             plan.superseded_kept.insert(name.clone());
             continue;

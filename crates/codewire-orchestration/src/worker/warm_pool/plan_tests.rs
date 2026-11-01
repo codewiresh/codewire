@@ -664,6 +664,77 @@ fn another_revision_of_a_configured_shape_drains_only_behind_a_ready_own_pool() 
     );
 }
 
+/// #3824: a shape configured to zero wants no members, so another revision's
+/// pool of it drains with no ready own member to wait for, by the same age
+/// rules. The node cap's zero is not that: an operator still wants members
+/// there, and the old pool keeps serving until the own pool is ready.
+#[test]
+fn a_configured_zero_drains_another_revision_of_its_shape() {
+    let mut previous_cfg = dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2");
+    previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
+    let previous = WarmPoolConfig::from_cfg(&previous_cfg, true)
+        .unwrap()
+        .unwrap()
+        .pools
+        .remove(0);
+    let mut fixture = Fixture::settled();
+    fixture.desired[0].configured.members = 0;
+    fixture.allowed[0] = 0;
+    let own = fixture.desired[0].clone();
+    assert_eq!(previous.configured.shape, own.configured.shape);
+    let old = previous.objects.name.clone();
+    fixture.templates.insert(
+        old.clone(),
+        live(&previous.objects.template, "template-previous"),
+    );
+    let grace = SUPERSEDED_GRACE.as_secs() as i64;
+    let old_pool = |second: i64| created(live_pool(&previous, "pool-previous", 2, 2), second);
+    let own_pool = |second: i64| created(live_pool(&own, "pool-0", 0, 0), second);
+    let untouched = |plan: &Plan| {
+        plan.superseded_kept.contains(&old)
+            && names(&plan.writes)
+                .iter()
+                .all(|write| !write.contains(&old))
+    };
+
+    // The older revision drains at once, though the own pool has no ready
+    // member and never will.
+    fixture.pools.insert(old.clone(), old_pool(NOW - 3600));
+    fixture
+        .pools
+        .insert(own.objects.name.clone(), own_pool(NOW - 120));
+    let plan = fixture.plan();
+    assert!(
+        names(&plan.writes).contains(&format!("replace-pool {old}")),
+        "{plan:?}"
+    );
+    assert!(plan.unconfigured.contains(&old));
+
+    // A newer revision is the next release's: kept until the grace.
+    fixture
+        .pools
+        .insert(own.objects.name.clone(), own_pool(NOW - 7200));
+    fixture.pools.insert(old.clone(), old_pool(NOW - grace + 1));
+    assert!(untouched(&fixture.plan()));
+    fixture.pools.insert(old.clone(), old_pool(NOW - grace));
+    assert!(names(&fixture.plan().writes).contains(&format!("replace-pool {old}")));
+
+    // No own pool yet, its template still waiting: only the grace drains.
+    fixture.pools.remove(&own.objects.name);
+    fixture.pools.insert(old.clone(), old_pool(NOW - grace + 1));
+    assert!(untouched(&fixture.plan()));
+    fixture.pools.insert(old.clone(), old_pool(NOW - grace));
+    assert!(names(&fixture.plan().writes).contains(&format!("replace-pool {old}")));
+
+    // The node cap's zero keeps the old pool behind an unready own pool.
+    fixture.desired[0].configured.members = 2;
+    fixture
+        .pools
+        .insert(own.objects.name.clone(), own_pool(NOW - 120));
+    fixture.pools.insert(old.clone(), old_pool(NOW - 3600));
+    assert!(untouched(&fixture.plan()));
+}
+
 #[test]
 fn terminating_pool_objects_are_never_written() {
     let mut fixture = Fixture::empty();
