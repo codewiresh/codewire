@@ -1574,16 +1574,6 @@ class SmokeGroupTests(unittest.TestCase):
 
 
 class SelectionTableTests(unittest.TestCase):
-    def test_every_crate_has_its_own_suite_row(self) -> None:
-        selected = (CONSUMERS / "scripts/dev/kind/test-selected.sh").read_text()
-        table = selected[selected.index("map_token() {"):selected.index("rust_pkg_* | transport_pkg_*)")]
-        # The selector reports these crates through another crate's token.
-        aliases = {"codewire-ui": "codewire-desktop"}
-        for manifest in sorted((ROOT / "crates").glob("*/Cargo.toml")):
-            crate = aliases.get(manifest.parent.name, manifest.parent.name).replace("-", "_")
-            with self.subTest(crate=manifest.parent.name):
-                self.assertRegex(table, rf"(rust|transport)_pkg_{crate}\b")
-
     def test_inputs_are_what_the_kind_dev_build_copies(self) -> None:
         sources = load_service_sources()
         dockerfile = (ROOT / "deployments/docker/kind-dev-binary.Dockerfile").read_text()

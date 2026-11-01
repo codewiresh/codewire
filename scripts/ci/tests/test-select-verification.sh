@@ -416,6 +416,13 @@ run_graph_case graph_detached 'policy rust rust_pkg_codewire_graph_detached' '' 
   crates/codewire-graph-detached/src/lib.rs
 run_graph_case graph_deleted_crate 'policy rust rust_pkg_codewire_graph_gone' '' \
   crates/codewire-graph-gone/src/lib.rs
+# A pull request that adds a crate (its manifest and source, with the root
+# manifest and lockfile that take it in) selects Policy, whose repo rules
+# require the crate's Kind suite row (kind-suite-rows). The Kind tool tests
+# that held the rule before run on a pull request only with its Kind opt-in, so
+# #3800 added a crate without a row and main failed later (#3814).
+run_graph_case graph_new_crate "policy $graph_workspace rust_pkg_codewire_graph_app" '' \
+  crates/codewire-graph-app/Cargo.toml crates/codewire-graph-app/src/lib.rs Cargo.toml Cargo.lock
 
 # Non-Rust paths, the root manifest and the lockfile keep their rules and
 # never read the graph: a Cargo that cannot run changes nothing for them.

@@ -8,6 +8,7 @@ from repo_policy.design_tokens import check_design_tokens
 from repo_policy.edge_routing import check_connect_edge_routing
 from repo_policy.hosted_overlay_contract import check_hosted_overlay_contract
 from repo_policy.idp_security import check_idp_signing_kek_isolation
+from repo_policy.kind_suite_rows import check_kind_suite_rows
 from repo_policy.ses_security import check_ses_sender_isolation
 from repo_policy.turnstile_security import check_turnstile_access_projection
 from repo_policy.licensing import check_license_map
@@ -83,6 +84,9 @@ def main(argv: list[str] | None = None) -> int:
     workspace_pin_parser = subparsers.add_parser("workspace-image-pin")
     workspace_pin_parser.add_argument("--self-test", action="store_true")
     workspace_pin_parser.set_defaults(func=check_workspace_image_pin)
+    kind_suite_rows_parser = subparsers.add_parser("kind-suite-rows")
+    kind_suite_rows_parser.add_argument("--self-test", action="store_true")
+    kind_suite_rows_parser.set_defaults(func=check_kind_suite_rows)
     webpki_roots_parser = subparsers.add_parser("webpki-roots-floor")
     webpki_roots_parser.add_argument("--self-test", action="store_true")
     webpki_roots_parser.set_defaults(func=check_webpki_roots_floor)
