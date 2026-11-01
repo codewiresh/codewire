@@ -554,7 +554,7 @@ impl Owner {
         if managed::is_managed(request.verb() as i32) && !self.managed_agents() {
             return Err(Error::Unavailable);
         }
-        let mut receiver = {
+        let (mut receiver, admitted) = {
             let mut state = self.0.state.lock().await;
             let _gate = self.0.admission.lock().unwrap_or_else(|e| e.into_inner());
             if self.0.shutdown.is_cancelled() {
@@ -565,7 +565,7 @@ impl Owner {
                     return Err(Error::Conflict);
                 }
                 match state.live.get(&request.request_id) {
-                    Some(sender) => sender.subscribe(),
+                    Some(sender) => (sender.subscribe(), existing),
                     None => return Ok(existing),
                 }
             } else {
@@ -573,15 +573,25 @@ impl Owner {
                     return Err(Error::Capacity);
                 }
                 let pending = state.store.register(&request)?;
-                let (sender, receiver) = watch::channel(pending);
+                let (sender, receiver) = watch::channel(pending.clone());
                 state.live.insert(request.request_id.clone(), sender);
                 let owner = self.clone();
                 self.0.tasks.spawn(async move {
                     owner.execute(request).await;
                 });
-                receiver
+                (receiver, pending)
             }
         };
+        // A zero join (a test bound only) replies with the receipt as
+        // admitted, never waits, and never reads the live one: `execute`
+        // cannot settle while the state lock above is held, so this reply
+        // always precedes the settle. `tokio::time::timeout` polls its future
+        // before its deadline, so a zero timeout could still return a settled
+        // receipt under load (#3774).
+        let rpc_join = self.0.engine.host_bounds().rpc_join;
+        if rpc_join.is_zero() {
+            return Ok(admitted);
+        }
         // The RPC merely joins the target task. Dropping/timing out this waiter
         // has no cancellation, journal removal, or second-effect authority.
         let joined = async {
@@ -595,7 +605,7 @@ impl Owner {
                 }
             }
         };
-        match tokio::time::timeout(self.0.engine.host_bounds().rpc_join, joined).await {
+        match tokio::time::timeout(rpc_join, joined).await {
             Ok(receipt) => Ok(receipt),
             Err(_) => Ok(receiver.borrow().clone()),
         }

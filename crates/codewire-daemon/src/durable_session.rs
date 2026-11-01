@@ -97,7 +97,8 @@ pub(crate) struct HostBounds {
     /// session's pause and stop, together.
     pub(crate) shutdown: Duration,
     /// How long a host-control RPC waits for its request's outcome before it
-    /// answers with the receipt it has. The request goes on either way.
+    /// answers with the receipt it has. The request goes on either way. Zero,
+    /// a test bound, answers at once with the receipt as admitted.
     #[cfg(target_os = "linux")]
     pub(crate) rpc_join: Duration,
 }
