@@ -12,6 +12,10 @@ use super::{EXTENSIONS_API_VERSION, LABEL_TYPE, shadow_warm_pool_name};
 
 pub const VOLUME_SNAPSHOT_API_VERSION: &str = "snapshot.storage.k8s.io/v1";
 pub const LABEL_SNAPSHOT_ID: &str = "codewire.sh/snapshot-id";
+/// The raw snapshot's record of its source's volume mode, which decides how
+/// its restore is cleared. A raw snapshot without it is a Filesystem one: a
+/// release before this label took no other.
+pub const LABEL_SOURCE_VOLUME_MODE: &str = "codewire.sh/source-volume-mode";
 const NAME_PREFIX: &str = "cw-snap-";
 /// The role a clearing object carries in `codewire.sh/type`.
 const CLEARING_TYPE: &str = "snapshot-clearing";
@@ -19,6 +23,14 @@ const CLEARING_TYPE: &str = "snapshot-clearing";
 pub const CLEARING_MOUNT_PATH: &str = "/workspace";
 /// The hidden `cw` command clearing runs (`codewire-cli-bin`).
 pub const CLEARING_COMMAND: &str = "__snapshot-clear";
+/// Where a Block restore appears in the clearing container.
+pub const CLEARING_DEVICE_PATH: &str = "/dev/codewire-clearing";
+/// The empty directory a Block restore is mounted on while its files are
+/// cleared.
+pub const CLEARING_BLOCK_MOUNT_PATH: &str = "/mnt/codewire-clearing";
+/// Where a Block clearing writes its report line, which Kubernetes keeps as the
+/// container's termination message for the worker to log.
+pub const CLEARING_REPORT_PATH: &str = "/dev/termination-log";
 /// `cw` in the support image, as `DAEMON_INIT_CONTAINER` copies it.
 const SUPPORT_IMAGE_CW: &str = "/usr/local/bin/cw";
 
@@ -50,20 +62,61 @@ pub fn is_clearing_sandbox(name: &str) -> bool {
     name.starts_with(NAME_PREFIX)
 }
 
+/// A source volume's mode, as its PVC states it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolumeMode {
+    /// A volume the node formats and the guest reaches over virtio-fs, so a
+    /// guest never reads its free blocks. Clearing zeroes the current token
+    /// files only (option A). Removed with the virtio-fs workspace path at
+    /// the Block cutover (#3718; private-docs designs/2026-11-01-commodity-
+    /// workspace-direct-io.md section 6, step 5), together with every branch
+    /// on it.
+    Filesystem,
+    /// A volume the guest formats and reads block by block, so clearing also
+    /// wipes every block its guest cannot read through the filesystem.
+    Block,
+}
+
+impl VolumeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Filesystem => "Filesystem",
+            Self::Block => "Block",
+        }
+    }
+
+    /// The mode a raw snapshot's label records; an absent label is
+    /// Filesystem, and anything else is refused.
+    pub fn from_label(label: Option<&str>) -> Option<Self> {
+        match label {
+            None | Some("Filesystem") => Some(Self::Filesystem),
+            Some("Block") => Some(Self::Block),
+            Some(_) => None,
+        }
+    }
+}
+
+/// A VolumeSnapshot of `source_pvc`. A raw snapshot records its source's
+/// volume mode; the kept snapshot passes `None`.
 pub fn render_volume_snapshot(
     namespace: &str,
     name: &str,
     snapshot_id: &str,
     source_pvc: &str,
     snapshot_class: &str,
+    source_mode: Option<VolumeMode>,
 ) -> Value {
+    let mut labels = json!({ LABEL_SNAPSHOT_ID: snapshot_id });
+    if let Some(mode) = source_mode {
+        labels[LABEL_SOURCE_VOLUME_MODE] = mode.as_str().into();
+    }
     json!({
         "apiVersion": VOLUME_SNAPSHOT_API_VERSION,
         "kind": "VolumeSnapshot",
         "metadata": {
             "name": name,
             "namespace": namespace,
-            "labels": { LABEL_SNAPSHOT_ID: snapshot_id },
+            "labels": labels,
         },
         "spec": {
             "volumeSnapshotClassName": snapshot_class,
@@ -81,40 +134,96 @@ pub struct ClearingOpts<'a> {
     pub storage_class: &'a str,
     /// The raw snapshot's `status.restoreSize`.
     pub restore_size: &'a str,
+    /// The raw snapshot's source volume mode, which its restore keeps.
+    pub volume_mode: VolumeMode,
 }
 
 /// The template of a clearing Sandbox: one container that clears a restore of
 /// the raw snapshot and exits.
+///
+/// A Block restore reaches the container as a device. The container mounts it
+/// on an empty directory to clear its files, unmounts it, and wipes every
+/// block its guest cannot read (`cw __snapshot-clear --block`), all inside the
+/// clearing VM, so the host never parses the guest's filesystem. Mounting
+/// needs `SYS_ADMIN`, which only this container holds, in a VM with no network.
 pub fn render_clearing_template(opts: &ClearingOpts<'_>) -> Value {
     let name = clearing_name(opts.snapshot_id);
+    let (command, capabilities, storage) = match opts.volume_mode {
+        VolumeMode::Filesystem => (
+            json!([SUPPORT_IMAGE_CW, CLEARING_COMMAND, CLEARING_MOUNT_PATH]),
+            json!(["DAC_OVERRIDE", "FOWNER"]),
+            json!({
+                "volumeMounts": [{ "name": "workspace", "mountPath": CLEARING_MOUNT_PATH }],
+            }),
+        ),
+        VolumeMode::Block => (
+            json!([
+                SUPPORT_IMAGE_CW,
+                CLEARING_COMMAND,
+                "--block",
+                CLEARING_DEVICE_PATH,
+                CLEARING_BLOCK_MOUNT_PATH,
+                "--report",
+                CLEARING_REPORT_PATH
+            ]),
+            json!(["DAC_OVERRIDE", "FOWNER", "SYS_ADMIN"]),
+            json!({
+                "volumeDevices": [{ "name": "workspace", "devicePath": CLEARING_DEVICE_PATH }],
+                "volumeMounts": [{ "name": "mount-point", "mountPath": CLEARING_BLOCK_MOUNT_PATH }],
+                "terminationMessagePath": CLEARING_REPORT_PATH,
+            }),
+        ),
+    };
+    let mut container = json!({
+        "name": "clear",
+        "image": opts.support_image,
+        "command": command,
+        "resources": {
+            "requests": { "cpu": "250m", "memory": "256Mi" },
+            "limits": { "cpu": "1", "memory": "512Mi" },
+        },
+        "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "readOnlyRootFilesystem": true,
+            "capabilities": { "drop": ["ALL"], "add": capabilities },
+            "seccompProfile": { "type": "RuntimeDefault" },
+        },
+    });
+    for (key, value) in storage.as_object().expect("an object") {
+        container[key] = value.clone();
+    }
     let mut pod_spec = json!({
         "restartPolicy": "Never",
         "serviceAccountName": SANDBOX_SERVICE_ACCOUNT,
         "automountServiceAccountToken": false,
         "enableServiceLinks": false,
-        // Root, because a tenant's files may have any mode, with only the two
+        // Root, because a tenant's files may have any mode, with only the
         // capabilities that needs. No fsGroup: the kubelet changes nothing on
         // the volume.
         "securityContext": { "runAsUser": 0, "runAsGroup": 0 },
-        "containers": [{
-            "name": "clear",
-            "image": opts.support_image,
-            "command": [SUPPORT_IMAGE_CW, CLEARING_COMMAND, CLEARING_MOUNT_PATH],
-            "resources": {
-                "requests": { "cpu": "250m", "memory": "256Mi" },
-                "limits": { "cpu": "1", "memory": "512Mi" },
-            },
-            "securityContext": {
-                "allowPrivilegeEscalation": false,
-                "readOnlyRootFilesystem": true,
-                "capabilities": { "drop": ["ALL"], "add": ["DAC_OVERRIDE", "FOWNER"] },
-                "seccompProfile": { "type": "RuntimeDefault" },
-            },
-            "volumeMounts": [{ "name": "workspace", "mountPath": CLEARING_MOUNT_PATH }],
-        }],
+        "containers": [container],
     });
     if !opts.runtime_class.is_empty() {
         pod_spec["runtimeClassName"] = opts.runtime_class.into();
+    }
+    if opts.volume_mode == VolumeMode::Block {
+        pod_spec["volumes"] = json!([{
+            "name": "mount-point",
+            "emptyDir": { "medium": "Memory", "sizeLimit": "1Mi" },
+        }]);
+    }
+    let mut claim_spec = json!({
+        "accessModes": ["ReadWriteOnce"],
+        "storageClassName": opts.storage_class,
+        "resources": { "requests": { "storage": opts.restore_size } },
+        "dataSource": {
+            "apiGroup": "snapshot.storage.k8s.io",
+            "kind": "VolumeSnapshot",
+            "name": raw_snapshot_name(opts.snapshot_id),
+        },
+    });
+    if opts.volume_mode == VolumeMode::Block {
+        claim_spec["volumeMode"] = "Block".into();
     }
     json!({
         "apiVersion": EXTENSIONS_API_VERSION,
@@ -139,16 +248,7 @@ pub fn render_clearing_template(opts: &ClearingOpts<'_>) -> Value {
             },
             "volumeClaimTemplates": [{
                 "metadata": { "name": "workspace" },
-                "spec": {
-                    "accessModes": ["ReadWriteOnce"],
-                    "storageClassName": opts.storage_class,
-                    "resources": { "requests": { "storage": opts.restore_size } },
-                    "dataSource": {
-                        "apiGroup": "snapshot.storage.k8s.io",
-                        "kind": "VolumeSnapshot",
-                        "name": raw_snapshot_name(opts.snapshot_id),
-                    },
-                },
+                "spec": claim_spec,
             }],
             // No ingress and no egress: the controller manages a policy that
             // admits nothing either way.
@@ -223,6 +323,7 @@ mod tests {
             runtime_class: "commodity",
             storage_class: "linstor-local",
             restore_size: "80Gi",
+            volume_mode: VolumeMode::Filesystem,
         }
     }
 
@@ -317,6 +418,117 @@ mod tests {
             pool["metadata"]["name"]
         );
         assert!(claim["spec"].get("env").is_none());
+    }
+
+    #[test]
+    fn a_filesystem_restore_is_mounted_by_the_node_and_gets_no_sys_admin() {
+        let template = render_clearing_template(&opts());
+        let claim = &template["spec"]["volumeClaimTemplates"][0]["spec"];
+        assert!(claim.get("volumeMode").is_none());
+        let pod = &template["spec"]["podTemplate"]["spec"];
+        let container = &pod["containers"][0];
+        assert!(container.get("volumeDevices").is_none());
+        assert_eq!(
+            container["volumeMounts"],
+            json!([{ "name": "workspace", "mountPath": "/workspace" }])
+        );
+        assert!(pod.get("volumes").is_none());
+    }
+
+    #[test]
+    fn a_block_restore_is_a_device_the_clearing_vm_mounts_and_wipes() {
+        let template = render_clearing_template(&ClearingOpts {
+            volume_mode: VolumeMode::Block,
+            ..opts()
+        });
+        let claim = &template["spec"]["volumeClaimTemplates"][0]["spec"];
+        assert_eq!(claim["volumeMode"], "Block");
+        assert_eq!(claim["dataSource"]["name"], raw_snapshot_name(ID));
+        assert_eq!(claim["resources"]["requests"]["storage"], "80Gi");
+
+        assert_eq!(template["spec"]["networkPolicy"]["ingress"], json!([]));
+        assert_eq!(template["spec"]["networkPolicy"]["egress"], json!([]));
+        let pod = &template["spec"]["podTemplate"]["spec"];
+        assert_eq!(pod["automountServiceAccountToken"], false);
+        assert_eq!(pod["runtimeClassName"], "commodity");
+        let containers = pod["containers"].as_array().unwrap();
+        assert_eq!(containers.len(), 1);
+        let container = &containers[0];
+        assert!(container.get("env").is_none());
+        assert_eq!(
+            container["command"],
+            json!([
+                "/usr/local/bin/cw",
+                "__snapshot-clear",
+                "--block",
+                "/dev/codewire-clearing",
+                "/mnt/codewire-clearing",
+                "--report",
+                "/dev/termination-log"
+            ])
+        );
+        assert_eq!(container["terminationMessagePath"], "/dev/termination-log");
+        assert_eq!(
+            container["volumeDevices"],
+            json!([{ "name": "workspace", "devicePath": "/dev/codewire-clearing" }])
+        );
+        // The volume itself is never mounted by the node, only the empty
+        // directory the container mounts it on.
+        assert_eq!(
+            container["volumeMounts"],
+            json!([{ "name": "mount-point", "mountPath": "/mnt/codewire-clearing" }])
+        );
+        assert_eq!(
+            pod["volumes"],
+            json!([{ "name": "mount-point", "emptyDir": { "medium": "Memory", "sizeLimit": "1Mi" } }])
+        );
+        let security = &container["securityContext"];
+        assert_eq!(
+            security["capabilities"],
+            json!({ "drop": ["ALL"], "add": ["DAC_OVERRIDE", "FOWNER", "SYS_ADMIN"] })
+        );
+        assert_eq!(security["allowPrivilegeEscalation"], false);
+        assert_eq!(security["readOnlyRootFilesystem"], true);
+        assert!(security.get("privileged").is_none());
+    }
+
+    #[test]
+    fn only_a_raw_snapshot_records_its_source_mode_and_an_unknown_one_is_refused() {
+        let raw = render_volume_snapshot(
+            "dev-sandboxes",
+            &raw_snapshot_name(ID),
+            ID,
+            "workspace-sandbox-x",
+            "linstor-local",
+            Some(VolumeMode::Block),
+        );
+        assert_eq!(raw["metadata"]["labels"][LABEL_SOURCE_VOLUME_MODE], "Block");
+        assert_eq!(raw["metadata"]["labels"][LABEL_SNAPSHOT_ID], ID);
+        let kept = render_volume_snapshot(
+            "dev-sandboxes",
+            &kept_snapshot_name(ID),
+            ID,
+            &clearing_volume_name(ID),
+            "linstor-local",
+            None,
+        );
+        assert!(
+            kept["metadata"]["labels"]
+                .get(LABEL_SOURCE_VOLUME_MODE)
+                .is_none()
+        );
+
+        assert_eq!(
+            VolumeMode::from_label(Some("Block")),
+            Some(VolumeMode::Block)
+        );
+        assert_eq!(
+            VolumeMode::from_label(Some("Filesystem")),
+            Some(VolumeMode::Filesystem)
+        );
+        // A raw snapshot from a release before the label.
+        assert_eq!(VolumeMode::from_label(None), Some(VolumeMode::Filesystem));
+        assert_eq!(VolumeMode::from_label(Some("block")), None);
     }
 
     #[test]

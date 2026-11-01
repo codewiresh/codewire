@@ -1170,7 +1170,8 @@ Codewire's files by the daemon's own rules, as local capture does: in `~/.codex`
 `.credentials.json.codewire.*`. Each is overwritten with zeros, flushed, then
 unlinked, and a recognised Claude Code store goes whole. It also unlinks, without
 zeroing, the source's sessions (`~/.codewire/daemon/sessions`, with their command
-lines and output) and managed agents' books. A symbolic link at any of those paths,
+lines and output), managed agents' books and temporary files (`~/.codewire/tmp`,
+where a Block workspace keeps `/tmp` and `/var/tmp`). A symbolic link at any of those paths,
 or at an agent's home, and a login file over 1 MiB, fail the capture: the daemon
 delivers through neither, but clearing can't show that nothing is there. Any error
 fails the capture, and the capture then deletes the raw snapshot, the clearing
@@ -1214,6 +1215,24 @@ sign-in whose file was last written on 2026-10-24. It was not a Codewire-deliver
 token, whose lifetime may differ, so the code reads each token's own `exp` rather
 than assuming one. Neither is shortened by this path.
 Confidential environments are never snapshotted.
+
+A Block workspace volume (#3718), which the guest formats and reads block by
+block, breaks the first of those properties, so the exception does not apply to
+it. Its raw snapshot records the source's volume mode, and its restore reaches
+the clearing VM as a device. Inside that VM, never on the host, the clearing
+command settles the filesystem with `e2fsck -f -p`, mounts it (`nosuid`, `nodev`,
+`noexec`) on an empty directory, clears its files as above, unmounts it, settles
+it again, and then wipes every block a guest cannot read through the filesystem:
+each free range, and each file's unwritten extents and blocks past its end. A range
+is discarded, and its discard proven by canaries written over its first and last
+aligned granule beforehand. A range whose canary survives, a range too small to
+hold a whole granule, a range's unaligned edges and a device that takes no
+discard are overwritten with zeros instead, and every byte written is read back
+from the device as zeros. Only that container holds `SYS_ADMIN`, for the mount.
+An `e2fsck` that cannot fix the filesystem without asking, a failed mount or
+unmount, and any wipe or read-back failure fail the capture; nothing is retried
+with `e2fsck -y`. The Filesystem path, and with it the exception, goes when the
+virtio-fs workspace path is removed at the Block cutover.
 
 A VM checkpoint (`cw checkpoint create`, Linux) is a running local VM's
 memory, device state and disks at one instant. Memory cannot be cleared the

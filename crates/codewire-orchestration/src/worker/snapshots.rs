@@ -21,7 +21,8 @@ use super::activity_authority::EXTERNAL_MUTATION_TIMEOUT;
 use super::env_data::{load_backend_row, workspace_pvc_anchor};
 use crate::sandbox::client::{ClearingProgress, KeptSnapshot, SandboxClient};
 use crate::sandbox::snapshots::{
-    ClearingOpts, clearing_volume_name, kept_snapshot_name, quantity_bytes, raw_snapshot_name,
+    ClearingOpts, VolumeMode, clearing_volume_name, kept_snapshot_name, quantity_bytes,
+    raw_snapshot_name,
 };
 use crate::sandbox::template::runtime_profile_spec;
 
@@ -34,6 +35,12 @@ pub const FAILURE_CAPTURE: &str = "capture_failed";
 
 /// How long the clearing container may take to start and finish.
 const CLEARING_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// The rate a Block clearing's timeout plans for, if every range fell back to
+/// writes: a third of the 80 GiB worst case measured on Dev (211.4 s to write,
+/// 32.5 s to read back, 2026-11-01).
+const BLOCK_CLEARING_PLANNED_BYTES_PER_SECOND: u64 = 128 * 1024 * 1024;
+/// The longest a Block clearing may wait, inside its activity's 30 minutes.
+const BLOCK_CLEARING_TIMEOUT_CAP: Duration = Duration::from_secs(25 * 60);
 const CLEARING_POLL: Duration = Duration::from_secs(1);
 /// How long one Kubernetes teardown or the kept snapshot may take.
 const OBJECT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -154,9 +161,21 @@ pub async fn capture_raw(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::Resu
         let storage = client
             .workspace_storage(&workspace_pvc_anchor(&backend))
             .await?;
-        anyhow::ensure!(!storage.raw_block, "a raw block volume is not snapshotted");
+        // A confidential source never reaches here (`source_capturable`), so
+        // a Block source is a commodity one the guest formats.
+        let source_mode = if storage.raw_block {
+            VolumeMode::Block
+        } else {
+            VolumeMode::Filesystem
+        };
         client
-            .ensure_volume_snapshot(&raw, snapshot_id, &storage.pvc_name, &class)
+            .ensure_volume_snapshot(
+                &raw,
+                snapshot_id,
+                &storage.pvc_name,
+                &class,
+                Some(source_mode),
+            )
             .await?;
         // The lock is held until the snapshot exists, so a start can't mount the
         // disk under it. Measured at about 1.2 s.
@@ -183,6 +202,7 @@ pub async fn run_clearing(
     let restore_size = client
         .wait_for_volume_snapshot(&raw, EXTERNAL_MUTATION_TIMEOUT)
         .await?;
+    let volume_mode = client.raw_snapshot_volume_mode(snapshot_id).await?;
     let cfg = &ctx.sandbox_cfg;
     let runtime = runtime_profile_spec(&cfg.runtime_profile, &cfg.docker_mode, cfg.dind_enabled);
     let backend = load_backend_row(&ctx.pool, &environment_id).await;
@@ -203,6 +223,7 @@ pub async fn run_clearing(
         runtime_class: &runtime.runtime_class_name,
         storage_class: &storage_class,
         restore_size: &restore_size,
+        volume_mode,
     };
     if create_while_capturing(
         &ctx.pool,
@@ -217,15 +238,92 @@ pub async fn run_clearing(
     let wait = async {
         loop {
             match client.clearing_progress(snapshot_id).await? {
-                ClearingProgress::Succeeded => return anyhow::Ok(None),
+                ClearingProgress::Succeeded { report } => {
+                    log_clearing_report(snapshot_id, volume_mode, report.as_deref());
+                    return anyhow::Ok(None);
+                }
                 ClearingProgress::Failed => return Ok(Some(FAILURE_CLEARING.to_owned())),
                 ClearingProgress::Pending => tokio::time::sleep(CLEARING_POLL).await,
             }
         }
     };
-    tokio::time::timeout(CLEARING_TIMEOUT, wait)
-        .await
-        .map_err(|_| anyhow::anyhow!("clearing did not finish in time"))?
+    let restore_bytes = quantity_bytes(&restore_size).and_then(|bytes| u64::try_from(bytes).ok());
+    let timeout = clearing_timeout(volume_mode, restore_bytes);
+    tokio::time::timeout(timeout, wait).await.map_err(|_| match volume_mode {
+        VolumeMode::Filesystem => anyhow::anyhow!("clearing did not finish in time"),
+        VolumeMode::Block => anyhow::anyhow!(
+            "clearing a {restore_size} Block restore did not finish within {} s, planned at {} MiB/s of writes beyond {} s",
+            timeout.as_secs(),
+            BLOCK_CLEARING_PLANNED_BYTES_PER_SECOND / (1024 * 1024),
+            CLEARING_TIMEOUT.as_secs()
+        ),
+    })?
+}
+
+/// A Filesystem clearing touches files only. A Block clearing may overwrite
+/// all of its free space when discards don't clear it, so it is given time for
+/// that at the planned rate, within the cap. A size that can't be read takes
+/// the cap.
+fn clearing_timeout(volume_mode: VolumeMode, restore_bytes: Option<u64>) -> Duration {
+    match volume_mode {
+        VolumeMode::Filesystem => CLEARING_TIMEOUT,
+        VolumeMode::Block => restore_bytes
+            .map(|bytes| {
+                CLEARING_TIMEOUT
+                    + Duration::from_secs(bytes / BLOCK_CLEARING_PLANNED_BYTES_PER_SECOND)
+            })
+            .unwrap_or(BLOCK_CLEARING_TIMEOUT_CAP)
+            .min(BLOCK_CLEARING_TIMEOUT_CAP),
+    }
+}
+
+/// Log a Block clearing's report (`cw __snapshot-clear --block`), a warning
+/// when any range was overwritten because discards didn't clear it: such a
+/// capture takes minutes rather than seconds, and that has to show.
+fn log_clearing_report(snapshot_id: &str, volume_mode: VolumeMode, report: Option<&str>) {
+    if volume_mode != VolumeMode::Block {
+        return;
+    }
+    let Some(report) = report else {
+        tracing::warn!(
+            snapshot_id,
+            "hosted snapshot: Block clearing left no report"
+        );
+        return;
+    };
+    let field = |name: &str| {
+        report
+            .split_whitespace()
+            .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+            .unwrap_or("?")
+    };
+    let (ranges, discard, fallback, written, ms) = (
+        field("ranges"),
+        field("discard"),
+        field("fallback"),
+        field("written"),
+        field("ms"),
+    );
+    if discard != "true" || fallback != "0" {
+        tracing::warn!(
+            snapshot_id,
+            ranges,
+            discard,
+            fallback_ranges = fallback,
+            written_bytes = written,
+            ms,
+            "hosted snapshot: Block clearing overwrote free space because discards didn't clear it"
+        );
+    } else {
+        tracing::info!(
+            snapshot_id,
+            ranges,
+            fallback_ranges = fallback,
+            written_bytes = written,
+            ms,
+            "hosted snapshot: Block clearing discarded its free space"
+        );
+    }
 }
 
 /// Step 3: once the clearing Pod is gone, take the kept snapshot and record it.
@@ -249,6 +347,7 @@ pub async fn keep_and_finish(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::
             snapshot_id,
             &clearing_volume_name(snapshot_id),
             &class,
+            None,
         ),
     )
     .await?
@@ -408,6 +507,29 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::*;
+
+    #[test]
+    fn a_block_clearing_has_time_to_overwrite_its_volume_and_never_outlives_its_activity() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(
+            clearing_timeout(VolumeMode::Filesystem, Some(80 * GIB)),
+            CLEARING_TIMEOUT
+        );
+        // 80 GiB at 128 MiB/s is 640 s, against 244 s measured on Dev.
+        assert_eq!(
+            clearing_timeout(VolumeMode::Block, Some(80 * GIB)),
+            Duration::from_secs(300 + 640)
+        );
+        assert_eq!(
+            clearing_timeout(VolumeMode::Block, Some(200 * GIB)),
+            BLOCK_CLEARING_TIMEOUT_CAP
+        );
+        assert_eq!(
+            clearing_timeout(VolumeMode::Block, None),
+            BLOCK_CLEARING_TIMEOUT_CAP
+        );
+        assert!(BLOCK_CLEARING_TIMEOUT_CAP < Duration::from_secs(30 * 60));
+    }
 
     #[test]
     fn only_a_stopped_standard_environment_may_be_captured() {

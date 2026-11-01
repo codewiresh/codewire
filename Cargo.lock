@@ -1652,6 +1652,7 @@ dependencies = [
  "codewire-access",
  "codewire-credential-bridge",
  "codewire-daemon-proto",
+ "codewire-ext4-scrub",
  "codewire-workload-secrets",
  "codewire-workspace-hack",
  "filetime",

@@ -5,8 +5,9 @@
 use super::*;
 use crate::sandbox::shadow_warm_pool_name;
 use crate::sandbox::snapshots::{
-    ClearingOpts, clearing_name, clearing_volume_name, kept_snapshot_name, raw_snapshot_name,
-    render_clearing_claim, render_clearing_pool, render_clearing_template, render_volume_snapshot,
+    ClearingOpts, LABEL_SOURCE_VOLUME_MODE, VolumeMode, clearing_name, clearing_volume_name,
+    kept_snapshot_name, raw_snapshot_name, render_clearing_claim, render_clearing_pool,
+    render_clearing_template, render_volume_snapshot,
 };
 
 /// What a VolumeSnapshot's status says.
@@ -29,10 +30,14 @@ pub enum KeptSnapshot {
 }
 
 /// Where the clearing container stands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClearingProgress {
     Pending,
-    Succeeded,
+    /// With the container's termination message: a Block clearing's report
+    /// line, counts only.
+    Succeeded {
+        report: Option<String>,
+    },
     Failed,
 }
 
@@ -69,7 +74,16 @@ fn clearing_progress(pod: &Pod) -> ClearingProgress {
         .as_ref()
         .and_then(|status| status.phase.as_deref())
     {
-        Some("Succeeded") => ClearingProgress::Succeeded,
+        Some("Succeeded") => ClearingProgress::Succeeded {
+            report: pod
+                .status
+                .as_ref()
+                .and_then(|status| status.container_statuses.as_ref())
+                .and_then(|statuses| statuses.iter().find(|status| status.name == "clear"))
+                .and_then(|status| status.state.as_ref())
+                .and_then(|state| state.terminated.as_ref())
+                .and_then(|terminated| terminated.message.clone()),
+        },
         Some("Failed") => ClearingProgress::Failed,
         _ => ClearingProgress::Pending,
     }
@@ -82,13 +96,15 @@ impl SandboxClient {
         Api::namespaced_with(self.client.clone(), &self.namespace, &resource)
     }
 
-    /// Create the VolumeSnapshot `name` of `source_pvc`, or find it.
+    /// Create the VolumeSnapshot `name` of `source_pvc`, or find it. A raw
+    /// snapshot records `source_mode`.
     pub async fn ensure_volume_snapshot(
         &self,
         name: &str,
         snapshot_id: &str,
         source_pvc: &str,
         snapshot_class: &str,
+        source_mode: Option<VolumeMode>,
     ) -> anyhow::Result<()> {
         let rendered = render_volume_snapshot(
             &self.namespace,
@@ -96,6 +112,7 @@ impl SandboxClient {
             snapshot_id,
             source_pvc,
             snapshot_class,
+            source_mode,
         );
         let object: DynamicObject = serde_json::from_value(rendered)?;
         match self
@@ -107,6 +124,24 @@ impl SandboxClient {
             Err(kube::Error::Api(error)) if error.code == 409 => Ok(()),
             Err(error) => Err(anyhow::anyhow!("create VolumeSnapshot {name}: {error}")),
         }
+    }
+
+    /// The source volume mode the raw snapshot of `snapshot_id` recorded.
+    pub async fn raw_snapshot_volume_mode(&self, snapshot_id: &str) -> anyhow::Result<VolumeMode> {
+        let name = raw_snapshot_name(snapshot_id);
+        let object = self
+            .volume_snapshots()
+            .get(&name)
+            .await
+            .map_err(|error| anyhow::anyhow!("get VolumeSnapshot {name}: {error}"))?;
+        let label = object
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(LABEL_SOURCE_VOLUME_MODE))
+            .map(String::as_str);
+        VolumeMode::from_label(label)
+            .ok_or_else(|| anyhow::anyhow!("VolumeSnapshot {name} records an unknown volume mode"))
     }
 
     pub async fn volume_snapshot_progress(
@@ -581,8 +616,26 @@ mod tests {
         );
         assert_eq!(
             clearing_progress(&pod("Succeeded")),
-            ClearingProgress::Succeeded
+            ClearingProgress::Succeeded { report: None }
         );
         assert_eq!(clearing_progress(&pod("Failed")), ClearingProgress::Failed);
+    }
+
+    #[test]
+    fn a_succeeded_clearing_carries_its_containers_termination_message() {
+        let pod: Pod = serde_json::from_value(json!({ "status": {
+            "phase": "Succeeded",
+            "containerStatuses": [{
+                "name": "clear", "image": "i", "imageID": "", "ready": false, "restartCount": 0,
+                "state": { "terminated": { "exitCode": 0, "message": "cleared logins=1 trees=0" } },
+            }],
+        }}))
+        .unwrap();
+        assert_eq!(
+            clearing_progress(&pod),
+            ClearingProgress::Succeeded {
+                report: Some("cleared logins=1 trees=0".into())
+            }
+        );
     }
 }

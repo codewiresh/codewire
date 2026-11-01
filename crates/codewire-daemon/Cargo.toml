@@ -39,6 +39,7 @@ zeroize = { workspace = true }
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+codewire-ext4-scrub = { workspace = true }
 rustix = { workspace = true }
 
 [dev-dependencies]

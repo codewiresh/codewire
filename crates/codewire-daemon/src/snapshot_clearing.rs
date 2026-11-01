@@ -16,15 +16,21 @@ use std::path::Path;
 
 use crate::{claude_home, codex_home};
 
+pub mod block;
+
 /// More than any login Codewire writes, so a larger file is not Codewire's.
 const MAX_LOGIN_BYTES: u64 = 1024 * 1024;
 
 /// Trees bound to the source environment that a new environment must not hold:
-/// its sessions, with their command lines and output, and its managed agents'
-/// books, which are keyed by the source's environment and Pod.
-const ENVIRONMENT_BOUND_TREES: [&[&str]; 2] = [
+/// its sessions, with their command lines and output, its managed agents'
+/// books, which are keyed by the source's environment and Pod, and its
+/// temporary files: a Block workspace keeps `/tmp` and `/var/tmp` at
+/// `.codewire/tmp`, wiped at every boot, so a snapshot holds whatever a user or
+/// tool left there (#3718).
+const ENVIRONMENT_BOUND_TREES: [&[&str]; 3] = [
     &[".codewire", "daemon", "sessions"],
     &[".local", "state", "codewire", "platform-managed-agents-v1"],
+    &[".codewire", "tmp"],
 ];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -330,13 +336,17 @@ mod tests {
             .join(".local/state/codewire/platform-managed-agents-v1/env");
         fs::create_dir_all(&books).unwrap();
         fs::write(books.join("requests"), "books").unwrap();
+        let temporary = root.path().join(".codewire/tmp/build");
+        fs::create_dir_all(&temporary).unwrap();
+        fs::write(temporary.join("token"), "left in /tmp").unwrap();
 
         let first = clear_workspace_volume(root.path()).unwrap();
         let second = clear_workspace_volume(root.path()).unwrap();
 
-        assert_eq!(first.trees_removed, 2);
+        assert_eq!(first.trees_removed, 3);
         assert_eq!(second, ClearingReport::default());
         assert!(!root.path().join(".codewire/daemon/sessions").exists());
+        assert!(!root.path().join(".codewire/tmp").exists());
         assert!(root.path().join(".codewire/daemon").exists());
     }
 
