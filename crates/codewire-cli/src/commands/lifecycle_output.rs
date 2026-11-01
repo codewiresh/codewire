@@ -205,8 +205,8 @@ pub(crate) struct ResultBlock {
     pub(crate) headline: String,
     /// Quiet detail under the headline: location and what was observed.
     pub(crate) detail: Option<String>,
-    /// A pending or partial part of the outcome, with its quiet detail.
-    pub(crate) attention: Option<(String, String)>,
+    /// Pending or partial parts of the outcome, each with its quiet detail.
+    pub(crate) attention: Vec<(String, String)>,
     pub(crate) next: Option<String>,
 }
 
@@ -216,7 +216,7 @@ impl ResultBlock {
             status,
             headline: headline.into(),
             detail: None,
-            attention: None,
+            attention: Vec::new(),
             next: None,
         }
     }
@@ -231,7 +231,7 @@ impl ResultBlock {
         headline: impl Into<String>,
         detail: impl Into<String>,
     ) -> Self {
-        self.attention = Some((headline.into(), detail.into()));
+        self.attention.push((headline.into(), detail.into()));
         self
     }
 
@@ -252,7 +252,7 @@ impl ResultBlock {
                 style.paint(Role::Dim, &terminal_text(detail))
             ));
         }
-        if let Some((headline, detail)) = &self.attention {
+        for (headline, detail) in &self.attention {
             out.push_str(&format!(
                 "\n{} {}\n  {}\n",
                 style.status(Status::Attention),

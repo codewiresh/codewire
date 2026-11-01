@@ -91,6 +91,8 @@ session with the Mesh, and shows offline within 45 seconds of going silent;
 LAST SEEN says when the Mesh last heard from it. It does not check
 connectivity between members. A network owner can revoke any node; a member
 can revoke only a node they enrolled, such as a local VM they attached.
+`cw --local rm` revokes a removed VM's node itself; if that fails, it prints
+the exact `cw network revoke` command.
 Deleting a network retires its name for good
 (old connections must never reach a replacement); stop or detach its
 environments and revoke its nodes first. Deletion shows the exact Mesh,

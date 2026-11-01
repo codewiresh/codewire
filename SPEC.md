@@ -385,6 +385,12 @@ record in the Mesh database. Who may revoke a node (#2697): a network owner,
 any node; a member, only a node recorded as their own, such as a local VM they
 attached. A hosted environment's node belongs to its environment: a member
 cannot revoke it, and it leaves the network when the environment is destroyed.
+The client that deletes a Mesh-attached local environment revokes its node,
+once the removal is confirmed, with the credential of the attachment's own
+owner store (`cw --local rm` does); the supervisor never holds that
+credential. A failed revoke leaves the removal done and the exit status
+unchanged: the node shows offline, and `cw` prints the exact
+`cw network revoke` command that removes it.
 
 ### Credentials on the host
 

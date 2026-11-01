@@ -396,27 +396,170 @@ pub(crate) async fn remove_native_environment(
     if removed.removed {
         reconcile_native_current_after_delete(&removed.name).await;
     }
+    // A confirmed removal of a Mesh-attached VM revokes its node (#2697).
+    let node = match environment.mesh.as_ref() {
+        Some(mesh) if removed.removed && !mesh.network_id.trim().is_empty() => {
+            Some((mesh, revoke_removed_environment_node(mesh).await))
+        }
+        _ => None,
+    };
+    report_removal(
+        output,
+        &caps,
+        &removed,
+        node.as_ref().map(|(mesh, node)| (*mesh, node)),
+    )
+}
+
+/// Prints the removal. A node that could not be revoked never changes the
+/// exit status: the environment is gone either way.
+pub(super) fn report_removal(
+    output: OutputFormat,
+    caps: &Capabilities,
+    removed: &v1::DeleteEnvironmentResponse,
+    node: Option<(&v1::MeshAttachment, &MeshNodeRemoval)>,
+) -> anyhow::Result<()> {
     match output {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+        OutputFormat::Json => {
+            let mut value = serde_json::json!({
                 "name": removed.name,
                 "removed": removed.removed,
                 "cleanup_pending": removed.cleanup_pending,
-            }))?
-        ),
-        OutputFormat::Text => remove_result(&removed).print(&caps),
+            });
+            if let Some((mesh, outcome)) = node {
+                value["mesh_node"] = match outcome {
+                    MeshNodeRemoval::Revoked => serde_json::json!({
+                        "network_id": mesh.network_id,
+                        "node_name": mesh.node_name,
+                        "revoked": true,
+                    }),
+                    MeshNodeRemoval::Kept(reason) => serde_json::json!({
+                        "network_id": mesh.network_id,
+                        "node_name": mesh.node_name,
+                        "revoked": false,
+                        "error": reason,
+                        "revoke_command": mesh_revoke_command(mesh),
+                    }),
+                };
+            }
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        OutputFormat::Text => remove_result(removed, node).print(caps),
     }
     Ok(())
 }
 
-/// Removed, removed with cleanup pending, or not confirmed.
-pub(super) fn remove_result(removed: &v1::DeleteEnvironmentResponse) -> ResultBlock {
+/// What became of a removed environment's Mesh node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum MeshNodeRemoval {
+    Revoked,
+    /// Still registered, and why.
+    Kept(String),
+}
+
+/// The client that deletes a Mesh-attached local environment revokes its
+/// node (#2697), with the credential of the attachment's own owner store, the
+/// one its enrollments were made with. The supervisor never holds one.
+async fn revoke_removed_environment_node(mesh: &v1::MeshAttachment) -> MeshNodeRemoval {
+    let auth_source = match v1::MeshEnrollmentAuthSource::try_from(mesh.auth_source) {
+        Ok(v1::MeshEnrollmentAuthSource::StandaloneLocal) => {
+            codewire_local_vmm::mesh_enrollment::MeshEnrollmentAuthSource::StandaloneLocal
+        }
+        Ok(v1::MeshEnrollmentAuthSource::HostedCurrent) => {
+            codewire_local_vmm::mesh_enrollment::MeshEnrollmentAuthSource::HostedCurrent
+        }
+        _ => return MeshNodeRemoval::Kept("its attachment names no owner store".into()),
+    };
+    let Ok(attachment) = codewire_local_vmm::mesh_ingress::MeshAttachment::new_with_auth_source(
+        auth_source,
+        &mesh.mesh_url,
+        &mesh.organization_id,
+        &mesh.network_id,
+        &mesh.node_name,
+        [],
+    ) else {
+        return MeshNodeRemoval::Kept("its Mesh attachment is not valid".into());
+    };
+    let Ok(paths) = ResolvePaths::from_env(&OsEnv) else {
+        return MeshNodeRemoval::Kept("the owner credential could not be found".into());
+    };
+    let credentials = NativeMeshEnrollmentCredentials { paths };
+    let Ok(token) = codewire_local_vmm::mesh_enrollment::MeshEnrollmentCredentialResolver::resolve(
+        &credentials,
+        &attachment,
+    )
+    .await
+    else {
+        return MeshNodeRemoval::Kept(
+            "the credential it was attached with is not available".into(),
+        );
+    };
+    revoke_mesh_node_with(
+        &attachment,
+        codewire_client::StaticTokenProvider::from_token(token),
+    )
+    .await
+}
+
+/// Revokes the attachment's node at its exact Mesh. A node already gone
+/// counts as revoked.
+pub(super) async fn revoke_mesh_node_with(
+    attachment: &codewire_local_vmm::mesh_ingress::MeshAttachment,
+    token: impl codewire_client::TokenProvider + 'static,
+) -> MeshNodeRemoval {
+    let client = codewire_client::ClientConfig::new(&attachment.mesh_url)
+        .and_then(|config| config.with_mesh_url(&attachment.mesh_url))
+        .and_then(|config| codewire_client::CodewireClient::new(config, token));
+    let client = match client {
+        Ok(client) => client,
+        Err(error) => return MeshNodeRemoval::Kept(error.to_string()),
+    };
+    match client
+        .revoke_mesh_node(codewire_client::RevokeMeshNodeRequest {
+            org_id: attachment.organization_id.clone(),
+            network_id: attachment.network_id.clone(),
+            node_name: attachment.node_name.clone(),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(_) => MeshNodeRemoval::Revoked,
+        Err(error) if error.code() == codewire_client::ErrorCode::NotFound => {
+            MeshNodeRemoval::Revoked
+        }
+        Err(error) => MeshNodeRemoval::Kept(error.to_string()),
+    }
+}
+
+/// The command that revokes the attachment's node by hand.
+fn mesh_revoke_command(mesh: &v1::MeshAttachment) -> String {
+    let placement = match v1::MeshEnrollmentAuthSource::try_from(mesh.auth_source) {
+        Ok(v1::MeshEnrollmentAuthSource::HostedCurrent) => "--cloud",
+        _ => "--local",
+    };
+    format!(
+        "cw {placement} network revoke {} --org {} --network {}",
+        mesh.node_name, mesh.organization_id, mesh.network_id
+    )
+}
+
+/// Removed, removed with cleanup pending, or not confirmed, and what became
+/// of its Mesh node.
+pub(super) fn remove_result(
+    removed: &v1::DeleteEnvironmentResponse,
+    node: Option<(&v1::MeshAttachment, &MeshNodeRemoval)>,
+) -> ResultBlock {
     let name = &removed.name;
     let local = location_label(VmLocation::Local);
     let block = if removed.removed {
+        let left = match node {
+            Some((mesh, MeshNodeRemoval::Revoked)) => {
+                format!(" · Mesh node {} left {}", mesh.node_name, mesh.network_id)
+            }
+            _ => String::new(),
+        };
         ResultBlock::new(Status::Done, format!("Environment {name} removed"))
-            .detail(format!("{local} · environment disk removed"))
+            .detail(format!("{local} · environment disk removed{left}"))
     } else {
         ResultBlock::new(
             Status::Attention,
@@ -432,7 +575,18 @@ pub(super) fn remove_result(removed: &v1::DeleteEnvironmentResponse) -> ResultBl
     } else {
         block
     };
-    block.next("cw ls")
+    match node {
+        Some((mesh, MeshNodeRemoval::Kept(reason))) => block
+            .attention(
+                format!(
+                    "Mesh node {} is still registered in {}",
+                    mesh.node_name, mesh.network_id
+                ),
+                format!("It was not revoked: {reason}. It shows offline until it is."),
+            )
+            .next(mesh_revoke_command(mesh)),
+        _ => block.next("cw ls"),
+    }
 }
 
 /// The working context of a create, from what it will request.
@@ -616,18 +770,163 @@ mod tests {
             cleanup_pending: false,
         };
         assert_eq!(
-            remove_result(&removed).render(PLAIN),
+            remove_result(&removed, None).render(PLAIN),
             "✓ Environment app removed\n  local VM · environment disk removed\n\n→ cw ls\n"
         );
         removed.cleanup_pending = true;
-        let text = remove_result(&removed).render(PLAIN);
+        let text = remove_result(&removed, None).render(PLAIN);
         assert!(text.starts_with("✓ Environment app removed\n"));
         assert!(text.contains("\n! Cleanup needs inspection\n  An unsafe or unknown object remains quarantined; inspect it with `cw doctor local`.\n"));
         removed.removed = false;
         assert!(
-            remove_result(&removed)
+            remove_result(&removed, None)
                 .render(PLAIN)
                 .starts_with("! Removal of app was not confirmed\n")
         );
+    }
+
+    fn mesh(auth_source: v1::MeshEnrollmentAuthSource) -> v1::MeshAttachment {
+        v1::MeshAttachment {
+            mesh_url: "https://mesh.codewire.sh".to_owned(),
+            organization_id: "org-demo".to_owned(),
+            network_id: "team".to_owned(),
+            node_name: "app".to_owned(),
+            auth_source: auth_source as i32,
+            ..Default::default()
+        }
+    }
+
+    fn removed() -> v1::DeleteEnvironmentResponse {
+        v1::DeleteEnvironmentResponse {
+            name: "app".to_owned(),
+            removed: true,
+            cleanup_pending: false,
+        }
+    }
+
+    /// #2697: a removed VM's node leaves its network, and the result says so.
+    #[test]
+    fn a_removed_attached_vm_reports_its_node_left() {
+        let mesh = mesh(v1::MeshEnrollmentAuthSource::HostedCurrent);
+        assert_eq!(
+            remove_result(&removed(), Some((&mesh, &MeshNodeRemoval::Revoked))).render(PLAIN),
+            "✓ Environment app removed\n  local VM · environment disk removed · Mesh node app left team\n\n→ cw ls\n"
+        );
+    }
+
+    /// #2697: a failed revoke leaves the removal done and names the exact
+    /// command that removes the node, on the attachment's own Mesh; the exit
+    /// status is unchanged.
+    #[test]
+    fn a_failed_revoke_names_the_exact_command_and_keeps_the_exit_status() {
+        let kept = MeshNodeRemoval::Kept("Mesh unavailable".to_owned());
+        for (source, command) in [
+            (
+                v1::MeshEnrollmentAuthSource::HostedCurrent,
+                "cw --cloud network revoke app --org org-demo --network team",
+            ),
+            (
+                v1::MeshEnrollmentAuthSource::StandaloneLocal,
+                "cw --local network revoke app --org org-demo --network team",
+            ),
+        ] {
+            let mesh = mesh(source);
+            assert_eq!(
+                remove_result(&removed(), Some((&mesh, &kept))).render(PLAIN),
+                format!(
+                    "✓ Environment app removed\n  local VM · environment disk removed\n\n\
+                     ! Mesh node app is still registered in team\n  \
+                     It was not revoked: Mesh unavailable. It shows offline until it is.\n\n\
+                     → {command}\n"
+                )
+            );
+            let caps = crate::commands::lifecycle_output::capabilities(OutputFormat::Json);
+            assert!(
+                report_removal(OutputFormat::Json, &caps, &removed(), Some((&mesh, &kept))).is_ok(),
+                "a failed revoke never fails the removal"
+            );
+        }
+        // With cleanup also pending, both are reported.
+        let mut pending = removed();
+        pending.cleanup_pending = true;
+        let mesh = mesh(v1::MeshEnrollmentAuthSource::HostedCurrent);
+        let text = remove_result(&pending, Some((&mesh, &kept))).render(PLAIN);
+        assert!(text.contains("! Cleanup needs inspection\n"));
+        assert!(text.contains("! Mesh node app is still registered in team\n"));
+    }
+
+    /// #2697: the revoke goes to the attachment's exact Mesh with the
+    /// owner's credential; a node already gone counts as revoked, and any
+    /// other refusal keeps the node with the reason.
+    #[tokio::test]
+    async fn the_revoke_reaches_the_attachments_mesh_and_reads_its_answer() {
+        use buffa::Message as _;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (status, expected) in [
+            (200, MeshNodeRemoval::Revoked),
+            (404, MeshNodeRemoval::Revoked),
+            (403, MeshNodeRemoval::Kept(String::new())),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/codewire.v1.MeshNodeService/RevokeMeshNode"))
+                .and(header("authorization", "Bearer cw_owner"))
+                .respond_with(move |request: &wiremock::Request| {
+                    let mut body = request.body.as_slice();
+                    let request = codewire_client::RevokeMeshNodeRequest::decode(&mut body)
+                        .expect("decode revoke request");
+                    assert_eq!(
+                        (
+                            request.org_id.as_str(),
+                            request.network_id.as_str(),
+                            request.node_name.as_str()
+                        ),
+                        ("org-demo", "team", "app")
+                    );
+                    match status {
+                        200 => ResponseTemplate::new(200)
+                            .insert_header("content-type", "application/proto")
+                            .set_body_bytes(
+                                codewire_client::RevokeMeshNodeResponse::default().encode_to_vec(),
+                            ),
+                        404 => ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                            "code": "not_found",
+                            "message": "Mesh node not found",
+                        })),
+                        _ => ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                            "code": "permission_denied",
+                            "message": "forbidden",
+                        })),
+                    }
+                })
+                .expect(1)
+                .mount(&server)
+                .await;
+            let attachment =
+                codewire_local_vmm::mesh_ingress::MeshAttachment::new_with_auth_source(
+                    codewire_local_vmm::mesh_enrollment::MeshEnrollmentAuthSource::StandaloneLocal,
+                    &server.uri(),
+                    "org-demo",
+                    "team",
+                    "app",
+                    [],
+                )
+                .unwrap();
+            let outcome = revoke_mesh_node_with(
+                &attachment,
+                codewire_client::StaticTokenProvider::from_token(
+                    codewire_client::BearerToken::new("cw_owner").unwrap(),
+                ),
+            )
+            .await;
+            match (&expected, &outcome) {
+                (MeshNodeRemoval::Kept(_), MeshNodeRemoval::Kept(reason)) => {
+                    assert!(!reason.is_empty(), "a kept node says why")
+                }
+                _ => assert_eq!(outcome, expected, "status {status}"),
+            }
+        }
     }
 }
