@@ -1317,9 +1317,11 @@ grep -Fx '[runtime-smoke] ERROR: all-scope acceptance requires initially empty p
 pass
 
 # #3132: every failed run names its stage and a value-blind class in exactly
-# one EXIT-handler line. The deploy relay repeats only this closed stage set.
+# one EXIT-handler line. The deploy relay repeats only this closed stage set,
+# so a new stage lands in codewire/deploy's acceptance_stages first
+# (udp-relay: codewire#3827).
 SMOKE_SOURCE="$REPO_ROOT/scripts/runtime/dev/smoke-dev-commodity.sh"
-expected_stages='setup principal oauth-login oauth-principal oauth-cleanup app-prepare app-create app-source-a app-source-b app-source-clear app-cleanup provider-ssh-prepare provider-ssh-cleanup create-environment wait-environment kube-assertions cw-run kube exec coco docker doctor ssh direct-udp tailnet-ssh derp-ssh websocket-ssh host-key ssh-burst app-preview resize-guest application-secrets application-secrets-all-scopes provider-ssh'
+expected_stages='setup principal oauth-login oauth-principal oauth-cleanup app-prepare app-create app-source-a app-source-b app-source-clear app-cleanup provider-ssh-prepare provider-ssh-cleanup create-environment wait-environment kube-assertions cw-run kube exec coco docker doctor ssh direct-udp udp-relay tailnet-ssh derp-ssh websocket-ssh host-key ssh-burst app-preview resize-guest application-secrets application-secrets-all-scopes provider-ssh'
 declared_stages="$(awk '/^smoke_stage\(\) \{/,/^}/' "$SMOKE_SOURCE" | sed -n 's/^ *\([a-z][a-z|-]*\))$/\1/p' | tr '|' ' ')"
 [[ "$declared_stages" == "$expected_stages" ]] || fail 'acceptance stage set changed without its relay contract'
 # Every literal stage, every selectable phase and each source phase is declared.

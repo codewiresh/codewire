@@ -569,7 +569,8 @@ EOF
     source "$SMOKE"
     # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
     declare SMOKE_SKIP_KUBE=1 SMOKE_SKIP_SSH=0 SMOKE_DERP_FALLBACK=0 \
-      SMOKE_PEER_RELAY_MATRIX=0 SMOKE_SSH_CONNECT_TIMEOUT=1
+      SMOKE_PEER_RELAY_MATRIX=0 SMOKE_SSH_CONNECT_TIMEOUT=1 \
+      EXPECTED_TAILNET_DIRECT_UDP_LB_IP=192.0.2.10
     run_tailnet_doctor() { :; }
     require_cmd() { :; }
     run_ssh_transport_smoke() { :; }
@@ -580,6 +581,297 @@ EOF
     }
     run_ssh_smoke
   )
+}
+
+# run_ssh_smoke with every path probe and SSH leg replaced by a recorder:
+# each line is the acceptance stage in force and the step that ran. Extra
+# arguments are evaluated first, to set the fixture's inputs or stubs.
+record_ssh_smoke_stages() {
+  local calls="$1" err="$2"
+  shift 2
+  local -a setups=("$@")
+  (
+    # The smoke reads its options from the positional parameters.
+    set --
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+    declare SMOKE_SKIP_KUBE=1 SMOKE_SKIP_SSH=0 SMOKE_DERP_FALLBACK=1 \
+      SMOKE_PEER_RELAY_MATRIX=1 SMOKE_SSH_CONNECT_TIMEOUT=1 \
+      EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp \
+      EXPECTED_TAILNET_DIRECT_UDP_LB_IP=192.0.2.10 \
+      EXPECTED_TAILNET_PEER_RELAY_ENDPOINT=192.0.2.20:41641
+    require_cmd() { :; }
+    run_tailnet_doctor() {
+      printf '%s doctor-%s %s\n' "$SMOKE_STAGE" "${1:-primary}" "$EXPECTED_TAILNET_PATH_TRANSPORT" >>"$calls"
+    }
+    run_ssh_transport_smoke() { printf '%s ssh-%s\n' "$SMOKE_STAGE" "${2:-$1}" >>"$calls"; }
+    run_host_key_smoke() { printf '%s host-key\n' "$SMOKE_STAGE" >>"$calls"; }
+    run_ssh_burst_smoke() { printf '%s ssh-burst\n' "$SMOKE_STAGE" >>"$calls"; }
+    local setup
+    for setup in "${setups[@]}"; do eval "$setup"; done
+    # The smoke's cleanup trap reports the stage; this one reports only that.
+    trap 'report_acceptance_failure "$?"' EXIT
+    run_ssh_smoke
+    trap - EXIT
+  ) >/dev/null 2>"$err"
+}
+
+# Each tailnet path fails on its own acceptance stage (codewire#3827). The
+# deploy relay repeats only the stage and class of a failure, so a stage that
+# two paths share hides which one broke: the UDP relay leg, forced DERP,
+# WebSocket and the host-key checks all used to report `ssh`.
+run_transport_path_stage_cases() {
+  local case_dir="$TEST_TMP/transport-path-stages"
+  local calls err expected
+
+  mkdir -p "$case_dir"
+  calls="$case_dir/direct.calls"
+  err="$case_dir/direct.err"
+  record_ssh_smoke_stages "$calls" "$err" || {
+    sed 's/[[:cntrl:]]//g' "$err" >&2
+    fail "direct_udp path fixture failed"
+  }
+  expected='direct-udp doctor-primary direct_udp
+direct-udp ssh-tailnet
+derp-ssh ssh-tailnet-derp
+websocket-ssh ssh-websocket
+udp-relay doctor-peer-relay-leg peer_relay
+udp-relay ssh-tailnet-peer-relay
+host-key host-key
+ssh-burst ssh-burst'
+  [[ "$(cat "$calls")" == "$expected" ]] || {
+    diff <(printf '%s\n' "$expected") "$calls" >&2 || true
+    fail "a tailnet path does not run on its own acceptance stage"
+  }
+
+  # The earlier relay-only assertion stays selectable and is named as the
+  # UDP relay path.
+  calls="$case_dir/relay.calls"
+  err="$case_dir/relay.err"
+  record_ssh_smoke_stages "$calls" "$err" \
+    'EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay' 'SMOKE_PEER_RELAY_MATRIX=0' || {
+    sed 's/[[:cntrl:]]//g' "$err" >&2
+    fail "peer_relay path fixture failed"
+  }
+  expected='udp-relay doctor-primary peer_relay
+udp-relay ssh-tailnet
+derp-ssh ssh-tailnet-derp
+websocket-ssh ssh-websocket
+host-key host-key
+ssh-burst ssh-burst'
+  [[ "$(cat "$calls")" == "$expected" ]] || {
+    diff <(printf '%s\n' "$expected") "$calls" >&2 || true
+    fail "the relay-only assertion does not run on the udp-relay stage"
+  }
+
+  # The one value-blind failure line names the path that broke.
+  local leg stage
+  for leg in 'peer-relay-leg:udp-relay' 'primary:direct-udp'; do
+    stage="${leg#*:}"
+    leg="${leg%%:*}"
+    calls="$case_dir/fail-$leg.calls"
+    err="$case_dir/fail-$leg.err"
+    if record_ssh_smoke_stages "$calls" "$err" \
+      "run_tailnet_doctor() { [[ \"\${1:-primary}\" != $leg ]] || die 'doctor failed'; }"; then
+      fail "a failed $leg doctor probe passed"
+    fi
+    grep -Fqx "[runtime-smoke] acceptance-failure stage=$stage class=assertion" "$err" ||
+      fail "a failed $leg doctor probe was not reported on stage $stage"
+  done
+  calls="$case_dir/fail-derp.calls"
+  err="$case_dir/fail-derp.err"
+  if record_ssh_smoke_stages "$calls" "$err" \
+    'run_ssh_transport_smoke() { [[ "${2:-}" != tailnet-derp ]] || die "derp failed"; }'; then
+    fail "a failed forced-DERP SSH leg passed"
+  fi
+  grep -Fqx '[runtime-smoke] acceptance-failure stage=derp-ssh class=assertion' "$err" ||
+    fail "a failed forced-DERP SSH leg was not reported on stage derp-ssh"
+}
+
+# A path assertion needs the endpoint it must reach: with an empty one, the
+# doctor evidence check would accept any endpoint of the right transport.
+run_transport_endpoint_input_cases() {
+  local case_dir="$TEST_TMP/transport-endpoint-inputs"
+  local calls err
+
+  mkdir -p "$case_dir"
+  calls="$case_dir/direct.calls"
+  err="$case_dir/direct.err"
+  if record_ssh_smoke_stages "$calls" "$err" \
+    'EXPECTED_TAILNET_DIRECT_UDP_LB_IP=""' 'SMOKE_PEER_RELAY_MATRIX=0'; then
+    fail "direct_udp ran without EXPECTED_TAILNET_DIRECT_UDP_LB_IP"
+  fi
+  grep -Fq 'EXPECTED_TAILNET_DIRECT_UDP_LB_IP is required to assert the direct UDP path' "$err" ||
+    fail "a missing direct-UDP endpoint was not named"
+  grep -Fqx '[runtime-smoke] acceptance-failure stage=direct-udp class=assertion' "$err" ||
+    fail "a missing direct-UDP endpoint was not reported on stage direct-udp"
+  [[ ! -s "$calls" ]] || fail "direct_udp probed before its endpoint was checked"
+
+  calls="$case_dir/relay.calls"
+  err="$case_dir/relay.err"
+  if record_ssh_smoke_stages "$calls" "$err" 'EXPECTED_TAILNET_PEER_RELAY_ENDPOINT=""'; then
+    fail "the UDP relay leg ran without EXPECTED_TAILNET_PEER_RELAY_ENDPOINT"
+  fi
+  grep -Fq 'EXPECTED_TAILNET_PEER_RELAY_ENDPOINT is required to assert the UDP relay path' "$err" ||
+    fail "a missing UDP relay endpoint was not named"
+  grep -Fqx '[runtime-smoke] acceptance-failure stage=udp-relay class=assertion' "$err" ||
+    fail "a missing UDP relay endpoint was not reported on stage udp-relay"
+  [[ ! -s "$calls" ]] || fail "the smoke probed before the relay endpoint was checked"
+}
+
+# The doctor runs the expected-path probe and a forced-DERP probe at once. A
+# failed run names the probe and its step, and a forced-DERP failure is the
+# DERP path's, not the direct path's.
+run_doctor_failed_probe_cases() {
+  local case_dir="$TEST_TMP/doctor-failed-probe"
+  local probe report err stage text
+
+  mkdir -p "$case_dir"
+  for probe in forced_derp expected; do
+    report="$case_dir/$probe-report.json"
+    err="$case_dir/$probe.err"
+    if [[ "$probe" == forced_derp ]]; then
+      stage=derp-ssh
+      text='failed probe=forced_derp, step=path'
+      jq -n --arg secret "$SENSITIVE_SENTINEL" '{
+        direct: {stages: [{name: "session", status: "ok"}, {name: "path", status: "ok"}]},
+        forced_derp: {stages: [{name: "session", status: "ok"}, {name: "path", status: "fail", detail: $secret}]}
+      }' >"$report"
+    else
+      stage=direct-udp
+      text='failed probe=expected, step=path'
+      jq -n --arg secret "$SENSITIVE_SENTINEL" '{
+        direct: {stages: [{name: "session", status: "ok"}, {name: "path", status: "fail", detail: $secret}]},
+        forced_derp: {stages: [{name: "path", status: "ok"}]}
+      }' >"$report"
+    fi
+    if (
+      # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+      source "$SMOKE"
+      TMPDIR_SMOKE="$case_dir"
+      SMOKE_ARTIFACT_DIR=""
+      # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
+      SMOKE_DERP_FALLBACK=1
+      SMOKE_PACKET_CAPTURE_UNAVAILABLE=0
+      EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp
+      CODEWIRE_SERVER_URL=https://codewire-dev.example.invalid
+      ENV_ID=test-environment
+      CW_BIN=/does/not/run
+      start_peer_relay_packet_diagnostics() { :; }
+      stop_peer_relay_packet_diagnostics() { :; }
+      capture_tailnet_doctor_failure_diagnostics() { :; }
+      timeout() { cat "$report"; return 1; }
+      smoke_stage direct-udp
+      trap 'report_acceptance_failure "$?"' EXIT
+      run_tailnet_doctor
+    ) >/dev/null 2>"$err"; then
+      fail "a failed $probe doctor probe passed"
+    fi
+    grep -F 'tailnet doctor probe failed' "$err" | grep -Fq "$text" ||
+      fail "a failed $probe doctor probe did not name its probe and step"
+    grep -Fqx "[runtime-smoke] acceptance-failure stage=$stage class=assertion" "$err" ||
+      fail "a failed $probe doctor probe was not reported on stage $stage"
+    if grep -Fq "$SENSITIVE_SENTINEL" "$err"; then
+      fail "the doctor failure line repeated a probe detail"
+    fi
+  done
+}
+
+# The CI wrapper's defaults are what Dev acceptance runs: direct UDP first,
+# then the UDP relay and forced DERP in the same environment. The relay-only
+# assertion stays selectable. With Kubernetes, a direct_udp run checks the
+# transport zone that carries both UDP paths.
+run_wrapper_transport_defaults_cases() {
+  local root="$TEST_TMP/wrapper-root" fake_bin="$TEST_TMP/wrapper-bin"
+  local out err
+
+  mkdir -p "$root/scripts/ci/verify" "$root/scripts/runtime/dev" "$fake_bin"
+  cp "$WRAPPER" "$root/scripts/ci/verify/runtime-dev-commodity-smoke.sh"
+  cat >"$root/scripts/runtime/dev/smoke-dev-commodity.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'transport=%s relay_matrix=%s derp=%s\n' \
+  "$EXPECTED_TAILNET_PATH_TRANSPORT" "$SMOKE_PEER_RELAY_MATRIX" "$SMOKE_DERP_FALLBACK"
+EOF
+  chmod 0755 "$root/scripts/runtime/dev/smoke-dev-commodity.sh"
+  cat >"$fake_bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *" get deploy codewire-orchestration -o json")
+    printf '%s\n' '{"spec":{"template":{"spec":{"containers":[{"name":"orchestration","envFrom":[{"configMapRef":{"name":"runtime"}}]}]}}}}' ;;
+  *" get configmap runtime -o json") cat "${FAKE_CONFIGMAP:?}" ;;
+  *) exit 97 ;;
+esac
+EOF
+  chmod 0755 "$fake_bin/kubectl"
+
+  local -a app_env=(
+    CODEWIRE_SERVER_URL=https://dev.example.invalid
+    EXPECTED_CODEWIRE_DEV_SERVER_URL=https://dev.example.invalid
+    SMOKE_SKIP_KUBE=1
+  )
+  out="$(env -u EXPECTED_TAILNET_PATH_TRANSPORT -u SMOKE_PEER_RELAY_MATRIX -u SMOKE_DERP_FALLBACK \
+    "${app_env[@]}" "$root/scripts/ci/verify/runtime-dev-commodity-smoke.sh" 2>/dev/null)" ||
+    fail "wrapper with default transport inputs failed"
+  [[ "$out" == 'transport=direct_udp relay_matrix=1 derp=1' ]] ||
+    fail "wrapper defaults do not assert direct UDP, the UDP relay and DERP: $out"
+  out="$(env "${app_env[@]}" EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay SMOKE_PEER_RELAY_MATRIX=0 \
+    "$root/scripts/ci/verify/runtime-dev-commodity-smoke.sh" 2>/dev/null)" ||
+    fail "wrapper refused the relay-only assertion"
+  [[ "$out" == 'transport=peer_relay relay_matrix=0 derp=1' ]] ||
+    fail "wrapper did not keep the relay-only assertion selectable: $out"
+  err="$TEST_TMP/wrapper-invalid.err"
+  if env "${app_env[@]}" SMOKE_PEER_RELAY_MATRIX=yes \
+    "$root/scripts/ci/verify/runtime-dev-commodity-smoke.sh" >/dev/null 2>"$err"; then
+    fail "wrapper accepted SMOKE_PEER_RELAY_MATRIX=yes"
+  fi
+  grep -Fq 'SMOKE_PEER_RELAY_MATRIX must be 0 or 1' "$err" || fail "wrapper did not name the bad relay switch"
+  if env "${app_env[@]}" EXPECTED_TAILNET_PATH_TRANSPORT=relay \
+    "$root/scripts/ci/verify/runtime-dev-commodity-smoke.sh" >/dev/null 2>"$err"; then
+    fail "wrapper accepted EXPECTED_TAILNET_PATH_TRANSPORT=relay"
+  fi
+
+  local vip config
+  for vip in 192.0.2.10 192.0.2.11; do
+    config="$TEST_TMP/wrapper-configmap-$vip.json"
+    jq -n --arg vip "$vip" '{data: {
+      SANDBOX_RUNTIME_PROFILE: "commodity",
+      SANDBOX_NAMESPACE: "sandboxes",
+      STUN_HOST: "stun.example.invalid",
+      STUN_PORT: "3478",
+      CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS: "192.0.2.20:41641",
+      SANDBOX_KATA_AGENT_POLICY_ENABLED: "true",
+      SANDBOX_DAEMON_IMAGE: "registry.example.invalid/codewire/daemon:test",
+      CODEWIRE_RUNTIME_TRANSPORT_ZONES_JSON: ({zones: [{
+        name: "zone-a", runtime_region: "region-a",
+        peer_relay: {public_endpoints: ["192.0.2.20:41641"], allocator_url: "http://relay.invalid/alloc", bind_addrs: ["relay.invalid:41641"]},
+        direct_udp: {vip: $vip}
+      }]} | tojson)
+    }}' >"$config"
+    err="$TEST_TMP/wrapper-kube-$vip.err"
+    if PATH="$fake_bin:$PATH" FAKE_CONFIGMAP="$config" \
+      CODEWIRE_SERVER_URL=https://dev.example.invalid \
+      EXPECTED_CODEWIRE_DEV_SERVER_URL=https://dev.example.invalid \
+      KUBE_CONTEXT=dev CODEWIRE_SERVER_NAMESPACE=control SANDBOX_NAMESPACE=sandboxes \
+      EXPECTED_NODE=node-a \
+      EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp \
+      EXPECTED_TAILNET_PEER_RELAY_ENDPOINT=192.0.2.20:41641 \
+      EXPECTED_UDP_RELAY_BIND_ADDRS=relay.invalid:41641 \
+      EXPECTED_UDP_RELAY_ALLOCATOR_URL=http://relay.invalid/alloc \
+      EXPECTED_TAILNET_DIRECT_UDP_LB_IP=192.0.2.10 \
+      EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE=zone-a \
+      EXPECTED_RUNTIME_TRANSPORT_REGION=region-a \
+      "$root/scripts/ci/verify/runtime-dev-commodity-smoke.sh" >/dev/null 2>"$err"; then
+      [[ "$vip" == 192.0.2.10 ]] || fail "direct_udp wrapper accepted a transport zone without the direct-UDP VIP"
+    else
+      [[ "$vip" == 192.0.2.11 ]] || {
+        sed 's/[[:cntrl:]]//g' "$err" >&2
+        fail "direct_udp wrapper refused a matching transport zone"
+      }
+      grep -Fq 'does not contain expected zone-a direct UDP and UDP relay capability' "$err" ||
+        fail "direct_udp wrapper did not name the missing transport-zone capability"
+    fi
+  done
 }
 
 # One ssh-burst run against local shells (#3688). The watching session reads
@@ -1441,6 +1733,10 @@ run_safe_diagnostic_case
 run_safe_client_diagnostic_case
 run_doctor_outer_timeout_receipt_case
 run_peer_relay_leg_wait_case
+run_transport_path_stage_cases
+run_transport_endpoint_input_cases
+run_doctor_failed_probe_cases
+run_wrapper_transport_defaults_cases
 run_environment_artifact_case
 run_kubernetes_failure_artifact_case
 run_packet_header_summary_case

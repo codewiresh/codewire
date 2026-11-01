@@ -312,7 +312,7 @@ if [[ "${FAKE_SHELLCHECK_REPOSITORY_BASELINE:-0}" == 1 ]]; then
       else [] end) +
       (if $smoke then
         findings(9; "scripts/runtime/tests/test-smoke-dev-commodity.sh"; 1090) +
-        findings(12; "scripts/runtime/tests/test-smoke-dev-commodity.sh"; 2034)
+        findings(11; "scripts/runtime/tests/test-smoke-dev-commodity.sh"; 2034)
       else [] end)
     ')"
 fi

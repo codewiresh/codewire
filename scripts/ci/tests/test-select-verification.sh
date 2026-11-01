@@ -1736,6 +1736,14 @@ run_paths_case runtime_dev_tooling pull_request refs/pull/1516/head false \
   scripts/runtime/dev/measure-dev-commodity-overhead.sh \
   scripts/runtime/dev/smoke-dev-commodity.sh \
   scripts/runtime/kata/kata-genpolicy.sh
+# The Dev acceptance wrapper and the transport matrix are tested in the Dev
+# smoke script family (codewire#3827).
+run_paths_case runtime_transport_smokes pull_request refs/pull/3827/head false \
+  'policy dev_smoke_script_tests security security_js' \
+  scripts/ci/verify/runtime-dev-commodity-smoke.sh \
+  scripts/runtime/dev/smoke-dev-transport-matrix.sh \
+  scripts/runtime/dev/smoke-dev-candidate.sh \
+  scripts/runtime/tests/test-smoke-dev-transport-matrix.sh
 run_paths_case runtime_dev_proofs pull_request refs/pull/2411/head false \
   'policy dev_smoke_script_tests security security_js' \
   scripts/runtime/dev/prove-dev-workspace-binding.sh \

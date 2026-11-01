@@ -322,15 +322,21 @@ Environment:
                            DERP map
   EXPECTED_STUN_PORT       Expected public STUN port in that DERP map
   EXPECTED_TAILNET_PATH_TRANSPORT
-                           Expected CW_DEBUG_TAILNET path-probe transport.
-                           Defaults to empty, accepting any reachable tailnet
-                           path. Set to direct_udp for explicit #182 proof or
-                           peer_relay for the #257 no-NodePort relay proof.
+                           The path the primary tailnet doctor probe and SSH
+                           leg must take. Defaults to direct_udp, through
+                           EXPECTED_TAILNET_DIRECT_UDP_LB_IP; peer_relay
+                           requires the shared UDP relay with peer direct UDP
+                           suppressed; any accepts any reachable tailnet path.
                            Non-any tailnet SSH checks also pass this to cw as
                            CW_TAILNET_EXPECTED_TRANSPORT before dialing.
+                           A failure names its path in the acceptance-failure
+                           stage: direct-udp, udp-relay, derp-ssh (forced
+                           DERP) or websocket-ssh.
+  EXPECTED_TAILNET_DIRECT_UDP_LB_IP
+                           Required when the primary path is direct_udp.
   EXPECTED_TAILNET_PEER_RELAY_ENDPOINT
-                           Required configured endpoint when
-                           EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay.
+                           Required when the primary path is peer_relay or
+                           SMOKE_PEER_RELAY_MATRIX=1.
   EXPECTED_UDP_RELAY_BIND_ADDRS
                            Accepted for wrapper compatibility; the daemon
                            receives relay endpoints from its access grant.
@@ -378,10 +384,13 @@ die() {
 }
 
 # Enter one acceptance stage. The deploy relay repeats only these names, so a
-# new stage needs its closed set there as well.
+# new stage needs its closed set there as well. Each tailnet path has its own
+# stage, so a failure names the path: direct-udp, udp-relay (the shared UDP
+# relay with peer direct UDP suppressed), derp-ssh (forced DERP) and
+# websocket-ssh.
 smoke_stage() {
   case "$1" in
-    setup|principal|oauth-login|oauth-principal|oauth-cleanup|app-prepare|app-create|app-source-a|app-source-b|app-source-clear|app-cleanup|provider-ssh-prepare|provider-ssh-cleanup|create-environment|wait-environment|kube-assertions|cw-run|kube|exec|coco|docker|doctor|ssh|direct-udp|tailnet-ssh|derp-ssh|websocket-ssh|host-key|ssh-burst|app-preview|resize-guest|application-secrets|application-secrets-all-scopes|provider-ssh)
+    setup|principal|oauth-login|oauth-principal|oauth-cleanup|app-prepare|app-create|app-source-a|app-source-b|app-source-clear|app-cleanup|provider-ssh-prepare|provider-ssh-cleanup|create-environment|wait-environment|kube-assertions|cw-run|kube|exec|coco|docker|doctor|ssh|direct-udp|udp-relay|tailnet-ssh|derp-ssh|websocket-ssh|host-key|ssh-burst|app-preview|resize-guest|application-secrets|application-secrets-all-scopes|provider-ssh)
       SMOKE_STAGE="$1" ;;
     *) die 'unknown acceptance stage' ;;
   esac
@@ -4175,7 +4184,14 @@ run_tailnet_doctor() {
         "$SMOKE_ARTIFACT_DIR/client-tailnet-peer-relay.json" >&2 || true
     fi
     capture_tailnet_doctor_failure_diagnostics
-    die "tailnet doctor probe failed; evidence in $stdout and $stderr"
+    local failure failed_probe failed_step
+    failure="$(tailnet_doctor_failed_probe "$stdout")"
+    failed_probe="${failure%% *}"
+    failed_step="${failure#* }"
+    if [[ "$failed_probe" == "forced_derp" ]]; then
+      smoke_stage derp-ssh
+    fi
+    die "tailnet doctor probe failed (expect=$expect, failed probe=$failed_probe, step=$failed_step); evidence in $stdout and $stderr"
   fi
   [[ "$packet_rc" == "0" ]] || \
     die "local peer-relay packet evidence is incomplete; correlate the external exact-tuple observers"
@@ -4187,6 +4203,23 @@ run_tailnet_doctor() {
   else
     log "application-only smoke accepted client-observed tailnet evidence"
   fi
+}
+
+# Which probe of a failed doctor run failed, and at which step: `expected`
+# (the probe for EXPECTED_TAILNET_PATH_TRANSPORT), `forced_derp` (the
+# concurrent DERP-only probe) or `expectation` when every step passed but the
+# path was not the one expected. Step names are cw's own fixed stage names.
+tailnet_doctor_failed_probe() {
+  local failure
+  failure="$(jq -r '
+    def failed: [.stages[]? | select(.status == "fail") | .name
+      | if type == "string" and test("^[a-z_-]{1,32}$") then . else "unnamed" end][0];
+    if (.direct | failed) != null then "expected \(.direct | failed)"
+    elif (.forced_derp | failed) != null then "forced_derp \(.forced_derp | failed)"
+    else "expectation path"
+    end
+  ' "$1" 2>/dev/null)" || failure=""
+  printf '%s\n' "${failure:-unknown report}"
 }
 
 record_tailnet_doctor_timeout() {
@@ -4413,17 +4446,18 @@ assert_tailnet_doctor_direct_udp_evidence() {
     die "tailnet doctor did not prove direct_udp via Cilium LoadBalancer IP $EXPECTED_TAILNET_DIRECT_UDP_LB_IP with STUN $EXPECTED_STUN_HOST:$EXPECTED_STUN_PORT"
 
   if [[ "$SMOKE_DERP_FALLBACK" == "1" ]]; then
-    smoke_stage derp-ssh
     assert_tailnet_doctor_forced_derp_evidence "$doctor_json"
-    smoke_stage direct-udp
   fi
 
   log "tailnet doctor proved direct_udp via Cilium LoadBalancer IP $EXPECTED_TAILNET_DIRECT_UDP_LB_IP and STUN map $EXPECTED_STUN_HOST:$EXPECTED_STUN_PORT"
 }
 
+# A forced-DERP failure is named as the DERP path, whichever leg asked for it.
 assert_tailnet_doctor_forced_derp_evidence() {
   local doctor_json="$1"
+  local caller_stage="$SMOKE_STAGE"
 
+  smoke_stage derp-ssh
   [[ -s "$doctor_json" ]] || die "tailnet doctor evidence missing for forced DERP fallback: $doctor_json"
   jq -e '
     (
@@ -4436,6 +4470,7 @@ assert_tailnet_doctor_forced_derp_evidence() {
     )
   ' "$doctor_json" >/dev/null || \
     die "tailnet doctor did not prove ready forced DERP fallback"
+  smoke_stage "$caller_stage"
 }
 
 assert_tailnet_doctor_peer_relay_evidence() {
@@ -4970,6 +5005,9 @@ run_ssh_transport_smoke() {
       "printf '${expected_output}\n'" >"$stdout" 2>"$stderr"; then
     sed 's/[[:cntrl:]]//g' "$stderr" >&2 || true
     capture_ssh_failure_evidence "$label"
+    if [[ "$transport" == "tailnet" ]]; then
+      die "$label SSH smoke failed (expected transport=${expected_transport:-any})"
+    fi
     die "$label SSH smoke failed"
   fi
 
@@ -5320,20 +5358,36 @@ run_ssh_smoke() {
   require_bool01 SMOKE_DERP_FALLBACK "$SMOKE_DERP_FALLBACK"
   require_bool01 SMOKE_PEER_RELAY_MATRIX "$SMOKE_PEER_RELAY_MATRIX"
   require_uint SMOKE_SSH_CONNECT_TIMEOUT "$SMOKE_SSH_CONNECT_TIMEOUT"
-  # Direct UDP is the path sessions must take; its failure is named on its own
-  # (infra#1793), never folded into the SSH or fallback stages.
+  # Each path's failure is named on its own stage, never folded into the SSH
+  # or another path's stage. Direct UDP is the path sessions must take
+  # (infra#1793); the shared UDP relay and forced DERP are its fallbacks.
+  # A path assertion needs the endpoint it must reach; without one it would
+  # accept any endpoint of the right kind.
+  if expect_tailnet_peer_relay || [[ "$SMOKE_PEER_RELAY_MATRIX" == "1" ]]; then
+    smoke_stage udp-relay
+    [[ -n "$EXPECTED_TAILNET_PEER_RELAY_ENDPOINT" ]] || \
+      die "EXPECTED_TAILNET_PEER_RELAY_ENDPOINT is required to assert the UDP relay path"
+  fi
   if expect_tailnet_direct_udp; then
     smoke_stage direct-udp
+    [[ -n "$EXPECTED_TAILNET_DIRECT_UDP_LB_IP" ]] || \
+      die "EXPECTED_TAILNET_DIRECT_UDP_LB_IP is required to assert the direct UDP path"
+  elif expect_tailnet_peer_relay; then
+    smoke_stage udp-relay
+  else
+    smoke_stage ssh
   fi
   run_tailnet_doctor
   require_cmd ssh
   run_ssh_transport_smoke tailnet
-  smoke_stage ssh
   if [[ "$SMOKE_DERP_FALLBACK" == "1" ]]; then
+    smoke_stage derp-ssh
     run_ssh_transport_smoke tailnet tailnet-derp derp_relay 1
   fi
+  smoke_stage websocket-ssh
   run_ssh_transport_smoke websocket
   if [[ "$SMOKE_PEER_RELAY_MATRIX" == "1" ]]; then
+    smoke_stage udp-relay
     initial_expected_transport="$EXPECTED_TAILNET_PATH_TRANSPORT"
     EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay
     log "running same-environment shared UDP peer-relay proof"
@@ -5341,6 +5395,7 @@ run_ssh_smoke() {
     run_ssh_transport_smoke tailnet tailnet-peer-relay peer_relay
     EXPECTED_TAILNET_PATH_TRANSPORT="$initial_expected_transport"
   fi
+  smoke_stage host-key
   run_host_key_smoke
   smoke_stage ssh-burst
   run_ssh_burst_smoke

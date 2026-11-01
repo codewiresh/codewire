@@ -1940,6 +1940,10 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/tests/fixtures/local-platform/__local-credential-authority|\
       scripts/runtime/tests/test-smoke-dev-commodity.sh|\
       scripts/runtime/tests/test-smoke-dev-application-secrets.sh|\
+      scripts/ci/verify/runtime-dev-commodity-smoke.sh|\
+      scripts/runtime/dev/smoke-dev-transport-matrix.sh|\
+      scripts/runtime/dev/smoke-dev-candidate.sh|\
+      scripts/runtime/tests/test-smoke-dev-transport-matrix.sh|\
       scripts/runtime/dev/prove-dev-workspace-binding.sh|\
       scripts/runtime/tests/test-workspace-binding-proof.sh|\
       scripts/runtime/dev/prove-dev-warm-pools.sh|\

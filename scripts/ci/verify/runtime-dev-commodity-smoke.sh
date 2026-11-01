@@ -10,7 +10,13 @@ CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-}"
 EXPECTED_NODE="${EXPECTED_NODE:-}"
 REQUIRE_TAILNET_PATH_PROBE="${REQUIRE_TAILNET_PATH_PROBE:-1}"
-EXPECTED_TAILNET_PATH_TRANSPORT="${EXPECTED_TAILNET_PATH_TRANSPORT:-peer_relay}"
+# Sessions go direct over UDP through the environment's direct-UDP load
+# balancer; the same environment then proves the shared UDP relay
+# (SMOKE_PEER_RELAY_MATRIX) and forced DERP (SMOKE_DERP_FALLBACK). Each path
+# fails on its own acceptance stage (owner, 2026-11-01, codewire#3827).
+# EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay SMOKE_PEER_RELAY_MATRIX=0 is the
+# earlier relay-only assertion.
+EXPECTED_TAILNET_PATH_TRANSPORT="${EXPECTED_TAILNET_PATH_TRANSPORT:-direct_udp}"
 EXPECTED_TAILNET_PEER_RELAY_ENDPOINT="${EXPECTED_TAILNET_PEER_RELAY_ENDPOINT:-}"
 EXPECTED_UDP_RELAY_BIND_ADDRS="${EXPECTED_UDP_RELAY_BIND_ADDRS:-}"
 EXPECTED_UDP_RELAY_ALLOCATOR_URL="${EXPECTED_UDP_RELAY_ALLOCATOR_URL:-}"
@@ -18,6 +24,7 @@ EXPECTED_TAILNET_DIRECT_UDP_LB_IP="${EXPECTED_TAILNET_DIRECT_UDP_LB_IP:-}"
 EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE="${EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE:-}"
 EXPECTED_RUNTIME_TRANSPORT_REGION="${EXPECTED_RUNTIME_TRANSPORT_REGION:-}"
 SMOKE_DERP_FALLBACK="${SMOKE_DERP_FALLBACK:-1}"
+SMOKE_PEER_RELAY_MATRIX="${SMOKE_PEER_RELAY_MATRIX:-1}"
 SMOKE_SKIP_KUBE="${SMOKE_SKIP_KUBE:-0}"
 EXPECTED_KATA_AGENT_POLICY_ANNOTATION="${EXPECTED_KATA_AGENT_POLICY_ANNOTATION:-1}"
 EXPECTED_KATA_COCO_INIT_DATA_ANNOTATION="${EXPECTED_KATA_COCO_INIT_DATA_ANNOTATION:-0}"
@@ -63,6 +70,12 @@ done
 
 [[ "$SMOKE_SKIP_KUBE" == "0" || "$SMOKE_SKIP_KUBE" == "1" ]] ||
   die "SMOKE_SKIP_KUBE must be 0 or 1"
+[[ "$SMOKE_PEER_RELAY_MATRIX" == "0" || "$SMOKE_PEER_RELAY_MATRIX" == "1" ]] ||
+  die "SMOKE_PEER_RELAY_MATRIX must be 0 or 1"
+case "$EXPECTED_TAILNET_PATH_TRANSPORT" in
+  direct_udp|peer_relay|udp_relay|any) ;;
+  *) die "EXPECTED_TAILNET_PATH_TRANSPORT must be direct_udp, peer_relay, udp_relay or any" ;;
+esac
 
 if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
   command -v kubectl >/dev/null 2>&1 || die "missing required command: kubectl"
@@ -128,9 +141,11 @@ if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
   fi
   [[ -n "$stun_host" ]] || die "STUN_HOST is empty; tailnet UDP discovery requires STUN"
   [[ "$stun_port" == "3478" ]] || die "STUN_PORT=$stun_port, want public UDP 3478"
-  if [[ "$EXPECTED_TAILNET_PATH_TRANSPORT" == "peer_relay" ]]; then
+  # The transport zone carries both the direct-UDP VIP and the shared relay;
+  # every asserted UDP path needs it.
+  if [[ "$EXPECTED_TAILNET_PATH_TRANSPORT" =~ ^(direct_udp|peer_relay|udp_relay)$ ]]; then
     [[ ",$udp_relay_advertise_addrs," == *",$EXPECTED_TAILNET_PEER_RELAY_ENDPOINT,"* ]] || \
-      die "CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS=$udp_relay_advertise_addrs, want $EXPECTED_TAILNET_PEER_RELAY_ENDPOINT for peer_relay smoke"
+      die "CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS=$udp_relay_advertise_addrs, want $EXPECTED_TAILNET_PEER_RELAY_ENDPOINT for the UDP relay path"
     [[ -z "$udp_relay_allocator_url" ]] || \
       die "CODEWIRE_UDP_RELAY_ALLOCATOR_URL=$udp_relay_allocator_url, want transport-zone registry"
     [[ -z "$udp_relay_bind_addrs" ]] || \
@@ -149,7 +164,7 @@ if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
         | select((.peer_relay.bind_addrs // []) | index($bind))
         | select(.direct_udp.vip == $direct_ip)' \
       <<<"$runtime_transport_zones_json" >/dev/null || \
-      die "runtime transport-zone registry does not contain expected $EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE peer relay capability"
+      die "runtime transport-zone registry does not contain expected $EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE direct UDP and UDP relay capability"
   fi
   if [[ "$EXPECTED_KATA_AGENT_POLICY_ANNOTATION" == "1" ]]; then
     [[ "$kata_agent_policy_enabled" == "true" ]] || \
@@ -182,6 +197,7 @@ export EXPECTED_KATA_AGENT_POLICY_ANNOTATION
 export EXPECTED_STUN_HOST="$stun_host"
 export EXPECTED_STUN_PORT="$stun_port"
 export SMOKE_DERP_FALLBACK
+export SMOKE_PEER_RELAY_MATRIX
 export SMOKE_SKIP_KUBE
 export EXPECTED_KATA_COCO_INIT_DATA_ANNOTATION
 export EXPECTED_KATA_COCO_KBS_URL

@@ -101,6 +101,9 @@ Environment:
                              daemon/tailnet change against dev.
   CANDIDATE_WORKER_LOOPS     Temporarily set WORKER_LOOPS while the candidate
                              smoke mutates dev, then restore it on exit.
+  SMOKE_SKIP_KUBE=1          With --current-dev, run the application and
+                             tailnet smoke without Kubernetes: no kubectl,
+                             no runtime ConfigMap or node preflight.
   EXPECTED_RUNTIME_NODE_SELECTOR
                              Kubernetes selector for runtime node storage
                              preflight. Defaults to katacontainers.io/kata-runtime=true.
@@ -582,7 +585,14 @@ validate_args() {
   if [[ "$CURRENT_DEV" != "1" && "$FORCE_SHARED_DEV" != "1" && "$DRY_RUN" != "1" && "$SKIP_DEPLOY" != "1" ]]; then
     die "--force-shared-dev is required before mutating the singleton dev control plane"
   fi
-  if [[ -z "$TAG" ]]; then
+  if [[ "${SMOKE_SKIP_KUBE:-0}" != "0" && "${SMOKE_SKIP_KUBE:-0}" != "1" ]]; then
+    die "SMOKE_SKIP_KUBE must be 0 or 1"
+  fi
+  if [[ "$PREFLIGHT_ONLY" == "1" && "${SMOKE_SKIP_KUBE:-0}" == "1" ]]; then
+    die "--preflight-only reads Kubernetes; it cannot run with SMOKE_SKIP_KUBE=1"
+  fi
+  # The current dev deploys no image, so it needs no candidate tag.
+  if [[ -z "$TAG" && "$CURRENT_DEV" != "1" ]]; then
     TAG="$(default_tag)"
   fi
 }
@@ -1212,13 +1222,20 @@ main() {
   if [[ "$CURRENT_DEV" == "1" ]]; then
     local current_sandbox_namespace
     current_sandbox_namespace="${SANDBOX_NAMESPACE_OVERRIDE:-$DEFAULT_SANDBOX_NAMESPACE}"
-    require_cmd kubectl
-    resolve_configmap_name
-    preflight_runtime_config "$current_sandbox_namespace"
-    preflight_runtime_node_storage
-    if [[ "$PREFLIGHT_ONLY" == "1" ]]; then
-      log "preflight-only complete"
-      return 0
+    if [[ "${SMOKE_SKIP_KUBE:-0}" == "1" ]]; then
+      # The application and tailnet smoke, as Dev acceptance runs it, holds
+      # no Kubernetes identity: the runtime ConfigMap and node preflights
+      # are Kubernetes reads, so they belong to the Kubernetes smoke only.
+      log "SMOKE_SKIP_KUBE=1: no Kubernetes runtime preflight"
+    else
+      require_cmd kubectl
+      resolve_configmap_name
+      preflight_runtime_config "$current_sandbox_namespace"
+      preflight_runtime_node_storage
+      if [[ "$PREFLIGHT_ONLY" == "1" ]]; then
+        log "preflight-only complete"
+        return 0
+      fi
     fi
     run_smoke "$current_sandbox_namespace"
     return 0
