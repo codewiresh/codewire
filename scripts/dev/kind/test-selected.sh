@@ -117,6 +117,10 @@ map_token() {
       transport_pkg_codewire_vmm_guest_probe | rust_pkg_codewire_egress_broker | \
       rust_pkg_codewire_egress_policy)
       unobserved "$token" 'local microVM runtime; Kind runs none' ;;
+    # The free-block scrub: local snapshots run it in the microVM runtime, hosted
+    # Block clearing in a clearing Sandbox on a snapshot class Kind doesn't have.
+    rust_pkg_codewire_ext4_scrub)
+      unobserved "$token" 'local microVM snapshots and hosted Block clearing; observed on Dev' ;;
     transport_pkg_codewire_derp | transport_pkg_codewire_udp_relay)
       unobserved "$token" 'not deployed in Kind' ;;
     rust_pkg_codewire_workspace_image)
