@@ -2104,14 +2104,6 @@ pub(crate) enum MeshCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct MeshUpArgs {
-    #[arg(long, value_name = "PATH", help = "codewire-mesh binary path")]
-    binary: Option<PathBuf>,
-    #[arg(
-        long = "derp-binary",
-        value_name = "PATH",
-        help = "codewire-derp binary path"
-    )]
-    derp_binary: Option<PathBuf>,
     #[arg(
         long = "base-url",
         default_value = DEFAULT_LOCAL_MESH_URL,
@@ -2680,7 +2672,7 @@ mod export;
 pub(crate) mod flat;
 pub(crate) mod inventory;
 pub(crate) mod lifecycle_output;
-mod mesh_commands;
+pub(crate) mod mesh_commands;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod placement_choice;
 mod platform_commands;
@@ -2701,7 +2693,7 @@ pub(crate) use export::handle_export;
 #[cfg(test)]
 pub(crate) use flat::env_operation;
 pub(crate) use flat::{HelpArgs, RetiredEnvArgs};
-#[cfg(target_os = "linux")]
+pub use mesh_commands::owner::LocalMeshOwner;
 pub(crate) use mesh_commands::retained::StateDir as MeshStateDir;
 pub(crate) use mesh_commands::*;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

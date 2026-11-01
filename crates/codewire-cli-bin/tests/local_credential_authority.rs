@@ -4,7 +4,7 @@
 //! empty-environment child and serves local storage through it.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -84,12 +84,14 @@ fn the_packaged_authority_starts_and_stores_a_secret_in_the_file_store() {
         directory: codewire_local_vmm::socket_dir::predicted(&root),
         root,
     };
-    fs::create_dir(home.path().join(".codewire")).unwrap();
-    fs::write(
-        home.path().join(".codewire/config.toml"),
-        "local_credential_store = \"file\"\n",
-    )
-    .unwrap();
+    // Owner-private, as cw writes them; cw refuses a shared Mesh configuration.
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(home.path().join(".codewire"))
+        .unwrap();
+    let config = home.path().join(".codewire/config.toml");
+    fs::write(&config, "local_credential_store = \"file\"\n").unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
     let _authority = Authority(home.path());
     let stored = cw(
         home.path(),

@@ -3,7 +3,7 @@ use std::path::Path;
 use super::*;
 
 pub(crate) mod network_output;
-#[cfg(target_os = "linux")]
+pub(crate) mod owner;
 pub(crate) mod retained;
 pub(crate) mod selection;
 
@@ -595,7 +595,7 @@ pub(crate) struct LocalDerpStatus {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[cfg_attr(target_os = "linux", serde(deny_unknown_fields))]
+#[serde(deny_unknown_fields)]
 pub(crate) struct LocalMeshRuntime {
     pub(crate) pid: u32,
     pub(crate) base_url: String,
@@ -605,9 +605,14 @@ pub(crate) struct LocalMeshRuntime {
     pub(crate) started_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) derp: Option<LocalDerpRuntime>,
-    #[cfg(target_os = "linux")]
+    /// The owner that serves this Mesh (#3797); absent in a record an
+    /// earlier cw wrote, which this cw never stops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) custody: Option<retained::ProcessCustody>,
+    pub(crate) owner: Option<owner::MeshOwnerRecord>,
+    /// Parse-only: an earlier cw's per-process custody. Its presence marks a
+    /// Mesh this cw refuses to stop.
+    #[serde(rename = "custody", default, skip_serializing)]
+    pub(crate) earlier_custody: Option<serde_json::Value>,
 }
 
 /// Credential-free projection consumed by native environment creation. It is
@@ -637,16 +642,16 @@ pub(crate) enum LocalMeshOwnerAuthSource {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[cfg_attr(target_os = "linux", serde(deny_unknown_fields))]
+#[serde(deny_unknown_fields)]
 pub(crate) struct LocalDerpRuntime {
     pub(crate) pid: u32,
     pub(crate) url: String,
     pub(crate) listen_addr: String,
     pub(crate) binary: String,
     pub(crate) log_path: String,
-    #[cfg(target_os = "linux")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) custody: Option<retained::ProcessCustody>,
+    /// Parse-only, as [`LocalMeshRuntime::earlier_custody`].
+    #[serde(rename = "custody", default, skip_serializing)]
+    pub(crate) earlier_custody: Option<serde_json::Value>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -875,166 +880,32 @@ pub(crate) fn mesh_auth_source_label(source: config::MeshAuthSource) -> &'static
     }
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) async fn handle_mesh_up(
     paths: &ResolvePaths,
     args: MeshUpArgs,
 ) -> anyhow::Result<MeshUpReport> {
-    retained::up(paths, args).await
+    owner::up(paths, args).await
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) async fn handle_mesh_down(paths: &ResolvePaths) -> anyhow::Result<MeshDownReport> {
-    retained::down(paths).await
+    owner::down(paths).await
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) fn validate_local_mesh_runtime(runtime: &LocalMeshRuntime) -> anyhow::Result<()> {
-    retained::validate_runtime(runtime).map(|_| ())
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) async fn handle_mesh_up(
-    paths: &ResolvePaths,
-    args: MeshUpArgs,
-) -> anyhow::Result<MeshUpReport> {
-    let local_identity = config::ensure_local_mesh_identity(&paths.mesh_data_dir)
-        .context("initialize standalone Mesh identity")?;
-    let selected_network = selection::local_selection_for(
-        &paths.mesh_data_dir,
-        &args.base_url,
-        &local_identity.organization_id,
-    );
-    if let Some(runtime) = load_local_mesh_runtime(&paths.mesh_data_dir)?
-        && local_process_is_running(runtime.pid)
-    {
-        if local_mesh_runtime_matches_args(&runtime, &args) {
-            save_local_mesh_owner_context(
-                &paths.mesh_data_dir,
-                &LocalMeshOwnerContext {
-                    schema_version: 1,
-                    auth_source: LocalMeshOwnerAuthSource::StandaloneLocal,
-                    mesh_url: runtime.base_url.clone(),
-                    organization_id: local_identity.organization_id,
-                    selected_network: None,
-                    auto_connect: false,
-                },
-            )?;
-            return Ok(mesh_up_report(false, &runtime));
-        }
-        stop_local_process(runtime.pid, "local Codewire Mesh").await?;
-        if let Some(derp) = runtime.derp.as_ref()
-            && local_process_is_running(derp.pid)
-        {
-            stop_local_process(derp.pid, "local Codewire DERP").await?;
-        }
-        remove_local_mesh_runtime(&paths.mesh_data_dir)?;
-    }
-    remove_local_mesh_owner_context(&paths.mesh_data_dir)?;
-
-    let organization_id = local_identity.organization_id.clone();
-    let spec = local_mesh_start_spec(paths, &args, local_identity)?;
-    let derp = match spec.derp.as_ref() {
-        Some(derp_spec) => Some(start_local_derp_process(derp_spec)?),
-        None => None,
-    };
-    let pid = match start_local_mesh_process(&spec) {
-        Ok(pid) => pid,
-        Err(err) => {
-            if let Some(derp) = derp.as_ref() {
-                let _ = stop_local_process(derp.pid, "local Codewire DERP").await;
-            }
-            return Err(err);
-        }
-    };
-    if let Err(error) = wait_for_standalone_mesh_catalog(
-        paths,
-        &spec,
-        &organization_id,
-        selected_network.as_deref(),
-    )
-    .await
-    {
-        let _ = stop_local_process(pid, "local Codewire Mesh").await;
-        if let Some(derp) = derp.as_ref() {
-            let _ = stop_local_process(derp.pid, "local Codewire DERP").await;
-        }
-        return Err(error);
-    }
-    let runtime = LocalMeshRuntime {
-        pid,
-        base_url: spec.base_url.clone(),
-        listen_addr: spec.listen_addr.clone(),
-        binary: spec.binary.display().to_string(),
-        log_path: spec.log_path.display().to_string(),
-        started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-        derp,
-    };
-    let persist = (|| -> anyhow::Result<()> {
-        config::save_mesh_connection(
-            &paths.mesh_data_dir,
-            &spec.base_url,
-            &spec.local_identity.api_key,
-        )
-        .context("save local mesh config")?;
-        save_local_mesh_runtime(&paths.mesh_data_dir, &runtime)?;
-        save_local_mesh_owner_context(
-            &paths.mesh_data_dir,
-            &LocalMeshOwnerContext {
-                schema_version: 1,
-                auth_source: LocalMeshOwnerAuthSource::StandaloneLocal,
-                mesh_url: runtime.base_url.clone(),
-                organization_id,
-                selected_network: None,
-                auto_connect: false,
-            },
-        )
-    })();
-    if let Err(error) = persist {
-        let mesh_stop = stop_local_process(runtime.pid, "local Codewire Mesh").await;
-        let derp_stop = match runtime.derp.as_ref() {
-            Some(derp) => stop_local_process(derp.pid, "local Codewire DERP").await,
-            None => Ok(()),
-        };
-        if let Err(cleanup) = mesh_stop.and(derp_stop) {
-            return Err(error.context(format!(
-                "started local Mesh state could not be persisted and process cleanup failed: {cleanup}"
-            )));
-        }
-        let _ = remove_local_mesh_runtime(&paths.mesh_data_dir);
-        let _ = remove_mesh_owner_context_for_auth_source(
-            &paths.mesh_data_dir,
-            LocalMeshOwnerAuthSource::StandaloneLocal,
-        );
-        return Err(error);
-    }
-    Ok(mesh_up_report(true, &runtime))
+pub(crate) fn validate_local_mesh_runtime(
+    runtime: &LocalMeshRuntime,
+    data_dir: &Path,
+) -> anyhow::Result<()> {
+    owner::validate_runtime(runtime, data_dir)
 }
 
 async fn wait_for_standalone_mesh_catalog(
-    paths: &ResolvePaths,
     spec: &LocalMeshStartSpec,
     organization_id: &str,
     selected_network: Option<&str>,
 ) -> anyhow::Result<()> {
-    #[cfg(target_os = "linux")]
     let resolved = config::ResolvedMeshConfig::static_token(
         spec.base_url.clone(),
         &spec.local_identity.api_key,
-    )?;
-    #[cfg(target_os = "linux")]
-    let _ = paths;
-    #[cfg(not(target_os = "linux"))]
-    let env = OsEnv;
-    #[cfg(not(target_os = "linux"))]
-    let resolved = config::resolve_mesh(
-        config::MeshResolveOptions {
-            mesh_url: Some(spec.base_url.clone()),
-            auth_token: Some(spec.local_identity.api_key.clone()),
-            ..config::MeshResolveOptions::default()
-        },
-        paths,
-        &env,
     )?;
     let client = MeshClient::new(&resolved)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1100,45 +971,6 @@ pub(crate) fn print_mesh_up_report(
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
-pub(crate) async fn handle_mesh_down(paths: &ResolvePaths) -> anyhow::Result<MeshDownReport> {
-    let Some(runtime) = load_local_mesh_runtime(&paths.mesh_data_dir)? else {
-        remove_mesh_owner_context_for_auth_source(
-            &paths.mesh_data_dir,
-            LocalMeshOwnerAuthSource::StandaloneLocal,
-        )?;
-        return Ok(MeshDownReport {
-            stopped: false,
-            pid: None,
-            state: "not_running".to_string(),
-        });
-    };
-
-    let mut stopped = false;
-    let mesh_running = local_process_is_running(runtime.pid);
-    if mesh_running {
-        stop_local_process(runtime.pid, "local Codewire Mesh").await?;
-        stopped = true;
-    }
-    if let Some(derp) = runtime.derp.as_ref()
-        && local_process_is_running(derp.pid)
-    {
-        stop_local_process(derp.pid, "local Codewire DERP").await?;
-        stopped = true;
-    }
-    remove_local_mesh_runtime(&paths.mesh_data_dir)?;
-    remove_mesh_owner_context_for_auth_source(
-        &paths.mesh_data_dir,
-        LocalMeshOwnerAuthSource::StandaloneLocal,
-    )?;
-    config::clear_local_mesh_connection(&paths.mesh_data_dir, &runtime.base_url)?;
-    Ok(MeshDownReport {
-        stopped,
-        pid: Some(runtime.pid),
-        state: if stopped { "stopped" } else { "stale" }.to_string(),
-    })
-}
-
 pub(crate) fn print_mesh_down_report(
     report: &MeshDownReport,
     output: OutputFormat,
@@ -1164,197 +996,27 @@ pub(crate) fn local_mesh_start_spec(
     paths: &ResolvePaths,
     args: &MeshUpArgs,
     local_identity: config::LocalMeshIdentity,
+    executable: &Path,
 ) -> anyhow::Result<LocalMeshStartSpec> {
     let base_url = trimmed_required(&args.base_url, "base URL")?.to_string();
     let listen_addr = trimmed_required(&args.listen, "listen address")?.to_string();
-    let binary = locate_codewire_mesh_binary(args.binary.as_ref())?;
     let derp = if args.no_derp {
         None
     } else {
         Some(LocalDerpStartSpec {
-            binary: locate_codewire_derp_binary(args.derp_binary.as_ref())?,
+            binary: executable.to_owned(),
             url: trimmed_required(&args.derp_url, "DERP URL")?.to_string(),
             listen_addr: trimmed_required(&args.derp_listen, "DERP listen address")?.to_string(),
             log_path: paths.mesh_data_dir.join(LOCAL_DERP_LOG_FILE),
         })
     };
     Ok(LocalMeshStartSpec {
-        binary,
+        binary: executable.to_owned(),
         base_url,
         listen_addr,
         local_identity,
         log_path: paths.mesh_data_dir.join(LOCAL_MESH_LOG_FILE),
         derp,
-    })
-}
-
-pub(crate) fn locate_codewire_mesh_binary(
-    override_path: Option<&PathBuf>,
-) -> anyhow::Result<PathBuf> {
-    if let Some(path) = override_path {
-        return Ok(path.clone());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        fs::canonicalize(env::current_exe().context("locate retained cw helper executable")?)
-            .context("resolve retained cw helper executable")
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        if let Ok(current) = env::current_exe()
-            && let Some(dir) = current.parent()
-        {
-            let sibling = dir.join("codewire-mesh");
-            if sibling.is_file() {
-                return Ok(sibling);
-            }
-        }
-        Ok(PathBuf::from("codewire-mesh"))
-    }
-}
-
-pub(crate) fn locate_codewire_derp_binary(
-    override_path: Option<&PathBuf>,
-) -> anyhow::Result<PathBuf> {
-    if let Some(path) = override_path {
-        return Ok(path.clone());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        fs::canonicalize(env::current_exe().context("locate retained cw helper executable")?)
-            .context("resolve retained cw helper executable")
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        if let Ok(current) = env::current_exe()
-            && let Some(dir) = current.parent()
-        {
-            let sibling = dir.join("codewire-derp");
-            if sibling.is_file() {
-                return Ok(sibling);
-            }
-        }
-        Ok(PathBuf::from("codewire-derp"))
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn start_local_mesh_process(spec: &LocalMeshStartSpec) -> anyhow::Result<u32> {
-    let executable = resolve_local_service_executable(&spec.binary, "codewire-mesh")?;
-    if let Some(parent) = spec.log_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let log = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&spec.log_path)
-        .with_context(|| format!("open {}", spec.log_path.display()))?;
-    let stderr = log
-        .try_clone()
-        .with_context(|| format!("clone {}", spec.log_path.display()))?;
-    let mut command = ProcessCommand::new(&executable);
-    command
-        .arg("--base-url")
-        .arg(&spec.base_url)
-        .arg("--listen")
-        .arg(&spec.listen_addr)
-        // The local API key remains a standard cw_ credential. Keep it out
-        // of argv; only hash-only verification material reaches the Mesh
-        // process. The client retains the credential; Mesh itself no longer
-        // accepts a separate server auth-token mode.
-        .env_clear()
-        .envs(local_service_logging_environment())
-        .env(
-            "CODEWIRE_MESH_LOCAL_ORGANIZATION_ID",
-            &spec.local_identity.organization_id,
-        )
-        .env(
-            "CODEWIRE_MESH_LOCAL_API_KEY_HASH",
-            spec.local_identity.api_key_hash(),
-        )
-        .stdin(Stdio::null());
-    if let Some(derp) = spec.derp.as_ref() {
-        command.arg("--derp-url").arg(&derp.url);
-    }
-    let mut child = command
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .with_context(|| {
-            format!(
-                "start codewire-mesh via {} (install codewire-mesh or pass --binary)",
-                spec.binary.display()
-            )
-        })?;
-
-    std::thread::sleep(Duration::from_millis(150));
-    if let Some(status) = child
-        .try_wait()
-        .with_context(|| format!("check codewire-mesh pid {}", child.id()))?
-    {
-        anyhow::bail!(
-            "codewire-mesh exited immediately with {status}; see {}",
-            spec.log_path.display()
-        );
-    }
-    Ok(child.id())
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn start_local_derp_process(
-    spec: &LocalDerpStartSpec,
-) -> anyhow::Result<LocalDerpRuntime> {
-    let executable = resolve_local_service_executable(&spec.binary, "codewire-derp")?;
-    if let Some(parent) = spec.log_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let log = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&spec.log_path)
-        .with_context(|| format!("open {}", spec.log_path.display()))?;
-    let stderr = log
-        .try_clone()
-        .with_context(|| format!("clone {}", spec.log_path.display()))?;
-    let mut child = ProcessCommand::new(&executable);
-    child
-        // Standalone Mesh advertises its loopback DERP URL with the
-        // InsecureForTests marker so the transport can admit this one
-        // self-signed endpoint. The relay itself still runs encrypted TLS;
-        // never turn the managed local process into a plaintext DERP server.
-        .env_clear()
-        .envs(local_service_logging_environment())
-        .env("PORT", "-1")
-        .env("TLS_LISTEN_ADDR", &spec.listen_addr)
-        .env("STUN_LISTEN_ADDR", "-1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(stderr));
-
-    let mut child = child.spawn().with_context(|| {
-        format!(
-            "start codewire-derp via {} (install codewire-derp, pass --derp-binary, or use --no-derp)",
-            spec.binary.display()
-        )
-    })?;
-
-    std::thread::sleep(Duration::from_millis(150));
-    if let Some(status) = child
-        .try_wait()
-        .with_context(|| format!("check codewire-derp pid {}", child.id()))?
-    {
-        anyhow::bail!(
-            "codewire-derp exited immediately with {status}; see {}",
-            spec.log_path.display()
-        );
-    }
-
-    Ok(LocalDerpRuntime {
-        pid: child.id(),
-        url: spec.url.clone(),
-        listen_addr: spec.listen_addr.clone(),
-        binary: spec.binary.display().to_string(),
-        log_path: spec.log_path.display().to_string(),
     })
 }
 
@@ -1365,120 +1027,8 @@ fn local_service_logging_environment() -> Vec<(std::ffi::OsString, std::ffi::OsS
         .collect()
 }
 
-#[cfg(not(target_os = "linux"))]
-fn resolve_local_service_executable(binary: &Path, label: &str) -> anyhow::Result<PathBuf> {
-    let direct = binary.is_absolute() || binary.components().count() > 1;
-    let candidates = if direct {
-        vec![binary.to_path_buf()]
-    } else {
-        let path = env::var_os("PATH").ok_or_else(|| {
-            anyhow::anyhow!("PATH is unavailable; install {label} or pass its path")
-        })?;
-        env::split_paths(&path)
-            .flat_map(|directory| local_executable_candidates(&directory, binary))
-            .collect()
-    };
-    for candidate in candidates {
-        if !local_executable_file(&candidate) {
-            continue;
-        }
-        return fs::canonicalize(&candidate)
-            .with_context(|| format!("resolve {label} executable {}", candidate.display()));
-    }
-    anyhow::bail!(
-        "{label} executable {} was not found or executable",
-        binary.display()
-    )
-}
-
-#[cfg(not(target_os = "linux"))]
-fn local_executable_candidates(directory: &Path, binary: &Path) -> Vec<PathBuf> {
-    let candidate = directory.join(binary);
-    #[cfg(windows)]
-    {
-        if candidate.extension().is_none() {
-            return vec![candidate.clone(), candidate.with_extension("exe")];
-        }
-    }
-    vec![candidate]
-}
-
-#[cfg(not(target_os = "linux"))]
-fn local_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return false;
-        }
-    }
-    true
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) async fn stop_local_process(pid: u32, label: &str) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        let status = ProcessCommand::new("kill")
-            .arg(pid.to_string())
-            .status()
-            .with_context(|| format!("stop {label} pid {pid}"))?;
-        if !status.success() && local_process_is_running(pid) {
-            anyhow::bail!("failed to stop {label} pid {pid}: {status}");
-        }
-        if wait_for_local_process_exit(pid, Duration::from_secs(2)).await {
-            return Ok(());
-        }
-        let status = ProcessCommand::new("kill")
-            .arg("-KILL")
-            .arg(pid.to_string())
-            .status()
-            .with_context(|| format!("kill unresponsive {label} pid {pid}"))?;
-        if !status.success() && local_process_is_running(pid) {
-            anyhow::bail!("failed to kill unresponsive {label} pid {pid}: {status}");
-        }
-        if !wait_for_local_process_exit(pid, Duration::from_secs(2)).await {
-            anyhow::bail!("{label} pid {pid} did not exit after SIGKILL");
-        }
-    }
-    #[cfg(windows)]
-    {
-        let status = ProcessCommand::new("taskkill")
-            .arg("/PID")
-            .arg(pid.to_string())
-            .arg("/T")
-            .status()
-            .with_context(|| format!("stop {label} pid {pid}"))?;
-        if !status.success() && local_process_is_running(pid) {
-            anyhow::bail!("failed to stop {label} pid {pid}: {status}");
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn wait_for_local_process_exit(pid: u32, timeout: Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if !local_process_is_running(pid) {
-            return true;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-#[cfg(target_os = "linux")]
 pub(crate) fn local_mesh_status(data_dir: &Path) -> LocalMeshStatus {
-    let unresolved = retained::unresolved_start(data_dir).unwrap_or(true);
+    let unresolved = owner::unresolved_start(data_dir).unwrap_or(true);
     let runtime = match load_local_mesh_runtime(data_dir) {
         Ok(Some(runtime)) => runtime,
         outcome => {
@@ -1499,7 +1049,7 @@ pub(crate) fn local_mesh_status(data_dir: &Path) -> LocalMeshStatus {
             };
         }
     };
-    let known = !unresolved && validate_local_mesh_runtime(&runtime).is_ok();
+    let known = !unresolved && validate_local_mesh_runtime(&runtime, data_dir).is_ok();
     LocalMeshStatus {
         state: if known { "running" } else { "unknown" }.to_owned(),
         pid: Some(runtime.pid),
@@ -1519,47 +1069,6 @@ pub(crate) fn local_mesh_status(data_dir: &Path) -> LocalMeshStatus {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn local_mesh_status(data_dir: &Path) -> LocalMeshStatus {
-    let runtime = load_local_mesh_runtime(data_dir).ok().flatten();
-    let Some(runtime) = runtime else {
-        return LocalMeshStatus {
-            state: "not_running".to_string(),
-            pid: None,
-            organization_id: None,
-            base_url: None,
-            listen_addr: None,
-            binary: None,
-            log_path: None,
-            derp: None,
-        };
-    };
-    let running = local_process_is_running(runtime.pid);
-    let derp = runtime.derp.map(|derp| LocalDerpStatus {
-        state: if local_process_is_running(derp.pid) {
-            "running".to_string()
-        } else {
-            "stale".to_string()
-        },
-        pid: Some(derp.pid),
-        url: derp.url,
-        listen_addr: derp.listen_addr,
-        binary: derp.binary,
-        log_path: derp.log_path,
-    });
-    LocalMeshStatus {
-        state: if running { "running" } else { "stale" }.to_string(),
-        pid: Some(runtime.pid),
-        organization_id: None,
-        base_url: Some(runtime.base_url),
-        listen_addr: Some(runtime.listen_addr),
-        binary: Some(runtime.binary),
-        log_path: Some(runtime.log_path),
-        derp,
-    }
-}
-
-#[cfg(target_os = "linux")]
 pub(crate) fn load_local_mesh_runtime(data_dir: &Path) -> anyhow::Result<Option<LocalMeshRuntime>> {
     let Some(directory) = retained::StateDir::open(data_dir, false)? else {
         return Ok(None);
@@ -1568,19 +1077,6 @@ pub(crate) fn load_local_mesh_runtime(data_dir: &Path) -> anyhow::Result<Option<
         .read(LOCAL_MESH_RUNTIME_FILE)?
         .map(|bytes| serde_json::from_slice(&bytes).context("parse private local Mesh runtime"))
         .transpose()
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn load_local_mesh_runtime(data_dir: &Path) -> anyhow::Result<Option<LocalMeshRuntime>> {
-    let path = local_mesh_runtime_path(data_dir);
-    let data = match fs::read_to_string(&path) {
-        Ok(data) => data,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
-    };
-    serde_json::from_str(&data)
-        .map(Some)
-        .with_context(|| format!("parse {}", path.display()))
 }
 
 pub(crate) fn save_local_mesh_runtime(
@@ -1607,7 +1103,6 @@ fn remove_mesh_owner_context_for_auth_source(
 pub(crate) fn load_local_mesh_owner_context(
     data_dir: &Path,
 ) -> anyhow::Result<Option<LocalMeshOwnerContext>> {
-    #[cfg(target_os = "linux")]
     let context: LocalMeshOwnerContext = {
         let Some(directory) = retained::StateDir::open(data_dir, false)? else {
             return Ok(None);
@@ -1616,16 +1111,6 @@ pub(crate) fn load_local_mesh_owner_context(
             return Ok(None);
         };
         serde_json::from_slice(&data).context("parse private local Mesh owner projection")?
-    };
-    #[cfg(not(target_os = "linux"))]
-    let context: LocalMeshOwnerContext = {
-        let path = local_mesh_owner_context_path(data_dir);
-        let data = match fs::read_to_string(&path) {
-            Ok(data) => data,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
-        };
-        serde_json::from_str(&data).with_context(|| format!("parse {}", path.display()))?
     };
     if context.schema_version != 1 {
         anyhow::bail!(
@@ -1648,7 +1133,6 @@ pub(crate) fn save_local_mesh_owner_context(
     write_owner_only_mesh_file(data_dir, &path, &data)
 }
 
-#[cfg(target_os = "linux")]
 fn write_owner_only_mesh_file(data_dir: &Path, path: &Path, data: &[u8]) -> anyhow::Result<()> {
     anyhow::ensure!(
         path.parent() == Some(data_dir),
@@ -1663,38 +1147,6 @@ fn write_owner_only_mesh_file(data_dir: &Path, path: &Path, data: &[u8]) -> anyh
     directory.write(name, data)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn write_owner_only_mesh_file(data_dir: &Path, path: &Path, data: &[u8]) -> anyhow::Result<()> {
-    use std::io::Write as _;
-
-    fs::create_dir_all(data_dir).with_context(|| format!("create {}", data_dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("protect {}", data_dir.display()))?;
-    }
-    let mut options = fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("write {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("protect {}", path.display()))?;
-    }
-    file.write_all(data)
-        .with_context(|| format!("write {}", path.display()))
-}
-
-#[cfg(target_os = "linux")]
 pub(crate) fn remove_local_mesh_owner_context(data_dir: &Path) -> anyhow::Result<()> {
     let Some(directory) = retained::StateDir::open(data_dir, false)? else {
         return Ok(());
@@ -1702,28 +1154,8 @@ pub(crate) fn remove_local_mesh_owner_context(data_dir: &Path) -> anyhow::Result
     directory.remove(LOCAL_MESH_OWNER_CONTEXT_FILE, None)
 }
 
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn remove_local_mesh_owner_context(data_dir: &Path) -> anyhow::Result<()> {
-    let path = local_mesh_owner_context_path(data_dir);
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("remove {}", path.display())),
-    }
-}
-
 pub(crate) fn local_mesh_owner_context_path(data_dir: &Path) -> PathBuf {
     data_dir.join(LOCAL_MESH_OWNER_CONTEXT_FILE)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn remove_local_mesh_runtime(data_dir: &Path) -> anyhow::Result<()> {
-    let path = local_mesh_runtime_path(data_dir);
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("remove {}", path.display())),
-    }
 }
 
 pub(crate) fn local_mesh_runtime_path(data_dir: &Path) -> PathBuf {
@@ -1739,50 +1171,6 @@ pub(crate) fn mesh_up_report(started: bool, runtime: &LocalMeshRuntime) -> MeshU
         binary: runtime.binary.clone(),
         log_path: runtime.log_path.clone(),
         derp: runtime.derp.clone(),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn local_process_is_running(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        #[cfg(target_os = "linux")]
-        if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
-            let state = stat
-                .rsplit_once(") ")
-                .and_then(|(_, suffix)| suffix.as_bytes().first())
-                .copied();
-            !matches!(state, Some(b'Z' | b'X') | None)
-        } else {
-            false
-        }
-        #[cfg(not(target_os = "linux"))]
-        ProcessCommand::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    }
-    #[cfg(windows)]
-    {
-        ProcessCommand::new("tasklist")
-            .arg("/FI")
-            .arg(format!("PID eq {pid}"))
-            .output()
-            .map(|output| {
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
-            })
-            .unwrap_or(false)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        false
     }
 }
 

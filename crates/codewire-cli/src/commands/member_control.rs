@@ -250,12 +250,12 @@ async fn down(dir: &store::Directory) -> anyhow::Result<u32> {
             ready.nonce == runtime.custody.member_nonce(),
             "member ready record was replaced"
         );
-        if let mesh_commands::retained::HelperConfiguration::HostMember {
+        let mesh_commands::retained::MemberConfiguration {
             environment_id,
             control_key,
             wg_key,
             ..
-        } = runtime.custody.member_configuration()?
+        } = runtime.custody.member_configuration()?;
         {
             ensure!(
                 ready.environment_id == *environment_id
@@ -266,9 +266,14 @@ async fn down(dir: &store::Directory) -> anyhow::Result<u32> {
         }
     }
     if let Some((starting, _)) = &starting {
+        let member = runtime.custody.member_configuration()?;
         ensure!(
             starting.schema == 1
-                && &starting.configuration == runtime.custody.member_configuration()?,
+                && matches!(
+                    &starting.configuration,
+                    mesh_commands::retained::HelperConfiguration::HostMember(configuration)
+                        if configuration == member
+                ),
             "member startup record was replaced"
         );
     }
@@ -421,14 +426,14 @@ async fn up(args: MemberUp) -> anyhow::Result<()> {
     let _lock = dir.lock().await?;
     if let Some(runtime) = dir.read::<Runtime>("member-runtime.json")? {
         runtime.custody.pin_member()?;
-        if let mesh_commands::retained::HelperConfiguration::HostMember {
+        let mesh_commands::retained::MemberConfiguration {
             environment_id,
             origin,
             org,
             network,
             derp_only,
             ..
-        } = runtime.custody.member_configuration()?
+        } = runtime.custody.member_configuration()?;
         {
             ensure!(
                 environment_id == &environment.id
@@ -438,8 +443,6 @@ async fn up(args: MemberUp) -> anyhow::Result<()> {
                     && *derp_only == args.derp_only,
                 "retained member configuration differs; stop it explicitly"
             );
-        } else {
-            anyhow::bail!("retained member role invalid");
         }
         return value(
             serde_json::json!({"running":true,"reused":true,"pid":runtime.custody.member_pid()}),
@@ -481,17 +484,19 @@ async fn up(args: MemberUp) -> anyhow::Result<()> {
         },
     }
     .validate()?;
-    let configuration = mesh_commands::retained::HelperConfiguration::HostMember {
-        directory: dir.path.clone(),
-        environment_id: environment.id.clone(),
-        host_root: environment.root(),
-        origin: args.mesh_url,
-        org: args.org,
-        network: args.network,
-        control_key: hex(&target),
-        wg_key: hex(&wg),
-        derp_only: args.derp_only,
-    };
+    let configuration = mesh_commands::retained::HelperConfiguration::HostMember(
+        mesh_commands::retained::MemberConfiguration {
+            directory: dir.path.clone(),
+            environment_id: environment.id.clone(),
+            host_root: environment.root(),
+            origin: args.mesh_url,
+            org: args.org,
+            network: args.network,
+            control_key: hex(&target),
+            wg_key: hex(&wg),
+            derp_only: args.derp_only,
+        },
+    );
     let mut enrollment = zeroize::Zeroizing::new(Vec::new());
     tokio::time::timeout(
         Duration::from_secs(15),

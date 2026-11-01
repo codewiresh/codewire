@@ -15,8 +15,6 @@ readonly SOURCE_ROOT
 readonly STOCK_SSH_WORKLOAD_SOURCE="$SCRIPT_DIRECTORY/stock-ssh-workload.sh"
 
 CW_BIN=''
-MESH_BIN=''
-DERP_BIN=''
 DATA_PLANE_SMOKE_BIN=''
 CREDENTIAL_BRIDGE_SMOKE_BIN=''
 STATE_PROBE_BIN=''
@@ -149,8 +147,6 @@ usage() {
   cat <<'USAGE' >&2
 usage: smoke-native-local-environment.sh \
   --cw-bin ABSOLUTE_PATH \
-  --mesh-bin ABSOLUTE_PATH \
-  --derp-bin ABSOLUTE_PATH \
   --data-plane-smoke-bin ABSOLUTE_PATH \
   --credential-bridge-smoke-bin ABSOLUTE_PATH \
   --state-probe-bin ABSOLUTE_PATH \
@@ -286,16 +282,6 @@ while [[ $# -gt 0 ]]; do
       CW_BIN="$2"
       shift 2
       ;;
-    --mesh-bin)
-      [[ $# -ge 2 && -z "$MESH_BIN" ]] || { usage; exit 2; }
-      MESH_BIN="$2"
-      shift 2
-      ;;
-    --derp-bin)
-      [[ $# -ge 2 && -z "$DERP_BIN" ]] || { usage; exit 2; }
-      DERP_BIN="$2"
-      shift 2
-      ;;
     --data-plane-smoke-bin)
       [[ $# -ge 2 && -z "$DATA_PLANE_SMOKE_BIN" ]] || { usage; exit 2; }
       DATA_PLANE_SMOKE_BIN="$2"
@@ -386,7 +372,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$CW_BIN" && -n "$MESH_BIN" && -n "$DERP_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$CREDENTIAL_BRIDGE_SMOKE_BIN" && -n "$STATE_PROBE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
+[[ -n "$CW_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$CREDENTIAL_BRIDGE_SMOKE_BIN" && -n "$STATE_PROBE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
   usage
   exit 2
 }
@@ -450,10 +436,6 @@ fi
 
 require_absolute_canonical_file 'cw binary' "$CW_BIN"
 [[ -x "$CW_BIN" ]] || die "cw binary is not executable: $CW_BIN"
-require_absolute_canonical_file 'Mesh binary' "$MESH_BIN"
-[[ -x "$MESH_BIN" ]] || die "Mesh binary is not executable: $MESH_BIN"
-require_absolute_canonical_file 'DERP binary' "$DERP_BIN"
-[[ -x "$DERP_BIN" ]] || die "DERP binary is not executable: $DERP_BIN"
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 && "${CW_BIN##*/}" != cw-local-credential-broker-smoke ]]; then
   die 'managed credential-broker smoke requires cw-local-credential-broker-smoke'
 fi
@@ -1009,8 +991,6 @@ run_cw_disruptive() {
 
 start_smoke_mesh() {
   run_cw mesh up \
-    --binary "$MESH_BIN" \
-    --derp-binary "$DERP_BIN" \
     --base-url "http://127.0.0.1:$MESH_PORT" \
     --listen "127.0.0.1:$MESH_PORT" \
     --derp-url "http://127.0.0.1:$DERP_PORT" \

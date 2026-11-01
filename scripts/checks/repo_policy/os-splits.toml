@@ -1,0 +1,117 @@
+# Where the CLI crates (codewire-cli, codewire-cli-bin) behave differently on
+# Linux and macOS, and why (#3797). This file is the home of those reasons.
+# `scripts/checks/repo_checks.py os-splits` fails when a file has a
+# single-OS `target_os` split that is not listed here with its exact count,
+# or when a CLI crate gates a workspace crate to one OS although that crate has
+# no OS-specific code and no recorded reason. A split shared by Linux and
+# macOS together (`any(target_os = "linux", target_os = "macos")`) is the
+# local VM boundary against other OSes and is not counted.
+#
+# To change a split: fix it if it is an accident (one product, shared code),
+# or update its count here, and its group's reason if that changed.
+
+[groups.member]
+reason = """Delegated member control (cw control, cw member, --member) must find and \
+stop orphaned descendants. Linux does it with pidfds and a subreaper; macOS has no public \
+API for it (docs/dev/MACOS-CLI.md), so it is refused there."""
+
+[groups.hosted]
+reason = """Roles that run only inside a hosted Sandbox, which is Linux: the platform cw \
+runtime, platform agent control and peer, the environment launcher, the hosted daemon and \
+access, and snapshot clearing. A Mac never runs them."""
+
+[groups.credentials]
+reason = """Local credential confinement and stores: Landlock, seccomp and Secret Service \
+on Linux; Seatbelt and the Keychain on macOS. One product, two kernel mechanisms."""
+
+[groups.vm-backend]
+reason = """The local VM backend and host facts: Cloud Hypervisor and /proc on Linux; \
+Virtualization.framework and sysctl on macOS."""
+
+[groups.snapshots]
+reason = """Local disk snapshots and VM checkpoints are not yet implemented on macOS \
+(#3803): a missing implementation, refused with that reason."""
+
+[groups.executable]
+reason = """The running executable: Linux opens its image through /proc/self/exe even \
+after its path is replaced; macOS has no such handle."""
+
+[groups.browser]
+reason = "Opening a browser: open on macOS, xdg-open on Linux."
+
+[groups.mesh]
+reason = """The local Mesh owner's launch: only Linux has PR_SET_NO_NEW_PRIVS. The \
+owner model itself is shared (owner.rs)."""
+
+[groups.dispatch]
+reason = """Role dispatch and module lists for the groups above: each line routes to, \
+or declares, code of one of them."""
+
+[groups.linux-tests]
+reason = """Tests of Linux-only behaviour (the groups above) or that use a Linux-only \
+proof such as a subreaper, pidfds or /proc. Their macOS counterparts are the macOS tests \
+and journeys listed in docs/dev/MACOS-CLI.md."""
+
+# Each file with single-OS splits: its group and its exact count of lines.
+[files]
+"crates/codewire-cli-bin/examples/dev_mesh_probe.rs" = { group = "linux-tests", count = 4 }
+"crates/codewire-cli-bin/src/local_mesh_helper.rs" = { group = "member", count = 2 }
+"crates/codewire-cli-bin/src/main.rs" = { group = "dispatch", count = 10 }
+"crates/codewire-cli-bin/tests/broker_confinement.rs" = { group = "credentials", count = 1 }
+"crates/codewire-cli-bin/tests/host_member_control.rs" = { group = "member", count = 1 }
+"crates/codewire-cli-bin/tests/init_remote_redaction.rs" = { group = "credentials", count = 1 }
+"crates/codewire-cli-bin/tests/local_credential_authority.rs" = { group = "credentials", count = 1 }
+"crates/codewire-cli-bin/tests/local_git_credential_helper.rs" = { group = "credentials", count = 7 }
+"crates/codewire-cli-bin/tests/native_egress_broker.rs" = { group = "vm-backend", count = 1 }
+"crates/codewire-cli-bin/tests/native_mesh_enrollment.rs" = { group = "vm-backend", count = 1 }
+"crates/codewire-cli-bin/tests/native_mesh_transport.rs" = { group = "vm-backend", count = 1 }
+"crates/codewire-cli-bin/tests/native_network_confinement.rs" = { group = "vm-backend", count = 1 }
+"crates/codewire-cli-bin/tests/native_network_worker.rs" = { group = "vm-backend", count = 1 }
+"crates/codewire-cli-bin/tests/native_network_worker_confinement.rs" = { group = "vm-backend", count = 1 }
+"crates/codewire-cli-bin/tests/native_supervisor.rs" = { group = "vm-backend", count = 1 }
+"crates/codewire-cli-bin/tests/network_delete.rs" = { group = "linux-tests", count = 1 }
+"crates/codewire-cli-bin/tests/retained_mesh.rs" = { group = "linux-tests", count = 4 }
+"crates/codewire-cli-bin/tests/support/cw_fixture.rs" = { group = "linux-tests", count = 9 }
+"crates/codewire-cli/src/build_record.rs" = { group = "executable", count = 1 }
+"crates/codewire-cli/src/commands/checkpoint.rs" = { group = "snapshots", count = 4 }
+"crates/codewire-cli/src/commands/collaboration.rs" = { group = "member", count = 1 }
+"crates/codewire-cli/src/commands/credential_authority.rs" = { group = "credentials", count = 34 }
+"crates/codewire-cli/src/commands/credential_authority/ssh.rs" = { group = "credentials", count = 17 }
+"crates/codewire-cli/src/commands/credential_broker.rs" = { group = "credentials", count = 15 }
+"crates/codewire-cli/src/commands/credential_input.rs" = { group = "credentials", count = 4 }
+"crates/codewire-cli/src/commands/credential_repository.rs" = { group = "credentials", count = 24 }
+"crates/codewire-cli/src/commands/credential_repository/ssh.rs" = { group = "credentials", count = 6 }
+"crates/codewire-cli/src/commands/environment.rs" = { group = "vm-backend", count = 2 }
+"crates/codewire-cli/src/commands/flat.rs" = { group = "member", count = 1 }
+"crates/codewire-cli/src/commands/host.rs" = { group = "member", count = 8 }
+"crates/codewire-cli/src/commands/mesh_commands/owner.rs" = { group = "mesh", count = 1 }
+"crates/codewire-cli/src/commands/mesh_commands/retained.rs" = { group = "member", count = 2 }
+"crates/codewire-cli/src/commands/mod.rs" = { group = "dispatch", count = 15 }
+"crates/codewire-cli/src/commands/native.rs" = { group = "vm-backend", count = 16 }
+"crates/codewire-cli/src/commands/native/host_support.rs" = { group = "vm-backend", count = 7 }
+"crates/codewire-cli/src/commands/native/sources.rs" = { group = "vm-backend", count = 1 }
+"crates/codewire-cli/src/commands/platform_commands.rs" = { group = "browser", count = 1 }
+"crates/codewire-cli/src/commands/sessions.rs" = { group = "member", count = 7 }
+"crates/codewire-cli/src/commands/sessions/agents.rs" = { group = "hosted", count = 55 }
+"crates/codewire-cli/src/commands/sessions/agents/dispatch.rs" = { group = "member", count = 2 }
+"crates/codewire-cli/src/commands/sessions/agents/host_control/tests.rs" = { group = "member", count = 1 }
+"crates/codewire-cli/src/commands/sessions/agents/native_host/verified_runtime.rs" = { group = "linux-tests", count = 1 }
+"crates/codewire-cli/src/commands/sessions/agents/noel.rs" = { group = "member", count = 6 }
+"crates/codewire-cli/src/commands/sessions/agents/pause.rs" = { group = "member", count = 11 }
+"crates/codewire-cli/src/commands/sessions/agents/turn_failure_tests.rs" = { group = "linux-tests", count = 2 }
+"crates/codewire-cli/src/commands/snapshot.rs" = { group = "snapshots", count = 4 }
+"crates/codewire-cli/src/commands/tests/environment.rs" = { group = "linux-tests", count = 5 }
+"crates/codewire-cli/src/commands/tests/sessions.rs" = { group = "linux-tests", count = 5 }
+"crates/codewire-cli/src/hosted_binding.rs" = { group = "hosted", count = 6 }
+"crates/codewire-cli/src/hosted_binding/tests.rs" = { group = "hosted", count = 3 }
+"crates/codewire-cli/src/lib.rs" = { group = "dispatch", count = 45 }
+"crates/codewire-cli/src/public_fetch.rs" = { group = "linux-tests", count = 1 }
+"crates/codewire-cli/src/public_fetch/http.rs" = { group = "linux-tests", count = 1 }
+"crates/codewire-cli/src/public_fetch/scratch.rs" = { group = "linux-tests", count = 1 }
+"crates/codewire-cli/src/public_fetch/tests.rs" = { group = "linux-tests", count = 6 }
+"crates/codewire-cli/src/update.rs" = { group = "executable", count = 1 }
+
+# A workspace crate a CLI crate links on one OS only, although it has no
+# OS-specific code of its own.
+[dependencies]
+"codewire-cli/codewire-tailnet" = { os = "linux", group = "member" }

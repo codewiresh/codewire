@@ -60,26 +60,19 @@ url = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-codewire-tailnet = { workspace = true }
-async-trait = { workspace = true }
-codewire-workspace-access = { workspace = true }
-futures = { workspace = true }
-prost = { workspace = true }
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 codewire-credential-broker = { workspace = true, features = ["ssh-agent"] }
 codewire-local-credentials = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
+futures = { workspace = true }
+prost = { workspace = true }
 rustix = { workspace = true }
 tempfile = { workspace = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-codewire-credential-broker = { workspace = true, features = ["ssh-agent"] }
-codewire-local-credentials = { workspace = true }
-codewire-local-vmm = { path = "../codewire-local-vmm" }
-futures = { workspace = true }
-prost = { workspace = true }
-rustix = { workspace = true }
-tempfile = { workspace = true }
+[target.'cfg(target_os = "linux")'.dependencies]
+async-trait = { workspace = true }
+codewire-tailnet = { workspace = true }
+codewire-workspace-access = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

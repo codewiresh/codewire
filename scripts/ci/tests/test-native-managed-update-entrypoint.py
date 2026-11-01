@@ -167,7 +167,7 @@ env() {
 
     def test_invalid_broker_renewal_profiles_refuse_before_effect_tools(self):
         base = []
-        for flag in ['cw-bin', 'mesh-bin', 'derp-bin', 'data-plane-smoke-bin',
+        for flag in ['cw-bin', 'data-plane-smoke-bin',
                      'credential-bridge-smoke-bin', 'state-probe-bin', 'artifact-root', 'artifact-lock']:
             base.extend(['--' + flag, '/unused/' + flag])
         renewal = ['--broker-renewal-observation']
@@ -191,7 +191,7 @@ env() {
 
     def test_invalid_update_profiles_refuse_before_effect_tools(self):
         base = []
-        for flag in ['cw-bin', 'mesh-bin', 'derp-bin', 'data-plane-smoke-bin',
+        for flag in ['cw-bin', 'data-plane-smoke-bin',
                      'credential-bridge-smoke-bin', 'state-probe-bin', 'artifact-root', 'artifact-lock']:
             base.extend(['--' + flag, '/unused/' + flag])
         modes = ['--managed-credential-broker', '--managed-agent-sessions',

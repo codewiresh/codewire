@@ -618,6 +618,47 @@ pub(crate) fn signal_unreaped_child(pid: u32, signal: Signal) -> Result<(), Reco
     }
 }
 
+/// The birth of `pid`, or `None` when no process has that PID.
+pub(crate) fn birth_if_present(pid: u32) -> Result<Option<(String, u64)>, RecoveryError> {
+    match observe_pid(pid) {
+        Ok(birth) => Ok(Some((
+            birth.boot_session.to_hyphenated(),
+            birth.start_abstime,
+        ))),
+        Err(ObservationError::ProcessExited) => Ok(None),
+        Err(ObservationError::ProcessRead(error)) if error.raw_os_error() == Some(libc::ESRCH) => {
+            Ok(None)
+        }
+        Err(error) => Err(RecoveryError::from_observation(error)),
+    }
+}
+
+/// Whether `pid` has exited and only waits to be reaped (a zombie). A PID
+/// reaped meanwhile has exited too.
+pub(crate) fn exited_unreaped(pid: u32) -> Result<bool, RecoveryError> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: a writable proc_bsdinfo of the stated size.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&raw mut info).cast(),
+            size,
+        )
+    };
+    if written != size {
+        let error = io::Error::last_os_error();
+        // A PID reaped meanwhile has exited too.
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(true);
+        }
+        return Err(RecoveryError::ReadProcess(error));
+    }
+    Ok(info.pbi_status == libc::SZOMB)
+}
+
 /// Exit this process when its parent exits. Darwin has no parent-death
 /// signal, so a spawned child calls this at entry. The parent PID is checked
 /// again after registering, so a parent that exited first is also caught.

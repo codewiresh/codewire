@@ -1,4 +1,4 @@
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod local_mesh_helper;
 
 fn main() {
@@ -99,7 +99,7 @@ fn main() {
     }
     // Helper roles must not resolve ordinary CLI settings, credentials or the
     // mutable managed entry. The parent already selected this exact executable.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(role) = std::env::args_os().nth(1)
         && local_mesh_helper::is_role(&role)
     {

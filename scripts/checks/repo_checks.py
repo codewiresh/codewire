@@ -16,6 +16,7 @@ from repo_policy.material_cache import check_epoch_material_cache_owner
 from repo_policy.mcp_settings import check_mcp_settings
 from repo_policy.mesh import check_mesh_surface_freeze
 from repo_policy.orchestration_security import check_orchestration_authz
+from repo_policy.os_splits import check_os_splits
 from repo_policy.permanent_raw import check_permanent_raw_surface
 from repo_policy.production import check_production_source_ownership
 from repo_policy.public_addresses import check_public_address_literals
@@ -87,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
     kind_suite_rows_parser = subparsers.add_parser("kind-suite-rows")
     kind_suite_rows_parser.add_argument("--self-test", action="store_true")
     kind_suite_rows_parser.set_defaults(func=check_kind_suite_rows)
+    os_splits_parser = subparsers.add_parser("os-splits")
+    os_splits_parser.add_argument("--self-test", action="store_true")
+    os_splits_parser.set_defaults(func=check_os_splits)
+
     webpki_roots_parser = subparsers.add_parser("webpki-roots-floor")
     webpki_roots_parser.add_argument("--self-test", action="store_true")
     webpki_roots_parser.set_defaults(func=check_webpki_roots_floor)

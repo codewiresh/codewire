@@ -18,12 +18,13 @@ path = "src/main.rs"
 codewire-cli = { path = "../codewire-cli" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 codewire-derp = { workspace = true }
+codewire-local-vmm = { path = "../codewire-local-vmm" }
 codewire-mesh = { path = "../codewire-mesh" }
 tracing-subscriber = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 axum = { workspace = true }
 buffa = { workspace = true }
 codewire-client = { workspace = true }
@@ -43,17 +44,9 @@ rand = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-uuid = { workspace = true }
-zeroize = { workspace = true }
-
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-codewire-egress-broker = { workspace = true }
-codewire-local-vmm = { path = "../codewire-local-vmm" }
-codewire-vmm-guest-probe = { workspace = true }
-libc = "0.2"
-tempfile = { workspace = true }
 tonic = { workspace = true }
 uuid = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 codewire-workspace-hack.workspace = true

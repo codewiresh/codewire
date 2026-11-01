@@ -17,8 +17,7 @@ use codewire_egress_broker::ipc::{BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS};
 use codewire_local_vmm::egress_broker::{
     EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_FIRST_SESSION_FD,
     EGRESS_BROKER_HOST_ADDRESSES_FD, EGRESS_BROKER_INHERITED_SESSIONS,
-    EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE,
-    encode_developer_egress_broker_bootstrap,
+    EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, encode_egress_broker_bootstrap,
 };
 use codewire_local_vmm::host_addresses::{HostAddressSet, encode_frame};
 use codewire_local_vmm::mesh_ingress::MESH_INGRESS_CONTROL_KEY_LEN;
@@ -254,9 +253,14 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         .unwrap();
     broker_parent
         .write_all(
-            encode_developer_egress_broker_bootstrap(vm_id, generation, &broker_key)
-                .unwrap()
-                .as_ref(),
+            encode_egress_broker_bootstrap(
+                vm_id,
+                generation,
+                &broker_key,
+                &codewire_egress_policy::CompiledPolicy::developer_baseline(),
+            )
+            .unwrap()
+            .as_ref(),
         )
         .unwrap();
     assert_eq!(
@@ -288,6 +292,7 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         &[0x7b; 32],
         &[0x4d; MESH_INGRESS_CONTROL_KEY_LEN],
         &[3_001],
+        codewire_egress_policy::CompiledPolicy::developer_baseline().digest(),
     )
     .unwrap();
     let mut worker_command = cw(

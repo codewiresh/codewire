@@ -22,6 +22,7 @@ enum WatchReply {
     Failure(tonic::Code),
     /// Fails with the code only once the test releases it, so the test can
     /// change the endpoint while the client is still inside this watch.
+    #[cfg(target_os = "linux")]
     FailureWhenReleased(tonic::Code, Arc<tokio::sync::Notify>),
 }
 
@@ -113,6 +114,7 @@ impl LocalSupervisorService for ProtocolPeer {
         match reply {
             WatchReply::Updates(updates) => Ok(Response::new(tokio_stream::iter(updates))),
             WatchReply::Failure(code) => Err(Status::new(code, "untrusted stream details")),
+            #[cfg(target_os = "linux")]
             WatchReply::FailureWhenReleased(code, release) => {
                 release.notified().await;
                 Err(Status::new(code, "untrusted stream details"))
@@ -309,6 +311,7 @@ impl TestServer {
     /// A server whose listener the test can close while the connections it
     /// accepted keep serving: aborting the returned accept task drops the
     /// listener, so its socket inode is free once the path is unlinked.
+    #[cfg(target_os = "linux")]
     fn start_with_closable_listener(
         info: impl FnOnce(&NativeRuntimeConfig) -> Result<v1::SupervisorInfo, tonic::Code>,
         replies: Vec<WatchReply>,

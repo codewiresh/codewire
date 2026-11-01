@@ -188,7 +188,7 @@ while :; do sleep 1; done
 EARLY_SETSID
 chmod 0755 "$FAKE_ROOT/fake-bin/setsid"
 
-for executable in normal-cw cw-local-credential-broker-smoke mesh derp data-plane \
+for executable in normal-cw cw-local-credential-broker-smoke data-plane \
     credential-bridge state-probe image-import checkout-fixture; do
   printf '#!/usr/bin/env bash\nexit 0\n' >"$FAKE_ROOT/fixtures/$executable"
   chmod 0755 "$FAKE_ROOT/fixtures/$executable"
@@ -201,8 +201,6 @@ chmod 0755 "$FAKE_ROOT/fixtures/dev-mesh-probe"
 
 export ACCEPTANCE_NORMAL_CW_BIN="$FAKE_ROOT/fixtures/normal-cw"
 export ACCEPTANCE_SYNTHETIC_CW_BIN="$FAKE_ROOT/fixtures/cw-local-credential-broker-smoke"
-export ACCEPTANCE_NATIVE_MESH_BIN="$FAKE_ROOT/fixtures/mesh"
-export ACCEPTANCE_NATIVE_DERP_BIN="$FAKE_ROOT/fixtures/derp"
 export ACCEPTANCE_NATIVE_DATA_PLANE_SMOKE_BIN="$FAKE_ROOT/fixtures/data-plane"
 export ACCEPTANCE_NATIVE_CREDENTIAL_BRIDGE_SMOKE_BIN="$FAKE_ROOT/fixtures/credential-bridge"
 export ACCEPTANCE_NATIVE_STATE_PROBE_BIN="$FAKE_ROOT/fixtures/state-probe"
@@ -593,7 +591,6 @@ pass
 
 expect_status 0 "$TEST_ROOT/help.out" "$RUNNER" --help
 for input_name in ACCEPTANCE_NORMAL_CW_BIN ACCEPTANCE_SYNTHETIC_CW_BIN \
-    ACCEPTANCE_NATIVE_MESH_BIN ACCEPTANCE_NATIVE_DERP_BIN \
     ACCEPTANCE_NATIVE_DATA_PLANE_SMOKE_BIN ACCEPTANCE_NATIVE_CREDENTIAL_BRIDGE_SMOKE_BIN \
     ACCEPTANCE_NATIVE_STATE_PROBE_BIN ACCEPTANCE_NATIVE_WORKSPACE_IMAGE_IMPORT_BIN \
     ACCEPTANCE_NATIVE_ARTIFACT_ROOT ACCEPTANCE_NATIVE_ARTIFACT_LOCK \

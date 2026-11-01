@@ -35,7 +35,7 @@
       "async fn network_create_with_owner(",
       "async fn invite_consume_and_join("
     ],
-    "crates/codewire-cli/src/commands/mesh_commands.rs": [
+    "crates/codewire-cli/src/commands/mesh_commands/owner.rs": [
       "CODEWIRE_MESH_LOCAL_API_KEY_HASH"
     ],
     "proto/codewire/internal/v1/mesh_authorization.proto": [
@@ -81,6 +81,12 @@
     "crates/codewire-cli/src/commands/mesh_commands.rs": [
       ".env(\"CODEWIRE_MESH_AUTH_MODE\"",
       ".env(\"CODEWIRE_MESH_AUTH_TOKEN\"",
+      "CODEWIRE_MESH_LOCAL_ENVIRONMENT_ID",
+      "CODEWIRE_MESH_LOCAL_ENVIRONMENT_TOKEN_HASH"
+    ],
+    "crates/codewire-cli/src/commands/mesh_commands/owner.rs": [
+      "\"CODEWIRE_MESH_AUTH_MODE\"",
+      "\"CODEWIRE_MESH_AUTH_TOKEN\"",
       "CODEWIRE_MESH_LOCAL_ENVIRONMENT_ID",
       "CODEWIRE_MESH_LOCAL_ENVIRONMENT_TOKEN_HASH"
     ],

@@ -14,7 +14,7 @@
 //! the managed store retains it as a version with the same digest.
 
 use std::ffi::OsString;
-use std::os::fd::{AsRawFd as _, OwnedFd};
+use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -76,8 +76,8 @@ impl SupervisorPeerPin {
         let (peer, configuration_digest, role) = match requested {
             None => (None, None, None),
             Some(requested) => {
-                let peer =
-                    ProcessBirth::observe(peer_pid(stream)?).map_err(|_| PeerError::Identity)?;
+                let peer = ProcessBirth::observe(peer_pid(stream.as_fd())?)
+                    .map_err(|_| PeerError::Identity)?;
                 let config = if peer.executable() == requested.executable {
                     requested.clone()
                 } else {
@@ -196,7 +196,7 @@ impl SupervisorPeerPin {
             .revalidate(&self.socket)
             .map_err(|_| PeerError::Identity)?;
         if let Some(peer) = &self.peer
-            && (peer_pid(stream)? != peer.pid()
+            && (peer_pid(stream.as_fd())? != peer.pid()
                 || ProcessBirth::observe(peer.pid()).map_err(|_| PeerError::Identity)? != *peer)
         {
             return Err(PeerError::Identity);
@@ -224,27 +224,63 @@ pub(crate) fn admit_known_process_stream(
     stream: &UnixStream,
     expected: &ProcessIdentity,
 ) -> Result<OwnedFd, PeerError> {
-    let credential = stream.peer_cred().map_err(|_| PeerError::Kernel)?;
-    if credential.uid() != current_uid() || peer_pid(stream)? != expected.pid {
+    admit_known_process_socket(stream.as_fd(), expected)
+}
+
+/// As [`admit_known_process_stream`], for any connected Unix socket.
+pub(crate) fn admit_known_process_socket(
+    socket: BorrowedFd<'_>,
+    expected: &ProcessIdentity,
+) -> Result<OwnedFd, PeerError> {
+    if peer_uid(socket)? != current_uid() || peer_pid(socket)? != expected.pid {
         return Err(PeerError::Identity);
     }
     let watched = WatchedProcess::watch(expected).map_err(|_| PeerError::Identity)?;
     // The PID was read before the birth check; read it again so a peer that
     // exited and was replaced in between is refused.
-    if peer_pid(stream)? != expected.pid || watched.is_exited().map_err(|_| PeerError::Kernel)? {
+    if peer_pid(socket)? != expected.pid || watched.is_exited().map_err(|_| PeerError::Kernel)? {
         return Err(PeerError::Identity);
     }
     Ok(watched.into_exit_descriptor())
 }
 
-fn peer_pid(stream: &UnixStream) -> Result<u32, PeerError> {
+/// Admit a socket whose peer is the recorded process birth. The exit queue
+/// is registered before the birth check, so a peer replaced after it is still
+/// caught; its executable file is not consulted, so an in-place rebuild or
+/// update of that file does not hide the process from its controller.
+pub(crate) fn admit_known_birth_socket(
+    socket: BorrowedFd<'_>,
+    expected: &ProcessIdentity,
+) -> Result<OwnedFd, PeerError> {
+    if peer_uid(socket)? != current_uid() || peer_pid(socket)? != expected.pid {
+        return Err(PeerError::Identity);
+    }
+    let watched = WatchedProcess::watch(expected).map_err(|_| PeerError::Identity)?;
+    if peer_pid(socket)? != expected.pid || watched.is_exited().map_err(|_| PeerError::Kernel)? {
+        return Err(PeerError::Identity);
+    }
+    Ok(watched.into_exit_descriptor())
+}
+
+/// The connected socket's peer user.
+fn peer_uid(socket: BorrowedFd<'_>) -> Result<u32, PeerError> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: a live socket descriptor and two writable outputs.
+    if unsafe { libc::getpeereid(socket.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+        return Err(PeerError::Kernel);
+    }
+    Ok(uid)
+}
+
+fn peer_pid(socket: BorrowedFd<'_>) -> Result<u32, PeerError> {
     let mut pid: libc::pid_t = 0;
     let mut length = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
     // SAFETY: a live socket descriptor and a writable pid_t-sized buffer
     // whose length is passed.
     let result = unsafe {
         libc::getsockopt(
-            stream.as_raw_fd(),
+            socket.as_raw_fd(),
             libc::SOL_LOCAL,
             libc::LOCAL_PEERPID,
             (&raw mut pid).cast(),

@@ -101,7 +101,6 @@ could not clear as a partial failure.
 
 ```sh
 cw mesh up [--listen 127.0.0.1:18090] [--base-url URL] [--derp-listen 127.0.0.1:18091] [--derp-url URL] [--no-derp]
-           [--binary PATH] [--derp-binary PATH]
 cw mesh status
 cw mesh down
 ```
@@ -113,6 +112,12 @@ hosted network. `cw mesh status` shows the local service's state and
 organization, the selected network and its Mesh, and the default Mesh, apart
 from connectivity, which it does not check. `cw mesh down` stops the service
 and forgets its endpoint; its organization stays for the next `cw mesh up`.
+
+The installed `cw` runs the service and its relay itself, on Linux and macOS
+alike; the `--binary` and `--derp-binary` options that named separate programs
+were removed. A Mesh service started by an earlier `cw` is not stopped by this
+one: `cw mesh status` shows it as `unknown`, and `cw mesh up` and `down` name
+its processes and the record to remove once you have stopped them yourself.
 
 ## Trusted host members (Linux)
 

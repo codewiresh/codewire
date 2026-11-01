@@ -5,7 +5,7 @@
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Read as _;
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
@@ -207,6 +207,38 @@ impl SupervisorExit {
 }
 
 fn socket_pidfd(stream: &UnixStream) -> Result<(OwnedFd, u32), PeerError> {
+    socket_fd_pidfd(stream.as_fd())
+}
+
+/// The connected socket's peer credentials: its PID and user.
+fn peer_credentials(socket: BorrowedFd<'_>) -> Result<(u32, u32), PeerError> {
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: a live socket and a writable ucred-sized buffer whose length is passed.
+    let result = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut credentials).cast(),
+            &mut length,
+        )
+    };
+    if result != 0 || length as usize != std::mem::size_of::<libc::ucred>() {
+        return Err(PeerError::Kernel);
+    }
+    let pid = u32::try_from(credentials.pid)
+        .ok()
+        .filter(|pid| *pid != 0)
+        .ok_or(PeerError::Kernel)?;
+    Ok((pid, credentials.uid))
+}
+
+fn socket_fd_pidfd(socket: BorrowedFd<'_>) -> Result<(OwnedFd, u32), PeerError> {
     // SO_PEERPIDFD pins the birth that supplied this connected socket. A later
     // pidfd_open(SO_PEERCRED.pid) could instead open a reused numeric PID.
     let mut raw = -1_i32;
@@ -214,7 +246,7 @@ fn socket_pidfd(stream: &UnixStream) -> Result<(OwnedFd, u32), PeerError> {
     // SAFETY: the socket is live, and the output and length are initialized.
     let result = unsafe {
         libc::getsockopt(
-            stream.as_raw_fd(),
+            socket.as_raw_fd(),
             libc::SOL_SOCKET,
             libc::SO_PEERPIDFD,
             (&mut raw as *mut i32).cast(),
@@ -234,13 +266,8 @@ fn socket_pidfd(stream: &UnixStream) -> Result<(OwnedFd, u32), PeerError> {
     if flags < 0 || unsafe { libc::fcntl(raw, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
         return Err(PeerError::Kernel);
     }
-    let credentials = stream.peer_cred().map_err(|_| PeerError::Kernel)?;
-    let pid = credentials
-        .pid()
-        .and_then(|pid| u32::try_from(pid).ok())
-        .filter(|pid| *pid != 0)
-        .ok_or(PeerError::Kernel)?;
-    if credentials.uid() != current_uid() {
+    let (pid, uid) = peer_credentials(socket)?;
+    if uid != current_uid() {
         return Err(PeerError::Identity);
     }
     let info = read_bounded(&PathBuf::from(format!("/proc/self/fdinfo/{raw}")), 4096)?;
@@ -262,10 +289,36 @@ pub(crate) fn admit_known_process_stream(
     stream: &UnixStream,
     expected: &ProcessIdentity,
 ) -> Result<OwnedFd, PeerError> {
-    let (pidfd, pid) = socket_pidfd(stream)?;
+    admit_known_process_socket(stream.as_fd(), expected)
+}
+
+/// As [`admit_known_process_stream`], for any connected Unix socket.
+pub(crate) fn admit_known_process_socket(
+    socket: BorrowedFd<'_>,
+    expected: &ProcessIdentity,
+) -> Result<OwnedFd, PeerError> {
+    let (pidfd, pid) = socket_fd_pidfd(socket)?;
     require_live(&pidfd)?;
     if pid != expected.pid || capture_process(pid, Instant::now() + ADMISSION_TIMEOUT)? != *expected
     {
+        return Err(PeerError::Identity);
+    }
+    require_live(&pidfd)?;
+    Ok(pidfd)
+}
+
+/// Admit a socket whose peer is the recorded process birth. The socket's
+/// pidfd pins that birth, so a check made while it is live names that very
+/// process; its executable file is not consulted, so an in-place rebuild or
+/// update of that file does not hide the process from its controller.
+pub(crate) fn admit_known_birth_socket(
+    socket: BorrowedFd<'_>,
+    expected: &ProcessIdentity,
+) -> Result<OwnedFd, PeerError> {
+    let (pidfd, pid) = socket_fd_pidfd(socket)?;
+    require_live(&pidfd)?;
+    let birth = super::process::birth_of(pid).map_err(|_| PeerError::Identity)?;
+    if pid != expected.pid || birth != (expected.boot_id.clone(), expected.start_time_ticks) {
         return Err(PeerError::Identity);
     }
     require_live(&pidfd)?;

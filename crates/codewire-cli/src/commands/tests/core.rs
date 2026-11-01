@@ -1264,7 +1264,6 @@ fn platform_login_saves_the_owner_organization_and_no_mesh_projection() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn local_mesh_children_receive_only_explicit_startup_and_logging_environment() {
     const CHILD_SENTINEL: &str = "CODEWIRE_TEST_LOCAL_MESH_ENV_CHILD";
@@ -1285,34 +1284,39 @@ fn local_mesh_children_receive_only_explicit_startup_and_logging_environment() {
         return;
     }
 
-    use crate::commands::mesh_commands::retained::{HelperConfiguration, configure_environment};
+    use crate::commands::mesh_commands::owner::{derp_environment, owner_environment};
     let raw_api_key = "cw_synthetic-local-mesh-api-key";
     let identity = config::LocalMeshIdentity {
         organization_id: "local-org-synthetic".to_owned(),
         api_key: raw_api_key.to_owned(),
     };
-    let mesh = HelperConfiguration::Mesh {
+    let spec = LocalMeshStartSpec {
+        binary: PathBuf::from("/synthetic/cw"),
         base_url: "http://127.0.0.1:18090".to_owned(),
         listen_addr: "127.0.0.1:18090".to_owned(),
-        derp_url: None,
-        organization_id: identity.organization_id.clone(),
-        api_key_hash: identity.api_key_hash(),
+        local_identity: identity.clone(),
+        log_path: PathBuf::from("/synthetic/mesh.log"),
+        derp: Some(LocalDerpStartSpec {
+            binary: PathBuf::from("/synthetic/cw"),
+            url: "http://127.0.0.1:18091".to_owned(),
+            listen_addr: "127.0.0.1:18091".to_owned(),
+            log_path: PathBuf::from("/synthetic/derp.log"),
+        }),
     };
-    let derp = HelperConfiguration::Derp {
-        url: "http://127.0.0.1:18091".to_owned(),
-        listen_addr: "127.0.0.1:18091".to_owned(),
-    };
-    for (configuration, is_mesh) in [(&mesh, true), (&derp, false)] {
+    let mesh = owner_environment(
+        &spec,
+        std::path::Path::new("/synthetic/mesh.sock"),
+        std::path::Path::new("/synthetic/mesh"),
+        "00000000-0000-4000-8000-000000000001",
+    );
+    let derp = derp_environment("127.0.0.1:18091");
+    for (environment, is_mesh) in [(&mesh, true), (&derp, false)] {
         let mut command = std::process::Command::new("/usr/bin/env");
-        configure_environment(
-            &mut command,
-            configuration,
-            "00000000-0000-4000-8000-000000000001",
-        );
+        command.env_clear().envs(environment.iter().cloned());
         let output = command.output().unwrap();
         assert!(output.status.success());
         let dump = String::from_utf8(output.stdout).unwrap();
-        assert!(dump.contains("CW_LOCAL_HELPER_NONCE="));
+        assert_eq!(dump.contains("CW_LOCAL_HELPER_NONCE="), is_mesh);
         assert!(dump.contains("RUST_LOG=codewire_mesh=trace"));
         if is_mesh {
             assert!(dump.contains("CODEWIRE_MESH_LOCAL_ORGANIZATION_ID=local-org-synthetic"));

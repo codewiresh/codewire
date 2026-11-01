@@ -292,6 +292,18 @@ without it the transport can use only its DERP relay over TCP. This path is
 implemented and unit-tested on the Mac but not yet observed with a real Mesh
 login.
 
+`cw mesh up` runs the standalone Mesh service on a Mac from the same code as on
+Linux (#3797): the installed `cw` serves the Mesh (`cw __local-mesh`), which
+starts and owns its DERP relay (`cw __local-derp`), so the relay ends with it.
+The service holds an owner-only control socket. A later `cw` never adopts or
+signals a recorded PID; it reaches the service only through that socket and
+admits the peer as exactly the recorded process birth (PID, boot and start
+time), so an in-place update of `cw` does not hide a running service. These are
+owner processes, not a sandbox, so no Seatbelt profile applies. Separate
+`codewire-mesh` and `codewire-derp` programs started by an earlier `cw` show
+as `unknown` in `cw mesh status`; `cw mesh up` and `down` name them, and they
+must be stopped by hand once.
+
 Delegated member control (`cw control`, `cw member` and `--member`) is refused
 on macOS hosts, with its reason. Member control must find and stop every
 process a member session started, including descendants whose parent has

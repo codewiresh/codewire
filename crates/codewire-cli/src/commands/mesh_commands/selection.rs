@@ -125,7 +125,6 @@ pub(crate) fn network_selection_path(data_dir: &Path) -> PathBuf {
 }
 
 pub(crate) fn load_network_selection(data_dir: &Path) -> anyhow::Result<Option<NetworkSelection>> {
-    #[cfg(target_os = "linux")]
     let data = {
         let Some(directory) = retained::StateDir::open(data_dir, false)? else {
             return Ok(None);
@@ -134,14 +133,6 @@ pub(crate) fn load_network_selection(data_dir: &Path) -> anyhow::Result<Option<N
             return Ok(None);
         };
         data
-    };
-    #[cfg(not(target_os = "linux"))]
-    let data = match fs::read(network_selection_path(data_dir)) {
-        Ok(data) => data,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).context("read the saved network selection");
-        }
     };
     let selection: NetworkSelection = serde_json::from_slice(&data)
         .context("parse the saved network selection; run `cw network clear`")?;
@@ -161,7 +152,6 @@ pub(crate) fn save_network_selection(
 
 /// Removes the saved selection; `false` when there was none.
 pub(crate) fn remove_network_selection(data_dir: &Path) -> anyhow::Result<bool> {
-    #[cfg(target_os = "linux")]
     {
         let Some(directory) = retained::StateDir::open(data_dir, false)? else {
             return Ok(false);
@@ -169,12 +159,6 @@ pub(crate) fn remove_network_selection(data_dir: &Path) -> anyhow::Result<bool> 
         let present = directory.read(NETWORK_SELECTION_FILE)?.is_some();
         directory.remove(NETWORK_SELECTION_FILE, None)?;
         Ok(present)
-    }
-    #[cfg(not(target_os = "linux"))]
-    match fs::remove_file(network_selection_path(data_dir)) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).context("remove the saved network selection"),
     }
 }
 
@@ -244,19 +228,8 @@ pub(crate) fn running_local_mesh(data_dir: &Path) -> anyhow::Result<Option<Local
         .context(
             "the local Mesh service has no owner record; run `cw mesh down`, then `cw mesh up`",
         )?;
-    #[cfg(target_os = "linux")]
-    retained::validate_owner(&runtime, &owner)
+    super::owner::validate_owner(&runtime, &owner, data_dir)
         .context("the local Mesh service's state is unknown; run `cw mesh status`")?;
-    #[cfg(not(target_os = "linux"))]
-    {
-        if !local_process_is_running(runtime.pid) {
-            return Ok(None);
-        }
-        anyhow::ensure!(
-            config::same_mesh_url(&owner.mesh_url, &runtime.base_url),
-            "the local Mesh owner record differs from the running service; run `cw mesh down`, then `cw mesh up`"
-        );
-    }
     Ok(Some(LocalMeshService {
         base_url: runtime.base_url,
         organization_id: owner.organization_id,

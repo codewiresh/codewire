@@ -339,6 +339,59 @@ fn parse_start_time(stat: &str) -> Result<u64, RecoveryError> {
         .ok_or(RecoveryError::MalformedProcess)
 }
 
+/// The birth of `pid`, or `None` when no process has that PID.
+pub(crate) fn birth_if_present(pid: u32) -> Result<Option<(String, u64)>, RecoveryError> {
+    match birth_of(pid) {
+        Ok(birth) => Ok(Some(birth)),
+        Err(RecoveryError::ReadProcess(error)) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether `pid` has exited and only waits to be reaped (a zombie).
+/// A PID reaped meanwhile has exited too.
+pub(crate) fn exited_unreaped(pid: u32) -> Result<bool, RecoveryError> {
+    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(RecoveryError::ReadProcess(error)),
+    };
+    let state = stat
+        .rfind(") ")
+        .and_then(|index| stat[index + 2..].chars().next())
+        .ok_or(RecoveryError::MalformedProcess)?;
+    Ok(matches!(state, 'Z' | 'X'))
+}
+
+/// End this process when its parent exits, as `darwin::process` does: the
+/// parent-death signal, which Linux delivers when the spawning thread exits.
+/// A parent that exited before this call left the child with init, so that is
+/// caught too.
+pub fn exit_with_parent() -> io::Result<()> {
+    // SAFETY: prctl with scalar arguments changes only this process's
+    // parent-death signal.
+    if unsafe {
+        libc::prctl(
+            libc::PR_SET_PDEATHSIG,
+            libc::SIGKILL as libc::c_ulong,
+            0,
+            0,
+            0,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: getppid has no preconditions.
+    if unsafe { libc::getppid() } <= 1 {
+        // SAFETY: _exit terminates at once, as the parent-death SIGKILL would.
+        unsafe { libc::_exit(1) }
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryError {
     #[error("invalid persisted process ID {0}")]

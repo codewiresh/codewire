@@ -1315,6 +1315,8 @@ mod tests {
         ));
     }
 
+    // VM checkpoints are Linux-only (#3803); macOS creates no checkpoints directory.
+    #[cfg(target_os = "linux")]
     #[test]
     fn clearing_stale_endpoints_keeps_a_placed_restore_input() {
         let (_parent, root) = private_root();

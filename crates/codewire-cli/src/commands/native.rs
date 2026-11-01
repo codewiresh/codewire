@@ -266,15 +266,8 @@ fn native_local_mesh_owner(paths: &ResolvePaths, network: &str) -> anyhow::Resul
         .filter(|owner| owner.auth_source == LocalMeshOwnerAuthSource::StandaloneLocal)
         .ok_or_else(not_running)?;
     let runtime = load_local_mesh_runtime(&paths.mesh_data_dir)?.ok_or_else(not_running)?;
-    #[cfg(target_os = "linux")]
-    mesh_commands::retained::validate_owner(&runtime, &owner)
+    mesh_commands::owner::validate_owner(&runtime, &owner, &paths.mesh_data_dir)
         .context("standalone local Mesh runtime custody is unknown; no attachment was admitted")?;
-    #[cfg(not(target_os = "linux"))]
-    if !local_process_is_running(runtime.pid) {
-        anyhow::bail!(
-            "the local Mesh service is stale; run `cw mesh up` before attaching local:{network}"
-        );
-    }
     anyhow::ensure!(
         config::same_mesh_url(&owner.mesh_url, &runtime.base_url),
         "local Mesh owner projection does not match the active standalone runtime"
@@ -4518,9 +4511,9 @@ mod tests {
             binary: "codewire-mesh".to_owned(),
             log_path: root.path().join("mesh.log").display().to_string(),
             started_at: "2026-09-02T00:00:00Z".to_owned(),
-            #[cfg(target_os = "linux")]
-            custody: None,
             derp: None,
+            owner: None,
+            earlier_custody: None,
         };
         save_local_mesh_runtime(&mesh_data_dir, &runtime).unwrap();
         save_local_mesh_owner_context(
@@ -4558,7 +4551,10 @@ mod tests {
 
         // local: needs the owned running service; its custody is unknown here.
         let error = attach(Some("local:explicit-network"), false).unwrap_err();
-        assert!(error.to_string().contains("custody is unknown"), "{error}");
+        assert!(
+            error.to_string().contains("custody is unknown"),
+            "{error:#}"
+        );
         assert_eq!(
             load_local_mesh_runtime(&mesh_data_dir).unwrap().unwrap(),
             runtime

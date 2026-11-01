@@ -1766,7 +1766,6 @@ scripts/runtime/dev/run-secrets-credentials-acceptance.sh --only local-platform
 
 The full matrix additionally requires separate explicit
 `ACCEPTANCE_NORMAL_CW_BIN` and `ACCEPTANCE_SYNTHETIC_CW_BIN` paths; the native
-`ACCEPTANCE_NATIVE_MESH_BIN`, `ACCEPTANCE_NATIVE_DERP_BIN`,
 `ACCEPTANCE_NATIVE_DATA_PLANE_SMOKE_BIN`,
 `ACCEPTANCE_NATIVE_CREDENTIAL_BRIDGE_SMOKE_BIN`,
 `ACCEPTANCE_NATIVE_STATE_PROBE_BIN` and

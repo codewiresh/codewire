@@ -207,7 +207,6 @@ pub fn clear_if(
     }
 }
 
-#[cfg(target_os = "linux")]
 fn state_error(path: &Path, write: bool, error: anyhow::Error) -> ConfigError {
     let path = path.to_path_buf();
     let source = std::io::Error::other(error);
@@ -218,7 +217,6 @@ fn state_error(path: &Path, write: bool, error: anyhow::Error) -> ConfigError {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn read_file(data_dir: &Path) -> Result<Option<String>, ConfigError> {
     let path = data_dir.join(SELECTION_FILE);
     let Some(directory) = crate::commands::MeshStateDir::open(data_dir, false)
@@ -233,7 +231,6 @@ fn read_file(data_dir: &Path) -> Result<Option<String>, ConfigError> {
     Ok(bytes.and_then(|bytes| String::from_utf8(bytes).ok()))
 }
 
-#[cfg(target_os = "linux")]
 fn write_file(data_dir: &Path, data: &[u8]) -> Result<(), ConfigError> {
     let path = data_dir.join(SELECTION_FILE);
     let directory = crate::commands::MeshStateDir::open(data_dir, true)
@@ -247,7 +244,6 @@ fn write_file(data_dir: &Path, data: &[u8]) -> Result<(), ConfigError> {
         .map_err(|error| state_error(&path, true, error))
 }
 
-#[cfg(target_os = "linux")]
 fn remove_file(data_dir: &Path) -> Result<(), ConfigError> {
     let path = data_dir.join(SELECTION_FILE);
     let Some(directory) = crate::commands::MeshStateDir::open(data_dir, false)
@@ -258,48 +254,6 @@ fn remove_file(data_dir: &Path) -> Result<(), ConfigError> {
     directory
         .remove(SELECTION_FILE, None)
         .map_err(|error| state_error(&path, true, error))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_file(data_dir: &Path) -> Result<Option<String>, ConfigError> {
-    let path = data_dir.join(SELECTION_FILE);
-    match fs::read(&path) {
-        Ok(bytes) => Ok(String::from_utf8(bytes).ok()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(ConfigError::ReadConfig { path, source }),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn write_file(data_dir: &Path, data: &[u8]) -> Result<(), ConfigError> {
-    let path = data_dir.join(SELECTION_FILE);
-    fs::create_dir_all(data_dir).map_err(|source| ConfigError::CreateConfigDir {
-        path: data_dir.to_path_buf(),
-        source,
-    })?;
-    harden_dir(data_dir)?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&path)
-        .map_err(|source| ConfigError::WriteConfig {
-            path: path.clone(),
-            source,
-        })?;
-    harden_file(&path)?;
-    file.write_all(data)
-        .map_err(|source| ConfigError::WriteConfig { path, source })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn remove_file(data_dir: &Path) -> Result<(), ConfigError> {
-    let path = data_dir.join(SELECTION_FILE);
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(ConfigError::WriteConfig { path, source }),
-    }
 }
 
 #[cfg(test)]

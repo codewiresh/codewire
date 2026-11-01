@@ -3,13 +3,19 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
+#[cfg(target_os = "linux")]
 const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
 
+#[cfg(target_os = "linux")]
 struct StripChild(Child);
 
+#[cfg(target_os = "linux")]
 impl Drop for StripChild {
     fn drop(&mut self) {
         // This handle owns an unreaped child, never a persisted numeric PID.
@@ -49,11 +55,36 @@ pub fn prepare(path: &Path) {
     io::copy(&mut source, &mut copy).unwrap();
     drop(copy);
 
-    // Cargo's debug CW can exceed the product's unchanged executable cap.
-    // Strip only this disposable copy. Since Rust 1.97 its v0-mangled symbol
-    // names alone exceed that cap, so remove the symbol table with the debug
-    // information. --strip-all preserves allocated code/data, including the
-    // #[used] build record backing CLI_VERSION.
+    #[cfg(target_os = "linux")]
+    strip_linux_copy(path);
+    #[cfg(target_os = "macos")]
+    check_macos_copy(path);
+    fs::set_permissions(path, fs::Permissions::from_mode(0o500)).unwrap();
+    assert_eq!(fs::symlink_metadata(path).unwrap().mode() & 0o7777, 0o500);
+}
+
+/// Spawn an executable a test process just wrote or copied. A concurrent
+/// test's fork child holds the write descriptor until its own exec, so the
+/// kernel briefly refuses this exec with ETXTBSY; retry only that, bounded.
+pub fn spawn_written<T>(mut spawn: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    for _ in 1..50 {
+        match spawn() {
+            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+    spawn()
+}
+
+/// Cargo's debug CW can exceed the member helper's executable cap. Strip only
+/// this disposable copy. Since Rust 1.97 its v0-mangled symbol names alone
+/// exceed that cap, so remove the symbol table with the debug information.
+/// --strip-all preserves allocated code/data, including the #[used] build
+/// record backing CLI_VERSION.
+#[cfg(target_os = "linux")]
+fn strip_linux_copy(path: &Path) {
     let mut strip = StripChild(
         Command::new("/usr/bin/strip")
             .args(["--strip-all", "--"])
@@ -88,21 +119,18 @@ pub fn prepare(path: &Path) {
     assert_eq!(u16::from_le_bytes([header[18], header[19]]), 62);
     #[cfg(target_arch = "aarch64")]
     assert_eq!(u16::from_le_bytes([header[18], header[19]]), 183);
-    fs::set_permissions(path, fs::Permissions::from_mode(0o500)).unwrap();
-    assert_eq!(fs::symlink_metadata(path).unwrap().mode() & 0o7777, 0o500);
 }
 
-/// Spawn an executable a test process just wrote or copied. A concurrent
-/// test's fork child holds the write descriptor until its own exec, so the
-/// kernel briefly refuses this exec with ETXTBSY; retry only that, bounded.
-pub fn spawn_written<T>(mut spawn: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    for _ in 1..50 {
-        match spawn() {
-            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            result => return result,
-        }
-    }
-    spawn()
+/// A macOS copy keeps its ad hoc signature only unstripped; nothing on macOS
+/// caps the executable's size.
+#[cfg(target_os = "macos")]
+fn check_macos_copy(path: &Path) {
+    let metadata = fs::symlink_metadata(path).unwrap();
+    assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+    assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+    assert_eq!(metadata.nlink(), 1);
+    let mut header = [0; 8];
+    File::open(path).unwrap().read_exact(&mut header).unwrap();
+    // MH_MAGIC_64, then CPU_TYPE_ARM64.
+    assert_eq!(&header, &[0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01]);
 }

@@ -692,7 +692,6 @@ pub struct ResolvedMeshConfig {
 }
 
 impl ResolvedMeshConfig {
-    #[cfg(target_os = "linux")]
     pub(crate) fn static_token(mesh_url: String, token: &str) -> Result<Self, ConfigError> {
         Self::static_token_from(mesh_url, token, MeshAuthSource::Explicit)
     }
@@ -871,7 +870,6 @@ fn saved_mesh_value_for_selected_url(
 
 pub fn load_mesh_config(data_dir: &Path) -> Result<MeshConfig, ConfigError> {
     let path = data_dir.join("config.toml");
-    #[cfg(target_os = "linux")]
     let data = {
         let read_error = |error: anyhow::Error| ConfigError::ReadConfig {
             path: path.clone(),
@@ -889,12 +887,6 @@ pub fn load_mesh_config(data_dir: &Path) -> Result<MeshConfig, ConfigError> {
             path: path.clone(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
         })?
-    };
-    #[cfg(not(target_os = "linux"))]
-    let data = match fs::read_to_string(&path) {
-        Ok(data) => data,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(MeshConfig::default()),
-        Err(source) => return Err(ConfigError::ReadConfig { path, source }),
     };
     let value: toml::Value = toml::from_str(&data).map_err(|source| ConfigError::ParseMesh {
         path: path.clone(),
@@ -1059,7 +1051,6 @@ fn write_mesh_config(data_dir: &Path, config: &MeshConfig) -> Result<(), ConfigE
         path: path.clone(),
         source,
     })?;
-    #[cfg(target_os = "linux")]
     {
         let write_error = |error: anyhow::Error| ConfigError::WriteConfig {
             path: path.clone(),
@@ -1074,27 +1065,6 @@ fn write_mesh_config(data_dir: &Path, config: &MeshConfig) -> Result<(), ConfigE
         directory
             .write("config.toml", data.as_bytes())
             .map_err(write_error)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        fs::create_dir_all(data_dir).map_err(|source| ConfigError::CreateConfigDir {
-            path: data_dir.to_path_buf(),
-            source,
-        })?;
-        harden_dir(data_dir)?;
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&path)
-            .map_err(|source| ConfigError::WriteConfig {
-                path: path.clone(),
-                source,
-            })?;
-        harden_file(&path)?;
-        file.write_all(data.as_bytes())
-            .map_err(|source| ConfigError::WriteConfig { path, source })
     }
 }
 
@@ -1702,7 +1672,6 @@ mod tests {
     fn write_mesh_config(dir: &Path, body: &str) {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("config.toml"), body).unwrap();
-        #[cfg(target_os = "linux")]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();

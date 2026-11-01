@@ -5820,6 +5820,7 @@ mod tests {
     fn request(vcpus: u8, memory_mib: u32) -> CreateVmRequest {
         CreateVmRequest {
             cw_runtime_catalog_generation: None,
+            #[cfg(target_os = "linux")]
             checkpoint: None,
             network_policy: CompiledPolicy::developer_baseline(),
             vm_id: Uuid::new_v4(),

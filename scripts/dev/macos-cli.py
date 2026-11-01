@@ -348,7 +348,9 @@ def worker(root, run):
             if request.get("runtime_tools"):
                 env["CW_TEST_RUNTIME_TOOLS"] = request["runtime_tools"]
 
-            def command(argv):
+            failed_tests = []
+
+            def command(argv, keep_going=False):
                 item = {"argv": argv, "log": f"command-{len(result['commands']):02d}.log"}
                 result["commands"].append(item)
                 save()
@@ -356,6 +358,9 @@ def worker(root, run):
                 item["exit_code"] = run_command(argv, source, env, run / item["log"], cancel, deadline)
                 save()
                 if item["exit_code"] != 0:
+                    if keep_going:
+                        failed_tests.append(shlex.join(argv))
+                        return
                     raise RuntimeError(f"command exited {item['exit_code']}: {shlex.join(argv)}")
 
             if (run / "seed.tar.gz").exists():
@@ -380,14 +385,23 @@ def worker(root, run):
                         command([str(binary), *args, "--help"])
                     shutil.copy2(binary, run / "artifacts/cw-aarch64-apple-darwin")
                 if action in ("test", "verify"):
-                    command(["python3", str(source / "crates/codewire-local-vmm/src/darwin/path/test_mount_fixture.py"), "-v"])
-                    command(["cargo", "test", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin"])
+                    # Every suite and test binary runs, so one failure does not
+                    # hide the others; the run fails after them all.
+                    command(["python3", str(source / "crates/codewire-local-vmm/src/darwin/path/test_mount_fixture.py"), "-v"],
+                            keep_going=True)
+                    command(["cargo", "test", *native, "--no-fail-fast", "-p", "codewire-cli", "-p", "codewire-cli-bin"],
+                            keep_going=True)
                     # The release verifier and Store run natively here. The
                     # artifact-graph test needs a git checkout; Linux CI runs it.
                     command(["cargo", "test", *native, "-p", "codewire-cw-release", "--",
-                             "--skip", "compiled_trust_is_an_exact_producer_and_artifact_graph_input"])
-                    command(["cargo", "test", *native, "-p", "codewire-local-vmm", "--lib"])
-                    command(["cargo", "test", *native, *CREDENTIAL_CRATES, "--lib"])
+                             "--skip", "compiled_trust_is_an_exact_producer_and_artifact_graph_input"],
+                            keep_going=True)
+                    command(["cargo", "test", *native, "--no-fail-fast", "-p", "codewire-local-vmm", "--lib"],
+                            keep_going=True)
+                    command(["cargo", "test", *native, "--no-fail-fast", *CREDENTIAL_CRATES, "--lib"],
+                            keep_going=True)
+                    if failed_tests:
+                        raise RuntimeError("test suites failed: " + "; ".join(failed_tests))
                 if action in ("clippy", "verify"):
                     command(["cargo", "clippy", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin",
                              "--all-targets", "--", "-D", "warnings"])

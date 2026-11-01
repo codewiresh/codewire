@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
-//! Controlled loopback roles and kernel process evidence. Managed release A/B
-//! admission and the real update journey remain separate acceptance.
+//! The local Mesh owner with its real embedded roles, on Linux and macOS
+//! (#3797). Every case runs in its own test process, which on Linux becomes
+//! the subreaper of what it starts, so its cleanup can be proved by reaping.
 use std::fs;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -17,6 +17,9 @@ mod cw_fixture;
 
 const ISOLATED_CASE: &str = "CW_RETAINED_MESH_ISOLATED_CASE";
 
+/// Linux only: reap every child this subreaper inherited, proving none is
+/// left. macOS has no subreaper, so there the cases observe exits instead.
+#[cfg(target_os = "linux")]
 fn reap_until(deadline: Instant) -> bool {
     loop {
         if Instant::now() >= deadline {
@@ -65,22 +68,15 @@ fn isolated_case(name: &str) -> bool {
         assert_eq!(case, name);
         // Only this exact one-test process adopts the retained helpers. Never
         // change the parallel Cargo test parent's process-wide child custody.
-        assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
-        let mut observed = 0;
-        assert_eq!(
-            unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut observed) },
-            0
-        );
-        assert_eq!(observed, 1);
-        assert_eq!(
-            unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) },
-            -1,
-            "no children before the isolated case launches"
-        );
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ECHILD)
-        );
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+            assert_eq!(
+                unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) },
+                -1,
+                "no children before the isolated case launches"
+            );
+        }
         return true;
     }
     let root = tempfile::Builder::new()
@@ -156,6 +152,7 @@ impl Fixture {
             .tempdir()
             .unwrap()
             .keep();
+        let root = fs::canonicalize(root).unwrap();
         let a = root.join("a-cw");
         let b = root.join("b-cw");
         for path in [&a, &b] {
@@ -207,10 +204,10 @@ impl Fixture {
             .unwrap()
     }
 
-    async fn up(&self, binary: &Path, overrides: &[&str]) -> Value {
+    async fn up(&self, binary: &Path) -> Value {
         let mesh_url = format!("http://{}", self.mesh_addr);
         let derp_url = format!("http://{}", self.derp_addr);
-        let mut args = vec![
+        let args = [
             "mesh",
             "up",
             "--base-url",
@@ -224,7 +221,6 @@ impl Fixture {
             "--output",
             "json",
         ];
-        args.extend_from_slice(overrides);
         success_json(self.run(binary, &args).await)
     }
 
@@ -233,12 +229,14 @@ impl Fixture {
             .unwrap()
     }
 
-    async fn down(&self, binary: &Path) {
-        let output = success_json(
+    async fn down(&self, binary: &Path) -> Value {
+        success_json(
             self.run(binary, &["mesh", "down", "--output", "json"])
                 .await,
-        );
-        assert_eq!(output["stopped"], true);
+        )
+    }
+
+    fn assert_clean(&self) {
         assert!(!self.root.join("mesh/mesh_runtime.json").exists());
         assert!(!self.root.join("mesh/mesh_owner.json").exists());
         assert_eq!(
@@ -250,7 +248,7 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        // Use the product's fenced cleanup; never signal a persisted numeric PID.
+        // Use the product's cleanup; never signal a persisted numeric PID.
         // Unknown interrupted custody preserves this exact root and executables.
         let mut command = std::process::Command::new(&self.b);
         self.configure(&mut command);
@@ -282,6 +280,7 @@ impl Drop for Fixture {
             && !self.root.join("mesh/mesh_runtime.json").exists()
             && !self.root.join("mesh/mesh-starting.json").exists()
         {
+            #[cfg(target_os = "linux")]
             if std::env::var_os(ISOLATED_CASE).is_some() {
                 assert!(
                     reap_until(Instant::now() + Duration::from_secs(5)),
@@ -313,59 +312,52 @@ fn success_json(output: Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn pin(custody: &Value) -> OwnedFd {
-    let pid = custody["pid"].as_u64().unwrap() as libc::pid_t;
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-    assert!(fd >= 0);
-    // This handle is an observation witness only. Product custody controls signals.
-    unsafe { OwnedFd::from_raw_fd(fd as i32) }
+/// The owner's recorded birth: the test's only witness of that process.
+fn owner_identity(runtime: &Value) -> codewire_local_vmm::ProcessIdentity {
+    serde_json::from_value(runtime["owner"]["process"].clone()).unwrap()
 }
 
-fn terminal(handle: &OwnedFd) -> bool {
-    let mut item = libc::pollfd {
-        fd: handle.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    assert!(unsafe { libc::poll(&mut item, 1, 0) } >= 0);
-    item.revents & libc::POLLIN != 0
+/// Whether `pid` still names a process. An observation only: the test reaps
+/// its inherited children first on Linux, where an exited one would linger.
+fn exists(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::waitpid(
+            pid as libc::pid_t,
+            std::ptr::null_mut(),
+            libc::WNOHANG | libc::__WALL,
+        );
+    }
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-fn assert_no_new_privileges(custody: &Value, handle: &OwnedFd) {
-    assert!(!terminal(handle));
-    let pid = custody["pid"].as_u64().unwrap();
-    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
-    assert!(status.lines().any(|line| {
-        line.split_once(':')
-            .is_some_and(|(key, value)| key == "NoNewPrivs" && value.trim() == "1")
-    }));
-    assert!(!terminal(handle));
+async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !condition() {
+        assert!(Instant::now() < deadline, "{what} within 5 s");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
-async fn embedded_roles_without_helper_path_reuse_live_a_from_b_then_launch_selected_b() {
+async fn the_owner_serves_mesh_and_derp_and_any_cw_reaches_it_only_through_its_socket() {
     if !isolated_case(
-        "embedded_roles_without_helper_path_reuse_live_a_from_b_then_launch_selected_b",
+        "the_owner_serves_mesh_and_derp_and_any_cw_reaches_it_only_through_its_socket",
     ) {
         return;
     }
     let fixture = Fixture::new();
-    let first = fixture.up(&fixture.a, &[]).await;
+    let first = fixture.up(&fixture.a).await;
     assert_eq!(first["started"], true);
     let original = fixture.runtime();
     assert_eq!(original["binary"], fixture.a.to_str().unwrap());
     assert_eq!(original["derp"]["binary"], fixture.a.to_str().unwrap());
-    assert_eq!(original["custody"]["role"], "embedded_mesh");
-    assert_eq!(original["derp"]["custody"]["role"], "embedded_derp");
-    for custody in [&original["custody"], &original["derp"]["custody"]] {
-        assert!(custody["start_ticks"].as_u64().unwrap() > 0);
-        assert_eq!(custody["boot_id"].as_str().unwrap().len(), 36);
-        assert_eq!(custody["executable"]["path"], fixture.a.to_str().unwrap());
-    }
-    let mesh = pin(&original["custody"]);
-    let derp = pin(&original["derp"]["custody"]);
-    assert_no_new_privileges(&original["custody"], &mesh);
-    assert_no_new_privileges(&original["derp"]["custody"], &derp);
+    let owner = owner_identity(&original);
+    assert_eq!(owner.pid, original["pid"].as_u64().unwrap() as u32);
+    assert_eq!(owner.executable, fixture.a);
+    let derp_pid = original["derp"]["pid"].as_u64().unwrap() as u32;
+    assert!(codewire_local_vmm::process_peer::recorded_birth_alive(&owner).unwrap());
+    assert!(exists(derp_pid));
     // Use the checked-in DERP client over TLS, with public fixture trust for
     // the local self-signed certificate. Plain DERP must be refused.
     use codewire_tailnet::derp_transport::{
@@ -394,10 +386,10 @@ async fn embedded_roles_without_helper_path_reuse_live_a_from_b_then_launch_sele
     .await
     .unwrap();
     assert!(plaintext.is_err());
-    let owner: Value =
+    let context: Value =
         serde_json::from_slice(&fs::read(fixture.root.join("mesh/mesh_owner.json")).unwrap())
             .unwrap();
-    let org = owner["organization_id"].as_str().unwrap();
+    let org = context["organization_id"].as_str().unwrap();
     let output = fixture
         .run(
             &fixture.a,
@@ -409,10 +401,10 @@ async fn embedded_roles_without_helper_path_reuse_live_a_from_b_then_launch_sele
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Another cw (an update) finds the same running owner and stops it.
     for binary in [&fixture.a, &fixture.b, &fixture.a] {
-        assert_eq!(fixture.up(binary, &[]).await["started"], false);
+        assert_eq!(fixture.up(binary).await["started"], false);
         assert_eq!(fixture.runtime(), original);
-        assert!(!terminal(&mesh) && !terminal(&derp));
         let current = success_json(
             fixture
                 .run(binary, &["network", "current", "--output", "json"])
@@ -426,32 +418,81 @@ async fn embedded_roles_without_helper_path_reuse_live_a_from_b_then_launch_sele
         );
         assert_eq!(status["local"]["state"], "running");
     }
-    fixture.down(&fixture.b).await;
-    assert!(terminal(&mesh) && terminal(&derp));
-    assert_eq!(fixture.up(&fixture.b, &[]).await["started"], true);
+    let stopped = fixture.down(&fixture.b).await;
+    assert_eq!(
+        (&stopped["stopped"], &stopped["state"]),
+        (&Value::from(true), &Value::from("stopped"))
+    );
+    fixture.assert_clean();
+    eventually("the owner exits", || {
+        !codewire_local_vmm::process_peer::recorded_birth_alive(&owner).unwrap()
+    })
+    .await;
+    eventually("its DERP child exits", || !exists(derp_pid)).await;
+    assert_eq!(fixture.up(&fixture.b).await["started"], true);
     let next = fixture.runtime();
     assert_eq!(next["binary"], fixture.b.to_str().unwrap());
-    assert_eq!(next["derp"]["binary"], fixture.b.to_str().unwrap());
     assert_ne!(
-        next["custody"]["launch_nonce"],
-        original["custody"]["launch_nonce"]
+        next["owner"]["launch_nonce"],
+        original["owner"]["launch_nonce"]
     );
     fixture.down(&fixture.b).await;
+    fixture.assert_clean();
 }
 
 #[tokio::test]
-async fn concurrent_start_and_down_serialize_and_invalid_present_override_has_no_effects() {
+async fn a_killed_owner_takes_its_derp_child_and_leaves_a_stale_record_that_is_not_signalled() {
     if !isolated_case(
-        "concurrent_start_and_down_serialize_and_invalid_present_override_has_no_effects",
+        "a_killed_owner_takes_its_derp_child_and_leaves_a_stale_record_that_is_not_signalled",
     ) {
         return;
     }
     let fixture = Fixture::new();
-    let (a, b) = tokio::join!(fixture.up(&fixture.a, &[]), fixture.up(&fixture.b, &[]));
+    assert_eq!(fixture.up(&fixture.a).await["started"], true);
+    let runtime = fixture.runtime();
+    let owner = owner_identity(&runtime);
+    let derp_pid = runtime["derp"]["pid"].as_u64().unwrap() as u32;
+    // A crash: the test kills the owner it just observed alive by its birth.
+    assert!(codewire_local_vmm::process_peer::recorded_birth_alive(&owner).unwrap());
+    assert_eq!(
+        unsafe { libc::kill(owner.pid as libc::pid_t, libc::SIGKILL) },
+        0
+    );
+    eventually("the killed owner exits", || {
+        !exists(owner.pid)
+            || !codewire_local_vmm::process_peer::recorded_birth_alive(&owner).unwrap()
+    })
+    .await;
+    eventually("its DERP child ends with it", || !exists(derp_pid)).await;
+    // A stale record is refused by up and cleared by down, with no signal.
+    let refused = fixture
+        .run(&fixture.b, &["mesh", "up", "--output", "json"])
+        .await;
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("cw mesh down"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let cleared = fixture.down(&fixture.b).await;
+    assert_eq!(
+        (&cleared["stopped"], &cleared["state"]),
+        (&Value::from(false), &Value::from("stale"))
+    );
+    fixture.assert_clean();
+}
+
+#[tokio::test]
+async fn concurrent_start_and_down_serialize_and_an_invalid_state_path_has_no_effects() {
+    if !isolated_case(
+        "concurrent_start_and_down_serialize_and_an_invalid_state_path_has_no_effects",
+    ) {
+        return;
+    }
+    let fixture = Fixture::new();
+    let (a, b) = tokio::join!(fixture.up(&fixture.a), fixture.up(&fixture.b));
     assert_ne!(a["started"], b["started"]);
-    let original = fixture.runtime();
-    let mesh = pin(&original["custody"]);
-    let derp = pin(&original["derp"]["custody"]);
+    let owner = owner_identity(&fixture.runtime());
     let (a, b) = tokio::join!(
         fixture.run(&fixture.a, &["mesh", "down", "--output", "json"]),
         fixture.run(&fixture.b, &["mesh", "down", "--output", "json"])
@@ -459,7 +500,10 @@ async fn concurrent_start_and_down_serialize_and_invalid_present_override_has_no
     let a = success_json(a);
     let b = success_json(b);
     assert_ne!(a["stopped"], b["stopped"]);
-    assert!(terminal(&mesh) && terminal(&derp));
+    eventually("the owner exits", || {
+        !codewire_local_vmm::process_peer::recorded_birth_alive(&owner).unwrap()
+    })
+    .await;
     let mut command = std::process::Command::new(&fixture.a);
     fixture.configure(&mut command);
     command
@@ -482,30 +526,59 @@ async fn concurrent_start_and_down_serialize_and_invalid_present_override_has_no
 }
 
 #[tokio::test]
-#[ignore = "requires CODEWIRE_TEST_MESH_BINARY and CODEWIRE_TEST_DERP_BINARY from standalone builds"]
-async fn explicit_standalone_overrides_are_pinned_and_reused_by_a_different_cw() {
+async fn an_owner_whose_executable_was_replaced_in_place_is_still_reached_and_stopped() {
+    if !isolated_case(
+        "an_owner_whose_executable_was_replaced_in_place_is_still_reached_and_stopped",
+    ) {
+        return;
+    }
     let fixture = Fixture::new();
-    let mesh = fs::canonicalize(
-        std::env::var_os("CODEWIRE_TEST_MESH_BINARY").expect("standalone Mesh fixture"),
+    assert_eq!(fixture.up(&fixture.a).await["started"], true);
+    let owner = owner_identity(&fixture.runtime());
+    // A rebuild or update writes a new file at the same path; the running
+    // owner keeps its old image.
+    let replacement = fixture.root.join("replacement-cw");
+    cw_fixture::prepare(&replacement);
+    fs::rename(&replacement, &fixture.a).unwrap();
+    let status = success_json(
+        fixture
+            .run(&fixture.b, &["mesh", "status", "--output", "json"])
+            .await,
+    );
+    assert_eq!(status["local"]["state"], "running");
+    let stopped = fixture.down(&fixture.b).await;
+    assert_eq!(stopped["state"], "stopped");
+    fixture.assert_clean();
+    eventually("the owner exits", || {
+        !codewire_local_vmm::process_peer::recorded_birth_alive(&owner).unwrap()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_owner_with_an_open_mesh_request_still_stops() {
+    if !isolated_case("an_owner_with_an_open_mesh_request_still_stops") {
+        return;
+    }
+    let fixture = Fixture::new();
+    assert_eq!(fixture.up(&fixture.a).await["started"], true);
+    let owner = owner_identity(&fixture.runtime());
+    // A request whose body never finishes arriving stays in flight, as an
+    // attached environment's coordinator stream does; a graceful drain alone
+    // would wait for it forever.
+    let mut open = std::net::TcpStream::connect(&fixture.mesh_addr).unwrap();
+    std::io::Write::write_all(
+        &mut open,
+        b"POST /codewire.v1.MeshNetworkService/ListMeshNetworks HTTP/1.1\r\nHost: mesh\r\n\
+          Content-Type: application/json\r\nContent-Length: 4096\r\n\r\n{",
     )
     .unwrap();
-    let derp = fs::canonicalize(
-        std::env::var_os("CODEWIRE_TEST_DERP_BINARY").expect("standalone DERP fixture"),
-    )
-    .unwrap();
-    let overrides = [
-        "--binary",
-        mesh.to_str().unwrap(),
-        "--derp-binary",
-        derp.to_str().unwrap(),
-    ];
-    assert_eq!(fixture.up(&fixture.a, &overrides).await["started"], true);
-    let original = fixture.runtime();
-    assert_eq!(original["custody"]["role"], "external_mesh");
-    assert_eq!(original["derp"]["custody"]["role"], "external_derp");
-    assert_eq!(original["binary"], mesh.to_str().unwrap());
-    assert_eq!(original["derp"]["binary"], derp.to_str().unwrap());
-    assert_eq!(fixture.up(&fixture.b, &overrides).await["started"], false);
-    assert_eq!(fixture.runtime(), original);
-    fixture.down(&fixture.b).await;
+    let stopped = fixture.down(&fixture.b).await;
+    assert_eq!(stopped["state"], "stopped");
+    fixture.assert_clean();
+    eventually("the owner exits", || {
+        !codewire_local_vmm::process_peer::recorded_birth_alive(&owner).unwrap()
+    })
+    .await;
+    drop(open);
 }

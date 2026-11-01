@@ -539,12 +539,16 @@ print("cooperative cancellation: no adopted children")
         self.assertEqual(cargo[2], ["cargo", "test", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", "-p", "codewire-cw-release", "--",
                                    "--skip", "compiled_trust_is_an_exact_producer_and_artifact_graph_input"])
+        self.assertEqual(cargo[1], ["cargo", "test", "--locked", "--offline", "--target",
+                                   "aarch64-apple-darwin", "--no-fail-fast", "-p", "codewire-cli",
+                                   "-p", "codewire-cli-bin"])
         self.assertEqual(cargo[3], ["cargo", "test", "--locked", "--offline", "--target",
-                                   "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib"])
+                                   "aarch64-apple-darwin", "--no-fail-fast", "-p", "codewire-local-vmm",
+                                   "--lib"])
         credential_crates = ["-p", "codewire-local-credentials", "-p", "codewire-credential-broker",
                              "--features", "codewire-credential-broker/ssh-agent"]
         self.assertEqual(cargo[4], ["cargo", "test", "--locked", "--offline", "--target",
-                                   "aarch64-apple-darwin", *credential_crates, "--lib"])
+                                   "aarch64-apple-darwin", "--no-fail-fast", *credential_crates, "--lib"])
         self.assertEqual(cargo[6], ["cargo", "clippy", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib", "--tests",
                                    "--", "-D", "warnings"])
@@ -588,10 +592,14 @@ print("cooperative cancellation: no adopted children")
             stdin.close()
         result = json.loads((run / "result.json").read_text())
         self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["commands"][-1]["exit_code"], 1)
-        self.assertIn("codewire-local-vmm", result["commands"][-1]["argv"])
-        self.assertIn(target, result["commands"][-1]["argv"])
+        failed = [item["argv"] for item in result["commands"] if item["exit_code"] != 0]
+        self.assertEqual(len(failed), 1, failed)
+        self.assertIn("codewire-local-vmm", failed[0])
+        self.assertIn(target, failed[0])
         self.assertEqual(helper.evidence_status(run, "fixture"), "failed")
+        if target == "aarch64-apple-darwin":
+            # A failed suite does not hide the suites after it.
+            self.assertIn("codewire-local-credentials", result["commands"][-1]["argv"])
 
     def test_vz_runner_worker_plan_and_artifact_collection(self):
         run = self.worker_fixture("vz-runner")
