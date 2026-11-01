@@ -4,11 +4,15 @@
 # It runs clippy with warnings as errors: Linux clippy never compiles
 # cfg(target_os = "macos") code, so a rustc warning or clippy lint there is
 # caught only here (a macOS-only unused variable passed `check` for a week).
+# It checks the local VMM's macOS unit tests too (#3810).
 #
-# With --cli it checks the CLI library's macOS unit tests and the macOS cw for
+# With --cli it checks the CLI library's macOS unit tests, cw's integration
+# tests (#3810) and the macOS cw for
 # both Mac targets instead. That cw links Apple frameworks (Security,
 # SystemConfiguration), so only a Mac links it; this compile-only check
 # catches its source errors on Linux.
+# Its time is the build job's "local-vmm checks" and "cw Darwin cross-check"
+# phases (run-rust-checks.sh).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -88,6 +92,9 @@ if [[ "$mode" == cli ]]; then
   # signature change once broke them unnoticed (#2745).
   "$zigbuild_bin" clippy --locked -p codewire-cli --lib --tests \
     --target aarch64-apple-darwin -- -D warnings
+  # The cw integration tests' macOS code too (#3810): nothing else compiles it.
+  "$zigbuild_bin" clippy --locked -p codewire-cli-bin --tests \
+    --target aarch64-apple-darwin -- -D warnings
   exec "$zigbuild_bin" clippy --locked -p codewire-cli-bin --bin cw \
     --target aarch64-apple-darwin --target x86_64-apple-darwin -- -D warnings
 fi
@@ -97,5 +104,8 @@ printf '[darwin-cross] Zig %s; cargo-zigbuild %s; target aarch64-apple-darwin\n'
 # `cargo zigbuild clippy` is a build invocation, not this check subcommand.
 # Keep the original packages, locked resolution, target and default features.
 # exec propagates the one actual Cargo check's failure to qualification.
-exec "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
+"$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
+  --target aarch64-apple-darwin -- -D warnings
+# The local VMM's macOS unit tests too (#3810): nothing else compiles them.
+exec "$zigbuild_bin" clippy --locked -p codewire-local-vmm --lib --tests \
   --target aarch64-apple-darwin -- -D warnings

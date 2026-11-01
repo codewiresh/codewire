@@ -22,6 +22,12 @@ expected_check = ['clippy', '--locked', '-p', 'codewire-local-vmm',
 # the CLI library's macOS-only unit tests.
 expected_cli_tests = ['clippy', '--locked', '-p', 'codewire-cli', '--lib', '--tests',
                       '--target', 'aarch64-apple-darwin', '--', '-D', 'warnings']
+# The macOS test code of the local VMM and of cw's integration tests, which
+# nothing else compiles (#3810).
+expected_vmm_tests = ['clippy', '--locked', '-p', 'codewire-local-vmm', '--lib', '--tests',
+                      '--target', 'aarch64-apple-darwin', '--', '-D', 'warnings']
+expected_bin_tests = ['clippy', '--locked', '-p', 'codewire-cli-bin', '--tests',
+                      '--target', 'aarch64-apple-darwin', '--', '-D', 'warnings']
 expected_cli = ['clippy', '--locked', '-p', 'codewire-cli-bin', '--bin', 'cw',
                 '--target', 'aarch64-apple-darwin', '--target', 'x86_64-apple-darwin',
                 '--', '-D', 'warnings']
@@ -94,7 +100,9 @@ else:
                            dict(tool='zig', args=['version']),
                            dict(tool='cargo-zigbuild', args=['--version']),
                            dict(tool='cargo-zigbuild', args=expected_check),
-                           dict(tool='cargo', args=expected_check)], records
+                           dict(tool='cargo', args=expected_check),
+                           dict(tool='cargo-zigbuild', args=expected_vmm_tests),
+                           dict(tool='cargo', args=expected_vmm_tests)], records
     records, _ = run(dict(DARWIN_FIXTURE_CHECK_STATUS='46'), status=46)
     assert records[-1] == dict(tool='cargo', args=expected_check)
     records, result = run(arguments=['--cli'])
@@ -103,6 +111,8 @@ else:
                        dict(tool='cargo-zigbuild', args=['--version']),
                        dict(tool='cargo-zigbuild', args=expected_cli_tests),
                        dict(tool='cargo', args=expected_cli_tests),
+                       dict(tool='cargo-zigbuild', args=expected_bin_tests),
+                       dict(tool='cargo', args=expected_bin_tests),
                        dict(tool='cargo-zigbuild', args=expected_cli),
                        dict(tool='cargo', args=expected_cli)], records
     assert 'macOS cw for aarch64 and x86_64' in result.stdout, result.stdout

@@ -288,9 +288,12 @@ assert sum(r['tool'] == 'test_static_contract.py' for r in records) == 1
 darwin_check = ['clippy', '--locked', '-p', 'codewire-local-vmm',
                 '-p', 'codewire-vmm-guest-probe', '--target', 'aarch64-apple-darwin',
                 '--', '-D', 'warnings']
-assert sum(r['tool'] == 'cargo' and r['args'] == darwin_check for r in records) == 1
-assert sum(r['tool'] == 'cargo-zigbuild' and r['args'] == darwin_check for r in records) == 1
-assert all(r['args'] == darwin_check for r in records if 'aarch64-apple-darwin' in r['args'])
+# Then the local VMM's macOS unit tests, which nothing else compiles (#3810).
+darwin_tests = ['clippy', '--locked', '-p', 'codewire-local-vmm', '--lib', '--tests',
+                '--target', 'aarch64-apple-darwin', '--', '-D', 'warnings']
+for darwin_tool in ('cargo', 'cargo-zigbuild'):
+    assert [r['args'] for r in records
+            if r['tool'] == darwin_tool and 'aarch64-apple-darwin' in r['args']] == [darwin_check, darwin_tests]
 
 # Old fail/new pass uses the actual runner with only its old bare check restored.
 # The synthetic Cargo rejects missing cross-compilation setup, not the package

@@ -2739,7 +2739,9 @@ grep -qF 'cargo build --locked -p codewire-derp --bin codewire-derp' "$derp_runn
 }
 grep -qF "if grep -Eq -- '--- SKIP'" "$derp_runner"
 grep -qF "|| ! grep -Eq -- '^[[:space:]]*--- PASS:'" "$derp_runner"
-grep -qF 'exec "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
+grep -qF '"$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \' \
+  "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
+grep -qF 'exec "$zigbuild_bin" clippy --locked -p codewire-local-vmm --lib --tests \' \
   "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
 grep -qF -- '--target aarch64-apple-darwin -- -D warnings' \
   "$ROOT/scripts/ci/verify/check-darwin-cross.sh"
