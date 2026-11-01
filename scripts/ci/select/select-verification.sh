@@ -1947,6 +1947,10 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/tests/test-sandbox-capacity-load.sh|\
       scripts/runtime/dev/prove-dev-runtime-memory-fill.sh|\
       scripts/runtime/tests/test-runtime-memory-fill-proof.sh|\
+      scripts/runtime/dev/kill-test-overhead-matrix.sh|\
+      scripts/runtime/tests/test-kill-test-overhead-matrix.sh|\
+      scripts/runtime/dev/kill-test-round.sh|\
+      scripts/runtime/tests/test-kill-test-round.sh|\
       scripts/runtime/agent-sandbox/drop-crd-conversion.sh|\
       scripts/runtime/tests/test-drop-crd-conversion.sh|\
       scripts/runtime/tests/test-with-dev-smoke-auth.sh)

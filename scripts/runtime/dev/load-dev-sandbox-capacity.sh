@@ -945,7 +945,10 @@ GO
     docker run --rm --entrypoint sh -v "$root/docker:/w" "$image" -c \
       'for i in 1 2 3 4 5 6; do dd if=/dev/urandom of=/w/f$i bs=1M count=1024 2>/dev/null; done' \
       >>"$root/docker.log" 2>&1 && log "image ran" || log "image run failed"
-    docker rmi -f "$image" >/dev/null 2>&1
+    mkdir -p "$root/build"
+    printf 'FROM %s\nRUN dd if=/dev/urandom of=/layer bs=1M count=2048 && rm /layer\n' "$image" >"$root/build/Dockerfile"
+    docker build -q --no-cache -t cap-load-build "$root/build" >>"$root/docker.log" 2>&1 && log "image built" || log "image build failed"
+    docker rmi -f cap-load-build "$image" >/dev/null 2>&1
   done
 ) &
 
@@ -1189,6 +1192,7 @@ workload_proof() { # ID -> JSON
      pulled: count(" image pulled"), pull_failed: count(" image pull failed"),
      pull_throttled: count(" image pull throttled"),
      ran: count(" image ran"), run_failed: count(" image run failed"),
+     image_built: count(" image built"), image_build_failed: count(" image build failed"),
      hold_ended: [$lines[] | select(contains(" memory hold ended with status "))] | length}' <<<"$log"
 }
 
@@ -1218,9 +1222,12 @@ workload_proof_sample() { # IDS... -> JSON
     def total($key): map(.[$key]) | add;
     {sandboxes_read: length, without_build: (map(select(.built == 0)) | length),
        without_image_run: (map(select(.ran == 0)) | length),
+       without_image_build: (map(select(.image_built == 0)) | length),
        built: total("built"), build_failed: total("build_failed"),
        pulled: total("pulled"), pull_failed: total("pull_failed"), pull_throttled: total("pull_throttled"),
-       ran: total("ran"), run_failed: total("run_failed"), hold_ended: total("hold_ended")}'
+       ran: total("ran"), run_failed: total("run_failed"),
+       image_built: total("image_built"), image_build_failed: total("image_build_failed"),
+       hold_ended: total("hold_ended")}'
 }
 
 # ------------------------------------------------------------ steps
@@ -1241,6 +1248,7 @@ stop_check() { # METRICS_JSON -> sets STOP_REASON
   v="$(jq -r 'if .workload_proof == null then "" else .workload_proof
       | [if .without_build > 0 then "no app built in \(.without_build) of \(.sandboxes_read)" else empty end,
          if .without_image_run > 0 then "no image ran in \(.without_image_run) of \(.sandboxes_read)" else empty end,
+         if (.without_image_build // 0) > 0 then "no image built in \(.without_image_build) of \(.sandboxes_read)" else empty end,
          if .hold_ended > 0 then "the memory hold ended early in \(.hold_ended)" else empty end]
       | join(", ") end' <<<"$m")"
   [[ -z "$v" ]] || { STOP_REASON="the real workload did not run as meant: $v: $(jq -c .workload_proof <<<"$m")"; return; }

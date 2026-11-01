@@ -155,7 +155,7 @@ expected='{"node_condition":"b: MemoryPressure=True","allocatable_cpu_m":2000,"a
 # memory held, the workspace writing, a build, and Docker writing past its limit.
 bash -c 'source "$1"; printf "%s" "$REAL_WORKLOAD_SH"' _ "$work/functions.sh" >"$work/real-workload.sh"
 bash -n "$work/real-workload.sh" || fail 'the real workload is not valid shell'
-for needed in 'bytearray' 'of="$root/workspace-file"' 'go build -a' 'docker pull' 'docker run' 'for i in 1 2 3 4 5 6'; do
+for needed in 'docker build -q' 'bytearray' 'of="$root/workspace-file"' 'go build -a' 'docker pull' 'docker run' 'for i in 1 2 3 4 5 6'; do
   grep -qF -- "$needed" "$work/real-workload.sh" || fail "the real workload lacks: $needed"
 done
 
@@ -226,6 +226,8 @@ result="$(stop_case "{\"node_condition\":\"ok\",\"workload_proof\":${proof//\"wi
 [[ "$result" == 'the real workload did not run as meant: no app built in 2 of 5:'* ]] || fail "no build: $result"
 result="$(stop_case "{\"node_condition\":\"ok\",\"workload_proof\":${proof//\"without_image_run\":0/\"without_image_run\":1}}")"
 [[ "$result" == 'the real workload did not run as meant: no image ran in 1 of 5:'* ]] || fail "no image: $result"
+result="$(stop_case "{\"node_condition\":\"ok\",\"workload_proof\":${proof//\"hold_ended\":0/\"without_image_build\":2,\"hold_ended\":0}}")"
+[[ "$result" == 'the real workload did not run as meant: no image built in 2 of 5:'* ]] || fail "no image build: $result"
 result="$(stop_case "{\"node_condition\":\"ok\",\"workload_proof\":${proof//\"hold_ended\":0/\"hold_ended\":1}}")"
 [[ "$result" == 'the real workload did not run as meant: the memory hold ended early in 1:'* ]] || fail "hold: $result"
 
@@ -236,13 +238,13 @@ result="$(bash -c '
   workload_proof() {
     case "$1" in
       unread) echo null ;;
-      idle) echo "{\"built\":0,\"build_failed\":0,\"pulled\":0,\"pull_failed\":0,\"pull_throttled\":2,\"ran\":0,\"run_failed\":0,\"hold_ended\":0}" ;;
-      *) echo "{\"built\":3,\"build_failed\":0,\"pulled\":1,\"pull_failed\":1,\"pull_throttled\":0,\"ran\":1,\"run_failed\":0,\"hold_ended\":0}" ;;
+      idle) echo "{\"built\":0,\"build_failed\":0,\"pulled\":0,\"pull_failed\":0,\"pull_throttled\":2,\"ran\":0,\"run_failed\":0,\"image_built\":0,\"image_build_failed\":0,\"hold_ended\":0}" ;;
+      *) echo "{\"built\":3,\"build_failed\":0,\"pulled\":1,\"pull_failed\":1,\"pull_throttled\":0,\"ran\":1,\"run_failed\":0,\"image_built\":1,\"image_build_failed\":0,\"hold_ended\":0}" ;;
     esac
   }
   workload_proof_sample a unread idle
 ' _ "$work/functions.sh")"
-expected='{"sandboxes_read":2,"without_build":1,"without_image_run":1,"built":3,"build_failed":0,"pulled":1,"pull_failed":1,"pull_throttled":2,"ran":1,"run_failed":0,"hold_ended":0}'
+expected='{"sandboxes_read":2,"without_build":1,"without_image_run":1,"without_image_build":1,"built":3,"build_failed":0,"pulled":1,"pull_failed":1,"pull_throttled":2,"ran":1,"run_failed":0,"image_built":1,"image_build_failed":0,"hold_ended":0}'
 [[ "$result" == "$expected" ]] || fail "proof sample: $result"
 result="$(bash -c 'source "$1"; workload_proof() { echo null; }; workload_proof_sample a b' _ "$work/functions.sh")"
 [[ "$result" == null ]] || fail "no readable proof: $result"
