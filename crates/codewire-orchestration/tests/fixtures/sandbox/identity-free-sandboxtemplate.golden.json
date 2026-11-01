@@ -168,52 +168,6 @@
       },
       "spec": {
         "automountServiceAccountToken": false,
-        "enableServiceLinks": false,
-        "initContainers": [
-          {
-            "command": [
-              "sh",
-              "-c",
-              "data_image=\"${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}\"\ndata_size=\"${CODEWIRE_DOCKER_DATA_SIZE:-8G}\"\nmount_mode=\"${CODEWIRE_DOCKER_MOUNT_MODE:-loop}\"\nif [ \"$mount_mode\" = \"loop\" ]; then\n  codewire_dir=\"$(dirname \"$data_image\")\"\n  mkdir -p \"$codewire_dir\"\n  chown 1000:1000 \"$codewire_dir\"\n  # Owner-writable only: the workspace daemon refuses a group- or\n  # world-writable ancestor of its platform session store.\n  chmod 0755 \"$codewire_dir\"\n  if [ ! -s \"$data_image\" ]; then\n    # A fresh sparse image reads as zeros, so mke2fs skips zeroing its\n    # inode tables and journal: a few MiB of writes at any size.\n    if ! { truncate -s \"$data_size\" \"$data_image\" &&\n      mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 \"$data_image\"; }; then\n      rm -f \"$data_image\"\n      echo \"the Docker data image $data_image was not created; Docker does not start\" >&2\n    fi\n  fi\n  if [ -s \"$data_image\" ]; then\n    # A grown workspace disk renders a larger data size: extend the image to\n    # it, never shrinking it, and grow its filesystem offline to fill the\n    # image. Growth keeps every byte, and a failed grow still starts Docker\n    # at its previous size (#3554).\n    data_gib=\"${data_size%G}\"\n    case \"$data_gib\" in ''|*[!0-9]*) data_gib=0 ;; esac\n    if [ \"$(stat -c %s \"$data_image\")\" -lt \"$((data_gib * 1073741824))\" ]; then\n      truncate -s \"$data_size\" \"$data_image\" || true\n    fi\n    data_fs_bytes=\"$(dumpe2fs -h \"$data_image\" 2>/dev/null | awk -F: '$1 == \"Block count\" { count = $2 } $1 == \"Block size\" { size = $2 } END { printf \"%.0f\", count * size }')\"\n    if [ \"$(stat -c %s \"$data_image\")\" -gt \"${data_fs_bytes:-0}\" ]; then\n      # resize2fs grows an unmounted filesystem only after a forced check;\n      # e2fsck exits 1 when it corrected something.\n      fsck_status=0\n      e2fsck -fy \"$data_image\" >/dev/null || fsck_status=$?\n      if [ \"$fsck_status\" -gt 1 ] || ! resize2fs \"$data_image\"; then\n        echo \"the Docker data filesystem did not grow to $data_size; Docker keeps its previous size\" >&2\n      fi\n    fi\n  fi\nfi"
-            ],
-            "env": [
-              {
-                "name": "CODEWIRE_DOCKER_DATA_IMAGE",
-                "value": "/workspace/.codewire/docker-data.ext4"
-              },
-              {
-                "name": "CODEWIRE_DOCKER_DATA_SIZE",
-                "value": "38G"
-              },
-              {
-                "name": "CODEWIRE_DOCKER_MOUNT_MODE",
-                "value": "loop"
-              }
-            ],
-            "image": "registry.example.invalid/codewire/daemon:golden",
-            "name": "codewire-docker-data-init",
-            "resources": {
-              "limits": {
-                "cpu": "1",
-                "memory": "512Mi"
-              },
-              "requests": {
-                "cpu": "25m",
-                "memory": "32Mi"
-              }
-            },
-            "securityContext": {
-              "runAsGroup": 0,
-              "runAsUser": 0
-            },
-            "volumeMounts": [
-              {
-                "mountPath": "/workspace",
-                "name": "workspace"
-              }
-            ]
-          }
-        ],
         "containers": [
           {
             "command": [
@@ -311,11 +265,13 @@
             "volumeMounts": [
               {
                 "mountPath": "/home/codewire",
-                "name": "workspace"
+                "mountPropagation": "HostToContainer",
+                "name": "wsmnt"
               },
               {
                 "mountPath": "/workspace",
-                "name": "workspace"
+                "mountPropagation": "HostToContainer",
+                "name": "wsmnt"
               },
               {
                 "mountPath": "/codewire/bin",
@@ -326,6 +282,16 @@
               {
                 "mountPath": "/codewire/run",
                 "name": "codewire-run"
+              },
+              {
+                "mountPath": "/tmp",
+                "mountPropagation": "HostToContainer",
+                "name": "wstmp"
+              },
+              {
+                "mountPath": "/var/tmp",
+                "mountPropagation": "HostToContainer",
+                "name": "wstmp"
               },
               {
                 "mountPath": "/run/codewire-credentials/workspace",
@@ -400,12 +366,114 @@
               },
               {
                 "mountPath": "/workspace",
-                "name": "workspace"
+                "mountPropagation": "HostToContainer",
+                "name": "wsmnt"
+              },
+              {
+                "mountPath": "/tmp",
+                "mountPropagation": "HostToContainer",
+                "name": "wstmp"
+              },
+              {
+                "mountPath": "/var/tmp",
+                "mountPropagation": "HostToContainer",
+                "name": "wstmp"
               }
             ]
           }
         ],
         "dnsPolicy": "ClusterFirst",
+        "enableServiceLinks": false,
+        "initContainers": [
+          {
+            "command": [
+              "sh",
+              "-c",
+              "set -u\n# The three paths are overridable only for the script's own test; nothing\n# renders them, and the pool policy admits no other variable.\ndev=\"${CODEWIRE_MOUNT_WORKSPACE_DEVICE:-/dev/cwws}\"\nws=\"${CODEWIRE_MOUNT_WORKSPACE_ROOT:-/mnt/ws}\"\ntmp=\"${CODEWIRE_MOUNT_WORKSPACE_TMP:-/mnt/tmp}\"\nvolume=\"${1:-}\"\nbegan=\"$(date +%s%N)\"\nrefuse() {\n  echo \"codewire mount-workspace: $*\" >&2\n  exit 1\n}\ncase \"$volume\" in\n  new|existing) ;;\n  *) refuse \"the volume state must be new or existing, not '$volume'\" ;;\nesac\ndd if=\"$dev\" of=/dev/null bs=4096 count=1 2>/dev/null || refuse \"the workspace device $dev cannot be read\"\nprobe=0\nblkid -p \"$dev\" >/dev/null 2>&1 || probe=$?\nfstype=\n[ \"$probe\" != 0 ] || fstype=\"$(blkid -p -s TYPE -o value \"$dev\" 2>/dev/null || true)\"\next4=0\nif [ \"$fstype\" = ext4 ] || dumpe2fs -h \"$dev\" >/dev/null 2>&1; then ext4=1; fi\nfresh=0\nif [ \"$ext4\" = 0 ] && [ \"$volume\" = new ]; then\n  case \"$probe\" in\n    0|2|8) ;;\n    *) refuse \"probing the workspace device failed (blkid exit $probe)\" ;;\n  esac\n  [ \"$probe\" = 2 ] || wipefs -a -q \"$dev\" || refuse \"clearing the new workspace volume's chance signature failed\"\n  mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 \"$dev\" || refuse \"formatting the new workspace volume failed\"\n  fresh=1\nelif [ \"$ext4\" = 0 ]; then\n  case \"$probe\" in\n    0) refuse \"the workspace volume holds '${fstype:-an unknown signature}', not ext4\" ;;\n    2) refuse \"the existing workspace volume has no filesystem; it is not formatted\" ;;\n    *) refuse \"probing the workspace device failed (blkid exit $probe)\" ;;\n  esac\nfi\nchecked=\"$(date +%s%N)\"\ncheck=0\ne2fsck -f -p \"$dev\" >/dev/null 2>&1 || check=$?\n[ \"$check\" -le 1 ] || refuse \"checking the workspace filesystem failed (e2fsck exit $check)\"\ncheck_ms=$((($(date +%s%N) - checked) / 1000000))\nmount -t ext4 -o noatime \"$dev\" \"$ws\" || refuse \"mounting the workspace filesystem failed\"\nresize2fs \"$dev\" >/dev/null 2>&1 || echo \"codewire mount-workspace: the workspace filesystem did not grow; it keeps its previous size\" >&2\n[ \"$fresh\" = 0 ] || chown 1000:1000 \"$ws\" || refuse \"the fresh workspace root could not be given to the workspace user\"\n[ ! -L \"$ws/.codewire\" ] || refuse \"the workspace's .codewire is a symbolic link\"\nif [ ! -d \"$ws/.codewire\" ]; then\n  mkdir \"$ws/.codewire\" && chown 1000:1000 \"$ws/.codewire\" && chmod 0755 \"$ws/.codewire\" ||\n    refuse \"the workspace's .codewire could not be created\"\nfi\nrm -rf \"$ws/.codewire/tmp\" && mkdir \"$ws/.codewire/tmp\" && chmod 1777 \"$ws/.codewire/tmp\" ||\n  refuse \"the workspace temporary directory could not be emptied\"\nmount --bind \"$ws/.codewire/tmp\" \"$tmp\" || refuse \"binding the workspace temporary directory failed\"\necho \"codewire mount-workspace: mounted the $volume workspace volume (formatted=$fresh e2fsck_ms=$check_ms total_ms=$((($(date +%s%N) - began) / 1000000)))\"\n",
+              "mount-workspace",
+              "new"
+            ],
+            "image": "registry.example.invalid/codewire/daemon:golden",
+            "name": "mount-workspace",
+            "resources": {
+              "limits": {
+                "cpu": "1",
+                "memory": "512Mi"
+              },
+              "requests": {
+                "cpu": "25m",
+                "memory": "32Mi"
+              }
+            },
+            "securityContext": {
+              "privileged": true,
+              "runAsGroup": 0,
+              "runAsUser": 0
+            },
+            "volumeDevices": [
+              {
+                "devicePath": "/dev/cwws",
+                "name": "workspace"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "mountPath": "/mnt/ws",
+                "mountPropagation": "Bidirectional",
+                "name": "wsmnt"
+              },
+              {
+                "mountPath": "/mnt/tmp",
+                "mountPropagation": "Bidirectional",
+                "name": "wstmp"
+              }
+            ]
+          },
+          {
+            "command": [
+              "sh",
+              "-c",
+              "data_image=\"${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}\"\ndata_size=\"${CODEWIRE_DOCKER_DATA_SIZE:-8G}\"\nmount_mode=\"${CODEWIRE_DOCKER_MOUNT_MODE:-loop}\"\nif [ \"$mount_mode\" = \"loop\" ]; then\n  codewire_dir=\"$(dirname \"$data_image\")\"\n  mkdir -p \"$codewire_dir\"\n  chown 1000:1000 \"$codewire_dir\"\n  # Owner-writable only: the workspace daemon refuses a group- or\n  # world-writable ancestor of its platform session store.\n  chmod 0755 \"$codewire_dir\"\n  if [ ! -s \"$data_image\" ]; then\n    # A fresh sparse image reads as zeros, so mke2fs skips zeroing its\n    # inode tables and journal: a few MiB of writes at any size.\n    if ! { truncate -s \"$data_size\" \"$data_image\" &&\n      mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 \"$data_image\"; }; then\n      rm -f \"$data_image\"\n      echo \"the Docker data image $data_image was not created; Docker does not start\" >&2\n    fi\n  fi\n  if [ -s \"$data_image\" ]; then\n    # A grown workspace disk renders a larger data size: extend the image to\n    # it, never shrinking it, and grow its filesystem offline to fill the\n    # image. Growth keeps every byte, and a failed grow still starts Docker\n    # at its previous size (#3554).\n    data_gib=\"${data_size%G}\"\n    case \"$data_gib\" in ''|*[!0-9]*) data_gib=0 ;; esac\n    if [ \"$(stat -c %s \"$data_image\")\" -lt \"$((data_gib * 1073741824))\" ]; then\n      truncate -s \"$data_size\" \"$data_image\" || true\n    fi\n    data_fs_bytes=\"$(dumpe2fs -h \"$data_image\" 2>/dev/null | awk -F: '$1 == \"Block count\" { count = $2 } $1 == \"Block size\" { size = $2 } END { printf \"%.0f\", count * size }')\"\n    if [ \"$(stat -c %s \"$data_image\")\" -gt \"${data_fs_bytes:-0}\" ]; then\n      # resize2fs grows an unmounted filesystem only after a forced check;\n      # e2fsck exits 1 when it corrected something.\n      fsck_status=0\n      e2fsck -fy \"$data_image\" >/dev/null || fsck_status=$?\n      if [ \"$fsck_status\" -gt 1 ] || ! resize2fs \"$data_image\"; then\n        echo \"the Docker data filesystem did not grow to $data_size; Docker keeps its previous size\" >&2\n      fi\n    fi\n  fi\nfi"
+            ],
+            "env": [
+              {
+                "name": "CODEWIRE_DOCKER_DATA_IMAGE",
+                "value": "/workspace/.codewire/docker-data.ext4"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_DATA_SIZE",
+                "value": "38G"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_MOUNT_MODE",
+                "value": "loop"
+              }
+            ],
+            "image": "registry.example.invalid/codewire/daemon:golden",
+            "name": "codewire-docker-data-init",
+            "resources": {
+              "limits": {
+                "cpu": "1",
+                "memory": "512Mi"
+              },
+              "requests": {
+                "cpu": "25m",
+                "memory": "32Mi"
+              }
+            },
+            "securityContext": {
+              "runAsGroup": 0,
+              "runAsUser": 0
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/workspace",
+                "mountPropagation": "HostToContainer",
+                "name": "wsmnt"
+              }
+            ]
+          }
+        ],
         "restartPolicy": "Never",
         "runtimeClassName": "commodity",
         "securityContext": {
@@ -426,6 +494,18 @@
           {
             "emptyDir": {},
             "name": "codewire-run"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "wsmnt"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "wstmp"
           },
           {
             "name": "credential-workspace-identity",
@@ -493,7 +573,8 @@
               "storage": "40Gi"
             }
           },
-          "storageClassName": "local-path"
+          "storageClassName": "local-path",
+          "volumeMode": "Block"
         }
       }
     ]
