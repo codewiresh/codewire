@@ -67,6 +67,8 @@ keyring = { workspace = true, optional = true, features = ["linux-native-sync-pe
 
 [dev-dependencies]
 codewire-cw-release = { workspace = true }
+# The rejoin tests serve a fake coordinator in-process.
+connectrpc = { workspace = true, features = ["server"] }
 rustix = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

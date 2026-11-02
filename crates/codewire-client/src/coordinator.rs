@@ -30,6 +30,11 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 const COORDINATOR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+/// The coordinator pings every session every 15 s
+/// (`codewire-coordinator`'s `COORDINATE_HEARTBEAT_INTERVAL`), so a session
+/// that hears nothing for three of its pings has a dead stream: a network cut
+/// or an address change can end it with no error reaching this side.
+const COORDINATOR_SILENCE_LIMIT: Duration = Duration::from_secs(45);
 const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 const HTTP2_REQUEST_BUFFER: usize = 32;
 const MAX_DERP_MAP_BYTES: usize = 256 * 1024;
@@ -132,6 +137,27 @@ pub enum Error {
     /// Configured extra trust roots for the coordinator are unusable.
     #[error("coordinator trust roots are unusable")]
     Trust,
+    /// The session heard nothing, not even the coordinator's ping, for this
+    /// long: the stream is dead though no error reached this side.
+    #[error("coordinator sent nothing for {0:?}")]
+    Silent(Duration),
+}
+
+impl Error {
+    /// The coordinator refused this peer: its access was revoked or its
+    /// credential is not accepted. Joining again would be refused the same
+    /// way, so the caller stops rather than retrying.
+    pub fn is_refusal(&self) -> bool {
+        let code = match self {
+            Self::Connect(error) => error.code,
+            Self::Credential(error) => error.code(),
+            _ => return false,
+        };
+        matches!(
+            code,
+            connectrpc::ErrorCode::PermissionDenied | connectrpc::ErrorCode::Unauthenticated
+        )
+    }
 }
 
 impl crate::CodewireClient {
@@ -702,6 +728,8 @@ impl CoordinatorPeerSession {
             heartbeat_interval,
         );
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let silence = tokio::time::sleep(COORDINATOR_SILENCE_LIMIT);
+        tokio::pin!(silence);
 
         while let Some(response) = self.pending_responses.pop_front() {
             handle_response(&mut self.peers, response, handlers)?;
@@ -714,8 +742,12 @@ impl CoordinatorPeerSession {
                     let Some(response) = response? else {
                         return Ok(());
                     };
+                    silence
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + COORDINATOR_SILENCE_LIMIT);
                     handle_response(&mut self.peers, response.to_owned_message(), handlers)?;
                 }
+                () = &mut silence => return Err(Error::Silent(COORDINATOR_SILENCE_LIMIT)),
                 maybe = async {
                     node_updates.as_mut().expect("guarded node update receiver").recv().await
                 }, if node_updates.is_some() => {

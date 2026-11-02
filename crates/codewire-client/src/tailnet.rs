@@ -345,17 +345,22 @@ async fn connect_tailnet_session(
 
     let (target_peer, target_peer_rx) = watch::channel(None::<Node>);
     let coordinator = client
-        .connect_primary_coordinator_with_setup_timeout(identity, peer_timeout)
+        .connect_primary_coordinator_with_setup_timeout(identity.clone(), peer_timeout)
         .await
         .context("set up typed coordinator session")?;
     debug_phase("coordinator", phase);
     let phase = Instant::now();
     let coordinator_task = spawn_coordinator_task(
-        conn.clone(),
+        CoordinatorTask {
+            conn: conn.clone(),
+            client: client.clone(),
+            identity,
+            setup_timeout: peer_timeout,
+            environment_uuid,
+            target_peer,
+            suppress_peer_direct_udp,
+        },
         coordinator,
-        environment_uuid,
-        target_peer,
-        suppress_peer_direct_udp,
     );
 
     let peer = wait_for_target_peer(target_peer_rx, peer_timeout)
@@ -399,33 +404,134 @@ fn tailnet_direct_udp_options(
     .with_public_peer_endpoints_only(true)
 }
 
-fn spawn_coordinator_task(
+/// The first wait before joining the coordinator again after a session
+/// ends; each failed attempt doubles it up to [`COORDINATOR_REJOIN_MAX_DELAY`].
+const COORDINATOR_REJOIN_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const COORDINATOR_REJOIN_MAX_DELAY: Duration = Duration::from_secs(10);
+
+/// Keep this client in the environment's tailnet for the connection's life.
+///
+/// A session can end without either side choosing it (a network cut, a Wi-Fi
+/// change, an edge restart). The coordinator then forgets this node, so the
+/// daemon stops sending to it and the DERP relay refuses it (#3861). Join
+/// again with the same node key, as the daemon does
+/// (`workspace-access`'s `run_coordinator_sessions`); setting the node
+/// callback publishes the current node first. The task ends only when the
+/// coordinator refuses this client, for instance after its access is revoked
+/// (#3828); the connection is then closed for its users.
+struct CoordinatorTask {
     conn: Arc<Conn>,
-    mut coordinator: CoordinatorPeerSession,
+    client: CodewireClient,
+    identity: PrimaryCoordinateIdentity,
+    setup_timeout: Duration,
     environment_uuid: Uuid,
     target_peer: watch::Sender<Option<Node>>,
     suppress_peer_direct_udp: bool,
+}
+
+fn spawn_coordinator_task(
+    task: CoordinatorTask,
+    first: CoordinatorPeerSession,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let (node_tx, node_rx) = mpsc::unbounded_channel();
-        conn.set_node_callback(move |node| {
-            let _ = node_tx.send(node.clone());
-        });
+        let CoordinatorTask {
+            conn,
+            client,
+            identity,
+            setup_timeout,
+            environment_uuid,
+            target_peer,
+            suppress_peer_direct_udp,
+        } = task;
+        let target_peer = &target_peer;
+        let conn = &conn;
+        keep_coordinator_sessions(
+            first,
+            || {
+                client
+                    .connect_primary_coordinator_with_setup_timeout(identity.clone(), setup_timeout)
+            },
+            |mut coordinator| async move {
+                let (node_tx, node_rx) = mpsc::unbounded_channel();
+                conn.set_node_callback(move |node| {
+                    let _ = node_tx.send(node.clone());
+                });
+                let update_conn = conn.clone();
+                let handlers = CoordinatorHandlers {
+                    on_peers: move |nodes: &[Node]| {
+                        let nodes = maybe_suppress_peer_direct_udp(nodes, suppress_peer_direct_udp);
+                        let _ = update_conn.update_peers(&nodes);
+                        if let Some(peer) = nodes.iter().find(|node| node.id == environment_uuid) {
+                            target_peer.send_replace(Some(peer.clone()));
+                        }
+                    },
+                    on_derp_map: |_| {},
+                };
+                let result = coordinator.run_with_node_updates(node_rx, handlers).await;
+                conn.clear_node_callback();
+                result
+            },
+        )
+        .await;
+    })
+}
 
-        let update_conn = conn.clone();
-        let handlers = CoordinatorHandlers {
-            on_peers: move |nodes: &[Node]| {
-                let nodes = maybe_suppress_peer_direct_udp(nodes, suppress_peer_direct_udp);
-                let _ = update_conn.update_peers(&nodes);
-                if let Some(peer) = nodes.iter().find(|node| node.id == environment_uuid) {
-                    target_peer.send_replace(Some(peer.clone()));
+/// Run `first`, then join again through `dial` whenever a session ends,
+/// until the coordinator refuses this peer. Waits
+/// [`COORDINATOR_REJOIN_INITIAL_DELAY`] after a session ends and doubles the
+/// wait after each failed join, up to [`COORDINATOR_REJOIN_MAX_DELAY`].
+async fn keep_coordinator_sessions<D, DF, R, RF>(
+    first: CoordinatorPeerSession,
+    mut dial: D,
+    mut run: R,
+) where
+    D: FnMut() -> DF,
+    DF: std::future::Future<Output = Result<CoordinatorPeerSession, crate::coordinator::Error>>,
+    R: FnMut(CoordinatorPeerSession) -> RF,
+    RF: std::future::Future<Output = Result<(), crate::coordinator::Error>>,
+{
+    let mut next = Some(first);
+    let mut delay = COORDINATOR_REJOIN_INITIAL_DELAY;
+    loop {
+        let coordinator = match next.take() {
+            Some(coordinator) => coordinator,
+            None => match dial().await {
+                Ok(coordinator) => {
+                    debug_coordinator("rejoined", None);
+                    coordinator
+                }
+                Err(error) if error.is_refusal() => {
+                    debug_coordinator("refused", Some(&error));
+                    return;
+                }
+                Err(error) => {
+                    debug_coordinator("rejoin failed", Some(&error));
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(COORDINATOR_REJOIN_MAX_DELAY);
+                    continue;
                 }
             },
-            on_derp_map: |_| {},
         };
-        let _ = coordinator.run_with_node_updates(node_rx, handlers).await;
-        conn.clear_node_callback();
-    })
+        delay = COORDINATOR_REJOIN_INITIAL_DELAY;
+        match run(coordinator).await {
+            Err(error) if error.is_refusal() => {
+                debug_coordinator("refused", Some(&error));
+                return;
+            }
+            Err(error) => debug_coordinator("session failed", Some(&error)),
+            Ok(()) => debug_coordinator("session ended", None),
+        }
+        tokio::time::sleep(delay).await;
+    }
+}
+
+fn debug_coordinator(event: &str, error: Option<&crate::coordinator::Error>) {
+    if std::env::var_os("CW_DEBUG_TAILNET").is_some() {
+        match error {
+            Some(error) => eprintln!("cw tailnet: coordinator {event}: {error}"),
+            None => eprintln!("cw tailnet: coordinator {event}"),
+        }
+    }
 }
 
 fn maybe_suppress_peer_direct_udp(nodes: &[Node], suppress: bool) -> Vec<Node> {
@@ -1308,6 +1414,192 @@ pub fn humantime(duration: Duration) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    mod coordinator_rejoin {
+        use std::collections::VecDeque;
+        use std::net::SocketAddr;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use codewire_proto::codewire::internal::v1::{
+            CoordinateDerpMap, CoordinatePing, CoordinateRequest, CoordinateResponse,
+            CoordinatorService,
+        };
+        use connectrpc::{
+            ConnectError, InboundStream, RequestContext, ServiceResult, ServiceStream,
+        };
+
+        use super::*;
+        use crate::coordinator::Error;
+
+        /// Turns a hang into a failure; the events themselves take seconds.
+        const HANG_GUARD: Duration = Duration::from_secs(60);
+
+        /// What the fake coordinator does with one session, in order.
+        #[derive(Clone, Copy, Debug)]
+        enum Session {
+            /// Send the DERP map, then end the stream.
+            EndAfterSetup,
+            /// Send the DERP map, then nothing, holding the stream open.
+            Silent,
+            /// Send the DERP map, ping every 15 s for 100 s, then end.
+            PingThenEnd,
+            /// Refuse the session, as for a revoked client.
+            Refuse,
+        }
+
+        #[derive(Clone)]
+        struct FakeCoordinator {
+            plan: Arc<Mutex<VecDeque<Session>>>,
+            sessions: Arc<AtomicUsize>,
+        }
+
+        #[allow(refining_impl_trait)]
+        impl CoordinatorService for FakeCoordinator {
+            async fn coordinate(
+                &self,
+                _ctx: RequestContext,
+                mut requests: InboundStream<CoordinateRequest>,
+            ) -> ServiceResult<ServiceStream<CoordinateResponse>> {
+                let _hello = requests.next().await;
+                self.sessions.fetch_add(1, Ordering::SeqCst);
+                let session = self
+                    .plan
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(Session::Refuse);
+                if matches!(session, Session::Refuse) {
+                    return Err(ConnectError::permission_denied(
+                        "environment access revoked",
+                    ));
+                }
+                let (responses, response_rx) = mpsc::channel(4);
+                let derp_map = CoordinateResponse {
+                    msg: CoordinateDerpMap {
+                        derp_map_json: br#"{"Regions":{}}"#.to_vec(),
+                        ..Default::default()
+                    }
+                    .into(),
+                    ..Default::default()
+                };
+                responses
+                    .send(Ok(derp_map))
+                    .await
+                    .map_err(|_| ConnectError::internal("response stream closed"))?;
+                tokio::spawn(async move {
+                    // Drain the client's pings so its sends never block.
+                    let drain = async { while requests.next().await.is_some() {} };
+                    match session {
+                        Session::EndAfterSetup | Session::Refuse => drop(responses),
+                        Session::Silent => {
+                            drain.await;
+                            drop(responses);
+                        }
+                        Session::PingThenEnd => {
+                            let pings = async {
+                                for _ in 0..(100 / 15 + 1) {
+                                    tokio::time::sleep(Duration::from_secs(15)).await;
+                                    let ping = CoordinateResponse {
+                                        msg: CoordinatePing::default().into(),
+                                        ..Default::default()
+                                    };
+                                    if responses.send(Ok(ping)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            };
+                            tokio::select! {
+                                () = pings => {}
+                                () = drain => {}
+                            }
+                        }
+                    }
+                });
+                connectrpc::Response::stream_ok(futures_util::stream::unfold(
+                    response_rx,
+                    |mut receiver| async move { receiver.recv().await.map(|item| (item, receiver)) },
+                ))
+            }
+        }
+
+        async fn serve(plan: &[Session]) -> (FakeCoordinator, SocketAddr) {
+            let coordinator = FakeCoordinator {
+                plan: Arc::new(Mutex::new(plan.iter().copied().collect())),
+                sessions: Arc::default(),
+            };
+            let router = connectrpc::Router::new().add_service(Arc::new(coordinator.clone()));
+            let server = connectrpc::Server::bind("127.0.0.1:0").await.unwrap();
+            let address = server.local_addr().unwrap();
+            tokio::spawn(async move {
+                let _ = server.serve(router).await;
+            });
+            (coordinator, address)
+        }
+
+        async fn dial(address: SocketAddr) -> Result<CoordinatorPeerSession, Error> {
+            CoordinatorPeerSession::connect_public_edge_grpc_with_setup_timeout(
+                &format!("http://{address}"),
+                "test-token",
+                PrimaryCoordinateIdentity::client("org", Uuid::new_v4()),
+                HANG_GUARD,
+            )
+            .await
+        }
+
+        async fn run(mut session: CoordinatorPeerSession) -> Result<(), Error> {
+            session
+                .run(CoordinatorHandlers {
+                    on_peers: |_: &[Node]| {},
+                    on_derp_map: |_: &Value| {},
+                })
+                .await
+        }
+
+        #[tokio::test]
+        async fn an_ended_session_is_joined_again_until_the_coordinator_refuses() {
+            let (coordinator, address) = serve(&[
+                Session::EndAfterSetup,
+                Session::EndAfterSetup,
+                Session::Refuse,
+            ])
+            .await;
+            let first = dial(address).await.expect("first session");
+            tokio::time::timeout(
+                HANG_GUARD,
+                keep_coordinator_sessions(first, || dial(address), run),
+            )
+            .await
+            .expect("a refusal ends the rejoin loop");
+            assert_eq!(coordinator.sessions.load(Ordering::SeqCst), 3);
+        }
+
+        #[tokio::test]
+        async fn a_session_that_hears_nothing_fails_as_silent() {
+            let (_coordinator, address) = serve(&[Session::Silent]).await;
+            let session = dial(address).await.expect("session");
+            // Only the deadline is under test: with the real exchange done,
+            // the idle runtime advances straight to it.
+            tokio::time::pause();
+            let error = tokio::time::timeout(Duration::from_secs(600), run(session))
+                .await
+                .expect("the deadline fires")
+                .expect_err("a silent coordinator is an error");
+            assert!(matches!(error, Error::Silent(limit) if limit == Duration::from_secs(45)));
+            assert!(!error.is_refusal(), "a silent stream is joined again");
+        }
+
+        #[tokio::test]
+        async fn the_coordinators_pings_keep_a_session_alive() {
+            let (_coordinator, address) = serve(&[Session::PingThenEnd]).await;
+            let session = dial(address).await.expect("session");
+            tokio::time::pause();
+            tokio::time::timeout(Duration::from_secs(600), run(session))
+                .await
+                .expect("the session ends")
+                .expect("pings every 15 s are never silence");
+        }
+    }
 
     fn environment_node(id: Uuid) -> Node {
         Node {

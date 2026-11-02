@@ -49,6 +49,7 @@ fn member_setup_error(phase: MemberSetupPhase, error: crate::coordinator::Error)
         Error::InvalidSetupResponse => ("invalid_setup_response", "none"),
         Error::DerpMapTooLarge => ("derp_map_too_large", "none"),
         Error::Trust => ("trust", "none"),
+        Error::Silent(_) => ("silent", "none"),
     };
     // Ordinary CLI failures may render their entire anyhow source chain. Do
     // not retain the original error: its URL, credential, RPC message/details,

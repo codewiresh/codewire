@@ -274,9 +274,11 @@ impl EnvironmentTailnet {
         })
     }
 
-    /// Whether the SSH connection has ended; a caller then connects again.
+    /// Whether the connection has ended, or the coordinator refused this
+    /// client (its access was revoked); a caller then connects again, and is
+    /// told why if it may not.
     pub fn is_closed(&self) -> bool {
-        self.ssh.is_closed()
+        self.ssh.is_closed() || self.coordinator.is_finished()
     }
 
     /// Open an interactive shell over this environment's tailnet; see
