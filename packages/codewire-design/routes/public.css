@@ -212,7 +212,7 @@ body.blurbox .panel .panel, body.blurbox .box.nobg { -webkit-backdrop-filter: no
 /* a box's background can be switched off on its own */
 .box.nobg, .box.nobg .panel { background: transparent; }
 .specwrap .spec { grid-column: auto; }
-.specwrap { position: relative; grid-column: 10 / 13; transform: translate(calc(var(--spec-c) * var(--pitch)), var(--spec-y)); }
+.specwrap { position: relative; grid-column: 10 / 13; padding: var(--pad-y) var(--pad-x); transform: translate(calc(var(--spec-c) * var(--pitch)), var(--spec-y)); }
 /* printer's marks: crop marks at the corners, a registration target and a plate number */
 .reg { position: relative; }
 .reg > .cm { position: absolute; width: 16px; height: 16px; pointer-events: none; --g: var(--grey); }
