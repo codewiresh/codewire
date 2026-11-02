@@ -184,12 +184,11 @@ spec:
     - name: mountWorkspaceScript
       expression: |-
         r'''set -u
-        # The four paths are overridable only for the script's own test; nothing
+        # The three paths are overridable only for the script's own test; nothing
         # renders them, and the pool policy admits no other variable.
         dev="${CODEWIRE_MOUNT_WORKSPACE_DEVICE:-/dev/cwws}"
         ws="${CODEWIRE_MOUNT_WORKSPACE_ROOT:-/mnt/ws}"
         tmp="${CODEWIRE_MOUNT_WORKSPACE_TMP:-/mnt/tmp}"
-        vm="${CODEWIRE_MOUNT_WORKSPACE_VM:-/proc/sys/vm}"
         volume="${1:-}"
         began="$(date +%s%N)"
         refuse() {
@@ -200,14 +199,6 @@ spec:
           new|existing) ;;
           *) refuse "the volume state must be new or existing, not '$volume'" ;;
         esac
-        # A completed write waits at most about a second in guest memory, so a
-        # killed VM loses at most about 2 s of writes, and a stop's flush has at most
-        # 256 MiB to write. A kernel that refuses keeps its defaults; the workspace
-        # still starts.
-        for setting in dirty_expire_centisecs=100 dirty_writeback_centisecs=100 dirty_background_bytes=67108864 dirty_bytes=268435456; do
-          echo "${setting#*=}" 2>/dev/null >"$vm/${setting%%=*}" ||
-            echo "codewire mount-workspace: vm.${setting%%=*} was not set; writes may wait longer in guest memory" >&2
-        done
         dd if="$dev" of=/dev/null bs=4096 count=1 2>/dev/null || refuse "the workspace device $dev cannot be read"
         probe=0
         blkid -p "$dev" >/dev/null 2>&1 || probe=$?
@@ -236,7 +227,7 @@ spec:
         e2fsck -f -p "$dev" >/dev/null 2>&1 || check=$?
         [ "$check" -le 1 ] || refuse "checking the workspace filesystem failed (e2fsck exit $check)"
         check_ms=$((($(date +%s%N) - checked) / 1000000))
-        mount -t ext4 -o noatime,commit=1 "$dev" "$ws" || refuse "mounting the workspace filesystem failed"
+        mount -t ext4 -o noatime "$dev" "$ws" || refuse "mounting the workspace filesystem failed"
         resize2fs "$dev" >/dev/null 2>&1 || echo "codewire mount-workspace: the workspace filesystem did not grow; it keeps its previous size" >&2
         [ "$fresh" = 0 ] || chown 1000:1000 "$ws" || refuse "the fresh workspace root could not be given to the workspace user"
         [ ! -L "$ws/.codewire" ] || refuse "the workspace's .codewire is a symbolic link"

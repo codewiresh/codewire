@@ -221,22 +221,24 @@ workspace keeps a Filesystem claim.
   retried in place; recovery is a new Pod. It mounts the filesystem into a
   guest-memory emptyDir (`wsmnt`, `Bidirectional`), which the workspace and
   DinD containers mount at `/workspace` and `/home/codewire`
-  (`HostToContainer`). It mounts with `commit=1`, and first bounds the
-  guest's writeback (`vm.dirty_expire_centisecs` and
-  `vm.dirty_writeback_centisecs` 100, `vm.dirty_bytes` 256 MiB), so a
-  completed write waits about a second in guest memory. Beside a guest DinD
+  (`HostToContainer`). The guest keeps the kernel's writeback defaults.
+  Beside a guest DinD
   it then prepares the Docker data image, as the data init does elsewhere; a
   failure there never stops the workspace. A Block Pod so has one init
   container that must exit, as a Filesystem Pod does: each one delays the
   next container by about a second.
 - **Flush.** The `workspace-flush` sidecar (an init container with
   `restartPolicy: Always`) waits for SIGTERM, then runs `syncfs` on the
-  workspace with a 20 s bound. The kubelet stops it after the workspace and
+  workspace with a 35 s bound, inside the Pod's 60 s grace period. The guest
+  keeps the kernel's writeback defaults, so the most it can have to write is
+  its dirty limit: 6.22 GiB in a 32 GiB guest, about 20 s at the measured
+  327 MB/s. The kubelet stops it after the workspace and
   DinD have exited, and the VM is destroyed only after it returns, so every
   planned stop, suspension, resize, replacement, rotation and drain keeps
   every completed write. It is unprivileged and sees only the mounted
-  workspace. A VM killed outright (OOM, a crashed VMM, node loss) loses about
-  the last 2 s of writes, as any disk does (owner, 2026-11-01, on #3718).
+  workspace. A VM killed outright (OOM, a crashed VMM, node loss) loses what
+  the guest had not yet written back, as any disk does (owner, 2026-11-02, on
+  #3718: "If the sandbox crashes, the sandbox crashes").
 - **Format.** Only a volume the create operation provisioned, rendered as
   `new`, is formatted, and only if `blkid -p` does not find ext4 on it. A
   linstor-local volume is LUKS-encrypted, so a new one reads as random bytes

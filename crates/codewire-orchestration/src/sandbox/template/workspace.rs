@@ -562,6 +562,12 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     if !init_containers.is_empty() {
         spec.insert("initContainers".into(), Value::Array(init_containers));
     }
+    if block {
+        spec.insert(
+            "terminationGracePeriodSeconds".into(),
+            BLOCK_WORKSPACE_GRACE_SECONDS.into(),
+        );
+    }
     spec.insert("containers".into(), Value::Array(containers));
     spec.insert("volumes".into(), Value::Array(volumes));
     Value::Object(spec)
@@ -713,18 +719,30 @@ pub(crate) fn workspace_flush_container(support_image: &str) -> Value {
     })
 }
 
+/// A Block workspace Pod's termination grace period: `workspace-flush`'s bound plus
+/// the workspace and DinD shutdowns before it (dockerd's own shutdown waits up
+/// to 15 s), so the kubelet never kills a Pod mid-flush. Only a stop with that
+/// much unwritten data ever waits this long; on Dev, a full dirty pool took
+/// 4.2 s (8 GiB) and 8.0 s (32 GiB) from SIGTERM to the flush done.
+pub(crate) const BLOCK_WORKSPACE_GRACE_SECONDS: u32 = 60;
+
 /// `workspace-flush`'s shell. It waits for SIGTERM, then `syncfs` writes every
 /// completed write of the workspace filesystem to the disk. ext4's journal
 /// keeps the unmounted filesystem consistent, and `mount-workspace` checks it
-/// at the next start. The flush is bounded well inside the Pod's 30 s grace
-/// period; the guest's dirty limit keeps it under a second at the measured
-/// disk speed. A failed or late flush is logged, and the Pod still stops.
+/// at the next start. The guest keeps the kernel's writeback defaults (owner,
+/// 2026-11-02: "If the sandbox crashes, the sandbox crashes"), so the flush
+/// may have up to the default dirty limit to write: 6.22 GiB (6.68 GB) in the
+/// largest, 32 GiB guest, measured on Dev (`nr_dirty_threshold`, #3718). At
+/// the 327 MB/s the workspace disk was measured to write, that is 20.4 s;
+/// with half again as margin, 30.6 s, so `syncfs` gets 35 s, inside the Pod's
+/// [`BLOCK_WORKSPACE_GRACE_SECONDS`]. A failed or late flush is logged, and the
+/// Pod still stops.
 pub(crate) const WORKSPACE_FLUSH_SCRIPT: &str = r#"# The path is overridable only for the script's own test.
 ws="${CODEWIRE_WORKSPACE_FLUSH_ROOT:-/mnt/ws}"
 flush() {
   began="$(date +%s%N)"
   status=0
-  timeout 20 sync -f "$ws" || status=$?
+  timeout 35 sync -f "$ws" || status=$?
   took=$((($(date +%s%N) - began) / 1000000))
   if [ "$status" = 0 ]; then
     echo "codewire workspace-flush: flushed the workspace (flush_ms=$took)"
@@ -823,12 +841,11 @@ fi"#
 ///   no path the workspace controls is followed as root.
 pub(crate) const MOUNT_WORKSPACE_SCRIPT: &str = concat!(
     r#"set -u
-# The four paths are overridable only for the script's own test; nothing
+# The three paths are overridable only for the script's own test; nothing
 # renders them, and the pool policy admits no other variable.
 dev="${CODEWIRE_MOUNT_WORKSPACE_DEVICE:-/dev/cwws}"
 ws="${CODEWIRE_MOUNT_WORKSPACE_ROOT:-/mnt/ws}"
 tmp="${CODEWIRE_MOUNT_WORKSPACE_TMP:-/mnt/tmp}"
-vm="${CODEWIRE_MOUNT_WORKSPACE_VM:-/proc/sys/vm}"
 volume="${1:-}"
 began="$(date +%s%N)"
 refuse() {
@@ -839,14 +856,6 @@ case "$volume" in
   new|existing) ;;
   *) refuse "the volume state must be new or existing, not '$volume'" ;;
 esac
-# A completed write waits at most about a second in guest memory, so a
-# killed VM loses at most about 2 s of writes, and a stop's flush has at most
-# 256 MiB to write. A kernel that refuses keeps its defaults; the workspace
-# still starts.
-for setting in dirty_expire_centisecs=100 dirty_writeback_centisecs=100 dirty_background_bytes=67108864 dirty_bytes=268435456; do
-  echo "${setting#*=}" 2>/dev/null >"$vm/${setting%%=*}" ||
-    echo "codewire mount-workspace: vm.${setting%%=*} was not set; writes may wait longer in guest memory" >&2
-done
 dd if="$dev" of=/dev/null bs=4096 count=1 2>/dev/null || refuse "the workspace device $dev cannot be read"
 probe=0
 blkid -p "$dev" >/dev/null 2>&1 || probe=$?
@@ -875,7 +884,7 @@ check=0
 e2fsck -f -p "$dev" >/dev/null 2>&1 || check=$?
 [ "$check" -le 1 ] || refuse "checking the workspace filesystem failed (e2fsck exit $check)"
 check_ms=$((($(date +%s%N) - checked) / 1000000))
-mount -t ext4 -o noatime,commit=1 "$dev" "$ws" || refuse "mounting the workspace filesystem failed"
+mount -t ext4 -o noatime "$dev" "$ws" || refuse "mounting the workspace filesystem failed"
 resize2fs "$dev" >/dev/null 2>&1 || echo "codewire mount-workspace: the workspace filesystem did not grow; it keeps its previous size" >&2
 [ "$fresh" = 0 ] || chown 1000:1000 "$ws" || refuse "the fresh workspace root could not be given to the workspace user"
 [ ! -L "$ws/.codewire" ] || refuse "the workspace's .codewire is a symbolic link"

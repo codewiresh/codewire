@@ -62,8 +62,6 @@ echo ext4 >"$FAKE/signature""#,
 struct Scene {
     _dir: tempfile::TempDir,
     root: PathBuf,
-    /// Stands for `/proc/sys/vm`.
-    vm: PathBuf,
     fake: PathBuf,
     bin: PathBuf,
     device: PathBuf,
@@ -75,8 +73,7 @@ impl Scene {
         let root = dir.path().join("ws");
         let fake = dir.path().join("fake");
         let bin = dir.path().join("bin");
-        let vm = dir.path().join("vm");
-        for path in [&root, &fake, &bin, &vm] {
+        for path in [&root, &fake, &bin] {
             std::fs::create_dir(path).unwrap();
         }
         for (name, body) in STANDINS {
@@ -93,7 +90,6 @@ impl Scene {
             root,
             fake,
             bin,
-            vm,
             device,
             _dir: dir,
         }
@@ -116,7 +112,6 @@ impl Scene {
             .args(["-c", MOUNT_WORKSPACE_SCRIPT, "mount-workspace", volume])
             .env_clear()
             .envs(env.iter().copied())
-            .env("CODEWIRE_MOUNT_WORKSPACE_VM", &self.vm)
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env("FAKE", &self.fake)
             .env("CODEWIRE_MOUNT_WORKSPACE_DEVICE", device)
@@ -165,7 +160,7 @@ impl Outcome {
     fn mounted(&self) {
         assert_eq!(self.status, 0, "{}", self.stderr);
         assert!(
-            self.calls.contains("mount -t ext4 -o noatime,commit=1"),
+            self.calls.contains("mount -t ext4 -o noatime "),
             "{}",
             self.calls
         );
@@ -400,11 +395,11 @@ fn an_unknown_volume_state_and_a_linked_codewire_directory_are_refused() {
 
 /// infra's Kyverno policy `codewire-shared-sandbox-runtime-security` admits
 /// the privileged `mount-workspace` only when `sha256(command[2])` is this
-/// value (infra#2229, moved by infra#2234; `MOUNT_WORKSPACE_SCRIPT_SHA256` in
+/// value (infra#2229, moved by infra#2234 and the writeback-defaults pin; `MOUNT_WORKSPACE_SCRIPT_SHA256` in
 /// `scripts/test-codewire-sandbox-runtime-admission`). A changed script lands
 /// after infra's pin moves with it, or Kyverno refuses every commodity Pod.
 const INFRA_MOUNT_WORKSPACE_SCRIPT_SHA256: &str =
-    "d750ce10ed26dc4b45037f6bea2205fc7e6e8d05af8d570dea8128ff16326e2c";
+    "8e81452565e4077767089beaa91b7730ed26f49ab852a67fdc009af2ade24681";
 
 #[test]
 fn the_script_is_the_one_infra_admits() {
@@ -418,38 +413,12 @@ fn the_script_is_the_one_infra_admits() {
 }
 
 #[test]
-fn the_guest_keeps_completed_writes_in_memory_for_about_a_second() {
-    let scene = Scene::new("ext4");
-    scene.run("existing").mounted();
-    for (setting, value) in [
-        ("dirty_expire_centisecs", "100"),
-        ("dirty_writeback_centisecs", "100"),
-        ("dirty_background_bytes", "67108864"),
-        ("dirty_bytes", "268435456"),
-    ] {
-        assert_eq!(
-            std::fs::read_to_string(scene.vm.join(setting)).unwrap(),
-            format!("{value}\n"),
-            "{setting}"
-        );
-    }
-}
-
-#[test]
-fn a_kernel_that_refuses_the_writeback_bound_still_mounts() {
-    let scene = Scene::new("ext4");
-    std::fs::remove_dir(&scene.vm).unwrap();
-    let outcome = scene.run("existing");
-    outcome.mounted();
-    assert_eq!(
-        outcome.stderr.lines().collect::<Vec<_>>(),
-        [
-            "codewire mount-workspace: vm.dirty_expire_centisecs was not set; writes may wait longer in guest memory",
-            "codewire mount-workspace: vm.dirty_writeback_centisecs was not set; writes may wait longer in guest memory",
-            "codewire mount-workspace: vm.dirty_background_bytes was not set; writes may wait longer in guest memory",
-            "codewire mount-workspace: vm.dirty_bytes was not set; writes may wait longer in guest memory",
-        ]
-    );
+fn the_guest_keeps_the_kernel_writeback_defaults() {
+    // Owner, 2026-11-02: "Just put the disk in there. If the sandbox
+    // crashes, the sandbox crashes." Only a planned stop flushes.
+    assert!(!MOUNT_WORKSPACE_SCRIPT.contains("/proc/sys"));
+    assert!(!MOUNT_WORKSPACE_SCRIPT.contains("commit="));
+    assert!(MOUNT_WORKSPACE_SCRIPT.contains(r#"mount -t ext4 -o noatime "$dev" "$ws""#));
 }
 
 const DOCKER_DATA: [(&str, &str); 3] = [
@@ -574,4 +543,16 @@ fn a_failed_flush_is_logged_and_the_pod_still_stops() {
         ),
         "{stderr}"
     );
+}
+
+#[test]
+fn the_flush_bound_and_the_grace_period_fit_together() {
+    let bound: u32 = WORKSPACE_FLUSH_SCRIPT
+        .split_once("timeout ")
+        .and_then(|(_, rest)| rest.split_once(" sync -f"))
+        .map(|(seconds, _)| seconds.parse().unwrap())
+        .expect("workspace-flush bounds its sync");
+    assert_eq!(bound, 35);
+    // The flush comes after the workspace and DinD shutdowns, up to 15 s.
+    assert!(bound + 15 <= super::workspace::BLOCK_WORKSPACE_GRACE_SECONDS);
 }
