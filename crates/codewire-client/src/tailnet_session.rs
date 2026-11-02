@@ -33,10 +33,74 @@ use crate::{
 /// The user the daemon's SSH server expects; the tailnet authenticated the
 /// client before the connection arrived.
 const SSH_USER: &str = "codewire";
-/// Matches the daemon's server keepalive: a silent connection is noticed
-/// within about 45 s, and the caller reconnects.
+/// Matches the daemon's server keepalive.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const KEEPALIVE_MAX: usize = 3;
+/// A connection that hears nothing for this long is dead, and the caller
+/// reconnects. Keepalives alone cannot say so: the tailnet's TCP completes a
+/// flush only once the peer acknowledges the data, so in a network cut
+/// russh's flush, and its keepalive timer with it, waited for the stack's
+/// 120 s idle timeout (#3861). A live connection hears the daemon's keepalive
+/// or a reply to its own at least every [`KEEPALIVE_INTERVAL`].
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// How long the end of a connection waits for its stream to shut down.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+
+/// The stream under an SSH connection, with its shutdown bounded by
+/// [`SHUTDOWN_GRACE`]. russh shuts its stream down whenever the connection
+/// ends, including after giving it up as dead, and keeps the connection's
+/// channels open until that completes. The tailnet's TCP completes a
+/// shutdown only once the peer acknowledges the pending data, so after a
+/// network cut every attachment waited for the network to return or for the
+/// stack's 120 s idle timeout (#3861). Past the grace the stream is dropped,
+/// which resets the connection.
+struct BoundedShutdown<S> {
+    inner: S,
+    deadline: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for BoundedShutdown<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for BoundedShutdown<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let std::task::Poll::Ready(result) =
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        {
+            return std::task::Poll::Ready(result);
+        }
+        let deadline = self
+            .deadline
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(SHUTDOWN_GRACE)));
+        deadline.as_mut().poll(cx).map(Ok)
+    }
+}
 
 /// Which tailnet path carries the connection now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,8 +146,13 @@ impl EnvironmentSsh {
         let config = Arc::new(client::Config {
             keepalive_interval: Some(KEEPALIVE_INTERVAL),
             keepalive_max: KEEPALIVE_MAX,
+            inactivity_timeout: Some(INACTIVITY_TIMEOUT),
             ..Default::default()
         });
+        let stream = BoundedShutdown {
+            inner: stream,
+            deadline: None,
+        };
         let mut ssh = client::connect_stream(config, stream, RecordedHostKey { expected })
             .await
             .map_err(|error| anyhow!(error).context("SSH handshake with the environment"))?;
@@ -483,5 +552,162 @@ impl client::Handler for RecordedHostKey {
             }
             russh::keys::PublicKeyOrCertificate::Certificate(_) => false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context as TaskContext, Poll};
+
+    use russh::keys::PrivateKey;
+    use russh::keys::ssh_key::private::Ed25519Keypair;
+    use russh::server;
+    use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
+
+    use super::*;
+
+    /// A server that admits the `none` user, as the daemon's does once the
+    /// tailnet has authenticated the client, and keeps the channels it opens.
+    #[derive(Default)]
+    struct Admit {
+        channels: Vec<russh::Channel<server::Msg>>,
+    }
+
+    impl server::Handler for Admit {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _user: &str) -> Result<server::Auth, Self::Error> {
+            Ok(server::Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: russh::Channel<server::Msg>,
+            reply: server::ChannelOpenHandle,
+            _session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.channels.push(channel);
+            reply.accept().await;
+            Ok(())
+        }
+    }
+
+    /// The client's end of the connection, which can go silent the way the
+    /// tailnet's TCP does in a network cut: writes are taken but go nowhere,
+    /// a flush waits for an acknowledgement that never comes, and nothing is
+    /// read.
+    struct Cuttable {
+        inner: DuplexStream,
+        cut: Arc<AtomicBool>,
+    }
+
+    impl AsyncRead for Cuttable {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.cut.load(Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for Cuttable {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.cut.load(Ordering::SeqCst) {
+                return Poll::Ready(Ok(buf.len()));
+            }
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.cut.load(Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            // The tailnet's TCP shuts down only once its data is acknowledged.
+            if self.cut.load(Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    // A network cut that sends no reset (#3861): the connection is given up
+    // within the inactivity timeout, not the tailnet TCP's 120 s idle
+    // timeout, so `cw shell` reconnects while typed keys can still reach the
+    // shell.
+    #[tokio::test]
+    async fn a_silent_cut_is_noticed_within_the_inactivity_timeout() {
+        let key = PrivateKey::from(Ed25519Keypair::from_seed(&[7; 32]));
+        let host_key = key.public_key().to_openssh().unwrap();
+        let config = Arc::new(server::Config {
+            keys: vec![key],
+            ..Default::default()
+        });
+        let (client_end, server_end) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let running = server::run_stream(config, server_end, Admit::default()).await?;
+            running.await
+        });
+        let cut = Arc::new(AtomicBool::new(false));
+        let ssh = EnvironmentSsh::connect(
+            Cuttable {
+                inner: client_end,
+                cut: cut.clone(),
+            },
+            &host_key,
+        )
+        .await
+        .expect("the connection opens");
+        // What an attachment rides on: it ends only when the channel does.
+        let mut channel = ssh
+            .ssh
+            .channel_open_session()
+            .await
+            .expect("a channel opens");
+
+        cut.store(true, Ordering::SeqCst);
+        // Typed during the cut: its flush never completes.
+        channel
+            .data(&b"typed"[..])
+            .await
+            .expect("the write is queued");
+        // Only the deadlines are under test, and everything here is in
+        // memory: the idle runtime advances straight to each timer.
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let ended = tokio::time::timeout(Duration::from_secs(600), async {
+            while channel.wait().await.is_some() {}
+        })
+        .await;
+        assert!(
+            ended.is_ok(),
+            "the channel of a silent connection never ended"
+        );
+        assert!(
+            started.elapsed() <= INACTIVITY_TIMEOUT + SHUTDOWN_GRACE + Duration::from_secs(1),
+            "the channel ended after {:?}",
+            started.elapsed()
+        );
+        assert!(ssh.is_closed());
+        server.abort();
     }
 }
