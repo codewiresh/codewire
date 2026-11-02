@@ -212,28 +212,37 @@ mod tests {
         }
     }
 
-    /// A Pod spec's only init container is the guest DinD's Docker data init:
-    /// the support image as root, the three data variables, and only the
-    /// workspace volume, so no credential, token or daemon copy reaches it.
-    fn assert_only_docker_data_init(pod_spec: &Value) {
+    /// A commodity Pod spec's init containers are `mount-workspace`, which
+    /// also prepares the guest DinD's Docker data image from the three data
+    /// variables, then the `workspace-flush` sidecar: unprivileged, with only
+    /// the mounted workspace, so no credential, token or daemon copy reaches
+    /// either (#3718, durability design §1, §4).
+    fn assert_block_workspace_inits(pod_spec: &Value) {
         let inits = pod_spec["initContainers"].as_array().expect("init containers");
-        assert_eq!(inits.len(), 1, "{inits:?}");
-        let init = &inits[0];
-        assert_eq!(init["name"], DOCKER_DATA_INIT_CONTAINER);
-        assert_eq!(init["command"], json!(["sh", "-c", docker_data_image_prepare_script()]));
-        assert_eq!(
-            init["volumeMounts"],
-            json!([{ "name": "workspace", "mountPath": "/workspace" }])
-        );
-        let names: Vec<_> = init["env"]
+        let names: Vec<_> = inits.iter().map(|init| init["name"].as_str().unwrap()).collect();
+        assert_eq!(names, [MOUNT_WORKSPACE_CONTAINER, WORKSPACE_FLUSH_CONTAINER]);
+        let mount = &inits[0];
+        assert_eq!(mount["command"][2], MOUNT_WORKSPACE_SCRIPT);
+        let env: Vec<_> = mount["env"]
             .as_array()
             .unwrap()
             .iter()
             .map(|entry| entry["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, DOCKER_DATA_INIT_ENV);
-        assert_eq!(init["securityContext"], json!({ "runAsUser": 0, "runAsGroup": 0 }));
-        assert!(init.get("envFrom").is_none());
+        assert_eq!(env, DOCKER_DATA_INIT_ENV);
+        assert!(mount.get("envFrom").is_none());
+        let flush = &inits[1];
+        assert_eq!(flush["restartPolicy"], "Always");
+        assert_eq!(flush["command"], json!(["sh", "-c", WORKSPACE_FLUSH_SCRIPT]));
+        assert_eq!(
+            flush["volumeMounts"],
+            json!([{ "name": "wsmnt", "mountPath": "/mnt/ws", "mountPropagation": "HostToContainer" }])
+        );
+        assert_eq!(flush["securityContext"]["runAsUser"], 1000);
+        assert_eq!(flush["securityContext"]["capabilities"], json!({ "drop": ["ALL"] }));
+        assert_eq!(flush["securityContext"]["allowPrivilegeEscalation"], false);
+        assert!(flush.get("env").is_none() && flush.get("envFrom").is_none());
+        assert!(flush.get("volumeDevices").is_none());
     }
 
 
@@ -422,7 +431,7 @@ mod tests {
                 // directory and writes Codex's home at startup: only the
                 // guest DinD's Docker data init runs, and it reaches only the
                 // workspace volume.
-                assert_only_docker_data_init(workspace);
+                assert_block_workspace_inits(workspace);
             }
         }
     }
@@ -477,7 +486,7 @@ mod tests {
         // Codex needs no init container, so only the guest DinD's Docker data
         // init runs, without a credential; confidential keeps only the daemon
         // copy, which never reaches the home.
-        assert_only_docker_data_init(workspace);
+        assert_block_workspace_inits(workspace);
         let confidential = measured(opts.clone());
         let confidential = render_sandbox_template("dev-sandboxes", &confidential);
         let confidential_inits = confidential["spec"]["podTemplate"]["spec"]["initContainers"]
@@ -506,7 +515,8 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|mount| mount == &json!({"name":"workspace","mountPath":"/home/codewire"}))
+                .any(|mount| mount
+                    == &json!({"name":"wsmnt","mountPath":"/home/codewire","mountPropagation":"HostToContainer"}))
         );
         assert!(CODEX_PLATFORM_HOME.starts_with("/home/codewire/"));
         // The bound daemon sets `CODEX_HOME` for the sessions it launches; the
@@ -623,7 +633,7 @@ mod tests {
                 )["spec"]
             );
             assert_no_legacy_codex(&rendered);
-            assert_only_docker_data_init(spec);
+            assert_block_workspace_inits(spec);
         }
         let mut opts = credential_opts();
         opts.managed_credential_clients = Default::default();
@@ -1003,7 +1013,7 @@ mod tests {
                     mount,
                     &json!({"name":"codewire-bin","mountPath":"/codewire/bin","subPath":"usr/local/bin","readOnly":true})
                 );
-                assert_only_docker_data_init(spec);
+                assert_block_workspace_inits(spec);
             } else {
                 assert_eq!(volume, &json!({"name":"codewire-bin","emptyDir":{}}));
                 assert_eq!(
@@ -1220,7 +1230,7 @@ mod tests {
         // The daemon comes read-only from the exact support image, so the
         // commodity Pod's only init container prepares the guest DinD's data
         // image (#3208).
-        assert_only_docker_data_init(&pod_template["spec"]);
+        assert_block_workspace_inits(&pod_template["spec"]);
         assert!(
             pod_template["spec"]["volumes"]
                 .as_array()
@@ -3491,9 +3501,11 @@ mod tests {
         );
     }
 
-    /// The Docker data init renders beside a guest DinD with a loop-mounted
-    /// image on every profile but confidential, after any daemon copy, and
-    /// carries DinD's own data image, size and mount mode (#3208).
+    /// The Docker data image is prepared beside a guest DinD with a
+    /// loop-mounted image on every profile but confidential, from DinD's own
+    /// data image, size and mount mode (#3208): by the data init after any
+    /// daemon copy, or on a commodity Block workspace by `mount-workspace`,
+    /// which a `workspace-flush` sidecar follows (#3718).
     #[test]
     fn a_guest_dind_renders_the_docker_data_init_after_any_daemon_copy() {
         let spec = |opts: &TemplateOpts| {
@@ -3511,10 +3523,18 @@ mod tests {
             (
                 RUNTIME_PROFILE_COMMODITY,
                 DOCKER_MODE_GUEST_DIND,
-                &[DOCKER_DATA_INIT_CONTAINER][..],
+                &[MOUNT_WORKSPACE_CONTAINER, WORKSPACE_FLUSH_CONTAINER][..],
             ),
-            (RUNTIME_PROFILE_COMMODITY, DOCKER_MODE_LOCAL_DIND_DIRECT, &[]),
-            (RUNTIME_PROFILE_COMMODITY, DOCKER_MODE_NONE, &[]),
+            (
+                RUNTIME_PROFILE_COMMODITY,
+                DOCKER_MODE_LOCAL_DIND_DIRECT,
+                &[MOUNT_WORKSPACE_CONTAINER, WORKSPACE_FLUSH_CONTAINER],
+            ),
+            (
+                RUNTIME_PROFILE_COMMODITY,
+                DOCKER_MODE_NONE,
+                &[MOUNT_WORKSPACE_CONTAINER, WORKSPACE_FLUSH_CONTAINER],
+            ),
             (
                 RUNTIME_PROFILE_RUNC,
                 DOCKER_MODE_GUEST_DIND,
@@ -3542,7 +3562,10 @@ mod tests {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .find(|init| init["name"] == DOCKER_DATA_INIT_CONTAINER)
+                .find(|init| {
+                    init["name"] == DOCKER_DATA_INIT_CONTAINER
+                        || (init["name"] == MOUNT_WORKSPACE_CONTAINER && init.get("env").is_some())
+                })
             else {
                 continue;
             };

@@ -82,9 +82,10 @@ the pod-local socket volume; the workspace uses
 guest, not the Kubernetes node's Docker socket.
 
 The `dind` data root must avoid host Docker/containerd sockets and must remain
-inside the runtime boundary. On commodity the `codewire-docker-data-init` init
-container creates `/workspace/.codewire/docker-data.ext4` from the support
-image's e2fsprogs, and DinD mounts it inside the guest at `/var/lib/docker`
+inside the runtime boundary. On commodity `mount-workspace` creates
+`/workspace/.codewire/docker-data.ext4` from the support image's e2fsprogs
+once the workspace is mounted, and DinD mounts it inside the guest at
+`/var/lib/docker`
 and starts dockerd with `vfs`. Confidential QEMU-SNP guests
 currently have ext4 support but no loop devices (`/dev/loop-control` and
 `/dev/loop*` are absent), so confidential uses a plain workspace-local
@@ -206,6 +207,63 @@ Trustee releases after attestation; on Dev that is LINSTOR
 A site sets `SANDBOX_WORKSPACE_STORAGE_CLASS` to its own StorageClass for
 `commodity` workspaces; the Kind overlays use Kind's built-in `standard`. A disk resize expands the workspace PVC only when that
 StorageClass advertises volume expansion.
+
+A `commodity` workspace claims a `volumeMode: Block`, `ReadWriteOnce` volume
+that the guest formats and mounts itself, so its writes reach the disk with no
+host page cache (#3718; `kata-clh` opens Block disks with direct I/O). Its
+class must serve Block volumes; on Dev that is `linstor-local`. A runc or Kind
+workspace keeps a Filesystem claim.
+
+- **Mount.** The one-shot init container `mount-workspace` is the only
+  container that ever holds the device, at `/dev/cwws`. It is privileged
+  inside the guest only, and runs from the support image. A Kata container
+  with a `volumeDevice` cannot restart, so it fails closed and is never
+  retried in place; recovery is a new Pod. It mounts the filesystem into a
+  guest-memory emptyDir (`wsmnt`, `Bidirectional`), which the workspace and
+  DinD containers mount at `/workspace` and `/home/codewire`
+  (`HostToContainer`). It mounts with `commit=1`, and first bounds the
+  guest's writeback (`vm.dirty_expire_centisecs` and
+  `vm.dirty_writeback_centisecs` 100, `vm.dirty_bytes` 256 MiB), so a
+  completed write waits about a second in guest memory. Beside a guest DinD
+  it then prepares the Docker data image, as the data init does elsewhere; a
+  failure there never stops the workspace. A Block Pod so has one init
+  container that must exit, as a Filesystem Pod does: each one delays the
+  next container by about a second.
+- **Flush.** The `workspace-flush` sidecar (an init container with
+  `restartPolicy: Always`) waits for SIGTERM, then runs `syncfs` on the
+  workspace with a 20 s bound. The kubelet stops it after the workspace and
+  DinD have exited, and the VM is destroyed only after it returns, so every
+  planned stop, suspension, resize, replacement, rotation and drain keeps
+  every completed write. It is unprivileged and sees only the mounted
+  workspace. A VM killed outright (OOM, a crashed VMM, node loss) loses about
+  the last 2 s of writes, as any disk does (owner, 2026-11-01, on #3718).
+- **Format.** Only a volume the create operation provisioned, rendered as
+  `new`, is formatted, and only if `blkid -p` does not find ext4 on it. A
+  linstor-local volume is LUKS-encrypted, so a new one reads as random bytes
+  that may match a short foreign magic by chance: any other signature is
+  wiped first. Whether a volume is new comes from the create operation, never
+  from its contents. Every other volume is `existing` and must be ext4: a
+  fork's from the start, and every other one from the first stop, suspension
+  or Pod replacement after a Pod's `mount-workspace` exited 0. A first Pod
+  that failed before its format leaves `new`, so its replacement can still
+  format. An `existing` volume with no filesystem or another one, a device
+  that does not read, a failed or ambiguous probe and an `e2fsck -f -p` above
+  1 are refused with one `codewire mount-workspace:` line. The last line of a
+  mount gives `e2fsck_ms` and `total_ms`.
+- **Policy.** The warm-pool template policy admits `mount-workspace` only
+  with its exact rendered script and a `new` or `existing` argument, from the
+  image the workspace daemon's `codewire-bin` volume comes from, and admits a
+  `volumeDevice` on no other container. Kyverno admits it as a privileged
+  container only by its script's sha256, and the renderer's test prints that
+  hash.
+- **Temporary files (R1).** `.codewire/tmp` on the workspace disk is emptied
+  at every boot and mounted at `/tmp` and `/var/tmp`, which takes the heaviest
+  temporary writers off the host-backed root filesystem.
+- **Growth.** A disk resize grows the device under a running guest; the
+  filesystem grows online in the next Pod's `mount-workspace`, so a running
+  environment's resize replaces its Pod.
+- **Before the Block workspace.** A commodity environment whose workspace is
+  still a Filesystem volume cannot start; existing ones are deleted at cutover.
 
 ## Managed Runtime Gates
 

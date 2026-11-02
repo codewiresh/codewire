@@ -793,14 +793,15 @@ fn member_reservations_count_requests_sidecars_and_runtime_overhead() {
         ("cpu".to_owned(), "250m".to_owned()),
         ("memory".to_owned(), "130Mi".to_owned()),
     ]);
-    // Workspace requests plus DinD (500m, 1Gi) plus the commodity overhead.
+    // Workspace requests plus DinD (500m, 1Gi), the workspace-flush sidecar
+    // (5m, 8Mi) and the commodity overhead.
     let small = member_reservation(
         &pools[0].objects.template["spec"]["podTemplate"]["spec"],
         &overhead,
     )
     .unwrap();
-    assert_eq!(small.cpu_millis, 1000 + 500 + 250);
-    assert_eq!(small.memory_bytes, (4096 + 1024 + 130) << 20);
+    assert_eq!(small.cpu_millis, 1000 + 500 + 5 + 250);
+    assert_eq!(small.memory_bytes, (4096 + 1024 + 8 + 130) << 20);
 
     let spec = json!({
         "containers": [{ "resources": { "requests": { "cpu": "1", "memory": "1Gi" } } }],

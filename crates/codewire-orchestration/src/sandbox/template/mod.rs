@@ -45,9 +45,15 @@ use workspace::custom_workspace_supervisor_command;
 pub(crate) use workspace::docker_data_image_prepare_script;
 pub(crate) use workspace::{
     DAEMON_INIT_CONTAINER, DAEMON_VOLUME, DOCKER_DATA_INIT_CONTAINER, DOCKER_DATA_INIT_ENV,
-    LEGACY_DIND_BOOTSTRAP_SCRIPT, dind_bootstrap_script, docker_data_init_container,
+    LEGACY_DIND_BOOTSTRAP_SCRIPT, MOUNT_WORKSPACE_CONTAINER, WORKSPACE_MOUNT_VOLUME,
+    WorkspaceVolume, dind_bootstrap_script, docker_data_init_container,
     eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
     pre_growth_dind_bootstrap_script,
+};
+#[cfg(test)]
+pub(crate) use workspace::{
+    MOUNT_WORKSPACE_DEVICE_PATH, MOUNT_WORKSPACE_SCRIPT, WORKSPACE_FLUSH_CONTAINER,
+    WORKSPACE_FLUSH_SCRIPT,
 };
 pub use workspace::{
     ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,
@@ -489,3 +495,5 @@ include!("tests.rs");
 mod bridge_tests;
 #[cfg(test)]
 mod docker_data_tests;
+#[cfg(test)]
+mod mount_workspace_tests;

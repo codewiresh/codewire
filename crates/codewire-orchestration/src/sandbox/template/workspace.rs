@@ -320,7 +320,9 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
             "storageClassName": storage_class,
             "resources": { "requests": { "storage": format!("{}Gi", opts.disk_gib) } },
         });
-        if confidential {
+        // Confidential's device is opened by CoCo's storage handler; a
+        // commodity one by the guest's `mount-workspace` (#3718).
+        if confidential || block_workspace(opts, &runtime_spec) {
             claim_spec["volumeMode"] = "Block".into();
         }
         if let Some(snapshot) = &opts.workspace_source_snapshot {
@@ -363,6 +365,10 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     if confidential_block {
         configure_confidential_workspace_device(ws);
     }
+    let block = block_workspace(opts, &runtime_spec);
+    if block {
+        configure_block_workspace_mounts(ws, true);
+    }
     let daemon_image_volume = daemon_from_image_volume(&runtime_spec);
     let daemon_volume = if daemon_image_volume {
         json!({
@@ -382,6 +388,9 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     let mut volumes = vec![daemon_volume, run_volume];
     if opts.disk_gib == 0 {
         volumes.insert(0, json!({ "name": "workspace", "emptyDir": {} }));
+    }
+    if block {
+        volumes.extend(block_workspace_volumes());
     }
     if opts.credential_runtime.is_some() {
         volumes.extend(credentials::workspace_volumes(opts));
@@ -496,6 +505,9 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         if confidential_block {
             configure_confidential_workspace_device(&mut dind);
         }
+        if block {
+            configure_block_workspace_mounts(&mut dind, true);
+        }
         containers.push(dind);
     } else if runtime_spec.docker_mode == DOCKER_MODE_GUEST_DIND {
         ws["env"]
@@ -512,6 +524,9 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         if confidential_block {
             configure_confidential_workspace_device(&mut dind);
         }
+        if block {
+            configure_block_workspace_mounts(&mut dind, true);
+        }
         containers.push(dind);
     } else {
         containers.push(ws.clone());
@@ -523,12 +538,26 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     // reach that protected disk at all. A guest DinD's data image is
     // prepared before DinD mounts it (#3208), last, as a Start re-renders it
     // into an older Sandbox.
+    // A Block workspace is mounted first, by the only container that ever
+    // holds its device (#3718).
+    // On Block it also prepares the Docker data image, and a sidecar flushes
+    // the workspace when the Pod stops.
     let mut init_containers = Vec::new();
+    let data_env = docker_data_init_env(opts, &runtime_spec);
+    if block {
+        init_containers.push(mount_workspace_init_container(
+            support_image,
+            WorkspaceVolume::rendered(opts),
+            data_env.clone().unwrap_or_default(),
+        ));
+    }
     if !daemon_image_volume {
         init_containers.push(daemon_init_container(support_image, &runtime_spec.profile));
     }
-    if let Some(data_init) = docker_data_init(opts, &runtime_spec, support_image) {
-        init_containers.push(data_init);
+    if block {
+        init_containers.push(workspace_flush_container(support_image));
+    } else if let Some(env) = data_env {
+        init_containers.push(docker_data_init_container(support_image, env));
     }
     if !init_containers.is_empty() {
         spec.insert("initContainers".into(), Value::Array(init_containers));
@@ -537,6 +566,337 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     spec.insert("volumes".into(), Value::Array(volumes));
     Value::Object(spec)
 }
+
+/// Whether the workspace is a commodity Block volume that the guest formats
+/// and mounts itself, so writes reach the disk with no host page cache
+/// (#3718, design §2). Kind and runc keep a Filesystem claim.
+fn block_workspace(opts: &TemplateOpts, runtime_spec: &RuntimeProfileSpec) -> bool {
+    runtime_spec.profile == RUNTIME_PROFILE_COMMODITY && opts.disk_gib > 0
+}
+
+/// The one-shot container that formats, checks, grows and mounts a Block
+/// workspace (#3718, design §2).
+pub(crate) const MOUNT_WORKSPACE_CONTAINER: &str = "mount-workspace";
+
+/// Where `mount-workspace` sees the workspace device.
+pub(crate) const MOUNT_WORKSPACE_DEVICE_PATH: &str = "/dev/cwws";
+
+/// The guest-memory volume the workspace filesystem is mounted into, and the
+/// one its `.codewire/tmp` is bound into for `/tmp` and `/var/tmp` (R1).
+pub(crate) const WORKSPACE_MOUNT_VOLUME: &str = "wsmnt";
+const WORKSPACE_TMP_VOLUME: &str = "wstmp";
+
+/// What the create operation knows of a Block workspace volume: `New` only
+/// for a fresh claim, which `mount-workspace` may format if it is not
+/// already ext4. Every other volume is `Existing` and never formatted.
+/// Once a Pod's `mount-workspace` has exited 0, the next stop, suspension or
+/// Pod replacement turns `New` into `Existing` (the client's
+/// `workspace_volume_existing`); a first Pod that failed before or during
+/// its format leaves `New`, so its replacement can still format. Until then
+/// the formatted disk's own ext4 signature keeps a rebuilt Pod from
+/// formatting it again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkspaceVolume {
+    New,
+    Existing,
+}
+
+impl WorkspaceVolume {
+    /// A fork restores a snapshot, so its volume is never new.
+    fn rendered(opts: &TemplateOpts) -> Self {
+        if opts.workspace_source_snapshot.is_some() {
+            Self::Existing
+        } else {
+            Self::New
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Existing => "existing",
+        }
+    }
+}
+
+/// The two guest-memory emptyDirs a Block workspace is mounted into. They
+/// hold only mount points, so they use no memory of their own.
+fn block_workspace_volumes() -> [Value; 2] {
+    [
+        json!({ "name": WORKSPACE_MOUNT_VOLUME, "emptyDir": { "medium": "Memory" } }),
+        json!({ "name": WORKSPACE_TMP_VOLUME, "emptyDir": { "medium": "Memory" } }),
+    ]
+}
+
+/// Replaces a container's `workspace` mounts with the mounted filesystem,
+/// seen through `HostToContainer` propagation, and, with `tmp`, mounts the
+/// workspace's temporary directory at `/tmp` and `/var/tmp` (R1). No
+/// long-lived container ever holds the device: a Kata container with a
+/// `volumeDevice` cannot restart (design §2).
+pub(crate) fn configure_block_workspace_mounts(container: &mut Value, tmp: bool) {
+    let mounts = container["volumeMounts"]
+        .as_array_mut()
+        .expect("container volumeMounts array");
+    for mount in mounts.iter_mut() {
+        if mount["name"].as_str() == Some("workspace") {
+            mount["name"] = WORKSPACE_MOUNT_VOLUME.into();
+            mount["mountPropagation"] = "HostToContainer".into();
+        }
+    }
+    if tmp {
+        for path in ["/tmp", "/var/tmp"] {
+            mounts.push(json!({
+                "name": WORKSPACE_TMP_VOLUME,
+                "mountPath": path,
+                "mountPropagation": "HostToContainer",
+            }));
+        }
+    }
+}
+
+/// `mount-workspace`: privileged inside the guest only, the one container
+/// with the workspace device, and done before any other container starts.
+/// Beside a guest DinD it also prepares the Docker data image, with the data
+/// init's variables (`data_env`), so a Block Pod has one init container that
+/// must exit, as a Filesystem Pod does: each one delays the next container by
+/// about a second (durability design §4).
+pub(crate) fn mount_workspace_init_container(
+    support_image: &str,
+    volume: WorkspaceVolume,
+    data_env: Vec<Value>,
+) -> Value {
+    let mut container = json!({
+        "name": MOUNT_WORKSPACE_CONTAINER,
+        "image": support_image,
+        "securityContext": { "privileged": true, "runAsUser": 0, "runAsGroup": 0 },
+        "command": ["sh", "-c", MOUNT_WORKSPACE_SCRIPT, MOUNT_WORKSPACE_CONTAINER, volume.as_str()],
+        "volumeDevices": [{ "name": "workspace", "devicePath": MOUNT_WORKSPACE_DEVICE_PATH }],
+        "volumeMounts": [
+            { "name": WORKSPACE_MOUNT_VOLUME, "mountPath": "/mnt/ws", "mountPropagation": "Bidirectional" },
+            { "name": WORKSPACE_TMP_VOLUME, "mountPath": "/mnt/tmp", "mountPropagation": "Bidirectional" },
+        ],
+        "resources": docker_data_init_resources(),
+    });
+    if !data_env.is_empty() {
+        container["env"] = Value::Array(data_env);
+    }
+    container
+}
+
+/// The native sidecar that flushes a Block workspace when its Pod stops
+/// (#3718, durability design §1).
+pub(crate) const WORKSPACE_FLUSH_CONTAINER: &str = "workspace-flush";
+
+/// `workspace-flush`: a sidecar (an init container with `restartPolicy:
+/// Always`), so the kubelet stops it only after the workspace and DinD have
+/// exited, and the VM is destroyed only after it returns. Without it, writes
+/// still in guest memory are lost when the VM goes. It is unprivileged and
+/// sees only the mounted workspace, as the workspace does.
+pub(crate) fn workspace_flush_container(support_image: &str) -> Value {
+    json!({
+        "name": WORKSPACE_FLUSH_CONTAINER,
+        "image": support_image,
+        "restartPolicy": "Always",
+        "securityContext": {
+            "runAsUser": 1000, "runAsGroup": 1000, "runAsNonRoot": true,
+            "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
+            "capabilities": { "drop": ["ALL"] },
+        },
+        "command": ["sh", "-c", WORKSPACE_FLUSH_SCRIPT],
+        "volumeMounts": [
+            { "name": WORKSPACE_MOUNT_VOLUME, "mountPath": "/mnt/ws", "mountPropagation": "HostToContainer" },
+        ],
+        "resources": {
+            "requests": { "cpu": "5m", "memory": "8Mi" },
+            "limits": { "cpu": "100m", "memory": "32Mi" },
+        },
+    })
+}
+
+/// `workspace-flush`'s shell. It waits for SIGTERM, then `syncfs` writes every
+/// completed write of the workspace filesystem to the disk. ext4's journal
+/// keeps the unmounted filesystem consistent, and `mount-workspace` checks it
+/// at the next start. The flush is bounded well inside the Pod's 30 s grace
+/// period; the guest's dirty limit keeps it under a second at the measured
+/// disk speed. A failed or late flush is logged, and the Pod still stops.
+pub(crate) const WORKSPACE_FLUSH_SCRIPT: &str = r#"# The path is overridable only for the script's own test.
+ws="${CODEWIRE_WORKSPACE_FLUSH_ROOT:-/mnt/ws}"
+flush() {
+  began="$(date +%s%N)"
+  status=0
+  timeout 20 sync -f "$ws" || status=$?
+  took=$((($(date +%s%N) - began) / 1000000))
+  if [ "$status" = 0 ]; then
+    echo "codewire workspace-flush: flushed the workspace (flush_ms=$took)"
+  else
+    echo "codewire workspace-flush: flushing the workspace failed (status=$status flush_ms=$took)" >&2
+  fi
+  kill "$sleeper" 2>/dev/null
+  exit 0
+}
+trap flush TERM
+while :; do
+  sleep 3600 &
+  sleeper=$!
+  wait "$sleeper"
+done
+"#;
+
+/// The Docker data image preparation as a literal, so that
+/// [`MOUNT_WORKSPACE_SCRIPT`] can carry it verbatim (see
+/// [`docker_data_image_prepare_script`]).
+macro_rules! docker_data_image_prepare_text {
+    () => {
+        r#"data_image="${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}"
+data_size="${CODEWIRE_DOCKER_DATA_SIZE:-8G}"
+mount_mode="${CODEWIRE_DOCKER_MOUNT_MODE:-loop}"
+if [ "$mount_mode" = "loop" ]; then
+  codewire_dir="$(dirname "$data_image")"
+  mkdir -p "$codewire_dir"
+  chown 1000:1000 "$codewire_dir"
+  # Owner-writable only: the workspace daemon refuses a group- or
+  # world-writable ancestor of its platform session store.
+  chmod 0755 "$codewire_dir"
+  if [ ! -s "$data_image" ]; then
+    # A fresh sparse image reads as zeros, so mke2fs skips zeroing its
+    # inode tables and journal: a few MiB of writes at any size.
+    if ! { truncate -s "$data_size" "$data_image" &&
+      mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$data_image"; }; then
+      rm -f "$data_image"
+      echo "the Docker data image $data_image was not created; Docker does not start" >&2
+    fi
+  fi
+  if [ -s "$data_image" ]; then
+    # A grown workspace disk renders a larger data size: extend the image to
+    # it, never shrinking it, and grow its filesystem offline to fill the
+    # image. Growth keeps every byte, and a failed grow still starts Docker
+    # at its previous size (#3554).
+    data_gib="${data_size%G}"
+    case "$data_gib" in ''|*[!0-9]*) data_gib=0 ;; esac
+    if [ "$(stat -c %s "$data_image")" -lt "$((data_gib * 1073741824))" ]; then
+      truncate -s "$data_size" "$data_image" || true
+    fi
+    data_fs_bytes="$(dumpe2fs -h "$data_image" 2>/dev/null | awk -F: '$1 == "Block count" { count = $2 } $1 == "Block size" { size = $2 } END { printf "%.0f", count * size }')"
+    if [ "$(stat -c %s "$data_image")" -gt "${data_fs_bytes:-0}" ]; then
+      # resize2fs grows an unmounted filesystem only after a forced check;
+      # e2fsck exits 1 when it corrected something.
+      fsck_status=0
+      e2fsck -fy "$data_image" >/dev/null || fsck_status=$?
+      if [ "$fsck_status" -gt 1 ] || ! resize2fs "$data_image"; then
+        echo "the Docker data filesystem did not grow to $data_size; Docker keeps its previous size" >&2
+      fi
+    fi
+  fi
+fi"#
+    };
+}
+
+/// `mount-workspace`'s shell; its one argument is `new` or `existing`.
+///
+/// It fails closed and is never retried in place: a retried container
+/// cannot re-add the locked disk, so recovery is a new Pod (#3786). Every
+/// refusal prints one `codewire mount-workspace:` line and exits 1.
+///
+/// - The device must read; a volume that fails to read is never probed or
+///   formatted.
+/// - `blkid -p` probes at a low level, so a stale or partial signature also
+///   counts as a signature. A linstor-local volume is LUKS-encrypted, so a
+///   new one reads as random bytes, never zeros: whether it is new comes from
+///   the create operation, never from its contents.
+/// - A volume holds ext4 when `dumpe2fs -h` reads a valid ext4 superblock or
+///   `blkid -p` finds ext4. Such a volume is never wiped or formatted, whatever
+///   else the probe says: the random bytes around a real filesystem may also
+///   match a foreign magic, which makes the probe ambiguous.
+/// - A `new` volume that does not hold ext4 is formatted. Its random bytes
+///   may match a short foreign magic by chance, so any signature is wiped
+///   first.
+/// - An `existing` volume must hold ext4: no signature, another one and a
+///   failed probe are refused.
+/// - `e2fsck -f -p` must exit 0 or 1 (corrected); its time and the whole
+///   step's are in the last line, for the no-slower measurement. The filesystem is then
+///   mounted and grown online to the device, which a grown claim makes
+///   larger; a failed grow keeps the previous size.
+/// - A fresh filesystem's root is the workspace user's: a guest-formatted
+///   volume gets no kubelet `fsGroup`.
+/// - `.codewire/tmp` is emptied at every boot and bound for `/tmp` and
+///   `/var/tmp` (R1). A `.codewire` that is a symbolic link is refused, so
+///   no path the workspace controls is followed as root.
+pub(crate) const MOUNT_WORKSPACE_SCRIPT: &str = concat!(
+    r#"set -u
+# The four paths are overridable only for the script's own test; nothing
+# renders them, and the pool policy admits no other variable.
+dev="${CODEWIRE_MOUNT_WORKSPACE_DEVICE:-/dev/cwws}"
+ws="${CODEWIRE_MOUNT_WORKSPACE_ROOT:-/mnt/ws}"
+tmp="${CODEWIRE_MOUNT_WORKSPACE_TMP:-/mnt/tmp}"
+vm="${CODEWIRE_MOUNT_WORKSPACE_VM:-/proc/sys/vm}"
+volume="${1:-}"
+began="$(date +%s%N)"
+refuse() {
+  echo "codewire mount-workspace: $*" >&2
+  exit 1
+}
+case "$volume" in
+  new|existing) ;;
+  *) refuse "the volume state must be new or existing, not '$volume'" ;;
+esac
+# A completed write waits at most about a second in guest memory, so a
+# killed VM loses at most about 2 s of writes, and a stop's flush has at most
+# 256 MiB to write. A kernel that refuses keeps its defaults; the workspace
+# still starts.
+for setting in dirty_expire_centisecs=100 dirty_writeback_centisecs=100 dirty_background_bytes=67108864 dirty_bytes=268435456; do
+  echo "${setting#*=}" 2>/dev/null >"$vm/${setting%%=*}" ||
+    echo "codewire mount-workspace: vm.${setting%%=*} was not set; writes may wait longer in guest memory" >&2
+done
+dd if="$dev" of=/dev/null bs=4096 count=1 2>/dev/null || refuse "the workspace device $dev cannot be read"
+probe=0
+blkid -p "$dev" >/dev/null 2>&1 || probe=$?
+fstype=
+[ "$probe" != 0 ] || fstype="$(blkid -p -s TYPE -o value "$dev" 2>/dev/null || true)"
+ext4=0
+if [ "$fstype" = ext4 ] || dumpe2fs -h "$dev" >/dev/null 2>&1; then ext4=1; fi
+fresh=0
+if [ "$ext4" = 0 ] && [ "$volume" = new ]; then
+  case "$probe" in
+    0|2|8) ;;
+    *) refuse "probing the workspace device failed (blkid exit $probe)" ;;
+  esac
+  [ "$probe" = 2 ] || wipefs -a -q "$dev" || refuse "clearing the new workspace volume's chance signature failed"
+  mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$dev" || refuse "formatting the new workspace volume failed"
+  fresh=1
+elif [ "$ext4" = 0 ]; then
+  case "$probe" in
+    0) refuse "the workspace volume holds '${fstype:-an unknown signature}', not ext4" ;;
+    2) refuse "the existing workspace volume has no filesystem; it is not formatted" ;;
+    *) refuse "probing the workspace device failed (blkid exit $probe)" ;;
+  esac
+fi
+checked="$(date +%s%N)"
+check=0
+e2fsck -f -p "$dev" >/dev/null 2>&1 || check=$?
+[ "$check" -le 1 ] || refuse "checking the workspace filesystem failed (e2fsck exit $check)"
+check_ms=$((($(date +%s%N) - checked) / 1000000))
+mount -t ext4 -o noatime,commit=1 "$dev" "$ws" || refuse "mounting the workspace filesystem failed"
+resize2fs "$dev" >/dev/null 2>&1 || echo "codewire mount-workspace: the workspace filesystem did not grow; it keeps its previous size" >&2
+[ "$fresh" = 0 ] || chown 1000:1000 "$ws" || refuse "the fresh workspace root could not be given to the workspace user"
+[ ! -L "$ws/.codewire" ] || refuse "the workspace's .codewire is a symbolic link"
+if [ ! -d "$ws/.codewire" ]; then
+  mkdir "$ws/.codewire" && chown 1000:1000 "$ws/.codewire" && chmod 0755 "$ws/.codewire" ||
+    refuse "the workspace's .codewire could not be created"
+fi
+rm -rf "$ws/.codewire/tmp" && mkdir "$ws/.codewire/tmp" && chmod 1777 "$ws/.codewire/tmp" ||
+  refuse "the workspace temporary directory could not be emptied"
+mount --bind "$ws/.codewire/tmp" "$tmp" || refuse "binding the workspace temporary directory failed"
+if [ -n "${CODEWIRE_DOCKER_DATA_SIZE:-}" ]; then
+  (
+    CODEWIRE_DOCKER_DATA_IMAGE="$ws/.codewire/docker-data.ext4"
+"#,
+    docker_data_image_prepare_text!(),
+    r#"
+  ) || echo "codewire mount-workspace: preparing the Docker data image failed; Docker reports it" >&2
+fi
+echo "codewire mount-workspace: mounted the $volume workspace volume (formatted=$fresh e2fsck_ms=$check_ms total_ms=$((($(date +%s%N) - began) / 1000000)))"
+"#
+);
 
 fn configure_confidential_workspace_device(container: &mut Value) {
     container["volumeMounts"]
@@ -761,47 +1121,7 @@ pub(crate) fn docker_data_image_prepare_script() -> &'static str {
     DOCKER_DATA_IMAGE_PREPARE_SCRIPT
 }
 
-const DOCKER_DATA_IMAGE_PREPARE_SCRIPT: &str = r#"data_image="${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}"
-data_size="${CODEWIRE_DOCKER_DATA_SIZE:-8G}"
-mount_mode="${CODEWIRE_DOCKER_MOUNT_MODE:-loop}"
-if [ "$mount_mode" = "loop" ]; then
-  codewire_dir="$(dirname "$data_image")"
-  mkdir -p "$codewire_dir"
-  chown 1000:1000 "$codewire_dir"
-  # Owner-writable only: the workspace daemon refuses a group- or
-  # world-writable ancestor of its platform session store.
-  chmod 0755 "$codewire_dir"
-  if [ ! -s "$data_image" ]; then
-    # A fresh sparse image reads as zeros, so mke2fs skips zeroing its
-    # inode tables and journal: a few MiB of writes at any size.
-    if ! { truncate -s "$data_size" "$data_image" &&
-      mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$data_image"; }; then
-      rm -f "$data_image"
-      echo "the Docker data image $data_image was not created; Docker does not start" >&2
-    fi
-  fi
-  if [ -s "$data_image" ]; then
-    # A grown workspace disk renders a larger data size: extend the image to
-    # it, never shrinking it, and grow its filesystem offline to fill the
-    # image. Growth keeps every byte, and a failed grow still starts Docker
-    # at its previous size (#3554).
-    data_gib="${data_size%G}"
-    case "$data_gib" in ''|*[!0-9]*) data_gib=0 ;; esac
-    if [ "$(stat -c %s "$data_image")" -lt "$((data_gib * 1073741824))" ]; then
-      truncate -s "$data_size" "$data_image" || true
-    fi
-    data_fs_bytes="$(dumpe2fs -h "$data_image" 2>/dev/null | awk -F: '$1 == "Block count" { count = $2 } $1 == "Block size" { size = $2 } END { printf "%.0f", count * size }')"
-    if [ "$(stat -c %s "$data_image")" -gt "${data_fs_bytes:-0}" ]; then
-      # resize2fs grows an unmounted filesystem only after a forced check;
-      # e2fsck exits 1 when it corrected something.
-      fsck_status=0
-      e2fsck -fy "$data_image" >/dev/null || fsck_status=$?
-      if [ "$fsck_status" -gt 1 ] || ! resize2fs "$data_image"; then
-        echo "the Docker data filesystem did not grow to $data_size; Docker keeps its previous size" >&2
-      fi
-    fi
-  fi
-fi"#;
+const DOCKER_DATA_IMAGE_PREPARE_SCRIPT: &str = docker_data_image_prepare_text!();
 
 /// The DinD bootstrap Sandboxes were rendered with before 531fc0f7e, exactly
 /// as their stored Pod specs carry it. It made the workspace home's
@@ -955,27 +1275,28 @@ fn guest_dind_data_env(opts: &TemplateOpts, runtime_spec: &RuntimeProfileSpec) -
     ]
 }
 
-/// The data init a Pod renders: beside a guest DinD with a loop-mounted
-/// image, never on confidential.
-fn docker_data_init(
+/// The data init's variables when a Pod prepares a Docker data image: beside
+/// a guest DinD with a loop-mounted image, never on confidential. A Block Pod
+/// gives them to `mount-workspace`, every other Pod to the data init.
+fn docker_data_init_env(
     opts: &TemplateOpts,
     runtime_spec: &RuntimeProfileSpec,
-    support_image: &str,
-) -> Option<Value> {
+) -> Option<Vec<Value>> {
     if runtime_spec.docker_mode != DOCKER_MODE_GUEST_DIND
         || runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL
     {
         return None;
     }
-    let env = guest_dind_data_env(opts, runtime_spec)
-        .into_iter()
-        .filter(|entry| {
-            entry["name"]
-                .as_str()
-                .is_some_and(|name| DOCKER_DATA_INIT_ENV.contains(&name))
-        })
-        .collect();
-    Some(docker_data_init_container(support_image, env))
+    Some(
+        guest_dind_data_env(opts, runtime_spec)
+            .into_iter()
+            .filter(|entry| {
+                entry["name"]
+                    .as_str()
+                    .is_some_and(|name| DOCKER_DATA_INIT_ENV.contains(&name))
+            })
+            .collect(),
+    )
 }
 
 fn dind_container(

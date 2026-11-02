@@ -335,8 +335,10 @@ The DinD image ships no filesystem tools since Docker 29.9.2 (#3208), so the
 image's e2fsprogs before DinD starts, and DinD only mounts it and starts
 dockerd with busybox. The init container runs as root with only the workspace
 volume, and reads the same `CODEWIRE_DOCKER_DATA_IMAGE`, `_SIZE` and
-`_MOUNT_MODE` as DinD. On commodity it is the Pod's only init container, so it
-runs before the workspace starts; elsewhere it follows `codewire-daemon-init`.
+`_MOUNT_MODE` as DinD, and follows `codewire-daemon-init`. On commodity the
+workspace is a Block volume, and `mount-workspace` prepares the image with the
+same script and variables right after it mounts the workspace, so no separate
+data init renders there (#3718).
 
 The image is created on the Pod's first start as a sparse file of
 `CODEWIRE_DOCKER_DATA_SIZE`, and formatted with `-E

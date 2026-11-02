@@ -178,6 +178,123 @@ spec:
         'CODEWIRE_DOCKER_DATA_ROOT', 'CODEWIRE_DOCKER_DATA_SIZE', 'CODEWIRE_DOCKER_MOUNT_MODE']
     - name: audiences
       expression: "['codewire.internal.workspace-binding.v1', 'codewire.internal.credential-workspace.v1']"
+    # codewire#3718: the exact script mount-workspace runs, which
+    # crates/codewire-orchestration/src/sandbox/template/workspace.rs renders
+    # (MOUNT_WORKSPACE_SCRIPT; the renderer's tests hold the two equal).
+    - name: mountWorkspaceScript
+      expression: |-
+        r'''set -u
+        # The four paths are overridable only for the script's own test; nothing
+        # renders them, and the pool policy admits no other variable.
+        dev="${CODEWIRE_MOUNT_WORKSPACE_DEVICE:-/dev/cwws}"
+        ws="${CODEWIRE_MOUNT_WORKSPACE_ROOT:-/mnt/ws}"
+        tmp="${CODEWIRE_MOUNT_WORKSPACE_TMP:-/mnt/tmp}"
+        vm="${CODEWIRE_MOUNT_WORKSPACE_VM:-/proc/sys/vm}"
+        volume="${1:-}"
+        began="$(date +%s%N)"
+        refuse() {
+          echo "codewire mount-workspace: $*" >&2
+          exit 1
+        }
+        case "$volume" in
+          new|existing) ;;
+          *) refuse "the volume state must be new or existing, not '$volume'" ;;
+        esac
+        # A completed write waits at most about a second in guest memory, so a
+        # killed VM loses at most about 2 s of writes, and a stop's flush has at most
+        # 256 MiB to write. A kernel that refuses keeps its defaults; the workspace
+        # still starts.
+        for setting in dirty_expire_centisecs=100 dirty_writeback_centisecs=100 dirty_background_bytes=67108864 dirty_bytes=268435456; do
+          echo "${setting#*=}" 2>/dev/null >"$vm/${setting%%=*}" ||
+            echo "codewire mount-workspace: vm.${setting%%=*} was not set; writes may wait longer in guest memory" >&2
+        done
+        dd if="$dev" of=/dev/null bs=4096 count=1 2>/dev/null || refuse "the workspace device $dev cannot be read"
+        probe=0
+        blkid -p "$dev" >/dev/null 2>&1 || probe=$?
+        fstype=
+        [ "$probe" != 0 ] || fstype="$(blkid -p -s TYPE -o value "$dev" 2>/dev/null || true)"
+        ext4=0
+        if [ "$fstype" = ext4 ] || dumpe2fs -h "$dev" >/dev/null 2>&1; then ext4=1; fi
+        fresh=0
+        if [ "$ext4" = 0 ] && [ "$volume" = new ]; then
+          case "$probe" in
+            0|2|8) ;;
+            *) refuse "probing the workspace device failed (blkid exit $probe)" ;;
+          esac
+          [ "$probe" = 2 ] || wipefs -a -q "$dev" || refuse "clearing the new workspace volume's chance signature failed"
+          mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$dev" || refuse "formatting the new workspace volume failed"
+          fresh=1
+        elif [ "$ext4" = 0 ]; then
+          case "$probe" in
+            0) refuse "the workspace volume holds '${fstype:-an unknown signature}', not ext4" ;;
+            2) refuse "the existing workspace volume has no filesystem; it is not formatted" ;;
+            *) refuse "probing the workspace device failed (blkid exit $probe)" ;;
+          esac
+        fi
+        checked="$(date +%s%N)"
+        check=0
+        e2fsck -f -p "$dev" >/dev/null 2>&1 || check=$?
+        [ "$check" -le 1 ] || refuse "checking the workspace filesystem failed (e2fsck exit $check)"
+        check_ms=$((($(date +%s%N) - checked) / 1000000))
+        mount -t ext4 -o noatime,commit=1 "$dev" "$ws" || refuse "mounting the workspace filesystem failed"
+        resize2fs "$dev" >/dev/null 2>&1 || echo "codewire mount-workspace: the workspace filesystem did not grow; it keeps its previous size" >&2
+        [ "$fresh" = 0 ] || chown 1000:1000 "$ws" || refuse "the fresh workspace root could not be given to the workspace user"
+        [ ! -L "$ws/.codewire" ] || refuse "the workspace's .codewire is a symbolic link"
+        if [ ! -d "$ws/.codewire" ]; then
+          mkdir "$ws/.codewire" && chown 1000:1000 "$ws/.codewire" && chmod 0755 "$ws/.codewire" ||
+            refuse "the workspace's .codewire could not be created"
+        fi
+        rm -rf "$ws/.codewire/tmp" && mkdir "$ws/.codewire/tmp" && chmod 1777 "$ws/.codewire/tmp" ||
+          refuse "the workspace temporary directory could not be emptied"
+        mount --bind "$ws/.codewire/tmp" "$tmp" || refuse "binding the workspace temporary directory failed"
+        if [ -n "${CODEWIRE_DOCKER_DATA_SIZE:-}" ]; then
+          (
+            CODEWIRE_DOCKER_DATA_IMAGE="$ws/.codewire/docker-data.ext4"
+        data_image="${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}"
+        data_size="${CODEWIRE_DOCKER_DATA_SIZE:-8G}"
+        mount_mode="${CODEWIRE_DOCKER_MOUNT_MODE:-loop}"
+        if [ "$mount_mode" = "loop" ]; then
+          codewire_dir="$(dirname "$data_image")"
+          mkdir -p "$codewire_dir"
+          chown 1000:1000 "$codewire_dir"
+          # Owner-writable only: the workspace daemon refuses a group- or
+          # world-writable ancestor of its platform session store.
+          chmod 0755 "$codewire_dir"
+          if [ ! -s "$data_image" ]; then
+            # A fresh sparse image reads as zeros, so mke2fs skips zeroing its
+            # inode tables and journal: a few MiB of writes at any size.
+            if ! { truncate -s "$data_size" "$data_image" &&
+              mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$data_image"; }; then
+              rm -f "$data_image"
+              echo "the Docker data image $data_image was not created; Docker does not start" >&2
+            fi
+          fi
+          if [ -s "$data_image" ]; then
+            # A grown workspace disk renders a larger data size: extend the image to
+            # it, never shrinking it, and grow its filesystem offline to fill the
+            # image. Growth keeps every byte, and a failed grow still starts Docker
+            # at its previous size (#3554).
+            data_gib="${data_size%G}"
+            case "$data_gib" in ''|*[!0-9]*) data_gib=0 ;; esac
+            if [ "$(stat -c %s "$data_image")" -lt "$((data_gib * 1073741824))" ]; then
+              truncate -s "$data_size" "$data_image" || true
+            fi
+            data_fs_bytes="$(dumpe2fs -h "$data_image" 2>/dev/null | awk -F: '$1 == "Block count" { count = $2 } $1 == "Block size" { size = $2 } END { printf "%.0f", count * size }')"
+            if [ "$(stat -c %s "$data_image")" -gt "${data_fs_bytes:-0}" ]; then
+              # resize2fs grows an unmounted filesystem only after a forced check;
+              # e2fsck exits 1 when it corrected something.
+              fsck_status=0
+              e2fsck -fy "$data_image" >/dev/null || fsck_status=$?
+              if [ "$fsck_status" -gt 1 ] || ! resize2fs "$data_image"; then
+                echo "the Docker data filesystem did not grow to $data_size; Docker keeps its previous size" >&2
+              fi
+            fi
+          fi
+        fi
+          ) || echo "codewire mount-workspace: preparing the Docker data image failed; Docker reports it" >&2
+        fi
+        echo "codewire mount-workspace: mounted the $volume workspace volume (formatted=$fresh e2fsck_ms=$check_ms total_ms=$((($(date +%s%N) - began) / 1000000)))"
+        '''
   validations:
     - expression: >-
         request.name.matches('^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$') &&
@@ -255,9 +372,30 @@ spec:
         !('io.katacontainers.config.hypervisor.kernel_params' in object.spec.podTemplate.metadata.annotations)) &&
         (!has(object.spec.volumeClaimTemplates) ||
         object.spec.volumeClaimTemplates.all(t, !has(t.spec) ||
-        ((!has(t.spec.volumeMode) || t.spec.volumeMode != 'Block') &&
-        (!has(t.spec.accessModes) || !('ReadWriteOncePod' in t.spec.accessModes)))))
+        (!has(t.spec.accessModes) || !('ReadWriteOncePod' in t.spec.accessModes))))
       message: confidential workspaces are never pooled
+    # codewire#3718: a commodity workspace is a Block volume the guest formats
+    # and mounts. Only the one-shot mount-workspace init container ever holds
+    # its device: a Kata container with a volumeDevice cannot restart.
+    - expression: >-
+        variables.pod.containers.all(c, !has(c.volumeDevices)) &&
+        (!has(variables.pod.initContainers) ||
+        variables.pod.initContainers.all(c, !has(c.volumeDevices) ||
+        (c.name == 'mount-workspace' && size(c.volumeDevices) == 1 &&
+        c.volumeDevices[0].name == 'workspace')))
+      message: only the mount-workspace init container holds the workspace device
+    # The one privileged init container runs only its rendered script, with
+    # the volume state as its one argument, from the support image the
+    # workspace daemon comes from (codewire#3718).
+    - expression: >-
+        !has(variables.pod.initContainers) ||
+        variables.pod.initContainers.all(c, c.name != 'mount-workspace' ||
+        (has(c.command) && size(c.command) == 5 && c.command[0] == 'sh' && c.command[1] == '-c' &&
+        c.command[2] == variables.mountWorkspaceScript && c.command[3] == 'mount-workspace' &&
+        c.command[4] in ['new', 'existing'] && !has(c.args) &&
+        variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) &&
+        has(v.image.reference) && v.image.reference == c.image)))
+      message: mount-workspace runs exactly its rendered script, from the workspace daemon's support image
     # codewire#3626: the template's one ingress rule admits orchestration's
     # identity, and nothing wider, on the daemon and SSH ports. One peer
     # carries both selectors (two peers would be an OR: the whole server
