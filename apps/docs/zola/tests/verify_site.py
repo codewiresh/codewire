@@ -313,9 +313,13 @@ def verify_supply_chain(site_root: Path) -> None:
     license_path = site_root / "tests/provenance/ZOLA-LICENSE-EUPL-1.2.txt"
     if hashlib.sha256(license_path.read_bytes()).hexdigest() != "6fc9e709ccbfe0d77fbffa2427a983282be2eb88e47b1cdb49f21a83b4d1e665":
         fail("Zola release license is missing or changed")
-    highlighting = site_root / "static/giallo.css"
-    if hashlib.sha256(highlighting.read_bytes()).hexdigest() != "fb6bfef1747cf20d61d5beef4eb3a65992abbb3cff35a6b71c53c182df7e3341":
-        fail("generated github-dark syntax theme is missing or changed")
+    for theme, digest in (
+        ("dark", "fb6bfef1747cf20d61d5beef4eb3a65992abbb3cff35a6b71c53c182df7e3341"),
+        ("light", "5cefe4954cda1947c74d407fe9f1bf5ce2748fd37236dfbff702c8a19925d80a"),
+    ):
+        highlighting = site_root / f"static/giallo-{theme}.css"
+        if hashlib.sha256(highlighting.read_bytes()).hexdigest() != digest:
+            fail(f"generated github-{theme} syntax theme is missing or changed")
     if "/usr/share/licenses/zola/LICENSE" not in dockerfile:
         fail("Zola dev container does not retain the verified release license")
 

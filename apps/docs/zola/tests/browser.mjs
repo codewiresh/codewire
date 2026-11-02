@@ -82,6 +82,16 @@ try {
   await mobile.keyboard.press("Escape");
   ensure(await toggle.getAttribute("aria-expanded") === "false", "Escape did not close mobile navigation");
 
+  // A light system turns the docs light: the white wordmark is inverted, and code takes the light syntax theme.
+  const light = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: "light" });
+  light.on("pageerror", (error) => browserErrors.push(error.message));
+  await light.goto(new URL("docs/environments/codewire-yaml", baseUrl.origin + "/").href, { waitUntil: "networkidle" });
+  ensure(await light.locator("body").evaluate((body) => getComputedStyle(body).backgroundColor) === "rgb(255, 255, 255)", "light docs background is not white");
+  ensure(await light.locator(".docs-brand img").evaluate((img) => getComputedStyle(img).filter) === "invert(1)", "light docs wordmark is not inverted");
+  ensure(await light.locator("pre.z-code").first().evaluate((pre) => getComputedStyle(pre).color) === "rgb(36, 41, 46)", "light docs code does not use the light syntax theme");
+  await light.screenshot({ path: resolve(screenshotDirectory, "docs-light-1440x900.png") });
+  await light.close();
+
   ensure(externalRequests.size === 0, `external browser requests detected: ${[...externalRequests].join(", ")}`);
   ensure(browserErrors.length === 0, `browser errors detected: ${browserErrors.join("; ")}`);
   ensure(failedResources.length === 0, `browser resources failed: ${failedResources.join("; ")}`);

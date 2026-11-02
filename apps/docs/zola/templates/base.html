@@ -16,7 +16,8 @@
     <link rel="canonical" href="{% block canonical_url %}https://codewire.sh/docs{% endblock canonical_url %}">
     <link rel="alternate" type="text/markdown" href="{% if current_path == "/" %}/docs/index.md{% else %}/docs{{ current_path | trim_end_matches(pat="/") | safe }}.md{% endif %}">
     <link rel="icon" href="{{ get_url(path="favicon.svg", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" type="image/svg+xml">
-    <link rel="stylesheet" href="{{ get_url(path="giallo.css", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}">
+    <link rel="stylesheet" href="{{ get_url(path="giallo-dark.css", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" media="(prefers-color-scheme: dark)">
+    <link rel="stylesheet" href="{{ get_url(path="giallo-light.css", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" media="(prefers-color-scheme: light)">
     <link rel="stylesheet" href="{{ get_url(path="docs.css", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}">
     <script src="{{ get_url(path="search.js", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" defer></script>
     <script src="{{ get_url(path="docs.js", cachebust=true) | replace(from=canonical_docs_root, to=browser_docs_root) | safe }}" defer></script>
