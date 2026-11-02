@@ -608,6 +608,14 @@ fi
 
 # The unclaimed-member probe speaks TLS to the binding listener with the
 # Pod's mounted roots, and finds no bridge, SSH or tailnet listener.
+# #3841: an unset shape keeps the pool reconciler inert, so the suite drains
+# its own pool through a zero count and removes its objects before unsetting.
+grep -Fq 'Without its shape the reconciler drains' "$WARM_POOLS" &&
+  fail 'warm-pools cleanup assumes an unset shape drains its pool'
+grep -Fq '"SANDBOX_WARM_POOL_SHAPES=${shape}=0"' "$WARM_POOLS" ||
+  fail 'warm-pools cleanup does not drain its pool through a zero count'
+grep -Fq '    warm_pool_remove_suite_pool' "$WARM_POOLS" ||
+  fail 'warm-pools cleanup does not remove the pool it configured'
 grep -Fq 'cafile="/run/codewire-orchestration-internal-roots/ca.crt"' "$WARM_POOLS" ||
   fail 'warm-pool own-bind probe does not verify the binding listener with the mounted roots'
 if grep -Fq 'CODEWIRE_WORKSPACE_BINDING_URL#http://' "$WARM_POOLS"; then

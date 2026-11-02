@@ -80,7 +80,7 @@ run_retained_warm_pools_suite() {
 
 # shellcheck disable=SC2329 # Invoked by the EXIT trap.
 warm_pools_suite_cleanup() {
-  local status=$? node id
+  local status=$? node id removed
   set +e
   for node in "${WARM_POOL_CORDONED[@]}"; do
     kubectl uncordon "$node" >/dev/null
@@ -93,10 +93,10 @@ warm_pools_suite_cleanup() {
       "{\"orgId\":\"${WARM_POOL_ORG}\",\"environmentId\":\"${id}\"}" >/dev/null
   done
   if [ "$WARM_POOL_RESTORE_SHAPES" = 1 ]; then
-    # Without its shape the reconciler drains the suite's pool.
-    kubectl -n "$NS" set env deploy/codewire-orchestration -c orchestration \
-      SANDBOX_WARM_POOL_SHAPES- >/dev/null
-    warm_pool_await_orchestration >/dev/null
+    # Cleanup runs without errexit; a pool left behind still fails the run.
+    warm_pool_remove_suite_pool
+    removed=$?
+    [ "$removed" = 0 ] || status=1
   fi
   (exit "$status")
   retained_suite_cleanup
@@ -690,6 +690,64 @@ warm_pool_effective_shapes() {
       -o jsonpath='{.data.SANDBOX_WARM_POOL_SHAPES}')"
   fi
   printf '%s\n' "$shapes"
+}
+
+# The suite's own shape's pool objects, as "<kind>/<name>": a reconciler-owned
+# pool or template whose name is that shape's.
+warm_pool_suite_objects() {
+  local prefix="$1"
+  kubectl -n "$SANDBOX_NS" get sandboxwarmpools,sandboxtemplates \
+    -l app.kubernetes.io/managed-by=codewire,codewire.sh/type=workspace-pool -o json |
+    jq -r --arg prefix "$prefix" \
+      '.items[] | select(.metadata.name | startswith($prefix)) | "\(.kind | ascii_downcase)/\(.metadata.name)"'
+}
+
+# Live members of the suite's shape's pools, of any revision.
+warm_pool_suite_members() {
+  local prefix="$1"
+  kubectl -n "$SANDBOX_NS" get sandboxes -l "$WARM_POOL_MEMBER_LABEL" -o json |
+    jq --arg prefix "$prefix" '[.items[] | select(.metadata.deletionTimestamp == null)
+      | select(any(.metadata.ownerReferences[]?;
+          .kind == "SandboxWarmPool" and (.name | startswith($prefix))))] | length'
+}
+
+# Remove the pool the suite configured (#3841). An unset shape keeps the
+# reconciler inert, with no Kubernetes access, so unsetting alone leaves the
+# pool behind. The suite zeroes its shape instead, which drains every revision
+# of its pool, waits until no member is left, deletes that shape's pool and
+# template objects, and only then unsets the setting it added.
+warm_pool_remove_suite_pool() {
+  local shape prefix deadline object awaited
+  shape="${WARM_POOL_SUITE_SHAPES%=*}"
+  prefix="cw-pool-$(tr '[:upper:]/' '[:lower:]-' <<<"$shape")-"
+  log "draining the suite pool ${shape} before removing its shape"
+  kubectl -n "$NS" set env deploy/codewire-orchestration -c orchestration \
+    "SANDBOX_WARM_POOL_SHAPES=${shape}=0" >/dev/null || return 1
+  # Called plainly, as every Kind step is: its status is checked after.
+  warm_pool_await_orchestration >/dev/null
+  awaited=$?
+  [ "$awaited" = 0 ] || return 1
+  deadline=$(( $(date +%s) + WARM_POOL_TIMEOUT_SECONDS ))
+  while [ "$(warm_pool_suite_members "$prefix")" != 0 ]; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "::error::the suite pool's members did not drain within ${WARM_POOL_TIMEOUT_SECONDS} s"
+      return 1
+    fi
+    sleep 2
+  done
+  while IFS= read -r object; do
+    [ -n "$object" ] || continue
+    kubectl -n "$SANDBOX_NS" delete "$object" --wait=true --timeout=120s >/dev/null || return 1
+  done < <(warm_pool_suite_objects "$prefix")
+  kubectl -n "$NS" set env deploy/codewire-orchestration -c orchestration \
+    SANDBOX_WARM_POOL_SHAPES- >/dev/null || return 1
+  warm_pool_await_orchestration >/dev/null
+  awaited=$?
+  [ "$awaited" = 0 ] || return 1
+  if [ -n "$(warm_pool_suite_objects "$prefix")" ]; then
+    echo "::error::the suite pool's objects remain after its shape was removed"
+    return 1
+  fi
 }
 
 # Configure the suite's own shape unless the cluster already runs a pool.
