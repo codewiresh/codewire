@@ -16,7 +16,7 @@ use super::state::{
     DirectProbeCandidate, DirectProbeState, DiscoAction, DiscoPeerIndex, DiscoTarget,
     EndpointRefresh, PeerState, PendingStun, Shared, State, VerifiedEndpoint,
 };
-use super::{DIRECT_HEARTBEAT_INTERVAL, DIRECT_PROBE_RETRY_WINDOW};
+use super::{DIRECT_HEARTBEAT_INTERVAL, DIRECT_PROBE_RETRY_WINDOW, DIRECT_REPROBE_INTERVAL};
 
 pub(super) async fn send_stun_refresh(
     socket: &UdpSocket,
@@ -168,9 +168,11 @@ pub(super) fn apply_peer_update(shared: &Shared, nodes: Vec<Node>) -> Vec<DiscoA
                 Some(DirectProbeState::Active(probe)) if now < probe.expires_at => {
                     DirectProbeState::Active(probe)
                 }
-                Some(DirectProbeState::Active(_)) | Some(DirectProbeState::Exhausted) => {
-                    DirectProbeState::Exhausted
-                }
+                Some(DirectProbeState::Active(probe)) => DirectProbeState::Exhausted {
+                    since: now,
+                    lapsed: probe.lapsed,
+                },
+                Some(exhausted @ DirectProbeState::Exhausted { .. }) => exhausted,
                 Some(DirectProbeState::Inactive) | None => {
                     start_direct_probes.push(raw);
                     DirectProbeState::Inactive
@@ -227,7 +229,7 @@ pub(super) fn apply_peer_update(shared: &Shared, nodes: Vec<Node>) -> Vec<DiscoA
                 .iter()
                 .map(|candidate| (candidate.tx_id, *peer_key))
                 .collect::<Vec<_>>(),
-            DirectProbeState::Inactive | DirectProbeState::Exhausted => Vec::new(),
+            DirectProbeState::Inactive | DirectProbeState::Exhausted { .. } => Vec::new(),
         })
         .collect::<Vec<_>>();
     for peer in previous.values() {
@@ -348,6 +350,7 @@ pub(super) fn start_direct_probe(
             DirectProbeState::Active(DirectProbe {
                 expires_at: now + DIRECT_PROBE_RETRY_WINDOW,
                 candidates,
+                lapsed,
             })
         };
     }
@@ -384,7 +387,10 @@ pub(super) fn retry_unverified_direct_candidates(
                         .into_iter()
                         .map(|candidate| candidate.tx_id),
                 );
-                peer.direct_probe = DirectProbeState::Exhausted;
+                peer.direct_probe = DirectProbeState::Exhausted {
+                    since: now,
+                    lapsed: probe.lapsed,
+                };
             }
             DirectProbeState::Active(probe) => {
                 actions.extend(probe.candidates.iter().map(|candidate| {
@@ -398,9 +404,7 @@ pub(super) fn retry_unverified_direct_candidates(
                 peer.direct_probe = DirectProbeState::Active(probe);
             }
             DirectProbeState::Inactive => {}
-            DirectProbeState::Exhausted => {
-                peer.direct_probe = DirectProbeState::Exhausted;
-            }
+            exhausted @ DirectProbeState::Exhausted { .. } => peer.direct_probe = exhausted,
         }
     }
 
@@ -416,8 +420,10 @@ pub(super) fn retry_unverified_direct_candidates(
 /// A verified endpoint at least [`DIRECT_HEARTBEAT_INTERVAL`] old gets one
 /// disco ping per interval; its pong renews the endpoint. A lapsed endpoint
 /// starts a new probe of the peer's candidates and the lapsed address, while
-/// WireGuard rides the peer relay or DERP. A peer that is not in use gets
-/// neither: its lapsed endpoint waits until WireGuard flows to it again.
+/// WireGuard rides the peer relay or DERP. A probe that finds nothing is
+/// started again every [`DIRECT_REPROBE_INTERVAL`], so direct UDP returns
+/// once the network does (#3861). A peer that is not in use gets none of
+/// this: its lapsed endpoint waits until WireGuard flows to it again.
 pub(super) fn maintain_direct_paths(shared: &Shared, now: Instant) -> Vec<DiscoAction> {
     let mut state = shared.state.lock().unwrap();
     let peer_keys = state.peers_by_node.keys().copied().collect::<Vec<_>>();
@@ -427,12 +433,25 @@ pub(super) fn maintain_direct_paths(shared: &Shared, now: Instant) -> Vec<DiscoA
         let Some(peer) = state.peers_by_node.get_mut(&peer_key) else {
             continue;
         };
-        let Some(verified) = peer.verified_endpoint else {
-            continue;
-        };
         if !peer.in_use(now) {
             continue;
         }
+        let Some(verified) = peer.verified_endpoint else {
+            let DirectProbeState::Exhausted { since, lapsed } = peer.direct_probe else {
+                continue;
+            };
+            if now.saturating_duration_since(since) >= DIRECT_REPROBE_INTERVAL {
+                tracing::debug!("rust tailnet direct UDP still unanswered; probing again");
+                actions.extend(start_direct_probe(
+                    &mut state,
+                    &shared.local_node_key,
+                    peer_key,
+                    lapsed,
+                    now,
+                ));
+            }
+            continue;
+        };
         if verified.is_fresh(now) {
             let since = |at: Instant| now.saturating_duration_since(at);
             let heartbeat_due = since(verified.verified_at) >= DIRECT_HEARTBEAT_INTERVAL

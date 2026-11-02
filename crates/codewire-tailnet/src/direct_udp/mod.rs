@@ -37,6 +37,12 @@ const DIRECT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const DIRECT_SESSION_ACTIVE_TIMEOUT: Duration = Duration::from_secs(45);
 const PEER_RELAY_BIND_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DIRECT_PROBE_RETRY_WINDOW: Duration = Duration::from_secs(5);
+/// How long a peer in use waits, after a probe found no direct path, before
+/// probing its candidates again (#3861). Without it a cut longer than one
+/// probe left direct UDP off for the life of the connection. magicsock pings
+/// a peer with no trusted address at the same interval
+/// (`discoPingInterval`).
+const DIRECT_REPROBE_INTERVAL: Duration = Duration::from_secs(5);
 const STUN_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(750);
 const STUN_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const DERP_MAGIC_IP: Ipv4Addr = Ipv4Addr::new(127, 3, 3, 40);

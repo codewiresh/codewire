@@ -206,6 +206,96 @@ fn a_lapsed_direct_path_probes_again_and_recovers_when_the_pong_returns() {
     assert!(state.pending_tx.is_empty());
 }
 
+#[test]
+fn a_direct_path_lost_longer_than_one_probe_is_probed_again_while_in_use() {
+    // A network cut (#3861): the lapse's probe goes unanswered for its whole
+    // window while WireGuard keeps flowing over DERP.
+    let learned: SocketAddr = "198.51.100.9:62000".parse().unwrap();
+    let advertised: SocketAddr = ADVERTISED.parse().unwrap();
+    let t0 = Instant::now();
+    let (shared, peer_key) = verified_peer(learned, t0);
+    let mut at = t0;
+    while at <= t0 + VERIFIED_ENDPOINT_TTL {
+        assert_eq!(sends_direct(&shared, peer_key, at), Some(learned));
+        maintain_direct_paths(&shared, at);
+        at += TICK;
+    }
+    assert!(active_path_for_peer(&shared, &peer_key, at).is_none());
+    assert_eq!(pinged(&maintain_direct_paths(&shared, at)).len(), 2);
+
+    // The cut outlasts the probe and the re-probe interval: every ping is
+    // lost, and WireGuard rides DERP throughout.
+    let mut probes = Vec::new();
+    let cut_ends = at + DIRECT_PROBE_RETRY_WINDOW * 4;
+    let mut exhausted_at = None;
+    while at < cut_ends {
+        at += TICK;
+        assert!(active_path_for_peer(&shared, &peer_key, at).is_none());
+        retry_unverified_direct_candidates(&shared, at);
+        if exhausted_at.is_none()
+            && matches!(
+                shared.state.lock().unwrap().peers_by_node[&peer_key].direct_probe,
+                DirectProbeState::Exhausted { .. }
+            )
+        {
+            exhausted_at = Some(at);
+        }
+        let actions = maintain_direct_paths(&shared, at);
+        if !actions.is_empty() {
+            let mut targets = pinged(&actions);
+            targets.sort_unstable();
+            probes.push((at, targets, actions));
+        }
+    }
+    let exhausted_at = exhausted_at.expect("the first probe runs out");
+    let (first_reprobe, targets, _) = &probes[0];
+    assert_eq!(
+        *first_reprobe - exhausted_at,
+        DIRECT_REPROBE_INTERVAL,
+        "a probe starts again once the interval has passed"
+    );
+    let mut expected = vec![advertised, learned];
+    expected.sort_unstable();
+    assert_eq!(targets, &expected, "the lapsed address is probed again too");
+    assert!(probes.len() >= 2, "probing continues while the cut lasts");
+
+    // The network is back: the lapsed address answers the latest probe.
+    let (_, _, latest) = probes.last().unwrap();
+    let to_learned = latest
+        .iter()
+        .filter(|action| matches!(action.target, DiscoTarget::Udp(addr) if addr == learned));
+    answer_from(&shared, peer_key, to_learned, learned, at);
+    assert_eq!(sends_direct(&shared, peer_key, at), Some(learned));
+}
+
+#[test]
+fn an_idle_peer_with_no_direct_path_is_not_probed_again() {
+    let learned: SocketAddr = "198.51.100.9:62000".parse().unwrap();
+    let t0 = Instant::now();
+    let (shared, peer_key) = verified_peer(learned, t0);
+    let mut at = t0;
+    while at <= t0 + VERIFIED_ENDPOINT_TTL {
+        assert_eq!(sends_direct(&shared, peer_key, at), Some(learned));
+        maintain_direct_paths(&shared, at);
+        at += TICK;
+    }
+    assert!(active_path_for_peer(&shared, &peer_key, at).is_none());
+    assert_eq!(pinged(&maintain_direct_paths(&shared, at)).len(), 2);
+
+    // WireGuard stops: once the peer is no longer in use, nothing is sent.
+    let mut probes_after_idle = 0;
+    let idle_from = at + DIRECT_SESSION_ACTIVE_TIMEOUT;
+    while at < idle_from + DIRECT_REPROBE_INTERVAL * 4 {
+        at += TICK;
+        retry_unverified_direct_candidates(&shared, at);
+        let actions = maintain_direct_paths(&shared, at);
+        if at > idle_from {
+            probes_after_idle += actions.len();
+        }
+    }
+    assert_eq!(probes_after_idle, 0);
+}
+
 /// Two transports on loopback with direct UDP verified both ways.
 struct VerifiedPair {
     a: Transport,

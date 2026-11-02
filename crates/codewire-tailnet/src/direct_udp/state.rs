@@ -338,13 +338,22 @@ impl PeerState {
 pub(super) enum DirectProbeState {
     Inactive,
     Active(DirectProbe),
-    Exhausted,
+    /// The last probe found no answering candidate. While the peer is in
+    /// use, a new probe starts [`super::DIRECT_REPROBE_INTERVAL`] after
+    /// `since`, again including `lapsed`.
+    Exhausted {
+        since: Instant,
+        lapsed: Option<SocketAddr>,
+    },
 }
 
 #[derive(Clone)]
 pub(super) struct DirectProbe {
     pub(super) expires_at: Instant,
     pub(super) candidates: Vec<DirectProbeCandidate>,
+    /// The direct address that worked before and lapsed, when this probe was
+    /// started for that; it may not be among the peer's endpoints.
+    pub(super) lapsed: Option<SocketAddr>,
 }
 
 #[derive(Clone, Copy)]

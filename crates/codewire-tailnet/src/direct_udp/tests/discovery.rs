@@ -64,7 +64,10 @@ fn direct_candidate_probe_expires_and_identical_updates_do_not_restart_it() {
     {
         let state = shared.state.lock().unwrap();
         let peer = state.peers_by_node.get(peer_node.as_bytes()).unwrap();
-        assert!(matches!(peer.direct_probe, DirectProbeState::Exhausted));
+        assert!(matches!(
+            peer.direct_probe,
+            DirectProbeState::Exhausted { .. }
+        ));
         assert!(state.pending_tx.is_empty());
     }
 
@@ -82,7 +85,7 @@ fn direct_candidate_probe_expires_and_identical_updates_do_not_restart_it() {
             .get(peer_node.as_bytes())
             .unwrap()
             .direct_probe,
-        DirectProbeState::Exhausted
+        DirectProbeState::Exhausted { .. }
     ));
 
     let changed = apply_peer_update(
