@@ -55,6 +55,20 @@ fn window_size() -> Option<(u16, u16)> {
         .filter(|(columns, rows)| *columns > 0 && *rows > 0)
 }
 
+/// The terminal's keys, through one handle for the whole process. A tokio
+/// stdin read runs on a blocking thread; when an attachment ends, its read is
+/// still in flight, and on a fresh handle the next keys it returns would be
+/// lost with the old one. Every attachment, and every reattachment after a
+/// drop, borrows this handle, so those keys reach the next attachment.
+pub(crate) async fn terminal_input() -> tokio::sync::MutexGuard<'static, tokio::io::Stdin> {
+    static INPUT: std::sync::OnceLock<tokio::sync::Mutex<tokio::io::Stdin>> =
+        std::sync::OnceLock::new();
+    INPUT
+        .get_or_init(|| tokio::sync::Mutex::new(tokio::io::stdin()))
+        .lock()
+        .await
+}
+
 /// Follows the attached terminal's size for a session's PTY: the size when
 /// the attachment opens, then each change (SIGWINCH), never the same size
 /// twice in a row. Disabled, it reports nothing and never wakes.
@@ -316,6 +330,17 @@ mod tests {
 
         screen.observe(b"\x1b[?1049l\x1b[?47h");
         assert!(screen.release_bytes().starts_with(b"\x1b[?1049l"));
+    }
+
+    #[tokio::test]
+    async fn every_attachment_reads_the_same_stdin_handle() {
+        // A read left in flight by one attachment must hand its bytes to the
+        // next, so both borrow one handle (the keys after a reconnect, #3827).
+        async fn handle() -> *const tokio::io::Stdin {
+            let input = terminal_input().await;
+            &*input
+        }
+        assert_eq!(handle().await, handle().await);
     }
 
     #[test]

@@ -1278,7 +1278,7 @@ async fn attach_host_environment_session(
     }
     let _raw = interactive.then(RawModeGuard::enable).transpose()?;
     let mut decoder = AttachNavigationDecoder::default();
-    let mut stdin = tokio::io::stdin();
+    let mut stdin = crate::terminal_attach::terminal_input().await;
     let mut buf = [0u8; 4096];
     let mut cursor = offset;
     let mut stdin_open = interactive;
@@ -1903,6 +1903,9 @@ pub(crate) async fn handle_environment_shell_command(
         }
         return handle_shell_stdio(globals, environment.as_deref()).await;
     }
+    if std::env::var_os("CW_DEBUG_TAILNET").is_some() {
+        super::core::init_tailnet_debug_log();
+    }
     if !args.durable {
         // A hosted environment gets a normal shell over its tailnet; local
         // VMs and trusted hosts keep their own direct paths below.
@@ -1914,25 +1917,12 @@ pub(crate) async fn handle_environment_shell_command(
             ..
         } = &target
         {
-            match super::tailnet_shell::connect(client, org_id, environment_id).await {
-                Ok((tailnet, shell)) => {
-                    let status = super::tailnet_shell::run(tailnet, shell).await?;
-                    if status != 0 {
-                        // As `ssh` does: the shell's own status, no message.
-                        std::process::exit(i32::try_from(status).unwrap_or(1));
-                    }
-                    return Ok(());
-                }
-                Err(error)
-                    if codewire_client::SshTransportMode::from_env()?
-                        == codewire_client::SshTransportMode::Tailnet =>
-                {
-                    return Err(error.context("tailnet shell (CW_SSH_TRANSPORT=tailnet)"));
-                }
-                Err(error) => {
-                    eprintln!("  via API (durable session) · tailnet unavailable: {error:#}");
-                }
+            let status = super::tailnet_shell::run(client, org_id, environment_id).await?;
+            if status != 0 {
+                // As `ssh` does: the shell's own status, no message.
+                std::process::exit(status);
             }
+            return Ok(());
         }
     }
     launch_run(
@@ -2073,7 +2063,7 @@ pub(crate) const TAILNET_DIRECT_WAIT: Duration = Duration::from_secs(2);
 /// tailnet cannot, and the line before the session says which path it took
 /// and why. `CW_SSH_TRANSPORT=tailnet` refuses the API fallback;
 /// `CW_SSH_TRANSPORT=websocket` skips the tailnet.
-async fn attach_platform_session(
+pub(crate) async fn attach_platform_session(
     client: &codewire_client::CodewireClient,
     open: codewire_client::AttachSessionOpen,
     tailnet: &mut Option<codewire_client::tailnet_session::EnvironmentTailnet>,
@@ -2281,7 +2271,7 @@ async fn attach_platform_environment_session(
     screen: &mut SessionScreen,
 ) -> anyhow::Result<AttachExit> {
     let input = attachment.input_handle();
-    let mut stdin = tokio::io::stdin();
+    let mut stdin = crate::terminal_attach::terminal_input().await;
     let mut stdin_buf = [0_u8; 4096];
     let mut stdout = std::io::stdout();
     let interactive =
@@ -2609,7 +2599,7 @@ async fn attachment_environment_targets(
     Ok(targets)
 }
 
-fn platform_session_is_terminal(session: &codewire_client::EnvironmentSession) -> bool {
+pub(crate) fn platform_session_is_terminal(session: &codewire_client::EnvironmentSession) -> bool {
     matches!(
         session.state.as_known(),
         Some(

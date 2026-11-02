@@ -212,9 +212,9 @@ pub(crate) async fn handle_shell_stdio(
     tailnet_ssh::pipe_shell_stdio(&client, &org_id, &environment_id, mode).await
 }
 
-/// `CW_DEBUG_TAILNET` timeline on stderr: tailnet and client debug events,
-/// timestamped from process start. `RUST_LOG` narrows or widens it.
-fn init_tailnet_debug_log() {
+/// `CW_DEBUG_TAILNET` timeline on stderr for `cw shell`: tailnet and client
+/// debug events, timestamped from process start. `RUST_LOG` narrows or widens it.
+pub(crate) fn init_tailnet_debug_log() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("codewire_tailnet=debug,codewire_client=debug"));
