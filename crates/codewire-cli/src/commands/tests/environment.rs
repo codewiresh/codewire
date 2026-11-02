@@ -1126,6 +1126,7 @@ async fn init_command_writes_codewire_yaml_from_direct_flags() {
         server: None,
         member: None,
         placement: None,
+        org: None,
     };
     handle_init_command(&globals, args).await.unwrap();
 
@@ -1170,6 +1171,7 @@ async fn init_command_refuses_existing_file_without_force() {
         server: None,
         member: None,
         placement: None,
+        org: None,
     };
     let err = handle_init_command(&globals, args).await.unwrap_err();
 
@@ -2228,6 +2230,7 @@ async fn env_share_rejects_local_before_platform_resolution() {
         server: None,
         member: None,
         placement,
+        org: None,
     };
 
     let error = handle_env_command(&globals, placement, operation)
@@ -2297,6 +2300,7 @@ async fn ports_refuses_combinations_and_ignored_options_before_any_lookup() {
         server: None,
         member: None,
         placement: None,
+        org: None,
     };
     for (argv, message) in [
         (

@@ -41,6 +41,7 @@ fn saved_message_location_selects_its_own_placement() {
         server: Some("https://codewire.test".to_owned()),
         member: Some("trusted-host".to_owned()),
         placement: None,
+        org: None,
     };
     let cloud = globals_for_message_placement(&globals, EnvironmentPlacement::Platform);
     assert_eq!(cloud.server, globals.server);
@@ -359,6 +360,7 @@ fn no_placement() -> Globals {
         server: None,
         member: None,
         placement: None,
+        org: None,
     }
 }
 
@@ -370,6 +372,7 @@ async fn selector_error(argv: &[&str]) -> String {
         server: None,
         member: cli.member.clone(),
         placement: cli.placement().unwrap(),
+        org: None,
     };
     let result = match cli.command {
         Command::Attach(args) => handle_attach_command(&globals, args).await,
@@ -542,6 +545,7 @@ async fn scope_error(argv: &[&str]) -> String {
         server: None,
         member: cli.member.clone(),
         placement: cli.placement().unwrap(),
+        org: None,
     };
     let error = match cli.command {
         Command::Stop(args) => crate::commands::flat::handle_stop(&globals, args).await,

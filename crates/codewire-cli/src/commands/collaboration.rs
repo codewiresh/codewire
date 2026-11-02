@@ -34,6 +34,7 @@ pub(crate) fn resolve_platform(
     Ok(config::resolve_platform(
         config::PlatformResolveOptions {
             server_url: globals.server.clone(),
+            org: globals.org.clone(),
         },
         paths,
         env,

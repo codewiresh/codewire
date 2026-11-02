@@ -19,6 +19,9 @@ pub const CW_CONFIG_DIR_ENV: &str = "CW_CONFIG_DIR";
 pub const CW_MESH_DATA_DIR_ENV: &str = "CW_MESH_DATA_DIR";
 pub const CODEWIRE_SERVER_URL_ENV: &str = "CODEWIRE_SERVER_URL";
 pub const CODEWIRE_API_KEY_ENV: &str = "CODEWIRE_API_KEY";
+/// Overrides the saved default organization for one invocation, as
+/// `CODEWIRE_SERVER_URL` overrides the server; `cw org set` saves one.
+pub const CODEWIRE_ORG_ENV: &str = "CODEWIRE_ORG";
 pub const CODEWIRE_MESH_URL_ENV: &str = "CODEWIRE_MESH_URL";
 pub const CODEWIRE_MESH_AUTH_TOKEN_ENV: &str = "CODEWIRE_MESH_AUTH_TOKEN";
 pub const CODEWIRE_MESH_NETWORK_ENV: &str = "CODEWIRE_MESH_NETWORK";
@@ -135,6 +138,9 @@ pub struct PlatformConfig {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PlatformResolveOptions {
     pub server_url: Option<String>,
+    /// `--org` for this invocation; then `CODEWIRE_ORG`; then the saved
+    /// default organization.
+    pub org: Option<String>,
 }
 
 #[derive(Clone)]
@@ -320,9 +326,13 @@ pub fn resolve_platform(
         }
     };
 
-    let default_org = config_result
-        .ok()
-        .and_then(|config| non_empty(config.default_org.trim().to_string()));
+    let default_org = trim_opt(opts.org)
+        .or_else(|| trim_opt(env.var(CODEWIRE_ORG_ENV)))
+        .or_else(|| {
+            config_result
+                .ok()
+                .and_then(|config| non_empty(config.default_org.trim().to_string()))
+        });
 
     Ok(ResolvedPlatformConfig::new(
         server_url,
@@ -1757,6 +1767,39 @@ mod tests {
     }
 
     #[test]
+    fn an_org_for_one_invocation_overrides_the_saved_default() {
+        let home = tempfile::tempdir().unwrap();
+        for (flag, env_org, expected) in [
+            (None, None, "org-default"),
+            (None, Some("org-env"), "org-env"),
+            (Some("org-flag"), Some("org-env"), "org-flag"),
+            (Some("  "), None, "org-default"),
+        ] {
+            let mut vars = vec![(CODEWIRE_API_KEY_ENV, "cw_synthetic")];
+            if let Some(org) = env_org {
+                vars.push((CODEWIRE_ORG_ENV, org));
+            }
+            let env = MapEnv::new(vars);
+            let paths = paths(home.path(), &env);
+            write_platform_config(&paths.platform_config_dir, "https://codewire.sh");
+            let resolved = resolve_platform(
+                PlatformResolveOptions {
+                    server_url: None,
+                    org: flag.map(str::to_owned),
+                },
+                &paths,
+                &env,
+            )
+            .unwrap();
+            assert_eq!(
+                resolved.default_org.as_deref(),
+                Some(expected),
+                "flag {flag:?}, env {env_org:?}"
+            );
+        }
+    }
+
+    #[test]
     fn platform_rejects_mismatched_saved_config() {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
@@ -1766,6 +1809,7 @@ mod tests {
         let err = resolve_platform(
             PlatformResolveOptions {
                 server_url: Some("https://codewire-dev.sh".to_string()),
+                org: None,
             },
             &paths,
             &env,

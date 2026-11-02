@@ -41,6 +41,33 @@ fn vscode_uri_helpers_use_environment_ids() {
 }
 
 #[test]
+fn session_commands_take_an_organization_for_one_invocation() {
+    let Command::Shell(shell) = Cli::try_parse_from(["cw", "shell", "--org", "acme", "builder"])
+        .unwrap()
+        .command
+    else {
+        panic!("expected shell command");
+    };
+    assert_eq!(shell.org.as_deref(), Some("acme"));
+    let Command::Attach(attach) =
+        Cli::try_parse_from(["cw", "attach", "--org", "acme", "builder", "--session", "s"])
+            .unwrap()
+            .command
+    else {
+        panic!("expected attach command");
+    };
+    assert_eq!(attach.org.as_deref(), Some("acme"));
+    let Command::Run(run) =
+        Cli::try_parse_from(["cw", "run", "--org", "acme", "--in", "builder", "--", "true"])
+            .unwrap()
+            .command
+    else {
+        panic!("expected run command");
+    };
+    assert_eq!(run.org.as_deref(), Some("acme"));
+}
+
+#[test]
 fn shell_command_parser_accepts_session_and_proxy_forms() {
     let cli = Cli::try_parse_from(["cw", "shell", "builder"]).unwrap();
     let Command::Shell(args) = cli.command else {

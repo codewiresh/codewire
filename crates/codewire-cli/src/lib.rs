@@ -312,6 +312,18 @@ struct Globals {
     member: Option<String>,
     /// `--local` or `--cloud`, read by every command that accepts one.
     placement: Option<EnvironmentPlacement>,
+    /// `--org` of a session command: the organization for this invocation.
+    org: Option<String>,
+}
+
+impl Globals {
+    /// These globals for one command that chose an organization.
+    fn with_org(&self, org: Option<String>) -> Self {
+        Self {
+            org: org.or_else(|| self.org.clone()),
+            ..self.clone()
+        }
+    }
 }
 
 mod commands;
@@ -874,6 +886,7 @@ where
         server: cli.server.clone(),
         member: cli.member.clone(),
         placement,
+        org: None,
     };
     match cli.command {
         Command::Config {
@@ -891,9 +904,15 @@ where
         Command::Current(args) => handle_current_command(&globals, args).await,
         Command::Init(args) => handle_init_command(&globals, args).await,
         Command::Vscode(args) => handle_vscode_command(&globals, args).await,
-        Command::Shell(args) => handle_environment_shell_command(&globals, args).await,
+        Command::Shell(args) => {
+            let globals = globals.with_org(args.org.clone());
+            handle_environment_shell_command(&globals, args).await
+        }
         Command::Ssh { command } => handle_ssh_command(&globals, command).await,
-        Command::Run(args) => handle_environment_run_command(&globals, args).await,
+        Command::Run(args) => {
+            let globals = globals.with_org(args.org.clone());
+            handle_environment_run_command(&globals, args).await
+        }
         #[cfg(unix)]
         Command::HostDaemon(args) => run_host_daemon(args).await,
         Command::Send(args) => handle_send_command(&globals, args).await,
@@ -973,7 +992,10 @@ where
             Ok(())
         }
         Command::Ls(args) => flat::handle_ls(&globals, args).await,
-        Command::Attach(args) => handle_attach_command(&globals, args).await,
+        Command::Attach(args) => {
+            let globals = globals.with_org(args.org.clone());
+            handle_attach_command(&globals, args).await
+        }
         Command::Logs(args) => flat::handle_logs(&globals, args).await,
         Command::Update(args) => flat::handle_update(&globals, args).await,
         Command::Ports(args) => flat::handle_ports(&globals, args).await,

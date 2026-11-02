@@ -1530,6 +1530,7 @@ fn resolve_setup_server_url_defaults_to_hosted_codewire() {
         server: None,
         member: None,
         placement: None,
+        org: None,
     };
 
     assert_eq!(
@@ -1547,6 +1548,7 @@ fn resolve_setup_server_url_prefers_global_server() {
         server: Some(" https://flag.codewire.sh/ ".to_string()),
         member: None,
         placement: None,
+        org: None,
     };
 
     assert_eq!(

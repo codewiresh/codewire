@@ -185,6 +185,7 @@ async fn platform_metadata(
     let platform = match config::resolve_platform(
         config::PlatformResolveOptions {
             server_url: globals.server.clone(),
+            org: globals.org.clone(),
         },
         paths,
         env,

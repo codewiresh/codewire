@@ -756,6 +756,12 @@ pub(crate) struct VscodeArgs {
 #[derive(Debug, Args)]
 pub(crate) struct EnvironmentShellArgs {
     #[arg(
+        long,
+        value_name = "ID_OR_SLUG",
+        help = "Organization for this command; overrides the saved default (`cw org set` changes that)"
+    )]
+    pub(crate) org: Option<String>,
+    #[arg(
         value_name = "ENV",
         help = "Environment name or ID; defaults to the selected environment"
     )]
@@ -810,6 +816,12 @@ pub(crate) fn parse_native_agent(value: &str) -> Result<NativeAgent, String> {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvironmentRunArgs {
+    #[arg(
+        long,
+        value_name = "ID_OR_SLUG",
+        help = "Organization for this command; overrides the saved default (`cw org set` changes that)"
+    )]
+    pub(crate) org: Option<String>,
     #[arg(long, help = "Durable request UUID for a member launch")]
     pub(crate) request_id: Option<String>,
     #[arg(
@@ -2598,6 +2610,12 @@ pub(crate) struct InboxArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct AttachArgs {
+    #[arg(
+        long,
+        value_name = "ID_OR_SLUG",
+        help = "Organization for this command; overrides the saved default (`cw org set` changes that)"
+    )]
+    pub(crate) org: Option<String>,
     #[arg(value_name = "ENV", help = "Environment name or ID")]
     pub(crate) environment: Option<String>,
     /// A second positional, refused with the `--session` spelling.

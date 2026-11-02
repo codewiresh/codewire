@@ -143,6 +143,7 @@ async fn secret_project_name(
             let platform = config::resolve_platform(
                 config::PlatformResolveOptions {
                     server_url: globals.server.clone(),
+                    org: globals.org.clone(),
                 },
                 &paths,
                 &env,

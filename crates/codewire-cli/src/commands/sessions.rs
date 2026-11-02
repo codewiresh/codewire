@@ -1905,6 +1905,7 @@ pub(crate) async fn handle_environment_shell_command(
     launch_run(
         globals,
         EnvironmentRunArgs {
+            org: None,
             request_id: None,
             native_agent: None,
             environment,
