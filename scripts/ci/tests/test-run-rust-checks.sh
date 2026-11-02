@@ -28,15 +28,16 @@ src="$work/src"
 mkdir -p "$src/scripts/ci/verify" "$work/state"
 cp "$SCRIPT" "$src/scripts/ci/verify/run-rust-checks.sh"
 
-# One stand-in for every check: it records its start and end, its target
-# folders and selection, prints a line of its own, sleeps (compile-all-targets
-# longest, so the checks end in another order than they print), and fails
-# when FAIL_CHECK names it.
+# One stand-in for every check: it records its end, its target folders and
+# selection, prints a line of its own, sleeps (compile-all-targets longest, so
+# the checks end in another order than they print), and fails when FAIL_CHECK
+# names it. Its start is recorded by the stub the script runs, as early as the
+# test can see it, so the time between start and end is the check's own time
+# however slow the machine is.
 cat > "$work/check" <<'CHECK'
 #!/usr/bin/env bash
 set -euo pipefail
 name="$1"
-echo "$name start $(date +%s%N)" >> "$CHECK_STATE/times"
 echo "$name target=${CARGO_TARGET_DIR:-} desktop=${CODEWIRE_DESKTOP_CARGO_TARGET_DIR:-} zigbuild=${CARGO_ZIGBUILD_CACHE_DIR:-} selection=${VERIFICATION_SELECTION:-}" >> "$CHECK_STATE/env"
 echo "output of $name"
 if [ "$name" = compile ]; then sleep "${COMPILE_SLEEP:-3}"; else sleep "${CHECK_SLEEP:-1}"; fi
@@ -46,20 +47,24 @@ CHECK
 chmod +x "$work/check"
 cat > "$src/scripts/ci/verify/compile-all-targets.sh" <<STUB
 #!/bin/sh
+echo "compile start \$(date +%s%N)" >> "\$CHECK_STATE/times"
 exec "$work/check" compile
 STUB
 cat > "$src/scripts/ci/verify/run-product-verification.sh" <<STUB
 #!/bin/sh
 case "\$1 \$RUST_TRANSPORT_SHARD \$RUST_SHARD_STAGE" in
-  'rust-transport features checks') exec "$work/check" features ;;
-  'rust-transport local-vmm checks') exec "$work/check" local-vmm ;;
-  'rust local-vmm checks') exec "$work/check" desktop ;;
+  'rust-transport features checks') name=features ;;
+  'rust-transport local-vmm checks') name=local-vmm ;;
+  'rust local-vmm checks') name=desktop ;;
   *) echo "unexpected run-product-verification.sh \$*" >&2; exit 2 ;;
 esac
+echo "\$name start \$(date +%s%N)" >> "\$CHECK_STATE/times"
+exec "$work/check" "\$name"
 STUB
 cat > "$src/scripts/ci/verify/check-darwin-cross.sh" <<STUB
 #!/bin/sh
 [ "\$*" = --cli ] || { echo "unexpected check-darwin-cross.sh \$*" >&2; exit 2; }
+echo "cw-darwin start \$(date +%s%N)" >> "\$CHECK_STATE/times"
 exec "$work/check" cw-darwin
 STUB
 chmod +x "$src/scripts/ci/verify/"*.sh
@@ -123,13 +128,24 @@ expected_out="$(
 )"
 [ "$(sed -n '/: start$/,$p' "$work/out" | sed -E 's/elapsed_seconds=[0-9]+\)$/elapsed_seconds=N)/')" = "$expected_out" ] ||
   fail "a log was not printed between its start and finish lines: $(cat "$work/out")"
-# Each finish line carries its own check's time: compile-all-targets 3 s,
-# the others 1 s (whole seconds, so up to one more).
+# Each finish line carries its own check's time, as the check measured it,
+# not the nominal sleep: on a loaded machine every check can be held until
+# the longest one ends (#3876, Policy run 33491), and then they all take that
+# long. The script counts whole seconds from just before the stub starts to
+# just after the check ends, so it reports at least the measured time rounded
+# down and, for a gap under half a second around the check, at most rounded to
+# the nearest second plus one. A time shared by the checks (from the first
+# start, or after the last end) reports about 3 s for a 1 s check, and fails.
 elapsed() { sed -nE "s/^\[rust-checks\] $1: finish \(status=[0-9]+ elapsed_seconds=([0-9]+)\)$/\1/p" "$work/out"; }
-compile_elapsed="$(elapsed compile-all-targets)" features_elapsed="$(elapsed 'feature-graph checks')"
-if ! { [ -n "$compile_elapsed" ] && (( compile_elapsed >= 3 )) && [ -n "$features_elapsed" ] && (( features_elapsed <= 2 )); }; then
-  fail "a finish line did not carry its own check's time: $(grep finish "$work/out")"
-fi
+for pair in 'compile-all-targets:compile' 'feature-graph checks:features' 'local-vmm checks:local-vmm' \
+    'desktop checks:desktop' 'cw Darwin cross-check:cw-darwin'; do
+  reported="$(elapsed "${pair%%:*}")"
+  took=$(( $(at "${pair#*:}" end) - $(at "${pair#*:}" start) ))
+  if ! { [ -n "$reported" ] && (( reported >= took / 1000000000 &&
+      reported <= (took + 500000000) / 1000000000 + 1 )); }; then
+    fail "the ${pair%%:*} finish line did not carry its own time (${took} ns): $(grep finish "$work/out")"
+  fi
+done
 ! grep -q '::error::' "$work/out" || fail 'a passing run reported an error'
 
 # A failed check fails the script; every other check still runs to its end
