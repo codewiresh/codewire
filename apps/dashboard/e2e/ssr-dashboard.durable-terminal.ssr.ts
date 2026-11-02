@@ -87,6 +87,17 @@ async function gotoFixture(page: Page) {
 // and aborts after 15 s (durable-terminal.js). Waits for start-up take those
 // deadlines, not the 5 s default meant for a reaction in a settled page: on a
 // loaded machine start-up can outlast 5 s and still be correct (#2991).
+// A design token's colour in the theme the page shows: the pages follow the system theme, so tests name the
+// token instead of one theme's value.
+const tokenColor = (page: Page, token: string) => page.evaluate((name) => {
+  const probe = document.createElement("span");
+  probe.style.color = `var(${name})`;
+  document.body.append(probe);
+  const color = getComputedStyle(probe).color;
+  probe.remove();
+  return color;
+}, token);
+
 const readinessDeadline = { timeout: 12_000 };
 const listDeadline = { timeout: 17_000 };
 
@@ -297,6 +308,7 @@ test("the header keeps its actions on one line and the selected tab carries the 
     }
     expect(Math.max(...offsets) - Math.min(...offsets), `${width}: ${offsets}`).toBeLessThanOrEqual(0.5);
     // The selected tab, and only it, carries the bar across its top edge.
+    const primary = await tokenColor(page, "--fg-primary");
     const indicators = await page.locator("[data-terminal-tab-item]").evaluateAll((items) => items.map((item) => {
       const mark = getComputedStyle(item, "::before");
       return { selected: item.querySelector('[role="tab"]')!.getAttribute("aria-selected") === "true",
@@ -309,7 +321,7 @@ test("the header keeps its actions on one line and the selected tab carries the 
         expect(item.content).not.toBe("none");
         expect(item.height).toBe(2);
         expect(Math.abs(item.width - item.item)).toBeLessThanOrEqual(1);
-        expect(item.color).toBe("rgb(237, 237, 237)");
+        expect(item.color).toBe(primary);
       } else expect(item.content).toBe("none");
     }
     // Tabs scroll inside their strip; New terminal and the page stay put.
@@ -336,7 +348,7 @@ test("the status bar follows the selected terminal's connection", async ({ page 
   await expect(bar.locator("[data-terminal-session-status]:not([hidden])")).toHaveCount(1);
   await expect(shown).toHaveText("Connected");
   await expect(shown).toHaveAttribute("data-tone", "success");
-  expect(await dot()).toBe("rgb(63, 185, 80)");
+  expect(await dot()).toBe(await tokenColor(page, "--success"));
   // The dot, centred on the row, sits on the label's capitals at every width.
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
@@ -351,7 +363,7 @@ test("the status bar follows the selected terminal's connection", async ({ page 
   attached(state, sessionId(1))[0].route.close({ code: 1011, reason: "upstream restarted" });
   await expect(shown).toHaveText("Disconnected. Reconnecting…");
   await expect(shown).toHaveAttribute("data-tone", "warning");
-  expect(await dot()).toBe("rgb(210, 153, 34)");
+  expect(await dot()).toBe(await tokenColor(page, "--warning"));
   // Another tab's state shows only while that tab is selected.
   await page.getByRole("tab", { name: "Terminal 2", exact: true }).click();
   await expect(shown).toHaveText("Connected");
@@ -381,7 +393,7 @@ test("the status bar follows the selected terminal's connection", async ({ page 
   output(attached(state, sessionId(2))[0], "out-of-order", 7n);
   await expect(shown).toHaveText("Connection closed because terminal output could not be verified.");
   await expect(shown).toHaveAttribute("data-tone", "danger");
-  expect(await dot()).toBe("rgb(232, 112, 95)");
+  expect(await dot()).toBe(await tokenColor(page, "--destructive"));
   expect(state.launches).toBe(0);
   expect(state.stops).toBe(0);
 });

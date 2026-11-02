@@ -349,7 +349,7 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     await expect(terminalRows.getByText("__SSR_ANSI16__", { exact: true })).toHaveCSS("color", "rgb(204, 0, 0)");
     await expect(terminalRows.getByText("__SSR_ANSI256__", { exact: true })).toHaveCSS("color", "rgb(255, 0, 0)");
     await expect(terminalRows.getByText("__SSR_RGB__", { exact: true })).toHaveCSS("color", "rgb(12, 160, 240)");
-    await expect(terminalRows).toHaveCSS("font-family", /IBM Plex Mono/);
+    await expect(terminalRows).toHaveCSS("font-family", /Geist Mono/);
     expect(await page.evaluate(() => (window as Window & { __terminalStyleViolations?: string[] }).__terminalStyleViolations)).toEqual([]);
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: ssrUrl });
     const copyBounds = (await terminalRows.getByText("__SSR_COPY_234__", { exact: true }).boundingBox())!;

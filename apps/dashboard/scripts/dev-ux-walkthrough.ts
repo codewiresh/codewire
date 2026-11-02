@@ -516,7 +516,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(rows).toContainText(/__UX_PID__\d+__/);
     pid = /__UX_PID__(\d+)__/.exec(await rows.innerText())![1];
     await expect(rows.getByText("__UX_RED__", { exact: true })).toHaveCSS("color", "rgb(204, 0, 0)");
-    await expect(rows).toHaveCSS("font-family", /IBM Plex Mono/);
+    await expect(rows).toHaveCSS("font-family", /Geist Mono/);
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: ORIGIN });
     const bounds = (await rows.getByText("__UX_COPY__", { exact: true }).boundingBox())!;
     await page.mouse.move(bounds.x, bounds.y + bounds.height / 2);

@@ -1,62 +1,168 @@
 :root {
   color-scheme: dark;
+  /* The palette, once per theme: dark by default, light when the system asks for it or the
+     visitor chooses it (theme.js keeps the choice; the public site shares it). Every text and
+     surface pair meets WCAG AA in both. The rules below read only the role tokens. */
+  --dark-bg-base: #0a0a0a;
+  --light-bg-base: #ffffff;
+  --dark-bg-primary: #0a0a0a;
+  --light-bg-primary: #ffffff;
+  --dark-bg-sidebar: #0b0b0b;
+  --light-bg-sidebar: #f7f7f5;
+  --dark-bg-secondary: #0d0d0d;
+  --light-bg-secondary: #fafaf9;
+  --dark-bg-surface: #131313;
+  --light-bg-surface: #f3f3f1;
+  --dark-bg-field: #131313;
+  --light-bg-field: #ffffff;
+  --dark-bg-overlay: #141414;
+  --light-bg-overlay: #ffffff;
+  --dark-bg-surface-hover: #191919;
+  --light-bg-surface-hover: #ebebe8;
+  --dark-bg-selected: #1e1e1e;
+  --light-bg-selected: #e4e4e0;
+  --dark-bg-inverse: #dbd1ad;
+  --light-bg-inverse: #000000;
+  --dark-bg-inverse-hover: #f4eccb;
+  --light-bg-inverse-hover: #333333;
+  --dark-backdrop: rgba(0, 0, 0, 0.72);
+  --light-backdrop: rgba(0, 0, 0, 0.32);
+  --dark-fg-primary: #dbd1ad;
+  --light-fg-primary: #000000;
+  --dark-fg-secondary: #c2b99a;
+  --light-fg-secondary: #404040;
+  --dark-fg-tertiary: #918a72;
+  --light-fg-tertiary: #5f5f5f;
+  --dark-fg-disabled: #736e5b;
+  --light-fg-disabled: #787878;
+  --dark-fg-inverse: #0d0d0d;
+  --light-fg-inverse: #ffffff;
+  --dark-fg-on-accent: #121212;
+  --light-fg-on-accent: #ffffff;
+  --dark-border: #262626;
+  --light-border: #e0e0dc;
+  --dark-border-hover: #363636;
+  --light-border-hover: #c8c8c3;
+  --dark-border-subtle: #1e1e1e;
+  --light-border-subtle: #ebebe8;
+  --dark-accent: #e6c784;
+  --light-accent: #0048bd;
+  --dark-accent-hover: #eed8a9;
+  --light-accent-hover: #003a99;
+  --dark-accent-muted: rgba(230, 199, 132, 0.14);
+  --light-accent-muted: rgba(0, 72, 189, 0.1);
+  --dark-accent-text: #e6c784;
+  --light-accent-text: #0048bd;
+  --dark-focus-ring: #eed8a9;
+  --light-focus-ring: #0048bd;
+  --dark-success: #3fb950;
+  --light-success: #116329;
+  --dark-success-muted: rgba(63, 185, 80, 0.12);
+  --light-success-muted: rgba(17, 99, 41, 0.1);
+  --dark-success-border: rgba(63, 185, 80, 0.35);
+  --light-success-border: rgba(17, 99, 41, 0.35);
+  --dark-warning: #d29922;
+  --light-warning: #7a4f00;
+  --dark-warning-muted: rgba(210, 153, 34, 0.12);
+  --light-warning-muted: rgba(122, 79, 0, 0.1);
+  --dark-warning-border: rgba(210, 153, 34, 0.35);
+  --light-warning-border: rgba(122, 79, 0, 0.35);
+  --dark-destructive: #e8705f;
+  --light-destructive: #b42318;
+  --dark-destructive-muted: rgba(232, 112, 95, 0.1);
+  --light-destructive-muted: rgba(180, 35, 24, 0.08);
+  --dark-destructive-border: rgba(232, 112, 95, 0.35);
+  --light-destructive-border: rgba(180, 35, 24, 0.35);
+  --dark-info: #5cc3dc;
+  --light-info: #095c72;
+  --dark-info-muted: rgba(31, 150, 180, 0.12);
+  --light-info-muted: rgba(9, 92, 114, 0.1);
+  --dark-info-border: rgba(31, 150, 180, 0.35);
+  --light-info-border: rgba(9, 92, 114, 0.35);
+  --dark-purple: #c084fc;
+  --light-purple: #6d28d9;
+  --dark-purple-border: rgba(192, 132, 252, 0.35);
+  --light-purple-border: rgba(109, 40, 217, 0.35);
+  --dark-orange: #fb923c;
+  --light-orange: #9a3d00;
+  --dark-orange-border: rgba(251, 146, 60, 0.35);
+  --light-orange-border: rgba(154, 61, 0, 0.35);
+  --dark-shadow-popover: 0 12px 32px rgba(0, 0, 0, 0.6);
+  --light-shadow-popover: 0 12px 32px rgba(0, 0, 0, 0.12);
+  --dark-shadow-overlay: 0 24px 80px rgba(0, 0, 0, 0.55);
+  --light-shadow-overlay: 0 24px 80px rgba(0, 0, 0, 0.18);
+  --dark-bg-field-translucent: rgba(255, 255, 255, 0.045);
+  --light-bg-field-translucent: rgba(0, 0, 0, 0.03);
+  --dark-shadow-field-inset: inset 0 1px 1px rgba(255, 255, 255, 0.035);
+  --light-shadow-field-inset: inset 0 1px 1px rgba(0, 0, 0, 0.04);
+  --dark-qr-light: #ffffff;
+  --light-qr-light: #ffffff;
+  --dark-bg-auth: #000000;
+  --light-bg-auth: #ffffff;
+  /* The wordmark artwork is white: light pages show it black. */
+  --dark-logo-filter: none;
+  --light-logo-filter: invert(1);
+
 
   /* Surfaces, darkest to lightest. */
-  --bg-base: #0a0a0a;
-  --bg-primary: #0a0a0a;
-  --bg-sidebar: #0b0b0b;
-  --bg-secondary: #0d0d0d;
-  --bg-surface: #131313;
-  --bg-field: #131313;
-  --bg-overlay: #141414;
-  --bg-surface-hover: #191919;
-  --bg-selected: #1e1e1e;
-  --bg-inverse: #f2f2f2;
-  --bg-inverse-hover: #ffffff;
-  --backdrop: rgba(0, 0, 0, 0.72);
+  --bg-base: var(--dark-bg-base);
+  --bg-primary: var(--dark-bg-primary);
+  --bg-sidebar: var(--dark-bg-sidebar);
+  --bg-secondary: var(--dark-bg-secondary);
+  --bg-surface: var(--dark-bg-surface);
+  --bg-field: var(--dark-bg-field);
+  --bg-overlay: var(--dark-bg-overlay);
+  --bg-surface-hover: var(--dark-bg-surface-hover);
+  --bg-selected: var(--dark-bg-selected);
+  /* Primary buttons are the text colour: the site's cream (routes/public.css). */
+  --bg-inverse: var(--dark-bg-inverse);
+  --bg-inverse-hover: var(--dark-bg-inverse-hover);
+  --backdrop: var(--dark-backdrop);
 
-  /* Text. Every pair with a surface above meets WCAG AA. */
-  --fg-primary: #ededed;
-  --fg-secondary: #b9b9b9;
-  --fg-tertiary: #8a8a8a;
-  --fg-disabled: #6e6e6e;
-  --fg-inverse: #0d0d0d;
-  --fg-on-accent: #02131a;
+  /* Text: the site's cream, and the same cream at the old greys' luminance, so
+     every pair with a surface above still meets WCAG AA. */
+  --fg-primary: var(--dark-fg-primary);
+  --fg-secondary: var(--dark-fg-secondary);
+  --fg-tertiary: var(--dark-fg-tertiary);
+  --fg-disabled: var(--dark-fg-disabled);
+  --fg-inverse: var(--dark-fg-inverse);
+  --fg-on-accent: var(--dark-fg-on-accent);
 
-  --border: #262626;
-  --border-hover: #363636;
-  --border-subtle: #1e1e1e;
+  --border: var(--dark-border);
+  --border-hover: var(--dark-border-hover);
+  --border-subtle: var(--dark-border-subtle);
 
-  --accent: #1f96b4;
-  --accent-hover: #2eaccb;
-  --accent-muted: rgba(31, 150, 180, 0.14);
-  --accent-text: #5cc3dc;
-  --focus-ring: #2eaccb;
+  /* The accent is the site's dark-theme signal colour. */
+  --accent: var(--dark-accent);
+  --accent-hover: var(--dark-accent-hover);
+  --accent-muted: var(--dark-accent-muted);
+  --accent-text: var(--dark-accent-text);
+  --focus-ring: var(--dark-focus-ring);
 
-  --success: #3fb950;
-  --success-muted: rgba(63, 185, 80, 0.12);
-  --success-border: rgba(63, 185, 80, 0.35);
-  --warning: #d29922;
-  --warning-muted: rgba(210, 153, 34, 0.12);
-  --warning-border: rgba(210, 153, 34, 0.35);
-  --destructive: #e8705f;
-  --destructive-muted: rgba(232, 112, 95, 0.1);
-  --destructive-border: rgba(232, 112, 95, 0.35);
-  --info: #5cc3dc;
-  --info-muted: rgba(31, 150, 180, 0.12);
-  --info-border: rgba(31, 150, 180, 0.35);
+  --success: var(--dark-success);
+  --success-muted: var(--dark-success-muted);
+  --success-border: var(--dark-success-border);
+  --warning: var(--dark-warning);
+  --warning-muted: var(--dark-warning-muted);
+  --warning-border: var(--dark-warning-border);
+  --destructive: var(--dark-destructive);
+  --destructive-muted: var(--dark-destructive-muted);
+  --destructive-border: var(--dark-destructive-border);
+  --info: var(--dark-info);
+  --info-muted: var(--dark-info-muted);
+  --info-border: var(--dark-info-border);
   /* Categorical tones for labels that are not statuses, such as assignments. */
-  --purple: #c084fc;
-  --purple-border: rgba(192, 132, 252, 0.35);
-  --orange: #fb923c;
-  --orange-border: rgba(251, 146, 60, 0.35);
+  --purple: var(--dark-purple);
+  --purple-border: var(--dark-purple-border);
+  --orange: var(--dark-orange);
+  --orange-border: var(--dark-orange-border);
 
-  --shadow-popover: 0 12px 32px rgba(0, 0, 0, 0.6);
+  --shadow-popover: var(--dark-shadow-popover);
   --shadow-current: inset 3px 0 0 var(--accent);
-  --shadow-overlay: 0 24px 80px rgba(0, 0, 0, 0.55);
+  --shadow-overlay: var(--dark-shadow-overlay);
 
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
   /* One size per text role; nothing smaller than --text-micro. */
   --text-page: clamp(1.5rem, 2vw, 1.875rem);
@@ -119,12 +225,12 @@
   --focus-ring-offset: 2px;
   --focus-ring-shadow: 0 0 0 1px var(--focus-ring);
   --autofill-shadow: inset 0 0 0 100vmax var(--bg-field);
-  --bg-field-translucent: rgba(255, 255, 255, 0.045);
-  --shadow-field-inset: inset 0 1px 1px rgba(255, 255, 255, 0.035);
-  --qr-light: #ffffff;
-  /* Cosmos: the sign-in and home background. public.css repeats these two. */
-  --bg-cosmos: #070a0b;
-  --cosmos-vignette: radial-gradient(circle at 50% 20%, rgba(11, 13, 14, 0.08), rgba(11, 13, 14, 0.32) 48%, rgba(11, 13, 14, 0.72) 100%), linear-gradient(to bottom, rgba(11, 13, 14, 0.16), rgba(11, 13, 14, 0.48));
+  --bg-field-translucent: var(--dark-bg-field-translucent);
+  --shadow-field-inset: var(--dark-shadow-field-inset);
+  --qr-light: var(--dark-qr-light);
+  /* Sign-in, sign-up, device, two-factor and preview-denied pages: plain black. */
+  --bg-auth: var(--dark-bg-auth);
+  --logo-filter: var(--dark-logo-filter);
   --choice-size: 1rem;
   --icon-size: 1rem;
   --icon-size-sm: 0.75rem;
@@ -161,27 +267,17 @@
   --icon-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
 }
 
-@font-face {
-  font-family: "IBM Plex Mono";
-  src: url("/assets/codewire/fonts/ibm-plex-mono-regular-2.5.0.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-}
+/* Light: the system asks for it and the visitor has not chosen dark, or the visitor chose light. */
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); color-scheme: light; } }
+:root[data-theme="light"] { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); color-scheme: light; }
 
+/* Geist Mono, shared with the public site: one variable file with the box-drawing
+   and block characters the terminal needs. */
 @font-face {
-  font-family: "IBM Plex Mono";
-  src: url("/assets/codewire/fonts/ibm-plex-mono-medium-2.5.0.woff2") format("woff2");
+  font-family: "Geist Mono";
+  src: url("/assets/codewire/fonts/geist-mono-1.9.0.woff2") format("woff2");
   font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "IBM Plex Mono";
-  src: url("/assets/codewire/fonts/ibm-plex-mono-semibold-2.5.0.woff2") format("woff2");
-  font-style: normal;
-  font-weight: var(--weight-semibold);
+  font-weight: 100 900;
   font-display: swap;
 }
 
@@ -252,6 +348,12 @@
 }
 
 
+/* The theme switch (theme.js): all three icons are in the markup; this shows the current one. */
+.cw-theme-switch .cw-theme-icon { display: none; }
+.cw-theme-switch[data-theme-current="system"] .cw-theme-icon--system,
+.cw-theme-switch[data-theme-current="light"] .cw-theme-icon--light,
+.cw-theme-switch[data-theme-current="dark"] .cw-theme-icon--dark { display: inline-block; }
+
 .cw-brand {
   display: flex;
   align-items: center;
@@ -261,6 +363,7 @@
 }
 
 .cw-brand img {
+  filter: var(--logo-filter);
   width: 1.25rem;
   height: 1.25rem;
 }
@@ -750,7 +853,6 @@ fieldset.cw-field > legend {
   border-radius: var(--radius-md);
   background: var(--bg-field);
   color: var(--fg-primary);
-  color-scheme: dark;
   font: inherit;
   font-size: var(--text-body);
   line-height: var(--leading-ui);

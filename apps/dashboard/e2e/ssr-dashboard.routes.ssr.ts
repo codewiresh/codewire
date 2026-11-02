@@ -4,7 +4,7 @@
 // covers: src/routes/settings.rs src/routes/snapshots.rs src/secrets_presets_connect.rs
 // covers: templates/auth-form.html templates/device.html templates/environment-create-form.html
 // covers: templates/environment-list.html templates/environment-source-fields.html
-// covers: templates/home.html templates/organization-environments-content.html
+// covers: templates/home.html templates/pricing.html templates/organization-environments-content.html
 // covers: templates/organization-environments.html templates/settings-credentials.html
 // covers: templates/settings-nav.html templates/settings-navigation.html
 // covers: templates/settings-secrets.html templates/settings.html templates/snapshots.html
@@ -22,7 +22,7 @@ const switchRoutesOrgSlug = `e2e-clean-routes-switch-${Date.now()}-${crypto.rand
 test.describe("homepage", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test("story assets and sign-in stay on the Rust origin", { tag: "@smoke" }, async ({ page }) => {
+  test("story assets and sign-in stay on the Rust origin", { tag: "@smoke" }, async ({ page, isMobile }) => {
     const requests: string[] = [];
     const errors: string[] = [];
     page.on("request", (request) => requests.push(request.url()));
@@ -33,65 +33,120 @@ test.describe("homepage", () => {
     const response = await page.goto("/");
     expect(response?.status()).toBe(200);
     expect(response?.headers()["content-security-policy"]).not.toContain("unsafe-inline");
-    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-    await expect(page.locator(".cw-brand img")).toHaveAttribute("alt", "Codewire");
+    await expect(page.getByRole("heading", { level: 1, name: "Codewire" })).toBeVisible();
     await expect(page.locator("script:not([src]), style")).toHaveCount(0);
-    await expect(page.getByRole("link", { name: "Read the docs" })).toHaveAttribute("href", "/docs");
-    await expect(page.getByRole("link", { name: "See pricing →" })).toHaveAttribute("href", "/docs/reference/subscription-plans");
-    await expect(page.getByRole("link", { name: "Request access" }).last()).toHaveAttribute("href", "/signup");
+    await expect(page.getByRole("link", { name: "Blog" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Request access" })).toHaveAttribute("href", "/signup");
     expect(await page.locator("body").evaluate((body) => body.scrollWidth <= window.innerWidth)).toBe(true);
     await page.waitForLoadState("networkidle");
     expect(errors).toEqual([]);
-    await page.getByRole("link", { name: "Sign in", exact: true }).click();
+    if (isMobile) await page.getByRole("button", { name: "Menu" }).click();
+    const main = page.getByRole("navigation", { name: isMobile ? "Menu" : "Main" });
+    await expect(main.getByRole("link", { name: "Docs" })).toHaveAttribute("href", "/docs");
+    await expect(main.getByRole("link", { name: "Pricing" })).toHaveAttribute("href", "/pricing");
+    await page.getByRole("link", { name: "Log in", exact: true }).click();
     await expect(page).toHaveURL(`${ssrUrl}/login`);
     await expect(page.getByRole("heading", { name: "Log in to Codewire", exact: true })).toBeVisible();
+    // The fonts are self-hosted: the page asks nothing of another origin.
     expect(requests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);
   });
 
-  test("network modes support keyboard interaction", async ({ page }) => {
+  test("network and isolation modes support keyboard interaction", async ({ page }) => {
     await page.goto("/");
-    const mesh = page.getByRole("button", { name: "Encrypted meshes" });
+    const mesh = page.getByRole("button", { name: "Mesh", exact: true });
     await mesh.focus();
     await mesh.press("Enter");
     await expect(mesh).toHaveAttribute("aria-pressed", "true");
-    await expect(page.locator(".cw-parallel-state--mesh")).toHaveAttribute("aria-hidden", "false");
-    await expect(page.locator("#parallel-operator-meta")).toContainText(/\d+ sessions/);
-    await page.getByRole("button", { name: "Independent sessions" }).click();
-    await expect(mesh).toHaveAttribute("aria-pressed", "false");
-    await expect(page.locator(".cw-parallel-state--independent")).toHaveAttribute("aria-hidden", "false");
+    await expect(page.getByRole("button", { name: "Independent", exact: true })).toHaveAttribute("aria-pressed", "false");
+    await expect(page.locator("#netcap")).toContainText("Mesh.");
+    const confidential = page.getByRole("button", { name: "Confidential" });
+    await confidential.focus();
+    await confidential.press("Enter");
+    await expect(confidential).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("#isocap")).toContainText("Confidential.");
   });
 
-  test("reduced motion shows the complete workflow", async ({ page }) => {
-    await page.emulateMedia({ reducedMotion: "reduce" });
+  test("the theme switch cycles system, light and dark and is kept across the public pages", async ({ page }) => {
     await page.goto("/");
-    const steps = page.locator(".cw-workflow-list > li");
-    await expect(steps).not.toHaveCount(0);
-    for (const step of await steps.all()) {
-      await expect(step).toBeVisible();
-      await expect(step).toHaveCSS("opacity", "1");
-    }
-    await expect(page.locator(".cw-workflow-terminal-column")).toBeHidden();
-    await expect(page.locator(".cw-flow-packet").first()).toBeHidden();
-    await page.emulateMedia({ reducedMotion: "no-preference" });
-    await expect(page.locator(".cw-workflow-stage")).toHaveClass(/is-enhanced/);
-    await page.emulateMedia({ reducedMotion: "reduce" });
-    await expect(page.locator(".cw-workflow-stage")).not.toHaveClass(/is-enhanced/);
-    for (const step of await steps.all()) await expect(step).toHaveCSS("opacity", "1");
+    const theme = page.locator("#themeBtn");
+    await expect(page.locator("html")).not.toHaveAttribute("data-theme", /./);
+    await theme.click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await theme.click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expect(theme).toHaveAttribute("aria-label", "Theme: Dark. Switch theme");
+    await page.goto("/pricing");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await page.locator("#themeBtn").click();
+    await expect(page.locator("html")).not.toHaveAttribute("data-theme", /./);
   });
 
-  test("without JavaScript the workflow and access link remain usable", async ({ browser }) => {
+  test("without JavaScript the story and access link remain usable", async ({ browser }) => {
     const context = await browser.newContext({ baseURL: ssrUrl, javaScriptEnabled: false, storageState: { cookies: [], origins: [] } });
     const page = await context.newPage();
     try {
       await page.goto("/");
-      const steps = page.locator(".cw-workflow-list > li");
-      await expect(steps).not.toHaveCount(0);
-      for (const step of await steps.all()) {
-        await expect(step).toBeVisible();
-        await expect(step).toHaveCSS("opacity", "1");
+      for (const name of [/^Every session in its own VM/, "Sandboxes everywhere.", "Choose your isolation.", "Take hold."]) {
+        await expect(page.getByRole("heading", { name })).toBeVisible();
       }
-      await expect(page.getByRole("link", { name: "Request access" }).last()).toHaveAttribute("href", "/signup");
-      await expect(page.locator(".cw-parallel-mode-switch")).toBeHidden();
+      await expect(page.getByRole("link", { name: "Request access" })).toHaveAttribute("href", "/signup");
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("pricing estimates a sandbox per period", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    const response = await page.goto("/pricing");
+    expect(response?.status()).toBe(200);
+    expect(response?.headers()["content-security-policy"]).not.toContain("unsafe-inline");
+    await expect(page.locator("script:not([src]), style")).toHaveCount(0);
+    await expect(page.getByRole("heading", { level: 1, name: "Pricing" })).toBeVisible();
+    await expect(page.locator('.nav a[href="/pricing"]')).toHaveAttribute("aria-current", "page");
+    const total = page.locator('[data-pricing-cost="total"]');
+    await expect(total).toHaveText("€0.2091");
+
+    await page.getByRole("button", { name: "4 vCPU · 16 GB" }).click();
+    await expect(page.getByRole("button", { name: "4 vCPU · 16 GB" })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "2 vCPU · 8 GB" })).toHaveAttribute("aria-pressed", "false");
+    await expect(total).toHaveText("€0.4095");
+
+    await page.getByRole("button", { name: "Month" }).click();
+    await expect(page.locator("[data-pricing-period-label]")).toHaveText("per month");
+    await expect(total).toHaveText("€298.94");
+
+    // vCPU and memory move only over the sizes a sandbox can have.
+    const cpu = page.getByLabel("vCPU", { exact: true });
+    const memory = page.getByLabel("Memory", { exact: true });
+    await expect(cpu).toHaveAttribute("data-pricing-steps", "1 2 4 8 16");
+    await expect(memory).toHaveAttribute("data-pricing-steps", "1 4 8 16 32");
+    await expect(page.getByLabel("Disk", { exact: true })).toHaveAttribute("max", "200");
+    await expect(cpu).toHaveAttribute("aria-valuetext", "4 vCPU");
+    await cpu.focus();
+    await cpu.press("End");
+    await expect(page.locator('[data-pricing-value="cpu"]')).toHaveText("16 vCPU");
+    await expect(cpu).toHaveAttribute("aria-valuetext", "16 vCPU");
+    await cpu.press("ArrowLeft");
+    await expect(page.locator('[data-pricing-value="cpu"]')).toHaveText("8 vCPU");
+    await memory.focus();
+    await memory.press("Home");
+    await expect(page.locator('[data-pricing-value="memory"]')).toHaveText("1 GB");
+    await expect(page.locator('[data-preset-cpu][aria-pressed="true"]')).toHaveCount(0);
+
+    expect(await page.locator("body").evaluate((body) => body.scrollWidth <= window.innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
+  test("without JavaScript pricing still shows the hourly price", async ({ browser }) => {
+    const context = await browser.newContext({ baseURL: ssrUrl, javaScriptEnabled: false, storageState: { cookies: [], origins: [] } });
+    const page = await context.newPage();
+    try {
+      await page.goto("/pricing");
+      await expect(page.locator('[data-pricing-cost="total"]')).toHaveText("€0.2091");
+      await expect(page.locator("[data-pricing-period-label]")).toHaveText("per hour");
+      await expect(page.getByRole("button", { name: "Month" })).toBeHidden();
+      await expect(page.getByRole("link", { name: "Start with €50 of compute" })).toHaveAttribute("href", "/signup");
     } finally {
       await context.close();
     }

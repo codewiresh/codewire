@@ -18,7 +18,6 @@ DESIGN_RUST_ROUTES = "crates/codewire-dashboard-web/src/routes"
 DESIGN_STYLESHEET_PATTERNS = (
     f"{DESIGN_PACKAGE}/styles.css",
     f"{DESIGN_PACKAGE}/components.css",
-    f"{DESIGN_PACKAGE}/cosmos.css",
     f"{DESIGN_PACKAGE}/routes/*.css",
     f"{DESIGN_FIXTURES}/*.css",
 )

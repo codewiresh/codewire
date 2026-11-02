@@ -1,7 +1,7 @@
 /* Sign-in, sign-up, device, invitation and two-factor pages: one centred panel
-   over the Cosmos background under the small C mark. Primitives own the
+   on plain black under the small C mark. Primitives own the
    visuals; this sheet lays the pages out. Every value is a design token. */
-.cw-auth-body { min-height: 100vh; background: var(--bg-base); isolation: isolate; }
+.cw-auth-body { min-height: 100vh; background: var(--bg-auth); isolation: isolate; }
 .cw-auth-shell { position: relative; z-index: 1; display: grid; width: min(100%, 35rem); min-height: 100svh; margin: 0 auto; align-content: center; gap: var(--space-6); padding: var(--space-8) var(--space-6); }
 .cw-auth-brand { display: inline-flex; justify-self: center; overflow: hidden; border: 1px solid var(--border-hover); border-radius: var(--radius-lg); }
 .cw-auth-brand img { display: block; width: var(--control-height-lg); height: var(--control-height-lg); }

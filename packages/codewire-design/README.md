@@ -30,7 +30,7 @@ are compiled into the Rust binary without a package build or browser download.
 
 Run `make design-system`, then open
 `http://127.0.0.1:4174/reference/fixtures/`. The static server binds only to
-loopback, maps the production IBM Plex Mono asset URLs to their checked-in font
+loopback, maps the production font asset URLs to their checked-in font
 files, and does not modify generated or production assets. Open files beneath
 `reference/source/` in the design authoring host when editing the original
 handoff; use the fixtures for the repository-owned, fully offline preview.
@@ -65,10 +65,11 @@ Rust adapter. Do not add inline scripts, eval-dependent HTMX features, dynamic
 package runners, package-CDN references, or install-time generation.
 
 The homepage template and `reference/fixtures/home.html`
-share `routes/public.css`, `public.js`, and the white Codewire artwork. The Rust
+share `routes/public.css` and `public.js`. Fonts are vendored under
+`crates/codewire-dashboard-web/assets/fonts/` and recorded in `.supplychain/vendor-artifacts.json`. The Rust
 asset tests verify homepage parity after resolving fixture asset paths.
-The homepage, sign-in, and sign-up share the decorative background in `cosmos.css`
-and `cosmos.js`. The auth template and `reference/fixtures/login.html`,
+Sign-in, sign-up and the other account pages sit on plain black
+(`--bg-auth`). The auth template and `reference/fixtures/login.html`,
 `reference/fixtures/login-preview.html` and `reference/fixtures/signup.html`
 share `routes/auth.css`. `login-preview.html` is the same sign-in reached from
 the private-preview redirect: only its title and one fixed context line differ.

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::{
     response::{render_page, render_template},
     state::AppState,
-    templates::{AuthStatusTemplate, HomeTemplate},
+    templates::{AuthStatusTemplate, HomeTemplate, PricingTemplate},
     view::AuthQuery,
 };
 
@@ -20,6 +20,10 @@ struct VerifyEmailResponse {
 
 pub(super) async fn home() -> Response {
     render_page(HomeTemplate)
+}
+
+pub(super) async fn pricing() -> Response {
+    render_page(PricingTemplate)
 }
 
 pub(super) async fn verify_email(

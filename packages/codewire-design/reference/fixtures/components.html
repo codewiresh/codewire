@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="utf-8"><script src="../../theme.js"></script><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Codewire components</title>
   <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
   <link rel="stylesheet" href="gallery.css">
@@ -240,6 +240,13 @@
         <div class="cw-field"><label class="cw-label" for="danger-card-confirm">Type <strong>delete</strong> to confirm</label><input class="cw-input" id="danger-card-confirm" name="confirm" required pattern="delete" autocomplete="off"></div>
         <div class="cw-form-actions"><button class="cw-button cw-danger-button" type="submit">Delete</button></div>
       </form>
+    </div>
+  </section>
+
+  <section class="cw-card" aria-labelledby="theme-switch-title">
+    <header class="cw-card-header"><h2 id="theme-switch-title" class="cw-card-title">Theme switch</h2><p class="cw-card-description">System, light or dark, one choice for every page (theme.js). It names its state in text and shows the matching icon; this one switches this page.</p></header>
+    <div class="cw-card-content">
+      <ul class="cw-console-footer"><li><button class="cw-nav-link cw-theme-switch" type="button" data-theme-switch data-theme-current="system"><svg class="cw-icon cw-theme-icon cw-theme-icon--system" aria-hidden="true"><use href="../../assets/icons.svg#icon-monitor"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--light" aria-hidden="true"><use href="../../assets/icons.svg#icon-sun"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--dark" aria-hidden="true"><use href="../../assets/icons.svg#icon-moon"/></svg><span data-theme-label>Theme: System</span></button></li></ul>
     </div>
   </section>
 

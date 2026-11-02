@@ -1372,7 +1372,7 @@ mod tests {
             let mut from = 0;
             for fragment in [
                 PREVIEW_TITLE,
-                "<div class=\"cw-cosmos\" aria-hidden=\"true\">",
+                "<body class=\"cw-body cw-auth-body\" data-route=\"auth\">",
                 "<main class=\"cw-auth-shell\">",
                 "<section class=\"cw-auth-panel\" aria-labelledby=\"auth-title\">",
                 "<header class=\"cw-auth-header\">",

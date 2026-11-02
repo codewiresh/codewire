@@ -831,13 +831,13 @@ mod tests {
     }
 
     #[test]
-    fn denied_page_and_fixture_share_the_cosmos_auth_shell() {
+    fn denied_page_and_fixture_share_the_auth_shell() {
         let product = include_str!("denied.html");
         let fixture = include_str!(
             "../../../../../packages/codewire-design/reference/fixtures/preview-access-denied.html"
         );
         for fragment in [
-            "<div class=\"cw-cosmos\" aria-hidden=\"true\">",
+            "<body class=\"cw-body cw-auth-body\" data-route=\"preview-access-denied\">",
             "<main class=\"cw-auth-shell\">",
             "<section class=\"cw-auth-panel\" aria-labelledby=\"preview-denied-title\">",
             "<h1 id=\"preview-denied-title\" class=\"cw-page-title\">Preview access denied</h1>",
@@ -848,6 +848,8 @@ mod tests {
         }
         assert!(!product.contains("gradient"));
         assert!(!fixture.contains("gradient"));
+        assert!(!product.contains("cosmos"));
+        assert!(!fixture.contains("cosmos"));
     }
 
     // A database failure while resolving a challenge's host is transient, so the
@@ -909,7 +911,7 @@ mod tests {
         let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
         let html = std::str::from_utf8(&body).unwrap();
         assert!(html.contains("Preview access denied"));
-        assert!(html.contains("/assets/codewire/cosmos-v1.js"));
+        assert!(html.contains("/assets/codewire/routes/auth-v2.css"));
         assert!(html.contains("/assets/codewire/brand-icon-v1.svg"));
         assert!(html.contains("class=\"cw-auth-header\""));
     }

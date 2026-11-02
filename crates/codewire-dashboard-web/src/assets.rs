@@ -17,9 +17,7 @@ pub(crate) const HTMX_PATH: &str = "/assets/codewire/htmx-2.0.10.min.js";
 pub(crate) const STYLE_PATH: &str = "/assets/codewire/design-v1.css";
 pub(crate) const DASHBOARD_STYLE_PATH: &str = "/assets/codewire/routes/dashboard-v1.css";
 pub(crate) const AUTH_STYLE_PATH: &str = "/assets/codewire/routes/auth-v2.css";
-pub(crate) const PUBLIC_STYLE_PATH: &str = "/assets/codewire/routes/public-v1.css";
-pub(crate) const COSMOS_STYLE_PATH: &str = "/assets/codewire/cosmos-v1.css";
-pub(crate) const COSMOS_SCRIPT_PATH: &str = "/assets/codewire/cosmos-v1.js";
+pub(crate) const PUBLIC_STYLE_PATH: &str = "/assets/codewire/routes/public-v2.css";
 pub(crate) const DEVICE_SCRIPT_PATH: &str = "/assets/codewire/device-v1.js";
 pub(crate) const SETTINGS_STYLE_PATH: &str = "/assets/codewire/routes/settings-v1.css";
 pub(crate) const ORGANIZATIONS_STYLE_PATH: &str = "/assets/codewire/routes/organizations-v1.css";
@@ -30,7 +28,9 @@ pub(crate) const TERMINAL_STYLE_PATH: &str = "/assets/codewire/routes/terminal-v
 pub(crate) const BILLING_ADMIN_STYLE_PATH: &str = "/assets/codewire/routes/billing-admin-v1.css";
 pub(crate) const XTERM_STYLE_PATH: &str = "/assets/codewire/xterm-6.0.0.css";
 pub(crate) const SCRIPT_PATH: &str = "/assets/codewire/dashboard-v1.js";
-pub(crate) const PUBLIC_SCRIPT_PATH: &str = "/assets/codewire/public-v1.js";
+pub(crate) const PUBLIC_SCRIPT_PATH: &str = "/assets/codewire/public-v2.js";
+pub(crate) const PRICING_SCRIPT_PATH: &str = "/assets/codewire/pricing-v1.js";
+pub(crate) const THEME_SCRIPT_PATH: &str = "/assets/codewire/theme-v1.js";
 pub(crate) const ORGANIZATIONS_SCRIPT_PATH: &str = "/assets/codewire/organizations-v1.js";
 pub(crate) const ENVIRONMENTS_SCRIPT_PATH: &str = "/assets/codewire/environments-v2.js";
 pub(crate) const TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/terminal-v1.js";
@@ -50,13 +50,11 @@ pub(crate) const BRAND_WORDMARK_PATH: &str = "/assets/codewire/brand-wordmark-v1
 pub(crate) const BRAND_ICON_PATH: &str = "/assets/codewire/brand-icon-v1.svg";
 pub(crate) const CONSOLE_LOGO_PATH: &str = "/assets/codewire/console-logo-v1.svg";
 pub(crate) const ICONS_PATH: &str = "/assets/codewire/icons-v2.svg";
-pub(crate) const SPACE_GROTESK_PATH: &str = "/assets/codewire/fonts/space-grotesk-2.0.woff2";
-pub(crate) const IBM_PLEX_MONO_REGULAR_PATH: &str =
-    "/assets/codewire/fonts/ibm-plex-mono-regular-2.5.0.woff2";
-pub(crate) const IBM_PLEX_MONO_MEDIUM_PATH: &str =
-    "/assets/codewire/fonts/ibm-plex-mono-medium-2.5.0.woff2";
-pub(crate) const IBM_PLEX_MONO_SEMIBOLD_PATH: &str =
-    "/assets/codewire/fonts/ibm-plex-mono-semibold-2.5.0.woff2";
+pub(crate) const SCHIBSTED_GROTESK_LATIN_PATH: &str =
+    "/assets/codewire/fonts/schibsted-grotesk-latin-5.3.0.woff2";
+pub(crate) const SCHIBSTED_GROTESK_LATIN_EXT_PATH: &str =
+    "/assets/codewire/fonts/schibsted-grotesk-latin-ext-5.3.0.woff2";
+pub(crate) const GEIST_MONO_PATH: &str = "/assets/codewire/fonts/geist-mono-1.9.0.woff2";
 
 const HTMX: &str = include_str!("../assets/htmx-2.0.10.min.js");
 const STYLES: &str = concat!(
@@ -68,8 +66,6 @@ const DASHBOARD_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/dashboard.css");
 const AUTH_STYLES: &str = include_str!("../../../packages/codewire-design/routes/auth.css");
 const PUBLIC_STYLES: &str = include_str!("../../../packages/codewire-design/routes/public.css");
-const COSMOS_STYLES: &str = include_str!("../../../packages/codewire-design/cosmos.css");
-const COSMOS_SCRIPT: &str = include_str!("../../../packages/codewire-design/cosmos.js");
 const DEVICE_SCRIPT: &str = include_str!("../../../packages/codewire-design/device.js");
 const SETTINGS_STYLES: &str = include_str!("../../../packages/codewire-design/routes/settings.css");
 const ORGANIZATIONS_STYLES: &str =
@@ -88,6 +84,8 @@ const DASHBOARD_SCRIPT: &str = concat!(
     include_str!("../../../packages/codewire-design/preview-ports.js"),
 );
 const PUBLIC_SCRIPT: &str = include_str!("../../../packages/codewire-design/public.js");
+const PRICING_SCRIPT: &str = include_str!("../../../packages/codewire-design/pricing.js");
+const THEME_SCRIPT: &str = include_str!("../../../packages/codewire-design/theme.js");
 const ORGANIZATIONS_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/organizations.js");
 const ENVIRONMENTS_SCRIPT: &str = include_str!("../../../packages/codewire-design/environments.js");
@@ -116,34 +114,31 @@ const BRAND_ICON: &str = include_str!("../../../packages/codewire-design/assets/
 const CONSOLE_LOGO: &str =
     include_str!("../../../packages/codewire-design/assets/console-logo.svg");
 const ICONS: &str = include_str!("../../../packages/codewire-design/assets/icons.svg");
-const SPACE_GROTESK: &[u8] =
-    include_bytes!("../../../packages/codewire-design/fonts/space-grotesk-2.0.woff2");
-const IBM_PLEX_MONO_REGULAR: &[u8] =
-    include_bytes!("../assets/fonts/IBMPlexMono-Regular-2.5.0.woff2");
-const IBM_PLEX_MONO_MEDIUM: &[u8] =
-    include_bytes!("../assets/fonts/IBMPlexMono-Medium-2.5.0.woff2");
-const IBM_PLEX_MONO_SEMIBOLD: &[u8] =
-    include_bytes!("../assets/fonts/IBMPlexMono-SemiBold-2.5.0.woff2");
+const SCHIBSTED_GROTESK_LATIN: &[u8] =
+    include_bytes!("../assets/fonts/SchibstedGrotesk-latin-5.3.0.woff2");
+const SCHIBSTED_GROTESK_LATIN_EXT: &[u8] =
+    include_bytes!("../assets/fonts/SchibstedGrotesk-latin-ext-5.3.0.woff2");
+const GEIST_MONO: &[u8] = include_bytes!("../assets/fonts/GeistMono-Variable-1.9.0.woff2");
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route(
-            SPACE_GROTESK_PATH,
-            static_binary_asset("font/woff2", SPACE_GROTESK),
+            SCHIBSTED_GROTESK_LATIN_PATH,
+            static_binary_asset("font/woff2", SCHIBSTED_GROTESK_LATIN),
+        )
+        .route(
+            SCHIBSTED_GROTESK_LATIN_EXT_PATH,
+            static_binary_asset("font/woff2", SCHIBSTED_GROTESK_LATIN_EXT),
+        )
+        .route(
+            GEIST_MONO_PATH,
+            static_binary_asset("font/woff2", GEIST_MONO),
         )
         .route(
             HTMX_PATH,
             static_asset("application/javascript; charset=utf-8", HTMX),
         )
         .route(STYLE_PATH, static_asset("text/css; charset=utf-8", STYLES))
-        .route(
-            COSMOS_STYLE_PATH,
-            static_asset("text/css; charset=utf-8", COSMOS_STYLES),
-        )
-        .route(
-            COSMOS_SCRIPT_PATH,
-            static_asset("application/javascript; charset=utf-8", COSMOS_SCRIPT),
-        )
         .route(
             DEVICE_SCRIPT_PATH,
             static_asset("application/javascript; charset=utf-8", DEVICE_SCRIPT),
@@ -195,6 +190,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             PUBLIC_SCRIPT_PATH,
             static_asset("application/javascript; charset=utf-8", PUBLIC_SCRIPT),
+        )
+        .route(
+            PRICING_SCRIPT_PATH,
+            static_asset("application/javascript; charset=utf-8", PRICING_SCRIPT),
+        )
+        .route(
+            THEME_SCRIPT_PATH,
+            static_asset("application/javascript; charset=utf-8", THEME_SCRIPT),
         )
         .route(
             ORGANIZATIONS_SCRIPT_PATH,
@@ -286,18 +289,6 @@ pub(crate) fn router() -> Router<AppState> {
             static_asset("image/svg+xml", CONSOLE_LOGO),
         )
         .route(ICONS_PATH, static_asset("image/svg+xml", ICONS))
-        .route(
-            IBM_PLEX_MONO_REGULAR_PATH,
-            static_binary_asset("font/woff2", IBM_PLEX_MONO_REGULAR),
-        )
-        .route(
-            IBM_PLEX_MONO_MEDIUM_PATH,
-            static_binary_asset("font/woff2", IBM_PLEX_MONO_MEDIUM),
-        )
-        .route(
-            IBM_PLEX_MONO_SEMIBOLD_PATH,
-            static_binary_asset("font/woff2", IBM_PLEX_MONO_SEMIBOLD),
-        )
 }
 
 fn static_asset(content_type: &'static str, body: &'static str) -> MethodRouter<AppState> {
@@ -371,17 +362,23 @@ mod tests {
     fn homepage_fixtures_and_docs_share_production_assets() {
         use askama::Template;
 
-        let html = crate::templates::HomeTemplate.render().unwrap();
-        for (fixture, prefix) in [(
-            include_str!("../../../packages/codewire-design/reference/fixtures/home.html"),
-            "../../",
-        )] {
+        for (fixture, html) in [
+            (
+                include_str!("../../../packages/codewire-design/reference/fixtures/home.html"),
+                crate::templates::HomeTemplate.render().unwrap(),
+            ),
+            (
+                include_str!("../../../packages/codewire-design/reference/fixtures/pricing.html"),
+                crate::templates::PricingTemplate.render().unwrap(),
+            ),
+        ] {
+            let prefix = "../../";
             let mut normalized = fixture.to_owned();
             for (local, public) in [
-                ("cosmos.css", COSMOS_STYLE_PATH),
-                ("cosmos.js", COSMOS_SCRIPT_PATH),
                 ("routes/public.css", PUBLIC_STYLE_PATH),
                 ("public.js", PUBLIC_SCRIPT_PATH),
+                ("pricing.js", PRICING_SCRIPT_PATH),
+                ("theme.js", THEME_SCRIPT_PATH),
                 ("assets/brand-icon.svg", BRAND_ICON_PATH),
                 ("assets/brand-wordmark.svg", BRAND_WORDMARK_PATH),
             ] {
@@ -390,7 +387,7 @@ mod tests {
             assert_eq!(
                 normalized.trim_end(),
                 html,
-                "homepage fixture drifted from production"
+                "public page fixture drifted from production"
             );
         }
         assert_eq!(

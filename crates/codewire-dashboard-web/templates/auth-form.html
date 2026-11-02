@@ -4,21 +4,17 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
+    <script src="/assets/codewire/theme-v1.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ view.title }} · Codewire</title>
     <link rel="icon" href="/assets/codewire/brand-icon-v1.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/assets/codewire/design-v1.css">
     <link rel="stylesheet" href="/assets/codewire/routes/auth-v2.css">
-    <link rel="stylesheet" href="/assets/codewire/cosmos-v1.css">
-    <script src="/assets/codewire/cosmos-v1.js" defer></script>
     {% if is_signup && !view.turnstile_site_key.is_empty() %}
     <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
     {% endif %}
   </head>
   <body class="cw-body cw-auth-body" data-route="auth">
-    <div class="cw-cosmos" aria-hidden="true">
-      <canvas id="cosmos-canvas"></canvas>
-    </div>
     <main class="cw-auth-shell">
       <a class="cw-auth-brand" href="/" aria-label="Codewire home">
         <img src="/assets/codewire/brand-icon-v1.svg" width="48" height="48" alt="Codewire">

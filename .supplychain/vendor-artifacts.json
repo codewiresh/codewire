@@ -83,40 +83,49 @@
       "sha384": "sha384-bniI+JB8zL1vreD+pp5VYLLlWl+gTajqJCwFtGaiRTCQtOTp2hUVXpkd9iv3ZMHp"
     },
     {
-      "package": "@ibm/plex-mono",
-      "version": "2.5.0",
-      "member": "fonts/complete/woff2/IBMPlexMono-Regular.woff2",
-      "path": "crates/codewire-dashboard-web/assets/fonts/IBMPlexMono-Regular-2.5.0.woff2",
-      "integrity": "sha512-STBJIPxPomOYPmBMO7z5TKPJUotAF9u3gAUumTqVgwgrAO+K4FRNh0MlhsoJjKhJKsMbBJR10/bk4inkj/wc1w==",
-      "size": 49248,
-      "sha384": "sha384-JSE7HMglLOeVIv8nHMFZLGJRsHQApoawdQqnJUQ2bQ73ayLAXKQOlyVlhYikwzYZ"
+      "package": "geist",
+      "version": "1.9.0",
+      "member": "dist/fonts/geist-mono/GeistMono-Variable.woff2",
+      "path": "crates/codewire-dashboard-web/assets/fonts/GeistMono-Variable-1.9.0.woff2",
+      "integrity": "sha512-uxiyxH5PaKDaK2//ln06NxJEz5gc6771BTwSs1YFgNnASGtp1SYD3VZShSIijvlNwDjMgHnzqye4MmIUTspEzw==",
+      "size": 71272,
+      "sha384": "sha384-o6GMcSTewMCV85trFgJ4aSvc6cMnNl9rMOHNoTGfZtSHUEpVSny2HoRWeGS/G+OI"
     },
     {
-      "package": "@ibm/plex-mono",
-      "version": "2.5.0",
-      "member": "fonts/complete/woff2/IBMPlexMono-Medium.woff2",
-      "path": "crates/codewire-dashboard-web/assets/fonts/IBMPlexMono-Medium-2.5.0.woff2",
-      "integrity": "sha512-STBJIPxPomOYPmBMO7z5TKPJUotAF9u3gAUumTqVgwgrAO+K4FRNh0MlhsoJjKhJKsMbBJR10/bk4inkj/wc1w==",
-      "size": 50400,
-      "sha384": "sha384-tylDsdgKnnChsCkLwFBV+SXV2SRHQIfUwfrudWNH+EDQs+bIUTLTdSELFa9+Q//W"
-    },
-    {
-      "package": "@ibm/plex-mono",
-      "version": "2.5.0",
-      "member": "fonts/complete/woff2/IBMPlexMono-SemiBold.woff2",
-      "path": "crates/codewire-dashboard-web/assets/fonts/IBMPlexMono-SemiBold-2.5.0.woff2",
-      "integrity": "sha512-STBJIPxPomOYPmBMO7z5TKPJUotAF9u3gAUumTqVgwgrAO+K4FRNh0MlhsoJjKhJKsMbBJR10/bk4inkj/wc1w==",
-      "size": 50600,
-      "sha384": "sha384-Pr0QoHYIEEtq2oAdw1cVpnS1O0lq13IiRuTjJqWxCaV2kugfds6EIW2b7+AXcOZ1"
-    },
-    {
-      "package": "@ibm/plex-mono",
-      "version": "2.5.0",
+      "package": "geist",
+      "version": "1.9.0",
       "member": "LICENSE.txt",
-      "path": "crates/codewire-dashboard-web/assets/fonts/LICENSE-IBMPlexMono-2.5.0",
-      "integrity": "sha512-STBJIPxPomOYPmBMO7z5TKPJUotAF9u3gAUumTqVgwgrAO+K4FRNh0MlhsoJjKhJKsMbBJR10/bk4inkj/wc1w==",
-      "size": 4456,
-      "sha384": "sha384-nJMRAEm3/jyDfD3kNrW7WQuX4T8Rgt62WYm/Dnse/hVOIYHZma62B6vzS5rnudJu"
+      "path": "crates/codewire-dashboard-web/assets/fonts/LICENSE-Geist-1.9.0",
+      "integrity": "sha512-uxiyxH5PaKDaK2//ln06NxJEz5gc6771BTwSs1YFgNnASGtp1SYD3VZShSIijvlNwDjMgHnzqye4MmIUTspEzw==",
+      "size": 4368,
+      "sha384": "sha384-jbtnSfDUTF5u+Kb3hsY4G3xZ++q0k162obR2ANXqKmAdeV4wqE4Nwi1uk90LnN8u"
+    },
+    {
+      "package": "@fontsource-variable/schibsted-grotesk",
+      "version": "5.3.0",
+      "member": "files/schibsted-grotesk-latin-wght-normal.woff2",
+      "path": "crates/codewire-dashboard-web/assets/fonts/SchibstedGrotesk-latin-5.3.0.woff2",
+      "integrity": "sha512-ndS6H/KICWANchlHF3q4UdZD+xrZ3Ji0rUobIuXlgvDUzDfqZDsVuXPXZb636nJZMHE9zZ9Fmwgqazm8hMB50Q==",
+      "size": 46752,
+      "sha384": "sha384-0V0mgU+ToSPPuG3MKsv1iCsK5wD2uAbpb2EdI03oiOwT4a0sWkkXLtA04rgH2gOv"
+    },
+    {
+      "package": "@fontsource-variable/schibsted-grotesk",
+      "version": "5.3.0",
+      "member": "files/schibsted-grotesk-latin-ext-wght-normal.woff2",
+      "path": "crates/codewire-dashboard-web/assets/fonts/SchibstedGrotesk-latin-ext-5.3.0.woff2",
+      "integrity": "sha512-ndS6H/KICWANchlHF3q4UdZD+xrZ3Ji0rUobIuXlgvDUzDfqZDsVuXPXZb636nJZMHE9zZ9Fmwgqazm8hMB50Q==",
+      "size": 20924,
+      "sha384": "sha384-4JH/XyWhDzu4TNP3WZS7XWJOW5+D6DdsGMVTZzWmy6yMmIRi9fT7jl7cnHitDHuA"
+    },
+    {
+      "package": "@fontsource-variable/schibsted-grotesk",
+      "version": "5.3.0",
+      "member": "LICENSE",
+      "path": "crates/codewire-dashboard-web/assets/fonts/LICENSE-SchibstedGrotesk-5.3.0",
+      "integrity": "sha512-ndS6H/KICWANchlHF3q4UdZD+xrZ3Ji0rUobIuXlgvDUzDfqZDsVuXPXZb636nJZMHE9zZ9Fmwgqazm8hMB50Q==",
+      "size": 4541,
+      "sha384": "sha384-5i/Xtr2MZ9XJA72VthpWl2foV5KRKs0qlmCalXnrpAyKGPK/B2MxirDlytY6TEZ0"
     }
   ]
 }

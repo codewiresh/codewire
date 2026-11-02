@@ -20,6 +20,10 @@ use crate::view::{
 pub(crate) struct HomeTemplate;
 
 #[derive(Template)]
+#[template(path = "pricing.html")]
+pub(crate) struct PricingTemplate;
+
+#[derive(Template)]
 #[template(path = "settings-secrets.html")]
 pub(crate) struct SettingsSecretsTemplate<'a> {
     pub(crate) view: &'a DashboardView,

@@ -156,8 +156,8 @@ test("terminal presentation preserves colors, metrics, selection and strict CSP"
   await expect(rows.getByText("RGB blue", { exact: true })).toHaveCSS("color", "rgb(12, 160, 240)");
   await expect(rows.getByText("256 background", { exact: true })).toHaveCSS("background-color", "rgb(255, 0, 0)");
   await expect(rows.getByText("RGB background", { exact: true })).toHaveCSS("background-color", "rgb(12, 160, 240)");
-  await expect(rows).toHaveCSS("font-family", /IBM Plex Mono/);
-  expect(await page.evaluate(() => document.fonts.check('13px "IBM Plex Mono"'))).toBe(true);
+  await expect(rows).toHaveCSS("font-family", /Geist Mono/);
+  expect(await page.evaluate(() => document.fonts.check('13px "Geist Mono"'))).toBe(true);
   expect(await page.locator("[data-terminal-root] style").evaluateAll((styles) => styles.every((style) => (style as HTMLElement).nonce === "codewire-terminal-design-preview"))).toBe(true);
   expect(await page.evaluate(() => (window as Window & { terminalStyleViolations?: string[] }).terminalStyleViolations)).toEqual([]);
 

@@ -13,9 +13,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DESIGN_ROOT = REPOSITORY_ROOT / "packages" / "codewire-design"
 FONT_ROOT = REPOSITORY_ROOT / "crates" / "codewire-dashboard-web" / "assets" / "fonts"
 FONT_ROUTES = {
-    "/assets/codewire/fonts/ibm-plex-mono-regular-2.5.0.woff2": "IBMPlexMono-Regular-2.5.0.woff2",
-    "/assets/codewire/fonts/ibm-plex-mono-medium-2.5.0.woff2": "IBMPlexMono-Medium-2.5.0.woff2",
-    "/assets/codewire/fonts/ibm-plex-mono-semibold-2.5.0.woff2": "IBMPlexMono-SemiBold-2.5.0.woff2",
+    "/assets/codewire/fonts/geist-mono-1.9.0.woff2": "GeistMono-Variable-1.9.0.woff2",
+    "/assets/codewire/fonts/schibsted-grotesk-latin-5.3.0.woff2": "SchibstedGrotesk-latin-5.3.0.woff2",
+    "/assets/codewire/fonts/schibsted-grotesk-latin-ext-5.3.0.woff2": "SchibstedGrotesk-latin-ext-5.3.0.woff2",
 }
 TERMINAL_ASSET_ROOT = REPOSITORY_ROOT / "crates" / "codewire-dashboard-web" / "assets" / "xterm"
 TERMINAL_ASSET_ROUTES = {

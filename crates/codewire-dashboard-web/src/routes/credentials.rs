@@ -1175,6 +1175,7 @@ fn enrollment_response(
     let return_path = escape_html(&page_path(context));
     let prefix = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<script src=\"/assets/codewire/theme-v1.js\"></script>\
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
 <title>Connect credential · Codewire</title>\
 <link rel=\"stylesheet\" href=\"/assets/codewire/design-v1.css\">\

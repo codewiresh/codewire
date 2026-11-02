@@ -78,7 +78,7 @@ test.describe("server-rendered dashboard", () => {
     expect(shellGeometry.headerHeight).toBeGreaterThan(0);
     expect(shellGeometry.headerHeight).toBeLessThan((page.viewportSize()?.height ?? 0) / 4);
     // Page titles are sentence-case sans headings, not small mono labels.
-    expect(shellGeometry.headingFont).not.toContain("IBM Plex Mono");
+    expect(shellGeometry.headingFont).not.toContain("Geist Mono");
     expect(Number.parseFloat(shellGeometry.headingSize ?? "0")).toBeGreaterThanOrEqual(24);
     expect(shellGeometry.headingTransform).toBe("none");
     expect(Number(shellGeometry.headingWeight)).toBeGreaterThanOrEqual(600);

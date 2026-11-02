@@ -18,8 +18,8 @@ type Pending = Partial<Record<`${Viewport} ${Check}`, number>>;
 
 const pending: Record<string, Pending> = {};
 
-// home.html uses public.css's own marketing scale: it keeps an 11px text floor, not the console type and radius scale.
-const ownScale = new Set(["home.html"]);
+// The public site (home.html, pricing.html) uses public.css's own scale: it keeps an 11px text floor, not the console type and radius scale.
+const ownScale = new Set(["home.html", "pricing.html"]);
 
 const fixtureDirectory = new URL("../../../packages/codewire-design/reference/fixtures/", import.meta.url);
 // Whole pages only. A fragment such as terminal-ports.html has no stylesheets of
@@ -186,24 +186,56 @@ async function focusGaps(page: Page) {
   return [...gaps];
 }
 
+test("the sidebar theme switch cycles system, light and dark and is kept on the next page", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-check");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  const html = page.locator("html");
+  const theme = page.locator(".cw-sidebar-slot [data-theme-switch]");
+  await expect(theme).toHaveText("Theme: System");
+  await expect(html).not.toHaveAttribute("data-theme", /./);
+  const background = () => page.locator("body").evaluate((body) => getComputedStyle(body).backgroundColor);
+  const dark = await background();
+  await theme.click();
+  await expect(html).toHaveAttribute("data-theme", "light");
+  await expect(theme).toHaveText("Theme: Light");
+  await expect(theme.locator(".cw-theme-icon--light")).toBeVisible();
+  await expect(theme.locator(".cw-theme-icon--system")).toBeHidden();
+  expect(await background()).not.toBe(dark);
+  await page.goto(`${origin}/reference/fixtures/login.html`);
+  await expect(html).toHaveAttribute("data-theme", "light");
+  await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  await expect(theme).toHaveText("Theme: Light");
+  await theme.click();
+  await expect(html).toHaveAttribute("data-theme", "dark");
+  await theme.click();
+  await expect(html).not.toHaveAttribute("data-theme", /./);
+  await expect(theme).toHaveText("Theme: System");
+});
+
 for (const fixture of fixtures) {
   test(`${fixture} renders within the design contract`, { tag: "@mobile" }, async ({ page }, testInfo) => {
     const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
     test.skip(!origin, "Run make design-check");
-    await page.goto(`${origin}/reference/fixtures/${fixture}`);
-    await page.evaluate(() => document.fonts.ready);
-
-    const findings = { ...(await inspect(page, ownScale.has(fixture))), focus: await focusGaps(page) };
     const viewport: Viewport = testInfo.project.name.endsWith("mobile") ? "mobile" : "desktop";
-    expect.soft(findings.overflow, "the page scrolls sideways").toBe(0);
-    expect.soft(findings.select, "selects must render the styled base-select picker").toEqual([]);
-    expect.soft(findings.labels, "buttons with an icon must wrap their label in a span").toEqual([]);
-    for (const check of ["scale", "contrast", "focus"] as const) {
-      const cap = pending[fixture]?.[`${viewport} ${check}`] ?? 0;
-      expect.soft(findings[check].length, `${viewport} ${check} findings (cap ${cap}): ${findings[check].join(" | ")}`)
-        .toBeLessThanOrEqual(cap);
-      if (cap > 0) {
-        expect.soft(findings[check].length, `${viewport} ${check} is clean; delete its pending entry`).toBeGreaterThan(0);
+    // Every page follows the system theme (theme.js), so each is measured in both.
+    for (const colorScheme of ["dark", "light"] as const) {
+      await page.emulateMedia({ colorScheme });
+      await page.goto(`${origin}/reference/fixtures/${fixture}`);
+      await page.evaluate(() => document.fonts.ready);
+
+      const findings = { ...(await inspect(page, ownScale.has(fixture))), focus: await focusGaps(page) };
+      expect.soft(findings.overflow, `${colorScheme}: the page scrolls sideways`).toBe(0);
+      expect.soft(findings.select, `${colorScheme}: selects must render the styled base-select picker`).toEqual([]);
+      expect.soft(findings.labels, `${colorScheme}: buttons with an icon must wrap their label in a span`).toEqual([]);
+      for (const check of ["scale", "contrast", "focus"] as const) {
+        const cap = pending[fixture]?.[`${viewport} ${check}`] ?? 0;
+        expect.soft(findings[check].length, `${viewport} ${colorScheme} ${check} findings (cap ${cap}): ${findings[check].join(" | ")}`)
+          .toBeLessThanOrEqual(cap);
+        if (cap > 0) {
+          expect.soft(findings[check].length, `${viewport} ${colorScheme} ${check} is clean; delete its pending entry`).toBeGreaterThan(0);
+        }
       }
     }
   });

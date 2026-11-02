@@ -2,407 +2,218 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="../../theme.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <link rel="icon" href="../../assets/brand-icon.svg" type="image/svg+xml">
-<title>Codewire — Cloud Environments for Agents and Their Humans</title>
-<meta name="description" content="Cloud environments for agents and their humans. Use one over SSH or VS Code, give one to an agent, or create one with an SDK.">
-<link rel="stylesheet" href="../../cosmos.css">
-<script src="../../cosmos.js" defer></script>
+<title>Codewire — A Sandbox for Every Session</title>
+<meta name="description" content="Persistent, isolated Linux machines for agents and their humans, on your own computer or in the cloud, with the same CLI and SDK.">
 <link rel="stylesheet" href="../../routes/public.css">
 <script src="../../public.js" defer></script>
 </head>
 <body data-route="home">
-  <a class="cw-skip-link" href="#main-content">Skip to content</a>
-  <div class="cw-cosmos" aria-hidden="true">
-    <canvas id="cosmos-canvas"></canvas>
-  </div>
+<a class="skip" href="#main-content">Skip to content</a>
+<canvas id="wire" aria-hidden="true"></canvas>
+<div class="cols" aria-hidden="true"><div><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
 
-  <header class="cw-site-header">
-    <div class="cw-header-inner">
-      <a class="cw-brand" href="/">
-        <img class="cw-brand-wordmark" src="../../assets/brand-wordmark.svg" width="139" height="25" alt="Codewire">
-      </a>
-      <nav aria-label="Primary navigation">
-        <ul class="cw-nav-links">
+<a id="flogo" href="#top" aria-label="Codewire, back to top"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 495 89" aria-hidden="true"><path fill="currentColor" d="M22.9844 40C31.9375 40.25 30.1563 53.4375 41.5469 53.8281C44.4844 53.9531 47.6875 53.0625 49.7344 51.3906C60.6094 43.4531 59.8438 25.6563 47.4375 25.6563C41.0313 25.6563 37.8281 29.125 38.8594 35.9063C38.9844 37.0625 38.9844 38.4688 38.2188 38.5938C37.0625 38.8438 36.5469 37.8281 36.2969 36.6719C34.8906 30.9063 30.6563 25.9219 22.7344 25.9219C10.9531 25.9219 0.9688 35.3906 0.9688 54.8438C0.9688 75.0781 18.5 88 35.1406 88C44.75 88 57.1563 82.375 57.1563 71.4844C57.1563 65.4688 51.7813 59.5781 44.6094 59.5781C36.4219 59.5781 34.7656 71.6094 24.6406 71.6094C17.2188 71.6094 11.8438 64.0625 11.7188 55.875C11.5938 47.2969 16.4531 39.875 22.9844 40ZM22.9844 40 M62.9688 55.3594C62.9688 72.25 76.2813 88 93.9375 88C110.0781 88 121.8438 74.5625 121.8438 58.6875C121.8438 41.9219 108.4063 25.9219 90.875 25.9219C74.75 25.9219 62.9688 39.6094 62.9688 55.3594ZM78.0781 64.8281C78.0781 53.7031 85.375 38.9688 96.25 37.5625C96.625 37.5625 97.1406 37.4375 97.5313 37.4375C102.1406 37.4375 105.2031 40.8906 105.8438 46.9063C107 58.9375 99.4531 73.0313 88.7031 75.5781C87.7969 75.8438 87.0313 75.8438 86.2656 75.8438C81.0156 75.8438 78.0781 71.2344 78.0781 64.8281ZM78.0781 64.8281 M181.8594 55.875C166.625 55.875 167.7813 73.0313 154.7188 73.1563C146.0156 73.4063 142.4375 65.4688 142.4375 59.7188C142.4375 52.0313 146.9063 45.5 154.5938 45.125C154.8438 45.125 155.1094 45.125 155.3594 45.125C163.4219 45.125 171.4844 52.5469 179.0469 52.5469C179.6875 52.5469 180.4531 52.4219 181.0938 52.2813C191.5781 50.2344 192.3594 40.25 192.3594 32.1875C192.3594 19.9063 186.2031 5.7031 171.3594 5.7031C164.7031 5.7031 158.1719 8.6406 158.1719 16.1875C158.1719 29.8906 175.2031 26.5625 180.0625 35.5156C181.5938 38.0781 180.9531 40.6406 178.6563 40.6406C178.0156 40.6406 177.25 40.3906 176.3594 40C172.6406 37.9531 164.8281 31.8125 155.75 31.8125C140.125 31.8125 127.9688 43.9688 127.9688 59.9688C127.9688 76.6094 140.3906 88 156 88C166.75 88 175.5781 80.0625 178.5313 70.0781C178.9063 68.5469 179.2969 65.7344 181.2188 66.5C182.625 67.1406 181.7344 69.5625 181.2188 71.3594C179.9375 74.5625 178.4063 77.125 178.5313 81.0938C178.6563 85.7031 182.75 88 186.8438 88C194.1406 88 197.5938 82.1094 197.5938 75.3281C197.5938 66.75 191.4531 55.875 181.8594 55.875ZM181.8594 55.875 M222.0156 56.7656C218.6875 56.7656 216.3906 53.9531 219.8438 48.8281C223.9375 42.6875 230.7188 38.9688 237.375 38.9688C240.4531 38.9688 241.5938 41.7969 240.0625 45.125C238.4063 49.3438 226.75 56.7656 222.0156 56.7656ZM203.9688 61.7656C203.4531 73.5313 208.7031 82.75 218.4375 86.3438C221.375 87.3594 225.0938 87.875 229.0625 87.875C236.6094 87.875 244.9219 85.9531 249.9219 82.875C260.7969 76.2188 253.375 61.7656 243.5156 62.9063C233.1563 64.0625 232.8906 74.2969 225.4688 75.5781C222.7813 76.2188 219.9688 74.4375 218.8125 72.25C216.6406 68.0313 220.4844 64.4531 225.4688 63.5469C235.7188 61.375 256.1875 56.7656 256.1875 41.6563C256.1875 33.0938 248.25 25.5313 237.7656 25.5313C236.9844 25.5313 236.3594 25.6563 235.7188 25.6563C216.7656 27.3281 204.8594 43.9688 203.9688 61.7656ZM203.9688 61.7656 M286.5469 71.3594C285.3906 72 284.1094 72.3906 283.0938 72.3906C280.4063 72.3906 278.6094 70.3438 279.8906 66.375C283.2188 55.75 300.5 47.4219 300.375 36.7969C300.2344 26.4375 289.6094 25.6563 282.4531 25.6563C274.6406 25.6563 265.0469 28.8594 265.0469 38.0781C265.0469 42.8125 269.3906 47.9375 274.25 47.9375C280.9063 47.9375 285.6406 40.25 288.5938 40.25C289.2344 40.25 289.6094 40.8906 289.6094 41.5313C289.6094 43.9688 261.9688 59.9688 261.9688 73.0313C261.9688 83.0156 269.6406 88 278.7344 88C300.625 88 299.8594 52.7969 309.0781 52.7969C315.7344 52.7969 312.6563 65.4688 312.6563 69.0625C312.6563 78.2656 315.7344 88.25 326.8594 88.25C337.75 88.25 341.0781 79.0469 342.7344 69.7031C344.0156 62.9063 344.7813 55.875 344.7813 48.8281C344.7813 39.2344 342.0938 25.5313 329.8125 25.5313C321.6094 25.6563 319.4375 31.8125 320.3438 36.6719C321.3594 44.0938 332.2344 46.0156 332.2344 62.0156C332.2344 64.8281 331.7344 73.1563 327.25 73.1563C320.3438 73.1563 322.25 58.6875 322.6406 54.3438C323.0313 46.9063 319.1875 38.8438 311.5 38.8438C296.2656 38.8438 296.2656 65.4688 286.5469 71.3594ZM286.5469 71.3594 M351.2188 10.9375C351.2188 16.7031 356.2188 21.0625 361.8438 21.0625C367.3594 21.0625 371.7031 17.0938 371.7031 11.3281C371.7031 5.7031 367.2188 0.9531 361.4688 0.9531C355.9531 0.9531 351.2188 5.5625 351.2188 10.9375ZM373.625 36.4219C373.625 29.375 368.25 25.9219 361.9688 25.9219C356.3438 25.9219 350.9688 29.375 351.2188 36.6719C351.4844 42.8125 358.5156 45.7656 358.5156 53.4375C358.5156 62.4063 351.2188 68.6719 350.9688 78.1406C350.9688 84.4219 356.2188 88 361.8438 88C370.4219 88 376.7031 83.2656 375.2813 74.8125C374.3906 68.6719 365.8125 66.5 365.8125 57.4063C365.8125 51.3906 373.625 45.125 373.625 36.4219ZM373.625 36.4219 M403.5938 43.4531C414.4844 43.4531 415.8906 57.4063 424.4688 58.8125C432.2656 60.0938 437.5156 56 439.1875 43.9688C440.4688 35.7813 441.1094 25.4063 430.2188 25.5313C426.5156 25.5313 421.6406 27.9688 421.3906 32.3125C421.0156 37.4375 423.1875 41.4063 425.3594 45.625C425.6094 46.1406 426.5156 47.6875 425.6094 48.1875C424.8438 48.7031 424.0781 47.6875 423.7031 47.1719C420.375 42.5625 411.0313 25.6563 398.8594 25.6563C391.0625 25.6563 383.7656 29.125 383.8906 40.125C384.0156 48.4531 390.4219 53.5625 390.7969 59.3281C391.4375 67.2656 381.9688 67.7813 381.9688 77.125C382.0938 84.1563 387.8594 88 395.5313 88C401.2969 88 407.9531 84.2813 408.0781 77.25C408.2031 65.4688 400.5313 62.4063 398.8594 53.4375C398.3594 49.7344 398.2188 43.4531 403.5938 43.4531ZM403.5938 43.4531 M460.0156 56.7656C456.6875 56.7656 454.3906 53.9531 457.8438 48.8281C461.9375 42.6875 468.7188 38.9688 475.375 38.9688C478.4531 38.9688 479.5938 41.7969 478.0625 45.125C476.4063 49.3438 464.75 56.7656 460.0156 56.7656ZM441.9688 61.7656C441.4531 73.5313 446.7031 82.75 456.4375 86.3438C459.375 87.3594 463.0938 87.875 467.0625 87.875C474.6094 87.875 482.9219 85.9531 487.9219 82.875C498.7969 76.2188 491.375 61.7656 481.5156 62.9063C471.1563 64.0625 470.8906 74.2969 463.4688 75.5781C460.7813 76.2188 457.9688 74.4375 456.8125 72.25C454.6406 68.0313 458.4844 64.4531 463.4688 63.5469C473.7188 61.375 494.1875 56.7656 494.1875 41.6563C494.1875 33.0938 486.25 25.5313 475.7656 25.5313C474.9844 25.5313 474.3594 25.6563 473.7188 25.6563C454.7656 27.3281 442.8594 43.9688 441.9688 61.7656ZM441.9688 61.7656"/></svg></a>
+<div class="page">
+  <header class="bar">
+    <div class="barin">
+      <span class="slot" id="slot" aria-hidden="true"></span>
+      <nav class="nav" aria-label="Main">
+        <ul>
           <li><a href="/docs">Docs</a></li>
-          <li><a href="#pricing">Pricing</a></li>
-          <li><a href="/login">Sign in</a></li>
-          <li><a class="cw-header-cta" href="/signup">Request access</a></li>
+          <li><a href="/pricing">Pricing</a></li>
         </ul>
       </nav>
+      <div class="acct">
+        <a class="login" href="/login">Log in</a>
+        <a class="signup" href="/signup">Sign up</a>
+        <button type="button" class="cw-site-icon" id="rainBtn" aria-label="Matrix rain" aria-pressed="false"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="square" aria-hidden="true"><path d="M3 1.5v2M3 6v2M3 10.5v1"/><path d="M8 3.5v2M8 8v2"/><path class="hd" d="M8 12.5v2"/><path d="M13 1.5v1M13 5v2M13 9.5v2"/></svg></button>
+        <button type="button" class="cw-site-icon" id="themeBtn" data-theme-switch data-theme-current="system" aria-label="Theme: System. Switch theme"><svg class="cw-site-theme-icon cw-site-theme-icon--system" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="9"/><path d="M5.5 14h5M8 11.5V14"/></svg><svg class="cw-site-theme-icon cw-site-theme-icon--light" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M3 13l1.4-1.4M11.6 4.4L13 3"/></svg><svg class="cw-site-theme-icon cw-site-theme-icon--dark" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M13.5 9.5A6 6 0 1 1 6.5 2.5a4.8 4.8 0 0 0 7 7z"/></svg></button>
+        <button type="button" class="cw-site-icon menuBtn" id="menuBtn" aria-label="Menu" aria-expanded="false" aria-controls="menu"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 5h12M2 11h12"/></svg></button>
+      </div>
     </div>
   </header>
 
   <main id="main-content">
-    <section class="cw-hero-section" aria-labelledby="intro-title">
-      <div class="cw-hero-copy">
-        <h1 id="intro-title">Cloud environments for agents and their humans.</h1>
-        <p class="cw-lede">Persistent, isolated Linux environments you can access from anywhere, orchestrate through the CLI or SDK, and connect in encrypted private meshes.</p>
-        <p class="cw-hero-detail">Open one in the browser, SSH, or VS Code. Check out a public Git repository by URL, manage application secrets, and return to the same files, tools, and sessions.</p>
-        <div class="cw-hero-actions">
-          <a class="cw-hero-action cw-hero-action--primary" href="/signup">Request access</a>
-          <a class="cw-hero-action cw-hero-action--secondary" href="/docs">Read the docs</a>
+  <section class="hero" id="top" data-st="0">
+    <div class="grid meta">
+      <p class="label">(Sandbox infrastructure)</p>
+      <p class="label grey">For agents and their humans</p>
+      <p class="label grey">Local · Cloud · Open source</p>
+      <p class="label grey">Private beta</p>
+    </div>
+    <h1 class="logo" aria-label="Codewire" data-snap><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 495 89" aria-hidden="true"><path fill="currentColor" d="M22.9844 40C31.9375 40.25 30.1563 53.4375 41.5469 53.8281C44.4844 53.9531 47.6875 53.0625 49.7344 51.3906C60.6094 43.4531 59.8438 25.6563 47.4375 25.6563C41.0313 25.6563 37.8281 29.125 38.8594 35.9063C38.9844 37.0625 38.9844 38.4688 38.2188 38.5938C37.0625 38.8438 36.5469 37.8281 36.2969 36.6719C34.8906 30.9063 30.6563 25.9219 22.7344 25.9219C10.9531 25.9219 0.9688 35.3906 0.9688 54.8438C0.9688 75.0781 18.5 88 35.1406 88C44.75 88 57.1563 82.375 57.1563 71.4844C57.1563 65.4688 51.7813 59.5781 44.6094 59.5781C36.4219 59.5781 34.7656 71.6094 24.6406 71.6094C17.2188 71.6094 11.8438 64.0625 11.7188 55.875C11.5938 47.2969 16.4531 39.875 22.9844 40ZM22.9844 40 M62.9688 55.3594C62.9688 72.25 76.2813 88 93.9375 88C110.0781 88 121.8438 74.5625 121.8438 58.6875C121.8438 41.9219 108.4063 25.9219 90.875 25.9219C74.75 25.9219 62.9688 39.6094 62.9688 55.3594ZM78.0781 64.8281C78.0781 53.7031 85.375 38.9688 96.25 37.5625C96.625 37.5625 97.1406 37.4375 97.5313 37.4375C102.1406 37.4375 105.2031 40.8906 105.8438 46.9063C107 58.9375 99.4531 73.0313 88.7031 75.5781C87.7969 75.8438 87.0313 75.8438 86.2656 75.8438C81.0156 75.8438 78.0781 71.2344 78.0781 64.8281ZM78.0781 64.8281 M181.8594 55.875C166.625 55.875 167.7813 73.0313 154.7188 73.1563C146.0156 73.4063 142.4375 65.4688 142.4375 59.7188C142.4375 52.0313 146.9063 45.5 154.5938 45.125C154.8438 45.125 155.1094 45.125 155.3594 45.125C163.4219 45.125 171.4844 52.5469 179.0469 52.5469C179.6875 52.5469 180.4531 52.4219 181.0938 52.2813C191.5781 50.2344 192.3594 40.25 192.3594 32.1875C192.3594 19.9063 186.2031 5.7031 171.3594 5.7031C164.7031 5.7031 158.1719 8.6406 158.1719 16.1875C158.1719 29.8906 175.2031 26.5625 180.0625 35.5156C181.5938 38.0781 180.9531 40.6406 178.6563 40.6406C178.0156 40.6406 177.25 40.3906 176.3594 40C172.6406 37.9531 164.8281 31.8125 155.75 31.8125C140.125 31.8125 127.9688 43.9688 127.9688 59.9688C127.9688 76.6094 140.3906 88 156 88C166.75 88 175.5781 80.0625 178.5313 70.0781C178.9063 68.5469 179.2969 65.7344 181.2188 66.5C182.625 67.1406 181.7344 69.5625 181.2188 71.3594C179.9375 74.5625 178.4063 77.125 178.5313 81.0938C178.6563 85.7031 182.75 88 186.8438 88C194.1406 88 197.5938 82.1094 197.5938 75.3281C197.5938 66.75 191.4531 55.875 181.8594 55.875ZM181.8594 55.875 M222.0156 56.7656C218.6875 56.7656 216.3906 53.9531 219.8438 48.8281C223.9375 42.6875 230.7188 38.9688 237.375 38.9688C240.4531 38.9688 241.5938 41.7969 240.0625 45.125C238.4063 49.3438 226.75 56.7656 222.0156 56.7656ZM203.9688 61.7656C203.4531 73.5313 208.7031 82.75 218.4375 86.3438C221.375 87.3594 225.0938 87.875 229.0625 87.875C236.6094 87.875 244.9219 85.9531 249.9219 82.875C260.7969 76.2188 253.375 61.7656 243.5156 62.9063C233.1563 64.0625 232.8906 74.2969 225.4688 75.5781C222.7813 76.2188 219.9688 74.4375 218.8125 72.25C216.6406 68.0313 220.4844 64.4531 225.4688 63.5469C235.7188 61.375 256.1875 56.7656 256.1875 41.6563C256.1875 33.0938 248.25 25.5313 237.7656 25.5313C236.9844 25.5313 236.3594 25.6563 235.7188 25.6563C216.7656 27.3281 204.8594 43.9688 203.9688 61.7656ZM203.9688 61.7656 M286.5469 71.3594C285.3906 72 284.1094 72.3906 283.0938 72.3906C280.4063 72.3906 278.6094 70.3438 279.8906 66.375C283.2188 55.75 300.5 47.4219 300.375 36.7969C300.2344 26.4375 289.6094 25.6563 282.4531 25.6563C274.6406 25.6563 265.0469 28.8594 265.0469 38.0781C265.0469 42.8125 269.3906 47.9375 274.25 47.9375C280.9063 47.9375 285.6406 40.25 288.5938 40.25C289.2344 40.25 289.6094 40.8906 289.6094 41.5313C289.6094 43.9688 261.9688 59.9688 261.9688 73.0313C261.9688 83.0156 269.6406 88 278.7344 88C300.625 88 299.8594 52.7969 309.0781 52.7969C315.7344 52.7969 312.6563 65.4688 312.6563 69.0625C312.6563 78.2656 315.7344 88.25 326.8594 88.25C337.75 88.25 341.0781 79.0469 342.7344 69.7031C344.0156 62.9063 344.7813 55.875 344.7813 48.8281C344.7813 39.2344 342.0938 25.5313 329.8125 25.5313C321.6094 25.6563 319.4375 31.8125 320.3438 36.6719C321.3594 44.0938 332.2344 46.0156 332.2344 62.0156C332.2344 64.8281 331.7344 73.1563 327.25 73.1563C320.3438 73.1563 322.25 58.6875 322.6406 54.3438C323.0313 46.9063 319.1875 38.8438 311.5 38.8438C296.2656 38.8438 296.2656 65.4688 286.5469 71.3594ZM286.5469 71.3594 M351.2188 10.9375C351.2188 16.7031 356.2188 21.0625 361.8438 21.0625C367.3594 21.0625 371.7031 17.0938 371.7031 11.3281C371.7031 5.7031 367.2188 0.9531 361.4688 0.9531C355.9531 0.9531 351.2188 5.5625 351.2188 10.9375ZM373.625 36.4219C373.625 29.375 368.25 25.9219 361.9688 25.9219C356.3438 25.9219 350.9688 29.375 351.2188 36.6719C351.4844 42.8125 358.5156 45.7656 358.5156 53.4375C358.5156 62.4063 351.2188 68.6719 350.9688 78.1406C350.9688 84.4219 356.2188 88 361.8438 88C370.4219 88 376.7031 83.2656 375.2813 74.8125C374.3906 68.6719 365.8125 66.5 365.8125 57.4063C365.8125 51.3906 373.625 45.125 373.625 36.4219ZM373.625 36.4219 M403.5938 43.4531C414.4844 43.4531 415.8906 57.4063 424.4688 58.8125C432.2656 60.0938 437.5156 56 439.1875 43.9688C440.4688 35.7813 441.1094 25.4063 430.2188 25.5313C426.5156 25.5313 421.6406 27.9688 421.3906 32.3125C421.0156 37.4375 423.1875 41.4063 425.3594 45.625C425.6094 46.1406 426.5156 47.6875 425.6094 48.1875C424.8438 48.7031 424.0781 47.6875 423.7031 47.1719C420.375 42.5625 411.0313 25.6563 398.8594 25.6563C391.0625 25.6563 383.7656 29.125 383.8906 40.125C384.0156 48.4531 390.4219 53.5625 390.7969 59.3281C391.4375 67.2656 381.9688 67.7813 381.9688 77.125C382.0938 84.1563 387.8594 88 395.5313 88C401.2969 88 407.9531 84.2813 408.0781 77.25C408.2031 65.4688 400.5313 62.4063 398.8594 53.4375C398.3594 49.7344 398.2188 43.4531 403.5938 43.4531ZM403.5938 43.4531 M460.0156 56.7656C456.6875 56.7656 454.3906 53.9531 457.8438 48.8281C461.9375 42.6875 468.7188 38.9688 475.375 38.9688C478.4531 38.9688 479.5938 41.7969 478.0625 45.125C476.4063 49.3438 464.75 56.7656 460.0156 56.7656ZM441.9688 61.7656C441.4531 73.5313 446.7031 82.75 456.4375 86.3438C459.375 87.3594 463.0938 87.875 467.0625 87.875C474.6094 87.875 482.9219 85.9531 487.9219 82.875C498.7969 76.2188 491.375 61.7656 481.5156 62.9063C471.1563 64.0625 470.8906 74.2969 463.4688 75.5781C460.7813 76.2188 457.9688 74.4375 456.8125 72.25C454.6406 68.0313 458.4844 64.4531 463.4688 63.5469C473.7188 61.375 494.1875 56.7656 494.1875 41.6563C494.1875 33.0938 486.25 25.5313 475.7656 25.5313C474.9844 25.5313 474.3594 25.6563 473.7188 25.6563C454.7656 27.3281 442.8594 43.9688 441.9688 61.7656ZM441.9688 61.7656"/></svg></h1>
+    <div class="grid foot">
+      <p class="label idx"><span class="panel">(0.0) Overview</span></p>
+      <p class="lede panel" data-drag="Headline">A sandbox for every session. <span>Persistent, isolated Linux machines, on your own computer or in the cloud, with the same CLI and SDK.</span></p>
+      <div class="specwrap panel reg" data-drag="Spec list" data-plate="0.1 · spec">
+        <dl class="spec">
+          <div><dt>Construction</dt><dd>One VM per session</dd></div>
+          <div><dt>Runs on</dt><dd>Linux, Apple Silicon, or hosted</dd></div>
+          <div><dt>Network</dt><dd>Encrypted private mesh</dd></div>
+          <div><dt>Licence</dt><dd>AGPL-3.0 and MIT</dd></div>
+          <div><dt>Billing</dt><dd>Per second, hosted only</dd></div>
+        </dl>
+      </div>
+    </div>
+    <div class="grid getrow" id="getrow">
+      <div class="getbox reg panel" data-plate="0.2 · install">
+        <p class="label grey boxlabel">Install · Linux and macOS</p>
+        <div class="install"><code>curl -fsSL https://get.codewire.sh | sh</code><button type="button" class="cw-site-copy" aria-label="Copy install command"><svg class="cp" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8"/><path d="M10.5 5.5v-3h-8v8h3"/></svg><svg class="ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 4.8"/></svg></button></div>
+      </div>
+      <div class="betarow"><canvas id="betaC" role="img" aria-label="Beta label: pre-release software, expect rough edges."></canvas></div>
+    </div>
+  </section>
+
+  <section class="sec" id="sessions" data-st="1">
+    <div class="grid head"><p class="label n">(1.0)</p><p class="label k grey">Sessions</p><h2>Every session in its own VM.<br>Sized to the work.</h2></div>
+    <div class="grid body">
+      <figure data-snap class="xs panel reg" data-plate="1.1 · memory to scale"><div class="unbox"><canvas id="szc" role="img" aria-label="Six VM columns on two trays, local and cloud. Each column is as tall as its memory limit, from 2 GB for docs to 32 GB for api, with live memory use filling it. Now and then one reaches its limit and stays there while the others carry on."></canvas></div><figcaption class="label grey">Fig. 1.1 · Six VMs, two locally, four on the cloud.</figcaption></figure>
+      <div class="sess panel">
+        <p class="copy">Each agent session runs in its own Linux VM, sized for the work it does. Codex fixing auth gets 8 GB. Claude Code on the API gets 32. When one hits its limit, it stops there; the other five never feel it.</p>
+        <div class="tw panel"><table>
+          <thead><tr><th scope="col">No.</th><th scope="col">Session</th><th scope="col">Agent</th><th scope="col">Runs</th><th scope="col" class="r">Memory</th></tr></thead>
+          <tbody>
+            <tr><td class="m">1.1</td><td>auth</td><td class="m">codex</td><td class="m">local</td><td class="m r">8 GB</td></tr>
+            <tr><td class="m">1.2</td><td>api</td><td class="m">claude</td><td class="m">cloud</td><td class="m r">32 GB</td></tr>
+            <tr><td class="m">1.3</td><td>billing</td><td class="m">claude</td><td class="m">cloud</td><td class="m r">16 GB</td></tr>
+            <tr><td class="m">1.4</td><td>docs</td><td class="m">codex</td><td class="m">local</td><td class="m r">2 GB</td></tr>
+            <tr><td class="m">1.5</td><td>web</td><td class="m">codex</td><td class="m">cloud</td><td class="m r">8 GB</td></tr>
+            <tr><td class="m">1.6</td><td>infra</td><td class="m">claude</td><td class="m">cloud</td><td class="m r">16 GB</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec ends" id="ends" data-st="2">
+    <div class="grid head"><p class="label n">(2.0)</p><p class="label k grey">Local + cloud</p><h2>Sandboxes everywhere.</h2></div>
+    <div class="grid body">
+      <div class="l">
+        <p class="big">Local</p>
+        <div class="term reg" id="termL" data-plate="2.1 · local" data-state="idle">
+          <div class="tbar" aria-hidden="true"><span>zsh · ~/my-app</span><span class="tst">Idle</span></div>
+          <div class="tbody" aria-hidden="true"></div>
+          <p class="vh">cw create --local --name my-app --path . prints: Environment my-app created, local VM, 2 vCPU, 4 GiB RAM, 20 GiB disk. cw run claude --in my-app prints: Started Claude Code in my-app/claude, local VM.</p>
         </div>
       </div>
-    </section>
-
-    <section class="cw-workflow-section" id="how-it-works" aria-labelledby="workflow-title">
-      <h2 id="workflow-title">Everything your session needs. Ready every time.</h2>
-      <p class="cw-workflow-intro">Enter a public repository URL, save your setup, and start a complete Linux sandbox for any session. Open it yourself or hand it to an agent.</p>
-
-      <div class="cw-workflow-stage">
-        <div class="cw-workflow-sticky">
-          <div class="cw-workflow-copy-window">
-            <ol class="cw-workflow-list" aria-label="How Codewire works">
-        <li class="cw-workflow-step is-active" id="workflow-step-1" data-title="01 / choose a repository" data-command="git ls-remote https://github.com/acme/api" data-result="Public repository is reachable.">
-          <span class="cw-workflow-number" aria-hidden="true">01</span>
-          <div>
-            <h3>Choose a public repository</h3>
-            <p>Start with the URL of a public Git repository. Your code is ready when the sandbox starts.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> git ls-remote https://github.com/acme/api</code></pre>
-          </div>
-        </li>
-
-        <li class="cw-workflow-step" id="workflow-step-2" data-title="02 / set it up once" data-command="cw init github.com/acme/api --save-preset api" data-result="Preset saved: api">
-          <span class="cw-workflow-number" aria-hidden="true">02</span>
-          <div>
-            <h3>Set it up once</h3>
-            <p>Save the image, tools, install commands, services, secrets, ports, and agent as a reusable preset.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw init github.com/acme/api \
-    --save-preset api</code></pre>
-          </div>
-        </li>
-
-        <li class="cw-workflow-step" id="workflow-step-3" data-title="03 / add an app secret" data-command="cw secrets create api&#10;cw secrets set api DATABASE_URL" data-result="Secret project &quot;api&quot; created.&#10;Secret DATABASE_URL set in project &quot;api&quot;.">
-          <span class="cw-workflow-number" aria-hidden="true">03</span>
-          <div>
-            <h3>Add an app secret</h3>
-            <p>Store application secrets in a project and bind it only where needed. Agent authentication stays separate.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw secrets create api
-<span class="cw-prompt">$</span> cw secrets set api DATABASE_URL</code></pre>
-          </div>
-        </li>
-
-        <li class="cw-workflow-step" id="workflow-step-4" data-title="04 / start fresh" data-command="cw create \&#10;    github.com/acme/api \&#10;    --preset api --secrets api --name auth" data-result="Environment created: auth&#10;Secret project mounted: api">
-          <span class="cw-workflow-number" aria-hidden="true">04</span>
-          <div>
-            <h3>Start a fresh sandbox every time</h3>
-            <p>One click in the dashboard, or one command. The same complete sandbox is ready again—with its tools and credentials.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw create \
-    github.com/acme/api \
-    --preset api --secrets api --name auth</code></pre>
-          </div>
-        </li>
-
-        <li class="cw-workflow-step" id="workflow-step-5" data-title="05 / connect" data-command="cw setup ssh&#10;ssh cw-auth" data-result="Connected to auth.">
-          <span class="cw-workflow-number" aria-hidden="true">05</span>
-          <div>
-            <h3>Connect over SSH or VS Code</h3>
-            <p>Run this once. Then use OpenSSH, scp, rsync, or VS Code to connect to the same machine as the agent.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw setup ssh
-<span class="cw-prompt">$</span> ssh cw-auth</code></pre>
-          </div>
-        </li>
-
-        <li class="cw-workflow-step" id="workflow-step-6" data-title="06 / tell Codex" data-command="cw run codex --in auth --detach -- \&#10;    &quot;Build a Node.js web app that uses DATABASE_URL and runs on port 3000.&quot;" data-result="Started Codex in auth/codex.&#10;Building the Node.js app…">
-          <span class="cw-workflow-number" aria-hidden="true">06</span>
-          <div>
-            <h3>Tell Codex what to build</h3>
-            <p>Give the agent the outcome. It works inside the configured environment with the repository, tools, and app secrets already in place.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw run codex --in auth --detach -- \
-    "Build a Node.js web app that uses DATABASE_URL and runs on port 3000."</code></pre>
-          </div>
-        </li>
-
-        <li class="cw-workflow-step" id="workflow-step-7" data-title="07 / start the server" data-command="cw run --in auth --detach -- npm run dev -- --host 0.0.0.0 --port 3000" data-result="Server listening on 0.0.0.0:3000">
-          <span class="cw-workflow-number" aria-hidden="true">07</span>
-          <div>
-            <h3>Start the server</h3>
-            <p>Run the app as another persistent session. It stays live alongside the agent, even after you disconnect.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw run --in auth --detach -- npm run dev \
-    -- --host 0.0.0.0 --port 3000</code></pre>
-          </div>
-        </li>
-
-        <li class="cw-workflow-step" id="workflow-step-8" data-title="08 / open a preview" data-command="cw ports auth --publish 3000 --label app --access org_members" data-result="Port 3000 registered as app&#10;URL: https://app-7f3c2-acme.cwpreview.sh&#10;Access: org_members">
-          <span class="cw-workflow-number" aria-hidden="true">08</span>
-          <div>
-            <h3>Open a preview URL</h3>
-            <p>Turn any running port into an authenticated URL for your team. No tunnel or manual proxy to keep alive.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw ports auth --publish 3000 \
-    --label app --access org_members</code></pre>
-          </div>
-        </li>
-
-        <li class="cw-workflow-step" id="workflow-step-9" data-title="09 / come back" data-command="cw attach auth --session codex" data-result="Attached to auth/codex.">
-          <span class="cw-workflow-number" aria-hidden="true">09</span>
-          <div>
-            <h3>Come back when it’s ready</h3>
-            <p>Reconnect to the same live session. Its files, process, and complete output are still there.</p>
-            <pre class="cw-workflow-command"><code><span class="cw-prompt">$</span> cw attach auth --session codex</code></pre>
-          </div>
-        </li>
-            </ol>
-          </div>
-
-          <aside class="cw-workflow-terminal-column" aria-label="Commands for the active step">
-            <div class="cw-workflow-terminal">
-              <div class="cw-workflow-terminal-bar">
-                <span class="cw-terminal-dots" aria-hidden="true"><span></span><span></span><span></span></span>
-                <span id="workflow-terminal-title">01 / choose a repository</span>
-              </div>
-              <div class="cw-workflow-terminal-screen">
-                <div id="workflow-terminal-commands">
-                  <div class="cw-terminal-command-line"><span class="cw-terminal-prompt">$ </span><span>git ls-remote https://github.com/acme/api</span><span class="cw-terminal-cursor" aria-hidden="true"></span></div>
-                </div>
-                <div class="cw-terminal-result" id="workflow-terminal-result" aria-live="polite">Public repository is reachable.</div>
-              </div>
-            </div>
-          </aside>
+      <div class="r">
+        <p class="big">Cloud</p>
+        <div class="term reg" id="termC" data-plate="2.2 · cloud" data-state="idle">
+          <div class="tbar" aria-hidden="true"><span>zsh · ~/my-app</span><span class="tst">Idle</span></div>
+          <div class="tbody" aria-hidden="true"></div>
+          <p class="vh">cw create --name my-app --image workspace prints: my-app, cloud VM, 2 vCPU, 8 GiB RAM, 10 GiB disk. cw run claude --in my-app prints: Started Claude Code in my-app/claude, cloud.</p>
         </div>
       </div>
-    </section>
+      <p class="copy note panel">On your own Linux machine or Apple Silicon Mac, each sandbox is a VM isolated by Cloud Hypervisor or Virtualization.framework, with no account needed. In the cloud, it is a hosted VM billed per second. The commands are the same at either end.</p>
+    </div>
+  </section>
 
-    <section class="cw-parallel-section" id="parallel" aria-labelledby="parallel-title">
-      <div class="cw-parallel-copy">
-        <h2 id="parallel-title">Every session gets its own sandbox.</h2>
-        <p class="cw-parallel-lede">Run agent sessions independently with you at the center—or let sandboxes speak to one another over encrypted private meshes. Size each one for the work.</p>
-
-        <div class="cw-parallel-mode-switch" hidden role="group" aria-label="Agent network mode">
-          <button class="cw-parallel-mode-button is-active" type="button" data-parallel-mode="independent" aria-pressed="true">Independent sessions</button>
-          <button class="cw-parallel-mode-button" type="button" data-parallel-mode="mesh" aria-pressed="false">Encrypted meshes</button>
+  <section class="sec" id="mesh" data-st="3">
+    <div class="grid head"><p class="label n">(3.0)</p><p class="label k grey">Encrypted mesh</p><h2>Wire them however the work needs.</h2></div>
+    <div class="grid body">
+      <figure data-snap class="net panel reg" data-plate="3.1 · geodesic, 42 nodes"><div class="netbox"><canvas id="netc" role="img" aria-label="Sandboxes on a spherical mesh. In independent mode each one is wired only to you at the centre; in mesh mode they pass messages to each other across the mesh."></canvas></div>
+        <figcaption class="label grey" id="netcap">Fig. 3.1 · Independent. Each sandbox is wired only to you.</figcaption></figure>
+      <div class="mside panel">
+        <p class="copy">Independent, each session talks only to you. Put them on an encrypted Mesh network and they hand work to each other with <span class="mono">cw msg</span>, hop by hop across the mesh, local VMs and hosted sandboxes on the same network.</p>
+        <div class="modes">
+          <div class="seg" role="group" aria-label="Network mode"><button type="button" class="cw-site-segment" id="mA" aria-pressed="true">Independent</button><button type="button" class="cw-site-segment" id="mB" aria-pressed="false">Mesh</button></div>
+          <div class="auto"><span class="label grey" id="autoLbl">Auto</span><i><b id="autoBar"></b></i></div>
         </div>
+        <div class="mlog"><p class="label grey boxlabel">Traffic · last six messages</p><ol id="log"></ol></div>
       </div>
+    </div>
+  </section>
 
-      <div class="cw-parallel-map" data-mode="independent" aria-label="Four independent agent sessions working in separate, differently sized sandboxes around one operator">
-        <div class="cw-parallel-state cw-parallel-state--independent" aria-hidden="false">
-        <svg class="cw-parallel-connections" viewBox="0 0 1200 500" preserveAspectRatio="none" aria-hidden="true">
-          <defs>
-            <filter id="packet-glow" x="-300%" y="-300%" width="700%" height="700%">
-              <feGaussianBlur stdDeviation="2.5" result="blur"></feGaussianBlur>
-              <feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge>
-            </filter>
-          </defs>
-
-          <path class="cw-parallel-route" id="parallel-route-1" d="M 530 232 C 470 165 425 95 360 62"></path>
-          <path class="cw-parallel-route" id="parallel-route-3" d="M 530 268 C 470 335 425 405 360 438"></path>
-          <path class="cw-parallel-route" id="parallel-route-4" d="M 670 232 C 730 165 775 95 840 62"></path>
-          <path class="cw-parallel-route" id="parallel-route-6" d="M 670 268 C 730 335 775 405 840 438"></path>
-
-          <circle class="cw-flow-packet" r="3.5"><animateMotion dur="3.6s" begin="-0.4s" repeatCount="indefinite"><mpath href="#parallel-route-1"></mpath></animateMotion></circle>
-          <circle class="cw-flow-packet" r="3.5"><animateMotion dur="3.6s" begin="-2.2s" repeatCount="indefinite"><mpath href="#parallel-route-1"></mpath></animateMotion></circle>
-          <circle class="cw-flow-packet" r="3.5"><animateMotion dur="3.8s" begin="-0.8s" repeatCount="indefinite"><mpath href="#parallel-route-3"></mpath></animateMotion></circle>
-          <circle class="cw-flow-packet" r="3.5"><animateMotion dur="3.8s" begin="-2.7s" repeatCount="indefinite"><mpath href="#parallel-route-3"></mpath></animateMotion></circle>
-          <circle class="cw-flow-packet" r="3.5"><animateMotion dur="3.7s" begin="-1.6s" repeatCount="indefinite"><mpath href="#parallel-route-4"></mpath></animateMotion></circle>
-          <circle class="cw-flow-packet" r="3.5"><animateMotion dur="3.7s" begin="-3.4s" repeatCount="indefinite"><mpath href="#parallel-route-4"></mpath></animateMotion></circle>
-          <circle class="cw-flow-packet" r="3.5"><animateMotion dur="3.9s" begin="-1.3s" repeatCount="indefinite"><mpath href="#parallel-route-6"></mpath></animateMotion></circle>
-          <circle class="cw-flow-packet" r="3.5"><animateMotion dur="3.9s" begin="-3.2s" repeatCount="indefinite"><mpath href="#parallel-route-6"></mpath></animateMotion></circle>
-        </svg>
-
-        <ul class="cw-agent-sessions">
-        <li class="cw-agent-session"><article class="cw-agent-terminal cw-agent-terminal--lt">
-          <header><span class="cw-agent-terminal-name">auth · 8 GB RAM</span><span class="cw-agent-status"><span class="cw-agent-status-dot"></span>codex</span></header>
-          <div class="cw-agent-terminal-body">
-            <div class="cw-agent-task">fix session expiry</div>
-            <div class="cw-agent-work">reading src/auth/session.rs</div>
-          </div>
-        </article></li>
-
-        <li class="cw-agent-session"><article class="cw-agent-terminal cw-agent-terminal--lb">
-          <header><span class="cw-agent-terminal-name">docs · 2 GB RAM</span><span class="cw-agent-status"><span class="cw-agent-status-dot"></span>codex</span></header>
-          <div class="cw-agent-terminal-body">
-            <div class="cw-agent-task">update quickstart</div>
-            <div class="cw-agent-work">running docs build</div>
-          </div>
-        </article></li>
-
-        <li class="cw-agent-session"><article class="cw-agent-terminal cw-agent-terminal--rt">
-          <header><span class="cw-agent-terminal-name">api · 32 GB RAM</span><span class="cw-agent-status"><span class="cw-agent-status-dot"></span>claude code</span></header>
-          <div class="cw-agent-terminal-body">
-            <div class="cw-agent-task">add retry backoff</div>
-            <div class="cw-agent-work">editing client/retry.ts</div>
-          </div>
-        </article></li>
-
-        <li class="cw-agent-session"><article class="cw-agent-terminal cw-agent-terminal--rb">
-          <header><span class="cw-agent-terminal-name">billing · 16 GB RAM</span><span class="cw-agent-status"><span class="cw-agent-status-dot"></span>claude code</span></header>
-          <div class="cw-agent-terminal-body">
-            <div class="cw-agent-task">trace failed invoice</div>
-            <div class="cw-agent-work">editing webhooks/stripe.go</div>
-          </div>
-        </article></li>
-        </ul>
+  <section class="sec" id="iso" data-st="4">
+    <div class="grid head"><p class="label n">(4.0)</p><p class="label k grey">Isolation</p><h2>Choose your isolation.</h2></div>
+    <div class="grid body">
+      <figure data-snap class="iso panel reg" data-plate="4.1 · one sandbox, exploded"><div class="isobox"><canvas id="isoc" role="img" aria-label="One sandbox, auth, drawn as an exploded parts diagram: its session and guest kernel inside its own VM boundary, held on registration pins above the shared hypervisor, host kernel and hardware."></canvas></div>
+        <figcaption class="label grey" id="isocap">Fig. 4.1 · One sandbox, taken apart. Its own session, kernel and VM; three shared layers below.</figcaption></figure>
+      <div class="isoside panel">
+        <p class="copy">Every sandbox is its own VM with its own guest kernel, inside a hypervisor boundary. When source code, credentials or customer data need more, the hardware can encrypt the sandbox's memory while it runs.</p>
+        <div class="seg" role="group" aria-label="Isolation level"><button type="button" class="cw-site-segment" id="iA" aria-pressed="true">Hypervisor</button><button type="button" class="cw-site-segment" id="iB" aria-pressed="false">Confidential<span class="ast" aria-hidden="true">*</span></button></div>
+        <div class="layers panel">
+          <div><span class="label grey">4.1</span><span><b>Hardware</b><p>CPU, memory and disk. Confidential sandboxes<span class="ast" aria-hidden="true">*</span> run on AMD SEV-SNP processors.</p></span></div>
+          <div><span class="label grey">4.2</span><span><b>Host kernel</b><p>Your machine, or ours. It runs the hypervisor and stays outside every sandbox.</p></span></div>
+          <div><span class="label grey">4.3</span><span><b>Hypervisor</b><p>Cloud Hypervisor on Linux, Virtualization.framework on macOS. One VM per sandbox.</p></span></div>
+          <div><span class="label grey">4.4</span><span><b>Guest kernel</b><p>One per sandbox. Never shared with the host or another sandbox.</p></span></div>
+          <div><span class="label grey">4.5</span><span><b>Session</b><p>The agent and your code. auth · codex · 8 GB</p></span></div>
+          <div class="conf" id="confRow"><span class="label live">4.6</span><span><b>Encrypted memory</b><p>Each sandbox's memory is encrypted with its own key. The host kernel and hypervisor only see ciphertext, and <span class="mono">cw report auth</span> verifies it with the processor's attestation.</p></span></div>
         </div>
-
-        <div class="cw-parallel-state cw-parallel-state--mesh" aria-hidden="true">
-          <svg class="cw-mesh-operator-connections" viewBox="0 0 1200 500" preserveAspectRatio="none" aria-hidden="true">
-            <path class="cw-parallel-route" id="mesh-route-top" d="M 600 185 L 600 205"></path>
-            <path class="cw-parallel-route" id="mesh-route-bottom" d="M 600 295 L 600 315"></path>
-            <circle class="cw-flow-packet" r="3.5"><animateMotion dur="1.8s" begin="-0.4s" repeatCount="indefinite"><mpath href="#mesh-route-top"></mpath></animateMotion></circle>
-            <circle class="cw-flow-packet" r="3.5"><animateMotion dur="1.8s" begin="-1.3s" repeatCount="indefinite"><mpath href="#mesh-route-top"></mpath></animateMotion></circle>
-            <circle class="cw-flow-packet" r="3.5"><animateMotion dur="1.8s" begin="-0.8s" repeatCount="indefinite"><mpath href="#mesh-route-bottom"></mpath></animateMotion></circle>
-            <circle class="cw-flow-packet" r="3.5"><animateMotion dur="1.8s" begin="-1.7s" repeatCount="indefinite"><mpath href="#mesh-route-bottom"></mpath></animateMotion></circle>
-          </svg>
-
-          <div class="cw-mesh-cluster cw-mesh-cluster--top" role="group" aria-labelledby="product-mesh-title">
-            <div class="cw-mesh-cluster-title"><span id="product-mesh-title">product mesh</span><span class="cw-mesh-encrypted">encrypted</span></div>
-            <svg class="cw-mesh-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-              <path class="cw-mesh-line" d="M 25 50 H 75"></path>
-              <path class="cw-mesh-message-route" id="product-mesh-forward" d="M 47 50 H 53"></path>
-              <path class="cw-mesh-message-route" id="product-mesh-reverse" d="M 53 50 H 47"></path>
-              <circle class="cw-flow-packet" r="1.15"><animateMotion dur="1.7s" begin="-0.4s" repeatCount="indefinite"><mpath href="#product-mesh-forward"></mpath></animateMotion></circle>
-              <circle class="cw-flow-packet" r="1.15"><animateMotion dur="1.9s" begin="-1.1s" repeatCount="indefinite"><mpath href="#product-mesh-reverse"></mpath></animateMotion></circle>
-            </svg>
-            <ul class="cw-mesh-agent-grid">
-              <li class="cw-mesh-agent">
-                <header><span>auth · 8 GB RAM</span><span class="cw-mesh-agent-tool">codex</span></header>
-                <div class="cw-mesh-agent-task">fix session expiry</div>
-                <div class="cw-mesh-agent-work">sending types → api</div>
-              </li>
-              <li class="cw-mesh-agent">
-                <header><span>api · 32 GB RAM</span><span class="cw-mesh-agent-tool">claude</span></header>
-                <div class="cw-mesh-agent-task">add retry backoff</div>
-                <div class="cw-mesh-agent-work">auth types ← auth</div>
-              </li>
-            </ul>
-          </div>
-
-          <div class="cw-mesh-cluster cw-mesh-cluster--bottom" role="group" aria-labelledby="operations-mesh-title">
-            <div class="cw-mesh-cluster-title"><span id="operations-mesh-title">operations mesh</span><span class="cw-mesh-encrypted">encrypted</span></div>
-            <svg class="cw-mesh-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-              <path class="cw-mesh-line" d="M 25 50 H 75"></path>
-              <path class="cw-mesh-message-route" id="operations-mesh-forward" d="M 47 50 H 53"></path>
-              <path class="cw-mesh-message-route" id="operations-mesh-reverse" d="M 53 50 H 47"></path>
-              <circle class="cw-flow-packet" r="1.15"><animateMotion dur="1.8s" begin="-0.3s" repeatCount="indefinite"><mpath href="#operations-mesh-forward"></mpath></animateMotion></circle>
-              <circle class="cw-flow-packet" r="1.15"><animateMotion dur="2s" begin="-1.4s" repeatCount="indefinite"><mpath href="#operations-mesh-reverse"></mpath></animateMotion></circle>
-            </svg>
-            <ul class="cw-mesh-agent-grid">
-              <li class="cw-mesh-agent">
-                <header><span>billing · 16 GB RAM</span><span class="cw-mesh-agent-tool">claude</span></header>
-                <div class="cw-mesh-agent-task">trace failed invoice</div>
-                <div class="cw-mesh-agent-work">webhook sample → docs</div>
-              </li>
-              <li class="cw-mesh-agent">
-                <header><span>docs · 2 GB RAM</span><span class="cw-mesh-agent-tool">codex</span></header>
-                <div class="cw-mesh-agent-task">update quickstart</div>
-                <div class="cw-mesh-agent-work">webhook ← billing</div>
-              </li>
-            </ul>
-          </div>
-        </div>
-
-        <div class="cw-operator-node">
-          <strong>you</strong>
-          <span id="parallel-operator-meta">4 sessions</span>
-        </div>
+        <p class="mono grey fnote">*In private alpha, access available upon request.</p>
       </div>
+    </div>
+  </section>
 
-      <p class="cw-parallel-caption" id="parallel-caption" aria-live="polite">One session. One sandbox. Sized for the work.</p>
-    </section>
+  <section class="sec" id="sdk" data-st="5">
+    <div class="grid head"><p class="label n">(5.0)</p><p class="label k grey">Program it</p><h2>Pull on any thread.</h2></div>
+    <div class="grid body">
+      <div class="langs panel"><p class="label grey boxlabel">SDKs</p><ul><li class="label">TypeScript</li><li class="label">Python</li><li class="label">Go</li></ul></div>
+      <div class="code panel reg" data-plate="5.1 · python"><pre><span class="k">from</span> codewire <span class="k">import</span> <span class="t">Codewire</span>
 
-    <section id="sdk" aria-labelledby="sdk-title">
-      <h2 id="sdk-title">Program it</h2>
-      <p>Use the CLI, or use the SDKs for TypeScript, Python, and Go.</p>
-      <p>Create, start, stop, resize, and delete environments. Run commands. Read and write files. Open ports. Build Codewire into your own tools and products.</p>
-      <pre aria-label="Codewire Python SDK example">from codewire import Codewire
-
-cw = Codewire()
-env = cw.environments.create(
-    name="api",
-    repo_url="https://github.com/acme/api",
-    image="workspace",
-    wait=True,
+cw = <span class="t">Codewire</span>()
+env = cw.environments.<span class="f">create</span>(
+    <span class="a">name</span>=<span class="s">"api"</span>,
+    <span class="a">repo_url</span>=<span class="s">"https://github.com/acme/api"</span>,
+    <span class="a">image</span>=<span class="s">"workspace"</span>,
+    <span class="a">wait</span>=<span class="n">True</span>,
 )
+result = env.<span class="f">exec</span>(<span class="a">command</span>=[<span class="s">"pytest"</span>, <span class="s">"-q"</span>])
+port = env.<span class="f">create_port</span>(<span class="a">port</span>=<span class="n">3000</span>, <span class="a">label</span>=<span class="s">"app"</span>)   <span class="c"># example.py</span></pre></div>
+    </div>
+  </section>
 
-result = env.exec(command=["pytest", "-q"])
-port = env.create_port(port=3000, label="app")</pre>
-      <p>The <code>cw</code> CLI supports hosted environments and native Linux environments backed by Cloud Hypervisor.</p>
-    </section>
-
-    <section class="cw-isolation-section" aria-labelledby="isolation-title">
-      <div class="cw-isolation-copy-block">
-        <h2 id="isolation-title">Choose your isolation level.</h2>
-        <p class="cw-isolation-intro">Use hypervisor isolation for everyday sessions. When source code, credentials, or customer data need stronger protection, use hardware-encrypted confidential isolation—and get a report that verifies it.</p>
+  <section class="sec" id="open" data-st="6">
+    <div class="grid head"><p class="label n">(6.0)</p><p class="label k grey">Open source</p><h2>Every wire, visible.</h2></div>
+    <div class="grid body">
+      <p class="copy opencopy">We're building the control plane and CLI for sandboxes, local and cloud, and we're here for the long run. Codewire is written in Rust, made with care, and open source. Free to run, and it stays that way.</p>
+      <div class="facts panel">
+        <p><span class="label grey">AGPL-3.0</span><br>The control plane, web dashboard and CLI.</p>
+        <p><span class="label grey">MIT</span><br>The SDKs for TypeScript, Python and Go.</p>
+        <p><span class="label grey">Per second</span><br>Pay for hosted compute while sandboxes run. No plans, no seats.</p>
       </div>
+      <div class="cmp panel reg" data-plate="6.1 · compare"><div class="tw"><table>
+        <thead><tr><th scope="col"><span class="vh">Feature</span></th><th scope="col">Codewire</th><th scope="col">Cloud-only sandboxes</th></tr></thead>
+        <tbody>
+          <tr><td>On your own machine</td><td class="y">Yes</td><td class="no">No</td></tr>
+          <tr><td>In the cloud</td><td class="y">Yes</td><td>Yes</td></tr>
+          <tr><td>Session-to-session mesh</td><td class="y">Encrypted, private</td><td class="no">Varies</td></tr>
+          <tr><td>Source code</td><td class="y">AGPL-3.0 · MIT</td><td class="no">Closed</td></tr>
+        </tbody>
+      </table></div></div>
+    </div>
+  </section>
 
-      <div class="cw-isolation-options">
-        <article class="cw-isolation-option">
-          <div class="cw-isolation-option-heading">
-            <h3>Hypervisor isolation</h3>
-            <span class="cw-isolation-tier">standard</span>
-          </div>
-
-          <div class="cw-isolation-diagram" role="img" aria-label="A standard sandbox isolated from the host by its own virtual machine, guest kernel, and the hypervisor">
-            <div class="cw-isolation-host">
-              <div class="cw-isolation-host-bar"><span>compute host</span><span>host kernel</span></div>
-              <div class="cw-isolation-vm">
-                <div class="cw-isolation-vm-bar"><span>sandbox VM</span><span class="cw-isolation-boundary-badge">isolated</span></div>
-                <div class="cw-isolation-workload">agent + generated code</div>
-                <div class="cw-isolation-kernel"><span>guest kernel</span><span>dedicated</span></div>
-              </div>
-              <div class="cw-isolation-foundation"><strong>hypervisor boundary</strong><span>host kernel stays outside</span></div>
-            </div>
-          </div>
-
-          <p class="cw-isolation-copy">Each sandbox runs in its own VM with its own guest kernel. It does not share the host kernel with other sandboxes.</p>
-        </article>
-
-        <article class="cw-isolation-option cw-isolation-option--confidential">
-          <div class="cw-isolation-option-heading">
-            <h3>Confidential isolation</h3>
-            <span class="cw-isolation-tier">confidential</span>
-          </div>
-
-          <div class="cw-isolation-diagram" role="img" aria-label="A confidential sandbox protected from the host by an attested virtual machine, encrypted guest memory, and a hardware trusted execution environment">
-            <div class="cw-isolation-host">
-              <div class="cw-isolation-host-bar"><span>compute host</span><span>memory hidden from host</span></div>
-              <div class="cw-isolation-vm">
-                <div class="cw-isolation-vm-bar"><span>confidential sandbox</span><span class="cw-isolation-boundary-badge">verified</span></div>
-                <div class="cw-isolation-workload">agent + sensitive code</div>
-                <div class="cw-isolation-kernel"><span>guest kernel + memory</span><span>encrypted</span></div>
-              </div>
-              <div class="cw-isolation-foundation"><strong>hardware protection · SEV-SNP</strong><span>attestation report</span></div>
-            </div>
-          </div>
-
-          <p class="cw-isolation-copy">Hardware encrypts the sandbox’s memory while it runs. Use <code>cw report auth</code> to get a trust report showing the confidential runtime and attestation status.</p>
-        </article>
+  <section class="end" id="end" data-st="7">
+    <div class="grid ask">
+      <h2>Take hold.</h2>
+      <div class="go">
+        <p class="copy">Codewire is in private beta. Tell us what you want to build and verify your email to request access.</p>
+        <a class="btn" href="/signup">Request access <span aria-hidden="true">→</span></a>
       </div>
-
-      <p class="cw-isolation-difference"><strong>Confidential compute, built into your sandbox workflow.</strong> Choose the boundary per session from the CLI, SDK, or API.</p>
-    </section>
-
-    <section id="pricing" aria-labelledby="pricing-title">
-      <h2 id="pricing-title">Agents are not seats</h2>
-      <p>Plans include monthly compute and storage. Additional usage is measured in CPU hours, memory GB-hours, and allocated disk GB-hours. Agent processes never count as user seats.</p>
-      <p>Start with a 14-day trial. No card is required. <a href="/docs/reference/subscription-plans">See pricing →</a></p>
-    </section>
-
-    <section aria-labelledby="source-title">
-      <h2 id="source-title">Open source</h2>
-      <p>The control plane, web dashboard, and CLI are open source under AGPL-3.0-only. The SDKs are open source under MIT.</p>
-      <p><a href="https://github.com/codewiresh/codewire">Read the source →</a></p>
-    </section>
-
-    <section id="access" aria-labelledby="access-title">
-      <h2 id="access-title">A sandbox for every session</h2>
-      <p>Codewire is in private beta. Tell us what you want to build and verify your email to request access.</p>
-
-      <p><a class="cw-hero-action cw-hero-action--primary" href="/signup">Request access</a></p>
-    </section>
+    </div>
+    <div class="grid endget">
+      <div class="getbox reg panel" data-plate="7.1 · install">
+        <p class="label grey boxlabel">Install · Linux and macOS</p>
+        <div class="install big"><code>curl -fsSL https://get.codewire.sh | sh</code><button type="button" class="cw-site-copy" aria-label="Copy install command"><svg class="cp" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8"/><path d="M10.5 5.5v-3h-8v8h3"/></svg><svg class="ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 4.8"/></svg></button></div>
+      </div>
+    </div>
+    <div class="logo" aria-hidden="true" data-snap><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 495 89"><path fill="currentColor" d="M22.9844 40C31.9375 40.25 30.1563 53.4375 41.5469 53.8281C44.4844 53.9531 47.6875 53.0625 49.7344 51.3906C60.6094 43.4531 59.8438 25.6563 47.4375 25.6563C41.0313 25.6563 37.8281 29.125 38.8594 35.9063C38.9844 37.0625 38.9844 38.4688 38.2188 38.5938C37.0625 38.8438 36.5469 37.8281 36.2969 36.6719C34.8906 30.9063 30.6563 25.9219 22.7344 25.9219C10.9531 25.9219 0.9688 35.3906 0.9688 54.8438C0.9688 75.0781 18.5 88 35.1406 88C44.75 88 57.1563 82.375 57.1563 71.4844C57.1563 65.4688 51.7813 59.5781 44.6094 59.5781C36.4219 59.5781 34.7656 71.6094 24.6406 71.6094C17.2188 71.6094 11.8438 64.0625 11.7188 55.875C11.5938 47.2969 16.4531 39.875 22.9844 40ZM22.9844 40 M62.9688 55.3594C62.9688 72.25 76.2813 88 93.9375 88C110.0781 88 121.8438 74.5625 121.8438 58.6875C121.8438 41.9219 108.4063 25.9219 90.875 25.9219C74.75 25.9219 62.9688 39.6094 62.9688 55.3594ZM78.0781 64.8281C78.0781 53.7031 85.375 38.9688 96.25 37.5625C96.625 37.5625 97.1406 37.4375 97.5313 37.4375C102.1406 37.4375 105.2031 40.8906 105.8438 46.9063C107 58.9375 99.4531 73.0313 88.7031 75.5781C87.7969 75.8438 87.0313 75.8438 86.2656 75.8438C81.0156 75.8438 78.0781 71.2344 78.0781 64.8281ZM78.0781 64.8281 M181.8594 55.875C166.625 55.875 167.7813 73.0313 154.7188 73.1563C146.0156 73.4063 142.4375 65.4688 142.4375 59.7188C142.4375 52.0313 146.9063 45.5 154.5938 45.125C154.8438 45.125 155.1094 45.125 155.3594 45.125C163.4219 45.125 171.4844 52.5469 179.0469 52.5469C179.6875 52.5469 180.4531 52.4219 181.0938 52.2813C191.5781 50.2344 192.3594 40.25 192.3594 32.1875C192.3594 19.9063 186.2031 5.7031 171.3594 5.7031C164.7031 5.7031 158.1719 8.6406 158.1719 16.1875C158.1719 29.8906 175.2031 26.5625 180.0625 35.5156C181.5938 38.0781 180.9531 40.6406 178.6563 40.6406C178.0156 40.6406 177.25 40.3906 176.3594 40C172.6406 37.9531 164.8281 31.8125 155.75 31.8125C140.125 31.8125 127.9688 43.9688 127.9688 59.9688C127.9688 76.6094 140.3906 88 156 88C166.75 88 175.5781 80.0625 178.5313 70.0781C178.9063 68.5469 179.2969 65.7344 181.2188 66.5C182.625 67.1406 181.7344 69.5625 181.2188 71.3594C179.9375 74.5625 178.4063 77.125 178.5313 81.0938C178.6563 85.7031 182.75 88 186.8438 88C194.1406 88 197.5938 82.1094 197.5938 75.3281C197.5938 66.75 191.4531 55.875 181.8594 55.875ZM181.8594 55.875 M222.0156 56.7656C218.6875 56.7656 216.3906 53.9531 219.8438 48.8281C223.9375 42.6875 230.7188 38.9688 237.375 38.9688C240.4531 38.9688 241.5938 41.7969 240.0625 45.125C238.4063 49.3438 226.75 56.7656 222.0156 56.7656ZM203.9688 61.7656C203.4531 73.5313 208.7031 82.75 218.4375 86.3438C221.375 87.3594 225.0938 87.875 229.0625 87.875C236.6094 87.875 244.9219 85.9531 249.9219 82.875C260.7969 76.2188 253.375 61.7656 243.5156 62.9063C233.1563 64.0625 232.8906 74.2969 225.4688 75.5781C222.7813 76.2188 219.9688 74.4375 218.8125 72.25C216.6406 68.0313 220.4844 64.4531 225.4688 63.5469C235.7188 61.375 256.1875 56.7656 256.1875 41.6563C256.1875 33.0938 248.25 25.5313 237.7656 25.5313C236.9844 25.5313 236.3594 25.6563 235.7188 25.6563C216.7656 27.3281 204.8594 43.9688 203.9688 61.7656ZM203.9688 61.7656 M286.5469 71.3594C285.3906 72 284.1094 72.3906 283.0938 72.3906C280.4063 72.3906 278.6094 70.3438 279.8906 66.375C283.2188 55.75 300.5 47.4219 300.375 36.7969C300.2344 26.4375 289.6094 25.6563 282.4531 25.6563C274.6406 25.6563 265.0469 28.8594 265.0469 38.0781C265.0469 42.8125 269.3906 47.9375 274.25 47.9375C280.9063 47.9375 285.6406 40.25 288.5938 40.25C289.2344 40.25 289.6094 40.8906 289.6094 41.5313C289.6094 43.9688 261.9688 59.9688 261.9688 73.0313C261.9688 83.0156 269.6406 88 278.7344 88C300.625 88 299.8594 52.7969 309.0781 52.7969C315.7344 52.7969 312.6563 65.4688 312.6563 69.0625C312.6563 78.2656 315.7344 88.25 326.8594 88.25C337.75 88.25 341.0781 79.0469 342.7344 69.7031C344.0156 62.9063 344.7813 55.875 344.7813 48.8281C344.7813 39.2344 342.0938 25.5313 329.8125 25.5313C321.6094 25.6563 319.4375 31.8125 320.3438 36.6719C321.3594 44.0938 332.2344 46.0156 332.2344 62.0156C332.2344 64.8281 331.7344 73.1563 327.25 73.1563C320.3438 73.1563 322.25 58.6875 322.6406 54.3438C323.0313 46.9063 319.1875 38.8438 311.5 38.8438C296.2656 38.8438 296.2656 65.4688 286.5469 71.3594ZM286.5469 71.3594 M351.2188 10.9375C351.2188 16.7031 356.2188 21.0625 361.8438 21.0625C367.3594 21.0625 371.7031 17.0938 371.7031 11.3281C371.7031 5.7031 367.2188 0.9531 361.4688 0.9531C355.9531 0.9531 351.2188 5.5625 351.2188 10.9375ZM373.625 36.4219C373.625 29.375 368.25 25.9219 361.9688 25.9219C356.3438 25.9219 350.9688 29.375 351.2188 36.6719C351.4844 42.8125 358.5156 45.7656 358.5156 53.4375C358.5156 62.4063 351.2188 68.6719 350.9688 78.1406C350.9688 84.4219 356.2188 88 361.8438 88C370.4219 88 376.7031 83.2656 375.2813 74.8125C374.3906 68.6719 365.8125 66.5 365.8125 57.4063C365.8125 51.3906 373.625 45.125 373.625 36.4219ZM373.625 36.4219 M403.5938 43.4531C414.4844 43.4531 415.8906 57.4063 424.4688 58.8125C432.2656 60.0938 437.5156 56 439.1875 43.9688C440.4688 35.7813 441.1094 25.4063 430.2188 25.5313C426.5156 25.5313 421.6406 27.9688 421.3906 32.3125C421.0156 37.4375 423.1875 41.4063 425.3594 45.625C425.6094 46.1406 426.5156 47.6875 425.6094 48.1875C424.8438 48.7031 424.0781 47.6875 423.7031 47.1719C420.375 42.5625 411.0313 25.6563 398.8594 25.6563C391.0625 25.6563 383.7656 29.125 383.8906 40.125C384.0156 48.4531 390.4219 53.5625 390.7969 59.3281C391.4375 67.2656 381.9688 67.7813 381.9688 77.125C382.0938 84.1563 387.8594 88 395.5313 88C401.2969 88 407.9531 84.2813 408.0781 77.25C408.2031 65.4688 400.5313 62.4063 398.8594 53.4375C398.3594 49.7344 398.2188 43.4531 403.5938 43.4531ZM403.5938 43.4531 M460.0156 56.7656C456.6875 56.7656 454.3906 53.9531 457.8438 48.8281C461.9375 42.6875 468.7188 38.9688 475.375 38.9688C478.4531 38.9688 479.5938 41.7969 478.0625 45.125C476.4063 49.3438 464.75 56.7656 460.0156 56.7656ZM441.9688 61.7656C441.4531 73.5313 446.7031 82.75 456.4375 86.3438C459.375 87.3594 463.0938 87.875 467.0625 87.875C474.6094 87.875 482.9219 85.9531 487.9219 82.875C498.7969 76.2188 491.375 61.7656 481.5156 62.9063C471.1563 64.0625 470.8906 74.2969 463.4688 75.5781C460.7813 76.2188 457.9688 74.4375 456.8125 72.25C454.6406 68.0313 458.4844 64.4531 463.4688 63.5469C473.7188 61.375 494.1875 56.7656 494.1875 41.6563C494.1875 33.0938 486.25 25.5313 475.7656 25.5313C474.9844 25.5313 474.3594 25.6563 473.7188 25.6563C454.7656 27.3281 442.8594 43.9688 441.9688 61.7656ZM441.9688 61.7656"/></svg></div>
+    <footer class="legal label grey"><span>© 2026 Codewire</span><span>Open source · AGPL-3.0 / MIT</span><span>codewire.sh</span></footer>
+  </section>
   </main>
-
-  <footer>
-    <nav aria-label="Footer navigation">
-      <ul class="cw-footer-links">
-        <li><a href="/docs">Docs</a></li>
-        <li><a href="#pricing">Pricing</a></li>
-        <li><a href="https://github.com/codewiresh/codewire">GitHub</a></li>
-        <li><a href="mailto:hello@codewire.sh">Contact</a></li>
-      </ul>
-    </nav>
-    <p>&copy; 2026 Codewire</p>
-  </footer>
-
+</div>
+<nav class="menu" id="menu" aria-label="Menu">
+  <ul>
+    <li><a href="/docs">Docs</a></li>
+    <li><a href="/pricing">Pricing</a></li>
+    <li><a href="/login">Log in</a></li>
+    <li><a class="signup" href="/signup">Sign up</a></li>
+  </ul>
+</nav>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 </body>
 </html>
