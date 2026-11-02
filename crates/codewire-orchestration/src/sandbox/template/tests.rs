@@ -223,13 +223,23 @@ mod tests {
         assert_eq!(names, [MOUNT_WORKSPACE_CONTAINER, WORKSPACE_FLUSH_CONTAINER]);
         let mount = &inits[0];
         assert_eq!(mount["command"][2], MOUNT_WORKSPACE_SCRIPT);
-        let env: Vec<_> = mount["env"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|entry| entry["name"].as_str().unwrap())
-            .collect();
-        assert_eq!(env, DOCKER_DATA_INIT_ENV);
+        assert_eq!(mount["terminationMessagePolicy"], "FallbackToLogsOnError");
+        let env = mount["env"].as_array().unwrap();
+        let names: Vec<_> = env.iter().map(|entry| entry["name"].as_str().unwrap()).collect();
+        assert_eq!(names[..DOCKER_DATA_INIT_ENV.len()], DOCKER_DATA_INIT_ENV);
+        // Each overlaid container's image reaches mount-workspace as its own
+        // container's image and its read-only image volume (§4a).
+        for entry in &env[DOCKER_DATA_INIT_ENV.len()..] {
+            let (container, volume) = match entry["name"].as_str().unwrap() {
+                "CODEWIRE_WORKSPACE_IMAGE" => ("workspace", "rootfs-workspace-image"),
+                "CODEWIRE_DIND_IMAGE" => ("dind", "rootfs-dind-image"),
+                other => panic!("mount-workspace carries {other}"),
+            };
+            let image = &entry["value"];
+            assert!(pod_spec["containers"].as_array().unwrap().iter().any(|c| c["name"] == container && &c["image"] == image));
+            assert!(pod_spec["volumes"].as_array().unwrap().iter().any(|v| v["name"] == volume && &v["image"]["reference"] == image));
+            assert!(mount["volumeMounts"].as_array().unwrap().iter().any(|m| m["name"] == volume && m["readOnly"] == true));
+        }
         assert!(mount.get("envFrom").is_none());
         let flush = &inits[1];
         assert_eq!(flush["restartPolicy"], "Always");
@@ -3584,7 +3594,14 @@ mod tests {
                 .filter(|entry| DOCKER_DATA_INIT_ENV.contains(&entry["name"].as_str().unwrap()))
                 .cloned()
                 .collect();
-            assert_eq!(data_init["env"], Value::Array(dind_data_env));
+            let init_data_env: Vec<_> = data_init["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| DOCKER_DATA_INIT_ENV.contains(&entry["name"].as_str().unwrap()))
+                .cloned()
+                .collect();
+            assert_eq!(init_data_env, dind_data_env);
         }
     }
 
@@ -3800,5 +3817,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bridge["spec"]["ingress"], daemon["spec"]["ingress"]);
+    }
+
+    /// On a Block workspace, the canonical workspace image and the pinned
+    /// DinD image run on read-only roots, each listed top-level directory an
+    /// overlay that mount-workspace builds from the container's own image
+    /// (#3718, direct I/O design §4a). A custom image keeps its writable root
+    /// (#3879); DinD's is the same either way.
+    #[test]
+    fn a_block_workspace_runs_its_images_on_overlays_of_the_disk() {
+        let names = |container: &Value| -> Vec<(String, String)> {
+            container["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| (m["mountPath"].as_str().unwrap().to_owned(), m["mountPropagation"].as_str().unwrap_or("").to_owned()))
+                .collect()
+        };
+        let canonical = TemplateOpts {
+            image: crate::sandbox::canonical_workspace_runtime_image().into(),
+            docker_mode: DOCKER_MODE_GUEST_DIND.into(),
+            ..commodity_opts()
+        };
+        let custom = TemplateOpts {
+            image: "ghcr.io/example/custom@sha256:4444444444444444444444444444444444444444444444444444444444444444".into(),
+            ..canonical.clone()
+        };
+        for (opts, workspace_overlaid) in [(&canonical, true), (&custom, false)] {
+            let spec = render_sandbox_template("dev-sandboxes", opts)["spec"]["podTemplate"]["spec"].clone();
+            let container = |name: &str| {
+                spec["containers"].as_array().unwrap().iter().find(|c| c["name"] == name).unwrap().clone()
+            };
+            let mount = spec["initContainers"].as_array().unwrap().iter().find(|c| c["name"] == MOUNT_WORKSPACE_CONTAINER).unwrap().clone();
+            let init_mounts = names(&mount);
+            for (name, dirs, overlaid) in [("workspace", WORKSPACE_ROOT_DIRS, workspace_overlaid), ("dind", DIND_ROOT_DIRS, true)] {
+                let c = container(name);
+                let mounts = names(&c);
+                assert_eq!(c["securityContext"]["readOnlyRootFilesystem"] == true, overlaid, "{name}");
+                for dir in dirs.split(' ') {
+                    assert_eq!(mounts.contains(&(format!("/{dir}"), "HostToContainer".into())), overlaid, "{name} /{dir}");
+                    assert_eq!(
+                        init_mounts.contains(&(format!("/mnt/root/{name}/{dir}"), "Bidirectional".into())),
+                        overlaid,
+                        "mount-workspace /mnt/root/{name}/{dir}"
+                    );
+                }
+                assert_eq!(mounts.contains(&("/run".into(), String::new())), overlaid, "{name} /run");
+                let image_volume = spec["volumes"].as_array().unwrap().iter().find(|v| v["name"] == format!("rootfs-{name}-image")).cloned();
+                assert_eq!(image_volume.as_ref().map(|v| v["image"]["reference"].clone()), overlaid.then(|| c["image"].clone()), "{name}");
+            }
+            assert_block_workspace_inits(&spec);
+        }
     }
 }

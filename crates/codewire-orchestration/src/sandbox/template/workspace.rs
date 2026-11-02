@@ -21,12 +21,12 @@ use codewire_daemon_proto::{
 use crate::worker::workspace_binding::WORKSPACE_BINDING_VOLUME;
 
 use super::{
-    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DIND_SOCKET_PATH, EXTENSIONS_API_VERSION, HOME_ROOT,
-    KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
-    KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    SANDBOX_SERVICE_ACCOUNT, TemplateOpts, WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR,
-    WORKSPACE_DAEMON_PORT, WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI,
-    WORKSPACE_READY_TIMEOUT,
+    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DEFAULT_DIND_IMAGE, DIND_SOCKET_PATH,
+    EXTENSIONS_API_VERSION, HOME_ROOT, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
+    KATA_CONFIDENTIAL_VOLUME_ANNOTATION, KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
+    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, SANDBOX_SERVICE_ACCOUNT, TemplateOpts,
+    WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR, WORKSPACE_DAEMON_PORT,
+    WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI, WORKSPACE_READY_TIMEOUT,
 };
 
 /// Copies the daemon from the support image into `codewire-bin` where the
@@ -366,8 +366,17 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         configure_confidential_workspace_device(ws);
     }
     let block = block_workspace(opts, &runtime_spec);
+    let overlays = if block {
+        root_overlays(opts, &runtime_spec)
+    } else {
+        Vec::new()
+    };
+    let overlay_of = |name: &str| overlays.iter().find(|overlay| overlay.container == name);
     if block {
         configure_block_workspace_mounts(ws, true);
+    }
+    if let Some(overlay) = overlay_of("workspace") {
+        overlay.configure(ws);
     }
     let daemon_image_volume = daemon_from_image_volume(&runtime_spec);
     let daemon_volume = if daemon_image_volume {
@@ -391,6 +400,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     }
     if block {
         volumes.extend(block_workspace_volumes());
+        volumes.extend(overlays.iter().flat_map(RootOverlay::volumes));
     }
     if opts.credential_runtime.is_some() {
         volumes.extend(credentials::workspace_volumes(opts));
@@ -527,6 +537,9 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         if block {
             configure_block_workspace_mounts(&mut dind, true);
         }
+        if let Some(overlay) = overlay_of("dind") {
+            overlay.configure(&mut dind);
+        }
         containers.push(dind);
     } else {
         containers.push(ws.clone());
@@ -549,6 +562,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             support_image,
             WorkspaceVolume::rendered(opts),
             data_env.clone().unwrap_or_default(),
+            &overlays,
         ));
     }
     if !daemon_image_volume {
@@ -660,6 +674,129 @@ pub(crate) fn configure_block_workspace_mounts(container: &mut Value, tmp: bool)
     }
 }
 
+/// The top-level directories of the canonical workspace image (Ubuntu with
+/// merged `/usr`: `bin`, `lib`, `lib64` and `sbin` are links into `usr`) and of
+/// the pinned DinD image that become overlays on a Block workspace (#3718,
+/// direct I/O design §4a). `dev`, `proc` and `sys` are the kernel's, `/run`
+/// is guest memory, `/tmp` and `/var/tmp` are the workspace's `tmp`, and
+/// `/home/codewire` is the workspace itself. As literals, so the pinned
+/// `mount-workspace` script carries the same lists the template mounts.
+macro_rules! workspace_root_dirs {
+    () => {
+        "boot etc home media mnt opt root srv usr var bin.usr-is-merged lib.usr-is-merged sbin.usr-is-merged"
+    };
+}
+macro_rules! dind_root_dirs {
+    () => {
+        "bin certs etc home lib media mnt opt root sbin srv usr var"
+    };
+}
+pub(crate) const WORKSPACE_ROOT_DIRS: &str = workspace_root_dirs!();
+pub(crate) const DIND_ROOT_DIRS: &str = dind_root_dirs!();
+
+/// One container whose root filesystem is read-only, with each of `dirs` an
+/// overlay: the image, read-only, below; the workspace disk above.
+pub(crate) struct RootOverlay {
+    /// The container's name, and its directory under `.codewire/rootfs`.
+    pub(crate) container: &'static str,
+    /// The image by digest: the lowers come from it as an image volume, and
+    /// a new digest resets the uppers.
+    pub(crate) image: String,
+    pub(crate) dirs: &'static str,
+}
+
+impl RootOverlay {
+    /// The variable that passes the image to `mount-workspace`.
+    fn image_variable(&self) -> &'static str {
+        if self.container == "dind" {
+            "CODEWIRE_DIND_IMAGE"
+        } else {
+            "CODEWIRE_WORKSPACE_IMAGE"
+        }
+    }
+
+    fn image_volume(&self) -> String {
+        format!("rootfs-{}-image", self.container)
+    }
+
+    fn run_volume(&self) -> String {
+        format!("rootfs-{}-run", self.container)
+    }
+
+    /// The emptyDir each directory's overlay is mounted on: a mount point
+    /// only, holding nothing of its own.
+    fn dir_volume(&self, dir: &str) -> String {
+        format!("rootfs-{}-{}", self.container, dir.replace('.', "-"))
+    }
+
+    fn volumes(&self) -> Vec<Value> {
+        let mut volumes = vec![
+            json!({ "name": self.image_volume(), "image": { "reference": self.image, "pullPolicy": "IfNotPresent" } }),
+            json!({ "name": self.run_volume(), "emptyDir": { "medium": "Memory" } }),
+        ];
+        volumes.extend(self.dirs.split(' ').map(
+            |dir| json!({ "name": self.dir_volume(dir), "emptyDir": { "medium": "Memory" } }),
+        ));
+        volumes
+    }
+
+    /// What `mount-workspace` mounts to build the overlays: the image
+    /// read-only, the guest-memory `/run` it seeds, and each mount point with
+    /// `Bidirectional` propagation, so the containers see the overlays.
+    fn init_mounts(&self) -> Vec<Value> {
+        let mut mounts = vec![
+            json!({ "name": self.image_volume(), "mountPath": format!("/mnt/img/{}", self.container), "readOnly": true }),
+            json!({ "name": self.run_volume(), "mountPath": format!("/mnt/run/{}", self.container) }),
+        ];
+        mounts.extend(self.dirs.split(' ').map(|dir| {
+            json!({
+                "name": self.dir_volume(dir),
+                "mountPath": format!("/mnt/root/{}/{dir}", self.container),
+                "mountPropagation": "Bidirectional",
+            })
+        }));
+        mounts
+    }
+
+    /// The container runs on a read-only root, with its overlays at their
+    /// top-level paths and guest memory at `/run`.
+    fn configure(&self, container: &mut Value) {
+        if !container["securityContext"].is_object() {
+            container["securityContext"] = json!({});
+        }
+        container["securityContext"]["readOnlyRootFilesystem"] = true.into();
+        let mounts = container["volumeMounts"]
+            .as_array_mut()
+            .expect("container volumeMounts array");
+        mounts.extend(self.dirs.split(' ').map(|dir| {
+            json!({ "name": self.dir_volume(dir), "mountPath": format!("/{dir}"), "mountPropagation": "HostToContainer" })
+        }));
+        mounts.push(json!({ "name": self.run_volume(), "mountPath": "/run" }));
+    }
+}
+
+/// The containers of a Block workspace Pod that run on overlays: the
+/// workspace for the canonical image, and a guest DinD on the pinned image.
+fn root_overlays(opts: &TemplateOpts, runtime_spec: &RuntimeProfileSpec) -> Vec<RootOverlay> {
+    let mut overlays = Vec::new();
+    if opts.workspace_root_overlays() {
+        overlays.push(RootOverlay {
+            container: "workspace",
+            image: opts.image.clone(),
+            dirs: WORKSPACE_ROOT_DIRS,
+        });
+    }
+    if runtime_spec.docker_mode == DOCKER_MODE_GUEST_DIND && dind_image(opts) == DEFAULT_DIND_IMAGE
+    {
+        overlays.push(RootOverlay {
+            container: "dind",
+            image: DEFAULT_DIND_IMAGE.into(),
+            dirs: DIND_ROOT_DIRS,
+        });
+    }
+    overlays
+}
+
 /// `mount-workspace`: privileged inside the guest only, the one container
 /// with the workspace device, and done before any other container starts.
 /// Beside a guest DinD it also prepares the Docker data image, with the data
@@ -670,6 +807,7 @@ pub(crate) fn mount_workspace_init_container(
     support_image: &str,
     volume: WorkspaceVolume,
     data_env: Vec<Value>,
+    overlays: &[RootOverlay],
 ) -> Value {
     let mut container = json!({
         "name": MOUNT_WORKSPACE_CONTAINER,
@@ -682,10 +820,23 @@ pub(crate) fn mount_workspace_init_container(
             { "name": WORKSPACE_TMP_VOLUME, "mountPath": "/mnt/tmp", "mountPropagation": "Bidirectional" },
         ],
         "resources": docker_data_init_resources(),
+        // Its own failure stays in the Pod's status: a Kata init container
+        // holding a device cannot run again in place (design §2).
+        "terminationMessagePolicy": "FallbackToLogsOnError",
     });
-    if !data_env.is_empty() {
-        container["env"] = Value::Array(data_env);
+    let mut env = data_env;
+    env.extend(
+        overlays
+            .iter()
+            .map(|overlay| json!({ "name": overlay.image_variable(), "value": overlay.image })),
+    );
+    if !env.is_empty() {
+        container["env"] = Value::Array(env);
     }
+    container["volumeMounts"]
+        .as_array_mut()
+        .expect("mount-workspace volumeMounts")
+        .extend(overlays.iter().flat_map(RootOverlay::init_mounts));
     container
 }
 
@@ -841,11 +992,14 @@ fi"#
 ///   no path the workspace controls is followed as root.
 pub(crate) const MOUNT_WORKSPACE_SCRIPT: &str = concat!(
     r#"set -u
-# The three paths are overridable only for the script's own test; nothing
-# renders them, and the pool policy admits no other variable.
+# The paths are overridable only for the script's own test; nothing renders
+# them, and the pool policy admits no other variable.
 dev="${CODEWIRE_MOUNT_WORKSPACE_DEVICE:-/dev/cwws}"
 ws="${CODEWIRE_MOUNT_WORKSPACE_ROOT:-/mnt/ws}"
 tmp="${CODEWIRE_MOUNT_WORKSPACE_TMP:-/mnt/tmp}"
+images="${CODEWIRE_MOUNT_WORKSPACE_IMAGES:-/mnt/img}"
+roots="${CODEWIRE_MOUNT_WORKSPACE_ROOTS:-/mnt/root}"
+runs="${CODEWIRE_MOUNT_WORKSPACE_RUNS:-/mnt/run}"
 volume="${1:-}"
 began="$(date +%s%N)"
 refuse() {
@@ -895,6 +1049,41 @@ fi
 rm -rf "$ws/.codewire/tmp" && mkdir "$ws/.codewire/tmp" && chmod 1777 "$ws/.codewire/tmp" ||
   refuse "the workspace temporary directory could not be emptied"
 mount --bind "$ws/.codewire/tmp" "$tmp" || refuse "binding the workspace temporary directory failed"
+# Each listed top-level directory of a container's image is an overlay: the
+# image below, read-only; its upper on this disk, under
+# .codewire/rootfs/<container>/ (direct I/O design §4a). Without index and
+# uuid, an upper stays usable when the next VM shares the image afresh. A
+# new image digest starts the uppers empty. Nothing the workspace controls
+# is followed as root: a linked directory there is refused.
+overlay() {
+  c="$1"
+  image="$2"
+  shift 2
+  r="$ws/.codewire/rootfs/$c"
+  [ ! -L "$ws/.codewire/rootfs" ] && [ ! -L "$r" ] || refuse "the $c root filesystem's directory is a symbolic link"
+  if [ "$(cat "$r/image" 2>/dev/null)" != "$image" ]; then
+    rm -rf "$r" && mkdir -p "$r" && printf '%s\n' "$image" >"$r/image" ||
+      refuse "the $c root filesystem could not be started for its image"
+  fi
+  mkdir -p "$runs/$c/lock" && chmod 1777 "$runs/$c/lock" || refuse "the $c /run could not be prepared"
+  for d in "$@"; do
+    for path in "$r/$d" "$r/$d/upper" "$r/$d/work"; do
+      [ ! -L "$path" ] || refuse "the $c root filesystem's /$d is a symbolic link"
+    done
+    mkdir -p "$r/$d/upper" "$r/$d/work" &&
+      chown --reference="$images/$c/$d" "$r/$d/upper" &&
+      chmod --reference="$images/$c/$d" "$r/$d/upper" ||
+      refuse "the $c root filesystem's /$d could not be prepared"
+    mount -t overlay overlay -o "lowerdir=$images/$c/$d,upperdir=$r/$d/upper,workdir=$r/$d/work,index=off,uuid=off" "$roots/$c/$d" ||
+      refuse "mounting the $c root filesystem's /$d failed"
+  done
+}
+[ -z "${CODEWIRE_WORKSPACE_IMAGE:-}" ] || overlay workspace "$CODEWIRE_WORKSPACE_IMAGE" "#,
+    workspace_root_dirs!(),
+    r#"
+[ -z "${CODEWIRE_DIND_IMAGE:-}" ] || overlay dind "$CODEWIRE_DIND_IMAGE" "#,
+    dind_root_dirs!(),
+    r#"
 if [ -n "${CODEWIRE_DOCKER_DATA_SIZE:-}" ]; then
   (
     CODEWIRE_DOCKER_DATA_IMAGE="$ws/.codewire/docker-data.ext4"

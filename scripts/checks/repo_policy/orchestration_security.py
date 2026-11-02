@@ -359,6 +359,13 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             "(c.name == 'mount-workspace' && size(c.volumeDevices) == 1 &&",
             "c.command[2] == variables.mountWorkspaceScript && c.command[3] == 'mount-workspace' &&",
             "v.image.reference == c.image",
+            # mount-workspace builds each read-only root from its own
+            # container's image, mounted as that image volume, and only it
+            # names one (codewire#3718).
+            "(c.name == 'mount-workspace' && e.name in ['CODEWIRE_WORKSPACE_IMAGE', 'CODEWIRE_DIND_IMAGE'] &&",
+            "w.name == (e.name == 'CODEWIRE_WORKSPACE_IMAGE' ? 'workspace' : 'dind') && w.image == e.value",
+            "v.name == (e.name == 'CODEWIRE_WORKSPACE_IMAGE' ? 'rootfs-workspace-image' : 'rootfs-dind-image') &&",
+            "has(v.image) && has(v.image.reference) && v.image.reference == e.value",
             "object.spec.networkPolicyManagement == 'Managed'",
             # codewire#3626: the template ingress is exactly orchestration's
             # identity, in one AND-ed peer, on TCP 7777 and 2222.
