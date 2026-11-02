@@ -494,7 +494,7 @@ if validate_probe_initdata "$wrong_generation_initdata" smoke 2>/dev/null; then
 fi
 rm -rf "$initdata_dir"
 
-rg -F "EXPECTED_KATA_COMMIT='b81c0f2db867caddbe98e660e0ccccc9c420b6f8'" \
+rg -F "EXPECTED_KATA_COMMIT='7ffba19210b343b37e0c8e2f3cab9620e2e1f7e7'" \
   "$PROBE_POLICY_GENERATOR" >/dev/null
 rg -F 'genpolicy reports $embedded_commit, but Kata source is $kata_head' \
   "$PROBE_POLICY_GENERATOR" >/dev/null
