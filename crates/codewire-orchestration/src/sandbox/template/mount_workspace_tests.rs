@@ -8,8 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::MOUNT_WORKSPACE_SCRIPT;
 use super::workspace::WORKSPACE_FLUSH_SCRIPT;
-use super::{MOUNT_WORKSPACE_SCRIPT, WORKSPACE_ROOT_DIRS};
 
 /// The stand-ins. `blkid -p` answers from `$FAKE/signature` (`none`, `ext4`,
 /// `xfs`, `error` or `ambiguous`); `mkfs.ext4` writes `ext4` there unless
@@ -62,10 +62,6 @@ echo ext4 >"$FAKE/signature""#,
 struct Scene {
     _dir: tempfile::TempDir,
     root: PathBuf,
-    /// Stand for `/mnt/img`, `/mnt/root` and `/mnt/run` (direct I/O design §4a).
-    images: PathBuf,
-    roots: PathBuf,
-    runs: PathBuf,
     fake: PathBuf,
     bin: PathBuf,
     device: PathBuf,
@@ -77,10 +73,7 @@ impl Scene {
         let root = dir.path().join("ws");
         let fake = dir.path().join("fake");
         let bin = dir.path().join("bin");
-        let images = dir.path().join("images");
-        let roots = dir.path().join("roots");
-        let runs = dir.path().join("runs");
-        for path in [&root, &fake, &bin, &images, &roots, &runs] {
+        for path in [&root, &fake, &bin] {
             std::fs::create_dir(path).unwrap();
         }
         for (name, body) in STANDINS {
@@ -93,18 +86,10 @@ impl Scene {
         std::fs::write(fake.join("signature"), signature).unwrap();
         let device = dir.path().join("device");
         std::fs::write(&device, vec![0u8; 8192]).unwrap();
-        // The workspace image's lowers, and the overlays' mount points.
-        for dir in WORKSPACE_ROOT_DIRS.split(' ') {
-            std::fs::create_dir_all(images.join("workspace").join(dir)).unwrap();
-            std::fs::create_dir_all(roots.join("workspace").join(dir)).unwrap();
-        }
         Self {
             root,
             fake,
             bin,
-            images,
-            roots,
-            runs,
             device,
             _dir: dir,
         }
@@ -127,9 +112,6 @@ impl Scene {
             .args(["-c", MOUNT_WORKSPACE_SCRIPT, "mount-workspace", volume])
             .env_clear()
             .envs(env.iter().copied())
-            .env("CODEWIRE_MOUNT_WORKSPACE_IMAGES", &self.images)
-            .env("CODEWIRE_MOUNT_WORKSPACE_ROOTS", &self.roots)
-            .env("CODEWIRE_MOUNT_WORKSPACE_RUNS", &self.runs)
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env("FAKE", &self.fake)
             .env("CODEWIRE_MOUNT_WORKSPACE_DEVICE", device)
@@ -417,7 +399,7 @@ fn an_unknown_volume_state_and_a_linked_codewire_directory_are_refused() {
 /// `scripts/test-codewire-sandbox-runtime-admission`). A changed script lands
 /// after infra's pin moves with it, or Kyverno refuses every commodity Pod.
 const INFRA_MOUNT_WORKSPACE_SCRIPT_SHA256: &str =
-    "7b498d4e9d028233d02f927d0f3bd59344f27693b03f883e2f5792fb4e69e52f";
+    "8e81452565e4077767089beaa91b7730ed26f49ab852a67fdc009af2ade24681";
 
 #[test]
 fn the_script_is_the_one_infra_admits() {
@@ -573,101 +555,4 @@ fn the_flush_bound_and_the_grace_period_fit_together() {
     assert_eq!(bound, 35);
     // The flush comes after the workspace and DinD shutdowns, up to 15 s.
     assert!(bound + 15 <= super::workspace::BLOCK_WORKSPACE_GRACE_SECONDS);
-}
-
-/// A synthetic workspace image digest: the stamp only compares it.
-const WORKSPACE_IMAGE: (&str, &str) = (
-    "CODEWIRE_WORKSPACE_IMAGE",
-    "registry.example.invalid/codewire/workspace@sha256:4444444444444444444444444444444444444444444444444444444444444444",
-);
-
-#[test]
-fn each_top_level_directory_of_the_image_is_an_overlay_on_the_disk() {
-    let scene = Scene::new("ext4");
-    let outcome = scene.run_with(&scene.device, "existing", &[WORKSPACE_IMAGE]);
-    outcome.mounted();
-    outcome.mounted_line("existing", 0);
-    let rootfs = scene.root.join(".codewire/rootfs/workspace");
-    for dir in WORKSPACE_ROOT_DIRS.split(' ') {
-        let line = format!(
-            "mount -t overlay overlay -o lowerdir={images}/workspace/{dir},upperdir={r}/{dir}/upper,workdir={r}/{dir}/work,index=off,uuid=off {roots}/workspace/{dir}",
-            images = scene.images.display(),
-            r = rootfs.display(),
-            roots = scene.roots.display(),
-        );
-        assert!(outcome.calls.contains(&line), "{line}\n{}", outcome.calls);
-    }
-    assert_eq!(
-        std::fs::read_to_string(rootfs.join("image")).unwrap(),
-        format!("{}\n", WORKSPACE_IMAGE.1)
-    );
-    let lock = std::fs::metadata(scene.runs.join("workspace/lock")).unwrap();
-    assert_eq!(
-        std::os::unix::fs::PermissionsExt::mode(&lock.permissions()) & 0o7777,
-        0o1777
-    );
-    // No DinD image, no DinD overlay.
-    assert!(!outcome.calls.contains("/dind/"), "{}", outcome.calls);
-}
-
-#[test]
-fn the_same_image_keeps_its_uppers_and_a_new_one_starts_them_empty() {
-    let scene = Scene::new("ext4");
-    scene
-        .run_with(&scene.device, "existing", &[WORKSPACE_IMAGE])
-        .mounted();
-    let installed = scene
-        .root
-        .join(".codewire/rootfs/workspace/usr/upper/installed");
-    std::fs::write(&installed, "kept").unwrap();
-    scene
-        .run_with(&scene.device, "existing", &[WORKSPACE_IMAGE])
-        .mounted();
-    assert!(
-        installed.exists(),
-        "a restart on the same image keeps what was written"
-    );
-    let newer = (
-        "CODEWIRE_WORKSPACE_IMAGE",
-        "registry.example.invalid/codewire/workspace@sha256:5555555555555555555555555555555555555555555555555555555555555555",
-    );
-    scene
-        .run_with(&scene.device, "existing", &[newer])
-        .mounted();
-    assert!(!installed.exists(), "a new image starts the uppers empty");
-    assert_eq!(
-        std::fs::read_to_string(scene.root.join(".codewire/rootfs/workspace/image")).unwrap(),
-        format!("{}\n", newer.1)
-    );
-}
-
-#[test]
-fn a_linked_root_filesystem_directory_is_refused() {
-    let scene = Scene::new("ext4");
-    std::fs::create_dir_all(scene.root.join(".codewire")).unwrap();
-    std::os::unix::fs::symlink("/etc", scene.root.join(".codewire/rootfs")).unwrap();
-    let outcome = scene.run_with(&scene.device, "existing", &[WORKSPACE_IMAGE]);
-    assert_eq!(outcome.status, 1);
-    assert_eq!(
-        outcome.stderr.lines().collect::<Vec<_>>(),
-        ["codewire mount-workspace: the workspace root filesystem's directory is a symbolic link"]
-    );
-    assert!(
-        !outcome.calls.contains("mount -t overlay"),
-        "{}",
-        outcome.calls
-    );
-}
-
-#[test]
-fn without_an_image_nothing_is_overlaid() {
-    let scene = Scene::new("ext4");
-    let outcome = scene.run("existing");
-    outcome.mounted();
-    assert!(
-        !outcome.calls.contains("mount -t overlay"),
-        "{}",
-        outcome.calls
-    );
-    assert!(!scene.root.join(".codewire/rootfs").exists());
 }

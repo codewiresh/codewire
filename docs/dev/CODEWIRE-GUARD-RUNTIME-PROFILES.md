@@ -227,19 +227,6 @@ workspace keeps a Filesystem claim.
   failure there never stops the workspace. A Block Pod so has one init
   container that must exit, as a Filesystem Pod does: each one delays the
   next container by about a second.
-- **One disk (direct I/O design §4a).** On the canonical workspace image
-  the workspace container's root filesystem is read-only, and each top-level
-  directory of the image (`boot etc home media mnt opt root srv usr var` and
-  the merged-`/usr` markers) is an overlay: the image, mounted as a read-only
-  image volume, below; `.codewire/rootfs/workspace/<dir>` on the workspace
-  disk above. A guest DinD on the pinned image gets the same over its own
-  directories. `mount-workspace` builds the overlays (`index=off,uuid=off`,
-  so an upper stays usable in the next VM) and seeds each container's
-  guest-memory `/run`. So `sudo apt install` and anything else written
-  outside `/home/codewire` lands on the one disk and survives stop and
-  start; a new image digest starts that container's uppers empty. A
-  brand-new top-level directory is refused (EROFS). A custom image keeps its
-  writable root until #3879 derives its directories.
 - **Flush.** The `workspace-flush` sidecar (an init container with
   `restartPolicy: Always`) waits for SIGTERM, then runs `syncfs` on the
   workspace with a 35 s bound, inside the Pod's 60 s grace period. The guest

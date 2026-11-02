@@ -52,8 +52,8 @@ pub(crate) use workspace::{
 };
 #[cfg(test)]
 pub(crate) use workspace::{
-    DIND_ROOT_DIRS, MOUNT_WORKSPACE_DEVICE_PATH, MOUNT_WORKSPACE_SCRIPT, WORKSPACE_FLUSH_CONTAINER,
-    WORKSPACE_FLUSH_SCRIPT, WORKSPACE_ROOT_DIRS,
+    MOUNT_WORKSPACE_DEVICE_PATH, MOUNT_WORKSPACE_SCRIPT, WORKSPACE_FLUSH_CONTAINER,
+    WORKSPACE_FLUSH_SCRIPT,
 };
 pub use workspace::{
     ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,
@@ -393,15 +393,6 @@ impl fmt::Debug for TemplateOpts {
 }
 
 impl TemplateOpts {
-    /// Whether a Block workspace's workspace container runs on a read-only
-    /// root with every top-level directory an overlay on the workspace disk
-    /// (#3718, direct I/O design §4a): only for the canonical workspace image,
-    /// whose directories the template knows. A custom image keeps its
-    /// writable root until #3879 derives its directories.
-    pub(crate) fn workspace_root_overlays(&self) -> bool {
-        crate::sandbox::is_canonical_workspace_runtime_image(&self.image)
-    }
-
     /// The runtime this workspace renders: a commodity workspace takes the
     /// class of its memory tier.
     pub fn runtime_profile_spec(&self) -> RuntimeProfileSpec {

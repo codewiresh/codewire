@@ -184,14 +184,11 @@ spec:
     - name: mountWorkspaceScript
       expression: |-
         r'''set -u
-        # The paths are overridable only for the script's own test; nothing renders
-        # them, and the pool policy admits no other variable.
+        # The three paths are overridable only for the script's own test; nothing
+        # renders them, and the pool policy admits no other variable.
         dev="${CODEWIRE_MOUNT_WORKSPACE_DEVICE:-/dev/cwws}"
         ws="${CODEWIRE_MOUNT_WORKSPACE_ROOT:-/mnt/ws}"
         tmp="${CODEWIRE_MOUNT_WORKSPACE_TMP:-/mnt/tmp}"
-        images="${CODEWIRE_MOUNT_WORKSPACE_IMAGES:-/mnt/img}"
-        roots="${CODEWIRE_MOUNT_WORKSPACE_ROOTS:-/mnt/root}"
-        runs="${CODEWIRE_MOUNT_WORKSPACE_RUNS:-/mnt/run}"
         volume="${1:-}"
         began="$(date +%s%N)"
         refuse() {
@@ -241,37 +238,6 @@ spec:
         rm -rf "$ws/.codewire/tmp" && mkdir "$ws/.codewire/tmp" && chmod 1777 "$ws/.codewire/tmp" ||
           refuse "the workspace temporary directory could not be emptied"
         mount --bind "$ws/.codewire/tmp" "$tmp" || refuse "binding the workspace temporary directory failed"
-        # Each listed top-level directory of a container's image is an overlay: the
-        # image below, read-only; its upper on this disk, under
-        # .codewire/rootfs/<container>/ (direct I/O design §4a). Without index and
-        # uuid, an upper stays usable when the next VM shares the image afresh. A
-        # new image digest starts the uppers empty. Nothing the workspace controls
-        # is followed as root: a linked directory there is refused.
-        overlay() {
-          c="$1"
-          image="$2"
-          shift 2
-          r="$ws/.codewire/rootfs/$c"
-          [ ! -L "$ws/.codewire/rootfs" ] && [ ! -L "$r" ] || refuse "the $c root filesystem's directory is a symbolic link"
-          if [ "$(cat "$r/image" 2>/dev/null)" != "$image" ]; then
-            rm -rf "$r" && mkdir -p "$r" && printf '%s\n' "$image" >"$r/image" ||
-              refuse "the $c root filesystem could not be started for its image"
-          fi
-          mkdir -p "$runs/$c/lock" && chmod 1777 "$runs/$c/lock" || refuse "the $c /run could not be prepared"
-          for d in "$@"; do
-            for path in "$r/$d" "$r/$d/upper" "$r/$d/work"; do
-              [ ! -L "$path" ] || refuse "the $c root filesystem's /$d is a symbolic link"
-            done
-            mkdir -p "$r/$d/upper" "$r/$d/work" &&
-              chown --reference="$images/$c/$d" "$r/$d/upper" &&
-              chmod --reference="$images/$c/$d" "$r/$d/upper" ||
-              refuse "the $c root filesystem's /$d could not be prepared"
-            mount -t overlay overlay -o "lowerdir=$images/$c/$d,upperdir=$r/$d/upper,workdir=$r/$d/work,index=off,uuid=off" "$roots/$c/$d" ||
-              refuse "mounting the $c root filesystem's /$d failed"
-          done
-        }
-        [ -z "${CODEWIRE_WORKSPACE_IMAGE:-}" ] || overlay workspace "$CODEWIRE_WORKSPACE_IMAGE" boot etc home media mnt opt root srv usr var bin.usr-is-merged lib.usr-is-merged sbin.usr-is-merged
-        [ -z "${CODEWIRE_DIND_IMAGE:-}" ] || overlay dind "$CODEWIRE_DIND_IMAGE" bin certs etc home lib media mnt opt root sbin srv usr var
         if [ -n "${CODEWIRE_DOCKER_DATA_SIZE:-}" ]; then
           (
             CODEWIRE_DOCKER_DATA_IMAGE="$ws/.codewire/docker-data.ext4"
@@ -348,16 +314,14 @@ spec:
       message: a warm-pool template runs and mounts only digest-pinned images (Kind adds its side-loaded daemon image)
     - expression: >-
         variables.containers.all(c, !has(c.envFrom) &&
-        (!has(c.env) || c.env.all(e, (e.name in variables.environment &&
+        (!has(c.env) || c.env.all(e, e.name in variables.environment &&
         dyn(e).all(k, k in ['name', 'value', 'valueFrom']) &&
         (!has(e.valueFrom) || (e.name == 'CODEWIRE_POD_UID' &&
         dyn(e.valueFrom).all(k, k == 'fieldRef') &&
         dyn(e.valueFrom.fieldRef).all(k, k in ['fieldPath', 'apiVersion']) &&
         e.valueFrom.fieldRef.fieldPath == 'metadata.uid' &&
-        (!has(e.valueFrom.fieldRef.apiVersion) || e.valueFrom.fieldRef.apiVersion == 'v1')))) ||
-        (c.name == 'mount-workspace' && e.name in ['CODEWIRE_WORKSPACE_IMAGE', 'CODEWIRE_DIND_IMAGE'] &&
-        dyn(e).all(k, k in ['name', 'value'])))))
-      message: a warm-pool template sets only the identity-free workspace and DinD variables, and mount-workspace the images it builds read-only roots from; it takes no environment source and reads only its own Pod UID
+        (!has(e.valueFrom.fieldRef.apiVersion) || e.valueFrom.fieldRef.apiVersion == 'v1'))))))
+      message: a warm-pool template sets only the identity-free workspace and DinD variables, takes no environment source and reads only its own Pod UID
     - expression: >-
         variables.pod.containers.exists_one(c, c.name == 'workspace') &&
         variables.pod.containers.all(c, c.name != 'workspace' ||
@@ -423,23 +387,6 @@ spec:
         variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) &&
         has(v.image.reference) && v.image.reference == c.image)))
       message: mount-workspace runs exactly its rendered script, from the workspace daemon's support image
-    # codewire#3718 (direct I/O design §4a): mount-workspace builds a
-    # read-only root's overlays from that container's own image, which the
-    # Pod mounts as an image volume. Only mount-workspace names an image, and
-    # each it names is its container's image and that volume's reference.
-    - expression: >-
-        variables.containers.all(c, c.name == 'mount-workspace' || !has(c.env) ||
-        !c.env.exists(e, e.name in ['CODEWIRE_WORKSPACE_IMAGE', 'CODEWIRE_DIND_IMAGE'])) &&
-        (!has(variables.pod.initContainers) ||
-        variables.pod.initContainers.all(c, c.name != 'mount-workspace' || !has(c.env) ||
-        c.env.all(e, !(e.name in ['CODEWIRE_WORKSPACE_IMAGE', 'CODEWIRE_DIND_IMAGE']) ||
-        (has(e.value) &&
-        variables.pod.containers.exists(w,
-        w.name == (e.name == 'CODEWIRE_WORKSPACE_IMAGE' ? 'workspace' : 'dind') && w.image == e.value) &&
-        variables.volumes.exists(v,
-        v.name == (e.name == 'CODEWIRE_WORKSPACE_IMAGE' ? 'rootfs-workspace-image' : 'rootfs-dind-image') &&
-        has(v.image) && has(v.image.reference) && v.image.reference == e.value)))))
-      message: mount-workspace builds each read-only root from its own container's image
     # codewire#3626: the template's one ingress rule admits orchestration's
     # identity, and nothing wider, on the daemon and SSH ports. One peer
     # carries both selectors (two peers would be an OR: the whole server
