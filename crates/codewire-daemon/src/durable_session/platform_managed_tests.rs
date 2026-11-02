@@ -369,6 +369,7 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
         cleanup_confirmed: false,
         cleanup_unknown: true,
         status_message: String::new(),
+        end_after_detached_seconds: 0,
     };
     let ordinary = session(vec!["/bin/sh".into(), "-c".into(), "exit 0".into()], None);
     let managed = session(origin.command(), Some(origin.clone()));

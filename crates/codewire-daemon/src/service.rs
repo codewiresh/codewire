@@ -767,6 +767,10 @@ async fn run_attach_session<S>(
 ) where
     S: Stream<Item = Result<v1::SessionAttachMessage, Status>> + Send + Unpin + 'static,
 {
+    // Every client attachment, over the API or the SSH server's session
+    // subsystem, is counted here while it runs: a session launched with
+    // `end_after_detached_seconds` ends only after that long with none.
+    let _attached = engine.attached(&attach.session_id);
     // Input is read by its own task, so applying one input never leaves the
     // next unread. It ends with the attachment.
     let input = std::sync::Arc::new(AttachInput::default());
@@ -1127,6 +1131,9 @@ fn validate_timestamp(timestamp: Option<&prost_types::Timestamp>) -> Result<(), 
 }
 
 #[cfg(test)]
+mod unattended_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use codewire_daemon_proto::daemon::v1::daemon_service_client::DaemonServiceClient;
@@ -1147,7 +1154,7 @@ mod tests {
     const TEST_AUTH_TOKEN: &str = "daemon-service-test-token";
 
     #[derive(Clone)]
-    struct TestAuthInterceptor {
+    pub(super) struct TestAuthInterceptor {
         token: MetadataValue<Ascii>,
     }
 
@@ -1160,9 +1167,10 @@ mod tests {
         }
     }
 
-    type TestClient = DaemonServiceClient<InterceptedService<Channel, TestAuthInterceptor>>;
+    pub(super) type TestClient =
+        DaemonServiceClient<InterceptedService<Channel, TestAuthInterceptor>>;
 
-    async fn authenticated_client(addr: SocketAddr) -> TestClient {
+    pub(super) async fn authenticated_client(addr: SocketAddr) -> TestClient {
         let channel = Channel::from_shared(format!("http://{addr}"))
             .unwrap()
             .connect()
@@ -1752,11 +1760,11 @@ mod tests {
         shutdown.send(()).ok();
     }
 
-    async fn spawn_daemon() -> (tempfile::TempDir, SocketAddr, oneshot::Sender<()>) {
+    pub(super) async fn spawn_daemon() -> (tempfile::TempDir, SocketAddr, oneshot::Sender<()>) {
         spawn_daemon_with_auth(TEST_AUTH_TOKEN).await
     }
 
-    fn attach_engine() -> (tempfile::TempDir, SessionEngine) {
+    pub(super) fn attach_engine() -> (tempfile::TempDir, SessionEngine) {
         let temp = tempfile::tempdir().expect("attach engine root");
         let workspace_root = temp.path().join("workspace");
         let home_root = temp.path().join("home");

@@ -1099,6 +1099,13 @@ impl SessionClient {
             self.require_capability(codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_METADATA)
                 .await?;
         }
+        // An older daemon ignores the field and keeps the session forever.
+        if request.end_after_detached_seconds != 0 {
+            self.require_capability(
+                codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_END_AFTER_DETACHED,
+            )
+            .await?;
+        }
         let mut client = self.inner.clone();
         Self::required_session(
             client
@@ -1536,6 +1543,7 @@ mod session_input_capability_tests {
         for capability in [
             codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_INPUT,
             codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_METADATA,
+            codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_END_AFTER_DETACHED,
         ] {
             let old = v1::GetCapabilitiesResponse {
                 state: v1::DaemonState::Ready as i32,

@@ -71,6 +71,9 @@ message EnvironmentSession {
   bool cleanup_unknown = 15;
   // Durable per-session launch admission generation; zero means unavailable.
   uint64 launch_generation = 16;
+  // The session ends once no client has been attached for this many seconds;
+  // zero means it never does. Set at launch.
+  uint32 end_after_detached_seconds = 17;
 }
 
 // Output offsets are absolute byte positions over the ordered output sequence.
@@ -97,6 +100,11 @@ message LaunchSessionRequest {
   string name = 10;
   // Canonical session UUID identity in this same environment, never a name.
   optional string parent_session_id = 11;
+  // Nonzero: the session ends, as a terminal hangup does, once no client has
+  // been attached for this many seconds, counted from launch until the first
+  // attachment and from each last detach. At most 604800 (7 days). Zero (the
+  // default) means the session runs until it exits or is stopped.
+  uint32 end_after_detached_seconds = 12;
 }
 
 message LaunchSessionResponse {

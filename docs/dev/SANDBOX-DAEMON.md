@@ -249,6 +249,13 @@ The typed service exposes:
   states
 - durable session launch/list/get/stop/restart, attach/detach, input, resize,
   events, and lossless output reads by byte offset
+- a launch setting, `end_after_detached_seconds` (capability
+  `session_end_after_detached.v1`, at most 7 days): the session ends, as an
+  explicit stop does (a PTY is hung up), once no client has been attached for
+  that long, counted from launch or restart until the first attachment and
+  from each last detach. Every attach stream counts, whichever path it came
+  by. The record keeps the setting and says `ended: no client for N minutes`.
+  Zero, the default, never ends a session this way
 - `ExecSession`: bidirectional stream for non-PTY commands
 - `PtySession`: bidirectional stream for interactive shells
 - `List`, `Stat`, `OpenFile`, `Read`, `Write`, `Mkdir`, `Remove`, `Rename`,

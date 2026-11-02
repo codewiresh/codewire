@@ -368,6 +368,9 @@ message SessionRecord {
   bool cleanup_unknown = 15;
   // Durable per-session launch admission generation; zero means unavailable.
   uint64 launch_generation = 16;
+  // The launch setting below: the session ends once no client has been
+  // attached for this many seconds. Zero means it never does.
+  uint32 end_after_detached_seconds = 17;
 }
 
 message LaunchSessionRequest {
@@ -380,6 +383,11 @@ message LaunchSessionRequest {
   int32 height = 7;
   string name = 8;
   optional string parent_session_id = 9;
+  // Nonzero: the session ends, as a hangup does, once no client has been
+  // attached for this many seconds; the timer also runs from launch until
+  // the first attachment. Zero (the default) means it never does. Requires
+  // session_end_after_detached.v1.
+  uint32 end_after_detached_seconds = 10;
 }
 
 message LaunchSessionResponse {

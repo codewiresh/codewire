@@ -174,6 +174,7 @@ where
                     term: request.term,
                     width: terminal_dimension(request.columns),
                     height: terminal_dimension(request.rows),
+                    end_after_detached_seconds: request.end_after_detached_seconds,
                 },
             )
             .await?;
@@ -646,6 +647,14 @@ fn launch_violations(request: &proto::LaunchSessionRequest) -> Vec<FieldViolatio
             "must be a canonical same-environment session identity",
         ));
     }
+    if request.end_after_detached_seconds
+        > codewire_daemon_proto::SESSION_END_AFTER_DETACHED_MAX_SECONDS
+    {
+        violations.push(violation(
+            "/end_after_detached_seconds",
+            "must be at most 604800 (7 days); zero never ends the session",
+        ));
+    }
     violations
 }
 
@@ -692,6 +701,7 @@ pub fn public_session(record: v1::SessionRecord) -> proto::EnvironmentSession {
         parent_session_id: record.parent_session_id,
         cleanup_unknown: record.cleanup_unknown,
         launch_generation: record.launch_generation,
+        end_after_detached_seconds: record.end_after_detached_seconds,
         session_id: record.session_id,
         state: public_session_state(record.state).into(),
         command: record.command,
@@ -782,6 +792,7 @@ mod tests {
                 (14, "parent_session_id"),
                 (15, "cleanup_unknown"),
                 (16, "launch_generation"),
+                (17, "end_after_detached_seconds"),
             ],
         ),
         (
@@ -807,6 +818,7 @@ mod tests {
                 (9, "rows"),
                 (10, "name"),
                 (11, "parent_session_id"),
+                (12, "end_after_detached_seconds"),
             ],
         ),
         ("codewire.v1.LaunchSessionResponse", &[(1, "session")]),
@@ -910,6 +922,7 @@ mod tests {
         output_reads: Arc<Mutex<Vec<v1::ReadSessionOutputRequest>>>,
         unary_inputs: Arc<Mutex<Vec<v1::SendSessionInputRequest>>>,
         restart_requests: RestartRequestLog,
+        launch_requests: Arc<Mutex<Vec<v1::LaunchSessionRequest>>>,
     }
 
     impl TestBackend {
@@ -920,6 +933,7 @@ mod tests {
                 output_reads: Arc::new(Mutex::new(Vec::new())),
                 unary_inputs: Arc::new(Mutex::new(Vec::new())),
                 restart_requests: Arc::new(Mutex::new(Vec::new())),
+                launch_requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -933,6 +947,7 @@ mod tests {
                 output_reads: Arc::new(Mutex::new(Vec::new())),
                 unary_inputs: Arc::new(Mutex::new(Vec::new())),
                 restart_requests: Arc::new(Mutex::new(Vec::new())),
+                launch_requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -1002,9 +1017,21 @@ mod tests {
             _ctx: &RequestContext,
             _org_id: &str,
             _environment_id: &str,
-            _request: v1::LaunchSessionRequest,
+            request: v1::LaunchSessionRequest,
         ) -> Result<v1::SessionRecord, connectrpc::ConnectError> {
-            unreachable!("authorization must reject before launch")
+            assert!(
+                self.authorization_error.is_none(),
+                "authorization must reject before launch"
+            );
+            let record = v1::SessionRecord {
+                session_id: "session-1".into(),
+                state: v1::SessionLifecycleState::Running as i32,
+                command: request.command.clone(),
+                end_after_detached_seconds: request.end_after_detached_seconds,
+                ..Default::default()
+            };
+            self.launch_requests.lock().await.push(request);
+            Ok(record)
         }
 
         async fn list(
@@ -1183,6 +1210,60 @@ mod tests {
             *requests.lock().await,
             vec![("session".into(), Some(41)), ("session".into(), None)]
         );
+    }
+
+    /// The setting reaches the daemon unchanged and comes back on the record;
+    /// a value past the bound is refused before anything launches.
+    #[tokio::test]
+    async fn launch_carries_end_after_detached_both_ways_and_refuses_past_the_bound() {
+        let backend = TestBackend::allowed();
+        let requests = backend.launch_requests.clone();
+        let validation_calls = backend.validation_calls.clone();
+        let bridge = EnvironmentSessionBridge::new(backend);
+        let launch = |seconds| {
+            let message = proto::LaunchSessionRequest {
+                org_id: "org".into(),
+                environment_id: "environment".into(),
+                command: vec!["bash".into()],
+                end_after_detached_seconds: seconds,
+                ..Default::default()
+            };
+            bytes::Bytes::from(message.encode_to_vec())
+        };
+
+        let body = launch(600);
+        let view = proto::LaunchSessionRequest::decode_view(&body).unwrap();
+        let response = proto::EnvironmentSessionService::launch_session(
+            &bridge,
+            RequestContext::default(),
+            ServiceRequest::from_parts(&view, &body),
+        )
+        .await
+        .unwrap();
+        let session = response.body.session.into_option().unwrap();
+        assert_eq!(session.end_after_detached_seconds, 600);
+        assert_eq!(
+            requests
+                .lock()
+                .await
+                .iter()
+                .map(|request| request.end_after_detached_seconds)
+                .collect::<Vec<_>>(),
+            [600]
+        );
+
+        let body = launch(604_801);
+        let view = proto::LaunchSessionRequest::decode_view(&body).unwrap();
+        let error = proto::EnvironmentSessionService::launch_session(
+            &bridge,
+            RequestContext::default(),
+            ServiceRequest::from_parts(&view, &body),
+        )
+        .await
+        .expect_err("past the bound");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(validation_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.lock().await.len(), 1, "nothing more launched");
     }
 
     #[tokio::test]
@@ -1506,6 +1587,34 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_may_end_after_at_most_seven_days_without_a_client() {
+        let launch = |seconds| proto::LaunchSessionRequest {
+            org_id: "org".into(),
+            environment_id: "environment".into(),
+            command: vec!["sh".into()],
+            end_after_detached_seconds: seconds,
+            ..Default::default()
+        };
+        for accepted in [0, 1, 600, 604_800] {
+            assert_eq!(launch_violations(&launch(accepted)), [], "{accepted}");
+        }
+        for refused in [604_801, u32::MAX] {
+            assert_eq!(
+                launch_violations(&launch(refused)),
+                [violation(
+                    "/end_after_detached_seconds",
+                    "must be at most 604800 (7 days); zero never ends the session",
+                )],
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            codewire_daemon_proto::SESSION_END_AFTER_DETACHED_MAX_SECONDS,
+            604_800
+        );
+    }
+
+    #[test]
     fn every_generated_session_route_is_owned_by_the_bridge() {
         let expected = [
             proto::ENVIRONMENT_SESSION_SERVICE_LAUNCH_SESSION_SPEC,
@@ -1575,6 +1684,7 @@ mod tests {
             parent_session_id: Some("session-parent".into()),
             cleanup_unknown: true,
             launch_generation: 123,
+            end_after_detached_seconds: 600,
             state: v1::SessionLifecycleState::Running as i32,
             command: vec!["sh".into()],
             working_dir: "/workspace".into(),
@@ -1589,6 +1699,7 @@ mod tests {
         assert_eq!(public.parent_session_id.as_deref(), Some("session-parent"));
         assert!(public.cleanup_unknown);
         assert_eq!(public.launch_generation, 123);
+        assert_eq!(public.end_after_detached_seconds, 600);
         assert_eq!(
             public.state.as_known(),
             Some(proto::EnvironmentSessionState::Running)

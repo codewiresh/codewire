@@ -1669,6 +1669,7 @@ async fn launch_host_conversation(
             height: 0,
             name,
             parent_session_id: (!parent_session_id.is_empty()).then_some(parent_session_id),
+            end_after_detached_seconds: 0,
         })
         .await
         .map(host_environment_session_view)

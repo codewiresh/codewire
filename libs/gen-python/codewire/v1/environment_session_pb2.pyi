@@ -42,7 +42,7 @@ ENVIRONMENT_SESSION_OUTPUT_STREAM_STDERR: EnvironmentSessionOutputStream
 ENVIRONMENT_SESSION_OUTPUT_STREAM_PTY: EnvironmentSessionOutputStream
 
 class EnvironmentSession(_message.Message):
-    __slots__ = ("session_id", "state", "command", "working_dir", "pty", "created_at", "started_at", "finished_at", "exit_code", "output_end_offset", "status_message", "output_start_offset", "name", "parent_session_id", "cleanup_unknown", "launch_generation")
+    __slots__ = ("session_id", "state", "command", "working_dir", "pty", "created_at", "started_at", "finished_at", "exit_code", "output_end_offset", "status_message", "output_start_offset", "name", "parent_session_id", "cleanup_unknown", "launch_generation", "end_after_detached_seconds")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
     COMMAND_FIELD_NUMBER: _ClassVar[int]
@@ -59,6 +59,7 @@ class EnvironmentSession(_message.Message):
     PARENT_SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     CLEANUP_UNKNOWN_FIELD_NUMBER: _ClassVar[int]
     LAUNCH_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    END_AFTER_DETACHED_SECONDS_FIELD_NUMBER: _ClassVar[int]
     session_id: str
     state: EnvironmentSessionState
     command: _containers.RepeatedScalarFieldContainer[str]
@@ -75,7 +76,8 @@ class EnvironmentSession(_message.Message):
     parent_session_id: str
     cleanup_unknown: bool
     launch_generation: int
-    def __init__(self, session_id: _Optional[str] = ..., state: _Optional[_Union[EnvironmentSessionState, str]] = ..., command: _Optional[_Iterable[str]] = ..., working_dir: _Optional[str] = ..., pty: _Optional[bool] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., finished_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., exit_code: _Optional[int] = ..., output_end_offset: _Optional[int] = ..., status_message: _Optional[str] = ..., output_start_offset: _Optional[int] = ..., name: _Optional[str] = ..., parent_session_id: _Optional[str] = ..., cleanup_unknown: _Optional[bool] = ..., launch_generation: _Optional[int] = ...) -> None: ...
+    end_after_detached_seconds: int
+    def __init__(self, session_id: _Optional[str] = ..., state: _Optional[_Union[EnvironmentSessionState, str]] = ..., command: _Optional[_Iterable[str]] = ..., working_dir: _Optional[str] = ..., pty: _Optional[bool] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., finished_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., exit_code: _Optional[int] = ..., output_end_offset: _Optional[int] = ..., status_message: _Optional[str] = ..., output_start_offset: _Optional[int] = ..., name: _Optional[str] = ..., parent_session_id: _Optional[str] = ..., cleanup_unknown: _Optional[bool] = ..., launch_generation: _Optional[int] = ..., end_after_detached_seconds: _Optional[int] = ...) -> None: ...
 
 class EnvironmentSessionOutputChunk(_message.Message):
     __slots__ = ("offset", "next_offset", "stream", "data")
@@ -90,7 +92,7 @@ class EnvironmentSessionOutputChunk(_message.Message):
     def __init__(self, offset: _Optional[int] = ..., next_offset: _Optional[int] = ..., stream: _Optional[_Union[EnvironmentSessionOutputStream, str]] = ..., data: _Optional[bytes] = ...) -> None: ...
 
 class LaunchSessionRequest(_message.Message):
-    __slots__ = ("org_id", "environment_id", "command", "working_dir", "env", "pty", "term", "columns", "rows", "name", "parent_session_id")
+    __slots__ = ("org_id", "environment_id", "command", "working_dir", "env", "pty", "term", "columns", "rows", "name", "parent_session_id", "end_after_detached_seconds")
     class EnvEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -109,6 +111,7 @@ class LaunchSessionRequest(_message.Message):
     ROWS_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     PARENT_SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    END_AFTER_DETACHED_SECONDS_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     environment_id: str
     command: _containers.RepeatedScalarFieldContainer[str]
@@ -120,7 +123,8 @@ class LaunchSessionRequest(_message.Message):
     rows: int
     name: str
     parent_session_id: str
-    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., command: _Optional[_Iterable[str]] = ..., working_dir: _Optional[str] = ..., env: _Optional[_Mapping[str, str]] = ..., pty: _Optional[bool] = ..., term: _Optional[str] = ..., columns: _Optional[int] = ..., rows: _Optional[int] = ..., name: _Optional[str] = ..., parent_session_id: _Optional[str] = ...) -> None: ...
+    end_after_detached_seconds: int
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., command: _Optional[_Iterable[str]] = ..., working_dir: _Optional[str] = ..., env: _Optional[_Mapping[str, str]] = ..., pty: _Optional[bool] = ..., term: _Optional[str] = ..., columns: _Optional[int] = ..., rows: _Optional[int] = ..., name: _Optional[str] = ..., parent_session_id: _Optional[str] = ..., end_after_detached_seconds: _Optional[int] = ...) -> None: ...
 
 class LaunchSessionResponse(_message.Message):
     __slots__ = ("session",)

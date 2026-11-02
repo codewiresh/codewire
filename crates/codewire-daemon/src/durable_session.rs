@@ -204,10 +204,17 @@ struct SessionHandle {
     output_end: watch::Sender<u64>,
     operation: AsyncMutex<()>,
     launch_cancellation: watch::Sender<bool>,
+    /// The clients attached now, and the timer of a session launched with
+    /// `end_after_detached_seconds`; see [`unattended`].
+    presence: Mutex<unattended::Presence>,
+    /// That launch setting, which the record keeps for its whole life.
+    end_after_detached: Option<Duration>,
 }
 
 impl SessionHandle {
     fn new(metadata: PersistedSession, output_index: Vec<OutputFrameIndex>) -> Arc<Self> {
+        let end_after_detached = (metadata.end_after_detached_seconds != 0)
+            .then(|| Duration::from_secs(metadata.end_after_detached_seconds.into()));
         Arc::new(Self {
             #[cfg(target_os = "linux")]
             platform_managed: std::sync::atomic::AtomicBool::new(
@@ -218,6 +225,8 @@ impl SessionHandle {
             output_index: Mutex::new(output_index),
             operation: AsyncMutex::new(()),
             launch_cancellation: watch::channel(false).0,
+            presence: Mutex::new(unattended::Presence::default()),
+            end_after_detached,
         })
     }
 }
@@ -284,6 +293,8 @@ impl Drop for SlowControl<'_> {
 enum SessionControl {
     Stop {
         reply: oneshot::Sender<()>,
+        /// The status a confirmed stop records; `None` is "session stopped".
+        reason: Option<String>,
     },
     Input {
         data: Vec<u8>,
@@ -301,6 +312,7 @@ enum ProcessCompletion {
     Stopped {
         result: Result<(), String>,
         reply: oneshot::Sender<()>,
+        reason: Option<String>,
     },
 }
 
@@ -433,6 +445,10 @@ struct PersistedSession {
     #[serde(default)]
     cleanup_unknown: bool,
     status_message: String,
+    // The launch setting: end once no client has been attached this long.
+    // Zero, and every record written before it existed, never ends.
+    #[serde(default)]
+    end_after_detached_seconds: u32,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -754,6 +770,14 @@ impl SessionEngine {
         if let Some(parent) = &request.parent_session_id {
             validate_session_id(parent)?;
         }
+        if request.end_after_detached_seconds
+            > codewire_daemon_proto::SESSION_END_AFTER_DETACHED_MAX_SECONDS
+        {
+            return Err(SessionError::InvalidArgument(format!(
+                "end_after_detached_seconds must be at most {}",
+                codewire_daemon_proto::SESSION_END_AFTER_DETACHED_MAX_SECONDS
+            )));
+        }
         let command = if request.command.is_empty() {
             vec![default_shell_for(&self.inner.config)]
         } else {
@@ -838,6 +862,7 @@ impl SessionEngine {
             cleanup_confirmed: false,
             cleanup_unknown: true,
             status_message: "session starting".into(),
+            end_after_detached_seconds: request.end_after_detached_seconds,
         };
         let handle = SessionHandle::new(persisted, Vec::new());
         let _operation = handle.operation.lock().await;
@@ -845,9 +870,12 @@ impl SessionEngine {
             let metadata = handle.metadata.lock().await;
             persist_metadata(&self.inner.root, &metadata).await?;
         }
-        lock(&self.inner.sessions).insert(session_id, handle.clone());
+        lock(&self.inner.sessions).insert(session_id.clone(), handle.clone());
         drop(admission);
-        self.start_process(handle.clone(), &cancel).await
+        let record = self.start_process(handle.clone(), &cancel).await?;
+        // A session nobody ever attaches to ends after its grace too.
+        self.arm_unattended(&session_id, &handle);
+        Ok(record)
     }
 
     #[cfg(test)]
@@ -1281,6 +1309,18 @@ impl SessionEngine {
         session_id: &str,
         handle: &SessionHandle,
     ) -> Result<v1::SessionRecord, SessionError> {
+        self.stop_active_because(session_id, handle, None).await
+    }
+
+    /// [`Self::stop_active`], recording `reason` as the stopped session's
+    /// status in place of "session stopped". The caller holds the session's
+    /// operation lock.
+    async fn stop_active_because(
+        &self,
+        session_id: &str,
+        handle: &SessionHandle,
+        reason: Option<String>,
+    ) -> Result<v1::SessionRecord, SessionError> {
         let control = lock(&self.inner.active)
             .get(session_id)
             .map(|active| active.control.clone());
@@ -1288,7 +1328,10 @@ impl SessionEngine {
         if let Some(control) = control {
             let (reply_tx, reply_rx) = oneshot::channel();
             if control
-                .send(SessionControl::Stop { reply: reply_tx })
+                .send(SessionControl::Stop {
+                    reply: reply_tx,
+                    reason,
+                })
                 .await
                 .is_ok()
             {
@@ -1476,7 +1519,10 @@ impl SessionEngine {
             persist_metadata(&self.inner.root, &metadata).await?;
         }
         drop(admission);
-        self.start_process(handle.clone(), &cancel).await
+        let record = self.start_process(handle.clone(), &cancel).await?;
+        // The new incarnation has the whole grace while nobody is attached.
+        self.arm_unattended(session_id, &handle);
+        Ok(record)
     }
 
     /// The session's output end offset, changed whenever output is recorded.
@@ -1924,6 +1970,7 @@ impl SessionEngine {
                 cleanup_confirmed: false,
                 cleanup_unknown: true,
                 status_message: "session starting".into(),
+                end_after_detached_seconds: 0,
             },
             Vec::new(),
         );
@@ -2044,7 +2091,10 @@ impl SessionEngine {
                         handle.launch_cancellation.send_replace(true);
                         let (reply, received) = oneshot::channel();
                         control
-                            .send(SessionControl::Stop { reply })
+                            .send(SessionControl::Stop {
+                                reply,
+                                reason: None,
+                            })
                             .await
                             .map_err(|_| Error::Unavailable)?;
                         received.await.map_err(|_| Error::Unavailable)?;
@@ -3746,7 +3796,7 @@ async fn monitor_process(monitor: ProcessMonitor) {
                 );
             }
             command = control.recv() => match command {
-                Some(SessionControl::Stop { reply }) => {
+                Some(SessionControl::Stop { reply, reason }) => {
                     if let Some(inner) = inner.upgrade() {
                         let mut metadata = handle.metadata.lock().await;
                         metadata.state = v1::SessionLifecycleState::Stopping as i32;
@@ -3759,6 +3809,7 @@ async fn monitor_process(monitor: ProcessMonitor) {
                             .await
                             .map_err(|error| format!("stop session process: {error}")),
                         reply,
+                        reason,
                     };
                 }
                 Some(SessionControl::Input { data, reply }) => {
@@ -3827,9 +3878,9 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
                     .map(|status| status.code().unwrap_or(1)).map_err(|error| error.to_string()));
             }
             command = control.recv() => match command {
-                Some(SessionControl::Stop { reply }) => {
+                Some(SessionControl::Stop { reply, reason }) => {
                     let result = terminate_session_launch(&mut child, Some(&mut group)).await;
-                    break ProcessCompletion::Stopped { result: if result { Ok(()) } else { Err("host process cleanup could not be confirmed".into()) }, reply };
+                    break ProcessCompletion::Stopped { result: if result { Ok(()) } else { Err("host process cleanup could not be confirmed".into()) }, reply, reason };
                 }
                 Some(SessionControl::Input { data, reply }) => {
                     if reply.is_closed() { continue; }
@@ -3903,7 +3954,7 @@ async fn monitor_pty_process(monitor: PtyProcessMonitor) {
                 );
             }
             command = control.recv() => match command {
-                Some(SessionControl::Stop { reply }) => {
+                Some(SessionControl::Stop { reply, reason }) => {
                     if let Some(inner) = inner.upgrade() {
                         let mut metadata = handle.metadata.lock().await;
                         metadata.state = v1::SessionLifecycleState::Stopping as i32;
@@ -3921,7 +3972,7 @@ async fn monitor_pty_process(monitor: PtyProcessMonitor) {
                         Err(format!("join session PTY stop task: {error}"))
                     });
                     let _ = (&mut wait_task).await;
-                    break ProcessCompletion::Stopped { result, reply };
+                    break ProcessCompletion::Stopped { result, reply, reason };
                 }
                 Some(SessionControl::Input { data, reply }) => {
                     if let Err(error) = pty_control.send(PtyRuntimeControl::Input { data, reply })
@@ -3997,10 +4048,10 @@ async fn monitor_host_pty_process(monitor: HostPtyProcessMonitor) {
                     else { Err("host PTY cleanup could not be confirmed".into()) });
             }
             command = control.recv() => match command {
-                Some(SessionControl::Stop { reply }) => {
+                Some(SessionControl::Stop { reply, reason }) => {
                     io_cancel.store(true, Ordering::Release);
                     let confirmed = terminate_session_pty_launch(&mut child, Some(&mut group)).await;
-                    break ProcessCompletion::Stopped { result: if confirmed { Ok(()) } else { Err("host PTY cleanup could not be confirmed".into()) }, reply };
+                    break ProcessCompletion::Stopped { result: if confirmed { Ok(()) } else { Err("host PTY cleanup could not be confirmed".into()) }, reply, reason };
                 }
                 Some(SessionControl::Input { data, reply }) => {
                     if reply.is_closed() { continue; }
@@ -4154,6 +4205,10 @@ async fn finish_process(
                     completion_result(&completion).is_err() || output_error.is_some();
                 metadata.cleanup_confirmed = !metadata.cleanup_unknown;
             }
+            let stopped_because = match &completion {
+                ProcessCompletion::Stopped { reason, .. } => reason.clone(),
+                ProcessCompletion::Exited(_) => None,
+            };
             match (completion_result(&completion), output_error) {
                 (_, Some(error)) => {
                     metadata.state = v1::SessionLifecycleState::Failed as i32;
@@ -4168,7 +4223,8 @@ async fn finish_process(
                 (Ok(ProcessResult::Stopped), None) => {
                     metadata.state = v1::SessionLifecycleState::Stopped as i32;
                     metadata.exit_code = None;
-                    metadata.status_message = "session stopped".into();
+                    metadata.status_message =
+                        stopped_because.unwrap_or_else(|| "session stopped".into());
                 }
                 (Err(error), None) => {
                     metadata.state = v1::SessionLifecycleState::Failed as i32;
@@ -4981,6 +5037,7 @@ impl PersistedSession {
             output_end_offset: self.output_end_offset,
             output_start_offset: self.output_start_offset,
             status_message: self.status_message.clone(),
+            end_after_detached_seconds: self.end_after_detached_seconds,
         }
     }
 }
@@ -5258,6 +5315,7 @@ mod tests {
             cleanup_confirmed: false,
             status_message: "session starting".into(),
             cleanup_unknown: true,
+            end_after_detached_seconds: 0,
         };
         persist_metadata(&engine.inner.root, &metadata)
             .await
@@ -5433,7 +5491,7 @@ mod tests {
         let monitor_handle = handle.clone();
         let monitor_id = id.clone();
         let monitor = tokio::spawn(async move {
-            let Some(SessionControl::Stop { reply }) = commands.recv().await else {
+            let Some(SessionControl::Stop { reply, .. }) = commands.recv().await else {
                 panic!("expected Stop from first Restart");
             };
             entered.send(()).unwrap();
@@ -5713,6 +5771,7 @@ mod tests {
             .launch(v1::LaunchSessionRequest {
                 name: String::new(),
                 parent_session_id: None,
+                end_after_detached_seconds: 0,
                 command: vec![
                     "/bin/sh".into(),
                     "-c".into(),
@@ -5825,6 +5884,7 @@ mod tests {
             cleanup_confirmed: false,
             cleanup_unknown: false,
             status_message: "session running".into(),
+            end_after_detached_seconds: 0,
         };
         persist_metadata(root, &metadata).await.unwrap();
         SessionHandle {
@@ -5837,6 +5897,8 @@ mod tests {
             output_index: Mutex::new(index),
             operation: AsyncMutex::new(()),
             launch_cancellation: watch::channel(false).0,
+            presence: Mutex::new(unattended::Presence::default()),
+            end_after_detached: None,
         }
     }
 
@@ -6354,6 +6416,7 @@ mod tests {
             cleanup_confirmed: false,
             cleanup_unknown: false,
             status_message: "session exited with status 0".into(),
+            end_after_detached_seconds: 0,
         };
 
         let (changed, index) = reconcile_output_cursor(root, &mut metadata)
@@ -6416,6 +6479,9 @@ mod tests {
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[path = "durable_session/host_tests.rs"]
 mod host_tests;
+
+#[path = "durable_session/unattended.rs"]
+mod unattended;
 
 #[cfg(target_os = "linux")]
 #[path = "durable_session/platform_managed.rs"]

@@ -2378,6 +2378,7 @@ mod linux {
                 term: String::new(),
                 width: 0,
                 height: 0,
+                end_after_detached_seconds: 0,
             })
             .await?;
         if admitted.command != command || admitted.session_id.is_empty() {
@@ -2458,6 +2459,7 @@ mod linux {
             term: String::new(),
             width: 0,
             height: 0,
+            end_after_detached_seconds: 0,
         }
     }
 
@@ -2478,6 +2480,7 @@ mod linux {
                 term: PROBE_PTY_TERM.to_owned(),
                 width: PROBE_PTY_WIDTH,
                 height: PROBE_PTY_HEIGHT,
+                end_after_detached_seconds: 0,
             })
             .await?;
         if admitted.command != command || admitted.session_id.is_empty() || !admitted.pty {
@@ -2521,6 +2524,7 @@ mod linux {
                 term: String::new(),
                 width: 0,
                 height: 0,
+                end_after_detached_seconds: 0,
             })
             .await?;
         let line =
@@ -2569,6 +2573,7 @@ mod linux {
                 term: String::new(),
                 width: 0,
                 height: 0,
+                end_after_detached_seconds: 0,
             })
             .await?;
         let record = wait_for_terminal_session(client, &record.session_id).await?;
@@ -2718,6 +2723,7 @@ mod linux {
                 term: String::new(),
                 width: 0,
                 height: 0,
+                end_after_detached_seconds: 0,
             })
             .await?;
         wait_for_session_stdout_line(client, &admitted.session_id, "CWPORT1 handler-ready").await?;
@@ -2804,6 +2810,7 @@ mod linux {
                 term: String::new(),
                 width: 0,
                 height: 0,
+                end_after_detached_seconds: 0,
             })
             .await?;
         wait_for_session_stdout_line(client, &admitted.session_id, "CWMESH1 handler-ready").await?;

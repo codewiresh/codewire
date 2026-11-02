@@ -1619,6 +1619,7 @@ async fn recovered_host_live_records_are_fenced_without_signaling_persisted_pid(
             cleanup_confirmed: false,
             cleanup_unknown: false,
             status_message: String::new(),
+            end_after_detached_seconds: 0,
         };
         let mut old = serde_json::to_value(&metadata).unwrap();
         old.as_object_mut().unwrap().remove("name");
@@ -2104,7 +2105,7 @@ async fn restart_cannot_overwrite_cleanup_fence_published_by_its_dispatched_stop
     let inner = engine.inner.clone();
     let stopping_id = id.clone();
     let task = tokio::spawn(async move {
-        let Some(SessionControl::Stop { reply }) = receiver.recv().await else {
+        let Some(SessionControl::Stop { reply, .. }) = receiver.recv().await else {
             panic!("restart must first dispatch Stop")
         };
         let mut metadata = stopping.metadata.lock().await;

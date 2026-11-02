@@ -289,6 +289,7 @@ impl EnvironmentSessionTarget {
                         name,
                         parent_session_id: (!parent_session_id.is_empty())
                             .then_some(parent_session_id),
+                        end_after_detached_seconds: 0,
                     })
                     .await?;
                 Ok(host_environment_session_view(session))

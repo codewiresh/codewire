@@ -174,6 +174,13 @@ pub const DAEMON_CAPABILITY_SESSIONS: &str = "sessions.v1";
 pub const DAEMON_CAPABILITY_ATTACH: &str = "attach.v1";
 pub const DAEMON_CAPABILITY_SESSION_INPUT: &str = "session_input.v1";
 pub const DAEMON_CAPABILITY_SESSION_METADATA: &str = "session_metadata.v1";
+/// A launch may set `end_after_detached_seconds`: the session ends once no
+/// client has been attached for that long. An older daemon would ignore the
+/// field and keep the session forever, so a launch that sets it requires this.
+pub const DAEMON_CAPABILITY_SESSION_END_AFTER_DETACHED: &str = "session_end_after_detached.v1";
+/// The longest `end_after_detached_seconds` a launch may set: 7 days. A
+/// session meant to outlive that is a durable session, launched without it.
+pub const SESSION_END_AFTER_DETACHED_MAX_SECONDS: u32 = 7 * 24 * 60 * 60;
 /// File operations act as the workload user: files they create belong to
 /// that user and access is checked as theirs, also where the daemon itself
 /// runs as root, as a local VM's guest daemon does (#3025).
@@ -269,6 +276,7 @@ pub const DAEMON_CAPABILITIES: &[&str] = &[
     DAEMON_CAPABILITY_ATTACH,
     DAEMON_CAPABILITY_SESSION_INPUT,
     DAEMON_CAPABILITY_SESSION_METADATA,
+    DAEMON_CAPABILITY_SESSION_END_AFTER_DETACHED,
     DAEMON_CAPABILITY_WORKLOAD_FILES,
     DAEMON_CAPABILITY_FORWARD_TCP,
 ];
@@ -279,6 +287,7 @@ pub const HOST_DAEMON_CAPABILITIES: &[&str] = &[
     DAEMON_CAPABILITY_ATTACH,
     DAEMON_CAPABILITY_SESSION_INPUT,
     DAEMON_CAPABILITY_SESSION_METADATA,
+    DAEMON_CAPABILITY_SESSION_END_AFTER_DETACHED,
 ];
 
 /// Empty means unnamed. Named sessions use a bounded, shell-safe label.

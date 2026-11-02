@@ -200,6 +200,19 @@ pub struct EnvironmentDaemonSessionAttachment {
     token: String,
 }
 
+/// The daemon capabilities a launch needs: each optional launch field an
+/// older daemon would silently ignore requires the capability that honours it.
+fn launch_capabilities(request: &v1::LaunchSessionRequest) -> Vec<&'static str> {
+    let mut required = vec![DAEMON_CAPABILITY_SESSIONS];
+    if !request.name.is_empty() || request.parent_session_id.is_some() {
+        required.push(codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_METADATA);
+    }
+    if request.end_after_detached_seconds != 0 {
+        required.push(codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_END_AFTER_DETACHED);
+    }
+    required
+}
+
 pub async fn launch_environment_daemon_session_core(
     state: &ApiState,
     user: &AuthUser,
@@ -207,20 +220,13 @@ pub async fn launch_environment_daemon_session_core(
     environment_id: &str,
     request: v1::LaunchSessionRequest,
 ) -> AppResult<v1::SessionRecord> {
-    let required = if !request.name.is_empty() || request.parent_session_id.is_some() {
-        &[
-            DAEMON_CAPABILITY_SESSIONS,
-            codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_METADATA,
-        ][..]
-    } else {
-        &[DAEMON_CAPABILITY_SESSIONS][..]
-    };
+    let required = launch_capabilities(&request);
     let (mut client, token) = session_client_for_target(
         state,
         user,
         org_id,
         environment_id,
-        required,
+        &required,
         DaemonRequestBudget::Launch,
     )
     .await?;
@@ -1497,6 +1503,36 @@ mod tests {
         ));
     }
 
+    /// A launch that ends after a grace with no client is refused by a daemon
+    /// that would ignore the setting, before anything launches.
+    #[test]
+    fn a_launch_requires_the_capability_of_each_setting_it_uses() {
+        let plain = v1::LaunchSessionRequest::default();
+        assert_eq!(launch_capabilities(&plain), [DAEMON_CAPABILITY_SESSIONS]);
+        let named = v1::LaunchSessionRequest {
+            name: "shell".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            launch_capabilities(&named),
+            [
+                DAEMON_CAPABILITY_SESSIONS,
+                codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_METADATA
+            ]
+        );
+        let ending = v1::LaunchSessionRequest {
+            end_after_detached_seconds: 600,
+            ..Default::default()
+        };
+        assert_eq!(
+            launch_capabilities(&ending),
+            [
+                DAEMON_CAPABILITY_SESSIONS,
+                codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_END_AFTER_DETACHED
+            ]
+        );
+    }
+
     #[test]
     fn daemon_repair_requires_completed_idle_setup() {
         assert!(daemon_repair_setup_is_idle(true, None));
@@ -1809,6 +1845,7 @@ mod tests {
                         term: String::new(),
                         width: 0,
                         height: 0,
+                        end_after_detached_seconds: 0,
                     },
                     TEST_DAEMON_TOKEN,
                 )
