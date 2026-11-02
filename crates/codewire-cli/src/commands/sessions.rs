@@ -1,6 +1,5 @@
 use super::*;
 use crate::terminal_attach::{RawModeGuard, SessionScreen};
-use tokio::io::AsyncReadExt as _;
 #[cfg(unix)]
 pub(crate) mod agents;
 

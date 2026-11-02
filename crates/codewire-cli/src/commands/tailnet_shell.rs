@@ -17,7 +17,7 @@ use codewire_client::{
     AttachSessionOpen, AttachSessionRequest, AttachSessionResize, CodewireClient,
     EnvironmentSessionAttachment, attach_session_request, attach_session_response,
 };
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::AsyncWriteExt as _;
 
 use super::sessions::{attach_platform_session, login_shell_command, platform_session_is_terminal};
 use crate::terminal_attach::{RawModeGuard, WindowSizeWatch, terminal_input, terminal_size};
