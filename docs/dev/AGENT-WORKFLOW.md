@@ -356,7 +356,8 @@ and artifacts. Use a fresh profile for another committed base. The
 them as `localhost/codewire-kind-admitted/<cluster>/…:held` until it seals the
 profile, and seals those IDs; a tag another checkout moves meanwhile is ignored,
 and an admitted image missing from the store fails with its name. `kind-deploy`
-builds current changes into qualified per-profile images, while `kind-test`
+builds current changes into qualified per-profile images and, before restarting
+the service, brings its admission policies to this tree's (#3833), while `kind-test`
 uses the admitted base's immutable client/test executables against that runtime.
 The watcher uses a separate mutable build cache; stop it with Ctrl+C before
 removing its cluster.

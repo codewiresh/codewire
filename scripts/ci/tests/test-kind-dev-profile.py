@@ -78,7 +78,12 @@ if tool == "kind":
     elif args[:2] == ["get", "kubeconfig"]: print("synthetic kubeconfig")
     elif args[:2] != ["load", "docker-image"]: sys.exit(64)
 elif tool == "kubectl":
-    if "get" in args and "secret" in args:
+    if args[:1] == ["kustomize"]:
+        overlay = state / "overlay.yaml"
+        if overlay.exists(): sys.stdout.write(overlay.read_text())
+    elif "get" in args and "validatingadmissionpolicies,validatingadmissionpolicybindings" in args:
+        for name in json.loads(os.environ.get("FAKE_ADMISSION_LIVE", "[]")): print(name)
+    elif "get" in args and "secret" in args:
         import base64
         name = args[args.index("secret") + 1]
         print(base64.b64encode((state / "roots" / f"{name}.pem").read_bytes()).decode(), end="")
@@ -95,7 +100,12 @@ elif tool == "kubectl":
         (state / "configmaps").mkdir(exist_ok=True)
         (state / "configmaps" / f"{args[args.index('-n') + 1]}-{name}.pem").write_text(literal.split("=", 2)[2])
         print("kind: ConfigMap")
-    elif "apply" in args: sys.stdin.read()
+    elif "apply" in args:
+        manifest = sys.stdin.read()
+        if "ValidatingAdmissionPolicy" in manifest:
+            if os.environ.get("FAKE_KUBE_FAIL") == "apply": sys.exit(29)
+            (state / "admission-applied.yaml").write_text(manifest)
+    elif "delete" in args: pass
     elif "get" in args:
         if any("imageID" in a for a in args): print(os.environ.get("FAKE_POD_IMAGE", "sha256:" + "c" * 64))
         elif any(".metadata.annotations" in a for a in args):
@@ -742,6 +752,84 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertEqual(len(creates), 4)
         self.assertTrue(changes and max(creates) < min(changes))
         self.assertFalse([call for call in kube if any("tls.key" in arg for arg in call["args"])])
+
+    def admission_overlay(self) -> None:
+        """A rendered overlay: two orchestration admission objects, one of
+        another service, and an orchestration object of another kind."""
+        def document(kind: str, name: str, component: str) -> str:
+            return (f"apiVersion: admissionregistration.k8s.io/v1\nkind: {kind}\nmetadata:\n  name: {name}\n"
+                    f"  labels:\n    app.kubernetes.io/component: {component}\n"
+                    f"    app.kubernetes.io/part-of: codewire\nspec: {{}}\n")
+        (self.state / "overlay.yaml").write_text("---\n".join((
+            document("ValidatingAdmissionPolicy", "codewire-orchestration-warm-pool", "orchestration"),
+            document("ValidatingAdmissionPolicyBinding", "codewire-orchestration-warm-pool", "orchestration"),
+            document("ValidatingAdmissionPolicy", "codewire-idp-sessions", "idp"),
+            document("Deployment", "codewire-orchestration", "orchestration"),
+        )))
+
+    def applied_admission(self) -> list[tuple[str, str]]:
+        import yaml
+        applied = self.state / "admission-applied.yaml"
+        if not applied.exists():
+            return []
+        return sorted((d["kind"], d["metadata"]["name"]) for d in yaml.safe_load_all(applied.read_text()) if d)
+
+    def test_deploy_brings_its_admission_objects_to_this_tree_before_restart(self) -> None:
+        # #3833: a retained cluster's policies follow the binaries deployed into it.
+        self.admission_overlay()
+        retired = "validatingadmissionpolicy.admissionregistration.k8s.io/codewire-orchestration-retired"
+        current = "validatingadmissionpolicy.admissionregistration.k8s.io/codewire-orchestration-warm-pool"
+        result = self.run_script("deploy-service.sh", "orchestration",
+                                 FAKE_ADMISSION_LIVE=json.dumps([current, retired]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.applied_admission(), [
+            ("ValidatingAdmissionPolicy", "codewire-orchestration-warm-pool"),
+            ("ValidatingAdmissionPolicyBinding", "codewire-orchestration-warm-pool")])
+        calls = [call["args"] for call in self.calls("kubectl")]
+        deletes = [args for args in calls if "delete" in args]
+        self.assertEqual(deletes, [["--context", f"kind-{self.values['KIND_CLUSTER_NAME']}", "delete", retired,
+                                    "--ignore-not-found"]])
+        applies = [i for i, args in enumerate(calls) if "apply" in args and "-f" in args]
+        restarts = [i for i, args in enumerate(calls) if "set" in args or "rollout" in args]
+        self.assertTrue(applies and restarts and max(applies) < min(restarts), calls)
+        self.assertLess(calls.index(deletes[0]), min(restarts))
+        annotations = [args[-1] for args in calls if "annotate" in args]
+        self.assertTrue(any(a.startswith("dev.codewire.kind-dev/admission=") for a in annotations), annotations)
+
+    def test_daemon_deploy_brings_the_renderer_admission_objects_current(self) -> None:
+        # The daemon restarts orchestration, whose templates carry its image.
+        self.admission_overlay()
+        result = self.run_script("deploy-service.sh", "daemon")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([name for _, name in self.applied_admission()],
+                         ["codewire-orchestration-warm-pool"] * 2)
+
+    def test_a_skipped_deploy_still_brings_admission_objects_current(self) -> None:
+        self.admission_overlay()
+        digest = record_digest("1" * 64, "codewire-idp")
+        result = self.run_script("deploy-service.sh", "idp", KIND_DEPLOY_SKIP_CURRENT="1", FAKE_DIGEST="1" * 64,
+                                 FAKE_RECORDS=json.dumps({"idp": f"{digest} sha256:{'2' * 64}"}), FAKE_POD_IMAGE="sha256:" + "2" * 64)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already runs this tree's source", result.stderr)
+        self.assertEqual(self.applied_admission(), [("ValidatingAdmissionPolicy", "codewire-idp-sessions")])
+        self.assertFalse(self.calls("docker"))
+
+    def test_a_service_without_admission_objects_writes_none(self) -> None:
+        self.admission_overlay()
+        result = self.run_script("deploy-service.sh", "billing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [call["args"] for call in self.calls("kubectl")]
+        self.assertEqual(self.applied_admission(), [])
+        self.assertFalse([args for args in calls if "delete" in args])
+        self.assertFalse([args for args in calls if any(a.startswith("dev.codewire.kind-dev/admission=") for a in args)])
+
+    def test_a_refused_admission_apply_stops_before_the_restart(self) -> None:
+        self.admission_overlay()
+        result = self.run_script("deploy-service.sh", "orchestration", FAKE_KUBE_FAIL="apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot apply orchestration's admission objects", result.stderr)
+        calls = [call["args"] for call in self.calls("kubectl")]
+        self.assertFalse([args for args in calls if "set" in args or "rollout" in args])
 
     def test_identical_named_deploy_restarts_once(self) -> None:
         result = self.run_script("deploy-service.sh", "idp", FAKE_SAME_IMAGE="1")

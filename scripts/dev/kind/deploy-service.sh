@@ -19,6 +19,11 @@
 # scripts/dev/kind/database.sh backs the databases up when the tree carries new
 # migrations, and refuses when the database is ahead of the tree.
 #
+# Before the restart it applies, from this tree's Kind overlay, the admission
+# policies and bindings of the component it restarts, and deletes that
+# component's ones the tree no longer renders, so a retained cluster's
+# policies follow its binaries (#3833); a skipped deploy does too.
+#
 # Each deploy records on the Deployment that runs the binary the digest of the
 # source it was built from (scripts/dev/kind/service-sources.py) and the image
 # its Pods then run. KIND_DEPLOY_SKIP_CURRENT=1 (what `make kind-test` uses)
@@ -152,6 +157,68 @@ record_deploy() {
   kube annotate --overwrite "deployment/${deployment}" "${RECORD_KEY}=${digest} ${identity}" >/dev/null
 }
 
+# The admission objects the restarted Deployment's writes must pass (#3833):
+# the Kind overlay's ValidatingAdmissionPolicies and bindings labelled with its
+# component, applied from this tree as the gate applies the overlay, so a
+# retained cluster's policies never stay behind the binaries deployed into it.
+# Objects of that component the tree no longer renders are deleted. The digest
+# of what was applied is recorded on the Deployment.
+ADMISSION_KEY="dev.codewire.kind-dev/admission"
+cluster() { kubectl --context "kind-${KIND_CLUSTER_NAME}" "$@"; }
+# admission_select COMPONENT MODE: from a rendered overlay on stdin, the
+# component's admission objects as YAML (MODE yaml) or as kubectl names
+# (MODE names), in a stable order.
+admission_select() {
+  # shellcheck disable=SC2016 # a Python program, not shell
+  python3 -B -c '
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit("PyYAML is required to select the Kind admission objects")
+component, mode = sys.argv[1:]
+# As `kubectl get -o name` prints them: the singular, lower-case kind.
+kinds = {"ValidatingAdmissionPolicy": "validatingadmissionpolicy",
+         "ValidatingAdmissionPolicyBinding": "validatingadmissionpolicybinding"}
+docs = sorted((d for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") in kinds
+               and (d["metadata"].get("labels") or {}).get("app.kubernetes.io/component") == component
+               and (d["metadata"].get("labels") or {}).get("app.kubernetes.io/part-of") == "codewire"),
+              key=lambda d: (d["kind"], d["metadata"]["name"]))
+if mode == "yaml":
+    yaml.safe_dump_all(docs, sys.stdout, sort_keys=True)
+else:
+    for d in docs:
+        print(kinds[d["kind"]] + ".admissionregistration.k8s.io/" + d["metadata"]["name"])
+' "$1" "$2"
+}
+sync_admission() {
+  local component="${deployment#codewire-}" rendered selected wanted live name count
+  rendered="$(kubectl kustomize "$ROOT/tests/e2e/kind")" || die 'cannot render the Kind overlay'
+  selected="$(admission_select "$component" yaml <<<"$rendered")" \
+    || die "cannot select ${component}'s admission objects"
+  wanted="$(admission_select "$component" names <<<"$rendered")" \
+    || die "cannot select ${component}'s admission objects"
+  live="$(cluster get validatingadmissionpolicies,validatingadmissionpolicybindings \
+    -l "app.kubernetes.io/component=${component},app.kubernetes.io/part-of=codewire" -o name)" \
+    || die "cannot list ${component}'s admission objects"
+  [ -z "$wanted" ] && [ -z "$live" ] && return 0
+  if [ -n "$wanted" ]; then
+    cluster apply --validate=false -f - <<<"$selected" >/dev/null \
+      || die "cannot apply ${component}'s admission objects"
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    grep -Fxq -- "$name" <<<"$wanted" && continue
+    log "deleting ${name}, which this tree no longer renders"
+    cluster delete "$name" --ignore-not-found >/dev/null || die "cannot delete ${name}"
+  done <<<"$live"
+  kube annotate --overwrite "deployment/${deployment}" \
+    "${ADMISSION_KEY}=$(printf '%s' "$selected" | sha256sum | cut -c1-64)" >/dev/null
+  count=0
+  [ -z "$wanted" ] || count="$(wc -l <<<"$wanted")"
+  log "${component}'s admission objects match this tree (${count} applied)"
+}
+
 deployment_selector() {
   local selector
   # shellcheck disable=SC2016 # a Go template, expanded by kubectl
@@ -173,6 +240,7 @@ if [ "${KIND_DEPLOY_SKIP_CURRENT:-0}" = 1 ] && [ -n "$digest" ]; then
   identity="$(running_identity 2>/dev/null || true)"
   if [ -n "$identity" ] && [ "$recorded" = "${digest} ${identity}" ]; then
     log "${SERVICE} already runs this tree's source (${digest:0:12}); not rebuilding"
+    sync_admission
     exit 0
   fi
 fi
@@ -304,6 +372,9 @@ kind load docker-image "$IMAGE" --name "$KIND_CLUSTER_NAME" >/dev/null
 # Republish the synthetic trust roots before anything restarts, so a cluster
 # past its 72-hour root renewal still trusts the leaves its services present.
 publish_kind_trust_roots --context "kind-${KIND_CLUSTER_NAME}"
+# Before the restart, so the current binary's first writes meet the current
+# policies (#3833).
+sync_admission
 
 unrecorded() { log "${SERVICE}'s source or running image changed meanwhile; this deploy is not recorded"; }
 if [ "$SERVICE" = daemon ] && [ "$KIND_PROFILE" != 1 ]; then
