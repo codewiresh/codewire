@@ -20,6 +20,7 @@ mod enabled {
     use std::time::Duration;
 
     use anyhow::Context as _;
+    use codewire_orchestration::runtime::kubernetes::KubernetesDriver;
     use codewire_orchestration::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE;
     use codewire_orchestration::sandbox::client::SandboxClient;
     use codewire_orchestration::sandbox::host_keys::RecordedHostKeys;
@@ -1701,11 +1702,13 @@ mod enabled {
             )
             .await?,
         );
+        let kube = kube::Client::try_default().await?;
         let context = Arc::new(worker::WorkerContext {
             pool: pool.clone(),
             cloudflare: None,
             preview_base_domain: String::new(),
-            kube: Some(kube::Client::try_default().await?),
+            kube: Some(kube.clone()),
+            runtime: Some(KubernetesDriver::shared(kube)),
             secrets: Arc::new(worker::secrets::SecretStore::from_env(pool)?),
             sandbox_cfg: worker::create::SandboxWorkerCfg::from_env(),
             confidential_storage: None,

@@ -18,7 +18,7 @@ use tokio::sync::Notify;
 
 use super::WorkerContext;
 use crate::lifecycle::{PgLifecycleStore, Service};
-use crate::sandbox::client::{ProbeResult, SandboxClient};
+use crate::runtime::{Placement, ProbeResult, RuntimeDriver};
 use crate::worker::activity_authority::{ActivityAuthority, is_authority_lost};
 
 /// The orchestration worker's leadership domain (see module docs).
@@ -198,7 +198,7 @@ async fn reconciler_loop(
         tokio::select! {
             _ = leader_notify.notified() => {
                 if is_leader.load(Ordering::SeqCst) {
-                    legacy_warm_pool_retirement_complete = retire_legacy_shared_warm_pools(&ctx).await;
+                    legacy_warm_pool_retirement_complete = retire_legacy_shared_warm_pools(ctx.runtime.as_deref(), &ctx.sandbox_cfg.sandbox_namespace).await;
                     recover_on_startup(&ctx).await;
                     startup_recovery_observed = true;
                 }
@@ -214,7 +214,7 @@ async fn reconciler_loop(
                         startup_recovery_observed = true;
                     }
                     if !legacy_warm_pool_retirement_complete {
-                        legacy_warm_pool_retirement_complete = retire_legacy_shared_warm_pools(&ctx).await;
+                        legacy_warm_pool_retirement_complete = retire_legacy_shared_warm_pools(ctx.runtime.as_deref(), &ctx.sandbox_cfg.sandbox_namespace).await;
                     }
                     run_reconciliation(&ctx).await;
                 } else {
@@ -226,13 +226,18 @@ async fn reconciler_loop(
     }
 }
 
-async fn retire_legacy_shared_warm_pools(ctx: &WorkerContext) -> bool {
-    let Some(kube) = &ctx.kube else {
+async fn retire_legacy_shared_warm_pools(
+    runtime: Option<&dyn RuntimeDriver>,
+    namespace: &str,
+) -> bool {
+    let Some(runtime) = runtime else {
         tracing::warn!("reconciler: legacy shared warm-pool retirement requires Kubernetes access");
         return false;
     };
-    let client = SandboxClient::new(kube.clone(), &ctx.sandbox_cfg.sandbox_namespace);
-    match client.retire_legacy_shared_warm_pools().await {
+    match runtime
+        .retire_legacy_shared_pools(&Placement::new(namespace))
+        .await
+    {
         Ok(0) => {
             tracing::info!("reconciler: legacy shared warm-pool retirement complete");
             true
@@ -793,7 +798,7 @@ struct LivenessRow {
 
 async fn sandbox_liveness_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>) {
     // Mirrors the Backend==nil early return.
-    if ctx.kube.is_none() {
+    if ctx.runtime.is_none() {
         return;
     }
     let mut ticker = tokio::time::interval(SANDBOX_LIVENESS_INTERVAL);
@@ -895,9 +900,11 @@ async fn reconcile_single_sandbox_liveness(
         return;
     }
 
-    let Some(kube) = &ctx.kube else { return };
-    let client = SandboxClient::new(kube.clone(), &row.namespace);
-    let probe = match client.probe_environment(&row.id).await {
+    let Some(runtime) = &ctx.runtime else { return };
+    let probe = match runtime
+        .probe(&Placement::new(&row.namespace), &row.id)
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(environment_id = row.id, namespace = row.namespace, error = %e, "sandbox liveness: probe failed");
@@ -1193,6 +1200,30 @@ async fn mark_sandbox_env_error(ctx: &WorkerContext, row: &LivenessRow, reason: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::fake::FakeRuntimeDriver;
+
+    #[tokio::test]
+    async fn legacy_pool_retirement_completes_only_when_the_runtime_reports_none_left() {
+        assert!(!retire_legacy_shared_warm_pools(None, "ns").await);
+
+        let runtime = FakeRuntimeDriver::default();
+        runtime
+            .retirements
+            .lock()
+            .unwrap()
+            .extend([Ok(2), Err("list refused".to_string()), Ok(0)]);
+        let answers = [false, false, true];
+        for complete in answers {
+            assert_eq!(
+                retire_legacy_shared_warm_pools(Some(&runtime), "ns").await,
+                complete
+            );
+        }
+        assert_eq!(
+            *runtime.placements.lock().unwrap(),
+            vec![Placement::new("ns"); answers.len()]
+        );
+    }
 
     #[test]
     fn incomplete_external_cleanup_recovery_includes_errored_destroy_intent() {

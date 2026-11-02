@@ -15,6 +15,7 @@ pub mod environment_mesh;
 pub mod lifecycle;
 pub(crate) mod repository_mount;
 pub mod resize_metrics;
+pub mod runtime;
 pub mod runtime_transport;
 pub mod sandbox;
 pub mod start_metrics;

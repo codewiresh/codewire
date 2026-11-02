@@ -23,6 +23,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::middleware;
 use codewire_orchestration::confidential_storage::{ConfidentialStorageManager, FeatureFlags};
+use codewire_orchestration::runtime::kubernetes::KubernetesDriver;
 use codewire_orchestration::worker::{self, cloudflare::CloudflareClient};
 use codewire_server_core::{AppBuilder, ServiceConfig};
 use codewire_tls::{ServerTlsFiles, TlsListener};
@@ -511,6 +512,7 @@ async fn main() -> anyhow::Result<()> {
         cloudflare: CloudflareClient::from_env(),
         preview_base_domain: std::env::var("PREVIEW_BASE_DOMAIN").unwrap_or_default(),
         kube: kube.clone(),
+        runtime: kube.clone().map(KubernetesDriver::shared),
         secrets: secrets.clone(),
         sandbox_cfg,
         confidential_storage: confidential_storage.clone(),

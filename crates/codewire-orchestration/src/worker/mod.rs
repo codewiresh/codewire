@@ -83,6 +83,8 @@ pub struct WorkerContext {
     /// Ambient kube client; None mirrors a nil sandbox backend in Go
     /// (health checks pass, workspace execs fail).
     pub kube: Option<kube::Client>,
+    /// The environment runtime; present exactly when `kube` is (#3628).
+    pub runtime: Option<std::sync::Arc<dyn crate::runtime::RuntimeDriver>>,
     /// Tenant secret store shared by the API and every worker activity.
     pub secrets: std::sync::Arc<secrets::SecretStore>,
     /// Sandbox/create config slice (env-derived, Go config.Config names).
