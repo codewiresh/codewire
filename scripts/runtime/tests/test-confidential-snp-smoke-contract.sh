@@ -266,7 +266,13 @@ rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-smoke
 rg -F 'node.codewire.sh/confidential-snp: "true"' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 rg -F 'kubernetes.io/hostname: example-node-1' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
 rg -F 'storageClassName: linstor-local' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
-rg -F 'linstor-workspace-ok' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+# The marker is what smoke-dev-confidential-snp.sh greps for the commodity class,
+# the probe fails when its write fails, and the fresh volume is the probe user's.
+rg -F 'marker="linstor-local-workspace-ok"' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null
+rg -F 'record_job "$commodity_job" commodity "$NODE" linstor-local' "$ROOT/scripts/runtime/confidential/smoke-dev-confidential-snp.sh" >/dev/null
+[[ "$(yq -r '.spec.template.spec.containers[0].command[2]' "$SMOKE_DIR/commodity-smoke-job.yaml" | head -1)" == "set -eu" ]]
+[[ "$(yq -r '.spec.template.spec.securityContext.fsGroup' "$SMOKE_DIR/commodity-smoke-job.yaml")" == \
+  "$(yq -r '.spec.template.spec.containers[0].securityContext.runAsGroup' "$SMOKE_DIR/commodity-smoke-job.yaml")" ]]
 rg -F '.data.SANDBOX_CONFIDENTIAL_WORKSPACE_STORAGE_CLASS == "linstor-confidential"' "$SMOKE" >/dev/null
 rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null
 [[ "$(yq -er '.spec.template.spec.securityContext.supplementalGroups' "$SMOKE_DIR/confidential-smoke-job.yaml" -o=json -I=0)" == '[0]' ]] || {
@@ -488,7 +494,7 @@ if validate_probe_initdata "$wrong_generation_initdata" smoke 2>/dev/null; then
 fi
 rm -rf "$initdata_dir"
 
-rg -F "EXPECTED_KATA_COMMIT='6078fea77c84cb18563cdc6bafff9fd5fda09ab3'" \
+rg -F "EXPECTED_KATA_COMMIT='b81c0f2db867caddbe98e660e0ccccc9c420b6f8'" \
   "$PROBE_POLICY_GENERATOR" >/dev/null
 rg -F 'genpolicy reports $embedded_commit, but Kata source is $kata_head' \
   "$PROBE_POLICY_GENERATOR" >/dev/null

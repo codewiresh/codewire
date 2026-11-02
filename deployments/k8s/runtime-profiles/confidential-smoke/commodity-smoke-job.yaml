@@ -4,7 +4,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: codewire-commodity-runtime-smoke-v75
+  name: codewire-commodity-runtime-smoke-v76
   namespace: codewire-runtime-probes
   labels:
     app.kubernetes.io/name: codewire-commodity-runtime-smoke
@@ -25,6 +25,10 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: example-node-1
       restartPolicy: Never
+      # The workspace volume's fresh filesystem root is the probe user's to
+      # write; without it the write is refused (#3718).
+      securityContext:
+        fsGroup: 65532
       volumes:
         - name: workspace
           ephemeral:
@@ -53,10 +57,11 @@ spec:
             - sh
             - -lc
             - |
+              set -eu
               echo "runtimeClass=commodity"
               uname -a
               test -r /proc/cpuinfo
-              marker="linstor-workspace-ok"
+              marker="linstor-local-workspace-ok"
               printf '%s\n' "$marker" > /workspace/marker
               test "$(cat /workspace/marker)" = "$marker"
               printf '%s\n' "$marker"
