@@ -356,8 +356,12 @@ bound_targets() {
   # without its generated sources, since the script's run still looks fresh
   # (main run 32717, after run 32706's sweep: thiserror's out/private.rs). So
   # such a directory goes, with its fingerprint, only when none of its files
-  # was read in the period, and one already left without out/ goes the same
-  # way, so Cargo runs its script again.
+  # was read in the period. One that a per-file sweep already damaged goes the
+  # same way, so Cargo runs its script again: it has `output` but no out/, or
+  # no invoked.timestamp, which Cargo writes on every run of the script and
+  # only a sweep removes. The second catches the out/ that Cargo recreates
+  # empty after such a sweep (#3869: a pull request branched before #3850 ran
+  # the per-file sweep on the shared cache, and thiserror lost private.rs).
   local days="${BUILD_ONCE_SWEEP_DAYS:-3}" unit units=0
   local -a build_units=()
   local -A read_units=()
@@ -377,7 +381,8 @@ bound_targets() {
       xargs -0 -r sh -c 'find "$@" -type f -atime -"$0" -printf "%H\0"' "$days" 2>/dev/null | sort -zu)
   fi
   for unit in "${build_units[@]}"; do
-    if { [ -f "$unit/output" ] && [ ! -d "$unit/out" ]; } || [ -z "${read_units[$unit]:-}" ]; then
+    if { [ -f "$unit/output" ] && { [ ! -d "$unit/out" ] || [ ! -f "$unit/invoked.timestamp" ]; }; } ||
+      [ -z "${read_units[$unit]:-}" ]; then
       rm -rf -- "$unit" "${unit%/build/*}/.fingerprint/${unit##*/}"
       units=$(( units + 1 ))
     fi
@@ -385,7 +390,7 @@ bound_targets() {
   find "$work/targets" -xdev -mindepth 2 -type d -empty -not -path '*/build/*' -delete 2>/dev/null || true
   [ "$swept" -eq 0 ] || echo "build-once: removed $swept target files no build read for $days days"
   [ "$units" -eq 0 ] ||
-    echo "build-once: removed $units build-script units no build read for $days days or left without their output"
+    echo "build-once: removed $units build-script units no build read for $days days or left without out/ or invoked.timestamp"
   read -r used used_kib size_kib < <(disk_usage) || true
   [[ "$used" =~ ^[0-9]+$ && "$used_kib" =~ ^[0-9]+$ && "$size_kib" =~ ^[0-9]+$ ]] ||
     die "cannot read the build disk's use: ${used:-nothing}"

@@ -270,13 +270,17 @@ grep -q '^  mark_used "$work/targets/$name"$' "$SCRIPT" || fail 'a leg does not 
 # A build script's directory is one unit (main run 32717): a live unit keeps
 # out/ files no build read, an empty out/ stays, a unit no build read goes with
 # its fingerprint, and one already left without out/ goes so Cargo reruns it.
+# So does one whose out/ Cargo recreated empty after an older per-file sweep
+# took its files and invoked.timestamp (#3869).
 profile="$marker_root/targets/darwin/aarch64-apple-darwin/debug"
-for unit in live-1 empty-2 stale-3 broken-4 nested-5; do
+for unit in live-1 empty-2 stale-3 broken-4 nested-5 recreated-6; do
   mkdir -p "$profile/build/$unit" "$profile/.fingerprint/$unit"
   printf 'cargo:rerun-if-changed=build.rs\n' > "$profile/build/$unit/output"
   printf '{}' > "$profile/.fingerprint/$unit/run-build-script-build-script-build.json"
+  [ "$unit" = recreated-6 ] || touch -d '5 days ago' "$profile/build/$unit/invoked.timestamp"
 done
-mkdir -p "$profile/build/live-1/out" "$profile/build/empty-2/out" "$profile/build/stale-3/out"
+mkdir -p "$profile/build/live-1/out" "$profile/build/empty-2/out" "$profile/build/stale-3/out" \
+  "$profile/build/recreated-6/out"
 printf 'generated' > "$profile/build/live-1/out/private.rs"
 printf 'generated' > "$profile/build/stale-3/out/private.rs"
 # A CMake-style script's own build/ under out/ is part of its unit: one read
@@ -296,7 +300,10 @@ FAKE_DF_PER_LEG=1 targets_prepare
   fail 'a unit read only under its out/build/ was swept'
 [ ! -e "$profile/build/broken-4" ] && [ ! -e "$profile/.fingerprint/broken-4" ] ||
   fail 'a build script unit left without out/ was kept, so Cargo would not rerun it'
-grep -q 'removed 2 build-script units no build read for 3 days or left without their output' "$work/prepare.log" ||
+[ ! -e "$profile/build/recreated-6" ] && [ ! -e "$profile/.fingerprint/recreated-6" ] ||
+  fail 'a build script unit with an empty out/ and no invoked.timestamp was kept, so Cargo would not rerun it'
+grep -q 'removed 3 build-script units no build read for 3 days or left without out/ or invoked.timestamp' \
+  "$work/prepare.log" ||
   fail 'the unit sweep gave no count'
 rm -rf "$marker_root/targets/darwin"
 
