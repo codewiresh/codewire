@@ -101,7 +101,8 @@ elif tool == "kubectl":
         (state / "configmaps" / f"{args[args.index('-n') + 1]}-{name}.pem").write_text(literal.split("=", 2)[2])
         print("kind: ConfigMap")
     elif "apply" in args:
-        manifest = sys.stdin.read()
+        from_stdin = "-f" in args and args[args.index("-f") + 1] == "-"
+        manifest = sys.stdin.read() if from_stdin else ""
         if "ValidatingAdmissionPolicy" in manifest:
             if os.environ.get("FAKE_KUBE_FAIL") == "apply": sys.exit(29)
             (state / "admission-applied.yaml").write_text(manifest)
@@ -113,6 +114,8 @@ elif tool == "kubectl":
             records = json.loads(os.environ.get("FAKE_RECORDS", "{}"))
             print(records.get(service, records.get("*", "<no value>")))
         elif "pods" in args: print("pod/old-one\npod/old-two")
+        elif "nodes" in args and any("InternalIP" in a for a in args):
+            print(os.environ.get("FAKE_NODE_ADDRESSES", "172.18.0.2"))
         elif any(a.startswith("go-template=") for a in args): print("app=selected,")
         elif any("command[0]" in a for a in args): print("/codewire-kind-fixtures/credential-service")
         elif any("FRONTEND_URL" in a or "CREDENTIAL_PUBLIC_ORIGIN" in a for a in args):
@@ -277,8 +280,8 @@ BUILDS = {
     "idp": ("codewire-idp", "", ""), "orchestration": ("codewire-orchestration", "kind-e2e", ""),
     "credential-service": ("codewire-credential-service", "enrollment,kind-e2e", "enrollment,kind-e2e"),
     "billing": ("codewire-billing", "", ""), "coordinator": ("codewire-coordinator", "", ""),
-    "mesh": ("codewire-mesh", "", ""), "dashboard": ("codewire-dashboard-web", "", ""),
-    "daemon": ("codewire-cli-bin", "", ""),
+    "mesh": ("codewire-mesh", "", ""), "derp": ("codewire-derp", "", ""),
+    "dashboard": ("codewire-dashboard-web", "", ""), "daemon": ("codewire-cli-bin", "", ""),
 }
 
 
@@ -304,6 +307,8 @@ class DeveloperProfileTests(unittest.TestCase):
             path.mkdir(parents=True, mode=0o700)
         shutil.copy2(ROOT / "scripts/ci/verify/kind/credentials.sh",
                      self.tree / "scripts/ci/verify/kind/credentials.sh")
+        shutil.copy2(ROOT / "scripts/ci/verify/kind/tailnet-edge.sh",
+                     self.tree / "scripts/ci/verify/kind/tailnet-edge.sh")
         shutil.copy2(INVENTORY, self.tree / "scripts/ci/verify/kind/smokes.txt")
         # Distinct synthetic public roots for deploy-service.sh's republish step.
         (self.state / "roots").mkdir(mode=0o700)
@@ -1133,6 +1138,42 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertTrue([call for call in self.calls("kubectl")
                          if call["args"][-4:] == ["set", "image", "deployment/codewire-mesh", "mesh=" + output]])
 
+    def test_derp_brings_up_kinds_tailnet_edge(self) -> None:
+        # A cluster that predates the relay gets it, its routes and the
+        # coordinator's DERP map from this one deploy (#3836).
+        result = self.run_script("deploy-service.sh", "derp")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = (self.state / "last-image").read_text()
+        self.assertTrue(output.startswith(self.values["KIND_PROFILE_IMAGE_PREFIX"] + "-services:dev-"))
+        build, = [call for call in self.calls("docker") if call["args"][:2] == ["buildx", "build"]]
+        self.assertIn("COPY codewire-derp /codewire-derp", build["dockerfile"])
+        kubectl = [call["args"] for call in self.calls("kubectl")]
+        context = ["--context", "kind-" + self.values["KIND_CLUSTER_NAME"]]
+        edge = ["apply", "-f", str(self.tree / "tests/e2e/kind/tailnet.yaml")]
+        apply, = [i for i, args in enumerate(kubectl) if args[-3:] == edge]
+        self.assertEqual(kubectl[apply][:4], context + ["-n", "codewire-e2e"])
+        set_env = next(i for i, args in enumerate(kubectl) if args[-7:-4] == ["set", "env", "deployment/codewire-coordinator"])
+        self.assertEqual(kubectl[set_env][:2], context)
+        self.assertEqual(kubectl[set_env][-4:],
+                         ["--containers=coordinator", "DERP_HOST=172.18.0.2", "DERP_PORT=443", "DERP_INSECURE=true"])
+        set_image = next(i for i, args in enumerate(kubectl)
+                         if args[-4:] == ["set", "image", "deployment/codewire-derp", "derp=" + output])
+        self.assertLess(apply, set_env)
+        self.assertLess(set_env, set_image)
+        self.assertIn("coordinator advertises DERP relay 172.18.0.2:443", result.stderr)
+        self.assertFalse(self.calls("database"))
+
+    def test_derp_refuses_an_ambiguous_node_address(self) -> None:
+        for addresses in ("", "172.18.0.2\n172.18.0.3", "fc00::2"):
+            with self.subTest(addresses=addresses):
+                self.calls_path.write_text("")
+                result = self.run_script("deploy-service.sh", "derp", FAKE_NODE_ADDRESSES=addresses)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn("needs one node with one IPv4 InternalIP", result.stderr)
+                self.assertFalse([call for call in self.calls("kubectl")
+                                  if "set" in call["args"] and "env" in call["args"]])
+                self.assertFalse([call for call in self.calls("kubectl") if "image" in call["args"]])
+
     def test_selected_deploys_changed_services_before_suites(self) -> None:
         result = self.run_script("test-selected.sh", KIND_TEST_SUITES="workspace-services",
                                  FAKE_CHANGES="crate codewire-daemon;service orchestration;service daemon",
@@ -1682,6 +1723,7 @@ SYNTHETIC_CRATES = {
     "codewire-credential-service": (["codewire-server-core"], ["codewire-test-support"]),
     "codewire-billing": (["codewire-server-core"], []),
     "codewire-coordinator": ([], []),
+    "codewire-derp": ([], []),
     "codewire-mesh": (["codewire-server-core"], []),
     "codewire-dashboard-web": (["codewire-server-core"], []),
     "codewire-cli-bin": (["codewire-cli"], []),

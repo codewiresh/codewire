@@ -36,7 +36,7 @@ KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 # image (make kind-runtime-images).
 ORDER=(edge-contract credentials workspace-services dashboard-browser final-fencing runtime-acceptance integrated cw-runtime cw-managed-agents warm-pools)
 # deploy-service.sh services, in deploy order.
-SERVICES=(idp orchestration credential-service billing coordinator mesh dashboard daemon)
+SERVICES=(idp orchestration credential-service billing coordinator mesh derp dashboard daemon)
 # The credentials suite's stages, as credential-journey.sh orders them. Naming
 # some (KIND_CREDENTIAL_STAGES) reruns only those after the suite's setup:
 # an iteration aid that never makes a green credentials suite (#2890).
@@ -121,7 +121,11 @@ map_token() {
     # Block clearing in a clearing Sandbox on a snapshot class Kind doesn't have.
     rust_pkg_codewire_ext4_scrub)
       unobserved "$token" 'local microVM snapshots and hosted Block clearing; observed on Dev' ;;
-    transport_pkg_codewire_derp | transport_pkg_codewire_udp_relay)
+    # Kind runs the relay (tests/e2e/kind/tailnet.yaml), but no retained suite
+    # drives a tailnet through it yet: walk the host tailnet journey.
+    transport_pkg_codewire_derp)
+      unobserved "$token" 'no retained suite drives the Kind relay; walk the host tailnet journey' ;;
+    transport_pkg_codewire_udp_relay)
       unobserved "$token" 'not deployed in Kind' ;;
     rust_pkg_codewire_workspace_image)
       unobserved "$token" 'a workspace image pin is observed on Dev' ;;

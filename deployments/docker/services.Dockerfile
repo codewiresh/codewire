@@ -128,8 +128,11 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-db-migrate" /out/codewire-db-migrate && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-udp-relay" /out/codewire-udp-relay && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-credential-service" /out/codewire-credential-service && \
-    mkdir -p /out/kind-fixtures /out/kind-git-runtime && \
+    mkdir -p /out/kind-fixtures /out/kind-git-runtime /out/kind-derp && \
     if [ "$CODEWIRE_ORCHESTRATION_FEATURES" = kind-e2e ]; then \
+      codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" \
+        -p codewire-derp --bin codewire-derp && \
+      cp "target/$CODEWIRE_RUST_PROFILE/codewire-derp" /out/kind-derp/codewire-derp && \
       codewire-rust-build cargo test --locked --profile "$CODEWIRE_RUST_PROFILE" \
         -p codewire-credential-service --features enrollment,kind-e2e --lib --no-run \
         --message-format=json > /tmp/credential-fixture-artifacts.jsonl && \
@@ -167,6 +170,11 @@ COPY --from=builder /out/kind-fixtures/ /codewire-kind-fixtures/
 # libc/loader; do not overwrite them with the builder's older libc. Like the
 # libtest payload above, this directory is empty outside kind-e2e + profile ci.
 COPY --from=builder /out/kind-git-runtime/ /
+# Kind's own DERP relay (tests/e2e/kind/tailnet.yaml, #3836). Like the payloads
+# above, built only by services-ci's kind-e2e feature and empty otherwise; its
+# own build, so it changes no shipped binary's feature set. Dev and Production
+# run the codewire-derp image.
+COPY --from=builder /out/kind-derp/ /
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 USER 65532:65532
 # Exercise the minimal Git closure in the actual non-root runtime, including
@@ -176,9 +184,11 @@ RUN if [ -x /codewire-kind-fixtures/credential-service ]; then \
       grep -qx 'runtime::kind::git::tests::stock_git_smart_http_round_trip: test' /tmp/kind-git-tests.txt && \
       /codewire-kind-fixtures/credential-service --exact \
         runtime::kind::git::tests::stock_git_smart_http_round_trip --test-threads=1 && \
-      rm /tmp/kind-git-tests.txt; \
+      rm /tmp/kind-git-tests.txt && \
+      test -x /codewire-derp; \
     else \
       test ! -e /usr/bin/git && test ! -e /usr/lib/git-core/git-http-backend && \
-      test ! -e /usr/lib/git-core/git-upload-pack && test ! -e /usr/lib/git-core/git-pack-objects; \
+      test ! -e /usr/lib/git-core/git-upload-pack && test ! -e /usr/lib/git-core/git-pack-objects && \
+      test ! -e /codewire-derp; \
     fi
 # No ENTRYPOINT: each deployment sets `command` to pick its binary.

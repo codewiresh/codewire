@@ -112,6 +112,8 @@ NS=codewire-e2e
 SANDBOX_NS=dev-sandboxes
 # shellcheck source=scripts/ci/verify/kind/credentials.sh
 source "$ROOT/scripts/ci/verify/kind/credentials.sh"
+# shellcheck source=scripts/ci/verify/kind/tailnet-edge.sh
+source "$ROOT/scripts/ci/verify/kind/tailnet-edge.sh"
 KIND_E2E_COMPATIBILITY_VERSION=1
 KIND_E2E_PREPARED_CONFIGMAP=codewire-kind-e2e-prepared
 RETAINED_KUBECONFIG=""
@@ -830,7 +832,7 @@ mark_retained_cluster_prepared() {
 record_retained_cluster_sources() {
   local service
   [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = build-ci ] || return 0
-  for service in idp orchestration credential-service billing coordinator mesh dashboard daemon; do
+  for service in idp orchestration credential-service billing coordinator mesh derp dashboard daemon; do
     KIND_DEPLOY_RECORD_ONLY=1 "$ROOT/scripts/dev/kind/deploy-service.sh" "$service" \
       || log "could not record the source of ${service}; make kind-test will rebuild it"
   done
@@ -1961,6 +1963,15 @@ deploy_overlay() {
     exit 1
   fi
   assert_kind_idp_topology || return $?
+  # Before the coordinator first starts, so it never advertises Production's
+  # relay (tailnet.yaml, #3836).
+  configure_kind_coordinator_derp "$NS" || return $?
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
+    # Only services-ci carries the Kind relay; a release image has no
+    # /codewire-derp. Tailnet peers then have no relay, never Production's.
+    log "release-image gate: Kind's DERP relay is not selected"
+    kubectl -n "$NS" scale deploy/codewire-derp --replicas=0 || return $?
+  fi
   deploy_kind_credential_issuers || return $?
   # Staged rollout: the services fail fast (correctly) when Postgres or
   # Temporal is unreachable, so park them at zero replicas until their
@@ -2023,6 +2034,7 @@ deploy_overlay() {
   kubectl -n "$NS" rollout status deploy/codewire-orchestration --timeout=300s || return $?
   kubectl -n "$NS" rollout status deploy/codewire-mesh --timeout=300s || return $?
   kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s || return $?
+  kubectl -n "$NS" rollout status deploy/codewire-derp --timeout=300s || return $?
 }
 
 require_dashboard_browser_host_dependencies() {

@@ -39,6 +39,7 @@ SERVICES = {
     "billing": "codewire-billing",
     "coordinator": "codewire-coordinator",
     "mesh": "codewire-mesh",
+    "derp": "codewire-derp",
     "dashboard": "codewire-dashboard-web",
     "daemon": "codewire-cli-bin",
 }

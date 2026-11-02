@@ -132,8 +132,10 @@ verify_services_dockerfile_contract() {
     fail 'services image does not build the selected locked profile'
   # One workspace Cargo invocation compiles every shared dependency once; the
   # historical three-invocation sequence rebuilt their common dependency graph.
+  # Only the services-ci fence below (Kind's DERP relay) builds anything else.
   # shellcheck disable=SC2016
-  [[ "$(grep -cF 'codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE"' "$SERVICES_DOCKERFILE")" -eq 1 ]] ||
+  [[ "$(sed '/^    if \[ "\$CODEWIRE_ORCHESTRATION_FEATURES" = kind-e2e \]; then/,/^    fi$/d' "$SERVICES_DOCKERFILE" |
+      grep -cF 'codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE"')" -eq 1 ]] ||
     fail 'services image must compile every shipped binary in one Cargo build'
   grep -qF 'FROM codewire-rust-base AS builder' "$SERVICES_DOCKERFILE" ||
     fail 'services does not consume the shared Rust build base'
@@ -245,6 +247,23 @@ verify_services_dockerfile_contract() {
     fail 'final runtime does not execute the real stock Git transfer proof'
   grep -qF 'test ! -e /usr/bin/git && test ! -e /usr/lib/git-core/git-http-backend' "$SERVICES_DOCKERFILE" ||
     fail 'release runtime does not prove Git fixture payload absence'
+  # Kind's DERP relay (tests/e2e/kind/tailnet.yaml) is built in its own Cargo
+  # invocation inside the same feature fence, so the shipped binaries' feature
+  # set never includes it and a promotable image carries no relay.
+  # shellcheck disable=SC2016
+  grep -qF 'codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" \' <<<"$fixture_block" &&
+    grep -qF -- '-p codewire-derp --bin codewire-derp && \' <<<"$fixture_block" ||
+    fail 'Kind DERP relay build escaped the services-ci fence'
+  [[ "$(grep -cF -- '-p codewire-derp' "$SERVICES_DOCKERFILE")" -eq 1 ]] ||
+    fail 'services image builds codewire-derp outside the Kind fence'
+  [[ "$(grep -c '/out/kind-derp' "$SERVICES_DOCKERFILE")" -eq 3 ]] ||
+    fail 'unexpected Kind DERP relay payload copy'
+  grep -Fxq 'COPY --from=builder /out/kind-derp/ /' "$SERVICES_DOCKERFILE" ||
+    fail 'Kind DERP relay lacks its explicit CI-only runtime artifact path'
+  grep -qF 'test ! -e /codewire-derp; \' "$SERVICES_DOCKERFILE" ||
+    fail 'release runtime does not prove Kind DERP relay absence'
+  grep -qF 'test -x /codewire-derp; \' "$SERVICES_DOCKERFILE" ||
+    fail 'services-ci runtime does not prove the Kind DERP relay is present'
 
   for binary_artifact in "${SERVICES_BINARY_ARTIFACTS[@]}"; do
     binary="${binary_artifact%%:*}"

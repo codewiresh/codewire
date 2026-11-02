@@ -25,6 +25,8 @@ resources:
   - ingress.yaml
   - orchestration-nodeport.yaml
   - coordinator-nodeport.yaml
+  # Kind's own DERP relay and the plain-HTTP coordinator route (#3836).
+  - tailnet.yaml
 
 patches:
   # The registries the image cache may hold images from: the public

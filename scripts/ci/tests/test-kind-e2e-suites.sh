@@ -968,7 +968,7 @@ grep -Fq 'unknown Kind e2e command: retained' "$FIXTURE/unknown-command.out" ||
 kind_function_pattern="$(
   grep -ho '^[A-Za-z_][A-Za-z0-9_]*() *[({]' \
     "$SCRIPT" "$COMMON" "$CREDENTIALS" "$ROOT/scripts/ci/verify/kind/credential-mode.sh" \
-    "$ROOT"/scripts/ci/verify/kind/suites/*.sh \
+    "$ROOT/scripts/ci/verify/kind/tailnet-edge.sh" "$ROOT"/scripts/ci/verify/kind/suites/*.sh \
     "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh" \
     "$ROOT/scripts/ci/verify/kind-host-runtime.sh" |
     sed 's/() *[({]$//' | sort -u | paste -sd '|' -
@@ -3576,7 +3576,7 @@ RECORDER
   : >"$CALLS"
   log() { record "log:$*"; }
   CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci record_retained_cluster_sources
-  printf 'record-only=1 %s\n' idp orchestration credential-service billing coordinator mesh dashboard daemon \
+  printf 'record-only=1 %s\n' idp orchestration credential-service billing coordinator mesh derp dashboard daemon \
     | cmp -s - <(grep '^record-only=' "$CALLS") || fail 'a new retained cluster did not record every service'
   grep -Fxq 'log:could not record the source of mesh; make kind-test will rebuild it' "$CALLS" ||
     fail 'a failed source record was not logged'

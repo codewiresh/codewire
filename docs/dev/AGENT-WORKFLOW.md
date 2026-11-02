@@ -434,7 +434,7 @@ Retained suites require the current kubectl context to be
 from kind itself, so a stale default context does not matter there.
 
 `kind-deploy` builds one service (`idp`, `orchestration`, `credential-service`,
-`billing`, `coordinator`, `mesh`) incrementally in the services image's
+`billing`, `coordinator`, `mesh`, `derp`) incrementally in the services image's
 toolchain, layers it onto the cluster's image and restarts only that
 Deployment. It uses the local `kind-dev` Cargo profile
 (`scripts/dev/kind/cargo-profile.toml`): the workspace's own
@@ -457,6 +457,22 @@ The first deploy from a new worktree is therefore a cold build. Each deploy
 records on its Deployment the digest of the source it built
 (`scripts/dev/kind/service-sources.py`) and the image its Pods then run;
 `SERVICE=mesh` and the other services take part the same way.
+
+Kind runs its own tailnet edge (`tests/e2e/kind/tailnet.yaml`): a DERP relay
+behind ingress-nginx, as on Production, and the coordinator's gRPC route on the
+plain-HTTP ingress, the server URL Kind gives `cw`. The coordinator advertises
+the relay at the Kind node's address on port 443, which the host reaches on the
+Docker network and workspace Pods reach through the ingress egress their
+NetworkPolicy admits; no Kind peer uses Production's relay. So `cw` on the host
+joins an environment's tailnet over Kind's relay, for example
+`CW_SSH_TRANSPORT=tailnet cw shell --stdio <environment>` with the profile's
+`http` URL as `CODEWIRE_SERVER_URL`. The relay is `codewire-derp`, which only
+the Kind services image carries. A cluster created before the edge existed gets
+it, and the coordinator's relay address, from `make kind-deploy SERVICE=derp`;
+run that again if the node's address changes. A workspace daemon keeps the
+relay it first connected to, so Sandboxes started before that still use the
+old one until they restart. Kind has no STUN server and no
+direct-UDP load balancer, so its peers stay on DERP.
 
 The retained cluster's databases are disposable, and a deploy upgrades them.
 `idp`, `orchestration`, `billing`, `coordinator` and `mesh` apply their

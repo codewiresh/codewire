@@ -5,6 +5,8 @@
 #   KIND_CLUSTER_NAME=<cluster> scripts/dev/kind/deploy-service.sh <service>
 #
 # Services: idp, orchestration, credential-service, billing, coordinator, mesh,
+# derp (Kind's own DERP relay, tests/e2e/kind/tailnet.yaml; a cluster that
+# predates it gets the relay, its routes and the coordinator's DERP map here),
 # dashboard (what the cluster ingress serves, so `make kind-test` exercises the
 # current dashboard source; `make kind-watch` serves it for review), and daemon
 # (the in-workspace `cw` carried by the daemon image; sandboxes created
@@ -39,6 +41,8 @@ source "$ROOT/scripts/dev/kind/profile.sh"
 kind_profile_load "$ROOT" || exit $?
 # shellcheck source=scripts/ci/verify/kind/credentials.sh
 source "$ROOT/scripts/ci/verify/kind/credentials.sh"
+# shellcheck source=scripts/ci/verify/kind/tailnet-edge.sh
+source "$ROOT/scripts/ci/verify/kind/tailnet-edge.sh"
 # shellcheck source=scripts/dev/kind/dev-builder.sh
 source "$ROOT/scripts/dev/kind/dev-builder.sh"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
@@ -60,7 +64,7 @@ fixture_features=""
 toolchain=codewire-rust-base
 rust_target=""
 case "$SERVICE" in
-  idp | billing | coordinator) ;;
+  idp | billing | coordinator | derp) ;;
   mesh)
     image=codewire-mesh
     destination=/usr/local/bin/
@@ -89,7 +93,7 @@ case "$SERVICE" in
     toolchain=codewire-cw-toolchain
     rust_target=x86_64-unknown-linux-musl
     ;;
-  *) die "usage: $0 <idp|orchestration|credential-service|billing|coordinator|mesh|dashboard|daemon>" ;;
+  *) die "usage: $0 <idp|orchestration|credential-service|billing|coordinator|mesh|derp|dashboard|daemon>" ;;
 esac
 deployment="codewire-${SERVICE}"
 if [ "$SERVICE" = daemon ]; then
@@ -284,7 +288,7 @@ for binary in "$STATE/bin/"*; do
   fi
   case "${binary##*/}" in
     codewire-idp|codewire-billing|codewire-coordinator|codewire-orchestration|\
-    codewire-credential-service|codewire-mesh|codewire-dashboard-web|cw) ;;
+    codewire-credential-service|codewire-mesh|codewire-derp|codewire-dashboard-web|cw) ;;
     *) die 'dev binary state contains an unknown binary' ;;
   esac
 done
@@ -377,6 +381,13 @@ publish_kind_trust_roots --context "kind-${KIND_CLUSTER_NAME}"
 sync_admission
 
 unrecorded() { log "${SERVICE}'s source or running image changed meanwhile; this deploy is not recorded"; }
+if [ "$SERVICE" = derp ]; then
+  # The relay, its routes and the coordinator's DERP map, as a new cluster
+  # gets them (common.sh deploy_overlay). Applying is idempotent; the image is
+  # set below like every other service's.
+  kube apply -f "$ROOT/tests/e2e/kind/tailnet.yaml" >/dev/null
+  configure_kind_coordinator_derp "$NAMESPACE" --context "kind-${KIND_CLUSTER_NAME}"
+fi
 if [ "$SERVICE" = daemon ] && [ "$KIND_PROFILE" != 1 ]; then
   record_deploy || unrecorded
   log "sandboxes created from now on run the current daemon"

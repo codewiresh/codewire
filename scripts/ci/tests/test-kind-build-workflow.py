@@ -1143,6 +1143,8 @@ class CommonConsumerContractTests(unittest.TestCase):
             (fixture / "tests/e2e/kind").mkdir(parents=True)
             shutil.copy2(COMMON, fixture / "scripts/ci/verify/kind/common.sh")
             shutil.copy2(CREDENTIALS, fixture / "scripts/ci/verify/kind/credentials.sh")
+            shutil.copy2(ROOT / "scripts/ci/verify/kind/tailnet-edge.sh",
+                         fixture / "scripts/ci/verify/kind/tailnet-edge.sh")
             # common.sh reads its default workspace image from the published pin.
             for relative in (
                 "scripts/ci/images/workspace-image-pin.py",

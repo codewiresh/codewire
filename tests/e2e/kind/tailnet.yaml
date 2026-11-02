@@ -1,0 +1,153 @@
+# Kind's tailnet edge (#3836): its own DERP relay, and the coordinator on the
+# plain-HTTP ingress the host `cw` is given as its server URL.
+#
+# The relay sits behind ingress-nginx like Production's (deployments/k8s/base
+# ingress.yaml codewire-derp): the ingress terminates TLS and forwards the
+# `Upgrade: DERP` request to the relay's plain HTTP port. The coordinator
+# advertises it at the Kind node's address on port 443, the ingress
+# controller's host port, which the host and workspace Pods both reach;
+# workspace egress admits ingress-nginx on 443 and refuses every private
+# address otherwise. scripts/ci/verify/kind/tailnet-edge.sh sets that address
+# on the coordinator, so nothing in Kind ever falls back to Production's relay.
+#
+# The relay runs the codewire-derp binary that only services-ci builds into the
+# services image (deployments/docker/services.Dockerfile). A retained cluster
+# that predates this file gets it with `make kind-deploy SERVICE=derp`, which
+# applies this file directly; keep it free of anything the overlay renders.
+#
+# Every object carries codewire.sh/kind-tailnet-edge so the edge is
+# identifiable as one unit.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-derp
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: derp
+    codewire.sh/kind-tailnet-edge: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: derp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codewire
+        app.kubernetes.io/component: derp
+    spec:
+      containers:
+        - name: derp
+          image: codewire-services:e2e
+          imagePullPolicy: Never
+          command: ["/codewire-derp"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Serve only node keys the coordinator registered for a live
+            # session (#2844), as Production does. Kind's Mesh has no key
+            # lookup listener, so its members are not relayed here.
+            - name: DERP_VERIFY_CLIENT_URLS
+              value: http://codewire-coordinator.$(POD_NAMESPACE).svc.cluster.local:8097
+            # No STUN: Kind advertises no STUN server, so peers stay on DERP.
+            - name: STUN_PORT
+              value: "-1"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /derp/latency-check
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-derp
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: derp
+    codewire.sh/kind-tailnet-edge: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: derp
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+---
+# Hostless, so it answers on the node address over HTTP and HTTPS. The DERP
+# client sends HTTP/1.1 without ALPN; ingress-nginx passes its Upgrade header.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-derp-e2e
+  labels:
+    codewire.sh/kind-tailnet-edge: "true"
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /derp
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-derp
+                port:
+                  name: http
+---
+# The coordinator's native gRPC stream on the plain-HTTP ingress, the server
+# URL Kind gives `cw`. ingress-nginx speaks HTTP/2 there with prior knowledge.
+# Without this route the request fell to the /codewire\. fallback and
+# orchestration answered 404. The TLS twin is codewire-coordinator-connect-e2e
+# in ingress.yaml.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codewire-coordinator-plain-e2e
+  labels:
+    codewire.sh/kind-tailnet-edge: "true"
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /codewire\.internal\.v1\.CoordinatorService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-coordinator
+                port:
+                  name: http

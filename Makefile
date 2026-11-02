@@ -227,7 +227,7 @@ kind-down:
 # Rebuild one service from current source into the retained cluster, e.g.
 # `make kind-deploy SERVICE=credential-service`.
 kind-deploy:
-	@test -n "$(SERVICE)" || { echo "usage: make kind-deploy SERVICE=<idp|orchestration|credential-service|billing|coordinator|mesh|dashboard|daemon>" >&2; exit 2; }
+	@test -n "$(SERVICE)" || { echo "usage: make kind-deploy SERVICE=<idp|orchestration|credential-service|billing|coordinator|mesh|derp|dashboard|daemon>" >&2; exit 2; }
 	./scripts/dev/kind/deploy-service.sh "$(SERVICE)"
 
 # Republish the retained cluster's synthetic trust roots (kind-deploy also
