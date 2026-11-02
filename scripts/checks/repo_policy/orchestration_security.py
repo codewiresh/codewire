@@ -268,6 +268,11 @@ WARM_POOL_LOCAL_IMAGES = {"tests/e2e/kind": ["codewire-daemon:e2e"]}
 # extra roots there alone (SANDBOX_COORDINATOR_EXTRA_ROOTS).
 WARM_POOL_ROOTS_CONFIGMAPS = ["codewire-orchestration-internal-roots"]
 WARM_POOL_EXTRA_ROOTS_CONFIGMAPS = {"tests/e2e/kind": ["codewire-coordinator-extra-roots"]}
+# The Kind e2e overlay's one test knob beside WARM_POOL_ENVIRONMENT:
+# SANDBOX_CODEX_LOGIN_CHECK_PERIOD_SECONDS renders the daemon's period for pool
+# members as for environments, so a member renders exactly as the environment
+# that adopts it (#3852).
+WARM_POOL_EXTRA_ENVIRONMENT = {"tests/e2e/kind": ["CODEWIRE_CODEX_LOGIN_CHECK_PERIOD_SECONDS"]}
 
 
 def cel_list(values: tuple[str, ...] | list[str]) -> str:
@@ -319,7 +324,6 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             f"(v.image.reference.matches('{WARM_POOL_DIGEST_PATTERN}') || v.image.reference in variables.localImages)",
             "!has(variables.pod.ephemeralContainers)",
             "variables.containers.all(c, !has(c.envFrom)",
-            f"- expression: '{cel_list(WARM_POOL_ENVIRONMENT)}' name: environment",
             f"- expression: '{cel_list(WARM_POOL_AUDIENCES)}' name: audiences",
             "e.name in variables.environment && dyn(e).all(k, k in ['name', 'value', 'valueFrom'])",
             "(!has(e.valueFrom) || (e.name == 'CODEWIRE_POD_UID' && dyn(e.valueFrom).all(k, k == 'fieldRef')",
@@ -408,6 +412,12 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                 found = re.search(r"name: localImages - expression: '?(\[[^\]]*\])'? name: rootsConfigMaps ", normalized)
                 if not found or found.group(1) != cel_list(roots):
                     output.append(f"{label}: {policy_name} roots ConfigMaps must be exactly {cel_list(roots)}, third: "
+                                  f"{found.group(1) if found else None}")
+                # Only the Kind e2e overlay adds its test knob's variable (#3852).
+                environment = [*WARM_POOL_ENVIRONMENT, *WARM_POOL_EXTRA_ENVIRONMENT.get(target["path"], [])]
+                found = re.search(r"- expression: '?(\[[^\]]*\])'? name: environment ", normalized)
+                if not found or found.group(1) != cel_list(environment):
+                    output.append(f"{label}: {policy_name} workspace environment must be exactly {cel_list(environment)}: "
                                   f"{found.group(1) if found else None}")
         if binding:
             expected = compact(f"spec: policyName: {policy_name} validationActions: - Deny")

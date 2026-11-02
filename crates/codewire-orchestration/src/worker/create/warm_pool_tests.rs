@@ -137,10 +137,12 @@ fn confidential_tier_settings_leave_commodity_pools_unchanged() {
 
 #[test]
 fn pool_template_equals_the_environment_rendering_of_its_shape() {
-    for ratio in ["1", "2"] {
+    // Kind's test deployment also sets the Codex login check period (#3852).
+    for (ratio, codex_period) in [("1", None), ("2", None), ("1", Some(30))] {
         let cfg = SandboxWorkerCfg {
             cpu_sharing_ratio: crate::sandbox::template::CpuSharingRatio::parse(Some(ratio))
                 .unwrap(),
+            codex_login_check_period_seconds: codex_period,
             ..dev_cfg()
         };
         for shape in shapes() {
@@ -152,7 +154,7 @@ fn pool_template_equals_the_environment_rendering_of_its_shape() {
                 assert_eq!(
                     rendered["spec"],
                     crate::sandbox::warm_pool::without_revision_marker(&pool.template["spec"]),
-                    "{shape:?} at {ratio}:1"
+                    "{shape:?} at {ratio}:1, Codex login period {codex_period:?}"
                 );
             }
         }

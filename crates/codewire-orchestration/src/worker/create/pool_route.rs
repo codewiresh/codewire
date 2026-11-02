@@ -238,6 +238,13 @@ pub(crate) async fn route(
             },
         }
     };
+    // The counter resets with the replica; the log keeps why a create of a
+    // pooled deployment went cold (#3852). No pool configured is not news.
+    if let Route::Cold(reason) = &route
+        && !matches!(reason, ColdReason::Unconfigured)
+    {
+        tracing::info!(env = %env.id, route = reason.as_str(), "environment creating cold");
+    }
     routes_metric()
         .with_label_values(&[match &route {
             Route::Pool { .. } => "pool",

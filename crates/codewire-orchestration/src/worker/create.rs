@@ -722,10 +722,12 @@ pub fn shape_template_opts(
         ingress_namespace: cfg.ingress_namespace.clone(),
         ingress_pod_name: cfg.ingress_pod_name.clone(),
         egress_bandwidth: cfg.egress_bandwidth.clone(),
-        // An environment's own rendering sets this. A warm pool member keeps
-        // the production period: pool template admission names no such
-        // variable.
-        codex_login_check_period_seconds: None,
+        // Kind's test deployment only, and the same as an environment's own
+        // rendering: a pool member must render exactly as the environment that
+        // adopts it, or every create of its shape routes cold (#3852). Kind's
+        // pool template admission names the variable; no other deployment's
+        // build reads it.
+        codex_login_check_period_seconds: cfg.codex_login_check_period_seconds,
         derp_host: cfg.derp_host.clone(),
         derp_port: parse_derp_port(&cfg.derp_port),
         stun_host: cfg.stun_host.clone(),
@@ -3389,9 +3391,9 @@ mod tests {
 
     /// The Kind-only Codex login check period: read only by `kind-e2e`
     /// builds, refused outside the daemon's 10-120 second bounds, and given to
-    /// an environment's rendering but never to a warm pool's.
+    /// an environment's rendering and its shape's warm pool alike (#3852).
     #[test]
-    fn the_kind_codex_login_check_period_is_bounded_and_environment_only() {
+    fn the_kind_codex_login_check_period_is_bounded_and_rendered_for_pools_too() {
         use std::ffi::OsString;
         assert_eq!(kind_codex_login_check_period_seconds(None), None);
         let thirty = kind_codex_login_check_period_seconds(Some(OsString::from("30")));
@@ -3433,7 +3435,7 @@ mod tests {
             disk_gib: 5,
         };
         let pool = warm_pool_template_opts(&cfg, shape).unwrap();
-        assert_eq!(pool.codex_login_check_period_seconds, None);
+        assert_eq!(pool.codex_login_check_period_seconds, Some(30));
     }
 
     #[test]

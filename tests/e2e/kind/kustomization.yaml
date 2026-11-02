@@ -249,6 +249,16 @@ patches:
       - op: replace
         path: /spec/variables/3/expression
         value: "'ingress-nginx|app.kubernetes.io/name=ingress-nginx'"
+      # SANDBOX_CODEX_LOGIN_CHECK_PERIOD_SECONDS (support.yaml) gives pool
+      # members the daemon's Codex login check period, as it gives
+      # environments, so a member renders exactly as the environment that
+      # adopts it (#3852).
+      - op: test
+        path: /spec/variables/12/name
+        value: environment
+      - op: replace
+        path: /spec/variables/12/expression
+        value: "['CODEWIRE_WORKSPACE_SHIM_ADDR', 'HOME', 'USER', 'CODEWIRE_WORKSPACE_BINDING_URL', 'CODEWIRE_POD_UID', 'CODEWIRE_WORKSPACE_POOL_REVISION', 'DOCKER_HOST', 'DOCKER_TLS_CERTDIR', 'CODEWIRE_DOCKER_DATA_IMAGE', 'CODEWIRE_DOCKER_DATA_ROOT', 'CODEWIRE_DOCKER_DATA_SIZE', 'CODEWIRE_DOCKER_MOUNT_MODE', 'CODEWIRE_CODEX_LOGIN_CHECK_PERIOD_SECONDS']"
 
 # Namespace transforms do not rewrite DNS SANs inside custom resources.
 replacements:
