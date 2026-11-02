@@ -103,6 +103,96 @@ pub(crate) fn test_child(command: &mut std::process::Command) -> &mut std::proce
     command
 }
 
+/// Kill and reap, when this test process exits, a long-lived test child it
+/// still owns (#3813). A fixture that hands its `Child` to a structure the test
+/// drops would otherwise leave the child running past the test binary: a
+/// dropped `Child` is neither killed nor reaped. At exit each registered PID is
+/// signalled only while `waitpid` reports it as this process's own unreaped,
+/// running child, so a PID a test already reaped, which the kernel may have
+/// reused, is never signalled.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn reap_at_exit(pid: u32) {
+    use std::sync::{Mutex, Once};
+    static PIDS: Mutex<Vec<libc::pid_t>> = Mutex::new(Vec::new());
+    static REGISTER: Once = Once::new();
+    extern "C" fn reap_registered() {
+        let pids = match PIDS.lock() {
+            Ok(pids) => pids.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        for pid in pids {
+            reap_owned_child(pid);
+        }
+    }
+    REGISTER.call_once(|| {
+        // SAFETY: registers a plain function with no captured state.
+        unsafe { libc::atexit(reap_registered) };
+    });
+    let pid = libc::pid_t::try_from(pid).expect("a child PID fits pid_t");
+    match PIDS.lock() {
+        Ok(mut pids) => pids.push(pid),
+        Err(poisoned) => poisoned.into_inner().push(pid),
+    }
+}
+
+/// Kill and reap `pid` only while it is this process's own running child;
+/// leave anything else alone. Whether it was signalled is returned.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn reap_owned_child(pid: libc::pid_t) -> bool {
+    let mut status = 0;
+    // SAFETY: waitpid with WNOHANG on one PID only reads its state.
+    if unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } != 0 {
+        // Already exited and now reaped, or not this process's child.
+        return false;
+    }
+    // Still running and unreaped, so the PID cannot have been reused.
+    // SAFETY: signals exactly that child, then waits for it.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+        libc::waitpid(pid, &mut status, 0);
+    }
+    true
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn only_an_owned_running_child_is_reaped_at_exit() {
+    let sleep = if cfg!(target_os = "macos") {
+        "/bin/sleep"
+    } else {
+        "/usr/bin/sleep"
+    };
+    #[expect(
+        clippy::zombie_processes,
+        reason = "reap_owned_child reaps it with waitpid, which is what this test checks"
+    )]
+    let running = test_child(&mut std::process::Command::new(sleep))
+        .arg("60")
+        .spawn()
+        .unwrap();
+    let pid = libc::pid_t::try_from(running.id()).unwrap();
+    assert!(
+        reap_owned_child(pid),
+        "an owned running child was not reaped"
+    );
+    // SAFETY: probes the PID with signal 0 only.
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        -1,
+        "the reaped child still exists"
+    );
+    let mut finished = test_child(&mut std::process::Command::new(sleep))
+        .arg("0")
+        .spawn()
+        .unwrap();
+    let finished_pid = libc::pid_t::try_from(finished.id()).unwrap();
+    finished.wait().unwrap();
+    assert!(
+        !reap_owned_child(finished_pid),
+        "an already reaped PID was signalled"
+    );
+}
+
 /// Spawn an executable this test process just wrote or copied. A concurrent
 /// test's fork child holds the write descriptor until its own exec, so the
 /// kernel briefly refuses this exec with ETXTBSY; retry only that, bounded.

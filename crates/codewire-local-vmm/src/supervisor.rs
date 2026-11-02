@@ -11665,6 +11665,9 @@ mod tests {
             .arg("60")
             .spawn()
             .unwrap();
+        // The core owns the Child, and a test drops the core without killing
+        // it; the test process ends it at exit instead (#3813).
+        crate::reap_at_exit(child.id());
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while running_executable(child.id()).as_deref() != Some(executable.as_path()) {
             assert!(

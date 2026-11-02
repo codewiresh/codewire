@@ -292,6 +292,21 @@ class HelperTests(unittest.TestCase):
                     with self.assertRaises(helper.CleanupUnknown):
                         helper.stop_group(process)
 
+    def test_a_group_that_outlives_sigkill_is_named_in_the_error(self):
+        # #3813: which member stayed, and in what state, not only that one did.
+        process = mock.Mock(pid=4242, returncode=-signal.SIGKILL)
+        process.poll.return_value = -signal.SIGKILL
+        listing = ("  4250  1  4242 Z    (codewire_local_vmm)\n"
+                   "  5000  1  5000 Ss   /usr/sbin/unrelated\n")
+        with mock.patch.object(helper.command_owner, "STOP_SECONDS", 0), \
+             mock.patch.object(helper.os, "killpg"), \
+             mock.patch.object(helper.command_owner.subprocess, "run",
+                               return_value=mock.Mock(stdout=listing)):
+            with self.assertRaises(helper.CleanupUnknown) as raised:
+                helper.stop_group(process)
+        self.assertIn("pid=4250 ppid=1 stat=Z (codewire_local_vmm)", str(raised.exception))
+        self.assertNotIn("unrelated", str(raised.exception))
+
     def test_cleanup_escalates_only_while_leader_remains_owned(self):
         process = mock.Mock(pid=4242, returncode=None)
         process.poll.side_effect = lambda: process.returncode

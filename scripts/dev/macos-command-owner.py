@@ -107,7 +107,26 @@ def stop_group(process):
             if time.monotonic() >= stop:
                 break
             time.sleep(0.02)
-    raise CleanupUnknown("command group remains; runtime and cache retained")
+    raise CleanupUnknown("command group remains; runtime and cache retained: "
+                         + group_members(process.pid))
+
+
+def group_members(pgid):
+    """The processes still in a group, for the error that keeps the cache
+    (#3813): which member outlived SIGKILL, and in what state."""
+    try:
+        listed = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid=,stat=,command="],
+                                capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"members unknown ({error})"
+    members = []
+    for line in listed.splitlines():
+        fields = line.split(None, 4)
+        if len(fields) >= 4 and fields[2] == str(pgid):
+            pid, ppid, _, state = fields[:4]
+            command = fields[4][:160] if len(fields) == 5 else ""
+            members.append(f"pid={pid} ppid={ppid} stat={state} {command}")
+    return "; ".join(members[:8]) or "no member listed"
 
 
 def run_command(argv, cwd, env, log, cancel, deadline):
@@ -137,4 +156,4 @@ def run_command(argv, cwd, env, log, cancel, deadline):
                 try:
                     stop_group(process)
                 except BaseException as error:
-                    raise CleanupUnknown("command cleanup is unknown; state retained") from error
+                    raise CleanupUnknown(f"command cleanup is unknown; state retained ({error})") from error
