@@ -600,6 +600,7 @@ run_product_command() {
 
 run_coco_product() {
   local product_log="$EVIDENCE_DIR/coco-product.log"
+  local kept_evidence
 
   [[ "$RUN_COCO_PRODUCT" == "1" ]] || {
     log "skipping Codewire product CoCo smoke"
@@ -612,7 +613,11 @@ run_coco_product() {
   else
     [[ "$COCO_EXPECT_REFUSAL" == "1" ]] || \
       die "CoCo product smoke failed; inspect $product_log"
+    # CDH's refusal reaches only the Pod's events and status, which the smoke
+    # keeps in its failed-smoke evidence directory, never its own output.
+    kept_evidence="$(sed -n 's/^\[runtime-smoke\] kept failed-smoke evidence directory //p' "$product_log" | tail -n 1)"
     rg -q "$COCO_EXPECT_FAILURE_PATTERN" "$product_log" || \
+      { [[ -n "$kept_evidence" ]] && rg -q --no-ignore --hidden -F 'Get resource failed' "$kept_evidence"; } || \
       die "CoCo refusal failed before the configured KBS/attestation assertion"
     log "CoCo product refusal occurred as expected"
   fi

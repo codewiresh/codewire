@@ -498,6 +498,7 @@ rg -F "EXPECTED_KATA_COMMIT='7ffba19210b343b37e0c8e2f3cab9620e2e1f7e7'" \
   "$PROBE_POLICY_GENERATOR" >/dev/null
 rg -F 'genpolicy reports $embedded_commit, but Kata source is $kata_head' \
   "$PROBE_POLICY_GENERATOR" >/dev/null
+rg -F "rg -q --no-ignore --hidden -F 'Get resource failed' \"\$kept_evidence\"" "$SMOKE" >/dev/null
 rg -F 'DOCKER_CONFIG="$workdir/docker-config"' "$PROBE_POLICY_GENERATOR" >/dev/null
 rg -F 'genpolicy-runtime-contract.json' "$PROBE_POLICY_GENERATOR" >/dev/null
 rg -F 'drop-in-examples/$settings_drop_in_name' "$PROBE_POLICY_GENERATOR" >/dev/null
