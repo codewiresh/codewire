@@ -166,10 +166,16 @@ warm_pool_preflight() {
   log "warm pool shape ${WP_CPU}m/${WP_MEMORY}Mi/${WP_DISK}Gi with ${WP_MEMBERS} member(s), image ${WP_IMAGE##*@}"
 }
 
+# The shape's serving pool. Since #3572 a rotation creates the new revision's
+# own pool, and the old one serves until the new one is ready, then drains to
+# zero replicas: exactly one pool of the shape serves once a rotation settles,
+# and none is named while two do (#3857).
 warm_pool_name() {
   kubectl -n "$SANDBOX_NS" get sandboxwarmpools -o json |
     jq -r --arg prefix "cw-pool-${WP_CPU}m-${WP_MEMORY}mi-${WP_DISK}gi-" \
-      '[.items[] | select(.metadata.name | startswith($prefix)) | .metadata.name] | if length == 1 then .[0] else "" end'
+      '[.items[] | select(.metadata.name | startswith($prefix))
+        | select(.metadata.deletionTimestamp == null and (.spec.replicas // 0) > 0)
+        | .metadata.name] | if length == 1 then .[0] else "" end'
 }
 
 # "<revision> <ready member UIDs, space separated>" for the shape's pool, when
@@ -210,7 +216,8 @@ warm_pool_wait_ready_members() {
   local want="$1" deadline count=0
   deadline=$(( $(date +%s) + WARM_POOL_TIMEOUT_SECONDS ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    [ -n "$WP_POOL" ] || WP_POOL="$(warm_pool_name)"
+    # Resolved each time: a rotation changes which pool serves the shape.
+    WP_POOL="$(warm_pool_name)"
     # Orchestration routes to the pool only while its template is this
     # replica's rendering.
     if [ -n "$WP_POOL" ] && [ "$(warm_pool_metric codewire_warm_pool_template_current \
@@ -841,7 +848,10 @@ warm_pool_stale_revision() {
   deadline=$(( $(date +%s) + WARM_POOL_TIMEOUT_SECONDS ))
   new_revision=""
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    new_state="$(warm_pool_state)"
+    # The new revision's own pool, once it alone serves the shape.
+    WP_POOL="$(warm_pool_name)"
+    new_state=""
+    [ -z "$WP_POOL" ] || new_state="$(warm_pool_state)"
     new_revision="${new_state%% *}"
     if [ -n "$new_revision" ] && [ "$new_revision" != "$old_revision" ] &&
         [ "$(warm_pool_ready_count)" -ge "$WP_MEMBERS" ]; then
