@@ -65,7 +65,54 @@ fn stty_state() -> String {
         .output()
         .expect("run stty -g");
     assert!(output.status.success(), "stty -g failed");
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    without_terminal_state_bits(String::from_utf8(output.stdout).unwrap().trim())
+}
+
+/// Darwin's `PENDIN`, "retype pending input (state)" in its termios.h.
+const DARWIN_PENDIN: u64 = 0x2000_0000;
+
+/// The terminal's settings without the bits the tty driver keeps as state.
+/// Leaving raw mode for canonical mode on macOS sets `PENDIN`, which the
+/// driver clears at its next read, so a restored terminal's BSD `stty -g`
+/// (`gfmt1:…:lflag=<hex>:…`) can differ from the saved one in that bit
+/// alone (#3809). Linux's `stty -g` is returned unchanged.
+fn without_terminal_state_bits(state: &str) -> String {
+    if !state.starts_with("gfmt1:") {
+        return state.to_owned();
+    }
+    state
+        .split(':')
+        .map(|field| match field.strip_prefix("lflag=") {
+            Some(hex) => match u64::from_str_radix(hex, 16) {
+                Ok(flags) => format!("lflag={:x}", flags & !DARWIN_PENDIN),
+                Err(_) => field.to_owned(),
+            },
+            None => field.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+#[test]
+fn a_restored_macos_terminal_compares_equal_without_its_pending_input_state() {
+    // As observed on macOS after `stty raw -echo` and `stty <saved>` (#3809).
+    let saved = "gfmt1:cflag=4b00:iflag=2b02:lflag=5cb:oflag=3:discard=f:dsusp=19:eof=4:eol=ff:\
+        eol2=ff:erase=7f:intr=3:kill=15:lnext=16:min=1:quit=1c:reprint=12:start=11:status=14:\
+        stop=13:susp=1a:time=0:werase=17:ispeed=9600:ospeed=9600";
+    let restored = saved.replace("lflag=5cb", "lflag=200005cb");
+    assert_eq!(
+        without_terminal_state_bits(&restored),
+        without_terminal_state_bits(saved)
+    );
+    // Any other difference still shows: echo left off (ECHO, 0x8) is not restored.
+    let unrestored = saved.replace("lflag=5cb", "lflag=5c3");
+    assert_ne!(
+        without_terminal_state_bits(&unrestored),
+        without_terminal_state_bits(saved)
+    );
+    // Linux's format is compared exactly.
+    let linux = "500:5:bf:8a3b:3:1c:7f:15:4:0:1:0:11:13:1a:0:12:f:17:16:0:0:0";
+    assert_eq!(without_terminal_state_bits(linux), linux);
 }
 
 /// The child half. A no-op unless started by a test below.
