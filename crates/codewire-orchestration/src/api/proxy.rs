@@ -9,7 +9,7 @@ use sqlx::Row;
 use super::ApiState;
 use super::environments::require_environment_access;
 use crate::confidential_storage::{confidential_refusal_reason, require_confidential_access};
-use crate::sandbox::client::{ProbeResult, SandboxClient};
+use crate::runtime::{Placement, ProbeResult};
 
 /// Mirrors `sandboxTarget`.
 pub(crate) struct SandboxTarget {
@@ -144,12 +144,12 @@ async fn resolve_running_sandbox_target_inner(
         .map(|row| row.get::<String, _>("pod_ip"))
         .unwrap_or_default();
 
-    let kube = state.kube.clone().ok_or((
+    let runtime = state.runtime.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "sandbox backend not configured",
     ))?;
-    let probe = SandboxClient::new(kube, &namespace)
-        .probe_environment(&id)
+    let probe = runtime
+        .probe(&Placement::new(&namespace), &id)
         .await
         .map_err(|_| {
             (

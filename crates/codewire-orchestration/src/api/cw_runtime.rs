@@ -30,7 +30,7 @@ use uuid::Uuid;
 use super::ApiState;
 use super::proxy::{SandboxTarget, huma_error, resolve_running_sandbox_target};
 use crate::confidential_storage::require_confidential_access;
-use crate::sandbox::client::{ProbeResult, SandboxClient};
+use crate::runtime::{Placement, ProbeResult};
 use crate::worker::environment_auth::{WorkspaceCredentialScope, daemon_credential_for};
 use crate::worker::workspace_binding::{CwRuntimeLiveBinding, live_cw_runtime_binding};
 
@@ -182,9 +182,13 @@ impl CaptureBackend for PlatformBackend<'_> {
     }
 
     async fn probe(&self, namespace: &str, env: &str) -> AppResult<ProbeResult> {
-        let kube = self.state.kube.clone().ok_or_else(binding_unavailable)?;
-        SandboxClient::new(kube, namespace)
-            .probe_environment(env)
+        let runtime = self
+            .state
+            .runtime
+            .as_ref()
+            .ok_or_else(binding_unavailable)?;
+        runtime
+            .probe(&Placement::new(namespace), env)
             .await
             .map_err(|_| binding_unavailable())
     }

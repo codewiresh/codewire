@@ -34,6 +34,7 @@ use super::ApiState;
 use super::proxy::{
     huma_error, resolve_running_sandbox_target, resolve_running_sandbox_target_for_repair,
 };
+use crate::runtime::{Placement, RuntimeDriver};
 use crate::sandbox::client::{SandboxClient, WorkspacePodIdentity};
 use crate::sandbox::template::{WORKSPACE_DAEMON_PORT, workspace_daemon_service_name};
 use crate::worker::activity_authority::{
@@ -653,6 +654,10 @@ pub async fn repair_environment_daemon_core(
         .kube
         .as_ref()
         .ok_or_else(|| AppError::ServiceUnavailable("sandbox client not configured".into()))?;
+    let runtime = state
+        .runtime
+        .clone()
+        .ok_or_else(|| AppError::ServiceUnavailable("sandbox client not configured".into()))?;
     let sandbox = SandboxClient::new(kube.clone(), &target.namespace);
     // No database connection is pinned across the long replacement wait.
     // Concurrent callers may observe the same incarnation, but deletion is
@@ -718,6 +723,7 @@ pub async fn repair_environment_daemon_core(
         DaemonRepair {
             pool: state.pool.clone(),
             kube: kube.clone(),
+            runtime,
             session_secret: state.session_secret.clone(),
             daemon_endpoints: state.environment_daemon_endpoints.clone(),
             namespace: target.namespace,
@@ -737,6 +743,7 @@ pub async fn repair_environment_daemon_core(
 struct DaemonRepair {
     pool: PgPool,
     kube: kube::Client,
+    runtime: Arc<dyn RuntimeDriver>,
     session_secret: String,
     daemon_endpoints: EnvironmentDaemonEndpointOverrides,
     namespace: String,
@@ -895,7 +902,8 @@ impl DaemonRepair {
             .authority
             .run_while_authoritative_for_states(
                 &["running"],
-                self.sandbox.probe_environment(environment_id),
+                self.runtime
+                    .probe(&Placement::new(&self.namespace), environment_id),
             )
             .await
         {

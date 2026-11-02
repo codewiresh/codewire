@@ -31,6 +31,7 @@ use super::start_timing::{record_create_milestone, start_profile};
 use super::workspace_binding::{BindRefused, bind_replacement_runtime};
 use super::{JobPayload, WorkerContext};
 use crate::repository_mount::{canonical_repository_mount, validate_repository_mounts};
+use crate::runtime::Placement;
 use crate::sandbox::client::{ProbeResult, SandboxClient, WorkspacePodIdentity};
 use crate::sandbox::exec::{StderrTap, WorkspaceExecResult};
 use crate::sandbox::host_keys::RecordedHostKeys;
@@ -1041,6 +1042,8 @@ impl WorkerSetupOps<'_> {
         input: &Inputs,
         old_uid: &str,
     ) -> anyhow::Result<ProbeResult> {
+        let runtime = self.ctx.require_runtime()?;
+        let placement = Placement::new(&input.namespace);
         let pod_name = if input.pod_name.trim().is_empty() {
             sandbox.get_pod_name(&input.environment_id).await?
         } else {
@@ -1055,7 +1058,7 @@ impl WorkerSetupOps<'_> {
             // resume. A newly allocated UID is not yet a usable replacement;
             // retain the strict identity boundary and wait through ordinary
             // Pending/not-Ready observations within the one recovery bound.
-            let probe = sandbox.probe_environment(&input.environment_id).await?;
+            let probe = runtime.probe(&placement, &input.environment_id).await?;
             if replacement_runtime_is_current(&pod_name, old_uid, &probe) {
                 let replacement = WorkspacePodIdentity {
                     name: probe.pod_name.clone(),
@@ -1095,7 +1098,7 @@ impl WorkerSetupOps<'_> {
                 })
                 .await?;
                 if reached == ReplacementAccess::Ready {
-                    let final_probe = sandbox.probe_environment(&input.environment_id).await?;
+                    let final_probe = runtime.probe(&placement, &input.environment_id).await?;
                     if final_probe.pod_uid == replacement.uid
                         && replacement_runtime_is_current(&pod_name, old_uid, &final_probe)
                     {
@@ -2549,11 +2552,8 @@ async fn probe_after_setup(
     namespace: &str,
     env_id: &str,
 ) -> Option<ProbeResult> {
-    let kube = ctx.kube.as_ref()?;
-    match SandboxClient::new(kube.clone(), namespace)
-        .probe_environment(env_id)
-        .await
-    {
+    let runtime = ctx.runtime.as_deref()?;
+    match runtime.probe(&Placement::new(namespace), env_id).await {
         Ok(probe) => Some(probe),
         Err(error) => {
             tracing::warn!(

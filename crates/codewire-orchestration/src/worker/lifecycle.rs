@@ -29,6 +29,7 @@ use super::start_timing::{duration_ms, start_profile};
 use super::workspace_binding::release_workspace_binding;
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{Action, PgLifecycleStore, RuntimeAbsenceProof, Service, Snapshot};
+use crate::runtime::Placement;
 use crate::sandbox::client::{
     ProbeResult, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
 };
@@ -128,17 +129,16 @@ async fn reconcile_running_runtime_identity(
     if backend.namespace.is_empty() {
         anyhow::bail!("environment runtime backend is unavailable");
     }
-    let sandbox = SandboxClient::new(
-        ctx.kube
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("environment runtime is unavailable"))?,
-        &backend.namespace,
-    );
+    let runtime = ctx
+        .runtime
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("environment runtime is unavailable"))?;
+    let placement = Placement::new(&backend.namespace);
     let deadline = tokio::time::Instant::now() + RUNNING_RUNTIME_RECOVERY_TIMEOUT;
     let probe = authority
         .run_while_authoritative_for_states(RUNNING_MUTATION_STATES, async {
             loop {
-                match sandbox.probe_environment(&environment.id).await {
+                match runtime.probe(&placement, &environment.id).await {
                     Ok(probe) if start_runtime_is_ready(&probe) => break Ok(probe),
                     Ok(_) => {
                         tracing::debug!(
@@ -782,6 +782,8 @@ pub async fn handle_environment_start(
     };
     let ns = backend.namespace.clone();
     let client = sandbox_client(ctx, &ns)?;
+    let runtime = ctx.require_runtime()?;
+    let placement = Placement::new(&ns);
 
     let confidential_storage_manifest_uri = if env.isolation_tier == "confidential" {
         let Some(storage) = ctx.confidential_storage.as_ref() else {
@@ -940,7 +942,7 @@ pub async fn handle_environment_start(
         &activity_ctx,
         authority.run_while_authoritative_for_states(START_MUTATION_STATES, async {
             loop {
-                match client.probe_environment(env_id).await {
+                match runtime.probe(&placement, env_id).await {
                     Ok(probe) if start_runtime_is_ready(&probe) => {
                         break Ok((
                             probe.pod_ip,
@@ -1020,7 +1022,7 @@ pub async fn handle_environment_start(
 
     // The resumed Pod is a new incarnation with its own start marks, read
     // once it runs, as create reads a new Pod's at `mark_running`.
-    match client.probe_environment(env_id).await {
+    match runtime.probe(&placement, env_id).await {
         Ok(probe) if probe.pod_uid == pod.uid => {
             // Timing is observational: the rows need `running`, which a
             // failed `mark_started` above leaves unset, and a failed write

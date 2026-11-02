@@ -23,6 +23,7 @@ use super::workspace_binding::{
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
+use crate::runtime::Placement;
 use crate::sandbox::client::{
     NoCapacity, ProbeResult, RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity,
     WorkspaceSandboxIdentity,
@@ -1258,11 +1259,8 @@ async fn run_environment_create(
         if let Some(b) = &backend
             && !b.namespace.is_empty()
         {
-            if let Some(kube) = &ctx.kube {
-                match SandboxClient::new(kube.clone(), &b.namespace)
-                    .probe_environment(env_id)
-                    .await
-                {
+            if let Some(runtime) = &ctx.runtime {
+                match runtime.probe(&Placement::new(&b.namespace), env_id).await {
                     Ok(p) => probe = p,
                     Err(e) => {
                         tracing::warn!(env = env_id, error = %e, "probe failed, assuming empty");
@@ -1964,8 +1962,9 @@ async fn run_environment_create(
                 // A pool Claim's Sandbox is warm only when the controller
                 // adopted a member; with none ready it was created cold.
                 let gateway_path = match claim_path {
-                    StartPath::Warm => client
-                        .probe_environment(env_id)
+                    StartPath::Warm => ctx
+                        .require_runtime()?
+                        .probe(&Placement::new(&backend.namespace), env_id)
                         .await
                         .map(|probe| StartPath::from_launch_type(Some(probe.launch_type.as_str())))
                         .unwrap_or(StartPath::Cold),
@@ -2758,14 +2757,15 @@ pub(super) async fn reconcile_or_refresh_runtime_identity(
     }
     super::lifecycle::restart_workspace_bootstrap(ctx, env, backend, &opts, authority, states)
         .await?;
-    let client = require_client(ctx, &backend.namespace)?;
+    let runtime = ctx.require_runtime()?;
+    let placement = Placement::new(&backend.namespace);
     let deadline = tokio::time::Instant::now() + ready_timeout_for_isolation(&env.isolation_tier);
     let probe = authority
         .run_while_authoritative_for_states(
             states,
             super::lifecycle::within_workspace_deadline(deadline, async {
                 loop {
-                    let probe = client.probe_environment(&env.id).await?;
+                    let probe = runtime.probe(&placement, &env.id).await?;
                     if super::lifecycle::start_runtime_is_ready(&probe) {
                         return Ok(probe);
                     }

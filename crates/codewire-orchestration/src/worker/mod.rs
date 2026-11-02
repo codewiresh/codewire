@@ -100,6 +100,15 @@ pub struct WorkerContext {
     pub credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
 }
 
+impl WorkerContext {
+    /// The environment runtime, or the error a worker reports without one.
+    fn require_runtime(&self) -> anyhow::Result<&dyn crate::runtime::RuntimeDriver> {
+        self.runtime
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("sandbox backend is not configured"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

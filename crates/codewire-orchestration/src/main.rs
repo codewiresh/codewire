@@ -592,6 +592,7 @@ async fn main() -> anyhow::Result<()> {
         auth: auth.clone(),
         // Ambient kube client for the exec proxy; unavailable mirrors
         // Go's nil sandbox client (the route then 503s).
+        runtime: kube.clone().map(KubernetesDriver::shared),
         kube,
         environment_daemon_endpoints,
         // Shared session secret for daemon tokens and preview authorization.
