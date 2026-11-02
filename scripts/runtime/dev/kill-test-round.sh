@@ -5,15 +5,17 @@
 #   kill-test-round.sh MAIN_GIB SECOND_GIB OVERHEAD     run one round, print one JSON line
 #   kill-test-round.sh --print MAIN_GIB SECOND_GIB OVERHEAD   the objects it would apply
 #
-# One test Pod alone on the sampler's node, in a throwaway RuntimeClass that copies
+# One test Pod alone on KILL_TEST_NODE, in a throwaway RuntimeClass that copies
 # commodity's with this overhead. Each container holds all but 1 GiB of its limit in
 # guest memory, so guest RAM is full; then buffered writers run on every writer path
-# for KILL_TEST_WRITE_SECONDS. The sampler Pod, which must already run on the node,
-# reads the test Pod's host cgroup twice a second.
+# for KILL_TEST_WRITE_SECONDS. KILL_TEST_HOST_READ reads the test Pod's host cgroup
+# from outside the cluster's Pods, as often as it answers: no Pod has host access
+# (owner, 2026-11-02, #3718). On Dev, through Talos it answers about every 2 s per file.
 #
 # Prints: survived, seconds, peak_dirty_writeback_mib (the Pod cgroup's file_dirty +
 # file_writeback), peak_host_processes_mib (its anon + kernel: the VMM's own memory,
-# virtiofsd and the shim), peak_shmem_mib and evidence. Guest RAM is shared memory,
+# virtiofsd and the shim), peak_shmem_mib (all three sampled, so lower bounds),
+# peak_cgroup_mib (the cgroup's exact memory.peak, null after a kill) and evidence. Guest RAM is shared memory,
 # since the root filesystem is on virtio-fs, so it isn't in anon. A round whose shmem
 # stays well short of the guest's holds says that's not so here, and is unknown.
 # Exit 0 survived, 1 lost, 2 could not run or can't be read.
@@ -21,7 +23,11 @@
 # Settings (environment):
 #   KUBE_CONTEXT              cluster (default codewire-dev)
 #   KILL_TEST_NAMESPACE       default codewire-runtime-probes
-#   KILL_TEST_SAMPLER         the hostPID sampler Pod there (default cw-oom-sampler)
+#   KILL_TEST_NODE            the node the test Pod runs on (required)
+#   KILL_TEST_HOST_READ       a command that prints one file of that node, given its
+#                             path as the last argument (required; on Dev
+#                             `scripts/talos-access run CLUSTER admin -- --nodes NODE read`
+#                             from infra, read-only)
 #   KILL_TEST_VOLUME          block (default): a Block volume the guest formats; or
 #                             virtiofs: a filesystem volume shared over virtio-fs
 #   KILL_TEST_HANDLER         RuntimeClass handler (default: commodity's)
@@ -35,14 +41,15 @@
 #                             the product's workspace shape on Block with a Go, Docker
 #                             and Rust build (see real_pod_json); WRITE_SECONDS is
 #                             then its budget (default 2400)
-#   KILL_TEST_KEEP_TRACE      optional file to keep the sampler's trace in (and, for
+#   KILL_TEST_KEEP_TRACE      optional file to keep the host trace in (and, for
 #                             the real workload, the workspace container's log beside it)
 set -euo pipefail
 umask 077
 
 KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
 NAMESPACE="${KILL_TEST_NAMESPACE:-codewire-runtime-probes}"
-SAMPLER="${KILL_TEST_SAMPLER:-cw-oom-sampler}"
+NODE="${KILL_TEST_NODE:-}"
+HOST_READ="${KILL_TEST_HOST_READ:-}"
 VOLUME="${KILL_TEST_VOLUME:-block}"
 HANDLER="${KILL_TEST_HANDLER:-}"
 STORAGE_CLASS="${KILL_TEST_STORAGE_CLASS:-linstor-local}"
@@ -250,7 +257,7 @@ SH
 # In order: Go (its tree unpacked into /usr/local as a package would be, then all of
 # cmd rebuilt from it), a docker build, then Rust (its toolchain unpacked into
 # /usr/local, then a crate built). Each step prints its start time, to match the
-# sampler's trace, then its result and wall time.
+# host trace, then its result and wall time.
 real_main_script() {
   real_main_fill_script
   cat <<'SH'
@@ -394,26 +401,29 @@ cleanup() {
   k delete runtimeclass "$TEST_NAME" --ignore-not-found >/dev/null 2>&1 || true
 }
 
-# The Pod cgroup each half second: file_dirty + file_writeback, anon + kernel, the
-# oom_kill event count and shmem, as "dirty_wb host oom_kill shmem", then anon,
-# kernel, file and the node's clock; first its memory.max.
-sample_script() {
-  cat <<'SH'
-C=/host-cgroup/kubepods/burstable/pod$POD_UID
-[ -d "$C" ] || C=/host-cgroup/kubepods/pod$POD_UID
-[ -d "$C" ] || { echo NO_CGROUP; exit 2; }
-echo "MEMORY_MAX $(cat "$C/memory.max")"
-while [ -d "$C" ]; do
-  awk -v t="$(date +%s)" -v evs="$(tr '\n' ' ' <"$C/memory.events")" '
-    { v[$1] = $2 }
-    END { n = split(evs, e, " "); for (i = 1; i < n; i += 2) ev[e[i]] = e[i + 1]
-          M = 1048576
-          printf "%d %d %d %d %d %d %d %d\n", (v["file_dirty"] + v["file_writeback"]) / M, (v["anon"] + v["kernel"]) / M, ev["oom_kill"], v["shmem"] / M,
-            v["anon"] / M, v["kernel"] / M, v["file"] / M, t }' "$C/memory.stat"
-  sleep 0.5
-done
-echo CGROUP_GONE
-SH
+# One file of the node, through KILL_TEST_HOST_READ.
+host_read() { # PATH
+  bash -c "$HOST_READ \"\$1\"" host_read "$1" 2>/dev/null
+}
+
+# The Pod cgroup as often as the host read answers: file_dirty + file_writeback,
+# anon + kernel, the oom_kill event count and shmem, as "dirty_wb host oom_kill shmem",
+# then anon, kernel, file and the local clock; first its memory.max.
+sample_cgroup() { # POD_UID
+  local c="/sys/fs/cgroup/kubepods/burstable/pod$1" max stat events
+  max="$(host_read "$c/memory.max")" || { c="/sys/fs/cgroup/kubepods/pod$1"; max="$(host_read "$c/memory.max")"; } ||
+    { echo NO_CGROUP; return 2; }
+  echo "CGROUP $c"
+  echo "MEMORY_MAX $max"
+  while stat="$(host_read "$c/memory.stat")" && events="$(host_read "$c/memory.events")"; do
+    awk -v t="$(date +%s)" -v evs="$(tr '\n' ' ' <<<"$events")" '
+      { v[$1] = $2 }
+      END { n = split(evs, e, " "); for (i = 1; i < n; i += 2) ev[e[i]] = e[i + 1]
+            M = 1048576
+            printf "%d %d %d %d %d %d %d %d\n", (v["file_dirty"] + v["file_writeback"]) / M, (v["anon"] + v["kernel"]) / M, ev["oom_kill"], v["shmem"] / M,
+              v["anon"] / M, v["kernel"] / M, v["file"] / M, t }' <<<"$stat"
+  done
+  echo CGROUP_GONE
 }
 
 peaks() { # TRACE -> "dirty_wb host shmem", or nulls
@@ -421,13 +431,28 @@ peaks() { # TRACE -> "dirty_wb host shmem", or nulls
     END { if (n) printf "%d %d %d", d, h, s; else printf "null null null" }' "$1" 2>/dev/null || echo "null null null"
 }
 
+# The cgroup's exact high-water mark of all its memory (anon, kernel, file and shmem
+# together), read once at the end; null when the cgroup is already gone, as after a
+# kill. The sampled peaks above are lower bounds of their parts.
+cgroup_peak_mib() { # TRACE
+  local c peak
+  c="$(awk '$1 == "CGROUP" { print $2; exit }' "$1" 2>/dev/null)"
+  if [[ -n "$c" ]] && peak="$(host_read "$c/memory.peak")" && [[ "$peak" =~ ^[0-9]+$ ]]; then
+    echo $(( peak / 1048576 ))
+  else
+    echo null
+  fi
+}
+
 result() { # SURVIVED SECONDS TRACE EVIDENCE
   local dirty host shmem
   read -r dirty host shmem <<<"$(peaks "$3")"
   jq -cn --argjson survived "$1" --argjson seconds "$2" --arg evidence "$4" \
     --argjson dirty "$dirty" --argjson host "$host" --argjson shmem "$shmem" \
+    --argjson cgroup "$(cgroup_peak_mib "$3")" \
     '{survived: $survived, seconds: $seconds, peak_dirty_writeback_mib: $dirty,
-      peak_host_processes_mib: $host, peak_shmem_mib: $shmem, evidence: $evidence}'
+      peak_host_processes_mib: $host, peak_shmem_mib: $shmem, peak_cgroup_mib: $cgroup,
+      evidence: $evidence}'
 }
 
 # Guest RAM must be shared memory for anon + kernel to be the host processes alone:
@@ -441,12 +466,9 @@ shmem_short() { # TRACE MAIN_GIB SECOND_GIB -> prints a reason when short
 }
 
 round() { # MAIN_GIB SECOND_GIB OVERHEAD
-  local main="$1" second="$2" overhead="$3" node started since uid phase sampler_pid
+  local main="$1" second="$2" overhead="$3" node="$NODE" started since uid phase reader_pid
   local deadline log kills cgroup_kills mglru reason short running_after
-  node="$(k -n "$NAMESPACE" get pod "$SAMPLER" -o jsonpath='{.spec.nodeName}')" ||
-    die "no sampler Pod $SAMPLER in $NAMESPACE"
-  [[ -n "$node" ]] || die "the sampler Pod isn't on a node"
-  mglru="$(k -n "$NAMESPACE" exec "$SAMPLER" -- cat /sys/kernel/mm/lru_gen/enabled 2>/dev/null | tail -1)"
+  mglru="$(host_read /sys/kernel/mm/lru_gen/enabled | tail -1)"
   # Global, so the EXIT trap still sees it after the round returns.
   trace="$(mktemp)"
   trap 'cleanup; [[ -z "$KEEP_TRACE" ]] || cp "${trace:-/dev/null}" "$KEEP_TRACE" 2>/dev/null; rm -f "${trace:-}"' EXIT
@@ -466,8 +488,8 @@ round() { # MAIN_GIB SECOND_GIB OVERHEAD
   running_after=$(( $(date +%s) - started ))
   echo "pod overhead: $(k -n "$NAMESPACE" get pod "$TEST_NAME" -o jsonpath='{.spec.overhead}' 2>/dev/null || true)" >&2
   [[ "$phase" == Running ]] || { result null "$(( $(date +%s) - started ))" /dev/null "the Pod never ran: $phase"; exit 2; }
-  k -n "$NAMESPACE" exec "$SAMPLER" -- sh -c "POD_UID=$uid; $(sample_script)" >"$trace" 2>&1 &
-  sampler_pid=$!
+  sample_cgroup "$uid" >"$trace" 2>&1 &
+  reader_pid=$!
   # Writes, plus the time to fill RAM and to start.
   deadline=$(( $(date +%s) + WRITE_SECONDS + main * 20 + 300 ))
   while (( $(date +%s) < deadline )); do
@@ -477,8 +499,8 @@ round() { # MAIN_GIB SECOND_GIB OVERHEAD
     grep -qE 'WRITES_DONE|FILL_SHORT' <<<"$log" && break
     sleep 5
   done
-  kill "$sampler_pid" 2>/dev/null || true
-  wait "$sampler_pid" 2>/dev/null || true
+  kill "$reader_pid" 2>/dev/null || true
+  wait "$reader_pid" 2>/dev/null || true
   cgroup_kills="$(awk '$1 ~ /^[0-9]+$/ { k = $3 } END { print k + 0 }' "$trace")"
   kills="$(kernel_vm_kills "$since")"
   reason="phase=$phase writes_done=$(grep -c WRITES_DONE <<<"${log:-}" || true) pod_oom_kills=$cgroup_kills kernel_vm_kills=${kills:-unread} mglru=${mglru:-unread} volume=$VOLUME handler=${HANDLER:-commodity} running_after=${running_after}s writers=[$WRITERS] node_wide=no"
@@ -513,7 +535,7 @@ main() {
     [[ "$#" == 3 ]] || die "usage: --print MAIN_GIB SECOND_GIB OVERHEAD"
     runtime_class_json '{"handler":"kata-clh","overhead":{"podFixed":{"cpu":"250m","memory":"1Gi"}},"scheduling":{}}' "$3"
     volume_json "$1" "$2"
-    pod_json "$1" "$2" "${KILL_TEST_NODE:-the-sampler-node}"
+    pod_json "$1" "$2" "${NODE:-the-node}"
     return
   fi
   [[ "$#" == 3 ]] || die "usage: MAIN_GIB SECOND_GIB OVERHEAD"
@@ -523,6 +545,7 @@ main() {
   [[ "$WORKLOAD" == fill || "$WORKLOAD" == real ]] || die "KILL_TEST_WORKLOAD is fill or real"
   [[ "$WORKLOAD" != real || "$VOLUME" == block ]] || die "the real workload runs on a Block volume"
   [[ -n "$IMAGE" && -n "$DIND_IMAGE" ]] || die "the workspace or DinD image pin wasn't found"
+  [[ -n "$NODE" && -n "$HOST_READ" ]] || die "KILL_TEST_NODE and KILL_TEST_HOST_READ are required"
   round "$@"
 }
 
