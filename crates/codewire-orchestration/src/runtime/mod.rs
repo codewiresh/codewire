@@ -31,6 +31,50 @@ impl Placement {
     }
 }
 
+/// Mirrors `sessions.Phase`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberPhase {
+    Pending,
+    Running,
+    Terminated,
+}
+
+/// Mirrors `sessions.Resources` — the declared (requested) compute the
+/// row is billed against. Integer widths match the schema
+/// (`cpu_millicores`/`memory_mib`/`disk_gib` are INT4 → i32).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Resources {
+    pub cpu_millicores: i32,
+    pub memory_mib: i32,
+    pub disk_gib: i32,
+    pub runtime_class: Option<String>,
+}
+
+/// One runtime the driver holds, whether or not an environment has it yet.
+#[derive(Debug, Clone)]
+pub struct RuntimeMember {
+    pub namespace: String,
+    pub name: String,
+    pub uid: String,
+    /// What the runtime itself records of its owner; each is empty when it
+    /// records nothing, and is a claim to check rather than an authority.
+    pub environment_id: String,
+    pub organization_id: String,
+    pub claim_uid: String,
+    /// A snapshot's clearing runtime: it has a claim but no environment.
+    pub snapshot_clearing: bool,
+    /// `Pending` also covers a runtime the driver listed but couldn't read:
+    /// it then has no owner and declares nothing, so a caller changes nothing
+    /// for it and doesn't take it for a vanished one.
+    pub phase: MemberPhase,
+    /// Why it is in that phase; may be empty.
+    pub phase_reason: String,
+    /// Everything it declares, sidecars included.
+    pub declared: Resources,
+    /// The workspace's share of `declared`.
+    pub workspace: Resources,
+}
+
 /// Warm capacity held ahead of any environment.
 #[async_trait]
 pub trait RuntimePools: Send + Sync {
@@ -48,6 +92,9 @@ pub trait RuntimeLifecycle: Send + Sync {
         placement: &Placement,
         environment_id: &str,
     ) -> anyhow::Result<ProbeResult>;
+
+    /// Every runtime at a placement, as it stands now.
+    async fn list_members(&self, placement: &Placement) -> anyhow::Result<Vec<RuntimeMember>>;
 }
 
 /// Everything orchestration needs from a runtime.

@@ -7,6 +7,7 @@ use chrono::{DateTime, Duration, SubsecRound, Utc};
 use sqlx::PgPool;
 
 use super::*;
+use crate::runtime::fake::FakeRuntimeDriver;
 use crate::test_database_support::TestDatabase;
 use crate::worker::activity_authority::ActivityAuthority;
 use crate::worker::environment_auth::WorkspaceCredentialScope;
@@ -287,6 +288,374 @@ async fn db_an_open_session_keeps_its_heartbeat_across_a_rebind() -> Result<()> 
         );
         let rows = sessions(&db.pool).await?;
         ensure!(rows.len() == 1 && rows[0].0 == started && rows[0].1 == now);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// A Sandbox of `ENV`, known only by its claim, as the driver lists it.
+fn member(phase: Phase, phase_reason: &str) -> RuntimeMember {
+    RuntimeMember {
+        namespace: NAMESPACE.into(),
+        name: "cw-pool-1000m-4096mi-10gi-78909fe3-x7k2p".into(),
+        uid: SANDBOX.into(),
+        environment_id: String::new(),
+        organization_id: String::new(),
+        claim_uid: CLAIM.into(),
+        snapshot_clearing: false,
+        phase,
+        phase_reason: phase_reason.into(),
+        declared: resources(),
+        workspace: Resources {
+            cpu_millicores: 1000,
+            memory_mib: 4096,
+            disk_gib: 10,
+            runtime_class: None,
+        },
+    }
+}
+
+fn runtime_listing(members: Vec<RuntimeMember>) -> FakeRuntimeDriver {
+    FakeRuntimeDriver {
+        members: members.into(),
+        ..FakeRuntimeDriver::default()
+    }
+}
+
+/// Everything a heartbeat could change on the session, and when it started.
+type SessionRow = (
+    DateTime<Utc>,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+    i32,
+    i32,
+    i32,
+    String,
+);
+
+async fn session_row(pool: &PgPool) -> Result<SessionRow> {
+    Ok(sqlx::query_as(
+        "SELECT started_at, last_observed_at, ended_at, cpu_millicores, memory_mib, disk_gib, \
+                organization_id \
+           FROM sandbox_running_sessions WHERE environment_id = $1",
+    )
+    .bind(ENV)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// (cpu_millicores, memory_mib, disk_gib) billed on the session.
+async fn billed(pool: &PgPool) -> Result<(i32, i32, i32)> {
+    let row = session_row(pool).await?;
+    Ok((row.3, row.4, row.5))
+}
+
+/// The same Sandbox after it was resized: it now declares more.
+fn resized_member() -> RuntimeMember {
+    RuntimeMember {
+        declared: Resources {
+            cpu_millicores: 2500,
+            memory_mib: 9216,
+            disk_gib: 20,
+            runtime_class: Some("commodity".into()),
+        },
+        workspace: Resources {
+            cpu_millicores: 2000,
+            memory_mib: 8192,
+            disk_gib: 20,
+            runtime_class: None,
+        },
+        ..member(Phase::Running, "")
+    }
+}
+
+/// A resize operation in `state`, created `age_secs` ago, whose last-applied
+/// shape is (2000m, 2048 MiB, 30 GiB).
+async fn resize_operation(pool: &PgPool, id: &str, state: &str, age_secs: i32) -> Result<()> {
+    let terminal = matches!(state, "completed" | "failed");
+    let failed = state == "failed";
+    sqlx::query(
+        "INSERT INTO environment_resize_operations (
+             id, org_id, environment_id, request_id,
+             previous_cpu_millicores, previous_memory_mb, previous_disk_gb,
+             desired_cpu_millicores, desired_memory_mb, desired_disk_gb,
+             last_applied_cpu_millicores, last_applied_memory_mb, last_applied_disk_gb,
+             previous_state, previous_desired_state, state, planned_mode, applied_mode,
+             failure_code, failure_message, created_at, completed_at)
+         VALUES ($1, $2, $3, $1, 1000, 4096, 10, 4000, 8192, 40, 2000, 2048, 30,
+                 'running', 'started', $4, 'in_place',
+                 CASE WHEN $4 = 'completed' THEN 'in_place' END,
+                 CASE WHEN $5 THEN 'synthetic_failure' END,
+                 CASE WHEN $5 THEN 'synthetic failure' END,
+                 NOW() - make_interval(secs => $6),
+                 CASE WHEN $7 THEN NOW() END)",
+    )
+    .bind(id)
+    .bind(ORGANIZATION)
+    .bind(ENV)
+    .bind(state)
+    .bind(failed)
+    .bind(f64::from(age_secs))
+    .bind(terminal)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn end_reason(pool: &PgPool) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT end_reason FROM sandbox_running_sessions WHERE environment_id = $1",
+    )
+    .bind(ENV)
+    .fetch_one(pool)
+    .await?)
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_listed_member_is_billed_until_it_vanishes() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        let bound_at = bind(&db.pool).await?;
+        let runtime = runtime_listing(vec![member(Phase::Running, "")]);
+
+        run_cycle(&db.pool, &runtime, NAMESPACE).await;
+        let rows = sessions(&db.pool).await?;
+        ensure!(rows.len() == 1 && rows[0].0 == bound_at && rows[0].2.is_none());
+        let (cpu, memory): (i32, i32) = sqlx::query_as(
+            "SELECT cpu_millicores, memory_mib FROM sandbox_running_sessions \
+              WHERE environment_id = $1",
+        )
+        .bind(ENV)
+        .fetch_one(&db.pool)
+        .await?;
+        ensure!((cpu, memory) == (1500, 5120), "{cpu} {memory}");
+
+        // A failed listing proves nothing about the member, and changes nothing.
+        let before_failure = session_row(&db.pool).await?;
+        *runtime.members_error.lock().unwrap() = Some("list refused".into());
+        run_cycle(&db.pool, &runtime, NAMESPACE).await;
+        ensure!(session_row(&db.pool).await? == before_failure);
+
+        // A vanished member stopped being billable when it was last observed.
+        *runtime.members_error.lock().unwrap() = None;
+        runtime.members.lock().unwrap().clear();
+        run_cycle(&db.pool, &runtime, NAMESPACE).await;
+        ensure!(sessions(&db.pool).await?[0].2 == Some(before_failure.1));
+        ensure!(end_reason(&db.pool).await?.as_deref() == Some("controller_lost_track"));
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_terminated_member_closes_with_its_reason() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+        let runtime = runtime_listing(vec![member(Phase::Running, "")]);
+        run_cycle(&db.pool, &runtime, NAMESPACE).await;
+
+        // Unlike a vanished member, a terminated one was seen: it closes now.
+        *runtime.members.lock().unwrap() = vec![member(Phase::Terminated, "PodFailed")];
+        let before_close = Utc::now().trunc_subsecs(6);
+        run_cycle(&db.pool, &runtime, NAMESPACE).await;
+
+        ensure!(sessions(&db.pool).await?[0].2 >= Some(before_close));
+        ensure!(end_reason(&db.pool).await?.as_deref() == Some("PodFailed"));
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_member_without_an_identity_changes_no_session() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+
+        // A snapshot's clearing runtime bills nothing, whatever its claim says.
+        let clearing = RuntimeMember {
+            snapshot_clearing: true,
+            ..member(Phase::Running, "")
+        };
+        run_cycle(&db.pool, &runtime_listing(vec![clearing]), NAMESPACE).await;
+        ensure!(sessions(&db.pool).await?.is_empty());
+
+        // A member the driver listed but couldn't read keeps its open session
+        // exactly as it was: it isn't heartbeated or taken for a vanished one.
+        let runtime = runtime_listing(vec![member(Phase::Running, "")]);
+        run_cycle(&db.pool, &runtime, NAMESPACE).await;
+        let before = session_row(&db.pool).await?;
+        let sandbox: kube::api::DynamicObject = serde_json::from_value(serde_json::json!({
+            "apiVersion": "agents.x-k8s.io/v1alpha1",
+            "kind": "Sandbox",
+            "metadata": {
+                "name": member(Phase::Running, "").name,
+                "namespace": NAMESPACE,
+                "uid": SANDBOX
+            }
+        }))?;
+        *runtime.members.lock().unwrap() =
+            vec![crate::runtime::kubernetes::members::unread_member(&sandbox)];
+        run_cycle(&db.pool, &runtime, NAMESPACE).await;
+        ensure!(session_row(&db.pool).await? == before);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_member_of_another_organization_is_never_billed() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+        let foreign = RuntimeMember {
+            environment_id: ENV.into(),
+            organization_id: "another-organization".into(),
+            ..member(Phase::Running, "")
+        };
+
+        // It opens nothing, though the environment has a live binding.
+        let reconciled = reconcile(&db.pool, &foreign).await;
+        ensure!(reconciled.unbillable, "{reconciled:?}");
+        ensure!(sessions(&db.pool).await?.is_empty());
+
+        // And it doesn't move an open session to that organization.
+        reconcile(&db.pool, &member(Phase::Running, "")).await;
+        let before = session_row(&db.pool).await?;
+        ensure!(before.6 == ORGANIZATION, "{}", before.6);
+        let reconciled = reconcile(&db.pool, &foreign).await;
+        ensure!(reconciled.unbillable, "{reconciled:?}");
+        ensure!(session_row(&db.pool).await? == before);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_an_active_resize_freezes_the_open_session() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+        reconcile(&db.pool, &member(Phase::Running, "")).await;
+        ensure!(billed(&db.pool).await? == (1500, 5120, 10));
+
+        resize_operation(&db.pool, "resize-active", "pending", 0).await?;
+        for state in ["pending", "applying", "restarting"] {
+            sqlx::query("UPDATE environment_resize_operations SET state = $1 WHERE id = $2")
+                .bind(state)
+                .bind("resize-active")
+                .execute(&db.pool)
+                .await?;
+            reconcile(&db.pool, &resized_member()).await;
+            let frozen = billed(&db.pool).await?;
+            ensure!(frozen == (1500, 5120, 10), "{state}: {frozen:?}");
+        }
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_failed_resize_bills_last_applied_and_keeps_the_sidecars() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+        reconcile(&db.pool, &member(Phase::Running, "")).await;
+
+        resize_operation(&db.pool, "resize-failed", "failed", 0).await?;
+        reconcile(&db.pool, &resized_member()).await;
+
+        // The sidecars' 500m and 1024 MiB stay; the workspace is last-applied,
+        // whatever the Sandbox declares while its rollback converges.
+        let got = billed(&db.pool).await?;
+        ensure!(got == (2500, 3072, 30), "{got:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_later_completed_resize_supersedes_a_failure() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+        reconcile(&db.pool, &member(Phase::Running, "")).await;
+
+        resize_operation(&db.pool, "resize-failed", "failed", 60).await?;
+        resize_operation(&db.pool, "resize-completed", "completed", 0).await?;
+        reconcile(&db.pool, &resized_member()).await;
+
+        // What the Sandbox declares now, not the failure's last-applied shape.
+        let got = billed(&db.pool).await?;
+        ensure!(got.0 == 2500 && got.1 == 9216, "{got:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_grown_disk_bills_the_environments_applied_size() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+        sqlx::query("UPDATE environments SET disk_gb = 120 WHERE id = $1")
+            .bind(ENV)
+            .execute(&db.pool)
+            .await?;
+
+        // The member still declares the 10 GiB it was created with.
+        reconcile(&db.pool, &member(Phase::Running, "")).await;
+
+        let got = billed(&db.pool).await?;
+        ensure!(got == (1500, 5120, 120), "{got:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_listing_and_sweep_share_one_namespace() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+        reconcile(&db.pool, &member(Phase::Running, "")).await;
+
+        // A namespace that lists nothing doesn't reach this one's sessions.
+        let runtime = FakeRuntimeDriver::default();
+        run_cycle(&db.pool, &runtime, "another-namespace").await;
+        ensure!(sessions(&db.pool).await?[0].2.is_none());
+        ensure!(*runtime.placements.lock().unwrap() == [Placement::new("another-namespace")]);
+
+        run_cycle(&db.pool, &runtime, NAMESPACE).await;
+        ensure!(sessions(&db.pool).await?[0].2.is_some());
         Ok(())
     }
     .await;

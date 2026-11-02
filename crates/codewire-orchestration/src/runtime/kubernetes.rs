@@ -1,11 +1,14 @@
 //! The agent-sandbox driver: each method is one call on a [`SandboxClient`]
-//! for the placement's namespace, which does no I/O to build.
+//! for the placement's namespace, which does no I/O to build, and reads what
+//! comes back into the driver's own types.
+
+pub(crate) mod members;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{Placement, ProbeResult, RuntimeDriver, RuntimeLifecycle, RuntimePools};
+use super::{Placement, ProbeResult, RuntimeDriver, RuntimeLifecycle, RuntimeMember, RuntimePools};
 use crate::sandbox::client::SandboxClient;
 
 pub struct KubernetesDriver {
@@ -41,6 +44,11 @@ impl RuntimeLifecycle for KubernetesDriver {
         self.sandbox_client(placement)
             .probe_environment(environment_id)
             .await
+    }
+
+    async fn list_members(&self, placement: &Placement) -> anyhow::Result<Vec<RuntimeMember>> {
+        let sandboxes = self.sandbox_client(placement).list_sandboxes().await?;
+        Ok(sandboxes.iter().map(members::runtime_member).collect())
     }
 }
 
@@ -101,6 +109,25 @@ mod tests {
         assert!(
             requests[0].starts_with("GET ")
                 && requests[0].contains("/namespaces/dev-sandboxes/sandboxclaims/"),
+            "{requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_members_reads_the_placement_in_one_request() {
+        let (driver, requests) = driver_over_empty_cluster();
+
+        let members = driver
+            .list_members(&Placement::new("dev-sandboxes"))
+            .await
+            .unwrap();
+
+        assert!(members.is_empty());
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(
+            requests[0].starts_with("GET ")
+                && requests[0].ends_with("/namespaces/dev-sandboxes/sandboxes"),
             "{requests:?}"
         );
     }
