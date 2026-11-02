@@ -9,6 +9,10 @@
 //! twice. An organization on the Unlimited card is never charged, but its
 //! watermarks still move, so a later switch to another card charges only
 //! from the switch.
+//!
+//! An open session draws only through its last observation. A session whose
+//! runtime vanishes closes at that time, and metering stops counting there,
+//! so credit drawn past it could never be earned (#3898).
 
 use std::time::Duration;
 
@@ -100,8 +104,8 @@ pub async fn draw_due_usage(pool: &PgPool) -> anyhow::Result<DrawSummary> {
     Ok(summary)
 }
 
-/// Draws one organization's due sessions up to now and returns the amount
-/// drawn, in nano-euros.
+/// Draws one organization's due sessions, each through its end or, while it
+/// is open, its last observation, and returns the amount drawn, in nano-euros.
 pub async fn draw_organization(pool: &PgPool, organization_id: &str) -> anyhow::Result<i64> {
     let mut transaction = pool.begin().await?;
     let card: Option<(String, i64, i64, i64)> = sqlx::query_as(
@@ -125,7 +129,7 @@ pub async fn draw_organization(pool: &PgPool, organization_id: &str) -> anyhow::
     let due: Vec<Row> = sqlx::query_as(
         r#"SELECT id, cpu_millicores, memory_mib, disk_gib,
                   COALESCE(credit_drawn_through, started_at),
-                  LEAST(COALESCE(ended_at, $2), $2)
+                  LEAST(COALESCE(ended_at, last_observed_at), $2)
            FROM sandbox_running_sessions
            WHERE organization_id = $1
              AND (ended_at IS NULL OR credit_drawn_through IS NULL
@@ -768,12 +772,9 @@ mod tests {
         let first = draw_organization(&pool, &fixture.organization_id)
             .await
             .unwrap();
-        // About two hours of the default sandbox; the open one ran a little
-        // longer by the time it was drawn.
-        assert!(
-            (2 * 201_270_000..2 * 201_270_000 + 201_270_000 / 60).contains(&first),
-            "{first}"
-        );
+        // Two hours of the default sandbox: the open one was last observed an
+        // hour after it started.
+        assert_eq!(first, 2 * 201_270_000);
         let entries = ledger(&pool, &fixture).await;
         assert_eq!(
             entries,
@@ -788,12 +789,11 @@ mod tests {
         .unwrap();
         assert_eq!(balance, -first);
 
-        // The ended session is done; the open one is drawn only for the time
-        // since, which is a fraction of a minute.
+        // The ended session is done, and the open one has no new observation.
         let second = draw_organization(&pool, &fixture.organization_id)
             .await
             .unwrap();
-        assert!(second < 201_270_000 / 60, "{second}");
+        assert_eq!(second, 0);
         let due: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM sandbox_running_sessions WHERE organization_id = $1 \
              AND (ended_at IS NULL OR credit_drawn_through < ended_at)",
@@ -803,6 +803,91 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(due, 1);
+        cleanup(&pool, fixture).await;
+    }
+
+    /// The fixture's sessions were last observed `minutes` after they started.
+    async fn observe(pool: &PgPool, fixture: &Fixture, minutes: i32) {
+        sqlx::query(
+            "UPDATE sandbox_running_sessions \
+             SET last_observed_at = started_at + make_interval(mins => $2) \
+             WHERE organization_id = $1",
+        )
+        .bind(&fixture.organization_id)
+        .bind(minutes)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn db_a_session_closed_at_its_last_observation_draws_what_metering_counts() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let fixture = seed(&pool, "regular").await;
+        // Started two hours ago, and last seen an hour after that (#3898).
+        session(&pool, &fixture, "open", "2 hours", None).await;
+        observe(&pool, &fixture, 60).await;
+        draw_organization(&pool, &fixture.organization_id)
+            .await
+            .unwrap();
+
+        // The sweep finds its Sandbox gone and closes it when it was last
+        // observed, so metering counts that one hour.
+        sqlx::query(
+            "UPDATE sandbox_running_sessions \
+             SET ended_at = last_observed_at, end_reason = 'controller_lost_track' \
+             WHERE organization_id = $1",
+        )
+        .bind(&fixture.organization_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        draw_organization(&pool, &fixture.organization_id)
+            .await
+            .unwrap();
+
+        let balance: i64 = sqlx::query_scalar(
+            "SELECT balance_nano_eur FROM billing_credit_balances WHERE organization_id = $1",
+        )
+        .bind(&fixture.organization_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(balance, -201_270_000);
+        cleanup(&pool, fixture).await;
+    }
+
+    #[tokio::test]
+    async fn db_an_open_session_draws_through_its_last_observation_then_its_end() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let fixture = seed(&pool, "regular").await;
+        session(&pool, &fixture, "open", "2 hours", None).await;
+        let draw = || draw_organization(&pool, &fixture.organization_id);
+
+        observe(&pool, &fixture, 60).await;
+        assert_eq!(draw().await.unwrap(), 201_270_000);
+        // No new observation, nothing more to draw.
+        assert_eq!(draw().await.unwrap(), 0);
+        // Heartbeats resume: the time since the last draw is drawn, once.
+        observe(&pool, &fixture, 90).await;
+        assert_eq!(draw().await.unwrap(), 201_270_000 / 2);
+        assert_eq!(draw().await.unwrap(), 0);
+
+        // A close later than the last observation draws through the close.
+        sqlx::query(
+            "UPDATE sandbox_running_sessions SET ended_at = started_at + interval '2 hours' \
+             WHERE organization_id = $1",
+        )
+        .bind(&fixture.organization_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(draw().await.unwrap(), 201_270_000 / 2);
+        assert_eq!(draw().await.unwrap(), 0);
         cleanup(&pool, fixture).await;
     }
 
@@ -838,8 +923,8 @@ mod tests {
         );
         assert!(ledger(&pool, &fixture).await.is_empty());
 
-        // After a switch to Discounted, the next draw covers only the
-        // seconds since the Unlimited draw.
+        // After a switch to Discounted, the next draw covers only the time
+        // observed since the Unlimited draw, which is none.
         sqlx::query("UPDATE organizations SET rate_card = 'discounted' WHERE id = $1")
             .bind(&fixture.organization_id)
             .execute(&pool)
@@ -848,10 +933,11 @@ mod tests {
         let since = draw_organization(&pool, &fixture.organization_id)
             .await
             .unwrap();
-        assert!(since < 201_270_000 / 120, "{since}");
+        assert_eq!(since, 0);
         // An hour on Discounted costs half of Regular.
         sqlx::query(
-            "UPDATE sandbox_running_sessions SET credit_drawn_through = now() - interval '1 hour' \
+            "UPDATE sandbox_running_sessions \
+             SET credit_drawn_through = now() - interval '1 hour', last_observed_at = now() \
              WHERE organization_id = $1",
         )
         .bind(&fixture.organization_id)
@@ -861,10 +947,7 @@ mod tests {
         let drawn = draw_organization(&pool, &fixture.organization_id)
             .await
             .unwrap();
-        assert!(
-            (201_270_000 / 2..201_270_000 / 2 + 201_270_000 / 120).contains(&drawn),
-            "{drawn}"
-        );
+        assert_eq!(drawn, 201_270_000 / 2);
         let entries = ledger(&pool, &fixture).await;
         assert_eq!(
             entries.last(),
