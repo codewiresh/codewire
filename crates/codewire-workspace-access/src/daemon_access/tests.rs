@@ -149,6 +149,8 @@ struct DaemonSsh {
     access_ready: watch::Sender<bool>,
     /// The daemon's own session client, to launch and inspect sessions.
     sessions: codewire_daemon::client::SessionClient,
+    /// The SSH host key line, as the platform records it.
+    host_key: String,
 }
 
 /// The environment the fixture's SSH server attaches sessions for.
@@ -195,7 +197,9 @@ async fn spawn_daemon_ssh_with_access(ready: bool) -> DaemonSsh {
     .await
     .unwrap();
     let store = HostKeyStore::new(temp.path().join("state"));
-    let config = Arc::new(daemon_ssh_server_config(store.for_generation(1).unwrap()));
+    let key = store.for_generation(1).unwrap();
+    let host_key = public_key_line(&key);
+    let config = Arc::new(daemon_ssh_server_config(key));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ssh = listener.local_addr().unwrap();
     let (access_ready_tx, access_ready) = watch::channel(ready);
@@ -214,6 +218,7 @@ async fn spawn_daemon_ssh_with_access(ready: bool) -> DaemonSsh {
         shutdown,
         access_ready: access_ready_tx,
         sessions,
+        host_key,
     }
 }
 
@@ -1100,5 +1105,201 @@ mod session_attach {
         assert!(!stderr.trim().is_empty(), "the refusal says why");
         assert_running(&daemon, &session).await;
         let _ = daemon.shutdown.send(true);
+    }
+
+    // The client half (`codewire_client::tailnet_session::EnvironmentSsh`),
+    // here over plain TCP; over the tailnet it is the same SSH connection.
+    mod client_transport {
+        use codewire_client::tailnet_session::EnvironmentSsh;
+        use codewire_client::{AttachSessionResponse, ErrorCode};
+
+        use super::*;
+
+        fn open(session_id: &str, output_offset: u64) -> AttachSessionOpen {
+            AttachSessionOpen {
+                org_id: "org-synthetic".into(),
+                environment_id: ENVIRONMENT_ID.into(),
+                session_id: session_id.into(),
+                output_offset,
+                ..Default::default()
+            }
+        }
+
+        /// Read output until it contains `needle`; returns the output and
+        /// the offset after it.
+        async fn read_until(
+            attachment: &mut codewire_client::EnvironmentSessionAttachment,
+            needle: &[u8],
+        ) -> (Vec<u8>, u64) {
+            let mut output = Vec::new();
+            let mut next = 0;
+            timeout(Duration::from_secs(20), async {
+                while !output.windows(needle.len()).any(|w| w == needle) {
+                    let response: AttachSessionResponse = attachment
+                        .next_output()
+                        .await
+                        .unwrap()
+                        .expect("the attachment stayed open");
+                    if let Some(attach_session_response::Event::Output(chunk)) = response.event {
+                        output.extend_from_slice(&chunk.data);
+                        next = chunk.next_offset;
+                    }
+                }
+            })
+            .await
+            .expect("output arrived");
+            (output, next)
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn the_client_attaches_types_and_reattaches_from_its_offset() {
+            let daemon = spawn_daemon_ssh().await;
+            let session = launch_echo(&daemon).await;
+            let ssh = EnvironmentSsh::connect(
+                tokio::net::TcpStream::connect(daemon.ssh).await.unwrap(),
+                &daemon.host_key,
+            )
+            .await
+            .unwrap();
+            let mut first = ssh.attach(open(&session, 0)).await.unwrap();
+            read_until(&mut first, b"hello").await;
+            first
+                .send(AttachSessionRequest {
+                    input: Some(attach_session_request::Input::Stdin(b"typed".to_vec())),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let (_, resume_at) = read_until(&mut first, b"typed").await;
+            drop(first);
+
+            daemon
+                .sessions
+                .send_input(&session, b"meanwhile".to_vec())
+                .await
+                .unwrap();
+            // The same connection serves the reattachment.
+            let mut again = ssh.attach(open(&session, resume_at)).await.unwrap();
+            let (output, _) = read_until(&mut again, b"meanwhile").await;
+            assert!(!output.windows(5).any(|w| w == b"typed"), "{output:?}");
+            assert_running(&daemon, &session).await;
+            let _ = daemon.shutdown.send(true);
+        }
+
+        // Plain `cw shell`: an ssh-like shell on a terminal, its exit status
+        // reported as `ssh` reports it.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn an_interactive_shell_runs_on_a_terminal_and_reports_its_exit_status() {
+            use codewire_client::tailnet_session::ShellEvent;
+
+            let daemon = spawn_daemon_ssh().await;
+            let ssh = EnvironmentSsh::connect(
+                tokio::net::TcpStream::connect(daemon.ssh).await.unwrap(),
+                &daemon.host_key,
+            )
+            .await
+            .unwrap();
+            let shell = ssh.open_shell("xterm-256color", 100, 30).await.unwrap();
+            shell
+                .input
+                .write(b"printf 'size=%s\\n' \"$(stty size)\"; exit 3\n")
+                .await
+                .unwrap();
+            let mut output = shell.output;
+            let mut stdout = Vec::new();
+            let status = timeout(Duration::from_secs(20), async {
+                loop {
+                    match output.next().await {
+                        Some(ShellEvent::Stdout(data)) => stdout.extend_from_slice(&data),
+                        Some(ShellEvent::Stderr(_)) => {}
+                        Some(ShellEvent::Exit(status)) => break status,
+                        None => panic!("the shell closed without an exit status"),
+                    }
+                }
+            })
+            .await
+            .expect("the shell exited");
+            assert_eq!(status, 3);
+            let stdout = String::from_utf8_lossy(&stdout);
+            assert!(stdout.contains("size=30 100"), "{stdout}");
+            let _ = daemon.shutdown.send(true);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_host_key_other_than_the_recorded_one_is_refused() {
+            let daemon = spawn_daemon_ssh().await;
+            let other = HostKeyStore::new(daemon._temp.path().join("other"))
+                .for_generation(7)
+                .unwrap();
+            let refused = EnvironmentSsh::connect(
+                tokio::net::TcpStream::connect(daemon.ssh).await.unwrap(),
+                &public_key_line(&other),
+            )
+            .await;
+            assert!(refused.is_err());
+            let _ = daemon.shutdown.send(true);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_refusal_carries_the_daemons_reason_and_is_not_retried() {
+            let daemon = spawn_daemon_ssh().await;
+            let ssh = EnvironmentSsh::connect(
+                tokio::net::TcpStream::connect(daemon.ssh).await.unwrap(),
+                &daemon.host_key,
+            )
+            .await
+            .unwrap();
+            let mut attachment = ssh
+                .attach(open("session-00000000-0000-4000-8000-000000000000", 0))
+                .await
+                .unwrap();
+            let error = timeout(Duration::from_secs(20), attachment.next_output())
+                .await
+                .expect("the refusal arrived")
+                .unwrap_err();
+            assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+            assert!(!error.message().is_empty());
+            assert!(!error.is_retryable_transport_interruption());
+            let _ = daemon.shutdown.send(true);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_dropped_connection_is_a_retryable_interruption() {
+            let daemon = spawn_daemon_ssh().await;
+            let session = launch_echo(&daemon).await;
+            // A relay the test can cut, as a network change would.
+            let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let relay_addr = relay.local_addr().unwrap();
+            let target = daemon.ssh;
+            let cut = tokio::spawn(async move {
+                let (mut inbound, _) = relay.accept().await.unwrap();
+                let mut outbound = tokio::net::TcpStream::connect(target).await.unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+            });
+            let ssh = EnvironmentSsh::connect(
+                tokio::net::TcpStream::connect(relay_addr).await.unwrap(),
+                &daemon.host_key,
+            )
+            .await
+            .unwrap();
+            let mut attachment = ssh.attach(open(&session, 0)).await.unwrap();
+            read_until(&mut attachment, b"hello").await;
+            cut.abort();
+            let error = timeout(Duration::from_secs(20), async {
+                loop {
+                    match attachment.next_output().await {
+                        Ok(Some(_)) => continue,
+                        Ok(None) => panic!("the attachment ended without an error"),
+                        Err(error) => break error,
+                    }
+                }
+            })
+            .await
+            .expect("the drop was noticed");
+            assert!(error.is_retryable_transport_interruption(), "{error:?}");
+            // The session itself is untouched.
+            assert_running(&daemon, &session).await;
+            let _ = daemon.shutdown.send(true);
+        }
     }
 }

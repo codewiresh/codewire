@@ -1539,7 +1539,153 @@ pub(crate) async fn handle_doctor_tailnet_command(
         OutputFormat::Text => print!("{}", format_tailnet_doctor_text(&report)),
     }
 
-    validate_tailnet_doctor_report(&report)
+    validate_tailnet_doctor_report(&report)?;
+    if args.latency {
+        measure_echo_latency(&client, &org_id, &report.environment_id, args.rounds).await?;
+    }
+    Ok(())
+}
+
+/// Keystroke echo round trips to a throwaway `cat` session, over the
+/// environment's tailnet (on whatever path it reaches) and over the API
+/// (#3827). One byte at a time, each timed until its echo returns.
+async fn measure_echo_latency(
+    client: &codewire_client::CodewireClient,
+    org_id: &str,
+    environment_id: &str,
+    rounds: u32,
+) -> anyhow::Result<()> {
+    use codewire_client::tailnet_session::EnvironmentTailnet;
+
+    let launched = client
+        .launch_session(codewire_client::LaunchSessionRequest {
+            org_id: org_id.into(),
+            environment_id: environment_id.into(),
+            command: vec!["sh".into(), "-c".into(), "stty raw -echo; exec cat".into()],
+            pty: true,
+            term: "xterm-256color".into(),
+            columns: 80,
+            rows: 24,
+            ..Default::default()
+        })
+        .await
+        .map_err(display_client_error)?;
+    let session_id = launched
+        .session
+        .as_option()
+        .map(|session| session.session_id.clone())
+        .context("the launched session has no id")?;
+    let open = codewire_client::AttachSessionOpen {
+        org_id: org_id.into(),
+        environment_id: environment_id.into(),
+        session_id: session_id.clone(),
+        ..Default::default()
+    };
+    // Each path is measured on its own, so one that is unavailable is
+    // reported with its reason and the other is still measured.
+    let over_tailnet = async {
+        let tailnet = EnvironmentTailnet::connect(client, org_id, environment_id).await?;
+        let path = tailnet.wait_for_direct(Duration::from_secs(5)).await?;
+        let mut attachment = tailnet
+            .attach(open.clone())
+            .await
+            .map_err(display_client_error)?;
+        let samples = echo_samples(&mut attachment, rounds).await?;
+        anyhow::Ok((path, samples))
+    }
+    .await;
+    let over_api = async {
+        let mut attachment = client
+            .attach_session(open.clone())
+            .await
+            .map_err(display_client_error)?;
+        echo_samples(&mut attachment, rounds).await
+    }
+    .await;
+    let stopped = client
+        .stop_session(codewire_client::StopSessionRequest {
+            org_id: org_id.into(),
+            environment_id: environment_id.into(),
+            session_id,
+            ..Default::default()
+        })
+        .await;
+    if let Err(error) = stopped {
+        eprintln!(
+            "warning: the latency session was not stopped: {}",
+            error.message()
+        );
+    }
+    println!("Keystroke echo round trip, {rounds} rounds:");
+    match &over_tailnet {
+        Ok((path, samples)) => {
+            let label = format!("tailnet ({})", path.path.label());
+            println!("  {}", latency_line(&label, samples));
+            if let Some(reason) = &path.reason {
+                println!("  direct UDP unavailable: {reason}");
+            }
+        }
+        Err(error) => println!("  {:<22} unavailable: {error:#}", "tailnet"),
+    }
+    match &over_api {
+        Ok(samples) => println!("  {}", latency_line("API", samples)),
+        Err(error) => println!("  {:<22} unavailable: {error:#}", "API"),
+    }
+    if over_tailnet.is_err() && over_api.is_err() {
+        anyhow::bail!("no path could be measured");
+    }
+    Ok(())
+}
+
+async fn echo_samples(
+    attachment: &mut codewire_client::EnvironmentSessionAttachment,
+    rounds: u32,
+) -> anyhow::Result<Vec<Duration>> {
+    let mut samples = Vec::with_capacity(rounds as usize);
+    for round in 0..rounds {
+        let byte = b'a' + (round % 26) as u8;
+        let started = std::time::Instant::now();
+        attachment
+            .send(codewire_client::AttachSessionRequest {
+                input: Some(codewire_client::attach_session_request::Input::Stdin(vec![
+                    byte,
+                ])),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match attachment.next_output().await {
+                    Ok(Some(response)) => {
+                        if let Some(codewire_client::attach_session_response::Event::Output(chunk)) =
+                            response.event
+                            && chunk.data.contains(&byte)
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Ok(None) => anyhow::bail!("the session ended during the measurement"),
+                    Err(error) => return Err(display_client_error(error)),
+                }
+            }
+        })
+        .await
+        .context("an echo did not return within 10 s")??;
+        samples.push(started.elapsed());
+    }
+    Ok(samples)
+}
+
+fn latency_line(label: &str, samples: &[Duration]) -> String {
+    let mut sorted = samples.to_vec();
+    sorted.sort();
+    let at = |q: f64| sorted[((sorted.len() as f64 - 1.0) * q) as usize];
+    format!(
+        "{label:<22} median {:>8.2} ms  p95 {:>8.2} ms",
+        at(0.5).as_secs_f64() * 1000.0,
+        at(0.95).as_secs_f64() * 1000.0
+    )
 }
 
 pub(crate) fn parse_tailnet_doctor_duration(

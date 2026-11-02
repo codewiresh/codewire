@@ -1902,6 +1902,38 @@ pub(crate) async fn handle_environment_shell_command(
         }
         return handle_shell_stdio(globals, environment.as_deref()).await;
     }
+    if !args.durable {
+        // A hosted environment gets a normal shell over its tailnet; local
+        // VMs and trusted hosts keep their own direct paths below.
+        let target = resolve_environment_session_target(globals, environment.as_deref()).await?;
+        if let EnvironmentSessionTarget::Platform {
+            org_id,
+            environment_id,
+            client,
+            ..
+        } = &target
+        {
+            match super::tailnet_shell::connect(client, org_id, environment_id).await {
+                Ok((tailnet, shell)) => {
+                    let status = super::tailnet_shell::run(tailnet, shell).await?;
+                    if status != 0 {
+                        // As `ssh` does: the shell's own status, no message.
+                        std::process::exit(i32::try_from(status).unwrap_or(1));
+                    }
+                    return Ok(());
+                }
+                Err(error)
+                    if codewire_client::SshTransportMode::from_env()?
+                        == codewire_client::SshTransportMode::Tailnet =>
+                {
+                    return Err(error.context("tailnet shell (CW_SSH_TRANSPORT=tailnet)"));
+                }
+                Err(error) => {
+                    eprintln!("  via API (durable session) · tailnet unavailable: {error:#}");
+                }
+            }
+        }
+    }
     launch_run(
         globals,
         EnvironmentRunArgs {
@@ -2030,6 +2062,84 @@ impl AttachNavigationDecoder {
     }
 }
 
+/// How long a first tailnet connection waits for direct UDP before it says
+/// which path it is on; every connection starts on DERP and usually moves to
+/// direct UDP within this time.
+pub(crate) const TAILNET_DIRECT_WAIT: Duration = Duration::from_secs(2);
+
+/// Attach to a hosted environment's session over its tailnet first: direct
+/// UDP, then peer relay, then DERP (#3827). The API carries it only when the
+/// tailnet cannot, and the line before the session says which path it took
+/// and why. `CW_SSH_TRANSPORT=tailnet` refuses the API fallback;
+/// `CW_SSH_TRANSPORT=websocket` skips the tailnet.
+async fn attach_platform_session(
+    client: &codewire_client::CodewireClient,
+    open: codewire_client::AttachSessionOpen,
+    tailnet: &mut Option<codewire_client::tailnet_session::EnvironmentTailnet>,
+) -> anyhow::Result<codewire_client::EnvironmentSessionAttachment> {
+    use codewire_client::SshTransportMode;
+    use codewire_client::tailnet_session::EnvironmentTailnet;
+
+    let mode = SshTransportMode::from_env()?;
+    let fallback = if mode == SshTransportMode::WebSocket {
+        "CW_SSH_TRANSPORT=websocket".to_owned()
+    } else {
+        if tailnet.as_ref().is_some_and(EnvironmentTailnet::is_closed) {
+            *tailnet = None;
+        }
+        let mut reason = None;
+        if tailnet.is_none() {
+            match EnvironmentTailnet::connect(client, &open.org_id, &open.environment_id).await {
+                Ok(connected) => {
+                    connected.wait_for_direct(TAILNET_DIRECT_WAIT).await.ok();
+                    *tailnet = Some(connected);
+                }
+                Err(error) if mode == SshTransportMode::Tailnet => {
+                    return Err(error.context("tailnet attach (CW_SSH_TRANSPORT=tailnet)"));
+                }
+                Err(error) => reason = Some(format!("{error:#}")),
+            }
+        }
+        if let Some(connected) = tailnet.as_ref() {
+            match connected.attach(open.clone()).await {
+                Ok(attachment) => {
+                    eprintln!("{}", tailnet_path_line(connected.path().ok()));
+                    return Ok(attachment);
+                }
+                Err(error) if mode == SshTransportMode::Tailnet => {
+                    return Err(display_client_error(error));
+                }
+                Err(error) => {
+                    *tailnet = None;
+                    reason = Some(error.message().to_owned());
+                }
+            }
+        }
+        reason.unwrap_or_else(|| "the tailnet is unavailable".into())
+    };
+    let attachment = client
+        .attach_session(open)
+        .await
+        .map_err(display_client_error)?;
+    eprintln!("  via API · tailnet unavailable: {fallback}");
+    Ok(attachment)
+}
+
+pub(crate) fn tailnet_path_line(
+    report: Option<codewire_client::tailnet_session::TailnetPathReport>,
+) -> String {
+    match report {
+        Some(report) => match report.reason {
+            None => format!("  via {}", report.path.label()),
+            Some(reason) => format!(
+                "  via {} · direct UDP unavailable: {reason}",
+                report.path.label()
+            ),
+        },
+        None => "  via the tailnet".into(),
+    }
+}
+
 async fn attach_environment_session(
     globals: &Globals,
     mut target: EnvironmentSessionTarget,
@@ -2040,6 +2150,9 @@ async fn attach_environment_session(
     // Survives reconnects, which resume the same output, so the program's
     // screen is given back only when this terminal leaves it.
     let mut screen = SessionScreen::new(std::io::stdout().is_terminal());
+    // One tailnet connection to a hosted environment, kept for every
+    // reattachment while it lives (#3827).
+    let mut tailnet = None;
     loop {
         let exit = match &target {
             #[cfg(unix)]
@@ -2068,16 +2181,18 @@ async fn attach_environment_session(
                 client,
                 ..
             } => {
-                let attachment = client
-                    .attach_session(codewire_client::AttachSessionOpen {
+                let attachment = attach_platform_session(
+                    client,
+                    codewire_client::AttachSessionOpen {
                         org_id: org_id.clone(),
                         environment_id: environment_id.clone(),
                         session_id: session.session_id.clone(),
                         output_offset,
                         ..Default::default()
-                    })
-                    .await
-                    .map_err(display_client_error)?;
+                    },
+                    &mut tailnet,
+                )
+                .await?;
                 attach_platform_environment_session(attachment, session.pty, true, &mut screen)
                     .await?
             }

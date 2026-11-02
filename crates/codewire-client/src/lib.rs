@@ -18,6 +18,8 @@ mod mesh;
 pub mod platform_agents;
 pub mod session_wire;
 mod tailnet;
+#[cfg(feature = "tailnet-session")]
+pub mod tailnet_session;
 mod transport_error;
 
 use std::sync::Arc;

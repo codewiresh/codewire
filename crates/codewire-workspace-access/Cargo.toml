@@ -42,6 +42,8 @@ zeroize = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+# The client half of the session subsystem, for its tests.
+codewire-client = { workspace = true, features = ["tailnet-session"] }
 russh-sftp = { workspace = true }
 serde = { workspace = true }
 url = { workspace = true }

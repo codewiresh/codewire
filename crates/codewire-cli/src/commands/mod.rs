@@ -166,6 +166,18 @@ pub(crate) struct DoctorTailnetArgs {
     expect: String,
     #[arg(long, help = "Skip the forced DERP fallback probe")]
     skip_forced_derp: bool,
+    #[arg(
+        long,
+        help = "Also measure keystroke echo round trips over the tailnet and the API, in a throwaway session (#3827); set CW_DERP_ONLY=1 to measure DERP"
+    )]
+    latency: bool,
+    #[arg(
+        long,
+        default_value_t = 100,
+        value_parser = clap::value_parser!(u32).range(1..=10_000),
+        help = "Echo round trips per path for --latency"
+    )]
+    rounds: u32,
 }
 
 #[derive(Debug, Args)]
@@ -774,6 +786,12 @@ pub(crate) struct EnvironmentShellArgs {
     pub(crate) in_environment: Option<String>,
     #[arg(long, help = "Pipe stdin/stdout for OpenSSH ProxyCommand")]
     pub(crate) stdio: bool,
+    #[arg(
+        long,
+        conflicts_with = "stdio",
+        help = "Start a named session that keeps running after you disconnect; reattach with `cw attach`"
+    )]
+    pub(crate) durable: bool,
 }
 
 /// The agent `cw run AGENT` opens in its own terminal UI.
@@ -2701,6 +2719,7 @@ mod sessions;
 mod snapshot;
 mod ssh_trust;
 mod storage_placement;
+mod tailnet_shell;
 
 pub(crate) use checkpoint::*;
 pub(crate) use collaboration::*;

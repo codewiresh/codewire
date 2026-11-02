@@ -117,6 +117,33 @@ async fn connect_tailnet_ssh(
     org_id: &str,
     environment_id: &str,
 ) -> anyhow::Result<TailnetConnection> {
+    let dialed = dial_tailnet_ssh(client, org_id, environment_id).await?;
+    Ok(TailnetConnection {
+        stream: Some(dialed.stream),
+        _conn: dialed.conn,
+        coordinator_task: dialed.coordinator_task,
+    })
+}
+
+/// A TCP stream to the environment daemon's SSH port over its tailnet, with
+/// the tailnet it rides.
+pub(crate) struct DialedTailnetSsh {
+    pub(crate) stream: codewire_tailnet::netstack::TcpStream,
+    pub(crate) conn: Arc<Conn>,
+    /// Read by `tailnet_session` for the live path.
+    #[cfg_attr(not(feature = "tailnet-session"), allow(dead_code))]
+    pub(crate) peer: Node,
+    pub(crate) coordinator_task: tokio::task::JoinHandle<()>,
+}
+
+/// Join the environment's tailnet and dial its daemon's SSH port, as
+/// `cw shell --stdio` does: at once, on DERP, unless
+/// `CW_TAILNET_EXPECTED_TRANSPORT` names a path to wait for.
+pub(crate) async fn dial_tailnet_ssh(
+    client: &CodewireClient,
+    org_id: &str,
+    environment_id: &str,
+) -> anyhow::Result<DialedTailnetSsh> {
     let peer_timeout = duration_from_env("CW_TAILNET_PEER_TIMEOUT", DEFAULT_PEER_TIMEOUT, false);
     let dial_timeout = duration_from_env("CW_TAILNET_DIAL_TIMEOUT", DEFAULT_DIAL_TIMEOUT, false);
     let force_derp = std::env::var_os("CW_DERP_ONLY").is_some();
@@ -152,9 +179,10 @@ async fn connect_tailnet_ssh(
         })?
         .with_context(|| format!("tailnet TCP dial to {dst}"))?;
 
-    Ok(TailnetConnection {
-        stream: Some(stream),
-        _conn: session.conn,
+    Ok(DialedTailnetSsh {
+        stream,
+        conn: session.conn,
+        peer: session.peer,
         coordinator_task: session.coordinator_task,
     })
 }

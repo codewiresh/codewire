@@ -11,6 +11,10 @@ description = "Shared ergonomic Rust client over Codewire's generated Connect-RP
 kind-e2e = []
 desktop-keyring = ["dep:keyring"]
 desktop-pkce-loopback = ["dep:open", "dep:tiny_http"]
+# Durable sessions and interactive shells over an environment's tailnet SSH
+# (`tailnet_session`, #3827). It brings an SSH client (russh), so only the
+# clients that use it enable it.
+tailnet-session = ["dep:russh"]
 
 [[example]]
 name = "coordinator-ingress-smoke"
@@ -33,6 +37,7 @@ hyper-util = { workspace = true }
 futures-util = "0.3"
 reqwest = { workspace = true }
 rand = { workspace = true }
+russh = { workspace = true, optional = true }
 sha2 = { workspace = true }
 open = { workspace = true, optional = true }
 tiny_http = { workspace = true, optional = true }
