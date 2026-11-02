@@ -1522,7 +1522,7 @@ fn attach_command_parser_accepts_selected_environment_session_flag() {
 }
 
 #[test]
-fn resolve_setup_server_url_defaults_to_hosted_codewire() {
+fn resolve_login_server_url_in_a_fresh_config_is_the_hosted_default() {
     let home = tempfile::tempdir().unwrap();
     let env = config::MapEnv::default();
     let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
@@ -1533,14 +1533,15 @@ fn resolve_setup_server_url_defaults_to_hosted_codewire() {
         org: None,
     };
 
+    // `cw login` before `cw setup` (#3888).
     assert_eq!(
-        resolve_setup_server_url(&globals, &paths, &env),
+        resolve_login_server_url(&globals, &paths, &env),
         "https://codewire.sh"
     );
 }
 
 #[test]
-fn resolve_setup_server_url_prefers_global_server() {
+fn resolve_login_server_url_prefers_global_server() {
     let home = tempfile::tempdir().unwrap();
     let env = config::MapEnv::new([("CODEWIRE_SERVER_URL", "https://env.codewire.sh")]);
     let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
@@ -1552,7 +1553,7 @@ fn resolve_setup_server_url_prefers_global_server() {
     };
 
     assert_eq!(
-        resolve_setup_server_url(&globals, &paths, &env),
+        resolve_login_server_url(&globals, &paths, &env),
         "https://flag.codewire.sh"
     );
 }

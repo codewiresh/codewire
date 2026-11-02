@@ -292,7 +292,7 @@ pub(crate) fn short_env_id(id: &str) -> &str {
 pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> anyhow::Result<()> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    let server_url = resolve_login_server_url(globals, &paths, &env)?;
+    let server_url = resolve_login_server_url(globals, &paths, &env);
     let configured_org = saved_login_default_org(&paths, &server_url);
     let client = OAuthClient::discover(&server_url)
         .await
@@ -357,7 +357,7 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
     }
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    let server_url = resolve_setup_server_url(globals, &paths, &env);
+    let server_url = resolve_login_server_url(globals, &paths, &env);
     let login_client = OAuthClient::discover(&server_url)
         .await
         .context("discover OAuth device flow")?;
@@ -438,15 +438,6 @@ pub(crate) fn validate_setup_placement(
     Ok(())
 }
 
-pub(crate) fn resolve_setup_server_url(
-    globals: &Globals,
-    paths: &ResolvePaths,
-    env: &impl config::Env,
-) -> String {
-    resolve_login_server_url(globals, paths, env)
-        .unwrap_or_else(|_| "https://codewire.sh".to_string())
-}
-
 pub(crate) async fn setup_select_org(
     client: &OrganizationClient,
     args: &SetupArgs,
@@ -511,25 +502,28 @@ pub(crate) async fn setup_select_org(
     }
 }
 
+/// The server `cw login` and `cw setup` sign in to: `--server`, then
+/// `CODEWIRE_SERVER_URL`, then the saved config, then hosted Codewire, so a
+/// new user can run `cw login` first (#3888).
 pub(crate) fn resolve_login_server_url(
     globals: &Globals,
     paths: &ResolvePaths,
     env: &impl config::Env,
-) -> anyhow::Result<String> {
+) -> String {
     if let Some(server_url) = normalize_login_server_url(globals.server.as_deref()) {
-        return Ok(server_url);
+        return server_url;
     }
     if let Some(server_url) =
         normalize_login_server_url(env.var(config::CODEWIRE_SERVER_URL_ENV).as_deref())
     {
-        return Ok(server_url);
+        return server_url;
     }
     if let Ok(config) = config::load_platform_config(&paths.platform_config_dir)
         && let Some(server_url) = normalize_login_server_url(Some(&config.server_url))
     {
-        return Ok(server_url);
+        return server_url;
     }
-    anyhow::bail!("no server configured (run 'cw setup' first, or pass --server)")
+    "https://codewire.sh".to_string()
 }
 
 pub(crate) fn normalize_login_server_url(value: Option<&str>) -> Option<String> {
