@@ -82,15 +82,27 @@ if [ "${1:-} ${2:-} ${3:-}" = 'image inspect --format' ]; then
     *dev.codewire.promotable*) printf '%s\n' true ;;
     *org.opencontainers.image.revision*)
       reference="${5:-}"
-      family="${reference#codewire-}"
+      family="${reference##*/}"
+      family="${family%%@*}"
+      family="${family#codewire-}"
       family="${family%:e2e}"
-      if [ -n "${CARRIED_FAMILIES_FILE:-}" ] && grep -qx "$family" "$CARRIED_FAMILIES_FILE"; then
+      if [ -n "${FAKE_TAG_MOVED_TO:-}" ] && [[ "$reference" == *:e2e ]]; then
+        printf '%s\n' "$FAKE_TAG_MOVED_TO"
+      elif [ -n "${FAKE_REVISION:-}" ]; then
+        printf '%s\n' "$FAKE_REVISION"
+      elif [ -n "${CARRIED_FAMILIES_FILE:-}" ] && grep -qx "$family" "$CARRIED_FAMILIES_FILE"; then
         printf '%s\n' "${FAKE_BASELINE_SHA:?}"
       else
         printf '%s\n' 0123456789abcdef0123456789abcdef01234567
       fi
       ;;
-    '{{.Id}}') printf '%s\n' sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+    '{{.Id}}')
+      if [ -n "${FAKE_TAG_MOVED_TO:-}" ] && [[ "${5:-}" == *:e2e ]]; then
+        printf '%s\n' sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      else
+        printf '%s\n' sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      fi
+      ;;
     *) exit 64 ;;
   esac
 fi
@@ -207,6 +219,32 @@ for wrong in release ci; do
     fail "the $wrong-profile rejection was not attributable"
 done
 
+# A candidate built from any other source is refused too.
+if run_group daemon "$work/revision-output" "$work/revision-docker.log" \
+    "$work/revision-build.log" 43 FAKE_REVISION=89abcdef0123456789abcdef0123456789abcdef \
+    >"$work/revision.stdout" 2>"$work/revision.stderr"; then
+  fail "a candidate from another source was accepted"
+fi
+grep -Fq 'did not preserve its exact release identity' "$work/revision.stderr" ||
+  fail "the other-source rejection was not attributable"
+
+# Every job on a runner shares one Docker daemon and deliveries overlap, so a
+# local tag names whatever another delivery tagged last. That can't fail this
+# delivery's candidate (Deploy Dev 35294, 2026-11-03).
+overlap_output="$work/overlap-output"
+overlap_docker_log="$work/overlap-docker.log"
+if ! run_group services "$overlap_output" "$overlap_docker_log" "$work/overlap-build.log" 44 \
+    FAKE_TAG_MOVED_TO=89abcdef0123456789abcdef0123456789abcdef \
+    >"$work/overlap.stdout" 2>"$work/overlap.stderr"; then
+  cat "$work/overlap.stderr" >&2
+  fail "another delivery's local tag failed this delivery's candidate"
+fi
+[[ "$(wc -l <"$overlap_output" | tr -d ' ')" -eq 8 ]] ||
+  fail "an overlapping delivery changed this delivery's runtime outputs"
+if grep -Eq '^image tag |:e2e' "$overlap_docker_log"; then
+  fail "the wrapper used a local tag another delivery can move"
+fi
+
 # A failed protected build, including a registry 503, stops the wrapper at
 # that image: no retry, and no later image is built.
 fatal_attempts="$work/fatal-attempts"
@@ -303,8 +341,8 @@ fi
 [[ "$(grep -Ec '^pull registry\.example\.invalid/codewire/' "$docker_log")" -eq 4 ]] ||
   fail "service half did not pull all four protected candidates by digest"
 for family in dashboard derp mesh services; do
-  grep -Eq "^image tag .*codewire/${family}@sha256:[0-9a-f]{64} codewire-${family}:e2e$" \
-    "$docker_log" || fail "wrapper did not materialize the exact $family candidate locally"
+  grep -Eq "^image inspect --format .*image\.revision.* registry\.example\.invalid/codewire/${family}@sha256:[0-9a-f]{64}$" \
+    "$docker_log" || fail "wrapper did not verify the exact $family candidate by digest"
 done
 
 if run_group services "$work/rejected-output" "$docker_log" "$build_log" 45 \

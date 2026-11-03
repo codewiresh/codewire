@@ -180,6 +180,17 @@ inspect_source_digest() {
     <<<"$inspect_output"
 }
 
+# Prove a pulled candidate's release identity by its immutable digest. Every
+# job on a runner shares one Docker daemon and deliveries overlap, so a local
+# tag names whatever another delivery tagged last (Deploy Dev 35294).
+candidate_has_release_identity() {
+  local reference="$1" expected_revision="$2" profile promotable revision
+  profile="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$reference")"
+  promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$reference")"
+  revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$reference")"
+  [ "$profile" = runtime ] && [ "$promotable" = true ] && [ "$revision" = "$expected_revision" ]
+}
+
 # Resolve the previous deploy's exact candidate for one certified-unaffected
 # family, prove its local release identity, and pin the new source tag to the
 # same immutable digest so the shared Bake transaction never rebuilds it. Any
@@ -189,7 +200,7 @@ carry_one() {
   local repository="$PUBLISH_REGISTRY_HOST/codewire/$image_name"
   local baseline_ref="$repository:$baseline_sha"
   local head_ref="$repository:$GITHUB_SHA"
-  local digest head_digest local_ref candidate_id local_id profile promotable revision
+  local digest head_digest
 
   runtime_registry_login || return 1
   if ! digest="$(inspect_source_digest "$baseline_ref")"; then
@@ -197,17 +208,8 @@ carry_one() {
     return 1
   fi
 
-  local_ref="codewire-${image_name}:e2e"
   DOCKER_CONFIG="$docker_config" docker pull "$repository@$digest" >/dev/null || return 1
-  docker image tag "$repository@$digest" "$local_ref" || return 1
-  candidate_id="$(docker image inspect --format '{{.Id}}' "$repository@$digest")"
-  local_id="$(docker image inspect --format '{{.Id}}' "$local_ref")"
-  profile="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$local_ref")"
-  promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$local_ref")"
-  revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$local_ref")"
-  if [ -z "$candidate_id" ] || [ "$candidate_id" != "$local_id" ] \
-      || [ "$profile" != runtime ] || [ "$promotable" != true ] \
-      || [ "$revision" != "$baseline_sha" ]; then
+  if ! candidate_has_release_identity "$repository@$digest" "$baseline_sha"; then
     echo "Carried runtime image $image_name does not preserve the deployed baseline release identity" >&2
     return 1
   fi
@@ -257,7 +259,7 @@ build_one() {
   local image_name="$1"
   local dockerfile="$2"
   local build_runtime_set="${3:-0}"
-  local output candidate_ref local_ref candidate_id local_id profile promotable revision
+  local output candidate_ref
 
   if is_carried "$image_name"; then
     return 0
@@ -273,20 +275,10 @@ build_one() {
   fi
 
   # Harbor is the protected candidate boundary. Pull the immutable manifest
-  # back by digest and give its selected local platform image the disposable
-  # names consumed by Kind. GHCR publication and deploy dispatch occur only
-  # after the complete exact-image suite passes in the same job.
-  local_ref="codewire-${image_name}:e2e"
+  # back by digest and check its selected local platform image. The publishing
+  # job takes these digests, so nothing needs a local name for the image.
   DOCKER_CONFIG="$docker_config" docker pull "$candidate_ref" >/dev/null
-  docker image tag "$candidate_ref" "$local_ref"
-  candidate_id="$(docker image inspect --format '{{.Id}}' "$candidate_ref")"
-  local_id="$(docker image inspect --format '{{.Id}}' "$local_ref")"
-  profile="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$local_ref")"
-  promotable="$(docker image inspect --format '{{ index .Config.Labels "dev.codewire.promotable" }}' "$local_ref")"
-  revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$local_ref")"
-  if [ -z "$candidate_id" ] || [ "$candidate_id" != "$local_id" ] \
-      || [ "$profile" != runtime ] || [ "$promotable" != true ] \
-      || [ "$revision" != "$GITHUB_SHA" ]; then
+  if ! candidate_has_release_identity "$candidate_ref" "$GITHUB_SHA"; then
     echo "Runtime candidate $image_name did not preserve its exact release identity locally" >&2
     exit 1
   fi
