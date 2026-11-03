@@ -1,10 +1,16 @@
 # Ingress to the UDP relay (#3926). Relay data on UDP 41641 is public: the
 # relay's LoadBalancer sends the internet here, and each side proves its disco
-# key before anything is forwarded. The HTTP listener on TCP 8095 serves the
-# allocator, which only orchestration calls, and metrics for Prometheus.
+# key before anything is forwarded. The allocator on TCP 8095 has no token yet and
+# only orchestration calls it. TCP 8096 is read-only: probes and metrics.
 #
-# A NetworkPolicy isolates its Pod on every port, so 41641 is listed. The kubelet
-# probes on 8095 come from the Pod's own node, which a policy never blocks.
+# 8096 lists no source because Prometheus runs on host networking on both
+# clusters. Cilium sees it as a node, which no Pod selector matches, and a
+# NetworkPolicy has no way to name a node. Sandboxes stay denied every TCP port
+# here by the platform's deny policy.
+#
+# A NetworkPolicy isolates its Pod on every port, so 41641 is listed. Traffic from
+# the Pod's own node is never blocked on Cilium, so a host-network process there
+# can reach the allocator; only a token closes that.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -26,12 +32,9 @@ spec:
             matchLabels:
               app.kubernetes.io/name: codewire
               app.kubernetes.io/component: orchestration
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: monitoring
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: prometheus
       ports:
         - protocol: TCP
           port: 8095
+    - ports:
+        - protocol: TCP
+          port: 8096

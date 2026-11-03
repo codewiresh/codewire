@@ -541,12 +541,23 @@ UDP_RELAY = "codewire-udp-relay"
 
 def assert_udp_relay(resources: list[str], label: str, output: list[str]) -> None:
     """The relay parses UDP from the internet, so it holds no shared secret and
-    its HTTP listener answers only orchestration and Prometheus (#3926). Relay
-    data stays open to every source, because the LoadBalancer sends the internet
-    there."""
+    its allocator answers only orchestration (#3926). Relay data stays open to
+    every source, because the LoadBalancer sends the internet there, and so do the
+    read-only endpoints, because Prometheus runs on host networking and matches no
+    Pod selector. Those endpoints stay on the port named http, which the PodMonitor
+    scrapes."""
     deployment = exactly_one(resources, "Deployment", UDP_RELAY, label, output)
     if deployment and re.search(r"secretRef:|secretKeyRef:|secret:", deployment):
         output.append(f"{label}: the UDP relay must take no Secret")
+    if deployment and compact(
+        """
+        - containerPort: 8095
+          name: allocator
+        - containerPort: 8096
+          name: http
+        """
+    ) not in compact(deployment):
+        output.append(f"{label}: the UDP relay must serve its allocator on 8095 and the port named http on 8096")
     policy = exactly_one(resources, "NetworkPolicy", UDP_RELAY, label, output)
     if not policy:
         return
@@ -562,14 +573,11 @@ def assert_udp_relay(resources: list[str], label: str, output: list[str]) -> Non
                 matchLabels:
                   app.kubernetes.io/component: orchestration
                   app.kubernetes.io/name: codewire
-            - namespaceSelector:
-                matchLabels:
-                  kubernetes.io/metadata.name: monitoring
-              podSelector:
-                matchLabels:
-                  app.kubernetes.io/name: prometheus
             ports:
             - port: 8095
+              protocol: TCP
+          - ports:
+            - port: 8096
               protocol: TCP
           podSelector:
             matchLabels:
@@ -581,7 +589,7 @@ def assert_udp_relay(resources: list[str], label: str, output: list[str]) -> Non
     )
     if compact(top_level_block(policy, "spec")) != expected:
         output.append(
-            f"{label}: UDP relay ingress must keep 41641/UDP open and admit only orchestration and Prometheus on 8095"
+            f"{label}: UDP relay ingress must keep 41641/UDP and 8096 open and admit only orchestration on 8095"
         )
 
 
@@ -596,8 +604,8 @@ def udp_relay_self_test(resources: list[str]) -> None:
         ("NetworkPolicy", "relay data closed", "port: 41641", "port: 41642"),
         ("NetworkPolicy", "allocator open to every source", "  - from:\n", "  - ports:\n    - port: 8095\n      protocol: TCP\n  - from:\n"),
         ("NetworkPolicy", "another component", "app.kubernetes.io/component: orchestration", "app.kubernetes.io/component: dashboard"),
-        ("NetworkPolicy", "another namespace", "kubernetes.io/metadata.name: monitoring", "kubernetes.io/metadata.name: default"),
-        ("NetworkPolicy", "a mutable namespace label", "kubernetes.io/metadata.name: monitoring", "codewire.sh/monitoring: allowed"),
+        ("NetworkPolicy", "read-only endpoints closed", "port: 8096", "port: 8097"),
+        ("Deployment", "metrics back on the allocator's port", "name: allocator", "name: http"),
     ]:
         changed = [
             resource.replace(before, after, 1) if top_level_field(resource, "kind") == kind else resource

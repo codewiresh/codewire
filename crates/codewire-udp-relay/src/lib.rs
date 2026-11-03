@@ -15,11 +15,13 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_UDP_BIND_ADDR: &str = "0.0.0.0:41641";
-pub const DEFAULT_HTTP_BIND_ADDR: &str = "0.0.0.0:8095";
+pub const DEFAULT_ALLOCATOR_BIND_ADDR: &str = "0.0.0.0:8095";
+pub const DEFAULT_OPS_BIND_ADDR: &str = "0.0.0.0:8096";
 
 pub const UDP_BIND_ADDR_ENV: &str = "CODEWIRE_UDP_RELAY_BIND_ADDR";
 pub const UDP_ADVERTISE_ADDRS_ENV: &str = "CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS";
-pub const HTTP_BIND_ADDR_ENV: &str = "CODEWIRE_UDP_RELAY_HTTP_ADDR";
+pub const ALLOCATOR_BIND_ADDR_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_ADDR";
+pub const OPS_BIND_ADDR_ENV: &str = "CODEWIRE_UDP_RELAY_OPS_ADDR";
 pub const ALLOCATOR_TOKEN_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_TOKEN";
 pub const DISCO_PRIVATE_KEY_HEX_ENV: &str = "CODEWIRE_UDP_RELAY_DISCO_PRIVATE_KEY_HEX";
 
@@ -27,7 +29,8 @@ pub const DISCO_PRIVATE_KEY_HEX_ENV: &str = "CODEWIRE_UDP_RELAY_DISCO_PRIVATE_KE
 pub struct Config {
     pub udp_bind_addr: SocketAddr,
     pub udp_advertise_addr_ports: Vec<SocketAddr>,
-    pub http_bind_addr: SocketAddr,
+    pub allocator_bind_addr: SocketAddr,
+    pub ops_bind_addr: SocketAddr,
     pub allocator_token: Option<String>,
     pub disco_private_key_hex: Option<String>,
 }
@@ -49,11 +52,17 @@ impl Config {
         )?;
         let udp_advertise_addr_ports =
             parse_socket_addr_list_env(UDP_ADVERTISE_ADDRS_ENV, getenv(UDP_ADVERTISE_ADDRS_ENV))?;
-        let http_bind_addr = parse_socket_addr_env(
-            HTTP_BIND_ADDR_ENV,
-            getenv(HTTP_BIND_ADDR_ENV)
+        let allocator_bind_addr = parse_socket_addr_env(
+            ALLOCATOR_BIND_ADDR_ENV,
+            getenv(ALLOCATOR_BIND_ADDR_ENV)
                 .as_deref()
-                .unwrap_or(DEFAULT_HTTP_BIND_ADDR),
+                .unwrap_or(DEFAULT_ALLOCATOR_BIND_ADDR),
+        )?;
+        let ops_bind_addr = parse_socket_addr_env(
+            OPS_BIND_ADDR_ENV,
+            getenv(OPS_BIND_ADDR_ENV)
+                .as_deref()
+                .unwrap_or(DEFAULT_OPS_BIND_ADDR),
         )?;
         let allocator_token = trim_env(&getenv, ALLOCATOR_TOKEN_ENV);
         let disco_private_key_hex = trim_env(&getenv, DISCO_PRIVATE_KEY_HEX_ENV);
@@ -65,7 +74,8 @@ impl Config {
         Ok(Self {
             udp_bind_addr,
             udp_advertise_addr_ports,
-            http_bind_addr,
+            allocator_bind_addr,
+            ops_bind_addr,
             allocator_token,
             disco_private_key_hex,
         })
@@ -141,8 +151,12 @@ impl RelayRuntime {
         Ok(Self { server, state })
     }
 
-    pub fn app(&self) -> Router {
-        router(self.state.clone())
+    pub fn allocator_app(&self) -> Router {
+        allocator_router(self.state.clone())
+    }
+
+    pub fn ops_app(&self) -> Router {
+        ops_router(self.state.clone())
     }
 
     pub fn state(&self) -> &AppState {
@@ -154,12 +168,21 @@ impl RelayRuntime {
     }
 }
 
-pub fn router(state: AppState) -> Router {
+/// Only orchestration calls this. Its own port lets the NetworkPolicy keep the
+/// allocator closed while read-only endpoints stay open to Prometheus, which
+/// runs on host networking and so matches no Pod selector (#3926).
+pub fn allocator_router(state: AppState) -> Router {
+    Router::new()
+        .route("/internal/udp-relay/allocations", post(allocate))
+        .with_state(state)
+}
+
+/// Read-only: probes and metrics.
+pub fn ops_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
-        .route("/internal/udp-relay/allocations", post(allocate))
         .with_state(state)
 }
 
@@ -409,7 +432,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(cfg.udp_bind_addr, "0.0.0.0:41641".parse().unwrap());
-        assert_eq!(cfg.http_bind_addr, "0.0.0.0:8095".parse().unwrap());
+        assert_eq!(cfg.allocator_bind_addr, "0.0.0.0:8095".parse().unwrap());
+        assert_eq!(cfg.ops_bind_addr, "0.0.0.0:8096".parse().unwrap());
         assert_eq!(
             cfg.udp_advertise_addr_ports,
             vec![
@@ -432,6 +456,32 @@ mod tests {
                 name: DISCO_PRIVATE_KEY_HEX_ENV
             }
         );
+    }
+
+    #[tokio::test]
+    async fn ops_listener_serves_read_only_endpoints_and_cannot_allocate() {
+        let app = ops_router(test_state(None).await);
+        for path in ["/healthz", "/readyz", "/metrics"] {
+            let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+        }
+
+        let response = app.oneshot(allocation_request(None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn allocator_listener_serves_only_allocations() {
+        let app = allocator_router(test_state(None).await);
+        for path in ["/healthz", "/readyz", "/metrics"] {
+            let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+
+        let response = app.oneshot(allocation_request(None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -498,6 +548,10 @@ mod tests {
     }
 
     async fn test_router(token: Option<String>) -> Router {
+        allocator_router(test_state(token).await)
+    }
+
+    async fn test_state(token: Option<String>) -> AppState {
         let server = SocketServer::bind(
             DiscoPrivate::from_raw([0x55; 32]),
             SocketOptions::new("127.0.0.1:0".parse().unwrap())
@@ -505,7 +559,7 @@ mod tests {
         )
         .await
         .unwrap();
-        router(AppState::new(server.handle(), token))
+        AppState::new(server.handle(), token)
     }
 
     fn allocation_request(auth: Option<&str>) -> Request<Body> {

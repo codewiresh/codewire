@@ -32,7 +32,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let runtime = RelayRuntime::bind(&cfg).await?;
-    let app = runtime.app();
+    let allocator_app = runtime.allocator_app();
+    let ops_app = runtime.ops_app();
     let server = runtime.into_server();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let udp_task = tokio::spawn(async move {
@@ -51,16 +52,23 @@ async fn main() -> anyhow::Result<()> {
             .await
     });
 
-    let listener = tokio::net::TcpListener::bind(cfg.http_bind_addr).await?;
+    let allocator_listener = tokio::net::TcpListener::bind(cfg.allocator_bind_addr).await?;
+    let ops_listener = tokio::net::TcpListener::bind(cfg.ops_bind_addr).await?;
     tracing::info!(
-        http_addr = %cfg.http_bind_addr,
+        allocator_addr = %cfg.allocator_bind_addr,
+        ops_addr = %cfg.ops_bind_addr,
         udp_addr = %cfg.udp_bind_addr,
         advertise_count = cfg.udp_advertise_addr_ports.len(),
         "codewire udp peer relay started"
     );
 
-    let http = axum::serve(listener, app).with_graceful_shutdown(wait_shutdown());
-    let result = http.await;
+    let allocator = axum::serve(allocator_listener, allocator_app)
+        .with_graceful_shutdown(wait_shutdown())
+        .into_future();
+    let ops = axum::serve(ops_listener, ops_app)
+        .with_graceful_shutdown(wait_shutdown())
+        .into_future();
+    let result = tokio::try_join!(allocator, ops);
     let _ = shutdown_tx.send(true);
     match tokio::time::timeout(Duration::from_secs(5), udp_task).await {
         Ok(Ok(Ok(()))) => {}

@@ -18,4 +18,4 @@ spec:
       name: udp
     - port: 8095
       targetPort: 8095
-      name: http
+      name: allocator

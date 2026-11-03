@@ -34,6 +34,9 @@ spec:
               protocol: UDP
               name: udp
             - containerPort: 8095
+              name: allocator
+            # Probes and metrics. The PodMonitor scrapes the port named http.
+            - containerPort: 8096
               name: http
           # This Pod parses UDP from the internet and needs no secret to do it,
           # so it takes none of codewire-secrets (#3926).
