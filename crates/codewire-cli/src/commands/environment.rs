@@ -683,29 +683,35 @@ pub(crate) async fn handle_platform_env_command(
             .await;
             let mut line = StatusLine::new(std::io::stderr(), &caps);
             line.begin(STOPPING_LABEL)?;
-            let Some(response) = Box::pin(lifecycle::tick_while(
+            let stopped = Box::pin(lifecycle::stop_cloud_environment(
+                &environment_client,
+                &org_id,
+                &environment_id,
+                &name,
                 &mut line,
                 !caps.is_machine(),
-                environment_client.stop_environment(&org_id, &environment_id),
+                lifecycle::StopWait::default(),
             ))
-            .await
-            else {
-                line.clear()?;
-                return Err(InterruptNotice::new(VmLocation::Cloud, "stop", &name).error(false));
-            };
-            let response = match response {
-                Ok(response) => {
+            .await;
+            match stopped {
+                Ok(()) => line.clear()?,
+                Err(error) if super::lifecycle_output::interrupted_exit_code(&error).is_some() => {
                     line.clear()?;
-                    response
+                    return Err(error);
                 }
                 Err(error) => {
                     line.fail(STOPPING_LABEL)?;
-                    return Err(error.context(format!("stop {name}")));
+                    return Err(error);
                 }
-            };
+            }
             match args.output {
-                OutputFormat::Json => print_env_status(&args.environment, &response, args.output)?,
-                OutputFormat::Text => lifecycle::stop_result(&name, &response).print(&caps),
+                OutputFormat::Json => {
+                    let response = StatusResponse {
+                        status: "stopped".to_owned(),
+                    };
+                    print_env_status(&args.environment, &response, args.output)?;
+                }
+                OutputFormat::Text => lifecycle::stop_result(&name).print(&caps),
             }
         }
         EnvCommand::Start(args) => {

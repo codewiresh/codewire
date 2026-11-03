@@ -1,12 +1,14 @@
 //! Cloud environment lifecycle results: the create/start summary and its
-//! working context, the stop acknowledgement, and the observed outcome of a
+//! working context, a stop and the wait for it, and the observed outcome of a
 //! removal.
 
 use super::*;
 use crate::commands::lifecycle_output::{
-    ResultBlock, bounded, credential_profile_name, credential_ref, environment_command,
-    exact_reference_id, location_label, next_run_command, secret_refs, unless_interrupted,
+    InterruptNotice, ResultBlock, bounded, credential_profile_name, credential_ref,
+    environment_command, exact_reference_id, location_label, next_run_command, secret_refs,
+    unless_interrupted,
 };
+use crate::commands::progress::terminal_text;
 use crate::output::{
     Allocation, LifecycleSummary, NetworkRef, Outcome, SourceRef, Status, StatusLine, VmLocation,
 };
@@ -102,20 +104,142 @@ pub(crate) async fn resolve_source_names(
     SourceNames { profile, project }
 }
 
-/// What the stop reply says: stopped when the platform reports it, else
-/// an accepted request with the state it reported.
-pub(crate) fn stop_result(name: &str, response: &StatusResponse) -> ResultBlock {
-    let state = trimmed_str(&response.status).unwrap_or("unknown");
-    let cloud = location_label(VmLocation::Cloud);
-    if state == "stopped" {
-        ResultBlock::new(Status::Done, format!("Environment {name} stopped"))
-            .detail(cloud)
-            .next(environment_command(VmLocation::Cloud, "start", name))
-    } else {
-        ResultBlock::new(Status::Done, format!("Stop requested: {name}"))
-            .detail(format!("{cloud} · state: {state}"))
-            .next(environment_command(VmLocation::Cloud, "info", name))
+/// How long `cw stop` waits to see `stopped`: past the 120 s the worker gives
+/// the Pod to go, and short enough to say something true when it runs out.
+const STOP_TIMEOUT: Duration = Duration::from_secs(180);
+const STOP_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The bounds of one wait for `stopped`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StopWait {
+    timeout: Duration,
+    interval: Duration,
+}
+
+impl Default for StopWait {
+    fn default() -> Self {
+        Self {
+            timeout: STOP_TIMEOUT,
+            interval: STOP_POLL_INTERVAL,
+        }
     }
+}
+
+/// `cw stop` on a cloud environment: the request, then the wait until the
+/// platform reports `stopped`, so that a `cw start` straight after is accepted.
+/// An interrupt ends only the wait.
+pub(crate) async fn stop_cloud_environment<W: std::io::Write>(
+    client: &EnvironmentClient,
+    org_id: &str,
+    environment_id: &str,
+    name: &str,
+    line: &mut StatusLine<W>,
+    interruptible: bool,
+    wait: StopWait,
+) -> anyhow::Result<()> {
+    let name = terminal_text(name);
+    let name = name.as_str();
+    let interrupted = InterruptNotice::new(VmLocation::Cloud, "stop", name);
+    let Some(accepted) = Box::pin(tick_while(
+        line,
+        interruptible,
+        client.stop_environment(org_id, environment_id),
+    ))
+    .await
+    else {
+        return Err(interrupted.error(false));
+    };
+    accepted.with_context(|| format!("stop {name}"))?;
+    let Some(stopped) = Box::pin(tick_while(
+        line,
+        interruptible,
+        await_stopped(client, org_id, environment_id, name, wait),
+    ))
+    .await
+    else {
+        return Err(interrupted.error(true));
+    };
+    stopped
+}
+
+/// Reads the environment until it is `stopped`. A read that fails is tried
+/// again: the stop is already accepted, and the timeout says what was last seen.
+async fn await_stopped(
+    client: &EnvironmentClient,
+    org_id: &str,
+    environment_id: &str,
+    name: &str,
+    wait: StopWait,
+) -> anyhow::Result<()> {
+    let mut last_seen = "no state read".to_owned();
+    let watched = tokio::time::timeout(wait.timeout, async {
+        loop {
+            let interval = match client
+                .get_environment_with_poll_interval(org_id, environment_id)
+                .await
+            {
+                Ok((environment, interval)) => {
+                    if stop_finished(&environment, name)? {
+                        return Ok(());
+                    }
+                    last_seen = format!("state: {}", environment.state);
+                    interval
+                }
+                Err(error) if is_not_found(&error) => {
+                    anyhow::bail!("{name} was removed before it stopped")
+                }
+                Err(error) => {
+                    last_seen =
+                        format!("last read failed: {}", terminal_text(&format!("{error:#}")));
+                    None
+                }
+            };
+            tokio::time::sleep(interval.unwrap_or(wait.interval)).await;
+        }
+    })
+    .await;
+    watched.unwrap_or_else(|_| {
+        anyhow::bail!(
+            "timed out after {} s waiting for {name} to stop ({last_seen}). The stop was requested and the platform carries on with it; check it with `{}`.",
+            wait.timeout.as_secs(),
+            environment_command(VmLocation::Cloud, "info", name)
+        )
+    })
+}
+
+/// Whether an accepted stop has finished, or the error when it never will.
+/// `running` is still on the way: the worker takes the request up after the
+/// reply.
+fn stop_finished(environment: &Environment, name: &str) -> anyhow::Result<bool> {
+    let state = environment.state.as_str();
+    match state {
+        "stopped" => return Ok(true),
+        "error" | "failed" | "destroying" | "destroyed" => {
+            let reason = environment
+                .error_reason
+                .as_deref()
+                .map(terminal_text)
+                .filter(|reason| !reason.is_empty())
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default();
+            anyhow::bail!("{name} became {state} before it stopped{reason}");
+        }
+        _ => {}
+    }
+    if environment.desired_state != "stopped" {
+        anyhow::bail!(
+            "{name} did not stop: a newer request wants it {} (state: {state})",
+            environment.desired_state
+        );
+    }
+    Ok(false)
+}
+
+/// What a finished stop says.
+pub(crate) fn stop_result(name: &str) -> ResultBlock {
+    ResultBlock::new(Status::Done, format!("Environment {name} stopped"))
+        .detail(location_label(VmLocation::Cloud))
+        .next(environment_command(VmLocation::Cloud, "start", name))
 }
 
 /// What a removal did, from one read after it.
@@ -341,28 +465,10 @@ mod tests {
     }
 
     #[test]
-    fn stop_acceptance_is_not_reported_as_stopped() {
-        let stopping = StatusResponse {
-            status: "stopping".to_owned(),
-        };
+    fn a_finished_stop_names_the_next_start() {
         assert_eq!(
-            stop_result("app", &stopping).render(PLAIN),
-            "✓ Stop requested: app\n  cloud VM · state: stopping\n\n→ cw --cloud info app\n"
-        );
-        let stopped = StatusResponse {
-            status: "stopped".to_owned(),
-        };
-        assert_eq!(
-            stop_result("app", &stopped).render(PLAIN),
+            stop_result("app").render(PLAIN),
             "✓ Environment app stopped\n  cloud VM\n\n→ cw --cloud start app\n"
-        );
-        let empty = StatusResponse {
-            status: " ".to_owned(),
-        };
-        assert!(
-            stop_result("app", &empty)
-                .render(PLAIN)
-                .contains("state: unknown")
         );
     }
 
@@ -513,8 +619,9 @@ mod tests {
 
     mod platform {
         use super::*;
+        use std::sync::{Arc, Mutex};
         use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
         const DELETE: &str = "/codewire.v1.EnvironmentService/DeleteEnvironment";
         const GET: &str = "/codewire.v1.EnvironmentService/GetEnvironment";
@@ -574,7 +681,10 @@ mod tests {
             server
         }
 
-        fn environment(state: codewire_client::EnvironmentState, grace: bool) -> ResponseTemplate {
+        fn get_response(
+            state: codewire_client::EnvironmentState,
+            grace: bool,
+        ) -> codewire_client::GetEnvironmentResponse {
             let at = |seconds| {
                 Some(codewire_client::Timestamp {
                     seconds,
@@ -582,7 +692,7 @@ mod tests {
                 })
                 .into()
             };
-            proto(codewire_client::GetEnvironmentResponse {
+            codewire_client::GetEnvironmentResponse {
                 environment: Some(codewire_client::Environment {
                     id: "env_demo".into(),
                     org_id: "org_demo".into(),
@@ -602,7 +712,11 @@ mod tests {
                 })
                 .into(),
                 ..Default::default()
-            })
+            }
+        }
+
+        fn environment(state: codewire_client::EnvironmentState, grace: bool) -> ResponseTemplate {
+            proto(get_response(state, grace))
         }
 
         async fn remove(server: &MockServer) -> anyhow::Result<CloudRemoval> {
@@ -690,25 +804,234 @@ mod tests {
             assert!(!failed.contains("scheduled"));
         }
 
-        #[tokio::test]
-        async fn a_stop_reply_of_stopping_is_reported_as_requested() {
-            let server = MockServer::start().await;
+        const START: &str = "/codewire.v1.EnvironmentService/StartEnvironment";
+        const QUICK: StopWait = StopWait {
+            timeout: Duration::from_secs(10),
+            interval: Duration::from_millis(10),
+        };
+
+        /// The platform as a stop runs on it: the reply comes first, the worker
+        /// takes the request up after it, and a start is refused until `stopped`.
+        #[derive(Clone)]
+        struct StoppingPlatform {
+            accepted: Arc<Mutex<Option<Instant>>>,
+        }
+
+        impl StoppingPlatform {
+            fn state(&self) -> codewire_client::EnvironmentState {
+                use codewire_client::EnvironmentState as State;
+                match self.accepted.lock().unwrap().map(|at| at.elapsed()) {
+                    Some(since) if since >= Duration::from_millis(200) => State::Stopped,
+                    Some(since) if since >= Duration::from_millis(50) => State::Stopping,
+                    _ => State::Running,
+                }
+            }
+        }
+
+        impl Respond for StoppingPlatform {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                match request.url.path() {
+                    STOP => {
+                        *self.accepted.lock().unwrap() = Some(Instant::now());
+                        proto(codewire_client::StopEnvironmentResponse {
+                            status: "stop requested".into(),
+                            ..Default::default()
+                        })
+                    }
+                    GET => observed(self.state(), codewire_client::DesiredState::Stopped, None),
+                    START if self.state() == codewire_client::EnvironmentState::Stopped => {
+                        proto(codewire_client::StartEnvironmentResponse {
+                            status: "start requested".into(),
+                            ..Default::default()
+                        })
+                    }
+                    START => error(
+                        400,
+                        "invalid_argument",
+                        "environment must be stopped, pending, or errored to start",
+                        None,
+                    ),
+                    other => panic!("unexpected request to {other}"),
+                }
+            }
+        }
+
+        fn observed(
+            state: codewire_client::EnvironmentState,
+            desired: codewire_client::DesiredState,
+            reason: Option<&str>,
+        ) -> ResponseTemplate {
+            let mut response = get_response(state, false);
+            let environment = response.environment.as_option_mut().unwrap();
+            environment.desired_state = desired.into();
+            environment.error_reason = reason.unwrap_or_default().into();
+            proto(response)
+        }
+
+        fn accepting_stop() -> Mock {
             Mock::given(method("POST"))
                 .and(path(STOP))
                 .respond_with(proto(codewire_client::StopEnvironmentResponse {
-                    status: "stopping".into(),
+                    status: "stop requested".into(),
                     ..Default::default()
                 }))
                 .expect(1)
+        }
+
+        async fn stop(server: &MockServer, wait: StopWait) -> anyhow::Result<()> {
+            let caps = crate::commands::lifecycle_output::capabilities(OutputFormat::Json);
+            let mut line = StatusLine::new(Vec::new(), &caps);
+            stop_cloud_environment(
+                &client(server),
+                "org_demo",
+                "env_demo",
+                "app",
+                &mut line,
+                false,
+                wait,
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn a_start_right_after_a_stop_is_accepted() {
+            let server = MockServer::start().await;
+            let platform = StoppingPlatform {
+                accepted: Arc::default(),
+            };
+            Mock::given(method("POST"))
+                .respond_with(platform)
                 .mount(&server)
                 .await;
-            let response = client(&server)
-                .stop_environment("org_demo", "env_demo")
+            stop(&server, QUICK).await.unwrap();
+            client(&server)
+                .start_environment("org_demo", "env_demo")
                 .await
                 .unwrap();
-            let text = stop_result("app", &response).render(PLAIN);
-            assert!(text.starts_with("✓ Stop requested: app\n"), "{text}");
-            assert!(!text.contains("stopped"));
+        }
+
+        #[tokio::test]
+        async fn a_stop_that_never_finishes_says_so_and_what_to_check() {
+            let server = MockServer::start().await;
+            accepting_stop().mount(&server).await;
+            Mock::given(method("POST"))
+                .and(path(GET))
+                .respond_with(observed(
+                    codewire_client::EnvironmentState::Stopping,
+                    codewire_client::DesiredState::Stopped,
+                    None,
+                ))
+                .mount(&server)
+                .await;
+            let wait = StopWait {
+                timeout: Duration::from_millis(50),
+                ..QUICK
+            };
+            let timed_out = stop(&server, wait).await.unwrap_err().to_string();
+            assert!(timed_out.starts_with("timed out after"), "{timed_out}");
+            assert!(timed_out.contains("waiting for app to stop (state: stopping)"));
+            assert!(timed_out.contains("`cw --cloud info app`"), "{timed_out}");
+        }
+
+        #[tokio::test]
+        async fn a_failed_read_is_tried_again() {
+            let server = MockServer::start().await;
+            accepting_stop().mount(&server).await;
+            Mock::given(method("POST"))
+                .and(path(GET))
+                .respond_with(error(503, "unavailable", "connection closed", None))
+                .up_to_n_times(1)
+                .with_priority(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(GET))
+                .respond_with(observed(
+                    codewire_client::EnvironmentState::Stopped,
+                    codewire_client::DesiredState::Stopped,
+                    None,
+                ))
+                .mount(&server)
+                .await;
+            stop(&server, QUICK).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_stop_that_cannot_finish_ends_the_wait_with_why() {
+            use codewire_client::{DesiredState, EnvironmentState};
+            for (state, desired, reason, expected) in [
+                (
+                    EnvironmentState::Error,
+                    DesiredState::Stopped,
+                    Some("set replicas 0: refused"),
+                    "app became error before it stopped: set replicas 0: refused",
+                ),
+                (
+                    EnvironmentState::Destroying,
+                    DesiredState::Destroyed,
+                    None,
+                    "app became destroying before it stopped",
+                ),
+                (
+                    EnvironmentState::Starting,
+                    DesiredState::Started,
+                    None,
+                    "app did not stop: a newer request wants it started (state: starting)",
+                ),
+                (
+                    EnvironmentState::Stopping,
+                    DesiredState::Started,
+                    None,
+                    "app did not stop: a newer request wants it started (state: stopping)",
+                ),
+            ] {
+                let server = MockServer::start().await;
+                accepting_stop().mount(&server).await;
+                Mock::given(method("POST"))
+                    .and(path(GET))
+                    .respond_with(observed(state, desired, reason))
+                    .mount(&server)
+                    .await;
+                assert_eq!(
+                    stop(&server, QUICK).await.unwrap_err().to_string(),
+                    expected
+                );
+            }
+            let server = MockServer::start().await;
+            accepting_stop().mount(&server).await;
+            Mock::given(method("POST"))
+                .and(path(GET))
+                .respond_with(error(404, "not_found", "environment not found", None))
+                .mount(&server)
+                .await;
+            assert_eq!(
+                stop(&server, QUICK).await.unwrap_err().to_string(),
+                "app was removed before it stopped"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_refused_stop_says_why_and_waits_for_nothing() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(STOP))
+                .respond_with(error(
+                    400,
+                    "invalid_argument",
+                    "environment must be running to stop",
+                    None,
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(GET))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let refused = format!("{:#}", stop(&server, QUICK).await.unwrap_err());
+            assert!(refused.starts_with("stop app: "), "{refused}");
+            assert!(refused.contains("must be running to stop"), "{refused}");
         }
     }
 }

@@ -282,14 +282,17 @@ cw ports my-app --publish 3000 --label web
 
 `creator` means only you can open it; `--access org_members` or
 `--access public` widens that. Stopping releases the compute and keeps the
-storage; it happens in the background:
+storage:
 
 ```sh
 cw stop my-app
 ```
 
 ```text
-  cloud VM · state: stop requested
+✓ Environment my-app stopped
+  cloud VM
+
+→ cw --cloud start my-app
 ```
 
 `cw rm my-app` deletes the sandbox and its storage. `cw setup` also writes

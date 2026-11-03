@@ -28,20 +28,16 @@ Stopping gives every process SIGTERM and up to 5 seconds, then powers the VM
 off. Every session ends; their saved output stays readable with `cw logs`.
 `cw start app` boots it again with the same disks and published ports.
 
-A hosted sandbox stops in the background:
+A hosted sandbox stops the same way, and `cw stop` returns once it has, so a
+`cw start` can follow it straight away:
 
 ```sh
-cw stop web-app
-cw ls
+cw stop web-app && cw start web-app
 ```
 
-```text
-  cloud VM · state: stop requested
-  NAME     LOCATION  STATE     SESSIONS  NETWORK
-  web-app  cloud     stopping  —         —
-```
-
-`cw start` is refused until the state is `stopped`. See
+`cw stop` waits up to 3 minutes. If the sandbox still hasn't stopped by then, it
+says so and exits non-zero; the stop carries on, and `cw info web-app` shows how
+far it has come. `cw start` is refused until the state is `stopped`. See
 [Environment statuses](@/reference/environment-statuses.md) for every state.
 
 ## Resize
