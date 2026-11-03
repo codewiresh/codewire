@@ -36,7 +36,7 @@ pub(crate) const SHELL_GRACE: Duration = Duration::from_secs(10 * 60);
 /// apart the tries grow. The API is the last resort (owner, 2026-11-01, on
 /// #3827), and a fallback can come from a failure that has already cleared:
 /// a long network cut lands here as soon as the network returns (#3895).
-const TAILNET_RETRY_FIRST: Duration = Duration::from_secs(5);
+pub(crate) const TAILNET_RETRY_FIRST: Duration = Duration::from_secs(5);
 const TAILNET_RETRY_LIMIT: Duration = Duration::from_secs(60);
 
 /// How one attachment ended.
@@ -105,19 +105,12 @@ pub(crate) async fn run(
                 if tailnet.is_some() {
                     retry_after = TAILNET_RETRY_FIRST;
                 }
-                let on_fallback =
-                    tailnet.is_none() && SshTransportMode::from_env()? == SshTransportMode::Auto;
+                let on_fallback = on_api_fallback(&tailnet)?;
                 let back = async {
                     if !on_fallback {
                         return std::future::pending().await;
                     }
-                    keep_trying(retry_after, || async {
-                        let connected =
-                            EnvironmentTailnet::connect(client, org_id, environment_id).await?;
-                        connected.wait_for_direct(TAILNET_DIRECT_WAIT).await.ok();
-                        anyhow::Ok(connected)
-                    })
-                    .await
+                    tailnet_again(client, org_id, environment_id, retry_after).await
                 };
                 pump(attachment, output_offset, interactive, back).await?
             }
@@ -159,6 +152,28 @@ pub(crate) async fn run(
     }
 }
 
+/// Whether an attachment that has just opened came in over the API because
+/// the tailnet failed, rather than because `CW_SSH_TRANSPORT` asked for it.
+pub(crate) fn on_api_fallback(tailnet: &Option<EnvironmentTailnet>) -> anyhow::Result<bool> {
+    Ok(tailnet.is_none() && SshTransportMode::from_env()? == SshTransportMode::Auto)
+}
+
+/// The tailnet, tried until it connects: after `first`, then at growing
+/// intervals.
+pub(crate) async fn tailnet_again(
+    client: &CodewireClient,
+    org_id: &str,
+    environment_id: &str,
+    first: Duration,
+) -> EnvironmentTailnet {
+    keep_trying(first, || async {
+        let connected = EnvironmentTailnet::connect(client, org_id, environment_id).await?;
+        connected.wait_for_direct(TAILNET_DIRECT_WAIT).await.ok();
+        anyhow::Ok(connected)
+    })
+    .await
+}
+
 /// Runs `attempt` after `first`, then at growing intervals, until it succeeds.
 async fn keep_trying<T, F, Attempt>(first: Duration, mut attempt: F) -> T
 where
@@ -178,7 +193,7 @@ where
     }
 }
 
-fn next_retry(delay: Duration) -> Duration {
+pub(crate) fn next_retry(delay: Duration) -> Duration {
     (delay * 2).min(TAILNET_RETRY_LIMIT)
 }
 

@@ -1972,8 +1972,16 @@ pub(crate) enum AttachExit {
     OpenWorkspaces,
     Restart,
     Terminal,
-    StreamEnded { output_offset: u64 },
-    StreamInterrupted { output_offset: u64 },
+    StreamEnded {
+        output_offset: u64,
+    },
+    StreamInterrupted {
+        output_offset: u64,
+    },
+    /// The tailnet came back while on the API; reattach over it from here.
+    TailnetBack {
+        output_offset: u64,
+    },
 }
 
 const ATTACH_RECONNECT_LIMIT: u8 = 3;
@@ -2143,6 +2151,7 @@ async fn attach_environment_session(
     // One tailnet connection to a hosted environment, kept for every
     // reattachment while it lives (#3827).
     let mut tailnet = None;
+    let mut retry_after = super::tailnet_shell::TAILNET_RETRY_FIRST;
     loop {
         let exit = match &target {
             #[cfg(unix)]
@@ -2162,8 +2171,15 @@ async fn attach_environment_session(
             EnvironmentSessionTarget::NativeLocal { environment_id, .. } => {
                 let client = native_environment_session_client(environment_id).await?;
                 let attachment = client.attach(&session.session_id, output_offset).await?;
-                attach_platform_environment_session(attachment, session.pty, true, &mut screen)
-                    .await?
+                attach_platform_environment_session(
+                    attachment,
+                    output_offset,
+                    session.pty,
+                    true,
+                    &mut screen,
+                    std::future::pending(),
+                )
+                .await?
             }
             EnvironmentSessionTarget::Platform {
                 org_id,
@@ -2183,13 +2199,40 @@ async fn attach_environment_session(
                     &mut tailnet,
                 )
                 .await?;
-                attach_platform_environment_session(attachment, session.pty, true, &mut screen)
-                    .await?
+                if tailnet.is_some() {
+                    retry_after = super::tailnet_shell::TAILNET_RETRY_FIRST;
+                }
+                let on_fallback = super::tailnet_shell::on_api_fallback(&tailnet)?;
+                let back = async {
+                    if !on_fallback {
+                        return std::future::pending().await;
+                    }
+                    tailnet = Some(
+                        super::tailnet_shell::tailnet_again(
+                            client,
+                            org_id,
+                            environment_id,
+                            retry_after,
+                        )
+                        .await,
+                    );
+                };
+                attach_platform_environment_session(
+                    attachment,
+                    output_offset,
+                    session.pty,
+                    true,
+                    &mut screen,
+                    back,
+                )
+                .await?
             }
         };
         if !matches!(
             exit,
-            AttachExit::StreamEnded { .. } | AttachExit::StreamInterrupted { .. }
+            AttachExit::StreamEnded { .. }
+                | AttachExit::StreamInterrupted { .. }
+                | AttachExit::TailnetBack { .. }
         ) {
             screen.release();
         }
@@ -2229,6 +2272,13 @@ async fn attach_environment_session(
                 output_offset = next_offset;
                 tokio::time::sleep(delay).await;
             }
+            AttachExit::TailnetBack {
+                output_offset: next_offset,
+            } => {
+                output_offset = next_offset;
+                // Longer next time, if this attachment lands on the API again.
+                retry_after = super::tailnet_shell::next_retry(retry_after);
+            }
             AttachExit::Restart => {
                 let current = target.get(&session.session_id).await?;
                 if !session_is_terminal(&current) {
@@ -2263,12 +2313,17 @@ async fn attach_environment_session(
     }
 }
 
+/// Carry one attachment opened at `start_offset`. It ends early if
+/// `tailnet_back` completes.
 async fn attach_platform_environment_session(
     mut attachment: codewire_client::EnvironmentSessionAttachment,
+    start_offset: u64,
     interactive: bool,
     raw_output: bool,
     screen: &mut SessionScreen,
+    tailnet_back: impl std::future::Future<Output = ()>,
 ) -> anyhow::Result<AttachExit> {
+    tokio::pin!(tailnet_back);
     let input = attachment.input_handle();
     let mut stdin = crate::terminal_attach::terminal_input().await;
     let mut stdin_buf = [0_u8; 4096];
@@ -2280,7 +2335,7 @@ async fn attach_platform_environment_session(
         .transpose()
         .context("enabling raw mode")?;
     let mut decoder = AttachNavigationDecoder::default();
-    let mut output_offset = 0;
+    let mut output_offset = start_offset;
     let mut stdin_closed = !interactive;
     let mut output_open = true;
     let mut terminal = false;
@@ -2309,6 +2364,9 @@ async fn attach_platform_environment_session(
             });
         }
         tokio::select! {
+            () = &mut tailnet_back, if output_open => {
+                return Ok(AttachExit::TailnetBack { output_offset });
+            }
             size = window.changed(), if output_open => {
                 if let Some(size) = size {
                     let _ = input.send(resize(size)).await;
@@ -2982,9 +3040,11 @@ async fn follow_session_output(
                 let client = native_environment_session_client(environment_id).await?;
                 attach_platform_environment_session(
                     client.attach(&session.session_id, output_offset).await?,
+                    output_offset,
                     false,
                     raw_output,
                     &mut SessionScreen::new(false),
+                    std::future::pending(),
                 )
                 .await?
             }
@@ -3006,9 +3066,11 @@ async fn follow_session_output(
                     .map_err(display_client_error)?;
                 attach_platform_environment_session(
                     attachment,
+                    output_offset,
                     false,
                     raw_output,
                     &mut SessionScreen::new(false),
+                    std::future::pending(),
                 )
                 .await?
             }
@@ -3037,6 +3099,77 @@ async fn follow_session_output(
             }
             _ => unreachable!("non-interactive attachment produced navigation"),
         }
+    }
+}
+
+#[cfg(test)]
+mod attach_offset_tests {
+    use super::*;
+
+    fn output(
+        next_offset: u64,
+    ) -> Result<codewire_client::AttachSessionResponse, codewire_client::ClientError> {
+        Ok(codewire_client::AttachSessionResponse {
+            event: Some(codewire_client::attach_session_response::Event::Output(
+                Box::new(codewire_client::EnvironmentSessionOutputChunk {
+                    next_offset,
+                    ..Default::default()
+                }),
+            )),
+            ..Default::default()
+        })
+    }
+
+    async fn carry(
+        outputs: tokio::sync::mpsc::Receiver<
+            Result<codewire_client::AttachSessionResponse, codewire_client::ClientError>,
+        >,
+        start_offset: u64,
+        tailnet_back: impl std::future::Future<Output = ()>,
+    ) -> AttachExit {
+        attach_platform_environment_session(
+            codewire_client::EnvironmentSessionAttachment::from_output(outputs),
+            start_offset,
+            false,
+            false,
+            &mut SessionScreen::new(false),
+            tailnet_back,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_attachment_that_ends_before_any_output_keeps_the_offset_it_opened_at() {
+        // Reporting 0 here would replay the session's whole history to the
+        // terminal on the next attachment.
+        let (sender, outputs) = tokio::sync::mpsc::channel(1);
+        drop(sender);
+        assert_eq!(
+            carry(outputs, 42, std::future::pending()).await,
+            AttachExit::StreamEnded { output_offset: 42 }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_attachment_on_the_api_moves_at_its_output_offset_when_the_tailnet_is_back() {
+        let (sender, outputs) = tokio::sync::mpsc::channel(1);
+        sender.send(output(50)).await.unwrap();
+        let back = tokio::time::sleep(Duration::from_secs(5));
+        assert_eq!(
+            carry(outputs, 42, back).await,
+            AttachExit::TailnetBack { output_offset: 50 }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_attachment_on_the_api_moves_at_the_offset_it_opened_at() {
+        let (_sender, outputs) = tokio::sync::mpsc::channel(1);
+        let back = tokio::time::sleep(Duration::from_secs(5));
+        assert_eq!(
+            carry(outputs, 42, back).await,
+            AttachExit::TailnetBack { output_offset: 42 }
+        );
     }
 }
 
