@@ -13,10 +13,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // A key that lasts only as long as the process is the intended setup (#3926).
+    // Allocations and the challenge secret are in memory, so a restart ends
+    // every endpoint whatever the key. Endpoint ids restart too, and a client
+    // ignores a lower id from a disco key it knows, until its old endpoint goes
+    // stale; a new key lets it take the new endpoint at once.
     if cfg.disco_private_key_hex.is_none() {
-        tracing::warn!(
+        tracing::info!(
             env = codewire_udp_relay::DISCO_PRIVATE_KEY_HEX_ENV,
-            "udp relay using ephemeral disco key; configure persistent key before production rollout"
+            "udp relay generated a disco key for this process"
         );
     }
     if cfg.allocator_token.is_none() {

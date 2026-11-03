@@ -65,7 +65,9 @@ payload into Postgres, then the workspace
 binding reads the bound workspace Pod's node labels and returns the selected
 zone's direct-UDP and peer-relay endpoints to the daemon. The daemon allocates
 relay slots through `AllocatePeerRelay`; the allocator and its token stay in
-orchestration.
+orchestration. The relay's NetworkPolicy keeps relay data on UDP 41641 open to
+every source and admits only orchestration and Prometheus to its HTTP listener
+on TCP 8095, which also serves the allocator.
 
 Terminology:
 

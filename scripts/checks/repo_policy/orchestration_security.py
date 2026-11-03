@@ -536,6 +536,89 @@ WORLD_EXCEPTIONS = {
 }
 
 
+UDP_RELAY = "codewire-udp-relay"
+
+
+def assert_udp_relay(resources: list[str], label: str, output: list[str]) -> None:
+    """The relay parses UDP from the internet, so it holds no shared secret and
+    its HTTP listener answers only orchestration and Prometheus (#3926). Relay
+    data stays open to every source, because the LoadBalancer sends the internet
+    there."""
+    deployment = exactly_one(resources, "Deployment", UDP_RELAY, label, output)
+    if deployment and re.search(r"secretRef:|secretKeyRef:|secret:", deployment):
+        output.append(f"{label}: the UDP relay must take no Secret")
+    policy = exactly_one(resources, "NetworkPolicy", UDP_RELAY, label, output)
+    if not policy:
+        return
+    expected = compact(
+        """
+        spec:
+          ingress:
+          - ports:
+            - port: 41641
+              protocol: UDP
+          - from:
+            - podSelector:
+                matchLabels:
+                  app.kubernetes.io/component: orchestration
+                  app.kubernetes.io/name: codewire
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: monitoring
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: prometheus
+            ports:
+            - port: 8095
+              protocol: TCP
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: udp-relay
+              app.kubernetes.io/name: codewire
+          policyTypes:
+          - Ingress
+        """
+    )
+    if compact(top_level_block(policy, "spec")) != expected:
+        output.append(
+            f"{label}: UDP relay ingress must keep 41641/UDP open and admit only orchestration and Prometheus on 8095"
+        )
+
+
+def udp_relay_self_test(resources: list[str]) -> None:
+    label = "udp-relay negative fixture"
+    clean: list[str] = []
+    assert_udp_relay(resources, label, clean)
+    if clean:
+        raise RuntimeError(f"{label} failed before any change: {clean}")
+    for kind, name, before, after in [
+        ("Deployment", "takes every shared secret", "envFrom:\n", "envFrom:\n        - secretRef:\n            name: codewire-secrets\n"),
+        ("NetworkPolicy", "relay data closed", "port: 41641", "port: 41642"),
+        ("NetworkPolicy", "allocator open to every source", "  - from:\n", "  - ports:\n    - port: 8095\n      protocol: TCP\n  - from:\n"),
+        ("NetworkPolicy", "another component", "app.kubernetes.io/component: orchestration", "app.kubernetes.io/component: dashboard"),
+        ("NetworkPolicy", "another namespace", "kubernetes.io/metadata.name: monitoring", "kubernetes.io/metadata.name: default"),
+        ("NetworkPolicy", "a mutable namespace label", "kubernetes.io/metadata.name: monitoring", "codewire.sh/monitoring: allowed"),
+    ]:
+        changed = [
+            resource.replace(before, after, 1) if top_level_field(resource, "kind") == kind else resource
+            for resource in resources
+        ]
+        if changed == resources:
+            raise RuntimeError(f"{label} {name} did not change the render")
+        output: list[str] = []
+        assert_udp_relay(changed, label, output)
+        if not output:
+            raise RuntimeError(f"{label} {name} passed the check")
+    missing: list[str] = []
+    assert_udp_relay(
+        [resource for resource in resources if top_level_field(resource, "kind") != "NetworkPolicy"],
+        label,
+        missing,
+    )
+    if not missing:
+        raise RuntimeError(f"{label} without its policy passed the check")
+
+
 def world_peer(peer: Any) -> bool:
     """An ipBlock peer for the whole world less every cluster and Pod range."""
     if not isinstance(peer, dict) or set(peer) != {"ipBlock"} or not isinstance(peer["ipBlock"], dict):
@@ -1158,6 +1241,8 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
         credential_target = {"subject_namespace": "prod", "role_namespace": "prod-sandboxes"}
         credential_resources = documents(run(["kustomize", "build", "deployments/k8s/credential-service"]).stdout)
         assert_credential_service(credential_resources, credential_target, "credential-service (rendered)", failures)
+        udp_relay_resources = documents(run(["kustomize", "build", "deployments/k8s/udp-relay"]).stdout)
+        assert_udp_relay(udp_relay_resources, "udp-relay (rendered)", failures)
         manifests: list[str] = []
         renders: dict[str, list[str]] = {}
         for target in targets:
@@ -1168,6 +1253,7 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
         if args.self_test:
             self_test()
             credential_service_self_test(credential_resources, credential_target)
+            udp_relay_self_test(udp_relay_resources)
             # The rendered credential edge is proved on the retained local
             # Kind overlay; codewire/deploy guards the hosted renders.
             for path in CREDENTIAL_SELF_TEST_TARGETS:
