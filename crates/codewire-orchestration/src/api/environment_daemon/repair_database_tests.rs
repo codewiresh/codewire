@@ -20,7 +20,7 @@ type Gate = (oneshot::Sender<()>, oneshot::Receiver<()>);
 /// A Kubernetes API that records each request and answers it with a server
 /// error. With a gate, the first request reports that it arrived and waits
 /// for the test before answering.
-fn failing_kubernetes(gate: Option<Gate>, requests: Arc<Mutex<Vec<String>>>) -> SandboxClient {
+fn failing_kubernetes(gate: Option<Gate>, requests: Arc<Mutex<Vec<String>>>) -> kube::Client {
     let gate = Arc::new(tokio::sync::Mutex::new(gate));
     let service = Router::new().fallback(move |request: Request<Body>| {
         let gate = Arc::clone(&gate);
@@ -41,24 +41,23 @@ fn failing_kubernetes(gate: Option<Gate>, requests: Arc<Mutex<Vec<String>>>) -> 
                 .unwrap()
         }
     });
-    SandboxClient::new(kube::Client::new(service, "default"), NAMESPACE)
+    kube::Client::new(service, "default")
 }
 
-async fn admitted_repair(fixture: &LeaseFixture, sandbox: SandboxClient) -> DaemonRepair {
+async fn admitted_repair(fixture: &LeaseFixture, kube: kube::Client) -> DaemonRepair {
     let authority = ActivityAuthority::capture_required(&fixture.pool, &fixture.id, "started", 1)
         .await
         .expect("seeded environment carries started authority");
     DaemonRepair {
         pool: fixture.pool.clone(),
-        kube: sandbox.client.clone(),
-        runtime: crate::runtime::kubernetes::KubernetesDriver::shared(sandbox.client.clone()),
+        kube: kube.clone(),
+        runtime: crate::runtime::kubernetes::KubernetesDriver::shared(kube),
         session_secret: "synthetic-daemon-repair-session-secret".into(),
         daemon_endpoints: EnvironmentDaemonEndpointOverrides::default(),
         namespace: NAMESPACE.into(),
         environment_id: fixture.id.clone(),
-        sandbox,
         authority,
-        current: WorkspacePodIdentity {
+        current: MemberRef {
             name: "workspace-old".into(),
             uid: "uid-old".into(),
         },
@@ -99,6 +98,44 @@ async fn db_repair_settles_its_lease_after_the_caller_is_dropped() {
             "GET /api/v1/namespaces/{NAMESPACE}/pods/workspace-old"
         )],
         "repair stops at the failed Pod read and never deletes or waits"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_repair_replaces_the_observed_member_then_waits_for_its_replacement() {
+    let fixture = LeaseFixture::seed(NAMESPACE).await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut repair =
+        admitted_repair(&fixture, failing_kubernetes(None, Arc::clone(&requests))).await;
+    let runtime = Arc::new(crate::runtime::fake::FakeRuntimeDriver {
+        replacement: Mutex::new(Some(crate::runtime::MemberReplacement::Replaced)),
+        ..Default::default()
+    });
+    repair.runtime = runtime.clone();
+    let image = repair.support_image.clone();
+
+    // The fake's wait fails, so the repair ends there.
+    let error = run_daemon_repair(&fixture.pool, &fixture.id, repair)
+        .await
+        .expect_err("the replacement never came");
+
+    assert!(
+        matches!(&error, AppError::Upstream(message) if message == "environment daemon repair did not converge"),
+        "{error:?}"
+    );
+    assert_eq!(
+        *runtime.replacement_calls.lock().unwrap(),
+        [
+            format!("replace {} workspace-old uid-old {image}", fixture.id),
+            "wait workspace-old uid-old".to_string(),
+        ]
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "nothing binds a replacement that never came"
     );
 
     fixture.cleanup().await;

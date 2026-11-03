@@ -10,8 +10,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::{
-    ClaimReadiness, ClaimRef, MemberRef, Placement, ProbeResult, RuntimeAccess, RuntimeLifecycle,
-    RuntimeMember, RuntimePools, RuntimeStream, RuntimeTeardown, SuspendedRuntime,
+    ClaimReadiness, ClaimRef, MemberRef, MemberReplacement, Placement, ProbeResult, RuntimeAccess,
+    RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeStream, RuntimeTeardown,
+    SuspendedRuntime,
 };
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::template::TemplateOpts;
@@ -24,6 +25,10 @@ pub(crate) struct FakeRuntimeDriver {
     pub members: Mutex<Vec<RuntimeMember>>,
     /// When set, listing members fails with this message.
     pub members_error: Mutex<Option<String>>,
+    /// What replacing a member answers.
+    pub replacement: Mutex<Option<MemberReplacement>>,
+    /// Each replacement and replacement wait asked for, in order.
+    pub replacement_calls: Mutex<Vec<String>>,
     /// The claim's readiness; an error is its message.
     pub claim_readiness: Mutex<Option<Result<ClaimReadiness, String>>>,
     /// Every placement a method was asked about, in order.
@@ -118,6 +123,49 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
     ) -> anyhow::Result<()> {
         anyhow::bail!("not scripted")
     }
+
+    async fn current_member(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+    ) -> anyhow::Result<Option<MemberRef>> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn member_name(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn replace_member(
+        &self,
+        _placement: &Placement,
+        environment_id: &str,
+        member: &MemberRef,
+        support_image: &str,
+    ) -> anyhow::Result<MemberReplacement> {
+        self.replacement_calls.lock().unwrap().push(format!(
+            "replace {environment_id} {} {} {support_image}",
+            member.name, member.uid
+        ));
+        (*self.replacement.lock().unwrap()).ok_or_else(|| anyhow::anyhow!("not scripted"))
+    }
+
+    async fn wait_replacement(
+        &self,
+        _placement: &Placement,
+        previous: &MemberRef,
+        _timeout: Duration,
+    ) -> anyhow::Result<MemberRef> {
+        self.replacement_calls
+            .lock()
+            .unwrap()
+            .push(format!("wait {} {}", previous.name, previous.uid));
+        anyhow::bail!("not scripted")
+    }
 }
 
 #[async_trait]
@@ -159,6 +207,15 @@ impl RuntimeAccess for FakeRuntimeDriver {
             Some(Err(message)) => Err(anyhow::anyhow!(message)),
             None => anyhow::bail!("not scripted"),
         }
+    }
+
+    async fn workspace_logs(
+        &self,
+        _placement: &Placement,
+        _member_name: &str,
+        _tail_lines: i64,
+    ) -> anyhow::Result<Vec<u8>> {
+        anyhow::bail!("not scripted")
     }
 
     async fn ssh_stream(

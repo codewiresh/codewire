@@ -9,10 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use k8s_openapi::api::core::v1::Pod;
+use kube::api::{Api, LogParams};
 
 use super::{
-    ClaimReadiness, ClaimRef, MemberRef, Placement, ProbeResult, RuntimeAccess, RuntimeDriver,
-    RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeStream, RuntimeTeardown,
+    ClaimReadiness, ClaimRef, MemberRef, MemberReplacement, Placement, ProbeResult, RuntimeAccess,
+    RuntimeDriver, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeStream, RuntimeTeardown,
     SuspendedRuntime,
 };
 use crate::sandbox::client::SandboxClient;
@@ -158,6 +160,49 @@ impl RuntimeLifecycle for KubernetesDriver {
             )
             .await
     }
+
+    async fn current_member(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<Option<MemberRef>> {
+        self.sandbox_client(placement)
+            .get_workspace_pod_identity(environment_id)
+            .await
+    }
+
+    async fn member_name(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<String> {
+        self.sandbox_client(placement)
+            .get_pod_name(environment_id)
+            .await
+    }
+
+    async fn replace_member(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        member: &MemberRef,
+        support_image: &str,
+    ) -> anyhow::Result<MemberReplacement> {
+        self.sandbox_client(placement)
+            .replace_workspace_pod_if_uid(environment_id, &member.name, &member.uid, support_image)
+            .await
+    }
+
+    async fn wait_replacement(
+        &self,
+        placement: &Placement,
+        previous: &MemberRef,
+        timeout: Duration,
+    ) -> anyhow::Result<MemberRef> {
+        self.sandbox_client(placement)
+            .wait_for_replacement_workspace_pod(&previous.name, &previous.uid, timeout)
+            .await
+    }
 }
 
 #[async_trait]
@@ -208,6 +253,27 @@ impl RuntimeAccess for KubernetesDriver {
             (true, true) => ClaimReadiness::Ready,
             (true, false) => ClaimReadiness::NotReady { reason },
         })
+    }
+
+    async fn workspace_logs(
+        &self,
+        placement: &Placement,
+        member_name: &str,
+        tail_lines: i64,
+    ) -> anyhow::Result<Vec<u8>> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &placement.namespace);
+        let logs = pods
+            .logs(
+                member_name,
+                &LogParams {
+                    container: Some("workspace".into()),
+                    tail_lines: Some(tail_lines),
+                    timestamps: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(logs.into_bytes())
     }
 
     async fn ssh_stream(
@@ -373,7 +439,7 @@ mod tests {
                 format!("/apis/agents.x-k8s.io/v1beta1{namespace}/sandboxes/sandbox-a"),
                 json!({"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
                     "metadata": {"name": "sandbox-a", "namespace": "dev-sandboxes",
-                        "uid": "1f4e3a52-8d2b-4c7e-9a60-5b1d2e3f4a5b",
+                        "uid": "1f4e3a52-8d2b-4c7e-9a60-5b1d2e3f4a5b", "resourceVersion": "1",
                         "annotations": {"agents.x-k8s.io/pod-name": "workspace-a"}}}),
             ),
             (
@@ -384,7 +450,9 @@ mod tests {
                         "ownerReferences": [{"apiVersion": "agents.x-k8s.io/v1beta1",
                             "kind": "Sandbox", "name": "sandbox-a", "uid": controller_uid,
                             "controller": true}]},
-                    "status": {"phase": "Running"}}),
+                    "status": {"phase": "Running",
+                        "containerStatuses": [{"name": "workspace", "ready": true,
+                            "image": "", "imageID": "", "restartCount": 0}]}}),
             ),
         ];
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -393,7 +461,9 @@ mod tests {
             let seen = seen.clone();
             let objects = objects.clone();
             async move {
-                seen.lock().unwrap().push(request.uri().to_string());
+                seen.lock()
+                    .unwrap()
+                    .push(format!("{} {}", request.method(), request.uri()));
                 let path = request.uri().path();
                 let (status, body) = objects.iter().find(|(known, _)| known == path).map_or(
                     (
@@ -424,6 +494,136 @@ mod tests {
             .filter(|request| request.contains("/portforward"))
             .cloned()
             .collect()
+    }
+
+    const STUB_POD_UID: &str = "7e7b20f6-0bd2-4f11-8b16-9c23d4e5f607";
+
+    #[tokio::test]
+    async fn the_current_member_is_the_claims_runtime_read_from_the_placement() {
+        let (driver, requests) = driver_over_addressless_pod(CONTROLLING_SANDBOX);
+        let placement = Placement::new("dev-sandboxes");
+
+        assert_eq!(
+            driver.member_name(&placement, "env-1").await.unwrap(),
+            "workspace-a"
+        );
+        let member = driver
+            .current_member(&placement, "env-1")
+            .await
+            .unwrap()
+            .expect("a member");
+
+        assert_eq!(member.name, "workspace-a");
+        assert_eq!(member.uid, STUB_POD_UID);
+        for request in requests.lock().unwrap().iter() {
+            assert!(
+                request.starts_with("GET ") && request.contains("/namespaces/dev-sandboxes/"),
+                "{request}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_logs_read_the_workspace_container_of_that_member() {
+        let (driver, requests) = driver_over_addressless_pod(CONTROLLING_SANDBOX);
+
+        // The stub has no log, so the read itself fails.
+        assert!(
+            driver
+                .workspace_logs(&Placement::new("dev-sandboxes"), "workspace-a", 200)
+                .await
+                .is_err()
+        );
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        let request = &requests[0];
+        assert!(
+            request.starts_with("GET /api/v1/namespaces/dev-sandboxes/pods/workspace-a/log?")
+                && request.contains("container=workspace")
+                && request.contains("tailLines=200")
+                && request.contains("timestamps=true"),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_an_incarnation_that_is_already_gone_writes_nothing() {
+        let (driver, requests) = driver_over_addressless_pod(CONTROLLING_SANDBOX);
+        let gone = MemberRef {
+            name: "workspace-a".into(),
+            uid: "an-earlier-incarnation".into(),
+        };
+
+        let replacement = driver
+            .replace_member(
+                &Placement::new("dev-sandboxes"),
+                "env-1",
+                &gone,
+                "support-image",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(replacement, MemberReplacement::AlreadyReplaced);
+        for request in requests.lock().unwrap().iter() {
+            assert!(request.starts_with("GET "), "{request}");
+        }
+    }
+
+    #[tokio::test]
+    async fn replacing_the_current_incarnation_deletes_it_in_the_placement() {
+        let (driver, requests) = driver_over_addressless_pod(CONTROLLING_SANDBOX);
+        let current = MemberRef {
+            name: "workspace-a".into(),
+            uid: STUB_POD_UID.into(),
+        };
+
+        let replacement = driver
+            .replace_member(
+                &Placement::new("dev-sandboxes"),
+                "env-1",
+                &current,
+                "support-image",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(replacement, MemberReplacement::Replaced);
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests.iter().any(|request| request
+                .starts_with("DELETE /api/v1/namespaces/dev-sandboxes/pods/workspace-a")),
+            "{requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replacement_is_a_ready_member_with_another_uid() {
+        let (driver, _) = driver_over_addressless_pod(CONTROLLING_SANDBOX);
+        let placement = Placement::new("dev-sandboxes");
+        let member = |uid: &str| MemberRef {
+            name: "workspace-a".into(),
+            uid: uid.into(),
+        };
+
+        let replacement = driver
+            .wait_replacement(
+                &placement,
+                &member("an-earlier-incarnation"),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replacement.uid, STUB_POD_UID);
+
+        // The same UID has not been replaced, however ready it is.
+        assert!(
+            driver
+                .wait_replacement(&placement, &member(STUB_POD_UID), Duration::from_millis(1))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

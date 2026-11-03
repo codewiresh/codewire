@@ -21,8 +21,6 @@ use codewire_server_core::org_deletion::{
     RuntimeMutationOutcome, run_environment_runtime_mutation_with_outcome,
 };
 use codewire_server_core::{AppError, AppResult};
-use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, LogParams};
 use sqlx::{PgPool, Row};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -34,8 +32,7 @@ use super::ApiState;
 use super::proxy::{
     huma_error, resolve_running_sandbox_target, resolve_running_sandbox_target_for_repair,
 };
-use crate::runtime::{Placement, RuntimeDriver};
-use crate::sandbox::client::{SandboxClient, WorkspacePodIdentity};
+use crate::runtime::{MemberRef, Placement, RuntimeDriver};
 use crate::sandbox::template::{WORKSPACE_DAEMON_PORT, workspace_daemon_service_name};
 use crate::worker::activity_authority::{
     ActivityAuthority, await_external_mutation, is_authority_lost,
@@ -612,33 +609,30 @@ pub async fn get_environment_daemon_logs_core(
     environment_id: &str,
 ) -> AppResult<Vec<u8>> {
     let target = resolve_target(state, user, org_id, environment_id).await?;
-    let kube = state
-        .kube
-        .as_ref()
+    let runtime = state
+        .runtime
+        .as_deref()
         .ok_or_else(|| AppError::ServiceUnavailable("sandbox client not configured".into()))?;
-    let sandbox = SandboxClient::new(kube.clone(), &target.namespace);
-    let pod_name = resolve_pod_name(&sandbox, &target.environment_id, &target.pod_name).await?;
-    let pods: Api<Pod> = Api::namespaced(kube.clone(), &target.namespace);
-    pods.logs(
-        &pod_name,
-        &LogParams {
-            container: Some("workspace".into()),
-            tail_lines: Some(DAEMON_LOG_TAIL_LINES),
-            timestamps: true,
-            ..Default::default()
-        },
+    let placement = Placement::new(&target.namespace);
+    let pod_name = resolve_pod_name(
+        runtime,
+        &placement,
+        &target.environment_id,
+        &target.pod_name,
     )
-    .await
-    .map(String::into_bytes)
-    .map_err(|error| {
-        tracing::warn!(
-            environment_id,
-            %pod_name,
-            %error,
-            "read environment daemon logs failed"
-        );
-        AppError::Upstream("environment daemon logs are unavailable".into())
-    })
+    .await?;
+    runtime
+        .workspace_logs(&placement, &pod_name, DAEMON_LOG_TAIL_LINES)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                environment_id,
+                %pod_name,
+                %error,
+                "read environment daemon logs failed"
+            );
+            AppError::Upstream("environment daemon logs are unavailable".into())
+        })
 }
 
 pub async fn repair_environment_daemon_core(
@@ -658,7 +652,6 @@ pub async fn repair_environment_daemon_core(
         .runtime
         .clone()
         .ok_or_else(|| AppError::ServiceUnavailable("sandbox client not configured".into()))?;
-    let sandbox = SandboxClient::new(kube.clone(), &target.namespace);
     // No database connection is pinned across the long replacement wait.
     // Concurrent callers may observe the same incarnation, but deletion is
     // UID-fenced, replacement wait is keyed by that old UID, and the final
@@ -712,8 +705,8 @@ pub async fn repair_environment_daemon_core(
     )
     .await
     .map_err(|_| AppError::Conflict("environment state changed during daemon repair".into()))?;
-    let current = sandbox
-        .get_workspace_pod_identity(&target.environment_id)
+    let current = runtime
+        .current_member(&Placement::new(&target.namespace), &target.environment_id)
         .await
         .map_err(|_| AppError::ServiceUnavailable("workspace Pod is unavailable".into()))?
         .ok_or_else(|| AppError::ServiceUnavailable("workspace Pod is unavailable".into()))?;
@@ -728,7 +721,6 @@ pub async fn repair_environment_daemon_core(
             daemon_endpoints: state.environment_daemon_endpoints.clone(),
             namespace: target.namespace,
             environment_id: target.environment_id,
-            sandbox,
             authority,
             current,
             support_image: state.sandbox_cfg.support_image().to_owned(),
@@ -748,9 +740,8 @@ struct DaemonRepair {
     daemon_endpoints: EnvironmentDaemonEndpointOverrides,
     namespace: String,
     environment_id: String,
-    sandbox: SandboxClient,
     authority: ActivityAuthority,
-    current: WorkspacePodIdentity,
+    current: MemberRef,
     /// The support image the replacement's daemon is re-pinned to.
     support_image: String,
     /// How long the replacement may take to come up and bind.
@@ -783,12 +774,13 @@ impl DaemonRepair {
         self,
     ) -> RuntimeMutationOutcome<AppResult<EnvironmentDaemonRepair>> {
         let environment_id = self.environment_id.as_str();
+        let placement = Placement::new(&self.namespace);
         if let Err(error) = delete_workspace_pod_while_setup_idle(
             &self.authority,
-            &self.sandbox,
+            self.runtime.as_ref(),
+            &placement,
             environment_id,
-            &self.current.name,
-            &self.current.uid,
+            &self.current,
             &self.support_image,
         )
         .await
@@ -815,11 +807,8 @@ impl DaemonRepair {
             .authority
             .run_while_authoritative_for_states(
                 &["running"],
-                self.sandbox.wait_for_replacement_workspace_pod(
-                    &self.current.name,
-                    &self.current.uid,
-                    self.timeout,
-                ),
+                self.runtime
+                    .wait_replacement(&placement, &self.current, self.timeout),
             )
             .await
         {
@@ -986,10 +975,10 @@ fn daemon_repair_setup_is_idle(setup_complete: bool, setup_owner_status: Option<
 /// with.
 async fn delete_workspace_pod_while_setup_idle(
     authority: &ActivityAuthority,
-    sandbox: &SandboxClient,
+    runtime: &dyn RuntimeDriver,
+    placement: &Placement,
     environment_id: &str,
-    pod_name: &str,
-    pod_uid: &str,
+    member: &MemberRef,
     support_image: &str,
 ) -> anyhow::Result<()> {
     let mut guard = authority.begin_external_mutation(&["running"]).await?;
@@ -1011,7 +1000,7 @@ async fn delete_workspace_pod_while_setup_idle(
     await_external_mutation(delete_workspace_pod_after_setup_recheck(
         setup_complete,
         setup_owner_status,
-        sandbox.replace_workspace_pod_if_uid(environment_id, pod_name, pod_uid, support_image),
+        runtime.replace_member(placement, environment_id, member, support_image),
     ))
     .await?;
     guard.commit().await
@@ -1433,17 +1422,21 @@ fn daemon_session_error(error: tonic::Status) -> AppError {
 }
 
 async fn resolve_pod_name(
-    sandbox: &SandboxClient,
+    runtime: &dyn RuntimeDriver,
+    placement: &Placement,
     environment_id: &str,
     known_pod_name: &str,
 ) -> AppResult<String> {
     if !known_pod_name.trim().is_empty() {
         return Ok(known_pod_name.to_string());
     }
-    sandbox.get_pod_name(environment_id).await.map_err(|error| {
-        tracing::warn!(environment_id, %error, "resolve environment daemon Pod failed");
-        AppError::Upstream("environment daemon Pod is unavailable".into())
-    })
+    runtime
+        .member_name(placement, environment_id)
+        .await
+        .map_err(|error| {
+            tracing::warn!(environment_id, %error, "resolve environment daemon Pod failed");
+            AppError::Upstream("environment daemon Pod is unavailable".into())
+        })
 }
 
 #[cfg(test)]
@@ -1539,6 +1532,28 @@ mod tests {
                 codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_END_AFTER_DETACHED
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn daemon_logs_use_the_known_pod_and_ask_the_runtime_only_without_one() {
+        let runtime = crate::runtime::fake::FakeRuntimeDriver::default();
+        let placement = Placement::new("dev-sandboxes");
+
+        assert_eq!(
+            resolve_pod_name(&runtime, &placement, "env-1", "known-pod")
+                .await
+                .unwrap(),
+            "known-pod"
+        );
+
+        // The fake has no answer scripted, so asking it fails.
+        let error = resolve_pod_name(&runtime, &placement, "env-1", " ")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Upstream(message) if message == "environment daemon Pod is unavailable"
+        ));
     }
 
     #[test]

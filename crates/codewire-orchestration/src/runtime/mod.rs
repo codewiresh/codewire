@@ -17,7 +17,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 pub use crate::sandbox::client::{
-    ProbeResult, WorkspacePodIdentity as MemberRef, WorkspaceSandboxIdentity as SuspendedRuntime,
+    ProbeResult, WorkspacePodIdentity as MemberRef, WorkspacePodReplacement as MemberReplacement,
+    WorkspaceSandboxIdentity as SuspendedRuntime,
 };
 use crate::sandbox::host_keys::HostKeyStore;
 pub use crate::sandbox::sidecar::PortForwardedStream as RuntimeStream;
@@ -189,6 +190,41 @@ pub trait RuntimeLifecycle: Send + Sync {
         placement: &Placement,
         teardown: &RuntimeTeardown<'_>,
     ) -> anyhow::Result<()>;
+
+    /// The incarnation the environment's claim currently points at, if it
+    /// exists.
+    async fn current_member(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<Option<MemberRef>>;
+
+    /// The name the environment's current runtime has or will have. One read
+    /// fewer than [`current_member`](Self::current_member), and it doesn't
+    /// require the runtime to exist.
+    async fn member_name(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<String>;
+
+    /// Replace exactly this incarnation, re-pinned to `support_image`. It never
+    /// touches a newer one.
+    async fn replace_member(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        member: &MemberRef,
+        support_image: &str,
+    ) -> anyhow::Result<MemberReplacement>;
+
+    /// Wait until a ready incarnation other than `previous` has taken its name.
+    async fn wait_replacement(
+        &self,
+        placement: &Placement,
+        previous: &MemberRef,
+        timeout: Duration,
+    ) -> anyhow::Result<MemberRef>;
 }
 
 /// How a client reaches a running environment.
@@ -221,6 +257,14 @@ pub trait RuntimeAccess: Send + Sync {
         placement: &Placement,
         environment_id: &str,
     ) -> anyhow::Result<ClaimReadiness>;
+
+    /// The last `tail_lines` of the workspace's output, with timestamps.
+    async fn workspace_logs(
+        &self,
+        placement: &Placement,
+        member_name: &str,
+        tail_lines: i64,
+    ) -> anyhow::Result<Vec<u8>>;
 
     /// A stream to the SSH server of the environment's current runtime, proven
     /// to be the one its bound claim controls.
