@@ -142,11 +142,17 @@ Environment:
                                     the candidate smoke, default 400 for fresh
                                     dev transport proof nodes
 
-Exit status is 0 only when every path passed and cleanup completed. On
-failure the last line names the failed path (direct_udp, udp_relay,
-derp_relay or websocket) with the smoke's acceptance stage and class, and
-every node this run cordoned is uncordoned on every exit path the shell can
-trap. The wrapper never prints API keys. Without --cleanup-on-failure, a
+Exit status is 0 only when every path passed and cleanup completed. On a
+smoke failure an error line names the failed path (direct_udp, udp_relay,
+derp_relay or websocket) with the smoke's acceptance stage and class. Every
+failed exit ends with one line that holds no name, ID or path:
+  [transport-matrix] exit-failure step=STEP cleanup=CLEANUP legs=LEGS
+STEP is setup, smoke, evidence or cleanup: what the run was doing when it
+failed. CLEANUP is ok or the first cleanup step that failed: nodes, cw,
+request, wait or namespace. LEGS is passed once the evidence of all four
+paths is confirmed, otherwise unproven. Every node this run cordoned is
+uncordoned on every exit path the shell can trap. The wrapper never prints
+API keys. Without --cleanup-on-failure, a
 failed run leaves the environment and evidence directories in place.
 
 The environment is removed once the smoke has logged its id, which it does
@@ -164,6 +170,19 @@ die() {
   printf '[transport-matrix] ERROR: %s\n' "$*" >&2
   exit 1
 }
+
+# What this run was doing, for the one line that ends a failed exit. The line
+# holds only values from these closed sets, so it can leave a private capture.
+MATRIX_STEP=setup
+MATRIX_CLEANUP_FAILED=ok
+MATRIX_LEGS=unproven
+
+report_exit_failure() {
+  log "exit-failure step=$MATRIX_STEP cleanup=$MATRIX_CLEANUP_FAILED legs=$MATRIX_LEGS"
+}
+
+# Replaced by cleanup once there is something to clean up.
+trap 'rc=$?; ((rc == 0)) || report_exit_failure; exit "$rc"' EXIT
 
 case "$-" in
   *x*) die "shell tracing is enabled; rerun without set -x" ;;
@@ -432,16 +451,19 @@ restore_cordoned_nodes() {
 
 wait_for_environment_destroyed() {
   local deadline=$((SECONDS + MATRIX_DESTROY_TIMEOUT_SECONDS))
-  local state_json
+  local report_json
 
+  # info resolves only live environments, so it fails once removal completes,
+  # and absence is not proof of removal. report reads this exact ID, deleted
+  # or not.
   while ((SECONDS < deadline)); do
-    if state_json="$({
+    if report_json="$({
       CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY" \
         CW_CONFIG_DIR="${INITIAL_EVIDENCE_DIR:-$MATRIX_DIR}/cw-config" \
-        timeout 60 "$MATRIX_CLI" --server "$CODEWIRE_SERVER_URL" info "$ENV_ID" --output json
+        timeout 60 "$MATRIX_CLI" --server "$CODEWIRE_SERVER_URL" report "$ENV_ID" --output json
     } 2>/dev/null)" &&
-      jq -e '.state == "destroyed" and .desired_state == "destroyed"' \
-        >/dev/null <<<"$state_json"; then
+      jq -e --arg id "$ENV_ID" '.environment.id == $id and .environment.state == "destroyed"' \
+        >/dev/null <<<"$report_json"; then
       return 0
     fi
     sleep 2
@@ -515,6 +537,12 @@ stop_running_smoke() {
   SMOKE_PGID=""
 }
 
+# The first cleanup step that failed names the failure; every one still runs.
+cleanup_failed() {
+  [[ "$MATRIX_CLEANUP_FAILED" != ok ]] || MATRIX_CLEANUP_FAILED="$1"
+  rc=1
+}
+
 cleanup() {
   local rc=$?
   local remove_env=0 env_removed=1
@@ -523,7 +551,7 @@ cleanup() {
   # runtime nodes still cordoned.
   trap '' INT TERM HUP
   stop_running_smoke
-  restore_cordoned_nodes || rc=1
+  restore_cordoned_nodes || cleanup_failed nodes
   [[ -n "$ENV_ID" ]] || read_initial_smoke_log
 
   if [[ "$MATRIX_KEEP_ENV" != "1" && ( "$rc" == "0" || "$MATRIX_CLEANUP_ON_FAILURE" == "1" ) ]]; then
@@ -534,15 +562,15 @@ cleanup() {
     log "deleting smoke environment $ENV_ID"
     if [[ ! -x "$MATRIX_CLI" ]]; then
       log "ERROR: no cw to delete environment $ENV_ID with; it remains"
-      rc=1
+      cleanup_failed cw
     elif ! CODEWIRE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY" \
       CW_CONFIG_DIR="${INITIAL_EVIDENCE_DIR:-$MATRIX_DIR}/cw-config" \
       timeout 120 "$MATRIX_CLI" --server "$CODEWIRE_SERVER_URL" rm --yes "$ENV_ID" >/dev/null 2>&1; then
       log "ERROR: environment $ENV_ID delete request failed; it remains"
-      rc=1
+      cleanup_failed request
     elif ! wait_for_environment_destroyed; then
       log "ERROR: environment $ENV_ID did not reach destroyed within ${MATRIX_DESTROY_TIMEOUT_SECONDS}s"
-      rc=1
+      cleanup_failed wait
     else
       log "environment $ENV_ID reached destroyed"
       env_removed=1
@@ -559,7 +587,7 @@ cleanup() {
       if ! kubectl_dev delete namespace "$MATRIX_SANDBOX_NAMESPACE" \
         --ignore-not-found --wait=true --timeout=180s >/dev/null; then
         log "ERROR: temporary sandbox namespace $MATRIX_SANDBOX_NAMESPACE deletion failed"
-        rc=1
+        cleanup_failed namespace
       fi
     else
       log "kept temporary sandbox namespace $MATRIX_SANDBOX_NAMESPACE"
@@ -570,6 +598,7 @@ cleanup() {
     log "transport matrix evidence directory $MATRIX_DIR"
   else
     log "kept failed transport matrix evidence directory $MATRIX_DIR"
+    report_exit_failure
   fi
   exit "$rc"
 }
@@ -618,6 +647,7 @@ cordon_other_runtime_nodes
 if [[ "$SMOKE_SKIP_KUBE" == "1" ]]; then
   target_description="$target_description, application and tailnet only"
 fi
+MATRIX_STEP=smoke
 log "running fresh-node direct_udp + udp_relay + forced DERP + websocket smoke for $SMOKE_NAME against $target_description (smoke bound ${MATRIX_TIMEOUT_SECONDS}s; worst case with cleanup $(matrix_worst_case_seconds "${#MATRIX_CORDONED_NODES[@]}")s)"
 # In the background so a signal reaches this shell at once and is forwarded.
 EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp \
@@ -655,6 +685,7 @@ if [[ "$smoke_rc" != "0" ]]; then
   die "transport matrix failed: $(failure_summary "$smoke_rc")"
 fi
 
+MATRIX_STEP=evidence
 [[ -n "$ENV_ID" ]] || die "failed to parse environment id from $INITIAL_LOG"
 [[ -n "$INITIAL_EVIDENCE_DIR" && -d "$INITIAL_EVIDENCE_DIR" ]] || \
   die "failed to parse evidence directory from $INITIAL_LOG"
@@ -674,4 +705,6 @@ grep -qx 'tailnet-derp-ssh-ok' "$INITIAL_EVIDENCE_DIR/ssh-tailnet-derp.out" || \
 grep -qx 'websocket-ssh-ok' "$INITIAL_EVIDENCE_DIR/ssh-websocket.out" || \
   die "path=websocket: WebSocket SSH evidence is missing from $INITIAL_EVIDENCE_DIR"
 
+MATRIX_STEP=cleanup
+MATRIX_LEGS=passed
 log "fresh-node transport matrix passed for $ENV_ID: direct_udp, udp_relay, derp_relay, websocket"

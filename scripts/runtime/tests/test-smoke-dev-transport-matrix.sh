@@ -5,7 +5,8 @@
 # dev is tested without changing it; every node the run cordons is uncordoned
 # on success, failure, the time bound and a signal, and a node left cordoned
 # by a killed run is recovered; the environment is removed on failure when
-# asked; and a failure's last line names the tailnet path that broke.
+# asked; a failure names the tailnet path that broke; and every failed exit
+# names its step, so a failure can never come back unnamed.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -89,19 +90,33 @@ esac
 EOF
 chmod 0755 "$FAKE_ROOT/scripts/runtime/dev/smoke-dev-candidate.sh"
 
-# cw: `rm` is recorded and `info` reports destroyed afterwards.
+# cw, answering as the real one does: `info` resolves only live environments,
+# so it fails once `rm` has run, and `report` reads the exact ID, deleted or not
+# (its environment has no desired_state). Any other command fails the run.
+# FAKE_CW_RM_FAILS refuses `rm`; FAKE_CW_NEVER_DESTROYED keeps the report short
+# of destroyed.
 FAKE_CW="$TEST_TMP/cw"
 cat >"$FAKE_CW" <<'EOF'
 #!/usr/bin/env bash
 state="${FAKE_STATE:?}"
 shift 2  # --server URL
 case "$1" in
-  rm) printf '%s\n' "$3" >>"$state/cw-rm" ;;
+  rm)
+    [[ "${FAKE_CW_RM_FAILS:-0}" != 1 ]] || exit 1
+    printf '%s\n' "$3" >>"$state/cw-rm"
+    ;;
   info)
     if [[ -s "$state/cw-rm" ]]; then
-      printf '{"state":"destroyed","desired_state":"destroyed"}\n'
+      printf 'platform environment "%s" not found\n' "$2" >&2
+      exit 1
+    fi
+    printf '{"state":"running","desired_state":"running"}\n'
+    ;;
+  report)
+    if [[ -s "$state/cw-rm" && "${FAKE_CW_NEVER_DESTROYED:-0}" != 1 ]]; then
+      printf '{"environment":{"id":"%s","state":"destroyed"}}\n' "$2"
     else
-      printf '{"state":"running","desired_state":"running"}\n'
+      printf '{"environment":{"id":"%s","state":"destroying"}}\n' "$2"
     fi
     ;;
   *) exit 97 ;;
@@ -213,6 +228,7 @@ process_running() {
 }
 node_state() { printf '%s:%s' "$(cat "$CASE/state/nodes/$1/unschedulable")" "$(cat "$CASE/state/nodes/$1/annotation" 2>/dev/null || true)"; }
 last_error() { grep -F '[transport-matrix] ERROR:' "$CASE/err" | tail -n 1; }
+exit_line() { grep -F '[transport-matrix] exit-failure' "$CASE/err" | tail -n 1; }
 show_err() { sed 's/[[:cntrl:]]//g' "$CASE/err" >&2; }
 
 # The deployed dev, unchanged: no candidate image, no shared-dev override, no
@@ -252,6 +268,28 @@ new_case supplied-cw
 run_matrix pass MATRIX_CORDON_OTHER_RUNTIME_NODES=0 CW_BIN="$FAKE_CW" -- --current-dev
 [[ "$(case_rc)" == 0 ]] || { show_err; fail "supplied-cw pass exited $(case_rc)"; }
 grep -Fq "cw_bin=$FAKE_CW" "$CASE/state/candidate.env" || fail "the smoke did not get the supplied CW_BIN"
+[[ -z "$(exit_line)" ]] || fail "a passing run printed an exit-failure line"
+
+# Every failed exit ends with one line naming its step, and the line holds no
+# ID or path. A cleanup failure after a pass says the legs passed.
+new_case cleanup-wait-names-itself
+run_matrix pass MATRIX_CORDON_OTHER_RUNTIME_NODES=0 CW_BIN="$FAKE_CW" FAKE_CW_NEVER_DESTROYED=1 \
+  MATRIX_DESTROY_TIMEOUT_SECONDS=1 -- --current-dev
+[[ "$(case_rc)" == 1 ]] || { show_err; fail "a cleanup timeout exited $(case_rc)"; }
+[[ "$(exit_line)" == '[transport-matrix] exit-failure step=cleanup cleanup=wait legs=passed' ]] ||
+  { show_err; fail "a cleanup timeout did not name itself: $(exit_line)"; }
+
+new_case cleanup-request-names-itself
+run_matrix pass MATRIX_CORDON_OTHER_RUNTIME_NODES=0 CW_BIN="$FAKE_CW" FAKE_CW_RM_FAILS=1 -- --current-dev
+[[ "$(case_rc)" == 1 ]] || { show_err; fail "a refused rm exited $(case_rc)"; }
+[[ "$(exit_line)" == '[transport-matrix] exit-failure step=cleanup cleanup=request legs=passed' ]] ||
+  { show_err; fail "a refused rm did not name itself: $(exit_line)"; }
+
+new_case setup-names-itself
+run_matrix pass CODEWIRE_DEV_SMOKE_API_KEY= -- --current-dev
+[[ "$(case_rc)" == 1 ]] || { show_err; fail "a missing key exited $(case_rc)"; }
+[[ "$(exit_line)" == '[transport-matrix] exit-failure step=setup cleanup=ok legs=unproven' ]] ||
+  { show_err; fail "a setup failure did not name itself: $(exit_line)"; }
 
 # A failed path is named on the last line; --cleanup-on-failure removes the
 # environment and keeps the evidence.
@@ -262,6 +300,8 @@ last_error | grep -Fq 'transport matrix failed: path=udp_relay stage=udp-relay c
   { show_err; fail "a relay failure did not name its path"; }
 [[ "$(cat "$CASE/state/cw-rm")" == env-0123 ]] || fail "--cleanup-on-failure kept the environment"
 grep -Fq 'kept failed transport matrix evidence directory' "$CASE/err" || fail "failure evidence was not kept"
+[[ "$(exit_line)" == '[transport-matrix] exit-failure step=smoke cleanup=ok legs=unproven' ]] ||
+  { show_err; fail "a relay failure's exit line is wrong: $(exit_line)"; }
 
 # Without it, a failure keeps the environment for debugging, as before.
 new_case relay-failure-keep

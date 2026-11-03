@@ -71,7 +71,9 @@
         "scripts/ci/verify/stock-ssh-workload.sh",
         "scripts/runtime/dev/provider-ssh-smoke.sh",
         "scripts/runtime/dev/run-secrets-credentials-acceptance.sh",
-        "scripts/runtime/dev/smoke-dev-commodity.sh"
+        "scripts/runtime/dev/smoke-dev-candidate.sh",
+        "scripts/runtime/dev/smoke-dev-commodity.sh",
+        "scripts/runtime/dev/smoke-dev-transport-matrix.sh"
       ]
     },
     "cw_cli_release_assets": {
