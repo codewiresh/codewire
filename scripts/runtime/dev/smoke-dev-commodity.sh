@@ -846,12 +846,15 @@ cw_with_timeout() {
 }
 
 # Value-blind class of one failed cw command: dns, tls, timeout, refused,
-# connect, http_<status> or exit_<code>. It reads only the exit status and
-# fixed patterns in the captured stderr, and never prints the stderr. cw
-# reports a failure before any response as "error sending request for url
-# (...); caused by: <cause>", where the cause names a "dns error", a
-# "tls error", a timeout or a refused "tcp connect error"; connect is what
-# remains, such as a reset connection.
+# conn_reset, conn_pipe, conn_tcp, conn_closed, conn_http2, conn_send,
+# http_<status> or exit_<code>. It reads only the exit status and fixed
+# patterns in the captured stderr, and never prints the stderr. cw reports a
+# failure before any response as "error sending request for url (...); caused
+# by: <cause>", where the cause names a "dns error", a "tls error", a timeout
+# or a refused "tcp connect error". The conn_ classes tell the rest apart: a
+# connection reset, a broken pipe, one that never opened, one closed before its
+# reply, an HTTP/2 error, and conn_send for any other send failure. The deploy
+# relay repeats only these names, and dev-ux-ownership.ts mirrors them.
 cw_failure_class() {
   local status="$1" error="$2" code=''
   if [[ "$status" == 124 || "$status" == 137 ]]; then printf timeout; return; fi
@@ -865,9 +868,12 @@ cw_failure_class() {
     if grep -Eqi -- 'tls error|certificate|tls handshake' "$error"; then printf tls; return; fi
     if grep -Eqi -- 'timed out|deadline exceeded|deadline_exceeded' "$error"; then printf timeout; return; fi
     if grep -Eqi -- 'connection refused' "$error"; then printf refused; return; fi
-    if grep -Eqi -- 'error sending request|connection reset|tcp connect error|broken pipe' "$error"; then
-      printf connect; return
-    fi
+    if grep -Eqi -- 'connection reset' "$error"; then printf conn_reset; return; fi
+    if grep -Eqi -- 'broken pipe' "$error"; then printf conn_pipe; return; fi
+    if grep -Eqi -- 'tcp connect error|client error \(Connect\)' "$error"; then printf conn_tcp; return; fi
+    if grep -Eqi -- 'connection closed before message completed' "$error"; then printf conn_closed; return; fi
+    if grep -Eqi -- 'http2 error' "$error"; then printf conn_http2; return; fi
+    if grep -Eqi -- 'error sending request' "$error"; then printf conn_send; return; fi
   fi
   printf 'exit_%s' "$status"
 }
@@ -876,13 +882,15 @@ cw_failure_class() {
 # value-blind class and logs it, then returns the status for the caller's fixed
 # die message. Standard input passes through for protected writes.
 prepare_cw() {
-  local step="$1" output="$2" error="$3" status class
+  local step="$1" output="$2" error="$3" status class started_at started_ms
   shift 3
+  started_at="$(command_start_time)"
+  started_ms="$(milliseconds_now)"
   if cw_with_timeout 30 "$@" >"$output" 2>"$error"; then SMOKE_LAST_CW_CLASS=''; return 0; else status=$?; fi
   class="$(cw_failure_class "$status" "$error")"
   SMOKE_LAST_CW_CLASS="$class"
   printf '%s\t%s\t%s\n' "$step" "$status" "$class" >>"$TMPDIR_SMOKE/app-prepare-commands.tsv"
-  log "cw-failure step=$step class=$class"
+  log "cw-failure step=$step class=$class$(command_timing "$started_at" "$started_ms")"
   return "$status"
 }
 
@@ -893,9 +901,11 @@ prepare_cw() {
 # step, index, attempt, exit status, class; logs carry only label and class.
 cleanup_cw() {
   local duration="$1" classification="$2" step="$3" index="$4" output="$5" error="$6" not_found="$7"
-  local attempt status class=''
+  local attempt status class='' started_at started_ms
   shift 7
   for ((attempt = 1; attempt <= SMOKE_CLEANUP_ATTEMPTS; attempt++)); do
+    started_at="$(command_start_time)"
+    started_ms="$(milliseconds_now)"
     if cw_with_timeout "$duration" "$@" >"$output" 2>"$error"; then status=0; else status=$?; fi
     if [[ "$status" == 0 ]]; then
       printf '%s\t%s\t%s\t0\tok\n' "$step" "$index" "$attempt" >>"$classification"
@@ -910,17 +920,29 @@ cleanup_cw() {
     class="$(cw_failure_class "$status" "$error")"
     printf '%s\t%s\t%s\t%s\t%s\n' "$step" "$index" "$attempt" "$status" "$class" >>"$classification"
     if ((attempt < SMOKE_CLEANUP_ATTEMPTS)); then
-      log "cleanup retry step=$step attempt=$attempt class=$class"
+      log "cleanup retry step=$step attempt=$attempt class=$class$(command_timing "$started_at" "$started_ms")"
       sleep "$((SMOKE_CLEANUP_RETRY_DELAY * attempt))"
     fi
   done
   SMOKE_LAST_CW_CLASS="$class"
-  log "cw-failure step=$step class=$class"
+  log "cw-failure step=$step class=$class$(command_timing "$started_at" "$started_ms")"
   return 1
 }
 
 milliseconds_now() {
   date +%s%3N
+}
+
+# When a command started, to the millisecond. Smoke log lines are stamped only
+# when the log is written out, so a failure line carries its own time to be
+# placed against gateway logs.
+command_start_time() {
+  date -u +%Y-%m-%dT%H:%M:%S.%3NZ
+}
+
+# The suffix of a failed command's line: its start time and how long it ran.
+command_timing() {
+  printf ' started=%s duration_ms=%s' "$1" "$(($(milliseconds_now) - $2))"
 }
 
 # Fixed completion marker for one application smoke stage, in the walkthrough's
@@ -1630,17 +1652,19 @@ prepare_application_all_scope_secrets() {
   for index in "${!org_keys[@]}"; do
     key="${org_keys[$index]}"; value="${org_values[$index]}"
     APP_SECRET_ORG_ATTEMPTS+=("$key")
-    printf '%s' "$value" | prepare_cw set-organization-key \
+    prepare_cw set-organization-key \
       "$TMPDIR_SMOKE/app-set-org-$index.out" "$TMPDIR_SMOKE/app-set-org-$index.err" \
-      secrets --cloud --organization set "$key" ||
+      secrets --cloud --organization set "$key" \
+      < <(printf '%s' "$value") ||
       die 'cannot write an owned organization secret via protected stdin'
   done
   for index in "${!user_keys[@]}"; do
     key="${user_keys[$index]}"; value="${user_values[$index]}"
     APP_SECRET_USER_ATTEMPTS+=("$key")
-    printf '%s' "$value" | prepare_cw set-personal-key \
+    prepare_cw set-personal-key \
       "$TMPDIR_SMOKE/app-set-user-$index.out" "$TMPDIR_SMOKE/app-set-user-$index.err" \
-      secrets --cloud --user set "$key" ||
+      secrets --cloud --user set "$key" \
+      < <(printf '%s' "$value") ||
       die 'cannot write an owned personal secret via protected stdin'
   done
 
@@ -1659,9 +1683,10 @@ prepare_application_all_scope_secrets() {
       "${project_pu[$index]}" "${project_cfg[$index]}")
     local key_index
     for key_index in "${!project_keys[@]}"; do
-      printf '%s' "${project_values[$key_index]}" | prepare_cw set-project-key \
+      prepare_cw set-project-key \
         "$TMPDIR_SMOKE/app-set-$index-$key_index.out" "$TMPDIR_SMOKE/app-set-$index-$key_index.err" \
-        secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" set "${project_keys[$key_index]}" ||
+        secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" set "${project_keys[$key_index]}" \
+        < <(printf '%s' "${project_values[$key_index]}") ||
         die 'cannot write an owned project secret via protected stdin'
     done
     prepare_cw list-project-keys "$TMPDIR_SMOKE/app-keys-$index.json" "$TMPDIR_SMOKE/app-keys-$index.err" \
@@ -1739,9 +1764,10 @@ prepare_application_secrets() {
     value="${APP_SECRET_VALUES[$index]}"
     APP_SECRET_HASHES+=("$(printf '%s' "$value" | sha256sum | cut -d ' ' -f 1)")
     for key in DATABASE_URL CW_DEV_PRECEDENCE; do
-      printf '%s' "$value" | prepare_cw set-project-key \
+      prepare_cw set-project-key \
         "$TMPDIR_SMOKE/app-set-$index-$key.out" "$TMPDIR_SMOKE/app-set-$index-$key.err" \
-        secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" set "$key" ||
+        secrets --cloud --project "id:${APP_SECRET_IDS[$index]}" set "$key" \
+        < <(printf '%s' "$value") ||
         die 'dedicated smoke identity cannot write its synthetic project secret via protected stdin'
     done
     prepare_cw list-project-keys "$TMPDIR_SMOKE/app-keys-$index.json" "$TMPDIR_SMOKE/app-keys-$index.err" \

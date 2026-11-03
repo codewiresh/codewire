@@ -3,10 +3,12 @@
 
 // Closed failure classes for the helper's one failure-class line (#3132). A
 // failed cw command adds the shell smoke's cw_failure_class set: dns, tls,
-// refused, connect, http_NNN or exit_N.
+// refused, conn_reset, conn_pipe, conn_tcp, conn_closed, conn_http2, conn_send,
+// http_NNN or exit_N.
 export type FailureClass = "timeout" | "assertion" | "navigation" | "unexpected"
-  | "dns" | "tls" | "refused" | "connect" | `http_${number}` | `exit_${number}`;
-const FAILURE_CLASS = /^(?:timeout|assertion|navigation|unexpected|dns|tls|refused|connect|http_[1-5][0-9]{2}|exit_[0-9]{1,3})$/;
+  | "dns" | "tls" | "refused" | "conn_reset" | "conn_pipe" | "conn_tcp" | "conn_closed" | "conn_http2" | "conn_send"
+  | `http_${number}` | `exit_${number}`;
+const FAILURE_CLASS = /^(?:timeout|assertion|navigation|unexpected|dns|tls|refused|conn_(?:reset|pipe|tcp|closed|http2|send)|http_[1-5][0-9]{2}|exit_[0-9]{1,3})$/;
 
 export function isFailureClass(value: unknown): value is FailureClass {
   return typeof value === "string" && FAILURE_CLASS.test(value);
@@ -23,7 +25,12 @@ export function cwFailureClass(status: number, stderr: string): FailureClass {
   if (/tls error|certificate|tls handshake/i.test(stderr)) return "tls";
   if (/timed out|deadline exceeded|deadline_exceeded/i.test(stderr)) return "timeout";
   if (/connection refused/i.test(stderr)) return "refused";
-  if (/error sending request|connection reset|tcp connect error|broken pipe/i.test(stderr)) return "connect";
+  if (/connection reset/i.test(stderr)) return "conn_reset";
+  if (/broken pipe/i.test(stderr)) return "conn_pipe";
+  if (/tcp connect error|client error \(Connect\)/i.test(stderr)) return "conn_tcp";
+  if (/connection closed before message completed/i.test(stderr)) return "conn_closed";
+  if (/http2 error/i.test(stderr)) return "conn_http2";
+  if (/error sending request/i.test(stderr)) return "conn_send";
   return `exit_${Math.min(Math.max(Math.trunc(status), 0), 255)}`;
 }
 // Playwright navigation failures: a Chromium net error, or a goto or reload

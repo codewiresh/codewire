@@ -17,6 +17,12 @@ APP_TEST_COUNT=0
 REAL_APPLICATION_PTY="$(declare -f run_application_secret_pty)"
 fail() { printf 'application smoke fixture: %s\n' "$*" >&2; exit 1; }
 pass() { APP_TEST_COUNT=$((APP_TEST_COUNT + 1)); }
+# One failed command's fixed line, followed by its start time and duration.
+has_timed_line() {
+  local escaped
+  escaped="$(printf '%s' "$1" | sed 's/[][\.*^$]/\\&/g')"
+  grep -Eqx -- "$escaped started=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z duration_ms=[0-9]{1,7}" "$2"
+}
 
 # Keep the real polling loop and readiness predicates, but advance its clock
 # only on retry sleeps. A one-second synthetic budget must not expire between
@@ -138,6 +144,10 @@ cw() {
       else
         [[ "$input" == cwdevapp* && ${#input} == 41 ]]
       fi || fail 'protected stdin was not supplied'
+      if [[ "$APP_FAILURE" == project-set-reset ]]; then
+        printf 'send request: error sending request for url (https://synthetic.invalid/private); caused by: client error (SendRequest): connection error: Connection reset by peer (os error 104)\n' >&2
+        return 1
+      fi
       [[ "$APP_FAILURE" != scope ]] || return 1 ;;
     'secrets --cloud --project '*" list --output json")
       if [[ "$APP_FAILURE" == leak ]]; then
@@ -751,7 +761,7 @@ if (trap 'cleanup_application_secrets' EXIT; prepare_application_secrets) \
 fi
 [[ "$(jq length "$TMPDIR_SMOKE/organization.db")" == 0 ]] ||
   fail 'partial write cleanup did not remove the exact attempted key'
-grep -Fx '[runtime-smoke] cw-failure step=set-organization-key class=exit_1' "$TMPDIR_SMOKE/partial.err" >/dev/null ||
+has_timed_line '[runtime-smoke] cw-failure step=set-organization-key class=exit_1' "$TMPDIR_SMOKE/partial.err" ||
   fail 'failed setup command class was not named'
 grep -Fx $'set-organization-key\t1\texit_1' "$TMPDIR_SMOKE/app-prepare-commands.tsv" >/dev/null ||
   fail 'failed setup command was not classified'
@@ -1185,8 +1195,8 @@ for variant in cleanup-user-list cleanup-user-delete-lost; do
       fail 'cleanup failed although nothing was left behind'
     grep -Fx $'cleanup-delete-personal-key\t0\t3\t24\texit_24' "$APP_TEST_ROOT/cleanup-commands.tsv" >/dev/null ||
       fail 'failed delete was not retried and classified'
-    grep -Fx '[runtime-smoke] cw-failure step=cleanup-delete-personal-key class=exit_24' \
-      "$APP_TEST_ROOT/cleanup-result.err" >/dev/null || fail 'delete failure class was not named'
+    has_timed_line '[runtime-smoke] cw-failure step=cleanup-delete-personal-key class=exit_24' \
+      "$APP_TEST_ROOT/cleanup-result.err" || fail 'delete failure class was not named'
     if grep -Fq 'ERROR: application cleanup incomplete' "$APP_TEST_ROOT/cleanup-result.err"; then
       fail 'cleanup reported incomplete although nothing was left behind'
     fi
@@ -1201,14 +1211,20 @@ for case in '124||timeout' '137||timeout' '1|HTTP error 502|http_502' \
     '1|HTTP status server error (503 Service Unavailable)|http_503' \
     '1|dns error: failed to lookup address information|dns' \
     '1|invalid peer certificate: UnknownIssuer|tls' \
-    '1|send request: error sending request for url (https://synthetic.invalid/x)|connect' \
+    '1|send request: error sending request for url (https://synthetic.invalid/x)|conn_send' \
     '1|operation timed out|timeout' '7|synthetic private refusal|exit_7' \
     '1|list orgs: send request: error sending request for url (https://synthetic.invalid/x); caused by: client error (Connect): dns error: failed to lookup address information: Name or service not known|dns' \
     '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (Connect): tcp connect error: Connection refused (os error 111)|refused' \
     '1|list orgs: send request: error sending request for url (https://127.0.0.1:9/x); caused by: client error (Connect): tls error: received corrupt message of type InvalidContentType|tls' \
     '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: operation timed out|timeout' \
     '1|list orgs: client-side deadline exceeded|timeout' \
-    '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (SendRequest): connection error: Connection reset by peer (os error 104)|connect'; do
+    '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (SendRequest): connection error: Connection reset by peer (os error 104)|conn_reset' \
+    '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (SendRequest): stream closed because of a broken pipe|conn_pipe' \
+    '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (Connect): tcp connect error: Network is unreachable (os error 101)|conn_tcp' \
+    '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (Connect): invalid peer|conn_tcp' \
+    '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (SendRequest): connection closed before message completed|conn_closed' \
+    '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (SendRequest): http2 error: GOAWAY|conn_http2' \
+    '1|list orgs: send request: error sending request for url (http://127.0.0.1:9/x); caused by: client error (SendRequest): connection error|conn_send'; do
   IFS='|' read -r status text expected <<<"$case"
   printf '%s\n' "$text" >"$TMPDIR_SMOKE/class.err"
   [[ "$(cw_failure_class "$status" "$TMPDIR_SMOKE/class.err")" == "$expected" ]] ||
@@ -1228,12 +1244,12 @@ cleanup_application_secrets 2>"$TMPDIR_SMOKE/transient.err" ||
   fail 'a transient cleanup failure was not retried to success'
 [[ ! -e "$TMPDIR_SMOKE/transient-armed" ]] || fail 'transient failure was never exercised'
 jq -e 'length == 0' "$TMPDIR_SMOKE/user.db" >/dev/null || fail 'transient cleanup failure leaked a personal key'
-grep -Fx $'cleanup-delete-personal-key\t0\t1\t1\tconnect' "$TMPDIR_SMOKE/app-cleanup-user-commands.tsv" >/dev/null ||
+grep -Fx $'cleanup-delete-personal-key\t0\t1\t1\tconn_send' "$TMPDIR_SMOKE/app-cleanup-user-commands.tsv" >/dev/null ||
   fail 'transient delete attempt was not classified'
 grep -Fx $'cleanup-delete-personal-key\t0\t2\t0\tok' "$TMPDIR_SMOKE/app-cleanup-user-commands.tsv" >/dev/null ||
   fail 'transient delete attempt was not retried'
-grep -Fx '[runtime-smoke] cleanup retry step=cleanup-delete-personal-key attempt=1 class=connect' \
-  "$TMPDIR_SMOKE/transient.err" >/dev/null || fail 'cleanup retry was not logged with its class'
+has_timed_line '[runtime-smoke] cleanup retry step=cleanup-delete-personal-key attempt=1 class=conn_send' \
+  "$TMPDIR_SMOKE/transient.err" || fail 'cleanup retry was not logged with its class'
 grep -Eqx '\[runtime-smoke\] app-cleanup:passed duration_ms=[0-9]+' "$TMPDIR_SMOKE/transient.err" ||
   fail 'successful cleanup did not emit its stage marker'
 if grep -Fq 'error sending request' "$TMPDIR_SMOKE/transient.err"; then fail 'cleanup echoed raw cw stderr'; fi
@@ -1250,9 +1266,12 @@ jq -e 'length == 0' "$TMPDIR_SMOKE/organization.db" >/dev/null || fail 'personal
 [[ "$(grep -c $'^cleanup-delete-personal-key\t0\t' "$TMPDIR_SMOKE/app-cleanup-user-commands.tsv")" == 3 ]] ||
   fail 'persistent delete failure was not retried exactly three times'
 for line in \
-    '[runtime-smoke] cleanup retry step=cleanup-delete-personal-key attempt=1 class=connect' \
-    '[runtime-smoke] cleanup retry step=cleanup-delete-personal-key attempt=2 class=connect' \
-    '[runtime-smoke] cw-failure step=cleanup-delete-personal-key class=connect' \
+    '[runtime-smoke] cleanup retry step=cleanup-delete-personal-key attempt=1 class=conn_send' \
+    '[runtime-smoke] cleanup retry step=cleanup-delete-personal-key attempt=2 class=conn_send' \
+    '[runtime-smoke] cw-failure step=cleanup-delete-personal-key class=conn_send'; do
+  has_timed_line "$line" "$TMPDIR_SMOKE/down.err" || fail "persistent failure did not log: $line"
+done
+for line in \
     '[runtime-smoke] cleanup-incomplete part=personal-keys reason=not-empty' \
     '[runtime-smoke] ERROR: application cleanup incomplete; exact owned IDs remain in private smoke evidence'; do
   grep -Fx -- "$line" "$TMPDIR_SMOKE/down.err" >/dev/null || fail "persistent failure did not log: $line"
@@ -1372,6 +1391,7 @@ application_main() {
       printf '[{"id":"00000000-0000-4000-8000-000000000042","name":"fixture-env","state":"running"}]\n' \
         >"$TMPDIR_SMOKE/environments.db" ;;
     projects-list-connect) APP_FAILURE=projects-list-connect ;;
+    project-set-reset) APP_FAILURE='project-set-reset' ;;
     signal) create_environment() { kill -TERM "$BASHPID"; } ;;
   esac
   main
@@ -1384,10 +1404,19 @@ grep -Fx '[runtime-smoke] ERROR: application smoke environment name already exis
 pass
 
 run_acceptance_case application_main projects-list-connect
-assert_acceptance_failure cw-connect 1 'stage=app-prepare class=connect'
-grep -Fx '[runtime-smoke] cw-failure step=list-projects class=connect' "$ACCEPTANCE_ERR" >/dev/null ||
+assert_acceptance_failure cw-connect 1 'stage=app-prepare class=conn_send'
+has_timed_line '[runtime-smoke] cw-failure step=list-projects class=conn_send' "$ACCEPTANCE_ERR" ||
   fail 'the cw step failure line changed'
 if grep -Fq 'error sending request' "$ACCEPTANCE_ERR"; then fail 'a cw step failure echoed raw stderr'; fi
+pass
+
+# Run 34777: a write fed from protected stdin ran in a pipeline subshell, so
+# its class was lost and the stage reported a plain assertion.
+run_acceptance_case application_main project-set-reset
+assert_acceptance_failure cw-stdin 1 'stage=app-prepare class=conn_reset'
+has_timed_line '[runtime-smoke] cw-failure step=set-project-key class=conn_reset' "$ACCEPTANCE_ERR" ||
+  fail 'the protected write failure line changed'
+if grep -Fq 'Connection reset' "$ACCEPTANCE_ERR"; then fail 'a protected write failure echoed raw stderr'; fi
 pass
 
 run_acceptance_case application_main signal
@@ -1406,7 +1435,7 @@ oauth_principal_connect() {
   prepare_fresh_oauth_cli
 }
 run_acceptance_case oauth_principal_connect
-assert_acceptance_failure oauth-principal 1 'stage=oauth-principal class=connect'
+assert_acceptance_failure oauth-principal 1 'stage=oauth-principal class=conn_send'
 grep -Fx logout "$APP_TEST_ROOT/fresh-login-state/logout" >/dev/null || fail 'failed principal check skipped logout'
 pass
 
