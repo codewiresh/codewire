@@ -1161,33 +1161,45 @@ run_confidential_preview_response_cases() {
 
   mkdir -p "$case_dir"
   printf '%s\r\n' \
-    'HTTP/2 302' \
-    'location: https://codewire-dev.example/sign-in?redirect_uri=%2F' \
-    'x-codewire-service: codewire-orchestration' >"$headers"
-  printf '%s\n' '<a href="/sign-in">Found</a>.' >"$body"
+    'HTTP/2 303' \
+    'location: https://codewire-dev.example/api/v1/preview-auth/authorize?challenge=opaque' \
+    'set-cookie: __Host-codewire-preview-challenge-id=opaque; Path=/; Secure; HttpOnly' >"$headers"
+  : >"$body"
 
   (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
     source "$SMOKE"
-    validate_confidential_preview_response 302 "$headers" "$body" "$token"
+    validate_confidential_preview_response 303 "$headers" "$body" "$token"
   ) || fail "valid confidential preview sign-in boundary was rejected"
 
   printf '%s\n' "$token" >"$body"
   if (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
     source "$SMOKE"
-    validate_confidential_preview_response 302 "$headers" "$body" "$token"
+    validate_confidential_preview_response 303 "$headers" "$body" "$token"
   ); then
     fail "confidential preview accepted an unauthenticated app-content leak"
   fi
 
-  printf '%s\n' '<a href="/sign-in">Found</a>.' >"$body"
+  : >"$body"
   if (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
     source "$SMOKE"
     validate_confidential_preview_response 200 "$headers" "$body" "$token"
   ); then
     fail "confidential preview accepted a non-redirect response"
+  fi
+
+  printf '%s\r\n' \
+    'HTTP/2 303' \
+    'location: https://app.example/elsewhere' \
+    'set-cookie: __Host-codewire-preview-challenge-id=opaque; Path=/; Secure; HttpOnly' >"$headers"
+  if (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    validate_confidential_preview_response 303 "$headers" "$body" "$token"
+  ); then
+    fail "confidential preview accepted a redirect that is not its sign-in"
   fi
 }
 run_safe_diagnostic_case() {

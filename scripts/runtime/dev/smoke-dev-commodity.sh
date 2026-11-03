@@ -2608,18 +2608,25 @@ assert_pod_shape() {
   # An identity-free daemon binds to the dedicated listener over TLS with
   # the published internal roots and learns everything else, including its
   # tailnet endpoints, from that binding: no daemon token, environment
-  # identity or tailnet configuration is rendered into the Pod.
-  jq -e --arg url "$expected_binding_url" '
+  # identity or tailnet configuration is rendered into the Pod. A confidential
+  # guest mounts no ConfigMap: its roots arrive once, measured, in the
+  # environment instead of through the internal-roots mount.
+  jq -e --arg url "$expected_binding_url" --arg tier "$SMOKE_ISOLATION_TIER" '
     (.spec.containers[] | select(.name == "workspace")) as $w
     | ([$w.env[]? | select(.name == "CODEWIRE_WORKSPACE_BINDING_URL") | .value] == [$url])
     and ([$w.env[]?.name] | (index("CODEWIRE_DAEMON_AUTH_TOKEN") | not) and (index("CODEWIRE_ENVIRONMENT_ID") | not))
     and ([$w.env[]?.name
           | select(startswith("CODEWIRE_TAILNET_") or startswith("CODEWIRE_UDP_RELAY_")
                    or startswith("CODEWIRE_STUN_") or . == "CODEWIRE_DERP_URL")] | length == 0)
-    and ([$w.volumeMounts[]? | select(
-          .name == "orchestration-internal-roots"
-          and .mountPath == "/run/codewire-orchestration-internal-roots"
-          and .readOnly == true)] | length == 1)
+    and (if $tier == "confidential" then
+           ([$w.env[]? | select(.name == "CODEWIRE_MEASURED_BINDING_ROOTS")] | length == 1)
+           and ([.spec.volumes[]? | select(has("configMap"))] | length == 0)
+         else
+           [$w.volumeMounts[]? | select(
+             .name == "orchestration-internal-roots"
+             and .mountPath == "/run/codewire-orchestration-internal-roots"
+             and .readOnly == true)] | length == 1
+         end)
   ' "$pod_json" >/dev/null || \
     die "workspace Pod is not an identity-free daemon binding to $expected_binding_url with the internal roots"
   if [[ "$EXPECTED_DOCKER_MODE" != "none" ]]; then
@@ -3706,19 +3713,10 @@ validate_confidential_preview_response() {
   local headers="$2"
   local body="$3"
   local token="$4"
-  local service location
+  local location
 
-  [[ "$status" == "302" ]] || return 1
+  [[ "$status" == "303" ]] || return 1
   [[ -f "$headers" && -f "$body" ]] || return 1
-  service="$(awk '
-    tolower($0) ~ /^x-codewire-service:[[:space:]]*/ {
-      value = $0
-      sub(/^[^:]*:[[:space:]]*/, "", value)
-      sub(/\r$/, "", value)
-    }
-    END { print value }
-  ' "$headers")"
-  [[ "$service" == "codewire-orchestration" ]] || return 1
   location="$(awk '
     tolower($0) ~ /^location:[[:space:]]*/ {
       value = $0
@@ -3727,7 +3725,8 @@ validate_confidential_preview_response() {
     }
     END { print value }
   ' "$headers")"
-  [[ "$location" == */sign-in\?redirect_uri=* ]] || return 1
+  [[ "$location" == https://*/api/v1/preview-auth/authorize\?challenge=* ]] || return 1
+  grep -Eiq '^set-cookie:[[:space:]]*__Host-codewire-preview-challenge-' "$headers" || return 1
   ! grep -Fq "$token" "$body"
 }
 
@@ -3896,7 +3895,11 @@ SCRIPT
   preview_failure=""
   log "fetching preview URL $preview_url"
   if [[ "$SMOKE_ISOLATION_TIER" == "confidential" ]]; then
+    # Only a top-level browser navigation starts sign-in; any other request
+    # fails closed with a 401, so ask the way a browser does.
     preview_status="$(curl --ipv4 -sS --connect-timeout 5 --max-time 15 \
+      --header 'Sec-Fetch-Mode: navigate' \
+      --header 'Sec-Fetch-Dest: document' \
       --dump-header "$preview_headers" \
       --output "$preview_body" \
       --write-out '%{http_code}' \

@@ -31,6 +31,7 @@ SNP_NODE=""
 STORAGE_NAMESPACE="${STORAGE_NAMESPACE:-piraeus-datastore}"
 TRUSTEE_NAMESPACE="${TRUSTEE_NAMESPACE:-codewire-trustee}"
 LINSTOR_VG="${LINSTOR_VG:-linstor_nvme}"
+OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 OPENBAO_RECOVERY_MOUNT="${OPENBAO_RECOVERY_MOUNT:-apps}"
 PROOF_MEMORY="${PROOF_MEMORY:-16GB}"
 PROOF_DISK="${PROOF_DISK:-20GB}"
@@ -225,7 +226,7 @@ kbs_holds_environment() {
 # Metadata only, never a value: the human session may read this mount's metadata.
 recovery_copy_state() {
   local err="$TMPDIR_PROOF/bao.err"
-  if bao kv metadata get -mount="$OPENBAO_RECOVERY_MOUNT" -format=json \
+  if BAO_ADDR="$OPENBAO_ADDR" bao kv metadata get -mount="$OPENBAO_RECOVERY_MOUNT" -format=json \
     "confidential-storage/$ENV_ID" >/dev/null 2>"$err"; then
     printf present
   elif grep -q 'No value found' "$err"; then
