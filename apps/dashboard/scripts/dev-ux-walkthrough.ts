@@ -419,6 +419,64 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
   }
 }
 
+// What each theme paints. The terminal keeps its own dark surface and text in
+// both, so the surface holding its text is what shows the output stays readable.
+const THEMES = {
+  light: { name: "Light", background: "rgb(255, 255, 255)", text: "rgb(0, 0, 0)" },
+  dark: { name: "Dark", background: "rgb(10, 10, 10)", text: "rgb(219, 209, 173)" },
+} as const;
+
+// The sidebar switch on the live workspace: each choice repaints the page at
+// once, stays on the next page at both widths, and leaves the shell attached.
+// Colours only; this helper takes no screenshots.
+async function themes(page: Page, terminal: Locator, rows: Locator, options: {
+  slug: string; detailPath: string; sessionId: string; pid: string; send: (command: string) => Promise<void>;
+}): Promise<void> {
+  const { slug, detailPath, sessionId, pid, send } = options;
+  const toggle = page.locator(".cw-sidebar-slot [data-theme-switch]");
+  const painted = async (theme: keyof typeof THEMES) => {
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await expect(page.locator("body")).toHaveCSS("background-color", THEMES[theme].background);
+    await expect(page.locator("body")).toHaveCSS("color", THEMES[theme].text);
+  };
+  const terminalPainted = async (theme: keyof typeof THEMES) => {
+    await painted(theme);
+    await expect(terminal.locator(".xterm-scrollable-element")).toHaveCSS("background-color", "rgb(10, 10, 10)");
+    await expect(rows).toHaveCSS("color", "rgb(228, 228, 231)");
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", sessionId);
+    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+  };
+  let shown = "System";
+  for (const theme of ["light", "dark"] as const) {
+    await stage(`theme-${theme}`, async () => {
+      await expect(toggle).toHaveText(`Theme: ${shown}`);
+      await toggle.click();
+      shown = THEMES[theme].name;
+      await expect(toggle).toHaveText(`Theme: ${shown}`);
+      await terminalPainted(theme);
+    });
+    await stage(`theme-${theme}-pages`, async () => {
+      for (const width of [390, 1440]) {
+        await page.setViewportSize({ width, height: 900 });
+        await visit(page, `/settings/?org=${slug}`);
+        await painted(theme);
+        await fits(page);
+        await visit(page, detailPath);
+        await terminalPainted(theme);
+        await fits(page);
+      }
+    });
+  }
+  await stage("theme-system", async () => {
+    await expect(toggle).toHaveText(`Theme: ${shown}`);
+    await toggle.click();
+    await expect(toggle).toHaveText("Theme: System");
+    await expect(page.locator("html")).not.toHaveAttribute("data-theme", /./);
+    await send("printf '__UX_THEME__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\"");
+    await expect(rows).toContainText(`__UX_THEME__preserved__${pid}__`);
+  });
+}
+
 export async function runDevUxWalkthrough(page: Page, options: {
   slug: string; userId: string; orgId: string; owned: OwnedUxSandbox; deadline: number;
 }): Promise<void> {
@@ -642,6 +700,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect.poll(async () => (await terminal.boundingBox())?.height ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(180);
     await page.setViewportSize({ width: 1440, height: 900 });
   });
+  await themes(page, terminal, rows, { slug, detailPath, sessionId: firstId!, pid, send });
   // Same bounded synthetic server as commodity smoke; never serve files or
   // attach provider credentials. Destroying this owned Sandbox cleans it up.
   const canary = "codewire-dev-ux-preview";
