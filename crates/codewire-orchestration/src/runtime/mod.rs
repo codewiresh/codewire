@@ -12,6 +12,7 @@
 pub(crate) mod fake;
 pub mod kubernetes;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -20,6 +21,7 @@ pub use crate::sandbox::client::{
     ProbeResult, WorkspacePodIdentity as MemberRef, WorkspacePodReplacement as MemberReplacement,
     WorkspaceSandboxIdentity as SuspendedRuntime,
 };
+pub use crate::sandbox::exec::WorkspaceExecHandle as RuntimeExec;
 use crate::sandbox::host_keys::HostKeyStore;
 pub use crate::sandbox::sidecar::PortForwardedStream as RuntimeStream;
 use crate::sandbox::template::TemplateOpts;
@@ -208,6 +210,33 @@ pub trait RuntimeLifecycle: Send + Sync {
         environment_id: &str,
     ) -> anyhow::Result<String>;
 
+    /// The incarnation holding this name now, if any, whoever controls it.
+    async fn member_named(
+        &self,
+        placement: &Placement,
+        member_name: &str,
+    ) -> anyhow::Result<Option<MemberRef>>;
+
+    /// Ask for the environment's runtime to suspend, for a caller that holds
+    /// no claim: the runtime is the one its claim's status names now, so unlike
+    /// [`suspend`](Self::suspend) this doesn't fence on the claim's identity.
+    /// This is not evidence it has suspended.
+    async fn suspend_current(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<()>;
+
+    /// Ask for the environment's runtime to run again, re-pinned to
+    /// `support_image`. The counterpart of
+    /// [`suspend_current`](Self::suspend_current), found the same way.
+    async fn resume_current(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        support_image: &str,
+    ) -> anyhow::Result<()>;
+
     /// Replace exactly this incarnation, re-pinned to `support_image`. It never
     /// touches a newer one.
     async fn replace_member(
@@ -252,11 +281,31 @@ pub trait RuntimeAccess: Send + Sync {
         host_keys: &dyn HostKeyStore,
     ) -> anyhow::Result<()>;
 
+    /// One attempt at what a client does first: connect, check the host key
+    /// against the store, log in and exchange SFTP.
+    async fn ssh_ready(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        host_keys: &dyn HostKeyStore,
+    ) -> anyhow::Result<()>;
+
     async fn claim_readiness(
         &self,
         placement: &Placement,
         environment_id: &str,
     ) -> anyhow::Result<ClaimReadiness>;
+
+    /// Start a command in the workspace of this exact member, without waiting
+    /// for it to exit. Once this returns, the command may already be running.
+    async fn start_exec(
+        &self,
+        placement: &Placement,
+        member_name: &str,
+        command: &[String],
+        work_dir: &str,
+        env: &BTreeMap<String, String>,
+    ) -> anyhow::Result<RuntimeExec>;
 
     /// The last `tail_lines` of the workspace's output, with timestamps.
     async fn workspace_logs(

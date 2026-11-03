@@ -5,6 +5,7 @@
 pub(crate) mod members;
 mod suspension;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,8 +15,8 @@ use kube::api::{Api, LogParams};
 
 use super::{
     ClaimReadiness, ClaimRef, MemberRef, MemberReplacement, Placement, ProbeResult, RuntimeAccess,
-    RuntimeDriver, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeStream, RuntimeTeardown,
-    SuspendedRuntime,
+    RuntimeDriver, RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeStream,
+    RuntimeTeardown, SuspendedRuntime,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -181,6 +182,38 @@ impl RuntimeLifecycle for KubernetesDriver {
             .await
     }
 
+    async fn member_named(
+        &self,
+        placement: &Placement,
+        member_name: &str,
+    ) -> anyhow::Result<Option<MemberRef>> {
+        self.sandbox_client(placement)
+            .get_workspace_pod_identity_by_name(member_name)
+            .await
+    }
+
+    async fn suspend_current(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<()> {
+        // A suspend re-pins nothing, so it names no image.
+        self.sandbox_client(placement)
+            .set_replicas(environment_id, 0, "")
+            .await
+    }
+
+    async fn resume_current(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        support_image: &str,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .set_replicas(environment_id, 1, support_image)
+            .await
+    }
+
     async fn replace_member(
         &self,
         placement: &Placement,
@@ -236,6 +269,30 @@ impl RuntimeAccess for KubernetesDriver {
     ) -> anyhow::Result<()> {
         self.sandbox_client(placement)
             .wait_for_workspace_access_ready(environment_id, timeout, host_keys)
+            .await
+    }
+
+    async fn ssh_ready(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        host_keys: &dyn HostKeyStore,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .check_sidecar_ready(environment_id, WORKSPACE_SSH_PORT, host_keys)
+            .await
+    }
+
+    async fn start_exec(
+        &self,
+        placement: &Placement,
+        member_name: &str,
+        command: &[String],
+        work_dir: &str,
+        env: &BTreeMap<String, String>,
+    ) -> anyhow::Result<RuntimeExec> {
+        self.sandbox_client(placement)
+            .start_workspace_exec_on_pod(member_name, command, work_dir, env)
             .await
     }
 
@@ -664,6 +721,209 @@ mod tests {
         );
 
         assert_eq!(port_forwards(&requests), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_named_member_is_whatever_holds_that_name_in_the_placement() {
+        // The stub's Pod is controlled by another Sandbox: a name alone says
+        // nothing about control.
+        let (driver, requests) = driver_over_addressless_pod("another-sandbox-uid");
+        let placement = Placement::new("dev-sandboxes");
+
+        let member = driver
+            .member_named(&placement, "workspace-a")
+            .await
+            .unwrap()
+            .expect("a member");
+        assert_eq!(member.name, "workspace-a");
+        assert_eq!(member.uid, STUB_POD_UID);
+
+        assert_eq!(
+            driver
+                .member_named(&placement, "workspace-gone")
+                .await
+                .unwrap(),
+            None
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(
+            requests[0].ends_with("/namespaces/dev-sandboxes/pods/workspace-a"),
+            "{requests:?}"
+        );
+    }
+
+    const OLD_SUPPORT_IMAGE: &str = "registry.test/codewire/support@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NEW_SUPPORT_IMAGE: &str = "registry.test/codewire/support@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// Each patch's path and body.
+    type Patches = Arc<Mutex<Vec<(String, String)>>>;
+
+    /// A claim and its running Sandbox, answering a patch with the operating
+    /// mode it asked for.
+    fn driver_over_patchable_sandbox() -> (Arc<dyn RuntimeDriver>, Patches) {
+        let sandbox = "/apis/agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxes/sandbox-a";
+        let patches = Arc::new(Mutex::new(Vec::new()));
+        let seen = patches.clone();
+        let service = Router::new().fallback(move |request: Request<Body>| {
+            let seen = seen.clone();
+            async move {
+                let path = request.uri().path().to_owned();
+                let is_patch = request.method() == axum::http::Method::PATCH;
+                let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body = String::from_utf8(body.to_vec()).unwrap();
+                let mode = if body.contains("Suspended") {
+                    "Suspended"
+                } else {
+                    "Running"
+                };
+                if is_patch {
+                    seen.lock().unwrap().push((path.clone(), body));
+                }
+                let object = if path == sandbox {
+                    json!({"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+                        "metadata": {"name": "sandbox-a", "namespace": "dev-sandboxes",
+                            "uid": CONTROLLING_SANDBOX, "resourceVersion": "1"},
+                        "spec": {"operatingMode": mode, "podTemplate": {"spec": {"volumes": [
+                            {"name": crate::sandbox::template::DAEMON_VOLUME,
+                                "image": {"reference": OLD_SUPPORT_IMAGE}}]}}}})
+                } else {
+                    json!({"apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                        "kind": "SandboxClaim",
+                        "metadata": {"name": "sandbox-env-1", "namespace": "dev-sandboxes",
+                            "uid": "c0ffee00-e29b-41d4-a716-446655440000"},
+                        "status": {"sandbox": {"name": "sandbox-a"}}})
+                };
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(object.to_string()))
+                    .unwrap()
+            }
+        });
+        let client = kube::Client::new(service, "the-default-namespace");
+        (KubernetesDriver::shared(client), patches)
+    }
+
+    #[tokio::test]
+    async fn the_current_runtime_is_patched_to_the_mode_asked_for_fenced_on_its_uid() {
+        let placement = Placement::new("dev-sandboxes");
+        for (mode, patches) in [
+            ("Suspended", {
+                let (driver, patches) = driver_over_patchable_sandbox();
+                driver.suspend_current(&placement, "env-1").await.unwrap();
+                patches
+            }),
+            ("Running", {
+                let (driver, patches) = driver_over_patchable_sandbox();
+                driver
+                    .resume_current(&placement, "env-1", NEW_SUPPORT_IMAGE)
+                    .await
+                    .unwrap();
+                patches
+            }),
+        ] {
+            let patches = patches.lock().unwrap();
+            assert_eq!(patches.len(), 1, "{patches:?}");
+            let (path, body) = &patches[0];
+            assert!(
+                path.ends_with("/namespaces/dev-sandboxes/sandboxes/sandbox-a"),
+                "{path}"
+            );
+            let operations: serde_json::Value = serde_json::from_str(body).unwrap();
+            let operations = operations.as_array().unwrap();
+            assert_eq!(
+                operations.first().unwrap(),
+                &json!({"op": "test", "path": "/metadata/uid", "value": CONTROLLING_SANDBOX})
+            );
+            assert_eq!(
+                operations.last().unwrap(),
+                &json!({"op": "add", "path": "/spec/operatingMode", "value": mode})
+            );
+            // Only a resume re-pins the daemon.
+            assert_eq!(
+                body.contains(NEW_SUPPORT_IMAGE),
+                mode == "Running",
+                "{body}"
+            );
+        }
+    }
+
+    struct OneHostKey;
+
+    #[async_trait]
+    impl HostKeyStore for OneHostKey {
+        async fn current_host_key(
+            &self,
+            _environment_id: &str,
+        ) -> Result<Option<(i64, String)>, sqlx::Error> {
+            Ok(Some((
+                1,
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+                    .into(),
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_ssh_check_reaches_the_ssh_port_of_a_runtime_its_sandbox_controls() {
+        let placement = Placement::new("dev-sandboxes");
+
+        let (driver, requests) = driver_over_addressless_pod(CONTROLLING_SANDBOX);
+        // The stub can't upgrade the connection, so the check itself fails.
+        assert!(
+            driver
+                .ssh_ready(&placement, "env-1", &OneHostKey)
+                .await
+                .is_err()
+        );
+        let forwards = port_forwards(&requests);
+        assert_eq!(forwards.len(), 1, "{forwards:?}");
+        assert!(
+            forwards[0].contains("/namespaces/dev-sandboxes/pods/workspace-a/portforward")
+                && forwards[0].contains("ports=2222"),
+            "{forwards:?}"
+        );
+
+        let (driver, requests) = driver_over_addressless_pod("another-sandbox-uid");
+        assert!(
+            driver
+                .ssh_ready(&placement, "env-1", &OneHostKey)
+                .await
+                .is_err()
+        );
+        assert_eq!(port_forwards(&requests), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn an_exec_runs_in_the_workspace_container_of_that_exact_member() {
+        let placement = Placement::new("dev-sandboxes");
+        let (driver, requests) = driver_over_addressless_pod(CONTROLLING_SANDBOX);
+
+        // The stub can't upgrade the connection, so the attachment fails.
+        let attached = driver
+            .start_exec(
+                &placement,
+                "workspace-b",
+                &["true".to_owned()],
+                "/workspace",
+                &BTreeMap::new(),
+            )
+            .await;
+
+        assert!(attached.is_err());
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "no lookup, only the attach: {requests:?}"
+        );
+        assert!(
+            requests[0].contains("/namespaces/dev-sandboxes/pods/workspace-b/exec")
+                && requests[0].contains("container=workspace"),
+            "{requests:?}"
+        );
     }
 
     #[tokio::test]

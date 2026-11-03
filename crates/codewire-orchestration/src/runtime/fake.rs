@@ -3,7 +3,7 @@
 //! [`KubernetesDriver`](super::kubernetes::KubernetesDriver): a fake only
 //! returns what its test scripted.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use super::{
     ClaimReadiness, ClaimRef, MemberRef, MemberReplacement, Placement, ProbeResult, RuntimeAccess,
-    RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeStream, RuntimeTeardown,
+    RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeStream, RuntimeTeardown,
     SuspendedRuntime,
 };
 use crate::sandbox::host_keys::HostKeyStore;
@@ -25,6 +25,8 @@ pub(crate) struct FakeRuntimeDriver {
     pub members: Mutex<Vec<RuntimeMember>>,
     /// When set, listing members fails with this message.
     pub members_error: Mutex<Option<String>>,
+    /// Each read of an environment's members, in order; the last one repeats.
+    pub member_reads: Mutex<VecDeque<Vec<MemberRef>>>,
     /// What replacing a member answers.
     pub replacement: Mutex<Option<MemberReplacement>>,
     /// Each replacement and replacement wait asked for, in order.
@@ -73,7 +75,14 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         _environment_id: &str,
         _known_member: &str,
     ) -> anyhow::Result<Vec<MemberRef>> {
-        anyhow::bail!("not scripted")
+        let mut reads = self.member_reads.lock().unwrap();
+        if reads.len() > 1 {
+            return Ok(reads.pop_front().expect("more than one read"));
+        }
+        match reads.front() {
+            Some(read) => Ok(read.clone()),
+            None => anyhow::bail!("not scripted"),
+        }
     }
 
     async fn suspend(&self, _claim: &ClaimRef) -> anyhow::Result<()> {
@@ -140,6 +149,31 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         anyhow::bail!("not scripted")
     }
 
+    async fn member_named(
+        &self,
+        _placement: &Placement,
+        _member_name: &str,
+    ) -> anyhow::Result<Option<MemberRef>> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn suspend_current(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn resume_current(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+        _support_image: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
     async fn replace_member(
         &self,
         _placement: &Placement,
@@ -193,6 +227,26 @@ impl RuntimeAccess for FakeRuntimeDriver {
         _timeout: Duration,
         _host_keys: &dyn HostKeyStore,
     ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn ssh_ready(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+        _host_keys: &dyn HostKeyStore,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn start_exec(
+        &self,
+        _placement: &Placement,
+        _member_name: &str,
+        _command: &[String],
+        _work_dir: &str,
+        _env: &BTreeMap<String, String>,
+    ) -> anyhow::Result<RuntimeExec> {
         anyhow::bail!("not scripted")
     }
 

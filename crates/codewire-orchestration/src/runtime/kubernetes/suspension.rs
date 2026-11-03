@@ -37,7 +37,7 @@ pub(super) async fn source_restart_pods(
     anyhow::ensure!(
         pods.iter()
             .all(|pod| !pod.name.is_empty() && !pod.uid.is_empty()),
-        "workspace Pod identity is incomplete before source restart"
+        "workspace Pod identity is incomplete"
     );
     Ok(pods)
 }

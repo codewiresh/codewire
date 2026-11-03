@@ -31,11 +31,10 @@ use super::start_timing::{record_create_milestone, start_profile};
 use super::workspace_binding::{BindRefused, bind_replacement_runtime};
 use super::{JobPayload, WorkerContext};
 use crate::repository_mount::{canonical_repository_mount, validate_repository_mounts};
-use crate::runtime::Placement;
-use crate::sandbox::client::{ProbeResult, SandboxClient, WorkspacePodIdentity};
+use crate::runtime::{MemberRef, Placement, RuntimeDriver};
+use crate::sandbox::client::ProbeResult;
 use crate::sandbox::exec::{StderrTap, WorkspaceExecResult};
 use crate::sandbox::host_keys::RecordedHostKeys;
-use crate::sandbox::sidecar::WORKSPACE_SSH_PORT;
 use crate::start_metrics::{CreateMilestone, StartPath};
 
 const DEFAULT_SIDECAR_READY_TIMEOUT: Duration = Duration::from_secs(180);
@@ -894,11 +893,10 @@ impl WorkerSetupOps<'_> {
         self.env.project_spec.environment.clone()
     }
 
-    fn sandbox_client(&self, namespace: &str) -> anyhow::Result<SandboxClient> {
+    fn runtime(&self) -> anyhow::Result<&dyn RuntimeDriver> {
         self.ctx
-            .kube
-            .clone()
-            .map(|client| SandboxClient::new(client, namespace))
+            .runtime
+            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("workspace setup: sandbox backend not configured"))
     }
 
@@ -944,53 +942,6 @@ impl WorkerSetupOps<'_> {
         }
     }
 
-    async fn wait_for_no_workspace_pod(
-        &self,
-        sandbox: &SandboxClient,
-        pod_name: &str,
-        old_uid: &str,
-    ) -> anyhow::Result<()> {
-        let deadline = tokio::time::Instant::now() + SETUP_POD_RECOVERY_TIMEOUT;
-        loop {
-            let named = sandbox.get_workspace_pod_identity_by_name(pod_name).await?;
-            let all = sandbox
-                .list_workspace_pod_identities(self.phase_authority.environment_id())
-                .await?;
-            let old_uid_present = named.as_ref().is_some_and(|pod| pod.uid == old_uid)
-                || all.iter().any(|pod| pod.uid == old_uid);
-            let any_workspace_pod = named.is_some() || !all.is_empty();
-            if !old_uid_present && !any_workspace_pod {
-                setup_fencing_evidence!(SetupFencingEvidence::NoPodObserved {
-                    environment_id: self.phase_authority.environment_id().to_string(),
-                    pod_uid: old_uid.to_string(),
-                });
-                break;
-            }
-            if let Some(identity) = named.as_ref().filter(|pod| pod.uid != old_uid) {
-                tracing::warn!(
-                    environment_id = self.phase_authority.environment_id(),
-                    pod_name,
-                    old_uid,
-                    observed_uid = identity.uid,
-                    "setup recovery waiting for workspace Pod absence"
-                );
-            }
-            if tokio::time::Instant::now() >= deadline {
-                anyhow::bail!(
-                    "setup recovery timed out waiting for Pod {pod_name} ({old_uid}) to be absent"
-                );
-            }
-            tokio::time::sleep(SETUP_POD_RECOVERY_POLL).await;
-        }
-        tokio::time::sleep(SETUP_EXEC_QUIESCENCE).await;
-        setup_fencing_evidence!(SetupFencingEvidence::QuiescenceComplete {
-            environment_id: self.phase_authority.environment_id().to_string(),
-            pod_uid: old_uid.to_string(),
-            wait_ms: SETUP_EXEC_QUIESCENCE.as_millis() as u64,
-        });
-        Ok(())
-    }
-
     async fn suspend_and_observe(
         &self,
         input: &Inputs,
@@ -1001,21 +952,30 @@ impl WorkerSetupOps<'_> {
             .as_deref()
             .filter(|uid| !uid.trim().is_empty())
             .ok_or_else(|| anyhow::Error::new(super::activity_authority::AuthorityLost))?;
-        let sandbox = self.sandbox_client(&input.namespace)?;
+        let runtime = self.runtime()?;
+        let placement = Placement::new(&input.namespace);
         let pod_name = if input.pod_name.trim().is_empty() {
-            sandbox.get_pod_name(&input.environment_id).await?
+            runtime
+                .member_name(&placement, &input.environment_id)
+                .await?
         } else {
             input.pod_name.clone()
         };
         let guard = self.phase_authority.begin_reap(old_owner).await?;
         let suspend_result = tokio::time::timeout(
             Duration::from_secs(30),
-            sandbox.set_replicas(&input.environment_id, 0, self.support_image()),
+            runtime.suspend_current(&placement, &input.environment_id),
         )
         .await;
         guard.commit().await?;
-        self.wait_for_no_workspace_pod(&sandbox, &pod_name, old_uid)
-            .await?;
+        wait_for_no_workspace_pod(
+            runtime,
+            &placement,
+            self.phase_authority.environment_id(),
+            &pod_name,
+            old_uid,
+        )
+        .await?;
         match suspend_result {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => {
@@ -1038,14 +998,15 @@ impl WorkerSetupOps<'_> {
 
     async fn wait_for_replacement_runtime(
         &self,
-        sandbox: &SandboxClient,
         input: &Inputs,
         old_uid: &str,
     ) -> anyhow::Result<ProbeResult> {
-        let runtime = self.ctx.require_runtime()?;
+        let runtime = self.runtime()?;
         let placement = Placement::new(&input.namespace);
         let pod_name = if input.pod_name.trim().is_empty() {
-            sandbox.get_pod_name(&input.environment_id).await?
+            runtime
+                .member_name(&placement, &input.environment_id)
+                .await?
         } else {
             input.pod_name.clone()
         };
@@ -1060,7 +1021,7 @@ impl WorkerSetupOps<'_> {
             // Pending/not-Ready observations within the one recovery bound.
             let probe = runtime.probe(&placement, &input.environment_id).await?;
             if replacement_runtime_is_current(&pod_name, old_uid, &probe) {
-                let replacement = WorkspacePodIdentity {
+                let replacement = MemberRef {
                     name: probe.pod_name.clone(),
                     uid: probe.pod_uid.clone(),
                 };
@@ -1150,10 +1111,13 @@ impl WorkerSetupOps<'_> {
         let Some(resume_guard) = self.phase_authority.begin_resume(old_owner).await? else {
             return Err(super::activity_authority::AuthorityLost.into());
         };
-        let sandbox = self.sandbox_client(&input.namespace)?;
         let resume_result = tokio::time::timeout(
             Duration::from_secs(30),
-            sandbox.set_replicas(&input.environment_id, 1, self.support_image()),
+            self.runtime()?.resume_current(
+                &Placement::new(&input.namespace),
+                &input.environment_id,
+                self.support_image(),
+            ),
         )
         .await;
         resume_guard.commit().await?;
@@ -1178,7 +1142,7 @@ impl WorkerSetupOps<'_> {
                 replacement_runtime_timeout(input),
                 self.authority.run_while_authoritative_for_states(
                     SETUP_MUTATION_STATES,
-                    self.wait_for_replacement_runtime(&sandbox, input, old_uid),
+                    self.wait_for_replacement_runtime(input, old_uid),
                 ),
             )
             .await
@@ -1331,11 +1295,12 @@ impl WorkerSetupOps<'_> {
         if !launch_group_active {
             *self.recovery_lock.lock().await = false;
         }
-        let sandbox = self.sandbox_client(namespace)?;
+        let runtime = self.runtime()?;
+        let placement = Placement::new(namespace);
         let mut recovered_uid_mismatch = false;
         let pod = loop {
-            let pod = sandbox
-                .get_workspace_pod_identity(env_id)
+            let pod = runtime
+                .current_member(&placement, env_id)
                 .await?
                 .filter(|identity| !identity.uid.trim().is_empty())
                 .ok_or_else(|| anyhow::anyhow!("workspace setup: workspace Pod is not present"))?;
@@ -1372,13 +1337,13 @@ impl WorkerSetupOps<'_> {
             .await?;
         let attach = tokio::time::timeout(
             SETUP_EXEC_ATTACH_TIMEOUT,
-            sandbox.start_workspace_exec_on_pod(&pod.name, cmd, work_dir, env),
+            runtime.start_exec(&placement, &pod.name, cmd, work_dir, env),
         )
         .await;
         let pod_still_exact = if matches!(&attach, Ok(Ok(_))) {
             match tokio::time::timeout(
                 SETUP_EXEC_ATTACH_TIMEOUT,
-                sandbox.get_workspace_pod_identity_by_name(&pod.name),
+                runtime.member_named(&placement, &pod.name),
             )
             .await
             {
@@ -2186,6 +2151,53 @@ pub(crate) fn resolve_git_field(
     email.to_string()
 }
 
+/// Wait until the environment has no member at all, under any name, then for
+/// any exec still attached to the old incarnation to have ended.
+async fn wait_for_no_workspace_pod(
+    runtime: &dyn RuntimeDriver,
+    placement: &Placement,
+    environment_id: &str,
+    pod_name: &str,
+    old_uid: &str,
+) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + SETUP_POD_RECOVERY_TIMEOUT;
+    loop {
+        let members = runtime.members(placement, environment_id, pod_name).await?;
+        if members.is_empty() {
+            setup_fencing_evidence!(SetupFencingEvidence::NoPodObserved {
+                environment_id: environment_id.to_string(),
+                pod_uid: old_uid.to_string(),
+            });
+            break;
+        }
+        if let Some(identity) = members
+            .iter()
+            .find(|member| member.name == pod_name && member.uid != old_uid)
+        {
+            tracing::warn!(
+                environment_id,
+                pod_name,
+                old_uid,
+                observed_uid = identity.uid,
+                "setup recovery waiting for workspace Pod absence"
+            );
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "setup recovery timed out waiting for Pod {pod_name} ({old_uid}) to be absent"
+            );
+        }
+        tokio::time::sleep(SETUP_POD_RECOVERY_POLL).await;
+    }
+    tokio::time::sleep(SETUP_EXEC_QUIESCENCE).await;
+    setup_fencing_evidence!(SetupFencingEvidence::QuiescenceComplete {
+        environment_id: environment_id.to_string(),
+        pod_uid: old_uid.to_string(),
+        wait_ms: SETUP_EXEC_QUIESCENCE.as_millis() as u64,
+    });
+    Ok(())
+}
+
 /// Mirrors `waitForSidecar`: no backend → pass; otherwise poll the
 /// SSH/SFTP readiness check with ~2s jittered intervals.
 #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
@@ -2194,10 +2206,10 @@ pub(crate) async fn wait_for_sidecar(
     namespace: &str,
     env_id: &str,
 ) -> anyhow::Result<()> {
-    let Some(kube) = &ctx.kube else {
+    let Some(runtime) = ctx.runtime.as_deref() else {
         return Ok(());
     };
-    let client = SandboxClient::new(kube.clone(), namespace);
+    let placement = Placement::new(namespace);
     let timeout = sidecar_ready_timeout();
     let deadline = tokio::time::Instant::now() + timeout;
     let mut attempt = 0u32;
@@ -2211,7 +2223,7 @@ pub(crate) async fn wait_for_sidecar(
         let attempt_timeout = remaining.min(SIDECAR_READY_ATTEMPT_TIMEOUT);
         match tokio::time::timeout(
             attempt_timeout,
-            client.check_sidecar_ready(env_id, WORKSPACE_SSH_PORT, &RecordedHostKeys(&ctx.pool)),
+            runtime.ssh_ready(&placement, env_id, &RecordedHostKeys(&ctx.pool)),
         )
         .await
         {
@@ -3241,6 +3253,68 @@ mod tests {
                 .any(|call| call.starts_with("log:daemon_ready")),
             "no status read, no row"
         );
+    }
+
+    fn member(name: &str, uid: &str) -> MemberRef {
+        MemberRef {
+            name: name.into(),
+            uid: uid.into(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_waits_until_no_member_is_left_under_any_name() {
+        let runtime = crate::runtime::fake::FakeRuntimeDriver::default();
+        *runtime.member_reads.lock().unwrap() = [
+            vec![member("workspace-old", "uid-old")],
+            // A replacement under the old name, then one under another name,
+            // are still members: neither proves the environment is empty.
+            vec![member("workspace-old", "uid-new")],
+            vec![member("workspace-other", "uid-other")],
+            vec![],
+        ]
+        .into();
+        let began = tokio::time::Instant::now();
+
+        wait_for_no_workspace_pod(
+            &runtime,
+            &Placement::new("dev-sandboxes"),
+            "env-1",
+            "workspace-old",
+            "uid-old",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runtime.member_reads.lock().unwrap().len(), 1);
+        assert_eq!(
+            began.elapsed(),
+            SETUP_POD_RECOVERY_POLL * 3 + SETUP_EXEC_QUIESCENCE
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_gives_up_at_its_bound_while_a_member_remains() {
+        let runtime = crate::runtime::fake::FakeRuntimeDriver::default();
+        *runtime.member_reads.lock().unwrap() =
+            [vec![member("workspace-other", "uid-other")]].into();
+        let began = tokio::time::Instant::now();
+
+        let error = wait_for_no_workspace_pod(
+            &runtime,
+            &Placement::new("dev-sandboxes"),
+            "env-1",
+            "workspace-old",
+            "uid-old",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "setup recovery timed out waiting for Pod workspace-old (uid-old) to be absent"
+        );
+        assert_eq!(began.elapsed(), SETUP_POD_RECOVERY_TIMEOUT);
     }
 
     /// Setup recovery binds the replacement Pod before its access wait: an
