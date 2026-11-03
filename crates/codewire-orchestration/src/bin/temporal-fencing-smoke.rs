@@ -1077,7 +1077,7 @@ mod enabled {
                 claim == (1, 1),
                 "retry claimed a second generation: {claim:?}"
             );
-            wait_setup_activity_attempted_at_least(&handle, 2).await?;
+            wait_claim_and_create_activity_attempted_at_least(&handle, 2).await?;
             self.destroy_and_wait(&env_id, &handle).await?;
             worker.stop().await?;
             println!("temporal-fencing-smoke: same-generation retry PASS");
@@ -1895,7 +1895,10 @@ mod enabled {
         })
     }
 
-    async fn wait_setup_activity_attempted_at_least<W>(
+    /// With no setup work, a confirmed create runs setup inside its own
+    /// activity, so a failed setup retries that activity, not
+    /// `EnvironmentSetupActivity`.
+    async fn wait_claim_and_create_activity_attempted_at_least<W>(
         handle: &temporalio_client::WorkflowHandle<Client, W>,
         expected_attempt: i32,
     ) -> anyhow::Result<i32>
@@ -1903,11 +1906,11 @@ mod enabled {
         W: temporalio_common::HasWorkflowDefinition,
     {
         wait_activity_attempted_at_least(
-            "EnvironmentSetupActivity",
+            "EnvironmentClaimAndCreateActivity",
             expected_attempt,
             ATTEMPT_HISTORY_WAIT,
             ATTEMPT_HISTORY_POLL,
-            || activity_attempt_observation(handle, "EnvironmentSetupActivity"),
+            || activity_attempt_observation(handle, "EnvironmentClaimAndCreateActivity"),
         )
         .await
     }
