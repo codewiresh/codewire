@@ -17,6 +17,10 @@ use progress::{FollowPolicy, StartProgress, format_environment_logs_plain};
 const PLATFORM_READY_TIMEOUT: Duration = Duration::from_secs(600);
 const PLATFORM_CONFIDENTIAL_READY_TIMEOUT: Duration = Duration::from_secs(1800);
 const PLATFORM_DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(180);
+// The server sends no interval while a start runs, so this tick decides when
+// the CLI sees it finish. At 2 s, a start 1 s slower on the server could return
+// 2 s later (#3922).
+const PLATFORM_READY_POLL: Duration = Duration::from_millis(500);
 const STOPPING_LABEL: &str = "Stopping the environment";
 const REMOVING_LABEL: &str = "Removing the environment";
 
@@ -2260,8 +2264,12 @@ async fn wait_for_platform_environment_daemon_ready(
                 "timed out waiting for environment {environment_id:?} to reach running state: {observation}"
             );
         }
-        tokio::time::sleep(poll_interval.unwrap_or(Duration::from_secs(2))).await;
+        tokio::time::sleep(platform_ready_poll(poll_interval)).await;
     }
+}
+
+pub(crate) fn platform_ready_poll(server_interval: Option<Duration>) -> Duration {
+    server_interval.unwrap_or(PLATFORM_READY_POLL)
 }
 
 pub(crate) fn platform_lifecycle_ready_timeout(isolation_tier: &str) -> Duration {

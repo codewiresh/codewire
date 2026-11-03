@@ -485,6 +485,15 @@ fn platform_daemon_readiness_requires_a_ready_daemon() {
 }
 
 #[test]
+fn platform_ready_poll_follows_the_server_and_is_short_without_it() {
+    assert_eq!(
+        platform_ready_poll(Some(Duration::from_secs(3))),
+        Duration::from_secs(3)
+    );
+    assert_eq!(platform_ready_poll(None), Duration::from_millis(500));
+}
+
+#[test]
 fn platform_lifecycle_wait_horizon_matches_server_class() {
     assert_eq!(
         platform_lifecycle_ready_timeout("standard"),
