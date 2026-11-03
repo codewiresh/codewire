@@ -346,6 +346,19 @@ impl EnvironmentSessionTarget {
         }
     }
 
+    /// The session as the server reports it, or `None` when the network is
+    /// why it can't say.
+    async fn get_unless_unreachable(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Option<EnvironmentSessionView>> {
+        match self.get(session_id).await {
+            Ok(session) => Ok(Some(session)),
+            Err(error) if super::tailnet_shell::is_network_failure(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn get(&self, session_id: &str) -> anyhow::Result<EnvironmentSessionView> {
         match self {
             #[cfg(unix)]
@@ -1984,6 +1997,9 @@ pub(crate) enum AttachExit {
     },
 }
 
+/// Far longer than the server takes: it answers on opening, and its heartbeat
+/// is 15 s.
+const API_ATTACH_ANSWER_WAIT: Duration = Duration::from_secs(30);
 const ATTACH_RECONNECT_LIMIT: u8 = 3;
 pub(crate) const ATTACH_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(250);
 
@@ -2115,11 +2131,25 @@ pub(crate) async fn attach_platform_session(
         }
         reason.unwrap_or_else(|| "the tailnet is unavailable".into())
     };
-    let attachment = client
+    let attachment = attach_over_api(client, open).await?;
+    eprintln!("  via API · tailnet unavailable: {fallback}");
+    Ok(attachment)
+}
+
+/// Attach over the API, once the server has answered: only then is the
+/// session reached, whatever the stream says about itself (#3895).
+async fn attach_over_api(
+    client: &codewire_client::CodewireClient,
+    open: codewire_client::AttachSessionOpen,
+) -> anyhow::Result<codewire_client::EnvironmentSessionAttachment> {
+    let mut attachment = client
         .attach_session(open)
         .await
         .map_err(display_client_error)?;
-    eprintln!("  via API · tailnet unavailable: {fallback}");
+    attachment
+        .wait_for_answer(API_ATTACH_ANSWER_WAIT)
+        .await
+        .map_err(display_client_error)?;
     Ok(attachment)
 }
 
@@ -2145,6 +2175,7 @@ async fn attach_environment_session(
 ) -> anyhow::Result<Option<EnvironmentSessionView>> {
     let mut output_offset = 0;
     let mut reconnect_budget = AttachmentReconnectBudget::default();
+    let mut pacing = super::tailnet_shell::ReconnectPacing::default();
     // Survives reconnects, which resume the same output, so the program's
     // screen is given back only when this terminal leaves it.
     let mut screen = SessionScreen::new(std::io::stdout().is_terminal());
@@ -2187,7 +2218,7 @@ async fn attach_environment_session(
                 client,
                 ..
             } => {
-                let attachment = attach_platform_session(
+                match attach_platform_session(
                     client,
                     codewire_client::AttachSessionOpen {
                         org_id: org_id.clone(),
@@ -2198,34 +2229,47 @@ async fn attach_environment_session(
                     },
                     &mut tailnet,
                 )
-                .await?;
-                if tailnet.is_some() {
-                    retry_after = super::tailnet_shell::TAILNET_RETRY_FIRST;
-                }
-                let on_fallback = super::tailnet_shell::on_api_fallback(&tailnet)?;
-                let back = async {
-                    if !on_fallback {
-                        return std::future::pending().await;
-                    }
-                    tailnet = Some(
-                        super::tailnet_shell::tailnet_again(
-                            client,
-                            org_id,
-                            environment_id,
-                            retry_after,
+                .await
+                {
+                    Ok(attachment) => {
+                        pacing.attached();
+                        if tailnet.is_some() {
+                            retry_after = super::tailnet_shell::TAILNET_RETRY_FIRST;
+                        }
+                        let on_fallback = super::tailnet_shell::on_api_fallback(&tailnet)?;
+                        let back = async {
+                            if !on_fallback {
+                                return std::future::pending().await;
+                            }
+                            tailnet = Some(
+                                super::tailnet_shell::tailnet_again(
+                                    client,
+                                    org_id,
+                                    environment_id,
+                                    retry_after,
+                                )
+                                .await,
+                            );
+                        };
+                        attach_platform_environment_session(
+                            attachment,
+                            output_offset,
+                            session.pty,
+                            true,
+                            &mut screen,
+                            back,
                         )
-                        .await,
-                    );
-                };
-                attach_platform_environment_session(
-                    attachment,
-                    output_offset,
-                    session.pty,
-                    true,
-                    &mut screen,
-                    back,
-                )
-                .await?
+                        .await?
+                    }
+                    Err(error)
+                        if pacing.reconnecting()
+                            && super::tailnet_shell::is_network_failure(&error) =>
+                    {
+                        tracing::debug!(error = %format!("{error:#}"), "reattach failed");
+                        AttachExit::StreamInterrupted { output_offset }
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         };
         if !matches!(
@@ -2252,25 +2296,33 @@ async fn attach_environment_session(
             AttachExit::Terminal => return target.get(&session.session_id).await.map(Some),
             AttachExit::StreamEnded {
                 output_offset: next_offset,
-            } => {
-                let refreshed = target.get(&session.session_id).await?;
-                if session_is_terminal(&refreshed) {
-                    return Ok(Some(refreshed));
-                }
-                session = refreshed;
-                output_offset = next_offset;
             }
-            AttachExit::StreamInterrupted {
+            | AttachExit::StreamInterrupted {
                 output_offset: next_offset,
             } => {
-                let refreshed = target.get(&session.session_id).await?;
-                if session_is_terminal(&refreshed) {
-                    return Ok(Some(refreshed));
-                }
-                let delay = reconnect_budget.retry_delay(next_offset)?;
-                session = refreshed;
+                let interrupted = matches!(exit, AttachExit::StreamInterrupted { .. });
                 output_offset = next_offset;
-                tokio::time::sleep(delay).await;
+                let refreshed = target.get_unless_unreachable(&session.session_id).await?;
+                let unreachable = refreshed.is_none();
+                if let Some(refreshed) = refreshed {
+                    if session_is_terminal(&refreshed) {
+                        return Ok(Some(refreshed));
+                    }
+                    session = refreshed;
+                }
+                if interrupted || unreachable {
+                    let delay = if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
+                        pacing.lost(next_offset).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "the connection to the environment was lost for 10 minutes; the session keeps running. Reconnect: {}",
+                                SessionPlace::of(&target).reconnect(&session)
+                            )
+                        })?
+                    } else {
+                        reconnect_budget.retry_delay(next_offset)?
+                    };
+                    tokio::time::sleep(delay).await;
+                }
             }
             AttachExit::TailnetBack {
                 output_offset: next_offset,
@@ -3020,6 +3072,7 @@ async fn follow_session_output(
     #[cfg(not(unix))]
     let _ = ansi;
     let mut reconnect_budget = AttachmentReconnectBudget::default();
+    let mut pacing = super::tailnet_shell::ReconnectPacing::default();
     loop {
         let exit = match target {
             #[cfg(unix)]
@@ -3054,48 +3107,69 @@ async fn follow_session_output(
                 client,
                 ..
             } => {
-                let attachment = client
-                    .attach_session(codewire_client::AttachSessionOpen {
+                match attach_over_api(
+                    client,
+                    codewire_client::AttachSessionOpen {
                         org_id: org_id.clone(),
                         environment_id: environment_id.clone(),
                         session_id: session.session_id.clone(),
                         output_offset,
                         ..Default::default()
-                    })
-                    .await
-                    .map_err(display_client_error)?;
-                attach_platform_environment_session(
-                    attachment,
-                    output_offset,
-                    false,
-                    raw_output,
-                    &mut SessionScreen::new(false),
-                    std::future::pending(),
+                    },
                 )
-                .await?
+                .await
+                {
+                    Ok(attachment) => {
+                        pacing.attached();
+                        attach_platform_environment_session(
+                            attachment,
+                            output_offset,
+                            false,
+                            raw_output,
+                            &mut SessionScreen::new(false),
+                            std::future::pending(),
+                        )
+                        .await?
+                    }
+                    Err(error)
+                        if pacing.reconnecting()
+                            && super::tailnet_shell::is_network_failure(&error) =>
+                    {
+                        tracing::debug!(error = %format!("{error:#}"), "reattach failed");
+                        AttachExit::StreamInterrupted { output_offset }
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         };
         match exit {
             AttachExit::Terminal => return Ok(()),
             AttachExit::StreamEnded {
                 output_offset: next_offset,
-            } => {
-                let refreshed = target.get(&session.session_id).await?;
-                if session_is_terminal(&refreshed) {
-                    return Ok(());
-                }
-                output_offset = next_offset;
             }
-            AttachExit::StreamInterrupted {
+            | AttachExit::StreamInterrupted {
                 output_offset: next_offset,
             } => {
-                let refreshed = target.get(&session.session_id).await?;
-                if session_is_terminal(&refreshed) {
+                let interrupted = matches!(exit, AttachExit::StreamInterrupted { .. });
+                output_offset = next_offset;
+                let refreshed = target.get_unless_unreachable(&session.session_id).await?;
+                let unreachable = refreshed.is_none();
+                if refreshed.is_some_and(|refreshed| session_is_terminal(&refreshed)) {
                     return Ok(());
                 }
-                let delay = reconnect_budget.retry_delay(next_offset)?;
-                output_offset = next_offset;
-                tokio::time::sleep(delay).await;
+                if interrupted || unreachable {
+                    let delay = if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
+                        pacing.lost(next_offset).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "the connection to the environment was lost for 10 minutes; the session keeps running. Reconnect: {}",
+                                SessionPlace::of(target).reconnect(session)
+                            )
+                        })?
+                    } else {
+                        reconnect_budget.retry_delay(next_offset)?
+                    };
+                    tokio::time::sleep(delay).await;
+                }
             }
             _ => unreachable!("non-interactive attachment produced navigation"),
         }
@@ -3105,6 +3179,63 @@ async fn follow_session_output(
 #[cfg(test)]
 mod attach_offset_tests {
     use super::*;
+
+    fn platform_target(address: std::net::SocketAddr) -> EnvironmentSessionTarget {
+        let config = codewire_client::ClientConfig::new(format!("http://{address}"))
+            .expect("server URL")
+            .with_unary_timeout(Duration::from_millis(200));
+        let client = codewire_client::CodewireClient::with_http(
+            config,
+            codewire_client::StaticTokenProvider::new("synthetic-token").expect("token"),
+            reqwest::Client::builder()
+                .http2_prior_knowledge()
+                .build()
+                .expect("client"),
+        )
+        .expect("client");
+        EnvironmentSessionTarget::Platform {
+            target: config::CurrentTargetConfig::default(),
+            org_id: "org".into(),
+            environment_id: "env".into(),
+            client: Box::new(client),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_read_with_no_answer_does_not_end_the_attachment() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listen");
+        let silent = platform_target(listener.local_addr().expect("address"));
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("accept");
+            std::future::pending::<()>().await;
+        });
+        assert!(
+            silent
+                .get_unless_unreachable("session")
+                .await
+                .expect("no answer is not a failure")
+                .is_none()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_session_read_with_no_server_does_not_end_the_attachment() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listen");
+        let refused = platform_target(listener.local_addr().expect("address"));
+        drop(listener);
+        assert!(
+            refused
+                .get_unless_unreachable("session")
+                .await
+                .expect("no server is not a failure")
+                .is_none()
+        );
+    }
 
     fn output(
         next_offset: u64,

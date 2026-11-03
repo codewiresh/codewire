@@ -5,7 +5,7 @@ use base64::Engine as _;
 use codewire_proto::google::rpc::{BadRequest, ErrorInfo as GoogleErrorInfo, RetryInfo};
 use connectrpc::{ConnectError, ErrorCode, ErrorDetail};
 
-const RESPONSE_BODY_INTERRUPTION_PREFIX: &str = "error reading response body:";
+const RESPONSE_BODY_INTERRUPTION_PREFIX: &str = "failed to read response body:";
 
 /// One field-level validation failure from `google.rpc.BadRequest`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn only_transport_interruptions_are_retryable() {
         let body = ClientError::from(ConnectError::internal(
-            "error reading response body: request or response body error",
+            "failed to read response body: request or response body error",
         ));
         assert!(body.is_retryable_transport_interruption());
 

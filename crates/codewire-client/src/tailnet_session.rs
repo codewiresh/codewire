@@ -449,6 +449,7 @@ async fn attach_over(
             terminal_error: terminal_error_rx,
         },
         output: output_rx,
+        first: None,
         driver,
     })
 }

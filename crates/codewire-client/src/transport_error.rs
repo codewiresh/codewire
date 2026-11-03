@@ -247,6 +247,81 @@ mod tests {
         assert_eq!(error.to_string(), "client-side deadline exceeded");
     }
 
+    /// The classifier matches connectrpc's wording, so this takes the error
+    /// from connectrpc itself: a rewording on an upgrade must fail here rather
+    /// than end every attachment whose connection drops (#3895).
+    #[tokio::test]
+    async fn a_response_cut_off_part_way_is_a_retryable_interruption() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+                let mut chunk = [0; 1024];
+                let read = tokio::io::AsyncReadExt::read(&mut stream, &mut chunk)
+                    .await
+                    .expect("read the request");
+                assert_ne!(read, 0, "the request ended early");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/connect+proto\r\ncontent-length: 1000\r\n\r\n\0\0\0\0\x10partial",
+                )
+                .await
+                .expect("write the start of a response");
+            // Dropping the stream ends the response short of its length.
+        });
+        let client = CodewireClient::with_http(
+            ClientConfig::new(format!("http://{address}")).expect("server URL"),
+            StaticTokenProvider::new("synthetic-token").expect("token"),
+            reqwest::Client::new(),
+        )
+        .expect("client");
+        let mut attachment = client
+            .attach_session(crate::AttachSessionOpen::default())
+            .await
+            .expect("the stream opens");
+        let error = attachment
+            .next_output()
+            .await
+            .expect_err("the response is cut off");
+        server.await.expect("server");
+        assert!(error.is_retryable_transport_interruption(), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn an_attachment_nobody_answers_opens_but_is_not_answered() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("accept");
+            std::future::pending::<()>().await;
+        });
+        let client = CodewireClient::with_http(
+            ClientConfig::new(format!("http://{address}")).expect("server URL"),
+            StaticTokenProvider::new("synthetic-token").expect("token"),
+            reqwest::Client::builder()
+                .http2_prior_knowledge()
+                .build()
+                .expect("client"),
+        )
+        .expect("client");
+        let mut attachment = client
+            .attach_session(crate::AttachSessionOpen::default())
+            .await
+            .expect("a stream opens with nobody there");
+        let error = attachment
+            .wait_for_answer(Duration::from_millis(200))
+            .await
+            .expect_err("nobody answers");
+        server.abort();
+        assert_eq!(error.code(), ErrorCode::DeadlineExceeded, "{error}");
+    }
+
     #[test]
     fn the_url_drops_credentials_query_and_fragment() {
         let url = reqwest::Url::parse("https://user:secret@example.test:8443/a/b?token=t#f")

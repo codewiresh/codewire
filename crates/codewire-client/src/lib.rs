@@ -243,6 +243,8 @@ pub struct RunSessionInput {
 pub struct EnvironmentSessionAttachment {
     input: EnvironmentSessionAttachmentInput,
     output: tokio::sync::mpsc::Receiver<Result<AttachSessionResponse, ClientError>>,
+    /// The event [`EnvironmentSessionAttachment::wait_for_answer`] read.
+    first: Option<AttachSessionResponse>,
     driver: tokio::task::JoinHandle<()>,
 }
 
@@ -1442,6 +1444,7 @@ where
             terminal_error: terminal_error_rx,
         },
         output: output_rx,
+        first: None,
         driver,
     })
 }
@@ -1501,7 +1504,28 @@ impl EnvironmentSessionAttachment {
                 terminal_error,
             },
             output,
+            first: None,
             driver: tokio::spawn(async move { while requests.recv().await.is_some() {} }),
+        }
+    }
+
+    /// Wait for the server's first event, which it sends on every open. A
+    /// stream counts as open as soon as its request is queued, even with no
+    /// network, so this is what shows anyone is there. The event stays for
+    /// [`Self::next_output`].
+    pub async fn wait_for_answer(&mut self, limit: Duration) -> Result<(), ClientError> {
+        match tokio::time::timeout(limit, self.output.recv()).await {
+            Err(_) => Err(ClientError::new(
+                ErrorCode::DeadlineExceeded,
+                "the server did not answer the attachment",
+            )),
+            Ok(Some(Err(error))) => Err(error),
+            Ok(Some(Ok(first))) => {
+                self.first = Some(first);
+                Ok(())
+            }
+            // Closed with nothing to say; next_output reports the end.
+            Ok(None) => Ok(()),
         }
     }
 
@@ -1514,6 +1538,9 @@ impl EnvironmentSessionAttachment {
     }
 
     pub async fn next_output(&mut self) -> Result<Option<AttachSessionResponse>, ClientError> {
+        if let Some(first) = self.first.take() {
+            return Ok(Some(first));
+        }
         match self.output.recv().await {
             Some(Ok(response)) => Ok(Some(response)),
             Some(Err(error)) => Err(error),
@@ -1781,6 +1808,54 @@ impl ClientTransport for ReqwestConnectTransport {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_for_an_answer_keeps_the_event_it_read() {
+        let (sender, output) = tokio::sync::mpsc::channel(2);
+        let mut attachment = EnvironmentSessionAttachment::from_output(output);
+        let first = AttachSessionResponse::default();
+        sender.send(Ok(first.clone())).await.expect("send");
+        attachment
+            .wait_for_answer(Duration::from_secs(30))
+            .await
+            .expect("answered");
+        assert_eq!(attachment.next_output().await.expect("first"), Some(first));
+        drop(sender);
+        assert_eq!(attachment.next_output().await.expect("end"), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silence_or_a_failure_is_not_an_answer() {
+        let (sender, output) = tokio::sync::mpsc::channel(2);
+        let mut attachment = EnvironmentSessionAttachment::from_output(output);
+        let silence = attachment
+            .wait_for_answer(Duration::from_secs(30))
+            .await
+            .expect_err("silence");
+        assert_eq!(silence.code(), ErrorCode::DeadlineExceeded);
+        sender
+            .send(Err(ClientError::new(ErrorCode::NotFound, "gone")))
+            .await
+            .expect("send");
+        let failure = attachment
+            .wait_for_answer(Duration::from_secs(30))
+            .await
+            .expect_err("failure");
+        assert_eq!(failure.code(), ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_closes_at_once_is_left_for_next_output_to_report() {
+        let (sender, output) = tokio::sync::mpsc::channel(1);
+        drop(sender);
+        let mut attachment = EnvironmentSessionAttachment::from_output(output);
+        attachment
+            .wait_for_answer(Duration::from_secs(30))
+            .await
+            .expect("closed");
+        assert_eq!(attachment.next_output().await.expect("end"), None);
+    }
+
     use std::future::Future as _;
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;

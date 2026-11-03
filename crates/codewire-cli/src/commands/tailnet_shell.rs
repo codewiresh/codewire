@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use codewire_client::tailnet_session::EnvironmentTailnet;
 use codewire_client::{
-    AttachSessionOpen, AttachSessionRequest, AttachSessionResize, CodewireClient,
-    EnvironmentSessionAttachment, SshTransportMode, attach_session_request,
+    AttachSessionOpen, AttachSessionRequest, AttachSessionResize, ClientError, CodewireClient,
+    EnvironmentSessionAttachment, ErrorCode, SshTransportMode, attach_session_request,
     attach_session_response,
 };
 use tokio::io::AsyncWriteExt as _;
@@ -38,6 +38,66 @@ pub(crate) const SHELL_GRACE: Duration = Duration::from_secs(10 * 60);
 /// a long network cut lands here as soon as the network returns (#3895).
 pub(crate) const TAILNET_RETRY_FIRST: Duration = Duration::from_secs(5);
 const TAILNET_RETRY_LIMIT: Duration = Duration::from_secs(60);
+
+/// An attachment that lasted this long was a working connection, so the next
+/// drop is a new one even if the session printed nothing.
+const RECONNECT_STAYED_UP: Duration = Duration::from_secs(30);
+
+/// Whether a failed call says nothing about the session: the server wasn't
+/// reached or didn't answer in time. Any other failure is the server's answer,
+/// such as access removed or the session gone, and ending there is right.
+pub(crate) fn is_network_failure(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ClientError>().is_some_and(|error| {
+        error.is_retryable_transport_interruption() || error.code() == ErrorCode::DeadlineExceeded
+    })
+}
+
+/// Paces an attachment to a hosted session while the network is down. The
+/// session runs on in the environment, so a long cut is not a reason to leave
+/// it (#3895): keep trying for as long as a plain shell would, then say how to
+/// come back. A failing server looks the same as a dead network from here, so
+/// this still ends: only output or a connection that stayed up starts it over.
+#[derive(Default)]
+pub(crate) struct ReconnectPacing {
+    dropped_at: Option<Instant>,
+    attached_at: Option<Instant>,
+    last_output_offset: u64,
+    attempt: u32,
+}
+
+impl ReconnectPacing {
+    /// Whether a connection has dropped and not yet come back.
+    pub(crate) fn reconnecting(&self) -> bool {
+        self.dropped_at.is_some()
+    }
+
+    /// The server has answered this attachment.
+    pub(crate) fn attached(&mut self) {
+        self.attached_at = Some(Instant::now());
+    }
+
+    /// The connection is lost at `output_offset`: how long to wait before the
+    /// next try, or `None` once the time to keep trying has run out.
+    pub(crate) fn lost(&mut self, output_offset: u64) -> Option<Duration> {
+        let stayed_up = self
+            .attached_at
+            .take()
+            .is_some_and(|attached| attached.elapsed() >= RECONNECT_STAYED_UP);
+        if stayed_up || output_offset > self.last_output_offset {
+            self.dropped_at = None;
+            self.attempt = 0;
+        }
+        self.last_output_offset = output_offset;
+        if self.dropped_at.get_or_insert_with(Instant::now).elapsed() >= SHELL_GRACE {
+            return None;
+        }
+        if self.attempt == 0 {
+            eprintln!("[cw] connection lost; reconnecting to the same session");
+        }
+        self.attempt += 1;
+        Some(Duration::from_millis(250 * u64::from(self.attempt.min(8))))
+    }
+}
 
 /// How one attachment ended.
 #[derive(Debug, PartialEq)]
@@ -286,6 +346,70 @@ fn resize(columns: u16, rows: u16) -> AttachSessionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_network_failure_is_worth_trying_again() {
+        use crate::commands::platform_commands::display_client_error;
+        let failure = |code| display_client_error(ClientError::new(code, "synthetic"));
+        assert!(is_network_failure(&failure(ErrorCode::Unavailable)));
+        assert!(is_network_failure(&failure(ErrorCode::DeadlineExceeded)));
+        assert!(is_network_failure(
+            &failure(ErrorCode::DeadlineExceeded).context("read the session")
+        ));
+        for answer in [
+            ErrorCode::PermissionDenied,
+            ErrorCode::NotFound,
+            ErrorCode::Unauthenticated,
+            ErrorCode::Internal,
+        ] {
+            assert!(!is_network_failure(&failure(answer)), "{answer:?}");
+        }
+        assert!(!is_network_failure(&anyhow::anyhow!("not from the server")));
+        // connectrpc's error for a response cut off part way.
+        let cut_off = connectrpc::ConnectError::internal(
+            "failed to read response body: request or response body error",
+        );
+        assert!(is_network_failure(&display_client_error(cut_off.into())));
+    }
+
+    #[test]
+    fn a_cut_is_retried_past_the_old_three_tries_with_growing_waits() {
+        let mut pacing = ReconnectPacing::default();
+        assert!(!pacing.reconnecting());
+        let waits: Vec<_> = (0..10).map(|_| pacing.lost(42).unwrap()).collect();
+        assert!(pacing.reconnecting());
+        assert_eq!(waits[0], Duration::from_millis(250));
+        assert_eq!(waits[1], Duration::from_millis(500));
+        assert_eq!(waits[9], Duration::from_secs(2), "capped");
+    }
+
+    #[test]
+    fn trying_ends_after_the_grace_with_no_output_or_lasting_connection() {
+        let mut pacing = ReconnectPacing::default();
+        assert!(pacing.lost(42).is_some());
+        pacing.dropped_at = Some(Instant::now() - SHELL_GRACE);
+        // A connection that opens and drops at once doesn't start it over.
+        pacing.attached();
+        assert_eq!(pacing.lost(42), None);
+    }
+
+    #[test]
+    fn output_or_a_lasting_connection_starts_the_time_over() {
+        let long_ago = Instant::now() - SHELL_GRACE;
+
+        let mut progress = ReconnectPacing::default();
+        assert!(progress.lost(42).is_some());
+        progress.dropped_at = Some(long_ago);
+        assert!(progress.lost(43).is_some());
+        assert!(progress.dropped_at.is_some_and(|at| at > long_ago));
+
+        let mut idle = ReconnectPacing::default();
+        assert!(idle.lost(42).is_some());
+        idle.dropped_at = Some(long_ago);
+        idle.attached_at = Some(Instant::now() - RECONNECT_STAYED_UP);
+        assert!(idle.lost(42).is_some());
+        assert!(idle.dropped_at.is_some_and(|at| at > long_ago));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn the_tailnet_is_tried_at_growing_intervals_until_it_connects() {
