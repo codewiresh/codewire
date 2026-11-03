@@ -29,12 +29,19 @@
 #
 # Environment: CODEWIRE_DEV_SMOKE_API_KEY (from with-dev-smoke-auth.sh), CW_BIN (default
 # cw), PROOF_CPU and PROOF_MEMORY (default one 4 GiB pool shape, which fills fastest).
+# KUBE_CONTEXT is the codewire-dev context, or what scripts/kube-access gives for
+# cw-dev-hz-eu-1, which is how an agent session runs this:
+#
+#   scripts/kube-access --mode agent cw-dev-hz-eu-1 -- \
+#     scripts/runtime/dev/with-dev-smoke-auth.sh -- \
+#     scripts/runtime/dev/prove-dev-vm-death-recovery.sh
 set -euo pipefail
 umask 077
 
 CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
+readonly DEV_CLUSTER="cw-dev-hz-eu-1"
 CW_BIN="${CW_BIN:-cw}"
 PROOF_CPU="${PROOF_CPU:-1000m}"
 PROOF_MEMORY="${PROOF_MEMORY:-4096}"
@@ -61,7 +68,7 @@ die() { printf '[vm-death] ERROR: %s\n' "$*" >&2; exit 2; }
 pass() { log "PASS $*"; }
 fail() { FAILURES=$((FAILURES + 1)); log "FAIL $*"; }
 skip() { SKIPS=$((SKIPS + 1)); log "SKIP $*"; }
-usage() { sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 now() { date +%s; }
 nap() { sleep "$1"; }
@@ -258,8 +265,10 @@ parse_args() {
     case "$round" in established|young) ;; *) die "unknown round: $round" ;; esac
   done
   [[ "$YOUNG_TRIES" =~ ^[1-9]$ ]] || die '--young-tries must be 1-9'
-  [[ "$CODEWIRE_SERVER_URL" == https://codewire-dev.sh && "$KUBE_CONTEXT" == codewire-dev ]] ||
-    die 'this proof runs only against Dev'
+  [[ "$CODEWIRE_SERVER_URL" == https://codewire-dev.sh ]] || die 'this proof runs only against Dev'
+  [[ "$KUBE_CONTEXT" == codewire-dev ||
+    ("$KUBE_CONTEXT" == "$DEV_CLUSTER" && -n "${KUBECONFIG:-}" && "${INFRA_TRANSIENT_KUBE_AUTH:-}" == 1) ]] ||
+    die "this proof runs only against Dev: the codewire-dev context, or through scripts/kube-access $DEV_CLUSTER"
   [[ -n "${CODEWIRE_DEV_SMOKE_API_KEY:-}" ]] || die 'CODEWIRE_DEV_SMOKE_API_KEY is required'
   case "$-" in *x*) die 'shell tracing is enabled; it would print the key' ;; esac
 }

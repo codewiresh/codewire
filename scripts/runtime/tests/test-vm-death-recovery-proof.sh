@@ -21,8 +21,13 @@ refuses() {
 
 bash -n "$PROOF"
 "$PROOF" --help | grep -q 'prove-dev-vm-death-recovery.sh' || die_test '--help does not describe the proof'
+"$PROOF" --help | grep -q 'scripts/kube-access --mode agent' || die_test '--help does not show the agent command'
 refuses 'only against Dev' env CODEWIRE_SERVER_URL=https://codewire.sh CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF"
 refuses 'only against Dev' env KUBE_CONTEXT=codewire-prod CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF"
+# The Dev cluster's name counts only through kube-access, which renders its KUBECONFIG.
+refuses 'only against Dev' env -u KUBECONFIG -u INFRA_TRANSIENT_KUBE_AUTH KUBE_CONTEXT=cw-dev-hz-eu-1 CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF"
+refuses 'only against Dev' env KUBECONFIG=/nonexistent INFRA_TRANSIENT_KUBE_AUTH=1 KUBE_CONTEXT=codewire-prod CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF"
+refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' env KUBECONFIG=/nonexistent INFRA_TRANSIENT_KUBE_AUTH=1 KUBE_CONTEXT=cw-dev-hz-eu-1 "$PROOF"
 refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' "$PROOF"
 refuses 'unknown round' env CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF" --rounds established,nonsense
 refuses '--young-tries must be' env CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF" --young-tries 0
