@@ -11,44 +11,34 @@ fn parse_env_overrides_requires_key_value_shape() {
     assert!(!rendered.contains(canary));
 }
 
-fn test_billing_overview(plan: &str, plan_display_name: &str) -> BillingOverview {
+fn test_billing_overview() -> BillingOverview {
     BillingOverview {
         billing_enabled: true,
         has_payment_method: true,
-        plan: plan.to_string(),
-        plan_display_name: plan_display_name.to_string(),
-        status: "active".to_string(),
-        trial_days: 14,
-        seat_count: 3,
-        included_devs: 5,
-        extra_seat_price_cents: 2000,
-        active_subscriptions: 2,
-        total_monthly_cost_cents: 12345,
+        credit_balance_nano_eur: 42_500_000_000,
+        month_usage_nano_eur: 3_100_000_000,
+        rates: crate::console_client::CreditRates {
+            cpu_per_vcpu_hour: 43_800_000,
+            memory_per_gib_hour: 14_100_000,
+            disk_per_gib_hour: 87_000,
+        },
+        auto_top_up_enabled: true,
+        auto_top_up_cents: 2000,
         current_month_usage: crate::console_client::UsageSummary {
             cpu_hours: 12.5,
             memory_gb_hours: 32.0,
             storage_gb_hours: 90.25,
-        },
-        limits: crate::console_client::BillingLimits {
-            team_members: crate::console_client::LimitUsage { used: 3, max: 10 },
-            concurrent_workspaces: 4,
-            storage_gb: 100,
         },
         ..BillingOverview::default()
     }
 }
 
 #[test]
-fn billing_plan_label_falls_back_to_plan_then_none() {
-    assert_eq!(
-        billing_plan_label(&test_billing_overview("team", "Team")),
-        "Team"
-    );
-    assert_eq!(
-        billing_plan_label(&test_billing_overview("team", "")),
-        "team"
-    );
-    assert_eq!(billing_plan_label(&test_billing_overview("", "")), "none");
+fn euros_show_cents_or_the_fraction_a_rate_needs() {
+    assert_eq!(format_euros(42_500_000_000), "€42.50");
+    assert_eq!(format_euros(-1_000_000), "-€0.001");
+    assert_eq!(format_euros(87_000), "€0.000087");
+    assert_eq!(format_euros(0), "€0.00");
 }
 
 #[test]
@@ -66,7 +56,7 @@ fn cost_org_matches_slug_or_id() {
 }
 
 #[test]
-fn format_cost_text_matches_existing_cli_shape() {
+fn format_cost_text_shows_credit_rates_and_top_up() {
     let reports = vec![
         OrgCostReport {
             org: OrgWithRole {
@@ -74,7 +64,7 @@ fn format_cost_text_matches_existing_cli_shape() {
                 slug: "codewire".to_string(),
                 ..OrgWithRole::default()
             },
-            billing: Some(test_billing_overview("team", "Team")),
+            billing: Some(test_billing_overview()),
         },
         OrgCostReport {
             org: OrgWithRole {
@@ -91,11 +81,11 @@ fn format_cost_text_matches_existing_cli_shape() {
         concat!(
             "# codewire\n",
             "\n",
-            "  Plan             Status       Seats $/mo     CPU hrs Mem GB·hrs Storage GB·hrs\n",
-            "  Team             active       3     $123.45  12.5    32.0       90.2\n",
+            "  Balance      This month   CPU hrs Mem GB·hrs Storage GB·hrs\n",
+            "  €42.50       €3.10        12.5    32.0       90.2\n",
             "\n",
-            "  Included developers: 5\n",
-            "  Active subscriptions: 2\n",
+            "  Rates: €0.0438 per vCPU-hour, €0.0141 per GiB-hour of memory, €0.000087 per GiB-hour of disk\n",
+            "  Automatic top-up: €20.00\n",
             "\n",
             "# missing (billing unavailable)\n",
             "\n",

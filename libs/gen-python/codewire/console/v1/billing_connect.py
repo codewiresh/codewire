@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .billing_pb2 import CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse, GetBillingOverviewRequest, GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse, ListResourcePlansRequest, ListResourcePlansResponse
+from .billing_pb2 import CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse, GetBillingOverviewRequest, GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse, ListResourcePlansRequest, ListResourcePlansResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -60,6 +60,9 @@ class BillingService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def create_setup_session(self, request: CreateSetupSessionRequest, ctx: RequestContext[CreateSetupSessionRequest, CreateSetupSessionResponse]) -> CreateSetupSessionResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def update_auto_top_up(self, request: UpdateAutoTopUpRequest, ctx: RequestContext[UpdateAutoTopUpRequest, UpdateAutoTopUpResponse]) -> UpdateAutoTopUpResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -165,6 +168,16 @@ class BillingServiceASGIApplication(ConnectASGIApplication[BillingService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.create_setup_session,
+                ),
+                "/codewire.console.v1.BillingService/UpdateAutoTopUp": Endpoint.unary(
+                    method=MethodInfo(
+                        name="UpdateAutoTopUp",
+                        service_name="codewire.console.v1.BillingService",
+                        input=UpdateAutoTopUpRequest,
+                        output=UpdateAutoTopUpResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.update_auto_top_up,
                 ),
             },
             interceptors=interceptors,
@@ -396,6 +409,26 @@ class BillingServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def update_auto_top_up(
+        self,
+        request: UpdateAutoTopUpRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> UpdateAutoTopUpResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="UpdateAutoTopUp",
+                service_name="codewire.console.v1.BillingService",
+                input=UpdateAutoTopUpRequest,
+                output=UpdateAutoTopUpResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class BillingServiceSync(Protocol):
     def list_org_plans(self, request: ListOrgPlansRequest, ctx: RequestContext[ListOrgPlansRequest, ListOrgPlansResponse]) -> ListOrgPlansResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -422,6 +455,9 @@ class BillingServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def create_setup_session(self, request: CreateSetupSessionRequest, ctx: RequestContext[CreateSetupSessionRequest, CreateSetupSessionResponse]) -> CreateSetupSessionResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def update_auto_top_up(self, request: UpdateAutoTopUpRequest, ctx: RequestContext[UpdateAutoTopUpRequest, UpdateAutoTopUpResponse]) -> UpdateAutoTopUpResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -525,6 +561,16 @@ class BillingServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.create_setup_session,
+                ),
+                "/codewire.console.v1.BillingService/UpdateAutoTopUp": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="UpdateAutoTopUp",
+                        service_name="codewire.console.v1.BillingService",
+                        input=UpdateAutoTopUpRequest,
+                        output=UpdateAutoTopUpResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.update_auto_top_up,
                 ),
             },
             interceptors=interceptors,
@@ -742,6 +788,25 @@ class BillingServiceClientSync(ConnectClientSync):
                 service_name="codewire.console.v1.BillingService",
                 input=CreateSetupSessionRequest,
                 output=CreateSetupSessionResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def update_auto_top_up(
+        self,
+        request: UpdateAutoTopUpRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> UpdateAutoTopUpResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="UpdateAutoTopUp",
+                service_name="codewire.console.v1.BillingService",
+                input=UpdateAutoTopUpRequest,
+                output=UpdateAutoTopUpResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

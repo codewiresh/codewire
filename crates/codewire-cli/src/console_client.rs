@@ -27,6 +27,26 @@ pub struct BillingOverview {
     /// The former REST handler faithfully emitted this as JSON null.
     pub subscriptions: Option<Vec<SubscriptionSummary>>,
     pub current_month_usage: UsageSummary,
+    /// Prepaid compute credit (#3381), in nano-euros (1e-9 EUR).
+    pub credit_balance_nano_eur: i64,
+    pub month_usage_nano_eur: i64,
+    pub rates: CreditRates,
+    /// No charge and no quota.
+    pub unmetered: bool,
+    pub auto_top_up_enabled: bool,
+    pub auto_top_up_cents: i32,
+    /// When credit ran out with no way to get more; creates and starts are
+    /// refused while it is set.
+    pub credit_exhausted_at: Option<String>,
+}
+
+/// What a running sandbox costs per unit-hour, in nano-euros.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct CreditRates {
+    pub cpu_per_vcpu_hour: i64,
+    pub memory_per_gib_hour: i64,
+    pub disk_per_gib_hour: i64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -91,7 +111,22 @@ impl ConsoleClient {
 }
 
 fn legacy_billing_overview(value: rpc::GetBillingOverviewResponse) -> BillingOverview {
+    let rates = value.rates.into_option().unwrap_or_default();
     BillingOverview {
+        credit_balance_nano_eur: value.credit_balance_nano_eur,
+        month_usage_nano_eur: value.month_usage_nano_eur,
+        rates: CreditRates {
+            cpu_per_vcpu_hour: rates.cpu_nano_eur_per_vcpu_hour,
+            memory_per_gib_hour: rates.memory_nano_eur_per_gib_hour,
+            disk_per_gib_hour: rates.disk_nano_eur_per_gib_hour,
+        },
+        unmetered: value.unmetered,
+        auto_top_up_enabled: value.auto_top_up_enabled,
+        auto_top_up_cents: value.auto_top_up_cents,
+        credit_exhausted_at: value
+            .credit_exhausted_at
+            .into_option()
+            .map(timestamp_to_rfc3339),
         billing_enabled: value.billing_enabled,
         has_payment_method: value.has_payment_method,
         plan: value.plan,

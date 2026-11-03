@@ -15,6 +15,7 @@ use codewire_admin_proto::codewire::admin::v1::{
 use codewire_proto::codewire::console::v1::{
     BillingServiceClient, GetBillingOverviewRequest, GetEnvironmentUsageRequest,
     ListBillingEventsRequest, ListInvoicesRequest, ListOrgPlansRequest, ListResourcePlansRequest,
+    UpdateAutoTopUpRequest,
 };
 use connectrpc::client::{ClientConfig, HttpClient};
 use connectrpc::{CodecFormat, ErrorCode};
@@ -149,6 +150,63 @@ async fn configured_billing_wire_contract() {
             .expect("GetBillingOverview Connect round trip")
             .into_owned();
         assert_eq!(overview.plan, "starter");
+        // The fixture organization is on the Regular card, with no credit yet.
+        assert!(!overview.unmetered);
+        assert_eq!(overview.credit_balance_nano_eur, 0);
+        assert_eq!(
+            overview
+                .rates
+                .as_option()
+                .expect("rates")
+                .cpu_nano_eur_per_vcpu_hour,
+            43_800_000
+        );
+
+        // Automatic top-up: a member may not change it; the owner may, within
+        // EUR 5 to EUR 1,000.
+        let top_up = |enabled: bool, amount_cents: i32| UpdateAutoTopUpRequest {
+            org_id: FIXTURE_ORG.into(),
+            enabled,
+            amount_cents,
+            ..Default::default()
+        };
+        let error = billing
+            .update_auto_top_up(top_up(false, 1000))
+            .await
+            .expect_err("a member cannot change automatic top-up");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        let owner = BillingServiceClient::new(
+            HttpClient::plaintext(),
+            harness.client_config(Some(&harness.admin_token), codec),
+        );
+        let error = owner
+            .update_auto_top_up(top_up(true, 499))
+            .await
+            .expect_err("a top-up below EUR 5 is invalid");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        for (enabled, amount_cents) in [(false, 1000), (true, 2000)] {
+            let updated = owner
+                .update_auto_top_up(top_up(enabled, amount_cents))
+                .await
+                .expect("UpdateAutoTopUp Connect round trip")
+                .into_owned();
+            assert_eq!(
+                (updated.enabled, updated.amount_cents),
+                (enabled, amount_cents)
+            );
+            let overview = owner
+                .get_billing_overview(GetBillingOverviewRequest {
+                    org_id: FIXTURE_ORG.into(),
+                    ..Default::default()
+                })
+                .await
+                .expect("GetBillingOverview Connect round trip")
+                .into_owned();
+            assert_eq!(
+                (overview.auto_top_up_enabled, overview.auto_top_up_cents),
+                (enabled, amount_cents)
+            );
+        }
 
         let invoices = billing
             .list_invoices(ListInvoicesRequest {

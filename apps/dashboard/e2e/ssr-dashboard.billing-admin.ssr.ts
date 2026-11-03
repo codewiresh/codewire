@@ -76,7 +76,7 @@ test.describe.serial("server-rendered billing and administration", () => {
       "aria-current",
       "page",
     );
-    await expect(page.getByRole("heading", { name: "Plan" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Compute credit" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Sandbox Usage" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Invoices" })).toBeVisible();
     expect(browserRequests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);

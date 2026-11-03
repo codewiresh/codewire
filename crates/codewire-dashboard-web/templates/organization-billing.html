@@ -24,7 +24,7 @@
       <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
       <main class="cw-main">{% let crumb_scope = organization.slug.as_str() %}{% let crumb_page = "billing" %}{% include "console-header.html" %}<div class="cw-page cw-org-management-page">
         <div class="cw-org-management-layout"><aside class="cw-context-nav">{% include "organization-settings-nav.html" %}</aside><div class="cw-context-main">
-        <header class="cw-context-page-header"><h1>Billing</h1><p>Plan, usage, invoices, and recent billing activity.</p></header>
+        <header class="cw-context-page-header"><h1>Billing</h1><p>Compute credit, usage, invoices, and recent billing activity.</p></header>
         <div class="cw-billing-stack">
           {% if !billing.message.is_empty() %}<div class="cw-alert cw-alert--success" role="status">{{ billing.message }}</div>{% endif %}
           {% if !billing.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ billing.error }}</div>{% endif %}
@@ -32,33 +32,51 @@
           <section class="cw-card" aria-label="Billing"><div class="cw-state"><p>Billing is not configured. Sandboxes run freely in dev mode.</p></div></section>
           {% endif %}
 
-          <section class="cw-card">
-            <header class="cw-card-header"><div><h2>Plan</h2><p>Organization-level billing.</p></div></header>
-            <div class="cw-card-body cw-plan-row">
-              <div>
-                <div class="cw-badge-row"><span class="cw-badge">{{ billing.plan_name }}</span>{% if !billing.status.is_empty() %}<span class="cw-badge" data-tone="{{ billing.status_tone }}">{{ billing.status }}</span>{% endif %}</div>
-                {% if billing.has_trial_end %}<p class="cw-muted">Trial ends {{ billing.trial_end }}</p>{% endif %}
-                {% if billing.has_period_end %}<p class="cw-muted">Current period ends {{ billing.period_end }}</p>{% endif %}
+          <section class="cw-card" aria-labelledby="credit-heading">
+            <header class="cw-card-header"><div><h2 id="credit-heading">Compute credit</h2><p>Running Sandboxes draw prepaid credit each second at this organization's rates. A stopped Sandbox costs nothing.</p></div></header>
+            <div class="cw-card-body cw-admin-section">
+              {% if billing.credit_exhausted && !billing.unmetered %}<p class="cw-alert cw-alert--error" role="alert">This organization ran out of compute credit on {{ billing.credit_exhausted_since }}. New Sandboxes and starts are refused, and running Sandboxes stop 24 hours after credit ran out; their storage is kept. Add a payment method or credit to continue.</p>{% endif %}
+              {% if billing.unmetered %}<p class="cw-muted">This organization is not charged for compute and has no Sandbox quota.</p>{% else %}
+              <dl class="cw-stat-grid">
+                <div class="cw-stat"><dt>Balance</dt><dd>{% if billing.credit_negative %}<span class="cw-badge" data-tone="warning">{{ billing.credit_balance }}</span>{% else %}{{ billing.credit_balance }}{% endif %}</dd></div>
+                <div class="cw-stat"><dt>vCPU</dt><dd>{{ billing.cpu_rate }} <small>per hour</small></dd></div>
+                <div class="cw-stat"><dt>Memory</dt><dd>{{ billing.memory_rate }} <small>per GiB-hour</small></dd></div>
+                <div class="cw-stat"><dt>Disk</dt><dd>{{ billing.disk_rate }} <small>per GiB-hour</small></dd></div>
+              </dl>
+              {% endif %}
+              {% if billing.billing_enabled %}
+              <div class="cw-credit-row">
+                <p class="cw-muted">{% if billing.has_payment_method %}A payment method is on file.{% else %}No payment method yet.{% endif %}{% if !billing.card_credit_granted && !billing.unmetered %} The first card an organization adds grants €50 of compute credit, once.{% endif %}</p>
+                {% if billing.can_manage %}
+                <form method="post" action="{% if billing.has_payment_method %}/{{ organization.slug }}/billing/_actions/portal{% else %}/{{ organization.slug }}/billing/_actions/setup{% endif %}">
+                  <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
+                  <button class="cw-button{% if billing.has_payment_method %} cw-button--outline{% endif %}" type="submit">{% if billing.has_payment_method %}Manage in Stripe ↗{% else %}Add payment method{% endif %}</button>
+                </form>
+                {% endif %}
               </div>
-              {% if billing.can_manage && billing.billing_enabled %}
-              <form method="post" action="{% if billing.has_payment_method %}/{{ organization.slug }}/billing/_actions/portal{% else %}/{{ organization.slug }}/billing/_actions/setup{% endif %}">
+              {% if billing.can_manage && !billing.unmetered %}
+              <form class="cw-catalog-form" method="post" action="/{{ organization.slug }}/billing/_actions/auto-top-up" aria-label="Automatic top-up">
                 <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
-                <button class="cw-button{% if billing.has_payment_method %} cw-button--outline{% endif %}" type="submit">{% if billing.has_payment_method %}Manage in Stripe ↗{% else %}Add payment method{% endif %}</button>
+                <label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="enabled" value="true"{% if billing.auto_top_up_enabled %} checked{% endif %}><span>Top up automatically</span></label>
+                <label class="cw-field"><span>Amount (EUR)</span><input class="cw-input" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" value="{{ billing.auto_top_up_euros }}" required></label>
+                <p class="cw-muted">When the balance runs out, the payment method is charged this amount, from €5 to €1,000.</p>
+                <div class="cw-form-action"><button class="cw-button cw-button--outline" type="submit">Save top-up</button></div>
               </form>
+              {% endif %}
               {% endif %}
             </div>
           </section>
 
           <section class="cw-card">
-            <header class="cw-card-header"><div><h2>Sandbox Usage</h2><p>Per-second compute billing for this month.</p></div></header>
+            <header class="cw-card-header"><div><h2>Sandbox Usage</h2><p>Credit drawn this month, per second of running Sandboxes.</p></div></header>
             <div class="cw-card-body">
               {% if !billing.usage_available %}
-              <div class="cw-alert cw-alert--warning" role="status">Usage is temporarily unavailable. Plan and payment controls remain usable.</div>
+              <div class="cw-alert cw-alert--warning" role="status">Usage is temporarily unavailable. Credit and payment controls remain usable.</div>
               {% else if billing.has_current_month %}
               <div class="cw-stat-grid cw-stat-grid--three">
                 <div class="cw-stat"><span>Current Month</span><strong>{{ billing.current_cost }}</strong></div>
-                <div class="cw-stat"><span>CPU Hours</span><strong>{{ billing.cpu_hours }}{% if billing.has_included_cpu_hours %}<small> / {{ billing.included_cpu_hours }}</small>{% endif %}</strong></div>
-                <div class="cw-stat"><span>Memory GiB-Hours</span><strong>{{ billing.memory_hours }}{% if billing.has_included_memory_hours %}<small> / {{ billing.included_memory_hours }}</small>{% endif %}</strong></div>
+                <div class="cw-stat"><span>CPU Hours</span><strong>{{ billing.cpu_hours }}</strong></div>
+                <div class="cw-stat"><span>Memory GiB-Hours</span><strong>{{ billing.memory_hours }}</strong></div>
               </div>
               {% if !billing.usage_bars.is_empty() %}
               <figure class="cw-usage-chart">
@@ -79,7 +97,7 @@
           </section>
 
           <section class="cw-card">
-            <header class="cw-card-header"><div><h2>Invoices</h2><p>Past billing periods.</p></div></header>
+            <header class="cw-card-header"><div><h2>Invoices</h2><p>Payments and their receipts.</p></div></header>
             <div class="cw-card-body">
               {% if !billing.invoices_available %}<div class="cw-alert cw-alert--warning" role="status">Invoice history is temporarily unavailable.</div>{% else if billing.invoices.is_empty() %}<p class="cw-muted">No invoices yet.</p>{% else %}
               <div class="cw-table-wrap"><table class="cw-table"><thead><tr><th scope="col">Period</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Documents</th></tr></thead><tbody>

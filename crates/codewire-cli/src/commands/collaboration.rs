@@ -153,40 +153,55 @@ pub(crate) fn format_cost_text(reports: &[OrgCostReport]) -> String {
 
         output.push_str(&format!("# {org_slug}\n\n"));
         output.push_str(&format!(
-            "  {:<16} {:<12} {:<5} {:<8} {:<7} {:<10} {}\n",
-            "Plan", "Status", "Seats", "$/mo", "CPU hrs", "Mem GB·hrs", "Storage GB·hrs"
+            "  {:<12} {:<12} {:<7} {:<10} {}\n",
+            "Balance", "This month", "CPU hrs", "Mem GB·hrs", "Storage GB·hrs"
         ));
         output.push_str(&format!(
-            "  {:<16} {:<12} {:<5} {:<8} {:<7.1} {:<10.1} {:.1}\n",
-            billing_plan_label(overview),
-            overview.status,
-            overview.seat_count,
-            format_cents(overview.total_monthly_cost_cents),
+            "  {:<12} {:<12} {:<7.1} {:<10.1} {:.1}\n",
+            format_euros(overview.credit_balance_nano_eur),
+            format_euros(overview.month_usage_nano_eur),
             overview.current_month_usage.cpu_hours,
             overview.current_month_usage.memory_gb_hours,
             overview.current_month_usage.storage_gb_hours,
         ));
         output.push('\n');
+        if overview.unmetered {
+            output.push_str("  Not charged for compute.\n\n");
+            continue;
+        }
         output.push_str(&format!(
-            "  Included developers: {}\n",
-            overview.included_devs
+            "  Rates: {} per vCPU-hour, {} per GiB-hour of memory, {} per GiB-hour of disk\n",
+            format_euros(overview.rates.cpu_per_vcpu_hour),
+            format_euros(overview.rates.memory_per_gib_hour),
+            format_euros(overview.rates.disk_per_gib_hour),
         ));
         output.push_str(&format!(
-            "  Active subscriptions: {}\n\n",
-            overview.active_subscriptions
+            "  Automatic top-up: {}\n",
+            if overview.auto_top_up_enabled {
+                format_euros(i64::from(overview.auto_top_up_cents) * 10_000_000)
+            } else {
+                "off".to_owned()
+            }
         ));
+        if let Some(since) = &overview.credit_exhausted_at {
+            output.push_str(&format!(
+                "  Credit ran out at {since}: creates and starts are refused, and running sandboxes stop 24 hours later.\n"
+            ));
+        }
+        output.push('\n');
     }
     output
 }
 
-pub(crate) fn billing_plan_label(overview: &BillingOverview) -> &str {
-    trimmed_str(&overview.plan_display_name)
-        .or_else(|| trimmed_str(&overview.plan))
-        .unwrap_or("none")
-}
-
-pub(crate) fn format_cents(cents: i32) -> String {
-    format!("${:.2}", cents as f64 / 100.0)
+/// A nano-euro amount in euros: two decimals, or up to six when the amount
+/// has more (a rate per hour is a fraction of a cent), never rounded up.
+pub(crate) fn format_euros(nano_eur: i64) -> String {
+    let sign = if nano_eur < 0 { "-" } else { "" };
+    let magnitude = nano_eur.unsigned_abs();
+    let whole = magnitude / 1_000_000_000;
+    let fraction = format!("{:09}", magnitude % 1_000_000_000);
+    let fraction = fraction[..6].trim_end_matches('0');
+    format!("{sign}€{whole}.{fraction:0<2}")
 }
 
 pub(crate) fn print_orgs(

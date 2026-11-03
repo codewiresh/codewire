@@ -12,9 +12,9 @@
 //! `billing_enabled:false, has_payment_method:false`.
 
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, TimeZone, Utc};
-use codewire_server_core::AppResult;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::require_org_member;
+use codewire_server_core::{AppError, AppResult};
 use sqlx::PgPool;
 
 use crate::routes::BillingState;
@@ -50,8 +50,32 @@ pub struct SubscriptionSummary {
     pub monthly_cost_cents: i32,
 }
 
+/// A rate card's prices, in nano-euros per unit-hour.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CreditRates {
+    pub cpu_per_vcpu_hour: i64,
+    pub memory_per_gib_hour: i64,
+    pub disk_per_gib_hour: i64,
+}
+
+/// An organization's prepaid compute credit (#3381). The card's name is never
+/// shown; Discounted is not offered publicly.
+#[derive(Debug, Clone, Default)]
+pub struct CreditOverview {
+    pub balance_nano_eur: i64,
+    pub rates: CreditRates,
+    /// The Unlimited card: no charge and no quota.
+    pub unmetered: bool,
+    pub auto_top_up_enabled: bool,
+    pub auto_top_up_cents: i32,
+    pub exhausted_at: Option<String>,
+    pub card_credit_granted: bool,
+    pub month_usage_nano_eur: i64,
+}
+
 #[derive(Debug)]
 pub struct BillingOverviewResponse {
+    pub credit: CreditOverview,
     pub billing_enabled: bool,
     pub has_payment_method: bool,
     pub plan: String,
@@ -261,6 +285,125 @@ fn coalesce_plan_display_name(values: &[&str]) -> String {
     "No plan".to_string()
 }
 
+async fn credit_overview(
+    pool: &PgPool,
+    org_id: &str,
+    month_start: DateTime<Utc>,
+) -> AppResult<CreditOverview> {
+    type Row = (
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        bool,
+        i32,
+        Option<DateTime<Utc>>,
+        bool,
+        i64,
+    );
+    let row: Row = sqlx::query_as(
+        r#"SELECT
+               o.rate_card, r.cpu_nano_eur_per_vcpu_hour,
+               r.memory_nano_eur_per_gib_hour, r.disk_nano_eur_per_gib_hour,
+               COALESCE((SELECT balance_nano_eur FROM billing_credit_balances
+                         WHERE organization_id = o.id), 0),
+               o.auto_top_up_enabled,
+               o.auto_top_up_cents,
+               o.credit_exhausted_at,
+               EXISTS (SELECT 1 FROM billing_credit_ledger
+                       WHERE organization_id = o.id AND idempotency_key = 'card_grant'),
+               COALESCE((SELECT -SUM(amount_nano_eur) FROM billing_credit_ledger
+                         WHERE organization_id = o.id AND entry_kind = 'usage'
+                           AND usage_ended_at >= $2), 0)::int8
+           FROM organizations o
+           JOIN billing_rate_cards r ON r.rate_card = o.rate_card
+           WHERE o.id = $1"#,
+    )
+    .bind(org_id)
+    .bind(month_start)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
+    let (rate_card, cpu, memory, disk, balance, enabled, cents, exhausted_at, granted, month) = row;
+    Ok(CreditOverview {
+        balance_nano_eur: balance,
+        rates: CreditRates {
+            cpu_per_vcpu_hour: cpu,
+            memory_per_gib_hour: memory,
+            disk_per_gib_hour: disk,
+        },
+        unmetered: rate_card == crate::credit::UNLIMITED_RATE_CARD,
+        auto_top_up_enabled: enabled,
+        auto_top_up_cents: cents,
+        exhausted_at: exhausted_at.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        card_credit_granted: granted,
+        month_usage_nano_eur: month,
+    })
+}
+
+/// The smallest and largest automatic top-up: EUR 5 and EUR 1,000.
+pub const AUTO_TOP_UP_CENTS: std::ops::RangeInclusive<i32> = 500..=100_000;
+
+/// Turns automatic top-up on or off and sets its amount, for an organization
+/// owner or admin, and audits the change in the same transaction.
+pub async fn update_auto_top_up(
+    pool: &PgPool,
+    user: &AuthUser,
+    org_id: &str,
+    enabled: bool,
+    amount_cents: i32,
+) -> AppResult<(bool, i32)> {
+    crate::checkout_sessions::require_org_billing_admin(pool, user, org_id).await?;
+    if !AUTO_TOP_UP_CENTS.contains(&amount_cents) {
+        return Err(AppError::Validation {
+            errors: vec![codewire_server_core::ValidationIssue {
+                path: "/amount_cents".into(),
+                message: "must be between 500 and 100000".into(),
+            }],
+        });
+    }
+    let mut transaction = pool.begin().await?;
+    let previous: (bool, i32) = sqlx::query_as(
+        r#"SELECT auto_top_up_enabled, auto_top_up_cents FROM organizations
+           WHERE id = $1 FOR UPDATE"#,
+    )
+    .bind(org_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"UPDATE organizations
+           SET auto_top_up_enabled = $2, auto_top_up_cents = $3, updated_at = NOW()
+           WHERE id = $1"#,
+    )
+    .bind(org_id)
+    .bind(enabled)
+    .bind(amount_cents)
+    .execute(&mut *transaction)
+    .await?;
+    if previous != (enabled, amount_cents) {
+        sqlx::query(
+            r#"INSERT INTO audit_logs (id, timestamp, action, user_id, metadata, severity)
+               VALUES (gen_random_uuid()::text, NOW(), 'organization.billing.auto_top_up', $1,
+                       jsonb_build_object('organization_id', $2::text,
+                                          'previous_enabled', $3::bool,
+                                          'previous_amount_cents', $4::int,
+                                          'enabled', $5::bool, 'amount_cents', $6::int),
+                       'info')"#,
+        )
+        .bind(&user.user_id)
+        .bind(org_id)
+        .bind(previous.0)
+        .bind(previous.1)
+        .bind(enabled)
+        .bind(amount_cents)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok((enabled, amount_cents))
+}
+
 /// Shared billing-overview operation used by the Connect adapter.
 pub async fn billing_overview(
     state: &BillingState,
@@ -303,10 +446,12 @@ pub async fn billing_overview(
         .single()
         .expect("first of month is always valid");
     let usage = usage_sums(pool, org_id, month_start).await?;
+    let credit = credit_overview(pool, org_id, month_start).await?;
 
     let (trial_days, extra_seat_cents) = lookup_settings(pool).await?;
 
     Ok(BillingOverviewResponse {
+        credit,
         billing_enabled,
         has_payment_method,
         plan_display_name: coalesce_plan_display_name(&[

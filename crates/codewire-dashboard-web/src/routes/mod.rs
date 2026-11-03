@@ -250,6 +250,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/{slug}/billing/", get(billing::page))
         .route("/{slug}/billing/_actions/portal", post(billing::portal))
         .route("/{slug}/billing/_actions/setup", post(billing::setup))
+        .route(
+            "/{slug}/billing/_actions/auto-top-up",
+            post(billing::auto_top_up),
+        )
         .route("/{slug}/secrets", get(slash_redirect))
         .route("/{slug}/secrets/", get(secrets_presets::secrets_page))
         // Legacy personal URLs keep no organization authority. Static user

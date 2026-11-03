@@ -10,7 +10,7 @@ use codewire_proto::codewire::console::v1::{
     BillingEvent as ProtoBillingEvent, BillingLimitUsage as ProtoBillingLimitUsage,
     BillingLimits as ProtoBillingLimits, BillingService, CreateCheckoutSessionRequest,
     CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse,
-    CreateSetupSessionRequest, CreateSetupSessionResponse,
+    CreateSetupSessionRequest, CreateSetupSessionResponse, CreditRates as ProtoCreditRates,
     EnvironmentUsageEntry as ProtoEnvironmentUsageEntry,
     EnvironmentUsageHour as ProtoEnvironmentUsageHour,
     EnvironmentUsageMonth as ProtoEnvironmentUsageMonth, GetBillingOverviewRequest,
@@ -18,7 +18,8 @@ use codewire_proto::codewire::console::v1::{
     Invoice as ProtoInvoice, ListBillingEventsRequest, ListBillingEventsResponse,
     ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse,
     ListResourcePlansRequest, ListResourcePlansResponse, OrgPlan as ProtoOrgPlan,
-    ResourcePlan as ProtoResourcePlan, UsageSummary as ProtoUsageSummary,
+    ResourcePlan as ProtoResourcePlan, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse,
+    UsageSummary as ProtoUsageSummary,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult};
@@ -33,12 +34,12 @@ use crate::org_billing::{
 };
 use crate::overview::{
     BillingOverviewResponse, EnvironmentUsageEntry, EnvironmentUsageHour, EnvironmentUsageResponse,
-    billing_overview, environment_usage,
+    billing_overview, environment_usage, update_auto_top_up,
 };
 use crate::plans::{self, OrgPlan, ResourcePlan};
 use crate::routes::BillingState;
 
-/// Registers all nine BillingService RPCs on their generated Connect routes.
+/// Registers all ten BillingService RPCs on their generated Connect routes.
 pub fn router(state: BillingState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(BillingConnectService { state }))
 }
@@ -229,6 +230,44 @@ impl BillingService for BillingConnectService {
             ..Default::default()
         })
     }
+
+    async fn update_auto_top_up(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, UpdateAutoTopUpRequest>,
+    ) -> ServiceResult<UpdateAutoTopUpResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let (enabled, amount_cents) = update_auto_top_up(
+            &self.state.pool,
+            &user,
+            request.org_id,
+            request.enabled,
+            request.amount_cents,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        // Turning top-up on charges a balance that already ran out now,
+        // rather than at the next metering pass. The setting is saved either
+        // way; a failed charge is recorded by the settlement.
+        if enabled
+            && let Err(error) = crate::credit::settle_organization(
+                &self.state.pool,
+                &self.state.stripe,
+                self.state.credit_enforcement,
+                request.org_id,
+                true,
+            )
+            .await
+        {
+            tracing::warn!(org_id = request.org_id, %error, "billing: settle after enabling top-up failed");
+        }
+        connectrpc::Response::ok(UpdateAutoTopUpResponse {
+            enabled,
+            amount_cents,
+            ..Default::default()
+        })
+    }
 }
 
 fn proto_org_plan(plan: OrgPlan) -> ProtoOrgPlan {
@@ -310,6 +349,20 @@ fn proto_billing_overview(value: BillingOverviewResponse) -> AppResult<GetBillin
             ..Default::default()
         })
         .into(),
+        credit_balance_nano_eur: value.credit.balance_nano_eur,
+        rates: Some(ProtoCreditRates {
+            cpu_nano_eur_per_vcpu_hour: value.credit.rates.cpu_per_vcpu_hour,
+            memory_nano_eur_per_gib_hour: value.credit.rates.memory_per_gib_hour,
+            disk_nano_eur_per_gib_hour: value.credit.rates.disk_per_gib_hour,
+            ..Default::default()
+        })
+        .into(),
+        unmetered: value.credit.unmetered,
+        auto_top_up_enabled: value.credit.auto_top_up_enabled,
+        auto_top_up_cents: value.credit.auto_top_up_cents,
+        credit_exhausted_at: optional_timestamp(value.credit.exhausted_at.as_deref())?.into(),
+        card_credit_granted: value.credit.card_credit_granted,
+        month_usage_nano_eur: value.credit.month_usage_nano_eur,
         ..Default::default()
     })
 }

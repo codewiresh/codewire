@@ -4,11 +4,12 @@ use axum::http::HeaderValue;
 use codewire_proto::codewire::console::v1::{
     BillingServiceClient, CreatePortalSessionRequest, CreateSetupSessionRequest,
     GetBillingOverviewRequest, GetEnvironmentUsageRequest, ListBillingEventsRequest,
-    ListInvoicesRequest,
+    ListInvoicesRequest, UpdateAutoTopUpRequest,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
 use crate::{
+    admin_connect::euro_text,
     dependency::{DependencyResult, PageDependency, resolve_connect},
     state::AppState,
     time_display::calendar_date,
@@ -54,23 +55,26 @@ pub(crate) struct BillingUsageBar {
 pub(crate) struct BillingPageView {
     pub(crate) billing_enabled: bool,
     pub(crate) has_payment_method: bool,
-    pub(crate) plan_name: String,
-    pub(crate) status: String,
-    pub(crate) status_tone: &'static str,
-    pub(crate) trial_end: String,
-    pub(crate) has_trial_end: bool,
-    pub(crate) period_end: String,
-    pub(crate) has_period_end: bool,
+    /// Prepaid compute credit (#3381), in euros.
+    pub(crate) credit_balance: String,
+    pub(crate) credit_negative: bool,
+    /// No charge at all: the rates are zero and there is no quota.
+    pub(crate) unmetered: bool,
+    pub(crate) cpu_rate: String,
+    pub(crate) memory_rate: String,
+    pub(crate) disk_rate: String,
+    pub(crate) card_credit_granted: bool,
+    pub(crate) auto_top_up_enabled: bool,
+    /// The automatic top-up in euros, as the form shows it ("20").
+    pub(crate) auto_top_up_euros: String,
+    pub(crate) credit_exhausted: bool,
+    pub(crate) credit_exhausted_since: String,
     pub(crate) can_manage: bool,
     pub(crate) usage_available: bool,
     pub(crate) has_current_month: bool,
     pub(crate) current_cost: String,
     pub(crate) cpu_hours: String,
-    pub(crate) included_cpu_hours: String,
-    pub(crate) has_included_cpu_hours: bool,
     pub(crate) memory_hours: String,
-    pub(crate) included_memory_hours: String,
-    pub(crate) has_included_memory_hours: bool,
     pub(crate) usage: Vec<BillingUsageRow>,
     pub(crate) usage_bars: Vec<BillingUsageBar>,
     pub(crate) invoices_available: bool,
@@ -140,11 +144,11 @@ pub(crate) async fn billing_page(
         .into_option()
         .map(|response| response.into_owned());
 
-    let trial_end = overview.trial_end.into_option().map(|value| value.seconds);
-    let period_end = overview
-        .current_period_end
+    let exhausted_at = overview
+        .credit_exhausted_at
         .into_option()
         .map(|value| value.seconds);
+    let rates = overview.rates.into_option().unwrap_or_default();
     let usage_available = usage.is_some();
     let (current_month, hourly, usage_rows) = usage.map_or_else(
         || (None, Vec::new(), Vec::new()),
@@ -187,71 +191,48 @@ pub(crate) async fn billing_page(
                 x: 8 + index * 12,
                 y: 80usize.saturating_sub(height),
                 height,
-                label: format!("{occurred}: {}", money(entry.cost_cents, "usd")),
+                label: format!("{occurred}: {}", money(entry.cost_cents, "eur")),
             }
         })
         .collect();
-    let (
-        has_current_month,
-        current_cost,
-        cpu_hours,
-        included_cpu_hours,
-        has_included_cpu_hours,
-        memory_hours,
-        included_memory_hours,
-        has_included_memory_hours,
-    ) = current_month.map_or_else(
-        || {
-            (
-                false,
-                money(0, "usd"),
-                "0.0".to_owned(),
-                String::new(),
-                false,
-                "0.0".to_owned(),
-                String::new(),
-                false,
-            )
-        },
+    let (has_current_month, cpu_hours, memory_hours) = current_month.map_or_else(
+        || (false, "0.0".to_owned(), "0.0".to_owned()),
         |month| {
             (
                 true,
-                money(month.cost_cents, "usd"),
                 format!("{:.1}", month.cpu_hours),
-                month.included_cpu_hours.to_string(),
-                month.included_cpu_hours > 0,
                 format!("{:.1}", month.mem_gb_hours),
-                month.included_mem_gb_hours.to_string(),
-                month.included_mem_gb_hours > 0,
             )
         },
     );
+    // The month's cost is what was drawn from credit, not an estimate.
+    let current_cost = euro_text(overview.month_usage_nano_eur);
 
     Ok(BillingPageView {
         billing_enabled: overview.billing_enabled,
         has_payment_method: overview.has_payment_method,
-        plan_name: nonempty(overview.plan_display_name, "No plan"),
-        status_tone: status_tone(&overview.status),
-        status: overview.status,
-        trial_end: trial_end.map(calendar_date).unwrap_or_default(),
-        has_trial_end: trial_end.is_some(),
-        period_end: period_end.map(calendar_date).unwrap_or_default(),
-        has_period_end: period_end.is_some(),
+        credit_balance: euro_text(overview.credit_balance_nano_eur),
+        credit_negative: overview.credit_balance_nano_eur < 0,
+        unmetered: overview.unmetered,
+        cpu_rate: euro_text(rates.cpu_nano_eur_per_vcpu_hour),
+        memory_rate: euro_text(rates.memory_nano_eur_per_gib_hour),
+        disk_rate: euro_text(rates.disk_nano_eur_per_gib_hour),
+        card_credit_granted: overview.card_credit_granted,
+        auto_top_up_enabled: overview.auto_top_up_enabled,
+        auto_top_up_euros: top_up_euros(overview.auto_top_up_cents),
+        credit_exhausted: exhausted_at.is_some(),
+        credit_exhausted_since: exhausted_at.map(calendar_date).unwrap_or_default(),
         can_manage,
         usage_available,
         has_current_month,
         current_cost,
         cpu_hours,
-        included_cpu_hours,
-        has_included_cpu_hours,
         memory_hours,
-        included_memory_hours,
-        has_included_memory_hours,
         usage: usage_rows
             .into_iter()
             .map(|entry| BillingUsageRow {
                 name: entry.name,
-                cost: money(entry.cost_cents, "usd"),
+                cost: money(entry.cost_cents, "eur"),
             })
             .collect(),
         usage_bars,
@@ -273,7 +254,12 @@ pub(crate) async fn billing_page(
                 let hosted_url = safe_stripe_url(invoice.hosted_invoice_url.unwrap_or_default());
                 let pdf_url = safe_stripe_url(invoice.invoice_pdf.unwrap_or_default());
                 BillingInvoiceRow {
-                    period: format!("{start} – {end}"),
+                    // A one-off invoice, such as a top-up, covers one day.
+                    period: if start == end {
+                        start
+                    } else {
+                        format!("{start} – {end}")
+                    },
                     amount: money(invoice.amount_paid, &invoice.currency),
                     status: invoice.status,
                     has_hosted_url: !hosted_url.is_empty(),
@@ -343,6 +329,54 @@ pub(crate) async fn create_setup_session(
         .checkout_url)
 }
 
+/// Turns automatic top-up on or off and sets its amount, in cents.
+pub(crate) async fn update_auto_top_up(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    enabled: bool,
+    amount_cents: i32,
+) -> Result<(), ConnectError> {
+    client(state, cookie)
+        .update_auto_top_up(UpdateAutoTopUpRequest {
+            org_id,
+            enabled,
+            amount_cents,
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+/// A top-up amount in whole euros, or with cents when it has them.
+fn top_up_euros(cents: i32) -> String {
+    if cents % 100 == 0 {
+        (cents / 100).to_string()
+    } else {
+        format!("{}.{:02}", cents / 100, cents % 100)
+    }
+}
+
+/// A submitted top-up amount in euros ("20", "7.50") in cents: EUR 5 to
+/// EUR 1,000 with at most two decimals.
+pub(crate) fn top_up_cents(text: &str) -> Option<i32> {
+    let text = text.trim();
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if whole.is_empty()
+        || whole.len() > 4
+        || fraction.len() > 2
+        || (text.contains('.') && fraction.is_empty())
+        || !whole
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let cents = whole.parse::<i32>().ok()? * 100 + format!("{fraction:0<2}").parse::<i32>().ok()?;
+    (500..=100_000).contains(&cents).then_some(cents)
+}
+
 pub(crate) fn safe_stripe_url(raw: String) -> String {
     let Ok(url) = url::Url::parse(&raw) else {
         return String::new();
@@ -359,28 +393,13 @@ pub(crate) fn safe_stripe_url(raw: String) -> String {
     }
 }
 
-fn nonempty(value: String, fallback: &str) -> String {
-    if value.trim().is_empty() {
-        fallback.to_owned()
-    } else {
-        value
-    }
-}
-
-fn status_tone(status: &str) -> &'static str {
-    match status {
-        "active" => "success",
-        "trialing" => "warning",
-        "past_due" | "unpaid" | "incomplete" => "danger",
-        _ => "muted",
-    }
-}
-
 fn money(cents: i32, currency: &str) -> String {
     let cents = i64::from(cents);
     let sign = if cents < 0 { "-" } else { "" };
     let absolute = cents.abs();
-    if currency.eq_ignore_ascii_case("usd") || currency.trim().is_empty() {
+    if currency.eq_ignore_ascii_case("eur") || currency.trim().is_empty() {
+        format!("{sign}€{}.{:02}", absolute / 100, absolute % 100)
+    } else if currency.eq_ignore_ascii_case("usd") {
         format!("{sign}${}.{:02}", absolute / 100, absolute % 100)
     } else {
         format!(
@@ -467,20 +486,106 @@ mod tests {
     #[test]
     fn money_formatting_is_bounded_and_currency_aware() {
         assert_eq!(money(1234, "usd"), "$12.34");
-        assert_eq!(money(-50, "eur"), "-0.50 EUR");
+        assert_eq!(money(-50, "eur"), "-€0.50");
+        assert_eq!(money(50, "gbp"), "0.50 GBP");
     }
 
     #[test]
-    fn optional_outages_keep_plan_and_payment_controls() {
-        let organization = OrganizationContext::from_row(&OrganizationRow {
+    fn top_up_amounts_are_euros_between_five_and_a_thousand() {
+        assert_eq!(top_up_cents("20"), Some(2000));
+        assert_eq!(top_up_cents(" 7.5 "), Some(750));
+        assert_eq!(top_up_cents("1000"), Some(100_000));
+        for invalid in ["", "4.99", "1000.01", "20.", "1e3", "-20", "20,00", "abc"] {
+            assert_eq!(top_up_cents(invalid), None, "{invalid:?}");
+        }
+        assert_eq!(top_up_euros(2000), "20");
+        assert_eq!(top_up_euros(750), "7.50");
+    }
+
+    fn test_organization() -> OrganizationContext {
+        OrganizationContext::from_row(&OrganizationRow {
             id: "org-test".into(),
             name: "Test organization".into(),
             slug: "test".into(),
+            billing_plan: "none".into(),
             role: "Owner",
             can_admin: true,
-            billing_plan: "paid".into(),
             url: "/test/".into(),
+        })
+    }
+
+    fn render(billing: &BillingPageView) -> String {
+        OrganizationBillingTemplate {
+            view: &dashboard_view(),
+            organization: &test_organization(),
+            billing,
+            active_tab: "billing",
+        }
+        .render()
+        .expect("render billing")
+    }
+
+    #[test]
+    fn compute_credit_shows_balance_rates_top_up_and_exhaustion() {
+        let billing = BillingPageView {
+            billing_enabled: true,
+            can_manage: true,
+            credit_balance: "-€0.25".into(),
+            credit_negative: true,
+            cpu_rate: "€0.0438".into(),
+            memory_rate: "€0.0141".into(),
+            disk_rate: "€0.000087".into(),
+            auto_top_up_enabled: true,
+            auto_top_up_euros: "20".into(),
+            credit_exhausted: true,
+            credit_exhausted_since: "Oct 28, 2026".into(),
+            csrf_token: "csrf".into(),
+            ..Default::default()
+        };
+        let body = render(&billing);
+        assert!(body.contains(r#"<h2 id="credit-heading">Compute credit</h2>"#));
+        assert!(body.contains(
+            r#"<dt>Balance</dt><dd><span class="cw-badge" data-tone="warning">-€0.25</span></dd>"#
+        ));
+        assert!(body.contains("<dt>vCPU</dt><dd>€0.0438 <small>per hour</small></dd>"));
+        assert!(body.contains("ran out of compute credit on Oct 28, 2026"));
+        // No card yet: the setup action and the one-time grant note.
+        assert!(body.contains(r#"action="/test/billing/_actions/setup""#));
+        assert!(body.contains("grants €50 of compute credit, once"));
+        // The top-up form is labelled and starts at the stored values.
+        assert!(body.contains(r#"action="/test/billing/_actions/auto-top-up""#));
+        assert!(body.contains(
+            r#"<label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="enabled" value="true" checked><span>Top up automatically</span></label>"#
+        ));
+        assert!(body.contains(r#"name="amount" inputmode="decimal""#));
+        assert!(body.contains(r#"value="20" required"#));
+        // No plan, seat or trial language is left.
+        for retired in ["Plan", "trial", "Trial", "seat"] {
+            assert!(!body.contains(retired), "{retired}");
+        }
+
+        // An Unlimited organization sees no rates, top-up or grant.
+        let body = render(&BillingPageView {
+            billing_enabled: true,
+            can_manage: true,
+            unmetered: true,
+            // Switched to Unlimited a moment ago: billing clears this on its
+            // next pass, and the page never claims creates are refused.
+            credit_exhausted: true,
+            credit_exhausted_since: "Oct 28, 2026".into(),
+            csrf_token: "csrf".into(),
+            ..Default::default()
         });
+        assert!(body.contains("not charged for compute"));
+        assert!(!body.contains("ran out of compute credit"));
+        assert!(!body.contains("auto-top-up"));
+        assert!(!body.contains("grants €50"));
+        assert!(!body.contains("<dt>vCPU</dt>"));
+    }
+
+    #[test]
+    fn optional_outages_keep_credit_and_payment_controls() {
+        let organization = test_organization();
         let outages: [BillingOutage; 3] = [
             (
                 "usage",
@@ -503,7 +608,7 @@ mod tests {
             let mut billing = BillingPageView {
                 billing_enabled: true,
                 can_manage: true,
-                plan_name: "Team".into(),
+                credit_balance: "€42.50".into(),
                 usage_available: true,
                 invoices_available: true,
                 events_available: true,
@@ -521,7 +626,7 @@ mod tests {
             .expect("render degraded billing");
 
             assert!(body.contains(notice), "{name}");
-            assert!(body.contains("Team"), "{name}");
+            assert!(body.contains("€42.50"), "{name}");
             assert!(body.contains("/test/billing/_actions/setup"), "{name}");
             assert!(!body.contains("upstream-sensitive-detail"), "{name}");
         }

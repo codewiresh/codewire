@@ -3,7 +3,7 @@
 [data-route="admin"] .cw-page { max-width: var(--content-wide); }
 .cw-billing-stack, .cw-admin-stack { display: grid; min-width: 0; gap: var(--space-3); }
 
-.cw-plan-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
+.cw-credit-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
 .cw-badge-row { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .cw-badge-row .cw-badge { margin-left: 0; }
 .cw-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); }
@@ -61,7 +61,7 @@ dl.cw-stat-grid { margin: 0; }
 .cw-access-action { margin: 0; }
 
 @media (max-width: 48rem) {
-  .cw-plan-row { align-items: stretch; flex-direction: column; }
+  .cw-credit-row { align-items: stretch; flex-direction: column; }
   .cw-stat-grid, .cw-stat-grid--three, .cw-organization-settings { grid-template-columns: minmax(0, 1fr); }
   .cw-organization-toggle { flex-wrap: nowrap; }
   .cw-admin-heading, .cw-filter-form, .cw-setting-row { align-items: stretch; flex-direction: column; }

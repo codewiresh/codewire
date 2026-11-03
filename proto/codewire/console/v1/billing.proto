@@ -45,8 +45,14 @@ service BillingService {
   // CreatePortalSession creates a Stripe billing portal session.
   rpc CreatePortalSession(CreatePortalSessionRequest) returns (CreatePortalSessionResponse);
 
-  // CreateSetupSession creates a Stripe payment-method setup session.
+  // CreateSetupSession creates a Stripe payment-method setup session. Where
+  // the deployment enforces credit, the first card an organization adds grants
+  // EUR 50 of credit, once per organization and once per card.
   rpc CreateSetupSession(CreateSetupSessionRequest) returns (CreateSetupSessionResponse);
+
+  // UpdateAutoTopUp turns automatic top-up on or off and sets its amount.
+  // Organization owners and admins only; audited.
+  rpc UpdateAutoTopUp(UpdateAutoTopUpRequest) returns (UpdateAutoTopUpResponse);
 }
 
 message ListOrgPlansRequest {}
@@ -117,6 +123,41 @@ message GetBillingOverviewResponse {
   int32 active_subscriptions = 13;
   int32 total_monthly_cost_cents = 14;
   UsageSummary current_month_usage = 15;
+  // Prepaid compute credit, in nano-euros (1e-9 EUR); below zero when usage
+  // outran it.
+  int64 credit_balance_nano_eur = 16;
+  // What a running sandbox costs this organization per unit-hour.
+  CreditRates rates = 17;
+  // Whether no charge applies at all: the rates are zero and there is no
+  // quota.
+  bool unmetered = 18;
+  bool auto_top_up_enabled = 19;
+  int32 auto_top_up_cents = 20;
+  // Set while the organization has no credit and no way to get it: creates
+  // and starts are refused, and running sandboxes stop 24 hours after it.
+  optional google.protobuf.Timestamp credit_exhausted_at = 21;
+  // Whether a card has already granted this organization its free credit.
+  bool card_credit_granted = 22;
+  // Usage drawn from credit since the start of this month, in nano-euros.
+  int64 month_usage_nano_eur = 23;
+}
+
+message CreditRates {
+  int64 cpu_nano_eur_per_vcpu_hour = 1;
+  int64 memory_nano_eur_per_gib_hour = 2;
+  int64 disk_nano_eur_per_gib_hour = 3;
+}
+
+message UpdateAutoTopUpRequest {
+  string org_id = 1;
+  bool enabled = 2;
+  // EUR 5 to EUR 1,000, in cents.
+  int32 amount_cents = 3;
+}
+
+message UpdateAutoTopUpResponse {
+  bool enabled = 1;
+  int32 amount_cents = 2;
 }
 
 message BillingLimitUsage {

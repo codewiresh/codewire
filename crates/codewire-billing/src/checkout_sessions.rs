@@ -85,11 +85,20 @@ async fn require_billing_admin(
     if !state.stripe.is_configured() {
         return Err(AppError::NotFound("billing is not enabled".into()));
     }
-    let role = user_org_role(&state.pool, user, org_id)
+    require_org_billing_admin(&state.pool, user, org_id).await
+}
+
+/// An organization owner or admin: non-members see a 404.
+pub(crate) async fn require_org_billing_admin(
+    pool: &PgPool,
+    user: &AuthUser,
+    org_id: &str,
+) -> Result<(), AppError> {
+    let role = user_org_role(pool, user, org_id)
         .await?
         .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
     // Assignment lookup failures are ignored in Go (`assignments, _ :=`).
-    let assignments = user_assignments(&state.pool, org_id, &user.user_id)
+    let assignments = user_assignments(pool, org_id, &user.user_id)
         .await
         .unwrap_or_default();
     if !can_admin(&role, &assignments) {

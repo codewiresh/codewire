@@ -1054,6 +1054,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn db_only_an_owner_changes_automatic_top_up_and_each_change_is_audited() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let fixture = seed(&pool, "regular").await;
+        let user = codewire_server_core::auth::AuthUser {
+            user_id: fixture.user_id.clone(),
+            org_id: None,
+            is_admin: false,
+            via_api_key: false,
+        };
+        let change = |enabled, cents| {
+            crate::overview::update_auto_top_up(
+                &pool,
+                &user,
+                &fixture.organization_id,
+                enabled,
+                cents,
+            )
+        };
+        let audited = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM audit_logs \
+                 WHERE action = 'organization.billing.auto_top_up' \
+                 AND metadata->>'organization_id' = $1",
+            )
+            .bind(&fixture.organization_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        // Not a member yet: the organization stays hidden.
+        change(false, 1000).await.unwrap_err();
+        sqlx::query(
+            "INSERT INTO org_members (id, org_id, user_id, role) \
+             VALUES (gen_random_uuid()::text, $1, $2, 'owner')",
+        )
+        .bind(&fixture.organization_id)
+        .bind(&fixture.user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        change(true, 499).await.unwrap_err();
+        change(true, 100_001).await.unwrap_err();
+        assert_eq!(audited().await, 0);
+
+        assert_eq!(change(false, 1000).await.unwrap(), (false, 1000));
+        assert_eq!(audited().await, 1);
+        // The same values again change nothing, so nothing is audited.
+        assert_eq!(change(false, 1000).await.unwrap(), (false, 1000));
+        assert_eq!(audited().await, 1);
+        assert_eq!(change(true, 2000).await.unwrap(), (true, 2000));
+        assert_eq!(audited().await, 2);
+        sqlx::query("DELETE FROM org_members WHERE org_id = $1")
+            .bind(&fixture.organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, fixture).await;
+    }
+
+    #[tokio::test]
     async fn with_enforcement_off_settling_does_nothing_at_all() {
         // Neither the database nor Stripe is reachable, so anything but
         // returning at once would fail.

@@ -32,6 +32,17 @@ pub(super) struct BillingSubmission {
     csrf: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct AutoTopUpSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    /// Present only when the box is checked.
+    #[serde(default)]
+    enabled: Option<String>,
+    /// Euros, at most two decimals.
+    amount: String,
+}
+
 pub(super) async fn page(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -88,6 +99,41 @@ pub(super) async fn setup(
     billing_session(&state, &slug, &headers, &submission.csrf, false).await
 }
 
+/// Turns automatic top-up on or off and sets its amount (#3381).
+pub(super) async fn auto_top_up(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Form(submission): Form<AutoTopUpSubmission>,
+) -> Response {
+    let path = billing_path(&slug);
+    let (_, organization, cookie) =
+        match action_context(&state, &headers, &slug, &submission.csrf, path.clone()).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    if !organization.can_admin {
+        return mutation_redirect(&state, path, "", "not-authorized", &headers);
+    }
+    let Some(amount_cents) = billing_connect::top_up_cents(&submission.amount) else {
+        return mutation_redirect(&state, path, "", "invalid-top-up", &headers);
+    };
+    let enabled = submission.enabled.as_deref() == Some("true");
+    match billing_connect::update_auto_top_up(
+        &state,
+        cookie,
+        organization.id,
+        enabled,
+        amount_cents,
+    )
+    .await
+    {
+        Ok(()) => mutation_redirect(&state, path, "top-up-saved", "", &headers),
+        Err(error) if error.code == ErrorCode::Unauthenticated => login_redirect(&path, &headers),
+        Err(error) => mutation_redirect(&state, path, "", mutation_error(&error), &headers),
+    }
+}
+
 async fn billing_session(
     state: &AppState,
     slug: &str,
@@ -131,6 +177,7 @@ fn billing_path(slug: &str) -> String {
 fn billing_message(value: &str) -> &'static str {
     match value {
         "payment-updated" => "Payment details updated.",
+        "top-up-saved" => "Automatic top-up saved.",
         _ => "",
     }
 }
@@ -141,6 +188,7 @@ fn billing_error(value: &str) -> &'static str {
         "invalid" => "The billing request was invalid.",
         "not-found" => "Billing details were not found for this organization.",
         "invalid-redirect" => "The billing provider returned an unsafe destination.",
+        "invalid-top-up" => "Enter a top-up amount from €5 to €1,000, with at most two decimals.",
         "unavailable" => "The billing service is temporarily unavailable.",
         _ => "",
     }
@@ -166,6 +214,7 @@ mod tests {
             "Payment details updated."
         );
         assert_eq!(billing_message("<script>"), "");
+        assert_eq!(billing_message("top-up-saved"), "Automatic top-up saved.");
         assert_eq!(
             billing_error("invalid-redirect"),
             "The billing provider returned an unsafe destination."
