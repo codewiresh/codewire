@@ -1090,6 +1090,12 @@ database_lane_orchestration_workspaces() {
       'api::environments::access_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "environment rate limit" environment-rate-limit \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::environments::rate_limit_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "organization membership credential matrix" organization-membership-credentials \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

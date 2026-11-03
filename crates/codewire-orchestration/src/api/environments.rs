@@ -1048,16 +1048,35 @@ pub(crate) async fn check_quota_in(
     evaluate_quota(quota, usage, env_type, cpu, mem)
 }
 
-/// Mirrors `auth.checkRateLimit` over the shared rate_limit table
-/// (count within a sliding window keyed by `key`; any read error means
-/// "no record yet" and resets the window, exactly like Go).
+/// Mirrors `auth.checkRateLimit` over the shared rate_limit table: at most
+/// `max` requests in a fixed window keyed by `key`, which starts at the first
+/// request and resets once it has passed. Any read error means "no record yet"
+/// and resets the window, exactly like Go.
 pub(crate) async fn check_rate_limit(
     pool: &PgPool,
     key: &str,
     window_secs: i64,
     max: i32,
 ) -> Result<bool, sqlx::Error> {
-    let now = chrono::Utc::now().timestamp_millis();
+    rate_limit_at(
+        pool,
+        key,
+        window_secs,
+        max,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+}
+
+/// `last_request` holds when the window started; a request inside the window
+/// must not move it, or a steady caller's window never ends (#3923).
+async fn rate_limit_at(
+    pool: &PgPool,
+    key: &str,
+    window_secs: i64,
+    max: i32,
+    now: i64,
+) -> Result<bool, sqlx::Error> {
     let window_start = now - window_secs * 1000;
 
     let existing: Option<(i32, i64)> =
@@ -1095,8 +1114,7 @@ pub(crate) async fn check_rate_limit(
         return Ok(false);
     }
 
-    sqlx::query("UPDATE rate_limit SET count = count + 1, last_request = $1 WHERE key = $2")
-        .bind(now)
+    sqlx::query("UPDATE rate_limit SET count = count + 1 WHERE key = $1")
         .bind(key)
         .execute(pool)
         .await?;
@@ -1566,6 +1584,9 @@ pub(crate) async fn extend_environment_ttl_core(
 
 #[cfg(test)]
 mod access_database_tests;
+
+#[cfg(test)]
+mod rate_limit_database_tests;
 
 #[cfg(test)]
 mod tests {
