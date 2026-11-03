@@ -1750,6 +1750,8 @@ run_paths_case runtime_dev_proofs pull_request refs/pull/2411/head false \
   scripts/runtime/dev/prove-dev-warm-pools.sh \
   scripts/runtime/tests/test-workspace-binding-proof.sh \
   scripts/runtime/tests/test-warm-pool-proof.sh \
+  scripts/runtime/dev/prove-dev-vm-death-recovery.sh \
+  scripts/runtime/tests/test-vm-death-recovery-proof.sh \
   scripts/runtime/dev/load-dev-sandbox-capacity.sh \
   scripts/runtime/tests/test-sandbox-capacity-load.sh \
   scripts/runtime/agent-sandbox/drop-crd-conversion.sh \

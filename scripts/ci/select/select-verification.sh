@@ -1948,6 +1948,8 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/tests/test-workspace-binding-proof.sh|\
       scripts/runtime/dev/prove-dev-warm-pools.sh|\
       scripts/runtime/tests/test-warm-pool-proof.sh|\
+      scripts/runtime/dev/prove-dev-vm-death-recovery.sh|\
+      scripts/runtime/tests/test-vm-death-recovery-proof.sh|\
       scripts/runtime/dev/load-dev-sandbox-capacity.sh|\
       scripts/runtime/tests/test-sandbox-capacity-load.sh|\
       scripts/runtime/dev/prove-dev-runtime-memory-fill.sh|\

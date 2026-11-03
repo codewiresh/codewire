@@ -1238,6 +1238,7 @@ run_dev_smoke_script_tests() {
   scripts/runtime/tests/test-smoke-dev-transport-matrix.sh
   scripts/runtime/tests/test-workspace-binding-proof.sh
   scripts/runtime/tests/test-warm-pool-proof.sh
+  scripts/runtime/tests/test-vm-death-recovery-proof.sh
   scripts/runtime/tests/test-sandbox-capacity-load.sh
   scripts/runtime/tests/test-runtime-memory-fill-proof.sh
   scripts/runtime/tests/test-kill-test-overhead-matrix.sh
