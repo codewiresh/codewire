@@ -801,6 +801,15 @@ fn credential_database_pool_does_not_ping_on_every_acquire() {
     assert_eq!(options.get_acquire_timeout(), Duration::from_secs(5));
 }
 
+/// A connection left inside a transaction by a cancelled begin is closed on
+/// release; `codewire_server_core::db` proves that against a database.
+#[test]
+fn credential_database_pool_checks_released_connections() {
+    let service = include_str!("../runtime.rs");
+    assert!(service.contains("codewire_server_core::db::checked_pool_options()"));
+    assert!(!service.contains("PgPoolOptions::new()"));
+}
+
 /// Only this long-lived service's broker upstream keeps provider connections
 /// alive. Its GitHub App authorization, Codex device-login and Claude sign-in
 /// transports and the per-environment local broker open one connection per

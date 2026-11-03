@@ -6,8 +6,8 @@
 
 use std::time::Duration;
 
-use sqlx::PgPool;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnection, PgPoolOptions};
+use sqlx::{Connection as _, PgPool};
 
 /// How a service pool proves its connections are live.
 ///
@@ -52,11 +52,39 @@ impl Default for PoolHealth {
     }
 }
 
+/// Whether a released connection is outside any transaction and may be reused.
+///
+/// sqlx 0.8.6 raises its transaction depth only after `BEGIN` is answered, and
+/// its cancel guard rolls back only above depth zero. So a request cancelled
+/// during that wait returns the connection with a transaction open that sqlx
+/// does not know about. Later statements on it report success without
+/// committing and keep their row locks, and an unrelated `ROLLBACK` discards
+/// them. sqlx does not expose the server's transaction status, but
+/// `begin_with` reads it: it fails with `BeginFailed` when its statement leaves
+/// the connection outside a transaction. This is one round trip on each
+/// release, in the task that returns the connection, not in the request.
+async fn outside_transaction(connection: &mut PgConnection) -> Result<bool, sqlx::Error> {
+    match connection.begin_with("SELECT 1").await {
+        Err(sqlx::Error::BeginFailed) => Ok(true),
+        Err(error) => Err(error),
+        Ok(_leaked) => {
+            tracing::warn!("closed a pooled connection released inside a transaction");
+            Ok(false)
+        }
+    }
+}
+
+/// `PgPoolOptions` for every long-running service pool: a connection left
+/// inside a transaction is closed on release, never reused.
+pub fn checked_pool_options() -> PgPoolOptions {
+    PgPoolOptions::new().after_release(|connection, _| Box::pin(outside_transaction(connection)))
+}
+
 /// The pool options every service shares, with `health` deciding when an
 /// idle connection is pinged.
 pub fn pool_options(health: PoolHealth) -> PgPoolOptions {
     let reprove_after_idle = health.reprove_after_idle;
-    PgPoolOptions::new()
+    checked_pool_options()
         .max_connections(25)
         .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Some(Duration::from_secs(10 * 60)))
@@ -105,10 +133,11 @@ mod tests {
     /// Round trips a statement costs through a link that delays every
     /// client-to-server write by `RTT`, measured in RTTs.
     mod database {
+        use std::future::Future as _;
+        use std::task::Poll;
         use std::time::Instant;
 
         use anyhow::{Context as _, Result, ensure};
-        use sqlx::Connection as _;
         use sqlx::postgres::PgConnectOptions;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         use tokio::net::{TcpListener, TcpStream};
@@ -339,6 +368,159 @@ mod tests {
                 pool.close().await;
             }
             admin.close().await?;
+            Ok(())
+        }
+
+        /// Polls `begin` once, then drops it as a cancelled request does.
+        /// Through the delayed link the reply cannot arrive before the drop.
+        async fn cancel_begin(pool: &PgPool) -> Result<()> {
+            let mut connection = pool.acquire().await?;
+            let mut begin = Box::pin(connection.begin());
+            let pending =
+                std::future::poll_fn(|cx| Poll::Ready(begin.as_mut().poll(cx).is_pending())).await;
+            ensure!(pending, "begin finished before it could be cancelled");
+            Ok(())
+        }
+
+        async fn backend_state(admin: &mut PgConnection, backend: i32) -> Result<Option<String>> {
+            Ok(
+                sqlx::query_scalar("SELECT state FROM pg_stat_activity WHERE pid = $1")
+                    .bind(backend)
+                    .fetch_optional(admin)
+                    .await?,
+            )
+        }
+
+        /// Waits for the state of `backend` to satisfy `expected`.
+        async fn await_backend_state(
+            admin: &mut PgConnection,
+            backend: i32,
+            expected: impl Fn(Option<&str>) -> bool,
+        ) -> Result<()> {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    if expected(backend_state(admin, backend).await?.as_deref()) {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .context("backend did not reach the expected state")?
+        }
+
+        /// One connection, so every statement uses the same backend.
+        async fn one_connection_pool(options: PgPoolOptions) -> Result<PgPool> {
+            let pool = options
+                .max_connections(1)
+                .acquire_timeout(Duration::from_secs(30))
+                .test_before_acquire(false)
+                .connect_with(delayed_options().await?)
+                .await?;
+            database_connection_released(&pool).await?;
+            Ok(pool)
+        }
+
+        /// sqlx's own pool still leaks the transaction, which is what makes
+        /// the next test mean something. If this fails after a sqlx upgrade,
+        /// `outside_transaction` is no longer needed.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        #[ignore = "requires TEST_DATABASE_URL"]
+        async fn sqlx_leaves_a_cancelled_begin_in_a_transaction() -> Result<()> {
+            let mut admin = PgConnection::connect_with(&database_options()?).await?;
+            let pool = one_connection_pool(PgPoolOptions::new()).await?;
+            let backend = database_backend(&pool).await?;
+            database_connection_released(&pool).await?;
+            cancel_begin(&pool).await?;
+            await_backend_state(&mut admin, backend, |state| {
+                state == Some("idle in transaction")
+            })
+            .await?;
+            pool.close().await;
+            admin.close().await?;
+            Ok(())
+        }
+
+        /// The connection a cancelled begin left in a transaction is closed
+        /// before any statement can run in it, so the next write commits and
+        /// locks nothing, and a later rollback cannot discard it.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        #[ignore = "requires TEST_DATABASE_URL"]
+        async fn a_cancelled_begin_cannot_capture_later_writes() -> Result<()> {
+            let mut admin = PgConnection::connect_with(&database_options()?).await?;
+            let pool = one_connection_pool(pool_options(PoolHealth::default())).await?;
+            let leaked = database_backend(&pool).await?;
+            database_connection_released(&pool).await?;
+            let table = format!("pool_cancelled_begin_{leaked}");
+            sqlx::raw_sql(&format!(
+                "DROP TABLE IF EXISTS {table}; \
+                 CREATE TABLE {table} (id int PRIMARY KEY, value int); \
+                 INSERT INTO {table} VALUES (1, 0)"
+            ))
+            .execute(&mut admin)
+            .await?;
+
+            cancel_begin(&pool).await?;
+            await_backend_state(&mut admin, leaked, |state| state.is_none()).await?;
+
+            sqlx::query(&format!("UPDATE {table} SET value = 1 WHERE id = 1"))
+                .execute(&pool)
+                .await?;
+            let replacement = database_backend(&pool).await?;
+            ensure!(replacement != leaked, "the leaked connection was reused");
+            let committed: i32 = sqlx::query_scalar(&format!("SELECT value FROM {table}"))
+                .fetch_one(&mut admin)
+                .await?;
+            ensure!(committed == 1, "the write was not committed: {committed}");
+            // Not blocked: the write holds no lock after it returned.
+            let mut locked = admin.begin().await?;
+            sqlx::query("SET LOCAL lock_timeout = '2s'")
+                .execute(&mut *locked)
+                .await?;
+            sqlx::query(&format!("UPDATE {table} SET value = 2 WHERE id = 1"))
+                .execute(&mut *locked)
+                .await?;
+            locked.commit().await?;
+            sqlx::query(&format!("UPDATE {table} SET value = 3 WHERE id = 1"))
+                .execute(&pool)
+                .await?;
+            pool.begin().await?.rollback().await?;
+            let survived: i32 = sqlx::query_scalar(&format!("SELECT value FROM {table}"))
+                .fetch_one(&mut admin)
+                .await?;
+            ensure!(survived == 3, "a rollback discarded the write: {survived}");
+
+            sqlx::raw_sql(&format!("DROP TABLE {table}"))
+                .execute(&mut admin)
+                .await?;
+            pool.close().await;
+            admin.close().await?;
+            Ok(())
+        }
+
+        /// Everything else keeps its connection: statements, commits,
+        /// rollbacks and a transaction dropped without either.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        #[ignore = "requires TEST_DATABASE_URL"]
+        async fn ordinary_releases_keep_their_connection() -> Result<()> {
+            let pool = one_connection_pool(pool_options(PoolHealth::default())).await?;
+            let backend = database_backend(&pool).await?;
+            pool.begin().await?.commit().await?;
+            ensure!(
+                database_backend(&pool).await? == backend,
+                "commit closed it"
+            );
+            pool.begin().await?.rollback().await?;
+            ensure!(
+                database_backend(&pool).await? == backend,
+                "rollback closed it"
+            );
+            drop(pool.begin().await?);
+            ensure!(
+                database_backend(&pool).await? == backend,
+                "a drop closed it"
+            );
+            pool.close().await;
             Ok(())
         }
     }

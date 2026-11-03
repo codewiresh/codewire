@@ -703,6 +703,8 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py os-splits --self-test
   python3 scripts/checks/repo_checks.py os-splits
   scripts/ci/release/check-mirror-content.sh --tree
+  python3 scripts/checks/repo_checks.py database-pools --self-test
+  python3 scripts/checks/repo_checks.py database-pools
   python3 scripts/checks/repo_checks.py mcp-settings --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source

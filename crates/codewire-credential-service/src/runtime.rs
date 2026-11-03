@@ -135,7 +135,7 @@ fn database_pool_options() -> PgPoolOptions {
 /// fails as Unavailable, which ends that Sandbox's bridge epoch; its next
 /// request opens a new one.
 fn database_pool_options_reproving_after(reprove_after_idle: Duration) -> PgPoolOptions {
-    PgPoolOptions::new()
+    codewire_server_core::db::checked_pool_options()
         .max_connections(16)
         .acquire_timeout(Duration::from_secs(5))
         .test_before_acquire(false)

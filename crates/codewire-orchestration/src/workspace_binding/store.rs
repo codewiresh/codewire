@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sqlx::PgPool;
-use sqlx::postgres::{PgListener, PgPoolOptions};
+use sqlx::postgres::PgListener;
 use tokio::sync::Notify;
 
 use crate::worker::environment_auth::WorkspaceCredentialScope;
@@ -178,7 +178,7 @@ impl PgBindingStore {
     /// A lazily connected pool of [`BINDING_POOL_CONNECTIONS`] with a 1s
     /// acquire timeout, so a flood waits briefly and then fails closed.
     pub fn connect_lazy(database_url: &str) -> anyhow::Result<Self> {
-        let pool = PgPoolOptions::new()
+        let pool = codewire_server_core::db::checked_pool_options()
             .max_connections(BINDING_POOL_CONNECTIONS)
             .min_connections(0)
             .acquire_timeout(BINDING_POOL_ACQUIRE_TIMEOUT)
