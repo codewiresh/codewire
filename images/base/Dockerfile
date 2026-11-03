@@ -52,24 +52,24 @@ RUN set -euo pipefail; \
         gh_sha=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5 ;; \
       *) echo "unsupported base image architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    curl --proto '=https' --tlsv1.2 -fsSL \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
       "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_VERSION}.tgz" \
       -o /tmp/docker.tgz; \
     echo "${docker_sha}  /tmp/docker.tgz" | sha256sum -c -; \
     tar -xzf /tmp/docker.tgz -C /tmp; \
     install -m 0755 /tmp/docker/* /usr/local/bin/; \
     install -d -m 0755 /usr/local/lib/docker/cli-plugins; \
-    curl --proto '=https' --tlsv1.2 -fsSL \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
       "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-${TARGETARCH}" \
       -o /usr/local/lib/docker/cli-plugins/docker-buildx; \
     echo "${buildx_sha}  /usr/local/lib/docker/cli-plugins/docker-buildx" | sha256sum -c -; \
-    curl --proto '=https' --tlsv1.2 -fsSL \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
       "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${compose_arch}" \
       -o /usr/local/lib/docker/cli-plugins/docker-compose; \
     echo "${compose_sha}  /usr/local/lib/docker/cli-plugins/docker-compose" | sha256sum -c -; \
     chmod 0755 /usr/local/lib/docker/cli-plugins/docker-buildx /usr/local/lib/docker/cli-plugins/docker-compose; \
     ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose; \
-    curl --proto '=https' --tlsv1.2 -fsSL \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
       "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz" \
       -o /tmp/gh.tgz; \
     echo "${gh_sha}  /tmp/gh.tgz" | sha256sum -c -; \
