@@ -62,7 +62,7 @@ jobs:
           WIPE: ${{ github.event.inputs.first_wipe }}
           CLIPPY: ${{ github.event.inputs.clippy }}
           JOBS: ${{ github.event.inputs.jobs }}
-          ARCHIVE_STORE_URL: http://ci-archive-pr.forgejo-ci-archive.svc:8090
+          ARCHIVE_STORE_URL: http://ams3-1-untrusted-helper-small-0.forgejo-ci-archive.svc:8090
         run: scripts/ci/measure/build-runner.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/build-runner"
 
   second:
@@ -86,5 +86,5 @@ jobs:
           TOUCH: ${{ github.event.inputs.second_touch }}
           CLIPPY: ${{ github.event.inputs.clippy }}
           JOBS: ${{ github.event.inputs.jobs }}
-          ARCHIVE_STORE_URL: http://ci-archive-pr.forgejo-ci-archive.svc:8090
+          ARCHIVE_STORE_URL: http://ams3-1-untrusted-helper-small-0.forgejo-ci-archive.svc:8090
         run: scripts/ci/measure/build-runner.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/build-runner"
