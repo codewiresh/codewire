@@ -753,7 +753,7 @@ case "${1:-} ${2:-} ${3:-}" in
   buildx\ create\ *)
     if [[ "$*" == *' --driver remote '* ]]; then
       # The trusted BuildKit builder: mutual TLS to its pinned endpoint only.
-      [[ "$*" == *' --driver-opt cacert='*'/ca.crt,cert='*'/client.crt,key='*'/client.key,servername=buildkit-trusted.forgejo-ci-builder.svc.cluster.local tcp://buildkit-trusted.forgejo-ci-builder.svc.cluster.local:1234' ]]
+      [[ "$*" == *' --driver-opt cacert='*'/ca.crt,cert='*'/client.crt,key='*'/client.key,servername=ams3-1-trusted-builder-large-0.forgejo-ci-builder.svc.cluster.local tcp://ams3-1-trusted-builder-large-0.forgejo-ci-builder.svc.cluster.local:1234' ]]
       exit 0
     fi
     [[ "$*" == *' --driver docker-container '* ]]

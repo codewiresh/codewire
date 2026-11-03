@@ -241,7 +241,7 @@ builder="$(cut -d'|' -f2 "$build_log" | sort -u)"
 # no BuildKit daemon of their own.
 grep -Fq "buildx create --name $builder --driver remote --platform linux/amd64 --driver-opt cacert=" "$docker_log" ||
   fail "wrapper did not attach the trusted BuildKit builder"
-grep -Fq 'servername=buildkit-trusted.forgejo-ci-builder.svc.cluster.local tcp://buildkit-trusted.forgejo-ci-builder.svc.cluster.local:1234' \
+grep -Fq 'servername=ams3-1-trusted-builder-large-0.forgejo-ci-builder.svc.cluster.local tcp://ams3-1-trusted-builder-large-0.forgejo-ci-builder.svc.cluster.local:1234' \
   "$docker_log" || fail "wrapper did not pin the trusted builder's endpoint and server name"
 grep -Fq "buildx inspect $builder --bootstrap" "$docker_log" ||
   fail "wrapper did not prove the trusted builder answers before building"

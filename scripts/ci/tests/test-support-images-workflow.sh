@@ -886,7 +886,7 @@ read -r tls_dir tls_mode <"$platform_tree/trusted-fetches"
   fail 'the trusted builder certificate or the private Docker configuration survived the build'
 docker_config="${tls_dir%/trusted-buildkit-tls}/docker-config"
 create_call="$(grep ' buildx create ' "$platform_tree/docker")"
-[[ "$create_call" == "DOCKER_CONFIG=$docker_config buildx create --name codewire-support-amd64-77-1-"*" --driver remote --platform linux/amd64 --driver-opt cacert=$tls_dir/ca.crt,cert=$tls_dir/client.crt,key=$tls_dir/client.key,servername=buildkit-trusted.forgejo-ci-builder.svc.cluster.local tcp://buildkit-trusted.forgejo-ci-builder.svc.cluster.local:1234" ]] ||
+[[ "$create_call" == "DOCKER_CONFIG=$docker_config buildx create --name codewire-support-amd64-77-1-"*" --driver remote --platform linux/amd64 --driver-opt cacert=$tls_dir/ca.crt,cert=$tls_dir/client.crt,key=$tls_dir/client.key,servername=ams3-1-trusted-builder-large-0.forgejo-ci-builder.svc.cluster.local tcp://ams3-1-trusted-builder-large-0.forgejo-ci-builder.svc.cluster.local:1234" ]] ||
   fail "the trusted builder is not attached as the mutual-TLS remote builder: $create_call"
 trusted_name="$(sed -n 's/^.* buildx create --name \([^ ]*\) .*$/\1/p' "$platform_tree/docker")"
 grep -qxF "DOCKER_CONFIG=$docker_config buildx inspect $trusted_name --bootstrap" "$platform_tree/docker" ||

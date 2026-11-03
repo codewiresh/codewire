@@ -10,7 +10,7 @@
 #
 # Callers set ROOT and source this file.
 
-readonly TRUSTED_BUILDKIT_HOST='buildkit-trusted.forgejo-ci-builder.svc.cluster.local'
+readonly TRUSTED_BUILDKIT_HOST='ams3-1-trusted-builder-large-0.forgejo-ci-builder.svc.cluster.local'
 readonly TRUSTED_BUILDKIT_ENDPOINT="tcp://$TRUSTED_BUILDKIT_HOST:1234"
 # Cargo jobs per build step: a starting value. The builder's guest has 24 GiB
 # and runs one step at a time (max-parallelism 1); a rustc job peaks near
