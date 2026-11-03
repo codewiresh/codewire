@@ -28,11 +28,9 @@ use super::ApiState;
 use super::prepare::{json_response, plain_error};
 use super::proxy::{resolve_running_sandbox_target, resolve_running_sandbox_target_for_role};
 use super::terminal::{authenticate_socket_request, require_sandbox_claim_ready};
-use crate::sandbox::client::SandboxClient;
-use crate::sandbox::sidecar::{PortForwardedStream, WORKSPACE_SSH_PORT};
+use crate::runtime::{Placement, RuntimeDriver, RuntimeStream};
 use crate::worker::workspace_binding::environment_daemon_credential;
 
-const DEFAULT_SHIM_PORT: u16 = 7777;
 const DAEMON_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Deserialize)]
@@ -73,23 +71,22 @@ pub async fn ssh_proxy_websocket(
         Err((status, msg)) => return ssh_error(status, msg),
     };
 
-    let Some(kube) = state.kube.clone() else {
+    let Some(runtime) = state.runtime.clone() else {
         return ssh_error(
             StatusCode::SERVICE_UNAVAILABLE,
             r#"{"error":"sandbox backend not configured"}"#,
         );
     };
-    let sb = SandboxClient::new(kube, &target.namespace);
-    if let Err(msg) = require_sandbox_claim_ready(&sb, &target.environment_id).await {
+    let placement = Placement::new(&target.namespace);
+    if let Err(msg) =
+        require_sandbox_claim_ready(runtime.as_ref(), &placement, &target.environment_id).await
+    {
         return ssh_error(StatusCode::SERVICE_UNAVAILABLE, &msg);
     }
 
     let connect = {
         let environment_id = target.environment_id.clone();
-        async move {
-            sb.workspace_ssh_stream(&environment_id, WORKSPACE_SSH_PORT)
-                .await
-        }
+        async move { runtime.ssh_stream(&placement, &environment_id).await }
     };
     let stream = match open_fenced_ssh_stream(&state.pool, &org_id, &target.environment_id, connect)
         .await
@@ -162,7 +159,7 @@ pub async fn ssh_proxy_check(
         Err(response) => return response,
     };
 
-    let Some(kube) = state.kube.clone() else {
+    let Some(runtime) = state.runtime.as_deref() else {
         return check_response(false, false, "");
     };
 
@@ -178,16 +175,16 @@ pub async fn ssh_proxy_check(
             Err((status, msg)) => return ssh_error(status, msg),
         };
 
-    let sb = SandboxClient::new(kube, &target.namespace);
-    if require_sandbox_claim_ready(&sb, &target.environment_id)
+    let placement = Placement::new(&target.namespace);
+    if require_sandbox_claim_ready(runtime, &placement, &target.environment_id)
         .await
         .is_err()
     {
         return check_response(false, false, "");
     }
 
-    if sb
-        .workspace_ssh_stream(&target.environment_id, WORKSPACE_SSH_PORT)
+    if runtime
+        .ssh_stream(&placement, &target.environment_id)
         .await
         .is_err()
     {
@@ -195,7 +192,9 @@ pub async fn ssh_proxy_check(
     }
 
     let (shim_healthy, shim_error) = probe_shim_health(
-        &sb,
+        runtime,
+        state.kube.as_ref(),
+        &placement,
         &state.pool,
         &target.environment_id,
         &state.session_secret,
@@ -217,7 +216,7 @@ pub async fn ssh_proxy_check(
 
 async fn ssh_proxy_session(
     socket: WebSocket,
-    stream: crate::sandbox::sidecar::PortForwardedStream,
+    stream: RuntimeStream,
     attempt_id: String,
     env_id: String,
 ) {
@@ -318,21 +317,22 @@ where
 }
 
 async fn probe_shim_health(
-    sb: &SandboxClient,
+    runtime: &dyn RuntimeDriver,
+    kube: Option<&kube::Client>,
+    placement: &Placement,
     pool: &sqlx::PgPool,
     env_id: &str,
     session_secret: &str,
 ) -> (bool, String) {
-    let stream = match sb.port_forward_stream(env_id, DEFAULT_SHIM_PORT).await {
+    let stream = match runtime.daemon_stream(placement, env_id).await {
         Ok(stream) => stream,
         Err(err) => return (false, format!("port-forward: {err}")),
     };
     // The live binding decides the credential (design §7), never a name.
-    let token =
-        match environment_daemon_credential(pool, Some(&sb.client), session_secret, env_id).await {
-            Ok(token) => token,
-            Err(_) => return (false, "authorize daemon health probe".into()),
-        };
+    let token = match environment_daemon_credential(pool, kube, session_secret, env_id).await {
+        Ok(token) => token,
+        Err(_) => return (false, "authorize daemon health probe".into()),
+    };
     let channel = match daemon_channel_from_port_forward(stream).await {
         Ok(channel) => channel,
         Err(error) => return (false, format!("daemon transport: {error}")),
@@ -348,7 +348,7 @@ async fn probe_shim_health(
     daemon_health_result(health.state, &health.message)
 }
 
-async fn daemon_channel_from_port_forward(stream: PortForwardedStream) -> anyhow::Result<Channel> {
+async fn daemon_channel_from_port_forward(stream: RuntimeStream) -> anyhow::Result<Channel> {
     let stream = Arc::new(Mutex::new(Some(stream)));
     let connector = service_fn(move |_| {
         let stream = Arc::clone(&stream);

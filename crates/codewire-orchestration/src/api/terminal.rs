@@ -29,7 +29,7 @@ use super::ApiState;
 use super::environment_daemon::environment_daemon_bridge_client_core;
 use super::prepare::plain_error;
 use super::proxy::resolve_running_sandbox_target;
-use crate::sandbox::client::SandboxClient;
+use crate::runtime::{ClaimReadiness, Placement, RuntimeDriver};
 
 const MSG_TYPE_STDIN: u8 = 0x00;
 const MSG_TYPE_RESIZE: u8 = 0x01;
@@ -148,14 +148,15 @@ pub async fn terminal_websocket(
         Err((status, msg)) => return terminal_error(status, msg),
     };
 
-    let Some(kube) = state.kube.clone() else {
+    let Some(runtime) = state.runtime.as_deref() else {
         return terminal_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "sandbox backend not configured",
         );
     };
-    let sb = SandboxClient::new(kube, &target.namespace);
-    if let Err(msg) = require_sandbox_claim_ready(&sb, &target.environment_id).await {
+    let placement = Placement::new(&target.namespace);
+    if let Err(msg) = require_sandbox_claim_ready(runtime, &placement, &target.environment_id).await
+    {
         return terminal_error(StatusCode::SERVICE_UNAVAILABLE, &msg);
     }
 
@@ -642,23 +643,24 @@ async fn close_browser<Tx: Sink<Message> + Unpin>(
 }
 
 pub(crate) async fn require_sandbox_claim_ready(
-    sb: &SandboxClient,
+    runtime: &dyn RuntimeDriver,
+    placement: &Placement,
     env_id: &str,
 ) -> Result<(), String> {
-    let (exists, ready, mut reason) = sb
-        .get_sandbox_claim_ready_status(env_id)
+    let readiness = runtime
+        .claim_readiness(placement, env_id)
         .await
         .map_err(|err| format!("get sandbox claim: {err}"))?;
-    if !exists {
-        return Err("sandbox claim not found".to_string());
+    match readiness {
+        ClaimReadiness::Absent => Err("sandbox claim not found".to_string()),
+        ClaimReadiness::Ready => Ok(()),
+        ClaimReadiness::NotReady { mut reason } => {
+            if reason.is_empty() {
+                reason = "not ready".to_string();
+            }
+            Err(format!("sandbox not ready: {reason}"))
+        }
     }
-    if ready {
-        return Ok(());
-    }
-    if reason.is_empty() {
-        reason = "not ready".to_string();
-    }
-    Err(format!("sandbox not ready: {reason}"))
 }
 
 fn terminal_error(status: StatusCode, body: &str) -> Response {
@@ -755,6 +757,49 @@ mod relay_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::fake::FakeRuntimeDriver;
+
+    #[tokio::test]
+    async fn a_claim_that_is_not_ready_refuses_the_connection_with_its_reason() {
+        let readiness = |answer| async move {
+            let runtime = FakeRuntimeDriver {
+                claim_readiness: std::sync::Mutex::new(Some(answer)),
+                ..Default::default()
+            };
+            let result =
+                require_sandbox_claim_ready(&runtime, &Placement::new("dev-sandboxes"), "env-1")
+                    .await;
+            assert_eq!(
+                *runtime.placements.lock().unwrap(),
+                [Placement::new("dev-sandboxes")]
+            );
+            result
+        };
+
+        assert_eq!(readiness(Ok(ClaimReadiness::Ready)).await, Ok(()));
+        assert_eq!(
+            readiness(Ok(ClaimReadiness::Absent)).await,
+            Err("sandbox claim not found".to_string())
+        );
+        assert_eq!(
+            readiness(Ok(ClaimReadiness::NotReady {
+                reason: "PodPending".into()
+            }))
+            .await,
+            Err("sandbox not ready: PodPending".to_string())
+        );
+        assert_eq!(
+            readiness(Ok(ClaimReadiness::NotReady {
+                reason: String::new()
+            }))
+            .await,
+            Err("sandbox not ready: not ready".to_string())
+        );
+        assert_eq!(
+            readiness(Err("forbidden".to_string())).await,
+            Err("get sandbox claim: forbidden".to_string())
+        );
+    }
 
     #[test]
     fn issue_and_redeem_ticket_round_trips() {

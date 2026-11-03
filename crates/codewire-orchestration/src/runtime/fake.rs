@@ -10,8 +10,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::{
-    ClaimRef, MemberRef, Placement, ProbeResult, RuntimeAccess, RuntimeLifecycle, RuntimeMember,
-    RuntimePools, RuntimeTeardown, SuspendedRuntime,
+    ClaimReadiness, ClaimRef, MemberRef, Placement, ProbeResult, RuntimeAccess, RuntimeLifecycle,
+    RuntimeMember, RuntimePools, RuntimeStream, RuntimeTeardown, SuspendedRuntime,
 };
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::template::TemplateOpts;
@@ -24,6 +24,8 @@ pub(crate) struct FakeRuntimeDriver {
     pub members: Mutex<Vec<RuntimeMember>>,
     /// When set, listing members fails with this message.
     pub members_error: Mutex<Option<String>>,
+    /// The claim's readiness; an error is its message.
+    pub claim_readiness: Mutex<Option<Result<ClaimReadiness, String>>>,
     /// Every placement a method was asked about, in order.
     pub placements: Mutex<Vec<Placement>>,
 }
@@ -143,6 +145,35 @@ impl RuntimeAccess for FakeRuntimeDriver {
         _timeout: Duration,
         _host_keys: &dyn HostKeyStore,
     ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn claim_readiness(
+        &self,
+        placement: &Placement,
+        _environment_id: &str,
+    ) -> anyhow::Result<ClaimReadiness> {
+        self.placements.lock().unwrap().push(placement.clone());
+        match self.claim_readiness.lock().unwrap().clone() {
+            Some(Ok(readiness)) => Ok(readiness),
+            Some(Err(message)) => Err(anyhow::anyhow!(message)),
+            None => anyhow::bail!("not scripted"),
+        }
+    }
+
+    async fn ssh_stream(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+    ) -> anyhow::Result<RuntimeStream> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn daemon_stream(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+    ) -> anyhow::Result<RuntimeStream> {
         anyhow::bail!("not scripted")
     }
 }

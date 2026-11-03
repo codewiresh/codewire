@@ -20,6 +20,7 @@ pub use crate::sandbox::client::{
     ProbeResult, WorkspacePodIdentity as MemberRef, WorkspaceSandboxIdentity as SuspendedRuntime,
 };
 use crate::sandbox::host_keys::HostKeyStore;
+pub use crate::sandbox::sidecar::PortForwardedStream as RuntimeStream;
 use crate::sandbox::template::TemplateOpts;
 
 /// Where a runtime object lives. A caller names this rather than holding a
@@ -103,6 +104,17 @@ pub struct RuntimeTeardown<'a> {
     pub prove_confidential_storage_absent: bool,
     pub recorded_volume_uid: Option<&'a str>,
     pub timeout: Duration,
+}
+
+/// Whether an environment's claim can take a connection yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClaimReadiness {
+    Absent,
+    /// The reason is the runtime's own, and may be empty.
+    NotReady {
+        reason: String,
+    },
+    Ready,
 }
 
 /// Warm capacity held ahead of any environment.
@@ -203,6 +215,30 @@ pub trait RuntimeAccess: Send + Sync {
         timeout: Duration,
         host_keys: &dyn HostKeyStore,
     ) -> anyhow::Result<()>;
+
+    async fn claim_readiness(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<ClaimReadiness>;
+
+    /// A stream to the SSH server of the environment's current runtime, proven
+    /// to be the one its bound claim controls.
+    async fn ssh_stream(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<RuntimeStream>;
+
+    /// A stream to the environment's daemon, unauthenticated: the caller
+    /// brings the credential. The runtime is found by name alone, so unlike
+    /// [`ssh_stream`](Self::ssh_stream) this can reach a replacement that has
+    /// taken the name since the caller last looked.
+    async fn daemon_stream(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<RuntimeStream>;
 }
 
 /// Everything orchestration needs from a runtime.

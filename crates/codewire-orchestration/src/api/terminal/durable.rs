@@ -29,7 +29,7 @@ use crate::api::environment_daemon::{
     attach_environment_daemon_session_core, get_environment_daemon_session_core,
 };
 use crate::api::proxy::resolve_running_sandbox_target;
-use crate::sandbox::client::SandboxClient;
+use crate::runtime::Placement;
 
 const PROTOCOL: &str = "codewire.durable-terminal.v1";
 const FRAME_BYTES: usize = 64 * 1024;
@@ -245,9 +245,13 @@ pub(super) async fn websocket(
         let target = resolve_running_sandbox_target(&state, &user, &org_id, &env_id)
             .await
             .map_err(|(status, _)| status)?;
-        let kube = state.kube.clone().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let runtime = state
+            .runtime
+            .as_deref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
         require_sandbox_claim_ready(
-            &SandboxClient::new(kube, &target.namespace),
+            runtime,
+            &Placement::new(&target.namespace),
             &target.environment_id,
         )
         .await
