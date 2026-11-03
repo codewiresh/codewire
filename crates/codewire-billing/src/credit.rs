@@ -551,6 +551,130 @@ pub async fn settle_due(
     Ok(count)
 }
 
+/// Below this, an organization that nothing will top up hears about it.
+pub const LOW_BALANCE_NANO_EUR: i64 = 5 * NANO_EUR_PER_EURO;
+
+const LOW_NOTICE: &str = "credit_low_notice";
+const EXHAUSTED_NOTICE: &str = "credit_exhausted_notice";
+
+/// An email an organization's owner is due.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreditNotice {
+    Low {
+        organization_id: String,
+        balance_nano_eur: i64,
+    },
+    Exhausted {
+        organization_id: String,
+    },
+}
+
+/// Who is due a notice. Each is sent once per spell: running out once since
+/// `credit_exhausted_at`, and running low once since credit last came in. An
+/// organization with automatic top-up and a Stripe customer needs no low
+/// notice: if the charge fails, it hears that it ran out.
+pub async fn credit_notices_due(pool: &PgPool) -> anyhow::Result<Vec<CreditNotice>> {
+    let exhausted: Vec<String> = sqlx::query_scalar(
+        r#"SELECT o.id FROM organizations o
+           WHERE o.credit_exhausted_at IS NOT NULL AND o.rate_card <> 'unlimited'
+             AND NOT EXISTS (
+                 SELECT 1 FROM billing_events e
+                 WHERE e.org_id = o.id AND e.event_type = $1
+                   AND e.created_at >= o.credit_exhausted_at)
+           ORDER BY o.id"#,
+    )
+    .bind(EXHAUSTED_NOTICE)
+    .fetch_all(pool)
+    .await?;
+    let low: Vec<(String, i64)> = sqlx::query_as(
+        r#"SELECT o.id, b.balance_nano_eur FROM billing_credit_balances b
+           JOIN organizations o ON o.id = b.organization_id
+           WHERE b.balance_nano_eur > 0 AND b.balance_nano_eur < $1
+             AND o.rate_card <> 'unlimited' AND o.credit_exhausted_at IS NULL
+             AND NOT (o.auto_top_up_enabled AND o.stripe_customer_id IS NOT NULL)
+             AND NOT EXISTS (
+                 SELECT 1 FROM billing_events e
+                 WHERE e.org_id = o.id AND e.event_type = $2
+                   AND e.created_at > COALESCE(
+                       (SELECT max(l.created_at) FROM billing_credit_ledger l
+                        WHERE l.organization_id = o.id AND l.amount_nano_eur > 0),
+                       '-infinity'::timestamptz))
+           ORDER BY o.id"#,
+    )
+    .bind(LOW_BALANCE_NANO_EUR)
+    .bind(LOW_NOTICE)
+    .fetch_all(pool)
+    .await?;
+    Ok(exhausted
+        .into_iter()
+        .map(|organization_id| CreditNotice::Exhausted { organization_id })
+        .chain(
+            low.into_iter()
+                .map(|(organization_id, balance_nano_eur)| CreditNotice::Low {
+                    organization_id,
+                    balance_nano_eur,
+                }),
+        )
+        .collect())
+}
+
+async fn record_notice(pool: &PgPool, organization_id: &str, kind: &str) -> anyhow::Result<()> {
+    sqlx::query("INSERT INTO billing_events (event_type, org_id, currency) VALUES ($1, $2, 'eur')")
+        .bind(kind)
+        .bind(organization_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Emails each due notice to the organization's owner, where this deployment
+/// enforces credit. A failed send is logged and is due again on the next run.
+pub async fn send_credit_notices(
+    pool: &PgPool,
+    email: &crate::email::EmailClient,
+    enforcement: CreditEnforcement,
+) -> anyhow::Result<usize> {
+    if !enforcement.is_on() || !email.is_configured() {
+        return Ok(0);
+    }
+    let mut sent = 0;
+    for notice in credit_notices_due(pool).await? {
+        let (organization_id, kind) = match &notice {
+            CreditNotice::Low {
+                organization_id, ..
+            } => (organization_id, LOW_NOTICE),
+            CreditNotice::Exhausted { organization_id } => (organization_id, EXHAUSTED_NOTICE),
+        };
+        let Some(owner) = crate::webhook::org_owner_email_by_id(pool, organization_id).await else {
+            tracing::warn!(
+                organization_id,
+                "credit notice: the organization has no owner"
+            );
+            continue;
+        };
+        let result = match &notice {
+            CreditNotice::Low {
+                balance_nano_eur, ..
+            } => {
+                email
+                    .send_credit_low(&owner, balance_nano_eur / NANO_EUR_PER_CENT)
+                    .await
+            }
+            CreditNotice::Exhausted { .. } => email.send_credit_exhausted(&owner).await,
+        };
+        match result {
+            Ok(()) => {
+                record_notice(pool, organization_id, kind).await?;
+                sent += 1;
+            }
+            Err(error) => {
+                tracing::error!(organization_id, kind, %error, "credit notice: send failed");
+            }
+        }
+    }
+    Ok(sent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1113,6 +1237,132 @@ mod tests {
             .await
             .unwrap();
         cleanup(&pool, fixture).await;
+    }
+
+    #[tokio::test]
+    async fn db_each_notice_is_due_once_per_spell() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let fixture = seed(&pool, "regular").await;
+        let organization_id = fixture.organization_id.clone();
+        let due = || async {
+            credit_notices_due(&pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|notice| match notice {
+                    CreditNotice::Low {
+                        organization_id: id,
+                        ..
+                    }
+                    | CreditNotice::Exhausted {
+                        organization_id: id,
+                    } => id == &organization_id,
+                })
+                .collect::<Vec<_>>()
+        };
+        let adjust = |key: &'static str, amount: i64| {
+            let (pool, organization_id) = (pool.clone(), organization_id.clone());
+            async move {
+                sqlx::query(
+                    "INSERT INTO billing_credit_ledger \
+                     (organization_id, entry_kind, amount_nano_eur, idempotency_key, \
+                      actor_user_id, reason) VALUES ($1, 'adjustment', $2, $3, 'test', 'test')",
+                )
+                .bind(&organization_id)
+                .bind(amount)
+                .bind(key)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+        assert!(due().await.is_empty(), "no credit yet means nothing is low");
+
+        // Plenty, then low with top-up on and a customer: not due.
+        adjust("plenty", 6 * NANO_EUR_PER_EURO).await;
+        assert!(due().await.is_empty());
+        adjust("spend", -2 * NANO_EUR_PER_EURO).await;
+        sqlx::query("UPDATE organizations SET stripe_customer_id = 'cus_notice' WHERE id = $1")
+            .bind(&organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(due().await.is_empty());
+
+        // Top-up off: due once, whatever the balance does next.
+        sqlx::query("UPDATE organizations SET auto_top_up_enabled = false WHERE id = $1")
+            .bind(&organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let low = CreditNotice::Low {
+            organization_id: organization_id.clone(),
+            balance_nano_eur: 4 * NANO_EUR_PER_EURO,
+        };
+        assert_eq!(due().await, [low]);
+        record_notice(&pool, &organization_id, LOW_NOTICE)
+            .await
+            .unwrap();
+        assert!(due().await.is_empty());
+
+        // New credit starts a new spell: low again later is due again.
+        adjust("back", NANO_EUR_PER_EURO / 2).await;
+        assert_eq!(due().await.len(), 1);
+        record_notice(&pool, &organization_id, LOW_NOTICE)
+            .await
+            .unwrap();
+
+        // Running out is due once, and replaces the low notice.
+        adjust("gone", -5 * NANO_EUR_PER_EURO).await;
+        mark_exhausted(&pool, &organization_id).await.unwrap();
+        let exhausted = CreditNotice::Exhausted {
+            organization_id: organization_id.clone(),
+        };
+        assert_eq!(due().await, std::slice::from_ref(&exhausted));
+        record_notice(&pool, &organization_id, EXHAUSTED_NOTICE)
+            .await
+            .unwrap();
+        assert!(due().await.is_empty());
+
+        // Running out again, after credit came back, is due again.
+        sqlx::query("UPDATE organizations SET credit_exhausted_at = now() WHERE id = $1")
+            .bind(&organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(due().await, [exhausted]);
+
+        // Unlimited hears nothing.
+        sqlx::query("UPDATE organizations SET rate_card = 'unlimited' WHERE id = $1")
+            .bind(&organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(due().await.is_empty());
+        sqlx::query("DELETE FROM billing_events WHERE org_id = $1")
+            .bind(&organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, fixture).await;
+    }
+
+    #[tokio::test]
+    async fn with_enforcement_off_no_notice_is_even_looked_for() {
+        // Never connected: looking would fail.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgres://codewire@127.0.0.1:1/codewire")
+            .unwrap();
+        let email = crate::email::EmailClient::disabled();
+        assert_eq!(
+            send_credit_notices(&pool, &email, CreditEnforcement::Off)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

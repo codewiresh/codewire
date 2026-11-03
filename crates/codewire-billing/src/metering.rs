@@ -115,6 +115,16 @@ pub fn start_loops(deps: Arc<MeteringDeps>, loops: &[String]) {
                                 {
                                     tracing::error!(error = %e, "credit metering: settlement failed");
                                 }
+                                // Then tell owners who ran low or ran out.
+                                if let Err(e) = crate::credit::send_credit_notices(
+                                    &deps.pool,
+                                    &deps.email,
+                                    deps.credit_enforcement,
+                                )
+                                .await
+                                {
+                                    tracing::error!(error = %e, "credit metering: notices failed");
+                                }
                             }
                         },
                     )

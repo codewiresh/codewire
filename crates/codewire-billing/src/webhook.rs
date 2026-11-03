@@ -894,7 +894,7 @@ async fn org_owner_email_by_customer(
     .flatten()
 }
 
-async fn org_owner_email_by_id(pool: &PgPool, org_id: &str) -> Option<String> {
+pub(crate) async fn org_owner_email_by_id(pool: &PgPool, org_id: &str) -> Option<String> {
     sqlx::query_scalar(
         r#"SELECT u.email FROM org_members m
            JOIN users u ON u.id = m.user_id

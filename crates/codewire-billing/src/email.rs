@@ -121,6 +121,23 @@ impl EmailClient {
         self.send(to, "Payment Failed — Codewire", &html).await
     }
 
+    /// Compute credit is below the low-balance mark and nothing will top it up.
+    pub async fn send_credit_low(&self, to: &str, balance_cents: i64) -> anyhow::Result<()> {
+        let balance = format_cents(balance_cents, "eur");
+        let html = format!(
+            "<div style=\"font-family: sans-serif; max-width: 480px; margin: 0 auto;\">\n\t<h2>Your compute credit is running low</h2>\n\t<p>This organization has <strong>{balance}</strong> of compute credit left, and automatic top-up won't add more.</p>\n\t<p>When it runs out, new Sandboxes and starts are refused, and running Sandboxes stop 24 hours later. Their storage is kept.</p>\n\t<p>Add a payment method or turn on automatic top-up on the organization's Billing page to keep running.</p>\n</div>"
+        );
+        self.send(to, "Your compute credit is running low — Codewire", &html)
+            .await
+    }
+
+    /// Compute credit ran out with no way to get more.
+    pub async fn send_credit_exhausted(&self, to: &str) -> anyhow::Result<()> {
+        let html = "<div style=\"font-family: sans-serif; max-width: 480px; margin: 0 auto;\">\n\t<h2>Your compute credit has run out</h2>\n\t<p>New Sandboxes and starts are refused from now on, and running Sandboxes stop in 24 hours. Their storage is kept.</p>\n\t<p>Add a payment method or update your card on the organization's Billing page to continue.</p>\n</div>";
+        self.send(to, "Your compute credit has run out — Codewire", html)
+            .await
+    }
+
     /// Mirrors `email.SendTrialEnding`.
     /// Mirrors `email.SendTrialExpired` byte-for-byte.
     pub async fn send_trial_expired(&self, to: &str) -> anyhow::Result<()> {
