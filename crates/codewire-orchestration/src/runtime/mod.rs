@@ -18,8 +18,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 pub use crate::sandbox::client::{
-    ProbeResult, WorkspacePodIdentity as MemberRef, WorkspacePodReplacement as MemberReplacement,
-    WorkspaceSandboxIdentity as SuspendedRuntime,
+    FailedLiveResize, PodResizeInfeasible, ProbeResult, WorkspacePodIdentity as MemberRef,
+    WorkspacePodReplacement as MemberReplacement, WorkspacePodResizeState as ResizeState,
+    WorkspacePvcAnchor as VolumeRef, WorkspaceSandboxIdentity as SuspendedRuntime,
+    WorkspaceStorage as VolumeIdentity, WorkspaceStorageResizeOutcome as VolumeGrowth,
 };
 pub use crate::sandbox::exec::WorkspaceExecHandle as RuntimeExec;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -256,9 +258,111 @@ pub trait RuntimeLifecycle: Send + Sync {
     ) -> anyhow::Result<MemberRef>;
 }
 
+/// How a running environment changes size without losing its identity.
+#[async_trait]
+pub trait RuntimeResize: Send + Sync {
+    /// What the environment's current member runs, and whether it can change
+    /// CPU and memory without a restart.
+    async fn resize_state(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<ResizeState>;
+
+    /// Record the size the environment's next member should have.
+    async fn set_desired_size(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        cpu_millicores: i32,
+        memory_mb: i32,
+        disk_gb: i32,
+    ) -> anyhow::Result<()>;
+
+    /// Change this exact member's CPU and memory, and wait until it runs them.
+    /// It never restarts or replaces the member. A size the member's host can
+    /// never fit fails with [`PodResizeInfeasible`].
+    async fn resize_in_place(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        member_uid: &str,
+        cpu_millicores: i32,
+        memory_mb: i32,
+        timeout: Duration,
+    ) -> anyhow::Result<ResizeState>;
+
+    /// What a failed in-place resize left on this exact member, withdrawing a
+    /// request still pending. Sizes are `(cpu_millicores, memory_mb)`.
+    async fn settle_failed_resize(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        member_uid: &str,
+        previous: (i32, i32),
+        requested: (i32, i32),
+        timeout: Duration,
+    ) -> FailedLiveResize;
+}
+
+/// An environment's persistent volume, found through what the backend recorded
+/// and never by name alone.
+#[async_trait]
+pub trait RuntimeStorage: Send + Sync {
+    /// The volume as it is now. Fails if the environment has none.
+    async fn volume(
+        &self,
+        placement: &Placement,
+        volume: &VolumeRef,
+    ) -> anyhow::Result<VolumeIdentity>;
+
+    /// The volume, if it can grow to this size. Writes nothing.
+    async fn check_volume_growth(
+        &self,
+        placement: &Placement,
+        volume: &VolumeRef,
+        disk_gb: i32,
+    ) -> anyhow::Result<VolumeIdentity>;
+
+    /// Ask for the volume to grow to this size. This is not evidence it has.
+    async fn grow_volume(
+        &self,
+        placement: &Placement,
+        volume: &VolumeRef,
+        disk_gb: i32,
+    ) -> anyhow::Result<()>;
+
+    /// Wait until the volume has grown, or until only a new member can finish
+    /// growing it. It never replaces the member itself.
+    async fn wait_volume_growth(
+        &self,
+        placement: &Placement,
+        volume: &VolumeRef,
+        disk_gb: i32,
+        timeout: Duration,
+    ) -> anyhow::Result<VolumeGrowth>;
+
+    /// Wait until the volume has this capacity, for a new member that finishes
+    /// growing it.
+    async fn wait_volume_capacity(
+        &self,
+        placement: &Placement,
+        volume: &VolumeRef,
+        disk_gb: i32,
+        timeout: Duration,
+    ) -> anyhow::Result<()>;
+}
+
 /// How a client reaches a running environment.
 #[async_trait]
 pub trait RuntimeAccess: Send + Sync {
+    /// The address of the environment's current member.
+    async fn member_address(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<String>;
+
     async fn ensure_access(
         &self,
         placement: &Placement,
@@ -335,9 +439,15 @@ pub trait RuntimeAccess: Send + Sync {
 }
 
 /// Everything orchestration needs from a runtime.
-pub trait RuntimeDriver: RuntimePools + RuntimeLifecycle + RuntimeAccess {}
+pub trait RuntimeDriver:
+    RuntimePools + RuntimeLifecycle + RuntimeResize + RuntimeStorage + RuntimeAccess
+{
+}
 
-impl<T: RuntimePools + RuntimeLifecycle + RuntimeAccess> RuntimeDriver for T {}
+impl<T: RuntimePools + RuntimeLifecycle + RuntimeResize + RuntimeStorage + RuntimeAccess>
+    RuntimeDriver for T
+{
+}
 
 pub(crate) async fn within_workspace_deadline<T>(
     deadline: tokio::time::Instant,

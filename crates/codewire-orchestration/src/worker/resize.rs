@@ -13,8 +13,8 @@ use crate::api::environment_resize::{
     EnvironmentResources, classify_execution_mode, scan_operation,
 };
 use crate::resize_metrics;
-use crate::sandbox::client::{
-    FailedLiveResize, PodResizeInfeasible, SandboxClient, WorkspaceStorageResizeOutcome,
+use crate::runtime::{
+    FailedLiveResize, MemberRef, Placement, PodResizeInfeasible, RuntimeDriver, VolumeGrowth,
 };
 use codewire_daemon_proto::daemon::v1::SessionLifecycleState;
 
@@ -71,12 +71,10 @@ fn active_session(state: i32) -> bool {
     )
 }
 
-fn sandbox_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<SandboxClient> {
-    let kube = ctx
-        .kube
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("sandbox runtime is unavailable"))?;
-    Ok(SandboxClient::new(kube, namespace))
+fn require_runtime(ctx: &WorkerContext) -> anyhow::Result<&dyn RuntimeDriver> {
+    ctx.runtime
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("sandbox runtime is unavailable"))
 }
 
 async fn active_operation(
@@ -126,7 +124,8 @@ async fn set_operation_state(
 async fn checkpoint_previous_pod_uid(
     authority: &ActivityAuthority,
     operation: &EnvironmentResizeOperation,
-    client: &SandboxClient,
+    runtime: &dyn RuntimeDriver,
+    placement: &Placement,
 ) -> anyhow::Result<String> {
     if let Some(uid) = operation
         .previous_pod_uid
@@ -135,8 +134,8 @@ async fn checkpoint_previous_pod_uid(
     {
         return Ok(uid.to_string());
     }
-    let pod = client
-        .get_workspace_pod_identity(&operation.environment_id)
+    let pod = runtime
+        .current_member(placement, &operation.environment_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("workspace Pod is unavailable for running environment"))?;
     authority
@@ -308,7 +307,8 @@ pub async fn handle_environment_resize(
         return Ok(());
     };
     let backend = load_backend_row(&ctx.pool, environment_id).await?;
-    let client = sandbox_client(ctx, &backend.namespace)?;
+    let runtime = require_runtime(ctx)?;
+    let placement = Placement::new(&backend.namespace);
 
     if operation.previous_state == "running" {
         let env = load_environment(&ctx.pool, environment_id).await?;
@@ -333,7 +333,7 @@ pub async fn handle_environment_resize(
     }
 
     let pod_state = if operation.previous_state == "running" {
-        Some(client.workspace_pod_resize_state(environment_id).await?)
+        Some(runtime.resize_state(&placement, environment_id).await?)
     } else {
         None
     };
@@ -368,7 +368,7 @@ pub async fn handle_environment_resize(
         sessions_enforced = true;
     }
     let previous_pod_uid = if operation.previous_state == "running" {
-        Some(checkpoint_previous_pod_uid(authority, &operation, &client).await?)
+        Some(checkpoint_previous_pod_uid(authority, &operation, runtime, &placement).await?)
     } else {
         None
     };
@@ -377,7 +377,8 @@ pub async fn handle_environment_resize(
     authority
         .run_external_mutation(
             RESIZE_MUTATION_STATES,
-            client.apply_resize_desired_state(
+            runtime.set_desired_size(
+                &placement,
                 environment_id,
                 operation.desired_resources.cpu_millicores,
                 operation.desired_resources.memory_mb,
@@ -391,7 +392,8 @@ pub async fn handle_environment_resize(
         authority
             .run_external_mutation(
                 RESIZE_MUTATION_STATES,
-                client.apply_workspace_storage_resize(
+                runtime.grow_volume(
+                    &placement,
                     &workspace_pvc_anchor(&backend),
                     operation.desired_resources.disk_gb,
                 ),
@@ -401,7 +403,8 @@ pub async fn handle_environment_resize(
             match authority
                 .run_while_authoritative_for_states(
                     RESIZE_MUTATION_STATES,
-                    client.wait_for_workspace_storage_resize(
+                    runtime.wait_volume_growth(
+                        &placement,
                         &workspace_pvc_anchor(&backend),
                         operation.desired_resources.disk_gb,
                         STORAGE_RESIZE_TIMEOUT,
@@ -409,10 +412,10 @@ pub async fn handle_environment_resize(
                 )
                 .await?
             {
-                WorkspaceStorageResizeOutcome::Applied => {
+                VolumeGrowth::Applied => {
                     checkpoint_storage_applied(authority, &operation).await?;
                 }
-                WorkspaceStorageResizeOutcome::RequiresPodRestart => {
+                VolumeGrowth::RequiresPodRestart => {
                     execution_mode = EnvironmentResizeExecutionMode::Restart;
                     storage_needs_post_restart_wait = true;
                     if operation.disruption_policy
@@ -452,7 +455,8 @@ pub async fn handle_environment_resize(
             authority
                 .run_while_authoritative_for_states(
                     RESIZE_MUTATION_STATES,
-                    client.resize_workspace_pod_in_place(
+                    runtime.resize_in_place(
+                        &placement,
                         environment_id,
                         &previous_pod_uid,
                         operation.desired_resources.cpu_millicores,
@@ -478,10 +482,13 @@ pub async fn handle_environment_resize(
     authority
         .run_external_mutation(
             RESIZE_MUTATION_STATES,
-            client.replace_workspace_pod_if_uid(
+            runtime.replace_member(
+                &placement,
                 environment_id,
-                &backend.pod_name,
-                &previous_pod_uid,
+                &MemberRef {
+                    name: backend.pod_name.clone(),
+                    uid: previous_pod_uid.clone(),
+                },
                 ctx.sandbox_cfg.support_image(),
             ),
         )
@@ -489,9 +496,12 @@ pub async fn handle_environment_resize(
     let replacement = authority
         .run_while_authoritative_for_states(
             RESIZE_MUTATION_STATES,
-            client.wait_for_replacement_workspace_pod(
-                &backend.pod_name,
-                &previous_pod_uid,
+            runtime.wait_replacement(
+                &placement,
+                &MemberRef {
+                    name: backend.pod_name.clone(),
+                    uid: previous_pod_uid.clone(),
+                },
                 RESTART_TIMEOUT,
             ),
         )
@@ -500,7 +510,8 @@ pub async fn handle_environment_resize(
         authority
             .run_while_authoritative_for_states(
                 RESIZE_MUTATION_STATES,
-                client.wait_for_workspace_storage_capacity(
+                runtime.wait_volume_capacity(
+                    &placement,
                     &workspace_pvc_anchor(&backend),
                     operation.desired_resources.disk_gb,
                     STORAGE_RESIZE_TIMEOUT,
@@ -509,7 +520,7 @@ pub async fn handle_environment_resize(
             .await?;
         checkpoint_storage_applied(authority, &operation).await?;
     }
-    let pod_ip = client.get_pod_ip(environment_id).await?;
+    let pod_ip = runtime.member_address(&placement, environment_id).await?;
     let env = load_environment(&ctx.pool, environment_id).await?;
     super::create::reconcile_runtime_identity(
         ctx,
@@ -645,19 +656,21 @@ pub async fn mark_environment_resize_failed(
         return Ok(());
     };
     let backend = load_backend_row(&ctx.pool, environment_id).await.ok();
-    let client = backend
-        .as_ref()
-        .and_then(|backend| sandbox_client(ctx, &backend.namespace).ok());
-    let live = match (live_compute_pod_uid(&operation), &client) {
+    let target = backend.as_ref().and_then(|backend| {
+        let runtime = require_runtime(ctx).ok()?;
+        Some((runtime, Placement::new(&backend.namespace)))
+    });
+    let live = match (live_compute_pod_uid(&operation), &target) {
         (None, _) => None,
         (Some(_), None) => Some(FailedLiveResize::Unknown(
             "the sandbox runtime is unavailable".into(),
         )),
-        (Some(pod_uid), Some(client)) => Some(
+        (Some(pod_uid), Some((runtime, placement))) => Some(
             authority
                 .run_while_authoritative_for_states(RESIZE_MUTATION_STATES, async {
-                    Ok(client
-                        .settle_failed_live_resize(
+                    Ok(runtime
+                        .settle_failed_resize(
+                            placement,
                             environment_id,
                             pod_uid,
                             (
@@ -677,9 +690,9 @@ pub async fn mark_environment_resize_failed(
     };
     let storage_requested = operation.desired_resources.disk_gb
         > operation.last_applied_resources.disk_gb
-        && match (&client, &backend) {
-            (Some(client), Some(backend)) => client
-                .workspace_storage(&workspace_pvc_anchor(backend))
+        && match (&target, &backend) {
+            (Some((runtime, placement)), Some(backend)) => runtime
+                .volume(placement, &workspace_pvc_anchor(backend))
                 .await
                 .map_or(true, |storage| {
                     storage.requested_disk_gb >= operation.desired_resources.disk_gb
@@ -702,11 +715,12 @@ pub async fn mark_environment_resize_failed(
     }
 
     let mut failure_message = format!("{message}{}", failed_live_resize_note(live.as_ref()));
-    if let Some(client) = &client
+    if let Some((runtime, placement)) = &target
         && let Err(error) = authority
             .run_external_mutation(
                 RESIZE_MUTATION_STATES,
-                client.apply_resize_desired_state(
+                runtime.set_desired_size(
+                    placement,
                     environment_id,
                     recorded.cpu_millicores,
                     recorded.memory_mb,

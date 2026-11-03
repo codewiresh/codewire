@@ -10,9 +10,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::{
-    ClaimReadiness, ClaimRef, MemberRef, MemberReplacement, Placement, ProbeResult, RuntimeAccess,
-    RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeStream, RuntimeTeardown,
-    SuspendedRuntime,
+    ClaimReadiness, ClaimRef, FailedLiveResize, MemberRef, MemberReplacement, Placement,
+    ProbeResult, ResizeState, RuntimeAccess, RuntimeExec, RuntimeLifecycle, RuntimeMember,
+    RuntimePools, RuntimeResize, RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime,
+    VolumeGrowth, VolumeIdentity, VolumeRef,
 };
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::template::TemplateOpts;
@@ -203,7 +204,110 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
 }
 
 #[async_trait]
+impl RuntimeResize for FakeRuntimeDriver {
+    async fn resize_state(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+    ) -> anyhow::Result<ResizeState> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn set_desired_size(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+        _cpu_millicores: i32,
+        _memory_mb: i32,
+        _disk_gb: i32,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn resize_in_place(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+        _member_uid: &str,
+        _cpu_millicores: i32,
+        _memory_mb: i32,
+        _timeout: Duration,
+    ) -> anyhow::Result<ResizeState> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn settle_failed_resize(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+        _member_uid: &str,
+        _previous: (i32, i32),
+        _requested: (i32, i32),
+        _timeout: Duration,
+    ) -> FailedLiveResize {
+        FailedLiveResize::Unknown("not scripted".into())
+    }
+}
+
+#[async_trait]
+impl RuntimeStorage for FakeRuntimeDriver {
+    async fn volume(
+        &self,
+        _placement: &Placement,
+        _volume: &VolumeRef,
+    ) -> anyhow::Result<VolumeIdentity> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn check_volume_growth(
+        &self,
+        _placement: &Placement,
+        _volume: &VolumeRef,
+        _disk_gb: i32,
+    ) -> anyhow::Result<VolumeIdentity> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn grow_volume(
+        &self,
+        _placement: &Placement,
+        _volume: &VolumeRef,
+        _disk_gb: i32,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn wait_volume_growth(
+        &self,
+        _placement: &Placement,
+        _volume: &VolumeRef,
+        _disk_gb: i32,
+        _timeout: Duration,
+    ) -> anyhow::Result<VolumeGrowth> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn wait_volume_capacity(
+        &self,
+        _placement: &Placement,
+        _volume: &VolumeRef,
+        _disk_gb: i32,
+        _timeout: Duration,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+}
+
+#[async_trait]
 impl RuntimeAccess for FakeRuntimeDriver {
+    async fn member_address(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("not scripted")
+    }
+
     async fn ensure_access(
         &self,
         _placement: &Placement,

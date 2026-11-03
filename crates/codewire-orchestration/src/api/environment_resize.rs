@@ -23,8 +23,7 @@ use super::environments::{
 };
 use crate::confidential_storage::require_confidential_access;
 use crate::resize_metrics::{self, RequestOutcome};
-use crate::sandbox::client::WorkspacePodResizeState;
-use crate::sandbox::client::{SandboxClient, WorkspacePvcAnchor};
+use crate::runtime::{Placement, ResizeState, VolumeRef};
 use crate::sandbox::template::{
     RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_COMMODITY_32G, RUNTIME_CLASS_RUNC,
 };
@@ -294,7 +293,7 @@ pub(crate) fn classify_execution_mode(
     environment_state: &str,
     previous: EnvironmentResources,
     desired: EnvironmentResources,
-    pod: Option<&WorkspacePodResizeState>,
+    pod: Option<&ResizeState>,
 ) -> AppResult<(EnvironmentResizeExecutionMode, String)> {
     if desired == previous {
         return Ok((
@@ -486,8 +485,8 @@ async fn build_resize_plan(
         || params.desired_resources.memory_mb != previous.memory_mb;
     let needs_runtime = params.desired_resources.disk_gb > previous.disk_gb
         || (environment_state == "running" && compute_changed);
-    let client = if needs_runtime {
-        let kube = state.kube.clone().ok_or_else(|| {
+    let target = if needs_runtime {
+        let runtime = state.runtime.as_deref().ok_or_else(|| {
             coded(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "runtime_unavailable",
@@ -502,23 +501,22 @@ async fn build_resize_plan(
                 "environment has no sandbox runtime",
             ));
         }
-        Some(SandboxClient::new(kube, namespace))
+        Some((runtime, Placement::new(namespace)))
     } else {
         None
     };
 
     let storage = if params.desired_resources.disk_gb > previous.disk_gb {
         // The shared resolver: the recorded Claim and PVC UIDs, never a name.
-        let anchor = WorkspacePvcAnchor {
+        let volume = VolumeRef {
             claim_name: claim_name.unwrap_or_default(),
             claim_uid: claim_uid.unwrap_or_default(),
             recorded_pvc_uid,
         };
+        let (runtime, placement) = target.as_ref().expect("runtime required for disk growth");
         Some(
-            client
-                .as_ref()
-                .expect("runtime client required for disk growth")
-                .require_workspace_storage_resize(&anchor, params.desired_resources.disk_gb)
+            runtime
+                .check_volume_growth(placement, &volume, params.desired_resources.disk_gb)
                 .await
                 .map_err(|error| {
                     coded(
@@ -534,11 +532,12 @@ async fn build_resize_plan(
 
     let disk_grows = params.desired_resources.disk_gb > previous.disk_gb;
     let pod = if environment_state == "running" && (compute_changed || disk_grows) {
+        let (runtime, placement) = target
+            .as_ref()
+            .expect("runtime required for running environment");
         Some(
-            client
-                .as_ref()
-                .expect("runtime client required for running environment")
-                .workspace_pod_resize_state(&params.environment_id)
+            runtime
+                .resize_state(placement, &params.environment_id)
                 .await
                 .map_err(|error| {
                     coded(
@@ -1338,7 +1337,7 @@ mod tests {
             EnvironmentResizeExecutionMode::InPlace
         );
 
-        let kata_snp = WorkspacePodResizeState {
+        let kata_snp = ResizeState {
             runtime_class_name: "kata-qemu-snp".into(),
             ..compatible.clone()
         };
@@ -1349,7 +1348,7 @@ mod tests {
             EnvironmentResizeExecutionMode::Restart
         );
 
-        let incompatible_policy = WorkspacePodResizeState {
+        let incompatible_policy = ResizeState {
             live_resize_compatible: false,
             incompatibility_reason: Some("memory uses restartPolicy RestartContainer".into()),
             ..compatible
@@ -1407,8 +1406,8 @@ mod tests {
         );
     }
 
-    fn pod_with_runtime_class(runtime_class_name: &str) -> WorkspacePodResizeState {
-        WorkspacePodResizeState {
+    fn pod_with_runtime_class(runtime_class_name: &str) -> ResizeState {
+        ResizeState {
             identity: crate::sandbox::client::WorkspacePodIdentity {
                 name: "workspace".into(),
                 uid: "uid-1".into(),

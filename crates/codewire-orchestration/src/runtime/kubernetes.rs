@@ -14,9 +14,10 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, LogParams};
 
 use super::{
-    ClaimReadiness, ClaimRef, MemberRef, MemberReplacement, Placement, ProbeResult, RuntimeAccess,
-    RuntimeDriver, RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeStream,
-    RuntimeTeardown, SuspendedRuntime,
+    ClaimReadiness, ClaimRef, FailedLiveResize, MemberRef, MemberReplacement, Placement,
+    ProbeResult, ResizeState, RuntimeAccess, RuntimeDriver, RuntimeExec, RuntimeLifecycle,
+    RuntimeMember, RuntimePools, RuntimeResize, RuntimeStorage, RuntimeStream, RuntimeTeardown,
+    SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeRef,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -239,7 +240,137 @@ impl RuntimeLifecycle for KubernetesDriver {
 }
 
 #[async_trait]
+impl RuntimeResize for KubernetesDriver {
+    async fn resize_state(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<ResizeState> {
+        self.sandbox_client(placement)
+            .workspace_pod_resize_state(environment_id)
+            .await
+    }
+
+    async fn set_desired_size(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        cpu_millicores: i32,
+        memory_mb: i32,
+        disk_gb: i32,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .apply_resize_desired_state(environment_id, cpu_millicores, memory_mb, disk_gb)
+            .await
+    }
+
+    async fn resize_in_place(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        member_uid: &str,
+        cpu_millicores: i32,
+        memory_mb: i32,
+        timeout: Duration,
+    ) -> anyhow::Result<ResizeState> {
+        self.sandbox_client(placement)
+            .resize_workspace_pod_in_place(
+                environment_id,
+                member_uid,
+                cpu_millicores,
+                memory_mb,
+                timeout,
+            )
+            .await
+    }
+
+    async fn settle_failed_resize(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        member_uid: &str,
+        previous: (i32, i32),
+        requested: (i32, i32),
+        timeout: Duration,
+    ) -> FailedLiveResize {
+        self.sandbox_client(placement)
+            .settle_failed_live_resize(environment_id, member_uid, previous, requested, timeout)
+            .await
+    }
+}
+
+#[async_trait]
+impl RuntimeStorage for KubernetesDriver {
+    async fn volume(
+        &self,
+        placement: &Placement,
+        volume: &VolumeRef,
+    ) -> anyhow::Result<VolumeIdentity> {
+        self.sandbox_client(placement)
+            .workspace_storage(volume)
+            .await
+    }
+
+    async fn check_volume_growth(
+        &self,
+        placement: &Placement,
+        volume: &VolumeRef,
+        disk_gb: i32,
+    ) -> anyhow::Result<VolumeIdentity> {
+        self.sandbox_client(placement)
+            .require_workspace_storage_resize(volume, disk_gb)
+            .await
+    }
+
+    async fn grow_volume(
+        &self,
+        placement: &Placement,
+        volume: &VolumeRef,
+        disk_gb: i32,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .apply_workspace_storage_resize(volume, disk_gb)
+            .await
+            .map(|_| ())
+    }
+
+    async fn wait_volume_growth(
+        &self,
+        placement: &Placement,
+        volume: &VolumeRef,
+        disk_gb: i32,
+        timeout: Duration,
+    ) -> anyhow::Result<VolumeGrowth> {
+        self.sandbox_client(placement)
+            .wait_for_workspace_storage_resize(volume, disk_gb, timeout)
+            .await
+    }
+
+    async fn wait_volume_capacity(
+        &self,
+        placement: &Placement,
+        volume: &VolumeRef,
+        disk_gb: i32,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .wait_for_workspace_storage_capacity(volume, disk_gb, timeout)
+            .await
+    }
+}
+
+#[async_trait]
 impl RuntimeAccess for KubernetesDriver {
+    async fn member_address(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<String> {
+        self.sandbox_client(placement)
+            .get_pod_ip(environment_id)
+            .await
+    }
+
     async fn ensure_access(
         &self,
         placement: &Placement,
@@ -924,6 +1055,403 @@ mod tests {
                 && requests[0].contains("container=workspace"),
             "{requests:?}"
         );
+    }
+
+    const CLAIM_UID: &str = "c0ffee00-e29b-41d4-a716-446655440000";
+    const PVC_UID: &str = "0a0b0c0d-1111-4222-8333-444455556666";
+
+    fn stub_volume() -> VolumeRef {
+        VolumeRef {
+            claim_name: "sandbox-env-1".into(),
+            claim_uid: CLAIM_UID.into(),
+            recorded_pvc_uid: None,
+        }
+    }
+
+    /// Each write's method, path and body.
+    type Writes = Arc<Mutex<Vec<(String, String, String)>>>;
+
+    /// A claim, its Sandbox, that Sandbox's running Pod and its volume of this
+    /// mode, asking for 80 GiB and with `capacity_gib` so far. A write answers
+    /// with the object as it was.
+    fn driver_over_sized_runtime(
+        volume_mode: &str,
+        capacity_gib: i32,
+    ) -> (Arc<dyn RuntimeDriver>, Writes) {
+        driver_over_sized_runtime_with_volume_conditions(volume_mode, capacity_gib, json!([]))
+    }
+
+    fn driver_over_sized_runtime_with_volume_conditions(
+        volume_mode: &str,
+        capacity_gib: i32,
+        volume_conditions: serde_json::Value,
+    ) -> (Arc<dyn RuntimeDriver>, Writes) {
+        let namespace = "/namespaces/dev-sandboxes";
+        let owned_by_sandbox = json!([{"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+            "name": "sandbox-a", "uid": CONTROLLING_SANDBOX, "controller": true}]);
+        let workspace = json!({"name": "workspace", "image": "workspace:1",
+            "resources": {"requests": {"cpu": "1", "memory": "1Gi"},
+                "limits": {"cpu": "1", "memory": "1Gi"}}});
+        let objects = [
+            (
+                format!(
+                    "/apis/extensions.agents.x-k8s.io/v1beta1{namespace}/sandboxclaims/sandbox-env-1"
+                ),
+                json!({"apiVersion": "extensions.agents.x-k8s.io/v1beta1", "kind": "SandboxClaim",
+                    "metadata": {"name": "sandbox-env-1", "namespace": "dev-sandboxes",
+                        "uid": CLAIM_UID},
+                    "status": {"sandbox": {"name": "sandbox-a"}}}),
+            ),
+            (
+                format!("/apis/agents.x-k8s.io/v1beta1{namespace}/sandboxes/sandbox-a"),
+                json!({"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+                    "metadata": {"name": "sandbox-a", "namespace": "dev-sandboxes",
+                        "uid": CONTROLLING_SANDBOX, "resourceVersion": "1",
+                        "annotations": {"agents.x-k8s.io/pod-name": "workspace-a"},
+                        "ownerReferences": [{"apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                            "kind": "SandboxClaim", "name": "sandbox-env-1", "uid": CLAIM_UID,
+                            "controller": true}]},
+                    "spec": {"podTemplate": {"spec": {"containers": [workspace.clone()]}},
+                        "volumeClaimTemplates": [{"metadata": {"name": "workspace"}}]}}),
+            ),
+            (
+                format!("/api/v1{namespace}/pods/workspace-a"),
+                json!({"apiVersion": "v1", "kind": "Pod",
+                    "metadata": {"name": "workspace-a", "namespace": "dev-sandboxes",
+                        "uid": STUB_POD_UID, "resourceVersion": "7",
+                        "ownerReferences": owned_by_sandbox},
+                    "spec": {"runtimeClassName": "kata", "containers": [workspace]},
+                    "status": {"phase": "Running", "podIP": "10.0.0.7",
+                        "containerStatuses": [{"name": "workspace", "ready": true,
+                            "image": "", "imageID": "", "restartCount": 2}]}}),
+            ),
+            (
+                format!("/api/v1{namespace}/persistentvolumeclaims/workspace-sandbox-a"),
+                json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+                    "metadata": {"name": "workspace-sandbox-a", "namespace": "dev-sandboxes",
+                        "uid": PVC_UID, "ownerReferences": owned_by_sandbox},
+                    "spec": {"storageClassName": "fast", "volumeMode": volume_mode,
+                        "resources": {"requests": {"storage": "80Gi"}}},
+                    "status": {"phase": "Bound", "conditions": volume_conditions,
+                        "capacity": {"storage": format!("{capacity_gib}Gi")}}}),
+            ),
+            (
+                "/apis/storage.k8s.io/v1/storageclasses/fast".to_owned(),
+                json!({"apiVersion": "storage.k8s.io/v1", "kind": "StorageClass",
+                    "metadata": {"name": "fast"}, "provisioner": "csi.test",
+                    "allowVolumeExpansion": true}),
+            ),
+        ];
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let seen = writes.clone();
+        let service = Router::new().fallback(move |request: Request<Body>| {
+            let seen = seen.clone();
+            let objects = objects.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_owned();
+                let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                if method != "GET" {
+                    seen.lock().unwrap().push((
+                        method,
+                        path.clone(),
+                        String::from_utf8(body.to_vec()).unwrap(),
+                    ));
+                }
+                let object = path.strip_suffix("/resize").unwrap_or(&path);
+                let (status, body) = objects.iter().find(|(known, _)| known == object).map_or(
+                    (
+                        StatusCode::NOT_FOUND,
+                        json!({"apiVersion": "v1", "kind": "Status", "status": "Failure",
+                            "reason": "NotFound", "code": 404}),
+                    ),
+                    |(_, object)| (StatusCode::OK, object.clone()),
+                );
+                Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            }
+        });
+        let client = kube::Client::new(service, "the-default-namespace");
+        (KubernetesDriver::shared(client), writes)
+    }
+
+    #[tokio::test]
+    async fn a_volume_carries_its_mode_and_is_found_through_its_claim() {
+        let placement = Placement::new("dev-sandboxes");
+        for (mode, raw_block) in [("Block", true), ("Filesystem", false)] {
+            let (driver, _) = driver_over_sized_runtime(mode, 80);
+
+            let volume = driver.volume(&placement, &stub_volume()).await.unwrap();
+
+            assert_eq!(volume.pvc_name, "workspace-sandbox-a");
+            assert_eq!(volume.pvc_uid, PVC_UID);
+            assert_eq!(volume.requested_disk_gb, 80);
+            assert_eq!(volume.raw_block, raw_block);
+        }
+
+        let (driver, _) = driver_over_sized_runtime("Block", 80);
+        let replaced = VolumeRef {
+            claim_uid: "another-claim-uid".into(),
+            ..stub_volume()
+        };
+        assert!(driver.volume(&placement, &replaced).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn growing_a_volume_writes_only_when_asked_and_is_fenced_on_its_uid() {
+        let placement = Placement::new("dev-sandboxes");
+        let (driver, writes) = driver_over_sized_runtime("Block", 80);
+
+        assert_eq!(
+            driver
+                .check_volume_growth(&placement, &stub_volume(), 100)
+                .await
+                .unwrap()
+                .pvc_uid,
+            PVC_UID
+        );
+        let shrink = driver
+            .check_volume_growth(&placement, &stub_volume(), 40)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            shrink.to_string(),
+            "persistent storage cannot shrink from 80 Gi to 40 Gi"
+        );
+        assert_eq!(*writes.lock().unwrap(), Vec::new());
+
+        driver
+            .grow_volume(&placement, &stub_volume(), 100)
+            .await
+            .unwrap();
+
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        let (method, path, body) = &writes[0];
+        assert_eq!(method, "PATCH");
+        assert!(
+            path.ends_with("/namespaces/dev-sandboxes/persistentvolumeclaims/workspace-sandbox-a"),
+            "{path}"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            json!({"metadata": {"uid": PVC_UID},
+                "spec": {"resources": {"requests": {"storage": "100Gi"}}}})
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_grown_block_volume_needs_a_new_member_and_a_filesystem_one_does_not() {
+        let placement = Placement::new("dev-sandboxes");
+        let timeout = Duration::from_secs(5);
+        for (mode, growth) in [
+            ("Block", VolumeGrowth::RequiresPodRestart),
+            ("Filesystem", VolumeGrowth::Applied),
+        ] {
+            let (driver, _) = driver_over_sized_runtime(mode, 100);
+            assert_eq!(
+                driver
+                    .wait_volume_growth(&placement, &stub_volume(), 100, timeout)
+                    .await
+                    .unwrap(),
+                growth
+            );
+            driver
+                .wait_volume_capacity(&placement, &stub_volume(), 100, timeout)
+                .await
+                .unwrap();
+        }
+
+        let (driver, _) = driver_over_sized_runtime("Filesystem", 80);
+        assert!(
+            driver
+                .wait_volume_growth(&placement, &stub_volume(), 100, timeout)
+                .await
+                .is_err()
+        );
+        assert!(
+            driver
+                .wait_volume_capacity(&placement, &stub_volume(), 100, timeout)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_filesystem_volume_waiting_for_its_mount_needs_a_new_member_and_has_not_grown() {
+        let placement = Placement::new("dev-sandboxes");
+        let timeout = Duration::from_millis(50);
+        let (driver, _) = driver_over_sized_runtime_with_volume_conditions(
+            "Filesystem",
+            80,
+            json!([{"type": "FileSystemResizePending", "status": "True"}]),
+        );
+
+        assert_eq!(
+            driver
+                .wait_volume_growth(&placement, &stub_volume(), 100, timeout)
+                .await
+                .unwrap(),
+            VolumeGrowth::RequiresPodRestart
+        );
+        // The capacity itself is what this wait reads, so the condition doesn't end it.
+        assert!(
+            driver
+                .wait_volume_capacity(&placement, &stub_volume(), 100, timeout)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn resize_state_and_address_describe_the_member_its_sandbox_controls() {
+        let placement = Placement::new("dev-sandboxes");
+        let (driver, writes) = driver_over_sized_runtime("Block", 80);
+
+        let state = driver.resize_state(&placement, "env-1").await.unwrap();
+
+        assert_eq!(state.identity.name, "workspace-a");
+        assert_eq!(state.identity.uid, STUB_POD_UID);
+        assert_eq!(state.runtime_class_name, "kata");
+        assert_eq!(state.restart_count, 2);
+        assert_eq!(
+            driver.member_address(&placement, "env-1").await.unwrap(),
+            "10.0.0.7"
+        );
+        assert_eq!(*writes.lock().unwrap(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn the_desired_size_is_written_to_the_claim_and_its_sandbox() {
+        let (driver, writes) = driver_over_sized_runtime("Block", 80);
+
+        driver
+            .set_desired_size(&Placement::new("dev-sandboxes"), "env-1", 2000, 4096, 100)
+            .await
+            .unwrap();
+
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes.len(), 2, "{writes:?}");
+        assert!(
+            writes[0].1.ends_with("/sandboxclaims/sandbox-env-1"),
+            "{writes:?}"
+        );
+        assert!(writes[1].1.ends_with("/sandboxes/sandbox-a"), "{writes:?}");
+        for (_, _, body) in writes.iter() {
+            assert!(body.contains("4096Mi"), "{body}");
+            assert!(
+                body.contains("\"cpu\":\"2\"") || body.contains("2000m"),
+                "{body}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_in_place_resize_asks_this_exact_member_for_that_size() {
+        let placement = Placement::new("dev-sandboxes");
+        let (driver, writes) = driver_over_sized_runtime("Block", 80);
+
+        // The stub's Pod never changes, so the wait runs out after the request.
+        assert!(
+            driver
+                .resize_in_place(
+                    &placement,
+                    "env-1",
+                    STUB_POD_UID,
+                    2000,
+                    4096,
+                    Duration::from_secs(5),
+                )
+                .await
+                .is_err()
+        );
+        {
+            let writes = writes.lock().unwrap();
+            assert_eq!(writes.len(), 1, "{writes:?}");
+            let (_, path, body) = &writes[0];
+            assert!(
+                path.ends_with("/namespaces/dev-sandboxes/pods/workspace-a/resize"),
+                "{path}"
+            );
+            assert!(
+                body.contains(STUB_POD_UID) && body.contains("4096Mi"),
+                "{body}"
+            );
+        }
+
+        let (driver, writes) = driver_over_sized_runtime("Block", 80);
+        assert!(
+            driver
+                .resize_in_place(
+                    &placement,
+                    "env-1",
+                    "another-uid",
+                    2000,
+                    4096,
+                    Duration::from_secs(5),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(*writes.lock().unwrap(), Vec::new());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn settling_a_failed_resize_withdraws_it_back_to_the_previous_size() {
+        let (driver, writes) = driver_over_sized_runtime("Block", 80);
+
+        // The stub's Pod never changes, so the withdrawal doesn't settle.
+        let settled = driver
+            .settle_failed_resize(
+                &Placement::new("dev-sandboxes"),
+                "env-1",
+                STUB_POD_UID,
+                (3000, 8192),
+                (2000, 4096),
+                Duration::from_secs(5),
+            )
+            .await;
+
+        assert!(
+            matches!(settled, FailedLiveResize::Unknown(_)),
+            "{settled:?}"
+        );
+        let writes = writes.lock().unwrap();
+        assert!(!writes.is_empty());
+        for (_, path, body) in writes.iter() {
+            assert!(path.ends_with("/pods/workspace-a/resize"), "{path}");
+            assert!(
+                body.contains("8192Mi") && !body.contains("4096Mi"),
+                "{body}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn settling_a_failed_resize_leaves_a_replaced_member_alone() {
+        let (driver, writes) = driver_over_sized_runtime("Block", 80);
+
+        let settled = driver
+            .settle_failed_resize(
+                &Placement::new("dev-sandboxes"),
+                "env-1",
+                "another-uid",
+                (1000, 1024),
+                (2000, 4096),
+                Duration::from_secs(5),
+            )
+            .await;
+
+        assert!(
+            matches!(settled, FailedLiveResize::Unknown(_)),
+            "{settled:?}"
+        );
+        assert_eq!(*writes.lock().unwrap(), Vec::new());
     }
 
     #[tokio::test]
