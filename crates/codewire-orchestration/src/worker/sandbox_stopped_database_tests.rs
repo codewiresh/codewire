@@ -10,7 +10,10 @@ use crate::lifecycle::{
     PgLifecycleStore, SANDBOX_RESTARTED_ERROR_CODE, SANDBOX_STOPPED_ERROR_CODE,
     SANDBOX_STOPPED_MESSAGE, Service, StartQuota,
 };
+use crate::runtime::ProbeResult;
+use crate::runtime::fake::FakeRuntimeDriver;
 use crate::test_database_support::TestDatabase;
+use crate::worker::loops::{LivenessRow, observe_sandbox_liveness};
 
 const CREATOR: &str = "stopped-creator";
 const ORGANIZATION: &str = "stopped-organization";
@@ -210,6 +213,131 @@ async fn db_running_again_clears_any_old_reason_and_another_failure_replaces_the
         svc.mark_started(ENVIRONMENT).await?;
         let (_, code, reason) = row(pool).await?;
         ensure!(code.is_none() && reason.is_none(), "{code:?} {reason:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// A running sandbox as liveness reads it, `running_for` after it got there.
+fn liveness_row(generation: i64, running_for: chrono::Duration) -> LivenessRow {
+    LivenessRow {
+        id: ENVIRONMENT.into(),
+        state: "running".into(),
+        desired_state: "started".into(),
+        operation_generation: generation,
+        state_changed_at: chrono::Utc::now() - running_for,
+        namespace: "stopped-sandboxes".into(),
+        pod_name: "sandbox-stopped".into(),
+        pod_ip: "10.0.0.1".into(),
+        bound_pod_uid: Some("pod-uid".into()),
+        setup_owner_generation: None,
+        setup_owner_status: String::new(),
+    }
+}
+
+fn runtime_reporting(claim_ready: bool, reason: &str, phase: &str) -> FakeRuntimeDriver {
+    FakeRuntimeDriver {
+        probe: ProbeResult {
+            claim_exists: true,
+            claim_ready,
+            claim_reason: reason.into(),
+            pod_exists: true,
+            pod_name: "sandbox-stopped".into(),
+            pod_uid: "pod-uid".into(),
+            pod_ip: "10.0.0.1".into(),
+            pod_phase: phase.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// An operation generation, as a workflow's claim gives a running sandbox.
+async fn generation(pool: &PgPool) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "UPDATE environments SET environment_operation_generation = 3 WHERE id = $1 \
+         RETURNING environment_operation_generation",
+    )
+    .bind(ENVIRONMENT)
+    .fetch_one(pool)
+    .await?)
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_failed_pod_asks_for_recovery_once_it_is_marked() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        let failed = runtime_reporting(false, "PodFailed", "Failed");
+        let now = chrono::Utc::now();
+
+        // Nothing else would look at it for five minutes (#3851).
+        let asked = observe_sandbox_liveness(&db.pool, &failed, now, &row).await;
+        ensure!(asked.is_some(), "no recovery asked for");
+        let (state, code, _) = self::row(&db.pool).await?;
+        ensure!(state == "error", "{state}");
+        ensure!(
+            code.as_deref() == Some(SANDBOX_STOPPED_ERROR_CODE),
+            "{code:?}"
+        );
+
+        // A second look, from a row read before the mark, asks for nothing more.
+        let asked = observe_sandbox_liveness(&db.pool, &failed, now, &row).await;
+        ensure!(asked.is_none(), "{asked:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_sandbox_that_fails_soon_after_starting_waits_for_the_sweep() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::seconds(10));
+        let failed = runtime_reporting(false, "PodFailed", "Failed");
+
+        let asked = observe_sandbox_liveness(&db.pool, &failed, chrono::Utc::now(), &row).await;
+        ensure!(asked.is_none(), "{asked:?}");
+        // It is still marked, so the user is told and the sweep can find it.
+        let (state, code, _) = self::row(&db.pool).await?;
+        ensure!(state == "error", "{state}");
+        ensure!(
+            code.as_deref() == Some(SANDBOX_STOPPED_ERROR_CODE),
+            "{code:?}"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_healthy_or_replaced_runtime_marks_nothing() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        let now = chrono::Utc::now();
+
+        let healthy = runtime_reporting(true, "", "Running");
+        let asked = observe_sandbox_liveness(&db.pool, &healthy, now, &row).await;
+        ensure!(asked.is_none(), "{asked:?}");
+
+        // A Pod replaced under the same name still takes the identity reconcile.
+        let mut replaced = runtime_reporting(true, "", "Running");
+        replaced.probe.pod_uid = "new-pod-uid".into();
+        let asked = observe_sandbox_liveness(&db.pool, &replaced, now, &row).await;
+        ensure!(asked.is_some(), "no reconcile asked for");
+
+        let (state, code, _) = self::row(&db.pool).await?;
+        ensure!(state == "running" && code.is_none(), "{state} {code:?}");
         Ok(())
     }
     .await;

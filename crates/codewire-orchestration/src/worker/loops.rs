@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use sqlx::{Connection, PgConnection, Row};
+use sqlx::{Connection, PgConnection, PgPool, Row};
 use tokio::sync::Notify;
 
 use super::WorkerContext;
@@ -27,6 +27,10 @@ const ADVISORY_LOCK_ID: i64 = 0x636F646577697265; // "codewire"
 const RECONCILER_INTERVAL: Duration = Duration::from_secs(30);
 const SANDBOX_LIVENESS_INTERVAL: Duration = Duration::from_secs(5);
 const SANDBOX_TRANSITIONAL_LIVENESS_GRACE: Duration = Duration::from_secs(60);
+/// A sandbox that stops this soon after reaching `running` waits for the
+/// stuck-state sweep instead of restarting at once, so one that can't stay up
+/// doesn't restart in a tight loop (#3851).
+const CRASH_RECOVERY_MIN_RUNNING: Duration = Duration::from_secs(60);
 const RECOVERY_ACTIVITY_WINDOW_SECS: i32 = 300; // environmentRecoveryActivityWindow
 const PENDING_CREATE_RECOVERY_SECS: i32 = 60;
 const DESTROY_WITHOUT_BACKEND_RECOVERY_SECS: i32 = 60;
@@ -781,19 +785,19 @@ async fn enqueue_environment_reconcile(
 // ── Sandbox liveness (port of sandbox_liveness.go) ─────────────────────
 
 #[derive(Clone)]
-struct LivenessRow {
-    id: String,
-    state: String,
-    desired_state: String,
-    operation_generation: i64,
-    state_changed_at: chrono::DateTime<chrono::Utc>,
-    namespace: String,
-    pod_name: String,
-    pod_ip: String,
+pub(super) struct LivenessRow {
+    pub(super) id: String,
+    pub(super) state: String,
+    pub(super) desired_state: String,
+    pub(super) operation_generation: i64,
+    pub(super) state_changed_at: chrono::DateTime<chrono::Utc>,
+    pub(super) namespace: String,
+    pub(super) pod_name: String,
+    pub(super) pod_ip: String,
     /// The bound workspace Pod UID (Program #2238 design §10).
-    bound_pod_uid: Option<String>,
-    setup_owner_generation: Option<i64>,
-    setup_owner_status: String,
+    pub(super) bound_pod_uid: Option<String>,
+    pub(super) setup_owner_generation: Option<i64>,
+    pub(super) setup_owner_status: String,
 }
 
 async fn sandbox_liveness_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>) {
@@ -873,6 +877,30 @@ async fn reconcile_single_sandbox_liveness(
     now: chrono::DateTime<chrono::Utc>,
     row: LivenessRow,
 ) {
+    let Some(runtime) = &ctx.runtime else { return };
+    let Some(reason) = observe_sandbox_liveness(&ctx.pool, runtime.as_ref(), now, &row).await
+    else {
+        return;
+    };
+    // Should this fail, the stuck-state sweep still recovers the sandbox.
+    if let Err(error) = enqueue_environment_reconcile(ctx, &row.id, true, reason).await {
+        tracing::warn!(
+            environment_id = row.id,
+            reason,
+            error = %error,
+            "sandbox liveness: enqueue reconcile failed"
+        );
+    }
+}
+
+/// Compares a sandbox with its runtime and records what it finds. Returns why
+/// a reconcile is needed now, if one is.
+pub(super) async fn observe_sandbox_liveness(
+    pool: &PgPool,
+    runtime: &dyn RuntimeDriver,
+    now: chrono::DateTime<chrono::Utc>,
+    row: &LivenessRow,
+) -> Option<&'static str> {
     if row.desired_state != "started" {
         tracing::debug!(
             environment_id = row.id,
@@ -880,27 +908,26 @@ async fn reconcile_single_sandbox_liveness(
             desired_state = row.desired_state,
             "sandbox liveness: lifecycle transition owns sandbox readiness"
         );
-        return;
+        return None;
     }
-    if setup_activity_active(&row) {
+    if setup_activity_active(row) {
         tracing::debug!(
             environment_id = row.id,
             operation_generation = row.operation_generation,
             setup_owner_status = row.setup_owner_status,
             "sandbox liveness: current setup activity owns sandbox readiness"
         );
-        return;
+        return None;
     }
     let grace = chrono::Duration::from_std(SANDBOX_TRANSITIONAL_LIVENESS_GRACE).unwrap();
     if row.namespace.is_empty() {
         if row.state != "running" && now - row.state_changed_at < grace {
-            return;
+            return None;
         }
-        mark_sandbox_env_error(ctx, &row, "sandbox backend namespace missing").await;
-        return;
+        mark_sandbox_env_error(pool, row, "sandbox backend namespace missing").await;
+        return None;
     }
 
-    let Some(runtime) = &ctx.runtime else { return };
     let probe = match runtime
         .probe(&Placement::new(&row.namespace), &row.id)
         .await
@@ -908,40 +935,37 @@ async fn reconcile_single_sandbox_liveness(
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(environment_id = row.id, namespace = row.namespace, error = %e, "sandbox liveness: probe failed");
-            return;
+            return None;
         }
     };
 
-    if running_runtime_recovery_required(&row, &probe) {
-        if let Err(error) = enqueue_environment_reconcile(
-            ctx,
-            &row.id,
-            true,
-            "workspace Pod runtime identity is not current",
-        )
-        .await
-        {
-            tracing::warn!(
-                environment_id = row.id,
-                error = %error,
-                "sandbox liveness: enqueue runtime identity reconcile failed"
-            );
-        }
-        return;
+    if running_runtime_recovery_required(row, &probe) {
+        return Some("workspace Pod runtime identity is not current");
     }
 
-    if let Some(reason) = sandbox_liveness_reason(now, &row, &probe) {
-        if sandbox_pod_failed_on_its_node(&row, &probe) {
-            mark_sandbox_stopped(ctx, &row, &reason).await;
+    if let Some(reason) = sandbox_liveness_reason(now, row, &probe) {
+        if sandbox_pod_failed_on_its_node(row, &probe) {
+            // The user is told it is restarting, and the volume is still
+            // there, so start now rather than at the next sweep.
+            if mark_sandbox_stopped(pool, row, &reason).await && crash_recovery_due(now, row) {
+                return Some("sandbox stopped unexpectedly");
+            }
         } else {
-            mark_sandbox_env_error(ctx, &row, &reason).await;
+            mark_sandbox_env_error(pool, row, &reason).await;
         }
-        return;
+        return None;
     }
 
     if !probe.pod_name.is_empty() || !probe.pod_ip.is_empty() {
-        sync_sandbox_backend_pod_info(ctx, &row, &probe).await;
+        sync_sandbox_backend_pod_info(pool, row, &probe).await;
     }
+    None
+}
+
+/// Whether a sandbox that just stopped had been running long enough to restart
+/// at once.
+fn crash_recovery_due(now: chrono::DateTime<chrono::Utc>, row: &LivenessRow) -> bool {
+    now - row.state_changed_at >= chrono::Duration::from_std(CRASH_RECOVERY_MIN_RUNNING).unwrap()
 }
 
 fn running_runtime_recovery_required(row: &LivenessRow, probe: &ProbeResult) -> bool {
@@ -1080,16 +1104,12 @@ fn sandbox_pod_failed_on_its_node(row: &LivenessRow, probe: &ProbeResult) -> boo
         && (probe.pod_phase == "Failed" || probe.claim_reason == "PodFailed")
 }
 
-async fn sync_sandbox_backend_pod_info(
-    ctx: &WorkerContext,
-    row: &LivenessRow,
-    probe: &ProbeResult,
-) {
+async fn sync_sandbox_backend_pod_info(pool: &PgPool, row: &LivenessRow, probe: &ProbeResult) {
     if probe.pod_name == row.pod_name && probe.pod_ip == row.pod_ip {
         return;
     }
     let authority = match ActivityAuthority::capture_required(
-        &ctx.pool,
+        pool,
         &row.id,
         &row.desired_state,
         row.operation_generation,
@@ -1104,7 +1124,7 @@ async fn sync_sandbox_backend_pod_info(
         }
     };
     let result = async {
-        let mut tx = ctx.pool.begin().await?;
+        let mut tx = pool.begin().await?;
         authority.lock_transaction(&mut tx).await?;
         sqlx::query(
             "UPDATE sandbox_environment_backend
@@ -1129,9 +1149,10 @@ async fn sync_sandbox_backend_pod_info(
 }
 
 /// The internal reason stays in the worker's log; the user gets the plain message.
-async fn mark_sandbox_stopped(ctx: &WorkerContext, row: &LivenessRow, reason: &str) {
+/// Returns whether this call marked it.
+async fn mark_sandbox_stopped(pool: &PgPool, row: &LivenessRow, reason: &str) -> bool {
     let authority = match ActivityAuthority::capture_required(
-        &ctx.pool,
+        pool,
         &row.id,
         &row.desired_state,
         row.operation_generation,
@@ -1139,16 +1160,17 @@ async fn mark_sandbox_stopped(ctx: &WorkerContext, row: &LivenessRow, reason: &s
     .await
     {
         Ok(authority) => authority,
-        Err(error) if is_authority_lost(&error) => return,
+        Err(error) if is_authority_lost(&error) => return false,
         Err(error) => {
             tracing::error!(environment_id = row.id, error = %error, "sandbox liveness: capture stopped authority failed");
-            return;
+            return false;
         }
     };
-    let svc = Service::<PgLifecycleStore>::for_activity(ctx.pool.clone(), authority);
+    let svc = Service::<PgLifecycleStore>::for_activity(pool.clone(), authority);
     match svc.mark_sandbox_stopped(&row.id).await {
         Err(e) => {
             tracing::error!(environment_id = row.id, error = %e, "sandbox liveness: mark stopped failed");
+            false
         }
         Ok(true) => {
             tracing::warn!(
@@ -1156,14 +1178,15 @@ async fn mark_sandbox_stopped(ctx: &WorkerContext, row: &LivenessRow, reason: &s
                 reason,
                 "sandbox liveness: running sandbox stopped unexpectedly"
             );
+            true
         }
-        Ok(false) => {}
+        Ok(false) => false,
     }
 }
 
-async fn mark_sandbox_env_error(ctx: &WorkerContext, row: &LivenessRow, reason: &str) {
+async fn mark_sandbox_env_error(pool: &PgPool, row: &LivenessRow, reason: &str) {
     let authority = match ActivityAuthority::capture_required(
-        &ctx.pool,
+        pool,
         &row.id,
         &row.desired_state,
         row.operation_generation,
@@ -1177,7 +1200,7 @@ async fn mark_sandbox_env_error(ctx: &WorkerContext, row: &LivenessRow, reason: 
             return;
         }
     };
-    let svc = Service::<PgLifecycleStore>::for_activity(ctx.pool.clone(), authority);
+    let svc = Service::<PgLifecycleStore>::for_activity(pool.clone(), authority);
     match svc
         .mark_error_for_states(&row.id, reason, &[row.state.as_str()])
         .await
@@ -1247,6 +1270,18 @@ mod tests {
             setup_owner_generation: None,
             setup_owner_status: String::new(),
         }
+    }
+
+    #[test]
+    fn only_a_sandbox_that_stayed_up_restarts_at_once() {
+        let running = row("running", 0);
+        let minimum = chrono::Duration::from_std(CRASH_RECOVERY_MIN_RUNNING).unwrap();
+        let at = running.state_changed_at + minimum;
+        assert!(crash_recovery_due(at, &running));
+        assert!(!crash_recovery_due(
+            at - chrono::Duration::seconds(1),
+            &running
+        ));
     }
 
     #[test]
