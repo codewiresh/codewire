@@ -1517,8 +1517,7 @@ fn is_native_grpc_essence(essence: &str) -> bool {
 /// protocol (or `unknown` for a pre-admission rejection), Connect status code,
 /// duration, credential kind, privacy-conscious principal fingerprint,
 /// server-derived synthetic classification, and user agent. Target
-/// `connect_rpc`; the
-/// Connect twin of workstream 13's `rest_sunset` REST-traffic event.
+/// `connect_rpc`.
 async fn log_rpc(req: Request, next: Next) -> Response {
     // Mounted paths are always "/{package}.{Service}/{method...}".
     let path = req.uri().path().to_owned();

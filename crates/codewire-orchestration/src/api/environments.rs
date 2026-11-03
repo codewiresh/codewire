@@ -19,7 +19,6 @@ use codewire_server_core::org_deletion::{
     run_organization_database_mutation,
 };
 use codewire_server_core::{AppError, AppResult};
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -28,13 +27,12 @@ use super::ApiState;
 use crate::confidential_storage::require_confidential_access;
 
 /// Mirrors `api.Environment` field-for-field (JSON tags included).
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Environment {
     pub id: String,
     pub org_id: String,
     pub created_by: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "String")]
     pub preset_id: Option<String>,
     #[serde(rename = "type")]
     pub env_type: String,
@@ -52,7 +50,6 @@ pub struct Environment {
     pub setup_complete: bool,
     pub operation_generation: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<serde_json::Value>")]
     pub source_selection: Option<super::environment_sources::EnvironmentSourceSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup_error: Option<String>,
@@ -92,7 +89,7 @@ pub struct Environment {
 }
 
 /// Mirrors `api.EnvironmentPort`.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EnvironmentPort {
     pub id: String,
     pub environment_id: String,
@@ -1534,14 +1531,6 @@ pub(crate) async fn cancel_environment_deletion_core(
     .await
 }
 
-/// Body of `POST .../extend-ttl`. (Go's huma schema also 422s when the
-/// field is absent; the CLI always sends it, so only the in-range
-/// check below is on the parity surface.)
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ExtendTtlBody {
-    pub additional_seconds: i32,
-}
-
 pub(crate) async fn extend_environment_ttl_core(
     state: &ApiState,
     user: &AuthUser,
@@ -1591,7 +1580,6 @@ mod rate_limit_database_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_server_core::validation::validate_value;
 
     #[test]
     fn credit_refuses_charging_cards_at_zero_and_never_unlimited() {
@@ -1802,33 +1790,5 @@ mod tests {
         assert!(ENV_SELECT_COLS.contains("e.project_spec->'secrets'"));
         assert!(ENV_SELECT_COLS.contains("e.project_spec->'credentials'"));
         assert!(!ENV_SELECT_COLS.contains("e.project_spec->'environment'"));
-    }
-
-    #[test]
-    fn extend_ttl_validation_rejects_missing_required_field() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<ExtendTtlBody>(serde_json::json!({}))
-        else {
-            panic!("expected missing additional_seconds to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("additional_seconds"));
-    }
-
-    #[test]
-    fn extend_ttl_validation_rejects_type_errors() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<ExtendTtlBody>(serde_json::json!({
-                "additional_seconds": "60"
-            }))
-        else {
-            panic!("expected type-invalid additional_seconds to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/additional_seconds");
-        assert!(errors[0].message.contains("integer"));
     }
 }

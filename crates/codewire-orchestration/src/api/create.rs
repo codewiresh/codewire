@@ -14,8 +14,6 @@ use codewire_server_core::org_deletion::{
     OrganizationRuntimeMutationError, run_organization_runtime_mutation,
 };
 use codewire_server_core::{AppError, AppResult};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 
 use super::ApiState;
@@ -52,36 +50,23 @@ pub(crate) fn hosted_disk_limit_exceeded(field: &str, disk_gib: u64) -> AppError
 // ── Shared body types (environment_types.go) ────────────────────────────
 
 /// Placement envelope plus the sole canonical workspace configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct CreateEnvironmentBody {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<i32>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub isolation_tier: String,
-    #[serde(default)]
-    #[schemars(with = "serde_json::Value")]
     pub project_spec: codewire_project::ProjectSpec,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_profile_revision: Option<u64>,
-    #[serde(default)]
     pub confirm_personal_credentials: bool,
-    #[serde(default)]
     pub confirm_personal_secrets: bool,
-    #[serde(default)]
     pub omit_application_previews: bool,
     /// The hosted Mesh network to join, by name, in the environment's
     /// organization. The creating user is recorded as the one who attached
     /// it; Mesh admits the node only while they are a member of the network.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
     /// The hosted disk snapshot to start from. The caller must have created it
     /// in this organization; the workspace disk is restored from it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_snapshot_id: Option<String>,
 }
 
@@ -1342,7 +1327,6 @@ mod tests {
     }
     use codewire_server_core::AppError;
     use codewire_server_core::credit_enforcement::CreditEnforcement;
-    use codewire_server_core::validation::validate_value;
     use sqlx::postgres::PgPoolOptions;
 
     fn image_project_spec(
@@ -2400,82 +2384,6 @@ credentials: {profile: user/work}
             )),
             "invalid_node_name"
         );
-    }
-
-    #[test]
-    fn create_environment_schema_exposes_only_placement_and_project_spec() {
-        let schema = serde_json::to_value(schemars::schema_for!(CreateEnvironmentBody)).unwrap();
-        let properties = schema["properties"].as_object().unwrap();
-        assert_eq!(
-            properties.keys().map(String::as_str).collect::<Vec<_>>(),
-            [
-                "confirm_personal_credentials",
-                "confirm_personal_secrets",
-                "expected_profile_revision",
-                "isolation_tier",
-                "name",
-                "network",
-                "omit_application_previews",
-                "preset_id",
-                "project_spec",
-                "source_snapshot_id",
-                "ttl_seconds"
-            ]
-        );
-    }
-
-    #[test]
-    fn create_environment_validation_defaults_to_an_empty_canonical_project_spec() {
-        let parsed =
-            validate_value::<CreateEnvironmentBody>(serde_json::json!({})).expect("empty body");
-
-        assert!(parsed.preset_id.is_none());
-        assert_eq!(
-            parsed.project_spec,
-            codewire_project::ProjectSpec::default()
-        );
-    }
-
-    #[test]
-    fn create_environment_rejects_removed_parallel_configuration_fields() {
-        for field in [
-            "repo_url",
-            "repos",
-            "image",
-            "env_vars",
-            "agent_env",
-            "secret_project",
-            "include_org_secrets",
-        ] {
-            let value = serde_json::Value::Object(
-                [(field.to_owned(), serde_json::Value::Null)]
-                    .into_iter()
-                    .collect(),
-            );
-            assert!(
-                validate_value::<CreateEnvironmentBody>(value).is_err(),
-                "removed field {field} was accepted"
-            );
-        }
-    }
-
-    #[test]
-    fn create_environment_validation_rejects_nested_project_type_errors() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<CreateEnvironmentBody>(serde_json::json!({
-                "project_spec": {
-                    "schema_version": 1,
-                    "working_directory": "/workspace",
-                    "resources": {"cpu_millicores": "2000"}
-                }
-            }))
-        else {
-            panic!("expected type-invalid CPU to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("u32"));
     }
 
     #[test]

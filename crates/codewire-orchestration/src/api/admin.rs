@@ -13,8 +13,7 @@ use std::borrow::Cow;
 use codewire_server_core::AppError;
 use codewire_server_core::AppResult;
 use codewire_server_core::ValidationIssue;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 use sqlx::Row;
 
 use super::ApiState;
@@ -35,7 +34,7 @@ mod quota_database_tests;
 mod startup_database_tests;
 
 /// Mirrors `api.AdminStatsResponse`.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize)]
 pub struct AdminStatsResponse {
     pub total_environments: i64,
     pub active_environments: i64,
@@ -115,7 +114,7 @@ pub(crate) async fn get_admin_stats_core(state: &ApiState) -> AppResult<AdminSta
 
 /// Mirrors `api.AdminOrg`. Bare-array body (`Body []AdminOrg`), so no
 /// `$schema`.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize)]
 pub struct AdminOrg {
     pub id: String,
     pub name: String,
@@ -178,19 +177,13 @@ fn validate_pagination(limit: i64, maximum: i64, offset: Option<i64>) -> AppResu
     Ok(())
 }
 
-/// Query params for `listAuditLogs`. huma `default:"50"`/`maximum:"200"`
-/// on `limit`, `default:"0"` on `offset`; `action`/`severity` are
-/// `omitempty` filters. The Rust handler enforces the documented limit and
-/// non-negative offset before issuing SQL.
-#[derive(Debug, Deserialize, JsonSchema)]
+/// Filters for listing audit logs. The core enforces the documented limit
+/// and non-negative offset before issuing SQL.
+#[derive(Debug)]
 pub struct ListAuditLogsParams {
-    #[serde(default = "default_limit")]
     pub limit: i64,
-    #[serde(default)]
     pub offset: i64,
-    #[serde(default)]
     pub action: Option<String>,
-    #[serde(default)]
     pub severity: Option<String>,
 }
 
@@ -198,7 +191,7 @@ pub struct ListAuditLogsParams {
 /// `user_agent` are Go `*string` → serialize as `null` when absent;
 /// `metadata` is `any` with `omitempty` → dropped when the JSONB column
 /// is NULL. Bare-array body (no `$schema`).
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize)]
 pub struct AuditLogEntry {
     pub id: String,
     pub timestamp: String,
@@ -272,21 +265,13 @@ pub(crate) fn default_startup_window_minutes() -> i32 {
     240
 }
 
-/// Query params for `listAdminEnvironmentLifecycleJournal` (huma
-/// `default:"100"`/`maximum:"500"` on `limit`).
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct LifecycleJournalParams {
-    #[serde(default = "default_journal_limit")]
-    pub limit: i64,
-}
-
 /// Mirrors `api.AdminEnvironmentLifecycleJournalEntry`. The nullable text
 /// columns are `COALESCE`d to `''` and serialized with `omitempty`
 /// (dropped when empty); `metadata` is the raw jsonb (Go `COALESCE(...,
 /// 'null')` → `json.RawMessage`, so `null` when absent, never dropped).
 /// `created_at` is a timestamptz formatted with Go's seconds-precision
 /// `formatTime`. Bare-array body (no `$schema`).
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize)]
 pub struct AdminEnvironmentLifecycleJournalEntry {
     pub id: String,
     pub environment_id: String,
@@ -373,16 +358,7 @@ pub(crate) async fn list_admin_environment_lifecycle_journal_core(
     Ok(entries)
 }
 
-/// Query params for `getAdminEnvironmentStartupSummary` (huma
-/// `default:"240"`/`minimum:"5"`/`maximum:"10080"` on
-/// `window_minutes`; Rust does not currently replicate huma validation).
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct StartupSummaryParams {
-    #[serde(default = "default_startup_window_minutes")]
-    pub window_minutes: i32,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize)]
 pub struct AdminEnvironmentStartupPhaseSummary {
     pub phase: String,
     pub sample_count: i32,
@@ -392,7 +368,7 @@ pub struct AdminEnvironmentStartupPhaseSummary {
     pub p95_ms: Option<i64>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize)]
 pub struct AdminEnvironmentStartupSummary {
     pub generated_at: String,
     pub window_minutes: i32,
@@ -592,7 +568,7 @@ async fn startup_summary(
     })
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize)]
 pub struct AdminEnvironmentStartupTiming {
     pub phase: String,
     pub status: String,
@@ -604,7 +580,7 @@ pub struct AdminEnvironmentStartupTiming {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize)]
 pub struct AdminEnvironmentStartupTimings {
     pub environment_id: String,
     pub created_at: String,

@@ -1,11 +1,10 @@
-//! Rust-native request validation infrastructure.
+//! Request validation for the permanently raw JSON routes.
 //!
-//! Handlers adopt this extractor when their Rust route is ready to own request
-//! validation instead of deferring to the old Go/huma parity oracle. Request
-//! DTOs derive `JsonSchema`; the same generated schema feeds Rust OpenAPI
-//! previews and runtime validation, so the documented contract and enforced
-//! shape stay aligned. Rejected input returns the stable Rust-native 422
-//! envelope.
+//! Connect owns every control-plane procedure and validates through its own
+//! messages. The raw routes that remain, identity above all, take their body
+//! through this extractor: the request type derives `JsonSchema`, and the
+//! schema generated from it rejects type- or shape-invalid input with the
+//! stable 422 envelope before the handler runs.
 
 use std::borrow::Cow;
 

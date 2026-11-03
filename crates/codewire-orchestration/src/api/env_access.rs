@@ -5,9 +5,6 @@
 //! retiring Go (#162) doesn't drop grant/revoke.
 //!
 //! Wire parity notes:
-//! - These are huma handlers on the Go side, so the success bodies carry
-//!   huma's `$schema` on single objects (the documented accepted drift); the
-//!   list endpoint is a bare JSON array with no `$schema`.
 //! - `created_at::text` on the Go side returns the raw Postgres
 //!   timestamp text (NOT `formatTime`), so we reproduce it with a
 //!   `::text` cast rather than `format_time`.
@@ -22,8 +19,7 @@ use axum::http::StatusCode;
 use codewire_server_core::AppResult;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org_deletion::run_organization_database_mutation;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlx::{PgPool, Row};
 
 use super::ApiState;
@@ -41,7 +37,7 @@ pub struct AccessGrant {
 }
 
 /// Mirrors `api.GrantAccessInput.Body`.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct GrantAccessBody {
     pub user_id: String,
     pub permission: String,
@@ -287,52 +283,4 @@ pub(crate) async fn revoke_environment_access_core(
         Ok(())
     })
     .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use codewire_server_core::AppError;
-    use codewire_server_core::validation::validate_value;
-
-    #[test]
-    fn grant_access_schema_requires_go_required_fields() {
-        let schema = serde_json::to_value(schemars::schema_for!(GrantAccessBody)).unwrap();
-
-        assert_eq!(
-            schema["required"],
-            serde_json::json!(["user_id", "permission"])
-        );
-    }
-
-    #[test]
-    fn grant_access_validation_rejects_missing_required_fields() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<GrantAccessBody>(serde_json::json!({
-                "user_id": "usr_1"
-            }))
-        else {
-            panic!("expected missing permission to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("permission"));
-    }
-
-    #[test]
-    fn grant_access_validation_rejects_type_errors() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<GrantAccessBody>(serde_json::json!({
-                "user_id": 7,
-                "permission": "viewer"
-            }))
-        else {
-            panic!("expected type-invalid user_id to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/user_id");
-        assert!(errors[0].message.contains("string"));
-    }
 }

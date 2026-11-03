@@ -13,8 +13,6 @@ use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::{can_admin, user_assignments, user_org_role};
 use codewire_server_core::org_deletion::run_organization_database_mutation;
 use codewire_server_core::{AppError, AppResult};
-use schemars::JsonSchema;
-use serde::Deserialize;
 
 use super::ApiState;
 use super::secrets::{forbidden, log_audit};
@@ -43,7 +41,7 @@ async fn require_org_role(state: &ApiState, user: &AuthUser, org_id: &str) -> Ap
         .ok_or_else(|| AppError::NotFound("organization not found".into()))
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug)]
 pub struct UpdateMemberAssignmentsBody {
     pub assignments: Vec<String>,
 }
@@ -186,7 +184,6 @@ pub(crate) async fn update_member_assignments_core(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_server_core::validation::validate_value;
 
     #[test]
     fn valid_assignment_set_matches_go() {
@@ -213,51 +210,5 @@ mod tests {
             a.insert(0, "viewer".to_string());
         }
         assert_eq!(a, vec!["developer".to_string(), "viewer".to_string()]);
-    }
-
-    #[test]
-    fn update_member_assignments_schema_requires_go_required_fields() {
-        let schema =
-            serde_json::to_value(schemars::schema_for!(UpdateMemberAssignmentsBody)).unwrap();
-
-        assert_eq!(schema["required"], serde_json::json!(["assignments"]));
-    }
-
-    #[test]
-    fn update_member_assignments_validation_rejects_missing_required_fields() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<UpdateMemberAssignmentsBody>(serde_json::json!({}))
-        else {
-            panic!("expected missing assignments to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("assignments"));
-    }
-
-    #[test]
-    fn update_member_assignments_validation_rejects_type_errors() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<UpdateMemberAssignmentsBody>(serde_json::json!({
-                "assignments": "developer"
-            }))
-        else {
-            panic!("expected type-invalid assignments to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/assignments");
-        assert!(errors[0].message.contains("array"));
-    }
-
-    #[test]
-    fn update_member_assignments_validation_accepts_empty_array() {
-        let parsed = validate_value::<UpdateMemberAssignmentsBody>(serde_json::json!({
-            "assignments": []
-        }))
-        .expect("empty assignment list should stay handler-valid");
-
-        assert!(parsed.assignments.is_empty());
     }
 }

@@ -9,8 +9,6 @@ use codewire_server_core::org_deletion::{
     OrganizationRuntimeMutationError, run_environment_runtime_mutation,
 };
 use codewire_server_core::{AppError, AppResult};
-use schemars::JsonSchema;
-use serde::Deserialize;
 use sqlx::{PgPool, Row};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -114,11 +112,10 @@ async fn get_org_slug(pool: &PgPool, org_id: &str) -> String {
 }
 
 /// Mirrors `api.CreatePortBody`.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct CreatePortBody {
     pub port: i32,
     pub label: String,
-    #[serde(default)]
     pub access: String,
 }
 
@@ -437,7 +434,6 @@ fn spawn_app_ports_push(state: &ApiState, env_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_server_core::validation::validate_value;
     use std::sync::Mutex;
 
     #[test]
@@ -502,57 +498,6 @@ mod tests {
             self.0.lock().unwrap().push((env_id.to_owned(), action));
             Ok(())
         }
-    }
-
-    #[test]
-    fn create_port_schema_requires_go_required_fields() {
-        let schema = serde_json::to_value(schemars::schema_for!(CreatePortBody)).unwrap();
-
-        assert_eq!(schema["required"], serde_json::json!(["port", "label"]));
-    }
-
-    #[test]
-    fn create_port_validation_rejects_missing_required_fields() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<CreatePortBody>(serde_json::json!({
-                "port": 3000
-            }))
-        else {
-            panic!("expected missing label to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("label"));
-    }
-
-    #[test]
-    fn create_port_validation_rejects_type_errors() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<CreatePortBody>(serde_json::json!({
-                "port": "3000",
-                "label": "web"
-            }))
-        else {
-            panic!("expected type-invalid port to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/port");
-        assert!(errors[0].message.contains("integer"));
-    }
-
-    #[test]
-    fn create_port_validation_keeps_access_optional() {
-        let parsed = validate_value::<CreatePortBody>(serde_json::json!({
-            "port": 3000,
-            "label": "web"
-        }))
-        .expect("access should remain optional");
-
-        assert_eq!(parsed.port, 3000);
-        assert_eq!(parsed.label, "web");
-        assert_eq!(parsed.access, "");
     }
 
     #[tokio::test]

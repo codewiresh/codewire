@@ -8,8 +8,6 @@ use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::user_org_role;
 use codewire_server_core::org_deletion::run_organization_database_mutation;
 use codewire_server_core::{AppError, AppResult};
-use schemars::JsonSchema;
-use serde::Deserialize;
 use sqlx::PgPool;
 
 use super::ApiState;
@@ -108,17 +106,12 @@ async fn insert_preset_db(
 // ── Create ──────────────────────────────────────────────────────────────
 
 /// Preset metadata plus its one canonical project configuration.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct CreatePresetBody {
     pub name: String,
-    #[serde(default)]
     pub slug: String,
-    #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
     pub default_ttl_seconds: Option<i32>,
-    #[schemars(with = "serde_json::Value")]
     pub project_spec: codewire_project::ProjectSpec,
 }
 
@@ -260,19 +253,12 @@ pub(crate) async fn get_preset_core(
 // ── Update ──────────────────────────────────────────────────────────────
 
 /// Metadata patch plus optional whole-value canonical configuration replacement.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct UpdatePresetBody {
-    #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
     pub slug: Option<String>,
-    #[serde(default)]
     pub default_ttl_seconds: Option<i32>,
-    #[serde(default)]
-    #[schemars(with = "Option<serde_json::Value>")]
     pub project_spec: Option<codewire_project::ProjectSpec>,
 }
 
@@ -530,139 +516,7 @@ pub(crate) async fn delete_preset_core(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_server_core::AppError;
-    use codewire_server_core::validation::validate_value;
     use sqlx::postgres::PgPoolOptions;
-
-    #[test]
-    fn create_preset_schema_requires_canonical_fields() {
-        let schema = serde_json::to_value(schemars::schema_for!(CreatePresetBody)).unwrap();
-
-        assert_eq!(
-            schema["required"],
-            serde_json::json!(["name", "project_spec"]),
-            "preset creation requires a name and one canonical project specification"
-        );
-    }
-
-    #[test]
-    fn create_preset_validation_rejects_missing_required_fields() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<CreatePresetBody>(serde_json::json!({
-                "project_spec": {
-                    "schema_version": 1,
-                    "working_directory": "/workspace"
-                }
-            }))
-        else {
-            panic!("expected missing name to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("name"));
-    }
-
-    #[test]
-    fn create_preset_validation_accepts_a_minimal_project_spec() {
-        let parsed = validate_value::<CreatePresetBody>(serde_json::json!({
-            "name": "Default",
-            "project_spec": {
-                "schema_version": 1,
-                "working_directory": "/workspace"
-            }
-        }))
-        .expect("minimal canonical project specification should validate");
-
-        assert_eq!(parsed.name, "Default");
-        assert!(parsed.project_spec.image.is_empty());
-    }
-
-    #[test]
-    fn preset_mutations_reject_removed_agent_env() {
-        assert!(
-            validate_value::<CreatePresetBody>(serde_json::json!({
-                "name": "Default",
-                "agent_env": {"TOKEN": "synthetic"}
-            }))
-            .is_err()
-        );
-        assert!(
-            validate_value::<UpdatePresetBody>(serde_json::json!({
-                "agent_env": {"TOKEN": "synthetic"}
-            }))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn update_preset_schema_has_no_required_fields() {
-        let schema = serde_json::to_value(schemars::schema_for!(UpdatePresetBody)).unwrap();
-
-        assert!(
-            schema.get("required").is_none(),
-            "PATCH body stays all-optional"
-        );
-    }
-
-    #[test]
-    fn rest_update_replaces_the_whole_project_spec_when_present() {
-        let absent: UpdatePresetBody = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(absent.slug.is_none());
-        assert!(absent.project_spec.is_none());
-
-        let empty: UpdatePresetBody = serde_json::from_value(serde_json::json!({
-            "slug": "",
-            "project_spec": {
-                "schema_version": 1,
-                "working_directory": "/workspace"
-            }
-        }))
-        .unwrap();
-        assert_eq!(empty.slug.as_deref(), Some(""));
-        assert_eq!(
-            empty.project_spec,
-            Some(codewire_project::ProjectSpec::default())
-        );
-
-        let value: UpdatePresetBody = serde_json::from_value(serde_json::json!({
-            "slug": "rust",
-            "project_spec": {
-                "schema_version": 1,
-                "working_directory": "/workspace",
-                "environment": {"RUST_LOG": "debug"}
-            }
-        }))
-        .unwrap();
-        assert_eq!(value.slug.as_deref(), Some("rust"));
-        assert_eq!(
-            value
-                .project_spec
-                .as_ref()
-                .and_then(|spec| spec.environment.get("RUST_LOG"))
-                .map(String::as_str),
-            Some("debug")
-        );
-    }
-
-    #[test]
-    fn update_preset_validation_rejects_type_errors() {
-        let Err(AppError::Validation { errors }) =
-            validate_value::<UpdatePresetBody>(serde_json::json!({
-                "project_spec": {
-                    "schema_version": 1,
-                    "working_directory": "/workspace",
-                    "resources": {"cpu_millicores": "2000"}
-                }
-            }))
-        else {
-            panic!("expected type-invalid CPU to be rejected");
-        };
-
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/");
-        assert!(errors[0].message.contains("u32"));
-    }
 
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL"]
