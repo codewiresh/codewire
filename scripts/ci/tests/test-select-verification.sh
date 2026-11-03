@@ -2608,6 +2608,11 @@ database_lane_source_case() {
 while IFS= read -r source; do
   defer_check database_lane_source_case "$source"
 done <<<"$database_lane_sources"
+for runtime_input in fake.rs kubernetes.rs kubernetes/members.rs kubernetes/suspension.rs mod.rs; do
+  run_paths_case "runtime_driver_selects_database_${runtime_input//[.\/]/_}" pull_request refs/pull/3628/head false \
+    'database policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
+    "crates/codewire-orchestration/src/runtime/$runtime_input"
+done
 # The preview matrix, exactly: the orchestration families and database.
 run_paths_case preview_database_tests_select_database push refs/heads/main false \
   'database policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \

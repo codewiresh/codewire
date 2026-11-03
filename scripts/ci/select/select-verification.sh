@@ -1754,11 +1754,14 @@ if [ "$event_selected" = false ]; then
       crates/codewire-orchestration/src/sandbox/warm_pool.rs|\
       crates/codewire-orchestration/src/sandbox/template.rs|\
       crates/codewire-orchestration/src/sandbox/template/*|\
+      crates/codewire-orchestration/src/runtime/*|\
       crates/codewire-orchestration/tests/environment_external_cleanup.rs|\
       crates/codewire-orchestration/tests/environment_sources.rs)
         # The workspace binding, its Sandbox reads and the pool rendering it
         # compares a pool-born Sandbox against are what the binding database
         # tests exercise; #3611 changed the rendering without selecting them.
+        # The repair, billing-session and sandbox-stopped database tests run
+        # through the runtime driver and its fake.
         # The database family (run-integration-verification.sh database_lane_*)
         # runs these files' ignored PostgreSQL tests; no other family does, so a
         # change to one must select it (#3194). test-select-verification.sh
