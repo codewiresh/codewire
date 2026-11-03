@@ -323,7 +323,7 @@ fn runtime_listing(members: Vec<RuntimeMember>) -> FakeRuntimeDriver {
     }
 }
 
-/// Everything a heartbeat could change on the session, and when it started.
+/// The session's times, billed resources and organization.
 type SessionRow = (
     DateTime<Utc>,
     DateTime<Utc>,
@@ -656,6 +656,68 @@ async fn db_listing_and_sweep_share_one_namespace() -> Result<()> {
 
         run_cycle(&db.pool, &runtime, NAMESPACE).await;
         ensure!(sessions(&db.pool).await?[0].2.is_some());
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_session_opening_during_a_resize_bills_last_applied() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+
+        // No open row to freeze at, so the last-applied shape is all there is.
+        resize_operation(&db.pool, "resize-active", "applying", 0).await?;
+        reconcile(&db.pool, &resized_member()).await;
+
+        let got = billed(&db.pool).await?;
+        ensure!(got == (2500, 3072, 30), "{got:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_running_member_that_resolves_to_no_environment_is_unbillable() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+        let unknown_claim = RuntimeMember {
+            claim_uid: "00000000-e29b-41d4-a716-446655440000".into(),
+            ..member(Phase::Running, "")
+        };
+        let unknown_environment = RuntimeMember {
+            environment_id: "00000000-e29b-41d4-a716-446655440001".into(),
+            ..member(Phase::Running, "")
+        };
+
+        for (running, expected) in [
+            (unknown_claim, "claim_not_found"),
+            (unknown_environment, "environment_not_found"),
+        ] {
+            match resolve_identity(&db.pool, &running).await? {
+                IdentityResolution::Unresolved(reason) => ensure!(reason == expected, "{reason}"),
+                other => anyhow::bail!("{expected}: {other:?}"),
+            }
+            let reconciled = reconcile(&db.pool, &running).await;
+            ensure!(reconciled.unbillable, "{expected}: {reconciled:?}");
+            ensure!(sessions(&db.pool).await?.is_empty(), "{expected}");
+
+            // Only a running one counts: a pending one isn't owed a bill yet.
+            let pending = RuntimeMember {
+                phase: Phase::Pending,
+                ..running
+            };
+            let reconciled = reconcile(&db.pool, &pending).await;
+            ensure!(!reconciled.unbillable, "{expected}: {reconciled:?}");
+        }
         Ok(())
     }
     .await;
