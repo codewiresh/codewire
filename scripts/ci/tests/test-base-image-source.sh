@@ -68,6 +68,10 @@ done
 # the base runtime or a live package transaction during environment creation.
 workspace_dockerfile="$ROOT/images/workspace/Dockerfile"
 stock_ssh="$ROOT/scripts/ci/verify/stock-ssh-workload.sh"
+# One 503 from a download host must not fail a whole support image build.
+if grep -E '^[[:space:]]*curl ' "$workspace_dockerfile" | grep -vF -- '--retry 5 --retry-connrefused' >/dev/null; then
+  fail 'workspace image download does not retry a transient failure'
+fi
 # Workspace cw compiles the same schemas as product images, including the
 # standard debug_redact field option unsupported by Bookworm's protoc.
 grep -qF 'https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip' \

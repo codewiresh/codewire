@@ -92,7 +92,7 @@ RUN set -euo pipefail; \
       amd64|arm64) ;; \
       *) echo "unsupported workspace image architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    curl --proto '=https' --tlsv1.2 -fsSL \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
       "https://go.dev/dl/go${GO_VERSION}.linux-${BUILDARCH}.tar.gz" -o /tmp/go.tgz; \
     echo "${go_sha}  /tmp/go.tgz" | sha256sum -c -; \
     tar --no-same-owner -xzf /tmp/go.tgz -C /usr/local; \
@@ -193,12 +193,12 @@ RUN set -euo pipefail; \
         go_sha=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 ;; \
       *) echo "unsupported workspace image architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    curl --proto '=https' --tlsv1.2 -fsSL \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
       "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" \
       -o /tmp/node.tgz; \
     echo "${node_sha}  /tmp/node.tgz" | sha256sum -c -; \
     tar --no-same-owner -xzf /tmp/node.tgz -C /usr/local --strip-components=1; \
-    curl --proto '=https' --tlsv1.2 -fsSL \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
       "https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tgz; \
     echo "${go_sha}  /tmp/go.tgz" | sha256sum -c -; \
     tar --no-same-owner -xzf /tmp/go.tgz -C /usr/local; \
@@ -268,7 +268,7 @@ RUN set -euo pipefail; \
       arm64) bun_arch=aarch64; bun_sha=baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e ;; \
       *) echo "unsupported workspace image architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    curl --proto '=https' --tlsv1.2 -fsSL \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
       "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-${bun_arch}.zip" \
       -o /tmp/bun.zip; \
     echo "${bun_sha}  /tmp/bun.zip" | sha256sum -c -; \
