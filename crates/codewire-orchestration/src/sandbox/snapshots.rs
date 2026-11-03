@@ -127,7 +127,6 @@ pub fn render_volume_snapshot(
 
 /// What a clearing Sandbox needs from the deployment and the raw snapshot.
 pub struct ClearingOpts<'a> {
-    pub namespace: &'a str,
     pub snapshot_id: &'a str,
     pub support_image: &'a str,
     pub runtime_class: &'a str,
@@ -146,7 +145,7 @@ pub struct ClearingOpts<'a> {
 /// block its guest cannot read (`cw __snapshot-clear --block`), all inside the
 /// clearing VM, so the host never parses the guest's filesystem. Mounting
 /// needs `SYS_ADMIN`, which only this container holds, in a VM with no network.
-pub fn render_clearing_template(opts: &ClearingOpts<'_>) -> Value {
+pub fn render_clearing_template(namespace: &str, opts: &ClearingOpts<'_>) -> Value {
     let name = clearing_name(opts.snapshot_id);
     let (command, capabilities, storage) = match opts.volume_mode {
         VolumeMode::Filesystem => (
@@ -230,7 +229,7 @@ pub fn render_clearing_template(opts: &ClearingOpts<'_>) -> Value {
         "kind": "SandboxTemplate",
         "metadata": {
             "name": name,
-            "namespace": opts.namespace,
+            "namespace": namespace,
             "labels": {
                 LABEL_TYPE: CLEARING_TYPE,
                 LABEL_SNAPSHOT_ID: opts.snapshot_id,
@@ -317,7 +316,6 @@ mod tests {
 
     fn opts() -> ClearingOpts<'static> {
         ClearingOpts {
-            namespace: "dev-sandboxes",
             snapshot_id: ID,
             support_image: "registry.example/daemon@sha256:abc",
             runtime_class: "commodity",
@@ -355,7 +353,7 @@ mod tests {
 
     #[test]
     fn the_clearing_template_restores_the_raw_snapshot_and_holds_no_authority() {
-        let template = render_clearing_template(&opts());
+        let template = render_clearing_template("dev-sandboxes", &opts());
         let claim = &template["spec"]["volumeClaimTemplates"][0]["spec"];
         assert_eq!(claim["dataSource"]["name"], raw_snapshot_name(ID));
         assert_eq!(claim["dataSource"]["kind"], "VolumeSnapshot");
@@ -387,7 +385,7 @@ mod tests {
 
     #[test]
     fn no_clearing_object_carries_an_environment_or_organization_label_of_the_source() {
-        let template = render_clearing_template(&opts());
+        let template = render_clearing_template("dev-sandboxes", &opts());
         let claim = render_clearing_claim("dev-sandboxes", ID);
         for object in [
             &template["metadata"]["labels"],
@@ -422,7 +420,7 @@ mod tests {
 
     #[test]
     fn a_filesystem_restore_is_mounted_by_the_node_and_gets_no_sys_admin() {
-        let template = render_clearing_template(&opts());
+        let template = render_clearing_template("dev-sandboxes", &opts());
         let claim = &template["spec"]["volumeClaimTemplates"][0]["spec"];
         assert!(claim.get("volumeMode").is_none());
         let pod = &template["spec"]["podTemplate"]["spec"];
@@ -437,10 +435,13 @@ mod tests {
 
     #[test]
     fn a_block_restore_is_a_device_the_clearing_vm_mounts_and_wipes() {
-        let template = render_clearing_template(&ClearingOpts {
-            volume_mode: VolumeMode::Block,
-            ..opts()
-        });
+        let template = render_clearing_template(
+            "dev-sandboxes",
+            &ClearingOpts {
+                volume_mode: VolumeMode::Block,
+                ..opts()
+            },
+        );
         let claim = &template["spec"]["volumeClaimTemplates"][0]["spec"];
         assert_eq!(claim["volumeMode"], "Block");
         assert_eq!(claim["dataSource"]["name"], raw_snapshot_name(ID));

@@ -19,11 +19,11 @@ use sqlx::{PgPool, Row};
 use super::WorkerContext;
 use super::activity_authority::EXTERNAL_MUTATION_TIMEOUT;
 use super::env_data::{load_backend_row, workspace_pvc_anchor};
-use crate::sandbox::client::{ClearingProgress, KeptSnapshot, SandboxClient};
-use crate::sandbox::snapshots::{
-    ClearingOpts, VolumeMode, clearing_volume_name, kept_snapshot_name, quantity_bytes,
-    raw_snapshot_name,
+use crate::runtime::{
+    CaptureStage, ClearingOpts, ClearingProgress, KeptSnapshot, Placement, RuntimeDriver,
+    VolumeMode,
 };
+use crate::sandbox::snapshots::quantity_bytes;
 use crate::sandbox::template::runtime_profile_spec;
 
 /// The source environment wasn't stopped when the raw snapshot was to be taken.
@@ -49,15 +49,12 @@ const STRANDED_AFTER_MINUTES: i32 = 15;
 /// How long organization deletion waits for captures in progress.
 const CAPTURE_SETTLE_LIMIT: Duration = Duration::from_secs(10 * 60);
 
-fn client(ctx: &WorkerContext) -> anyhow::Result<SandboxClient> {
-    let kube = ctx
-        .kube
-        .as_ref()
+fn require_runtime(ctx: &WorkerContext) -> anyhow::Result<(&dyn RuntimeDriver, Placement)> {
+    let runtime = ctx
+        .runtime
+        .as_deref()
         .context("hosted snapshots require Kubernetes")?;
-    Ok(SandboxClient::new(
-        kube.clone(),
-        &ctx.sandbox_cfg.sandbox_namespace,
-    ))
+    Ok((runtime, Placement::new(&ctx.sandbox_cfg.sandbox_namespace)))
 }
 
 fn snapshot_class(ctx: &WorkerContext) -> anyhow::Result<&str> {
@@ -129,9 +126,8 @@ fn source_capturable(state: &str, desired_state: &str, isolation_tier: &str) -> 
 /// the raw snapshot. Returns a failure code when the source can't be captured.
 /// The whole of it runs under one bound, because the lock is held throughout.
 pub async fn capture_raw(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::Result<Option<String>> {
-    let client = client(ctx)?;
+    let (runtime, placement) = require_runtime(ctx)?;
     let class = snapshot_class(ctx)?.to_owned();
-    let raw = raw_snapshot_name(snapshot_id);
     tokio::time::timeout(EXTERNAL_MUTATION_TIMEOUT, async {
         let mut tx = ctx.pool.begin().await?;
         let Some(environment_id) = lock_capturing(&mut tx, snapshot_id).await? else {
@@ -158,29 +154,23 @@ pub async fn capture_raw(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::Resu
             return Ok(Some(FAILURE_NOT_STOPPED.to_owned()));
         }
         let backend = load_backend_row(&ctx.pool, &environment_id).await?;
-        let storage = client
-            .workspace_storage(&workspace_pvc_anchor(&backend))
+        let source = runtime
+            .volume(&placement, &workspace_pvc_anchor(&backend))
             .await?;
         // A confidential source never reaches here (`source_capturable`), so
         // a Block source is a commodity one the guest formats.
-        let source_mode = if storage.raw_block {
-            VolumeMode::Block
-        } else {
-            VolumeMode::Filesystem
-        };
-        client
-            .ensure_volume_snapshot(
-                &raw,
-                snapshot_id,
-                &storage.pvc_name,
-                &class,
-                Some(source_mode),
-            )
+        runtime
+            .snapshot_volume(&placement, snapshot_id, &source, &class)
             .await?;
         // The lock is held until the snapshot exists, so a start can't mount the
         // disk under it. Measured at about 1.2 s.
-        client
-            .wait_for_volume_snapshot(&raw, EXTERNAL_MUTATION_TIMEOUT)
+        runtime
+            .wait_snapshot(
+                &placement,
+                snapshot_id,
+                CaptureStage::Raw,
+                EXTERNAL_MUTATION_TIMEOUT,
+            )
             .await?;
         tx.rollback().await?;
         Ok(None)
@@ -194,33 +184,36 @@ pub async fn run_clearing(
     ctx: &WorkerContext,
     snapshot_id: &str,
 ) -> anyhow::Result<Option<String>> {
-    let client = client(ctx)?;
+    let (runtime, placement) = require_runtime(ctx)?;
     let Some(environment_id) = capturing_source(&ctx.pool, snapshot_id).await? else {
         return Ok(None);
     };
-    let raw = raw_snapshot_name(snapshot_id);
-    let restore_size = client
-        .wait_for_volume_snapshot(&raw, EXTERNAL_MUTATION_TIMEOUT)
+    let restore_size = runtime
+        .wait_snapshot(
+            &placement,
+            snapshot_id,
+            CaptureStage::Raw,
+            EXTERNAL_MUTATION_TIMEOUT,
+        )
         .await?;
-    let volume_mode = client.raw_snapshot_volume_mode(snapshot_id).await?;
+    let volume_mode = runtime.raw_snapshot_mode(&placement, snapshot_id).await?;
     let cfg = &ctx.sandbox_cfg;
-    let runtime = runtime_profile_spec(&cfg.runtime_profile, &cfg.docker_mode, cfg.dind_enabled);
+    let profile = runtime_profile_spec(&cfg.runtime_profile, &cfg.docker_mode, cfg.dind_enabled);
     let backend = load_backend_row(&ctx.pool, &environment_id).await;
     // The source's storage class, when it is still there; a source destroyed
     // since the raw snapshot restores into the deployment's class.
     let storage_class = match backend {
-        Ok(backend) => client
-            .workspace_storage(&workspace_pvc_anchor(&backend))
+        Ok(backend) => runtime
+            .volume(&placement, &workspace_pvc_anchor(&backend))
             .await
             .map(|storage| storage.storage_class_name)
             .unwrap_or_else(|_| cfg.workspace_storage_class.clone()),
         Err(_) => cfg.workspace_storage_class.clone(),
     };
     let opts = ClearingOpts {
-        namespace: &cfg.sandbox_namespace,
         snapshot_id,
         support_image: cfg.support_image(),
-        runtime_class: &runtime.runtime_class_name,
+        runtime_class: &profile.runtime_class_name,
         storage_class: &storage_class,
         restore_size: &restore_size,
         volume_mode,
@@ -228,7 +221,7 @@ pub async fn run_clearing(
     if create_while_capturing(
         &ctx.pool,
         snapshot_id,
-        client.ensure_clearing_sandbox(&opts),
+        runtime.start_clearing(&placement, &opts),
     )
     .await?
     .is_none()
@@ -237,7 +230,7 @@ pub async fn run_clearing(
     }
     let wait = async {
         loop {
-            match client.clearing_progress(snapshot_id).await? {
+            match runtime.clearing_progress(&placement, snapshot_id).await? {
                 ClearingProgress::Succeeded { report } => {
                     log_clearing_report(snapshot_id, volume_mode, report.as_deref());
                     return anyhow::Ok(None);
@@ -330,36 +323,34 @@ fn log_clearing_report(snapshot_id: &str, volume_mode: VolumeMode, report: Optio
 /// The row turns `ready` only after everything else is deleted, in the same
 /// activity, so `ready` means the raw snapshot is gone.
 pub async fn keep_and_finish(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::Result<()> {
-    let client = client(ctx)?;
+    let (runtime, placement) = require_runtime(ctx)?;
     let class = snapshot_class(ctx)?.to_owned();
     if capturing_source(&ctx.pool, snapshot_id).await?.is_none() {
         return Ok(());
     }
-    let kept = kept_snapshot_name(snapshot_id);
-    client
-        .stop_clearing_pod(snapshot_id, OBJECT_TIMEOUT)
+    runtime
+        .stop_clearing(&placement, snapshot_id, OBJECT_TIMEOUT)
         .await?;
     if create_while_capturing(
         &ctx.pool,
         snapshot_id,
-        client.ensure_volume_snapshot(
-            &kept,
-            snapshot_id,
-            &clearing_volume_name(snapshot_id),
-            &class,
-            None,
-        ),
+        runtime.keep_cleared_volume(&placement, snapshot_id, &class),
     )
     .await?
     .is_none()
     {
         return Ok(());
     }
-    let restore_size = client
-        .wait_for_volume_snapshot(&kept, OBJECT_TIMEOUT)
+    let restore_size = runtime
+        .wait_snapshot(&placement, snapshot_id, CaptureStage::Kept, OBJECT_TIMEOUT)
         .await?;
-    client
-        .delete_capture_objects(snapshot_id, KeptSnapshot::Retain, OBJECT_TIMEOUT)
+    runtime
+        .delete_capture(
+            &placement,
+            snapshot_id,
+            KeptSnapshot::Retain,
+            OBJECT_TIMEOUT,
+        )
         .await?;
     sqlx::query(
         "UPDATE hosted_snapshots
@@ -386,8 +377,14 @@ pub async fn abandon_capture(
     if !mark_failed(&ctx.pool, snapshot_id, failure_code).await? {
         return Ok(());
     }
-    client(ctx)?
-        .delete_capture_objects(snapshot_id, KeptSnapshot::Delete, OBJECT_TIMEOUT)
+    let (runtime, placement) = require_runtime(ctx)?;
+    runtime
+        .delete_capture(
+            &placement,
+            snapshot_id,
+            KeptSnapshot::Delete,
+            OBJECT_TIMEOUT,
+        )
         .await
 }
 
@@ -412,8 +409,14 @@ async fn mark_failed(pool: &PgPool, snapshot_id: &str, failure_code: &str) -> an
 
 /// Delete a snapshot's objects, then its row.
 pub async fn delete_snapshot(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::Result<()> {
-    client(ctx)?
-        .delete_capture_objects(snapshot_id, KeptSnapshot::Delete, OBJECT_TIMEOUT)
+    let (runtime, placement) = require_runtime(ctx)?;
+    runtime
+        .delete_capture(
+            &placement,
+            snapshot_id,
+            KeptSnapshot::Delete,
+            OBJECT_TIMEOUT,
+        )
         .await?;
     sqlx::query("DELETE FROM hosted_snapshots WHERE id = $1 AND state = 'deleting'")
         .bind(snapshot_id)

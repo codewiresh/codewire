@@ -184,7 +184,8 @@ impl SandboxClient {
     /// Create a clearing Sandbox's template, shadow pool and claim, or find them.
     pub async fn ensure_clearing_sandbox(&self, opts: &ClearingOpts<'_>) -> anyhow::Result<()> {
         let snapshot_id = opts.snapshot_id;
-        let template: DynamicObject = serde_json::from_value(render_clearing_template(opts))?;
+        let template: DynamicObject =
+            serde_json::from_value(render_clearing_template(&self.namespace, opts))?;
         let pool: DynamicObject =
             serde_json::from_value(render_clearing_pool(&self.namespace, snapshot_id))?;
         let claim: DynamicObject =

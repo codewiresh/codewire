@@ -14,14 +14,16 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, LogParams};
 
 use super::{
-    ClaimReadiness, ClaimRef, FailedLiveResize, MemberRef, MemberReplacement, Placement,
-    ProbeResult, ResizeState, RuntimeAccess, RuntimeDriver, RuntimeExec, RuntimeLifecycle,
-    RuntimeMember, RuntimePools, RuntimeResize, RuntimeStorage, RuntimeStream, RuntimeTeardown,
-    SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeRef,
+    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
+    KeptSnapshot, MemberRef, MemberReplacement, Placement, ProbeResult, ResizeState, RuntimeAccess,
+    RuntimeDriver, RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeResize,
+    RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime,
+    VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::sidecar::WORKSPACE_SSH_PORT;
+use crate::sandbox::snapshots::{clearing_volume_name, kept_snapshot_name, raw_snapshot_name};
 use crate::sandbox::template::TemplateOpts;
 
 const WORKSPACE_DAEMON_PORT: u16 = crate::sandbox::template::WORKSPACE_DAEMON_PORT as u16;
@@ -355,6 +357,118 @@ impl RuntimeStorage for KubernetesDriver {
     ) -> anyhow::Result<()> {
         self.sandbox_client(placement)
             .wait_for_workspace_storage_capacity(volume, disk_gb, timeout)
+            .await
+    }
+}
+
+#[async_trait]
+impl RuntimeSnapshots for KubernetesDriver {
+    async fn snapshot_volume(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+        source: &VolumeIdentity,
+        snapshot_class: &str,
+    ) -> anyhow::Result<()> {
+        let source_mode = if source.raw_block {
+            VolumeMode::Block
+        } else {
+            VolumeMode::Filesystem
+        };
+        self.sandbox_client(placement)
+            .ensure_volume_snapshot(
+                &raw_snapshot_name(snapshot_id),
+                snapshot_id,
+                &source.pvc_name,
+                snapshot_class,
+                Some(source_mode),
+            )
+            .await
+    }
+
+    async fn keep_cleared_volume(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+        snapshot_class: &str,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .ensure_volume_snapshot(
+                &kept_snapshot_name(snapshot_id),
+                snapshot_id,
+                &clearing_volume_name(snapshot_id),
+                snapshot_class,
+                None,
+            )
+            .await
+    }
+
+    async fn wait_snapshot(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+        stage: CaptureStage,
+        timeout: Duration,
+    ) -> anyhow::Result<String> {
+        let name = match stage {
+            CaptureStage::Raw => raw_snapshot_name(snapshot_id),
+            CaptureStage::Kept => kept_snapshot_name(snapshot_id),
+        };
+        self.sandbox_client(placement)
+            .wait_for_volume_snapshot(&name, timeout)
+            .await
+    }
+
+    async fn raw_snapshot_mode(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+    ) -> anyhow::Result<VolumeMode> {
+        self.sandbox_client(placement)
+            .raw_snapshot_volume_mode(snapshot_id)
+            .await
+    }
+
+    async fn start_clearing(
+        &self,
+        placement: &Placement,
+        opts: &ClearingOpts<'_>,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .ensure_clearing_sandbox(opts)
+            .await
+    }
+
+    async fn clearing_progress(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+    ) -> anyhow::Result<ClearingProgress> {
+        self.sandbox_client(placement)
+            .clearing_progress(snapshot_id)
+            .await
+    }
+
+    async fn stop_clearing(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .stop_clearing_pod(snapshot_id, timeout)
+            .await
+    }
+
+    async fn delete_capture(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+        kept: KeptSnapshot,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .delete_capture_objects(snapshot_id, kept, timeout)
             .await
     }
 }
@@ -1452,6 +1566,227 @@ mod tests {
             "{settled:?}"
         );
         assert_eq!(*writes.lock().unwrap(), Vec::new());
+    }
+
+    /// An API server where every snapshot is ready, recording what is written.
+    /// Everything else is absent.
+    fn driver_over_ready_snapshots(source_mode: &str) -> (Arc<dyn RuntimeDriver>, Writes) {
+        let source_mode = source_mode.to_owned();
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let seen = writes.clone();
+        let service = Router::new().fallback(move |request: Request<Body>| {
+            let seen = seen.clone();
+            let source_mode = source_mode.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_owned();
+                let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                if method != "GET" {
+                    seen.lock().unwrap().push((
+                        method.clone(),
+                        path.clone(),
+                        String::from_utf8(body.to_vec()).unwrap(),
+                    ));
+                }
+                let name = path.rsplit('/').next().unwrap_or_default().to_owned();
+                let snapshot = json!({"apiVersion": "snapshot.storage.k8s.io/v1",
+                    "kind": "VolumeSnapshot",
+                    "metadata": {"name": name, "namespace": "dev-sandboxes", "labels": {
+                        crate::sandbox::snapshots::LABEL_SOURCE_VOLUME_MODE: source_mode}},
+                    "status": {"readyToUse": true, "restoreSize": name}});
+                let found = path.contains("/volumesnapshots")
+                    && (method == "POST" || path.contains("/volumesnapshots/"));
+                let (status, body) = if found && method != "DELETE" {
+                    (StatusCode::OK, snapshot)
+                } else {
+                    (
+                        StatusCode::NOT_FOUND,
+                        json!({"apiVersion": "v1", "kind": "Status",
+                        "status": "Failure", "reason": "NotFound", "code": 404}),
+                    )
+                };
+                Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            }
+        });
+        let client = kube::Client::new(service, "the-default-namespace");
+        (KubernetesDriver::shared(client), writes)
+    }
+
+    fn stub_volume_identity(raw_block: bool) -> VolumeIdentity {
+        VolumeIdentity {
+            pvc_name: "workspace-sandbox-a".into(),
+            pvc_uid: PVC_UID.into(),
+            storage_class_name: "fast".into(),
+            requested_disk_gb: 80,
+            applied_disk_gb: Some(80),
+            filesystem_resize_pending: false,
+            expansion_allowed: true,
+            raw_block,
+            confidential: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_raw_snapshot_is_of_the_source_volume_and_records_its_mode() {
+        let placement = Placement::new("dev-sandboxes");
+        for (raw_block, mode) in [(true, VolumeMode::Block), (false, VolumeMode::Filesystem)] {
+            let (driver, writes) = driver_over_ready_snapshots("");
+
+            driver
+                .snapshot_volume(
+                    &placement,
+                    "snap-1",
+                    &stub_volume_identity(raw_block),
+                    "class-a",
+                )
+                .await
+                .unwrap();
+
+            let writes = writes.lock().unwrap();
+            assert_eq!(writes.len(), 1, "{writes:?}");
+            let (method, path, body) = &writes[0];
+            assert_eq!(method, "POST");
+            assert!(
+                path.contains("/namespaces/dev-sandboxes/volumesnapshots"),
+                "{path}"
+            );
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                body.pointer("/metadata/name").unwrap(),
+                raw_snapshot_name("snap-1").as_str()
+            );
+            assert_eq!(
+                body.pointer("/spec/source/persistentVolumeClaimName")
+                    .unwrap(),
+                "workspace-sandbox-a"
+            );
+            assert_eq!(
+                body.pointer("/spec/volumeSnapshotClassName").unwrap(),
+                "class-a"
+            );
+            assert_eq!(
+                body.pointer("/metadata/labels").unwrap()
+                    [crate::sandbox::snapshots::LABEL_SOURCE_VOLUME_MODE],
+                mode.as_str()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_kept_snapshot_is_of_the_cleared_volume_and_never_the_source() {
+        let (driver, writes) = driver_over_ready_snapshots("");
+
+        driver
+            .keep_cleared_volume(&Placement::new("dev-sandboxes"), "snap-1", "class-a")
+            .await
+            .unwrap();
+
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        let body: serde_json::Value = serde_json::from_str(&writes[0].2).unwrap();
+        assert_eq!(
+            body.pointer("/metadata/name").unwrap(),
+            kept_snapshot_name("snap-1").as_str()
+        );
+        assert_eq!(
+            body.pointer("/spec/volumeSnapshotClassName").unwrap(),
+            "class-a"
+        );
+        assert_eq!(
+            body.pointer("/spec/source/persistentVolumeClaimName")
+                .unwrap(),
+            clearing_volume_name("snap-1").as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn each_stage_waits_for_its_own_snapshot_and_the_raw_one_gives_the_mode() {
+        let placement = Placement::new("dev-sandboxes");
+        let (driver, _) = driver_over_ready_snapshots("Block");
+        let timeout = Duration::from_secs(5);
+
+        // The stub reports each snapshot's name as its size.
+        assert_eq!(
+            driver
+                .wait_snapshot(&placement, "snap-1", CaptureStage::Raw, timeout)
+                .await
+                .unwrap(),
+            raw_snapshot_name("snap-1")
+        );
+        assert_eq!(
+            driver
+                .wait_snapshot(&placement, "snap-1", CaptureStage::Kept, timeout)
+                .await
+                .unwrap(),
+            kept_snapshot_name("snap-1")
+        );
+        assert_eq!(
+            driver
+                .raw_snapshot_mode(&placement, "snap-1")
+                .await
+                .unwrap(),
+            VolumeMode::Block
+        );
+    }
+
+    #[tokio::test]
+    async fn a_clearing_that_has_not_started_is_pending_and_stopping_it_is_done() {
+        let placement = Placement::new("dev-sandboxes");
+        let (driver, writes) = driver_over_ready_snapshots("");
+
+        assert_eq!(
+            driver
+                .clearing_progress(&placement, "snap-1")
+                .await
+                .unwrap(),
+            ClearingProgress::Pending
+        );
+        driver
+            .stop_clearing(&placement, "snap-1", Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        assert_eq!(writes[0].0, "PATCH");
+        assert!(writes[0].2.contains("Suspended"), "{writes:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deleting_a_capture_keeps_the_kept_snapshot_only_when_asked() {
+        let placement = Placement::new("dev-sandboxes");
+        let deleted_kept = |writes: &Writes| {
+            writes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, path, _)| path.ends_with(&kept_snapshot_name("snap-1")))
+        };
+        for (kept, deleted) in [(KeptSnapshot::Retain, false), (KeptSnapshot::Delete, true)] {
+            let (driver, writes) = driver_over_ready_snapshots("");
+
+            // The stub keeps answering for a deleted snapshot, so the wait ends in error.
+            let _ = driver
+                .delete_capture(&placement, "snap-1", kept, Duration::from_secs(5))
+                .await;
+
+            assert_eq!(deleted_kept(&writes), deleted);
+            assert!(
+                writes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(method, path, _)| method == "DELETE"
+                        && path.ends_with(&raw_snapshot_name("snap-1"))),
+                "the raw snapshot always goes"
+            );
+        }
     }
 
     #[tokio::test]

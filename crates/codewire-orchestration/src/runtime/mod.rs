@@ -18,14 +18,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 pub use crate::sandbox::client::{
-    FailedLiveResize, PodResizeInfeasible, ProbeResult, WorkspacePodIdentity as MemberRef,
-    WorkspacePodReplacement as MemberReplacement, WorkspacePodResizeState as ResizeState,
-    WorkspacePvcAnchor as VolumeRef, WorkspaceSandboxIdentity as SuspendedRuntime,
-    WorkspaceStorage as VolumeIdentity, WorkspaceStorageResizeOutcome as VolumeGrowth,
+    ClearingProgress, FailedLiveResize, KeptSnapshot, PodResizeInfeasible, ProbeResult,
+    WorkspacePodIdentity as MemberRef, WorkspacePodReplacement as MemberReplacement,
+    WorkspacePodResizeState as ResizeState, WorkspacePvcAnchor as VolumeRef,
+    WorkspaceSandboxIdentity as SuspendedRuntime, WorkspaceStorage as VolumeIdentity,
+    WorkspaceStorageResizeOutcome as VolumeGrowth,
 };
 pub use crate::sandbox::exec::WorkspaceExecHandle as RuntimeExec;
 use crate::sandbox::host_keys::HostKeyStore;
 pub use crate::sandbox::sidecar::PortForwardedStream as RuntimeStream;
+pub use crate::sandbox::snapshots::{ClearingOpts, VolumeMode};
 use crate::sandbox::template::TemplateOpts;
 
 /// Where a runtime object lives. A caller names this rather than holding a
@@ -109,6 +111,15 @@ pub struct RuntimeTeardown<'a> {
     pub prove_confidential_storage_absent: bool,
     pub recorded_volume_uid: Option<&'a str>,
     pub timeout: Duration,
+}
+
+/// Which of a capture's two disk snapshots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureStage {
+    /// The source's disk as it was, sign-ins included.
+    Raw,
+    /// A restore of the raw snapshot after clearing: what is kept.
+    Kept,
 }
 
 /// Whether an environment's claim can take a connection yet.
@@ -353,6 +364,81 @@ pub trait RuntimeStorage: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
+/// A disk snapshot's capture, step by step, each keyed by the snapshot's id so
+/// that a retry resumes it. A step that creates something runs under the
+/// caller's lock on the capture, which is why this is not one call.
+#[async_trait]
+pub trait RuntimeSnapshots: Send + Sync {
+    /// Take the raw snapshot of this volume, or find it. It records the volume's
+    /// mode. The volume must not be mounted, and must not be one only its guest
+    /// can read.
+    async fn snapshot_volume(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+        source: &VolumeIdentity,
+        snapshot_class: &str,
+    ) -> anyhow::Result<()>;
+
+    /// Take the kept snapshot of the cleared volume, or find it. It is the one
+    /// volume a snapshot keeps, so call this only after `clearing_progress`
+    /// returned `Succeeded` and `stop_clearing` returned: the driver can't check
+    /// either, and a snapshot of an uncleared volume would keep its sign-ins.
+    async fn keep_cleared_volume(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+        snapshot_class: &str,
+    ) -> anyhow::Result<()>;
+
+    /// Wait until this snapshot is ready, and return its size.
+    async fn wait_snapshot(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+        stage: CaptureStage,
+        timeout: Duration,
+    ) -> anyhow::Result<String>;
+
+    /// The source volume's mode, as the raw snapshot recorded it.
+    async fn raw_snapshot_mode(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+    ) -> anyhow::Result<VolumeMode>;
+
+    /// Start clearing a restore of the raw snapshot, or find it started.
+    async fn start_clearing(
+        &self,
+        placement: &Placement,
+        opts: &ClearingOpts<'_>,
+    ) -> anyhow::Result<()>;
+
+    async fn clearing_progress(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+    ) -> anyhow::Result<ClearingProgress>;
+
+    /// Stop the clearing and wait until the volume is unmounted.
+    async fn stop_clearing(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<()>;
+
+    /// Delete what a capture made, the kept snapshot only if asked. An error
+    /// never stops the rest, because the raw snapshot holds sign-ins whole.
+    async fn delete_capture(
+        &self,
+        placement: &Placement,
+        snapshot_id: &str,
+        kept: KeptSnapshot,
+        timeout: Duration,
+    ) -> anyhow::Result<()>;
+}
+
 /// How a client reaches a running environment.
 #[async_trait]
 pub trait RuntimeAccess: Send + Sync {
@@ -440,12 +526,18 @@ pub trait RuntimeAccess: Send + Sync {
 
 /// Everything orchestration needs from a runtime.
 pub trait RuntimeDriver:
-    RuntimePools + RuntimeLifecycle + RuntimeResize + RuntimeStorage + RuntimeAccess
+    RuntimePools + RuntimeLifecycle + RuntimeResize + RuntimeStorage + RuntimeSnapshots + RuntimeAccess
 {
 }
 
-impl<T: RuntimePools + RuntimeLifecycle + RuntimeResize + RuntimeStorage + RuntimeAccess>
-    RuntimeDriver for T
+impl<
+    T: RuntimePools
+        + RuntimeLifecycle
+        + RuntimeResize
+        + RuntimeStorage
+        + RuntimeSnapshots
+        + RuntimeAccess,
+> RuntimeDriver for T
 {
 }
 

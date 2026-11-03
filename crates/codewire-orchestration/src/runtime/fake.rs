@@ -10,10 +10,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::{
-    ClaimReadiness, ClaimRef, FailedLiveResize, MemberRef, MemberReplacement, Placement,
-    ProbeResult, ResizeState, RuntimeAccess, RuntimeExec, RuntimeLifecycle, RuntimeMember,
-    RuntimePools, RuntimeResize, RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime,
-    VolumeGrowth, VolumeIdentity, VolumeRef,
+    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
+    KeptSnapshot, MemberRef, MemberReplacement, Placement, ProbeResult, ResizeState, RuntimeAccess,
+    RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeResize, RuntimeSnapshots,
+    RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity,
+    VolumeMode, VolumeRef,
 };
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::template::TemplateOpts;
@@ -292,6 +293,81 @@ impl RuntimeStorage for FakeRuntimeDriver {
         _placement: &Placement,
         _volume: &VolumeRef,
         _disk_gb: i32,
+        _timeout: Duration,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+}
+
+#[async_trait]
+impl RuntimeSnapshots for FakeRuntimeDriver {
+    async fn snapshot_volume(
+        &self,
+        _placement: &Placement,
+        _snapshot_id: &str,
+        _source: &VolumeIdentity,
+        _snapshot_class: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn keep_cleared_volume(
+        &self,
+        _placement: &Placement,
+        _snapshot_id: &str,
+        _snapshot_class: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn wait_snapshot(
+        &self,
+        _placement: &Placement,
+        _snapshot_id: &str,
+        _stage: CaptureStage,
+        _timeout: Duration,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn raw_snapshot_mode(
+        &self,
+        _placement: &Placement,
+        _snapshot_id: &str,
+    ) -> anyhow::Result<VolumeMode> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn start_clearing(
+        &self,
+        _placement: &Placement,
+        _opts: &ClearingOpts<'_>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn clearing_progress(
+        &self,
+        _placement: &Placement,
+        _snapshot_id: &str,
+    ) -> anyhow::Result<ClearingProgress> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn stop_clearing(
+        &self,
+        _placement: &Placement,
+        _snapshot_id: &str,
+        _timeout: Duration,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn delete_capture(
+        &self,
+        _placement: &Placement,
+        _snapshot_id: &str,
+        _kept: KeptSnapshot,
         _timeout: Duration,
     ) -> anyhow::Result<()> {
         anyhow::bail!("not scripted")
