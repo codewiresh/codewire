@@ -2,17 +2,10 @@
   "mcpServers": {
     "playwright": {
       "type": "stdio",
-      "command": "docker",
+      "command": "sh",
       "args": [
-        "run",
-        "-i",
-        "--rm",
-        "--init",
-        "--network",
-        "host",
-        "--shm-size=2gb",
-        "mcr.microsoft.com/playwright/mcp@sha256:3d871c22ea2d4cca0966e2cfb1860e1cb03eb7353725a3d6cffd133296fb04eb",
-        "--headless"
+        "-c",
+        "exec docker run -i --rm --init --network host --shm-size=2gb --security-opt seccomp=\"$(git rev-parse --show-toplevel)/scripts/dev/playwright-mcp-seccomp.json\" --entrypoint node mcr.microsoft.com/playwright/mcp@sha256:690763cbb437ee7233f538a953bb5390bf03791eb5c965b471e59d17a6132fcb /app/cli.js --headless --browser chromium --sandbox"
       ],
       "env": {}
     }
