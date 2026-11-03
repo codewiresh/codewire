@@ -3,13 +3,20 @@
 //! comes back into the driver's own types.
 
 pub(crate) mod members;
+mod suspension;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
-use super::{Placement, ProbeResult, RuntimeDriver, RuntimeLifecycle, RuntimeMember, RuntimePools};
+use super::{
+    ClaimRef, MemberRef, Placement, ProbeResult, RuntimeAccess, RuntimeDriver, RuntimeLifecycle,
+    RuntimeMember, RuntimePools, RuntimeTeardown, SuspendedRuntime,
+};
 use crate::sandbox::client::SandboxClient;
+use crate::sandbox::host_keys::HostKeyStore;
+use crate::sandbox::template::TemplateOpts;
 
 pub struct KubernetesDriver {
     client: kube::Client,
@@ -49,6 +56,138 @@ impl RuntimeLifecycle for KubernetesDriver {
     async fn list_members(&self, placement: &Placement) -> anyhow::Result<Vec<RuntimeMember>> {
         let sandboxes = self.sandbox_client(placement).list_sandboxes().await?;
         Ok(sandboxes.iter().map(members::runtime_member).collect())
+    }
+
+    async fn members(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        known_member: &str,
+    ) -> anyhow::Result<Vec<MemberRef>> {
+        suspension::source_restart_pods(
+            &self.sandbox_client(placement),
+            environment_id,
+            known_member,
+        )
+        .await
+    }
+
+    async fn suspend(&self, claim: &ClaimRef) -> anyhow::Result<()> {
+        self.sandbox_client(&claim.placement)
+            .suspend_workspace(&suspension::claim_opts(claim), &claim.name, &claim.uid)
+            .await
+    }
+
+    async fn wait_suspended(
+        &self,
+        claim: &ClaimRef,
+        known_member: &str,
+        previous: &[MemberRef],
+        timeout: Duration,
+    ) -> anyhow::Result<SuspendedRuntime> {
+        suspension::wait_for_workspace_suspension(
+            &self.sandbox_client(&claim.placement),
+            claim,
+            known_member,
+            previous,
+            timeout,
+        )
+        .await
+    }
+
+    async fn reconcile_identity(&self, claim: &ClaimRef) -> anyhow::Result<()> {
+        self.sandbox_client(&claim.placement)
+            .reconcile_claim_runtime_identity(
+                &suspension::claim_opts(claim),
+                &claim.name,
+                &claim.uid,
+            )
+            .await
+    }
+
+    async fn resume(
+        &self,
+        claim: &ClaimRef,
+        suspended: &SuspendedRuntime,
+        support_image: &str,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(&claim.placement)
+            .set_replicas_for_identity(
+                &suspension::claim_opts(claim),
+                &claim.name,
+                &claim.uid,
+                suspended,
+                1,
+                support_image,
+            )
+            .await
+    }
+
+    async fn wait_ready(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .wait_for_ready(environment_id, timeout)
+            .await
+    }
+
+    async fn placement_exists(&self, placement: &Placement) -> anyhow::Result<bool> {
+        self.sandbox_client(placement).namespace_exists().await
+    }
+
+    async fn tear_down(
+        &self,
+        placement: &Placement,
+        teardown: &RuntimeTeardown<'_>,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .delete_environment_resources_with_recorded_storage(
+                teardown.environment_id,
+                teardown.known_member,
+                teardown.per_environment_template,
+                teardown.prove_confidential_storage_absent,
+                teardown.recorded_volume_uid,
+                teardown.timeout,
+            )
+            .await
+    }
+}
+
+#[async_trait]
+impl RuntimeAccess for KubernetesDriver {
+    async fn ensure_access(
+        &self,
+        placement: &Placement,
+        rendering: &TemplateOpts,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .ensure_access_stack(rendering)
+            .await
+    }
+
+    async fn delete_access(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .delete_access_stack(environment_id)
+            .await
+    }
+
+    async fn wait_access_ready(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        timeout: Duration,
+        host_keys: &dyn HostKeyStore,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .wait_for_workspace_access_ready(environment_id, timeout, host_keys)
+            .await
     }
 }
 
@@ -130,6 +269,50 @@ mod tests {
                 && requests[0].ends_with("/namespaces/dev-sandboxes/sandboxes"),
             "{requests:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn members_are_read_from_the_placement_with_the_known_member_rechecked() {
+        let (driver, requests) = driver_over_empty_cluster();
+
+        let members = driver
+            .members(&Placement::new("dev-sandboxes"), "env-1", "known-pod")
+            .await
+            .unwrap();
+
+        assert!(members.is_empty());
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(
+            requests[0].ends_with("/namespaces/dev-sandboxes/pods")
+                && requests[1].ends_with("/namespaces/dev-sandboxes/pods/known-pod"),
+            "{requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn suspending_acts_only_on_the_claims_placement() {
+        let (driver, requests) = driver_over_empty_cluster();
+        let claim = ClaimRef {
+            placement: Placement::new("dev-sandboxes"),
+            environment_id: "env-1".into(),
+            organization_id: "org-1".into(),
+            operation_generation: 3,
+            name: "claim-1".into(),
+            uid: "claim-uid-1".into(),
+        };
+
+        // There is no claim to own, so it refuses after reading only.
+        assert!(driver.suspend(&claim).await.is_err());
+
+        let requests = requests.lock().unwrap();
+        assert!(!requests.is_empty());
+        for request in requests.iter() {
+            assert!(
+                request.starts_with("GET ") && request.contains("/namespaces/dev-sandboxes/"),
+                "{requests:?}"
+            );
+        }
     }
 
     #[tokio::test]

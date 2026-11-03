@@ -2763,7 +2763,7 @@ pub(super) async fn reconcile_or_refresh_runtime_identity(
     let probe = authority
         .run_while_authoritative_for_states(
             states,
-            super::lifecycle::within_workspace_deadline(deadline, async {
+            crate::runtime::within_workspace_deadline(deadline, async {
                 loop {
                     let probe = runtime.probe(&placement, &env.id).await?;
                     if super::lifecycle::start_runtime_is_ready(&probe) {

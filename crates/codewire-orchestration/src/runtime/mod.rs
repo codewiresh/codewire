@@ -12,9 +12,15 @@
 pub(crate) mod fake;
 pub mod kubernetes;
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 
-pub use crate::sandbox::client::ProbeResult;
+pub use crate::sandbox::client::{
+    ProbeResult, WorkspacePodIdentity as MemberRef, WorkspaceSandboxIdentity as SuspendedRuntime,
+};
+use crate::sandbox::host_keys::HostKeyStore;
+use crate::sandbox::template::TemplateOpts;
 
 /// Where a runtime object lives. A caller names this rather than holding a
 /// client per location; for Kubernetes it is the namespace.
@@ -75,6 +81,30 @@ pub struct RuntimeMember {
     pub workspace: Resources,
 }
 
+/// The claim an environment's operation holds on its runtime. A driver acts
+/// only on the claim this names, fenced by its UID and generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimRef {
+    pub placement: Placement,
+    pub environment_id: String,
+    pub organization_id: String,
+    pub operation_generation: i64,
+    pub name: String,
+    pub uid: String,
+}
+
+/// What to remove when an environment is destroyed, and what must be proven
+/// gone before that counts as done.
+pub struct RuntimeTeardown<'a> {
+    pub environment_id: &'a str,
+    /// The member the backend recorded, or empty.
+    pub known_member: &'a str,
+    pub per_environment_template: Option<&'a str>,
+    pub prove_confidential_storage_absent: bool,
+    pub recorded_volume_uid: Option<&'a str>,
+    pub timeout: Duration,
+}
+
 /// Warm capacity held ahead of any environment.
 #[async_trait]
 pub trait RuntimePools: Send + Sync {
@@ -95,9 +125,107 @@ pub trait RuntimeLifecycle: Send + Sync {
 
     /// Every runtime at a placement, as it stands now.
     async fn list_members(&self, placement: &Placement) -> anyhow::Result<Vec<RuntimeMember>>;
+
+    /// The environment's current members, and the one the backend recorded if
+    /// it still exists. Refuses an incomplete identity.
+    async fn members(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        known_member: &str,
+    ) -> anyhow::Result<Vec<MemberRef>>;
+
+    /// Ask for the claim's runtime to suspend. This is not evidence it has.
+    async fn suspend(&self, claim: &ClaimRef) -> anyhow::Result<()>;
+
+    /// Wait until the claim's runtime is suspended and every one of `previous`
+    /// and any replacement is gone. The result is what `resume` requires.
+    async fn wait_suspended(
+        &self,
+        claim: &ClaimRef,
+        known_member: &str,
+        previous: &[MemberRef],
+        timeout: Duration,
+    ) -> anyhow::Result<SuspendedRuntime>;
+
+    /// Converge the runtime's identity for the claim's generation.
+    async fn reconcile_identity(&self, claim: &ClaimRef) -> anyhow::Result<()>;
+
+    /// Start the exact runtime whose suspension was observed.
+    async fn resume(
+        &self,
+        claim: &ClaimRef,
+        suspended: &SuspendedRuntime,
+        support_image: &str,
+    ) -> anyhow::Result<()>;
+
+    /// Wait until the environment's runtime reports ready.
+    async fn wait_ready(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<()>;
+
+    /// Whether a placement still exists at all.
+    async fn placement_exists(&self, placement: &Placement) -> anyhow::Result<bool>;
+
+    /// Remove the environment's runtime and storage, and wait until they have
+    /// gone.
+    async fn tear_down(
+        &self,
+        placement: &Placement,
+        teardown: &RuntimeTeardown<'_>,
+    ) -> anyhow::Result<()>;
+}
+
+/// How a client reaches a running environment.
+#[async_trait]
+pub trait RuntimeAccess: Send + Sync {
+    async fn ensure_access(
+        &self,
+        placement: &Placement,
+        rendering: &TemplateOpts,
+    ) -> anyhow::Result<()>;
+
+    async fn delete_access(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<()>;
+
+    /// Wait until the environment answers a connection with a host key the
+    /// store accepts.
+    async fn wait_access_ready(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        timeout: Duration,
+        host_keys: &dyn HostKeyStore,
+    ) -> anyhow::Result<()>;
 }
 
 /// Everything orchestration needs from a runtime.
-pub trait RuntimeDriver: RuntimePools + RuntimeLifecycle {}
+pub trait RuntimeDriver: RuntimePools + RuntimeLifecycle + RuntimeAccess {}
 
-impl<T: RuntimePools + RuntimeLifecycle> RuntimeDriver for T {}
+impl<T: RuntimePools + RuntimeLifecycle + RuntimeAccess> RuntimeDriver for T {}
+
+pub(crate) async fn within_workspace_deadline<T>(
+    deadline: tokio::time::Instant,
+    future: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    anyhow::ensure!(
+        tokio::time::Instant::now() < deadline,
+        "workspace lifecycle observation timed out"
+    );
+    let result = tokio::time::timeout_at(deadline, future)
+        .await
+        .map_err(|_| anyhow::anyhow!("workspace lifecycle observation timed out"))??;
+    // A future that becomes ready after monopolizing its poll cannot turn a
+    // late observation into timely completion.
+    anyhow::ensure!(
+        tokio::time::Instant::now() < deadline,
+        "workspace lifecycle observation timed out"
+    );
+    Ok(result)
+}
