@@ -1487,6 +1487,24 @@ impl RunSessionInput {
 }
 
 impl EnvironmentSessionAttachment {
+    /// An attachment that reads its output from a channel, for tests of the
+    /// code that carries one.
+    #[doc(hidden)]
+    pub fn from_output(
+        output: tokio::sync::mpsc::Receiver<Result<AttachSessionResponse, ClientError>>,
+    ) -> Self {
+        let (input, mut requests) = tokio::sync::mpsc::channel(8);
+        let (_, terminal_error) = tokio::sync::watch::channel(None);
+        Self {
+            input: EnvironmentSessionAttachmentInput {
+                input,
+                terminal_error,
+            },
+            output,
+            driver: tokio::spawn(async move { while requests.recv().await.is_some() {} }),
+        }
+    }
+
     pub fn input_handle(&self) -> EnvironmentSessionAttachmentInput {
         self.input.clone()
     }

@@ -10,16 +10,21 @@
 //! shown, and every key, Ctrl+B included, reaches the shell.
 //! `cw shell --durable` keeps a named session that outlives the client.
 
+use std::future::Future;
 use std::io::IsTerminal as _;
 use std::time::{Duration, Instant};
 
+use codewire_client::tailnet_session::EnvironmentTailnet;
 use codewire_client::{
     AttachSessionOpen, AttachSessionRequest, AttachSessionResize, CodewireClient,
-    EnvironmentSessionAttachment, attach_session_request, attach_session_response,
+    EnvironmentSessionAttachment, SshTransportMode, attach_session_request,
+    attach_session_response,
 };
 use tokio::io::AsyncWriteExt as _;
 
-use super::sessions::{attach_platform_session, login_shell_command, platform_session_is_terminal};
+use super::sessions::{
+    TAILNET_DIRECT_WAIT, attach_platform_session, login_shell_command, platform_session_is_terminal,
+};
 use crate::terminal_attach::{RawModeGuard, WindowSizeWatch, terminal_input, terminal_size};
 
 /// How long the shell keeps running with no client attached (owner,
@@ -27,12 +32,22 @@ use crate::terminal_attach::{RawModeGuard, WindowSizeWatch, terminal_input, term
 /// reattach after a drop.
 pub(crate) const SHELL_GRACE: Duration = Duration::from_secs(10 * 60);
 
+/// How soon a shell on the API fallback tries the tailnet again, and how far
+/// apart the tries grow. The API is the last resort (owner, 2026-11-01, on
+/// #3827), and a fallback can come from a failure that has already cleared:
+/// a long network cut lands here as soon as the network returns (#3895).
+const TAILNET_RETRY_FIRST: Duration = Duration::from_secs(5);
+const TAILNET_RETRY_LIMIT: Duration = Duration::from_secs(60);
+
 /// How one attachment ended.
-enum Pumped {
+#[derive(Debug, PartialEq)]
+enum Pumped<T> {
     /// The shell ended; its exit status, or the session's reason.
     Ended(Result<i32, String>),
     /// The connection dropped; reattach from here.
     Interrupted { output_offset: u64 },
+    /// The tailnet came back while on the API; reattach over it from here.
+    TailnetBack { output_offset: u64, tailnet: T },
 }
 
 /// Launch the shell and run it to its end. Returns its exit status.
@@ -74,6 +89,7 @@ pub(crate) async fn run(
     let mut output_offset = 0;
     let mut dropped_at: Option<Instant> = None;
     let mut attempt = 0_u32;
+    let mut retry_after = TAILNET_RETRY_FIRST;
     loop {
         let open = AttachSessionOpen {
             org_id: org_id.into(),
@@ -86,7 +102,24 @@ pub(crate) async fn run(
             Ok(attachment) => {
                 dropped_at = None;
                 attempt = 0;
-                pump(attachment, output_offset, interactive).await?
+                if tailnet.is_some() {
+                    retry_after = TAILNET_RETRY_FIRST;
+                }
+                let on_fallback =
+                    tailnet.is_none() && SshTransportMode::from_env()? == SshTransportMode::Auto;
+                let back = async {
+                    if !on_fallback {
+                        return std::future::pending().await;
+                    }
+                    keep_trying(retry_after, || async {
+                        let connected =
+                            EnvironmentTailnet::connect(client, org_id, environment_id).await?;
+                        connected.wait_for_direct(TAILNET_DIRECT_WAIT).await.ok();
+                        anyhow::Ok(connected)
+                    })
+                    .await
+                };
+                pump(attachment, output_offset, interactive, back).await?
             }
             Err(error) if dropped_at.is_some() => {
                 tracing::debug!(error = %format!("{error:#}"), "reattach failed");
@@ -113,17 +146,51 @@ pub(crate) async fn run(
                 attempt += 1;
                 tokio::time::sleep(Duration::from_millis(250 * u64::from(attempt.min(8)))).await;
             }
+            Pumped::TailnetBack {
+                output_offset: next,
+                tailnet: connected,
+            } => {
+                output_offset = next;
+                tailnet = Some(connected);
+                // Longer next time, if this attachment lands on the API again.
+                retry_after = next_retry(retry_after);
+            }
         }
     }
 }
 
+/// Runs `attempt` after `first`, then at growing intervals, until it succeeds.
+async fn keep_trying<T, F, Attempt>(first: Duration, mut attempt: F) -> T
+where
+    F: FnMut() -> Attempt,
+    Attempt: Future<Output = anyhow::Result<T>>,
+{
+    let mut delay = first;
+    loop {
+        tokio::time::sleep(delay).await;
+        match attempt().await {
+            Ok(value) => return value,
+            Err(error) => {
+                tracing::debug!(error = %format!("{error:#}"), "tailnet retry failed");
+            }
+        }
+        delay = next_retry(delay);
+    }
+}
+
+fn next_retry(delay: Duration) -> Duration {
+    (delay * 2).min(TAILNET_RETRY_LIMIT)
+}
+
 /// Carry one attachment: keys in, output out, resizes; every byte passes
-/// through.
-async fn pump(
+/// through. It ends early if `tailnet_back` completes.
+async fn pump<T>(
     mut attachment: EnvironmentSessionAttachment,
     mut output_offset: u64,
     interactive: bool,
-) -> anyhow::Result<Pumped> {
+    tailnet_back: impl Future<Output = T>,
+) -> anyhow::Result<Pumped<T>> {
+    tokio::pin!(tailnet_back);
     let input = attachment.input_handle();
     let raw = interactive.then(RawModeGuard::enable).transpose()?;
     let mut window = WindowSizeWatch::new(interactive);
@@ -136,6 +203,7 @@ async fn pump(
     let mut stdin_open = true;
     let pumped = loop {
         tokio::select! {
+            tailnet = &mut tailnet_back => break Pumped::TailnetBack { output_offset, tailnet },
             read = stdin.read(&mut buffer), if stdin_open => match read {
                 Ok(0) | Err(_) => stdin_open = false,
                 Ok(read) => {
@@ -197,5 +265,83 @@ fn resize(columns: u16, rows: u16) -> AttachSessionRequest {
             },
         ))),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn the_tailnet_is_tried_at_growing_intervals_until_it_connects() {
+        let started = tokio::time::Instant::now();
+        let mut tries = Vec::new();
+        let value = keep_trying(TAILNET_RETRY_FIRST, || {
+            tries.push(started.elapsed().as_secs());
+            let attempt = tries.len();
+            async move {
+                if attempt < 6 {
+                    anyhow::bail!("not yet");
+                }
+                Ok(attempt)
+            }
+        })
+        .await;
+        assert_eq!(value, 6);
+        assert_eq!(tries, [5, 15, 35, 75, 135, 195], "capped at one a minute");
+    }
+
+    fn output(
+        next_offset: u64,
+    ) -> Result<codewire_client::AttachSessionResponse, codewire_client::ClientError> {
+        Ok(codewire_client::AttachSessionResponse {
+            event: Some(attach_session_response::Event::Output(Box::new(
+                codewire_client::EnvironmentSessionOutputChunk {
+                    next_offset,
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_shell_on_the_api_moves_at_its_output_offset_when_the_tailnet_is_back() {
+        let (sender, outputs) = tokio::sync::mpsc::channel(4);
+        sender.send(output(7)).await.unwrap();
+        let back = async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            "tailnet"
+        };
+        let attachment = EnvironmentSessionAttachment::from_output(outputs);
+        let pumped = pump(attachment, 0, false, back).await.unwrap();
+        assert_eq!(
+            pumped,
+            Pumped::TailnetBack {
+                output_offset: 7,
+                tailnet: "tailnet",
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_shell_with_no_tailnet_to_return_to_stays_until_its_connection_drops() {
+        let (sender, outputs) = tokio::sync::mpsc::channel(4);
+        sender.send(output(7)).await.unwrap();
+        let carrier = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            sender.send(output(9)).await.unwrap();
+        });
+        let attachment = EnvironmentSessionAttachment::from_output(outputs);
+        let back = std::future::pending::<()>();
+        let pumped = pump(attachment, 0, false, back).await.unwrap();
+        carrier.await.unwrap();
+        assert_eq!(pumped, Pumped::Interrupted { output_offset: 9 });
+    }
+
+    #[test]
+    fn a_failed_switch_waits_longer_before_the_next() {
+        assert_eq!(next_retry(TAILNET_RETRY_FIRST), Duration::from_secs(10));
+        assert_eq!(next_retry(TAILNET_RETRY_LIMIT), TAILNET_RETRY_LIMIT);
     }
 }

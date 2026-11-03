@@ -309,9 +309,7 @@ async fn connect_tailnet_session(
     let local_node_key = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
     let disco_private = DiscoPrivate::generate(&mut OsRng);
     let phase = Instant::now();
-    let fallback_transport = connect_derp_transport(&derp_target, &secret)
-        .await
-        .context("connect DERP relay")?;
+    let fallback_transport = connect_derp_relay(&derp_target, &secret, peer_timeout).await?;
     debug_phase("derp_connect", phase);
     let phase = Instant::now();
 
@@ -1170,6 +1168,20 @@ fn ssh_identification_prefix_len(bytes: &[u8]) -> Option<usize> {
         .map(|idx| idx + 1)
 }
 
+/// Connect to the DERP relay, within `timeout`: a relay whose packets are
+/// silently dropped never fails on its own, and the caller's fallback waits on
+/// this (#3895).
+async fn connect_derp_relay(
+    target: &DerpTarget,
+    secret: &StaticSecret,
+    timeout: Duration,
+) -> anyhow::Result<codewire_tailnet::conn::Transport> {
+    tokio::time::timeout(timeout, connect_derp_transport(target, secret))
+        .await
+        .with_context(|| format!("connect DERP relay: timed out after {}", humantime(timeout)))?
+        .context("connect DERP relay")
+}
+
 fn derp_target_from_platform_url(url: &Url) -> DerpTarget {
     let host = url.host_str().unwrap_or("localhost").to_string();
     let port = url.port().unwrap_or(match url.scheme() {
@@ -1414,6 +1426,27 @@ pub fn humantime(duration: Duration) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn a_derp_relay_that_never_answers_fails_within_the_timeout() {
+        // Accepts through its backlog and never answers, as a relay behind a
+        // firewall that drops its traffic never does.
+        let silent = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let url = Url::parse(&format!("http://{}", silent.local_addr().unwrap())).unwrap();
+        let target = derp_target_from_platform_url(&url);
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let error = tokio::time::timeout(
+            Duration::from_secs(30),
+            connect_derp_relay(&target, &secret, Duration::from_millis(200)),
+        )
+        .await
+        .expect("the connection is given up by its own timeout")
+        .err()
+        .expect("a silent relay doesn't connect");
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+    }
 
     mod coordinator_rejoin {
         use std::collections::VecDeque;
