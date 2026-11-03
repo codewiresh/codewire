@@ -343,3 +343,151 @@ async fn db_a_healthy_or_replaced_runtime_marks_nothing() -> Result<()> {
     .await;
     db.finish(result).await
 }
+
+fn deleting_at(at: chrono::DateTime<chrono::Utc>) -> k8s_openapi::jiff::Timestamp {
+    k8s_openapi::jiff::Timestamp::from_second(at.timestamp()).unwrap()
+}
+
+/// #3944: a daemon repair deletes the Pod, whose containers then exit. On the
+/// real race the claim said `PodSucceeded`, the repair lost its authority and
+/// the sandbox stayed in `error`.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_pod_being_deleted_marks_nothing_however_it_exited() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        let now = chrono::Utc::now();
+
+        for (reason, phase) in [("PodSucceeded", "Succeeded"), ("PodFailed", "Failed")] {
+            let mut leaving = runtime_reporting(false, reason, phase);
+            leaving.probe.pod_deleting_at = Some(deleting_at(now));
+            let asked = observe_sandbox_liveness(&db.pool, &leaving, now, &row).await;
+            ensure!(asked.is_none(), "{phase}: {asked:?}");
+            let (state, code, _) = self::row(&db.pool).await?;
+            ensure!(
+                state == "running" && code.is_none(),
+                "{phase}: {state} {code:?}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// The old Pod is gone and the claim still reports how it ended, with no
+/// replacement yet: a reconcile, as for any missing runtime, and no error.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_the_gap_before_a_replacement_asks_for_a_reconcile_and_marks_nothing() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        let now = chrono::Utc::now();
+
+        let mut gone = runtime_reporting(false, "PodSucceeded", "");
+        gone.probe.pod_exists = false;
+        gone.probe.pod_name = String::new();
+        gone.probe.pod_uid = String::new();
+        gone.probe.pod_ip = String::new();
+        let asked = observe_sandbox_liveness(&db.pool, &gone, now, &row).await;
+        ensure!(asked.is_some(), "no reconcile asked for");
+
+        // The replacement exists under the same name and isn't ready.
+        let mut pending = runtime_reporting(false, "SandboxNotReady", "Pending");
+        pending.probe.pod_uid = "new-pod-uid".into();
+        pending.probe.pod_ip = String::new();
+        let asked = observe_sandbox_liveness(&db.pool, &pending, now, &row).await;
+        ensure!(asked.is_some(), "no reconcile asked for");
+
+        let (state, code, _) = self::row(&db.pool).await?;
+        ensure!(state == "running" && code.is_none(), "{state} {code:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// A non-zero exit, with the replacement already up: the claim's `PodFailed` is
+/// about the old Pod, so it takes the identity reconcile and stops nothing.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_claim_still_reporting_the_old_pods_failure_stops_nothing() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        let now = chrono::Utc::now();
+
+        for phase in ["Pending", "Running"] {
+            let mut replaced = runtime_reporting(false, "PodFailed", phase);
+            replaced.probe.pod_uid = "new-pod-uid".into();
+            let asked = observe_sandbox_liveness(&db.pool, &replaced, now, &row).await;
+            ensure!(asked.is_some(), "{phase}: no reconcile asked for");
+            let (state, code, _) = self::row(&db.pool).await?;
+            ensure!(
+                state == "running" && code.is_none(),
+                "{phase}: {state} {code:?}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// The other direction: a Pod that finished by itself has no deletion mark.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_pod_that_really_finished_still_marks_an_error() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        let finished = runtime_reporting(false, "PodSucceeded", "Succeeded");
+
+        observe_sandbox_liveness(&db.pool, &finished, chrono::Utc::now(), &row).await;
+        let (state, _, reason) = self::row(&db.pool).await?;
+        ensure!(state == "error", "{state}");
+        ensure!(
+            reason.as_deref() == Some("sandbox claim not ready: PodSucceeded"),
+            "{reason:?}"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// The bound: a Pod stuck going can't hide a dead sandbox.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_pod_stuck_being_deleted_marks_an_error_after_the_grace() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        let now = chrono::Utc::now();
+        let mut stuck = runtime_reporting(false, "PodSucceeded", "Succeeded");
+
+        stuck.probe.pod_deleting_at = Some(deleting_at(now - chrono::Duration::seconds(59)));
+        observe_sandbox_liveness(&db.pool, &stuck, now, &row).await;
+        ensure!(
+            self::row(&db.pool).await?.0 == "running",
+            "marked inside the grace"
+        );
+
+        stuck.probe.pod_deleting_at = Some(deleting_at(now - chrono::Duration::seconds(61)));
+        observe_sandbox_liveness(&db.pool, &stuck, now, &row).await;
+        ensure!(
+            self::row(&db.pool).await?.0 == "error",
+            "not marked after the grace"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

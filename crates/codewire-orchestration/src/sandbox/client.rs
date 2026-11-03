@@ -56,6 +56,9 @@ pub struct ProbeResult {
     pub sandbox_suspended: bool,
     pub pod_exists: bool,
     pub pod_phase: String,
+    /// `metadata.deletionTimestamp` of the probed Pod: something asked for it
+    /// to go. The time it will be force-killed, so up to its grace period ahead.
+    pub pod_deleting_at: Option<Timestamp>,
     pub node_name: String,
     pub pod_name: String,
     pub pod_uid: String,
@@ -5088,6 +5091,7 @@ impl SandboxClient {
             };
             result.workspace_pvc_name = workspace_pvc_claim_name(&pod).unwrap_or_default();
             result.pod_uid = pod.metadata.uid.clone().unwrap_or_default();
+            result.pod_deleting_at = pod.metadata.deletion_timestamp.as_ref().map(|time| time.0);
             if let Some(status) = &pod.status {
                 result.pod_phase = status.phase.clone().unwrap_or_default();
                 result.pod_ip = status.pod_ip.clone().unwrap_or_default();
@@ -6127,6 +6131,54 @@ mod tests {
             }
         });
         SandboxClient::new(Client::new(service, "default"), "dev-sandboxes")
+    }
+
+    #[tokio::test]
+    async fn probe_reports_a_pod_being_deleted_and_not_one_that_finished() {
+        let probed = |deleting: Option<&'static str>| async move {
+            let service = Router::new().fallback(move |request: Request<Body>| async move {
+                let path = request.uri().path().to_string();
+                let body = if path == MODE_CLAIM_PATH {
+                    json!({
+                        "apiVersion": "extensions.agents.x-k8s.io/v1beta1", "kind": "SandboxClaim",
+                        "metadata": {"name": "sandbox-env-test", "namespace": "dev-sandboxes"},
+                        "status": {"sandbox": {"name": "workspace-env-test"}},
+                    })
+                } else if path == MODE_SANDBOX_PATH {
+                    mode_sandbox()
+                } else {
+                    let mut pod = json!({
+                        "apiVersion": "v1", "kind": "Pod",
+                        "metadata": {"name": "workspace-env-test", "namespace": "dev-sandboxes", "uid": "pod-uid"},
+                        "status": {"phase": "Succeeded"},
+                    });
+                    if let Some(at) = deleting {
+                        pod["metadata"]["deletionTimestamp"] = json!(at);
+                    }
+                    pod
+                };
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            });
+            SandboxClient::new(Client::new(service, "default"), "dev-sandboxes")
+                .probe_environment("env-test")
+                .await
+                .unwrap()
+        };
+
+        let finished = probed(None).await;
+        assert_eq!(finished.pod_phase, "Succeeded");
+        assert_eq!(finished.pod_deleting_at, None);
+
+        let deleting = probed(Some("2026-11-03T19:26:48Z")).await;
+        assert_eq!(deleting.pod_phase, "Succeeded");
+        assert_eq!(
+            deleting.pod_deleting_at,
+            Some("2026-11-03T19:26:48Z".parse().unwrap())
+        );
     }
 
     /// #2328: create recovery resumes only an observed suspended Sandbox. An

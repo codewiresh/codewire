@@ -939,6 +939,16 @@ pub(super) async fn observe_sandbox_liveness(
         }
     };
 
+    if running_pod_is_leaving(now, row, &probe) {
+        tracing::info!(
+            environment_id = row.id,
+            pod_uid = probe.pod_uid,
+            pod_phase = probe.pod_phase,
+            "sandbox liveness: a Pod being deleted has not failed"
+        );
+        return None;
+    }
+
     if running_runtime_recovery_required(row, &probe) {
         return Some("workspace Pod runtime identity is not current");
     }
@@ -968,11 +978,30 @@ fn crash_recovery_due(now: chrono::DateTime<chrono::Utc>, row: &LivenessRow) -> 
     now - row.state_changed_at >= chrono::Duration::from_std(CRASH_RECOVERY_MIN_RUNNING).unwrap()
 }
 
+/// A deleted Pod's containers exit as it goes, and it can show `Succeeded` or
+/// `Failed` before it is removed. Something asked for that, such as a daemon
+/// repair replacing it, so it says nothing about the sandbox (#3944). Kubernetes
+/// holds the mark, so this survives a restart and needs no agreement between
+/// workers. The grace bounds it: a Pod stuck going counts as failed again.
+fn running_pod_is_leaving(
+    now: chrono::DateTime<chrono::Utc>,
+    row: &LivenessRow,
+    probe: &ProbeResult,
+) -> bool {
+    row.state == "running"
+        && matches!(probe.pod_phase.as_str(), "Failed" | "Succeeded")
+        && probe.pod_deleting_at.is_some_and(|deleting_at| {
+            now.timestamp() - deleting_at.as_second()
+                < SANDBOX_TRANSITIONAL_LIVENESS_GRACE.as_secs() as i64
+        })
+}
+
 fn running_runtime_recovery_required(row: &LivenessRow, probe: &ProbeResult) -> bool {
     if row.state != "running"
         || row.desired_state != "started"
         || !probe.claim_exists
-        || is_terminal_claim_reason(&probe.claim_reason)
+        || (is_terminal_claim_reason(&probe.claim_reason)
+            && !claim_failure_is_of_an_earlier_pod(probe))
         || matches!(probe.pod_phase.as_str(), "Failed" | "Succeeded")
     {
         return false;
@@ -992,6 +1021,14 @@ fn running_runtime_recovery_required(row: &LivenessRow, probe: &ProbeResult) -> 
             .bound_pod_uid
             .as_deref()
             .is_some_and(|bound| bound != probe.pod_uid)
+}
+
+/// A terminal phase is final for a Pod, so a live Pod isn't the one a claim's
+/// `PodFailed` describes: the claim hasn't caught up with its replacement (#3944).
+fn claim_failure_is_of_an_earlier_pod(probe: &ProbeResult) -> bool {
+    probe.claim_reason == "PodFailed"
+        && probe.pod_exists
+        && !matches!(probe.pod_phase.as_str(), "" | "Failed" | "Succeeded")
 }
 
 fn setup_activity_active(row: &LivenessRow) -> bool {
@@ -1387,6 +1424,38 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// #3944: what a daemon repair's deleted Pod looks like, and what doesn't.
+    #[test]
+    fn only_a_finished_pod_being_deleted_is_leaving() {
+        let now = chrono::Utc::now();
+        let seconds_ago = |seconds: i64| {
+            k8s_openapi::jiff::Timestamp::from_second(now.timestamp() - seconds).unwrap()
+        };
+        let observed = |state: &str, phase: &str, deleting: Option<i64>| {
+            let mut observed = probe(true, false, "PodSucceeded", true, phase, "");
+            observed.pod_deleting_at = deleting.map(seconds_ago);
+            running_pod_is_leaving(now, &row(state, 300), &observed)
+        };
+
+        assert!(observed("running", "Succeeded", Some(0)));
+        assert!(observed("running", "Failed", Some(0)));
+        // A mark ahead of now: the time it will be force-killed.
+        assert!(observed("running", "Succeeded", Some(-30)));
+        assert!(observed("running", "Succeeded", Some(59)));
+
+        assert!(
+            !observed("running", "Succeeded", None),
+            "finished by itself"
+        );
+        assert!(!observed("running", "Failed", None), "failed by itself");
+        assert!(!observed("running", "Succeeded", Some(60)), "stuck going");
+        // Still running while it goes: the identity reconcile decides.
+        assert!(!observed("running", "Running", Some(0)));
+        // A start or create has its own window and its own checks.
+        assert!(!observed("starting", "Succeeded", Some(0)));
+        assert!(!observed("creating", "Failed", Some(0)));
     }
 
     /// Design §10: a Pod replaced under the same name and IP is found by its
