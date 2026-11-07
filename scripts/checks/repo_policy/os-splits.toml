@@ -106,7 +106,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/sessions/agents/noel.rs" = { group = "member", count = 6 }
 "crates/codewire-cli/src/commands/sessions/agents/pause.rs" = { group = "member", count = 11 }
 "crates/codewire-cli/src/commands/sessions/agents/turn_failure_tests.rs" = { group = "linux-tests", count = 2 }
-"crates/codewire-cli/src/commands/snapshot.rs" = { group = "snapshots", count = 4 }
+"crates/codewire-cli/src/commands/snapshot.rs" = { group = "snapshots", count = 7 }
 "crates/codewire-cli/src/commands/storage_placement.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli/src/commands/tests/environment.rs" = { group = "linux-tests", count = 5 }
 "crates/codewire-cli/src/commands/tests/sessions.rs" = { group = "linux-tests", count = 5 }

@@ -263,11 +263,14 @@ pub(super) async fn handle_platform_snapshot_command(
     let (org_id, _, client) = resolve_platform_context(globals).await?;
     match command {
         SnapshotCommand::Create(args) => {
-            let environment_id =
-                resolve_environment_id(&client, &org_id, &args.environment).await?;
+            let environment = args
+                .environment
+                .as_deref()
+                .context("environment is required")?;
+            let environment_id = resolve_environment_id(&client, &org_id, environment).await?;
             let name = match args.name.as_deref().and_then(trimmed_str) {
                 Some(name) => name.to_owned(),
-                None => default_snapshot_name(&args.environment, chrono::Utc::now()),
+                None => default_snapshot_name(environment, chrono::Utc::now()),
             };
             let created = client
                 .create_snapshot(&org_id, &environment_id, &name)

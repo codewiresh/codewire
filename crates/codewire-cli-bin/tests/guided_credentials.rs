@@ -254,6 +254,13 @@ impl Pty {
         };
         assert_eq!(local_flags(self.before.c_lflag), local_flags(after.c_lflag));
         assert_eq!(self.before.c_cc, after.c_cc);
+        // POSIX stores the baud rates separately on some hosts.
+        assert_eq!(unsafe { libc::cfgetispeed(&self.before) }, unsafe {
+            libc::cfgetispeed(&after)
+        });
+        assert_eq!(unsafe { libc::cfgetospeed(&self.before) }, unsafe {
+            libc::cfgetospeed(&after)
+        });
         let output = String::from_utf8_lossy(&self.output).into_owned();
         assert!(!output.contains("synthetic-x"));
         assert!(!output.contains("synthetic-value"));

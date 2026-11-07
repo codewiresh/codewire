@@ -73,8 +73,32 @@ fn missing_owner(mesh: &NetworkMesh) -> anyhow::Error {
 
 pub(crate) async fn handle_network_command(
     globals: &Globals,
-    command: NetworkCommand,
+    mut command: NetworkCommand,
 ) -> anyhow::Result<()> {
+    let guided_create = matches!(&command, NetworkCommand::Create(args) if args.name.is_none() || args.org.is_none());
+    match &mut command {
+        NetworkCommand::Create(args) => {
+            if guided_create {
+                super::guided::require_available(
+                    OutputFormat::Text,
+                    "supply the network and owner: `cw network create NAME --org ORG_ID`",
+                )?;
+            }
+            args.name = Some(super::additions::required(
+                args.name.take(),
+                "Network name",
+                OutputFormat::Text,
+                "name the network: `cw network create NAME --org ORG_ID`",
+            )?);
+        }
+        NetworkCommand::Use(args) if args.name.is_none() => {
+            super::guided::require_available(
+                OutputFormat::Text,
+                "name the network: `cw network use NAME`",
+            )?;
+        }
+        _ => {}
+    }
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let style = stdout_style();
@@ -116,10 +140,60 @@ pub(crate) async fn handle_network_command(
                 }
             }
         }
-        NetworkCommand::Create(args) => {
-            let network_id = trimmed_required(&args.name, "network name")?;
-            let org_id = trimmed_required(&args.org, "organization ID")?;
+        NetworkCommand::Create(mut args) => {
+            let network_id = trimmed_required(
+                args.name.as_deref().context("network name is required")?,
+                "network name",
+            )?;
             let mesh = resolve_network_mesh(globals, &paths, &env, args.mesh_url)?;
+            if args.org.is_none() {
+                let org_id = if mesh.kind == Some(MeshKind::Cloud) {
+                    let platform = resolve_platform(globals, &paths, &env)?;
+                    let orgs = organization_client(&platform)?
+                        .list_orgs()
+                        .await
+                        .context("list organizations")?;
+                    super::additions::org_choice(&orgs, None)?.id.clone()
+                } else if let Some(owner) = mesh.owner_organization.as_deref() {
+                    super::guided::choose(
+                        "Organization that will own this network",
+                        &[super::guided::Choice::new(owner, mesh.label())],
+                    )?;
+                    owner.to_owned()
+                } else {
+                    super::guided::text(
+                        "Exact owner organization ID",
+                        None,
+                        super::guided::required,
+                    )?
+                };
+                args.org = Some(org_id);
+            }
+            let org_id = trimmed_required(
+                args.org.as_deref().context("organization ID is required")?,
+                "organization ID",
+            )?;
+            if guided_create {
+                super::additions::review(
+                    "Create Mesh network?",
+                    &[
+                        ("Name", network_id.to_owned()),
+                        ("Organization", org_id.to_owned()),
+                        ("Mesh", format!("{} · {}", mesh.label(), mesh.url())),
+                        (
+                            "Select locally",
+                            if args.no_use {
+                                "No".to_owned()
+                            } else {
+                                "When the Mesh owner matches".to_owned()
+                            },
+                        ),
+                    ],
+                )?;
+            }
+            if args.auto_connect {
+                eprintln!("New environments will automatically attach to this network.");
+            }
             let context = MeshContext::new(&mesh, Some(org_id));
             with_progress(
                 OutputFormat::Text,
@@ -140,8 +214,13 @@ pub(crate) async fn handle_network_command(
             } else {
                 match (mesh.kind, mesh.owner_organization.as_deref()) {
                     (Some(kind), Some(owner)) if owner == org_id => {
-                        let selection =
-                            NetworkSelection::new(kind, mesh.url(), org_id, network_id, false);
+                        let selection = NetworkSelection::new(
+                            kind,
+                            mesh.url(),
+                            org_id,
+                            network_id,
+                            args.auto_connect,
+                        );
                         match save_network_selection(&paths.mesh_data_dir, &selection) {
                             Ok(()) => (CreateSelection::Selected, None),
                             Err(error) => (
@@ -216,8 +295,8 @@ pub(crate) async fn handle_network_command(
             }
         }
         NetworkCommand::Use(args) => {
-            let network_id = trimmed_required(&args.name, "network name")?;
-            let mesh = resolve_network_mesh(globals, &paths, &env, args.mesh_url)?;
+            let mesh_override = args.mesh_url;
+            let mesh = resolve_network_mesh(globals, &paths, &env, mesh_override.clone())?;
             let (Some(kind), Some(org_id)) = (mesh.kind, mesh.owner_organization.as_deref()) else {
                 return Err(missing_owner(&mesh));
             };
@@ -227,6 +306,48 @@ pub(crate) async fn handle_network_command(
                 MeshClient::new(&mesh.resolved)?.list_networks(org_id),
             )
             .await?;
+            let network_name = match args.name {
+                Some(name) => name,
+                None => {
+                    if networks.is_empty() {
+                        let action = super::guided::choose(
+                            &format!("No networks in organization {}", terminal_text(org_id)),
+                            &[
+                                super::guided::Choice::new("Create a network", mesh.label()),
+                                super::guided::Choice::new("Cancel", "Keep the current selection"),
+                            ],
+                        )?;
+                        anyhow::ensure!(action == 0, "canceled; no network selected");
+                        return Box::pin(handle_network_command(
+                            globals,
+                            NetworkCommand::Create(NetworkCreateArgs {
+                                name: None,
+                                org: Some(org_id.to_owned()),
+                                mesh_url: mesh_override,
+                                no_use: false,
+                                auto_connect: args.auto_connect,
+                            }),
+                        ))
+                        .await;
+                    }
+                    let choices = networks
+                        .iter()
+                        .map(|network| {
+                            super::guided::Choice::new(
+                                &network.id,
+                                format!("{} · organization {}", mesh.label(), network.org_id),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    networks[super::guided::choose(
+                        "Choose the network for new environments",
+                        &choices,
+                    )?]
+                    .id
+                    .clone()
+                }
+            };
+            let network_id = trimmed_required(&network_name, "network name")?;
             anyhow::ensure!(
                 networks.iter().any(|network| network.id == network_id),
                 "network {} was not found in organization {} on {} ({}); nothing was selected",

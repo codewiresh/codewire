@@ -1,7 +1,7 @@
 ---
 title: Networking
 description: network, mesh, control and member, and the global --member option for driving an enrolled trusted host.
-updated: 2026-11-01
+updated: 2026-11-07
 weight: 6
 aliases: ["/cli/networking"]
 ---
@@ -175,3 +175,11 @@ reports only the session's final state and exit code; read its output with
 `logs --session`. Member control exists on Linux only:
 macOS offers no public way to find a session's processes after their parent
 exits, so on a Mac run sessions in a local VM instead.
+
+## Guided network selection
+
+At an interactive terminal, `cw network create` asks for a missing network
+name and owner organization, then reviews the Mesh and ownership before
+creation. `cw network use` without a name offers the networks belonging to
+the selected Mesh owner. An empty list explains how to create one.
+Noninteractive calls require the name and any required `--org` explicitly.

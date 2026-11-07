@@ -38,8 +38,8 @@ pub(crate) enum SnapshotCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct SnapshotCreateArgs {
-    #[arg(help = "The stopped environment to snapshot")]
-    pub(crate) environment: String,
+    #[arg(help = "The stopped environment to snapshot; omit to choose interactively")]
+    pub(crate) environment: Option<String>,
     #[arg(
         long,
         value_name = "NAME",
@@ -66,8 +66,94 @@ pub(crate) struct SnapshotTargetArgs {
 
 pub(crate) async fn handle_snapshot_command(
     globals: &Globals,
-    args: SnapshotArgs,
+    mut args: SnapshotArgs,
 ) -> anyhow::Result<()> {
+    let mut effective = globals.clone();
+    if let SnapshotCommand::Create(create) = &mut args.command
+        && create.environment.is_none()
+    {
+        super::guided::require_available(
+            create.output,
+            "name a stopped environment: `cw snapshot create ENV [--name NAME]`",
+        )?;
+        if effective.placement.is_none() {
+            #[cfg(target_os = "linux")]
+            {
+                effective.placement = Some(
+                    if super::guided::choose(
+                        "Where is the stopped environment?",
+                        &[
+                            super::guided::Choice::new("On this computer", "Local disk snapshots"),
+                            super::guided::Choice::new("In Codewire cloud", "Cloud disk snapshots"),
+                        ],
+                    )? == 0
+                    {
+                        EnvironmentPlacement::Local
+                    } else {
+                        EnvironmentPlacement::Platform
+                    },
+                );
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                super::guided::choose(
+                    "Where is the stopped environment?",
+                    &[super::guided::Choice::new(
+                        "In Codewire cloud",
+                        "Local disk snapshots require Linux",
+                    )],
+                )?;
+                effective.placement = Some(EnvironmentPlacement::Platform);
+            }
+        }
+        if effective.placement == Some(EnvironmentPlacement::Local) && !cfg!(target_os = "linux") {
+            anyhow::bail!(
+                "local disk snapshots need a Linux host for now; use --cloud for cloud snapshots"
+            );
+        }
+        let inventory = super::inventory::environment_inventory(
+            &effective,
+            effective.placement,
+            &super::inventory::InventoryOptions {
+                state: Some("stopped".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let entries = snapshot_candidates(&inventory)?;
+        let choices = entries
+            .iter()
+            .map(|entry| {
+                super::guided::Choice::new(
+                    entry.name(),
+                    format!("{} · {}", entry.location.kind(), entry.id()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let entry =
+            &entries[super::guided::choose("Choose a stopped environment to snapshot", &choices)?];
+        create.environment = Some(entry.id().to_owned());
+        if create.name.is_none() {
+            create.name = Some(super::guided::text(
+                "Snapshot name",
+                Some(&default_snapshot_name(entry.name(), chrono::Utc::now())),
+                super::guided::required,
+            )?);
+        }
+        super::additions::review(
+            "Create disk snapshot?",
+            &[
+                ("Environment", entry.name().to_owned()),
+                ("Location", entry.location.kind().to_owned()),
+                ("Snapshot", create.name.clone().unwrap_or_default()),
+                (
+                    "Contents",
+                    "Disks, including workload files; delivered sign-ins are removed".to_owned(),
+                ),
+            ],
+        )?;
+    }
+    let globals = &effective;
     if globals.placement == Some(EnvironmentPlacement::Platform) {
         return platform::handle_platform_snapshot_command(globals, args.command).await;
     }
@@ -82,6 +168,26 @@ pub(crate) async fn handle_snapshot_command(
     }
 }
 
+fn snapshot_candidates(
+    inventory: &super::inventory::EnvironmentInventory,
+) -> anyhow::Result<&[super::inventory::InventoryEntry]> {
+    if inventory.entries.is_empty() {
+        let unavailable = inventory.unavailable();
+        if !unavailable.is_empty() {
+            for (_, reason) in unavailable {
+                eprintln!("{}", progress::terminal_text(reason));
+            }
+            anyhow::bail!(
+                "stopped environments could not be listed; resolve the error above and retry `cw snapshot create`"
+            );
+        }
+        anyhow::bail!(
+            "no eligible stopped environments; list environments with `cw ls`, then stop one with `cw stop ENV`"
+        );
+    }
+    Ok(&inventory.entries)
+}
+
 #[cfg(target_os = "linux")]
 async fn handle_local_snapshot_command(
     globals: &Globals,
@@ -93,13 +199,17 @@ async fn handle_local_snapshot_command(
     let client = native_client().await?;
     match command {
         SnapshotCommand::Create(args) => {
+            let environment = args
+                .environment
+                .as_deref()
+                .context("environment is required")?;
             let name = match args.name.as_deref().and_then(trimmed_str) {
                 Some(name) => name.to_owned(),
-                None => default_snapshot_name(&args.environment, chrono::Utc::now()),
+                None => default_snapshot_name(environment, chrono::Utc::now()),
             };
             let account = native_signed_in_account(globals);
             let snapshot = client
-                .create_snapshot(&args.environment, &name, account)
+                .create_snapshot(environment, &name, account)
                 .await
                 .map_err(status("snapshot create"))?;
             match args.output {
@@ -434,7 +544,7 @@ mod tests {
         else {
             panic!("create");
         };
-        assert_eq!(create.environment, "app");
+        assert_eq!(create.environment.as_deref(), Some("app"));
         assert_eq!(create.name.as_deref(), Some("good-toolchain"));
         assert!(matches!(
             Probe::try_parse_from(["snapshot", "ls", "--output", "json"])
@@ -456,7 +566,15 @@ mod tests {
             Probe::try_parse_from(["snapshot", "rm", "s1"]).unwrap().command,
             SnapshotCommand::Rm(SnapshotTargetArgs { snapshot, .. }) if snapshot == "s1"
         ));
-        assert!(Probe::try_parse_from(["snapshot", "create"]).is_err());
+        assert!(matches!(
+            Probe::try_parse_from(["snapshot", "create"])
+                .unwrap()
+                .command,
+            SnapshotCommand::Create(SnapshotCreateArgs {
+                environment: None,
+                ..
+            })
+        ));
         assert!(Probe::try_parse_from(["snapshot", "rm"]).is_err());
     }
 
@@ -502,5 +620,26 @@ mod tests {
         assert!(inspected.contains("1.0 GiB shared"), "{inspected}");
         assert!(inspected.contains(".env file"), "{inspected}");
         assert!(inspected.contains("no platform account"), "{inspected}");
+    }
+
+    #[test]
+    fn unavailable_snapshot_inventory_is_not_reported_as_empty() {
+        use super::super::inventory::{
+            EnvironmentInventory, Location, LocationReport, LocationStatus,
+        };
+        let mut inventory = EnvironmentInventory::default();
+        assert!(
+            snapshot_candidates(&inventory)
+                .unwrap_err()
+                .to_string()
+                .contains("no eligible stopped environments")
+        );
+        inventory.locations.push(LocationReport {
+            location: Location::Cloud,
+            status: LocationStatus::Unavailable("synthetic inventory failure".to_owned()),
+        });
+        let error = snapshot_candidates(&inventory).unwrap_err().to_string();
+        assert!(error.contains("could not be listed"));
+        assert!(!error.contains("no eligible"));
     }
 }

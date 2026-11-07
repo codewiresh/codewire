@@ -49,8 +49,8 @@ pub(crate) enum PolicyCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct PolicyCreateArgs {
-    #[arg(help = "The new policy's name")]
-    pub(crate) name: String,
+    #[arg(help = "The new policy's name; omit for an interactive walkthrough")]
+    pub(crate) name: Option<String>,
     #[arg(
         long,
         value_name = "POLICY",
@@ -120,7 +120,7 @@ impl PolicyCommand {
 
 pub(crate) async fn handle_policy_command(
     globals: &Globals,
-    args: PolicyArgs,
+    mut args: PolicyArgs,
 ) -> anyhow::Result<()> {
     // `check` against a built-in needs no store.
     if let PolicyCommand::Check(check) = &args.command
@@ -128,13 +128,27 @@ pub(crate) async fn handle_policy_command(
     {
         return print_check(check, &builtin.to_string(), None, &builtin.compile());
     }
+    let guided_create = matches!(&args.command, PolicyCommand::Create(args) if args.name.is_none());
+    if let PolicyCommand::Create(args) = &mut args.command {
+        if guided_create && globals.placement == Some(EnvironmentPlacement::Platform) {
+            anyhow::bail!(
+                "platform network policies are not available yet; use `cw --local policy create`"
+            );
+        }
+        args.name = Some(super::additions::required(
+            args.name.take(),
+            "Policy name",
+            args.output,
+            "name the policy: `cw --local policy create NAME`",
+        )?);
+    }
     match globals.placement {
         Some(EnvironmentPlacement::Platform) => anyhow::bail!(
             "platform network policies are not available yet; keep this policy on this host with --local"
         ),
         Some(EnvironmentPlacement::Local) => {}
         None => {
-            guided::require_available(
+            super::guided::require_available(
                 if args.command.json() {
                     OutputFormat::Json
                 } else {
@@ -142,20 +156,23 @@ pub(crate) async fn handle_policy_command(
                 },
                 "select the policy store: `cw --local policy ...`",
             )?;
-            guided::choose(
+            super::guided::choose(
                 "Where should Codewire store this policy?",
-                &[guided::Choice::new(
+                &[super::guided::Choice::new(
                     "On this computer",
                     "Local policy store; cloud policy storage is not available yet",
                 )],
             )?;
         }
     }
-    handle_local_policy_command(args.command).await
+    handle_local_policy_command(args.command, guided_create).await
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-async fn handle_local_policy_command(command: PolicyCommand) -> anyhow::Result<()> {
+async fn handle_local_policy_command(
+    command: PolicyCommand,
+    guided_create: bool,
+) -> anyhow::Result<()> {
     use codewire_local_vmm::control::v1;
 
     let mut client = native_client().await?;
@@ -163,7 +180,71 @@ async fn handle_local_policy_command(command: PolicyCommand) -> anyhow::Result<(
         move |status: tonic::Status| anyhow::anyhow!("{action}: {}", status.message())
     };
     match command {
-        PolicyCommand::Create(args) => {
+        PolicyCommand::Create(mut args) => {
+            if guided_create {
+                if args.from.is_none() {
+                    let policies = client
+                        .list_network_policies()
+                        .await
+                        .map_err(status("list base policies"))?;
+                    let mut choices =
+                        vec![super::guided::Choice::new("Locked", "No outbound access")];
+                    choices.extend(policies.iter().map(|policy| {
+                        super::guided::Choice::new(&policy.name, rules_text(policy))
+                    }));
+                    let index = super::guided::choose("Start with which rules?", &choices)?;
+                    args.from = Some(if index == 0 {
+                        "locked".to_owned()
+                    } else {
+                        policies[index - 1].name.clone()
+                    });
+                }
+                if args.allow.is_empty() {
+                    let targets = super::guided::text(
+                        "Destinations to allow (comma separated; Enter for none)",
+                        Some(""),
+                        |value| {
+                            let targets = value
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|v| !v.is_empty())
+                                .map(str::to_owned)
+                                .collect::<Vec<_>>();
+                            rules_from(&targets)
+                                .map(|_| ())
+                                .map_err(|error| error.to_string())
+                        },
+                    )?;
+                    args.allow = targets
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
+                super::additions::review(
+                    "Create network policy?",
+                    &[
+                        ("Storage", "This computer".to_owned()),
+                        ("Name", args.name.clone().unwrap_or_default()),
+                        (
+                            "Base",
+                            args.from.clone().unwrap_or_else(|| "locked".to_owned()),
+                        ),
+                        (
+                            "Allow",
+                            if args.allow.is_empty() {
+                                "No additional destinations".to_owned()
+                            } else {
+                                format!(
+                                    "{} (unspecified ports: 22, 80, 443)",
+                                    args.allow.join(", ")
+                                )
+                            },
+                        ),
+                    ],
+                )?;
+            }
             let from = args
                 .from
                 .as_deref()
@@ -173,7 +254,7 @@ async fn handle_local_policy_command(command: PolicyCommand) -> anyhow::Result<(
             let allow = rules_from(&args.allow)?;
             let created = client
                 .create_network_policy(v1::CreateNetworkPolicyRequest {
-                    name: args.name,
+                    name: args.name.context("policy name is required")?,
                     from,
                     allow: allow.into_iter().map(rule_proto).collect(),
                 })
@@ -244,7 +325,10 @@ async fn handle_local_policy_command(command: PolicyCommand) -> anyhow::Result<(
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-async fn handle_local_policy_command(_command: PolicyCommand) -> anyhow::Result<()> {
+async fn handle_local_policy_command(
+    _command: PolicyCommand,
+    _guided_create: bool,
+) -> anyhow::Result<()> {
     anyhow::bail!("local network policies need a Linux or macOS host")
 }
 

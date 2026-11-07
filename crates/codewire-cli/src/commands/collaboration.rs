@@ -445,18 +445,7 @@ pub(crate) fn prompt_default(label: &str, default: &str) -> anyhow::Result<Strin
 }
 
 pub(crate) fn prompt_select_org(orgs: &[OrgWithRole]) -> anyhow::Result<&OrgWithRole> {
-    eprintln!("Select organization:");
-    for (index, org) in orgs.iter().enumerate() {
-        eprintln!("  {}) {} ({})", index + 1, org.name, org.role);
-    }
-    let choice = prompt_text("Organization number: ")?;
-    let index = choice
-        .parse::<usize>()
-        .ok()
-        .and_then(|choice| choice.checked_sub(1))
-        .ok_or_else(|| anyhow::anyhow!("invalid organization selection"))?;
-    orgs.get(index)
-        .ok_or_else(|| anyhow::anyhow!("invalid organization selection"))
+    super::additions::org_choice(orgs, None)
 }
 
 pub(crate) fn stdin_is_interactive() -> bool {

@@ -56,6 +56,7 @@ mod credential_darwin;
 mod credential_repository;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use credential_repository::*;
+mod additions;
 mod credential_input;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credentials;
@@ -1861,8 +1862,11 @@ pub(crate) struct OrgSetArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct OrgCreateArgs {
-    #[arg(value_name = "NAME")]
-    name: String,
+    #[arg(
+        value_name = "NAME",
+        help = "Organization name; omit for an interactive walkthrough"
+    )]
+    name: Option<String>,
     #[arg(long, help = "URL-safe slug (default: auto-generated from name)")]
     slug: Option<String>,
 }
@@ -1877,14 +1881,13 @@ pub(crate) struct OrgDeleteArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct OrgInviteArgs {
-    #[arg(value_name = "EMAIL")]
-    email: String,
     #[arg(
-        long,
-        default_value = "member",
-        help = "Role to assign (owner, admin, member)"
+        value_name = "EMAIL",
+        help = "Invitation recipient; omit for an interactive walkthrough"
     )]
-    role: String,
+    email: Option<String>,
+    #[arg(long, help = "Role to assign (owner, admin, member; default: member)")]
+    role: Option<String>,
     #[arg(long, value_name = "ID_OR_SLUG", help = "Organization ID or slug")]
     org: Option<String>,
 }
@@ -1901,10 +1904,13 @@ pub(crate) enum ApiKeyCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct ApiKeyCreateArgs {
-    #[arg(value_name = "NAME")]
-    name: String,
-    #[arg(long, default_value_t = 0, help = "Expire after N days (0 = never)")]
-    expires: i32,
+    #[arg(
+        value_name = "NAME",
+        help = "API key name; omit for an interactive walkthrough"
+    )]
+    name: Option<String>,
+    #[arg(long, help = "Expire after N days (0 = never; default: never)")]
+    expires: Option<i32>,
 }
 
 #[derive(Debug, Args)]
@@ -1927,12 +1933,15 @@ pub(crate) enum PresetCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct PresetCreateArgs {
-    #[arg(value_name = "SLUG")]
-    slug: String,
+    #[arg(
+        value_name = "SLUG",
+        help = "Preset slug; omit for an interactive walkthrough"
+    )]
+    slug: Option<String>,
     #[arg(long, help = "Display name (defaults to slug)")]
     name: Option<String>,
     #[arg(long, help = "Container image (shorthand: go, node, python)")]
-    image: String,
+    image: Option<String>,
     #[arg(long, help = "Default install command")]
     install: Option<String>,
     #[arg(long, help = "Default startup script")]
@@ -2206,8 +2215,8 @@ pub(crate) struct NetworkListArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct NetworkCreateArgs {
-    #[arg(help = "Network name to create")]
-    name: String,
+    #[arg(help = "Network name to create; omit for an interactive walkthrough")]
+    name: Option<String>,
     #[arg(long = "mesh-url", help = "Mesh base URL override")]
     mesh_url: Option<String>,
     #[arg(
@@ -2215,9 +2224,13 @@ pub(crate) struct NetworkCreateArgs {
         value_name = "ORG_ID",
         help = "Exact organization ID to own the network"
     )]
-    org: String,
+    org: Option<String>,
     #[arg(long, help = "Create without selecting the network locally")]
     no_use: bool,
+    /// Carries `network use --auto-connect` through its empty-list creation.
+    /// A direct `network create` keeps automatic attachment disabled.
+    #[arg(skip)]
+    auto_connect: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2244,8 +2257,8 @@ pub(crate) struct NetworkCurrentArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct NetworkUseArgs {
-    #[arg(help = "Network name to select")]
-    name: String,
+    #[arg(help = "Network name to select; omit to choose interactively")]
+    name: Option<String>,
     #[arg(long = "mesh-url", help = "Mesh base URL override")]
     mesh_url: Option<String>,
     #[arg(

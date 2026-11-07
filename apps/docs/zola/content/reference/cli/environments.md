@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, update, ports, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh and preset.
-updated: 2026-10-28
+updated: 2026-11-07
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -415,3 +415,12 @@ Preset created: Team web.
 ```
 
 See [Presets](@/environments/presets.md).
+
+## Guided snapshot creation
+
+At an interactive terminal, `cw snapshot create` without an environment asks
+for a supported location, then lists eligible stopped environments. Choose a
+source and snapshot name and review before creating the snapshot. Workload
+files are retained; Codewire-delivered sign-ins are removed. Local disk
+snapshots currently require Linux; other hosts offer cloud snapshots.
+Noninteractive and JSON calls must name the source environment explicitly.

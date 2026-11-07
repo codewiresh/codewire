@@ -731,8 +731,9 @@ fn browser_command(url: &str) -> ProcessCommand {
 
 pub(crate) async fn handle_org_command(
     globals: &Globals,
-    command: Option<OrgCommand>,
+    mut command: Option<OrgCommand>,
 ) -> anyhow::Result<()> {
+    let guided = super::additions::org_metadata(&mut command)?;
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
@@ -754,7 +755,7 @@ pub(crate) async fn handle_org_command(
         }
         OrgCommand::Set(args) => {
             let orgs = client.list_orgs().await.context("list orgs")?;
-            let selected = select_org(&orgs, args.id_or_slug.as_deref())?;
+            let selected = super::additions::org_choice(&orgs, args.id_or_slug.as_deref())?;
             let mut saved = config::load_platform_config(&paths.platform_config_dir)?;
             if !config::same_server_url(&saved.server_url, &platform.server_url) {
                 anyhow::bail!(
@@ -769,13 +770,24 @@ pub(crate) async fn handle_org_command(
             eprintln!("Current org set to {} ({}).", selected.name, selected.slug);
         }
         OrgCommand::Create(args) => {
-            let name = trimmed_required(&args.name, "organization name")?;
+            let name = trimmed_required(
+                args.name
+                    .as_deref()
+                    .context("organization name is required")?,
+                "organization name",
+            )?;
             let slug = args
                 .slug
                 .as_deref()
                 .and_then(trimmed_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| slugify(name));
+            if guided {
+                super::additions::review(
+                    "Create organization?",
+                    &[("Name", name.to_owned()), ("Slug", slug.clone())],
+                )?;
+            }
             let org = client
                 .create_org(&CreateOrgRequest {
                     name: name.to_string(),
@@ -830,10 +842,25 @@ pub(crate) async fn handle_org_command(
             }
         }
         OrgCommand::Invite(args) => {
-            let email = trimmed_required(&args.email, "email")?;
-            let role = trimmed_required(&args.role, "role")?;
+            let email =
+                trimmed_required(args.email.as_deref().context("email is required")?, "email")?;
+            let role = trimmed_required(args.role.as_deref().unwrap_or("member"), "role")?;
             let orgs = client.list_orgs().await.context("list orgs")?;
-            let org_id = resolve_org_id(&platform, &orgs, args.org.as_deref())?;
+            let org_id = if guided && args.org.is_none() {
+                super::additions::org_choice(&orgs, None)?.id.clone()
+            } else {
+                resolve_org_id(&platform, &orgs, args.org.as_deref())?
+            };
+            if guided {
+                super::additions::review(
+                    "Send invitation?",
+                    &[
+                        ("Organization", org_id.clone()),
+                        ("Email", email.to_owned()),
+                        ("Role", role.to_owned()),
+                    ],
+                )?;
+            }
             let created = client
                 .create_invitation(
                     &org_id,
@@ -857,8 +884,9 @@ pub(crate) async fn handle_org_command(
 
 pub(crate) async fn handle_api_keys_command(
     globals: &Globals,
-    command: ApiKeyCommand,
+    mut command: ApiKeyCommand,
 ) -> anyhow::Result<()> {
+    let guided = super::additions::api_key_metadata(&mut command)?;
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
@@ -866,18 +894,43 @@ pub(crate) async fn handle_api_keys_command(
         .list_orgs()
         .await
         .context("list orgs")?;
-    let org_id = current_org_id(&platform, &orgs)?;
+    let org_id = if guided {
+        super::additions::org_choice(&orgs, None)?.id.clone()
+    } else {
+        current_org_id(&platform, &orgs)?
+    };
     let client = codewire_client(&platform)?;
 
     match command {
         ApiKeyCommand::Create(args) => {
-            let name = trimmed_required(&args.name, "api key name")?;
+            let name = trimmed_required(
+                args.name.as_deref().context("API key name is required")?,
+                "api key name",
+            )?;
+            let expires = args.expires.unwrap_or(0);
+            if guided {
+                super::additions::review(
+                    "Create API key?",
+                    &[
+                        ("Organization", org_id.clone()),
+                        ("Name", name.to_owned()),
+                        (
+                            "Expiry",
+                            if expires > 0 {
+                                format!("{expires} days")
+                            } else {
+                                "Never".to_owned()
+                            },
+                        ),
+                    ],
+                )?;
+            }
             let response = client
                 .create_api_key(CreateApiKeyRequest {
                     org_id,
                     name: name.to_string(),
                     scopes: Vec::new(),
-                    expires_in_days: (args.expires > 0).then_some(args.expires),
+                    expires_in_days: (expires > 0).then_some(expires),
                     ..Default::default()
                 })
                 .await
@@ -916,14 +969,19 @@ pub(crate) async fn handle_api_keys_command(
 
 pub(crate) async fn handle_preset_command(
     globals: &Globals,
-    command: PresetCommand,
+    mut command: PresetCommand,
 ) -> anyhow::Result<()> {
+    let guided = super::additions::preset_metadata(&mut command)?;
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let client = organization_client(&platform)?;
     let orgs = client.list_orgs().await.context("list orgs")?;
-    let org_id = current_org_id(&platform, &orgs)?;
+    let org_id = if guided {
+        super::additions::org_choice(&orgs, None)?.id.clone()
+    } else {
+        current_org_id(&platform, &orgs)?
+    };
 
     match command {
         PresetCommand::List => {
@@ -931,8 +989,12 @@ pub(crate) async fn handle_preset_command(
             print!("{}", format_preset_list_text(&presets));
         }
         PresetCommand::Create(args) => {
-            let slug = trimmed_required(&args.slug, "preset slug")?;
-            let image = trimmed_required(&args.image, "image")?;
+            let slug = trimmed_required(
+                args.slug.as_deref().context("preset slug is required")?,
+                "preset slug",
+            )?;
+            let image =
+                trimmed_required(args.image.as_deref().context("image is required")?, "image")?;
             let image = if image.contains('/') {
                 image.to_string()
             } else {
@@ -975,6 +1037,43 @@ pub(crate) async fn handle_preset_command(
                 },
             };
             request.project_spec.validate()?;
+            if guided {
+                super::additions::review(
+                    "Create preset?",
+                    &[
+                        ("Organization", org_id.clone()),
+                        ("Slug", slug.to_owned()),
+                        ("Image", request.project_spec.image.clone()),
+                        ("Display name", request.name.clone()),
+                        (
+                            "CPU",
+                            args.cpu
+                                .clone()
+                                .unwrap_or_else(|| "Environment default".into()),
+                        ),
+                        (
+                            "Memory",
+                            args.memory
+                                .map(|v| format!("{v} MB"))
+                                .unwrap_or_else(|| "Environment default".into()),
+                        ),
+                        (
+                            "Disk",
+                            args.disk
+                                .map(|v| format!("{v} GB"))
+                                .unwrap_or_else(|| "Environment default".into()),
+                        ),
+                        (
+                            "TTL",
+                            args.ttl
+                                .clone()
+                                .unwrap_or_else(|| "Environment default".into()),
+                        ),
+                        ("Install", request.project_spec.install_command.clone()),
+                        ("Startup", request.project_spec.startup_script.clone()),
+                    ],
+                )?;
+            }
             let preset = client
                 .create_preset(&org_id, &request)
                 .await

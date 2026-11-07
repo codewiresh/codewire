@@ -1,7 +1,7 @@
 ---
 title: Configuration
 description: Where cw keeps its files and which environment variables it reads.
-updated: 2026-10-26
+updated: 2026-11-07
 weight: 9
 aliases: ["/cli/configuration"]
 ---
@@ -32,3 +32,15 @@ cw config inspect --output json
 
 Every variable `cw` reads is in
 [Environment variables](@/reference/cli/environment-variables.md).
+
+## Guided preset and policy creation
+
+At an interactive terminal, `cw preset create` asks for a missing slug and
+image. Optional settings are available through **Edit optional settings**;
+review the organization, image and resource defaults before creation.
+`cw --local policy create` asks for a missing name, offers `locked` or an
+existing policy as its base, and lets you enter allowed destinations. Targets
+without a port allow ports 22, 80 and 443. The review shows the base and added
+rules. Policies are stored on this computer; cloud policy storage is not yet
+available. Supplied arguments skip their questions. Noninteractive and JSON
+calls require explicit inputs and never open a menu.

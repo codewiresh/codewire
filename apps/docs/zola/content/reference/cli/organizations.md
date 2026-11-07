@@ -1,7 +1,7 @@
 ---
 title: Organizations
 description: setup, login, logout, whoami, org, api-keys and cost.
-updated: 2026-10-26
+updated: 2026-11-07
 weight: 7
 aliases: ["/cli/account"]
 ---
@@ -53,15 +53,15 @@ cw whoami [--output json]
 cw org list [--output json]            # alias: ls
 cw org current
 cw org set [ID_OR_SLUG]                # also: cw org, with one organization
-cw org create NAME [--slug SLUG]
-cw org invite EMAIL [--role owner|admin|member] [--org ID_OR_SLUG]   # prints the invitation link once
+cw org create [NAME] [--slug SLUG]
+cw org invite [EMAIL] [--role owner|admin|member] [--org ID_OR_SLUG]   # prints the invitation link once
 cw org delete ID_OR_SLUG [--yes]       # owner only; asks you to type the name
 ```
 
 ## cw api-keys
 
 ```sh
-cw api-keys create NAME [--expires DAYS]   # 0 = never; the key is printed once
+cw api-keys create [NAME] [--expires DAYS]   # 0 = never; the key is printed once
 cw api-keys list
 cw api-keys delete KEY_ID
 ```
@@ -75,3 +75,11 @@ cw cost [--org SLUG_OR_ID] [--output json]
 ```
 
 Usage and billing overview for the organization.
+
+At an interactive terminal, omitting the organization name, invitation email,
+or API-key name opens a walkthrough. Invitations offer a role menu; API keys
+offer expiry choices. The walkthrough shows the owning organization and asks
+for confirmation before creating anything. Supplied flags skip their questions.
+`cw org set` without a target offers a searchable organization list.
+Without a terminal, name these values explicitly; stdin is never consumed as
+metadata.
