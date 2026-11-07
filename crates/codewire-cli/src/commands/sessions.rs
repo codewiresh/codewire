@@ -644,7 +644,7 @@ async fn environment_session_target_from_current(
             let environment_id = target.target_ref.clone();
             Ok(EnvironmentSessionTarget::Platform {
                 target,
-                org_id: current_org_id(&platform, &orgs)?,
+                org_id: resolve_org_id(&platform, &orgs, globals.org.as_deref())?,
                 environment_id,
                 client: Box::new(codewire_client(&platform)?),
             })
@@ -1633,9 +1633,102 @@ async fn launch_run(
         return super::member_control::terminal::run(globals, args).await;
     }
     anyhow::ensure!(args.request_id.is_none(), "--request-id requires --member");
-    let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
-    let bare = check_run_request(&args, caps.interactive && caps.live)?;
-    let target = resolve_environment_session_target(globals, args.environment.as_deref()).await?;
+    let caps = super::lifecycle_output::capabilities(args.output);
+    let can_ask = run_can_ask(&args, &caps);
+    let bare = check_run_request(&args, can_ask)?;
+    if bare {
+        // Collect the last missing launch choice before a walkthrough can
+        // create an environment. Canceling the agent menu creates nothing.
+        args.native_agent =
+            Some(choose_native_agent("a new or existing environment", &caps).await?);
+    }
+    let paths = ResolvePaths::from_env(&OsEnv)?;
+    let selected = if args.environment.as_deref().and_then(trimmed_str).is_none() {
+        Some(config::current_target(&paths.mesh_data_dir)?)
+    } else {
+        None
+    };
+    let mut missing = selected
+        .as_ref()
+        .is_some_and(|selected| selected.kind == "local" && selected.target_ref == "local");
+    if can_ask && let Some(selected) = &selected {
+        if matches!(globals.placement, Some(EnvironmentPlacement::Platform))
+            && selected.kind == "local"
+            || matches!(globals.placement, Some(EnvironmentPlacement::Local))
+                && selected.kind == "env"
+        {
+            missing = true;
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if !missing && selected.kind == "local" {
+            missing = !native_state_exists()?
+                || native_environment(&selected.target_ref).await?.is_none();
+            if missing {
+                eprintln!(
+                    "The selected local environment no longer exists. Choose another environment or create one."
+                );
+            }
+        }
+    }
+    let mut target = if missing {
+        anyhow::ensure!(can_ask, "{}", no_environment_selected());
+        check_run_setup_request(&args)?;
+        let (selected, organization) =
+            super::launch_setup::choose_run_environment(globals, &args).await?;
+        environment_session_target_from_current(
+            &globals.with_org(organization),
+            &paths,
+            &OsEnv,
+            selected,
+        )
+        .await?
+    } else {
+        resolve_environment_session_target(globals, args.environment.as_deref()).await?
+    };
+    if can_ask
+        && !missing
+        && args.environment.as_deref().and_then(trimmed_str).is_none()
+        && let EnvironmentSessionTarget::Platform {
+            client,
+            org_id,
+            environment_id,
+            ..
+        } = &target
+    {
+        let missing_cloud = match client
+            .get_environment(codewire_client::GetEnvironmentRequest {
+                org_id: org_id.clone(),
+                environment_id: environment_id.clone(),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(response) => {
+                let environment = response
+                    .environment
+                    .as_option()
+                    .context("platform returned no environment")?;
+                environment.state.as_known() == Some(codewire_client::EnvironmentState::Destroyed)
+            }
+            Err(error) if error.code() == codewire_client::ErrorCode::NotFound => true,
+            Err(error) => return Err(display_client_error(error)),
+        };
+        if missing_cloud {
+            eprintln!(
+                "The selected cloud environment no longer exists. Choose another environment or create one."
+            );
+            check_run_setup_request(&args)?;
+            let (selected, organization) =
+                super::launch_setup::choose_run_environment(globals, &args).await?;
+            target = environment_session_target_from_current(
+                &globals.with_org(organization),
+                &paths,
+                &OsEnv,
+                selected,
+            )
+            .await?;
+        }
+    }
     if args.agent.is_some() {
         #[cfg(unix)]
         return agents::handle_agent_run_command(globals, target, args).await;
@@ -1643,11 +1736,7 @@ async fn launch_run(
         anyhow::bail!("managed conversations currently require a trusted Linux or macOS host");
     }
     let place = SessionPlace::of(&target);
-    let agent = match args.native_agent {
-        Some(agent) => Some(agent),
-        None if bare => Some(choose_native_agent(&place.environment, &caps).await?),
-        None => None,
-    };
+    let agent = args.native_agent;
     let pty = match agent {
         // An agent's terminal UI needs a terminal even when this command's
         // own streams are not one, or when it prints JSON and detaches.
@@ -1719,9 +1808,29 @@ async fn launch_run(
     Ok(())
 }
 
-/// What `cw run` can refuse before any lookup: a bare `cw run` where it
-/// cannot ask which agent (`can_ask`), and a `--name` that is not a
-/// session name. Returns whether the run is bare.
+/// Prompt only when the requested output mode and process terminals allow it.
+pub(crate) fn run_can_ask(args: &EnvironmentRunArgs, caps: &crate::output::Capabilities) -> bool {
+    matches!(args.output, OutputFormat::Text) && caps.interactive && caps.live
+}
+
+/// Creating a sandbox can satisfy a new session request. A parent session
+/// or an agent outside the sandbox capability set requires an existing
+/// target, selected through the normal explicit or saved-selection path.
+fn check_run_setup_request(args: &EnvironmentRunArgs) -> anyhow::Result<()> {
+    let requires_existing = args.parent.is_some()
+        || args
+            .agent
+            .as_deref()
+            .is_some_and(|agent| !matches!(agent, "codex" | "claude"));
+    anyhow::ensure!(
+        !requires_existing,
+        "this run requires an existing supported environment; select it with --in ENV or cw use ENV before running it"
+    );
+    Ok(())
+}
+
+/// Refuse missing script input or an invalid session name before any lookup.
+/// Returns whether the run still needs an agent choice.
 pub(crate) fn check_run_request(args: &EnvironmentRunArgs, can_ask: bool) -> anyhow::Result<bool> {
     let bare = args.native_agent.is_none() && args.agent.is_none() && args.command.is_empty();
     anyhow::ensure!(

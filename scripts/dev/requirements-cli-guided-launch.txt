@@ -1,0 +1,4 @@
+# HTTP/2 fixture only; no product runtime dependency.
+h2==4.4.1
+hpack==4.2.0
+hyperframe==6.1.0

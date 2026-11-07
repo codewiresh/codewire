@@ -50,7 +50,10 @@ pub(crate) async fn handle_whoami_command(
     print_platform_user(&user, &platform, args.output)
 }
 
-pub(crate) async fn handle_init_command(globals: &Globals, args: InitArgs) -> anyhow::Result<()> {
+pub(crate) async fn handle_init_command(
+    globals: &Globals,
+    mut args: InitArgs,
+) -> anyhow::Result<()> {
     if !args.force
         && args
             .file
@@ -63,6 +66,9 @@ pub(crate) async fn handle_init_command(globals: &Globals, args: InitArgs) -> an
         );
     }
 
+    let guided = super::launch_setup::prepare_init(globals, &mut args)
+        .await
+        .context("codewire.yaml was not written")?;
     let mut platform_context = None;
     let request = if init_needs_platform_resolution(&args) {
         let prepare = init_prepare_request_from_args(&args)?;
@@ -78,6 +84,19 @@ pub(crate) async fn handle_init_command(globals: &Globals, args: InitArgs) -> an
         init_request_from_args(&args)?
     };
 
+    if guided {
+        eprintln!(
+            "{}",
+            super::launch_setup::configuration_summary("Write codewire.yaml", &request)
+        );
+        eprintln!(
+            "  File          {}",
+            terminal_text(&args.file.display().to_string())
+        );
+        if !super::guided::confirm("Write this configuration?")? {
+            anyhow::bail!("canceled; no configuration written");
+        }
+    }
     write_resolved_codewire_yaml(&args.file, &request).context("write codewire.yaml")?;
     eprintln!("codewire.yaml written: {}", args.file.display());
     if let Some(preset_name) = trimmed_optional(args.save_preset.clone()) {
@@ -318,7 +337,10 @@ pub(crate) fn init_needs_platform_resolution(args: &InitArgs) -> bool {
 }
 
 pub(crate) fn init_has_direct_yaml_inputs(args: &InitArgs) -> bool {
-    args.cpu.is_some()
+    args.profile.is_some()
+        || args.no_profile
+        || args.secrets.is_some()
+        || args.cpu.is_some()
         || args.memory.is_some()
         || args.disk.is_some()
         || args.image.as_deref().and_then(trimmed_str).is_some()
@@ -341,6 +363,7 @@ pub(crate) fn env_create_request_from_init_args(
         anyhow::bail!("--branch requires a repo URL");
     }
     let env_args = EnvCreateArgs {
+        guided: false,
         policy: None,
         environment_type: EnvironmentTypeArg::Sandbox,
         repo_urls: args.repo_urls.clone(),
@@ -367,9 +390,9 @@ pub(crate) fn env_create_request_from_init_args(
         startup: args.startup.clone(),
         coding_agent: args.coding_agent.clone(),
         env: args.env.clone(),
-        profile: None,
-        no_profile: false,
-        secrets: None,
+        profile: args.profile.clone(),
+        no_profile: args.no_profile,
+        secrets: args.secrets.clone(),
         user_secrets: None,
         org_secrets: false,
         network: None,

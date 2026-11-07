@@ -54,8 +54,13 @@ as positionals or with `--repo`; they replace the file's repositories.
 | `-y, --yes` | Skip confirmation prompts |
 | `--output json` | |
 
-At a terminal a local create shows the resolved settings and asks
-`[Y]es / [e]dit / [n]o`. A trusted host (`--local --type host`) takes only
+At a terminal, a create without `--name` asks for a name and, unless placement
+is explicit, where to create the environment. Cloud setup offers optional
+resource, image, repository and source-reference settings before its review.
+Local creation shows the resolved settings with **Create environment**, **Edit
+settings** and **Cancel** choices. Edit one setting at a time, then return to
+review. Escape, Ctrl-C or closed input cancels; `--yes` and JSON output skip
+these walkthroughs. A trusted host (`--local --type host`) takes only
 `--name` and `--path`.
 
 ## cw ls, info, report
@@ -348,11 +353,16 @@ app · local VM · running
 ```sh
 cw init [REPO_URL]... [--image IMAGE] [--install CMD] [--startup CMD] [--cpu CPU] [--memory MB] [--disk GB]
         [-e KEY=VALUE] [--preset SLUG] [--repo URL] [--branch B] [--file codewire.yaml] [--force] [-y]
+        [--profile PROFILE | --no-profile] [--secrets PROJECT]
 ```
 
 Writes `codewire.yaml`. With only direct inputs it works offline; a preset,
 repository or branch is resolved by the platform. It refuses to overwrite
-without `--force`. See [`codewire.yaml`](@/environments/codewire-yaml.md).
+without `--force`. At a terminal, bare `cw init` asks for an image,
+then offers optional resources, setup commands, credential-profile and
+secret-project references. It shows a review before writing. References contain
+no credential or secret material. Explicit direct inputs and `--yes` keep the
+flag-based path. See [`codewire.yaml`](@/environments/codewire-yaml.md).
 
 ## cw shell
 

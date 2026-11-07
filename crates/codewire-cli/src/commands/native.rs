@@ -492,9 +492,7 @@ pub(crate) async fn create_native_environment(
 ) -> anyhow::Result<Option<NativeCreated>> {
     host_support::require_local_vm_host()?;
     reject_unsupported_native_create_options(&args)?;
-    // Before the review: a VM of the cw this one updated from that still runs
-    // refuses the create.
-    let mut client = native_boot_client().await?;
+    // Gather and review inputs before booting the supervisor or allocating a VM.
     if args.name.as_deref().and_then(trimmed_str).is_none() {
         args.name = Some(default_native_name(
             Some(&native_source(&args)?.project_directory),
@@ -502,12 +500,25 @@ pub(crate) async fn create_native_environment(
         ));
     }
     let reviewed = native_create_is_interactive(&args);
-    if reviewed && !review_native_create(&mut args).await? {
-        return Ok(None);
+    if reviewed {
+        loop {
+            if !review_native_create(globals, &mut args)
+                .await
+                .context("no environment was created")?
+            {
+                return Ok(None);
+            }
+            if !offer_missing_runtime_setup().await? {
+                break;
+            }
+            // Installation changes the available runtime, not the reviewed
+            // environment. Return to its review before creating anything.
+        }
     }
     if reviewed && let Some(profile) = args.profile.as_deref().and_then(local_profile_selector) {
         super::credentials::offer_local_profile_ssh_key(profile).await?;
     }
+    let mut client = native_boot_client().await?;
     let name = args
         .name
         .as_deref()
@@ -1177,21 +1188,52 @@ fn native_create_is_interactive(args: &EnvCreateArgs) -> bool {
         && std::io::stderr().is_terminal()
 }
 
-/// Shows the settings and asks Yes, edit or no. Returns `false` on no.
-async fn review_native_create(args: &mut EnvCreateArgs) -> anyhow::Result<bool> {
+/// Shows the resolved settings and offers create, edit or cancel.
+async fn review_native_create(globals: &Globals, args: &mut EnvCreateArgs) -> anyhow::Result<bool> {
+    use super::guided::{self, Choice};
     loop {
         eprintln!("{}", native_create_summary(args)?);
-        let answer = prompt_text("Create with these settings? [Y]es / [e]dit / [n]o: ")?;
-        match answer.to_ascii_lowercase().as_str() {
-            "" | "y" | "yes" => return Ok(true),
-            "n" | "no" => {
-                eprintln!("Canceled; nothing was created.");
+        match guided::choose(
+            "Create with these settings?",
+            &[
+                Choice::new("Create environment", ""),
+                Choice::new("Edit settings", ""),
+                Choice::new("Cancel", ""),
+            ],
+        )? {
+            0 => return Ok(true),
+            1 => edit_native_create(globals, args).await?,
+            _ => {
+                eprintln!("Canceled; no environment was created.");
                 return Ok(false);
             }
-            "e" | "edit" => edit_native_create(args)?,
-            _ => eprintln!("Answer y, e or n."),
         }
     }
+}
+
+async fn offer_missing_runtime_setup() -> anyhow::Result<bool> {
+    use codewire_local_vmm::runtime_install::{self, InstalledRuntime, RuntimePaths};
+    let Some(document) = crate::local_runtime_pin::embedded()?
+        .filter(|document| runtime_install::host_runtime(document).is_ok())
+    else {
+        return Ok(false);
+    };
+    let (artifact_root, artifact_lock) = runtime_artifact_paths()?;
+    if runtime_install::installed_runtime(
+        &RuntimePaths {
+            artifact_root,
+            artifact_lock,
+        },
+        &document,
+    )? != InstalledRuntime::Missing
+    {
+        return Ok(false);
+    }
+    if !super::guided::confirm("Install this Codewire release's local VM runtime to continue?")? {
+        anyhow::bail!("canceled; no environment created");
+    }
+    setup_local_runtime(None, false).await?;
+    Ok(true)
 }
 
 /// Existing local environment names; empty before the first environment, when
@@ -1246,6 +1288,7 @@ fn default_native_name(path: Option<&Path>, taken: &[String]) -> String {
 
 fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
     let (source, mut project, provenance) = native_plan(args)?;
+    sources::apply_create_source_flags(&mut project.spec, args)?;
     let implicit = project.spec.repositories.is_empty() && project.local_mounts.is_empty();
     let mut workspace = resolve_native_workspace(
         &source.project_directory,
@@ -1327,7 +1370,15 @@ fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
             gib_label(disk_bytes)
         ),
         format!("  Docker       {docker}"),
-        format!("  Credentials  {profile}"),
+        format!("  Credentials  {}", progress::terminal_text(&profile)),
+        format!(
+            "  App secrets  {}",
+            progress::terminal_text(&native_review_secrets(&project.spec.secrets))
+        ),
+        format!(
+            "  Policy       {}",
+            progress::terminal_text(args.policy.as_deref().unwrap_or("open"))
+        ),
         format!("  Ports        {ports}"),
     ]);
     if let Some(notice) = workspace.notice {
@@ -1340,74 +1391,159 @@ fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
     Ok(lines.join("\n"))
 }
 
-/// Asks each setting in turn, with the current value as the default. An
-/// answer that does not parse is asked again.
-fn edit_native_create(args: &mut EnvCreateArgs) -> anyhow::Result<()> {
-    loop {
-        let name = prompt_default("Name", args.name.as_deref().unwrap_or_default())?;
-        if codewire_local_vmm::valid_environment_name(&name) {
-            args.name = Some(name);
-            break;
-        }
-        eprintln!("Use 1 to 63 letters, digits, '-', '_' or '.', starting with a letter or digit.");
+/// Edits one setting, with the resolved value as its default. Invalid
+/// answers remain in the prompt for correction.
+fn native_review_secrets(secrets: &codewire_project::SecretBindings) -> String {
+    let mut sources = Vec::new();
+    if !secrets.project.is_empty() {
+        sources.push(secrets.project.clone());
     }
-    let current_path = args
-        .path
-        .as_deref()
-        .unwrap_or_else(|| Path::new("."))
-        .display()
-        .to_string();
-    loop {
-        let path = PathBuf::from(prompt_default("Project directory", &current_path)?);
-        if std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
-            args.path = Some(path);
-            break;
-        }
-        eprintln!("{} is not a directory.", path.display());
+    if secrets.organization {
+        sources.push("organization".into());
     }
-    let current_mode = match args.path_mode.unwrap_or(PathModeArg::Mount) {
-        PathModeArg::Mount => "mount",
-        PathModeArg::Clone => "clone",
-        PathModeArg::Copy => "copy",
-        PathModeArg::Empty => "empty",
-    };
-    loop {
-        let mode = prompt_default("Workspace (mount, copy, clone, empty)", current_mode)?;
-        match <PathModeArg as clap::ValueEnum>::from_str(&mode, true) {
-            Ok(mode) => {
-                args.path_mode = Some(mode);
-                break;
+    if let Some(store) = secrets.user {
+        sources.push(format!("{store:?} user secrets"));
+    }
+    if sources.is_empty() {
+        "none".into()
+    } else {
+        sources.join(", ")
+    }
+}
+
+async fn edit_native_create(globals: &Globals, args: &mut EnvCreateArgs) -> anyhow::Result<()> {
+    use super::guided::{self, Choice};
+    let (_, mut current, _) = native_plan(args)?;
+    sources::apply_create_source_flags(&mut current.spec, args)?;
+    let choices = [
+        Choice::new("Name", ""),
+        Choice::new("Project directory", ""),
+        Choice::new(
+            "Workspace",
+            "Live mount, one-time copy, Git clone, or empty",
+        ),
+        Choice::new("Image", ""),
+        Choice::new("Resources", "CPU, memory and disk"),
+        Choice::new(
+            "Credential profile",
+            "Explicit local:NAME or platform:NAME reference",
+        ),
+        Choice::new("Application secrets", "Explicit project reference"),
+        Choice::new("Network policy", "open, locked, or local:NAME"),
+        Choice::new("Docker", ""),
+        Choice::new("Back to review", ""),
+    ];
+    match guided::choose("Edit settings", &choices)? {
+        0 => {
+            args.name = Some(guided::text(
+                "Environment name",
+                args.name.as_deref(),
+                super::launch_setup::environment_name,
+            )?)
+        }
+        1 => {
+            let current = args
+                .path
+                .as_deref()
+                .unwrap_or_else(|| Path::new("."))
+                .display()
+                .to_string();
+            args.path = Some(PathBuf::from(guided::text(
+                "Project directory",
+                Some(&current),
+                |value| {
+                    std::fs::metadata(value)
+                        .ok()
+                        .filter(|m| m.is_dir())
+                        .map(|_| ())
+                        .ok_or_else(|| "Choose an existing directory".into())
+                },
+            )?));
+        }
+        2 => {
+            let choices = [
+                Choice::new(
+                    "Live mount",
+                    "Guest root can read, change and delete files in this folder",
+                ),
+                Choice::new(
+                    "Copy this folder",
+                    "One-time copy including uncommitted changes",
+                ),
+                Choice::new(
+                    "Git clone",
+                    "Committed state only; excludes local uncommitted changes",
+                ),
+                Choice::new("Empty workspace", ""),
+            ];
+            args.path_mode = Some(
+                [
+                    PathModeArg::Mount,
+                    PathModeArg::Copy,
+                    PathModeArg::Clone,
+                    PathModeArg::Empty,
+                ][guided::choose("Workspace", &choices)?],
+            );
+        }
+        3 => {
+            args.image = Some(guided::text(
+                "Container image",
+                args.image.as_deref().or_else(|| {
+                    (!current.spec.image.is_empty()).then_some(current.spec.image.as_str())
+                }),
+                guided::required,
+            )?)
+        }
+        4 => {
+            let cpu = current.vcpus.unwrap_or(DEFAULT_NATIVE_VCPUS).to_string();
+            let memory = format!(
+                "{}MiB",
+                current.memory_mib.unwrap_or(DEFAULT_NATIVE_MEMORY_MIB)
+            );
+            let disk = format!(
+                "{}GiB",
+                current.disk_bytes.unwrap_or(DEFAULT_NATIVE_DISK_BYTES) / (1024 * 1024 * 1024)
+            );
+            edit_quantity("CPU cores", &mut args.cpu, &cpu, |s| {
+                parse_native_cpu(s).map(drop)
+            })?;
+            edit_quantity("Memory", &mut args.memory, &memory, |s| {
+                parse_native_memory(s).map(drop)
+            })?;
+            edit_quantity("Disk", &mut args.disk, &disk, |s| {
+                parse_native_disk(s).map(drop)
+            })?;
+        }
+        5 => {
+            args.profile = super::launch_setup::choose_profile(globals, false).await?;
+            args.no_profile = args.profile.is_none();
+        }
+        6 => args.secrets = Some(super::launch_setup::choose_secret_project(globals, false).await?),
+        7 => {
+            args.policy = Some(guided::text(
+                "Network policy",
+                args.policy.as_deref().or(Some("open")),
+                |s| {
+                    codewire_egress_policy::reference::PolicyReference::parse(s)
+                        .map(drop)
+                        .map_err(|e| e.to_string())
+                },
+            )?)
+        }
+        8 => {
+            args.no_docker = guided::choose(
+                "Guest Docker",
+                &[
+                    Choice::new("Enabled", "Separate guest data disk"),
+                    Choice::new("Disabled", ""),
+                ],
+            )? == 1;
+            if args.no_docker {
+                args.docker_disk = None;
             }
-            Err(_) => eprintln!("Choose mount, copy, clone or empty."),
         }
+        _ => {}
     }
-    let image = prompt_default(
-        "Image (default = Codewire workspace)",
-        args.image.as_deref().unwrap_or("default"),
-    )?;
-    args.image = (image != "default").then_some(image);
-    edit_quantity("vCPUs", &mut args.cpu, "2", |value| {
-        parse_native_cpu(value).map(|_| ())
-    })?;
-    edit_quantity("Memory", &mut args.memory, "4GB", |value| {
-        parse_native_memory(value).map(|_| ())
-    })?;
-    edit_quantity("Disk", &mut args.disk, "20GB", |value| {
-        parse_native_disk(value).map(|_| ())
-    })?;
-    let docker = prompt_default(
-        "Docker (on, off)",
-        if args.no_docker { "off" } else { "on" },
-    )?;
-    args.no_docker = docker.eq_ignore_ascii_case("off") || docker.eq_ignore_ascii_case("no");
-    if args.no_docker {
-        args.docker_disk = None;
-    }
-    let profile = prompt_default(
-        "Credential profile (local:NAME, platform:NAME or none)",
-        args.profile.as_deref().unwrap_or("none"),
-    )?;
-    args.profile = (!profile.eq_ignore_ascii_case("none")).then_some(profile);
     Ok(())
 }
 
@@ -1417,16 +1553,12 @@ fn edit_quantity(
     default: &str,
     parse: impl Fn(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    loop {
-        let answer = prompt_default(label, value.as_deref().unwrap_or(default))?;
-        match parse(&answer) {
-            Ok(()) => {
-                *value = Some(answer);
-                return Ok(());
-            }
-            Err(error) => eprintln!("{error}"),
-        }
-    }
+    *value = Some(super::guided::text(
+        label,
+        value.as_deref().or(Some(default)),
+        |s| parse(s).map_err(|e| e.to_string()),
+    )?);
+    Ok(())
 }
 
 /// A binary size in GiB, the unit the VM is given: `20 GiB`, `1.5 GiB`.

@@ -504,6 +504,27 @@ pub(crate) async fn handle_platform_env_command(
     globals: &Globals,
     command: EnvCommand,
 ) -> anyhow::Result<()> {
+    handle_platform_env_command_with_created(globals, command)
+        .await
+        .map(drop)
+}
+
+/// Keeps the exact result of a reviewed create for the first-run journey.
+/// A canceled create never becomes a lookup by name of an unrelated environment.
+pub(crate) async fn create_platform_environment_for_run(
+    globals: &Globals,
+    args: Box<EnvCreateArgs>,
+) -> anyhow::Result<Environment> {
+    handle_platform_env_command_with_created(globals, EnvCommand::Create(args))
+        .await?
+        .context("canceled; no environment created")
+}
+
+async fn handle_platform_env_command_with_created(
+    globals: &Globals,
+    command: EnvCommand,
+) -> anyhow::Result<Option<Environment>> {
+    let mut created = None;
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     // A create reads and checks its configuration, and names where it came
@@ -523,7 +544,9 @@ pub(crate) async fn handle_platform_env_command(
         }
         _ => None,
     };
-    let platform = resolve_platform(globals, &paths, &env)?;
+    let guided_flow = matches!(&command, EnvCommand::Create(args) if args.guided && super::guided::available(args.output) && !args.yes);
+    let platform =
+        super::launch_setup::resolve_guided_platform(globals, &paths, guided_flow).await?;
     // A network a cloud create can never use is refused before any request.
     if let EnvCommand::Create(args) = &command {
         refuse_requested_cloud_mesh(args.network.as_deref(), args.no_network)?;
@@ -531,7 +554,14 @@ pub(crate) async fn handle_platform_env_command(
     let environment_client = EnvironmentClient::new(&platform)?;
     let organization_client = organization_client(&platform)?;
     let orgs = organization_client.list_orgs().await.context("list orgs")?;
-    let org_id = current_org_id(&platform, &orgs)?;
+    let org_id = super::launch_setup::organization_for_setup(
+        globals,
+        &platform,
+        &organization_client,
+        &orgs,
+        guided_flow,
+    )
+    .await?;
 
     match command {
         EnvCommand::Agent(args) => {
@@ -547,7 +577,27 @@ pub(crate) async fn handle_platform_env_command(
             }
         }
         EnvCommand::Runtime(_) => anyhow::bail!("cw runtime supports only native Linux VMs"),
-        EnvCommand::Create(args) => {
+        EnvCommand::Create(mut args) => {
+            if guided_flow {
+                let located = globals.with_org(Some(org_id.clone()));
+                super::launch_setup::edit_cloud_create(
+                    &located,
+                    &mut args,
+                    &prepared_create
+                        .as_ref()
+                        .context("the create request was not prepared")?
+                        .0,
+                )
+                .await?;
+                // Apply edits through the same resolver and file precedence as
+                // the original validated request, before any create request.
+                let source = project_file::select_from(
+                    &project_file::invoking_directory()?,
+                    args.file.as_deref(),
+                    args.no_file,
+                )?;
+                prepared_create = Some(prepare_platform_env_create(&args, &source)?);
+            }
             let began = Instant::now();
             let (mut request, provenance) = prepared_create
                 .take()
@@ -573,6 +623,9 @@ pub(crate) async fn handle_platform_env_command(
                 &mut request,
             )
             .await?;
+            if !super::launch_setup::review_cloud_create(&args, &request, &org_id)? {
+                return Ok(None);
+            }
             let environment = environment_client
                 .create_environment(&org_id, &request)
                 .await
@@ -632,6 +685,7 @@ pub(crate) async fn handle_platform_env_command(
                     );
                 }
             }
+            created = Some(environment);
         }
         EnvCommand::Update(args) => {
             anyhow::ensure!(
@@ -747,7 +801,7 @@ pub(crate) async fn handle_platform_env_command(
                 ))
                 .await?;
                 super::lifecycle_output::print_summary(&summary, &caps);
-                return Ok(());
+                return Ok(None);
             }
             let response = environment_client
                 .start_environment(&org_id, &environment_id)
@@ -828,7 +882,7 @@ pub(crate) async fn handle_platform_env_command(
 
             if selection.targets.is_empty() {
                 println!("No environments to prune.");
-                return Ok(());
+                return Ok(None);
             }
 
             print!("{}", format_env_prune_targets_text(&selection.targets));
@@ -839,7 +893,7 @@ pub(crate) async fn handle_platform_env_command(
                     "Would prune {} environments (dry run).",
                     selection.targets.len()
                 );
-                return Ok(());
+                return Ok(None);
             }
 
             if !args.yes
@@ -849,7 +903,7 @@ pub(crate) async fn handle_platform_env_command(
                 ))?
             {
                 println!("Aborted.");
-                return Ok(());
+                return Ok(None);
             }
 
             let deleted =
@@ -866,7 +920,7 @@ pub(crate) async fn handle_platform_env_command(
 
             if selection.targets.is_empty() {
                 println!("No environments to nuke.");
-                return Ok(());
+                return Ok(None);
             }
 
             println!(
@@ -885,7 +939,7 @@ pub(crate) async fn handle_platform_env_command(
                     &expected,
                 )? {
                     println!("Aborted.");
-                    return Ok(());
+                    return Ok(None);
                 }
             }
 
@@ -969,7 +1023,7 @@ pub(crate) async fn handle_platform_env_command(
             handle_environment_daemon_command(&environment_client, &org_id, args.command).await?;
         }
     }
-    Ok(())
+    Ok(created)
 }
 
 #[derive(Debug)]
@@ -1440,8 +1494,9 @@ pub(crate) struct UnifiedEnvironmentListEntry {
 async fn handle_unified_environment_create(
     globals: &Globals,
     placement: Option<EnvironmentPlacement>,
-    args: Box<EnvCreateArgs>,
+    mut args: Box<EnvCreateArgs>,
 ) -> anyhow::Result<()> {
+    let placement = super::launch_setup::prepare_create(placement, &mut args)?;
     if args.environment_type == EnvironmentTypeArg::Host {
         #[cfg(unix)]
         {
@@ -2531,7 +2586,7 @@ pub(crate) fn env_create_request_from_source(
 
 const MAX_CPU_CORES: u64 = 256;
 
-fn parse_create_memory(value: Option<&str>) -> anyhow::Result<Option<i32>> {
+pub(crate) fn parse_create_memory(value: Option<&str>) -> anyhow::Result<Option<i32>> {
     value
         .map(|value| match value.parse::<i32>() {
             Ok(value) => Ok(value),

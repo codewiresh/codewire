@@ -29,8 +29,13 @@ Create a local sandbox
   Resources    2 vCPU · 4 GiB RAM · 20 GiB disk
   Docker       on (8 GiB data disk)
   Credentials  none
+  App secrets  none
+  Policy       open
   Ports        none
-Create with these settings? [Y]es / [e]dit / [n]o: y
+Create with these settings?
+› Create environment
+  Edit settings
+  Cancel
 ```
 
 `--path-mode copy` copies the folder once, as it is now, uncommitted work

@@ -392,19 +392,6 @@ pub(crate) fn organization_deletion_polling_stopped_message(operation_id: &str) 
     )
 }
 
-pub(crate) fn prompt_confirm_default_yes(label: &str) -> anyhow::Result<bool> {
-    eprint!("{label} [Y]: ");
-    std::io::stderr()
-        .flush()
-        .context("flush confirmation prompt")?;
-    let mut input = String::new();
-    std::io::stdin()
-        .read_line(&mut input)
-        .context("read confirmation")?;
-    let input = input.trim();
-    Ok(matches!(input, "" | "Y" | "y" | "yes" | "Yes" | "YES"))
-}
-
 pub(crate) fn prompt_confirm_default_no(label: &str) -> anyhow::Result<bool> {
     eprint!("{label} [y/N]: ");
     std::io::stderr()
@@ -450,16 +437,6 @@ pub(crate) fn prompt_select_org(orgs: &[OrgWithRole]) -> anyhow::Result<&OrgWith
 
 pub(crate) fn stdin_is_interactive() -> bool {
     std::io::stdin().is_terminal()
-}
-
-pub(crate) fn prompt_text(label: &str) -> anyhow::Result<String> {
-    eprint!("{label}");
-    std::io::stderr().flush().context("flush prompt")?;
-    let mut input = String::new();
-    std::io::stdin()
-        .read_line(&mut input)
-        .context("read prompt")?;
-    Ok(input.trim().to_string())
 }
 
 pub(crate) fn format_api_key_list_text(keys: &[ApiKey]) -> String {

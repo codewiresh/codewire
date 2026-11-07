@@ -1804,6 +1804,12 @@ run_paths_case cli_makefile pull_request refs/pull/1521/head false \
 run_paths_case cli_host_journey pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js' \
   scripts/dev/test-cli-host.py
+# #3959: this synthetic guided-launch host journey and its exact dependencies
+# select the existing CLI host gates, never all platform verification.
+for guided_input in scripts/dev/test-cli-guided-launch.py scripts/dev/requirements-cli-guided-launch.txt; do
+  run_paths_case "cli_guided_${guided_input//\//_}" pull_request refs/pull/3959/head false \
+    'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js' "$guided_input"
+done
 run_paths_case source_approval_policy pull_request refs/pull/2255/head false \
   'policy' .supplychain/source-policy.json
 for host_input in scripts/dev/test-cli-host-managed.py scripts/ci/tests/test-cli-host-managed.py scripts/dev/fixtures/host-member-managed-assets.py; do
@@ -1819,7 +1825,9 @@ run_paths_case host_managed_and_source_policy pull_request refs/pull/2255/head f
 neighbor_root="$TMP/host-neighbors.repo"
 for neighbor in .supplychain/source-policy-unlisted.json \
     scripts/dev/test-cli-host-managed-unlisted.py scripts/ci/tests/test-cli-host-managed-unlisted.py \
-    scripts/dev/fixtures/host-member-managed-assets-unlisted.py; do
+    scripts/dev/fixtures/host-member-managed-assets-unlisted.py \
+    scripts/dev/test-cli-guided-launch-unlisted.py \
+    scripts/dev/requirements-cli-guided-launch-unlisted.txt; do
   [ ! -e "$ROOT/$neighbor" ] || {
     echo "classification neighbor exists in the checkout: $neighbor" >&2; exit 1
   }

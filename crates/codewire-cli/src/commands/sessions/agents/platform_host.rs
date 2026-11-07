@@ -534,14 +534,20 @@ fn print_operation(
     Ok(())
 }
 
-pub(super) async fn run(
-    target: EnvironmentSessionTarget,
-    args: EnvironmentRunArgs,
-) -> anyhow::Result<()> {
+/// Placement-specific request constraints shared by launch and first-run setup.
+pub(crate) fn validate_run_request(args: &EnvironmentRunArgs) -> anyhow::Result<()> {
     anyhow::ensure!(
         !args.tty && args.command.is_empty() && args.env.is_empty(),
         "managed platform conversations accept --agent and selected environment sources; omit --tty, COMMAND and --env"
     );
+    Ok(())
+}
+
+pub(super) async fn run(
+    target: EnvironmentSessionTarget,
+    args: EnvironmentRunArgs,
+) -> anyhow::Result<()> {
+    validate_run_request(&args)?;
     let agent = match args.agent.as_deref() {
         Some("codex") => AgentKind::Codex,
         Some("claude") => AgentKind::Claude,

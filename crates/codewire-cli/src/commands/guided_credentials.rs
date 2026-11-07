@@ -520,6 +520,63 @@ pub(super) async fn profile_choices(
         .collect())
 }
 
+/// The configuration editor selects the protected store separately from VM placement.
+pub(super) async fn choose_profile_reference(
+    globals: &Globals,
+    placement: StoragePlacement,
+) -> anyhow::Result<String> {
+    let profiles = profile_choices(globals, placement).await?;
+    let mut choices = profiles
+        .iter()
+        .map(|(name, _)| Choice::new(name, "Credential profile"))
+        .collect::<Vec<_>>();
+    choices.push(Choice::new(
+        "Set up a profile",
+        "Choose its first provider credential",
+    ));
+    let index = guided::choose("Choose a credential profile", &choices)?;
+    let selector = if let Some((_, selector)) = profiles.get(index) {
+        selector.clone()
+    } else {
+        let mut args = CredentialsArgs {
+            profile: None,
+            command: CredentialsCommand::Set(CredentialProfileSetArgs {
+                profile: String::new(),
+                slot: None,
+                credential: None,
+            }),
+        };
+        complete(globals, &mut args, placement, false).await?;
+        let selector = args.profile.clone().context("profile is required")?;
+        if let CredentialsCommand::Set(set) = &args.command {
+            eprintln!("  Profile       {}", progress::terminal_text(&selector));
+            eprintln!(
+                "  Provider      {}",
+                progress::terminal_text(set.slot.as_deref().unwrap_or_default())
+            );
+            eprintln!(
+                "  Credential    {}",
+                progress::terminal_text(set.credential.as_deref().unwrap_or_default())
+            );
+        }
+        anyhow::ensure!(
+            guided::confirm("Save this credential profile binding?")?,
+            "canceled; profile binding was not saved"
+        );
+        let operation = resolve_credential_operation(args.profile, args.command, placement)?;
+        execute_credential_operation(globals, operation, placement).await?;
+        selector
+    };
+    Ok(format!(
+        "{}:{selector}",
+        if placement == StoragePlacement::Local {
+            "local"
+        } else {
+            "platform"
+        }
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

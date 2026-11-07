@@ -476,13 +476,21 @@ pub(crate) async fn setup_select_org(
 
     match orgs.as_slice() {
         [] if stdin_is_interactive() => {
-            if !prompt_confirm_default_yes("No organizations found. Create one?")? {
+            if !super::guided::confirm("No organizations found. Create one?")? {
                 return Ok(None);
             }
-            let name = trimmed_required(&prompt_text("Organization name: ")?, "organization name")?
-                .to_string();
+            let name = super::guided::text("Organization name", None, super::guided::required)?;
             let default_slug = slugify(&name);
-            let slug = prompt_default("Organization slug", &default_slug)?;
+            let slug = super::guided::text(
+                "Organization slug",
+                Some(&default_slug),
+                super::additions::valid_slug,
+            )?;
+            eprintln!("  Name          {}", progress::terminal_text(&name));
+            eprintln!("  Slug          {}", progress::terminal_text(&slug));
+            if !super::guided::confirm("Create organization?")? {
+                return Ok(None);
+            }
             let org = client
                 .create_org(&CreateOrgRequest { name, slug })
                 .await
@@ -1117,7 +1125,7 @@ pub(crate) async fn handle_platform_secrets_command(
         }
         SecretOperation::Organization(command) => {
             let orgs = organizations.list_orgs().await.context("list orgs")?;
-            let org_id = current_org_id(&platform, &orgs)?;
+            let org_id = resolve_org_id(&platform, &orgs, globals.org.as_deref())?;
             handle_org_secret_command(&client, &org_id, command).await?;
         }
         SecretOperation::Preview(args) => {
@@ -1127,7 +1135,7 @@ pub(crate) async fn handle_platform_secrets_command(
                 super::storage_placement::StoragePlacement::Platform,
             )?;
             let orgs = organizations.list_orgs().await.context("list orgs")?;
-            let org_id = current_org_id(&platform, &orgs)?;
+            let org_id = resolve_org_id(&platform, &orgs, globals.org.as_deref())?;
             let secret_project_id = if let Some(project_name) = intent.project.as_deref() {
                 Some(
                     load_secret_project_by_name(&client, &org_id, project_name)
@@ -1151,12 +1159,12 @@ pub(crate) async fn handle_platform_secrets_command(
         }
         SecretOperation::Project { name, command } => {
             let orgs = organizations.list_orgs().await.context("list orgs")?;
-            let org_id = current_org_id(&platform, &orgs)?;
+            let org_id = resolve_org_id(&platform, &orgs, globals.org.as_deref())?;
             handle_project_secret_command(&client, &org_id, &name, command).await?;
         }
         SecretOperation::Projects(command) => {
             let orgs = organizations.list_orgs().await.context("list orgs")?;
-            let org_id = current_org_id(&platform, &orgs)?;
+            let org_id = resolve_org_id(&platform, &orgs, globals.org.as_deref())?;
             match command {
                 SecretProjectCommand::Create(args) => {
                     let name = trimmed_required(

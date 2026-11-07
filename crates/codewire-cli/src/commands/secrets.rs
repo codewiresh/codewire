@@ -198,7 +198,7 @@ pub(super) async fn secret_project_choices(
     let paths = ResolvePaths::from_env(&OsEnv)?;
     let platform = resolve_platform(globals, &paths, &OsEnv)?;
     let orgs = organization_client(&platform)?.list_orgs().await?;
-    let org = current_org_id(&platform, &orgs)?;
+    let org = resolve_org_id(&platform, &orgs, globals.org.as_deref())?;
     let client = SecretClient::new(&platform)?;
     Ok(client
         .list_secret_projects(&org)
@@ -819,6 +819,54 @@ fn read_workload_secret_bytes<R: std::io::BufRead>(
         )
     })?;
     Ok(bytes)
+}
+
+pub(super) async fn choose_secret_project_reference(
+    globals: &Globals,
+    placement: StoragePlacement,
+) -> anyhow::Result<String> {
+    use super::guided::{self, Choice};
+    let projects = secret_project_choices(globals, placement).await?;
+    let mut choices = projects
+        .iter()
+        .map(|(name, _)| Choice::new(name, "Secret project"))
+        .collect::<Vec<_>>();
+    choices.push(Choice::new(
+        "Create a secret project",
+        "Add its keys with cw secrets set",
+    ));
+    let index = guided::choose("Choose a secret project", &choices)?;
+    let selector = if let Some((_, selector)) = projects.get(index) {
+        selector.clone()
+    } else {
+        let name = guided::text("Secret project name", None, |name| {
+            parse_secret_project_name(name).map(|_| ())
+        })?;
+        anyhow::ensure!(
+            guided::confirm(&format!(
+                "Create secret project {}?",
+                progress::terminal_text(&name)
+            ))?,
+            "canceled; secret project was not created"
+        );
+        dispatch_secrets(
+            globals,
+            SecretOperation::Projects(SecretProjectCommand::Create(SecretProjectCreateArgs {
+                name: Some(name.clone()),
+            })),
+            placement,
+        )
+        .await?;
+        name
+    };
+    Ok(format!(
+        "{}:{selector}",
+        if placement == StoragePlacement::Local {
+            "local"
+        } else {
+            "platform"
+        }
+    ))
 }
 
 #[cfg(test)]

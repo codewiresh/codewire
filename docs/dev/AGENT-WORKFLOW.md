@@ -88,6 +88,15 @@ Use additional gates only for their failure class:
 - Rust CLI-only work: the changed crates' `cargo test` and `cargo clippy`,
   plus the host journey with a built `cw`
 
+Observe guided launch and configuration with a built `cw` using
+`scripts/dev/test-cli-guided-launch.py --cw target/debug/cw`. The helper uses
+isolated state, pseudo-terminals and a synthetic Connect HTTP/2 service; it does
+not use provider accounts or boot VMs. Run it on a host supported by local VMs;
+it requires `protoc` and a Python 3.10+
+virtualenv installed from `scripts/dev/requirements-cli-guided-launch.txt`.
+`--evidence-dir` retains the observations in a new
+chosen directory; otherwise it prints its temporary evidence directory.
+
 Ignored Rust tests either run in a named CI step or are manual. CI runs the
 database tests (the database lanes), the egress broker's host-interface refusal
 (in a private network namespace, `scripts/ci/verify/run-in-public-netns.sh`;

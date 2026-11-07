@@ -13,8 +13,8 @@ environment as a positional or with `--in ENV` (not both) and an existing
 session with `--session`; a positional is always an environment, never a
 session. `run` names its environment only with `--in ENV`, because its
 positional is the agent. `--name` names a new session and never selects an
-existing one. With no environment named or selected, a command says how to
-choose one: `cw use ENV`, or `--in ENV`.
+existing one. With no environment named or selected, commands other than
+interactive `run` say how to choose one: `cw use ENV`, or `--in ENV`.
 
 ## cw run
 
@@ -32,7 +32,14 @@ environment and session and the way back: detach with Ctrl-B, then D, and
 reconnect with `cw attach ENV --session SESSION`. The positional is only
 `claude` or `codex`; anything else is refused with the `--in` spelling, so an
 environment named `claude` is `cw run claude --in claude`. Bare `cw run` asks
-which agent to open on a terminal and is refused in a script. With `--agent`
+which agent to open on a terminal and is refused in a script or with JSON
+output. If no environment is selected, the terminal flow offers an existing
+sandbox or explicit local/cloud creation, constrained by placement flags. A
+stopped choice asks before starting; an existing choice keeps its saved
+configuration. Creating a new environment requires a settings review. A missing
+cloud login or pinned local VM runtime offers the supported setup step before
+continuing. Choosing an environment for this run does not change `cw use`.
+Scripts and JSON commands never provision from a missing target. With `--agent`
 the run starts a managed conversation instead (see [Agents](@/reference/cli/agents.md));
 it cannot be combined with an agent positional, a command after `--`, or
 `--tty`.

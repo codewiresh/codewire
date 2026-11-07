@@ -154,9 +154,10 @@ These follow the Linux contract and messages:
   fails.
 - In a terminal, `cw create --local` shows the name (from the directory),
   workspace, image, resources, Docker, credentials and ports it will use and
-  asks `[Y]es / [e]dit / [n]o`; `edit` asks for each setting with the current
-  value as the default. `--yes`, `-o json` and non-terminal input skip the
-  question. While it works, one live line names the current stage (sources,
+  offers **Create environment**, **Edit settings** and **Cancel**. Editing
+  chooses one setting at a time, with resolved values as defaults. Escape,
+  Ctrl-C or closed input cancels before creating a VM. `--yes`, `-o json` and
+  non-terminal input skip the review. While it works, one live line names the current stage (sources,
   disk, image, VM, boot) and elapsed time.
 - Repositories declared in `codewire.yaml` (`repositories:` with `source`,
   optional `branch`, `destination`) are fetched by host Git into a

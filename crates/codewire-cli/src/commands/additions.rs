@@ -293,7 +293,7 @@ fn invitation_email(value: &str) -> Result<(), String> {
     }
 }
 
-fn valid_slug(value: &str) -> Result<(), String> {
+pub(super) fn valid_slug(value: &str) -> Result<(), String> {
     if !value.is_empty()
         && value.len() <= 48
         && value

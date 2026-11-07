@@ -751,6 +751,21 @@ pub(crate) struct InitArgs {
     force: bool,
     #[arg(long = "save-preset", help = "Save the resolved preset to the server")]
     save_preset: Option<String>,
+    #[arg(
+        long,
+        value_name = "PROFILE",
+        conflicts_with = "no_profile",
+        help = "Credential profile reference to write to codewire.yaml"
+    )]
+    profile: Option<String>,
+    #[arg(long, help = "Write no credential profile")]
+    no_profile: bool,
+    #[arg(
+        long,
+        value_name = "PROJECT",
+        help = "Application-secret project reference to write to codewire.yaml"
+    )]
+    secrets: Option<String>,
     #[arg(short, long, help = "Skip confirmation prompts")]
     yes: bool,
 }
@@ -1129,6 +1144,8 @@ fn parse_runtime_request_id(value: &str) -> Result<uuid::Uuid, String> {
 
 #[derive(Clone, Debug, Args)]
 pub(crate) struct EnvCreateArgs {
+    #[arg(skip)]
+    guided: bool,
     #[arg(long = "type", value_enum, default_value_t = EnvironmentTypeArg::Sandbox,
         help = "Sandbox or explicitly trusted host execution")]
     environment_type: EnvironmentTypeArg,
@@ -2738,6 +2755,7 @@ mod environment;
 mod export;
 pub(crate) mod flat;
 pub(crate) mod inventory;
+mod launch_setup;
 pub(crate) mod lifecycle_output;
 pub(crate) mod mesh_commands;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
