@@ -33,14 +33,39 @@ pub(super) async fn generate_ssh(
 /// provider's OAuth kind, enrolled by paste.
 const CLAUDE_SUBSCRIPTION: &str = "claude-subscription";
 
-pub(super) async fn handle(
+pub(super) async fn execute(
     client: &CodewireClient,
     command: CredentialsCommand,
+) -> anyhow::Result<super::credential_input::CredentialExecution> {
+    let mut execution = super::credential_input::CredentialExecution::Unchanged;
+    handle_with_receipt(client, command, &mut execution).await?;
+    Ok(execution)
+}
+
+fn remember_platform(
+    record: &rpc::Credential,
+    execution: &mut super::credential_input::CredentialExecution,
+) {
+    *execution = super::credential_input::CredentialExecution::Saved(
+        super::credential_input::SavedCredential {
+            id: record.id.clone(),
+            name: record.name.clone(),
+        },
+    );
+}
+
+async fn handle_with_receipt(
+    client: &CodewireClient,
+    command: CredentialsCommand,
+    execution: &mut super::credential_input::CredentialExecution,
 ) -> anyhow::Result<()> {
     match command {
-        CredentialsCommand::Generate(args) => generate_ssh(client, &args).await.map(drop),
+        CredentialsCommand::Generate(args) => generate_ssh(client, &args)
+            .await
+            .map(|record| remember_platform(&record, execution)),
         CredentialsCommand::Connect(args) => {
-            let (provider, kind, label) = match args.provider {
+            let selected_provider = args.provider.context("credential provider is required")?;
+            let (provider, kind, label) = match selected_provider {
                 CredentialConnectProviderArg::Codex => {
                     ("openai", rpc::CredentialAuthenticationKind::Oauth, "Codex")
                 }
@@ -53,7 +78,13 @@ pub(super) async fn handle(
                     "Claude",
                 ),
             };
-            let name = trimmed_required(&args.name, "credential name")?.to_owned();
+            let name = trimmed_required(
+                args.name
+                    .as_deref()
+                    .context("credential name is required")?,
+                "credential name",
+            )?
+            .to_owned();
             let current = find_named(client, &name).await?;
             let request = oauth_connection_request(provider, kind, &name, current.as_ref())?;
             if let Some(current) = &current {
@@ -69,17 +100,18 @@ pub(super) async fn handle(
                     eprintln!("{message}");
                 } else if !prompt_confirm_default_no(&message)? {
                     eprintln!("Canceled; no credential was changed.");
+                    anyhow::ensure!(!args.guided, "canceled; no credential was changed");
                     return Ok(());
                 }
             }
             // The Claude sign-in is started and its code read before the
             // cancellable exchange, so Ctrl-C at the prompt simply exits.
-            let claude = match args.provider {
+            let claude = match selected_provider {
                 CredentialConnectProviderArg::Claude => Some(start_claude_sign_in(client).await?),
                 _ => None,
             };
             let enrollment = async {
-                match args.provider {
+                match selected_provider {
                     CredentialConnectProviderArg::Claude => {
                         let (sign_in, pasted) = claude.expect("started above");
                         client
@@ -156,6 +188,7 @@ pub(super) async fn handle(
                 "\n{}",
                 login_screen::success_screen(signed_in_account(&credential))
             );
+            remember_platform(&credential, execution);
             print(&[credential], OutputFormat::Text)?;
             super::credentials::report_github_pending(github_pending(&pending));
             Ok(())
@@ -241,7 +274,7 @@ pub(super) async fn handle(
             Ok(())
         }
         CredentialsCommand::Add(args) => {
-            if args.provider == "ssh" {
+            if args.provider.as_deref() == Some("ssh") {
                 let name = validate_ssh_import(&args)?;
                 // Confirm owner-scoped access and name availability before
                 // reading the explicitly selected private file or passphrase.
@@ -261,11 +294,12 @@ pub(super) async fn handle(
                     &[response
                         .credential
                         .into_option()
+                        .inspect(|record| remember_platform(record, execution))
                         .context("platform omitted SSH metadata")?],
                     OutputFormat::Text,
                 );
             }
-            if args.provider == CLAUDE_SUBSCRIPTION {
+            if args.provider.as_deref() == Some(CLAUDE_SUBSCRIPTION) {
                 let name = validate_subscription_token_arguments(&args)?;
                 // Confirm owner-scoped access and name availability before
                 // asking for the token.
@@ -289,6 +323,7 @@ pub(super) async fn handle(
                     &[response
                         .credential
                         .into_option()
+                        .inspect(|record| remember_platform(record, execution))
                         .context("platform omitted credential metadata")?],
                     OutputFormat::Text,
                 );
@@ -296,8 +331,8 @@ pub(super) async fn handle(
             validate_key_arguments(&args)?;
             let material = prompt_credential_material()?;
             let response = client.add_api_key_credential(rpc::AddApiKeyCredentialRequest {
-                provider: args.provider,
-                name: args.name.trim().to_owned(),
+                provider: args.provider.context("credential provider is required")?,
+                name: args.name.as_deref().context("credential name is required")?.trim().to_owned(),
                 value: material.expose_secret().to_vec(),
                 expires_at_unix: args.expires_at,
                 ..Default::default()
@@ -306,6 +341,7 @@ pub(super) async fn handle(
                 &[response
                     .credential
                     .into_option()
+                    .inspect(|record| remember_platform(record, execution))
                     .context("platform omitted credential metadata")?],
                 OutputFormat::Text,
             )
@@ -381,7 +417,13 @@ fn validate_subscription_token_arguments(args: &CredentialAddArgs) -> anyhow::Re
         args.expires_at.is_none(),
         "a Claude subscription token's expiry is recorded as one year after it is added; --expires-at is not accepted"
     );
-    Ok(trimmed_required(&args.name, "credential name")?.to_owned())
+    Ok(trimmed_required(
+        args.name
+            .as_deref()
+            .context("credential name is required")?,
+        "credential name",
+    )?
+    .to_owned())
 }
 
 /// Replace an exact existing Claude subscription token with a newly pasted
@@ -591,10 +633,15 @@ fn validate_key_arguments(args: &CredentialAddArgs) -> anyhow::Result<()> {
         "--key-file is only valid for add ssh"
     );
     anyhow::ensure!(
-        matches!(args.provider.as_str(), "openai" | "anthropic"),
+        matches!(args.provider.as_deref(), Some("openai" | "anthropic")),
         "API-key enrollment supports openai or anthropic; use add claude-subscription for a Claude subscription token or connect for OAuth"
     );
-    trimmed_required(&args.name, "credential name")?;
+    trimmed_required(
+        args.name
+            .as_deref()
+            .context("credential name is required")?,
+        "credential name",
+    )?;
     anyhow::ensure!(
         args.account_hint.is_none(),
         "platform API keys do not use --account-hint"
@@ -809,7 +856,7 @@ mod tests {
                 },
             )
             .await;
-            let result = handle(
+            let result = execute(
                 &client,
                 CredentialsCommand::Rename(CredentialRenameArgs {
                     credential: "work".into(),
@@ -850,11 +897,13 @@ mod tests {
     fn subscription_token_add_rejects_argv_expiry_hint_and_key_file_before_input() {
         let args = |expires_at: Option<u64>, account_hint: Option<&str>, key_file: bool| {
             CredentialAddArgs {
-                provider: CLAUDE_SUBSCRIPTION.into(),
-                name: " claude ".into(),
+                provider: Some(CLAUDE_SUBSCRIPTION.into()),
+                name: Some(" claude ".into()),
                 account_hint: account_hint.map(str::to_owned),
                 expires_at,
                 key_file: key_file.then(|| "/dev/null".into()),
+
+                guided: false,
             }
         };
         assert_eq!(
@@ -869,7 +918,7 @@ mod tests {
             assert!(validate_subscription_token_arguments(&invalid).is_err());
         }
         let mut blank = args(None, None, false);
-        blank.name = "  ".into();
+        blank.name = Some("  ".into());
         assert!(validate_subscription_token_arguments(&blank).is_err());
         // An API-key add never accepts the subscription provider word.
         assert!(validate_key_arguments(&args(None, None, false)).is_err());
@@ -1026,7 +1075,7 @@ mod tests {
             rpc::CredentialStatus::Active,
         )
         .await;
-        let error = handle(
+        let error = execute(
             &client,
             CredentialsCommand::Delete(CredentialDeleteArgs {
                 credential: Some("name:work".into()),
@@ -1061,7 +1110,7 @@ mod tests {
             },
         )
         .await;
-        handle(
+        execute(
             &client,
             CredentialsCommand::Revoke(CredentialSelectorArgs {
                 credential: format!("id:{ID}"),
@@ -1091,7 +1140,7 @@ mod tests {
             rpc::DeleteCredentialResponse::default(),
         )
         .await;
-        handle(
+        execute(
             &client,
             CredentialsCommand::Delete(CredentialDeleteArgs {
                 credential: Some("work".into()),
@@ -1131,7 +1180,7 @@ mod tests {
             .mount(&server)
             .await;
         assert!(
-            handle(
+            execute(
                 &client(&server),
                 CredentialsCommand::Revoke(CredentialSelectorArgs {
                     credential: "work".into(),
@@ -1165,7 +1214,7 @@ mod tests {
             )
             .await;
         }
-        let error = handle(
+        let error = execute(
             &client(&server),
             CredentialsCommand::List(CredentialListArgs {
                 output: OutputFormat::Text,
@@ -1182,13 +1231,15 @@ mod tests {
         let server = MockServer::start().await;
         let client = client(&server);
         let command = CredentialsCommand::Add(CredentialAddArgs {
-            provider: "codex".into(),
-            name: "work".into(),
+            provider: Some("codex".into()),
+            name: Some("work".into()),
             account_hint: None,
             expires_at: None,
             key_file: None,
+
+            guided: false,
         });
-        assert!(handle(&client, command).await.is_err());
+        assert!(execute(&client, command).await.is_err());
         assert!(server.received_requests().await.unwrap().is_empty());
         // Rotation must inspect the stored kind, then reject unsupported
         // material before prompting or sending any mutation.
@@ -1198,7 +1249,7 @@ mod tests {
             rpc::CredentialStatus::Active,
         )
         .await;
-        let error = handle(
+        let error = execute(
             &client,
             CredentialsCommand::Rotate(CredentialRotateArgs {
                 credential: "work".into(),

@@ -1060,7 +1060,12 @@ pub(crate) async fn handle_platform_secrets_command(
             let org_id = current_org_id(&platform, &orgs)?;
             match command {
                 SecretProjectCommand::Create(args) => {
-                    let name = trimmed_required(&args.name, "secret project name")?;
+                    let name = trimmed_required(
+                        args.name
+                            .as_deref()
+                            .context("secret project name is required")?,
+                        "secret project name",
+                    )?;
                     let project = client
                         .create_secret_project(
                             &org_id,
@@ -1113,6 +1118,24 @@ async fn handle_project_secret_command(
     project_name: &str,
     command: ScopedSecretCommand,
 ) -> anyhow::Result<()> {
+    if let ScopedSecretCommand::Set(args) = &command
+        && args.new_project
+    {
+        let key = args.key.as_deref().context("secret key is required")?;
+        let value = prompt_platform_workload_secret_value()?;
+        let project = client
+            .create_secret_project(
+                org_id,
+                &CreateSecretProjectRequest {
+                    name: project_name.to_owned(),
+                },
+            )
+            .await
+            .context("create secret project")?;
+        client.set_project_secret(org_id, &project.id, key, &value).await.with_context(|| format!("secret project {project_name:?} created; setting its first secret failed, inspect the project before retrying"))?;
+        eprintln!("Created secret project {project_name:?} and set {key}.");
+        return Ok(());
+    }
     let project = load_secret_project_by_name(client, org_id, project_name).await?;
     match command {
         ScopedSecretCommand::List(args) => {
@@ -1127,7 +1150,20 @@ async fn handle_project_secret_command(
             )?;
         }
         ScopedSecretCommand::Set(args) => {
-            let key = trimmed_required(&args.key, "secret key")?;
+            let key = trimmed_required(
+                args.key.as_deref().context("secret key is required")?,
+                "secret key",
+            )?;
+            if args.guided
+                && client
+                    .list_project_secrets(org_id, &project.id)
+                    .await?
+                    .iter()
+                    .any(|existing| existing.key == key)
+                && !super::guided::confirm(&format!("Replace the existing value for {key}?"))?
+            {
+                return Ok(());
+            }
             let value = prompt_platform_workload_secret_value()?;
             client
                 .set_project_secret(org_id, &project.id, key, &value)
@@ -1169,7 +1205,20 @@ pub(crate) async fn handle_user_secret_command(
             print_secret_metadata_list(&secrets, "No user secrets found.", args.output)?;
         }
         ScopedSecretCommand::Set(args) => {
-            let key = trimmed_required(&args.key, "secret key")?;
+            let key = trimmed_required(
+                args.key.as_deref().context("secret key is required")?,
+                "secret key",
+            )?;
+            if args.guided
+                && client
+                    .list_user_secrets()
+                    .await?
+                    .iter()
+                    .any(|existing| existing.key == key)
+                && !super::guided::confirm(&format!("Replace the existing value for {key}?"))?
+            {
+                return Ok(());
+            }
             let value = prompt_platform_workload_secret_value()?;
             client
                 .set_user_secret(key, &value)
@@ -1213,7 +1262,20 @@ pub(crate) async fn handle_org_secret_command(
             print_secret_metadata_list(&secrets, "No organization secrets found.", args.output)?;
         }
         ScopedSecretCommand::Set(args) => {
-            let key = trimmed_required(&args.key, "secret key")?;
+            let key = trimmed_required(
+                args.key.as_deref().context("secret key is required")?,
+                "secret key",
+            )?;
+            if args.guided
+                && client
+                    .list_org_secrets(org_id)
+                    .await?
+                    .iter()
+                    .any(|existing| existing.key == key)
+                && !super::guided::confirm(&format!("Replace the existing value for {key}?"))?
+            {
+                return Ok(());
+            }
             let value = prompt_platform_workload_secret_value()?;
             client
                 .set_org_secret(org_id, key, &value)

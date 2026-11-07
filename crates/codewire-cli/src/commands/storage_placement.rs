@@ -1,6 +1,6 @@
-use std::io::{BufRead, IsTerminal as _, Write};
-
-use anyhow::Context as _;
+use super::guided::{self, Choice};
+use super::{OsEnv, OutputFormat, ResolvePaths};
+use codewire_protected_store::ProtectedStoreBackend;
 
 pub(crate) use codewire_project::StoragePlacement;
 
@@ -24,10 +24,47 @@ pub(crate) fn resolve_storage_placement(
     platform: bool,
     json_output: bool,
 ) -> anyhow::Result<StoragePlacement> {
-    let interactive =
-        !json_output && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    select_storage_placement(local, platform, interactive, || {
-        prompt_storage_placement(std::io::stdin().lock(), std::io::stderr().lock())
+    resolve_with_title(
+        local,
+        platform,
+        json_output,
+        "Where should Codewire store these secrets?",
+    )
+}
+
+pub(crate) fn resolve_credential_storage_placement(
+    local: bool,
+    platform: bool,
+    json_output: bool,
+) -> anyhow::Result<StoragePlacement> {
+    resolve_with_title(
+        local,
+        platform,
+        json_output,
+        "Where should Codewire store this credential?",
+    )
+}
+
+fn resolve_with_title(
+    local: bool,
+    platform: bool,
+    json_output: bool,
+    title: &str,
+) -> anyhow::Result<StoragePlacement> {
+    let output = if json_output {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Text
+    };
+    select_storage_placement(local, platform, guided::available(output), || {
+        let backend = ResolvePaths::from_env(&OsEnv)
+            .map_err(anyhow::Error::from)
+            .and_then(|paths| {
+                super::credential_input::configured_local_credential_store(&paths.mesh_data_dir)
+            })
+            .map_err(|error| error.to_string());
+        let choices = storage_choices(backend.as_ref().copied());
+        selected_storage(guided::choose(title, &choices)?, backend)
     })
 }
 
@@ -50,29 +87,40 @@ fn select_storage_placement(
     }
 }
 
-fn prompt_storage_placement(
-    reader: impl BufRead,
-    mut writer: impl Write,
+fn selected_storage(
+    index: usize,
+    backend: Result<ProtectedStoreBackend, String>,
 ) -> anyhow::Result<StoragePlacement> {
-    write!(writer, "Storage placement [local/cloud]: ")
-        .context("write storage placement prompt")?;
-    writer.flush().context("flush storage placement prompt")?;
-    let mut input = String::new();
-    let count = reader
-        .take(65)
-        .read_line(&mut input)
-        .context("read storage placement")?;
-    if count == 0 || input.trim().is_empty() {
-        anyhow::bail!("storage placement selection canceled; no storage selected");
+    if index == 0 {
+        backend.map_err(anyhow::Error::msg)?;
+        Ok(StoragePlacement::Local)
+    } else {
+        Ok(StoragePlacement::Platform)
     }
-    anyhow::ensure!(
-        count < 65,
-        "invalid storage placement; choose local or cloud"
-    );
-    match input.trim() {
-        "local" => Ok(StoragePlacement::Local),
-        "cloud" => Ok(StoragePlacement::Platform),
-        _ => anyhow::bail!("invalid storage placement; choose local or cloud"),
+}
+
+fn storage_choices(backend: Result<ProtectedStoreBackend, &String>) -> Vec<Choice> {
+    vec![
+        Choice::new(
+            if cfg!(target_os = "macos") {
+                "On this Mac"
+            } else {
+                "On this computer"
+            },
+            match backend {
+                Ok(backend) => backend_label(backend).to_owned(),
+                Err(error) => format!("Unavailable: {error}"),
+            },
+        ),
+        Choice::new("In your Codewire account", "Protected cloud storage"),
+    ]
+}
+
+fn backend_label(backend: ProtectedStoreBackend) -> &'static str {
+    match backend {
+        ProtectedStoreBackend::Keychain => "macOS Keychain",
+        ProtectedStoreBackend::SecretService => "Linux system keyring (Secret Service)",
+        ProtectedStoreBackend::File => "Permission-restricted file storage",
     }
 }
 
@@ -81,63 +129,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_placement_never_reads_input_and_conflicts_fail_before_input() {
+    fn explicit_placement_never_prompts_and_conflicts_fail_before_input() {
         for interactive in [false, true] {
             for (local, platform, expected) in [
                 (true, false, Some(StoragePlacement::Local)),
                 (false, true, Some(StoragePlacement::Platform)),
                 (true, true, None),
             ] {
-                let result = select_storage_placement(local, platform, interactive, || {
-                    panic!("explicit placement must not read input")
-                });
-                assert_eq!(result.ok(), expected);
+                assert_eq!(
+                    select_storage_placement(local, platform, interactive, || panic!(
+                        "must not prompt"
+                    ))
+                    .ok(),
+                    expected
+                );
             }
         }
     }
 
     #[test]
-    fn missing_noninteractive_placement_never_consumes_sensitive_input() {
-        let error = select_storage_placement(false, false, false, || {
-            panic!("noninteractive input must remain unread")
-        })
-        .unwrap_err();
+    fn noninteractive_placement_never_consumes_piped_material() {
+        let error = select_storage_placement(false, false, false, || panic!("must not read input"))
+            .unwrap_err();
         assert!(error.to_string().contains("--local or --cloud"));
     }
 
     #[test]
-    fn missing_interactive_placement_accepts_only_explicit_answers() {
-        for (answer, expected) in [
-            ("local\n", Some(StoragePlacement::Local)),
-            ("cloud\n", Some(StoragePlacement::Platform)),
-            ("platform\n", None),
-            ("", None),
-            ("\n", None),
-            ("yes\n", None),
-            ("sensitive-input-canary\n", None),
-        ] {
-            let mut output = Vec::new();
-            let result = select_storage_placement(false, false, true, || {
-                prompt_storage_placement(answer.as_bytes(), &mut output)
-            });
-            if let Err(error) = &result {
-                assert!(!error.to_string().contains("sensitive-input-canary"));
-            }
-            assert_eq!(result.ok(), expected);
-            assert_eq!(output, b"Storage placement [local/cloud]: ");
-        }
+    fn unavailable_local_backend_does_not_block_cloud_selection() {
+        let error = "local keyring unavailable".to_owned();
+        let choices = storage_choices(Err(&error));
+        assert_eq!(
+            choices[1],
+            Choice::new("In your Codewire account", "Protected cloud storage")
+        );
+        assert_eq!(
+            selected_storage(1, Err(error.clone())).unwrap(),
+            StoragePlacement::Platform
+        );
+        assert!(selected_storage(0, Err(error)).is_err());
     }
 
     #[test]
-    fn placement_prompt_consumes_only_the_choice_line_and_bounds_invalid_input() {
-        let mut input = std::io::Cursor::new(b"local\nvalue-remains-unread\n");
+    fn backend_labels_describe_the_configured_protection() {
         assert_eq!(
-            prompt_storage_placement(&mut input, Vec::new()).unwrap(),
-            StoragePlacement::Local
+            backend_label(ProtectedStoreBackend::Keychain),
+            "macOS Keychain"
         );
-        assert_eq!(input.position(), 6);
-        let mut oversized = std::io::Cursor::new(vec![b'x'; 1024]);
-        assert!(prompt_storage_placement(&mut oversized, Vec::new()).is_err());
-        assert_eq!(oversized.position(), 65);
+        assert!(backend_label(ProtectedStoreBackend::SecretService).contains("system keyring"));
+        assert!(!backend_label(ProtectedStoreBackend::File).contains("Keychain"));
     }
 }

@@ -29,6 +29,7 @@ mod spinner;
 mod status_line;
 mod style;
 mod summary;
+mod text_input;
 
 #[cfg(all(test, unix))]
 mod pty_tests;
@@ -47,4 +48,5 @@ pub(crate) use self::{
         Allocation, LifecycleSummary, MeshPlacement, NetworkRef, Outcome, SourcePlacement,
         SourceRef, VmLocation,
     },
+    text_input::run_text_input,
 };

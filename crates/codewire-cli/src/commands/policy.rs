@@ -15,7 +15,6 @@ use codewire_egress_policy::reference::{PolicyReference, PolicyStore};
 use codewire_egress_policy::typed::{AllowRule, AllowTarget, TypedPolicy};
 use codewire_egress_policy::{BuiltinPolicy, CompiledPolicy};
 
-use super::storage_placement::{StoragePlacement, resolve_storage_placement};
 use super::*;
 
 /// The ports a target gets when it names none: those `open` allows, so an
@@ -129,14 +128,30 @@ pub(crate) async fn handle_policy_command(
     {
         return print_check(check, &builtin.to_string(), None, &builtin.compile());
     }
-    let local = globals.placement == Some(EnvironmentPlacement::Local);
-    let platform = globals.placement == Some(EnvironmentPlacement::Platform);
-    match resolve_storage_placement(local, platform, args.command.json())? {
-        StoragePlacement::Platform => anyhow::bail!(
+    match globals.placement {
+        Some(EnvironmentPlacement::Platform) => anyhow::bail!(
             "platform network policies are not available yet; keep this policy on this host with --local"
         ),
-        StoragePlacement::Local => handle_local_policy_command(args.command).await,
+        Some(EnvironmentPlacement::Local) => {}
+        None => {
+            guided::require_available(
+                if args.command.json() {
+                    OutputFormat::Json
+                } else {
+                    OutputFormat::Text
+                },
+                "select the policy store: `cw --local policy ...`",
+            )?;
+            guided::choose(
+                "Where should Codewire store this policy?",
+                &[guided::Choice::new(
+                    "On this computer",
+                    "Local policy store; cloud policy storage is not available yet",
+                )],
+            )?;
+        }
     }
+    handle_local_policy_command(args.command).await
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

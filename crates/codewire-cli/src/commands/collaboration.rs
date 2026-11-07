@@ -473,40 +473,6 @@ pub(crate) fn prompt_text(label: &str) -> anyhow::Result<String> {
     Ok(input.trim().to_string())
 }
 
-pub(crate) struct EchoGuard {
-    pub(crate) restore: bool,
-}
-
-impl EchoGuard {
-    pub(crate) fn disable_if_tty() -> anyhow::Result<Self> {
-        if !std::io::stdin().is_terminal() {
-            return Ok(Self { restore: false });
-        }
-        set_stty_echo(false).context("disable terminal echo")?;
-        Ok(Self { restore: true })
-    }
-}
-
-impl Drop for EchoGuard {
-    fn drop(&mut self) {
-        if self.restore {
-            let _ = set_stty_echo(true);
-            eprintln!();
-        }
-    }
-}
-
-pub(crate) fn set_stty_echo(enabled: bool) -> anyhow::Result<()> {
-    let status = ProcessCommand::new("stty")
-        .arg(if enabled { "echo" } else { "-echo" })
-        .status()
-        .context("run stty")?;
-    if !status.success() {
-        anyhow::bail!("stty failed");
-    }
-    Ok(())
-}
-
 pub(crate) fn format_api_key_list_text(keys: &[ApiKey]) -> String {
     let mut output = format!("{:<16} {:<24} {:<36} CREATED\n", "PREFIX", "NAME", "ID");
     for key in keys {

@@ -67,6 +67,9 @@ fn decode_one(bytes: &[u8]) -> Decoded {
         b'\r' | b'\n' => Decoded::Key(Key::Enter, 1),
         0x7f | 0x08 => Decoded::Key(Key::Backspace, 1),
         0x03 => Decoded::Key(Key::CtrlC, 1),
+        // In raw mode Ctrl-D is a byte rather than an EOF; cancel just as
+        // a closed input stream does.
+        0x04 => Decoded::Key(Key::Escape, 1),
         0x15 => Decoded::Key(Key::CtrlU, 1),
         byte if byte < 0x20 => Decoded::Key(Key::Other, 1),
         byte if byte < 0x80 => Decoded::Key(Key::Char(char::from(byte)), 1),

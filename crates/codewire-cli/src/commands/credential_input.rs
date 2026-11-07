@@ -12,15 +12,16 @@ use codewire_access::{
     CredentialId, ProviderId, builtin_provider_catalog,
 };
 use codewire_protected_store::{MAX_PROTECTED_VALUE_BYTES, ProtectedStoreBackend, ProtectedValue};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use super::storage_placement::{
-    StoragePlacement, require_reference_placement, resolve_storage_placement,
+    StoragePlacement, require_reference_placement,
+    resolve_credential_storage_placement as resolve_storage_placement,
 };
 use super::{
     CredentialGenerateArgs, CredentialProfileCommand, CredentialProfileDeleteArgs,
     CredentialProfileSelectorArgs, CredentialProfilesCommand, CredentialsArgs, CredentialsCommand,
-    EchoGuard, Globals, OutputFormat, trimmed_required,
+    Globals, OutputFormat, trimmed_required,
 };
 
 pub(super) const CODEX_DEVICE_AUTHORIZATION_GUIDANCE: &str = "Before connecting, turn on \"Enable device code authorization for Codex\" in ChatGPT Security settings: https://chatgpt.com/#settings/Security. For a managed workspace, your administrator may need to allow device code login.";
@@ -37,6 +38,21 @@ pub(super) enum CredentialOperation {
     GenerateIntoProfile(CredentialGenerateArgs, String),
 }
 
+/// Enrollment reports the identity returned by its save operation. A declined
+/// reconnect never produces this receipt, and later menus bind its exact ID.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct SavedCredential {
+    pub(super) id: String,
+    pub(super) name: String,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) enum CredentialExecution {
+    #[default]
+    Unchanged,
+    Saved(SavedCredential),
+}
+
 /// Printed after a generated SSH public key.
 pub(super) const SSH_PUBLIC_KEY_GITHUB_HINT: &str =
     "Add the public key above to GitHub: https://github.com/settings/ssh/new";
@@ -49,22 +65,48 @@ enum CredentialDispatch {
 
 pub(crate) async fn handle_credentials_command(
     globals: &Globals,
-    args: CredentialsArgs,
+    mut args: CredentialsArgs,
 ) -> anyhow::Result<()> {
+    if matches!(&args.command, CredentialsCommand::Set(set) if set.slot.as_deref() == Some("github"))
+    {
+        anyhow::bail!(GITHUB_ALWAYS_INCLUDED);
+    }
+    if super::guided_credentials::missing(&args) && !super::guided::available(OutputFormat::Text) {
+        super::guided::require_available(
+            OutputFormat::Text,
+            "supply the provider and --name NAME; profile changes also need --profile NAME and a credential selector",
+        )?;
+    }
     // The global `--local` / `--cloud` is the explicit storage choice here.
     let placement = resolve_storage_placement(
         globals.placement == Some(super::EnvironmentPlacement::Local),
         globals.placement == Some(super::EnvironmentPlacement::Platform),
         credential_command_json(&args.command),
     )?;
-    // Decide host support before profile resolution and, more importantly,
-    // before any authority configuration or protected input is touched.
-    let dispatch = credential_dispatch(
+    super::guided_credentials::complete(globals, &mut args, placement, globals.placement.is_none())
+        .await?;
+    let follow_up = if args.profile.is_none() {
+        super::guided_credentials::assignment_slot(&args.command)
+    } else {
+        None
+    };
+    let operation = resolve_credential_operation(args.profile, args.command, placement)?;
+    let execution = execute_credential_operation(globals, operation, placement).await?;
+    if let (Some(slot), CredentialExecution::Saved(saved)) = (follow_up, execution) {
+        super::guided_credentials::offer_assignment(globals, placement, &slot, &saved).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn execute_credential_operation(
+    globals: &Globals,
+    operation: CredentialOperation,
+    placement: StoragePlacement,
+) -> anyhow::Result<CredentialExecution> {
+    match credential_dispatch(
         placement,
         cfg!(any(target_os = "linux", target_os = "macos")),
-    )?;
-    let operation = resolve_credential_operation(args.profile, args.command, placement)?;
-    match dispatch {
+    )? {
         CredentialDispatch::Platform => {
             super::platform_profiles::handle_platform_credentials(globals, operation).await
         }
@@ -359,7 +401,10 @@ pub(super) const GITHUB_ALWAYS_INCLUDED: &str = "every profile includes your one
 pub(super) fn profile_set_credential(
     args: &super::CredentialProfileSetArgs,
 ) -> anyhow::Result<&str> {
-    anyhow::ensure!(args.slot != "github", GITHUB_ALWAYS_INCLUDED);
+    anyhow::ensure!(
+        args.slot.as_deref() != Some("github"),
+        GITHUB_ALWAYS_INCLUDED
+    );
     args.credential
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("select a credential for this provider"))
@@ -403,20 +448,13 @@ pub(super) fn prompt_named_material(label: &str) -> anyhow::Result<ProtectedValu
 /// confirmation under `indent`.
 pub(super) fn prompt_hidden(prompt: &str, indent: &str) -> anyhow::Result<ProtectedValue> {
     let interactive = std::io::stdin().is_terminal();
-    if interactive {
-        eprint!("{prompt}");
-        std::io::stderr()
-            .flush()
-            .context("flush credential prompt")?;
-    }
-    let echo_guard = if interactive {
-        Some(EchoGuard::disable_if_tty()?)
+    let value = if interactive {
+        read_hidden_terminal_bytes(prompt, MAX_PROTECTED_VALUE_BYTES).and_then(|mut bytes| {
+            ProtectedValue::new(std::mem::take(&mut *bytes)).context("invalid credential material")
+        })
     } else {
-        None
+        read_protected_value(std::io::stdin().lock(), false)
     };
-    let stdin = std::io::stdin();
-    let value = read_protected_value(stdin.lock(), interactive);
-    drop(echo_guard);
     if interactive {
         // The Enter that ended the hidden line was not echoed either.
         eprintln!();
@@ -425,6 +463,68 @@ pub(super) fn prompt_hidden(prompt: &str, indent: &str) -> anyhow::Result<Protec
         }
     }
     value
+}
+
+/// Read protected terminal input without echo or ordinary widget/string state.
+/// Raw mode turns Ctrl-C/Ctrl-D into cancellation bytes so RAII restores the
+/// terminal, instead of a signal terminating before the echo guard can drop.
+pub(super) fn read_hidden_terminal_bytes(
+    prompt: &str,
+    maximum: usize,
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd as _;
+        let mut input = std::fs::File::from(std::io::stdin().as_fd().try_clone_to_owned()?);
+        let _terminal = crate::terminal_attach::RawModeGuard::enable()?;
+        // Advertise the prompt only after echo is disabled, so immediate
+        // paste cannot race the terminal transition.
+        eprint!("{prompt}");
+        std::io::stderr()
+            .flush()
+            .context("flush protected input prompt")?;
+        read_hidden_bytes(&mut input, maximum)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (prompt, maximum);
+        anyhow::bail!(
+            "protected terminal input is unavailable on this host; pipe the value to stdin"
+        )
+    }
+}
+
+fn read_hidden_bytes(reader: &mut impl Read, maximum: usize) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    let mut value = Zeroizing::new(Vec::with_capacity(maximum));
+    let mut byte = Zeroizing::new([0u8; 1]);
+    loop {
+        match reader.read(&mut *byte) {
+            Ok(0) => anyhow::bail!("canceled; no protected value was saved"),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error).context("read protected terminal input"),
+            Ok(_) => {}
+        }
+        match byte[0] {
+            b'\r' | b'\n' => return Ok(value),
+            0x1b | 0x03 | 0x04 => anyhow::bail!("canceled; no protected value was saved"),
+            0x15 => {
+                value.as_mut_slice().zeroize();
+                value.clear();
+            }
+            0x7f | 0x08 => {
+                let start = std::str::from_utf8(&value)
+                    .ok()
+                    .and_then(|text| text.char_indices().next_back().map(|(index, _)| index))
+                    .unwrap_or_else(|| value.len().saturating_sub(1));
+                value[start..].zeroize();
+                value.truncate(start);
+            }
+            byte => {
+                anyhow::ensure!(value.len() < maximum, "protected input is too large");
+                value.push(byte);
+            }
+        }
+    }
 }
 
 /// What the hidden prompt says once it has read a value: its length only.
@@ -602,12 +702,23 @@ fn ssh_enrollment_name(name: &str, expiry: Option<u64>) -> anyhow::Result<String
 pub(super) fn validate_ssh_generation(
     args: &super::CredentialGenerateArgs,
 ) -> anyhow::Result<String> {
-    anyhow::ensure!(args.provider == "ssh", "key generation supports ssh only");
-    ssh_enrollment_name(&args.name, args.expires_at)
+    anyhow::ensure!(
+        args.provider.as_deref() == Some("ssh"),
+        "key generation supports ssh only"
+    );
+    ssh_enrollment_name(
+        args.name
+            .as_deref()
+            .context("credential name is required")?,
+        args.expires_at,
+    )
 }
 
 pub(super) fn validate_ssh_import(args: &super::CredentialAddArgs) -> anyhow::Result<String> {
-    anyhow::ensure!(args.provider == "ssh", "SSH import requires provider ssh");
+    anyhow::ensure!(
+        args.provider.as_deref() == Some("ssh"),
+        "SSH import requires provider ssh"
+    );
     anyhow::ensure!(
         args.account_hint.is_none(),
         "SSH credentials do not use --account-hint"
@@ -618,7 +729,12 @@ pub(super) fn validate_ssh_import(args: &super::CredentialAddArgs) -> anyhow::Re
             .is_some_and(|path| !path.as_os_str().is_empty()),
         "add ssh requires an explicit --key-file PATH"
     );
-    ssh_enrollment_name(&args.name, args.expires_at)
+    ssh_enrollment_name(
+        args.name
+            .as_deref()
+            .context("credential name is required")?,
+        args.expires_at,
+    )
 }
 
 pub(super) fn read_ssh_import(args: &super::CredentialAddArgs) -> anyhow::Result<SshImport> {
@@ -627,19 +743,21 @@ pub(super) fn read_ssh_import(args: &super::CredentialAddArgs) -> anyhow::Result
     let file = open_explicit_ssh_key(path)?;
     let private_key = read_ssh_key(file)?;
     let interactive = std::io::stdin().is_terminal();
-    if interactive {
-        eprint!("SSH passphrase (empty for an unencrypted key): ");
-        std::io::stderr()
-            .flush()
-            .context("flush SSH passphrase prompt")?;
-    }
-    let echo = if interactive {
-        Some(EchoGuard::disable_if_tty()?)
+    let passphrase = if interactive {
+        read_hidden_terminal_bytes(
+            "SSH passphrase (empty for an unencrypted key): ",
+            MAX_SSH_PASSPHRASE_BYTES,
+        )
+        .and_then(|bytes| {
+            anyhow::ensure!(
+                !bytes.iter().any(|byte| matches!(byte, 0 | b'\r' | b'\n')),
+                "invalid SSH passphrase input"
+            );
+            Ok((!bytes.is_empty()).then_some(bytes))
+        })
     } else {
-        None
+        read_ssh_passphrase(std::io::stdin().lock(), false)
     };
-    let passphrase = read_ssh_passphrase(std::io::stdin().lock(), interactive);
-    drop(echo);
     if interactive {
         eprintln!();
     }
@@ -718,6 +836,30 @@ fn read_ssh_passphrase(
 mod tests {
     use super::*;
     use clap::Parser as _;
+
+    #[test]
+    fn hidden_terminal_cancel_never_returns_partial_material() {
+        for suffix in [0x1b, 0x03, 0x04] {
+            let mut input =
+                std::io::Cursor::new([b"synthetic-partial".as_slice(), &[suffix]].concat());
+            let error = read_hidden_bytes(&mut input, 128).unwrap_err();
+            assert!(error.to_string().contains("canceled"));
+            assert!(!error.to_string().contains("synthetic-partial"));
+        }
+        assert!(read_hidden_bytes(&mut std::io::Cursor::new(b"partial"), 128).is_err());
+    }
+
+    #[test]
+    fn hidden_terminal_unicode_backspace_clear_and_bounds() {
+        let mut unicode = std::io::Cursor::new("synthetic-é\u{7f}x\r".as_bytes());
+        assert_eq!(
+            &*read_hidden_bytes(&mut unicode, 128).unwrap(),
+            b"synthetic-x"
+        );
+        let mut clear = std::io::Cursor::new(b"discard\x15kept\r");
+        assert_eq!(&*read_hidden_bytes(&mut clear, 128).unwrap(), b"kept");
+        assert!(read_hidden_bytes(&mut std::io::Cursor::new(b"too-long\r"), 3).is_err());
+    }
 
     #[test]
     fn unsupported_hosts_accept_platform_and_reject_local_without_fallback() {
@@ -1016,11 +1158,13 @@ mod tests {
     #[test]
     fn ssh_selection_is_validated_without_opening_any_key_or_reading_stdin() {
         let mut args = super::super::CredentialAddArgs {
-            provider: "ssh".into(),
-            name: "work".into(),
+            provider: Some("ssh".into()),
+            name: Some("work".into()),
             account_hint: None,
             expires_at: None,
             key_file: Some("/deliberately-absent-key".into()),
+
+            guided: false,
         };
         assert_eq!(validate_ssh_import(&args).unwrap(), "work");
         args.key_file = None;
@@ -1029,7 +1173,7 @@ mod tests {
         args.account_hint = Some("unexpected".into());
         assert!(validate_ssh_import(&args).is_err());
         args.account_hint = None;
-        args.provider = "github".into();
+        args.provider = Some("github".into());
         assert!(validate_ssh_import(&args).is_err());
         assert!(ssh_enrollment_name("name\ncontrol", None).is_err());
         assert!(ssh_enrollment_name("work", Some(1)).is_err());

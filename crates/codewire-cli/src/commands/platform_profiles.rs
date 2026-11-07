@@ -14,7 +14,7 @@ use super::*;
 pub(super) async fn handle_platform_credentials(
     globals: &Globals,
     operation: CredentialOperation,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<super::credential_input::CredentialExecution> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
@@ -24,9 +24,11 @@ pub(super) async fn handle_platform_credentials(
         platform.token_provider()?,
     )?;
     match operation {
-        CredentialOperation::Profile(command) => handle_profile(&client, command).await,
+        CredentialOperation::Profile(command) => handle_profile(&client, command)
+            .await
+            .map(|_| super::credential_input::CredentialExecution::Unchanged),
         CredentialOperation::Credential(command) => {
-            super::platform_credentials::handle(&client, command).await
+            super::platform_credentials::execute(&client, command).await
         }
         CredentialOperation::GenerateIntoProfile(args, profile) => {
             let credential = super::platform_credentials::generate_ssh(&client, &args).await?;
@@ -34,11 +36,12 @@ pub(super) async fn handle_platform_credentials(
                 &client,
                 CredentialProfileCommand::Set(CredentialProfileSetArgs {
                     profile,
-                    slot: "ssh".to_owned(),
+                    slot: Some("ssh".to_owned()),
                     credential: Some(format!("id:{}", credential.id)),
                 }),
             )
             .await
+            .map(|_| super::credential_input::CredentialExecution::Unchanged)
         }
     }
 }
@@ -60,7 +63,7 @@ async fn handle_profile(
             let credential = super::platform_credentials::resolve(client, selector).await?;
             let kind = platform_authentication_kind(&credential)?;
             let slot = supported_profile_slot(
-                &args.slot,
+                args.slot.as_deref().context("provider slot is required")?,
                 &ProviderId::parse(&credential.provider)?,
                 kind,
             )?
@@ -161,7 +164,7 @@ async fn handle_profile(
     }
 }
 
-fn platform_authentication_kind(
+pub(super) fn platform_authentication_kind(
     credential: &rpc::Credential,
 ) -> anyhow::Result<CredentialAuthKind> {
     use rpc::CredentialAuthenticationKind as Kind;
@@ -421,7 +424,7 @@ mod tests {
     fn set_args() -> CredentialProfileCommand {
         CredentialProfileCommand::Set(CredentialProfileSetArgs {
             profile: "user/work".into(),
-            slot: "codex".into(),
+            slot: Some("codex".into()),
             credential: Some("name:codex-work".into()),
         })
     }
@@ -607,12 +610,12 @@ mod tests {
         for command in [
             CredentialProfileCommand::Set(CredentialProfileSetArgs {
                 profile: "user/work".into(),
-                slot: "github".into(),
+                slot: Some("github".into()),
                 credential: None,
             }),
             CredentialProfileCommand::Set(CredentialProfileSetArgs {
                 profile: "user/work".into(),
-                slot: "github".into(),
+                slot: Some("github".into()),
                 credential: Some("name:github-work".into()),
             }),
             CredentialProfileCommand::Unset(CredentialProfileSlotArgs {

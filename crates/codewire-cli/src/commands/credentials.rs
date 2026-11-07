@@ -46,6 +46,15 @@ use super::{
 
 pub(crate) async fn handle_local_credentials_command(
     operation: CredentialOperation,
+) -> anyhow::Result<super::credential_input::CredentialExecution> {
+    let mut execution = super::credential_input::CredentialExecution::Unchanged;
+    handle_local_with_receipt(operation, &mut execution).await?;
+    Ok(execution)
+}
+
+async fn handle_local_with_receipt(
+    operation: CredentialOperation,
+    execution: &mut super::credential_input::CredentialExecution,
 ) -> anyhow::Result<()> {
     let mut client = connect_local_credential_authority().await?;
     let command = match operation {
@@ -58,11 +67,11 @@ pub(crate) async fn handle_local_credentials_command(
         CredentialOperation::Credential(command) => command,
     };
     match command {
-        CredentialsCommand::Connect(args) => connect_credential(&mut client, args).await,
-        CredentialsCommand::Add(args) => add_credential(&mut client, args).await,
-        CredentialsCommand::Generate(args) => {
-            generate_local_ssh(&mut client, &args).await.map(drop)
-        }
+        CredentialsCommand::Connect(args) => connect_credential(&mut client, args, execution).await,
+        CredentialsCommand::Add(args) => add_credential(&mut client, args, execution).await,
+        CredentialsCommand::Generate(args) => generate_local_ssh(&mut client, &args)
+            .await
+            .map(|record| remember_local(&record, execution)),
         CredentialsCommand::List(args) => list_credentials(&mut client, args).await,
         CredentialsCommand::Get(args) => {
             get_credential(
@@ -89,13 +98,26 @@ pub(crate) async fn handle_local_credentials_command(
     }
 }
 
+fn remember_local(
+    record: &CredentialRecord,
+    execution: &mut super::credential_input::CredentialExecution,
+) {
+    *execution = super::credential_input::CredentialExecution::Saved(
+        super::credential_input::SavedCredential {
+            id: record.metadata.id.to_string(),
+            name: record.metadata.display_name.clone(),
+        },
+    );
+}
+
 async fn connect_credential(
     client: &mut LocalCredentialClient,
     args: CredentialConnectArgs,
+    execution: &mut super::credential_input::CredentialExecution,
 ) -> anyhow::Result<()> {
-    match args.provider {
-        CredentialConnectProviderArg::Codex => connect_codex(client, args).await,
-        CredentialConnectProviderArg::Github => connect_github(client, args).await,
+    match args.provider.context("credential provider is required")? {
+        CredentialConnectProviderArg::Codex => connect_codex(client, args, execution).await,
+        CredentialConnectProviderArg::Github => connect_github(client, args, execution).await,
         CredentialConnectProviderArg::Claude => anyhow::bail!(
             "Claude sign-ins are stored only on the Codewire platform; connect one with --cloud"
         ),
@@ -105,8 +127,10 @@ async fn connect_credential(
 async fn connect_codex(
     client: &mut LocalCredentialClient,
     args: CredentialConnectArgs,
+    execution: &mut super::credential_input::CredentialExecution,
 ) -> anyhow::Result<()> {
     let Some(target) = prepare_oauth_connection(client, &args, "openai").await? else {
+        anyhow::ensure!(!args.guided, "canceled; no credential was changed");
         return Ok(());
     };
     let (bundle, account_hint) = super::provider_login::codex_device_login()
@@ -120,6 +144,7 @@ async fn connect_codex(
         .context(
             "local Codex storage acknowledgement is unknown; inspect the credential list before retrying",
         )?;
+    remember_local(&record, execution);
     eprintln!(
         "Local Codex credential {:?} connected ({}).",
         record.metadata.display_name, record.metadata.id
@@ -130,8 +155,10 @@ async fn connect_codex(
 async fn connect_github(
     client: &mut LocalCredentialClient,
     args: CredentialConnectArgs,
+    execution: &mut super::credential_input::CredentialExecution,
 ) -> anyhow::Result<()> {
     let Some(target) = prepare_oauth_connection(client, &args, "github").await? else {
+        anyhow::ensure!(!args.guided, "canceled; no credential was changed");
         return Ok(());
     };
     let mut import = super::provider_login::github_device_login().await?;
@@ -158,6 +185,7 @@ async fn connect_github(
         .context(
             "local GitHub storage acknowledgement is unknown; inspect the credential list before retrying",
         )?;
+    remember_local(&record, execution);
     eprintln!(
         "Local GitHub credential {:?} connected ({}).",
         record.metadata.display_name, record.metadata.id
@@ -310,7 +338,12 @@ async fn prepare_oauth_connection(
     args: &CredentialConnectArgs,
     provider: &str,
 ) -> anyhow::Result<Option<OAuthConnectionTarget>> {
-    let display_name = trimmed_required(&args.name, "credential name")?;
+    let display_name = trimmed_required(
+        args.name
+            .as_deref()
+            .context("credential name is required")?,
+        "credential name",
+    )?;
     let records = client
         .list_credentials()
         .await
@@ -445,8 +478,9 @@ async fn publish_oauth_connection(
 async fn add_credential(
     client: &mut LocalCredentialClient,
     args: CredentialAddArgs,
+    execution: &mut super::credential_input::CredentialExecution,
 ) -> anyhow::Result<()> {
-    if args.provider == "ssh" {
+    if args.provider.as_deref() == Some("ssh") {
         let name = validate_ssh_import(&args)?;
         anyhow::ensure!(
             !client
@@ -459,14 +493,20 @@ async fn add_credential(
         let input = read_ssh_import(&args)?;
         let record = client.add_ssh_credential(name, input.private_key, input.passphrase, args.expires_at).await
             .context("import local SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
+        remember_local(&record, execution);
         return print_credentials(&[record], OutputFormat::Text);
     }
     anyhow::ensure!(
         args.key_file.is_none(),
         "--key-file is only valid for add ssh"
     );
-    let provider = ProviderId::parse(trimmed_required(&args.provider, "provider")?)
-        .context("invalid credential provider")?;
+    let provider = ProviderId::parse(trimmed_required(
+        args.provider
+            .as_deref()
+            .context("credential provider is required")?,
+        "provider",
+    )?)
+    .context("invalid credential provider")?;
     let authentication_kind = api_key_enrollment_kind(provider.as_str())?;
     let catalog = builtin_provider_catalog();
     let definition = catalog
@@ -482,7 +522,13 @@ async fn add_credential(
     let input = NewCredential {
         provider,
         authentication_kind,
-        display_name: trimmed_required(&args.name, "credential name")?.to_owned(),
+        display_name: trimmed_required(
+            args.name
+                .as_deref()
+                .context("credential name is required")?,
+            "credential name",
+        )?
+        .to_owned(),
         account_hint: args
             .account_hint
             .as_deref()
@@ -495,6 +541,7 @@ async fn add_credential(
         .add_credential(input, material)
         .await
         .context("add local credential")?;
+    remember_local(&record, execution);
     eprintln!(
         "Local credential {:?} added ({}).",
         record.metadata.display_name, record.metadata.id
@@ -640,7 +687,7 @@ async fn generate_local_ssh_into_profile(
         client,
         CredentialProfileSetArgs {
             profile,
-            slot: "ssh".to_owned(),
+            slot: Some("ssh".to_owned()),
             credential: Some(format!("id:{}", record.metadata.id)),
         },
     )
@@ -700,9 +747,10 @@ pub(crate) async fn offer_local_profile_ssh_key(profile: &str) -> anyhow::Result
     let credential = if index == generate {
         let name = super::prompt_default("New SSH key name", &format!("{profile}-ssh"))?;
         let args = super::CredentialGenerateArgs {
-            provider: "ssh".to_owned(),
-            name,
+            provider: Some("ssh".to_owned()),
+            name: Some(name),
             expires_at: None,
+            guided: false,
         };
         generate_local_ssh(&mut client, &args).await?.metadata.id
     } else {
@@ -712,7 +760,7 @@ pub(crate) async fn offer_local_profile_ssh_key(profile: &str) -> anyhow::Result
         &mut client,
         CredentialProfileSetArgs {
             profile: profile.to_owned(),
-            slot: "ssh".to_owned(),
+            slot: Some("ssh".to_owned()),
             credential: Some(format!("id:{credential}")),
         },
     )
@@ -770,7 +818,7 @@ async fn set_profile_entry(
     let selector = profile_set_credential(&args)?;
     let credential = resolve_credential(client, selector).await?;
     let slot = supported_profile_slot(
-        &args.slot,
+        args.slot.as_deref().context("provider slot is required")?,
         &credential.metadata.provider,
         credential.metadata.authentication_kind,
     )?;
@@ -1424,9 +1472,11 @@ mod tests {
         );
         let mut client = connect_ready_authority(&config, &server).await;
         let generate = |name: &str| super::super::CredentialGenerateArgs {
-            provider: "ssh".to_owned(),
-            name: name.to_owned(),
+            provider: Some("ssh".to_owned()),
+            name: Some(name.to_owned()),
             expires_at: None,
+
+            guided: false,
         };
 
         let loose = generate_local_ssh(&mut client, &generate("loose-ssh"))
@@ -1781,7 +1831,7 @@ mod tests {
             assert!(
                 matches!(generated.command, Command::Credentials(CredentialsArgs {
                 command: CredentialsCommand::Generate(super::super::CredentialGenerateArgs { name, .. }), ..
-            }) if name == "work")
+            }) if name.as_deref() == Some("work"))
             );
             let imported = Cli::try_parse_from([
                 "cw",
@@ -1834,7 +1884,7 @@ mod tests {
                 assert!(
                     matches!(parsed.command, Command::Credentials(CredentialsArgs {
                     command: CredentialsCommand::Add(CredentialAddArgs { name, .. }), ..
-                }) if name == "work")
+                }) if name.as_deref() == Some("work"))
                 );
                 assert!(
                     Cli::try_parse_from([
@@ -1870,7 +1920,7 @@ mod tests {
         assert!(
             matches!(parsed.command, Command::Credentials(CredentialsArgs {
             command: CredentialsCommand::Add(CredentialAddArgs { provider, name, .. }), ..
-        }) if provider == "claude-subscription" && name == "claude")
+        }) if provider.as_deref() == Some("claude-subscription") && name.as_deref() == Some("claude"))
         );
         // The token is never an argument.
         assert!(
@@ -1906,7 +1956,7 @@ mod tests {
             connect.command,
             Command::Credentials(CredentialsArgs {
                 command: CredentialsCommand::Connect(CredentialConnectArgs {
-                    provider: CredentialConnectProviderArg::Codex,
+                    provider: Some(CredentialConnectProviderArg::Codex),
                     ..
                 }),
                 ..
@@ -1928,7 +1978,7 @@ mod tests {
             connect_github.command,
             Command::Credentials(CredentialsArgs {
                 command: CredentialsCommand::Connect(CredentialConnectArgs {
-                    provider: CredentialConnectProviderArg::Github,
+                    provider: Some(CredentialConnectProviderArg::Github),
                     ..
                 }),
                 ..
@@ -2049,7 +2099,7 @@ mod tests {
                 panic!("generate ssh with --profile binds that profile")
             };
             assert_eq!(
-                (generate.name.as_str(), profile.as_str()),
+                (generate.name.as_deref().unwrap(), profile.as_str()),
                 ("work-ssh", "work")
             );
             for tail in [

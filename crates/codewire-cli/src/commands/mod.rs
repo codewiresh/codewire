@@ -59,6 +59,8 @@ pub(crate) use credential_repository::*;
 mod credential_input;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credentials;
+pub(crate) mod guided;
+mod guided_credentials;
 mod login_screen;
 mod platform_credentials;
 mod platform_profiles;
@@ -460,11 +462,11 @@ pub(crate) struct CredentialsArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CredentialsCommand {
-    #[command(about = "Connect an explicitly selected provider identity")]
+    #[command(about = "Connect a provider identity; missing choices are prompted at a terminal")]
     Connect(CredentialConnectArgs),
-    #[command(about = "Add an explicitly supplied credential")]
+    #[command(about = "Add a protected credential; missing choices are prompted at a terminal")]
     Add(CredentialAddArgs),
-    #[command(about = "Generate a protected SSH identity and show its public key")]
+    #[command(about = "Generate a protected SSH identity; asks for a missing name at a terminal")]
     Generate(CredentialGenerateArgs),
     #[command(visible_alias = "ls", about = "List credential metadata")]
     List(CredentialListArgs),
@@ -494,15 +496,17 @@ pub(crate) enum CredentialsCommand {
 #[derive(Debug, Args)]
 pub(crate) struct CredentialConnectArgs {
     #[arg(value_enum, value_name = "PROVIDER")]
-    pub(crate) provider: CredentialConnectProviderArg,
+    pub(crate) provider: Option<CredentialConnectProviderArg>,
     #[arg(long, value_name = "NAME")]
-    pub(crate) name: String,
+    pub(crate) name: Option<String>,
     #[arg(
         short,
         long,
         help = "Confirm reconnecting an existing named credential"
     )]
     pub(crate) yes: bool,
+    #[arg(skip)]
+    pub(crate) guided: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -520,9 +524,9 @@ pub(crate) struct CredentialAddArgs {
         value_name = "PROVIDER",
         help = "openai or anthropic (API key read from stdin), claude-subscription (token from `claude setup-token`, read from stdin; platform only), or ssh"
     )]
-    pub(crate) provider: String,
+    pub(crate) provider: Option<String>,
     #[arg(long, value_name = "NAME")]
-    pub(crate) name: String,
+    pub(crate) name: Option<String>,
     #[arg(long, value_name = "HINT")]
     pub(crate) account_hint: Option<String>,
     #[arg(long, value_name = "UNIX_SECONDS")]
@@ -533,16 +537,20 @@ pub(crate) struct CredentialAddArgs {
         help = "Explicit OpenSSH private-key file; required only for add ssh"
     )]
     pub(crate) key_file: Option<PathBuf>,
+    #[arg(skip)]
+    pub(crate) guided: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct CredentialGenerateArgs {
     #[arg(value_name = "PROVIDER", value_parser = ["ssh"])]
-    pub(crate) provider: String,
+    pub(crate) provider: Option<String>,
     #[arg(long, value_name = "NAME")]
-    pub(crate) name: String,
+    pub(crate) name: Option<String>,
     #[arg(long, value_name = "UNIX_SECONDS")]
     pub(crate) expires_at: Option<u64>,
+    #[arg(skip)]
+    pub(crate) guided: bool,
 }
 
 #[derive(Debug, Args)]
@@ -652,7 +660,7 @@ pub(crate) struct CredentialProfileSetArgs {
     #[arg(skip)]
     pub(crate) profile: String,
     #[arg(value_name = "PROVIDER", value_parser = ["codex", "openai", "github", "anthropic", "ssh"])]
-    pub(crate) slot: String,
+    pub(crate) slot: Option<String>,
     #[arg(
         value_name = "CREDENTIAL_SELECTOR",
         help = "Credential name, name:<name>, or id:<canonical-uuid>"
@@ -1967,10 +1975,10 @@ pub(crate) enum SecretsCommand {
         about = "List key metadata in the explicitly selected scope"
     )]
     List(ScopedSecretListArgs),
-    #[command(about = "Set one key using a hidden prompt or standard input")]
+    #[command(about = "Set one key; guide missing scope/name and read a hidden value or stdin")]
     Set(ScopedSecretKeyArgs),
     #[command(about = "Delete one key from the explicitly selected scope")]
-    Delete(ScopedSecretKeyArgs),
+    Delete(ScopedSecretDeleteArgs),
     #[command(about = "Rename one key in the explicitly selected scope")]
     Rename(ScopedSecretRenameArgs),
     #[command(about = "Preview key/source resolution from codewire.yaml")]
@@ -2010,7 +2018,7 @@ pub(crate) struct SecretPreviewArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SecretProjectCommand {
-    #[command(about = "Create a secret project")]
+    #[command(about = "Create a secret project; asks for a missing name at a terminal")]
     Create(SecretProjectCreateArgs),
     #[command(visible_alias = "ls", about = "List named secret projects")]
     List(ScopedSecretListArgs),
@@ -2021,7 +2029,7 @@ pub(crate) enum SecretProjectCommand {
 #[derive(Debug, Args)]
 pub(crate) struct SecretProjectCreateArgs {
     #[arg(value_name = "NAME", value_parser = parse_secret_project_name)]
-    pub(crate) name: String,
+    pub(crate) name: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -2036,7 +2044,7 @@ pub(crate) struct SecretProjectDeleteArgs {
 pub(crate) enum ScopedSecretCommand {
     List(ScopedSecretListArgs),
     Set(ScopedSecretKeyArgs),
-    Delete(ScopedSecretKeyArgs),
+    Delete(ScopedSecretDeleteArgs),
     Rename(ScopedSecretRenameArgs),
 }
 
@@ -2048,6 +2056,16 @@ pub(crate) struct ScopedSecretListArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct ScopedSecretKeyArgs {
+    #[arg(value_name = "KEY", value_parser = parse_secret_key)]
+    pub(crate) key: Option<String>,
+    #[arg(skip)]
+    pub(crate) guided: bool,
+    #[arg(skip)]
+    pub(crate) new_project: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ScopedSecretDeleteArgs {
     #[arg(value_name = "KEY", value_parser = parse_secret_key)]
     pub(crate) key: String,
 }

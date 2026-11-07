@@ -49,14 +49,56 @@ pub(crate) struct SecretPreviewIntent {
 
 pub(crate) async fn handle_secrets_command(
     globals: &Globals,
-    args: SecretsArgs,
+    mut args: SecretsArgs,
 ) -> anyhow::Result<()> {
-    // The global `--local` / `--cloud` is the explicit storage choice here.
     let local = globals.placement == Some(EnvironmentPlacement::Local);
     let platform = globals.placement == Some(EnvironmentPlacement::Platform);
+    let addition = matches!(
+        &args.command,
+        SecretsCommand::Set(_)
+            | SecretsCommand::Projects {
+                command: SecretProjectCommand::Create(_)
+            }
+    );
+    if addition {
+        let missing = match &args.command {
+            SecretsCommand::Set(set) => {
+                set.key.is_none() || (!args.user && !args.organization && args.project.is_none())
+            }
+            SecretsCommand::Projects {
+                command: SecretProjectCommand::Create(create),
+            } => create.name.is_none(),
+            _ => false,
+        };
+        if missing {
+            super::guided::require_available(
+                OutputFormat::Text,
+                "supply KEY and one of --project NAME, --user, --organization; project creation needs NAME",
+            )?;
+        }
+        let placement = resolve_storage_placement(local, platform, false)?;
+        complete_secret_metadata(
+            globals,
+            &mut args,
+            placement,
+            missing || globals.placement.is_none(),
+        )
+        .await?;
+        let operation = resolve_secret_operation(args)?;
+        validate_secret_operation_placement(&operation, placement)?;
+        return dispatch_secrets(globals, operation, placement).await;
+    }
     let operation = resolve_secret_operation(args)?;
     let placement = resolve_storage_placement(local, platform, secret_operation_json(&operation))?;
     validate_secret_operation_placement(&operation, placement)?;
+    dispatch_secrets(globals, operation, placement).await
+}
+
+pub(super) async fn dispatch_secrets(
+    globals: &Globals,
+    operation: SecretOperation,
+    placement: StoragePlacement,
+) -> anyhow::Result<()> {
     if placement == StoragePlacement::Local && matches!(operation, SecretOperation::Organization(_))
     {
         anyhow::bail!("organization workload secrets are unsupported locally; use --cloud");
@@ -65,6 +107,105 @@ pub(crate) async fn handle_secrets_command(
         StoragePlacement::Platform => handle_platform_secrets_command(globals, operation).await,
         StoragePlacement::Local => handle_local_secrets_command(operation).await,
     }
+}
+
+async fn complete_secret_metadata(
+    globals: &Globals,
+    args: &mut SecretsArgs,
+    placement: StoragePlacement,
+    guided: bool,
+) -> anyhow::Result<()> {
+    use super::guided::{self, Choice};
+    let SecretsCommand::Set(set) = &mut args.command else {
+        if let SecretsCommand::Projects {
+            command: SecretProjectCommand::Create(create),
+        } = &mut args.command
+            && create.name.is_none()
+        {
+            create.name = Some(guided::text("Secret project name", None, |name| {
+                parse_secret_project_name(name).map(|_| ())
+            })?);
+        }
+        return Ok(());
+    };
+    anyhow::ensure!(
+        !(args.organization && placement == StoragePlacement::Local),
+        "organization workload secrets are unsupported locally; use --cloud"
+    );
+    set.guided = guided;
+    if args.project.is_none() && !args.user && !args.organization {
+        let mut scopes = vec![
+            Choice::new(
+                "A project",
+                "Select the project when configuring an environment",
+            ),
+            Choice::new("Your account", "User-scoped secret"),
+        ];
+        if placement == StoragePlacement::Platform {
+            scopes.push(Choice::new("Organization", "Organization-scoped secret"));
+        }
+        match guided::choose("Where should this secret live?", &scopes)? {
+            0 => {
+                let projects = secret_project_choices(globals, placement).await?;
+                let mut choices = projects
+                    .iter()
+                    .map(|(name, _)| Choice::new(name, "Existing project"))
+                    .collect::<Vec<_>>();
+                choices.push(Choice::new(
+                    "Create a project",
+                    "Create it before saving the first secret",
+                ));
+                let index = guided::choose("Choose a secret project", &choices)?;
+                if let Some((_, selector)) = projects.get(index) {
+                    args.project = Some(selector.clone());
+                } else {
+                    args.project = Some(guided::text("New secret project name", None, |name| {
+                        parse_secret_project_name(name).map(|_| ())
+                    })?);
+                    set.new_project = true;
+                }
+            }
+            1 => args.user = true,
+            _ => args.organization = true,
+        }
+    }
+    if set.key.is_none() {
+        set.key = Some(guided::text("Secret key", None, |key| {
+            parse_secret_key(key).map(|_| ())
+        })?);
+    }
+    Ok(())
+}
+
+pub(super) async fn secret_project_choices(
+    globals: &Globals,
+    placement: StoragePlacement,
+) -> anyhow::Result<Vec<(String, String)>> {
+    if placement == StoragePlacement::Local {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let mut client = connect_local_credential_authority().await?;
+            return Ok(client
+                .list_secret_projects()
+                .await?
+                .into_iter()
+                .map(|project| (project.name, format!("id:{}", project.id)))
+                .collect());
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        anyhow::bail!("local secret storage is unavailable on this host");
+    }
+    let paths = ResolvePaths::from_env(&OsEnv)?;
+    let platform = resolve_platform(globals, &paths, &OsEnv)?;
+    let orgs = organization_client(&platform)?.list_orgs().await?;
+    let org = current_org_id(&platform, &orgs)?;
+    let client = SecretClient::new(&platform)?;
+    Ok(client
+        .list_secret_projects(&org)
+        .await?
+        .into_iter()
+        .map(|project| (project.name, format!("id:{}", project.id)))
+        .collect())
 }
 
 pub(crate) fn parse_secret_project_name(value: &str) -> Result<String, String> {
@@ -145,6 +286,9 @@ fn resolve_secret_operation(args: SecretsArgs) -> anyhow::Result<SecretOperation
         SecretsCommand::Delete(args) => ScopedSecretCommand::Delete(args),
         SecretsCommand::Rename(args) => ScopedSecretCommand::Rename(args),
     };
+    if let ScopedSecretCommand::Set(args) = &command {
+        anyhow::ensure!(args.key.is_some(), "secret key is required; supply KEY");
+    }
     anyhow::ensure!(
         scope_count == 1,
         "key operations require exactly one of --project=NAME, --user, or --organization; no project is inferred"
@@ -324,7 +468,21 @@ async fn local_user_command(
             print_local_secret_metadata(&secrets, "No local user secrets found.", args.output)
         }
         ScopedSecretCommand::Set(args) => {
-            let key = trimmed_required(&args.key, "secret key")?.to_owned();
+            let key = trimmed_required(
+                args.key.as_deref().context("secret key is required")?,
+                "secret key",
+            )?
+            .to_owned();
+            if args.guided
+                && client
+                    .list_user_workload_secrets()
+                    .await?
+                    .iter()
+                    .any(|existing| existing.key == key)
+                && !super::guided::confirm(&format!("Replace the existing value for {key}?"))?
+            {
+                return Ok(());
+            }
             let value = prompt_workload_secret_value()?;
             client
                 .set_user_workload_secret(key.clone(), value)
@@ -362,7 +520,13 @@ async fn local_project_command(
 ) -> anyhow::Result<()> {
     match command {
         SecretProjectCommand::Create(args) => {
-            let name = trimmed_required(&args.name, "secret project name")?.to_owned();
+            let name = trimmed_required(
+                args.name
+                    .as_deref()
+                    .context("secret project name is required")?,
+                "secret project name",
+            )?
+            .to_owned();
             let project = client
                 .create_secret_project(name)
                 .await
@@ -403,6 +567,19 @@ async fn local_project_key_command(
     project_name: &str,
     command: ScopedSecretCommand,
 ) -> anyhow::Result<()> {
+    if let ScopedSecretCommand::Set(args) = &command
+        && args.new_project
+    {
+        let key = args.key.as_deref().context("secret key is required")?;
+        let value = prompt_workload_secret_value()?;
+        let project = client
+            .create_secret_project(project_name.to_owned())
+            .await
+            .context("create secret project")?;
+        client.set_project_workload_secret(project.id, key.to_owned(), value).await.with_context(|| format!("secret project {project_name:?} created; setting its first secret failed, inspect the project before retrying"))?;
+        eprintln!("Created secret project {project_name:?} and set {key}.");
+        return Ok(());
+    }
     let project = resolve_local_project_by_name(client, project_name).await?;
     match command {
         ScopedSecretCommand::List(args) => {
@@ -417,7 +594,21 @@ async fn local_project_key_command(
             )
         }
         ScopedSecretCommand::Set(args) => {
-            let key = trimmed_required(&args.key, "secret key")?.to_owned();
+            let key = trimmed_required(
+                args.key.as_deref().context("secret key is required")?,
+                "secret key",
+            )?
+            .to_owned();
+            if args.guided
+                && client
+                    .list_project_workload_secrets(project.id)
+                    .await?
+                    .iter()
+                    .any(|existing| existing.key == key)
+                && !super::guided::confirm(&format!("Replace the existing value for {key}?"))?
+            {
+                return Ok(());
+            }
             let value = prompt_workload_secret_value()?;
             client
                 .set_project_workload_secret(project.id, key.clone(), value)
@@ -586,18 +777,17 @@ pub(crate) fn prompt_platform_workload_secret_value() -> anyhow::Result<Zeroizin
 fn prompt_workload_secret_bytes() -> anyhow::Result<Zeroizing<Vec<u8>>> {
     let interactive = std::io::stdin().is_terminal();
     if interactive {
-        eprint!("Value: ");
-        std::io::stderr().flush().context("flush secret prompt")?;
-    }
-    let echo_guard = if interactive {
-        Some(EchoGuard::disable_if_tty()?)
+        let value = super::credential_input::read_hidden_terminal_bytes(
+            "Value: ",
+            MAX_WORKLOAD_SECRET_VALUE_BYTES,
+        );
+        eprintln!();
+        let value = value?;
+        validate_workload_secret_value(&value)?;
+        Ok(value)
     } else {
-        None
-    };
-    let stdin = std::io::stdin();
-    let value = read_workload_secret_bytes(stdin.lock(), interactive);
-    drop(echo_guard);
-    value
+        read_workload_secret_bytes(std::io::stdin().lock(), false)
+    }
 }
 
 fn read_workload_secret_bytes<R: std::io::BufRead>(
@@ -802,9 +992,23 @@ mod tests {
     fn project_lifecycle_requires_its_own_nonblank_name_and_no_scope_flags() {
         for placement in ["--local", "--cloud"] {
             for command in ["create", "delete"] {
-                assert!(
-                    Cli::try_parse_from(["cw", "secrets", placement, "projects", command]).is_err()
-                );
+                let missing =
+                    Cli::try_parse_from(["cw", "secrets", placement, "projects", command]);
+                if command == "create" {
+                    assert!(matches!(
+                        missing.unwrap().command,
+                        Command::Secrets(SecretsArgs {
+                            command: SecretsCommand::Projects {
+                                command: SecretProjectCommand::Create(SecretProjectCreateArgs {
+                                    name: None
+                                })
+                            },
+                            ..
+                        })
+                    ));
+                } else {
+                    assert!(missing.is_err());
+                }
                 for name in ["", " "] {
                     assert!(
                         Cli::try_parse_from([

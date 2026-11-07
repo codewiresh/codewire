@@ -1,16 +1,39 @@
 ---
 title: Secrets and credentials
 description: cw secrets for application secrets and cw credentials for provider credentials and profiles.
-updated: 2026-10-26
+updated: 2026-11-07
 weight: 5
 aliases: ["/cli/secrets-and-credentials"]
 ---
 
-Both commands name their store before the subcommand: `--local` (the
-protected store on your machine; Linux and macOS) or `--cloud` (the
-platform). At a terminal `cw` asks when neither is given; scripts and JSON
-output must pass one. Values are read from a hidden prompt or standard input,
-never from arguments.
+Use `--local` for protected storage on this computer (Linux and macOS), or
+`--cloud` for storage in your Codewire account. At an interactive terminal,
+omitting the store opens a menu. It names the actual local protection:
+macOS Keychain, the Linux system keyring, or permission-restricted file storage
+when configured. An unavailable local store is labeled with its reason; your
+Codewire account remains selectable. Credential storage is separate from where
+your environment runs.
+
+For a guided addition, start with:
+
+```sh
+cw credentials add
+cw credentials connect
+cw credentials generate
+cw credentials set
+cw secrets set
+cw secrets projects create
+```
+
+`cw` asks for missing choices and keeps supplied flags. Use arrows or type to
+filter a menu, then Enter to select. Invalid names can be corrected in place.
+Escape, Ctrl-C, or Ctrl-D cancels; protected values stay hidden, including when
+correcting or canceling them. Prompts and completed answers appear on stderr;
+credential and secret values never appear in summaries or arguments.
+
+Scripts and JSON commands never open menus. Supply the store and all required
+metadata explicitly before piping a protected value. The full forms below work
+for automation as well as interactive use.
 
 ## cw secrets
 
@@ -31,8 +54,14 @@ cw secrets --local|--cloud preview [--file codewire.yaml] [--output json]
 | `--organization` | The current organization's keys (platform only) |
 | `--project NAME` | A named secret project, `local:NAME`, `platform:NAME` or `id:UUID` |
 
-Key operations need exactly one scope flag; nothing is inferred from
-`cw use` or `codewire.yaml`. `set` reads the value from a hidden prompt or
+Key operations need one explicit scope; nothing is inferred from `cw use` or
+`codewire.yaml`. Guided `set` offers the supported scopes, existing secret
+projects, and creation of a project with its first key. It asks for the key
+name and confirms replacement of an existing key before reading the new value.
+Project creation and key storage are separate writes: if saving the first key
+fails after project creation, the error identifies the retained project.
+
+For scripts, pass exactly one scope flag. `set` reads the value from a hidden prompt or
 stdin (one trailing newline removed); keys match `[A-Za-z_][A-Za-z0-9_]*` and
 values are UTF-8 up to 64 KiB. `projects delete` removes every key in the
 project and needs `--yes` when not interactive. `preview` shows which key
@@ -79,8 +108,14 @@ cw credentials --cloud generate ssh --name NAME [--expires-at UNIX_SECONDS]
 | `claude-subscription` | token from `claude setup-token`, from stdin; platform only; one-year expiry recorded |
 | `ssh` | an Ed25519 key `cw` generates (public key printed), or an imported OpenSSH key file |
 
-Repeating `connect` with an existing name reconnects after confirmation
-(`-y`).
+Guided `add`, `connect`, and `generate` ask for missing provider, name, and
+SSH-file choices. Menus offer providers supported by the chosen store. After a
+successful guided enrollment, `cw` offers optional profile assignment; choosing
+or canceling that later step keeps the saved credential. Assignment binds the
+exact saved identity, even if its name changes while the menu is open.
+
+Repeating `connect` with an existing name reconnects after confirmation (`-y`).
+Declining the reconnect stops the walkthrough without changing a profile.
 
 ### Inspect and change
 
@@ -106,6 +141,11 @@ cw credentials --local --profile NAME revisions                   # local storag
 cw credentials --cloud profiles list                               # alias: ls; the default first
 cw credentials --cloud profiles default NAME                       # make NAME your default
 ```
+
+Guided `credentials set` offers an existing profile or a new name, then a
+compatible active credential for the selected provider. If none exists, it
+offers the supported connection, API-key, or SSH setup route and returns to the
+profile selection. Canceling before enrollment leaves the profile unchanged.
 
 A profile names one identity per slot. The `codex` slot takes a Codex sign-in
 or an OpenAI API key, `openai` an OpenAI API key, `anthropic` an API key, a
