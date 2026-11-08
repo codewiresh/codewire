@@ -45,7 +45,7 @@ try {
   desktop.on("pageerror", (error) => browserErrors.push(error.message));
   await desktop.goto(baseUrl.href, { waitUntil: "networkidle" });
   ensure(await desktop.title() === "What is Codewire? · Codewire", "desktop title mismatch");
-  ensure(await desktop.locator(".docs-nav-link").count() === 62, "desktop navigation is not the 62-route manifest");
+  ensure(await desktop.locator(".docs-nav-link").count() === 63, "desktop navigation is not the 63-route manifest");
   ensure(await desktop.locator(".docs-nav-link[aria-current='page']").count() === 1, "desktop navigation has no unique active route");
   ensure(await desktop.locator("body").evaluate((body) => getComputedStyle(body).backgroundColor) === "rgb(10, 10, 10)", "The design-system background token is not active");
 
@@ -66,6 +66,13 @@ try {
   ]);
   ensure(await desktop.locator(".docs-nav-link[aria-current='page']").count() === 1, "search navigation lost active-route state");
   await desktop.screenshot({ path: resolve(screenshotDirectory, "docs-desktop-1440x900.png"), fullPage: true });
+
+  await desktop.goto(new URL("docs/reference/openssf", baseUrl.origin + "/").href, { waitUntil: "networkidle" });
+  ensure(await desktop.title() === "OpenSSF security posture · Codewire", "OpenSSF page title mismatch");
+  ensure(await desktop.locator(".docs-security-posture").count() === 1, "OpenSSF report is missing");
+  ensure(await desktop.locator(".docs-security-posture table, .docs-security-unavailable").count() > 0, "OpenSSF report has neither results nor its unavailable state");
+  ensure(await desktop.locator("a[href^='https://scorecard.dev/viewer/']").count() > 0, "OpenSSF report has no authoritative viewer link");
+  await desktop.screenshot({ path: resolve(screenshotDirectory, "docs-openssf-1440x900.png"), fullPage: true });
 
   const mobile = await context.newPage();
   await mobile.setViewportSize({ width: 390, height: 844 });

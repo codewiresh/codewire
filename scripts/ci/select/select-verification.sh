@@ -1280,9 +1280,10 @@ if [ "$event_selected" = false ]; then
         select_token sdk_python
         recognized=true
         ;;
-      .github/workflows/sdk-release.yml|scripts/ci/tests/test-sdk-release-workflow.py)
-        # The owner-dispatched npm and PyPI releases of the SDKs, by trusted
-        # publishing from GitHub (#3512).
+      .github/workflows/sdk-release.yml|scripts/ci/tests/test-sdk-release-workflow.py|\
+      .github/workflows/scorecard.yml|scripts/ci/tests/test-scorecard-workflow.py)
+        # GitHub-only publication workflows: trusted SDK releases (#3512) and
+        # the public OpenSSF Scorecard result.
         select_token release
         recognized=true
         ;;

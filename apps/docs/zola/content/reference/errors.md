@@ -1,8 +1,8 @@
 ---
 title: Errors
 description: The error codes the Codewire platform returns, what each one means, and what to do next.
-updated: 2026-10-27
-weight: 9
+updated: 2026-11-08
+weight: 10
 ---
 
 When the platform refuses a request, `cw` prints the platform's message and

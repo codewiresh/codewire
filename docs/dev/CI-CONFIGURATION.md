@@ -8,6 +8,17 @@ tree changes.
 What a deployment itself configures, such as the registries its runtime
 images come from, is in the [configuration reference](../CONFIGURATION.md).
 
+## GitHub-only OpenSSF publication
+
+`.github/workflows/scorecard.yml` runs the official OpenSSF Scorecard action on
+the GitHub mirror's `main` branch and weekly. The job is skipped while the
+mirror is private. On a public mirror it publishes the signed result to the
+OpenSSF API and viewer, and uploads the SARIF result to GitHub code scanning.
+The workflow is not CI authority or a required status and holds no mirror
+credential: its only capabilities are repository read, code-scanning upload
+and GitHub OIDC for OpenSSF publication. The Zola OpenSSF page reads the public
+API at build time; it does not read GitHub or OpenSSF credentials.
+
 ## Forgejo server
 
 - **Action resolution.** Workflows refer to actions by short references such

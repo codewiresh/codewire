@@ -1,7 +1,7 @@
 ---
 title: Quickstart
 description: Install cw, run your project in a VM on your own machine, start Claude Code in it, open a dev server, then do the same on the platform.
-updated: 2026-10-26
+updated: 2026-11-08
 weight: 5
 aliases: ["/getting-started", "/getting-started/install", "/getting-started/local-vm", "/getting-started/hosted-sandbox"]
 ---

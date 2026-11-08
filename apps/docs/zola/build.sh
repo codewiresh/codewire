@@ -21,6 +21,8 @@ if [[ "$($zola_bin --version)" != "zola 0.22.1" ]]; then
   exit 1
 fi
 
+export CODEWIRE_BUILD_TIMESTAMP="${CODEWIRE_BUILD_TIMESTAMP:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
+
 (
   cd "$site_root"
   "$zola_bin" build --force --output-dir "$output"

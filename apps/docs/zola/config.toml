@@ -38,3 +38,5 @@ index_format = "fuse_json"
 [extra]
 product_name = "Codewire"
 dashboard_url = "/dashboard"
+openssf_scorecard_api = "https://api.scorecard.dev/projects/github.com/codewiresh/codewire"
+openssf_best_practices_api = "https://www.bestpractices.dev/projects.json?url=https%3A%2F%2Fgithub.com%2Fcodewiresh%2Fcodewire"

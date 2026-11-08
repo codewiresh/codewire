@@ -1,7 +1,7 @@
 ---
 title: Preview environments
 description: A hosted sandbox for each branch or pull request, with the app running in a session and an HTTPS preview URL, that deletes itself after a lifetime you choose.
-updated: 2026-10-26
+updated: 2026-11-08
 weight: 2
 aliases: ["/use-cases/preview-per-pull-request"]
 ---

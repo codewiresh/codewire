@@ -1,8 +1,8 @@
 ---
 title: Troubleshooting hosted sandboxes
 description: Find out why a hosted sandbox failed to create, start or connect, why a preview or a conversation does not respond, and how to recover.
-updated: 2026-10-26
-weight: 6
+updated: 2026-11-08
+weight: 7
 ---
 
 Start with the state and the checks `cw` runs itself:

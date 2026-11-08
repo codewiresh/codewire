@@ -1,7 +1,7 @@
 ---
 title: Account and organization
 description: Request access, sign in with two-factor authentication, create the organization that owns your hosted sandboxes, and delete your account.
-updated: 2026-10-29
+updated: 2026-11-08
 weight: 1
 aliases: ["/getting-started/account", "/guides/account"]
 ---

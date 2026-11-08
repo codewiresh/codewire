@@ -1,8 +1,8 @@
 ---
 title: Documentation for agents
 description: Every page as Markdown, an index in llms.txt and the whole documentation in llms-full.txt, for agents and other tools that read text.
-updated: 2026-10-26
-weight: 8
+updated: 2026-11-08
+weight: 9
 ---
 
 The documentation is published as Markdown as well as HTML, so an agent can

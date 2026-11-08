@@ -12,12 +12,17 @@ GITHUB_WORKFLOW_ROOT="$ROOT/.github/workflows"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# The SDK release is the one GitHub Actions workflow: npm and PyPI trust only
-# hosted CI for trusted publishing (#3512). Any other stays retired.
+# npm and PyPI trust hosted CI for trusted SDK publishing (#3512), and OpenSSF
+# accepts signed Scorecard results only from GitHub's hosted runner. These two
+# GitHub-only publication workflows are allowed; any other stays retired.
 if [ -d "$GITHUB_WORKFLOW_ROOT" ] &&
-  find "$GITHUB_WORKFLOW_ROOT" -type f ! -path "$GITHUB_WORKFLOW_ROOT/sdk-release.yml" -print -quit | grep -q .; then
-  echo 'repository-authored GitHub Actions workflows other than sdk-release.yml must remain retired' >&2
-  find "$GITHUB_WORKFLOW_ROOT" -type f ! -path "$GITHUB_WORKFLOW_ROOT/sdk-release.yml" -print >&2
+  find "$GITHUB_WORKFLOW_ROOT" -type f \
+    ! -path "$GITHUB_WORKFLOW_ROOT/sdk-release.yml" \
+    ! -path "$GITHUB_WORKFLOW_ROOT/scorecard.yml" -print -quit | grep -q .; then
+  echo 'repository-authored GitHub Actions workflows other than sdk-release.yml and scorecard.yml must remain retired' >&2
+  find "$GITHUB_WORKFLOW_ROOT" -type f \
+    ! -path "$GITHUB_WORKFLOW_ROOT/sdk-release.yml" \
+    ! -path "$GITHUB_WORKFLOW_ROOT/scorecard.yml" -print >&2
   exit 1
 fi
 

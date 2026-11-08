@@ -1,13 +1,15 @@
 ---
 title: Security model
 description: What isolates an environment, where secrets and credentials live, and what each placement does not protect.
-updated: 2026-10-26
+updated: 2026-11-08
 weight: 4
 aliases: ["/security"]
 ---
 
 This page describes the boundaries Codewire enforces and the ones it does not.
-Read it before you give an agent access to something that matters.
+Read it before you give an agent access to something that matters. For the
+source repository's independent supply-chain assessments, see the
+[OpenSSF security posture](@/reference/openssf.md).
 
 ## A VM per environment
 

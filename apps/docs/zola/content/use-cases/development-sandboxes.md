@@ -1,7 +1,7 @@
 ---
 title: Development sandboxes
 description: A development environment per project that is the same on every machine, on your laptop with no account or hosted for a whole team, described once in codewire.yaml or a preset.
-updated: 2026-10-26
+updated: 2026-11-08
 weight: 1
 aliases: ["/use-cases/local-first", "/use-cases/team-workspaces"]
 ---

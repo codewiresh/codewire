@@ -1,7 +1,7 @@
 ---
 title: Application secrets
 description: Store values such as DATABASE_URL in organization, personal or project scope, and select which ones an environment's processes receive.
-updated: 2026-10-26
+updated: 2026-11-08
 weight: 2
 aliases: ["/guides/application-secrets"]
 ---

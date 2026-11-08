@@ -1,7 +1,7 @@
 ---
 title: Personal assistants
 description: Keep an agent running in a hosted sandbox with your project, message it from any terminal, and read its answers later; it remembers the conversation.
-updated: 2026-10-26
+updated: 2026-11-08
 weight: 4
 ---
 

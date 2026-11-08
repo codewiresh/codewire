@@ -1,0 +1,84 @@
+{% set offline = get_env(name="CODEWIRE_OPENSSF_OFFLINE", default="") %}
+{% set scorecard_path = get_env(name="CODEWIRE_OPENSSF_SCORECARD_PATH", default="") %}
+{% set best_practices_path = get_env(name="CODEWIRE_OPENSSF_BEST_PRACTICES_PATH", default="") %}
+{% set scorecard = false %}
+{% set best_practices = false %}
+{% if scorecard_path %}
+  {% set scorecard = load_data(path=scorecard_path, format="json", required=false) %}
+{% elif offline != "1" %}
+  {% set scorecard = load_data(url=config.extra.openssf_scorecard_api, format="json", required=false) %}
+{% endif %}
+{% if best_practices_path %}
+  {% set best_practices = load_data(path=best_practices_path, format="json", required=false) %}
+{% elif offline != "1" %}
+  {% set best_practices = load_data(url=config.extra.openssf_best_practices_api, format="json", required=false) %}
+{% endif %}
+
+<div class="docs-security-posture">
+  {% if best_practices and best_practices | length > 0 and best_practices[0].badge_level is string %}
+    {% set badge = best_practices[0] %}
+    <p class="docs-security-badge">
+      <strong>Best Practices badge: {{ badge.badge_level | capitalize }}</strong>
+      {% if badge.achieve_passing_status %}Achieved <time datetime="{{ badge.achieve_passing_status }}">{{ badge.achieve_passing_status }}</time>.{% endif %}
+      {% if badge.id is number %}Verify at <a href="https://www.bestpractices.dev/projects/{{ badge.id }}">bestpractices.dev/projects/{{ badge.id }}</a>.{% endif %}
+    </p>
+  {% else %}
+    <p class="docs-security-badge docs-security-unavailable">
+      <strong>Best Practices badge: unavailable</strong>
+      No project result was returned in this build. Check the
+      <a href="https://www.bestpractices.dev/en">Best Practices project</a> and its
+      <a href="https://www.bestpractices.dev/en/criteria/0">passing criteria</a>.
+    </p>
+  {% endif %}
+
+  {% if scorecard and scorecard.score is number and scorecard.checks %}
+    <div class="docs-security-summary">
+      <p class="docs-security-score"><strong>{{ scorecard.score }}</strong><span>out of 10</span></p>
+      <dl class="docs-security-meta">
+        <div><dt>Repository</dt><dd><a href="https://github.com/codewiresh/codewire">github.com/codewiresh/codewire</a></dd></div>
+        {% if scorecard.repo.commit %}<div><dt>Commit</dt><dd><a href="https://github.com/codewiresh/codewire/commit/{{ scorecard.repo.commit }}"><code>{{ scorecard.repo.commit | truncate(length=7, end="") }}</code></a></dd></div>{% endif %}
+        {% if scorecard.scorecard.version %}<div><dt>Scorecard version</dt><dd>{{ scorecard.scorecard.version }}</dd></div>{% endif %}
+        {% if scorecard.date %}<div><dt>Scan generated</dt><dd><time datetime="{{ scorecard.date }}">{{ scorecard.date | date(format="%B %-d, %Y at %H:%M UTC") }}</time></dd></div>{% endif %}
+      </dl>
+    </div>
+
+    <div class="docs-table">
+      <table>
+        <caption>Scorecard checks from the published OpenSSF result</caption>
+        <thead><tr><th scope="col">Check</th><th scope="col">Score</th><th scope="col">Evidence</th></tr></thead>
+        <tbody>
+          {% for check in scorecard.checks %}
+            <tr>
+              <td>{% if check.documentation.url %}<a href="{{ check.documentation.url }}">{{ check.name }}</a>{% else %}{{ check.name }}{% endif %}</td>
+              <td>{{ check.score }} / 10</td>
+              <td>
+                {{ check.reason }}
+                {% if check.details and check.details | length > 0 %}
+                  <details class="docs-security-details">
+                    <summary>Check details</summary>
+                    <ul>{% for detail in check.details %}<li>{{ detail }}</li>{% endfor %}</ul>
+                  </details>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p>Verify this snapshot in the <a href="https://scorecard.dev/viewer/?uri=github.com/codewiresh/codewire">OpenSSF Scorecard viewer</a>.</p>
+  {% else %}
+    <p class="docs-security-unavailable">
+      <strong>Scorecard data is unavailable in this build.</strong>
+      The first result may not have been published yet, or the OpenSSF API may be
+      temporarily unavailable. Verify directly in the
+      <a href="https://scorecard.dev/viewer/?uri=github.com/codewiresh/codewire">Scorecard viewer</a>.
+    </p>
+  {% endif %}
+
+  {% set fetched_at = get_env(name="CODEWIRE_BUILD_TIMESTAMP", default="") %}
+  <p class="docs-security-snapshot">
+    OpenSSF data is fetched when this documentation is built.
+    {% if fetched_at %}Snapshot fetched <time datetime="{{ fetched_at }}">{{ fetched_at }}</time>.{% endif %}
+    Your browser makes no request to OpenSSF.
+  </p>
+</div>

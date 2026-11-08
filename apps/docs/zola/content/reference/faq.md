@@ -1,8 +1,8 @@
 ---
 title: FAQ
 description: Account, organization and billing questions. Questions about a feature are answered on that feature's page.
-updated: 2026-10-26
-weight: 7
+updated: 2026-11-08
+weight: 8
 ---
 
 Questions about using a feature are answered at the end of its page:

@@ -1,7 +1,7 @@
 ---
 title: Lifecycle
 description: Stop, start, resize and remove environments; give hosted sandboxes a lifetime, extend it, and protect them from deletion.
-updated: 2026-10-26
+updated: 2026-11-08
 weight: 5
 aliases: ["/guides/lifecycle"]
 ---

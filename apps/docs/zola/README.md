@@ -46,6 +46,17 @@ shortcodes become plain Markdown; a shortcode the exporter does not know fails
 the build. The Rust server also serves the two text files at `/llms.txt` and
 `/llms-full.txt`.
 
+The OpenSSF page is the one HTML exception to checked-in-only content: its
+shortcode fetches the public Scorecard and Best Practices APIs at build time.
+An unavailable API produces a source-linked fallback, never a failed build or a
+browser request to OpenSSF. The Markdown copy links to those authoritative
+results instead. `tests/verify.sh` disables remote loading for its two
+reproducibility builds, then uses the checked-in JSON fixtures to verify the
+populated report and the unavailable state. `CODEWIRE_OPENSSF_OFFLINE=1` also
+disables remote loading for an offline local build. The snapshot records
+`CODEWIRE_BUILD_TIMESTAMP`; `build.sh` sets it from UTC when the caller has not
+provided a reproducible-build timestamp.
+
 ## Production-equivalent container
 
 The dashboard image uses a digest-pinned Debian build stage, checksum-bound

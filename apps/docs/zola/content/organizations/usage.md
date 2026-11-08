@@ -1,7 +1,7 @@
 ---
 title: Usage and costs
 description: Organization plans, per-second metering of hosted sandboxes, reading your usage with cw cost, and the Billing page.
-updated: 2026-10-26
+updated: 2026-11-08
 weight: 4
 aliases: ["/reference/subscription-plans"]
 ---

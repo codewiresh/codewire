@@ -92,6 +92,13 @@ def aside(match: re.Match[str]) -> str:
 def convert(body: str, canonical_by_source: dict[str, str], routes: set[str]) -> str:
     body = CARD_GRID.sub(card_grid, body)
     body = ASIDE.sub(aside, body)
+    body = re.sub(
+        r"\{\{\s*security_posture\(\)\s*\}\}",
+        "OpenSSF data is rendered into the HTML page at build time. Verify the current results in the "
+        "[Scorecard viewer](https://scorecard.dev/viewer/?uri=github.com/codewiresh/codewire) and the "
+        "[Best Practices project](https://www.bestpractices.dev/en).",
+        body,
+    )
 
     def internal(match: re.Match[str]) -> str:
         source = f"content/{match.group('source')}"

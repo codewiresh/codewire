@@ -1,7 +1,7 @@
 ---
 title: Images and presets
 description: Save an image, install and startup commands, resources and a lifetime once in the organization, and create hosted sandboxes from it.
-updated: 2026-10-26
+updated: 2026-11-08
 weight: 4
 aliases: ["/guides/presets"]
 ---

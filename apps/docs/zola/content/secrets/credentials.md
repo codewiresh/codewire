@@ -1,7 +1,7 @@
 ---
 title: Credentials
 description: Connect Codex, add OpenAI and Anthropic keys, a Claude subscription token or sign-in, SSH keys and GitHub, then build the credential profile an environment uses.
-updated: 2026-10-26
+updated: 2026-11-08
 weight: 1
 aliases: ["/guides/credentials"]
 ---

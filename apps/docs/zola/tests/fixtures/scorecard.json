@@ -1,0 +1,37 @@
+{
+  "date": "2026-10-03T00:45:14Z",
+  "repo": {
+    "name": "github.com/codewiresh/codewire",
+    "commit": "21a00a2d4f6a35f3f85d43e3d5a1a3e0d5c72c64"
+  },
+  "scorecard": {
+    "version": "v5.5.0",
+    "commit": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "score": 9.2,
+  "checks": [
+    {
+      "name": "Dangerous-Workflow",
+      "score": 10,
+      "reason": "no dangerous workflow patterns detected",
+      "details": null,
+      "documentation": {
+        "url": "https://github.com/ossf/scorecard/blob/main/docs/checks.md#dangerous-workflow",
+        "short": "Determines if the project's GitHub Action workflows avoid dangerous patterns."
+      }
+    },
+    {
+      "name": "Branch-Protection",
+      "score": 5,
+      "reason": "branch protection is not maximal on development and all release branches",
+      "details": [
+        "Info: 'force pushes' disabled on branch 'main'",
+        "Warn: required approving review count is 1 on branch 'main'"
+      ],
+      "documentation": {
+        "url": "https://github.com/ossf/scorecard/blob/main/docs/checks.md#branch-protection",
+        "short": "Determines if the default and release branches are protected."
+      }
+    }
+  ]
+}

@@ -1,8 +1,8 @@
 ---
 title: Troubleshooting
 description: "Local VMs: what their messages mean, what cw doctor local reports, and how to recover."
-updated: 2026-10-26
-weight: 5
+updated: 2026-11-08
+weight: 6
 aliases: ["/guides/troubleshoot-local-vms"]
 ---
 

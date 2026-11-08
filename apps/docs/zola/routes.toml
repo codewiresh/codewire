@@ -302,6 +302,12 @@ source = "content/reference/security.md"
 output = "reference/security/index.html"
 
 [[routes]]
+canonical = "/docs/reference/openssf"
+redirect_from = "/docs/reference/openssf/"
+source = "content/reference/openssf.md"
+output = "reference/openssf/index.html"
+
+[[routes]]
 canonical = "/docs/reference/troubleshooting"
 redirect_from = "/docs/reference/troubleshooting/"
 source = "content/reference/troubleshooting.md"
