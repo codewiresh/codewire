@@ -31,8 +31,12 @@ class GitFixture(unittest.TestCase):
         self.addCleanup(patch.stop)
 
     def git(self, directory, *arguments, check=True):
-        return subprocess.run(["git", *arguments], cwd=directory, capture_output=True,
-                              text=True, check=check, timeout=10)
+        try:
+            return subprocess.run(["git", *arguments], cwd=directory, capture_output=True,
+                                  text=True, check=check, timeout=10)
+        except subprocess.CalledProcessError as error:
+            self.fail(f"synthetic Git command {error.cmd!r} exited {error.returncode}\n"
+                      f"stdout:\n{error.stdout}\nstderr:\n{error.stderr}")
 
     def graph(self, *, breaking=False):
         source = self.work / "source"
