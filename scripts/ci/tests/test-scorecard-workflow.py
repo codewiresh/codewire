@@ -24,8 +24,8 @@ def main() -> None:
     text = WORKFLOW.read_text()
     workflow = yaml.safe_load(text)
     triggers = workflow.get("on", workflow.get(True))
-    if set(triggers) != {"push", "schedule"}:
-        fail("Scorecard must run on pushes and its weekly schedule")
+    if set(triggers) != {"push", "schedule", "workflow_dispatch"}:
+        fail("Scorecard must allow pushes, its weekly schedule and manual retries")
     if triggers["push"] != {"branches": ["main"]}:
         fail("Scorecard push runs must be limited to main")
     if workflow.get("permissions") != "read-all":

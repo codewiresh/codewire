@@ -11,8 +11,8 @@ images come from, is in the [configuration reference](../CONFIGURATION.md).
 ## GitHub-only OpenSSF publication
 
 `.github/workflows/scorecard.yml` runs the official OpenSSF Scorecard action on
-the GitHub mirror's `main` branch and weekly. The job is skipped while the
-mirror is private. On a public mirror it publishes the signed result to the
+the GitHub mirror's `main` branch, weekly and on manual dispatch for retries.
+The job is skipped while the mirror is private. On a public mirror it publishes the signed result to the
 OpenSSF API and viewer, and uploads the SARIF result to GitHub code scanning.
 The workflow is not CI authority or a required status and holds no mirror
 credential: its only capabilities are repository read, code-scanning upload
