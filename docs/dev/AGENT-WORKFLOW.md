@@ -15,12 +15,13 @@ fj actions runs list -R origin --output json
 fj actions runs logs 789 --job 101 -R origin
 ```
 
-Paginate audits. Create with `fj pr -R origin create` and squash-merge with an
-explicit title and body, so the commit names the pull request by number and
-never links to the forge (the GitHub mirror refuses `Reviewed-on:` links):
+Paginate audits. Create with `fj pr -R origin create` and use the checked-in
+merge helper after reviewing the exact head and required checks. It supplies
+both title and body explicitly: the CLI's default body can contain a forge URL,
+regardless of the repository's web merge template.
 
 ```sh
-fj pr -R origin merge 456 -M squash -t "feat: do the thing (#456)" -m "Reviewed-on: #456"
+scripts/dev/merge-pr.sh 456 "feat: do the thing"
 ```
 
 Read a failing component log before diagnosing. Bind a healthy run once and use

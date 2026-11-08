@@ -1,3 +1,3 @@
-${PullRequestTitle} (${PullRequestReference})
+${PullRequestTitle} (#${PullRequestIndex})
 
-Reviewed-on: ${PullRequestReference}
+Reviewed-on: #${PullRequestIndex}

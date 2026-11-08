@@ -812,7 +812,7 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/prod-readonly-smoke.yaml|\
       .gitea/workflows/runtime-dev-commodity-smoke.yaml|\
       .gitea/workflows/merge-check.yaml|\
-      .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|\
+      .githooks/pre-push|Makefile|scripts/dev/install-hooks.sh|scripts/dev/merge-pr.sh|\
       .config/nextest.toml|\
       scripts/dev/dashboard-watch.py|\
       scripts/dev/macos-cli.py|scripts/dev/test-macos-cli.py|\

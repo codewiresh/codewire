@@ -348,4 +348,49 @@ fi
 grep -Fq 'MIRROR_PRIVATE_CONTENT_PATTERNS: ${{ vars.MIRROR_PRIVATE_CONTENT_PATTERNS }}' "$WORKFLOW" ||
   fail 'the mirror workflow does not pass the private content patterns'
 
+# The CLI supplies a URL when -m is omitted; the maintained merge route
+# must always send the explicit number-only body, independent of web defaults.
+mkdir -p "$work/merge-bin"
+cat >"$work/merge-bin/fj" <<'SH'
+#!/usr/bin/env bash
+printf '%s\0' "$@" >"${MERGE_TEST_ARGS:?}"
+SH
+chmod 0755 "$work/merge-bin/fj"
+export MERGE_TEST_ARGS="$work/merge.args"
+PATH="$work/merge-bin:$PATH" bash "$ROOT/scripts/dev/merge-pr.sh" 42 'fix: safe title'
+python3 - "$MERGE_TEST_ARGS" <<'PYTEST'
+import sys
+from pathlib import Path
+args=Path(sys.argv[1]).read_bytes().split(b'\0')[:-1]
+assert args == [b'pr', b'-R', b'origin', b'merge', b'42', b'-M', b'squash',
+                b'-t', b'fix: safe title (#42)', b'-m', b'Reviewed-on: #42'], args
+PYTEST
+PATH="$work/merge-bin:$PATH" bash "$ROOT/scripts/dev/merge-pr.sh" 42 'fix: safe title (#42)'
+python3 - "$MERGE_TEST_ARGS" <<'PYTEST'
+import sys
+from pathlib import Path
+assert Path(sys.argv[1]).read_bytes().count(b'(#42)') == 1
+PYTEST
+rm "$MERGE_TEST_ARGS"
+PATH="$work/merge-bin:$PATH" bash "$ROOT/scripts/dev/merge-pr.sh" --help >/dev/null
+[[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'merge help contacted the forge'
+for invalid in not-a-number 0; do
+  if PATH="$work/merge-bin:$PATH" bash "$ROOT/scripts/dev/merge-pr.sh" "$invalid" title >/dev/null 2>&1; then
+    fail 'invalid merge number was accepted'
+  fi
+done
+if PATH="$work/merge-bin:$PATH" bash "$ROOT/scripts/dev/merge-pr.sh" 42 $'title\nbody' >/dev/null 2>&1; then
+  fail 'multiline merge title was accepted'
+fi
+[[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'invalid merge arguments contacted the forge'
+python3 - "$ROOT/.gitea/default_merge_message/SQUASH_TEMPLATE.md" <<'PYTEST'
+import sys
+from pathlib import Path
+from string import Template
+rendered=Template(Path(sys.argv[1]).read_text()).substitute(
+    PullRequestTitle='fix: safe title', PullRequestIndex='42')
+assert rendered == 'fix: safe title (#42)\n\nReviewed-on: #42\n', rendered
+PYTEST
+printf '[test-check-mirror-content] explicit merge metadata and template: 7 cases passed\n'
+
 printf '[test-check-mirror-content] mirror content gate contract passed\n'
