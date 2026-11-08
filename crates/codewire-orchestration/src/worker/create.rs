@@ -278,6 +278,9 @@ pub struct SandboxWorkerCfg {
     /// configures no warm pool; parsed by
     /// [`crate::sandbox::warm_pool::parse_warm_pool_shapes`].
     pub warm_pool_shapes: String,
+    /// Percentage of the smallest runtime node the shared pools may reserve.
+    /// Empty keeps the default; validated by the warm-pool reconciler.
+    pub warm_pool_max_node_percent: String,
     /// `SANDBOX_COORDINATOR_EXTRA_ROOTS=true` mounts the public
     /// `codewire-coordinator-extra-roots` bundle into identity-free workspaces
     /// so the daemon can verify a local cluster's coordinator. Dev and
@@ -492,6 +495,10 @@ impl SandboxWorkerCfg {
                 .is_empty(),
             warm_pool_shapes: std::env::var(crate::sandbox::warm_pool::WARM_POOL_SHAPES_ENV)
                 .unwrap_or_default(),
+            warm_pool_max_node_percent: std::env::var(
+                crate::worker::warm_pool::MAX_NODE_PERCENT_ENV,
+            )
+            .unwrap_or_default(),
             coordinator_extra_roots: getenv("SANDBOX_COORDINATOR_EXTRA_ROOTS", "false") == "true",
             ingress_namespace: getenv("SANDBOX_INGRESS_NAMESPACE", ""),
             ingress_pod_name: getenv("SANDBOX_INGRESS_POD_NAME", ""),

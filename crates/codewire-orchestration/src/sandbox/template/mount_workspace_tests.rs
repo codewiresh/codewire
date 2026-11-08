@@ -469,6 +469,7 @@ fn a_failed_docker_data_image_never_stops_the_workspace() {
 
 /// Whether any process's parent is `pid`. The parent is the second field
 /// after the command name, which is in parentheses and may hold spaces.
+#[cfg(target_os = "linux")] // The kubelet workspace-stop fixture reads Linux /proc.
 fn has_child(pid: u32) -> bool {
     std::fs::read_dir("/proc").unwrap().flatten().any(|entry| {
         std::fs::read_to_string(entry.path().join("stat"))
@@ -483,6 +484,7 @@ fn has_child(pid: u32) -> bool {
 
 /// Runs `workspace-flush` until it waits, then stops it as the kubelet does.
 /// `sync` is the real one unless `fail_sync` puts a failing stand-in first.
+#[cfg(target_os = "linux")]
 fn stop_workspace_flush(fail_sync: bool) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
@@ -522,6 +524,7 @@ fn stop_workspace_flush(fail_sync: bool) -> std::process::Output {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn workspace_flush_syncs_the_workspace_when_stopped() {
     let output = stop_workspace_flush(false);
     assert!(output.status.success(), "{output:?}");
@@ -533,6 +536,7 @@ fn workspace_flush_syncs_the_workspace_when_stopped() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn a_failed_flush_is_logged_and_the_pod_still_stops() {
     let output = stop_workspace_flush(true);
     assert!(output.status.success(), "{output:?}");

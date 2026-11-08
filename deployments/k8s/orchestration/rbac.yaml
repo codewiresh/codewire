@@ -47,7 +47,7 @@ rules:
     verbs: ["get"]
   # Workspace binding selects transport-zone capabilities from the scheduled
   # runtime node labels. The warm-pool reconciler (Program #2238 C2) lists
-  # runtime nodes for the 25% node cap and to find cordoned ones. Read-only.
+  # runtime nodes for the configured node cap and to find cordoned ones. Read-only.
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list"]

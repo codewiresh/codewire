@@ -53,6 +53,34 @@ fn no_configured_shape_keeps_the_reconciler_inert() {
         WarmPoolConfig::from_cfg(&SandboxWorkerCfg::default(), true).unwrap(),
         None
     );
+    let mut cfg = dev_cfg("");
+    cfg.warm_pool_max_node_percent = "invalid".into();
+    assert_eq!(startup(&cfg, Ok(true)), Startup::Inert);
+}
+
+#[test]
+fn the_node_reservation_percentage_defaults_and_refuses_invalid_configuration() {
+    assert_eq!(parse_max_node_percent("").unwrap(), 25);
+    for (value, expected) in [("1", 1), ("25", 25), ("50", 50), ("100", 100)] {
+        let mut cfg = dev_cfg("2000m/16384Mi/80Gi=1");
+        cfg.warm_pool_max_node_percent = value.into();
+        let config = WarmPoolConfig::from_cfg(&cfg, false).unwrap().unwrap();
+        assert_eq!(config.max_node_percent, expected);
+    }
+    for value in [
+        "0", "101", "256", "-1", "+50", "50%", "0.5", " 50", "50 ", "bad",
+    ] {
+        let mut cfg = dev_cfg("2000m/16384Mi/80Gi=1");
+        cfg.warm_pool_max_node_percent = value.into();
+        assert!(WarmPoolConfig::from_cfg(&cfg, false).is_err(), "{value}");
+        assert!(
+            matches!(
+                startup(&cfg, Ok(false)),
+                Startup::Reconcile(WarmPoolConfig { draining: true, pools, .. }) if pools.is_empty()
+            ),
+            "{value} must drain existing pools"
+        );
+    }
 }
 
 #[test]
@@ -262,6 +290,33 @@ async fn a_pass_creates_the_template_then_the_pool_under_the_node_cap() {
     assert_eq!(path, &format!("{API}/sandboxwarmpools"));
     assert_eq!(body["spec"]["replicas"], 2);
     assert_eq!(body["spec"]["updateStrategy"]["type"], "Recreate");
+}
+
+#[tokio::test]
+async fn the_configured_percentage_controls_how_many_members_the_reconciler_creates() {
+    // Each member reserves just over 17 GiB including DinD and VM overhead.
+    // A 128 GiB node admits one under 25%, and all three under 50%.
+    for (percent, expected) in [("", 1), ("50", 3)] {
+        let cluster = Arc::new(Mutex::new(Cluster {
+            pools: vec![reconciled_shadow()],
+            ..Cluster::default()
+        }));
+        let client = api(Arc::clone(&cluster));
+        let mut cfg = dev_cfg("2000m/16384Mi/80Gi=3");
+        cfg.warm_pool_max_node_percent = percent.into();
+        let config = WarmPoolConfig::from_cfg(&cfg, false).unwrap().unwrap();
+        let mut state = LoopState::default();
+        for _ in 0..2 {
+            assert_eq!(
+                reconcile_once(&client, &config, &mut state).await.unwrap(),
+                PassResult::Wrote
+            );
+        }
+        let cluster = cluster.lock().unwrap();
+        let (_, path, pool) = &cluster.writes[1];
+        assert_eq!(path, &format!("{API}/sandboxwarmpools"));
+        assert_eq!(pool["spec"]["replicas"], expected, "percentage {percent:?}");
+    }
 }
 
 #[tokio::test]

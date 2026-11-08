@@ -10,6 +10,26 @@ fn owned_parent() -> tempfile::TempDir {
     parent
 }
 
+#[test]
+fn held_metadata_matches_native_stat_and_refuses_mode_change_or_replacement() {
+    let parent = owned_parent();
+    let directory = File::open(parent.path()).unwrap();
+    let path = parent.path().join("candidate.cw");
+    let held = File::create(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let named = rfs::statat(&directory, "candidate.cw", AtFlags::SYMLINK_NOFOLLOW).unwrap();
+    assert!(named_matches_held(&named, &held.metadata().unwrap()));
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+    assert!(!named_matches_held(&named, &held.metadata().unwrap()));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::rename(&path, parent.path().join("retained")).unwrap();
+    fs::write(&path, b"replacement").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let replaced = rfs::statat(&directory, "candidate.cw", AtFlags::SYMLINK_NOFOLLOW).unwrap();
+    assert!(!named_matches_held(&replaced, &held.metadata().unwrap()));
+}
+
 #[tokio::test]
 async fn complete_record_only_static_payload_is_admitted_through_held_file_and_removed() {
     let parent = owned_parent();

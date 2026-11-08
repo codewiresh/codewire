@@ -26,9 +26,6 @@ pub const MEMBER_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// Member deletions per pass. The controller refills at its own bounded rate;
 /// this bounds how fast the reconciler can churn volumes.
 pub const MAX_MEMBER_DELETES_PER_PASS: usize = 4;
-/// Owner decision (2026-10-02): pools reserve at most a quarter of a runtime
-/// node.
-pub const NODE_RESERVATION_PERCENT: i128 = 25;
 /// How long a template change counts as an in-progress rotation while its
 /// pool refills. A rotation that has not settled by then stops blocking the
 /// next shape, so one stuck shape cannot freeze every other pool.
@@ -317,11 +314,11 @@ pub fn template_spec_current(live: &DynamicObject, rendered: &Value) -> bool {
     })
 }
 
-/// The owner's cap: [`NODE_RESERVATION_PERCENT`] of the smallest
+/// The configured percentage (validated by `WarmPoolConfig`) of the smallest
 /// schedulable runtime node, per resource. Members may all land on one node,
 /// so the cap bounds the total against a single node. No schedulable node,
 /// or an unreadable allocatable, is a zero budget.
-pub fn node_budget(runtime_nodes: &[Node]) -> Budget {
+pub fn node_budget(runtime_nodes: &[Node], max_node_percent: u8) -> Budget {
     let mut smallest: Option<(i128, i128)> = None;
     for node in runtime_nodes.iter().filter(|node| node_schedulable(node)) {
         let allocatable = node
@@ -343,9 +340,10 @@ pub fn node_budget(runtime_nodes: &[Node]) -> Budget {
         });
     }
     let (cpu, memory) = smallest.unwrap_or_default();
+    let percent = i128::from(max_node_percent);
     Budget {
-        cpu_millis: cpu * NODE_RESERVATION_PERCENT / 100,
-        memory_bytes: memory * NODE_RESERVATION_PERCENT / 100,
+        cpu_millis: cpu * percent / 100,
+        memory_bytes: memory * percent / 100,
     }
 }
 

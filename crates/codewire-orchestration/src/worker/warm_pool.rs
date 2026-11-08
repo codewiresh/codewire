@@ -14,10 +14,11 @@
 //! - **One shape at a time.** At most one template changes per pass, and not
 //!   while another pool still holds stale members or has not refilled after
 //!   its own change (bounded by `plan::ROTATION_SETTLE`).
-//! - **Node cap.** All pools together reserve at most 25% of the smallest
-//!   schedulable runtime node (owner decision, 2026-10-02): requests plus the
+//! - **Node cap.** All pools together reserve at most the configured percentage
+//!   of the smallest schedulable runtime node: requests plus the
 //!   RuntimeClass overhead, on nodes the RuntimeClass schedules to. Pools are
-//!   clamped in configuration order, and each clamp is logged.
+//!   clamped in configuration order, and each clamp is logged. The default
+//!   is 25%; deployments set their own budget (owner, 2026-11-08, #2238).
 //! - **Member hygiene.** Unclaimed members on cordoned nodes, of unconfigured
 //!   pools, built from an older template, or older than 24 hours are deleted
 //!   with UID and resourceVersion preconditions, a few per pass. An adoption
@@ -90,6 +91,8 @@ pub use plan::{
 };
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+pub const MAX_NODE_PERCENT_ENV: &str = "SANDBOX_WARM_POOL_MAX_NODE_PERCENT";
+const DEFAULT_MAX_NODE_PERCENT: u8 = 25;
 /// How long a starting replica waits for its own revision's pools before it
 /// reports ready anyway, so a release never stalls on a pool (#3572).
 pub const WARM_UP_BOUND: Duration = Duration::from_secs(3 * 60);
@@ -99,11 +102,26 @@ const WARM_UP_POLL: Duration = Duration::from_secs(2);
 /// never holds a start that has nothing to warm.
 const ROTATION_CHECK_BOUND: Duration = Duration::from_secs(15);
 
+fn parse_max_node_percent(value: &str) -> anyhow::Result<u8> {
+    if value.is_empty() {
+        return Ok(DEFAULT_MAX_NODE_PERCENT);
+    }
+    let percent = value.parse::<u8>().ok();
+    anyhow::ensure!(
+        value.bytes().all(|byte| byte.is_ascii_digit())
+            && percent.is_some_and(|percent| (1..=100).contains(&percent)),
+        "{MAX_NODE_PERCENT_ENV} must be a whole number from 1 to 100"
+    );
+    Ok(percent.expect("the percentage was validated"))
+}
+
 /// What this replica reconciles toward.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WarmPoolConfig {
     pub namespace: String,
     pub pools: Vec<DesiredPool>,
+    /// Validated percentage (1..=100) of the smallest runtime node.
+    pub max_node_percent: u8,
     /// `false` with `SANDBOX_IMAGE_CACHE=disabled`: nothing is cached, so the
     /// gate is open.
     pub image_cache_enabled: bool,
@@ -142,6 +160,7 @@ pub fn startup(cfg: &SandboxWorkerCfg, image_cache_enabled: anyhow::Result<bool>
             Startup::Reconcile(WarmPoolConfig {
                 namespace: namespace.to_owned(),
                 pools: Vec::new(),
+                max_node_percent: DEFAULT_MAX_NODE_PERCENT,
                 image_cache_enabled: false,
                 draining: true,
             })
@@ -162,6 +181,7 @@ impl WarmPoolConfig {
         if configured.is_empty() {
             return Ok(None);
         }
+        let max_node_percent = parse_max_node_percent(&cfg.warm_pool_max_node_percent)?;
         let namespace = cfg.sandbox_namespace.trim();
         anyhow::ensure!(!namespace.is_empty(), "sandbox namespace is not configured");
         let pools = configured
@@ -180,6 +200,7 @@ impl WarmPoolConfig {
         Ok(Some(Self {
             namespace: namespace.to_owned(),
             pools,
+            max_node_percent,
             image_cache_enabled,
             draining: false,
         }))
@@ -274,6 +295,7 @@ pub async fn warm_pool_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>)
     tracing::info!(
         namespace = %config.namespace,
         pools = config.pools.len(),
+        max_node_percent = config.max_node_percent,
         image_cache = config.image_cache_enabled,
         draining = config.draining,
         "warm pools: reconciling configured shapes"
@@ -680,7 +702,7 @@ async fn reconcile_once(
         .list(&ListParams::default().labels(&selector_of(&node_selector)))
         .await?
         .items;
-    let (budget, lower) = settle_budget(state.budget, node_budget(&nodes));
+    let (budget, lower) = settle_budget(state.budget, node_budget(&nodes, config.max_node_percent));
     state.budget = Some((budget, lower));
     let nodes: BTreeMap<String, Node> = nodes
         .into_iter()
@@ -726,7 +748,8 @@ async fn reconcile_once(
                 member_memory_bytes = reservation.map(|r| r.memory_bytes as i64),
                 budget_cpu_millis = budget.cpu_millis as i64,
                 budget_memory_bytes = budget.memory_bytes as i64,
-                "warm pools: members clamped to 25% of the smallest runtime node"
+                max_node_percent = config.max_node_percent,
+                "warm pools: members clamped to the configured share of the smallest runtime node"
             );
         } else if *allowed >= pool.configured.members && state.clamped.remove(&label).is_some() {
             tracing::info!(shape = %label, allowed, "warm pools: node cap no longer clamps this shape");
@@ -1159,7 +1182,7 @@ fn config_valid_metric() -> &'static IntGauge {
     CONFIG_VALID.get_or_init(|| {
         register_int_gauge!(
             "codewire_warm_pool_config_valid",
-            "0 when SANDBOX_WARM_POOL_SHAPES is invalid and every existing pool drains."
+            "0 when warm-pool configuration is invalid and every existing pool drains."
         )
         .expect("warm pool config metric registration must be unique")
     })

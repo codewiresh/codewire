@@ -192,6 +192,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // Executes the Linux workspace's absolute /bin utilities.
     fn workspace_env_script_round_trips_delimiters_and_shell_syntax() {
         let home = tempfile::tempdir().expect("temporary home");
         let payload = concat!(
@@ -230,6 +231,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // Executes the Linux workspace's absolute /bin utilities.
     fn ordinary_defaults_replace_with_empty_and_do_not_follow_workload_home() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = tempfile::tempdir().unwrap();
@@ -409,6 +411,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // Executes the Linux workspace's absolute /bin utilities.
     fn configure_environment_publishes_defaults_then_sets_the_author() {
         let vars = BTreeMap::from([(
             "PAYLOAD".to_owned(),
@@ -431,6 +434,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // Executes the Linux workspace's absolute /bin utilities.
     fn configure_environment_author_failure_is_its_own_status() {
         let vars = BTreeMap::from([("ALPHA_KEY".to_owned(), "plain-value".to_owned())]);
         for (fail_key, expected_calls) in [("user.email", 1), ("user.name", 2)] {

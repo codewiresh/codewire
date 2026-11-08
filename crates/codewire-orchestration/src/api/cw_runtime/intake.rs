@@ -82,6 +82,17 @@ fn owner_directory(metadata: &Metadata, private: bool) -> AppResult<()> {
     Ok(())
 }
 
+// Darwin's device and mode fields are narrower than MetadataExt's values.
+// Widen them as std does, preserving exact identity and permission checks.
+#[allow(clippy::unnecessary_cast)]
+fn named_matches_held(named: &rfs::Stat, held: &Metadata) -> bool {
+    named.st_dev as u64 == held.dev()
+        && named.st_ino as u64 == held.ino()
+        && named.st_uid == held.uid()
+        && named.st_gid == held.gid()
+        && named.st_mode as u32 == held.mode()
+}
+
 impl Candidate {
     fn create(parent: &Path, identity: CwPayloadIdentity) -> AppResult<Self> {
         validate_identity(&identity)?;
@@ -195,11 +206,7 @@ impl Candidate {
                     AtFlags::SYMLINK_NOFOLLOW,
                 )
                 .map_err(|_| unavailable())?;
-                if (named.st_dev, named.st_ino) != directory.id
-                    || named.st_uid != m.uid()
-                    || named.st_gid != m.gid()
-                    || named.st_mode != m.mode()
-                {
+                if !named_matches_held(&named, &m) {
                     return Err(unavailable());
                 }
             }
@@ -227,13 +234,7 @@ impl Candidate {
             AtFlags::SYMLINK_NOFOLLOW,
         )
         .map_err(|_| unavailable())?;
-        if named.st_dev != metadata.dev()
-            || named.st_ino != metadata.ino()
-            || named.st_mode != metadata.mode()
-            || named.st_uid != metadata.uid()
-            || named.st_gid != metadata.gid()
-            || named.st_nlink != 1
-        {
+        if !named_matches_held(&named, &metadata) || named.st_nlink != 1 {
             return Err(unavailable());
         }
         Ok(())

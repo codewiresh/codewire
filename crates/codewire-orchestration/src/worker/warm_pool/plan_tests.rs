@@ -766,21 +766,24 @@ fn node(name: &str, cpu: &str, memory: &str, ready: bool, cordoned: bool) -> Nod
 }
 
 #[test]
-fn the_node_cap_is_a_quarter_of_the_smallest_schedulable_node() {
+fn the_node_cap_uses_the_configured_percentage_of_the_smallest_schedulable_node() {
     let nodes = [
         node("large", "16", "64Gi", true, false),
         node("medium", "7800m", "32Gi", true, false),
         node("cordoned", "2", "8Gi", true, true),
         node("not-ready", "1", "4Gi", false, false),
     ];
-    let budget = node_budget(&nodes);
+    let budget = node_budget(&nodes, 25);
     assert_eq!(budget.cpu_millis, 1950);
     assert_eq!(budget.memory_bytes, 8 << 30);
-    assert_eq!(node_budget(&[]), Budget::default());
-    assert_eq!(node_budget(&nodes[2..]), Budget::default());
+    let dev_budget = node_budget(&nodes, 50);
+    assert_eq!(dev_budget.cpu_millis, 3900);
+    assert_eq!(dev_budget.memory_bytes, 16 << 30);
+    assert_eq!(node_budget(&[], 50), Budget::default());
+    assert_eq!(node_budget(&nodes[2..], 25), Budget::default());
     let unreadable = node("odd", "lots", "64Gi", true, false);
     assert_eq!(
-        node_budget(&[nodes[0].clone(), unreadable]),
+        node_budget(&[nodes[0].clone(), unreadable], 50),
         Budget::default()
     );
     assert!(node_unfit(Some(&nodes[2]), &[]) && !node_unfit(Some(&nodes[0]), &[]));
