@@ -729,6 +729,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
   scripts/ci/tests/test-integration-postgres.sh
   scripts/ci/tests/test-select-verification.sh
+  python3 -I -B scripts/ci/tests/test-proto-breaking-base.py ResolverTests
   python3 -I -B scripts/ci/tests/test-ci-workflow-structure.py
   python3 -I -B scripts/ci/tests/test-cw-runtime-source.py
   scripts/ci/tests/test-local-rust-cache.sh
@@ -961,6 +962,7 @@ run_contracts_proto() {
     buf lint
   )
   python3 scripts/checks/proto_breaking.py --self-test
+  BUF="$(command -v buf)" python3 scripts/ci/tests/test-proto-breaking-base.py BufPreimageTests
   BUF="$(command -v buf)" python3 scripts/checks/proto_breaking.py --base-sha "$base_sha"
   (
     cd proto

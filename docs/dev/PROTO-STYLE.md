@@ -113,6 +113,12 @@ exact change, historical replacements return to strict Buf checking, and a
 deleted contract cannot be recreated. This mechanism keeps no compatibility
 shim.
 
+CI compares against the exact event base, including a previous main tip outside
+the current ancestry after a history repair. If that object is absent locally,
+the policy makes one bounded read from the checkout's `origin` for that exact
+commit; it writes no refs and refuses an unavailable preimage. It never
+substitutes the new parent or skips the compatibility checks.
+
 ## Authentication
 
 `docs/dev/AUTH-POLICY.md` is the canonical credential policy. Proto services do

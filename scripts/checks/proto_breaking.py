@@ -16,6 +16,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 PREIMAGES = ROOT / "scripts/checks/contracts/proto-breaking-preimages.sha256"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 CODEWIRE_PREFIX = "proto/codewire/"
 # The private local VM runtime contract. A cw keeps working with a supervisor
 # back to the oldest supported release (MINIMUM_SUPERVISOR_PROTOCOL_VERSION),
@@ -124,6 +125,39 @@ def git_output(*args: str) -> str:
     return result.stdout
 
 
+def resolve_base(base_sha: str) -> str:
+    """Keep the exact preimage, including a previous tip outside current history."""
+    def local_commit() -> str | None:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", "--end-of-options", f"{base_sha}^{{commit}}"],
+            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    resolved = local_commit()
+    if resolved is not None:
+        return resolved
+    if COMMIT_RE.fullmatch(base_sha) is None:
+        raise PolicyError("an unavailable protobuf base must be an exact commit SHA")
+    timeout = shutil.which("timeout") or shutil.which("gtimeout")
+    if timeout is None:
+        raise PolicyError("resolving an unavailable protobuf base needs timeout or gtimeout")
+    # The canonical checkout already owns origin's read authorization. Fetch
+    # only this immutable object graph, with no branch, tag or FETCH_HEAD writes.
+    try:
+        result = subprocess.run(
+            [timeout, "--signal=TERM", "--kill-after=5s", "60s", "git", "fetch", "--quiet",
+             "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--no-auto-maintenance",
+             "origin", base_sha],
+            cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise PolicyError("the exact protobuf base fetch did not complete") from error
+    if result.returncode != 0 or local_commit() != base_sha:
+        raise PolicyError(f"exact protobuf base {base_sha} is unavailable from origin")
+    return base_sha
+
+
 def changed_proto_digests(base_sha: str, diff_filter: str) -> dict[str, str]:
     paths = git_output(
         "diff",
@@ -162,7 +196,7 @@ def base_preimages(base_sha: str) -> set[Preimage]:
 
 
 def run_breaking(base_sha: str) -> None:
-    resolved_base = git_output("rev-parse", "--verify", f"{base_sha}^{{commit}}").strip()
+    resolved_base = resolve_base(base_sha)
     current_preimages = parse_preimages(PREIMAGES.read_text(encoding="utf-8"))
     historical_preimages = base_preimages(resolved_base)
     deleted = changed_proto_digests(resolved_base, "D")
